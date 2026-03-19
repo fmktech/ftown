@@ -93,7 +93,13 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
         if (data.response.success && data.response.data) {
           const responseData = data.response.data as { sessions?: Session[] };
           if (Array.isArray(responseData.sessions)) {
-            setSessions(responseData.sessions);
+            setSessions((prev) => {
+              const merged = new Map(prev.map((s) => [s.id, s]));
+              for (const s of responseData.sessions!) {
+                merged.set(s.id, s);
+              }
+              return Array.from(merged.values());
+            });
           }
         }
       }

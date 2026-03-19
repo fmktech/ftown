@@ -47,10 +47,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
         return;
       }
     } else {
-      const args: string[] = [];
-      if (options.model) {
-        args.push('--model', options.model);
-      }
+      const args: string[] = ['--dangerously-skip-permissions'];
 
       const env: Record<string, string> = { ...process.env as Record<string, string>, TERM: 'xterm-256color' };
 
