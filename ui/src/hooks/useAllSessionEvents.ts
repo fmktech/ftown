@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Centrifuge, Subscription } from "centrifuge";
 import { Session } from "@/types";
 import { TokenUsage } from "./useSessionEvents";
@@ -29,106 +29,112 @@ export function useAllSessionEvents(
 ): Map<string, SessionActivity> {
   const [activityMap, setActivityMap] = useState<Map<string, SessionActivity>>(new Map());
   const subsRef = useRef<Map<string, Subscription>>(new Map());
+  const clientRef = useRef(client);
+  const userIdRef = useRef(userId);
+  clientRef.current = client;
+  userIdRef.current = userId;
+
+  const subscribe = useCallback((sessionId: string) => {
+    const c = clientRef.current;
+    const u = userIdRef.current;
+    if (!c || !u) return;
+    if (subsRef.current.has(sessionId)) return;
+
+    const channel = `events:${sessionId}#${u}`;
+
+    const existing = c.getSubscription(channel);
+    if (existing) {
+      existing.removeAllListeners();
+      existing.unsubscribe();
+      c.removeSubscription(existing);
+    }
+
+    const sub = c.newSubscription(channel, {
+      since: { offset: 0, epoch: "" },
+    });
+
+    sub.on("publication", (ctx) => {
+      const msg = ctx.data as HookEventMessage;
+      if (msg.type !== "hook_event") return;
+
+      setActivityMap((prev) => {
+        const current = prev.get(sessionId) ?? { activity: "idle" as const };
+        let updated: SessionActivity;
+
+        switch (msg.eventName) {
+          case "PreToolUse":
+            updated = {
+              ...current,
+              activity: "tool_use",
+              toolName: msg.data.tool_name as string | undefined,
+            };
+            break;
+          case "PostToolUse":
+            updated = { ...current, activity: "thinking", toolName: undefined };
+            break;
+          case "Stop":
+            updated = {
+              ...current,
+              activity: "idle",
+              toolName: undefined,
+              ...(msg.usage
+                ? { usage: { inputTokens: msg.usage.inputTokens, outputTokens: msg.usage.outputTokens } }
+                : {}),
+            };
+            break;
+          default:
+            return prev;
+        }
+
+        const next = new Map(prev);
+        next.set(sessionId, updated);
+        return next;
+      });
+    });
+
+    sub.subscribe();
+    subsRef.current.set(sessionId, sub);
+  }, []);
+
+  const unsubscribe = useCallback((sessionId: string) => {
+    const c = clientRef.current;
+    const sub = subsRef.current.get(sessionId);
+    if (!sub) return;
+    sub.removeAllListeners();
+    sub.unsubscribe();
+    if (c) c.removeSubscription(sub);
+    subsRef.current.delete(sessionId);
+  }, []);
 
   useEffect(() => {
-    if (!client || !userId) {
-      setActivityMap(new Map());
-      return;
-    }
+    if (!client || !userId) return;
 
-    const runningSessions = sessions.filter((s) => s.status === "running");
-    const runningIds = new Set(runningSessions.map((s) => s.id));
-    const currentSubs = subsRef.current;
+    const runningIds = new Set(
+      sessions.filter((s) => s.status === "running").map((s) => s.id)
+    );
 
-    for (const [sessionId, sub] of currentSubs) {
+    // Unsubscribe from sessions no longer running
+    for (const sessionId of subsRef.current.keys()) {
       if (!runningIds.has(sessionId)) {
-        sub.removeAllListeners();
-        sub.unsubscribe();
-        client.removeSubscription(sub);
-        currentSubs.delete(sessionId);
-        setActivityMap((prev) => {
-          const next = new Map(prev);
-          next.delete(sessionId);
-          return next;
-        });
+        unsubscribe(sessionId);
       }
     }
 
-    for (const session of runningSessions) {
-      if (currentSubs.has(session.id)) continue;
-
-      const channel = `events:${session.id}#${userId}`;
-
-      const existing = client.getSubscription(channel);
-      if (existing) {
-        existing.removeAllListeners();
-        existing.unsubscribe();
-        client.removeSubscription(existing);
-      }
-
-      const sub = client.newSubscription(channel, {
-        since: { offset: 0, epoch: "" },
-      });
-
-      sub.on("publication", (ctx) => {
-        const msg = ctx.data as HookEventMessage;
-        if (msg.type !== "hook_event") return;
-
-        const sessionId = session.id;
-
-        setActivityMap((prev) => {
-          const current = prev.get(sessionId) ?? { activity: "idle" as const };
-          let updated: SessionActivity;
-
-          switch (msg.eventName) {
-            case "PreToolUse":
-              updated = {
-                ...current,
-                activity: "tool_use",
-                toolName: msg.data.tool_name as string | undefined,
-              };
-              break;
-            case "PostToolUse":
-              updated = {
-                ...current,
-                activity: "thinking",
-                toolName: undefined,
-              };
-              break;
-            case "Stop":
-              updated = {
-                ...current,
-                activity: "idle",
-                toolName: undefined,
-                ...(msg.usage
-                  ? { usage: { inputTokens: msg.usage.inputTokens, outputTokens: msg.usage.outputTokens } }
-                  : {}),
-              };
-              break;
-            default:
-              return prev;
-          }
-
-          const next = new Map(prev);
-          next.set(sessionId, updated);
-          return next;
-        });
-      });
-
-      sub.subscribe();
-      currentSubs.set(session.id, sub);
+    // Subscribe to new running sessions
+    for (const id of runningIds) {
+      subscribe(id);
     }
+  }, [client, userId, sessions, subscribe, unsubscribe]);
 
+  // Cleanup on unmount
+  useEffect(() => {
     return () => {
-      for (const [, sub] of currentSubs) {
-        sub.removeAllListeners();
-        sub.unsubscribe();
-        client.removeSubscription(sub);
+      for (const sessionId of subsRef.current.keys()) {
+        unsubscribe(sessionId);
       }
-      currentSubs.clear();
       setActivityMap(new Map());
     };
-  }, [client, sessions, userId]);
+  }, [unsubscribe]);
 
   return activityMap;
 }

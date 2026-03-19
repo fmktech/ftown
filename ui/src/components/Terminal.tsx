@@ -226,7 +226,7 @@ export function Terminal({ client, sessionId, userId, isRunning, sessionName }: 
                 <span
                   style={{
                     fontSize: 10,
-                    color: "var(--text-faint)",
+                    color: "var(--text-muted)",
                     fontVariantNumeric: "tabular-nums",
                     letterSpacing: "0.04em",
                   }}

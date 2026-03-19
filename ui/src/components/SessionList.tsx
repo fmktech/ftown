@@ -12,9 +12,10 @@ interface SessionListProps {
   sessionActivity?: Map<string, SessionActivity>;
 }
 
-function StatusBadge({ status }: { status: SessionStatus }) {
+function StatusBadge({ status, activity }: { status: SessionStatus; activity?: "thinking" | "tool_use" | "idle" }) {
+  const isIdle = status === "running" && activity === "idle";
   const config: Record<SessionStatus, { dot: string; label: string; pulse: string }> = {
-    running:      { dot: "status-dot-running",  label: "running",      pulse: "animate-running" },
+    running:      { dot: isIdle ? "status-dot-pending" : "status-dot-running", label: isIdle ? "idle" : "running", pulse: isIdle ? "" : "animate-running" },
     completed:    { dot: "status-dot-done",     label: "done",         pulse: "" },
     error:        { dot: "status-dot-error",    label: "error",        pulse: "" },
     pending:      { dot: "status-dot-pending",  label: "pending",      pulse: "animate-pending" },
@@ -23,7 +24,7 @@ function StatusBadge({ status }: { status: SessionStatus }) {
   const { dot, label, pulse } = config[status] ?? config.completed;
 
   const labelColors: Record<SessionStatus, string> = {
-    running:      "var(--accent)",
+    running:      isIdle ? "var(--status-pending)" : "var(--accent)",
     completed:    "var(--text-faint)",
     error:        "var(--status-error)",
     pending:      "var(--status-pending)",
@@ -170,30 +171,31 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
                   {displayName}
                 </span>
               )}
-              <StatusBadge status={session.status} />
+              <StatusBadge status={session.status} activity={sessionActivity?.get(session.id)?.activity} />
             </div>
 
             {/* Activity indicator */}
-            {session.status === "running" && sessionActivity?.get(session.id)?.activity && sessionActivity.get(session.id)!.activity !== "idle" && (
-              <div
-                style={{
-                  fontSize: 10,
-                  color: "var(--text-faint)",
-                  fontStyle: "italic",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                  marginBottom: 2,
-                  ...(sessionActivity.get(session.id)!.activity === "thinking"
-                    ? { animation: "pulse-pending 2s ease-in-out infinite" }
-                    : {}),
-                }}
-              >
-                {sessionActivity.get(session.id)!.activity === "thinking"
-                  ? "thinking..."
-                  : `using ${sessionActivity.get(session.id)!.toolName ?? "tool"}`}
-              </div>
-            )}
+            {session.status === "running" && (() => {
+              const act = sessionActivity?.get(session.id);
+              if (!act || act.activity === "idle") return null;
+              const isThinking = act.activity === "thinking";
+              return (
+                <div
+                  style={{
+                    fontSize: 10,
+                    color: isThinking ? "var(--status-pending)" : "var(--accent)",
+                    fontStyle: "italic",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    marginBottom: 2,
+                    ...(isThinking ? { animation: "pulse-pending 2s ease-in-out infinite" } : {}),
+                  }}
+                >
+                  {isThinking ? "thinking..." : `using ${act.toolName ?? "tool"}`}
+                </div>
+              );
+            })()}
 
             {/* Prompt preview */}
             {session.name && (

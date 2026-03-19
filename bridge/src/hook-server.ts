@@ -80,6 +80,8 @@ export class HookServer extends EventEmitter<HookServerEvents> {
           return;
         }
 
+        console.log(`[HookServer] Received ${payload.hook_event_name} for ftown session ${payload.ftown_session_id}`);
+
         const hookEvent: HookEvent = {
           sessionId: payload.ftown_session_id,
           eventName: payload.hook_event_name,
