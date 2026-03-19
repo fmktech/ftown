@@ -104,7 +104,7 @@ function ContextMenu({
   }, [onClose]);
 
   const isRunning = menu.sessionStatus === "running" || menu.sessionStatus === "pending";
-  const canResume = menu.sessionStatus === "completed" || menu.sessionStatus === "error";
+  const canResume = !isRunning;
 
   return createPortal(
     <div
