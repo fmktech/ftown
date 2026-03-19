@@ -9,6 +9,7 @@ import {
   Command,
   CommandResponse,
   CreateSessionPayload,
+  RenameSessionPayload,
 } from "@/types";
 
 interface SessionUpdateMessage {
@@ -28,6 +29,7 @@ interface UseSessionsResult {
   createSession: (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType }) => void;
   stopSession: (sessionId: string) => void;
   retrySession: (sessionId: string) => void;
+  renameSession: (sessionId: string, name: string) => void;
   refreshSessions: () => void;
   lastResponse: CommandResponse | null;
 }
@@ -175,6 +177,22 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
     [userId, publishCommand]
   );
 
+  const renameSession = useCallback(
+    (sessionId: string, name: string) => {
+      if (!userId) return;
+
+      const payload: RenameSessionPayload = { sessionId, name };
+      const command: Command = {
+        type: "rename_session",
+        payload,
+        requestId: uuidv4(),
+      };
+
+      publishCommand(command);
+    },
+    [userId, publishCommand]
+  );
+
   const refreshSessions = useCallback(() => {
     if (!userId) return;
 
@@ -192,6 +210,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
     createSession,
     stopSession,
     retrySession,
+    renameSession,
     refreshSessions,
     lastResponse,
   };

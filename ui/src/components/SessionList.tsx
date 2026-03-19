@@ -1,11 +1,13 @@
 "use client";
 
+import { useState, useRef, useEffect } from "react";
 import { Session, SessionStatus } from "@/types";
 
 interface SessionListProps {
   sessions: Session[];
   selectedSessionId: string | null;
   onSelectSession: (sessionId: string) => void;
+  onRenameSession?: (sessionId: string, name: string) => void;
 }
 
 function StatusBadge({ status }: { status: SessionStatus }) {
@@ -49,7 +51,34 @@ function formatTimestamp(timestamp: string): string {
   return date.toLocaleDateString();
 }
 
-export function SessionList({ sessions, selectedSessionId, onSelectSession }: SessionListProps) {
+export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession }: SessionListProps) {
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editingSessionId && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editingSessionId]);
+
+  function startEditing(session: Session): void {
+    setEditingSessionId(session.id);
+    setEditValue(session.name || session.prompt.slice(0, 36));
+  }
+
+  function commitRename(): void {
+    if (editingSessionId && editValue.trim() && onRenameSession) {
+      onRenameSession(editingSessionId, editValue.trim());
+    }
+    setEditingSessionId(null);
+  }
+
+  function cancelEditing(): void {
+    setEditingSessionId(null);
+  }
+
   if (sessions.length === 0) {
     return (
       <div
@@ -93,20 +122,52 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession }: Se
           >
             {/* Title row */}
             <div className="flex items-center justify-between gap-2 mb-1">
-              <span
-                style={{
-                  fontSize: 12,
-                  fontWeight: isSelected ? 600 : 400,
-                  color: isSelected ? "var(--text-primary)" : "var(--text-secondary)",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                  flex: 1,
-                  minWidth: 0,
-                }}
-              >
-                {displayName}
-              </span>
+              {editingSessionId === session.id ? (
+                <input
+                  ref={inputRef}
+                  value={editValue}
+                  onChange={(e) => setEditValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitRename();
+                    if (e.key === "Escape") cancelEditing();
+                  }}
+                  onBlur={commitRename}
+                  onClick={(e) => e.stopPropagation()}
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: "var(--text-primary)",
+                    background: "var(--bg-void)",
+                    border: "1px solid var(--accent-dim)",
+                    borderRadius: 3,
+                    padding: "1px 4px",
+                    outline: "none",
+                    flex: 1,
+                    minWidth: 0,
+                    fontFamily: "var(--font-mono)",
+                  }}
+                />
+              ) : (
+                <span
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    startEditing(session);
+                  }}
+                  style={{
+                    fontSize: 12,
+                    fontWeight: isSelected ? 600 : 400,
+                    color: isSelected ? "var(--text-primary)" : "var(--text-secondary)",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    flex: 1,
+                    minWidth: 0,
+                    cursor: "default",
+                  }}
+                >
+                  {displayName}
+                </span>
+              )}
               <StatusBadge status={session.status} />
             </div>
 

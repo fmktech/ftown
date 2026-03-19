@@ -41,7 +41,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
 
-  const { sessions: rawSessions, createSession, stopSession, retrySession, refreshSessions } = useSessions(client, userId);
+  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, refreshSessions } = useSessions(client, userId);
   const { bridges, hasBridges } = useBridges(client, userId);
 
   const activeBridgeIds = useMemo(() => new Set(bridges.map((b) => b.bridgeId)), [bridges]);
@@ -198,7 +198,17 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
             <button
               className="btn-ghost"
               onClick={async () => {
-                await navigator.clipboard.writeText(`npx tsx src/index.ts --token ${token} --api-url ${window.location.origin}`);
+                const text = `npx tsx src/index.ts --token ${token} --api-url ${window.location.origin}`;
+                try {
+                  await navigator.clipboard.writeText(text);
+                } catch {
+                  const ta = document.createElement("textarea");
+                  ta.value = text;
+                  document.body.appendChild(ta);
+                  ta.select();
+                  document.execCommand("copy");
+                  document.body.removeChild(ta);
+                }
                 setTokenCopied(true);
                 setTimeout(() => setTokenCopied(false), 2000);
               }}
@@ -271,6 +281,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
               sessions={sessions}
               selectedSessionId={selectedSessionId}
               onSelectSession={setSelectedSessionId}
+              onRenameSession={renameSession}
             />
           </div>
         </aside>

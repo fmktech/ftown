@@ -12,6 +12,7 @@ import type {
   CommandResponse,
   CreateSessionPayload,
   GetHistoryPayload,
+  RenameSessionPayload,
   RetrySessionPayload,
   Session,
   StopSessionPayload,
@@ -263,6 +264,28 @@ program
             );
 
             response = { requestId: command.requestId, success: true, data: { session: existingSession } };
+            break;
+          }
+
+          case 'rename_session': {
+            const payload = command.payload as RenameSessionPayload;
+            if (!payload.sessionId || !payload.name) {
+              response = { requestId: command.requestId, success: false, error: 'Missing sessionId or name' };
+              break;
+            }
+
+            const sessionToRename = await store.loadSession(payload.sessionId);
+            if (!sessionToRename) {
+              response = { requestId: command.requestId, success: false, error: 'Session not found' };
+              break;
+            }
+
+            sessionToRename.name = payload.name;
+            sessionToRename.updatedAt = new Date().toISOString();
+            await store.saveSession(sessionToRename);
+            await centrifugo.publishSessionUpdate(userId, sessionToRename);
+
+            response = { requestId: command.requestId, success: true, data: { session: sessionToRename } };
             break;
           }
 
