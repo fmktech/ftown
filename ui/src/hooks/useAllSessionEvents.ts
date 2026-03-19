@@ -51,6 +51,9 @@ export function useAllSessionEvents(
         let updated: SessionActivity;
 
         switch (msg.eventName) {
+          case "UserPromptSubmit":
+            updated = { ...current, activity: "thinking", toolName: undefined };
+            break;
           case "PreToolUse":
             updated = {
               ...current,

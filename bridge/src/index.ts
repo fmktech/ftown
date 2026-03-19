@@ -61,6 +61,7 @@ function installGlobalHooks(): void {
 
   const hookEntry = { matcher: '', hooks: [{ type: 'command', command: hookScript, async: true }] };
   const ftownHooks = {
+    UserPromptSubmit: [hookEntry],
     Stop: [hookEntry],
     PreToolUse: [hookEntry],
     PostToolUse: [hookEntry],
