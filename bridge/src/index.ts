@@ -409,7 +409,8 @@ program
 
             const sessionToResume = await store.loadSession(payload.sessionId);
             if (!sessionToResume) {
-              return; // silently skip — another bridge may have this session
+              response = { requestId: command.requestId, success: false, error: 'Session not found on this bridge' };
+              break;
             }
 
             if (runner.isRunning(payload.sessionId)) {
