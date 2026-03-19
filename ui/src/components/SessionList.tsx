@@ -2,12 +2,14 @@
 
 import { useState, useRef, useEffect } from "react";
 import { Session, SessionStatus } from "@/types";
+import { SessionActivity } from "@/hooks/useAllSessionEvents";
 
 interface SessionListProps {
   sessions: Session[];
   selectedSessionId: string | null;
   onSelectSession: (sessionId: string) => void;
   onRenameSession?: (sessionId: string, name: string) => void;
+  sessionActivity?: Map<string, SessionActivity>;
 }
 
 function StatusBadge({ status }: { status: SessionStatus }) {
@@ -51,7 +53,7 @@ function formatTimestamp(timestamp: string): string {
   return date.toLocaleDateString();
 }
 
-export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession }: SessionListProps) {
+export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession, sessionActivity }: SessionListProps) {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -170,6 +172,28 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
               )}
               <StatusBadge status={session.status} />
             </div>
+
+            {/* Activity indicator */}
+            {session.status === "running" && sessionActivity?.get(session.id)?.activity && sessionActivity.get(session.id)!.activity !== "idle" && (
+              <div
+                style={{
+                  fontSize: 10,
+                  color: "var(--text-faint)",
+                  fontStyle: "italic",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  marginBottom: 2,
+                  ...(sessionActivity.get(session.id)!.activity === "thinking"
+                    ? { animation: "pulse-pending 2s ease-in-out infinite" }
+                    : {}),
+                }}
+              >
+                {sessionActivity.get(session.id)!.activity === "thinking"
+                  ? "thinking..."
+                  : `using ${sessionActivity.get(session.id)!.toolName ?? "tool"}`}
+              </div>
+            )}
 
             {/* Prompt preview */}
             {session.name && (

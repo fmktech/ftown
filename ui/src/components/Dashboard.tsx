@@ -6,6 +6,7 @@ import { ConnectionStatus } from "@/hooks/useCentrifugo";
 import { ShellType } from "@/types";
 import { useSessions } from "@/hooks/useSessions";
 import { useBridges } from "@/hooks/useBridges";
+import { useAllSessionEvents } from "@/hooks/useAllSessionEvents";
 import { SessionList } from "./SessionList";
 import { Terminal } from "./Terminal";
 import { NewSessionModal } from "./NewSessionModal";
@@ -43,6 +44,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
 
   const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, refreshSessions } = useSessions(client, userId);
   const { bridges, hasBridges } = useBridges(client, userId);
+  const sessionActivity = useAllSessionEvents(client, rawSessions, userId);
 
   const activeBridgeIds = useMemo(() => new Set(bridges.map((b) => b.bridgeId)), [bridges]);
 
@@ -284,6 +286,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
               selectedSessionId={selectedSessionId}
               onSelectSession={setSelectedSessionId}
               onRenameSession={renameSession}
+              sessionActivity={sessionActivity}
             />
           </div>
         </aside>

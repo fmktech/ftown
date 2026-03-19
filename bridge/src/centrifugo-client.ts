@@ -184,8 +184,11 @@ export class CentrifugoClient {
     const channel = `events:${sessionId}#${userId}`;
     if (!this.subscriptions.has(channel)) {
       const sub = this.client.newSubscription(channel);
-      sub.subscribe();
       this.subscriptions.set(channel, sub);
+      await new Promise<void>((resolve) => {
+        sub.on('subscribed', () => resolve());
+        sub.subscribe();
+      });
     }
     try {
       await this.client.publish(channel, event);
