@@ -46,8 +46,15 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const { bridges, hasBridges } = useBridges(client, userId);
   const sessionActivity = useAllSessionEvents(client, rawSessions, userId);
 
-  const sessions = useMemo(() => rawSessions,
-    [rawSessions]
+  const activeBridgeIds = useMemo(() => new Set(bridges.map((b) => b.bridgeId)), [bridges]);
+
+  const sessions = useMemo(() =>
+    rawSessions.map((s) =>
+      s.status === "running" && activeBridgeIds.size > 0 && !activeBridgeIds.has(s.bridgeId)
+        ? { ...s, status: "disconnected" as const }
+        : s
+    ),
+    [rawSessions, activeBridgeIds]
   );
 
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
