@@ -102,7 +102,6 @@ export function Terminal({ client, sessionId, userId, isRunning, sessionName, us
     term.clear();
     term.reset();
     fitAddonRef.current?.fit();
-    term.refresh(0, term.rows - 1);
 
     // Clean up previous subscriptions
     if (outputSubRef.current) {
@@ -136,6 +135,12 @@ export function Terminal({ client, sessionId, userId, isRunning, sessionName, us
         term.write(msg.data);
       }
     });
+    outputSub.on("subscribed", () => {
+      // History replay is done — send resize to remote PTY to force redraw
+      if (inputSubRef.current) {
+        inputSubRef.current.publish({ type: "resize", cols: term.cols, rows: term.rows });
+      }
+    });
     outputSub.subscribe();
     outputSubRef.current = outputSub;
 
@@ -165,14 +170,23 @@ export function Terminal({ client, sessionId, userId, isRunning, sessionName, us
       }
     });
 
-    // Refit terminal and send dimensions to PTY after history replays
-    const resizeTimer = setTimeout(() => {
-      fitAddonRef.current?.fit();
+    // Burst resize signals to PTY over 2s to force remote redraw
+    const resizeTimers: ReturnType<typeof setTimeout>[] = [];
+    // First call: nudge size to force a real resize
+    resizeTimers.push(setTimeout(() => {
+      term.resize(term.cols, term.rows - 1);
       inputSub.publish({ type: "resize", cols: term.cols, rows: term.rows });
-    }, 200);
+    }, 200));
+    // Remaining calls: just send resize at correct size
+    for (let i = 1; i < 10; i++) {
+      resizeTimers.push(setTimeout(() => {
+        fitAddonRef.current?.fit();
+        inputSub.publish({ type: "resize", cols: term.cols, rows: term.rows });
+      }, 200 * (i + 1)));
+    }
 
     return () => {
-      clearTimeout(resizeTimer);
+      resizeTimers.forEach(clearTimeout);
       dataDisposable.dispose();
       resizeDisposable.dispose();
       if (outputSubRef.current) {
