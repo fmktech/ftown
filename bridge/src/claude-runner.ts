@@ -16,6 +16,7 @@ interface RunOptions {
   cols?: number;
   rows?: number;
   shellType?: ShellType;
+  hookPort?: number;
 }
 
 export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
@@ -51,6 +52,13 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
         args.push('--model', options.model);
       }
 
+      const env: Record<string, string> = { ...process.env as Record<string, string>, TERM: 'xterm-256color' };
+
+      if (options.hookPort) {
+        env.FTOWN_HOOK_PORT = String(options.hookPort);
+        env.FTOWN_SESSION_ID = sessionId;
+      }
+
       const claudePath = process.env.CLAUDE_PATH ?? 'claude';
       const shellCmd = [claudePath, ...args].map((a) => a.includes(' ') ? `"${a}"` : a).join(' ');
       console.log(`[ProcessRunner] Spawning claude: ${shellCmd} in ${cwd}`);
@@ -61,7 +69,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
           cols,
           rows,
           cwd,
-          env: { ...process.env, TERM: 'xterm-256color' },
+          env,
         });
         console.log(`[ProcessRunner] Claude process spawned, pid: ${proc.pid}`);
       } catch (err) {
@@ -142,4 +150,5 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
   isRunning(sessionId: string): boolean {
     return this.activeProcesses.has(sessionId);
   }
+
 }

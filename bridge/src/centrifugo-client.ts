@@ -180,6 +180,20 @@ export class CentrifugoClient {
     this.subscriptions.set(channel, sub);
   }
 
+  async publishHookEvent(userId: string, sessionId: string, event: Record<string, unknown>): Promise<void> {
+    const channel = `events:${sessionId}#${userId}`;
+    if (!this.subscriptions.has(channel)) {
+      const sub = this.client.newSubscription(channel);
+      sub.subscribe();
+      this.subscriptions.set(channel, sub);
+    }
+    try {
+      await this.client.publish(channel, event);
+    } catch (err) {
+      console.error(`[Centrifugo] Failed to publish hook event to ${channel}:`, err);
+    }
+  }
+
   async publishCommandResponse(userId: string, response: CommandResponse): Promise<void> {
     const channel = `commands#${userId}`;
     try {

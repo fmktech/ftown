@@ -46,6 +46,14 @@
       "allow_publish_for_subscriber": true,
       "allow_subscribe_for_client": true,
       "allow_user_limited_channels": true
+    },
+    {
+      "name": "events",
+      "allow_publish_for_subscriber": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true,
+      "history_size": 100,
+      "history_ttl": "1h"
     }
   ],
   "ping_interval": "10s",

@@ -1,11 +1,17 @@
 import { Command as Commander } from 'commander';
 import { v4 as uuidv4 } from 'uuid';
-import { resolve } from 'node:path';
-import { hostname as osHostname } from 'node:os';
+import { resolve, join, dirname } from 'node:path';
+import { hostname as osHostname, homedir } from 'node:os';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { readFile } from 'node:fs/promises';
 
 import { CentrifugoClient } from './centrifugo-client.js';
 import { ProcessRunner } from './claude-runner.js';
 import { SessionStore } from './session-store.js';
+import { HookServer } from './hook-server.js';
+
+import type { HookEvent } from './hook-server.js';
 
 import type {
   Command,
@@ -43,6 +49,37 @@ async function fetchBridgeToken(apiUrl: string, authToken: string, bridgeId: str
   return res.json() as Promise<BridgeAuthResponse>;
 }
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+function installGlobalHooks(): void {
+  const hookScript = resolve(join(__dirname, '..', 'hooks', 'notify.sh'));
+  const claudeDir = join(homedir(), '.claude');
+  const settingsPath = join(claudeDir, 'settings.json');
+
+  const hookEntry = { matcher: '', hooks: [{ type: 'command', command: hookScript, async: true }] };
+  const ftownHooks = {
+    Stop: [hookEntry],
+    PreToolUse: [hookEntry],
+    PostToolUse: [hookEntry],
+    Notification: [hookEntry],
+  };
+
+  let settings: Record<string, unknown> = {};
+  try {
+    settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as Record<string, unknown>;
+  } catch {
+    // file doesn't exist or invalid json
+  }
+
+  const existingHooks = (settings.hooks ?? {}) as Record<string, unknown>;
+  settings.hooks = { ...existingHooks, ...ftownHooks };
+
+  mkdirSync(claudeDir, { recursive: true });
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
+  console.log(`[Bridge] Installed global hooks at ${settingsPath}`);
+}
+
 const program = new Commander();
 
 program
@@ -69,9 +106,14 @@ program
     console.log(`  Data dir:       ${dataDir}`);
     console.log('========================================');
 
+    installGlobalHooks();
+
     const store = new SessionStore(dataDir);
     const runner = new ProcessRunner();
     const centrifugo = new CentrifugoClient(centrifugoUrl, auth.token);
+    const hookServer = new HookServer();
+    const hookPort = await hookServer.start();
+    console.log(`[Bridge] Hook server started on port ${hookPort}`);
 
     const outputBuffers = new Map<string, string>();
     const flushTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -130,6 +172,67 @@ program
       }
     });
 
+    interface TranscriptEntry {
+      type: string;
+      message?: {
+        usage?: {
+          input_tokens?: number;
+          output_tokens?: number;
+        };
+      };
+    }
+
+    async function parseTranscriptUsage(transcriptPath: string): Promise<{ inputTokens: number; outputTokens: number; totalTokens: number } | undefined> {
+      try {
+        const content = await readFile(transcriptPath, 'utf-8');
+        const lines = content.trim().split('\n');
+        let inputTokens = 0;
+        let outputTokens = 0;
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const entry = JSON.parse(line) as TranscriptEntry;
+            if (entry.type === 'assistant' && entry.message?.usage) {
+              inputTokens += entry.message.usage.input_tokens ?? 0;
+              outputTokens += entry.message.usage.output_tokens ?? 0;
+            }
+          } catch {
+            // skip malformed lines
+          }
+        }
+
+        if (inputTokens === 0 && outputTokens === 0) return undefined;
+        return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens };
+      } catch {
+        return undefined;
+      }
+    }
+
+    hookServer.on('event', (hookEvent: HookEvent) => {
+      (async () => {
+        const eventData: Record<string, unknown> = {
+          type: 'hook_event',
+          eventName: hookEvent.eventName,
+          data: hookEvent.data,
+        };
+
+        if (hookEvent.eventName === 'Stop') {
+          const transcriptPath = hookEvent.data.transcript_path as string | undefined;
+          if (transcriptPath) {
+            const usage = await parseTranscriptUsage(transcriptPath);
+            if (usage) {
+              eventData.usage = usage;
+            }
+          }
+        }
+
+        await centrifugo.publishHookEvent(userId, hookEvent.sessionId, eventData);
+      })().catch((err) => {
+        console.error('[Bridge] Failed to handle hook event:', err);
+      });
+    });
+
     async function handleCommand(command: Command): Promise<void> {
       console.log(`[Bridge] Received command: ${command.type} (requestId: ${command.requestId})`);
 
@@ -170,6 +273,7 @@ program
               model: payload.model,
               workingDir: payload.workingDir,
               shellType: payload.shellType,
+              hookPort,
             });
 
             // Subscribe to terminal input from UI for this session
@@ -255,6 +359,7 @@ program
               model: existingSession.model,
               workingDir: existingSession.workingDir,
               shellType: existingSession.shellType,
+              hookPort,
             });
 
             centrifugo.subscribeToTerminalInput(
@@ -320,6 +425,7 @@ program
 
     const shutdown = (): void => {
       console.log('\n[Bridge] Shutting down...');
+      hookServer.stop();
       runner.stopAll();
       centrifugo.disconnect();
       process.exit(0);
