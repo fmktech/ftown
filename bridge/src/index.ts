@@ -412,7 +412,7 @@ program
               return; // silently skip — another bridge may have this session
             }
 
-            if (sessionToResume.status === 'running') {
+            if (runner.isRunning(payload.sessionId)) {
               response = { requestId: command.requestId, success: false, error: 'Session is already running' };
               break;
             }
