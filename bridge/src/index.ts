@@ -111,6 +111,18 @@ program
     installGlobalHooks();
 
     const store = new SessionStore(dataDir);
+
+    // Mark any previously "running" sessions as "error" (they died with the old bridge)
+    const staleSessiones = await store.listSessions();
+    for (const s of staleSessiones) {
+      if (s.status === 'running' || s.status === 'pending') {
+        s.status = 'error';
+        s.updatedAt = new Date().toISOString();
+        await store.saveSession(s);
+        console.log(`[Bridge] Marked stale session ${s.id} as error`);
+      }
+    }
+
     const runner = new ProcessRunner();
     const centrifugo = new CentrifugoClient(centrifugoUrl, auth.token);
     const hookServer = new HookServer();
