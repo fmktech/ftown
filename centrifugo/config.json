@@ -1,0 +1,43 @@
+{
+  "token_hmac_secret_key": "your-centrifugo-token-secret-change-me",
+  "api_key": "your-centrifugo-api-key-change-me",
+  "admin": true,
+  "admin_password": "admin",
+  "admin_secret": "admin-secret",
+  "allowed_origins": [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://localhost:3002"
+  ],
+  "allow_anonymous_connect_without_token": false,
+  "allow_user_limited_channels": true,
+  "allow_publish_for_subscriber": true,
+  "allow_subscribe_for_client": true,
+  "allow_history_for_subscriber": true,
+  "presence": true,
+  "allow_presence_for_subscriber": true,
+  "history_size": 500,
+  "history_ttl": "24h",
+  "force_recovery": true,
+  "namespaces": [
+    {
+      "name": "terminal",
+      "allow_publish_for_subscriber": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true,
+      "allow_history_for_subscriber": true,
+      "history_size": 10000,
+      "history_ttl": "24h",
+      "force_recovery": true
+    },
+    {
+      "name": "terminal-input",
+      "allow_publish_for_subscriber": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true
+    }
+  ],
+  "ping_interval": "10s",
+  "pong_timeout": "5s",
+  "log_level": "info"
+}
