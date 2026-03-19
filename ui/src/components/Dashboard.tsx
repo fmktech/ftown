@@ -47,7 +47,9 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const activeBridgeIds = useMemo(() => new Set(bridges.map((b) => b.bridgeId)), [bridges]);
 
   const sessions = useMemo(() =>
-    rawSessions.filter((s) => activeBridgeIds.has(s.bridgeId)),
+    activeBridgeIds.size === 0
+      ? rawSessions
+      : rawSessions.filter((s) => activeBridgeIds.has(s.bridgeId)),
     [rawSessions, activeBridgeIds]
   );
 
