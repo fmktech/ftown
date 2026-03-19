@@ -5,6 +5,7 @@ import { Centrifuge, Subscription } from "centrifuge";
 import { v4 as uuidv4 } from "uuid";
 import {
   Session,
+  ShellType,
   Command,
   CommandResponse,
   CreateSessionPayload,
@@ -24,7 +25,7 @@ interface CommandResponseMessage {
 
 interface UseSessionsResult {
   sessions: Session[];
-  createSession: (prompt: string, options?: { name?: string; model?: string; workingDir?: string }) => void;
+  createSession: (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType }) => void;
   stopSession: (sessionId: string) => void;
   retrySession: (sessionId: string) => void;
   refreshSessions: () => void;
@@ -40,7 +41,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
   useEffect(() => {
     if (!client || !userId) return;
 
-    const sessionsChannel = `sessions#${userId}`;
+    const sessionsChannel = `sessions:updates#${userId}`;
     const commandsChannel = `commands#${userId}`;
 
     for (const ch of [sessionsChannel, commandsChannel]) {
@@ -93,6 +94,13 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
     commandsSub.subscribe();
     commandsSubRef.current = commandsSub;
 
+    // Load existing sessions from bridges on connect
+    commandsSub.publish({
+      type: "list_sessions",
+      payload: {},
+      requestId: uuidv4(),
+    });
+
     return () => {
       sessionsSub.removeAllListeners();
       sessionsSub.unsubscribe();
@@ -114,7 +122,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
   );
 
   const createSession = useCallback(
-    (prompt: string, options?: { name?: string; model?: string; workingDir?: string }) => {
+    (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType }) => {
       if (!userId) return;
 
       const payload: CreateSessionPayload = {
@@ -122,6 +130,8 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
         name: options?.name,
         model: options?.model ?? "sonnet",
         workingDir: options?.workingDir,
+        bridgeId: options?.bridgeId,
+        shellType: options?.shellType ?? "claude",
       };
 
       const command: Command = {

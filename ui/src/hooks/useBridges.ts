@@ -22,17 +22,18 @@ export function useBridges(client: Centrifuge | null, userId: string | null): Us
   const fetchPresence = useCallback(async (sub: Subscription) => {
     try {
       const result = await sub.presence();
-      const bridgeList: BridgeInfo[] = Object.entries(result.clients).map(
-        ([clientId, info]) => {
-          const data = info.connInfo as { bridgeId?: string; hostname?: string; connectedAt?: string } | undefined;
+      console.log("[bridges] presence result:", JSON.stringify(result.clients, null, 2));
+      const bridgeList: BridgeInfo[] = Object.entries(result.clients)
+        .filter(([, info]) => info.connInfo && typeof info.connInfo === "object" && "bridgeId" in (info.connInfo as Record<string, unknown>))
+        .map(([clientId, info]) => {
+          const data = info.connInfo as { bridgeId: string; hostname?: string; connectedAt?: string };
           return {
             clientId,
-            bridgeId: data?.bridgeId ?? clientId,
-            hostname: data?.hostname ?? "unknown",
-            connectedAt: data?.connectedAt ?? "",
+            bridgeId: data.bridgeId,
+            hostname: data.hostname ?? "unknown",
+            connectedAt: data.connectedAt ?? "",
           };
-        }
-      );
+        });
       setBridges(bridgeList);
     } catch {
       setBridges([]);
@@ -62,11 +63,12 @@ export function useBridges(client: Centrifuge | null, userId: string | null): Us
 
     sub.on("join", (ctx) => {
       const data = ctx.info.connInfo as { bridgeId?: string; hostname?: string; connectedAt?: string } | undefined;
+      if (!data?.bridgeId) return;
       const bridge: BridgeInfo = {
         clientId: ctx.info.client,
-        bridgeId: data?.bridgeId ?? ctx.info.client,
-        hostname: data?.hostname ?? "unknown",
-        connectedAt: data?.connectedAt ?? "",
+        bridgeId: data.bridgeId,
+        hostname: data.hostname ?? "unknown",
+        connectedAt: data.connectedAt ?? "",
       };
       setBridges((prev) => {
         if (prev.some((b) => b.clientId === bridge.clientId)) return prev;
@@ -81,7 +83,12 @@ export function useBridges(client: Centrifuge | null, userId: string | null): Us
     sub.subscribe();
     subRef.current = sub;
 
+    const presenceInterval = setInterval(() => {
+      fetchPresence(sub);
+    }, 10_000);
+
     return () => {
+      clearInterval(presenceInterval);
       sub.removeAllListeners();
       sub.unsubscribe();
       client.removeSubscription(sub);

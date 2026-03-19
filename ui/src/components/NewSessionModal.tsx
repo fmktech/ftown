@@ -1,11 +1,14 @@
 "use client";
 
 import { useState, useCallback } from "react";
+import { ShellType } from "@/types";
+import { BridgeInfo } from "@/hooks/useBridges";
 
 interface NewSessionModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSubmit: (prompt: string, options: { name?: string; model?: string; workingDir?: string }) => void;
+  onSubmit: (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType }) => void;
+  bridges: BridgeInfo[];
 }
 
 const MODELS = [
@@ -14,27 +17,37 @@ const MODELS = [
   { value: "haiku", label: "Haiku" },
 ];
 
-export function NewSessionModal({ isOpen, onClose, onSubmit }: NewSessionModalProps) {
+export function NewSessionModal({ isOpen, onClose, onSubmit, bridges }: NewSessionModalProps) {
   const [prompt, setPrompt] = useState("");
   const [name, setName] = useState("");
   const [model, setModel] = useState("sonnet");
   const [workingDir, setWorkingDir] = useState("");
+  const [shellType, setShellType] = useState<ShellType>("claude");
+  const [bridgeId, setBridgeId] = useState("");
+
+  const effectiveBridgeId = bridgeId || (bridges.length > 0 ? bridges[0].bridgeId : "");
+
+  const canSubmit = shellType === "shell" || prompt.trim().length > 0;
 
   const handleSubmit = useCallback(() => {
-    if (!prompt.trim()) return;
+    if (!canSubmit) return;
 
-    onSubmit(prompt.trim(), {
+    onSubmit(shellType === "shell" ? "" : prompt.trim(), {
       name: name.trim() || undefined,
-      model,
+      model: shellType === "shell" ? undefined : model,
       workingDir: workingDir.trim() || undefined,
+      bridgeId: effectiveBridgeId || undefined,
+      shellType,
     });
 
     setPrompt("");
     setName("");
     setModel("sonnet");
     setWorkingDir("");
+    setShellType("claude");
+    setBridgeId("");
     onClose();
-  }, [prompt, name, model, workingDir, onSubmit, onClose]);
+  }, [canSubmit, shellType, prompt, name, model, workingDir, effectiveBridgeId, onSubmit, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -64,17 +77,74 @@ export function NewSessionModal({ isOpen, onClose, onSubmit }: NewSessionModalPr
 
         <div className="space-y-4">
           <div>
-            <label className="block text-sm text-[#888888] mb-1">Prompt *</label>
-            <textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder="What should Claude do?"
-              rows={4}
-              autoFocus
-              className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] resize-none"
-              onKeyDown={handleKeyDown}
-            />
+            <label className="block text-sm text-[#888888] mb-1">Shell Type</label>
+            <div className="flex gap-0">
+              <button
+                type="button"
+                onClick={() => setShellType("claude")}
+                className="px-4 py-2 text-sm font-mono transition-colors"
+                style={{
+                  background: shellType === "claude" ? "#00ff88" : "#0a0a0a",
+                  color: shellType === "claude" ? "#0a0a0a" : "#888888",
+                  borderTop: shellType === "claude" ? "1px solid #00ff88" : "1px solid #2a2a2a",
+                  borderRight: shellType === "claude" ? "1px solid #00ff88" : "1px solid #2a2a2a",
+                  borderBottom: shellType === "claude" ? "1px solid #00ff88" : "1px solid #2a2a2a",
+                  borderLeft: shellType === "claude" ? "1px solid #00ff88" : "1px solid #2a2a2a",
+                  borderRadius: "4px 0 0 4px",
+                  fontWeight: shellType === "claude" ? 700 : 400,
+                }}
+              >
+                Claude
+              </button>
+              <button
+                type="button"
+                onClick={() => setShellType("shell")}
+                className="px-4 py-2 text-sm font-mono transition-colors"
+                style={{
+                  background: shellType === "shell" ? "#00ff88" : "#0a0a0a",
+                  color: shellType === "shell" ? "#0a0a0a" : "#888888",
+                  borderTop: shellType === "shell" ? "1px solid #00ff88" : "1px solid #2a2a2a",
+                  borderRight: shellType === "shell" ? "1px solid #00ff88" : "1px solid #2a2a2a",
+                  borderBottom: shellType === "shell" ? "1px solid #00ff88" : "1px solid #2a2a2a",
+                  borderLeft: "none",
+                  borderRadius: "0 4px 4px 0",
+                  fontWeight: shellType === "shell" ? 700 : 400,
+                }}
+              >
+                Shell (zsh)
+              </button>
+            </div>
           </div>
+
+          <div>
+            <label className="block text-sm text-[#888888] mb-1">Bridge</label>
+            <select
+              value={effectiveBridgeId}
+              onChange={(e) => setBridgeId(e.target.value)}
+              className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] focus:outline-none focus:border-[#00ff88]"
+            >
+              {bridges.map((b) => (
+                <option key={b.bridgeId} value={b.bridgeId}>
+                  {b.bridgeId} ({b.hostname})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {shellType === "claude" && (
+            <div>
+              <label className="block text-sm text-[#888888] mb-1">Prompt *</label>
+              <textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                placeholder="What should Claude do?"
+                rows={4}
+                autoFocus
+                className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] resize-none"
+                onKeyDown={handleKeyDown}
+              />
+            </div>
+          )}
 
           <div>
             <label className="block text-sm text-[#888888] mb-1">Session Name</label>
@@ -88,20 +158,22 @@ export function NewSessionModal({ isOpen, onClose, onSubmit }: NewSessionModalPr
             />
           </div>
 
-          <div>
-            <label className="block text-sm text-[#888888] mb-1">Model</label>
-            <select
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] focus:outline-none focus:border-[#00ff88]"
-            >
-              {MODELS.map((m) => (
-                <option key={m.value} value={m.value}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
-          </div>
+          {shellType === "claude" && (
+            <div>
+              <label className="block text-sm text-[#888888] mb-1">Model</label>
+              <select
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] focus:outline-none focus:border-[#00ff88]"
+              >
+                {MODELS.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           <div>
             <label className="block text-sm text-[#888888] mb-1">Working Directory</label>
@@ -124,7 +196,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit }: NewSessionModalPr
             </button>
             <button
               onClick={handleSubmit}
-              disabled={!prompt.trim()}
+              disabled={!canSubmit}
               className="px-4 py-2 bg-[#00ff88] text-[#0a0a0a] font-bold rounded text-sm hover:bg-[#00cc6e] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               Create Session

@@ -28,3 +28,6 @@ Thumbs.db
 *.tsbuildinfo
 .turbo/
 coverage/
+
+.secrets/
+config.prod.json

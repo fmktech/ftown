@@ -15,6 +15,8 @@
   "allow_subscribe_for_client": true,
   "allow_history_for_subscriber": true,
   "presence": true,
+  "join_leave": true,
+  "force_push_join_leave": true,
   "allow_presence_for_subscriber": true,
   "history_size": 500,
   "history_ttl": "24h",
@@ -29,6 +31,15 @@
       "history_size": 10000,
       "history_ttl": "24h",
       "force_recovery": true
+    },
+    {
+      "name": "sessions",
+      "allow_publish_for_subscriber": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true,
+      "history_size": 0,
+      "history_ttl": "0s",
+      "force_recovery": false
     },
     {
       "name": "terminal-input",

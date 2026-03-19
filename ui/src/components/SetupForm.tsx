@@ -9,7 +9,6 @@ interface SetupFormProps {
 
 export function SetupForm({ onConnect }: SetupFormProps) {
   const [userId, setUserId] = useState("");
-  const [centrifugoUrl, setCentrifugoUrl] = useState("ws://localhost:8000/connection/websocket");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [generatedToken, setGeneratedToken] = useState<string | null>(null);
@@ -40,20 +39,20 @@ export function SetupForm({ onConnect }: SetupFormProps) {
         throw new Error(data.error || "Failed to generate token");
       }
 
-      const data = await response.json() as { token: string };
+      const data = await response.json() as { token: string; centrifugoUrl: string };
       setGeneratedToken(data.token);
 
       localStorage.setItem("ftown_token", data.token);
       localStorage.setItem("ftown_userId", finalUserId);
-      localStorage.setItem("ftown_centrifugoUrl", centrifugoUrl);
+      localStorage.setItem("ftown_centrifugoUrl", data.centrifugoUrl);
 
-      onConnect(data.token, finalUserId, centrifugoUrl);
+      onConnect(data.token, finalUserId, data.centrifugoUrl);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
     } finally {
       setLoading(false);
     }
-  }, [userId, centrifugoUrl, onConnect]);
+  }, [userId, onConnect]);
 
   const handleCopyToken = useCallback(async () => {
     if (!generatedToken) return;
@@ -86,16 +85,6 @@ export function SetupForm({ onConnect }: SetupFormProps) {
                 Generate
               </button>
             </div>
-          </div>
-
-          <div>
-            <label className="block text-sm text-[#888888] mb-1">Centrifugo WebSocket URL</label>
-            <input
-              type="text"
-              value={centrifugoUrl}
-              onChange={(e) => setCentrifugoUrl(e.target.value)}
-              className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] focus:outline-none focus:border-[#00ff88]"
-            />
           </div>
 
           {error && (

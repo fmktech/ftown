@@ -51,14 +51,14 @@ export class CentrifugoClient {
   }
 
   subscribeToSessions(userId: string): void {
-    const channel = `sessions#${userId}`;
+    const channel = `sessions:updates#${userId}`;
     const sub = this.client.newSubscription(channel);
     sub.subscribe();
     this.subscriptions.set(channel, sub);
   }
 
   async publishSessionUpdate(userId: string, session: Session): Promise<void> {
-    const channel = `sessions#${userId}`;
+    const channel = `sessions:updates#${userId}`;
     try {
       await this.client.publish(channel, {
         type: 'session_update',

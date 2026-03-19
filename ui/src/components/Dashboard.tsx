@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { Centrifuge } from "centrifuge";
 import { ConnectionStatus } from "@/hooks/useCentrifugo";
+import { ShellType } from "@/types";
 import { useSessions } from "@/hooks/useSessions";
 import { useBridges } from "@/hooks/useBridges";
 import { SessionList } from "./SessionList";
@@ -40,13 +41,20 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
 
-  const { sessions, createSession, stopSession, retrySession, refreshSessions } = useSessions(client, userId);
+  const { sessions: rawSessions, createSession, stopSession, retrySession, refreshSessions } = useSessions(client, userId);
   const { bridges, hasBridges } = useBridges(client, userId);
+
+  const activeBridgeIds = useMemo(() => new Set(bridges.map((b) => b.bridgeId)), [bridges]);
+
+  const sessions = useMemo(() =>
+    rawSessions.filter((s) => activeBridgeIds.has(s.bridgeId)),
+    [rawSessions, activeBridgeIds]
+  );
 
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
 
   const handleCreateSession = useCallback(
-    (prompt: string, options: { name?: string; model?: string; workingDir?: string }) => {
+    (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType }) => {
       createSession(prompt, options);
     },
     [createSession]
@@ -190,7 +198,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
             <button
               className="btn-ghost"
               onClick={async () => {
-                await navigator.clipboard.writeText(`npx tsx src/index.ts --token ${token}`);
+                await navigator.clipboard.writeText(`npx tsx src/index.ts --token ${token} --api-url ${window.location.origin}`);
                 setTokenCopied(true);
                 setTimeout(() => setTokenCopied(false), 2000);
               }}
@@ -212,7 +220,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
               letterSpacing: "0.02em",
             }}
           >
-            npx tsx src/index.ts --token {token}
+            npx tsx src/index.ts --token {token} --api-url {typeof window !== "undefined" ? window.location.origin : ""}
           </code>
         </div>
       )}
@@ -283,6 +291,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
         isOpen={showNewSession}
         onClose={() => setShowNewSession(false)}
         onSubmit={handleCreateSession}
+        bridges={bridges}
       />
     </div>
   );

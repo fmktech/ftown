@@ -10,18 +10,20 @@ interface SessionListProps {
 
 function StatusBadge({ status }: { status: SessionStatus }) {
   const config: Record<SessionStatus, { dot: string; label: string; pulse: string }> = {
-    running:   { dot: "status-dot-running",  label: "running",   pulse: "animate-running" },
-    completed: { dot: "status-dot-done",     label: "done",      pulse: "" },
-    error:     { dot: "status-dot-error",    label: "error",     pulse: "" },
-    pending:   { dot: "status-dot-pending",  label: "pending",   pulse: "animate-pending" },
+    running:      { dot: "status-dot-running",  label: "running",      pulse: "animate-running" },
+    completed:    { dot: "status-dot-done",     label: "done",         pulse: "" },
+    error:        { dot: "status-dot-error",    label: "error",        pulse: "" },
+    pending:      { dot: "status-dot-pending",  label: "pending",      pulse: "animate-pending" },
+    disconnected: { dot: "status-dot-done",     label: "disconnected", pulse: "" },
   };
   const { dot, label, pulse } = config[status] ?? config.completed;
 
   const labelColors: Record<SessionStatus, string> = {
-    running:   "var(--accent)",
-    completed: "var(--text-faint)",
-    error:     "var(--status-error)",
-    pending:   "var(--status-pending)",
+    running:      "var(--accent)",
+    completed:    "var(--text-faint)",
+    error:        "var(--status-error)",
+    pending:      "var(--status-pending)",
+    disconnected: "var(--text-faint)",
   };
 
   return (
@@ -126,9 +128,27 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession }: Se
 
             {/* Meta row */}
             <div className="flex items-center justify-between">
-              <span style={{ fontSize: 10, color: "var(--text-faint)" }}>
-                {session.model}
-              </span>
+              <div className="flex items-center gap-2">
+                <span
+                  style={{
+                    fontSize: 9,
+                    fontWeight: 600,
+                    letterSpacing: "0.06em",
+                    padding: "1px 4px",
+                    borderRadius: 3,
+                    background: session.shellType === "shell" ? "rgba(255, 170, 0, 0.12)" : "rgba(0, 255, 136, 0.08)",
+                    color: session.shellType === "shell" ? "var(--status-pending)" : "var(--accent)",
+                    border: `1px solid ${session.shellType === "shell" ? "rgba(255, 170, 0, 0.2)" : "rgba(0, 255, 136, 0.15)"}`,
+                    textTransform: "uppercase",
+                    fontFamily: "var(--font-mono)",
+                  }}
+                >
+                  {session.shellType === "shell" ? "zsh" : "claude"}
+                </span>
+                <span style={{ fontSize: 10, color: "var(--text-faint)" }}>
+                  {session.model}
+                </span>
+              </div>
               <span style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>
                 {formatTimestamp(session.createdAt)}
               </span>

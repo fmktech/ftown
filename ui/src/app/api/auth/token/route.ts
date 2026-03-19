@@ -40,5 +40,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     expiresIn: "24h",
   });
 
-  return NextResponse.json({ token });
+  return NextResponse.json({
+    token,
+    centrifugoUrl: process.env.NEXT_PUBLIC_CENTRIFUGO_URL,
+  });
 }

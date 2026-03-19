@@ -1,3 +1,5 @@
+export type ShellType = 'claude' | 'shell';
+
 export interface Session {
   id: string;
   name: string;
@@ -8,6 +10,7 @@ export interface Session {
   updatedAt: string;
   model?: string;
   workingDir?: string;
+  shellType?: ShellType;
 }
 
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error';
@@ -36,6 +39,8 @@ export interface CreateSessionPayload {
   name?: string;
   model?: string;
   workingDir?: string;
+  bridgeId?: string;
+  shellType?: ShellType;
 }
 
 export interface StopSessionPayload {
@@ -48,6 +53,7 @@ export interface GetHistoryPayload {
 
 export interface RetrySessionPayload {
   sessionId: string;
+  bridgeId?: string;
 }
 
 export interface SendMessagePayload {

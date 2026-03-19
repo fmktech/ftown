@@ -1,9 +1,10 @@
 import { Command as Commander } from 'commander';
 import { v4 as uuidv4 } from 'uuid';
 import { resolve } from 'node:path';
+import { hostname as osHostname } from 'node:os';
 
 import { CentrifugoClient } from './centrifugo-client.js';
-import { ClaudeRunner } from './claude-runner.js';
+import { ProcessRunner } from './claude-runner.js';
 import { SessionStore } from './session-store.js';
 
 import type {
@@ -16,26 +17,29 @@ import type {
   StopSessionPayload,
 } from './types.js';
 
-interface JwtPayload {
-  sub: string;
-  [key: string]: unknown;
+interface BridgeAuthResponse {
+  token: string;
+  centrifugoUrl: string;
+  userId: string;
 }
 
-function decodeJwtPayload(token: string): JwtPayload {
-  const parts = token.split('.');
-  if (parts.length !== 3) {
-    throw new Error('Invalid JWT format');
-  }
-  const payload = Buffer.from(parts[1], 'base64url').toString('utf-8');
-  return JSON.parse(payload) as JwtPayload;
-}
+async function fetchBridgeToken(apiUrl: string, authToken: string, bridgeId: string): Promise<BridgeAuthResponse> {
+  const res = await fetch(`${apiUrl}/api/auth/bridge`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      token: authToken,
+      bridgeId,
+      hostname: osHostname(),
+    }),
+  });
 
-function extractUserId(token: string): string {
-  const payload = decodeJwtPayload(token);
-  if (!payload.sub) {
-    throw new Error('JWT does not contain a "sub" claim for userId');
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Bridge auth failed (${res.status}): ${body}`);
   }
-  return payload.sub;
+
+  return res.json() as Promise<BridgeAuthResponse>;
 }
 
 const program = new Commander();
@@ -43,42 +47,58 @@ const program = new Commander();
 program
   .name('ftown-bridge')
   .description('Claude Code orchestrator bridge for Centrifugo')
-  .requiredOption('--token <jwt>', 'JWT token for Centrifugo authentication')
-  .option('--centrifugo-url <url>', 'Centrifugo WebSocket URL', 'ws://localhost:8000/connection/websocket')
+  .requiredOption('--token <jwt>', 'Auth token (JWT signed with Centrifugo secret)')
+  .requiredOption('--api-url <url>', 'ftown UI API URL (e.g. https://ftown.vercel.app)')
   .option('--data-dir <path>', 'Directory for session data', './data')
   .option('--bridge-id <id>', 'Bridge instance ID')
-  .action(async (opts: { token: string; centrifugoUrl: string; dataDir: string; bridgeId?: string }) => {
+  .action(async (opts: { token: string; apiUrl: string; dataDir: string; bridgeId?: string }) => {
     const bridgeId = opts.bridgeId ?? uuidv4();
     const dataDir = resolve(opts.dataDir);
-    const userId = extractUserId(opts.token);
+
+    console.log('[Bridge] Authenticating with API...');
+    const auth = await fetchBridgeToken(opts.apiUrl, opts.token, bridgeId);
+    const userId = auth.userId;
+    const centrifugoUrl = auth.centrifugoUrl;
 
     console.log('========================================');
     console.log('  ftown-bridge starting');
     console.log(`  Bridge ID:      ${bridgeId}`);
     console.log(`  User ID:        ${userId}`);
-    console.log(`  Centrifugo URL: ${opts.centrifugoUrl}`);
+    console.log(`  Centrifugo URL: ${centrifugoUrl}`);
     console.log(`  Data dir:       ${dataDir}`);
     console.log('========================================');
 
     const store = new SessionStore(dataDir);
-    const runner = new ClaudeRunner();
-    const centrifugo = new CentrifugoClient(opts.centrifugoUrl, opts.token);
+    const runner = new ProcessRunner();
+    const centrifugo = new CentrifugoClient(centrifugoUrl, auth.token);
 
-    let dataCount = 0;
-    runner.on('data', async (sessionId, data) => {
-      dataCount++;
-      if (dataCount <= 3) {
-        console.log(`[Bridge] Terminal data for ${sessionId} (${data.length} bytes)`);
-      }
-      try {
-        await store.appendTerminalData(sessionId, data);
-        await centrifugo.publishTerminalData(userId, sessionId, data);
-      } catch (err) {
-        console.error(`[Bridge] Failed to handle terminal data for session ${sessionId}:`, err);
+    const outputBuffers = new Map<string, string>();
+    const flushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    const FLUSH_INTERVAL_MS = 16;
+
+    function flushBuffer(sessionId: string): void {
+      const buf = outputBuffers.get(sessionId);
+      if (!buf) return;
+      outputBuffers.delete(sessionId);
+      flushTimers.delete(sessionId);
+      store.appendTerminalData(sessionId, buf).catch((err) => {
+        console.error(`[Bridge] Failed to store terminal data for ${sessionId}:`, err);
+      });
+      centrifugo.publishTerminalData(userId, sessionId, buf).catch((err) => {
+        console.error(`[Bridge] Failed to publish terminal data for ${sessionId}:`, err);
+      });
+    }
+
+    runner.on('data', (sessionId, data) => {
+      const existing = outputBuffers.get(sessionId) ?? '';
+      outputBuffers.set(sessionId, existing + data);
+      if (!flushTimers.has(sessionId)) {
+        flushTimers.set(sessionId, setTimeout(() => flushBuffer(sessionId), FLUSH_INTERVAL_MS));
       }
     });
 
     runner.on('complete', async (sessionId) => {
+      flushBuffer(sessionId);
       try {
         const session = await store.loadSession(sessionId);
         if (session) {
@@ -94,6 +114,7 @@ program
     });
 
     runner.on('error', async (sessionId, error) => {
+      flushBuffer(sessionId);
       try {
         const session = await store.loadSession(sessionId);
         if (session) {
@@ -117,7 +138,12 @@ program
         switch (command.type) {
           case 'create_session': {
             const payload = command.payload as CreateSessionPayload;
-            if (!payload.prompt) {
+
+            if (payload.bridgeId && payload.bridgeId !== bridgeId) {
+              return;
+            }
+
+            if (!payload.prompt && payload.shellType !== 'shell') {
               response = { requestId: command.requestId, success: false, error: 'Missing prompt' };
               break;
             }
@@ -125,14 +151,15 @@ program
             const sessionId = uuidv4();
             const session: Session = {
               id: sessionId,
-              name: payload.name ?? payload.prompt.slice(0, 80),
-              prompt: payload.prompt,
+              name: payload.name ?? (payload.shellType === 'shell' ? 'Shell' : payload.prompt.slice(0, 80)),
+              prompt: payload.prompt ?? '',
               status: 'running',
               bridgeId,
               createdAt: new Date().toISOString(),
               updatedAt: new Date().toISOString(),
               model: payload.model,
               workingDir: payload.workingDir,
+              shellType: payload.shellType,
             };
 
             await store.saveSession(session);
@@ -141,6 +168,7 @@ program
             runner.run(sessionId, payload.prompt, {
               model: payload.model,
               workingDir: payload.workingDir,
+              shellType: payload.shellType,
             });
 
             // Subscribe to terminal input from UI for this session
@@ -196,6 +224,11 @@ program
 
           case 'retry_session': {
             const payload = command.payload as RetrySessionPayload;
+
+            if (payload.bridgeId && payload.bridgeId !== bridgeId) {
+              return;
+            }
+
             if (!payload.sessionId) {
               response = { requestId: command.requestId, success: false, error: 'Missing sessionId' };
               break;
@@ -220,6 +253,7 @@ program
             runner.run(existingSession.id, existingSession.prompt, {
               model: existingSession.model,
               workingDir: existingSession.workingDir,
+              shellType: existingSession.shellType,
             });
 
             centrifugo.subscribeToTerminalInput(

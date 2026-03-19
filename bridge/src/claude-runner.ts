@@ -2,11 +2,12 @@ import * as pty from 'node-pty';
 import { EventEmitter } from 'node:events';
 
 import type { IPty } from 'node-pty';
+import type { ShellType } from './types.js';
 
-export interface ClaudeRunnerEvents {
-  data: [string, string];       // sessionId, raw terminal data
-  complete: [string];            // sessionId
-  error: [string, Error];       // sessionId, error
+export interface ProcessRunnerEvents {
+  data: [string, string];
+  complete: [string];
+  error: [string, Error];
 }
 
 interface RunOptions {
@@ -14,40 +15,60 @@ interface RunOptions {
   workingDir?: string;
   cols?: number;
   rows?: number;
+  shellType?: ShellType;
 }
 
-export class ClaudeRunner extends EventEmitter<ClaudeRunnerEvents> {
+export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
   private readonly activeProcesses: Map<string, IPty> = new Map();
 
   run(sessionId: string, prompt: string, options: RunOptions = {}): void {
-    const args: string[] = [];
-
-    if (options.model) {
-      args.push('--model', options.model);
-    }
-
     const cwd = options.workingDir ?? process.cwd();
     const cols = options.cols ?? 120;
     const rows = options.rows ?? 40;
-
-    const claudePath = process.env.CLAUDE_PATH ?? 'claude';
-    const shellCmd = [claudePath, ...args].map((a) => a.includes(' ') ? `"${a}"` : a).join(' ');
-    console.log(`[ClaudeRunner] Spawning shell: ${shellCmd} in ${cwd}`);
+    const shellType = options.shellType ?? 'claude';
 
     let proc: IPty;
-    try {
-      proc = pty.spawn('/bin/zsh', ['-l', '-c', shellCmd], {
-        name: 'xterm-256color',
-        cols,
-        rows,
-        cwd,
-        env: { ...process.env, TERM: 'xterm-256color' },
-      });
-      console.log(`[ClaudeRunner] Process spawned, pid: ${proc.pid}`);
-    } catch (err) {
-      console.error(`[ClaudeRunner] Failed to spawn:`, err);
-      this.emit('error', sessionId, err instanceof Error ? err : new Error(String(err)));
-      return;
+
+    if (shellType === 'shell') {
+      console.log(`[ProcessRunner] Spawning interactive shell in ${cwd}`);
+      try {
+        proc = pty.spawn('/bin/zsh', ['-l'], {
+          name: 'xterm-256color',
+          cols,
+          rows,
+          cwd,
+          env: { ...process.env, TERM: 'xterm-256color' },
+        });
+        console.log(`[ProcessRunner] Shell process spawned, pid: ${proc.pid}`);
+      } catch (err) {
+        console.error(`[ProcessRunner] Failed to spawn shell:`, err);
+        this.emit('error', sessionId, err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
+    } else {
+      const args: string[] = [];
+      if (options.model) {
+        args.push('--model', options.model);
+      }
+
+      const claudePath = process.env.CLAUDE_PATH ?? 'claude';
+      const shellCmd = [claudePath, ...args].map((a) => a.includes(' ') ? `"${a}"` : a).join(' ');
+      console.log(`[ProcessRunner] Spawning claude: ${shellCmd} in ${cwd}`);
+
+      try {
+        proc = pty.spawn('/bin/zsh', ['-l', '-c', shellCmd], {
+          name: 'xterm-256color',
+          cols,
+          rows,
+          cwd,
+          env: { ...process.env, TERM: 'xterm-256color' },
+        });
+        console.log(`[ProcessRunner] Claude process spawned, pid: ${proc.pid}`);
+      } catch (err) {
+        console.error(`[ProcessRunner] Failed to spawn claude:`, err);
+        this.emit('error', sessionId, err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
     }
 
     this.activeProcesses.set(sessionId, proc);
@@ -57,22 +78,23 @@ export class ClaudeRunner extends EventEmitter<ClaudeRunnerEvents> {
     });
 
     proc.onExit(({ exitCode, signal }) => {
-      console.log(`[ClaudeRunner] Process exited, code: ${exitCode}, signal: ${signal}`);
+      console.log(`[ProcessRunner] Process exited, code: ${exitCode}, signal: ${signal}`);
       this.activeProcesses.delete(sessionId);
       if (exitCode === 0 || exitCode === null || exitCode === undefined) {
         this.emit('complete', sessionId);
       } else {
-        this.emit('error', sessionId, new Error(`Claude exited with code ${exitCode}`));
+        this.emit('error', sessionId, new Error(`Process exited with code ${exitCode}`));
       }
     });
 
-    // Send the initial prompt after Claude initializes
-    setTimeout(() => {
-      if (this.activeProcesses.has(sessionId)) {
-        console.log(`[ClaudeRunner] Sending prompt to session ${sessionId}`);
-        proc.write(prompt + '\r');
-      }
-    }, 2000);
+    if (shellType === 'claude') {
+      setTimeout(() => {
+        if (this.activeProcesses.has(sessionId)) {
+          console.log(`[ProcessRunner] Sending prompt to session ${sessionId}`);
+          proc.write(prompt + '\r');
+        }
+      }, 2000);
+    }
   }
 
   write(sessionId: string, data: string): boolean {

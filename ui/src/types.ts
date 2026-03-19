@@ -1,4 +1,6 @@
-export type SessionStatus = 'pending' | 'running' | 'completed' | 'error';
+export type SessionStatus = 'pending' | 'running' | 'completed' | 'error' | 'disconnected';
+
+export type ShellType = 'claude' | 'shell';
 
 export interface Session {
   id: string;
@@ -10,6 +12,7 @@ export interface Session {
   updatedAt: string;
   model?: string;
   workingDir?: string;
+  shellType?: ShellType;
 }
 
 export type SessionMessageType = 'assistant' | 'user' | 'system' | 'tool_use' | 'tool_result';
@@ -69,6 +72,8 @@ export interface CreateSessionPayload {
   name?: string;
   model?: string;
   workingDir?: string;
+  bridgeId?: string;
+  shellType?: ShellType;
 }
 
 export interface StopSessionPayload {
