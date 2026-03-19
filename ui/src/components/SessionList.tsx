@@ -11,6 +11,7 @@ interface SessionListProps {
   onSelectSession: (sessionId: string) => void;
   onRenameSession?: (sessionId: string, name: string) => void;
   onStopSession?: (sessionId: string) => void;
+  onResumeSession?: (sessionId: string) => void;
   onRemoveSession?: (sessionId: string) => void;
   sessionActivity?: Map<string, SessionActivity>;
 }
@@ -67,11 +68,13 @@ function formatTimestamp(timestamp: string): string {
 function ContextMenu({
   menu,
   onStop,
+  onResume,
   onRemove,
   onClose,
 }: {
   menu: ContextMenuState;
   onStop: (sessionId: string) => void;
+  onResume: (sessionId: string) => void;
   onRemove: (sessionId: string) => void;
   onClose: () => void;
 }) {
@@ -101,6 +104,7 @@ function ContextMenu({
   }, [onClose]);
 
   const isRunning = menu.sessionStatus === "running" || menu.sessionStatus === "pending";
+  const canResume = menu.sessionStatus === "completed" || menu.sessionStatus === "error";
 
   return createPortal(
     <div
@@ -148,6 +152,34 @@ function ContextMenu({
           Stop
         </button>
       )}
+      {canResume && (
+        <button
+          onClick={() => {
+            onResume(menu.sessionId);
+            onClose();
+          }}
+          style={{
+            display: "block",
+            width: "100%",
+            textAlign: "left",
+            padding: "6px 12px",
+            background: "transparent",
+            border: "none",
+            color: "var(--accent)",
+            cursor: "pointer",
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "var(--bg-hover)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "transparent";
+          }}
+        >
+          Resume
+        </button>
+      )}
       <button
         onClick={() => {
           onRemove(menu.sessionId);
@@ -179,7 +211,7 @@ function ContextMenu({
   );
 }
 
-export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession, onStopSession, onRemoveSession, sessionActivity }: SessionListProps) {
+export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession, onStopSession, onResumeSession, onRemoveSession, sessionActivity }: SessionListProps) {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -390,6 +422,7 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
         <ContextMenu
           menu={contextMenu}
           onStop={onStopSession}
+          onResume={onResumeSession ?? (() => {})}
           onRemove={onRemoveSession}
           onClose={closeContextMenu}
         />

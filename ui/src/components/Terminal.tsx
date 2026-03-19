@@ -101,6 +101,8 @@ export function Terminal({ client, sessionId, userId, isRunning, sessionName }: 
     const term = xtermRef.current;
     term.clear();
     term.reset();
+    fitAddonRef.current?.fit();
+    term.refresh(0, term.rows - 1);
 
     // Clean up previous subscriptions
     if (outputSubRef.current) {
@@ -163,10 +165,11 @@ export function Terminal({ client, sessionId, userId, isRunning, sessionName }: 
       }
     });
 
-    // Send current dimensions to PTY so it redraws for the correct size
+    // Refit terminal and send dimensions to PTY after history replays
     const resizeTimer = setTimeout(() => {
+      fitAddonRef.current?.fit();
       inputSub.publish({ type: "resize", cols: term.cols, rows: term.rows });
-    }, 150);
+    }, 200);
 
     return () => {
       clearTimeout(resizeTimer);

@@ -42,17 +42,12 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
 
-  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, removeSession, refreshSessions } = useSessions(client, userId);
+  const { sessions: rawSessions, createSession, stopSession, retrySession, resumeSession, renameSession, removeSession, refreshSessions } = useSessions(client, userId);
   const { bridges, hasBridges } = useBridges(client, userId);
   const sessionActivity = useAllSessionEvents(client, rawSessions, userId);
 
-  const activeBridgeIds = useMemo(() => new Set(bridges.map((b) => b.bridgeId)), [bridges]);
-
-  const sessions = useMemo(() =>
-    activeBridgeIds.size === 0
-      ? rawSessions
-      : rawSessions.filter((s) => activeBridgeIds.has(s.bridgeId)),
-    [rawSessions, activeBridgeIds]
+  const sessions = useMemo(() => rawSessions,
+    [rawSessions]
   );
 
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
@@ -294,6 +289,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
               onSelectSession={setSelectedSessionId}
               onRenameSession={renameSession}
               onStopSession={stopSession}
+              onResumeSession={resumeSession}
               onRemoveSession={handleRemoveSession}
               sessionActivity={sessionActivity}
             />

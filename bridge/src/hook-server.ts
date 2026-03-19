@@ -15,6 +15,7 @@ export interface ClaudeHookPayload {
 
 export interface HookEvent {
   sessionId: string;
+  claudeSessionId: string;
   eventName: string;
   data: Record<string, unknown>;
 }
@@ -84,6 +85,7 @@ export class HookServer extends EventEmitter<HookServerEvents> {
 
         const hookEvent: HookEvent = {
           sessionId: payload.ftown_session_id,
+          claudeSessionId: payload.session_id,
           eventName: payload.hook_event_name,
           data: {
             cwd: payload.cwd,

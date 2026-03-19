@@ -11,6 +11,7 @@ export interface Session {
   model?: string;
   workingDir?: string;
   shellType?: ShellType;
+  claudeSessionId?: string;
 }
 
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error';
@@ -32,7 +33,7 @@ export interface Command {
   requestId: string;
 }
 
-export type CommandType = 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session';
+export type CommandType = 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'resume_session';
 
 export interface CreateSessionPayload {
   prompt: string;
@@ -70,7 +71,12 @@ export interface RemoveSessionPayload {
   sessionId: string;
 }
 
-export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RetrySessionPayload | SendMessagePayload | RenameSessionPayload | RemoveSessionPayload | Record<string, unknown>;
+export interface ResumeSessionPayload {
+  sessionId: string;
+  bridgeId?: string;
+}
+
+export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RetrySessionPayload | SendMessagePayload | RenameSessionPayload | RemoveSessionPayload | ResumeSessionPayload | Record<string, unknown>;
 
 export interface CommandResponse {
   requestId: string;

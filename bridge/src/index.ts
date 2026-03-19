@@ -20,6 +20,7 @@ import type {
   GetHistoryPayload,
   RemoveSessionPayload,
   RenameSessionPayload,
+  ResumeSessionPayload,
   RetrySessionPayload,
   Session,
   StopSessionPayload,
@@ -217,6 +218,14 @@ program
 
     hookServer.on('event', (hookEvent: HookEvent) => {
       (async () => {
+        if (hookEvent.claudeSessionId) {
+          const session = await store.loadSession(hookEvent.sessionId);
+          if (session && !session.claudeSessionId) {
+            session.claudeSessionId = hookEvent.claudeSessionId;
+            await store.saveSession(session);
+          }
+        }
+
         const eventData: Record<string, unknown> = {
           type: 'hook_event',
           eventName: hookEvent.eventName,
@@ -375,6 +384,56 @@ program
             );
 
             response = { requestId: command.requestId, success: true, data: { session: existingSession } };
+            break;
+          }
+
+          case 'resume_session': {
+            const payload = command.payload as ResumeSessionPayload;
+
+            if (!payload.sessionId) {
+              response = { requestId: command.requestId, success: false, error: 'Missing sessionId' };
+              break;
+            }
+
+            const sessionToResume = await store.loadSession(payload.sessionId);
+            if (!sessionToResume) {
+              return; // silently skip — another bridge may have this session
+            }
+
+            if (sessionToResume.status === 'running') {
+              response = { requestId: command.requestId, success: false, error: 'Session is already running' };
+              break;
+            }
+
+            sessionToResume.status = 'running';
+            sessionToResume.updatedAt = new Date().toISOString();
+            await store.saveSession(sessionToResume);
+            await centrifugo.publishSessionUpdate(userId, sessionToResume);
+
+            if (sessionToResume.claudeSessionId) {
+              runner.run(sessionToResume.id, sessionToResume.prompt, {
+                model: sessionToResume.model,
+                workingDir: sessionToResume.workingDir,
+                shellType: sessionToResume.shellType,
+                hookPort,
+                resumeSessionId: sessionToResume.claudeSessionId,
+              });
+            } else {
+              runner.run(sessionToResume.id, sessionToResume.prompt, {
+                model: sessionToResume.model,
+                workingDir: sessionToResume.workingDir,
+                shellType: sessionToResume.shellType,
+                hookPort,
+              });
+            }
+
+            centrifugo.subscribeToTerminalInput(
+              userId, sessionToResume.id,
+              (sid, data) => { runner.write(sid, data); },
+              (sid, cols, rows) => { runner.resize(sid, cols, rows); },
+            );
+
+            response = { requestId: command.requestId, success: true, data: { session: sessionToResume } };
             break;
           }
 

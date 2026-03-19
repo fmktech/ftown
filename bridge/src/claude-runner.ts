@@ -17,6 +17,7 @@ interface RunOptions {
   rows?: number;
   shellType?: ShellType;
   hookPort?: number;
+  resumeSessionId?: string;
 }
 
 export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
@@ -48,6 +49,10 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
       }
     } else {
       const args: string[] = ['--dangerously-skip-permissions'];
+
+      if (options.resumeSessionId) {
+        args.push('--resume', options.resumeSessionId);
+      }
 
       const env: Record<string, string> = { ...process.env as Record<string, string>, TERM: 'xterm-256color' };
 
@@ -92,7 +97,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
       }
     });
 
-    if (shellType === 'claude') {
+    if (shellType === 'claude' && !options.resumeSessionId) {
       setTimeout(() => {
         if (this.activeProcesses.has(sessionId)) {
           console.log(`[ProcessRunner] Sending prompt to session ${sessionId}`);
