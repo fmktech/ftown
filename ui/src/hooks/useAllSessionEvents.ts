@@ -42,18 +42,7 @@ export function useAllSessionEvents(
 
     const channel = `events:${sessionId}#${u}`;
 
-    const existing = c.getSubscription(channel);
-    if (existing) {
-      existing.removeAllListeners();
-      existing.unsubscribe();
-      c.removeSubscription(existing);
-    }
-
-    const sub = c.newSubscription(channel, {
-      since: { offset: 0, epoch: "" },
-    });
-
-    sub.on("publication", (ctx) => {
+    const onPublication = (ctx: { data: unknown }): void => {
       const msg = ctx.data as HookEventMessage;
       if (msg.type !== "hook_event") return;
 
@@ -90,19 +79,26 @@ export function useAllSessionEvents(
         next.set(sessionId, updated);
         return next;
       });
+    };
+
+    const existing = c.getSubscription(channel);
+    if (existing) {
+      existing.on("publication", onPublication);
+      subsRef.current.set(sessionId, existing);
+      return;
+    }
+
+    const sub = c.newSubscription(channel, {
+      since: { offset: 0, epoch: "" },
     });
+
+    sub.on("publication", onPublication);
 
     sub.subscribe();
     subsRef.current.set(sessionId, sub);
   }, []);
 
   const unsubscribe = useCallback((sessionId: string) => {
-    const c = clientRef.current;
-    const sub = subsRef.current.get(sessionId);
-    if (!sub) return;
-    sub.removeAllListeners();
-    sub.unsubscribe();
-    if (c) c.removeSubscription(sub);
     subsRef.current.delete(sessionId);
   }, []);
 
