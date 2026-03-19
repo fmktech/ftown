@@ -5,7 +5,7 @@ import { Centrifuge, Subscription } from "centrifuge";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
-import { useSessionEvents } from "@/hooks/useSessionEvents";
+import { TokenUsage } from "@/hooks/useSessionEvents";
 import "@xterm/xterm/css/xterm.css";
 
 interface TerminalProps {
@@ -14,6 +14,7 @@ interface TerminalProps {
   userId: string | null;
   isRunning: boolean;
   sessionName?: string | null;
+  usage?: TokenUsage;
 }
 
 function formatTokenCount(n: number): string {
@@ -22,8 +23,7 @@ function formatTokenCount(n: number): string {
   return String(n);
 }
 
-export function Terminal({ client, sessionId, userId, isRunning, sessionName }: TerminalProps) {
-  const { usage } = useSessionEvents(client, sessionId, userId);
+export function Terminal({ client, sessionId, userId, isRunning, sessionName, usage }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -225,7 +225,7 @@ export function Terminal({ client, sessionId, userId, isRunning, sessionName }: 
             </div>
 
             <div className="flex items-center gap-3">
-              {(usage.inputTokens > 0 || usage.outputTokens > 0) && (
+              {usage && (usage.inputTokens > 0 || usage.outputTokens > 0) && (
                 <span
                   style={{
                     fontSize: 10,

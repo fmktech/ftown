@@ -83,9 +83,9 @@ export function useAllSessionEvents(
 
     const existing = c.getSubscription(channel);
     if (existing) {
-      existing.on("publication", onPublication);
-      subsRef.current.set(sessionId, existing);
-      return;
+      existing.removeAllListeners();
+      existing.unsubscribe();
+      c.removeSubscription(existing);
     }
 
     const sub = c.newSubscription(channel, {
@@ -99,6 +99,13 @@ export function useAllSessionEvents(
   }, []);
 
   const unsubscribe = useCallback((sessionId: string) => {
+    const c = clientRef.current;
+    const sub = subsRef.current.get(sessionId);
+    if (sub) {
+      sub.removeAllListeners();
+      sub.unsubscribe();
+      if (c) c.removeSubscription(sub);
+    }
     subsRef.current.delete(sessionId);
   }, []);
 

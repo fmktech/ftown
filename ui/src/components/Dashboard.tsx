@@ -311,6 +311,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
             userId={userId}
             isRunning={selectedSession?.status === "running"}
             sessionName={selectedSession?.name ?? selectedSession?.prompt?.slice(0, 48) ?? null}
+            usage={selectedSessionId ? sessionActivity.get(selectedSessionId)?.usage : undefined}
           />
         </main>
       </div>
