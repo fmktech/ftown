@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, readdir, appendFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir, appendFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 
@@ -69,6 +69,13 @@ export class SessionStore {
     const newLock = prevLock.then(() => appendFile(filePath, data, 'utf-8'));
     this.writeLocks.set(sessionId, newLock);
     await newLock;
+  }
+
+  async deleteSession(sessionId: string): Promise<void> {
+    const dir = this.sessionDir(sessionId);
+    if (existsSync(dir)) {
+      await rm(dir, { recursive: true, force: true });
+    }
   }
 
   async loadTerminalLog(sessionId: string): Promise<string> {

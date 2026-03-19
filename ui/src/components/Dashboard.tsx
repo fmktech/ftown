@@ -42,7 +42,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
 
-  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, refreshSessions } = useSessions(client, userId);
+  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, removeSession, refreshSessions } = useSessions(client, userId);
   const { bridges, hasBridges } = useBridges(client, userId);
   const sessionActivity = useAllSessionEvents(client, rawSessions, userId);
 
@@ -71,6 +71,13 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const handleRetrySession = useCallback(() => {
     if (selectedSessionId) retrySession(selectedSessionId);
   }, [selectedSessionId, retrySession]);
+
+  const handleRemoveSession = useCallback((sessionId: string) => {
+    removeSession(sessionId);
+    if (selectedSessionId === sessionId) {
+      setSelectedSessionId(null);
+    }
+  }, [removeSession, selectedSessionId]);
 
   return (
     <div
@@ -286,6 +293,8 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
               selectedSessionId={selectedSessionId}
               onSelectSession={setSelectedSessionId}
               onRenameSession={renameSession}
+              onStopSession={stopSession}
+              onRemoveSession={handleRemoveSession}
               sessionActivity={sessionActivity}
             />
           </div>

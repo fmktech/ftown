@@ -10,6 +10,7 @@ import {
   CommandResponse,
   CreateSessionPayload,
   RenameSessionPayload,
+  RemoveSessionPayload,
 } from "@/types";
 
 interface SessionUpdateMessage {
@@ -30,6 +31,7 @@ interface UseSessionsResult {
   stopSession: (sessionId: string) => void;
   retrySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
+  removeSession: (sessionId: string) => void;
   refreshSessions: () => void;
   lastResponse: CommandResponse | null;
 }
@@ -61,15 +63,19 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
       const data = ctx.data as SessionUpdateMessage;
 
       if (data.type === 'session_update' && data.session) {
-        setSessions((prev) => {
-          const idx = prev.findIndex((s) => s.id === data.session.id);
-          if (idx >= 0) {
-            const updated = [...prev];
-            updated[idx] = data.session;
-            return updated;
-          }
-          return [data.session, ...prev];
-        });
+        if ((data.session.status as string) === 'removed') {
+          setSessions((prev) => prev.filter((s) => s.id !== data.session.id));
+        } else {
+          setSessions((prev) => {
+            const idx = prev.findIndex((s) => s.id === data.session.id);
+            if (idx >= 0) {
+              const updated = [...prev];
+              updated[idx] = data.session;
+              return updated;
+            }
+            return [data.session, ...prev];
+          });
+        }
       }
     });
 
@@ -193,6 +199,22 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
     [userId, publishCommand]
   );
 
+  const removeSession = useCallback(
+    (sessionId: string) => {
+      if (!userId) return;
+
+      const payload: RemoveSessionPayload = { sessionId };
+      const command: Command = {
+        type: "remove_session",
+        payload,
+        requestId: uuidv4(),
+      };
+
+      publishCommand(command);
+    },
+    [userId, publishCommand]
+  );
+
   const refreshSessions = useCallback(() => {
     if (!userId) return;
 
@@ -211,6 +233,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
     stopSession,
     retrySession,
     renameSession,
+    removeSession,
     refreshSessions,
     lastResponse,
   };

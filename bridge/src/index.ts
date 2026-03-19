@@ -18,6 +18,7 @@ import type {
   CommandResponse,
   CreateSessionPayload,
   GetHistoryPayload,
+  RemoveSessionPayload,
   RenameSessionPayload,
   RetrySessionPayload,
   Session,
@@ -391,6 +392,31 @@ program
             await centrifugo.publishSessionUpdate(userId, sessionToRename);
 
             response = { requestId: command.requestId, success: true, data: { session: sessionToRename } };
+            break;
+          }
+
+          case 'remove_session': {
+            const payload = command.payload as RemoveSessionPayload;
+            if (!payload.sessionId) {
+              response = { requestId: command.requestId, success: false, error: 'Missing sessionId' };
+              break;
+            }
+
+            runner.stop(payload.sessionId);
+
+            const sessionToRemove = await store.loadSession(payload.sessionId);
+            await store.deleteSession(payload.sessionId);
+
+            if (sessionToRemove) {
+              const removedSession: Session = {
+                ...sessionToRemove,
+                status: 'removed' as Session['status'],
+                updatedAt: new Date().toISOString(),
+              };
+              await centrifugo.publishSessionUpdate(userId, removedSession);
+            }
+
+            response = { requestId: command.requestId, success: true, data: { removed: true } };
             break;
           }
 

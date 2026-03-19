@@ -32,7 +32,7 @@ export interface Command {
   requestId: string;
 }
 
-export type CommandType = 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session';
+export type CommandType = 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session';
 
 export interface CreateSessionPayload {
   prompt: string;
@@ -66,7 +66,11 @@ export interface RenameSessionPayload {
   name: string;
 }
 
-export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RetrySessionPayload | SendMessagePayload | RenameSessionPayload | Record<string, unknown>;
+export interface RemoveSessionPayload {
+  sessionId: string;
+}
+
+export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RetrySessionPayload | SendMessagePayload | RenameSessionPayload | RemoveSessionPayload | Record<string, unknown>;
 
 export interface CommandResponse {
   requestId: string;

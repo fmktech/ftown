@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { Session, SessionStatus } from "@/types";
 import { SessionActivity } from "@/hooks/useAllSessionEvents";
 
@@ -9,7 +10,16 @@ interface SessionListProps {
   selectedSessionId: string | null;
   onSelectSession: (sessionId: string) => void;
   onRenameSession?: (sessionId: string, name: string) => void;
+  onStopSession?: (sessionId: string) => void;
+  onRemoveSession?: (sessionId: string) => void;
   sessionActivity?: Map<string, SessionActivity>;
+}
+
+interface ContextMenuState {
+  sessionId: string;
+  sessionStatus: SessionStatus;
+  x: number;
+  y: number;
 }
 
 function StatusBadge({ status, activity }: { status: SessionStatus; activity?: "thinking" | "tool_use" | "idle" }) {
@@ -54,9 +64,125 @@ function formatTimestamp(timestamp: string): string {
   return date.toLocaleDateString();
 }
 
-export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession, sessionActivity }: SessionListProps) {
+function ContextMenu({
+  menu,
+  onStop,
+  onRemove,
+  onClose,
+}: {
+  menu: ContextMenuState;
+  onStop: (sessionId: string) => void;
+  onRemove: (sessionId: string) => void;
+  onClose: () => void;
+}) {
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent): void {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    }
+    function handleKeyDown(e: KeyboardEvent): void {
+      if (e.key === "Escape") onClose();
+    }
+    function handleScroll(): void {
+      onClose();
+    }
+
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("scroll", handleScroll, true);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("scroll", handleScroll, true);
+    };
+  }, [onClose]);
+
+  const isRunning = menu.sessionStatus === "running" || menu.sessionStatus === "pending";
+
+  return createPortal(
+    <div
+      ref={menuRef}
+      style={{
+        position: "fixed",
+        top: menu.y,
+        left: menu.x,
+        zIndex: 9999,
+        background: "var(--bg-elevated)",
+        border: "1px solid var(--border-muted)",
+        borderRadius: 6,
+        padding: "4px 0",
+        minWidth: 120,
+        boxShadow: "0 4px 12px rgba(0, 0, 0, 0.4)",
+        fontFamily: "var(--font-mono)",
+        fontSize: 11,
+      }}
+    >
+      {isRunning && (
+        <button
+          onClick={() => {
+            onStop(menu.sessionId);
+            onClose();
+          }}
+          style={{
+            display: "block",
+            width: "100%",
+            textAlign: "left",
+            padding: "6px 12px",
+            background: "transparent",
+            border: "none",
+            color: "var(--status-error)",
+            cursor: "pointer",
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "var(--bg-hover)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "transparent";
+          }}
+        >
+          Stop
+        </button>
+      )}
+      <button
+        onClick={() => {
+          onRemove(menu.sessionId);
+          onClose();
+        }}
+        style={{
+          display: "block",
+          width: "100%",
+          textAlign: "left",
+          padding: "6px 12px",
+          background: "transparent",
+          border: "none",
+          color: "var(--status-error)",
+          cursor: "pointer",
+          fontFamily: "var(--font-mono)",
+          fontSize: 11,
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.background = "var(--bg-hover)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.background = "transparent";
+        }}
+      >
+        Remove
+      </button>
+    </div>,
+    document.body
+  );
+}
+
+export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession, onStopSession, onRemoveSession, sessionActivity }: SessionListProps) {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -65,6 +191,10 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
       inputRef.current.select();
     }
   }, [editingSessionId]);
+
+  const closeContextMenu = useCallback(() => {
+    setContextMenu(null);
+  }, []);
 
   function startEditing(session: Session): void {
     setEditingSessionId(session.id);
@@ -80,6 +210,17 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
 
   function cancelEditing(): void {
     setEditingSessionId(null);
+  }
+
+  function handleContextMenu(e: React.MouseEvent, session: Session): void {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({
+      sessionId: session.id,
+      sessionStatus: session.status,
+      x: e.clientX,
+      y: e.clientY,
+    });
   }
 
   if (sessions.length === 0) {
@@ -104,6 +245,7 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
           <button
             key={session.id}
             onClick={() => onSelectSession(session.id)}
+            onContextMenu={(e) => handleContextMenu(e, session)}
             style={{
               width: "100%",
               textAlign: "left",
@@ -243,6 +385,15 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
           </button>
         );
       })}
+
+      {contextMenu && onStopSession && onRemoveSession && (
+        <ContextMenu
+          menu={contextMenu}
+          onStop={onStopSession}
+          onRemove={onRemoveSession}
+          onClose={closeContextMenu}
+        />
+      )}
     </div>
   );
 }
