@@ -520,11 +520,19 @@ program
     centrifugo.connect();
     centrifugo.joinBridgesChannel(userId, bridgeId);
     centrifugo.subscribeToSessions(userId);
+
+    let ready = false;
     centrifugo.subscribeToCommands(userId, (command) => {
+      if (!ready) return;
       handleCommand(command).catch((err) => {
         console.error(`[Bridge] Unhandled error in command handler:`, err);
       });
     });
+    // Ignore replayed history — only process commands arriving after subscribe
+    setTimeout(() => {
+      ready = true;
+      console.log('[Bridge] Ready and listening for commands');
+    }, 2000);
 
     const shutdown = (): void => {
       console.log('\n[Bridge] Shutting down...');
@@ -536,8 +544,6 @@ program
 
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
-
-    console.log('[Bridge] Ready and listening for commands');
   });
 
 program.parse();
