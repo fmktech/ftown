@@ -119,11 +119,14 @@ program
     const outputBuffers = new Map<string, string>();
     const flushTimers = new Map<string, ReturnType<typeof setTimeout>>();
     const FLUSH_INTERVAL_MS = 16;
+    const MAX_BUFFER_BYTES = 32_000;
 
     function flushBuffer(sessionId: string): void {
       const buf = outputBuffers.get(sessionId);
       if (!buf) return;
       outputBuffers.delete(sessionId);
+      const timer = flushTimers.get(sessionId);
+      if (timer) clearTimeout(timer);
       flushTimers.delete(sessionId);
       store.appendTerminalData(sessionId, buf).catch((err) => {
         console.error(`[Bridge] Failed to store terminal data for ${sessionId}:`, err);
@@ -136,7 +139,9 @@ program
     runner.on('data', (sessionId, data) => {
       const existing = outputBuffers.get(sessionId) ?? '';
       outputBuffers.set(sessionId, existing + data);
-      if (!flushTimers.has(sessionId)) {
+      if ((existing.length + data.length) >= MAX_BUFFER_BYTES) {
+        flushBuffer(sessionId);
+      } else if (!flushTimers.has(sessionId)) {
         flushTimers.set(sessionId, setTimeout(() => flushBuffer(sessionId), FLUSH_INTERVAL_MS));
       }
     });
