@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import { Command as Commander } from 'commander';
 import { v4 as uuidv4 } from 'uuid';
 import { resolve, join, dirname } from 'node:path';

@@ -1,15 +1,37 @@
 {
   "name": "ftown-bridge",
   "version": "0.1.0",
+  "description": "CLI bridge for ftown — connects local Claude Code sessions to the ftown orchestrator",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
     "ftown-bridge": "dist/index.js"
   },
+  "files": [
+    "dist",
+    "hooks"
+  ],
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "orchestrator",
+    "terminal",
+    "bridge"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fmktech/ftown.git",
+    "directory": "bridge"
   },
   "dependencies": {
     "centrifuge": "^5.2.2",

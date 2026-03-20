@@ -211,7 +211,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
             <button
               className="btn-ghost"
               onClick={async () => {
-                const text = `npx tsx src/index.ts --token ${token} --api-url ${window.location.origin}`;
+                const text = `npx ftown-bridge --token ${token} --api-url ${window.location.origin}`;
                 try {
                   await navigator.clipboard.writeText(text);
                 } catch {
@@ -243,7 +243,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
               letterSpacing: "0.02em",
             }}
           >
-            npx tsx src/index.ts --token {token} --api-url {typeof window !== "undefined" ? window.location.origin : ""}
+            npx ftown-bridge --token {token} --api-url {typeof window !== "undefined" ? window.location.origin : ""}
           </code>
         </div>
       )}
