@@ -289,6 +289,11 @@ program
               break;
             }
 
+            if (!existingSession.command) {
+              response = { requestId: command.requestId, success: false, error: 'Session has no command (created before v0.2.0)' };
+              break;
+            }
+
             existingSession.status = 'running';
             existingSession.bridgeId = bridgeId;
             existingSession.updatedAt = new Date().toISOString();
