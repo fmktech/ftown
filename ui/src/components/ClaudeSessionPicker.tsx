@@ -34,19 +34,22 @@ function parseSessionLines(stdout: string): ClaudeSession[] {
     .filter((s) => s.sessionId);
 }
 
-function formatTimestamp(ts: string): string {
+function formatRelativeTime(ts: string): string {
   if (!ts) return "";
   try {
     const d = new Date(ts);
-    if (isNaN(d.getTime())) return ts;
-    return d.toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+    if (isNaN(d.getTime())) return "";
+    const diffMs = Date.now() - d.getTime();
+    const mins = Math.floor(diffMs / 60000);
+    if (mins < 1) return "now";
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    if (days < 7) return `${days}d ago`;
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   } catch {
-    return ts;
+    return "";
   }
 }
 
@@ -62,15 +65,47 @@ export function ClaudeSessionPicker({ bridgeId, workingDir, onSelect, bridgeExec
     setError(null);
 
     const escapedDir = workingDir.replace(/'/g, "'\\''");
-    const script = `DIR="$HOME/.claude/projects/$(echo '${escapedDir}' | sed 's|^/|-|;s|/|-|g')"
-if [ ! -d "$DIR" ]; then echo '[]'; exit 0; fi
-find "$DIR" -maxdepth 1 -name "*.jsonl" -type f | while read f; do
-  SID=$(basename "$f" .jsonl)
-  FIRST_LINE=$(head -1 "$f" 2>/dev/null)
-  TS=$(echo "$FIRST_LINE" | python3 -c "import sys,json; print(json.loads(sys.stdin.readline()).get('timestamp',''))" 2>/dev/null)
-  SUMMARY=$(grep '"type":"human"' "$f" 2>/dev/null | head -1 | python3 -c "import sys,json; d=json.loads(sys.stdin.readline()); c=d.get('content',''); print(c[:80] if isinstance(c,str) else str(c)[:80])" 2>/dev/null)
-  echo "$SID|$TS|$SUMMARY"
-done | sort -t'|' -k2 -r | head -20`;
+    const script = `python3 << 'PYEOF'
+import os, json, glob
+d = os.path.expanduser("~/.claude/projects/") + os.popen("echo '${escapedDir}' | tr '[:upper:]' '[:lower:]' | sed 's| |-|g;s|^/|-|;s|/|-|g'").read().strip()
+if not os.path.isdir(d):
+    print("[]")
+    exit()
+results = []
+for f in glob.glob(os.path.join(d, "*.jsonl")):
+    sid = os.path.basename(f).replace(".jsonl", "")
+    if not sid or "-" not in sid:
+        continue
+    ts, summary = "", ""
+    try:
+        with open(f) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except:
+                    continue
+                if not ts and entry.get("timestamp"):
+                    ts = entry["timestamp"]
+                t = entry.get("type", "")
+                if t in ("human", "user") and not summary:
+                    c = entry.get("content", "")
+                    if isinstance(c, list):
+                        parts = [p.get("text","") for p in c if isinstance(p, dict) and p.get("type") == "text"]
+                        c = " ".join(parts)
+                    if isinstance(c, str) and c.strip():
+                        summary = c.strip()[:100].replace("|", " ")
+                if ts and summary:
+                    break
+    except:
+        pass
+    results.append((sid, ts, summary))
+results.sort(key=lambda x: x[1], reverse=True)
+for sid, ts, summary in results[:20]:
+    print(f"{sid}|{ts}|{summary}")
+PYEOF`;
 
     try {
       const result = await bridgeExec(script, workingDir, bridgeId);
@@ -124,15 +159,12 @@ done | sort -t'|' -k2 -r | head -20`;
           className="w-full text-left px-3 py-2 hover:bg-[#2a2a2a] transition-colors border-b border-[#222] last:border-b-0"
         >
           <div className="flex items-center justify-between gap-2">
-            <span className="text-xs text-[#aaa] truncate flex-1 font-mono">
-              {s.summary || s.sessionId.slice(0, 12)}
+            <span className="text-xs text-[#ccc] truncate flex-1">
+              {s.summary || "Empty session"}
             </span>
-            <span className="text-[10px] text-[#555] shrink-0">
-              {formatTimestamp(s.timestamp)}
+            <span className="text-[10px] text-[#555] shrink-0 tabular-nums">
+              {formatRelativeTime(s.timestamp)}
             </span>
-          </div>
-          <div className="text-[10px] text-[#444] font-mono mt-0.5">
-            {s.sessionId.slice(0, 20)}...
           </div>
         </button>
       ))}
