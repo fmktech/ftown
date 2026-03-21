@@ -11,43 +11,28 @@ interface NewSessionModalProps {
   bridges: BridgeInfo[];
 }
 
-const MODELS = [
-  { value: "sonnet", label: "Sonnet" },
-  { value: "opus", label: "Opus" },
-  { value: "haiku", label: "Haiku" },
-];
-
 export function NewSessionModal({ isOpen, onClose, onSubmit, bridges }: NewSessionModalProps) {
-  const [prompt, setPrompt] = useState("");
   const [name, setName] = useState("");
-  const [model, setModel] = useState("sonnet");
   const [workingDir, setWorkingDir] = useState("");
   const [shellType, setShellType] = useState<ShellType>("claude");
   const [bridgeId, setBridgeId] = useState("");
 
   const effectiveBridgeId = bridgeId || (bridges.length > 0 ? bridges[0].bridgeId : "");
 
-  const canSubmit = shellType === "shell" || prompt.trim().length > 0;
-
   const handleSubmit = useCallback(() => {
-    if (!canSubmit) return;
-
-    onSubmit(shellType === "shell" ? "" : prompt.trim(), {
+    onSubmit("", {
       name: name.trim() || undefined,
-      model: shellType === "shell" ? undefined : model,
       workingDir: workingDir.trim() || undefined,
       bridgeId: effectiveBridgeId || undefined,
       shellType,
     });
 
-    setPrompt("");
     setName("");
-    setModel("sonnet");
     setWorkingDir("");
     setShellType("claude");
     setBridgeId("");
     onClose();
-  }, [canSubmit, shellType, prompt, name, model, workingDir, effectiveBridgeId, onSubmit, onClose]);
+  }, [shellType, name, workingDir, effectiveBridgeId, onSubmit, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -131,21 +116,6 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges }: NewSessi
             </select>
           </div>
 
-          {shellType === "claude" && (
-            <div>
-              <label className="block text-sm text-[#888888] mb-1">Prompt *</label>
-              <textarea
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                placeholder="What should Claude do?"
-                rows={4}
-                autoFocus
-                className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] resize-none"
-                onKeyDown={handleKeyDown}
-              />
-            </div>
-          )}
-
           <div>
             <label className="block text-sm text-[#888888] mb-1">Session Name</label>
             <input
@@ -157,23 +127,6 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges }: NewSessi
               onKeyDown={handleKeyDown}
             />
           </div>
-
-          {shellType === "claude" && (
-            <div>
-              <label className="block text-sm text-[#888888] mb-1">Model</label>
-              <select
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] focus:outline-none focus:border-[#00ff88]"
-              >
-                {MODELS.map((m) => (
-                  <option key={m.value} value={m.value}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
 
           <div>
             <label className="block text-sm text-[#888888] mb-1">Working Directory</label>
@@ -196,8 +149,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges }: NewSessi
             </button>
             <button
               onClick={handleSubmit}
-              disabled={!canSubmit}
-              className="px-4 py-2 bg-[#00ff88] text-[#0a0a0a] font-bold rounded text-sm hover:bg-[#00cc6e] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-4 py-2 bg-[#00ff88] text-[#0a0a0a] font-bold rounded text-sm hover:bg-[#00cc6e] transition-colors"
             >
               Create Session
             </button>

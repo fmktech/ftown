@@ -277,15 +277,11 @@ program
               return;
             }
 
-            if (!payload.prompt && payload.shellType !== 'shell') {
-              response = { requestId: command.requestId, success: false, error: 'Missing prompt' };
-              break;
-            }
-
             const sessionId = uuidv4();
+            const defaultName = payload.shellType === 'shell' ? 'Shell' : (payload.prompt ? payload.prompt.slice(0, 80) : 'Claude');
             const session: Session = {
               id: sessionId,
-              name: payload.name ?? (payload.shellType === 'shell' ? 'Shell' : payload.prompt.slice(0, 80)),
+              name: payload.name ?? defaultName,
               prompt: payload.prompt ?? '',
               status: 'running',
               bridgeId,

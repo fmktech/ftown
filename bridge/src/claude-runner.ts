@@ -97,7 +97,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
       }
     });
 
-    if (shellType === 'claude' && !options.resumeSessionId) {
+    if (shellType === 'claude' && !options.resumeSessionId && prompt) {
       setTimeout(() => {
         if (this.activeProcesses.has(sessionId)) {
           console.log(`[ProcessRunner] Sending prompt to session ${sessionId}`);
