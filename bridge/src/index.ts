@@ -182,16 +182,17 @@ program
     async function handleCommand(command: Command): Promise<void> {
       console.log(`[Bridge] Received command: ${command.type} (requestId: ${command.requestId})`);
 
+      const payloadBridgeId = (command.payload as Record<string, unknown>).bridgeId as string | undefined;
+      if (payloadBridgeId && payloadBridgeId !== bridgeId) {
+        return;
+      }
+
       let response: CommandResponse;
 
       try {
         switch (command.type) {
           case 'create_session': {
             const payload = command.payload as CreateSessionPayload;
-
-            if (payload.bridgeId && payload.bridgeId !== bridgeId) {
-              return;
-            }
 
             const sessionId = uuidv4();
             const session: Session = {
@@ -268,10 +269,6 @@ program
 
           case 'retry_session': {
             const payload = command.payload as StopSessionPayload;
-
-            if (payload.bridgeId && payload.bridgeId !== bridgeId) {
-              return;
-            }
 
             if (!payload.sessionId) {
               response = { requestId: command.requestId, success: false, error: 'Missing sessionId' };
@@ -364,10 +361,6 @@ program
 
           case 'bridge_exec': {
             const payload = command.payload as BridgeExecPayload;
-
-            if (payload.bridgeId && payload.bridgeId !== bridgeId) {
-              return;
-            }
 
             try {
               const { stdout, stderr } = await execAsync(payload.command, {

@@ -1,6 +1,6 @@
 {
   "name": "ftown-bridge",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "CLI bridge for ftown — generic PTY-over-Centrifugo relay",
   "type": "module",
   "main": "dist/index.js",
