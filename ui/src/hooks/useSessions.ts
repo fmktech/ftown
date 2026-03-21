@@ -159,9 +159,9 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
       if (shellType === "shell") {
         cmd = "/bin/zsh -l";
       } else if (options?.claudeSessionId) {
-        cmd = `claude --allow-dangerously-skip-permissions --dangerously-skip-permissions --resume ${options.claudeSessionId}`;
+        cmd = `claude --allow-dangerously-skip-permissions --resume ${options.claudeSessionId}`;
       } else {
-        cmd = "claude --allow-dangerously-skip-permissions --dangerously-skip-permissions";
+        cmd = "claude --allow-dangerously-skip-permissions";
       }
 
       const payload: CreateSessionPayload = {
