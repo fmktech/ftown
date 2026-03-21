@@ -1,17 +1,13 @@
-export type ShellType = 'claude' | 'shell';
-
 export interface Session {
   id: string;
   name: string;
-  prompt: string;
+  command: string;
+  prompt?: string;
   status: SessionStatus;
   bridgeId: string;
   createdAt: string;
   updatedAt: string;
-  model?: string;
   workingDir?: string;
-  shellType?: ShellType;
-  claudeSessionId?: string;
 }
 
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error';
@@ -33,33 +29,32 @@ export interface Command {
   requestId: string;
 }
 
-export type CommandType = 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'resume_session';
+export type CommandType = 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec';
 
 export interface CreateSessionPayload {
-  prompt: string;
+  command: string;
   name?: string;
-  model?: string;
   workingDir?: string;
   bridgeId?: string;
-  shellType?: ShellType;
+  env?: Record<string, string>;
+  initialInput?: string;
+  initialInputDelay?: number;
+}
+
+export interface BridgeExecPayload {
+  command: string;
+  workingDir?: string;
+  timeout?: number;
+  bridgeId?: string;
 }
 
 export interface StopSessionPayload {
   sessionId: string;
+  bridgeId?: string;
 }
 
 export interface GetHistoryPayload {
   sessionId: string;
-}
-
-export interface RetrySessionPayload {
-  sessionId: string;
-  bridgeId?: string;
-}
-
-export interface SendMessagePayload {
-  sessionId: string;
-  message: string;
 }
 
 export interface RenameSessionPayload {
@@ -71,12 +66,7 @@ export interface RemoveSessionPayload {
   sessionId: string;
 }
 
-export interface ResumeSessionPayload {
-  sessionId: string;
-  bridgeId?: string;
-}
-
-export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RetrySessionPayload | SendMessagePayload | RenameSessionPayload | RemoveSessionPayload | ResumeSessionPayload | Record<string, unknown>;
+export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | Record<string, unknown>;
 
 export interface CommandResponse {
   requestId: string;

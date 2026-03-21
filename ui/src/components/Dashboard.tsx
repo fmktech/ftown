@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { Centrifuge } from "centrifuge";
 import { ConnectionStatus } from "@/hooks/useCentrifugo";
 import { Session, ShellType } from "@/types";
@@ -43,9 +43,48 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
 
-  const { sessions: rawSessions, createSession, stopSession, retrySession, resumeSession, renameSession, removeSession, refreshSessions } = useSessions(client, userId);
+  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, removeSession, refreshSessions, bridgeExec } = useSessions(client, userId);
   const { bridges, hasBridges } = useBridges(client, userId);
   const sessionActivity = useAllSessionEvents(client, rawSessions, userId);
+
+  const installedHookBridges = useRef(new Set<string>());
+
+  useEffect(() => {
+    for (const bridge of bridges) {
+      if (installedHookBridges.current.has(bridge.bridgeId)) continue;
+      installedHookBridges.current.add(bridge.bridgeId);
+
+      const script = `
+mkdir -p ~/.ftown
+cat > ~/.ftown/notify.sh << 'HOOKEOF'
+#!/bin/bash
+INPUT=$(cat)
+PORT="\${FTOWN_HOOK_PORT}"
+SID="\${FTOWN_SESSION_ID}"
+[ -z "$PORT" ] || [ -z "$SID" ] && exit 0
+echo "$INPUT" | jq -c --arg sid "$SID" '. + {ftown_session_id: $sid}' | curl -s -X POST "http://localhost:\${PORT}/hook" -H "Content-Type: application/json" -d @- > /dev/null 2>&1
+exit 0
+HOOKEOF
+chmod +x ~/.ftown/notify.sh
+python3 -c "
+import json, os
+p = os.path.expanduser('~/.claude/settings.json')
+s = {}
+try:
+    with open(p) as f: s = json.load(f)
+except: pass
+h = s.get('hooks', {})
+e = {'matcher': '', 'hooks': [{'type': 'command', 'command': os.path.expanduser('~/.ftown/notify.sh'), 'async': True}]}
+for ev in ['UserPromptSubmit','Stop','PreToolUse','PostToolUse','Notification']:
+    h[ev] = [e]
+s['hooks'] = h
+os.makedirs(os.path.dirname(p), exist_ok=True)
+with open(p, 'w') as f: json.dump(s, f, indent=2)
+print('hooks installed')
+"`;
+      bridgeExec(script, "~", bridge.bridgeId).catch(() => {});
+    }
+  }, [bridges, bridgeExec]);
 
   const activeBridgeIds = useMemo(() => new Set(bridges.map((b) => b.bridgeId)), [bridges]);
 
@@ -61,7 +100,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
 
   const handleCreateSession = useCallback(
-    (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType }) => {
+    (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string }) => {
       createSession(prompt, options);
     },
     [createSession]
@@ -306,7 +345,6 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
               onSelectSession={setSelectedSessionId}
               onRenameSession={renameSession}
               onStopSession={stopSession}
-              onResumeSession={resumeSession}
               onRemoveSession={handleRemoveSession}
               onCloneSession={handleCloneSession}
               sessionActivity={sessionActivity}
@@ -333,6 +371,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
         onSubmit={handleCreateSession}
         bridges={bridges}
         defaults={sessionDefaults}
+        bridgeExec={bridgeExec}
       />
     </div>
   );

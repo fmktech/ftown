@@ -9,9 +9,9 @@ import {
   Command,
   CommandResponse,
   CreateSessionPayload,
+  BridgeExecPayload,
   RenameSessionPayload,
   RemoveSessionPayload,
-  ResumeSessionPayload,
 } from "@/types";
 
 interface SessionUpdateMessage {
@@ -26,15 +26,21 @@ interface CommandResponseMessage {
   timestamp: string;
 }
 
+export interface BridgeExecResponse {
+  stdout: string;
+  stderr?: string;
+  exitCode?: number;
+}
+
 interface UseSessionsResult {
   sessions: Session[];
-  createSession: (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType }) => void;
+  createSession: (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string }) => void;
   stopSession: (sessionId: string) => void;
   retrySession: (sessionId: string) => void;
-  resumeSession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
   removeSession: (sessionId: string) => void;
   refreshSessions: () => void;
+  bridgeExec: (command: string, workingDir: string, bridgeId: string) => Promise<BridgeExecResponse>;
   lastResponse: CommandResponse | null;
 }
 
@@ -43,6 +49,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
   const [lastResponse, setLastResponse] = useState<CommandResponse | null>(null);
   const sessionsSubRef = useRef<Subscription | null>(null);
   const commandsSubRef = useRef<Subscription | null>(null);
+  const pendingCallbacksRef = useRef<Map<string, (response: CommandResponse) => void>>(new Map());
 
   useEffect(() => {
     if (!client || !userId) return;
@@ -92,6 +99,12 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
       if (data.type === 'command_response' && data.response) {
         setLastResponse(data.response);
 
+        const cb = pendingCallbacksRef.current.get(data.response.requestId);
+        if (cb) {
+          pendingCallbacksRef.current.delete(data.response.requestId);
+          cb(data.response);
+        }
+
         if (data.response.success && data.response.data) {
           const responseData = data.response.data as { sessions?: Session[] };
           if (Array.isArray(responseData.sessions)) {
@@ -138,16 +151,29 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
   );
 
   const createSession = useCallback(
-    (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType }) => {
+    (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string }) => {
       if (!userId) return;
 
+      const shellType = options?.shellType ?? "claude";
+      let cmd: string;
+      if (shellType === "shell") {
+        cmd = "/bin/zsh -l";
+      } else if (options?.claudeSessionId) {
+        cmd = `claude --dangerously-skip-permissions --resume ${options.claudeSessionId}`;
+      } else {
+        cmd = "claude --dangerously-skip-permissions";
+      }
+
       const payload: CreateSessionPayload = {
+        command: cmd,
         prompt,
         name: options?.name,
         model: options?.model,
         workingDir: options?.workingDir,
         bridgeId: options?.bridgeId,
-        shellType: options?.shellType ?? "claude",
+        shellType,
+        claudeSessionId: options?.claudeSessionId,
+        ...(prompt ? { initialInput: prompt + "\r", initialInputDelay: 2000 } : {}),
       };
 
       const command: Command = {
@@ -183,22 +209,6 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
       const command: Command = {
         type: "retry_session",
         payload: { sessionId },
-        requestId: uuidv4(),
-      };
-
-      publishCommand(command);
-    },
-    [userId, publishCommand]
-  );
-
-  const resumeSession = useCallback(
-    (sessionId: string) => {
-      if (!userId) return;
-
-      const payload: ResumeSessionPayload = { sessionId };
-      const command: Command = {
-        type: "resume_session",
-        payload,
         requestId: uuidv4(),
       };
 
@@ -251,15 +261,45 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
     publishCommand(command);
   }, [userId, publishCommand]);
 
+  const bridgeExec = useCallback(
+    (command: string, workingDir: string, bridgeId: string): Promise<BridgeExecResponse> => {
+      return new Promise((resolve, reject) => {
+        if (!userId) {
+          reject(new Error("Not connected"));
+          return;
+        }
+
+        const requestId = uuidv4();
+        const timeout = setTimeout(() => {
+          pendingCallbacksRef.current.delete(requestId);
+          reject(new Error("bridge_exec timed out"));
+        }, 30_000);
+
+        pendingCallbacksRef.current.set(requestId, (resp) => {
+          clearTimeout(timeout);
+          if (resp.success) {
+            resolve(resp.data as BridgeExecResponse);
+          } else {
+            reject(new Error(resp.error ?? "bridge_exec failed"));
+          }
+        });
+
+        const payload: BridgeExecPayload = { command, workingDir, bridgeId };
+        publishCommand({ type: "bridge_exec", payload, requestId });
+      });
+    },
+    [userId, publishCommand]
+  );
+
   return {
     sessions,
     createSession,
     stopSession,
     retrySession,
-    resumeSession,
     renameSession,
     removeSession,
     refreshSessions,
+    bridgeExec,
     lastResponse,
   };
 }

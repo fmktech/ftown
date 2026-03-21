@@ -11,7 +11,6 @@ interface SessionListProps {
   onSelectSession: (sessionId: string) => void;
   onRenameSession?: (sessionId: string, name: string) => void;
   onStopSession?: (sessionId: string) => void;
-  onResumeSession?: (sessionId: string) => void;
   onRemoveSession?: (sessionId: string) => void;
   onCloneSession?: (session: Session) => void;
   sessionActivity?: Map<string, SessionActivity>;
@@ -68,14 +67,12 @@ function formatTimestamp(timestamp: string): string {
 function ContextMenu({
   menu,
   onStop,
-  onResume,
   onRemove,
   onClone,
   onClose,
 }: {
   menu: ContextMenuState;
   onStop: (sessionId: string) => void;
-  onResume: (sessionId: string) => void;
   onRemove: (sessionId: string) => void;
   onClone: (session: Session) => void;
   onClose: () => void;
@@ -106,7 +103,6 @@ function ContextMenu({
   }, [onClose]);
 
   const isRunning = menu.session.status === "running" || menu.session.status === "pending";
-  const canResume = !isRunning;
 
   const menuButtonStyle = {
     display: "block" as const,
@@ -162,19 +158,6 @@ function ContextMenu({
           Stop
         </button>
       )}
-      {canResume && (
-        <button
-          onClick={() => {
-            onResume(menu.session.id);
-            onClose();
-          }}
-          style={{ ...menuButtonStyle, color: "var(--accent)" }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-        >
-          Resume
-        </button>
-      )}
       <button
         onClick={() => {
           onRemove(menu.session.id);
@@ -191,7 +174,7 @@ function ContextMenu({
   );
 }
 
-export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession, onStopSession, onResumeSession, onRemoveSession, onCloneSession, sessionActivity }: SessionListProps) {
+export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession, onStopSession, onRemoveSession, onCloneSession, sessionActivity }: SessionListProps) {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -403,7 +386,6 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
         <ContextMenu
           menu={contextMenu}
           onStop={onStopSession}
-          onResume={onResumeSession ?? (() => {})}
           onRemove={onRemoveSession}
           onClone={onCloneSession ?? (() => {})}
           onClose={closeContextMenu}

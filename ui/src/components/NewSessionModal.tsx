@@ -3,6 +3,8 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
 import { ShellType } from "@/types";
 import { BridgeInfo } from "@/hooks/useBridges";
+import { BridgeExecResponse } from "@/hooks/useSessions";
+import { ClaudeSessionPicker } from "./ClaudeSessionPicker";
 
 export interface SessionDefaults {
   name?: string;
@@ -14,9 +16,10 @@ export interface SessionDefaults {
 interface NewSessionModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSubmit: (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType }) => void;
+  onSubmit: (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string }) => void;
   bridges: BridgeInfo[];
   defaults?: SessionDefaults;
+  bridgeExec: (command: string, workingDir: string, bridgeId: string) => Promise<BridgeExecResponse>;
 }
 
 function getStoredPaths(hostname: string): string[] {
@@ -36,12 +39,14 @@ function storePath(hostname: string, path: string): void {
   localStorage.setItem(`ftown:paths:${hostname}`, JSON.stringify(updated));
 }
 
-export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults }: NewSessionModalProps) {
+export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, bridgeExec }: NewSessionModalProps) {
   const [name, setName] = useState("");
   const [workingDir, setWorkingDir] = useState("");
   const [shellType, setShellType] = useState<ShellType>("claude");
   const [bridgeId, setBridgeId] = useState("");
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [selectedClaudeSessionId, setSelectedClaudeSessionId] = useState<string | null>(null);
+  const [selectedClaudeSummary, setSelectedClaudeSummary] = useState<string | null>(null);
 
   const effectiveBridgeId = bridgeId || (bridges.length > 0 ? bridges[0].bridgeId : "");
   const selectedBridge = bridges.find((b) => b.bridgeId === effectiveBridgeId);
@@ -60,6 +65,8 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults }
       setWorkingDir(defaults.workingDir ?? "");
       setShellType(defaults.shellType ?? "claude");
       setBridgeId(defaults.bridgeId ?? "");
+      setSelectedClaudeSessionId(null);
+      setSelectedClaudeSummary(null);
     }
   }, [isOpen, defaults]);
 
@@ -73,6 +80,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults }
       workingDir: workingDir.trim() || undefined,
       bridgeId: effectiveBridgeId || undefined,
       shellType,
+      claudeSessionId: selectedClaudeSessionId ?? undefined,
     });
 
     setName("");
@@ -80,8 +88,10 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults }
     setShellType("claude");
     setBridgeId("");
     setShowSuggestions(false);
+    setSelectedClaudeSessionId(null);
+    setSelectedClaudeSummary(null);
     onClose();
-  }, [shellType, name, workingDir, effectiveBridgeId, hostname, onSubmit, onClose]);
+  }, [shellType, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, onSubmit, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -211,6 +221,33 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults }
               </div>
             )}
           </div>
+
+          {shellType === "claude" && effectiveBridgeId && workingDir.trim() && (
+            selectedClaudeSessionId ? (
+              <div className="flex items-center gap-2 px-3 py-2 border border-[#00ff88]/30 rounded bg-[#00ff88]/5">
+                <span className="text-xs text-[#00ff88] flex-1 truncate font-mono">
+                  Resuming: {selectedClaudeSummary || selectedClaudeSessionId.slice(0, 20)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => { setSelectedClaudeSessionId(null); setSelectedClaudeSummary(null); }}
+                  className="text-xs text-[#666] hover:text-[#aaa] transition-colors shrink-0"
+                >
+                  Clear
+                </button>
+              </div>
+            ) : (
+              <ClaudeSessionPicker
+                bridgeId={effectiveBridgeId}
+                workingDir={workingDir.trim()}
+                onSelect={(sid, summary) => {
+                  setSelectedClaudeSessionId(sid);
+                  setSelectedClaudeSummary(summary);
+                }}
+                bridgeExec={bridgeExec}
+              />
+            )
+          )}
 
           <div className="flex gap-3 justify-end pt-2">
             <button

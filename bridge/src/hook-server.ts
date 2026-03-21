@@ -3,19 +3,14 @@ import { EventEmitter } from 'node:events';
 
 import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 
-export interface ClaudeHookPayload {
-  session_id: string;
-  ftown_session_id?: string;
-  transcript_path: string;
-  cwd: string;
+export interface HookPayload {
+  ftown_session_id: string;
   hook_event_name: string;
-  tool_name?: string;
-  tool_input?: Record<string, unknown>;
+  [key: string]: unknown;
 }
 
 export interface HookEvent {
   sessionId: string;
-  claudeSessionId: string;
   eventName: string;
   data: Record<string, unknown>;
 }
@@ -73,26 +68,25 @@ export class HookServer extends EventEmitter<HookServerEvents> {
     req.on('end', () => {
       try {
         const body = Buffer.concat(chunks).toString('utf-8');
-        const payload = JSON.parse(body) as ClaudeHookPayload;
+        const payload = JSON.parse(body) as Record<string, unknown>;
 
-        if (!payload.ftown_session_id) {
+        const ftownSessionId = payload.ftown_session_id as string | undefined;
+        const hookEventName = payload.hook_event_name as string | undefined;
+
+        if (!ftownSessionId || !hookEventName) {
           res.writeHead(200);
           res.end('{"ok":true}');
           return;
         }
 
-        console.log(`[HookServer] Received ${payload.hook_event_name} for ftown session ${payload.ftown_session_id}`);
+        console.log(`[HookServer] Received ${hookEventName} for ftown session ${ftownSessionId}`);
+
+        const { ftown_session_id: _, ...rest } = payload;
 
         const hookEvent: HookEvent = {
-          sessionId: payload.ftown_session_id,
-          claudeSessionId: payload.session_id,
-          eventName: payload.hook_event_name,
-          data: {
-            cwd: payload.cwd,
-            transcript_path: payload.transcript_path,
-            ...(payload.tool_name ? { tool_name: payload.tool_name } : {}),
-            ...(payload.tool_input ? { tool_input: payload.tool_input } : {}),
-          },
+          sessionId: ftownSessionId,
+          eventName: hookEventName,
+          data: rest as Record<string, unknown>,
         };
 
         this.emit('event', hookEvent);

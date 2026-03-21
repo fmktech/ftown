@@ -2,11 +2,11 @@
 
 import { Command as Commander } from 'commander';
 import { v4 as uuidv4 } from 'uuid';
-import { resolve, join, dirname } from 'node:path';
-import { hostname as osHostname, homedir } from 'node:os';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
+import { hostname as osHostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { readFile } from 'node:fs/promises';
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
 
 import { CentrifugoClient } from './centrifugo-client.js';
 import { ProcessRunner } from './claude-runner.js';
@@ -16,17 +16,27 @@ import { HookServer } from './hook-server.js';
 import type { HookEvent } from './hook-server.js';
 
 import type {
+  BridgeExecPayload,
   Command,
   CommandResponse,
   CreateSessionPayload,
   GetHistoryPayload,
   RemoveSessionPayload,
   RenameSessionPayload,
-  ResumeSessionPayload,
-  RetrySessionPayload,
   Session,
   StopSessionPayload,
 } from './types.js';
+
+const execAsync = promisify(exec);
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+interface ExecError {
+  stdout: string;
+  stderr: string;
+  code: number;
+}
 
 interface BridgeAuthResponse {
   token: string;
@@ -53,43 +63,11 @@ async function fetchBridgeToken(apiUrl: string, authToken: string, bridgeId: str
   return res.json() as Promise<BridgeAuthResponse>;
 }
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-function installGlobalHooks(): void {
-  const hookScript = resolve(join(__dirname, '..', 'hooks', 'notify.sh'));
-  const claudeDir = join(homedir(), '.claude');
-  const settingsPath = join(claudeDir, 'settings.json');
-
-  const hookEntry = { matcher: '', hooks: [{ type: 'command', command: hookScript, async: true }] };
-  const ftownHooks = {
-    UserPromptSubmit: [hookEntry],
-    Stop: [hookEntry],
-    PreToolUse: [hookEntry],
-    PostToolUse: [hookEntry],
-    Notification: [hookEntry],
-  };
-
-  let settings: Record<string, unknown> = {};
-  try {
-    settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as Record<string, unknown>;
-  } catch {
-    // file doesn't exist or invalid json
-  }
-
-  const existingHooks = (settings.hooks ?? {}) as Record<string, unknown>;
-  settings.hooks = { ...existingHooks, ...ftownHooks };
-
-  mkdirSync(claudeDir, { recursive: true });
-  writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
-  console.log(`[Bridge] Installed global hooks at ${settingsPath}`);
-}
-
 const program = new Commander();
 
 program
   .name('ftown-bridge')
-  .description('Claude Code orchestrator bridge for Centrifugo')
+  .description('ftown orchestrator bridge for Centrifugo')
   .requiredOption('--token <jwt>', 'Auth token (JWT signed with Centrifugo secret)')
   .requiredOption('--api-url <url>', 'ftown UI API URL (e.g. https://ftown.vercel.app)')
   .option('--data-dir <path>', 'Directory for session data', './data')
@@ -111,11 +89,8 @@ program
     console.log(`  Data dir:       ${dataDir}`);
     console.log('========================================');
 
-    installGlobalHooks();
-
     const store = new SessionStore(dataDir);
 
-    // Mark any previously "running" sessions as "error" (they died with the old bridge)
     const staleSessiones = await store.listSessions();
     for (const s of staleSessiones) {
       if (s.status === 'running' || s.status === 'pending') {
@@ -194,71 +169,12 @@ program
       }
     });
 
-    interface TranscriptEntry {
-      type: string;
-      message?: {
-        usage?: {
-          input_tokens?: number;
-          output_tokens?: number;
-        };
-      };
-    }
-
-    async function parseTranscriptUsage(transcriptPath: string): Promise<{ inputTokens: number; outputTokens: number; totalTokens: number } | undefined> {
-      try {
-        const content = await readFile(transcriptPath, 'utf-8');
-        const lines = content.trim().split('\n');
-        let inputTokens = 0;
-        let outputTokens = 0;
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const entry = JSON.parse(line) as TranscriptEntry;
-            if (entry.type === 'assistant' && entry.message?.usage) {
-              inputTokens += entry.message.usage.input_tokens ?? 0;
-              outputTokens += entry.message.usage.output_tokens ?? 0;
-            }
-          } catch {
-            // skip malformed lines
-          }
-        }
-
-        if (inputTokens === 0 && outputTokens === 0) return undefined;
-        return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens };
-      } catch {
-        return undefined;
-      }
-    }
-
     hookServer.on('event', (hookEvent: HookEvent) => {
-      (async () => {
-        if (hookEvent.claudeSessionId) {
-          const session = await store.loadSession(hookEvent.sessionId);
-          if (session && !session.claudeSessionId) {
-            session.claudeSessionId = hookEvent.claudeSessionId;
-            await store.saveSession(session);
-          }
-        }
-
-        const eventData: Record<string, unknown> = {
-          type: 'hook_event',
-          eventName: hookEvent.eventName,
-          data: hookEvent.data,
-        };
-
-        if (hookEvent.eventName === 'Stop') {
-          const transcriptPath = hookEvent.data.transcript_path as string | undefined;
-          if (transcriptPath) {
-            const usage = await parseTranscriptUsage(transcriptPath);
-            if (usage) {
-              eventData.usage = usage;
-            }
-          }
-        }
-
-        await centrifugo.publishHookEvent(userId, hookEvent.sessionId, eventData);
-      })().catch((err) => {
+      centrifugo.publishHookEvent(userId, hookEvent.sessionId, {
+        type: 'hook_event',
+        eventName: hookEvent.eventName,
+        data: hookEvent.data,
+      }).catch((err) => {
         console.error('[Bridge] Failed to handle hook event:', err);
       });
     });
@@ -278,31 +194,28 @@ program
             }
 
             const sessionId = uuidv4();
-            const defaultName = payload.shellType === 'shell' ? 'Shell' : (payload.prompt ? payload.prompt.slice(0, 80) : 'Claude');
             const session: Session = {
               id: sessionId,
-              name: payload.name ?? defaultName,
-              prompt: payload.prompt ?? '',
+              name: payload.name ?? payload.command.slice(0, 80),
+              command: payload.command,
               status: 'running',
               bridgeId,
               createdAt: new Date().toISOString(),
               updatedAt: new Date().toISOString(),
-              model: payload.model,
               workingDir: payload.workingDir,
-              shellType: payload.shellType,
             };
 
             await store.saveSession(session);
             await centrifugo.publishSessionUpdate(userId, session);
 
-            runner.run(sessionId, payload.prompt, {
-              model: payload.model,
+            runner.run(sessionId, payload.command, {
               workingDir: payload.workingDir,
-              shellType: payload.shellType,
+              env: payload.env,
+              initialInput: payload.initialInput,
+              initialInputDelay: payload.initialInputDelay,
               hookPort,
             });
 
-            // Subscribe to terminal input from UI for this session
             centrifugo.subscribeToTerminalInput(
               userId, sessionId,
               (sid, data) => { runner.write(sid, data); },
@@ -354,7 +267,7 @@ program
           }
 
           case 'retry_session': {
-            const payload = command.payload as RetrySessionPayload;
+            const payload = command.payload as StopSessionPayload;
 
             if (payload.bridgeId && payload.bridgeId !== bridgeId) {
               return;
@@ -377,14 +290,13 @@ program
             }
 
             existingSession.status = 'running';
+            existingSession.bridgeId = bridgeId;
             existingSession.updatedAt = new Date().toISOString();
             await store.saveSession(existingSession);
             await centrifugo.publishSessionUpdate(userId, existingSession);
 
-            runner.run(existingSession.id, existingSession.prompt, {
-              model: existingSession.model,
+            runner.run(existingSession.id, existingSession.command, {
               workingDir: existingSession.workingDir,
-              shellType: existingSession.shellType,
               hookPort,
             });
 
@@ -395,57 +307,6 @@ program
             );
 
             response = { requestId: command.requestId, success: true, data: { session: existingSession } };
-            break;
-          }
-
-          case 'resume_session': {
-            const payload = command.payload as ResumeSessionPayload;
-
-            if (!payload.sessionId) {
-              response = { requestId: command.requestId, success: false, error: 'Missing sessionId' };
-              break;
-            }
-
-            const sessionToResume = await store.loadSession(payload.sessionId);
-            if (!sessionToResume) {
-              response = { requestId: command.requestId, success: false, error: 'Session not found on this bridge' };
-              break;
-            }
-
-            if (runner.isRunning(payload.sessionId)) {
-              response = { requestId: command.requestId, success: false, error: 'Session is already running' };
-              break;
-            }
-
-            sessionToResume.status = 'running';
-            sessionToResume.updatedAt = new Date().toISOString();
-            await store.saveSession(sessionToResume);
-            await centrifugo.publishSessionUpdate(userId, sessionToResume);
-
-            if (sessionToResume.claudeSessionId) {
-              runner.run(sessionToResume.id, sessionToResume.prompt, {
-                model: sessionToResume.model,
-                workingDir: sessionToResume.workingDir,
-                shellType: sessionToResume.shellType,
-                hookPort,
-                resumeSessionId: sessionToResume.claudeSessionId,
-              });
-            } else {
-              runner.run(sessionToResume.id, sessionToResume.prompt, {
-                model: sessionToResume.model,
-                workingDir: sessionToResume.workingDir,
-                shellType: sessionToResume.shellType,
-                hookPort,
-              });
-            }
-
-            centrifugo.subscribeToTerminalInput(
-              userId, sessionToResume.id,
-              (sid, data) => { runner.write(sid, data); },
-              (sid, cols, rows) => { runner.resize(sid, cols, rows); },
-            );
-
-            response = { requestId: command.requestId, success: true, data: { session: sessionToResume } };
             break;
           }
 
@@ -496,6 +357,27 @@ program
             break;
           }
 
+          case 'bridge_exec': {
+            const payload = command.payload as BridgeExecPayload;
+
+            if (payload.bridgeId && payload.bridgeId !== bridgeId) {
+              return;
+            }
+
+            try {
+              const { stdout, stderr } = await execAsync(payload.command, {
+                cwd: payload.workingDir ?? process.cwd(),
+                timeout: payload.timeout ?? 30000,
+                maxBuffer: 1024 * 1024,
+              });
+              response = { requestId: command.requestId, success: true, data: { stdout, stderr, exitCode: 0 } };
+            } catch (err) {
+              const execErr = err as ExecError;
+              response = { requestId: command.requestId, success: true, data: { stdout: execErr.stdout, stderr: execErr.stderr, exitCode: execErr.code } };
+            }
+            break;
+          }
+
           default: {
             response = {
               requestId: command.requestId,
@@ -527,7 +409,6 @@ program
         console.error(`[Bridge] Unhandled error in command handler:`, err);
       });
     });
-    // Ignore replayed history — only process commands arriving after subscribe
     setTimeout(() => {
       ready = true;
       console.log('[Bridge] Ready and listening for commands');
