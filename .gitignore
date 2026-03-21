@@ -31,3 +31,4 @@ coverage/
 
 .secrets/
 config.prod.json
+node-compile-cache/
