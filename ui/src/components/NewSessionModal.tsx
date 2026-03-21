@@ -1,25 +1,73 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { ShellType } from "@/types";
 import { BridgeInfo } from "@/hooks/useBridges";
+
+export interface SessionDefaults {
+  name?: string;
+  workingDir?: string;
+  bridgeId?: string;
+  shellType?: ShellType;
+}
 
 interface NewSessionModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSubmit: (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType }) => void;
   bridges: BridgeInfo[];
+  defaults?: SessionDefaults;
 }
 
-export function NewSessionModal({ isOpen, onClose, onSubmit, bridges }: NewSessionModalProps) {
+function getStoredPaths(hostname: string): string[] {
+  try {
+    const raw = localStorage.getItem(`ftown:paths:${hostname}`);
+    return raw ? JSON.parse(raw) as string[] : [];
+  } catch {
+    return [];
+  }
+}
+
+function storePath(hostname: string, path: string): void {
+  if (!path.trim()) return;
+  const existing = getStoredPaths(hostname);
+  const filtered = existing.filter((p) => p !== path);
+  const updated = [path, ...filtered].slice(0, 20);
+  localStorage.setItem(`ftown:paths:${hostname}`, JSON.stringify(updated));
+}
+
+export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults }: NewSessionModalProps) {
   const [name, setName] = useState("");
   const [workingDir, setWorkingDir] = useState("");
   const [shellType, setShellType] = useState<ShellType>("claude");
   const [bridgeId, setBridgeId] = useState("");
+  const [showSuggestions, setShowSuggestions] = useState(false);
 
   const effectiveBridgeId = bridgeId || (bridges.length > 0 ? bridges[0].bridgeId : "");
+  const selectedBridge = bridges.find((b) => b.bridgeId === effectiveBridgeId);
+  const hostname = selectedBridge?.hostname ?? "";
+
+  const suggestedPaths = useMemo(() => {
+    if (!hostname) return [];
+    const paths = getStoredPaths(hostname);
+    if (!workingDir.trim()) return paths;
+    return paths.filter((p) => p.toLowerCase().includes(workingDir.toLowerCase()));
+  }, [hostname, workingDir]);
+
+  useEffect(() => {
+    if (isOpen && defaults) {
+      setName(defaults.name ?? "");
+      setWorkingDir(defaults.workingDir ?? "");
+      setShellType(defaults.shellType ?? "claude");
+      setBridgeId(defaults.bridgeId ?? "");
+    }
+  }, [isOpen, defaults]);
 
   const handleSubmit = useCallback(() => {
+    if (hostname && workingDir.trim()) {
+      storePath(hostname, workingDir.trim());
+    }
+
     onSubmit("", {
       name: name.trim() || undefined,
       workingDir: workingDir.trim() || undefined,
@@ -31,8 +79,9 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges }: NewSessi
     setWorkingDir("");
     setShellType("claude");
     setBridgeId("");
+    setShowSuggestions(false);
     onClose();
-  }, [shellType, name, workingDir, effectiveBridgeId, onSubmit, onClose]);
+  }, [shellType, name, workingDir, effectiveBridgeId, hostname, onSubmit, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -128,16 +177,39 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges }: NewSessi
             />
           </div>
 
-          <div>
+          <div className="relative">
             <label className="block text-sm text-[#888888] mb-1">Working Directory</label>
             <input
               type="text"
               value={workingDir}
-              onChange={(e) => setWorkingDir(e.target.value)}
+              onChange={(e) => {
+                setWorkingDir(e.target.value);
+                setShowSuggestions(true);
+              }}
+              onFocus={() => setShowSuggestions(true)}
+              onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
               placeholder="/path/to/project (optional)"
               className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88]"
               onKeyDown={handleKeyDown}
             />
+            {showSuggestions && suggestedPaths.length > 0 && (
+              <div className="absolute z-10 w-full mt-1 bg-[#1a1a1a] border border-[#2a2a2a] rounded max-h-40 overflow-y-auto">
+                {suggestedPaths.map((path) => (
+                  <button
+                    key={path}
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      setWorkingDir(path);
+                      setShowSuggestions(false);
+                    }}
+                    className="w-full text-left px-3 py-1.5 text-xs text-[#aaa] hover:bg-[#2a2a2a] hover:text-[#e0e0e0] font-mono truncate"
+                  >
+                    {path}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="flex gap-3 justify-end pt-2">

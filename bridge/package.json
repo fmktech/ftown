@@ -1,6 +1,6 @@
 {
   "name": "ftown-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "CLI bridge for ftown — connects local Claude Code sessions to the ftown orchestrator",
   "type": "module",
   "main": "dist/index.js",

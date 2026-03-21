@@ -144,7 +144,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
       const payload: CreateSessionPayload = {
         prompt,
         name: options?.name,
-        model: options?.model ?? "sonnet",
+        model: options?.model,
         workingDir: options?.workingDir,
         bridgeId: options?.bridgeId,
         shellType: options?.shellType ?? "claude",

@@ -3,13 +3,13 @@
 import { useState, useCallback, useMemo } from "react";
 import { Centrifuge } from "centrifuge";
 import { ConnectionStatus } from "@/hooks/useCentrifugo";
-import { ShellType } from "@/types";
+import { Session, ShellType } from "@/types";
 import { useSessions } from "@/hooks/useSessions";
 import { useBridges } from "@/hooks/useBridges";
 import { useAllSessionEvents } from "@/hooks/useAllSessionEvents";
 import { SessionList } from "./SessionList";
 import { Terminal } from "./Terminal";
-import { NewSessionModal } from "./NewSessionModal";
+import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
 
 interface DashboardProps {
   client: Centrifuge | null;
@@ -39,6 +39,7 @@ function ConnectionDot({ status }: { status: ConnectionStatus }) {
 export function Dashboard({ client, connectionStatus, connectionError, userId, token, onDisconnect }: DashboardProps) {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [showNewSession, setShowNewSession] = useState(false);
+  const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
 
@@ -80,6 +81,15 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
       setSelectedSessionId(null);
     }
   }, [removeSession, selectedSessionId]);
+
+  const handleCloneSession = useCallback((session: Session) => {
+    setSessionDefaults({
+      workingDir: session.workingDir,
+      bridgeId: session.bridgeId,
+      shellType: session.shellType,
+    });
+    setShowNewSession(true);
+  }, []);
 
   return (
     <div
@@ -298,6 +308,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
               onStopSession={stopSession}
               onResumeSession={resumeSession}
               onRemoveSession={handleRemoveSession}
+              onCloneSession={handleCloneSession}
               sessionActivity={sessionActivity}
             />
           </div>
@@ -318,9 +329,10 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
 
       <NewSessionModal
         isOpen={showNewSession}
-        onClose={() => setShowNewSession(false)}
+        onClose={() => { setShowNewSession(false); setSessionDefaults(undefined); }}
         onSubmit={handleCreateSession}
         bridges={bridges}
+        defaults={sessionDefaults}
       />
     </div>
   );

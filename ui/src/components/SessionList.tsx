@@ -13,12 +13,12 @@ interface SessionListProps {
   onStopSession?: (sessionId: string) => void;
   onResumeSession?: (sessionId: string) => void;
   onRemoveSession?: (sessionId: string) => void;
+  onCloneSession?: (session: Session) => void;
   sessionActivity?: Map<string, SessionActivity>;
 }
 
 interface ContextMenuState {
-  sessionId: string;
-  sessionStatus: SessionStatus;
+  session: Session;
   x: number;
   y: number;
 }
@@ -70,12 +70,14 @@ function ContextMenu({
   onStop,
   onResume,
   onRemove,
+  onClone,
   onClose,
 }: {
   menu: ContextMenuState;
   onStop: (sessionId: string) => void;
   onResume: (sessionId: string) => void;
   onRemove: (sessionId: string) => void;
+  onClone: (session: Session) => void;
   onClose: () => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
@@ -103,8 +105,20 @@ function ContextMenu({
     };
   }, [onClose]);
 
-  const isRunning = menu.sessionStatus === "running" || menu.sessionStatus === "pending";
+  const isRunning = menu.session.status === "running" || menu.session.status === "pending";
   const canResume = !isRunning;
+
+  const menuButtonStyle = {
+    display: "block" as const,
+    width: "100%",
+    textAlign: "left" as const,
+    padding: "6px 12px",
+    background: "transparent",
+    border: "none",
+    cursor: "pointer",
+    fontFamily: "var(--font-mono)",
+    fontSize: 11,
+  };
 
   return createPortal(
     <div
@@ -124,30 +138,26 @@ function ContextMenu({
         fontSize: 11,
       }}
     >
+      <button
+        onClick={() => {
+          onClone(menu.session);
+          onClose();
+        }}
+        style={{ ...menuButtonStyle, color: "var(--text-secondary)" }}
+        onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+      >
+        Clone
+      </button>
       {isRunning && (
         <button
           onClick={() => {
-            onStop(menu.sessionId);
+            onStop(menu.session.id);
             onClose();
           }}
-          style={{
-            display: "block",
-            width: "100%",
-            textAlign: "left",
-            padding: "6px 12px",
-            background: "transparent",
-            border: "none",
-            color: "var(--status-error)",
-            cursor: "pointer",
-            fontFamily: "var(--font-mono)",
-            fontSize: 11,
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = "var(--bg-hover)";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = "transparent";
-          }}
+          style={{ ...menuButtonStyle, color: "var(--status-error)" }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
         >
           Stop
         </button>
@@ -155,54 +165,24 @@ function ContextMenu({
       {canResume && (
         <button
           onClick={() => {
-            onResume(menu.sessionId);
+            onResume(menu.session.id);
             onClose();
           }}
-          style={{
-            display: "block",
-            width: "100%",
-            textAlign: "left",
-            padding: "6px 12px",
-            background: "transparent",
-            border: "none",
-            color: "var(--accent)",
-            cursor: "pointer",
-            fontFamily: "var(--font-mono)",
-            fontSize: 11,
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = "var(--bg-hover)";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = "transparent";
-          }}
+          style={{ ...menuButtonStyle, color: "var(--accent)" }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
         >
           Resume
         </button>
       )}
       <button
         onClick={() => {
-          onRemove(menu.sessionId);
+          onRemove(menu.session.id);
           onClose();
         }}
-        style={{
-          display: "block",
-          width: "100%",
-          textAlign: "left",
-          padding: "6px 12px",
-          background: "transparent",
-          border: "none",
-          color: "var(--status-error)",
-          cursor: "pointer",
-          fontFamily: "var(--font-mono)",
-          fontSize: 11,
-        }}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.background = "var(--bg-hover)";
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.background = "transparent";
-        }}
+        style={{ ...menuButtonStyle, color: "var(--status-error)" }}
+        onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
       >
         Remove
       </button>
@@ -211,7 +191,7 @@ function ContextMenu({
   );
 }
 
-export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession, onStopSession, onResumeSession, onRemoveSession, sessionActivity }: SessionListProps) {
+export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession, onStopSession, onResumeSession, onRemoveSession, onCloneSession, sessionActivity }: SessionListProps) {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -248,8 +228,7 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
     e.preventDefault();
     e.stopPropagation();
     setContextMenu({
-      sessionId: session.id,
-      sessionStatus: session.status,
+      session,
       x: e.clientX,
       y: e.clientY,
     });
@@ -406,9 +385,11 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
                 >
                   {session.shellType === "shell" ? "zsh" : "claude"}
                 </span>
-                <span style={{ fontSize: 10, color: "var(--text-faint)" }}>
-                  {session.model}
-                </span>
+                {session.model && session.shellType !== "shell" && (
+                  <span style={{ fontSize: 10, color: "var(--text-faint)" }}>
+                    {session.model}
+                  </span>
+                )}
               </div>
               <span style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>
                 {formatTimestamp(session.createdAt)}
@@ -424,6 +405,7 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
           onStop={onStopSession}
           onResume={onResumeSession ?? (() => {})}
           onRemove={onRemoveSession}
+          onClone={onCloneSession ?? (() => {})}
           onClose={closeContextMenu}
         />
       )}
