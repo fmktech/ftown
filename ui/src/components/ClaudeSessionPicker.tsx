@@ -90,15 +90,16 @@ for f in glob.glob(os.path.join(d, "*.jsonl")):
                 if not ts and entry.get("timestamp"):
                     ts = entry["timestamp"]
                 t = entry.get("type", "")
-                if t in ("human", "user") and not summary:
+                if t in ("human", "user"):
                     c = entry.get("content", "")
+                    msg = entry.get("message", {})
+                    if not c and isinstance(msg, dict):
+                        c = msg.get("content", "")
                     if isinstance(c, list):
                         parts = [p.get("text","") for p in c if isinstance(p, dict) and p.get("type") == "text"]
                         c = " ".join(parts)
                     if isinstance(c, str) and c.strip():
                         summary = c.strip()[:100].replace("|", " ")
-                if ts and summary:
-                    break
     except:
         pass
     results.append((sid, ts, summary))
