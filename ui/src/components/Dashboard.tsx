@@ -8,7 +8,8 @@ import { useSessions } from "@/hooks/useSessions";
 import { useBridges } from "@/hooks/useBridges";
 import { useAllSessionEvents } from "@/hooks/useAllSessionEvents";
 import { SessionList } from "./SessionList";
-import { Terminal } from "./Terminal";
+import { Terminal, TerminalHandle } from "./Terminal";
+import { MobileControlBar } from "./MobileControlBar";
 import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
 
 interface DashboardProps {
@@ -42,6 +43,8 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
+  const [mobileTab, setMobileTab] = useState<"sessions" | "terminal">("sessions");
+  const terminalRef = useRef<TerminalHandle>(null);
 
   const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, removeSession, refreshSessions, bridgeExec } = useSessions(client, userId);
   const { bridges, hasBridges } = useBridges(client, userId);
@@ -121,6 +124,18 @@ print('hooks installed')
     }
   }, [removeSession, selectedSessionId]);
 
+  const handleSelectSession = useCallback((id: string | null) => {
+    setSelectedSessionId(id);
+    if (id) setMobileTab("terminal");
+  }, []);
+
+  const handleMobileTabSwitch = useCallback((tab: "sessions" | "terminal") => {
+    setMobileTab(tab);
+    if (tab === "terminal") {
+      requestAnimationFrame(() => terminalRef.current?.refit());
+    }
+  }, []);
+
   const handleCloneSession = useCallback((session: Session) => {
     setSessionDefaults({
       workingDir: session.workingDir,
@@ -132,7 +147,7 @@ print('hooks installed')
 
   return (
     <div
-      className="h-screen flex flex-col"
+      className="h-dvh flex flex-col"
       style={{ background: "var(--bg-void)" }}
     >
       {/* ── Top Chrome ── */}
@@ -172,12 +187,12 @@ print('hooks installed')
             + New Session
           </button>
 
-          <button className="btn-ghost" onClick={refreshSessions}>
+          <button className="btn-ghost hidden md:inline-flex" onClick={refreshSessions}>
             Refresh
           </button>
 
           <button
-            className="btn-ghost"
+            className="btn-ghost hidden md:inline-flex"
             onClick={() => setShowToken(!showToken)}
             style={showToken ? { color: "var(--accent)", borderColor: "var(--accent-dim)" } : {}}
           >
@@ -197,7 +212,7 @@ print('hooks installed')
         </div>
 
         {/* Right cluster */}
-        <div className="flex items-center gap-4">
+        <div className="hidden md:flex items-center gap-4">
           {connectionError && (
             <span style={{ fontSize: 11, color: "var(--status-error)" }}>
               {connectionError}
@@ -297,20 +312,41 @@ print('hooks installed')
         </div>
       )}
 
+      {/* ── Mobile Tab Bar ── */}
+      <div
+        className="flex md:hidden shrink-0"
+        style={{
+          borderBottom: "1px solid var(--border-muted)",
+          background: "var(--bg-surface)",
+        }}
+      >
+        <button
+          className={`mobile-tab ${mobileTab === "sessions" ? "mobile-tab-active" : ""}`}
+          onClick={() => handleMobileTabSwitch("sessions")}
+        >
+          Sessions{sessions.length > 0 ? ` (${sessions.length})` : ""}
+        </button>
+        <button
+          className={`mobile-tab ${mobileTab === "terminal" ? "mobile-tab-active" : ""}`}
+          onClick={() => handleMobileTabSwitch("terminal")}
+        >
+          Terminal
+        </button>
+      </div>
+
       {/* ── Main Layout ── */}
       <div className="flex-1 flex min-h-0">
         {/* Sidebar */}
         <aside
-          className="shrink-0 flex flex-col"
+          className={`shrink-0 flex-col w-full md:w-[260px] ${mobileTab === "sessions" ? "flex" : "hidden"} md:flex`}
           style={{
-            width: 260,
             borderRight: "1px solid var(--border-subtle)",
             background: "var(--bg-surface)",
             overflow: "hidden",
           }}
         >
           <div
-            className="shrink-0 flex items-center justify-between px-4"
+            className="shrink-0 hidden md:flex items-center justify-between px-4"
             style={{
               height: 36,
               borderBottom: "1px solid var(--border-subtle)",
@@ -342,7 +378,7 @@ print('hooks installed')
             <SessionList
               sessions={sessions}
               selectedSessionId={selectedSessionId}
-              onSelectSession={setSelectedSessionId}
+              onSelectSession={handleSelectSession}
               onRenameSession={renameSession}
               onStopSession={stopSession}
               onRemoveSession={handleRemoveSession}
@@ -353,8 +389,9 @@ print('hooks installed')
         </aside>
 
         {/* Terminal area */}
-        <main className="flex-1 flex flex-col min-h-0 min-w-0">
+        <main className={`flex-1 flex-col min-h-0 min-w-0 ${mobileTab === "terminal" ? "flex" : "hidden"} md:flex`}>
           <Terminal
+            ref={terminalRef}
             client={client}
             sessionId={selectedSessionId}
             userId={userId}
@@ -362,6 +399,9 @@ print('hooks installed')
             sessionName={selectedSession?.name ?? selectedSession?.prompt?.slice(0, 48) ?? null}
             usage={selectedSessionId ? sessionActivity.get(selectedSessionId)?.usage : undefined}
           />
+          {selectedSessionId && (
+            <MobileControlBar onSendInput={(data) => terminalRef.current?.sendInput(data)} />
+          )}
         </main>
       </div>
 

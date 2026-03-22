@@ -1,12 +1,17 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, forwardRef, useImperativeHandle } from "react";
 import { Centrifuge, Subscription } from "centrifuge";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { TokenUsage } from "@/hooks/useSessionEvents";
 import "@xterm/xterm/css/xterm.css";
+
+export interface TerminalHandle {
+  sendInput: (data: string) => void;
+  refit: () => void;
+}
 
 interface TerminalProps {
   client: Centrifuge | null;
@@ -23,12 +28,23 @@ function formatTokenCount(n: number): string {
   return String(n);
 }
 
-export function Terminal({ client, sessionId, userId, isRunning, sessionName, usage }: TerminalProps) {
+export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ client, sessionId, userId, isRunning, sessionName, usage }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const outputSubRef = useRef<Subscription | null>(null);
   const inputSubRef = useRef<Subscription | null>(null);
+
+  useImperativeHandle(ref, () => ({
+    sendInput(data: string) {
+      if (inputSubRef.current) {
+        inputSubRef.current.publish({ type: "input", data });
+      }
+    },
+    refit() {
+      fitAddonRef.current?.fit();
+    },
+  }), []);
 
   // Initialize xterm once
   useEffect(() => {
@@ -305,4 +321,4 @@ export function Terminal({ client, sessionId, userId, isRunning, sessionName, us
       )}
     </div>
   );
-}
+});
