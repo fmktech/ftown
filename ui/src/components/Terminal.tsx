@@ -285,7 +285,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       <div
         ref={containerRef}
         className="flex-1 min-h-0 scanlines"
-        style={{ position: "relative" }}
+        style={{ position: "relative", touchAction: "none" }}
       />
 
       {!sessionId && (
