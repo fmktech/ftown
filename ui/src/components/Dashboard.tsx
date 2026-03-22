@@ -45,6 +45,23 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [tokenCopied, setTokenCopied] = useState(false);
   const [mobileTab, setMobileTab] = useState<"sessions" | "terminal">("sessions");
   const terminalRef = useRef<TerminalHandle>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  // Resize layout when mobile keyboard opens/closes
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+
+    const onResize = () => {
+      if (rootRef.current) {
+        rootRef.current.style.height = `${vv.height}px`;
+      }
+      terminalRef.current?.refit();
+    };
+
+    vv.addEventListener("resize", onResize);
+    return () => vv.removeEventListener("resize", onResize);
+  }, []);
 
   const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, removeSession, refreshSessions, bridgeExec } = useSessions(client, userId);
   const { bridges, hasBridges } = useBridges(client, userId);
@@ -147,6 +164,7 @@ print('hooks installed')
 
   return (
     <div
+      ref={rootRef}
       className="h-dvh flex flex-col"
       style={{ background: "var(--bg-void)" }}
     >
