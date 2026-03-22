@@ -94,15 +94,6 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     term.unicode.activeVersion = "11";
     fitAddon.fit();
 
-    // Prevent mobile keyboard from appearing on tap
-    const isMobile = window.matchMedia("(max-width: 767px)").matches || "ontouchstart" in window;
-    if (isMobile) {
-      const textarea = containerRef.current.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement | null;
-      if (textarea) {
-        textarea.setAttribute("readonly", "readonly");
-      }
-    }
-
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
 
