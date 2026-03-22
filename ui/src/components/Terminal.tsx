@@ -94,6 +94,15 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     term.unicode.activeVersion = "11";
     fitAddon.fit();
 
+    // Prevent mobile keyboard from appearing on tap
+    const isMobile = window.matchMedia("(max-width: 767px)").matches || "ontouchstart" in window;
+    if (isMobile) {
+      const textarea = containerRef.current.querySelector(".xterm-helper-textarea") as HTMLTextAreaElement | null;
+      if (textarea) {
+        textarea.setAttribute("readonly", "readonly");
+      }
+    }
+
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
 
@@ -102,7 +111,43 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     });
     resizeObserver.observe(containerRef.current);
 
+    // Touch scroll: translate vertical swipes into xterm scrollLines
+    let touchStartY: number | null = null;
+    let accumulatedDelta = 0;
+    const LINE_HEIGHT = 20; // approximate px per terminal line
+
+    const onTouchStart = (e: TouchEvent) => {
+      touchStartY = e.touches[0].clientY;
+      accumulatedDelta = 0;
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      if (touchStartY === null) return;
+      e.preventDefault();
+      const currentY = e.touches[0].clientY;
+      const delta = touchStartY - currentY;
+      touchStartY = currentY;
+      accumulatedDelta += delta;
+
+      const lines = Math.trunc(accumulatedDelta / LINE_HEIGHT);
+      if (lines !== 0) {
+        term.scrollLines(lines);
+        accumulatedDelta -= lines * LINE_HEIGHT;
+      }
+    };
+    const onTouchEnd = () => {
+      touchStartY = null;
+      accumulatedDelta = 0;
+    };
+
+    const container = containerRef.current;
+    container.addEventListener("touchstart", onTouchStart, { passive: true });
+    container.addEventListener("touchmove", onTouchMove, { passive: false });
+    container.addEventListener("touchend", onTouchEnd, { passive: true });
+
     return () => {
+      container.removeEventListener("touchstart", onTouchStart);
+      container.removeEventListener("touchmove", onTouchMove);
+      container.removeEventListener("touchend", onTouchEnd);
       resizeObserver.disconnect();
       term.dispose();
       xtermRef.current = null;
