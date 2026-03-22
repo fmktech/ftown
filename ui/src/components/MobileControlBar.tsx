@@ -18,7 +18,8 @@ export function MobileControlBar({ onSendInput }: MobileControlBarProps) {
     <div
       className="flex md:hidden shrink-0 items-center justify-around px-2 gap-1"
       style={{
-        height: 52,
+        paddingTop: 4,
+        paddingBottom: "max(4px, env(safe-area-inset-bottom))",
         background: "var(--bg-surface)",
         borderTop: "1px solid var(--border-muted)",
       }}

@@ -66,12 +66,14 @@ function formatTimestamp(timestamp: string): string {
 
 function ContextMenu({
   menu,
+  onRename,
   onStop,
   onRemove,
   onClone,
   onClose,
 }: {
   menu: ContextMenuState;
+  onRename: (session: Session) => void;
   onStop: (sessionId: string) => void;
   onRemove: (sessionId: string) => void;
   onClone: (session: Session) => void;
@@ -80,7 +82,7 @@ function ContextMenu({
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    function handleClickOutside(e: MouseEvent): void {
+    function handleClickOutside(e: MouseEvent | TouchEvent): void {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         onClose();
       }
@@ -93,10 +95,12 @@ function ContextMenu({
     }
 
     document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("touchstart", handleClickOutside);
     document.addEventListener("keydown", handleKeyDown);
     window.addEventListener("scroll", handleScroll, true);
     return () => {
       document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("touchstart", handleClickOutside);
       document.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("scroll", handleScroll, true);
     };
@@ -134,6 +138,17 @@ function ContextMenu({
         fontSize: 11,
       }}
     >
+      <button
+        onClick={() => {
+          onRename(menu.session);
+          onClose();
+        }}
+        style={{ ...menuButtonStyle, color: "var(--text-secondary)" }}
+        onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+      >
+        Rename
+      </button>
       <button
         onClick={() => {
           onClone(menu.session);
@@ -179,6 +194,8 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
   const [editValue, setEditValue] = useState("");
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressFired = useRef(false);
 
   useEffect(() => {
     if (editingSessionId && inputRef.current) {
@@ -238,8 +255,33 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
         return (
           <button
             key={session.id}
-            onClick={() => onSelectSession(session.id)}
+            onClick={() => {
+              if (longPressFired.current) return;
+              onSelectSession(session.id);
+            }}
             onContextMenu={(e) => handleContextMenu(e, session)}
+            onTouchStart={(e) => {
+              longPressFired.current = false;
+              const touch = e.touches[0];
+              const x = touch.clientX;
+              const y = touch.clientY;
+              longPressTimer.current = setTimeout(() => {
+                longPressFired.current = true;
+                setContextMenu({ session, x, y });
+              }, 500);
+            }}
+            onTouchEnd={() => {
+              if (longPressTimer.current) {
+                clearTimeout(longPressTimer.current);
+                longPressTimer.current = null;
+              }
+            }}
+            onTouchMove={() => {
+              if (longPressTimer.current) {
+                clearTimeout(longPressTimer.current);
+                longPressTimer.current = null;
+              }
+            }}
             style={{
               width: "100%",
               textAlign: "left",
@@ -385,6 +427,7 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
       {contextMenu && onStopSession && onRemoveSession && (
         <ContextMenu
           menu={contextMenu}
+          onRename={startEditing}
           onStop={onStopSession}
           onRemove={onRemoveSession}
           onClone={onCloneSession ?? (() => {})}
