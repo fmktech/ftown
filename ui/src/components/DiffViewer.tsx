@@ -104,10 +104,12 @@ const DARK_STYLES = `
   .diff2html-dark-wrapper .d2h-file-diff {
     background: #0a0a18 !important;
     margin-bottom: 0 !important;
+    overflow-x: auto !important;
   }
   .diff2html-dark-wrapper .d2h-diff-table {
     font-family: var(--font-mono) !important;
     font-size: 12px !important;
+    table-layout: auto !important;
   }
   .diff2html-dark-wrapper .d2h-diff-tbody tr {
     background: #0a0a18 !important;
@@ -134,6 +136,9 @@ const DARK_STYLES = `
     color: #3d4555 !important;
     width: 40px !important;
     min-width: 40px !important;
+    position: sticky !important;
+    left: 0 !important;
+    z-index: 1 !important;
   }
   /* Insertions */
   .diff2html-dark-wrapper .d2h-ins,
