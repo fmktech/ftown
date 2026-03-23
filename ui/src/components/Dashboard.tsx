@@ -463,6 +463,15 @@ print('hooks installed')
             <MobileControlBar onSendInput={(data) => terminalRef.current?.sendInput(data)} />
           )}
         </main>
+
+        {/* Diff sidebar */}
+        <DiffViewer
+          isOpen={showDiff}
+          onClose={() => setShowDiff(false)}
+          diff={diffContent}
+          diffStat={selectedSession?.diffStat ?? ""}
+          sessionName={selectedSession?.name ?? ""}
+        />
       </div>
 
       <NewSessionModal
@@ -482,13 +491,6 @@ print('hooks installed')
         onRetry={() => window.location.reload()}
       />
 
-      <DiffViewer
-        isOpen={showDiff}
-        onClose={() => setShowDiff(false)}
-        diff={diffContent}
-        diffStat={selectedSession?.diffStat ?? ""}
-        sessionName={selectedSession?.name ?? ""}
-      />
     </div>
   );
 }
