@@ -5,10 +5,12 @@ A Claude Code orchestrator that lets you manage and stream remote CLI sessions t
 ## Demo
 
 ### Desktop
-<video src="https://github.com/fmktech/ftown/raw/main/ui/public/demo-desktop.mp4" autoplay loop muted playsinline width="100%"></video>
+https://github.com/user-attachments/assets/c077e4a6-1f25-4d60-b213-cd905c86c6a3
 
 ### Mobile
-<video src="https://github.com/fmktech/ftown/raw/main/ui/public/demo-mobile.mp4" autoplay loop muted playsinline width="300"></video>
+https://github.com/user-attachments/assets/e9c1ce70-70b0-4ba0-81d8-080d4eeef445
+
+
 
 ## Architecture
 
