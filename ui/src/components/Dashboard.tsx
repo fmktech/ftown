@@ -12,6 +12,7 @@ import { Terminal, TerminalHandle } from "./Terminal";
 import { MobileControlBar } from "./MobileControlBar";
 import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
 import { ConnectionDiagnostics } from "./ConnectionDiagnostics";
+import { DiffViewer } from "./DiffViewer";
 
 interface DashboardProps {
   client: Centrifuge | null;
@@ -65,7 +66,11 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     return () => vv.removeEventListener("resize", onResize);
   }, []);
 
-  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, removeSession, refreshSessions, bridgeExec } = useSessions(client, userId);
+  const [showDiff, setShowDiff] = useState(false);
+  const [diffContent, setDiffContent] = useState<string>("");
+  const [diffLoading, setDiffLoading] = useState(false);
+
+  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, removeSession, refreshSessions, bridgeExec, getDiff } = useSessions(client, userId);
   const { bridges, hasBridges } = useBridges(client, userId);
   const sessionActivity = useAllSessionEvents(client, rawSessions, userId);
 
@@ -155,6 +160,20 @@ print('hooks installed')
     }
   }, []);
 
+  const handleViewDiff = useCallback(async () => {
+    if (!selectedSession?.id) return;
+    setDiffLoading(true);
+    try {
+      const diff = await getDiff(selectedSession.id);
+      setDiffContent(diff);
+      setShowDiff(true);
+    } catch (err) {
+      console.error("Failed to fetch diff:", err);
+    } finally {
+      setDiffLoading(false);
+    }
+  }, [selectedSession, getDiff]);
+
   const handleCloneSession = useCallback((session: Session) => {
     setSessionDefaults({
       workingDir: session.workingDir,
@@ -227,6 +246,11 @@ print('hooks installed')
           {selectedSession?.status === "error" && (
             <button className="btn-warn" onClick={handleRetrySession}>
               Retry
+            </button>
+          )}
+          {selectedSession?.status === "completed" && selectedSession?.diffStat && (
+            <button className="btn-ghost" onClick={handleViewDiff} disabled={diffLoading}>
+              {diffLoading ? "Loading..." : "Diff"}
             </button>
           )}
         </div>
@@ -456,6 +480,14 @@ print('hooks installed')
         centrifugoUrl={centrifugoUrl}
         token={token}
         onRetry={() => window.location.reload()}
+      />
+
+      <DiffViewer
+        isOpen={showDiff}
+        onClose={() => setShowDiff(false)}
+        diff={diffContent}
+        diffStat={selectedSession?.diffStat ?? ""}
+        sessionName={selectedSession?.name ?? ""}
       />
     </div>
   );

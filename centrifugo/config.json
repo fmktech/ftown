@@ -74,7 +74,7 @@
     }
   ],
   "client_channel_limit": 256,
-  "client_max_body_size": 131072,
+  "client_max_body_size": 524288,
   "ping_interval": "10s",
   "pong_timeout": "5s",
   "log_level": "info"

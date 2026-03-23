@@ -11,6 +11,36 @@ type TerminalResizeHandler = (sessionId: string, cols: number, rows: number) => 
 
 type CommandHandler = (command: Command) => void;
 
+const MAX_PUBLISH_BYTES = 460_000;
+
+function byteLen(str: string): number {
+  return Buffer.byteLength(str, 'utf8');
+}
+
+function truncateData(data: Record<string, unknown>): Record<string, unknown> {
+  const json = JSON.stringify(data);
+  if (byteLen(json) <= MAX_PUBLISH_BYTES) return data;
+
+  if (typeof data.data === 'string') {
+    const overhead = byteLen(JSON.stringify({ ...data, data: '' }));
+    const maxDataBytes = MAX_PUBLISH_BYTES - overhead - 100;
+    let truncated = data.data;
+    while (byteLen(truncated) > maxDataBytes) {
+      truncated = truncated.slice(0, Math.floor(truncated.length * (maxDataBytes / byteLen(truncated))));
+    }
+    return { ...data, data: truncated + '\n[truncated]' };
+  }
+
+  if (typeof data.data === 'object' && data.data !== null) {
+    const innerJson = JSON.stringify(data.data);
+    if (byteLen(innerJson) > MAX_PUBLISH_BYTES) {
+      return { ...data, data: { _truncated: true, _preview: innerJson.slice(0, 2000) } };
+    }
+  }
+
+  return data;
+}
+
 export class CentrifugoClient {
   private readonly client: Centrifuge;
   private readonly subscriptions: Map<string, Subscription> = new Map();
@@ -32,6 +62,10 @@ export class CentrifugoClient {
 
     this.client.on('disconnected', (ctx) => {
       console.log(`[Centrifugo] Disconnected: code=${ctx.code} reason=${ctx.reason}`);
+      if (ctx.code === 3) {
+        console.log(`[Centrifugo] Reconnecting after message size limit disconnect...`);
+        setTimeout(() => this.client.connect(), 1000);
+      }
     });
 
     this.client.on('error', (ctx) => {
@@ -80,7 +114,7 @@ export class CentrifugoClient {
       this.subscriptions.set(channel, sub);
     }
     try {
-      await this.client.publish(channel, { type: 'output', data });
+      await this.client.publish(channel, truncateData({ type: 'output', data }));
     } catch (err) {
       console.error(`[Centrifugo] Failed to publish terminal data to ${channel}:`, err);
     }
@@ -192,7 +226,7 @@ export class CentrifugoClient {
       });
     }
     try {
-      await this.client.publish(channel, event);
+      await this.client.publish(channel, truncateData(event));
     } catch (err) {
       console.error(`[Centrifugo] Failed to publish hook event to ${channel}:`, err);
     }
@@ -201,11 +235,11 @@ export class CentrifugoClient {
   async publishCommandResponse(userId: string, response: CommandResponse): Promise<void> {
     const channel = `commands:rpc#${userId}`;
     try {
-      await this.client.publish(channel, {
+      await this.client.publish(channel, truncateData({
         type: 'command_response',
-        response,
+        response: response as unknown as Record<string, unknown>,
         timestamp: new Date().toISOString(),
-      });
+      }));
     } catch (err) {
       console.error(`[Centrifugo] Failed to publish command response to ${channel}:`, err);
       throw err;

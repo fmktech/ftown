@@ -8,6 +8,7 @@ export interface Session {
   createdAt: string;
   updatedAt: string;
   workingDir?: string;
+  diffStat?: string;
 }
 
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error';
@@ -29,7 +30,7 @@ export interface Command {
   requestId: string;
 }
 
-export type CommandType = 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec';
+export type CommandType = 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'get_diff';
 
 export interface CreateSessionPayload {
   command: string;
@@ -66,7 +67,12 @@ export interface RemoveSessionPayload {
   sessionId: string;
 }
 
-export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | Record<string, unknown>;
+export interface GetDiffPayload {
+  sessionId: string;
+  bridgeId?: string;
+}
+
+export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | GetDiffPayload | Record<string, unknown>;
 
 export interface CommandResponse {
   requestId: string;

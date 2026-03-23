@@ -10,6 +10,7 @@ import {
   CommandResponse,
   CreateSessionPayload,
   BridgeExecPayload,
+  GetDiffPayload,
   RenameSessionPayload,
   RemoveSessionPayload,
 } from "@/types";
@@ -41,6 +42,7 @@ interface UseSessionsResult {
   removeSession: (sessionId: string) => void;
   refreshSessions: () => void;
   bridgeExec: (command: string, workingDir: string, bridgeId: string) => Promise<BridgeExecResponse>;
+  getDiff: (sessionId: string, bridgeId?: string) => Promise<string>;
   lastResponse: CommandResponse | null;
 }
 
@@ -291,6 +293,37 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
     [userId, publishCommand]
   );
 
+  const getDiff = useCallback(
+    (sessionId: string, bridgeId?: string): Promise<string> => {
+      return new Promise((resolve, reject) => {
+        if (!userId) {
+          reject(new Error("Not connected"));
+          return;
+        }
+
+        const requestId = uuidv4();
+        const timeout = setTimeout(() => {
+          pendingCallbacksRef.current.delete(requestId);
+          reject(new Error("get_diff timed out"));
+        }, 30_000);
+
+        pendingCallbacksRef.current.set(requestId, (resp) => {
+          clearTimeout(timeout);
+          if (resp.success) {
+            const data = resp.data as { diff: string };
+            resolve(data.diff ?? "");
+          } else {
+            reject(new Error(resp.error ?? "get_diff failed"));
+          }
+        });
+
+        const payload: GetDiffPayload = { sessionId, bridgeId };
+        publishCommand({ type: "get_diff", payload, requestId });
+      });
+    },
+    [userId, publishCommand]
+  );
+
   return {
     sessions,
     createSession,
@@ -300,6 +333,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
     removeSession,
     refreshSessions,
     bridgeExec,
+    getDiff,
     lastResponse,
   };
 }

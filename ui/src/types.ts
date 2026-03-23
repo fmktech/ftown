@@ -15,6 +15,7 @@ export interface Session {
   shellType?: ShellType;
   claudeSessionId?: string;
   command?: string;
+  diffStat?: string;
 }
 
 export type SessionMessageType = 'assistant' | 'user' | 'system' | 'tool_use' | 'tool_result';
@@ -61,7 +62,7 @@ export interface SessionMessage {
   raw?: ClaudeStreamEvent;
 }
 
-export type CommandType = 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'rename_session' | 'remove_session' | 'bridge_exec';
+export type CommandType = 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'get_diff';
 
 export interface Command {
   type: CommandType;
@@ -107,7 +108,12 @@ export interface BridgeExecPayload {
   bridgeId?: string;
 }
 
-export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | Record<string, unknown>;
+export interface GetDiffPayload {
+  sessionId: string;
+  bridgeId?: string;
+}
+
+export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | GetDiffPayload | Record<string, unknown>;
 
 export interface CommandResponse {
   requestId: string;

@@ -20,6 +20,7 @@ import type {
   Command,
   CommandResponse,
   CreateSessionPayload,
+  GetDiffPayload,
   GetHistoryPayload,
   RemoveSessionPayload,
   RenameSessionPayload,
@@ -165,6 +166,18 @@ program
         if (session) {
           session.status = 'completed';
           session.updatedAt = new Date().toISOString();
+
+          if (session.workingDir) {
+            try {
+              const { stdout: statOutput } = await execAsync('git diff --stat', { cwd: session.workingDir, maxBuffer: 1024 * 1024 });
+              const { stdout: fullDiff } = await execAsync('git diff', { cwd: session.workingDir, maxBuffer: 5 * 1024 * 1024 });
+              await store.saveDiff(sessionId, fullDiff);
+              session.diffStat = statOutput;
+            } catch {
+              // Not a git repo or git not available — skip silently
+            }
+          }
+
           await store.saveSession(session);
           await centrifugo.publishSessionUpdate(userId, session);
         }
@@ -394,6 +407,17 @@ program
               const execErr = err as ExecError;
               response = { requestId: command.requestId, success: true, data: { stdout: execErr.stdout, stderr: execErr.stderr, exitCode: execErr.code } };
             }
+            break;
+          }
+
+          case 'get_diff': {
+            const payload = command.payload as GetDiffPayload;
+            if (!payload.sessionId) {
+              response = { requestId: command.requestId, success: false, error: 'Missing sessionId' };
+              break;
+            }
+            const diff = await store.loadDiff(payload.sessionId);
+            response = { requestId: command.requestId, success: true, data: { diff } };
             break;
           }
 
