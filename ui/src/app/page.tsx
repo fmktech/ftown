@@ -169,27 +169,55 @@ export default async function LandingPage() {
         <div
           style={{
             marginTop: 56,
-            padding: "20px 32px",
+            padding: "24px 32px",
             background: "var(--bg-surface)",
             border: "1px solid var(--border-muted)",
             borderRadius: 8,
             maxWidth: 560,
             width: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 0,
           }}
         >
-          <pre
-            style={{
-              fontSize: 11,
-              color: "var(--text-muted)",
-              lineHeight: 1.6,
-              textAlign: "center",
-              margin: 0,
-              overflow: "auto",
-            }}
-          >{`┌─────────────┐    WebSocket    ┌────────────┐    WebSocket    ┌─────────────┐
-│   Browser    │◄──────────────►│ Centrifugo  │◄──────────────►│   Bridge    │
-│  (Next.js)   │                │  (pub/sub)  │                │ (node-pty)  │
-└─────────────┘                └────────────┘                └─────────────┘`}</pre>
+          {/* Browser box */}
+          <div style={{ textAlign: "center", flexShrink: 0 }}>
+            <div style={{ border: "1px solid var(--border-muted)", borderRadius: 6, padding: "10px 16px" }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>Browser</div>
+              <div style={{ fontSize: 10, color: "var(--text-muted)" }}>Next.js</div>
+            </div>
+          </div>
+          {/* Arrow + label */}
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "0 8px", flexShrink: 1, minWidth: 0 }}>
+            <span style={{ fontSize: 9, color: "var(--text-faint)", marginBottom: 4, whiteSpace: "nowrap" }}>WebSocket</span>
+            <div style={{ width: "100%", minWidth: 40, height: 0, borderTop: "1px solid var(--border-muted)", position: "relative" }}>
+              <span style={{ position: "absolute", left: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&lt;</span>
+              <span style={{ position: "absolute", right: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&gt;</span>
+            </div>
+          </div>
+          {/* Centrifugo box */}
+          <div style={{ textAlign: "center", flexShrink: 0 }}>
+            <div style={{ border: "1px solid var(--accent)", borderRadius: 6, padding: "10px 16px", boxShadow: "0 0 12px color-mix(in srgb, var(--accent) 15%, transparent)" }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--accent)" }}>Centrifugo</div>
+              <div style={{ fontSize: 10, color: "var(--text-muted)" }}>pub/sub</div>
+            </div>
+          </div>
+          {/* Arrow + label */}
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "0 8px", flexShrink: 1, minWidth: 0 }}>
+            <span style={{ fontSize: 9, color: "var(--text-faint)", marginBottom: 4, whiteSpace: "nowrap" }}>WebSocket</span>
+            <div style={{ width: "100%", minWidth: 40, height: 0, borderTop: "1px solid var(--border-muted)", position: "relative" }}>
+              <span style={{ position: "absolute", left: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&lt;</span>
+              <span style={{ position: "absolute", right: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&gt;</span>
+            </div>
+          </div>
+          {/* Bridge box */}
+          <div style={{ textAlign: "center", flexShrink: 0 }}>
+            <div style={{ border: "1px solid var(--border-muted)", borderRadius: 6, padding: "10px 16px" }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>Bridge</div>
+              <div style={{ fontSize: 10, color: "var(--text-muted)" }}>node-pty</div>
+            </div>
+          </div>
         </div>
 
         {/* Features */}
