@@ -248,7 +248,7 @@ print('hooks installed')
               Retry
             </button>
           )}
-          {selectedSession?.status === "completed" && selectedSession?.diffStat && (
+          {selectedSession?.diffStat && (
             <button className="btn-ghost" onClick={handleViewDiff} disabled={diffLoading}>
               {diffLoading ? "Loading..." : "Diff"}
             </button>

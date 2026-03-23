@@ -166,20 +166,9 @@ program
         if (session) {
           session.status = 'completed';
           session.updatedAt = new Date().toISOString();
-
-          if (session.workingDir) {
-            try {
-              const { stdout: statOutput } = await execAsync('git diff --stat', { cwd: session.workingDir, maxBuffer: 1024 * 1024 });
-              const { stdout: fullDiff } = await execAsync('git diff', { cwd: session.workingDir, maxBuffer: 5 * 1024 * 1024 });
-              await store.saveDiff(sessionId, fullDiff);
-              session.diffStat = statOutput;
-            } catch {
-              // Not a git repo or git not available — skip silently
-            }
-          }
-
           await store.saveSession(session);
           await centrifugo.publishSessionUpdate(userId, session);
+          await captureDiff(sessionId);
         }
         console.log(`[Bridge] Session ${sessionId} completed`);
       } catch (err) {
@@ -203,6 +192,23 @@ program
       }
     });
 
+    async function captureDiff(sessionId: string): Promise<void> {
+      const session = await store.loadSession(sessionId);
+      if (!session?.workingDir) return;
+      try {
+        const { stdout: statOutput } = await execAsync('git diff --stat', { cwd: session.workingDir, maxBuffer: 1024 * 1024 });
+        const { stdout: fullDiff } = await execAsync('git diff', { cwd: session.workingDir, maxBuffer: 5 * 1024 * 1024 });
+        if (statOutput.trim()) {
+          await store.saveDiff(sessionId, fullDiff);
+          session.diffStat = statOutput;
+          await store.saveSession(session);
+          await centrifugo.publishSessionUpdate(userId, session);
+        }
+      } catch {
+        // Not a git repo or git not available
+      }
+    }
+
     hookServer.on('event', (hookEvent: HookEvent) => {
       centrifugo.publishHookEvent(userId, hookEvent.sessionId, {
         type: 'hook_event',
@@ -211,6 +217,12 @@ program
       }).catch((err) => {
         console.error('[Bridge] Failed to handle hook event:', err);
       });
+
+      if (hookEvent.eventName === 'PostToolUse') {
+        captureDiff(hookEvent.sessionId).catch((err) => {
+          console.error('[Bridge] Failed to capture diff:', err);
+        });
+      }
     });
 
     async function handleCommand(command: Command): Promise<void> {
