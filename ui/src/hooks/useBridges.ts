@@ -46,7 +46,7 @@ export function useBridges(client: Centrifuge | null, userId: string | null): Us
       return;
     }
 
-    const channel = `bridges#${userId}`;
+    const channel = `bridges:presence#${userId}`;
 
     const existing = client.getSubscription(channel);
     if (existing) {

@@ -55,6 +55,22 @@
       "allow_user_limited_channels": true,
       "history_size": 100,
       "history_ttl": "1h"
+    },
+    {
+      "name": "commands",
+      "allow_publish_for_subscriber": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true
+    },
+    {
+      "name": "bridges",
+      "allow_publish_for_subscriber": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true,
+      "presence": true,
+      "join_leave": true,
+      "force_push_join_leave": true,
+      "allow_presence_for_subscriber": true
     }
   ],
   "client_channel_limit": 256,

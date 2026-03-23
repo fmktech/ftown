@@ -114,7 +114,7 @@ export class CentrifugoClient {
   }
 
   subscribeToCommands(userId: string, handler: CommandHandler): void {
-    const channel = `commands#${userId}`;
+    const channel = `commands:rpc#${userId}`;
 
     const existingSub = this.subscriptions.get(channel);
     if (existingSub) {
@@ -157,7 +157,7 @@ export class CentrifugoClient {
   }
 
   joinBridgesChannel(userId: string, bridgeId: string): void {
-    const channel = `bridges#${userId}`;
+    const channel = `bridges:presence#${userId}`;
 
     const presenceInfo: BridgePresenceInfo = {
       bridgeId,
@@ -199,7 +199,7 @@ export class CentrifugoClient {
   }
 
   async publishCommandResponse(userId: string, response: CommandResponse): Promise<void> {
-    const channel = `commands#${userId}`;
+    const channel = `commands:rpc#${userId}`;
     try {
       await this.client.publish(channel, {
         type: 'command_response',

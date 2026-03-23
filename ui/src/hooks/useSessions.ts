@@ -55,7 +55,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
     if (!client || !userId) return;
 
     const sessionsChannel = `sessions:updates#${userId}`;
-    const commandsChannel = `commands#${userId}`;
+    const commandsChannel = `commands:rpc#${userId}`;
 
     for (const ch of [sessionsChannel, commandsChannel]) {
       const existing = client.getSubscription(ch);
