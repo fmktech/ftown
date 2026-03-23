@@ -8,3 +8,10 @@ CREATE TABLE users (
 );
 
 CREATE INDEX idx_users_email ON users(email);
+
+CREATE TABLE login_attempts (
+  email      TEXT        PRIMARY KEY,
+  failed_count INTEGER  NOT NULL DEFAULT 0,
+  locked_until TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

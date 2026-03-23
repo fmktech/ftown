@@ -10,9 +10,10 @@
     "http://localhost:3002"
   ],
   "allow_anonymous_connect_without_token": false,
+  "token_audience": "ftown:centrifugo",
   "allow_user_limited_channels": true,
-  "allow_publish_for_subscriber": true,
-  "allow_subscribe_for_client": true,
+  "allow_publish_for_subscriber": false,
+  "allow_subscribe_for_client": false,
   "allow_history_for_subscriber": true,
   "presence": true,
   "join_leave": true,

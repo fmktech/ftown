@@ -16,7 +16,7 @@ export async function POST(): Promise<NextResponse> {
     );
   }
 
-  const token = jwt.sign({ sub: session.user.email }, secret, { expiresIn: "24h" });
+  const token = jwt.sign({ sub: session.user.email }, secret, { audience: "ftown:centrifugo", expiresIn: "24h" });
 
   return NextResponse.json({
     token,

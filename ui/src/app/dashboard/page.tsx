@@ -18,7 +18,7 @@ export default async function DashboardPage() {
     throw new Error("Missing CENTRIFUGO_TOKEN_SECRET or NEXT_PUBLIC_CENTRIFUGO_URL environment variable");
   }
 
-  const token = jwt.sign({ sub: email }, centrifugoSecret, { expiresIn: "24h" });
+  const token = jwt.sign({ sub: email }, centrifugoSecret, { audience: "ftown:centrifugo", expiresIn: "24h" });
 
   return (
     <DashboardClient

@@ -2,6 +2,7 @@ import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import { compare } from "bcryptjs";
 import { getDb } from "@/lib/db";
+import { checkLoginRateLimit, recordFailedLogin, resetLoginAttempts } from "@/lib/login-rate-limit";
 
 interface DbUser {
   id: string;
@@ -24,6 +25,11 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           return null;
         }
 
+        const rateLimit = await checkLoginRateLimit(email);
+        if (!rateLimit.allowed) {
+          throw new Error("Too many failed attempts. Try again later.");
+        }
+
         const sql = getDb();
         const rows = (await sql.query(
           "SELECT id, email, password_hash FROM users WHERE email = $1",
@@ -31,6 +37,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         )) as DbUser[];
 
         if (rows.length === 0) {
+          await recordFailedLogin(email);
           return null;
         }
 
@@ -38,9 +45,11 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         const isValid = await compare(password, user.password_hash);
 
         if (!isValid) {
+          await recordFailedLogin(email);
           return null;
         }
 
+        await resetLoginAttempts(email);
         return { id: user.id, email: user.email };
       },
     }),

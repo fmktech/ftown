@@ -36,7 +36,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   let decoded: { sub: string };
   try {
-    decoded = jwt.verify(body.token, secret) as { sub: string };
+    decoded = jwt.verify(body.token, secret, { audience: "ftown:centrifugo" }) as { sub: string };
   } catch {
     return NextResponse.json(
       { error: "Invalid or expired token" },
@@ -61,7 +61,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       },
     },
     secret,
-    { expiresIn: "24h" },
+    { audience: "ftown:centrifugo", expiresIn: "24h" },
   );
 
   const refreshToken = jwt.sign(
@@ -71,7 +71,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       type: "bridge_refresh",
     },
     secret,
-    { expiresIn: "30d" },
+    { audience: "ftown:bridge-refresh", expiresIn: "30d" },
   );
 
   const centrifugoUrl = process.env.NEXT_PUBLIC_CENTRIFUGO_URL;

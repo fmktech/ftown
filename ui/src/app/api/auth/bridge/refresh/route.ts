@@ -42,7 +42,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   let decoded: BridgeRefreshPayload;
   try {
-    decoded = jwt.verify(body.refreshToken, secret) as BridgeRefreshPayload;
+    decoded = jwt.verify(body.refreshToken, secret, { audience: "ftown:bridge-refresh" }) as BridgeRefreshPayload;
   } catch {
     return NextResponse.json(
       { error: "Invalid or expired refresh token" },
@@ -74,7 +74,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       },
     },
     secret,
-    { expiresIn: "24h" }
+    { audience: "ftown:centrifugo", expiresIn: "24h" }
   );
 
   return NextResponse.json({ token });
