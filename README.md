@@ -2,6 +2,14 @@
 
 A Claude Code orchestrator that lets you manage and stream remote CLI sessions through a web dashboard.
 
+## Demo
+
+### Desktop
+https://github.com/fmktech/ftown/raw/main/ui/public/demo-desktop.mp4
+
+### Mobile
+https://github.com/fmktech/ftown/raw/main/ui/public/demo-mobile.mp4
+
 ## Architecture
 
 ```
