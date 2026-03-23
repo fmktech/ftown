@@ -191,91 +191,156 @@ export function DiffViewer({ isOpen, onClose, diff, diffStat, sessionName }: Dif
           ) : (
             <div className="diff2html-dark-wrapper">
               <style>{`
+                .diff2html-dark-wrapper * {
+                  border-color: #2a2a3e !important;
+                }
                 .diff2html-dark-wrapper .d2h-wrapper {
-                  background: transparent;
+                  background: transparent !important;
+                }
+                .diff2html-dark-wrapper .d2h-file-list-wrapper {
+                  display: none !important;
                 }
                 .diff2html-dark-wrapper .d2h-file-header {
-                  background: #1a1a2e;
-                  border-color: #2a2a3e;
+                  background: #141425 !important;
+                  padding: 8px 12px !important;
                 }
                 .diff2html-dark-wrapper .d2h-file-name-wrapper {
-                  font-family: var(--font-mono);
+                  font-family: var(--font-mono) !important;
+                }
+                .diff2html-dark-wrapper .d2h-file-name {
+                  color: #e2e8f0 !important;
+                  font-weight: 600 !important;
+                }
+                .diff2html-dark-wrapper .d2h-tag {
+                  background: #1e1e35 !important;
+                  color: #8892a8 !important;
+                }
+                .diff2html-dark-wrapper .d2h-file-stats .d2h-lines-added {
+                  color: #4ade80 !important;
+                }
+                .diff2html-dark-wrapper .d2h-file-stats .d2h-lines-deleted {
+                  color: #f87171 !important;
+                }
+                .diff2html-dark-wrapper .d2h-file-diff {
+                  background: #0a0a18 !important;
+                }
+                .diff2html-dark-wrapper .d2h-diff-table {
+                  font-family: var(--font-mono) !important;
+                  font-size: 12px !important;
+                }
+                .diff2html-dark-wrapper .d2h-diff-tbody tr {
+                  background: #0a0a18 !important;
+                }
+                .diff2html-dark-wrapper .d2h-code-line,
+                .diff2html-dark-wrapper .d2h-code-side-line {
+                  background: #0a0a18 !important;
+                  color: #c8cfd8 !important;
+                  padding: 0 12px !important;
                 }
                 .diff2html-dark-wrapper .d2h-code-line-ctn {
-                  font-family: var(--font-mono);
-                  font-size: 12px;
+                  background: transparent !important;
+                  color: inherit !important;
+                  font-family: var(--font-mono) !important;
+                  font-size: 12px !important;
                 }
-                .diff2html-dark-wrapper .d2h-code-line {
-                  background: #0d0d1a;
+                .diff2html-dark-wrapper .d2h-code-line-prefix {
+                  color: #555e70 !important;
+                  background: transparent !important;
+                  user-select: none !important;
                 }
-                .diff2html-dark-wrapper .d2h-code-side-line {
-                  background: #0d0d1a;
+                .diff2html-dark-wrapper .d2h-code-linenumber {
+                  background: #0e0e20 !important;
+                  color: #3d4555 !important;
+                  width: 48px !important;
+                  min-width: 48px !important;
                 }
+                /* Insertions */
+                .diff2html-dark-wrapper .d2h-ins,
+                .diff2html-dark-wrapper tr.d2h-ins,
                 .diff2html-dark-wrapper .d2h-ins .d2h-code-line,
-                .diff2html-dark-wrapper .d2h-ins.d2h-code-line {
-                  background: rgba(46, 160, 67, 0.15);
+                .diff2html-dark-wrapper .d2h-ins.d2h-code-line,
+                .diff2html-dark-wrapper .d2h-ins .d2h-code-side-line,
+                .diff2html-dark-wrapper .d2h-ins.d2h-code-side-line {
+                  background: rgba(46, 160, 67, 0.12) !important;
+                  color: #7ee8a0 !important;
                 }
                 .diff2html-dark-wrapper .d2h-ins .d2h-code-line-ctn,
                 .diff2html-dark-wrapper .d2h-ins.d2h-code-line-ctn {
-                  background: rgba(46, 160, 67, 0.2);
+                  background: transparent !important;
+                  color: #7ee8a0 !important;
                 }
+                .diff2html-dark-wrapper .d2h-ins .d2h-code-line-prefix {
+                  color: #4ade80 !important;
+                }
+                .diff2html-dark-wrapper .d2h-ins .d2h-code-linenumber,
+                .diff2html-dark-wrapper .d2h-ins.d2h-change .d2h-code-linenumber {
+                  background: rgba(46, 160, 67, 0.18) !important;
+                  color: #4ade80 !important;
+                }
+                /* Deletions */
+                .diff2html-dark-wrapper .d2h-del,
+                .diff2html-dark-wrapper tr.d2h-del,
                 .diff2html-dark-wrapper .d2h-del .d2h-code-line,
-                .diff2html-dark-wrapper .d2h-del.d2h-code-line {
-                  background: rgba(248, 81, 73, 0.15);
+                .diff2html-dark-wrapper .d2h-del.d2h-code-line,
+                .diff2html-dark-wrapper .d2h-del .d2h-code-side-line,
+                .diff2html-dark-wrapper .d2h-del.d2h-code-side-line {
+                  background: rgba(248, 81, 73, 0.12) !important;
+                  color: #fca5a5 !important;
                 }
                 .diff2html-dark-wrapper .d2h-del .d2h-code-line-ctn,
                 .diff2html-dark-wrapper .d2h-del.d2h-code-line-ctn {
-                  background: rgba(248, 81, 73, 0.2);
+                  background: transparent !important;
+                  color: #fca5a5 !important;
                 }
-                .diff2html-dark-wrapper .d2h-info {
-                  background: rgba(56, 189, 248, 0.1);
-                  color: rgb(56, 189, 248);
+                .diff2html-dark-wrapper .d2h-del .d2h-code-line-prefix {
+                  color: #f87171 !important;
                 }
-                .diff2html-dark-wrapper .d2h-file-name {
-                  color: var(--text-primary);
+                .diff2html-dark-wrapper .d2h-del .d2h-code-linenumber,
+                .diff2html-dark-wrapper .d2h-del.d2h-change .d2h-code-linenumber {
+                  background: rgba(248, 81, 73, 0.18) !important;
+                  color: #f87171 !important;
                 }
-                .diff2html-dark-wrapper .d2h-code-line-prefix {
-                  color: var(--text-faint);
+                /* Inline change highlights */
+                .diff2html-dark-wrapper ins {
+                  background: rgba(46, 160, 67, 0.35) !important;
+                  color: #bbf7d0 !important;
+                  text-decoration: none !important;
                 }
-                .diff2html-dark-wrapper .d2h-code-linenumber {
-                  background: #12122a;
-                  color: var(--text-faint);
-                  border-color: #2a2a3e;
+                .diff2html-dark-wrapper del {
+                  background: rgba(248, 81, 73, 0.35) !important;
+                  color: #fecaca !important;
+                  text-decoration: none !important;
                 }
-                .diff2html-dark-wrapper .d2h-file-list-wrapper {
-                  display: none;
-                }
-                .diff2html-dark-wrapper .d2h-tag {
-                  background: #1a1a2e;
-                  color: var(--text-muted);
-                  border-color: #2a2a3e;
-                }
-                .diff2html-dark-wrapper .d2h-file-diff {
-                  border-color: #2a2a3e;
-                }
-                .diff2html-dark-wrapper .d2h-diff-table {
-                  border-color: #2a2a3e;
-                }
-                .diff2html-dark-wrapper .d2h-code-line-ctn,
-                .diff2html-dark-wrapper .d2h-code-line {
-                  color: var(--text-primary);
+                /* Hunk info */
+                .diff2html-dark-wrapper .d2h-info,
+                .diff2html-dark-wrapper .d2h-info .d2h-code-line,
+                .diff2html-dark-wrapper .d2h-info .d2h-code-side-line {
+                  background: rgba(56, 189, 248, 0.08) !important;
+                  color: #7dd3fc !important;
                 }
                 .diff2html-dark-wrapper .d2h-info .d2h-code-line-ctn {
-                  color: rgb(56, 189, 248);
+                  color: #7dd3fc !important;
                 }
-                .diff2html-dark-wrapper .d2h-file-stats {
-                  color: var(--text-muted);
+                .diff2html-dark-wrapper .d2h-info .d2h-code-linenumber {
+                  background: rgba(56, 189, 248, 0.12) !important;
+                  color: #7dd3fc !important;
+                }
+                /* Empty placeholder rows */
+                .diff2html-dark-wrapper .d2h-emptyplaceholder,
+                .diff2html-dark-wrapper .d2h-code-side-emptyplaceholder {
+                  background: #0e0e20 !important;
                 }
                 .diff2html-dark-wrapper .d2h-moved-tag {
-                  background: #1a1a2e;
-                  color: var(--text-muted);
+                  background: #1e1e35 !important;
+                  color: #8892a8 !important;
                 }
+                /* Scrollbar */
                 .diff2html-dark-wrapper ::-webkit-scrollbar {
                   width: 8px;
                   height: 8px;
                 }
                 .diff2html-dark-wrapper ::-webkit-scrollbar-track {
-                  background: #0d0d1a;
+                  background: #0a0a18;
                 }
                 .diff2html-dark-wrapper ::-webkit-scrollbar-thumb {
                   background: #2a2a3e;
