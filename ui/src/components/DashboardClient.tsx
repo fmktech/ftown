@@ -25,6 +25,7 @@ export function DashboardClient({ userId, token, centrifugoUrl }: DashboardClien
       connectionError={error}
       userId={userId}
       token={token}
+      centrifugoUrl={centrifugoUrl}
       onDisconnect={handleDisconnect}
     />
   );

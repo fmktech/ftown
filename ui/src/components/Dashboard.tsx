@@ -11,6 +11,7 @@ import { SessionList } from "./SessionList";
 import { Terminal, TerminalHandle } from "./Terminal";
 import { MobileControlBar } from "./MobileControlBar";
 import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
+import { ConnectionDiagnostics } from "./ConnectionDiagnostics";
 
 interface DashboardProps {
   client: Centrifuge | null;
@@ -18,6 +19,7 @@ interface DashboardProps {
   connectionError: string | null;
   userId: string;
   token: string;
+  centrifugoUrl: string;
   onDisconnect: () => void;
 }
 
@@ -37,7 +39,7 @@ function ConnectionDot({ status }: { status: ConnectionStatus }) {
   );
 }
 
-export function Dashboard({ client, connectionStatus, connectionError, userId, token, onDisconnect }: DashboardProps) {
+export function Dashboard({ client, connectionStatus, connectionError, userId, token, centrifugoUrl, onDisconnect }: DashboardProps) {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [showNewSession, setShowNewSession] = useState(false);
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
@@ -430,6 +432,14 @@ print('hooks installed')
         bridges={bridges}
         defaults={sessionDefaults}
         bridgeExec={bridgeExec}
+      />
+
+      <ConnectionDiagnostics
+        connectionStatus={connectionStatus}
+        connectionError={connectionError}
+        centrifugoUrl={centrifugoUrl}
+        token={token}
+        onRetry={() => window.location.reload()}
       />
     </div>
   );
