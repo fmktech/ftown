@@ -113,69 +113,9 @@ export default async function LandingPage() {
 
       {/* Hero */}
       <main style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "48px 24px" }}>
-        <div style={{ maxWidth: 640, textAlign: "center" }}>
-          <h1
-            style={{
-              fontSize: "clamp(28px, 5vw, 44px)",
-              fontWeight: 800,
-              color: "var(--text-primary)",
-              lineHeight: 1.15,
-              marginBottom: 16,
-              letterSpacing: "-0.02em",
-            }}
-          >
-            Orchestrate{" "}
-            <span style={{ color: "var(--accent)", textShadow: "0 0 24px var(--accent-glow)" }}>
-              Claude Code
-            </span>
-            {" "}from anywhere
-          </h1>
-
-          <p
-            style={{
-              fontSize: 14,
-              color: "var(--text-secondary)",
-              lineHeight: 1.7,
-              maxWidth: 480,
-              margin: "0 auto 32px",
-            }}
-          >
-            Stream remote CLI sessions to your browser in real-time.
-            Manage multiple machines, multiple sessions, all from a single dashboard.
-            Self-hosted. Open source.
-          </p>
-
-          <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
-            <Link
-              href="/register"
-              className="btn-accent"
-              style={{ fontSize: 13, padding: "10px 24px", textDecoration: "none", display: "inline-block" }}
-            >
-              Self-host (Open Source)
-            </Link>
-            <Link
-              href="/register"
-              className="btn-ghost"
-              style={{ fontSize: 13, padding: "10px 24px", textDecoration: "none", display: "inline-block", border: "1px solid var(--accent)", color: "var(--accent)" }}
-            >
-              Try Hosted — Free for limited time
-            </Link>
-            <a
-              href="https://github.com/fmktech/ftown"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="btn-ghost"
-              style={{ fontSize: 13, padding: "10px 24px", textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 8 }}
-            >
-              <GitHubIcon /> GitHub
-            </a>
-          </div>
-        </div>
-
-        {/* Hero + Mobile demo side by side */}
+        {/* Hero row: text left, mobile video right */}
         <div
           style={{
-            marginTop: 56,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
@@ -185,69 +125,126 @@ export default async function LandingPage() {
             flexWrap: "wrap",
           }}
         >
-          {/* Architecture diagram */}
-          <div
-            style={{
-              padding: "24px 32px",
-              background: "var(--bg-surface)",
-              border: "1px solid var(--border-muted)",
-              borderRadius: 8,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              flex: "1 1 400px",
-              minWidth: 0,
-            }}
-          >
-            {/* Browser box */}
-            <div style={{ textAlign: "center", flexShrink: 0 }}>
-              <div style={{ border: "1px solid var(--border-muted)", borderRadius: 6, padding: "10px 16px" }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>Browser</div>
-                <div style={{ fontSize: 10, color: "var(--text-muted)" }}>Next.js</div>
-              </div>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "0 8px", flexShrink: 1, minWidth: 0 }}>
-              <span style={{ fontSize: 9, color: "var(--text-faint)", marginBottom: 4, whiteSpace: "nowrap" }}>WebSocket</span>
-              <div style={{ width: "100%", minWidth: 40, height: 0, borderTop: "1px solid var(--border-muted)", position: "relative" }}>
-                <span style={{ position: "absolute", left: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&lt;</span>
-                <span style={{ position: "absolute", right: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&gt;</span>
-              </div>
-            </div>
-            {/* Centrifugo box */}
-            <div style={{ textAlign: "center", flexShrink: 0 }}>
-              <div style={{ border: "1px solid var(--accent)", borderRadius: 6, padding: "10px 16px", boxShadow: "0 0 12px color-mix(in srgb, var(--accent) 15%, transparent)" }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: "var(--accent)" }}>Centrifugo</div>
-                <div style={{ fontSize: 10, color: "var(--text-muted)" }}>pub/sub</div>
-              </div>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "0 8px", flexShrink: 1, minWidth: 0 }}>
-              <span style={{ fontSize: 9, color: "var(--text-faint)", marginBottom: 4, whiteSpace: "nowrap" }}>WebSocket</span>
-              <div style={{ width: "100%", minWidth: 40, height: 0, borderTop: "1px solid var(--border-muted)", position: "relative" }}>
-                <span style={{ position: "absolute", left: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&lt;</span>
-                <span style={{ position: "absolute", right: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&gt;</span>
-              </div>
-            </div>
-            {/* Bridge box */}
-            <div style={{ textAlign: "center", flexShrink: 0 }}>
-              <div style={{ border: "1px solid var(--border-muted)", borderRadius: 6, padding: "10px 16px" }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>Bridge</div>
-                <div style={{ fontSize: 10, color: "var(--text-muted)" }}>node-pty</div>
-              </div>
+          {/* Left: text + CTAs */}
+          <div style={{ flex: "1 1 400px", minWidth: 0 }}>
+            <h1
+              style={{
+                fontSize: "clamp(28px, 5vw, 44px)",
+                fontWeight: 800,
+                color: "var(--text-primary)",
+                lineHeight: 1.15,
+                marginBottom: 16,
+                letterSpacing: "-0.02em",
+              }}
+            >
+              Orchestrate{" "}
+              <span style={{ color: "var(--accent)", textShadow: "0 0 24px var(--accent-glow)" }}>
+                Claude Code
+              </span>
+              {" "}from anywhere
+            </h1>
+
+            <p
+              style={{
+                fontSize: 14,
+                color: "var(--text-secondary)",
+                lineHeight: 1.7,
+                maxWidth: 480,
+                marginBottom: 32,
+              }}
+            >
+              Stream remote CLI sessions to your browser in real-time.
+              Manage multiple machines, multiple sessions, all from a single dashboard.
+              Self-hosted. Open source.
+            </p>
+
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+              <Link
+                href="/register"
+                className="btn-accent"
+                style={{ fontSize: 13, padding: "10px 24px", textDecoration: "none", display: "inline-block" }}
+              >
+                Self-host (Open Source)
+              </Link>
+              <Link
+                href="/register"
+                className="btn-ghost"
+                style={{ fontSize: 13, padding: "10px 24px", textDecoration: "none", display: "inline-block", border: "1px solid var(--accent)", color: "var(--accent)" }}
+              >
+                Try Hosted — Free for limited time
+              </Link>
+              <a
+                href="https://github.com/fmktech/ftown"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn-ghost"
+                style={{ fontSize: 13, padding: "10px 24px", textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 8 }}
+              >
+                <GitHubIcon /> GitHub
+              </a>
             </div>
           </div>
 
-          {/* Mobile demo */}
+          {/* Right: mobile demo */}
           <div style={{ flexShrink: 0 }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.08em", textAlign: "center" }}>Mobile</div>
             <video
               autoPlay
               loop
               muted
               playsInline
-              style={{ width: 200, borderRadius: 12, border: "1px solid var(--border-muted)" }}
+              style={{ width: 220, borderRadius: 12, border: "1px solid var(--border-muted)" }}
             >
               <source src="/demo-mobile.mp4" type="video/mp4" />
             </video>
+          </div>
+        </div>
+
+        {/* Architecture diagram */}
+        <div
+          style={{
+            marginTop: 48,
+            padding: "24px 32px",
+            background: "var(--bg-surface)",
+            border: "1px solid var(--border-muted)",
+            borderRadius: 8,
+            maxWidth: 560,
+            width: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <div style={{ textAlign: "center", flexShrink: 0 }}>
+            <div style={{ border: "1px solid var(--border-muted)", borderRadius: 6, padding: "10px 16px" }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>Browser</div>
+              <div style={{ fontSize: 10, color: "var(--text-muted)" }}>Next.js</div>
+            </div>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "0 8px", flexShrink: 1, minWidth: 0 }}>
+            <span style={{ fontSize: 9, color: "var(--text-faint)", marginBottom: 4, whiteSpace: "nowrap" }}>WebSocket</span>
+            <div style={{ width: "100%", minWidth: 40, height: 0, borderTop: "1px solid var(--border-muted)", position: "relative" }}>
+              <span style={{ position: "absolute", left: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&lt;</span>
+              <span style={{ position: "absolute", right: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&gt;</span>
+            </div>
+          </div>
+          <div style={{ textAlign: "center", flexShrink: 0 }}>
+            <div style={{ border: "1px solid var(--accent)", borderRadius: 6, padding: "10px 16px", boxShadow: "0 0 12px color-mix(in srgb, var(--accent) 15%, transparent)" }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--accent)" }}>Centrifugo</div>
+              <div style={{ fontSize: 10, color: "var(--text-muted)" }}>pub/sub</div>
+            </div>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "0 8px", flexShrink: 1, minWidth: 0 }}>
+            <span style={{ fontSize: 9, color: "var(--text-faint)", marginBottom: 4, whiteSpace: "nowrap" }}>WebSocket</span>
+            <div style={{ width: "100%", minWidth: 40, height: 0, borderTop: "1px solid var(--border-muted)", position: "relative" }}>
+              <span style={{ position: "absolute", left: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&lt;</span>
+              <span style={{ position: "absolute", right: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&gt;</span>
+            </div>
+          </div>
+          <div style={{ textAlign: "center", flexShrink: 0 }}>
+            <div style={{ border: "1px solid var(--border-muted)", borderRadius: 6, padding: "10px 16px" }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>Bridge</div>
+              <div style={{ fontSize: 10, color: "var(--text-muted)" }}>node-pty</div>
+            </div>
           </div>
         </div>
 
