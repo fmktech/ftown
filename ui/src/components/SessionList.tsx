@@ -51,6 +51,33 @@ function StatusBadge({ status, activity }: { status: SessionStatus; activity?: "
   );
 }
 
+function parseDiffStat(diffStat: string | undefined): { added: number; removed: number } | null {
+  if (!diffStat) return null;
+  const lines = diffStat.trim().split("\n");
+  const summary = lines[lines.length - 1];
+  const addMatch = summary.match(/(\d+) insertion/);
+  const delMatch = summary.match(/(\d+) deletion/);
+  const added = addMatch ? parseInt(addMatch[1], 10) : 0;
+  const removed = delMatch ? parseInt(delMatch[1], 10) : 0;
+  if (added === 0 && removed === 0) return null;
+  return { added, removed };
+}
+
+function DiffBadge({ diffStat }: { diffStat: string | undefined }) {
+  const stats = parseDiffStat(diffStat);
+  if (!stats) return null;
+  return (
+    <span className="flex items-center gap-1 shrink-0" style={{ fontSize: 10, fontFamily: "var(--font-mono)" }}>
+      {stats.added > 0 && (
+        <span style={{ color: "rgb(74, 222, 128)" }}>+{stats.added}</span>
+      )}
+      {stats.removed > 0 && (
+        <span style={{ color: "rgb(248, 113, 113)" }}>-{stats.removed}</span>
+      )}
+    </span>
+  );
+}
+
 function formatTimestamp(timestamp: string): string {
   const date = new Date(timestamp);
   const now = new Date();
@@ -349,6 +376,7 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
                   {displayName}
                 </span>
               )}
+              <DiffBadge diffStat={session.diffStat} />
               <StatusBadge status={session.status} activity={sessionActivity?.get(session.id)?.activity} />
             </div>
 
