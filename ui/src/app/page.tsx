@@ -220,6 +220,43 @@ export default async function LandingPage() {
           </div>
         </div>
 
+        {/* Demo Videos */}
+        <div
+          style={{
+            marginTop: 48,
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+            gap: 16,
+            maxWidth: 640,
+            width: "100%",
+          }}
+        >
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.08em" }}>Desktop</div>
+            <video
+              autoPlay
+              loop
+              muted
+              playsInline
+              style={{ width: "100%", borderRadius: 8, border: "1px solid var(--border-muted)" }}
+            >
+              <source src="/demo-desktop.mp4" type="video/mp4" />
+            </video>
+          </div>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.08em" }}>Mobile</div>
+            <video
+              autoPlay
+              loop
+              muted
+              playsInline
+              style={{ width: "100%", maxWidth: 280, borderRadius: 8, border: "1px solid var(--border-muted)" }}
+            >
+              <source src="/demo-mobile.mp4" type="video/mp4" />
+            </video>
+          </div>
+        </div>
+
         {/* Features */}
         <div
           style={{
