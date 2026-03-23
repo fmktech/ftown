@@ -151,7 +151,14 @@ export default async function LandingPage() {
               className="btn-accent"
               style={{ fontSize: 13, padding: "10px 24px", textDecoration: "none", display: "inline-block" }}
             >
-              Get Started
+              Self-host (Open Source)
+            </Link>
+            <Link
+              href="/register"
+              className="btn-ghost"
+              style={{ fontSize: 13, padding: "10px 24px", textDecoration: "none", display: "inline-block", border: "1px solid var(--accent)", color: "var(--accent)" }}
+            >
+              Try Hosted — Free for limited time
             </Link>
             <a
               href="https://github.com/fmktech/ftown"
@@ -165,87 +172,97 @@ export default async function LandingPage() {
           </div>
         </div>
 
-        {/* Architecture */}
+        {/* Hero + Mobile demo side by side */}
         <div
           style={{
             marginTop: 56,
-            padding: "24px 32px",
-            background: "var(--bg-surface)",
-            border: "1px solid var(--border-muted)",
-            borderRadius: 8,
-            maxWidth: 560,
-            width: "100%",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            gap: 0,
+            gap: 48,
+            width: "100%",
+            maxWidth: 960,
+            flexWrap: "wrap",
           }}
         >
-          {/* Browser box */}
-          <div style={{ textAlign: "center", flexShrink: 0 }}>
-            <div style={{ border: "1px solid var(--border-muted)", borderRadius: 6, padding: "10px 16px" }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>Browser</div>
-              <div style={{ fontSize: 10, color: "var(--text-muted)" }}>Next.js</div>
+          {/* Architecture diagram */}
+          <div
+            style={{
+              padding: "24px 32px",
+              background: "var(--bg-surface)",
+              border: "1px solid var(--border-muted)",
+              borderRadius: 8,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flex: "1 1 400px",
+              minWidth: 0,
+            }}
+          >
+            {/* Browser box */}
+            <div style={{ textAlign: "center", flexShrink: 0 }}>
+              <div style={{ border: "1px solid var(--border-muted)", borderRadius: 6, padding: "10px 16px" }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>Browser</div>
+                <div style={{ fontSize: 10, color: "var(--text-muted)" }}>Next.js</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "0 8px", flexShrink: 1, minWidth: 0 }}>
+              <span style={{ fontSize: 9, color: "var(--text-faint)", marginBottom: 4, whiteSpace: "nowrap" }}>WebSocket</span>
+              <div style={{ width: "100%", minWidth: 40, height: 0, borderTop: "1px solid var(--border-muted)", position: "relative" }}>
+                <span style={{ position: "absolute", left: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&lt;</span>
+                <span style={{ position: "absolute", right: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&gt;</span>
+              </div>
+            </div>
+            {/* Centrifugo box */}
+            <div style={{ textAlign: "center", flexShrink: 0 }}>
+              <div style={{ border: "1px solid var(--accent)", borderRadius: 6, padding: "10px 16px", boxShadow: "0 0 12px color-mix(in srgb, var(--accent) 15%, transparent)" }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "var(--accent)" }}>Centrifugo</div>
+                <div style={{ fontSize: 10, color: "var(--text-muted)" }}>pub/sub</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "0 8px", flexShrink: 1, minWidth: 0 }}>
+              <span style={{ fontSize: 9, color: "var(--text-faint)", marginBottom: 4, whiteSpace: "nowrap" }}>WebSocket</span>
+              <div style={{ width: "100%", minWidth: 40, height: 0, borderTop: "1px solid var(--border-muted)", position: "relative" }}>
+                <span style={{ position: "absolute", left: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&lt;</span>
+                <span style={{ position: "absolute", right: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&gt;</span>
+              </div>
+            </div>
+            {/* Bridge box */}
+            <div style={{ textAlign: "center", flexShrink: 0 }}>
+              <div style={{ border: "1px solid var(--border-muted)", borderRadius: 6, padding: "10px 16px" }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>Bridge</div>
+                <div style={{ fontSize: 10, color: "var(--text-muted)" }}>node-pty</div>
+              </div>
             </div>
           </div>
-          {/* Arrow + label */}
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "0 8px", flexShrink: 1, minWidth: 0 }}>
-            <span style={{ fontSize: 9, color: "var(--text-faint)", marginBottom: 4, whiteSpace: "nowrap" }}>WebSocket</span>
-            <div style={{ width: "100%", minWidth: 40, height: 0, borderTop: "1px solid var(--border-muted)", position: "relative" }}>
-              <span style={{ position: "absolute", left: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&lt;</span>
-              <span style={{ position: "absolute", right: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&gt;</span>
-            </div>
-          </div>
-          {/* Centrifugo box */}
-          <div style={{ textAlign: "center", flexShrink: 0 }}>
-            <div style={{ border: "1px solid var(--accent)", borderRadius: 6, padding: "10px 16px", boxShadow: "0 0 12px color-mix(in srgb, var(--accent) 15%, transparent)" }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--accent)" }}>Centrifugo</div>
-              <div style={{ fontSize: 10, color: "var(--text-muted)" }}>pub/sub</div>
-            </div>
-          </div>
-          {/* Arrow + label */}
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "0 8px", flexShrink: 1, minWidth: 0 }}>
-            <span style={{ fontSize: 9, color: "var(--text-faint)", marginBottom: 4, whiteSpace: "nowrap" }}>WebSocket</span>
-            <div style={{ width: "100%", minWidth: 40, height: 0, borderTop: "1px solid var(--border-muted)", position: "relative" }}>
-              <span style={{ position: "absolute", left: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&lt;</span>
-              <span style={{ position: "absolute", right: -1, top: -4, color: "var(--text-faint)", fontSize: 8 }}>&gt;</span>
-            </div>
-          </div>
-          {/* Bridge box */}
-          <div style={{ textAlign: "center", flexShrink: 0 }}>
-            <div style={{ border: "1px solid var(--border-muted)", borderRadius: 6, padding: "10px 16px" }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>Bridge</div>
-              <div style={{ fontSize: 10, color: "var(--text-muted)" }}>node-pty</div>
-            </div>
-          </div>
-        </div>
 
-        {/* Demo Videos */}
-        <div style={{ marginTop: 48, width: "100%", maxWidth: 960 }}>
-          <div style={{ marginBottom: 24 }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.08em" }}>Desktop</div>
+          {/* Mobile demo */}
+          <div style={{ flexShrink: 0 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.08em", textAlign: "center" }}>Mobile</div>
             <video
               autoPlay
               loop
               muted
               playsInline
-              style={{ width: "100%", borderRadius: 8, border: "1px solid var(--border-muted)" }}
-            >
-              <source src="/demo-desktop.mp4" type="video/mp4" />
-            </video>
-          </div>
-          <div>
-            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.08em" }}>Mobile</div>
-            <video
-              autoPlay
-              loop
-              muted
-              playsInline
-              style={{ width: "100%", maxWidth: 320, borderRadius: 8, border: "1px solid var(--border-muted)" }}
+              style={{ width: 200, borderRadius: 12, border: "1px solid var(--border-muted)" }}
             >
               <source src="/demo-mobile.mp4" type="video/mp4" />
             </video>
           </div>
+        </div>
+
+        {/* Desktop demo — full width */}
+        <div style={{ marginTop: 48, width: "100%", maxWidth: 960 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.08em" }}>Desktop</div>
+          <video
+            autoPlay
+            loop
+            muted
+            playsInline
+            style={{ width: "100%", borderRadius: 8, border: "1px solid var(--border-muted)" }}
+          >
+            <source src="/demo-desktop.mp4" type="video/mp4" />
+          </video>
         </div>
 
         {/* Features */}
