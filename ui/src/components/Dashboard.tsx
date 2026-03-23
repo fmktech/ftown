@@ -164,7 +164,7 @@ print('hooks installed')
     if (!selectedSession?.id) return;
     setDiffLoading(true);
     try {
-      const diff = await getDiff(selectedSession.id);
+      const diff = await getDiff(selectedSession.id, selectedSession.bridgeId);
       setDiffContent(diff);
       setShowDiff(true);
     } catch (err) {
