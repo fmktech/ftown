@@ -40,6 +40,7 @@ interface ExecError {
 
 interface BridgeAuthResponse {
   token: string;
+  refreshToken: string;
   centrifugoUrl: string;
   userId: string;
 }
@@ -89,6 +90,26 @@ program
     console.log(`  Data dir:       ${dataDir}`);
     console.log('========================================');
 
+    async function getToken(): Promise<string> {
+      console.log('[Bridge] Refreshing Centrifugo token...');
+      const res = await fetch(`${opts.apiUrl}/api/auth/bridge/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          refreshToken: auth.refreshToken,
+          bridgeId,
+          hostname: osHostname(),
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`Token refresh failed (${res.status}): ${body}`);
+      }
+      const data = await res.json() as { token: string };
+      console.log('[Bridge] Token refreshed successfully');
+      return data.token;
+    }
+
     const store = new SessionStore(dataDir);
 
     const staleSessiones = await store.listSessions();
@@ -102,7 +123,7 @@ program
     }
 
     const runner = new ProcessRunner();
-    const centrifugo = new CentrifugoClient(centrifugoUrl, auth.token);
+    const centrifugo = new CentrifugoClient(centrifugoUrl, auth.token, getToken);
     const hookServer = new HookServer();
     const hookPort = await hookServer.start();
     console.log(`[Bridge] Hook server started on port ${hookPort}`);

@@ -1,10 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import jwt from "jsonwebtoken";
 
-interface BridgeTokenRequestBody {
-  token: string;
+interface BridgeRefreshRequestBody {
+  refreshToken: string;
   bridgeId: string;
   hostname: string;
+}
+
+interface BridgeRefreshPayload {
+  sub: string;
+  bridgeId: string;
+  type: string;
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -17,9 +23,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  let body: BridgeTokenRequestBody;
+  let body: BridgeRefreshRequestBody;
   try {
-    body = (await request.json()) as BridgeTokenRequestBody;
+    body = (await request.json()) as BridgeRefreshRequestBody;
   } catch {
     return NextResponse.json(
       { error: "Invalid JSON body" },
@@ -27,31 +33,38 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  if (!body.token || !body.bridgeId || !body.hostname) {
+  if (!body.refreshToken || !body.bridgeId || !body.hostname) {
     return NextResponse.json(
-      { error: "token, bridgeId, and hostname are required" },
+      { error: "refreshToken, bridgeId, and hostname are required" },
       { status: 400 }
     );
   }
 
-  let decoded: { sub: string };
+  let decoded: BridgeRefreshPayload;
   try {
-    decoded = jwt.verify(body.token, secret) as { sub: string };
+    decoded = jwt.verify(body.refreshToken, secret) as BridgeRefreshPayload;
   } catch {
     return NextResponse.json(
-      { error: "Invalid or expired token" },
+      { error: "Invalid or expired refresh token" },
       { status: 401 }
     );
   }
 
-  if (!decoded.sub) {
+  if (decoded.type !== "bridge_refresh") {
     return NextResponse.json(
-      { error: "Token missing sub claim" },
+      { error: "Invalid token type" },
       { status: 401 }
     );
   }
 
-  const centrifugoToken = jwt.sign(
+  if (decoded.bridgeId !== body.bridgeId) {
+    return NextResponse.json(
+      { error: "bridgeId mismatch" },
+      { status: 401 }
+    );
+  }
+
+  const token = jwt.sign(
     {
       sub: decoded.sub,
       info: {
@@ -61,25 +74,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       },
     },
     secret,
-    { expiresIn: "24h" },
+    { expiresIn: "24h" }
   );
 
-  const refreshToken = jwt.sign(
-    {
-      sub: decoded.sub,
-      bridgeId: body.bridgeId,
-      type: "bridge_refresh",
-    },
-    secret,
-    { expiresIn: "30d" },
-  );
-
-  const centrifugoUrl = process.env.NEXT_PUBLIC_CENTRIFUGO_URL;
-
-  return NextResponse.json({
-    token: centrifugoToken,
-    refreshToken,
-    centrifugoUrl,
-    userId: decoded.sub,
-  });
+  return NextResponse.json({ token });
 }

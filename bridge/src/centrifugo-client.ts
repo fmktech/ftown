@@ -15,9 +15,10 @@ export class CentrifugoClient {
   private readonly client: Centrifuge;
   private readonly subscriptions: Map<string, Subscription> = new Map();
 
-  constructor(url: string, token: string) {
+  constructor(url: string, token: string, getToken: () => Promise<string>) {
     this.client = new Centrifuge(url, {
       token,
+      getToken,
       websocket: WebSocket,
     });
 
