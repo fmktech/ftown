@@ -2,6 +2,13 @@
   "name": "ftown-ui",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
+  "description": "Web dashboard for ftown — manage and stream remote Claude Code sessions",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fmktech/ftown.git",
+    "directory": "ui"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",

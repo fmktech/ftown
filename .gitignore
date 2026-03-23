@@ -32,3 +32,7 @@ coverage/
 .secrets/
 config.prod.json
 node-compile-cache/
+
+*.pem
+*.key
+CLAUDE.md
