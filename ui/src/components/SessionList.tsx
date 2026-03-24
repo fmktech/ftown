@@ -13,6 +13,7 @@ interface SessionListProps {
   onStopSession?: (sessionId: string) => void;
   onRemoveSession?: (sessionId: string) => void;
   onCloneSession?: (session: Session) => void;
+  onReorderSessions?: (orderedIds: string[]) => void;
   sessionActivity?: Map<string, SessionActivity>;
 }
 
@@ -216,10 +217,13 @@ function ContextMenu({
   );
 }
 
-export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession, onStopSession, onRemoveSession, onCloneSession, sessionActivity }: SessionListProps) {
+export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession, onStopSession, onRemoveSession, onCloneSession, onReorderSessions, sessionActivity }: SessionListProps) {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [dragOverPosition, setDragOverPosition] = useState<"above" | "below" | null>(null);
+  const draggedIdRef = useRef<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressFired = useRef(false);
@@ -261,6 +265,59 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
     });
   }
 
+  function handleDragStart(e: React.DragEvent, sessionId: string): void {
+    draggedIdRef.current = sessionId;
+    e.dataTransfer.effectAllowed = "move";
+    if (e.currentTarget instanceof HTMLElement) {
+      e.currentTarget.style.opacity = "0.4";
+    }
+  }
+
+  function handleDragEnd(e: React.DragEvent): void {
+    draggedIdRef.current = null;
+    setDragOverId(null);
+    setDragOverPosition(null);
+    if (e.currentTarget instanceof HTMLElement) {
+      e.currentTarget.style.opacity = "1";
+    }
+  }
+
+  function handleDragOver(e: React.DragEvent, sessionId: string): void {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (!draggedIdRef.current || draggedIdRef.current === sessionId) {
+      setDragOverId(null);
+      setDragOverPosition(null);
+      return;
+    }
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const midY = rect.top + rect.height / 2;
+    setDragOverId(sessionId);
+    setDragOverPosition(e.clientY < midY ? "above" : "below");
+  }
+
+  function handleDrop(e: React.DragEvent, targetId: string): void {
+    e.preventDefault();
+    const draggedId = draggedIdRef.current;
+    if (!draggedId || draggedId === targetId || !onReorderSessions) return;
+
+    const ids = sessions.map((s) => s.id);
+    const fromIdx = ids.indexOf(draggedId);
+    const toIdx = ids.indexOf(targetId);
+    if (fromIdx === -1 || toIdx === -1) return;
+
+    ids.splice(fromIdx, 1);
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const midY = rect.top + rect.height / 2;
+    const insertIdx = e.clientY < midY ? ids.indexOf(targetId) : ids.indexOf(targetId) + 1;
+    ids.splice(insertIdx, 0, draggedId);
+    onReorderSessions(ids);
+
+    setDragOverId(null);
+    setDragOverPosition(null);
+    draggedIdRef.current = null;
+  }
+
   if (sessions.length === 0) {
     return (
       <div
@@ -282,6 +339,12 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
         return (
           <button
             key={session.id}
+            draggable
+            onDragStart={(e) => handleDragStart(e, session.id)}
+            onDragEnd={handleDragEnd}
+            onDragOver={(e) => handleDragOver(e, session.id)}
+            onDragLeave={() => { setDragOverId(null); setDragOverPosition(null); }}
+            onDrop={(e) => handleDrop(e, session.id)}
             onClick={() => {
               if (longPressFired.current) return;
               onSelectSession(session.id);
@@ -314,9 +377,11 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
               textAlign: "left",
               padding: "10px 16px",
               borderBottom: "1px solid var(--border-subtle)",
+              borderTop: dragOverId === session.id && dragOverPosition === "above" ? "2px solid var(--accent)" : "none",
+              ...(dragOverId === session.id && dragOverPosition === "below" ? { borderBottom: "2px solid var(--accent)" } : {}),
               borderLeft: `2px solid ${isSelected ? "var(--accent)" : "transparent"}`,
               background: isSelected ? "var(--bg-elevated)" : "transparent",
-              cursor: "pointer",
+              cursor: "grab",
               transition: "background 0.12s ease, border-color 0.12s ease",
               fontFamily: "var(--font-mono)",
               display: "block",

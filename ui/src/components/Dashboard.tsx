@@ -47,6 +47,10 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
   const [mobileTab, setMobileTab] = useState<"sessions" | "terminal">("sessions");
+  const [sessionOrder, setSessionOrder] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    try { return JSON.parse(localStorage.getItem("ftown:sessionOrder") ?? "[]"); } catch { return []; }
+  });
   const terminalRef = useRef<TerminalHandle>(null);
   const mobileControlRef = useRef<MobileControlBarHandle>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -116,16 +120,27 @@ print('hooks installed')
 
   const activeBridgeIds = useMemo(() => new Set(bridges.map((b) => b.bridgeId)), [bridges]);
 
-  const sessions = useMemo(() =>
-    rawSessions.map((s) =>
+  const sessions = useMemo(() => {
+    const mapped = rawSessions.map((s) =>
       s.status === "running" && activeBridgeIds.size > 0 && !activeBridgeIds.has(s.bridgeId)
         ? { ...s, status: "disconnected" as const }
         : s
-    ),
-    [rawSessions, activeBridgeIds]
-  );
+    );
+    if (sessionOrder.length === 0) return mapped;
+    const orderMap = new Map(sessionOrder.map((id, i) => [id, i]));
+    return [...mapped].sort((a, b) => {
+      const ai = orderMap.get(a.id) ?? Infinity;
+      const bi = orderMap.get(b.id) ?? Infinity;
+      return ai - bi;
+    });
+  }, [rawSessions, activeBridgeIds, sessionOrder]);
 
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
+
+  const handleReorderSessions = useCallback((orderedIds: string[]) => {
+    setSessionOrder(orderedIds);
+    localStorage.setItem("ftown:sessionOrder", JSON.stringify(orderedIds));
+  }, []);
 
   const handleCreateSession = useCallback(
     (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string }) => {
@@ -472,6 +487,7 @@ print('hooks installed')
               onStopSession={stopSession}
               onRemoveSession={handleRemoveSession}
               onCloneSession={handleCloneSession}
+              onReorderSessions={handleReorderSessions}
               sessionActivity={sessionActivity}
             />
           </div>
