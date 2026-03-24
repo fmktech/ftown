@@ -202,19 +202,36 @@ print('hooks installed')
         {/* Left cluster */}
         <div className="flex items-center gap-3">
           {/* Wordmark */}
-          <span
-            style={{
-              fontSize: 12,
-              fontWeight: 800,
-              letterSpacing: "0.15em",
-              color: "var(--accent)",
-              textTransform: "uppercase",
-              textShadow: "0 0 12px var(--accent-glow)",
-              userSelect: "none",
-            }}
-          >
-            ftown
-          </span>
+          <div className="flex items-center gap-1.5" style={{ userSelect: "none" }}>
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="20" height="20">
+              <defs>
+                <linearGradient id="ng" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor="#33ffaa" />
+                  <stop offset="100%" stopColor="#00ff88" />
+                </linearGradient>
+              </defs>
+              <rect x="4" y="4" width="56" height="56" rx="12" fill="#0a0a0d"/>
+              <path d="M20 16 L20 48 M20 16 L40 16 M20 32 L34 32" stroke="#00ff88" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+              <circle cx="48" cy="16" r="4" fill="url(#ng)"/>
+              <circle cx="48" cy="32" r="4" fill="url(#ng)"/>
+              <circle cx="48" cy="48" r="4" fill="url(#ng)"/>
+              <line x1="40" y1="16" x2="44" y2="16" stroke="#00ff88" strokeWidth="2" opacity="0.6"/>
+              <line x1="34" y1="32" x2="44" y2="32" stroke="#00ff88" strokeWidth="2" opacity="0.6"/>
+              <line x1="20" y1="48" x2="44" y2="48" stroke="#00ff88" strokeWidth="2" opacity="0.6"/>
+            </svg>
+            <span
+              style={{
+                fontSize: 12,
+                fontWeight: 800,
+                letterSpacing: "0.15em",
+                color: "var(--accent)",
+                textTransform: "uppercase",
+                textShadow: "0 0 12px var(--accent-glow)",
+              }}
+            >
+              ftown
+            </span>
+          </div>
 
           <span style={{ width: 1, height: 16, background: "var(--border-muted)" }} />
 
