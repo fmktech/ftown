@@ -249,7 +249,7 @@ print('hooks installed')
             </button>
           )}
           {selectedSession?.diffStat && (
-            <button className="btn-ghost" onClick={handleViewDiff} disabled={diffLoading}>
+            <button className="btn-accent" onClick={handleViewDiff} disabled={diffLoading}>
               {diffLoading ? "Loading..." : "Diff"}
             </button>
           )}

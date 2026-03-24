@@ -312,14 +312,14 @@ export function DiffViewer({ isOpen, onClose, diff, diffStat, sessionName }: Dif
           <button
             className="btn-ghost"
             onClick={handleCopy}
-            style={{ fontSize: 12, padding: "6px 12px", fontFamily: "var(--font-mono)", minHeight: 32 }}
+            style={{ fontSize: 12, padding: "6px 12px", fontFamily: "var(--font-mono)", minHeight: 32, color: "var(--text-primary)", borderColor: "var(--border-muted)" }}
           >
             {copied ? "Copied!" : "Copy"}
           </button>
           <button
             className="btn-ghost"
             onClick={onClose}
-            style={{ fontSize: 20, lineHeight: 1, padding: "6px 10px", color: "var(--text-faint)", minHeight: 32 }}
+            style={{ fontSize: 20, lineHeight: 1, padding: "6px 10px", color: "var(--text-primary)", minHeight: 32, borderColor: "var(--border-muted)" }}
           >
             {"\u00D7"}
           </button>
