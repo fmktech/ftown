@@ -9,7 +9,7 @@ import { useBridges } from "@/hooks/useBridges";
 import { useAllSessionEvents } from "@/hooks/useAllSessionEvents";
 import { SessionList } from "./SessionList";
 import { Terminal, TerminalHandle } from "./Terminal";
-import { MobileControlBar } from "./MobileControlBar";
+import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
 import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
 import { ConnectionDiagnostics } from "./ConnectionDiagnostics";
 import { DiffViewer } from "./DiffViewer";
@@ -48,6 +48,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [tokenCopied, setTokenCopied] = useState(false);
   const [mobileTab, setMobileTab] = useState<"sessions" | "terminal">("sessions");
   const terminalRef = useRef<TerminalHandle>(null);
+  const mobileControlRef = useRef<MobileControlBarHandle>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
   // Resize layout when mobile keyboard opens/closes
@@ -458,9 +459,10 @@ print('hooks installed')
             isRunning={selectedSession?.status === "running"}
             sessionName={selectedSession?.name ?? selectedSession?.prompt?.slice(0, 48) ?? null}
             usage={selectedSessionId ? sessionActivity.get(selectedSessionId)?.usage : undefined}
+            onMobileTap={() => mobileControlRef.current?.focusInput()}
           />
           {selectedSessionId && (
-            <MobileControlBar onSendInput={(data) => terminalRef.current?.sendInput(data)} />
+            <MobileControlBar ref={mobileControlRef} onSendInput={(data) => terminalRef.current?.sendInput(data)} />
           )}
         </main>
 

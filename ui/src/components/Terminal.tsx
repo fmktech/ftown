@@ -20,6 +20,7 @@ interface TerminalProps {
   isRunning: boolean;
   sessionName?: string | null;
   usage?: TokenUsage;
+  onMobileTap?: () => void;
 }
 
 function formatTokenCount(n: number): string {
@@ -28,12 +29,13 @@ function formatTokenCount(n: number): string {
   return String(n);
 }
 
-export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ client, sessionId, userId, isRunning, sessionName, usage }, ref) {
+export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ client, sessionId, userId, isRunning, sessionName, usage, onMobileTap }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const outputSubRef = useRef<Subscription | null>(null);
   const inputSubRef = useRef<Subscription | null>(null);
+  const onMobileTapRef = useRef(onMobileTap);
 
   useImperativeHandle(ref, () => ({
     sendInput(data: string) {
@@ -45,6 +47,8 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       fitAddonRef.current?.fit();
     },
   }), []);
+
+  useEffect(() => { onMobileTapRef.current = onMobileTap; }, [onMobileTap]);
 
   // Initialize xterm once
   useEffect(() => {
@@ -141,7 +145,11 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
         accumulatedDelta -= lines * LINE_HEIGHT;
       }
     };
-    const onTouchEnd = () => {
+    const onTouchEnd = (e: TouchEvent) => {
+      // If this was a tap (no significant scroll), focus the mobile input
+      if (touchStartY !== null && Math.abs(accumulatedDelta) < LINE_HEIGHT) {
+        onMobileTapRef.current?.();
+      }
       touchStartY = null;
       accumulatedDelta = 0;
     };
