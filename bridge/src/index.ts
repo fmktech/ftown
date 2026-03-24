@@ -233,9 +233,24 @@ program
           const { stdout: fullDiff } = await execAsync('git diff', { cwd: repoDir, maxBuffer: 5 * 1024 * 1024 });
 
           const relative = repoDir === session.workingDir ? '' : repoDir.replace(session.workingDir + '/', '');
-          const prefix = relative ? `[${relative}] ` : '';
-          allStat += `${prefix}${statOutput}`;
-          allDiff += fullDiff;
+          if (relative) {
+            // Prefix file paths in diff so files show as subrepo/path
+            const prefixedDiff = fullDiff.replace(
+              /^diff --git a\/(.+?) b\/(.+?)$/gm,
+              `diff --git a/${relative}/$1 b/${relative}/$2`,
+            ).replace(
+              /^--- a\/(.+?)$/gm,
+              `--- a/${relative}/$1`,
+            ).replace(
+              /^\+\+\+ b\/(.+?)$/gm,
+              `+++ b/${relative}/$1`,
+            );
+            allStat += `[${relative}] ${statOutput}`;
+            allDiff += prefixedDiff;
+          } else {
+            allStat += statOutput;
+            allDiff += fullDiff;
+          }
         } catch {
           // not a git repo or git not available
         }
