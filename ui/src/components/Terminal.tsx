@@ -105,31 +105,42 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       xtermTextarea.setAttribute("autocomplete", "off");
       xtermTextarea.setAttribute("spellcheck", "false");
 
-      // On mobile, intercept composition to send characters immediately
-      // instead of waiting for the IME to commit the full word
+      // On mobile, bypass IME composition entirely so each keystroke
+      // appears instantly and backspace/space work correctly.
       if ("ontouchstart" in window) {
-        let compositionData = "";
+        let isComposing = false;
+        let sentCount = 0;
 
         xtermTextarea.addEventListener("compositionstart", () => {
-          compositionData = "";
+          isComposing = true;
+          sentCount = 0;
         });
 
-        xtermTextarea.addEventListener("compositionupdate", (e: Event) => {
-          const ce = e as CompositionEvent;
-          const newData = ce.data || "";
-          if (newData.length > compositionData.length) {
-            const newChars = newData.slice(compositionData.length);
-            term.paste(newChars);
-          }
-          compositionData = newData;
-        });
-
-        // Capture phase: clear textarea BEFORE xterm reads compositionend,
-        // so xterm sends empty string (no duplicate). But let the event
-        // propagate so xterm exits composition mode and handles space/keys normally.
         xtermTextarea.addEventListener("compositionend", (e: Event) => {
+          isComposing = false;
           (e.target as HTMLTextAreaElement).value = "";
-          compositionData = "";
+          sentCount = 0;
+        }, true);
+
+        xtermTextarea.addEventListener("beforeinput", (e: Event) => {
+          const ie = e as InputEvent;
+
+          if (isComposing && ie.inputType === "insertCompositionText" && ie.data) {
+            e.preventDefault();
+            const newPart = ie.data.slice(sentCount);
+            if (newPart) {
+              term.paste(newPart);
+              sentCount = ie.data.length;
+            }
+          }
+
+          if (isComposing && ie.inputType === "deleteContentBackward") {
+            e.preventDefault();
+            if (sentCount > 0) {
+              term.paste("\x7f");
+              sentCount--;
+            }
+          }
         }, true);
       }
     }
