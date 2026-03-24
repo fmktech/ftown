@@ -351,7 +351,10 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       )}
 
       {/* xterm container - always in DOM, no display:none */}
-      <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
+      <div
+        style={{ position: "relative", flex: 1, minHeight: 0 }}
+        onClick={() => onMobileTapRef.current?.()}
+      >
         <div
           ref={containerRef}
           className="scanlines"
