@@ -94,6 +94,32 @@ export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControl
 
         {/* Control buttons row */}
         <div className="flex items-center justify-around px-2 gap-1" style={{ paddingTop: 4, paddingBottom: 2 }}>
+          {/* Keyboard toggle button */}
+          <button
+            className="mobile-ctrl-btn"
+            style={{
+              minWidth: 44,
+              minHeight: 40,
+              flex: 1,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "var(--accent)",
+              border: "1px solid var(--accent)",
+              borderRadius: 6,
+              color: "var(--bg-void)",
+              fontSize: 16,
+              fontWeight: 700,
+              cursor: "pointer",
+              touchAction: "manipulation",
+              userSelect: "none",
+              WebkitUserSelect: "none",
+            }}
+            onTouchEnd={(e) => { e.preventDefault(); focusInput(); }}
+            onClick={(e) => { e.preventDefault(); focusInput(); }}
+          >
+            {"\u2328"}
+          </button>
           {BUTTONS.map((btn) => (
             <button
               key={btn.label}
