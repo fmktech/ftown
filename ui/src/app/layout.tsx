@@ -5,6 +5,10 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "ftown - Claude Code Orchestrator",
   description: "Manage and view Claude Code sessions running on remote CLI bridges",
+  icons: {
+    icon: "/icon.svg",
+    apple: "/apple-icon.svg",
+  },
 };
 
 export const viewport: Viewport = {
