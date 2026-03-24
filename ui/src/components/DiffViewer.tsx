@@ -89,6 +89,26 @@ function FileDiffSection({ file }: { file: FileDiff }) {
 }
 
 const DARK_STYLES = `
+  .diff-sidebar {
+    width: 480px;
+    min-width: 480px;
+    display: flex;
+    flex-direction: column;
+    border-left: 1px solid var(--border-muted);
+    background: var(--bg-void);
+    overflow: hidden;
+  }
+  @media (max-width: 768px) {
+    .diff-sidebar {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      min-width: 0;
+      z-index: 40;
+      border-left: none;
+    }
+  }
+
   .diff2html-dark-wrapper * {
     border-color: #2a2a3e !important;
   }
@@ -263,15 +283,7 @@ export function DiffViewer({ isOpen, onClose, diff, diffStat, sessionName }: Dif
 
   return (
     <aside
-      style={{
-        width: 480,
-        minWidth: 480,
-        display: "flex",
-        flexDirection: "column",
-        borderLeft: "1px solid var(--border-muted)",
-        background: "var(--bg-void)",
-        overflow: "hidden",
-      }}
+      className="diff-sidebar"
     >
       <style>{DARK_STYLES}</style>
 
