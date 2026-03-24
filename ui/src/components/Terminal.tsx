@@ -104,7 +104,34 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       xtermTextarea.setAttribute("autocapitalize", "off");
       xtermTextarea.setAttribute("autocomplete", "off");
       xtermTextarea.setAttribute("spellcheck", "false");
-      xtermTextarea.setAttribute("inputmode", "text");
+
+      // On mobile, intercept composition to send characters immediately
+      // instead of waiting for the IME to commit the full word
+      if ("ontouchstart" in window) {
+        let compositionData = "";
+
+        xtermTextarea.addEventListener("compositionstart", () => {
+          compositionData = "";
+        });
+
+        xtermTextarea.addEventListener("compositionupdate", (e: Event) => {
+          const ce = e as CompositionEvent;
+          const newData = ce.data || "";
+          // Send only the newly added characters
+          if (newData.length > compositionData.length) {
+            const newChars = newData.slice(compositionData.length);
+            term.paste(newChars);
+          }
+          compositionData = newData;
+        });
+
+        xtermTextarea.addEventListener("compositionend", (e: Event) => {
+          e.stopImmediatePropagation();
+          // Clear textarea to prevent xterm from sending the composed text again
+          (e.target as HTMLTextAreaElement).value = "";
+          compositionData = "";
+        }, true);
+      }
     }
 
     const resizeObserver = new ResizeObserver(() => {
