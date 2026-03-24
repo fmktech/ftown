@@ -65,7 +65,7 @@ export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControl
 
     return (
       <div
-        className="flex lg:hidden shrink-0 flex-col"
+        className="touch-control-bar shrink-0 flex-col"
         style={{
           paddingBottom: "max(4px, env(safe-area-inset-bottom))",
           background: "var(--bg-surface)",

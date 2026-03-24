@@ -262,3 +262,13 @@ body {
   color: var(--accent) !important;
   border-color: var(--accent) !important;
 }
+
+/* Show mobile control bar only on touch devices */
+.touch-control-bar {
+  display: none !important;
+}
+@media (pointer: coarse) {
+  .touch-control-bar {
+    display: flex !important;
+  }
+}
