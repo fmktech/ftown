@@ -105,43 +105,11 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       xtermTextarea.setAttribute("autocomplete", "off");
       xtermTextarea.setAttribute("spellcheck", "false");
 
-      // On mobile, bypass IME composition entirely so each keystroke
-      // appears instantly and backspace/space work correctly.
+      // On mobile, hide xterm's textarea to prevent IME composition issues.
+      // Input is handled by the MobileControlBar's text input instead.
       if ("ontouchstart" in window) {
-        let isComposing = false;
-        let sentCount = 0;
-
-        xtermTextarea.addEventListener("compositionstart", () => {
-          isComposing = true;
-          sentCount = 0;
-        });
-
-        xtermTextarea.addEventListener("compositionend", (e: Event) => {
-          isComposing = false;
-          (e.target as HTMLTextAreaElement).value = "";
-          sentCount = 0;
-        }, true);
-
-        xtermTextarea.addEventListener("beforeinput", (e: Event) => {
-          const ie = e as InputEvent;
-
-          if (isComposing && ie.inputType === "insertCompositionText" && ie.data) {
-            e.preventDefault();
-            const newPart = ie.data.slice(sentCount);
-            if (newPart) {
-              term.paste(newPart);
-              sentCount = ie.data.length;
-            }
-          }
-
-          if (isComposing && ie.inputType === "deleteContentBackward") {
-            e.preventDefault();
-            if (sentCount > 0) {
-              term.paste("\x7f");
-              sentCount--;
-            }
-          }
-        }, true);
+        xtermTextarea.setAttribute("inputmode", "none");
+        xtermTextarea.setAttribute("readonly", "true");
       }
     }
 
