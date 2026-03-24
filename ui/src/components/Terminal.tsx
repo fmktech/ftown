@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, forwardRef, useImperativeHandle } from "react";
+import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from "react";
 import { Centrifuge, Subscription } from "centrifuge";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -36,6 +36,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
   const outputSubRef = useRef<Subscription | null>(null);
   const inputSubRef = useRef<Subscription | null>(null);
   const onMobileTapRef = useRef(onMobileTap);
+  const [scrolledUp, setScrolledUp] = useState(false);
 
   useImperativeHandle(ref, () => ({
     sendInput(data: string) {
@@ -122,6 +123,13 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     });
     resizeObserver.observe(containerRef.current);
 
+    // Track whether user has scrolled up from the bottom
+    const scrollDisposable = term.onScroll(() => {
+      const buffer = term.buffer.active;
+      const atBottom = buffer.viewportY >= buffer.baseY;
+      setScrolledUp(!atBottom);
+    });
+
     // Touch scroll: translate vertical swipes into xterm scrollLines
     let touchStartY: number | null = null;
     let accumulatedDelta = 0;
@@ -163,6 +171,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       container.removeEventListener("touchstart", onTouchStart);
       container.removeEventListener("touchmove", onTouchMove);
       container.removeEventListener("touchend", onTouchEnd);
+      scrollDisposable.dispose();
       resizeObserver.disconnect();
       term.dispose();
       xtermRef.current = null;
@@ -342,11 +351,45 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       )}
 
       {/* xterm container - always in DOM, no display:none */}
-      <div
-        ref={containerRef}
-        className="flex-1 min-h-0 scanlines"
-        style={{ position: "relative", touchAction: "none" }}
-      />
+      <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
+        <div
+          ref={containerRef}
+          className="scanlines"
+          style={{ position: "absolute", inset: 0, touchAction: "none" }}
+        />
+        {scrolledUp && (
+          <button
+            onClick={() => {
+              const term = xtermRef.current;
+              if (term) {
+                term.scrollToBottom();
+                setScrolledUp(false);
+              }
+            }}
+            style={{
+              position: "absolute",
+              bottom: 12,
+              right: 12,
+              zIndex: 10,
+              width: 36,
+              height: 36,
+              borderRadius: "50%",
+              background: "var(--bg-elevated)",
+              border: "1px solid var(--border-muted)",
+              color: "var(--text-secondary)",
+              fontSize: 18,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+              boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
+            }}
+            title="Scroll to bottom"
+          >
+            {"\u2193"}
+          </button>
+        )}
+      </div>
 
       {!sessionId && (
         <div
