@@ -294,7 +294,7 @@ export function DiffViewer({ isOpen, onClose, diff, diffStat, sessionName }: Dif
           alignItems: "center",
           justifyContent: "space-between",
           padding: "0 12px",
-          height: 36,
+          minHeight: 44,
           borderBottom: "1px solid var(--border-subtle)",
           background: "var(--bg-surface)",
           flexShrink: 0,
@@ -308,18 +308,18 @@ export function DiffViewer({ isOpen, onClose, diff, diffStat, sessionName }: Dif
             {files.length} {files.length === 1 ? "file" : "files"}
           </span>
         </div>
-        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
           <button
             className="btn-ghost"
             onClick={handleCopy}
-            style={{ fontSize: 10, padding: "2px 8px", fontFamily: "var(--font-mono)" }}
+            style={{ fontSize: 12, padding: "6px 12px", fontFamily: "var(--font-mono)", minHeight: 32 }}
           >
             {copied ? "Copied!" : "Copy"}
           </button>
           <button
             className="btn-ghost"
             onClick={onClose}
-            style={{ fontSize: 14, lineHeight: 1, padding: "2px 6px", color: "var(--text-faint)" }}
+            style={{ fontSize: 20, lineHeight: 1, padding: "6px 10px", color: "var(--text-faint)", minHeight: 32 }}
           >
             {"\u00D7"}
           </button>
