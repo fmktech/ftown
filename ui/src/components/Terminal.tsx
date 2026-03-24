@@ -117,7 +117,6 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
         xtermTextarea.addEventListener("compositionupdate", (e: Event) => {
           const ce = e as CompositionEvent;
           const newData = ce.data || "";
-          // Send only the newly added characters
           if (newData.length > compositionData.length) {
             const newChars = newData.slice(compositionData.length);
             term.paste(newChars);
@@ -125,9 +124,10 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
           compositionData = newData;
         });
 
+        // Capture phase: clear textarea BEFORE xterm reads compositionend,
+        // so xterm sends empty string (no duplicate). But let the event
+        // propagate so xterm exits composition mode and handles space/keys normally.
         xtermTextarea.addEventListener("compositionend", (e: Event) => {
-          e.stopImmediatePropagation();
-          // Clear textarea to prevent xterm from sending the composed text again
           (e.target as HTMLTextAreaElement).value = "";
           compositionData = "";
         }, true);
