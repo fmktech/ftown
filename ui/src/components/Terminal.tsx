@@ -97,6 +97,16 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
 
+    // Disable mobile keyboard autocorrect/composition to get instant keystrokes
+    const xtermTextarea = containerRef.current.querySelector("textarea");
+    if (xtermTextarea) {
+      xtermTextarea.setAttribute("autocorrect", "off");
+      xtermTextarea.setAttribute("autocapitalize", "off");
+      xtermTextarea.setAttribute("autocomplete", "off");
+      xtermTextarea.setAttribute("spellcheck", "false");
+      xtermTextarea.setAttribute("inputmode", "text");
+    }
+
     const resizeObserver = new ResizeObserver(() => {
       fitAddon.fit();
     });
