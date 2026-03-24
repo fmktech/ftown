@@ -36,6 +36,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
   const outputSubRef = useRef<Subscription | null>(null);
   const inputSubRef = useRef<Subscription | null>(null);
   const onMobileTapRef = useRef(onMobileTap);
+  const didScrollRef = useRef(false);
   const [scrolledUp, setScrolledUp] = useState(false);
 
   useImperativeHandle(ref, () => ({
@@ -353,7 +354,9 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       {/* xterm container - always in DOM, no display:none */}
       <div
         style={{ position: "relative", flex: 1, minHeight: 0 }}
-        onClick={() => onMobileTapRef.current?.()}
+        onTouchStart={() => { didScrollRef.current = false; }}
+        onTouchMove={() => { didScrollRef.current = true; }}
+        onClick={() => { if (!didScrollRef.current) onMobileTapRef.current?.(); }}
       >
         <div
           ref={containerRef}
