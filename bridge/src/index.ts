@@ -192,20 +192,60 @@ program
       }
     });
 
+    async function findGitRepos(baseDir: string): Promise<string[]> {
+      const repos: string[] = [];
+      // Check if baseDir itself is a git repo
+      try {
+        await execAsync('git rev-parse --show-toplevel', { cwd: baseDir });
+        repos.push(baseDir);
+      } catch {
+        // not a git repo
+      }
+      // Find nested .git directories up to 4 levels deep
+      try {
+        const { stdout } = await execAsync(
+          `find . -maxdepth 4 -name .git -type d 2>/dev/null`,
+          { cwd: baseDir, maxBuffer: 512 * 1024 },
+        );
+        for (const line of stdout.trim().split('\n')) {
+          if (!line) continue;
+          const repoDir = resolve(baseDir, line, '..');
+          if (!repos.includes(repoDir)) repos.push(repoDir);
+        }
+      } catch {
+        // find not available or errored
+      }
+      return repos;
+    }
+
     async function captureDiff(sessionId: string): Promise<void> {
       const session = await store.loadSession(sessionId);
       if (!session?.workingDir) return;
-      try {
-        const { stdout: statOutput } = await execAsync('git diff --stat', { cwd: session.workingDir, maxBuffer: 1024 * 1024 });
-        const { stdout: fullDiff } = await execAsync('git diff', { cwd: session.workingDir, maxBuffer: 5 * 1024 * 1024 });
-        if (statOutput.trim()) {
-          await store.saveDiff(sessionId, fullDiff);
-          session.diffStat = statOutput;
-          await store.saveSession(session);
-          await centrifugo.publishSessionUpdate(userId, session);
+
+      const repos = await findGitRepos(session.workingDir);
+      let allStat = '';
+      let allDiff = '';
+
+      for (const repoDir of repos) {
+        try {
+          const { stdout: statOutput } = await execAsync('git diff --stat', { cwd: repoDir, maxBuffer: 1024 * 1024 });
+          if (!statOutput.trim()) continue;
+          const { stdout: fullDiff } = await execAsync('git diff', { cwd: repoDir, maxBuffer: 5 * 1024 * 1024 });
+
+          const relative = repoDir === session.workingDir ? '' : repoDir.replace(session.workingDir + '/', '');
+          const prefix = relative ? `[${relative}] ` : '';
+          allStat += `${prefix}${statOutput}`;
+          allDiff += fullDiff;
+        } catch {
+          // not a git repo or git not available
         }
-      } catch {
-        // Not a git repo or git not available
+      }
+
+      if (allStat.trim()) {
+        await store.saveDiff(sessionId, allDiff);
+        session.diffStat = allStat;
+        await store.saveSession(session);
+        await centrifugo.publishSessionUpdate(userId, session);
       }
     }
 
