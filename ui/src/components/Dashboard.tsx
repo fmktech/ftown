@@ -249,11 +249,22 @@ print('hooks installed')
               Retry
             </button>
           )}
-          {selectedSession?.diffStat && (
-            <button className="btn-accent" onClick={handleViewDiff} disabled={diffLoading}>
-              {diffLoading ? "Loading..." : "Diff"}
-            </button>
-          )}
+          {selectedSession?.diffStat && (() => {
+            const lines = selectedSession.diffStat.trim().split("\n");
+            const summary = lines[lines.length - 1];
+            const added = summary.match(/(\d+) insertion/)?.[1] ?? "0";
+            const removed = summary.match(/(\d+) deletion/)?.[1] ?? "0";
+            return (
+              <button className="btn-ghost" onClick={handleViewDiff} disabled={diffLoading} style={{ fontFamily: "var(--font-mono)", fontSize: 11, gap: 6 }}>
+                {diffLoading ? "..." : (
+                  <>
+                    <span style={{ color: "rgb(74, 222, 128)" }}>+{added}</span>
+                    <span style={{ color: "rgb(248, 113, 113)" }}>-{removed}</span>
+                  </>
+                )}
+              </button>
+            );
+          })()}
         </div>
 
         {/* Right cluster */}
