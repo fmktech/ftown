@@ -84,11 +84,18 @@ export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControl
           onKeyDown={handleKeyDown}
           onInput={handleInput}
           style={{
-            position: "absolute",
-            left: -9999,
+            position: "fixed",
+            top: -1,
+            left: 0,
+            width: 1,
+            height: 1,
             opacity: 0,
-            width: 0,
-            height: 0,
+            caretColor: "transparent",
+            border: "none",
+            outline: "none",
+            padding: 0,
+            margin: 0,
+            pointerEvents: "none",
           }}
         />
 
