@@ -25,7 +25,9 @@ export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControl
 
     useImperativeHandle(ref, () => ({
       focusInput() {
-        inputRef.current?.focus();
+        if (document.activeElement !== inputRef.current) {
+          inputRef.current?.focus();
+        }
       },
     }), []);
 

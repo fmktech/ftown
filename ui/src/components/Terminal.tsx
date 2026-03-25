@@ -36,6 +36,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
   const outputSubRef = useRef<Subscription | null>(null);
   const inputSubRef = useRef<Subscription | null>(null);
   const onMobileTapRef = useRef(onMobileTap);
+  const didScrollRef = useRef(false);
   const [scrolledUp, setScrolledUp] = useState(false);
 
   useImperativeHandle(ref, () => ({
@@ -153,11 +154,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
         accumulatedDelta -= lines * LINE_HEIGHT;
       }
     };
-    const onTouchEnd = (e: TouchEvent) => {
-      // If this was a tap (no significant scroll), focus the mobile input
-      if (touchStartY !== null && Math.abs(accumulatedDelta) < LINE_HEIGHT) {
-        onMobileTapRef.current?.();
-      }
+    const onTouchEnd = () => {
       touchStartY = null;
       accumulatedDelta = 0;
     };
@@ -351,7 +348,12 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       )}
 
       {/* xterm container - always in DOM, no display:none */}
-      <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
+      <div
+        style={{ position: "relative", flex: 1, minHeight: 0 }}
+        onTouchStart={() => { didScrollRef.current = false; }}
+        onTouchMove={() => { didScrollRef.current = true; }}
+        onTouchEnd={() => { if (!didScrollRef.current) onMobileTapRef.current?.(); }}
+      >
         <div
           ref={containerRef}
           className="scanlines"
