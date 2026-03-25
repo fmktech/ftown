@@ -72,32 +72,29 @@ export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControl
           borderTop: "1px solid var(--border-muted)",
         }}
       >
-        {/* Hidden input — offscreen but still focusable for keyboard */}
-        <input
-          ref={inputRef}
-          type="text"
-          autoCorrect="off"
-          autoCapitalize="off"
-          autoComplete="off"
-          spellCheck={false}
-          enterKeyHint="send"
-          onKeyDown={handleKeyDown}
-          onInput={handleInput}
-          style={{
-            position: "fixed",
-            top: -1,
-            left: 0,
-            width: 1,
-            height: 1,
-            opacity: 0,
-            caretColor: "transparent",
-            border: "none",
-            outline: "none",
-            padding: 0,
-            margin: 0,
-            pointerEvents: "none",
-          }}
-        />
+        {/* Hidden input — clipped to zero size but still focusable for keyboard */}
+        <div style={{ position: "absolute", overflow: "hidden", width: 0, height: 0, top: 0, left: 0 }}>
+          <input
+            ref={inputRef}
+            type="text"
+            autoCorrect="off"
+            autoCapitalize="off"
+            autoComplete="off"
+            spellCheck={false}
+            enterKeyHint="send"
+            onKeyDown={handleKeyDown}
+            onInput={handleInput}
+            style={{
+              fontSize: 16,
+              opacity: 0,
+              caretColor: "transparent",
+              border: "none",
+              outline: "none",
+              padding: 0,
+              margin: 0,
+            }}
+          />
+        </div>
 
         {/* Control buttons row */}
         <div className="flex items-center justify-around px-2 gap-1" style={{ paddingTop: 4, paddingBottom: 2 }}>
