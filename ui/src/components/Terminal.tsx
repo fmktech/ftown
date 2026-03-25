@@ -176,14 +176,21 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     };
   }, []);
 
+  const prevSessionIdRef = useRef<string | null>(null);
+
   // Subscribe to centrifugo channels when sessionId changes
   useEffect(() => {
     if (!client || !sessionId || !userId || !xtermRef.current) return;
 
     const term = xtermRef.current;
-    term.clear();
-    term.reset();
-    fitAddonRef.current?.fit();
+
+    // Only clear terminal when switching to a different session
+    if (prevSessionIdRef.current !== sessionId) {
+      term.clear();
+      term.reset();
+      fitAddonRef.current?.fit();
+      prevSessionIdRef.current = sessionId;
+    }
 
     // Clean up previous subscriptions
     if (outputSubRef.current) {
