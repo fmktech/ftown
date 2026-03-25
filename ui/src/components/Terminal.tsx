@@ -352,7 +352,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
         style={{ position: "relative", flex: 1, minHeight: 0 }}
         onTouchStart={() => { didScrollRef.current = false; }}
         onTouchMove={() => { didScrollRef.current = true; }}
-        onTouchEnd={() => { if (!didScrollRef.current) onMobileTapRef.current?.(); }}
+        onClick={() => { if (!didScrollRef.current) onMobileTapRef.current?.(); }}
       >
         <div
           ref={containerRef}
