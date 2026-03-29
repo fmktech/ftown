@@ -77,7 +77,17 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     return () => vv.removeEventListener("resize", onResize);
   }, []);
 
+  const [isDesktop, setIsDesktop] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 768px)");
+    setIsDesktop(mq.matches);
+    const handler = (e: MediaQueryListEvent) => setIsDesktop(e.matches);
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, []);
+
   const [showWebPreview, setShowWebPreview] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [showDiff, setShowDiff] = useState(false);
   const [diffContent, setDiffContent] = useState<string>("");
   const [diffLoading, setDiffLoading] = useState(false);
@@ -565,7 +575,7 @@ print('hooks installed')
               onCloneSession={handleCloneSession}
               onReorderSessions={handleReorderSessions}
               sessionActivity={sessionActivity}
-              collapsed={sidebarCollapsed}
+              collapsed={isDesktop && sidebarCollapsed}
             />
           </div>
         </aside>
@@ -581,6 +591,7 @@ print('hooks installed')
             sessionName={selectedSession?.name ?? selectedSession?.prompt?.slice(0, 48) ?? null}
             usage={selectedSessionId ? sessionActivity.get(selectedSessionId)?.usage : undefined}
             onMobileTap={() => mobileControlRef.current?.focusInput()}
+            onLinkClick={showWebPreview ? (url) => setPreviewUrl(url) : undefined}
           />
           {selectedSessionId && (
             <MobileControlBar ref={mobileControlRef} onSendInput={(data) => terminalRef.current?.sendInput(data)} />
@@ -598,6 +609,7 @@ print('hooks installed')
 
         <WebPreview
           isOpen={showWebPreview}
+          externalUrl={previewUrl}
           onClose={() => {
             setShowWebPreview(false);
             setTimeout(() => terminalRef.current?.refit(), 250);

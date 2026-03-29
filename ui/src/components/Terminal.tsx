@@ -5,6 +5,7 @@ import { Centrifuge, Subscription } from "centrifuge";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import { TokenUsage } from "@/hooks/useSessionEvents";
 import "@xterm/xterm/css/xterm.css";
 
@@ -21,6 +22,7 @@ interface TerminalProps {
   sessionName?: string | null;
   usage?: TokenUsage;
   onMobileTap?: () => void;
+  onLinkClick?: (url: string) => void;
 }
 
 function formatTokenCount(n: number): string {
@@ -29,13 +31,14 @@ function formatTokenCount(n: number): string {
   return String(n);
 }
 
-export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ client, sessionId, userId, isRunning, sessionName, usage, onMobileTap }, ref) {
+export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ client, sessionId, userId, isRunning, sessionName, usage, onMobileTap, onLinkClick }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const outputSubRef = useRef<Subscription | null>(null);
   const inputSubRef = useRef<Subscription | null>(null);
   const onMobileTapRef = useRef(onMobileTap);
+  const onLinkClickRef = useRef(onLinkClick);
   const didScrollRef = useRef(false);
   const [scrolledUp, setScrolledUp] = useState(false);
 
@@ -51,6 +54,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
   }), []);
 
   useEffect(() => { onMobileTapRef.current = onMobileTap; }, [onMobileTap]);
+  useEffect(() => { onLinkClickRef.current = onLinkClick; }, [onLinkClick]);
 
   // Initialize xterm once
   useEffect(() => {
@@ -96,6 +100,13 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     const unicode11Addon = new Unicode11Addon();
     term.loadAddon(fitAddon);
     term.loadAddon(unicode11Addon);
+    term.loadAddon(new WebLinksAddon((_event, uri) => {
+      if (onLinkClickRef.current) {
+        onLinkClickRef.current(uri);
+      } else {
+        window.open(uri, "_blank");
+      }
+    }));
     term.open(containerRef.current);
     term.unicode.activeVersion = "11";
     fitAddon.fit();

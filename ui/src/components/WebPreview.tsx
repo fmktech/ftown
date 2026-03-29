@@ -1,15 +1,23 @@
 "use client";
 
-import { useState, useCallback, useRef, KeyboardEvent } from "react";
+import { useState, useCallback, useRef, useEffect, KeyboardEvent } from "react";
 
 interface WebPreviewProps {
   isOpen: boolean;
   onClose: () => void;
+  externalUrl?: string | null;
 }
 
-export function WebPreview({ isOpen, onClose }: WebPreviewProps) {
+export function WebPreview({ isOpen, onClose, externalUrl }: WebPreviewProps) {
   const [url, setUrl] = useState("http://localhost:3000");
   const [iframeSrc, setIframeSrc] = useState("http://localhost:3000");
+
+  useEffect(() => {
+    if (externalUrl) {
+      setUrl(externalUrl);
+      setIframeSrc(externalUrl);
+    }
+  }, [externalUrl]);
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   const navigate = useCallback(() => {
