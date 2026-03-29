@@ -13,6 +13,7 @@ import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
 import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
 import { ConnectionDiagnostics } from "./ConnectionDiagnostics";
 import { DiffViewer } from "./DiffViewer";
+import { WebPreview } from "./WebPreview";
 
 interface DashboardProps {
   client: Centrifuge | null;
@@ -47,17 +48,18 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
   const [mobileTab, setMobileTab] = useState<"sessions" | "terminal">("sessions");
-  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
-    return localStorage.getItem("ftown:sidebarCollapsed") === "true";
-  });
-  const [sessionOrder, setSessionOrder] = useState<string[]>(() => {
-    if (typeof window === "undefined") return [];
-    try { return JSON.parse(localStorage.getItem("ftown:sessionOrder") ?? "[]"); } catch { return []; }
-  });
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sessionOrder, setSessionOrder] = useState<string[]>([]);
   const terminalRef = useRef<TerminalHandle>(null);
   const mobileControlRef = useRef<MobileControlBarHandle>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setSidebarCollapsed(localStorage.getItem("ftown:sidebarCollapsed") === "true");
+    try {
+      setSessionOrder(JSON.parse(localStorage.getItem("ftown:sessionOrder") ?? "[]"));
+    } catch { /* ignore */ }
+  }, []);
 
   // Resize layout when mobile keyboard opens/closes
   useEffect(() => {
@@ -75,6 +77,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     return () => vv.removeEventListener("resize", onResize);
   }, []);
 
+  const [showWebPreview, setShowWebPreview] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
   const [diffContent, setDiffContent] = useState<string>("");
   const [diffLoading, setDiffLoading] = useState(false);
@@ -282,6 +285,20 @@ print('hooks installed')
             style={showToken ? { color: "var(--accent)", borderColor: "var(--accent-dim)" } : {}}
           >
             CLI Token
+          </button>
+
+          <button
+            className="btn-ghost hidden md:inline-flex"
+            onClick={() => {
+              setShowWebPreview(prev => {
+                const next = !prev;
+                setTimeout(() => terminalRef.current?.refit(), 250);
+                return next;
+              });
+            }}
+            style={showWebPreview ? { color: "var(--accent)", borderColor: "var(--accent-dim)" } : {}}
+          >
+            Preview
           </button>
 
           {selectedSession?.status === "running" && (
@@ -577,6 +594,14 @@ print('hooks installed')
           diff={diffContent}
           diffStat={selectedSession?.diffStat ?? ""}
           sessionName={selectedSession?.name ?? ""}
+        />
+
+        <WebPreview
+          isOpen={showWebPreview}
+          onClose={() => {
+            setShowWebPreview(false);
+            setTimeout(() => terminalRef.current?.refit(), 250);
+          }}
         />
       </div>
 
