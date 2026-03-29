@@ -120,7 +120,6 @@ export function WebPreview({ isOpen, onClose, externalUrl }: WebPreviewProps) {
           border: "none",
           background: "#fff",
         }}
-        sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
       />
     </aside>
   );
