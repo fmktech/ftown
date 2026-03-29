@@ -47,6 +47,10 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
   const [mobileTab, setMobileTab] = useState<"sessions" | "terminal">("sessions");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem("ftown:sidebarCollapsed") === "true";
+  });
   const [sessionOrder, setSessionOrder] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
     try { return JSON.parse(localStorage.getItem("ftown:sessionOrder") ?? "[]"); } catch { return []; }
@@ -197,6 +201,15 @@ print('hooks installed')
       shellType: session.shellType,
     });
     setShowNewSession(true);
+  }, []);
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed(prev => {
+      const next = !prev;
+      localStorage.setItem("ftown:sidebarCollapsed", String(next));
+      setTimeout(() => terminalRef.current?.refit(), 250);
+      return next;
+    });
   }, []);
 
   return (
@@ -442,40 +455,86 @@ print('hooks installed')
       <div className="flex-1 flex min-h-0">
         {/* Sidebar */}
         <aside
-          className={`shrink-0 flex-col w-full md:w-[260px] ${mobileTab === "sessions" ? "flex" : "hidden"} md:flex`}
+          className={`shrink-0 flex-col w-full ${sidebarCollapsed ? "md:w-[60px]" : "md:w-[260px]"} ${mobileTab === "sessions" ? "flex" : "hidden"} md:flex`}
           style={{
             borderRight: "1px solid var(--border-subtle)",
             background: "var(--bg-surface)",
             overflow: "hidden",
+            transition: "width 0.2s ease",
           }}
         >
           <div
-            className="shrink-0 hidden md:flex items-center justify-between px-4"
+            className="shrink-0 hidden md:flex items-center"
             style={{
               height: 36,
               borderBottom: "1px solid var(--border-subtle)",
+              padding: sidebarCollapsed ? "0" : "0 16px",
+              justifyContent: sidebarCollapsed ? "center" : "space-between",
             }}
           >
-            <span
-              style={{
-                fontSize: 10,
-                fontWeight: 600,
-                letterSpacing: "0.12em",
-                textTransform: "uppercase",
-                color: "var(--text-muted)",
-              }}
-            >
-              Sessions
-            </span>
-            <span
-              style={{
-                fontSize: 10,
-                color: "var(--text-faint)",
-                fontVariantNumeric: "tabular-nums",
-              }}
-            >
-              {sessions.length}
-            </span>
+            {sidebarCollapsed ? (
+              <button
+                onClick={toggleSidebar}
+                title="Expand sidebar"
+                style={{
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  color: "var(--text-muted)",
+                  fontSize: 14,
+                  padding: "2px 4px",
+                  fontFamily: "var(--font-mono)",
+                  lineHeight: 1,
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
+                onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-muted)")}
+              >
+                »
+              </button>
+            ) : (
+              <>
+                <span
+                  style={{
+                    fontSize: 10,
+                    fontWeight: 600,
+                    letterSpacing: "0.12em",
+                    textTransform: "uppercase",
+                    color: "var(--text-muted)",
+                  }}
+                >
+                  Sessions
+                </span>
+                <div className="flex items-center gap-2">
+                  <span
+                    style={{
+                      fontSize: 10,
+                      color: "var(--text-faint)",
+                      fontVariantNumeric: "tabular-nums",
+                    }}
+                  >
+                    {sessions.length}
+                  </span>
+                  <button
+                    onClick={toggleSidebar}
+                    title="Collapse sidebar"
+                    style={{
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      color: "var(--text-faint)",
+                      fontSize: 14,
+                      padding: "2px 4px",
+                      fontFamily: "var(--font-mono)",
+                      lineHeight: 1,
+                    }}
+                    onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
+                    onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-faint)")}
+                  >
+                    «
+                  </button>
+                </div>
+              </>
+            )}
           </div>
 
           <div className="flex-1 overflow-y-auto">
@@ -489,6 +548,7 @@ print('hooks installed')
               onCloneSession={handleCloneSession}
               onReorderSessions={handleReorderSessions}
               sessionActivity={sessionActivity}
+              collapsed={sidebarCollapsed}
             />
           </div>
         </aside>

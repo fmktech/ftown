@@ -15,6 +15,7 @@ interface SessionListProps {
   onCloneSession?: (session: Session) => void;
   onReorderSessions?: (orderedIds: string[]) => void;
   sessionActivity?: Map<string, SessionActivity>;
+  collapsed?: boolean;
 }
 
 interface ContextMenuState {
@@ -217,7 +218,7 @@ function ContextMenu({
   );
 }
 
-export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession, onStopSession, onRemoveSession, onCloneSession, onReorderSessions, sessionActivity }: SessionListProps) {
+export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession, onStopSession, onRemoveSession, onCloneSession, onReorderSessions, sessionActivity, collapsed }: SessionListProps) {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -319,6 +320,7 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
   }
 
   if (sessions.length === 0) {
+    if (collapsed) return null;
     return (
       <div
         className="flex flex-col items-center justify-center p-8 fade-in"
@@ -335,6 +337,67 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
       {sessions.map((session) => {
         const isSelected = session.id === selectedSessionId;
         const displayName = session.name || session.prompt.slice(0, 36);
+
+        if (collapsed) {
+          const act = sessionActivity?.get(session.id);
+          const isRunning = session.status === "running";
+          const isIdle = isRunning && act?.activity === "idle";
+          const isThinking = isRunning && act?.activity === "thinking";
+          const isToolUse = isRunning && act?.activity === "tool_use";
+
+          const borderColor = session.status === "error" ? "var(--status-error)"
+            : session.status === "pending" ? "var(--status-pending)"
+            : isThinking ? "#ff8800"
+            : isToolUse ? "#eedd00"
+            : isRunning ? "#666"
+            : "transparent";
+
+          const tooltip = isThinking ? `${displayName}\nthinking...`
+            : isToolUse ? `${displayName}\nusing ${act?.toolName ?? "tool"}`
+            : `${displayName}\n${session.status}`;
+
+          return (
+            <button
+              key={session.id}
+              onClick={() => onSelectSession(session.id)}
+              onContextMenu={(e) => handleContextMenu(e, session)}
+              title={tooltip}
+              style={{
+                width: "100%",
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+                borderBottom: "1px solid var(--border-subtle)",
+                borderLeft: `3px solid ${borderColor !== "transparent" ? borderColor : isSelected ? "var(--accent)" : "transparent"}`,
+                background: isSelected ? "var(--bg-elevated)" : "transparent",
+                cursor: "pointer",
+                transition: "background 0.12s ease, border-color 0.3s ease",
+                padding: "6px 8px",
+                fontFamily: "var(--font-mono)",
+              }}
+              onMouseEnter={(e) => {
+                if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)";
+              }}
+              onMouseLeave={(e) => {
+                if (!isSelected) e.currentTarget.style.background = "transparent";
+              }}
+            >
+              <span style={{
+                fontSize: 10,
+                fontWeight: isSelected ? 600 : 400,
+                color: isSelected ? "var(--text-primary)" : "var(--text-secondary)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                lineHeight: 1.3,
+              }}>
+                {displayName.slice(0, 10)}
+              </span>
+
+
+            </button>
+          );
+        }
 
         return (
           <button
