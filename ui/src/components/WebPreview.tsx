@@ -99,13 +99,23 @@ export function WebPreview({ isOpen, onClose, externalUrl }: WebPreviewProps) {
           className="btn-ghost"
           onClick={handleRefresh}
           style={{ fontSize: 13, padding: "2px 6px", minHeight: 24, lineHeight: 1 }}
+          title="Refresh"
         >
           ↻
         </button>
         <button
           className="btn-ghost"
+          onClick={() => window.open(iframeSrc, "_blank")}
+          style={{ fontSize: 12, padding: "2px 6px", minHeight: 24, lineHeight: 1 }}
+          title="Open in new window"
+        >
+          ↗
+        </button>
+        <button
+          className="btn-ghost"
           onClick={onClose}
           style={{ fontSize: 16, padding: "2px 6px", minHeight: 24, lineHeight: 1 }}
+          title="Close"
         >
           ×
         </button>
