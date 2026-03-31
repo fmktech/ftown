@@ -369,10 +369,10 @@ print('hooks installed')
                 width: 24,
                 height: 24,
                 borderRadius: "50%",
-                background: "var(--bg-elevated)",
+                background: "#444",
                 border: "1px solid var(--border-muted)",
-                color: "var(--text-muted)",
-                fontSize: 9,
+                color: "#fff",
+                fontSize: 10,
                 fontFamily: "var(--font-mono)",
                 fontWeight: 700,
                 letterSpacing: "0.04em",
@@ -393,7 +393,7 @@ print('hooks installed')
                 e.currentTarget.style.color = "var(--text-muted)";
               }}
             >
-              {userId.slice(0, 2).toUpperCase()}
+              {userId.charAt(0).toUpperCase()}
             </button>
             {showUserMenu && (
               <div
