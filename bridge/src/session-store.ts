@@ -24,10 +24,6 @@ export class SessionStore {
     return join(this.sessionDir(sessionId), 'terminal.log');
   }
 
-  private diffPath(sessionId: string): string {
-    return join(this.sessionDir(sessionId), 'changes.diff');
-  }
-
   async saveSession(session: Session): Promise<void> {
     const dir = this.sessionDir(session.id);
     await mkdir(dir, { recursive: true });
@@ -90,17 +86,4 @@ export class SessionStore {
     return readFile(filePath, 'utf-8');
   }
 
-  async saveDiff(sessionId: string, diff: string): Promise<void> {
-    const dir = this.sessionDir(sessionId);
-    await mkdir(dir, { recursive: true });
-    await writeFile(this.diffPath(sessionId), diff, 'utf-8');
-  }
-
-  async loadDiff(sessionId: string): Promise<string> {
-    const filePath = this.diffPath(sessionId);
-    if (!existsSync(filePath)) {
-      return '';
-    }
-    return readFile(filePath, 'utf-8');
-  }
 }

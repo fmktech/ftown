@@ -12,8 +12,6 @@ import { Terminal, TerminalHandle } from "./Terminal";
 import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
 import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
 import { ConnectionDiagnostics } from "./ConnectionDiagnostics";
-import { DiffViewer } from "./DiffViewer";
-import { WebPreview } from "./WebPreview";
 
 interface DashboardProps {
   client: Centrifuge | null;
@@ -50,9 +48,11 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [mobileTab, setMobileTab] = useState<"sessions" | "terminal">("sessions");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sessionOrder, setSessionOrder] = useState<string[]>([]);
+  const [showUserMenu, setShowUserMenu] = useState(false);
   const terminalRef = useRef<TerminalHandle>(null);
   const mobileControlRef = useRef<MobileControlBarHandle>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const userMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setSidebarCollapsed(localStorage.getItem("ftown:sidebarCollapsed") === "true");
@@ -86,13 +86,18 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     return () => mq.removeEventListener("change", handler);
   }, []);
 
-  const [showWebPreview, setShowWebPreview] = useState(false);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [showDiff, setShowDiff] = useState(false);
-  const [diffContent, setDiffContent] = useState<string>("");
-  const [diffLoading, setDiffLoading] = useState(false);
+  useEffect(() => {
+    if (!showUserMenu) return;
+    const handler = (e: MouseEvent) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
+        setShowUserMenu(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showUserMenu]);
 
-  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, removeSession, refreshSessions, bridgeExec, getDiff } = useSessions(client, userId);
+  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, removeSession, refreshSessions, bridgeExec } = useSessions(client, userId);
   const { bridges, hasBridges } = useBridges(client, userId);
   const sessionActivity = useAllSessionEvents(client, rawSessions, userId);
 
@@ -193,20 +198,6 @@ print('hooks installed')
     }
   }, []);
 
-  const handleViewDiff = useCallback(async () => {
-    if (!selectedSession?.id) return;
-    setDiffLoading(true);
-    try {
-      const diff = await getDiff(selectedSession.id, selectedSession.bridgeId);
-      setDiffContent(diff);
-      setShowDiff(true);
-    } catch (err) {
-      console.error("Failed to fetch diff:", err);
-    } finally {
-      setDiffLoading(false);
-    }
-  }, [selectedSession, getDiff]);
-
   const handleCloneSession = useCallback((session: Session) => {
     setSessionDefaults({
       workingDir: session.workingDir,
@@ -281,12 +272,24 @@ print('hooks installed')
             onClick={() => setShowNewSession(true)}
             disabled={!hasBridges}
             title={hasBridges ? "Create a new session" : "No bridges online — start a bridge first"}
+            style={{ padding: "4px 8px", lineHeight: 1, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
           >
-            + New Session
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <line x1="8" y1="3" x2="8" y2="13" />
+              <line x1="3" y1="8" x2="13" y2="8" />
+            </svg>
           </button>
 
-          <button className="btn-ghost hidden md:inline-flex" onClick={refreshSessions}>
-            Refresh
+          <button
+            className="btn-ghost hidden md:inline-flex"
+            onClick={refreshSessions}
+            title="Refresh sessions"
+            style={{ padding: "4px 8px", lineHeight: 1, alignItems: "center", justifyContent: "center" }}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M1 1v5h5" />
+              <path d="M3.51 10a5 5 0 1 0 .49-5.38L1 6" />
+            </svg>
           </button>
 
           <button
@@ -294,21 +297,7 @@ print('hooks installed')
             onClick={() => setShowToken(!showToken)}
             style={showToken ? { color: "var(--accent)", borderColor: "var(--accent-dim)" } : {}}
           >
-            CLI Token
-          </button>
-
-          <button
-            className="btn-ghost hidden md:inline-flex"
-            onClick={() => {
-              setShowWebPreview(prev => {
-                const next = !prev;
-                setTimeout(() => terminalRef.current?.refit(), 250);
-                return next;
-              });
-            }}
-            style={showWebPreview ? { color: "var(--accent)", borderColor: "var(--accent-dim)" } : {}}
-          >
-            Preview
+            Bridge Command
           </button>
 
           {selectedSession?.status === "running" && (
@@ -321,22 +310,6 @@ print('hooks installed')
               Retry
             </button>
           )}
-          {selectedSession?.diffStat && (() => {
-            const lines = selectedSession.diffStat.trim().split("\n");
-            const summary = lines[lines.length - 1];
-            const added = summary.match(/(\d+) insertion/)?.[1] ?? "0";
-            const removed = summary.match(/(\d+) deletion/)?.[1] ?? "0";
-            return (
-              <button className="btn-ghost" onClick={handleViewDiff} disabled={diffLoading} style={{ fontFamily: "var(--font-mono)", fontSize: 11, gap: 6 }}>
-                {diffLoading ? "..." : (
-                  <>
-                    <span style={{ color: "rgb(74, 222, 128)" }}>+{added}</span>
-                    <span style={{ color: "rgb(248, 113, 113)" }}>-{removed}</span>
-                  </>
-                )}
-              </button>
-            );
-          })()}
         </div>
 
         {/* Right cluster */}
@@ -388,18 +361,102 @@ print('hooks installed')
 
           <span style={{ width: 1, height: 12, background: "var(--border-muted)" }} />
 
-          <span style={{ fontSize: 11, color: "var(--text-muted)", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {userId}
-          </span>
-
-          <button
-            onClick={onDisconnect}
-            style={{ fontSize: 11, color: "var(--text-faint)", background: "none", border: "none", cursor: "pointer", padding: "2px 4px", fontFamily: "var(--font-mono)" }}
-            onMouseEnter={(e) => (e.currentTarget.style.color = "var(--status-error)")}
-            onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-faint)")}
-          >
-            disconnect
-          </button>
+          <div ref={userMenuRef} style={{ position: "relative" }}>
+            <button
+              onClick={() => setShowUserMenu((v) => !v)}
+              title={userId}
+              style={{
+                width: 24,
+                height: 24,
+                borderRadius: "50%",
+                background: "var(--bg-elevated)",
+                border: "1px solid var(--border-muted)",
+                color: "var(--text-muted)",
+                fontSize: 9,
+                fontFamily: "var(--font-mono)",
+                fontWeight: 700,
+                letterSpacing: "0.04em",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: 0,
+                lineHeight: 1,
+                transition: "border-color 0.15s, color 0.15s",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.borderColor = "var(--accent-dim)";
+                e.currentTarget.style.color = "var(--text-primary)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.borderColor = "var(--border-muted)";
+                e.currentTarget.style.color = "var(--text-muted)";
+              }}
+            >
+              {userId.slice(0, 2).toUpperCase()}
+            </button>
+            {showUserMenu && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "calc(100% + 6px)",
+                  right: 0,
+                  background: "var(--bg-elevated)",
+                  border: "1px solid var(--border-muted)",
+                  borderRadius: 6,
+                  boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
+                  padding: "4px 0",
+                  minWidth: 160,
+                  zIndex: 100,
+                  fontFamily: "var(--font-mono)",
+                }}
+              >
+                <div
+                  style={{
+                    padding: "6px 12px",
+                    fontSize: 11,
+                    color: "var(--text-muted)",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    maxWidth: 200,
+                  }}
+                >
+                  {userId}
+                </div>
+                <div style={{ height: 1, background: "var(--border-muted)", margin: "2px 0" }} />
+                <button
+                  onClick={() => {
+                    setShowUserMenu(false);
+                    onDisconnect();
+                  }}
+                  style={{
+                    display: "block",
+                    width: "100%",
+                    textAlign: "left",
+                    padding: "6px 12px",
+                    fontSize: 11,
+                    color: "var(--text-faint)",
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    fontFamily: "var(--font-mono)",
+                    transition: "color 0.15s, background 0.15s",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.color = "var(--status-error)";
+                    e.currentTarget.style.background = "rgba(255,255,255,0.03)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.color = "var(--text-faint)";
+                    e.currentTarget.style.background = "none";
+                  }}
+                >
+                  Disconnect
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
@@ -591,30 +648,12 @@ print('hooks installed')
             sessionName={selectedSession?.name ?? selectedSession?.prompt?.slice(0, 48) ?? null}
             usage={selectedSessionId ? sessionActivity.get(selectedSessionId)?.usage : undefined}
             onMobileTap={() => mobileControlRef.current?.focusInput()}
-            onLinkClick={showWebPreview ? (url) => setPreviewUrl(url) : undefined}
           />
           {selectedSessionId && (
             <MobileControlBar ref={mobileControlRef} onSendInput={(data) => terminalRef.current?.sendInput(data)} />
           )}
         </main>
 
-        {/* Diff sidebar */}
-        <DiffViewer
-          isOpen={showDiff}
-          onClose={() => setShowDiff(false)}
-          diff={diffContent}
-          diffStat={selectedSession?.diffStat ?? ""}
-          sessionName={selectedSession?.name ?? ""}
-        />
-
-        <WebPreview
-          isOpen={showWebPreview}
-          externalUrl={previewUrl}
-          onClose={() => {
-            setShowWebPreview(false);
-            setTimeout(() => terminalRef.current?.refit(), 250);
-          }}
-        />
       </div>
 
       <NewSessionModal

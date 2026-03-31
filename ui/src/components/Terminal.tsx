@@ -22,7 +22,6 @@ interface TerminalProps {
   sessionName?: string | null;
   usage?: TokenUsage;
   onMobileTap?: () => void;
-  onLinkClick?: (url: string) => void;
 }
 
 function formatTokenCount(n: number): string {
@@ -31,14 +30,13 @@ function formatTokenCount(n: number): string {
   return String(n);
 }
 
-export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ client, sessionId, userId, isRunning, sessionName, usage, onMobileTap, onLinkClick }, ref) {
+export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ client, sessionId, userId, isRunning, sessionName, usage, onMobileTap }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const outputSubRef = useRef<Subscription | null>(null);
   const inputSubRef = useRef<Subscription | null>(null);
   const onMobileTapRef = useRef(onMobileTap);
-  const onLinkClickRef = useRef(onLinkClick);
   const didScrollRef = useRef(false);
   const [scrolledUp, setScrolledUp] = useState(false);
 
@@ -54,8 +52,6 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
   }), []);
 
   useEffect(() => { onMobileTapRef.current = onMobileTap; }, [onMobileTap]);
-  useEffect(() => { onLinkClickRef.current = onLinkClick; }, [onLinkClick]);
-
   // Initialize xterm once
   useEffect(() => {
     if (!containerRef.current) return;
@@ -101,11 +97,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     term.loadAddon(fitAddon);
     term.loadAddon(unicode11Addon);
     term.loadAddon(new WebLinksAddon((_event, uri) => {
-      if (onLinkClickRef.current) {
-        onLinkClickRef.current(uri);
-      } else {
-        window.open(uri, "_blank");
-      }
+      window.open(uri, "_blank");
     }));
     term.open(containerRef.current);
     term.unicode.activeVersion = "11";

@@ -20,7 +20,6 @@ import type {
   Command,
   CommandResponse,
   CreateSessionPayload,
-  GetDiffPayload,
   GetHistoryPayload,
   RemoveSessionPayload,
   RenameSessionPayload,
@@ -168,7 +167,6 @@ program
           session.updatedAt = new Date().toISOString();
           await store.saveSession(session);
           await centrifugo.publishSessionUpdate(userId, session);
-          await captureDiff(sessionId);
         }
         console.log(`[Bridge] Session ${sessionId} completed`);
       } catch (err) {
@@ -192,78 +190,6 @@ program
       }
     });
 
-    async function findGitRepos(baseDir: string): Promise<string[]> {
-      const repos: string[] = [];
-      // Check if baseDir itself is a git repo
-      try {
-        await execAsync('git rev-parse --show-toplevel', { cwd: baseDir });
-        repos.push(baseDir);
-      } catch {
-        // not a git repo
-      }
-      // Find nested .git directories up to 4 levels deep
-      try {
-        const { stdout } = await execAsync(
-          `find . -maxdepth 4 -name .git -type d 2>/dev/null`,
-          { cwd: baseDir, maxBuffer: 512 * 1024 },
-        );
-        for (const line of stdout.trim().split('\n')) {
-          if (!line) continue;
-          const repoDir = resolve(baseDir, line, '..');
-          if (!repos.includes(repoDir)) repos.push(repoDir);
-        }
-      } catch {
-        // find not available or errored
-      }
-      return repos;
-    }
-
-    async function captureDiff(sessionId: string): Promise<void> {
-      const session = await store.loadSession(sessionId);
-      if (!session?.workingDir) return;
-
-      const repos = await findGitRepos(session.workingDir);
-      let allStat = '';
-      let allDiff = '';
-
-      for (const repoDir of repos) {
-        try {
-          const { stdout: statOutput } = await execAsync('git diff --stat', { cwd: repoDir, maxBuffer: 1024 * 1024 });
-          if (!statOutput.trim()) continue;
-          const { stdout: fullDiff } = await execAsync('git diff', { cwd: repoDir, maxBuffer: 5 * 1024 * 1024 });
-
-          const relative = repoDir === session.workingDir ? '' : repoDir.replace(session.workingDir + '/', '');
-          if (relative) {
-            // Prefix file paths in diff so files show as subrepo/path
-            const prefixedDiff = fullDiff.replace(
-              /^diff --git a\/(.+?) b\/(.+?)$/gm,
-              `diff --git a/${relative}/$1 b/${relative}/$2`,
-            ).replace(
-              /^--- a\/(.+?)$/gm,
-              `--- a/${relative}/$1`,
-            ).replace(
-              /^\+\+\+ b\/(.+?)$/gm,
-              `+++ b/${relative}/$1`,
-            );
-            allStat += `[${relative}] ${statOutput}`;
-            allDiff += prefixedDiff;
-          } else {
-            allStat += statOutput;
-            allDiff += fullDiff;
-          }
-        } catch {
-          // not a git repo or git not available
-        }
-      }
-
-      if (allStat.trim()) {
-        await store.saveDiff(sessionId, allDiff);
-        session.diffStat = allStat;
-        await store.saveSession(session);
-        await centrifugo.publishSessionUpdate(userId, session);
-      }
-    }
-
     hookServer.on('event', (hookEvent: HookEvent) => {
       centrifugo.publishHookEvent(userId, hookEvent.sessionId, {
         type: 'hook_event',
@@ -273,11 +199,6 @@ program
         console.error('[Bridge] Failed to handle hook event:', err);
       });
 
-      if (hookEvent.eventName === 'PostToolUse') {
-        captureDiff(hookEvent.sessionId).catch((err) => {
-          console.error('[Bridge] Failed to capture diff:', err);
-        });
-      }
     });
 
     async function handleCommand(command: Command): Promise<void> {
@@ -474,17 +395,6 @@ program
               const execErr = err as ExecError;
               response = { requestId: command.requestId, success: true, data: { stdout: execErr.stdout, stderr: execErr.stderr, exitCode: execErr.code } };
             }
-            break;
-          }
-
-          case 'get_diff': {
-            const payload = command.payload as GetDiffPayload;
-            if (!payload.sessionId) {
-              response = { requestId: command.requestId, success: false, error: 'Missing sessionId' };
-              break;
-            }
-            const diff = await store.loadDiff(payload.sessionId);
-            response = { requestId: command.requestId, success: true, data: { diff } };
             break;
           }
 
