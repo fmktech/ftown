@@ -13,7 +13,7 @@ interface MobileControlBarProps {
 const BUTTONS: { label: string; data: string }[] = [
   { label: "ESC", data: "\x1b" },
   { label: "^C", data: "\x03" },
-  { label: "Tab", data: "\t" },
+  { label: "⇧Tab", data: "\x1b[Z" },
   { label: "\u2191", data: "\x1b[A" },
   { label: "\u2193", data: "\x1b[B" },
   { label: "\u21B5", data: "\r" },
