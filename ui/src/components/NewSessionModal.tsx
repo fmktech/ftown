@@ -119,7 +119,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       onKeyDown={handleKeyDown}
     >
       <div
-        className="w-full max-w-lg border border-[#2a2a2a] bg-[#111111] rounded-lg p-6"
+        className="w-full max-w-lg lg:max-w-2xl border border-[#2a2a2a] bg-[#111111] rounded-lg p-6 max-h-[90vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-lg font-bold text-[#00ff88] mb-4">New Session</h2>
