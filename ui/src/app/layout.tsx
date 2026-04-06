@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { Analytics } from "@vercel/analytics/next";
 import { Providers } from "./providers";
 import { ServiceWorkerRegister } from "./sw-register";
 import "./globals.css";
@@ -35,6 +36,7 @@ export default function RootLayout({
       <body className="antialiased min-h-screen">
         <ServiceWorkerRegister />
         <Providers>{children}</Providers>
+        <Analytics />
       </body>
     </html>
   );
