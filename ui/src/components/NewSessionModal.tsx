@@ -5,6 +5,7 @@ import { ShellType } from "@/types";
 import { BridgeInfo } from "@/hooks/useBridges";
 import { BridgeExecResponse } from "@/hooks/useSessions";
 import { ClaudeSessionPicker } from "./ClaudeSessionPicker";
+import EnvVarsEditor, { getStoredEnvVars } from "./EnvVarsEditor";
 
 export interface SessionDefaults {
   name?: string;
@@ -16,7 +17,7 @@ export interface SessionDefaults {
 interface NewSessionModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSubmit: (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string }) => void;
+  onSubmit: (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; env?: Record<string, string> }) => void;
   bridges: BridgeInfo[];
   defaults?: SessionDefaults;
   bridgeExec: (command: string, workingDir: string, bridgeId: string) => Promise<BridgeExecResponse>;
@@ -75,12 +76,16 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       storePath(hostname, workingDir.trim());
     }
 
+    const storedEnv = getStoredEnvVars();
+    const env = Object.keys(storedEnv).length > 0 ? storedEnv : undefined;
+
     onSubmit("", {
       name: name.trim() || undefined,
       workingDir: workingDir.trim() || undefined,
       bridgeId: effectiveBridgeId || undefined,
       shellType,
       claudeSessionId: selectedClaudeSessionId ?? undefined,
+      env,
     });
 
     setName("");
@@ -248,6 +253,8 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
               />
             )
           )}
+
+          <EnvVarsEditor />
 
           <div className="flex gap-3 justify-end pt-2">
             <button

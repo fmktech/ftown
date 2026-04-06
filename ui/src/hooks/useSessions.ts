@@ -34,7 +34,7 @@ export interface BridgeExecResponse {
 
 interface UseSessionsResult {
   sessions: Session[];
-  createSession: (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string }) => void;
+  createSession: (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; env?: Record<string, string> }) => void;
   stopSession: (sessionId: string) => void;
   retrySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
@@ -151,7 +151,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
   );
 
   const createSession = useCallback(
-    (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string }) => {
+    (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; env?: Record<string, string> }) => {
       if (!userId) return;
 
       const shellType = options?.shellType ?? "claude";
@@ -173,6 +173,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
         bridgeId: options?.bridgeId,
         shellType,
         claudeSessionId: options?.claudeSessionId,
+        env: options?.env,
         ...(prompt ? { initialInput: prompt + "\r", initialInputDelay: 2000 } : {}),
       };
 

@@ -165,7 +165,7 @@ print('hooks installed')
   }, []);
 
   const handleCreateSession = useCallback(
-    (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string }) => {
+    (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; env?: Record<string, string> }) => {
       createSession(prompt, options);
     },
     [createSession]
