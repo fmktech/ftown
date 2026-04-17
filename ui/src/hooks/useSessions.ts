@@ -158,6 +158,8 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
       let cmd: string;
       if (shellType === "shell") {
         cmd = "/bin/zsh -l";
+      } else if (shellType === "opencode") {
+        cmd = "opencode";
       } else if (options?.claudeSessionId) {
         cmd = `claude --allow-dangerously-skip-permissions --resume ${options.claudeSessionId}`;
       } else {

@@ -226,6 +226,9 @@ program
               createdAt: new Date().toISOString(),
               updatedAt: new Date().toISOString(),
               workingDir: payload.workingDir,
+              shellType: payload.shellType,
+              model: payload.model,
+              claudeSessionId: payload.claudeSessionId,
             };
 
             await store.saveSession(session);

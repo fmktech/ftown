@@ -1,3 +1,5 @@
+export type ShellType = 'claude' | 'shell' | 'zai' | 'opencode';
+
 export interface Session {
   id: string;
   name: string;
@@ -8,6 +10,9 @@ export interface Session {
   createdAt: string;
   updatedAt: string;
   workingDir?: string;
+  shellType?: ShellType;
+  model?: string;
+  claudeSessionId?: string;
 }
 
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error';
@@ -39,6 +44,9 @@ export interface CreateSessionPayload {
   env?: Record<string, string>;
   initialInput?: string;
   initialInputDelay?: number;
+  shellType?: ShellType;
+  model?: string;
+  claudeSessionId?: string;
 }
 
 export interface BridgeExecPayload {

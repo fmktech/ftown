@@ -43,9 +43,9 @@ function getZaiDefaultEnv(token: string): Record<string, string> {
   return {
     ANTHROPIC_AUTH_TOKEN: token,
     ANTHROPIC_BASE_URL: "https://api.z.ai/api/anthropic",
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: "GLM-4.5-Air",
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: "GLM-4.7-Flash",
     ANTHROPIC_DEFAULT_OPUS_MODEL: "GLM-5.1",
-    ANTHROPIC_DEFAULT_SONNET_MODEL: "GLM-4.7",
+    ANTHROPIC_DEFAULT_SONNET_MODEL: "GLM-5-Turbo",
     API_TIMEOUT_MS: "3000000",
   };
 }
@@ -193,6 +193,20 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                 }}
               >
                 z.ai
+              </button>
+              <button
+                type="button"
+                onClick={() => setShellType("opencode")}
+                className="px-4 py-2 text-sm font-mono transition-colors"
+                style={{
+                  background: shellType === "opencode" ? "#00ff88" : "#0a0a0a",
+                  color: shellType === "opencode" ? "#0a0a0a" : "#888888",
+                  border: `1px solid ${shellType === "opencode" ? "#00ff88" : "#2a2a2a"}`,
+                  borderRight: "none",
+                  fontWeight: shellType === "opencode" ? 700 : 400,
+                }}
+              >
+                opencode
               </button>
               <button
                 type="button"
