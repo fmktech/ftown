@@ -529,14 +529,14 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
                     letterSpacing: "0.06em",
                     padding: "1px 4px",
                     borderRadius: 3,
-                    background: session.shellType === "shell" ? "rgba(255, 170, 0, 0.12)" : "rgba(0, 255, 136, 0.08)",
-                    color: session.shellType === "shell" ? "var(--status-pending)" : "var(--accent)",
-                    border: `1px solid ${session.shellType === "shell" ? "rgba(255, 170, 0, 0.2)" : "rgba(0, 255, 136, 0.15)"}`,
+                    background: session.shellType === "shell" ? "rgba(255, 170, 0, 0.12)" : session.shellType === "zai" ? "rgba(100, 149, 237, 0.12)" : "rgba(0, 255, 136, 0.08)",
+                    color: session.shellType === "shell" ? "var(--status-pending)" : session.shellType === "zai" ? "#6495ED" : "var(--accent)",
+                    border: `1px solid ${session.shellType === "shell" ? "rgba(255, 170, 0, 0.2)" : session.shellType === "zai" ? "rgba(100, 149, 237, 0.2)" : "rgba(0, 255, 136, 0.15)"}`,
                     textTransform: "uppercase",
                     fontFamily: "var(--font-mono)",
                   }}
                 >
-                  {session.shellType === "shell" ? "zsh" : "claude"}
+                  {session.shellType === "shell" ? "zsh" : session.shellType === "zai" ? "z.ai" : "claude"}
                 </span>
                 {session.model && session.shellType !== "shell" && (
                   <span style={{ fontSize: 10, color: "var(--text-faint)" }}>

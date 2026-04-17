@@ -23,6 +23,33 @@ interface NewSessionModalProps {
   bridgeExec: (command: string, workingDir: string, bridgeId: string) => Promise<BridgeExecResponse>;
 }
 
+const ZAI_TOKEN_KEY = "ftown:zaiToken";
+
+function getStoredZaiToken(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return localStorage.getItem(ZAI_TOKEN_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function setStoredZaiToken(token: string): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(ZAI_TOKEN_KEY, token);
+}
+
+function getZaiDefaultEnv(token: string): Record<string, string> {
+  return {
+    ANTHROPIC_AUTH_TOKEN: token,
+    ANTHROPIC_BASE_URL: "https://api.z.ai/api/anthropic",
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: "GLM-4.5-Air",
+    ANTHROPIC_DEFAULT_OPUS_MODEL: "GLM-5.1",
+    ANTHROPIC_DEFAULT_SONNET_MODEL: "GLM-4.7",
+    API_TIMEOUT_MS: "3000000",
+  };
+}
+
 function getStoredPaths(hostname: string): string[] {
   try {
     const raw = localStorage.getItem(`ftown:paths:${hostname}`);
@@ -48,6 +75,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedClaudeSessionId, setSelectedClaudeSessionId] = useState<string | null>(null);
   const [selectedClaudeSummary, setSelectedClaudeSummary] = useState<string | null>(null);
+  const [zaiToken, setZaiToken] = useState("");
 
   const effectiveBridgeId = bridgeId || (bridges.length > 0 ? bridges[0].bridgeId : "");
   const selectedBridge = bridges.find((b) => b.bridgeId === effectiveBridgeId);
@@ -68,6 +96,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       setBridgeId(defaults.bridgeId ?? "");
       setSelectedClaudeSessionId(null);
       setSelectedClaudeSummary(null);
+      setZaiToken(getStoredZaiToken());
     }
   }, [isOpen, defaults]);
 
@@ -76,8 +105,16 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       storePath(hostname, workingDir.trim());
     }
 
-    const storedEnv = getStoredEnvVars();
-    const env = Object.keys(storedEnv).length > 0 ? storedEnv : undefined;
+    let env: Record<string, string> | undefined;
+
+    if (shellType === "zai") {
+      const trimmedToken = zaiToken.trim();
+      if (trimmedToken) setStoredZaiToken(trimmedToken);
+      env = { ...getStoredEnvVars(), ...getZaiDefaultEnv(trimmedToken) };
+    } else {
+      const storedEnv = getStoredEnvVars();
+      env = Object.keys(storedEnv).length > 0 ? storedEnv : undefined;
+    }
 
     onSubmit("", {
       name: name.trim() || undefined,
@@ -96,7 +133,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setSelectedClaudeSessionId(null);
     setSelectedClaudeSummary(null);
     onClose();
-  }, [shellType, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, onSubmit, onClose]);
+  }, [shellType, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, zaiToken, onSubmit, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -135,10 +172,8 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                 style={{
                   background: shellType === "claude" ? "#00ff88" : "#0a0a0a",
                   color: shellType === "claude" ? "#0a0a0a" : "#888888",
-                  borderTop: shellType === "claude" ? "1px solid #00ff88" : "1px solid #2a2a2a",
-                  borderRight: shellType === "claude" ? "1px solid #00ff88" : "1px solid #2a2a2a",
-                  borderBottom: shellType === "claude" ? "1px solid #00ff88" : "1px solid #2a2a2a",
-                  borderLeft: shellType === "claude" ? "1px solid #00ff88" : "1px solid #2a2a2a",
+                  border: `1px solid ${shellType === "claude" ? "#00ff88" : "#2a2a2a"}`,
+                  borderRight: "none",
                   borderRadius: "4px 0 0 4px",
                   fontWeight: shellType === "claude" ? 700 : 400,
                 }}
@@ -147,15 +182,26 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
               </button>
               <button
                 type="button"
+                onClick={() => setShellType("zai")}
+                className="px-4 py-2 text-sm font-mono transition-colors"
+                style={{
+                  background: shellType === "zai" ? "#00ff88" : "#0a0a0a",
+                  color: shellType === "zai" ? "#0a0a0a" : "#888888",
+                  border: `1px solid ${shellType === "zai" ? "#00ff88" : "#2a2a2a"}`,
+                  borderRight: "none",
+                  fontWeight: shellType === "zai" ? 700 : 400,
+                }}
+              >
+                z.ai
+              </button>
+              <button
+                type="button"
                 onClick={() => setShellType("shell")}
                 className="px-4 py-2 text-sm font-mono transition-colors"
                 style={{
                   background: shellType === "shell" ? "#00ff88" : "#0a0a0a",
                   color: shellType === "shell" ? "#0a0a0a" : "#888888",
-                  borderTop: shellType === "shell" ? "1px solid #00ff88" : "1px solid #2a2a2a",
-                  borderRight: shellType === "shell" ? "1px solid #00ff88" : "1px solid #2a2a2a",
-                  borderBottom: shellType === "shell" ? "1px solid #00ff88" : "1px solid #2a2a2a",
-                  borderLeft: "none",
+                  border: `1px solid ${shellType === "shell" ? "#00ff88" : "#2a2a2a"}`,
                   borderRadius: "0 4px 4px 0",
                   fontWeight: shellType === "shell" ? 700 : 400,
                 }}
@@ -163,6 +209,20 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                 Shell (zsh)
               </button>
             </div>
+
+            {shellType === "zai" && (
+              <div className="mt-3">
+                <label className="block text-sm text-[#888888] mb-1">z.ai API Token</label>
+                <input
+                  type="password"
+                  value={zaiToken}
+                  onChange={(e) => setZaiToken(e.target.value)}
+                  placeholder="Enter your z.ai API token"
+                  className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] font-mono"
+                  onKeyDown={handleKeyDown}
+                />
+              </div>
+            )}
           </div>
 
           <div>
@@ -227,7 +287,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
             )}
           </div>
 
-          {shellType === "claude" && effectiveBridgeId && workingDir.trim() && (
+          {(shellType === "claude" || shellType === "zai") && effectiveBridgeId && workingDir.trim() && (
             selectedClaudeSessionId ? (
               <div className="flex items-center gap-2 px-3 py-2 border border-[#00ff88]/30 rounded bg-[#00ff88]/5">
                 <span className="text-xs text-[#00ff88] flex-1 truncate font-mono">
