@@ -7,6 +7,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { TokenUsage } from "@/hooks/useSessionEvents";
+import { ShellType } from "@/types";
 import "@xterm/xterm/css/xterm.css";
 
 export interface TerminalHandle {
@@ -22,6 +23,7 @@ interface TerminalProps {
   sessionName?: string | null;
   usage?: TokenUsage;
   onMobileTap?: () => void;
+  shellType?: ShellType;
 }
 
 function formatTokenCount(n: number): string {
@@ -30,13 +32,14 @@ function formatTokenCount(n: number): string {
   return String(n);
 }
 
-export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ client, sessionId, userId, isRunning, sessionName, usage, onMobileTap }, ref) {
+export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ client, sessionId, userId, isRunning, sessionName, usage, onMobileTap, shellType }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const outputSubRef = useRef<Subscription | null>(null);
   const inputSubRef = useRef<Subscription | null>(null);
   const onMobileTapRef = useRef(onMobileTap);
+  const shellTypeRef = useRef(shellType);
   const didScrollRef = useRef(false);
   const [scrolledUp, setScrolledUp] = useState(false);
 
@@ -52,6 +55,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
   }), []);
 
   useEffect(() => { onMobileTapRef.current = onMobileTap; }, [onMobileTap]);
+  useEffect(() => { shellTypeRef.current = shellType; }, [shellType]);
   // Initialize xterm once
   useEffect(() => {
     if (!containerRef.current) return;
@@ -162,15 +166,39 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       accumulatedDelta = 0;
     };
 
+    // Mouse-wheel scroll for opencode: opencode doesn't bind arrow keys (xterm's
+    // alt-buffer default) to transcript scroll. Translate wheel into its line-scroll
+    // keybinds: ctrl+alt+y (up) = \x1b\x19, ctrl+alt+e (down) = \x1b\x05.
+    // Shift+wheel → half-page (ctrl+alt+u / ctrl+alt+d).
+    let wheelAccum = 0;
+    const WHEEL_LINE_PX = 20;
+    const onWheel = (e: WheelEvent) => {
+      if (shellTypeRef.current !== "opencode") return;
+      if (term.buffer.active.type !== "alternate") return;
+      if (!inputSubRef.current) return;
+      e.preventDefault();
+      wheelAccum += e.deltaY;
+      const lines = Math.trunc(wheelAccum / WHEEL_LINE_PX);
+      if (lines === 0) return;
+      wheelAccum -= lines * WHEEL_LINE_PX;
+      const count = Math.abs(lines);
+      const seq = e.shiftKey
+        ? (lines < 0 ? "\x1b\x15" : "\x1b\x04")
+        : (lines < 0 ? "\x1b\x19" : "\x1b\x05");
+      inputSubRef.current.publish({ type: "input", data: seq.repeat(count) });
+    };
+
     const container = containerRef.current;
     container.addEventListener("touchstart", onTouchStart, { passive: true });
     container.addEventListener("touchmove", onTouchMove, { passive: false });
     container.addEventListener("touchend", onTouchEnd, { passive: true });
+    container.addEventListener("wheel", onWheel, { passive: false });
 
     return () => {
       container.removeEventListener("touchstart", onTouchStart);
       container.removeEventListener("touchmove", onTouchMove);
       container.removeEventListener("touchend", onTouchEnd);
+      container.removeEventListener("wheel", onWheel);
       scrollDisposable.dispose();
       resizeObserver.disconnect();
       term.dispose();

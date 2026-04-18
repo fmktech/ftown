@@ -648,6 +648,7 @@ print('hooks installed')
             sessionName={selectedSession?.name ?? selectedSession?.prompt?.slice(0, 48) ?? null}
             usage={selectedSessionId ? sessionActivity.get(selectedSessionId)?.usage : undefined}
             onMobileTap={() => mobileControlRef.current?.focusInput()}
+            shellType={selectedSession?.shellType}
           />
           {selectedSessionId && (
             <MobileControlBar ref={mobileControlRef} onSendInput={(data) => terminalRef.current?.sendInput(data)} />
