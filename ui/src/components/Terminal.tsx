@@ -156,9 +156,17 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       accumulatedDelta += delta;
 
       const lines = Math.trunc(accumulatedDelta / LINE_HEIGHT);
-      if (lines !== 0) {
+      if (lines === 0) return;
+      accumulatedDelta -= lines * LINE_HEIGHT;
+
+      if (shellTypeRef.current === "opencode" && inputSubRef.current) {
+        // opencode: emit its line-scroll keybinds (ctrl+alt+y/e) so the TUI
+        // scrolls its own transcript. Finger up (lines > 0) = show later
+        // content = messages_line_down (\x1b\x05).
+        const seq = lines < 0 ? "\x1b\x19" : "\x1b\x05";
+        inputSubRef.current.publish({ type: "input", data: seq.repeat(Math.abs(lines)) });
+      } else {
         term.scrollLines(lines);
-        accumulatedDelta -= lines * LINE_HEIGHT;
       }
     };
     const onTouchEnd = () => {
@@ -257,7 +265,11 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     const outputSub = client.newSubscription(outputChannel, {
       since: { offset: 0, epoch: "" },
     });
+    let lastOutputOffset = -1;
     outputSub.on("publication", (ctx) => {
+      const offset = (ctx as { offset?: number }).offset ?? 0;
+      if (offset <= lastOutputOffset) return;
+      lastOutputOffset = offset;
       const msg = ctx.data as { type: string; data?: string };
       if (msg.type === "output" && msg.data) {
         term.write(msg.data);
