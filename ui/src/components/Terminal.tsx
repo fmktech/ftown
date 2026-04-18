@@ -171,12 +171,15 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     // keybinds: ctrl+alt+y (up) = \x1b\x19, ctrl+alt+e (down) = \x1b\x05.
     // Shift+wheel → half-page (ctrl+alt+u / ctrl+alt+d).
     let wheelAccum = 0;
-    const WHEEL_LINE_PX = 20;
+    const WHEEL_LINE_PX = 16;
     const onWheel = (e: WheelEvent) => {
       if (shellTypeRef.current !== "opencode") return;
-      if (term.buffer.active.type !== "alternate") return;
       if (!inputSubRef.current) return;
+      // Always prevent page scroll while over an opencode terminal, even if
+      // this tick doesn't yet cross the per-line threshold — otherwise the
+      // browser scrolls the page on small trackpad deltas.
       e.preventDefault();
+      e.stopPropagation();
       wheelAccum += e.deltaY;
       const lines = Math.trunc(wheelAccum / WHEEL_LINE_PX);
       if (lines === 0) return;
@@ -192,13 +195,18 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     container.addEventListener("touchstart", onTouchStart, { passive: true });
     container.addEventListener("touchmove", onTouchMove, { passive: false });
     container.addEventListener("touchend", onTouchEnd, { passive: true });
-    container.addEventListener("wheel", onWheel, { passive: false });
+    // Capture phase + attached to both the outer container and xterm's viewport,
+    // so xterm's own wheel handler doesn't consume the event first.
+    container.addEventListener("wheel", onWheel, { passive: false, capture: true });
+    const viewport = container.querySelector(".xterm-viewport") as HTMLElement | null;
+    viewport?.addEventListener("wheel", onWheel, { passive: false, capture: true });
 
     return () => {
       container.removeEventListener("touchstart", onTouchStart);
       container.removeEventListener("touchmove", onTouchMove);
       container.removeEventListener("touchend", onTouchEnd);
-      container.removeEventListener("wheel", onWheel);
+      container.removeEventListener("wheel", onWheel, { capture: true } as EventListenerOptions);
+      viewport?.removeEventListener("wheel", onWheel, { capture: true } as EventListenerOptions);
       scrollDisposable.dispose();
       resizeObserver.disconnect();
       term.dispose();
