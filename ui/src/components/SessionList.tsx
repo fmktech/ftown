@@ -16,6 +16,9 @@ interface SessionListProps {
   onReorderSessions?: (orderedIds: string[]) => void;
   sessionActivity?: Map<string, SessionActivity>;
   collapsed?: boolean;
+  hiddenSessionIds?: Set<string>;
+  onHideSession?: (sessionId: string) => void;
+  onUnhideSession?: (sessionId: string) => void;
 }
 
 interface ContextMenuState {
@@ -72,6 +75,9 @@ function ContextMenu({
   onStop,
   onRemove,
   onClone,
+  onHide,
+  onUnhide,
+  isHidden,
   onClose,
 }: {
   menu: ContextMenuState;
@@ -79,6 +85,9 @@ function ContextMenu({
   onStop: (sessionId: string) => void;
   onRemove: (sessionId: string) => void;
   onClone: (session: Session) => void;
+  onHide: (sessionId: string) => void;
+  onUnhide: (sessionId: string) => void;
+  isHidden: boolean;
   onClose: () => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
@@ -162,6 +171,31 @@ function ContextMenu({
       >
         Clone
       </button>
+      {isHidden ? (
+        <button
+          onClick={() => {
+            onUnhide(menu.session.id);
+            onClose();
+          }}
+          style={{ ...menuButtonStyle, color: "var(--text-secondary)" }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+        >
+          Unhide
+        </button>
+      ) : (
+        <button
+          onClick={() => {
+            onHide(menu.session.id);
+            onClose();
+          }}
+          style={{ ...menuButtonStyle, color: "var(--text-secondary)" }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+        >
+          Hide
+        </button>
+      )}
       {isRunning && (
         <button
           onClick={() => {
@@ -191,16 +225,20 @@ function ContextMenu({
   );
 }
 
-export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession, onStopSession, onRemoveSession, onCloneSession, onReorderSessions, sessionActivity, collapsed }: SessionListProps) {
+export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession, onStopSession, onRemoveSession, onCloneSession, onReorderSessions, sessionActivity, collapsed, hiddenSessionIds, onHideSession, onUnhideSession }: SessionListProps) {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const [dragOverPosition, setDragOverPosition] = useState<"above" | "below" | null>(null);
+  const [hiddenExpanded, setHiddenExpanded] = useState(false);
   const draggedIdRef = useRef<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressFired = useRef(false);
+  const hiddenSet = hiddenSessionIds ?? new Set<string>();
+  const visibleSessions = sessions.filter((s) => !hiddenSet.has(s.id));
+  const hiddenSessions = sessions.filter((s) => hiddenSet.has(s.id));
 
   useEffect(() => {
     if (editingSessionId && inputRef.current) {
@@ -292,7 +330,9 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
     draggedIdRef.current = null;
   }
 
-  if (sessions.length === 0) {
+  const sessionListToRender = visibleSessions;
+
+  if (sessionListToRender.length === 0 && hiddenSessions.length === 0) {
     if (collapsed) return null;
     return (
       <div
@@ -307,7 +347,7 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
 
   return (
     <div className="flex flex-col">
-      {sessions.map((session) => {
+      {sessionListToRender.map((session) => {
         const isSelected = session.id === selectedSessionId;
         const displayName = session.name || session.prompt.slice(0, 36);
 
@@ -552,6 +592,81 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
         );
       })}
 
+      {hiddenSessions.length > 0 && !collapsed && (
+        <div className="flex flex-col">
+          <button
+            onClick={() => setHiddenExpanded((v) => !v)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: "8px 16px",
+              borderBottom: "1px solid var(--border-subtle)",
+              borderTop: "1px solid var(--border-subtle)",
+              background: "var(--bg-base)",
+              cursor: "pointer",
+              fontFamily: "var(--font-mono)",
+              fontSize: 11,
+              color: "var(--text-muted)",
+              letterSpacing: "0.06em",
+              textTransform: "uppercase",
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-base)"; }}
+          >
+            <span>Hidden ({hiddenSessions.length})</span>
+            <span style={{ fontSize: 10, opacity: 0.6 }}>{hiddenExpanded ? "▾" : "▸"}</span>
+          </button>
+          {hiddenExpanded && hiddenSessions.map((session) => {
+            const isSelected = session.id === selectedSessionId;
+            const displayName = session.name || session.prompt.slice(0, 36);
+            return (
+              <button
+                key={session.id}
+                onClick={() => onSelectSession(session.id)}
+                onContextMenu={(e) => handleContextMenu(e, session)}
+                style={{
+                  width: "100%",
+                  textAlign: "left",
+                  padding: "8px 16px",
+                  borderBottom: "1px solid var(--border-subtle)",
+                  borderLeft: `2px solid ${isSelected ? "var(--accent)" : "transparent"}`,
+                  background: isSelected ? "var(--bg-elevated)" : "transparent",
+                  cursor: "pointer",
+                  transition: "background 0.12s ease, border-color 0.12s ease",
+                  fontFamily: "var(--font-mono)",
+                  display: "block",
+                  opacity: 0.6,
+                }}
+                onMouseEnter={(e) => {
+                  if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)";
+                }}
+                onMouseLeave={(e) => {
+                  if (!isSelected) e.currentTarget.style.background = "transparent";
+                }}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span
+                    style={{
+                      fontSize: 11,
+                      color: isSelected ? "var(--text-primary)" : "var(--text-secondary)",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      flex: 1,
+                      minWidth: 0,
+                    }}
+                  >
+                    {displayName}
+                  </span>
+                  <StatusBadge status={session.status} activity={sessionActivity?.get(session.id)?.activity} />
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {contextMenu && onStopSession && onRemoveSession && (
         <ContextMenu
           menu={contextMenu}
@@ -559,6 +674,9 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
           onStop={onStopSession}
           onRemove={onRemoveSession}
           onClone={onCloneSession ?? (() => {})}
+          onHide={onHideSession ?? (() => {})}
+          onUnhide={onUnhideSession ?? (() => {})}
+          isHidden={hiddenSet.has(contextMenu.session.id)}
           onClose={closeContextMenu}
         />
       )}

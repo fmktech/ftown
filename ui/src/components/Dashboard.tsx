@@ -48,6 +48,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [mobileTab, setMobileTab] = useState<"sessions" | "terminal">("sessions");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sessionOrder, setSessionOrder] = useState<string[]>([]);
+  const [hiddenSessionIds, setHiddenSessionIds] = useState<Set<string>>(new Set());
   const [showUserMenu, setShowUserMenu] = useState(false);
   const terminalRef = useRef<TerminalHandle>(null);
   const mobileControlRef = useRef<MobileControlBarHandle>(null);
@@ -58,6 +59,10 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     setSidebarCollapsed(localStorage.getItem("ftown:sidebarCollapsed") === "true");
     try {
       setSessionOrder(JSON.parse(localStorage.getItem("ftown:sessionOrder") ?? "[]"));
+    } catch { /* ignore */ }
+    try {
+      const raw = localStorage.getItem("ftown:hiddenSessions");
+      if (raw) setHiddenSessionIds(new Set(JSON.parse(raw)));
     } catch { /* ignore */ }
   }, []);
 
@@ -185,6 +190,24 @@ print('hooks installed')
       setSelectedSessionId(null);
     }
   }, [removeSession, selectedSessionId]);
+
+  const handleHideSession = useCallback((sessionId: string) => {
+    setHiddenSessionIds((prev) => {
+      const next = new Set(prev);
+      next.add(sessionId);
+      localStorage.setItem("ftown:hiddenSessions", JSON.stringify([...next]));
+      return next;
+    });
+  }, []);
+
+  const handleUnhideSession = useCallback((sessionId: string) => {
+    setHiddenSessionIds((prev) => {
+      const next = new Set(prev);
+      next.delete(sessionId);
+      localStorage.setItem("ftown:hiddenSessions", JSON.stringify([...next]));
+      return next;
+    });
+  }, []);
 
   const handleSelectSession = useCallback((id: string | null) => {
     setSelectedSessionId(id);
@@ -633,6 +656,9 @@ print('hooks installed')
               onReorderSessions={handleReorderSessions}
               sessionActivity={sessionActivity}
               collapsed={isDesktop && sidebarCollapsed}
+              hiddenSessionIds={hiddenSessionIds}
+              onHideSession={handleHideSession}
+              onUnhideSession={handleUnhideSession}
             />
           </div>
         </aside>
