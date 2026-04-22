@@ -1,4 +1,4 @@
-export type ShellType = 'claude' | 'shell' | 'zai' | 'opencode';
+export type ShellType = 'claude' | 'shell' | 'zai' | 'kimi' | 'opencode';
 
 export interface Session {
   id: string;

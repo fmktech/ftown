@@ -24,6 +24,7 @@ interface NewSessionModalProps {
 }
 
 const ZAI_TOKEN_KEY = "ftown:zaiToken";
+const KIMI_TOKEN_KEY = "ftown:kimiToken";
 
 function getStoredZaiToken(): string {
   if (typeof window === "undefined") return "";
@@ -39,6 +40,20 @@ function setStoredZaiToken(token: string): void {
   localStorage.setItem(ZAI_TOKEN_KEY, token);
 }
 
+function getStoredKimiToken(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return localStorage.getItem(KIMI_TOKEN_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function setStoredKimiToken(token: string): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(KIMI_TOKEN_KEY, token);
+}
+
 function getZaiDefaultEnv(token: string): Record<string, string> {
   return {
     ANTHROPIC_AUTH_TOKEN: token,
@@ -46,6 +61,14 @@ function getZaiDefaultEnv(token: string): Record<string, string> {
     ANTHROPIC_DEFAULT_HAIKU_MODEL: "GLM-4.7-Flash",
     ANTHROPIC_DEFAULT_OPUS_MODEL: "GLM-5.1",
     ANTHROPIC_DEFAULT_SONNET_MODEL: "GLM-5-Turbo",
+    API_TIMEOUT_MS: "3000000",
+  };
+}
+
+function getKimiDefaultEnv(token: string): Record<string, string> {
+  return {
+    ANTHROPIC_API_KEY: token,
+    ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/",
     API_TIMEOUT_MS: "3000000",
   };
 }
@@ -76,6 +99,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const [selectedClaudeSessionId, setSelectedClaudeSessionId] = useState<string | null>(null);
   const [selectedClaudeSummary, setSelectedClaudeSummary] = useState<string | null>(null);
   const [zaiToken, setZaiToken] = useState("");
+  const [kimiToken, setKimiToken] = useState("");
 
   const effectiveBridgeId = bridgeId || (bridges.length > 0 ? bridges[0].bridgeId : "");
   const selectedBridge = bridges.find((b) => b.bridgeId === effectiveBridgeId);
@@ -97,6 +121,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       setSelectedClaudeSessionId(null);
       setSelectedClaudeSummary(null);
       setZaiToken(getStoredZaiToken());
+      setKimiToken(getStoredKimiToken());
     }
   }, [isOpen, defaults]);
 
@@ -111,6 +136,10 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       const trimmedToken = zaiToken.trim();
       if (trimmedToken) setStoredZaiToken(trimmedToken);
       env = { ...getStoredEnvVars(), ...getZaiDefaultEnv(trimmedToken) };
+    } else if (shellType === "kimi") {
+      const trimmedToken = kimiToken.trim();
+      if (trimmedToken) setStoredKimiToken(trimmedToken);
+      env = { ...getStoredEnvVars(), ...getKimiDefaultEnv(trimmedToken) };
     } else {
       const storedEnv = getStoredEnvVars();
       env = Object.keys(storedEnv).length > 0 ? storedEnv : undefined;
@@ -133,7 +162,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setSelectedClaudeSessionId(null);
     setSelectedClaudeSummary(null);
     onClose();
-  }, [shellType, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, zaiToken, onSubmit, onClose]);
+  }, [shellType, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, zaiToken, kimiToken, onSubmit, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -196,6 +225,20 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
               </button>
               <button
                 type="button"
+                onClick={() => setShellType("kimi")}
+                className="px-4 py-2 text-sm font-mono transition-colors"
+                style={{
+                  background: shellType === "kimi" ? "#00ff88" : "#0a0a0a",
+                  color: shellType === "kimi" ? "#0a0a0a" : "#888888",
+                  border: `1px solid ${shellType === "kimi" ? "#00ff88" : "#2a2a2a"}`,
+                  borderRight: "none",
+                  fontWeight: shellType === "kimi" ? 700 : 400,
+                }}
+              >
+                Kimi
+              </button>
+              <button
+                type="button"
                 onClick={() => setShellType("opencode")}
                 className="px-4 py-2 text-sm font-mono transition-colors"
                 style={{
@@ -232,6 +275,20 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                   value={zaiToken}
                   onChange={(e) => setZaiToken(e.target.value)}
                   placeholder="Enter your z.ai API token"
+                  className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] font-mono"
+                  onKeyDown={handleKeyDown}
+                />
+              </div>
+            )}
+
+            {shellType === "kimi" && (
+              <div className="mt-3">
+                <label className="block text-sm text-[#888888] mb-1">Kimi API Token</label>
+                <input
+                  type="password"
+                  value={kimiToken}
+                  onChange={(e) => setKimiToken(e.target.value)}
+                  placeholder="Enter your Kimi API token"
                   className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] font-mono"
                   onKeyDown={handleKeyDown}
                 />
