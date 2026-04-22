@@ -277,6 +277,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                   placeholder="Enter your z.ai API token"
                   className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] font-mono"
                   onKeyDown={handleKeyDown}
+                  autoComplete="new-password"
                 />
               </div>
             )}
@@ -291,6 +292,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                   placeholder="Enter your Kimi API token"
                   className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] font-mono"
                   onKeyDown={handleKeyDown}
+                  autoComplete="new-password"
                 />
               </div>
             )}
