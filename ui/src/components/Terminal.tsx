@@ -262,31 +262,16 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       client.removeSubscription(existingOut);
     }
 
-    const outputSub = client.newSubscription(outputChannel);
-    let lastOutputOffset = -1;
+    const outputSub = client.newSubscription(outputChannel, {
+      since: { offset: 0 },
+    });
     outputSub.on("publication", (ctx) => {
-      const offset = (ctx as { offset?: number }).offset ?? 0;
-      if (offset <= lastOutputOffset) return;
-      lastOutputOffset = offset;
       const msg = ctx.data as { type: string; data?: string };
       if (msg.type === "output" && msg.data) {
         term.write(msg.data);
       }
     });
     outputSub.on("subscribed", () => {
-      outputSub.history({ limit: 10000 }).then((result) => {
-        for (const pub of result.publications) {
-          const offset = pub.offset ?? 0;
-          if (offset <= lastOutputOffset) continue;
-          lastOutputOffset = offset;
-          const msg = pub.data as { type: string; data?: string };
-          if (msg.type === "output" && msg.data) {
-            term.write(msg.data);
-          }
-        }
-      }).catch((err) => {
-        console.warn("[Terminal] Failed to fetch channel history:", err);
-      });
       if (inputSubRef.current) {
         inputSubRef.current.publish({ type: "resize", cols: term.cols, rows: term.rows });
       }
