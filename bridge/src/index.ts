@@ -34,6 +34,12 @@ const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+const DEFAULT_COMPACT_WINDOW: Record<string, number> = {
+  deepseek: 1_000_000,
+  zai: 200_000,
+  kimi: 256_000,
+};
+
 interface ExecError {
   stdout: string;
   stderr: string;
@@ -225,6 +231,13 @@ program
             const payload = command.payload as CreateSessionPayload;
 
             const sessionId = uuidv4();
+
+            const compactWindow = payload.shellType ? DEFAULT_COMPACT_WINDOW[payload.shellType] : undefined;
+            const env = {
+              ...(compactWindow !== undefined ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(compactWindow) } : {}),
+              ...(payload.env ?? {}),
+            };
+
             const session: Session = {
               id: sessionId,
               name: payload.name ?? payload.command.slice(0, 80),
@@ -244,7 +257,7 @@ program
 
             runner.run(sessionId, payload.command, {
               workingDir: payload.workingDir,
-              env: payload.env,
+              env,
               initialInput: payload.initialInput,
               initialInputDelay: payload.initialInputDelay,
               hookPort,
@@ -330,8 +343,10 @@ program
             await store.saveSession(existingSession);
             await centrifugo.publishSessionUpdate(userId, existingSession);
 
+            const retryCompact = existingSession.shellType ? DEFAULT_COMPACT_WINDOW[existingSession.shellType] : undefined;
             runner.run(existingSession.id, existingSession.command, {
               workingDir: existingSession.workingDir,
+              env: retryCompact !== undefined ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(retryCompact) } : undefined,
               hookPort,
             });
 
