@@ -159,14 +159,9 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       if (lines === 0) return;
       accumulatedDelta -= lines * LINE_HEIGHT;
 
-      if (shellTypeRef.current === "opencode" && inputSubRef.current) {
-        // opencode: emit its line-scroll keybinds (ctrl+alt+y/e) so the TUI
-        // scrolls its own transcript. Finger up (lines > 0) = show later
-        // content = messages_line_down (\x1b\x05).
+      if (inputSubRef.current) {
         const seq = lines < 0 ? "\x1b\x19" : "\x1b\x05";
         inputSubRef.current.publish({ type: "input", data: seq.repeat(Math.abs(lines)) });
-      } else {
-        term.scrollLines(lines);
       }
     };
     const onTouchEnd = () => {
@@ -174,55 +169,42 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       accumulatedDelta = 0;
     };
 
-    // Mouse-wheel scroll for opencode: opencode doesn't bind arrow keys (xterm's
-    // alt-buffer default) to transcript scroll. Translate wheel into its line-scroll
-    // keybinds: ctrl+alt+y (up) = \x1b\x19, ctrl+alt+e (down) = \x1b\x05.
-    // Shift+wheel → half-page (ctrl+alt+u / ctrl+alt+d).
+    // Mouse-wheel: translate into PTY line-scroll keybinds.
+    // ctrl+alt+y (up) = \x1b\x19, ctrl+alt+e (down) = \x1b\x05
+    // Shift+wheel → half-page (ctrl+alt+u = \x1b\x15 / ctrl+alt+d = \x1b\x04)
     const container = containerRef.current;
     container.addEventListener("touchstart", onTouchStart, { passive: true });
     container.addEventListener("touchmove", onTouchMove, { passive: false });
     container.addEventListener("touchend", onTouchEnd, { passive: true });
 
-    let onWheel: ((e: WheelEvent) => void) | undefined;
     let wheelAccum = 0;
     const WHEEL_LINE_PX = 16;
 
-    let viewport: HTMLElement | null = null;
+    const onWheel = (e: WheelEvent) => {
+      if (!inputSubRef.current) return;
+      e.preventDefault();
+      e.stopPropagation();
+      wheelAccum += e.deltaY;
+      const lines = Math.trunc(wheelAccum / WHEEL_LINE_PX);
+      if (lines === 0) return;
+      wheelAccum -= lines * WHEEL_LINE_PX;
+      const count = Math.abs(lines);
+      const seq = e.shiftKey
+        ? (lines < 0 ? "\x1b\x15" : "\x1b\x04")
+        : (lines < 0 ? "\x1b\x19" : "\x1b\x05");
+      inputSubRef.current.publish({ type: "input", data: seq.repeat(count) });
+    };
 
-    if (shellType === "opencode") {
-      onWheel = (e: WheelEvent) => {
-        if (!inputSubRef.current) return;
-        // Always prevent page scroll while over an opencode terminal, even if
-        // this tick doesn't yet cross the per-line threshold — otherwise the
-        // browser scrolls the page on small trackpad deltas.
-        e.preventDefault();
-        e.stopPropagation();
-        wheelAccum += e.deltaY;
-        const lines = Math.trunc(wheelAccum / WHEEL_LINE_PX);
-        if (lines === 0) return;
-        wheelAccum -= lines * WHEEL_LINE_PX;
-        const count = Math.abs(lines);
-        const seq = e.shiftKey
-          ? (lines < 0 ? "\x1b\x15" : "\x1b\x04")
-          : (lines < 0 ? "\x1b\x19" : "\x1b\x05");
-        inputSubRef.current.publish({ type: "input", data: seq.repeat(count) });
-      };
-
-      // Capture phase + attached to both the outer container and xterm's viewport,
-      // so xterm's own wheel handler doesn't consume the event first.
-      container.addEventListener("wheel", onWheel, { passive: false, capture: true });
-      viewport = container.querySelector(".xterm-viewport") as HTMLElement | null;
-      viewport?.addEventListener("wheel", onWheel, { passive: false, capture: true });
-    }
+    container.addEventListener("wheel", onWheel, { passive: false, capture: true });
+    const viewport = container.querySelector(".xterm-viewport") as HTMLElement | null;
+    viewport?.addEventListener("wheel", onWheel, { passive: false, capture: true });
 
     return () => {
       container.removeEventListener("touchstart", onTouchStart);
       container.removeEventListener("touchmove", onTouchMove);
       container.removeEventListener("touchend", onTouchEnd);
-      if (onWheel) {
-        container.removeEventListener("wheel", onWheel, { capture: true } as EventListenerOptions);
-        viewport?.removeEventListener("wheel", onWheel, { capture: true } as EventListenerOptions);
-      }
+      container.removeEventListener("wheel", onWheel, { capture: true } as EventListenerOptions);
+      viewport?.removeEventListener("wheel", onWheel, { capture: true } as EventListenerOptions);
       scrollDisposable.dispose();
       resizeObserver.disconnect();
       term.dispose();
@@ -270,9 +252,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       client.removeSubscription(existingOut);
     }
 
-    const outputSub = client.newSubscription(outputChannel, {
-      since: { offset: 0 },
-    });
+    const outputSub = client.newSubscription(outputChannel);
     outputSub.on("publication", (ctx) => {
       const msg = ctx.data as { type: string; data?: string };
       if (msg.type === "output" && msg.data) {
