@@ -12,11 +12,13 @@ import { CentrifugoClient } from './centrifugo-client.js';
 import { ProcessRunner } from './claude-runner.js';
 import { SessionStore } from './session-store.js';
 import { LocalApiServer } from './local-api-server.js';
+import { TerminalManager } from './terminal-manager.js';
 
 import type { HookEvent } from './local-api-server.js';
 
 import type {
   BridgeExecPayload,
+  ClearTerminalPayload,
   Command,
   CommandResponse,
   CreateSessionPayload,
@@ -122,12 +124,14 @@ program
       }
     }
 
+    const terminalManager = new TerminalManager(50000, 120);
+
     const runner = new ProcessRunner();
     const centrifugo = new CentrifugoClient(centrifugoUrl, auth.token, getToken);
     const localApiServer = new LocalApiServer();
     const hookPort = await localApiServer.start();
     console.log(`[Bridge] Local API server started on port ${hookPort}`);
-    localApiServer.setDependencies(store, runner, centrifugo, userId);
+    localApiServer.setDependencies(store, runner, centrifugo, userId, terminalManager);
 
     const outputBuffers = new Map<string, string>();
     const flushTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -150,6 +154,8 @@ program
     }
 
     runner.on('data', (sessionId, data) => {
+      terminalManager.write(sessionId, data);
+
       const existing = outputBuffers.get(sessionId) ?? '';
       outputBuffers.set(sessionId, existing + data);
       if ((existing.length + data.length) >= MAX_BUFFER_BYTES) {
@@ -189,6 +195,7 @@ program
       } catch (err) {
         console.error(`[Bridge] Failed to handle error for session ${sessionId}:`, err);
       }
+      terminalManager.destroy(sessionId);
     });
 
     localApiServer.on('event', (hookEvent: HookEvent) => {
@@ -399,6 +406,20 @@ program
               const execErr = err as ExecError;
               response = { requestId: command.requestId, success: true, data: { stdout: execErr.stdout, stderr: execErr.stderr, exitCode: execErr.code } };
             }
+            break;
+          }
+
+          case 'clear_terminal': {
+            const payload = command.payload as ClearTerminalPayload;
+            if (!payload.sessionId) {
+              response = { requestId: command.requestId, success: false, error: 'Missing sessionId' };
+              break;
+            }
+
+            flushBuffer(payload.sessionId);
+            await store.clearTerminalLog(payload.sessionId);
+            terminalManager.destroy(payload.sessionId);
+            response = { requestId: command.requestId, success: true, data: { cleared: true } };
             break;
           }
 

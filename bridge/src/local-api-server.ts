@@ -6,6 +6,7 @@ import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 import type { SessionStore } from './session-store.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
+import type { TerminalManager } from './terminal-manager.js';
 
 export interface HookPayload {
   ftown_session_id: string;
@@ -60,6 +61,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private store: SessionStore | null = null;
   private runner: ProcessRunner | null = null;
   private centrifugo: CentrifugoClient | null = null;
+  private terminalManager: TerminalManager | null = null;
   private userId: string = '';
 
   setDependencies(
@@ -67,11 +69,13 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     runner: ProcessRunner,
     centrifugo: CentrifugoClient,
     userId: string,
+    terminalManager?: TerminalManager,
   ): void {
     this.store = store;
     this.runner = runner;
     this.centrifugo = centrifugo;
     this.userId = userId;
+    this.terminalManager = terminalManager ?? null;
   }
 
   async start(): Promise<number> {
@@ -203,12 +207,41 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       const offset = getQueryInt(url, 'offset', 0);
       const limit = getQueryInt(url, 'limit', 1000);
 
+      if (this.terminalManager && this.terminalManager.has(sessionId)) {
+        const screen = this.terminalManager.getScreen(sessionId, offset, limit);
+        jsonResponse(res, 200, screen);
+        return;
+      }
+
       const log = await this.store.loadTerminalLog(sessionId);
+      if (!log || log.length === 0) {
+        jsonResponse(res, 200, { lines: [], totalLines: 0, offset, limit });
+        return;
+      }
+
       const allLines = log.split('\n');
       const totalLines = allLines.length;
       const lines = allLines.slice(offset, offset + limit);
 
       jsonResponse(res, 200, { lines, totalLines, offset, limit });
+      return;
+    }
+
+    // DELETE /api/sessions/:id/screen
+    if (sessionScreenMatch && req.method === 'DELETE') {
+      const sessionId = sessionScreenMatch[1];
+      const session = await this.store.loadSession(sessionId);
+      if (!session) {
+        jsonResponse(res, 404, { error: 'Session not found' });
+        return;
+      }
+
+      await this.store.clearTerminalLog(sessionId);
+      if (this.terminalManager && this.terminalManager.has(sessionId)) {
+        this.terminalManager.destroy(sessionId);
+      }
+
+      jsonResponse(res, 200, { cleared: true });
       return;
     }
 
@@ -236,6 +269,11 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         regex = new RegExp(pattern, 'i');
       } catch {
         jsonResponse(res, 400, { error: 'Invalid regex pattern' });
+        return;
+      }
+
+      if (this.terminalManager && this.terminalManager.has(sessionId)) {
+        jsonResponse(res, 200, this.terminalManager.grep(sessionId, pattern, offset, limit));
         return;
       }
 
