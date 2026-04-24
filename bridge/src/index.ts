@@ -254,6 +254,12 @@ program
               userId, sessionId,
               (sid, data) => { runner.write(sid, data); },
               (sid, cols, rows) => { runner.resize(sid, cols, rows); },
+              (sid) => {
+                const screen = terminalManager.getScreen(sid, 0, 1000);
+                centrifugo.publishTerminalScreen(userId, sid, screen.lines).catch((err) => {
+                  console.error(`[Bridge] Failed to publish terminal screen for ${sid}:`, err);
+                });
+              },
             );
 
             response = { requestId: command.requestId, success: true, data: { session } };
@@ -339,6 +345,12 @@ program
               userId, existingSession.id,
               (sid, data) => { runner.write(sid, data); },
               (sid, cols, rows) => { runner.resize(sid, cols, rows); },
+              (sid) => {
+                const screen = terminalManager.getScreen(sid, 0, 1000);
+                centrifugo.publishTerminalScreen(userId, sid, screen.lines).catch((err) => {
+                  console.error(`[Bridge] Failed to publish terminal screen for ${sid}:`, err);
+                });
+              },
             );
 
             response = { requestId: command.requestId, success: true, data: { session: existingSession } };

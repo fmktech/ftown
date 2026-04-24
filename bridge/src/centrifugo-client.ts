@@ -8,6 +8,7 @@ import type { Command, CommandResponse, Session, BridgePresenceInfo } from './ty
 
 type TerminalInputHandler = (sessionId: string, data: string) => void;
 type TerminalResizeHandler = (sessionId: string, cols: number, rows: number) => void;
+type TerminalInitHandler = (sessionId: string) => void;
 
 type CommandHandler = (command: Command) => void;
 
@@ -128,6 +129,7 @@ export class CentrifugoClient {
     sessionId: string,
     onInput: TerminalInputHandler,
     onResize: TerminalResizeHandler,
+    onInit?: TerminalInitHandler,
   ): void {
     const channel = `terminal-input:${sessionId}#${userId}`;
     if (this.subscriptions.has(channel)) {
@@ -143,6 +145,9 @@ export class CentrifugoClient {
       }
       if (msg.type === 'resize' && msg.cols !== undefined && msg.rows !== undefined) {
         onResize(sessionId, msg.cols, msg.rows);
+      }
+      if (msg.type === 'init' && onInit) {
+        onInit(sessionId);
       }
     });
 
@@ -216,6 +221,19 @@ export class CentrifugoClient {
 
     sub.subscribe();
     this.subscriptions.set(channel, sub);
+  }
+
+  async publishTerminalScreen(userId: string, sessionId: string, lines: string[]): Promise<void> {
+    const channel = `terminal:${sessionId}#${userId}`;
+    try {
+      await this.client.publish(channel, {
+        type: 'screen_dump',
+        lines,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.error(`[Centrifugo] Failed to publish terminal screen to ${channel}:`, err);
+    }
   }
 
   async publishHookEvent(userId: string, sessionId: string, event: Record<string, unknown>): Promise<void> {
