@@ -255,7 +255,13 @@ program
               (sid, data) => { runner.write(sid, data); },
               (sid, cols, rows) => { runner.resize(sid, cols, rows); },
               (sid) => {
-                const raw = terminalManager.serialize(sid);
+                const MAX_BYTES = 400_000;
+                let scrollback = 5000;
+                let raw = terminalManager.serialize(sid, scrollback);
+                while (raw && Buffer.byteLength(raw, 'utf8') > MAX_BYTES && scrollback > 100) {
+                  scrollback = Math.floor(scrollback / 2);
+                  raw = terminalManager.serialize(sid, scrollback);
+                }
                 if (!raw) return;
                 centrifugo.publishTerminalScreen(userId, sid, raw).catch((err) => {
                   console.error(`[Bridge] Failed to publish terminal screen for ${sid}:`, err);
@@ -347,7 +353,13 @@ program
               (sid, data) => { runner.write(sid, data); },
               (sid, cols, rows) => { runner.resize(sid, cols, rows); },
               (sid) => {
-                const raw = terminalManager.serialize(sid);
+                const MAX_BYTES = 400_000;
+                let scrollback = 5000;
+                let raw = terminalManager.serialize(sid, scrollback);
+                while (raw && Buffer.byteLength(raw, 'utf8') > MAX_BYTES && scrollback > 100) {
+                  scrollback = Math.floor(scrollback / 2);
+                  raw = terminalManager.serialize(sid, scrollback);
+                }
                 if (!raw) return;
                 centrifugo.publishTerminalScreen(userId, sid, raw).catch((err) => {
                   console.error(`[Bridge] Failed to publish terminal screen for ${sid}:`, err);
