@@ -1,4 +1,5 @@
-import { Terminal } from '@xterm/headless';
+import xtermHeadless, { type Terminal as TerminalType } from '@xterm/headless';
+const { Terminal } = xtermHeadless;
 
 export interface ScreenData {
   lines: string[];
@@ -20,7 +21,7 @@ export interface GrepResult {
 }
 
 interface ManagedTerminal {
-  terminal: Terminal;
+  terminal: TerminalType;
   rawBuffer: string;
 }
 
@@ -61,6 +62,12 @@ export class TerminalManager {
     const data = managed.rawBuffer;
     managed.rawBuffer = '';
     return data;
+  }
+
+  getRawBuffer(sessionId: string): string {
+    const managed = this.terminals.get(sessionId);
+    if (!managed) return '';
+    return managed.rawBuffer;
   }
 
   getScreen(sessionId: string, offset = 0, limit = 1000): ScreenData {

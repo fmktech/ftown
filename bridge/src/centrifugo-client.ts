@@ -223,12 +223,12 @@ export class CentrifugoClient {
     this.subscriptions.set(channel, sub);
   }
 
-  async publishTerminalScreen(userId: string, sessionId: string, lines: string[]): Promise<void> {
+  async publishTerminalScreen(userId: string, sessionId: string, raw: string): Promise<void> {
     const channel = `terminal:${sessionId}#${userId}`;
     try {
       await this.client.publish(channel, {
         type: 'screen_dump',
-        lines,
+        raw,
         timestamp: new Date().toISOString(),
       });
     } catch (err) {

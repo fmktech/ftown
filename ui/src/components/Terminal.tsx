@@ -264,13 +264,17 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
 
     const outputSub = client.newSubscription(outputChannel);
     outputSub.on("publication", (ctx) => {
-      const msg = ctx.data as { type: string; data?: string; lines?: string[] };
+      const msg = ctx.data as { type: string; data?: string; raw?: string; lines?: string[] };
       if (msg.type === "output" && msg.data) {
         term.write(msg.data);
       }
-      if (msg.type === "screen_dump" && msg.lines) {
+      if (msg.type === "screen_dump") {
         term.reset();
-        term.write(msg.lines.join("\r\n"));
+        if (msg.raw) {
+          term.write(msg.raw);
+        } else if (msg.lines) {
+          term.write(msg.lines.join("\r\n"));
+        }
       }
     });
     outputSub.on("subscribed", () => {
