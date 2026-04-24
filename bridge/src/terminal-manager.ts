@@ -1,5 +1,7 @@
 import xtermHeadless, { type Terminal as TerminalType } from '@xterm/headless';
+import serializeAddon from '@xterm/addon-serialize';
 const { Terminal } = xtermHeadless;
+const { SerializeAddon } = serializeAddon;
 
 export interface ScreenData {
   lines: string[];
@@ -22,6 +24,7 @@ export interface GrepResult {
 
 interface ManagedTerminal {
   terminal: TerminalType;
+  serializer: InstanceType<typeof SerializeAddon>;
   rawBuffer: string;
 }
 
@@ -44,7 +47,9 @@ export class TerminalManager {
         scrollback: this.scrollback,
         allowProposedApi: true,
       });
-      managed = { terminal, rawBuffer: '' };
+      const serializer = new SerializeAddon();
+      terminal.loadAddon(serializer);
+      managed = { terminal, serializer, rawBuffer: '' };
       this.terminals.set(sessionId, managed);
     }
     return managed;
@@ -68,6 +73,12 @@ export class TerminalManager {
     const managed = this.terminals.get(sessionId);
     if (!managed) return '';
     return managed.rawBuffer;
+  }
+
+  serialize(sessionId: string, scrollback?: number): string {
+    const managed = this.terminals.get(sessionId);
+    if (!managed) return '';
+    return managed.serializer.serialize({ scrollback });
   }
 
   getScreen(sessionId: string, offset = 0, limit = 1000): ScreenData {

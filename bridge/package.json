@@ -1,6 +1,6 @@
 {
   "name": "ftown-bridge",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "CLI bridge for ftown — generic PTY-over-Centrifugo relay",
   "type": "module",
   "main": "dist/index.js",
@@ -35,6 +35,7 @@
     "directory": "bridge"
   },
   "dependencies": {
+    "@xterm/addon-serialize": "^0.14.0",
     "@xterm/headless": "^6.0.0",
     "centrifuge": "^5.2.2",
     "commander": "^13.1.0",
