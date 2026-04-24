@@ -77,6 +77,7 @@ function getZaiDefaultEnv(token: string): Record<string, string> {
     ANTHROPIC_DEFAULT_OPUS_MODEL: "GLM-5.1",
     ANTHROPIC_DEFAULT_SONNET_MODEL: "GLM-5-Turbo",
     API_TIMEOUT_MS: "3000000",
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: "200000",
   };
 }
 
@@ -85,6 +86,7 @@ function getKimiDefaultEnv(token: string): Record<string, string> {
     ANTHROPIC_API_KEY: token,
     ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/",
     API_TIMEOUT_MS: "3000000",
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: "256000",
   };
 }
 
@@ -96,6 +98,7 @@ function getDeepseekDefaultEnv(token: string): Record<string, string> {
     ANTHROPIC_DEFAULT_SONNET_MODEL: "deepseek-v4-pro",
     ANTHROPIC_DEFAULT_HAIKU_MODEL: "deepseek-v4-flash",
     API_TIMEOUT_MS: "3000000",
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: "1000000",
   };
 }
 
