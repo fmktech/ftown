@@ -263,7 +263,8 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     }
 
     const outputSub = client.newSubscription(outputChannel, {
-      since: { offset: 0, epoch: "" },
+      since: { offset: 0 },
+      recoverable: true,
     });
     let lastOutputOffset = -1;
     outputSub.on("publication", (ctx) => {
