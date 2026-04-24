@@ -25,6 +25,7 @@ interface NewSessionModalProps {
 
 const ZAI_TOKEN_KEY = "ftown:zaiToken";
 const KIMI_TOKEN_KEY = "ftown:kimiToken";
+const DEEPSEEK_TOKEN_KEY = "ftown:deepseekToken";
 
 function getStoredZaiToken(): string {
   if (typeof window === "undefined") return "";
@@ -54,6 +55,20 @@ function setStoredKimiToken(token: string): void {
   localStorage.setItem(KIMI_TOKEN_KEY, token);
 }
 
+function getStoredDeepseekToken(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return localStorage.getItem(DEEPSEEK_TOKEN_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function setStoredDeepseekToken(token: string): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(DEEPSEEK_TOKEN_KEY, token);
+}
+
 function getZaiDefaultEnv(token: string): Record<string, string> {
   return {
     ANTHROPIC_AUTH_TOKEN: token,
@@ -69,6 +84,17 @@ function getKimiDefaultEnv(token: string): Record<string, string> {
   return {
     ANTHROPIC_API_KEY: token,
     ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/",
+    API_TIMEOUT_MS: "3000000",
+  };
+}
+
+function getDeepseekDefaultEnv(token: string): Record<string, string> {
+  return {
+    ANTHROPIC_API_KEY: token,
+    ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic",
+    ANTHROPIC_DEFAULT_OPUS_MODEL: "deepseek-v4-pro",
+    ANTHROPIC_DEFAULT_SONNET_MODEL: "deepseek-v4-pro",
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: "deepseek-v4-flash",
     API_TIMEOUT_MS: "3000000",
   };
 }
@@ -100,6 +126,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const [selectedClaudeSummary, setSelectedClaudeSummary] = useState<string | null>(null);
   const [zaiToken, setZaiToken] = useState("");
   const [kimiToken, setKimiToken] = useState("");
+  const [deepseekToken, setDeepseekToken] = useState("");
 
   const effectiveBridgeId = bridgeId || (bridges.length > 0 ? bridges[0].bridgeId : "");
   const selectedBridge = bridges.find((b) => b.bridgeId === effectiveBridgeId);
@@ -122,6 +149,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       setSelectedClaudeSummary(null);
       setZaiToken(getStoredZaiToken());
       setKimiToken(getStoredKimiToken());
+      setDeepseekToken(getStoredDeepseekToken());
     }
   }, [isOpen, defaults]);
 
@@ -140,6 +168,10 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       const trimmedToken = kimiToken.trim();
       if (trimmedToken) setStoredKimiToken(trimmedToken);
       env = { ...getStoredEnvVars(), ...getKimiDefaultEnv(trimmedToken) };
+    } else if (shellType === "deepseek") {
+      const trimmedToken = deepseekToken.trim();
+      if (trimmedToken) setStoredDeepseekToken(trimmedToken);
+      env = { ...getStoredEnvVars(), ...getDeepseekDefaultEnv(trimmedToken) };
     } else {
       const storedEnv = getStoredEnvVars();
       env = Object.keys(storedEnv).length > 0 ? storedEnv : undefined;
@@ -162,7 +194,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setSelectedClaudeSessionId(null);
     setSelectedClaudeSummary(null);
     onClose();
-  }, [shellType, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, zaiToken, kimiToken, onSubmit, onClose]);
+  }, [shellType, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, zaiToken, kimiToken, deepseekToken, onSubmit, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -253,6 +285,20 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
               </button>
               <button
                 type="button"
+                onClick={() => setShellType("deepseek")}
+                className="px-4 py-2 text-sm font-mono transition-colors"
+                style={{
+                  background: shellType === "deepseek" ? "#00ff88" : "#0a0a0a",
+                  color: shellType === "deepseek" ? "#0a0a0a" : "#888888",
+                  border: `1px solid ${shellType === "deepseek" ? "#00ff88" : "#2a2a2a"}`,
+                  borderRight: "none",
+                  fontWeight: shellType === "deepseek" ? 700 : 400,
+                }}
+              >
+                deepseek
+              </button>
+              <button
+                type="button"
                 onClick={() => setShellType("shell")}
                 className="px-4 py-2 text-sm font-mono transition-colors"
                 style={{
@@ -290,6 +336,21 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                   value={kimiToken}
                   onChange={(e) => setKimiToken(e.target.value)}
                   placeholder="Enter your Kimi API token"
+                  className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] font-mono"
+                  onKeyDown={handleKeyDown}
+                  autoComplete="new-password"
+                />
+              </div>
+            )}
+
+            {shellType === "deepseek" && (
+              <div className="mt-3">
+                <label className="block text-sm text-[#888888] mb-1">DeepSeek API Token</label>
+                <input
+                  type="password"
+                  value={deepseekToken}
+                  onChange={(e) => setDeepseekToken(e.target.value)}
+                  placeholder="Enter your DeepSeek API token"
                   className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] font-mono"
                   onKeyDown={handleKeyDown}
                   autoComplete="new-password"

@@ -11,9 +11,9 @@ import { promisify } from 'node:util';
 import { CentrifugoClient } from './centrifugo-client.js';
 import { ProcessRunner } from './claude-runner.js';
 import { SessionStore } from './session-store.js';
-import { HookServer } from './hook-server.js';
+import { LocalApiServer } from './local-api-server.js';
 
-import type { HookEvent } from './hook-server.js';
+import type { HookEvent } from './local-api-server.js';
 
 import type {
   BridgeExecPayload,
@@ -124,9 +124,10 @@ program
 
     const runner = new ProcessRunner();
     const centrifugo = new CentrifugoClient(centrifugoUrl, auth.token, getToken);
-    const hookServer = new HookServer();
-    const hookPort = await hookServer.start();
-    console.log(`[Bridge] Hook server started on port ${hookPort}`);
+    const localApiServer = new LocalApiServer();
+    const hookPort = await localApiServer.start();
+    console.log(`[Bridge] Local API server started on port ${hookPort}`);
+    localApiServer.setDependencies(store, runner, centrifugo, userId);
 
     const outputBuffers = new Map<string, string>();
     const flushTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -190,7 +191,7 @@ program
       }
     });
 
-    hookServer.on('event', (hookEvent: HookEvent) => {
+    localApiServer.on('event', (hookEvent: HookEvent) => {
       centrifugo.publishHookEvent(userId, hookEvent.sessionId, {
         type: 'hook_event',
         eventName: hookEvent.eventName,
@@ -439,7 +440,7 @@ program
 
     const shutdown = (): void => {
       console.log('\n[Bridge] Shutting down...');
-      hookServer.stop();
+      localApiServer.stop();
       runner.stopAll();
       centrifugo.disconnect();
       process.exit(0);

@@ -1,6 +1,6 @@
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error' | 'disconnected';
 
-export type ShellType = 'claude' | 'shell' | 'zai' | 'kimi' | 'opencode';
+export type ShellType = 'claude' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek';
 
 export interface Session {
   id: string;
