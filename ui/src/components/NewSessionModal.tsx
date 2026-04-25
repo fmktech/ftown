@@ -119,10 +119,30 @@ function storePath(hostname: string, path: string): void {
   localStorage.setItem(`ftown:paths:${hostname}`, JSON.stringify(updated));
 }
 
+type TopShell = "claude" | "opencode" | "shell";
+type ClaudeFlavor = "standard" | "zai" | "kimi" | "deepseek";
+
+function shellTypeToTop(s: ShellType | undefined): { top: TopShell; flavor: ClaudeFlavor } {
+  if (s === "opencode") return { top: "opencode", flavor: "standard" };
+  if (s === "shell") return { top: "shell", flavor: "standard" };
+  if (s === "zai") return { top: "claude", flavor: "zai" };
+  if (s === "kimi") return { top: "claude", flavor: "kimi" };
+  if (s === "deepseek") return { top: "claude", flavor: "deepseek" };
+  return { top: "claude", flavor: "standard" };
+}
+
+function resolveShellType(top: TopShell, flavor: ClaudeFlavor): ShellType {
+  if (top !== "claude") return top;
+  if (flavor === "standard") return "claude";
+  return flavor;
+}
+
 export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, bridgeExec }: NewSessionModalProps) {
   const [name, setName] = useState("");
   const [workingDir, setWorkingDir] = useState("");
-  const [shellType, setShellType] = useState<ShellType>("claude");
+  const [topShell, setTopShell] = useState<TopShell>("claude");
+  const [claudeFlavor, setClaudeFlavor] = useState<ClaudeFlavor>("standard");
+  const shellType: ShellType = resolveShellType(topShell, claudeFlavor);
   const [bridgeId, setBridgeId] = useState("");
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedClaudeSessionId, setSelectedClaudeSessionId] = useState<string | null>(null);
@@ -146,7 +166,9 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     if (isOpen && defaults) {
       setName(defaults.name ?? "");
       setWorkingDir(defaults.workingDir ?? "");
-      setShellType(defaults.shellType ?? "claude");
+      const { top, flavor } = shellTypeToTop(defaults.shellType ?? "claude");
+      setTopShell(top);
+      setClaudeFlavor(flavor);
       setBridgeId(defaults.bridgeId ?? "");
       setSelectedClaudeSessionId(null);
       setSelectedClaudeSummary(null);
@@ -191,7 +213,8 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
 
     setName("");
     setWorkingDir("");
-    setShellType("claude");
+    setTopShell("claude");
+    setClaudeFlavor("standard");
     setBridgeId("");
     setShowSuggestions(false);
     setSelectedClaudeSessionId(null);
@@ -231,90 +254,85 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
             <div className="flex gap-0">
               <button
                 type="button"
-                onClick={() => setShellType("claude")}
+                onClick={() => setTopShell("claude")}
                 className="px-4 py-2 text-sm font-mono transition-colors"
                 style={{
-                  background: shellType === "claude" ? "#00ff88" : "#0a0a0a",
-                  color: shellType === "claude" ? "#0a0a0a" : "#888888",
-                  border: `1px solid ${shellType === "claude" ? "#00ff88" : "#2a2a2a"}`,
+                  background: topShell === "claude" ? "#00ff88" : "#0a0a0a",
+                  color: topShell === "claude" ? "#0a0a0a" : "#888888",
+                  border: `1px solid ${topShell === "claude" ? "#00ff88" : "#2a2a2a"}`,
                   borderRight: "none",
                   borderRadius: "4px 0 0 4px",
-                  fontWeight: shellType === "claude" ? 700 : 400,
+                  fontWeight: topShell === "claude" ? 700 : 400,
                 }}
               >
                 Claude
               </button>
               <button
                 type="button"
-                onClick={() => setShellType("zai")}
+                onClick={() => setTopShell("opencode")}
                 className="px-4 py-2 text-sm font-mono transition-colors"
                 style={{
-                  background: shellType === "zai" ? "#00ff88" : "#0a0a0a",
-                  color: shellType === "zai" ? "#0a0a0a" : "#888888",
-                  border: `1px solid ${shellType === "zai" ? "#00ff88" : "#2a2a2a"}`,
+                  background: topShell === "opencode" ? "#00ff88" : "#0a0a0a",
+                  color: topShell === "opencode" ? "#0a0a0a" : "#888888",
+                  border: `1px solid ${topShell === "opencode" ? "#00ff88" : "#2a2a2a"}`,
                   borderRight: "none",
-                  fontWeight: shellType === "zai" ? 700 : 400,
-                }}
-              >
-                z.ai
-              </button>
-              <button
-                type="button"
-                onClick={() => setShellType("kimi")}
-                className="px-4 py-2 text-sm font-mono transition-colors"
-                style={{
-                  background: shellType === "kimi" ? "#00ff88" : "#0a0a0a",
-                  color: shellType === "kimi" ? "#0a0a0a" : "#888888",
-                  border: `1px solid ${shellType === "kimi" ? "#00ff88" : "#2a2a2a"}`,
-                  borderRight: "none",
-                  fontWeight: shellType === "kimi" ? 700 : 400,
-                }}
-              >
-                Kimi
-              </button>
-              <button
-                type="button"
-                onClick={() => setShellType("opencode")}
-                className="px-4 py-2 text-sm font-mono transition-colors"
-                style={{
-                  background: shellType === "opencode" ? "#00ff88" : "#0a0a0a",
-                  color: shellType === "opencode" ? "#0a0a0a" : "#888888",
-                  border: `1px solid ${shellType === "opencode" ? "#00ff88" : "#2a2a2a"}`,
-                  borderRight: "none",
-                  fontWeight: shellType === "opencode" ? 700 : 400,
+                  fontWeight: topShell === "opencode" ? 700 : 400,
                 }}
               >
                 opencode
               </button>
               <button
                 type="button"
-                onClick={() => setShellType("deepseek")}
+                onClick={() => setTopShell("shell")}
                 className="px-4 py-2 text-sm font-mono transition-colors"
                 style={{
-                  background: shellType === "deepseek" ? "#00ff88" : "#0a0a0a",
-                  color: shellType === "deepseek" ? "#0a0a0a" : "#888888",
-                  border: `1px solid ${shellType === "deepseek" ? "#00ff88" : "#2a2a2a"}`,
-                  borderRight: "none",
-                  fontWeight: shellType === "deepseek" ? 700 : 400,
-                }}
-              >
-                deepseek
-              </button>
-              <button
-                type="button"
-                onClick={() => setShellType("shell")}
-                className="px-4 py-2 text-sm font-mono transition-colors"
-                style={{
-                  background: shellType === "shell" ? "#00ff88" : "#0a0a0a",
-                  color: shellType === "shell" ? "#0a0a0a" : "#888888",
-                  border: `1px solid ${shellType === "shell" ? "#00ff88" : "#2a2a2a"}`,
+                  background: topShell === "shell" ? "#00ff88" : "#0a0a0a",
+                  color: topShell === "shell" ? "#0a0a0a" : "#888888",
+                  border: `1px solid ${topShell === "shell" ? "#00ff88" : "#2a2a2a"}`,
                   borderRadius: "0 4px 4px 0",
-                  fontWeight: shellType === "shell" ? 700 : 400,
+                  fontWeight: topShell === "shell" ? 700 : 400,
                 }}
               >
                 Shell (zsh)
               </button>
             </div>
+
+            {topShell === "claude" && (
+              <div className="mt-3">
+                <label className="block text-xs text-[#666] mb-1 uppercase tracking-wider">Flavor</label>
+                <div className="flex gap-0">
+                  {(["standard", "zai", "kimi", "deepseek"] as ClaudeFlavor[]).map((f, i, arr) => {
+                    const labels: Record<ClaudeFlavor, string> = {
+                      standard: "Standard",
+                      zai: "z.ai",
+                      kimi: "Kimi",
+                      deepseek: "DeepSeek",
+                    };
+                    const active = claudeFlavor === f;
+                    const isFirst = i === 0;
+                    const isLast = i === arr.length - 1;
+                    return (
+                      <button
+                        key={f}
+                        type="button"
+                        onClick={() => setClaudeFlavor(f)}
+                        className="px-3 py-1.5 text-xs font-mono transition-colors"
+                        style={{
+                          background: active ? "#00ff88" : "#0a0a0a",
+                          color: active ? "#0a0a0a" : "#888888",
+                          border: `1px solid ${active ? "#00ff88" : "#2a2a2a"}`,
+                          borderRight: isLast ? undefined : "none",
+                          borderRadius: isFirst ? "4px 0 0 4px" : isLast ? "0 4px 4px 0" : "0",
+                          fontWeight: active ? 700 : 400,
+                        }}
+                      >
+                        {labels[f]}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {shellType === "zai" && (
               <div className="mt-3">
