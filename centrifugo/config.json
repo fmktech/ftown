@@ -74,7 +74,7 @@
     }
   ],
   "client_channel_limit": 256,
-  "websocket_message_size_limit": 524288,
+  "websocket_message_size_limit": 4194304,
   "ping_interval": "10s",
   "pong_timeout": "5s",
   "log_level": "info"
