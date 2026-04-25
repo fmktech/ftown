@@ -253,7 +253,26 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       inputSubRef.current = null;
     }
 
-    // Subscribe to terminal output
+    // Subscribe to terminal input channel FIRST so we can publish resize
+    // before the output subscription's presence-join triggers a screen dump.
+    const inputChannel = `terminal-input:${sessionId}#${userId}`;
+    const existingIn = client.getSubscription(inputChannel);
+    if (existingIn) {
+      existingIn.removeAllListeners();
+      existingIn.unsubscribe();
+      client.removeSubscription(existingIn);
+    }
+
+    const inputSub = client.newSubscription(inputChannel);
+    inputSub.on("subscribed", () => {
+      inputSub.publish({ type: "resize", cols: term.cols, rows: term.rows });
+    });
+    inputSub.subscribe();
+    inputSubRef.current = inputSub;
+
+    // Subscribe to terminal output AFTER input. On subscribed, request init
+    // dump — bridge will have already processed our resize on the input
+    // channel, so the dump renders at the client's cols.
     const outputChannel = `terminal:${sessionId}#${userId}`;
     const existingOut = client.getSubscription(outputChannel);
     if (existingOut) {
@@ -279,27 +298,11 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     });
     outputSub.on("subscribed", () => {
       if (inputSubRef.current) {
-        inputSubRef.current.publish({ type: "resize", cols: term.cols, rows: term.rows });
+        inputSubRef.current.publish({ type: "init" });
       }
     });
     outputSub.subscribe();
     outputSubRef.current = outputSub;
-
-    // Subscribe to terminal input channel
-    const inputChannel = `terminal-input:${sessionId}#${userId}`;
-    const existingIn = client.getSubscription(inputChannel);
-    if (existingIn) {
-      existingIn.removeAllListeners();
-      existingIn.unsubscribe();
-      client.removeSubscription(existingIn);
-    }
-
-    const inputSub = client.newSubscription(inputChannel);
-    inputSub.subscribe();
-    inputSubRef.current = inputSub;
-
-    // Request current terminal screen from bridge's headless xterm
-    inputSub.publish({ type: "init" });
 
     // Wire xterm input to centrifugo
     const dataDisposable = term.onData((data) => {

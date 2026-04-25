@@ -133,6 +133,25 @@ program
     console.log(`[Bridge] Local API server started on port ${hookPort}`);
     localApiServer.setDependencies(store, runner, centrifugo, userId, terminalManager);
 
+    function publishScreenDump(sid: string): void {
+      const MAX_BYTES = 3_500_000;
+      let scrollback = 20000;
+      let raw = terminalManager.serialize(sid, scrollback);
+      while (raw && Buffer.byteLength(raw, 'utf8') > MAX_BYTES && scrollback > 100) {
+        scrollback = Math.floor(scrollback / 2);
+        raw = terminalManager.serialize(sid, scrollback);
+      }
+      if (!raw) return;
+      centrifugo.publishTerminalScreen(userId, sid, raw).catch((err) => {
+        console.error(`[Bridge] Failed to publish terminal screen for ${sid}:`, err);
+      });
+    }
+
+    function handleClientResize(sid: string, cols: number, rows: number): void {
+      runner.resize(sid, cols, rows);
+      terminalManager.resize(sid, cols, rows);
+    }
+
     const outputBuffers = new Map<string, string>();
     const flushTimers = new Map<string, ReturnType<typeof setTimeout>>();
     const FLUSH_INTERVAL_MS = 16;
@@ -254,20 +273,8 @@ program
             centrifugo.subscribeToTerminalInput(
               userId, sessionId,
               (sid, data) => { runner.write(sid, data); },
-              (sid, cols, rows) => { runner.resize(sid, cols, rows); },
-              (sid) => {
-                const MAX_BYTES = 3_500_000;
-                let scrollback = 20000;
-                let raw = terminalManager.serialize(sid, scrollback);
-                while (raw && Buffer.byteLength(raw, 'utf8') > MAX_BYTES && scrollback > 100) {
-                  scrollback = Math.floor(scrollback / 2);
-                  raw = terminalManager.serialize(sid, scrollback);
-                }
-                if (!raw) return;
-                centrifugo.publishTerminalScreen(userId, sid, raw).catch((err) => {
-                  console.error(`[Bridge] Failed to publish terminal screen for ${sid}:`, err);
-                });
-              },
+              (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
+              (sid) => { publishScreenDump(sid); },
             );
 
             response = { requestId: command.requestId, success: true, data: { session } };
@@ -353,20 +360,8 @@ program
             centrifugo.subscribeToTerminalInput(
               userId, existingSession.id,
               (sid, data) => { runner.write(sid, data); },
-              (sid, cols, rows) => { runner.resize(sid, cols, rows); },
-              (sid) => {
-                const MAX_BYTES = 3_500_000;
-                let scrollback = 20000;
-                let raw = terminalManager.serialize(sid, scrollback);
-                while (raw && Buffer.byteLength(raw, 'utf8') > MAX_BYTES && scrollback > 100) {
-                  scrollback = Math.floor(scrollback / 2);
-                  raw = terminalManager.serialize(sid, scrollback);
-                }
-                if (!raw) return;
-                centrifugo.publishTerminalScreen(userId, sid, raw).catch((err) => {
-                  console.error(`[Bridge] Failed to publish terminal screen for ${sid}:`, err);
-                });
-              },
+              (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
+              (sid) => { publishScreenDump(sid); },
             );
 
             response = { requestId: command.requestId, success: true, data: { session: existingSession } };
