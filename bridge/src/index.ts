@@ -237,6 +237,7 @@ program
               shellType: payload.shellType,
               model: payload.model,
               claudeSessionId: payload.claudeSessionId,
+              env: payload.env,
             };
 
             await store.saveSession(session);
@@ -255,8 +256,8 @@ program
               (sid, data) => { runner.write(sid, data); },
               (sid, cols, rows) => { runner.resize(sid, cols, rows); },
               (sid) => {
-                const MAX_BYTES = 400_000;
-                let scrollback = 5000;
+                const MAX_BYTES = 3_500_000;
+                let scrollback = 20000;
                 let raw = terminalManager.serialize(sid, scrollback);
                 while (raw && Buffer.byteLength(raw, 'utf8') > MAX_BYTES && scrollback > 100) {
                   scrollback = Math.floor(scrollback / 2);
@@ -345,6 +346,7 @@ program
 
             runner.run(existingSession.id, existingSession.command, {
               workingDir: existingSession.workingDir,
+              env: existingSession.env,
               hookPort,
             });
 
@@ -353,8 +355,8 @@ program
               (sid, data) => { runner.write(sid, data); },
               (sid, cols, rows) => { runner.resize(sid, cols, rows); },
               (sid) => {
-                const MAX_BYTES = 400_000;
-                let scrollback = 5000;
+                const MAX_BYTES = 3_500_000;
+                let scrollback = 20000;
                 let raw = terminalManager.serialize(sid, scrollback);
                 while (raw && Buffer.byteLength(raw, 'utf8') > MAX_BYTES && scrollback > 100) {
                   scrollback = Math.floor(scrollback / 2);

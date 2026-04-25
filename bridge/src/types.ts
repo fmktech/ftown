@@ -13,6 +13,7 @@ export interface Session {
   shellType?: ShellType;
   model?: string;
   claudeSessionId?: string;
+  env?: Record<string, string>;
 }
 
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error';
