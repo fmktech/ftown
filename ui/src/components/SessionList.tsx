@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, type ReactElement } from "react";
 import { createPortal } from "react-dom";
 import { Session, SessionStatus } from "@/types";
 import { SessionActivity } from "@/hooks/useAllSessionEvents";
@@ -14,6 +14,7 @@ interface SessionListProps {
   onRemoveSession?: (sessionId: string) => void;
   onCloneSession?: (session: Session) => void;
   onReorderSessions?: (orderedIds: string[]) => void;
+  onSetSessionParent?: (sessionId: string, parentSessionId: string | null) => void;
   sessionActivity?: Map<string, SessionActivity>;
   collapsed?: boolean;
   hiddenSessionIds?: Set<string>;
@@ -225,13 +226,14 @@ function ContextMenu({
   );
 }
 
-export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession, onStopSession, onRemoveSession, onCloneSession, onReorderSessions, sessionActivity, collapsed, hiddenSessionIds, onHideSession, onUnhideSession }: SessionListProps) {
+export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession, onStopSession, onRemoveSession, onCloneSession, onReorderSessions, onSetSessionParent, sessionActivity, collapsed, hiddenSessionIds, onHideSession, onUnhideSession }: SessionListProps) {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
-  const [dragOverPosition, setDragOverPosition] = useState<"above" | "below" | null>(null);
+  const [dragOverPosition, setDragOverPosition] = useState<"above" | "below" | "onto" | null>(null);
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
+  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
   const draggedIdRef = useRef<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -294,6 +296,16 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
     }
   }
 
+  function computeDropZone(e: React.DragEvent): "above" | "below" | "onto" {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const offset = e.clientY - rect.top;
+    const topStrip = rect.height * 0.2;
+    const bottomStrip = rect.height * 0.8;
+    if (offset < topStrip) return "above";
+    if (offset > bottomStrip) return "below";
+    return "onto";
+  }
+
   function handleDragOver(e: React.DragEvent, sessionId: string): void {
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
@@ -302,16 +314,46 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
       setDragOverPosition(null);
       return;
     }
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const midY = rect.top + rect.height / 2;
     setDragOverId(sessionId);
-    setDragOverPosition(e.clientY < midY ? "above" : "below");
+    setDragOverPosition(computeDropZone(e));
   }
 
   function handleDrop(e: React.DragEvent, targetId: string): void {
     e.preventDefault();
     const draggedId = draggedIdRef.current;
-    if (!draggedId || draggedId === targetId || !onReorderSessions) return;
+    if (!draggedId || draggedId === targetId) {
+      setDragOverId(null);
+      setDragOverPosition(null);
+      draggedIdRef.current = null;
+      return;
+    }
+
+    const zone = computeDropZone(e);
+
+    if (zone === "onto") {
+      if (onSetSessionParent) {
+        const draggedSession = sessions.find((s) => s.id === draggedId);
+        const targetSession = sessions.find((s) => s.id === targetId);
+        if (draggedSession && targetSession) {
+          const isCycle = targetSession.parentSessionId === draggedSession.id;
+          const alreadyChild = draggedSession.parentSessionId === targetSession.id;
+          if (!isCycle && !alreadyChild) {
+            onSetSessionParent(draggedId, targetId);
+          }
+        }
+      }
+      setDragOverId(null);
+      setDragOverPosition(null);
+      draggedIdRef.current = null;
+      return;
+    }
+
+    if (!onReorderSessions) {
+      setDragOverId(null);
+      setDragOverPosition(null);
+      draggedIdRef.current = null;
+      return;
+    }
 
     const ids = sessions.map((s) => s.id);
     const fromIdx = ids.indexOf(draggedId);
@@ -319,9 +361,7 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
     if (fromIdx === -1 || toIdx === -1) return;
 
     ids.splice(fromIdx, 1);
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const midY = rect.top + rect.height / 2;
-    const insertIdx = e.clientY < midY ? ids.indexOf(targetId) : ids.indexOf(targetId) + 1;
+    const insertIdx = zone === "above" ? ids.indexOf(targetId) : ids.indexOf(targetId) + 1;
     ids.splice(insertIdx, 0, draggedId);
     onReorderSessions(ids);
 
@@ -331,6 +371,32 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
   }
 
   const sessionListToRender = visibleSessions;
+
+  const visibleIdSet = new Set(sessionListToRender.map((s) => s.id));
+  const childrenByParent = new Map<string, Session[]>();
+  const rootSessions: Session[] = [];
+  for (const s of sessionListToRender) {
+    const pid = s.parentSessionId;
+    if (pid && visibleIdSet.has(pid)) {
+      const arr = childrenByParent.get(pid) ?? [];
+      arr.push(s);
+      childrenByParent.set(pid, arr);
+    } else {
+      rootSessions.push(s);
+    }
+  }
+  for (const arr of childrenByParent.values()) {
+    arr.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  }
+
+  function toggleCollapsed(id: string): void {
+    setCollapsedParents((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   if (sessionListToRender.length === 0 && hiddenSessions.length === 0) {
     if (collapsed) return null;
@@ -345,13 +411,14 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
     );
   }
 
-  return (
-    <div className="flex flex-col">
-      {sessionListToRender.map((session) => {
-        const isSelected = session.id === selectedSessionId;
-        const displayName = session.name || session.prompt.slice(0, 36);
+  function renderRow(session: Session, isChild: boolean): ReactElement | null {
+    const isSelected = session.id === selectedSessionId;
+    const displayName = session.name || session.prompt.slice(0, 36);
+    const kids = childrenByParent.get(session.id);
+    const hasChildren = !isChild && !!kids && kids.length > 0;
+    const isCollapsedParent = collapsedParents.has(session.id);
 
-        if (collapsed) {
+    if (collapsed) {
           const act = sessionActivity?.get(session.id);
           const isRunning = session.status === "running";
           const isIdle = isRunning && act?.activity === "idle";
@@ -385,7 +452,7 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
                 background: isSelected ? "var(--bg-elevated)" : "transparent",
                 cursor: "pointer",
                 transition: "background 0.12s ease, border-color 0.3s ease",
-                padding: "6px 8px",
+                padding: isChild ? "6px 8px 6px 20px" : "6px 8px",
                 fontFamily: "var(--font-mono)",
               }}
               onMouseEnter={(e) => {
@@ -451,12 +518,17 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
             style={{
               width: "100%",
               textAlign: "left",
-              padding: "10px 16px",
+              padding: isChild ? "10px 16px 10px 32px" : "10px 16px",
               borderBottom: "1px solid var(--border-subtle)",
               borderTop: dragOverId === session.id && dragOverPosition === "above" ? "2px solid var(--accent)" : "none",
               ...(dragOverId === session.id && dragOverPosition === "below" ? { borderBottom: "2px solid var(--accent)" } : {}),
               borderLeft: `2px solid ${isSelected ? "var(--accent)" : "transparent"}`,
-              background: isSelected ? "var(--bg-elevated)" : "transparent",
+              background: dragOverId === session.id && dragOverPosition === "onto"
+                ? "var(--accent-dim, rgba(0, 255, 136, 0.15))"
+                : isSelected ? "var(--bg-elevated)" : "transparent",
+              boxShadow: dragOverId === session.id && dragOverPosition === "onto"
+                ? "inset 0 0 0 2px var(--accent)"
+                : "none",
               cursor: "grab",
               transition: "background 0.12s ease, border-color 0.12s ease",
               fontFamily: "var(--font-mono)",
@@ -471,6 +543,26 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
           >
             {/* Title row */}
             <div className="flex items-center justify-between gap-2 mb-1">
+              {hasChildren && (
+                <span
+                  role="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleCollapsed(session.id);
+                  }}
+                  style={{
+                    fontSize: 10,
+                    color: "var(--text-faint)",
+                    cursor: "pointer",
+                    width: 12,
+                    display: "inline-block",
+                    textAlign: "center",
+                    userSelect: "none",
+                  }}
+                >
+                  {isCollapsedParent ? "▸" : "▾"}
+                </span>
+              )}
               {editingSessionId === session.id ? (
                 <input
                   ref={inputRef}
@@ -589,6 +681,19 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
               </span>
             </div>
           </button>
+        );
+  }
+
+  return (
+    <div className="flex flex-col">
+      {rootSessions.map((session) => {
+        const kids = childrenByParent.get(session.id) ?? [];
+        const isCollapsedParent = collapsedParents.has(session.id);
+        return (
+          <div key={session.id} className="flex flex-col">
+            {renderRow(session, false)}
+            {kids.length > 0 && !isCollapsedParent && kids.map((child) => renderRow(child, true))}
+          </div>
         );
       })}
 

@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
 import { EventEmitter } from 'node:events';
+import { timingSafeEqual } from 'node:crypto';
 
 import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 
@@ -33,20 +34,50 @@ function jsonResponse(res: ServerResponse, status: number, data: unknown): void 
   res.end(JSON.stringify(data));
 }
 
+class BadRequestError extends Error {}
+
 function parseBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('end', () => {
+      const body = Buffer.concat(chunks).toString('utf-8');
+      if (!body) {
+        resolve({});
+        return;
+      }
       try {
-        const body = Buffer.concat(chunks).toString('utf-8');
-        resolve(body ? JSON.parse(body) as Record<string, unknown> : {});
-      } catch (err) {
-        reject(err);
+        resolve(JSON.parse(body) as Record<string, unknown>);
+      } catch {
+        reject(new BadRequestError('Invalid JSON body'));
       }
     });
     req.on('error', reject);
   });
+}
+
+function constantTimeEq(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, 'utf-8');
+  const bufB = Buffer.from(b, 'utf-8');
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
+
+function isLoopbackHost(hostHeader: string | undefined, expectedPort: number): boolean {
+  if (!hostHeader) return false;
+  const [host, port] = hostHeader.split(':');
+  if (port && parseInt(port, 10) !== expectedPort) return false;
+  return host === '127.0.0.1' || host === 'localhost' || host === '[::1]';
+}
+
+function extractBearer(req: IncomingMessage): string | null {
+  const auth = req.headers['authorization'];
+  if (typeof auth === 'string' && auth.startsWith('Bearer ')) {
+    return auth.slice(7).trim();
+  }
+  const header = req.headers['x-bridge-token'];
+  if (typeof header === 'string' && header) return header.trim();
+  return null;
 }
 
 function getQueryInt(url: URL, name: string, defaultValue: number): number {
@@ -63,6 +94,12 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private centrifugo: CentrifugoClient | null = null;
   private terminalManager: TerminalManager | null = null;
   private userId: string = '';
+  private authToken: string = '';
+  private port: number = 0;
+
+  setAuthToken(token: string): void {
+    this.authToken = token;
+  }
 
   setDependencies(
     store: SessionStore,
@@ -95,6 +132,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           return;
         }
         this.server = server;
+        this.port = address.port;
         console.log(`[LocalApiServer] Listening on port ${address.port}`);
         resolve(address.port);
       });
@@ -109,8 +147,28 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   }
 
   private handleRequest(req: IncomingMessage, res: ServerResponse): void {
+    if (!isLoopbackHost(req.headers.host, this.port)) {
+      jsonResponse(res, 421, { error: 'Misdirected request' });
+      return;
+    }
+
+    const origin = req.headers.origin;
+    if (typeof origin === 'string' && origin && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|$)/.test(origin)) {
+      jsonResponse(res, 403, { error: 'Forbidden origin' });
+      return;
+    }
+
     const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
     const path = url.pathname;
+
+    if (this.authToken) {
+      const presented = extractBearer(req);
+      if (!presented || !constantTimeEq(presented, this.authToken)) {
+        res.setHeader('WWW-Authenticate', 'Bearer realm="ftown-bridge"');
+        jsonResponse(res, 401, { error: 'Unauthorized' });
+        return;
+      }
+    }
 
     if (path === '/hook' && req.method === 'POST') {
       this.handleHook(req, res);
@@ -119,6 +177,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
 
     if (path.startsWith('/api/')) {
       this.handleApiRoute(req, res, path, url).catch((err) => {
+        if (err instanceof BadRequestError) {
+          jsonResponse(res, 400, { error: err.message });
+          return;
+        }
         console.error('[LocalApiServer] API route error:', err instanceof Error ? err.message : String(err));
         jsonResponse(res, 500, { error: 'Internal server error' });
       });
@@ -171,9 +233,11 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       const sessionId = sessionMatch[1];
       const body = await parseBody(req);
       const name = body.name as string | undefined;
+      const hasParentField = Object.prototype.hasOwnProperty.call(body, 'parentSessionId');
+      const rawParent = body.parentSessionId as string | null | undefined;
 
-      if (!name) {
-        jsonResponse(res, 400, { error: 'Missing name' });
+      if (name === undefined && !hasParentField) {
+        jsonResponse(res, 400, { error: 'Nothing to update' });
         return;
       }
 
@@ -183,7 +247,33 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         return;
       }
 
-      session.name = name;
+      if (name !== undefined) {
+        if (typeof name !== 'string' || !name) {
+          jsonResponse(res, 400, { error: 'Invalid name' });
+          return;
+        }
+        session.name = name;
+      }
+
+      if (hasParentField) {
+        if (rawParent === null || rawParent === '' || rawParent === undefined) {
+          session.parentSessionId = undefined;
+        } else if (typeof rawParent !== 'string') {
+          jsonResponse(res, 400, { error: 'Invalid parentSessionId' });
+          return;
+        } else if (rawParent === sessionId) {
+          jsonResponse(res, 400, { error: 'Session cannot be its own parent' });
+          return;
+        } else {
+          const proposed = await this.store.loadSession(rawParent);
+          if (!proposed) {
+            jsonResponse(res, 400, { error: 'Parent session not found' });
+            return;
+          }
+          session.parentSessionId = proposed.parentSessionId ?? proposed.id;
+        }
+      }
+
       session.updatedAt = new Date().toISOString();
       await this.store.saveSession(session);
 

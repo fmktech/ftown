@@ -17,6 +17,7 @@ interface RunOptions {
   initialInput?: string;
   initialInputDelay?: number;
   hookPort?: number;
+  hookToken?: string;
 }
 
 export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
@@ -35,6 +36,10 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
     if (options.hookPort) {
       env.FTOWN_HOOK_PORT = String(options.hookPort);
       env.FTOWN_SESSION_ID = sessionId;
+    }
+
+    if (options.hookToken) {
+      env.FTOWN_HOOK_TOKEN = options.hookToken;
     }
 
     if (options.env) {

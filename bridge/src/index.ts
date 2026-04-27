@@ -2,11 +2,13 @@
 
 import { Command as Commander } from 'commander';
 import { v4 as uuidv4 } from 'uuid';
-import { resolve, dirname } from 'node:path';
-import { hostname as osHostname } from 'node:os';
+import { resolve, dirname, join } from 'node:path';
+import { homedir, hostname as osHostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
+import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 
 import { CentrifugoClient } from './centrifugo-client.js';
 import { ProcessRunner } from './claude-runner.js';
@@ -25,6 +27,7 @@ import type {
   GetHistoryPayload,
   RemoveSessionPayload,
   RenameSessionPayload,
+  UpdateSessionParentPayload,
   Session,
   StopSessionPayload,
 } from './types.js';
@@ -129,9 +132,38 @@ program
     const runner = new ProcessRunner();
     const centrifugo = new CentrifugoClient(centrifugoUrl, auth.token, getToken);
     const localApiServer = new LocalApiServer();
+    const apiToken = randomBytes(32).toString('hex');
+    localApiServer.setAuthToken(apiToken);
     const hookPort = await localApiServer.start();
     console.log(`[Bridge] Local API server started on port ${hookPort}`);
     localApiServer.setDependencies(store, runner, centrifugo, userId, terminalManager);
+
+    const bridgeStateDir = join(homedir(), '.ftown');
+    const bridgePointerPath = join(bridgeStateDir, 'bridge.json');
+    try {
+      mkdirSync(bridgeStateDir, { recursive: true, mode: 0o700 });
+      writeFileSync(
+        bridgePointerPath,
+        JSON.stringify({
+          port: hookPort,
+          token: apiToken,
+          bridgeId,
+          pid: process.pid,
+          startedAt: new Date().toISOString(),
+        }, null, 2),
+        { mode: 0o600 },
+      );
+      console.log(`[Bridge] Wrote bridge pointer to ${bridgePointerPath}`);
+    } catch (err) {
+      console.error('[Bridge] Failed to write bridge pointer:', err);
+    }
+
+    const cleanupPointer = (): void => {
+      try { unlinkSync(bridgePointerPath); } catch { /* already gone */ }
+    };
+    process.on('exit', cleanupPointer);
+    process.on('SIGINT', () => { cleanupPointer(); process.exit(0); });
+    process.on('SIGTERM', () => { cleanupPointer(); process.exit(0); });
 
     function publishScreenDump(sid: string): void {
       const MAX_BYTES = 3_500_000;
@@ -243,6 +275,14 @@ program
           case 'create_session': {
             const payload = command.payload as CreateSessionPayload;
 
+            let parentSessionId: string | undefined;
+            if (payload.parentSessionId) {
+              const proposed = await store.loadSession(payload.parentSessionId);
+              if (proposed) {
+                parentSessionId = proposed.parentSessionId ?? proposed.id;
+              }
+            }
+
             const sessionId = uuidv4();
             const session: Session = {
               id: sessionId,
@@ -257,6 +297,7 @@ program
               model: payload.model,
               claudeSessionId: payload.claudeSessionId,
               env: payload.env,
+              parentSessionId,
             };
 
             await store.saveSession(session);
@@ -268,6 +309,7 @@ program
               initialInput: payload.initialInput,
               initialInputDelay: payload.initialInputDelay,
               hookPort,
+              hookToken: apiToken,
             });
 
             centrifugo.subscribeToTerminalInput(
@@ -355,6 +397,7 @@ program
               workingDir: existingSession.workingDir,
               env: existingSession.env,
               hookPort,
+              hookToken: apiToken,
             });
 
             centrifugo.subscribeToTerminalInput(
@@ -365,6 +408,41 @@ program
             );
 
             response = { requestId: command.requestId, success: true, data: { session: existingSession } };
+            break;
+          }
+
+          case 'update_session_parent': {
+            const payload = command.payload as UpdateSessionParentPayload;
+            if (!payload.sessionId) {
+              response = { requestId: command.requestId, success: false, error: 'Missing sessionId' };
+              break;
+            }
+
+            const target = await store.loadSession(payload.sessionId);
+            if (!target) {
+              response = { requestId: command.requestId, success: false, error: 'Session not found' };
+              break;
+            }
+
+            if (payload.parentSessionId === null || payload.parentSessionId === undefined || payload.parentSessionId === '') {
+              target.parentSessionId = undefined;
+            } else if (payload.parentSessionId === target.id) {
+              response = { requestId: command.requestId, success: false, error: 'Session cannot be its own parent' };
+              break;
+            } else {
+              const proposed = await store.loadSession(payload.parentSessionId);
+              if (!proposed) {
+                response = { requestId: command.requestId, success: false, error: 'Parent session not found' };
+                break;
+              }
+              target.parentSessionId = proposed.parentSessionId ?? proposed.id;
+            }
+
+            target.updatedAt = new Date().toISOString();
+            await store.saveSession(target);
+            await centrifugo.publishSessionUpdate(userId, target);
+
+            response = { requestId: command.requestId, success: true, data: { session: target } };
             break;
           }
 

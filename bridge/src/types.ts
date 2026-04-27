@@ -14,6 +14,7 @@ export interface Session {
   model?: string;
   claudeSessionId?: string;
   env?: Record<string, string>;
+  parentSessionId?: string;
 }
 
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error';
@@ -35,7 +36,7 @@ export interface Command {
   requestId: string;
 }
 
-export type CommandType = 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'clear_terminal';
+export type CommandType = 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'clear_terminal' | 'update_session_parent';
 
 export interface CreateSessionPayload {
   command: string;
@@ -48,6 +49,7 @@ export interface CreateSessionPayload {
   shellType?: ShellType;
   model?: string;
   claudeSessionId?: string;
+  parentSessionId?: string;
 }
 
 export interface BridgeExecPayload {
@@ -71,6 +73,11 @@ export interface RenameSessionPayload {
   name: string;
 }
 
+export interface UpdateSessionParentPayload {
+  sessionId: string;
+  parentSessionId: string | null;
+}
+
 export interface RemoveSessionPayload {
   sessionId: string;
 }
@@ -79,7 +86,7 @@ export interface ClearTerminalPayload {
   sessionId: string;
 }
 
-export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | ClearTerminalPayload | Record<string, unknown>;
+export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | ClearTerminalPayload | UpdateSessionParentPayload | Record<string, unknown>;
 
 export interface CommandResponse {
   requestId: string;

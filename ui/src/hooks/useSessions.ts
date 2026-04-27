@@ -12,6 +12,7 @@ import {
   BridgeExecPayload,
   RenameSessionPayload,
   RemoveSessionPayload,
+  UpdateSessionParentPayload,
 } from "@/types";
 
 interface SessionUpdateMessage {
@@ -38,6 +39,7 @@ interface UseSessionsResult {
   stopSession: (sessionId: string) => void;
   retrySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
+  setSessionParent: (sessionId: string, parentSessionId: string | null) => void;
   removeSession: (sessionId: string) => void;
   refreshSessions: () => void;
   bridgeExec: (command: string, workingDir: string, bridgeId: string) => Promise<BridgeExecResponse>;
@@ -236,6 +238,22 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
     [userId, publishCommand]
   );
 
+  const setSessionParent = useCallback(
+    (sessionId: string, parentSessionId: string | null) => {
+      if (!userId) return;
+
+      const payload: UpdateSessionParentPayload = { sessionId, parentSessionId };
+      const command: Command = {
+        type: "update_session_parent",
+        payload,
+        requestId: uuidv4(),
+      };
+
+      publishCommand(command);
+    },
+    [userId, publishCommand]
+  );
+
   const removeSession = useCallback(
     (sessionId: string) => {
       if (!userId) return;
@@ -300,6 +318,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
     stopSession,
     retrySession,
     renameSession,
+    setSessionParent,
     removeSession,
     refreshSessions,
     bridgeExec,

@@ -15,6 +15,7 @@ export interface Session {
   shellType?: ShellType;
   claudeSessionId?: string;
   command?: string;
+  parentSessionId?: string;
 }
 
 export type SessionMessageType = 'assistant' | 'user' | 'system' | 'tool_use' | 'tool_result';
@@ -61,7 +62,7 @@ export interface SessionMessage {
   raw?: ClaudeStreamEvent;
 }
 
-export type CommandType = 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'rename_session' | 'remove_session' | 'bridge_exec';
+export type CommandType = 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'update_session_parent';
 
 export interface Command {
   type: CommandType;
@@ -81,6 +82,7 @@ export interface CreateSessionPayload {
   env?: Record<string, string>;
   initialInput?: string;
   initialInputDelay?: number;
+  parentSessionId?: string;
 }
 
 export interface StopSessionPayload {
@@ -96,6 +98,11 @@ export interface RenameSessionPayload {
   name: string;
 }
 
+export interface UpdateSessionParentPayload {
+  sessionId: string;
+  parentSessionId: string | null;
+}
+
 export interface RemoveSessionPayload {
   sessionId: string;
 }
@@ -107,7 +114,7 @@ export interface BridgeExecPayload {
   bridgeId?: string;
 }
 
-export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | Record<string, unknown>;
+export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | UpdateSessionParentPayload | Record<string, unknown>;
 
 export interface CommandResponse {
   requestId: string;
