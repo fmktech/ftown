@@ -26,6 +26,57 @@ interface NewSessionModalProps {
 const ZAI_TOKEN_KEY = "ftown:zaiToken";
 const KIMI_TOKEN_KEY = "ftown:kimiToken";
 const DEEPSEEK_TOKEN_KEY = "ftown:deepseekToken";
+const FIREWORKS_TOKEN_KEY = "ftown:fireworksToken";
+const FIREWORKS_MODELS_KEY = "ftown:fireworksModels";
+
+const FIREWORKS_MODEL_OPTIONS = [
+  "accounts/fireworks/models/deepseek-v4-pro",
+  "accounts/fireworks/models/kimi-k2p6",
+  "accounts/fireworks/models/minimax-m2p7",
+  "accounts/fireworks/models/qwen3p6-plus",
+  "accounts/fireworks/models/glm-5p1",
+  "accounts/fireworks/models/gpt-oss-120b",
+] as const;
+
+interface FireworksModels {
+  opus: string;
+  sonnet: string;
+  haiku: string;
+}
+
+const FIREWORKS_DEFAULT_MODELS: FireworksModels = {
+  opus: "accounts/fireworks/models/kimi-k2p6",
+  sonnet: "accounts/fireworks/models/deepseek-v4-pro",
+  haiku: "accounts/fireworks/models/gpt-oss-120b",
+};
+
+const AUTO_COMPACT_WINDOW_KEY = "ftown:autoCompactWindow";
+
+const FLAVOR_AUTO_COMPACT_DEFAULTS: Record<"standard" | "zai" | "kimi" | "deepseek" | "fireworks", string> = {
+  standard: "",
+  zai: "200000",
+  kimi: "256000",
+  deepseek: "1000000",
+  fireworks: "200000",
+};
+
+function getStoredAutoCompactWindow(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return localStorage.getItem(AUTO_COMPACT_WINDOW_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function setStoredAutoCompactWindow(value: string): void {
+  if (typeof window === "undefined") return;
+  if (value) {
+    localStorage.setItem(AUTO_COMPACT_WINDOW_KEY, value);
+  } else {
+    localStorage.removeItem(AUTO_COMPACT_WINDOW_KEY);
+  }
+}
 
 function getStoredZaiToken(): string {
   if (typeof window === "undefined") return "";
@@ -69,6 +120,41 @@ function setStoredDeepseekToken(token: string): void {
   localStorage.setItem(DEEPSEEK_TOKEN_KEY, token);
 }
 
+function getStoredFireworksToken(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return localStorage.getItem(FIREWORKS_TOKEN_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function setStoredFireworksToken(token: string): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(FIREWORKS_TOKEN_KEY, token);
+}
+
+function getStoredFireworksModels(): FireworksModels {
+  if (typeof window === "undefined") return FIREWORKS_DEFAULT_MODELS;
+  try {
+    const raw = localStorage.getItem(FIREWORKS_MODELS_KEY);
+    if (!raw) return FIREWORKS_DEFAULT_MODELS;
+    const parsed = JSON.parse(raw) as Partial<FireworksModels>;
+    return {
+      opus: parsed.opus ?? FIREWORKS_DEFAULT_MODELS.opus,
+      sonnet: parsed.sonnet ?? FIREWORKS_DEFAULT_MODELS.sonnet,
+      haiku: parsed.haiku ?? FIREWORKS_DEFAULT_MODELS.haiku,
+    };
+  } catch {
+    return FIREWORKS_DEFAULT_MODELS;
+  }
+}
+
+function setStoredFireworksModels(models: FireworksModels): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(FIREWORKS_MODELS_KEY, JSON.stringify(models));
+}
+
 function getZaiDefaultEnv(token: string): Record<string, string> {
   return {
     ANTHROPIC_AUTH_TOKEN: token,
@@ -102,6 +188,20 @@ function getDeepseekDefaultEnv(token: string): Record<string, string> {
   };
 }
 
+function getFireworksDefaultEnv(token: string, models: FireworksModels): Record<string, string> {
+  return {
+    ANTHROPIC_AUTH_TOKEN: token,
+    ANTHROPIC_BASE_URL: "https://api.fireworks.ai/inference",
+    ANTHROPIC_MODEL: models.opus,
+    ANTHROPIC_SMALL_FAST_MODEL: models.haiku,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: models.opus,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: models.sonnet,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: models.haiku,
+    API_TIMEOUT_MS: "3000000",
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: "200000",
+  };
+}
+
 function getStoredPaths(hostname: string): string[] {
   try {
     const raw = localStorage.getItem(`ftown:paths:${hostname}`);
@@ -120,7 +220,7 @@ function storePath(hostname: string, path: string): void {
 }
 
 type TopShell = "claude" | "opencode" | "shell";
-type ClaudeFlavor = "standard" | "zai" | "kimi" | "deepseek";
+type ClaudeFlavor = "standard" | "zai" | "kimi" | "deepseek" | "fireworks";
 
 function shellTypeToTop(s: ShellType | undefined): { top: TopShell; flavor: ClaudeFlavor } {
   if (s === "opencode") return { top: "opencode", flavor: "standard" };
@@ -128,6 +228,7 @@ function shellTypeToTop(s: ShellType | undefined): { top: TopShell; flavor: Clau
   if (s === "zai") return { top: "claude", flavor: "zai" };
   if (s === "kimi") return { top: "claude", flavor: "kimi" };
   if (s === "deepseek") return { top: "claude", flavor: "deepseek" };
+  if (s === "fireworks") return { top: "claude", flavor: "fireworks" };
   return { top: "claude", flavor: "standard" };
 }
 
@@ -150,6 +251,9 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const [zaiToken, setZaiToken] = useState("");
   const [kimiToken, setKimiToken] = useState("");
   const [deepseekToken, setDeepseekToken] = useState("");
+  const [fireworksToken, setFireworksToken] = useState("");
+  const [fireworksModels, setFireworksModels] = useState<FireworksModels>(FIREWORKS_DEFAULT_MODELS);
+  const [autoCompactWindow, setAutoCompactWindow] = useState("");
 
   const effectiveBridgeId = bridgeId || (bridges.length > 0 ? bridges[0].bridgeId : "");
   const selectedBridge = bridges.find((b) => b.bridgeId === effectiveBridgeId);
@@ -175,6 +279,9 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       setZaiToken(getStoredZaiToken());
       setKimiToken(getStoredKimiToken());
       setDeepseekToken(getStoredDeepseekToken());
+      setFireworksToken(getStoredFireworksToken());
+      setFireworksModels(getStoredFireworksModels());
+      setAutoCompactWindow(getStoredAutoCompactWindow());
     }
   }, [isOpen, defaults]);
 
@@ -197,9 +304,24 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       const trimmedToken = deepseekToken.trim();
       if (trimmedToken) setStoredDeepseekToken(trimmedToken);
       env = { ...getStoredEnvVars(), ...getDeepseekDefaultEnv(trimmedToken) };
+    } else if (shellType === "fireworks") {
+      const trimmedToken = fireworksToken.trim();
+      if (trimmedToken) setStoredFireworksToken(trimmedToken);
+      setStoredFireworksModels(fireworksModels);
+      env = { ...getStoredEnvVars(), ...getFireworksDefaultEnv(trimmedToken, fireworksModels) };
     } else {
       const storedEnv = getStoredEnvVars();
       env = Object.keys(storedEnv).length > 0 ? storedEnv : undefined;
+    }
+
+    if (topShell === "claude") {
+      const trimmedAutoCompact = autoCompactWindow.trim();
+      setStoredAutoCompactWindow(trimmedAutoCompact);
+      const effectiveAutoCompact =
+        trimmedAutoCompact || FLAVOR_AUTO_COMPACT_DEFAULTS[claudeFlavor];
+      if (effectiveAutoCompact) {
+        env = { ...(env ?? {}), CLAUDE_CODE_AUTO_COMPACT_WINDOW: effectiveAutoCompact };
+      }
     }
 
     onSubmit("", {
@@ -220,7 +342,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setSelectedClaudeSessionId(null);
     setSelectedClaudeSummary(null);
     onClose();
-  }, [shellType, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, zaiToken, kimiToken, deepseekToken, onSubmit, onClose]);
+  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, zaiToken, kimiToken, deepseekToken, fireworksToken, fireworksModels, autoCompactWindow, onSubmit, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -301,12 +423,13 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
               <div className="mt-3">
                 <label className="block text-xs text-[#666] mb-1 uppercase tracking-wider">Flavor</label>
                 <div className="flex gap-0">
-                  {(["standard", "zai", "kimi", "deepseek"] as ClaudeFlavor[]).map((f, i, arr) => {
+                  {(["standard", "zai", "kimi", "deepseek", "fireworks"] as ClaudeFlavor[]).map((f, i, arr) => {
                     const labels: Record<ClaudeFlavor, string> = {
                       standard: "Standard",
                       zai: "z.ai",
                       kimi: "Kimi",
                       deepseek: "DeepSeek",
+                      fireworks: "Fireworks",
                     };
                     const active = claudeFlavor === f;
                     const isFirst = i === 0;
@@ -375,6 +498,67 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                   className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] font-mono"
                   onKeyDown={handleKeyDown}
                   autoComplete="new-password"
+                />
+              </div>
+            )}
+
+            {shellType === "fireworks" && (
+              <div className="mt-3 space-y-2">
+                <div>
+                  <label className="block text-sm text-[#888888] mb-1">Fireworks API Token</label>
+                  <input
+                    type="password"
+                    value={fireworksToken}
+                    onChange={(e) => setFireworksToken(e.target.value)}
+                    placeholder="Enter your Fireworks API token"
+                    className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] font-mono"
+                    onKeyDown={handleKeyDown}
+                    autoComplete="new-password"
+                  />
+                </div>
+                {(["opus", "sonnet", "haiku"] as const).map((slot) => (
+                  <div key={slot}>
+                    <label className="block text-xs text-[#666] mb-1 uppercase tracking-wider">
+                      {slot} model
+                    </label>
+                    <select
+                      value={fireworksModels[slot]}
+                      onChange={(e) =>
+                        setFireworksModels((prev) => ({ ...prev, [slot]: e.target.value }))
+                      }
+                      className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-xs text-[#e0e0e0] focus:outline-none focus:border-[#00ff88] font-mono"
+                    >
+                      {FIREWORKS_MODEL_OPTIONS.map((m) => (
+                        <option key={m} value={m}>
+                          {m.replace("accounts/fireworks/models/", "")}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {topShell === "claude" && (
+              <div className="mt-3">
+                <label className="block text-sm text-[#888888] mb-1">
+                  Auto-Compact Window{" "}
+                  <span className="text-xs text-[#555] font-mono normal-case tracking-normal">
+                    (CLAUDE_CODE_AUTO_COMPACT_WINDOW)
+                  </span>
+                </label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={autoCompactWindow}
+                  onChange={(e) => setAutoCompactWindow(e.target.value.replace(/[^\d]/g, ""))}
+                  placeholder={
+                    FLAVOR_AUTO_COMPACT_DEFAULTS[claudeFlavor]
+                      ? `default: ${FLAVOR_AUTO_COMPACT_DEFAULTS[claudeFlavor]}`
+                      : "tokens (leave blank to disable)"
+                  }
+                  className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] font-mono"
+                  onKeyDown={handleKeyDown}
                 />
               </div>
             )}
