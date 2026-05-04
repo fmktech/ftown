@@ -332,6 +332,12 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       }, 200 * (i + 1)));
     }
 
+    // After the resize burst settles, send Ctrl+L to force the TUI to clear
+    // and redraw at the correct dimensions on activation.
+    resizeTimers.push(setTimeout(() => {
+      inputSubRef.current?.publish({ type: "input", data: "\x0c" });
+    }, 200 * 11));
+
     return () => {
       resizeTimers.forEach(clearTimeout);
       dataDisposable.dispose();
