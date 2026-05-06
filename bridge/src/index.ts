@@ -15,6 +15,7 @@ import { ProcessRunner } from './claude-runner.js';
 import { SessionStore } from './session-store.js';
 import { LocalApiServer } from './local-api-server.js';
 import { TerminalManager } from './terminal-manager.js';
+import { installClaudeHooks } from './hook-installer.js';
 
 import type { HookEvent } from './local-api-server.js';
 
@@ -137,6 +138,9 @@ program
     const hookPort = await localApiServer.start();
     console.log(`[Bridge] Local API server started on port ${hookPort}`);
     localApiServer.setDependencies(store, runner, centrifugo, userId, terminalManager);
+
+    const notifyScriptPath = resolve(__dirname, '..', 'hooks', 'notify.sh');
+    installClaudeHooks(notifyScriptPath);
 
     const bridgeStateDir = join(homedir(), '.ftown');
     const bridgePointerPath = join(bridgeStateDir, 'bridge.json');
