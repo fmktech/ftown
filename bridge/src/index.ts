@@ -179,7 +179,10 @@ program
       }
 
       // Phase 2: full dump with scrollback. Client re-renders on top of phase 1.
-      const MAX_BYTES = 3_500_000;
+      // Cap accounts for ~50% JSON-encoding inflation on ANSI-heavy buffers
+      // (each \x1b ->  expands 1 -> 6 bytes), keeping the on-wire
+      // Centrifugo frame under websocket_message_size_limit.
+      const MAX_BYTES = 2_500_000;
       let scrollback = 20000;
       let raw = terminalManager.serialize(sid, scrollback);
       while (raw && Buffer.byteLength(raw, 'utf8') > MAX_BYTES && scrollback > 100) {

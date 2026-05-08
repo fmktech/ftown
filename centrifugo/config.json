@@ -74,7 +74,7 @@
     }
   ],
   "client_channel_limit": 256,
-  "websocket_message_size_limit": 4194304,
+  "websocket_message_size_limit": 8388608,
   "websocket_compression": true,
   "websocket_compression_min_size": 1024,
   "ping_interval": "10s",
