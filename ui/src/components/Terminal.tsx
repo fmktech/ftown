@@ -263,9 +263,27 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       client.removeSubscription(existingIn);
     }
 
+    // TUI shells redraw their full buffer on Ctrl+L, so we can skip the
+    // bridge-side screen_dump for running TUI sessions. Raw shell and dead
+    // sessions still need screen_dump because Ctrl+L can't restore their state.
+    const isTUIShell =
+      shellType === "claude" ||
+      shellType === "zai" ||
+      shellType === "kimi" ||
+      shellType === "deepseek" ||
+      shellType === "fireworks" ||
+      shellType === "opencode";
+    const useCtrlLRefresh = isTUIShell && isRunning;
+
     const inputSub = client.newSubscription(inputChannel);
+    // Centrifugo preserves message order within a single publisher channel,
+    // and the bridge processes resize + input sequentially. Publishing both
+    // back-to-back guarantees the PTY sees resize before the form-feed.
     inputSub.on("subscribed", () => {
       inputSub.publish({ type: "resize", cols: term.cols, rows: term.rows });
+      if (useCtrlLRefresh) {
+        inputSub.publish({ type: "input", data: "\x0c" });
+      }
     });
     inputSub.subscribe();
     inputSubRef.current = inputSub;
@@ -296,18 +314,6 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
         }
       }
     });
-    // TUI shells redraw their full buffer on Ctrl+L, so we can skip the
-    // bridge-side screen_dump for running TUI sessions. Raw shell and dead
-    // sessions still need screen_dump because Ctrl+L can't restore their state.
-    const isTUIShell =
-      shellType === "claude" ||
-      shellType === "zai" ||
-      shellType === "kimi" ||
-      shellType === "deepseek" ||
-      shellType === "fireworks" ||
-      shellType === "opencode";
-    const useCtrlLRefresh = isTUIShell && isRunning;
-
     outputSub.on("subscribed", () => {
       if (!useCtrlLRefresh && inputSubRef.current) {
         inputSubRef.current.publish({ type: "init" });
@@ -329,21 +335,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       }
     });
 
-    const activationTimers: ReturnType<typeof setTimeout>[] = [];
-    // One redundant resize after layout settles, in case the on-subscribe
-    // resize raced with mount.
-    activationTimers.push(setTimeout(() => {
-      fitAddonRef.current?.fit();
-      inputSubRef.current?.publish({ type: "resize", cols: term.cols, rows: term.rows });
-      if (useCtrlLRefresh) {
-        activationTimers.push(setTimeout(() => {
-          inputSubRef.current?.publish({ type: "input", data: "\x0c" });
-        }, 100));
-      }
-    }, 200));
-
     return () => {
-      activationTimers.forEach(clearTimeout);
       dataDisposable.dispose();
       resizeDisposable.dispose();
       if (outputSubRef.current) {
