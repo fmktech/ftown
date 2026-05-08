@@ -170,6 +170,15 @@ program
     process.on('SIGTERM', () => { cleanupPointer(); process.exit(0); });
 
     function publishScreenDump(sid: string): void {
+      // Phase 1: viewport-only dump (~rows*cols bytes) for instant render.
+      const viewportRaw = terminalManager.serialize(sid, 0);
+      if (viewportRaw) {
+        centrifugo.publishTerminalScreen(userId, sid, viewportRaw).catch((err) => {
+          console.error(`[Bridge] Failed to publish viewport screen for ${sid}:`, err);
+        });
+      }
+
+      // Phase 2: full dump with scrollback. Client re-renders on top of phase 1.
       const MAX_BYTES = 3_500_000;
       let scrollback = 20000;
       let raw = terminalManager.serialize(sid, scrollback);
@@ -178,8 +187,9 @@ program
         raw = terminalManager.serialize(sid, scrollback);
       }
       if (!raw) return;
+      if (raw === viewportRaw) return;
       centrifugo.publishTerminalScreen(userId, sid, raw).catch((err) => {
-        console.error(`[Bridge] Failed to publish terminal screen for ${sid}:`, err);
+        console.error(`[Bridge] Failed to publish full screen for ${sid}:`, err);
       });
     }
 
