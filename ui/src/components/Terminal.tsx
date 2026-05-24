@@ -263,16 +263,6 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       client.removeSubscription(existingIn);
     }
 
-    const isTUIShell =
-      shellType === "claude" ||
-      shellType === "cursor" ||
-      shellType === "zai" ||
-      shellType === "kimi" ||
-      shellType === "deepseek" ||
-      shellType === "fireworks" ||
-      shellType === "opencode";
-    const useCtrlLRefresh = isTUIShell && isRunning;
-
     const inputSub = client.newSubscription(inputChannel);
     inputSub.on("subscribed", () => {
       inputSub.publish({ type: "resize", cols: term.cols, rows: term.rows });
@@ -308,16 +298,9 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     });
     // On output sub ready, request a screen_dump from the bridge to restore
     // prior conversation state and scrollback (xterm-headless serialize).
-    // For running TUIs, follow with Ctrl+L so the TUI repaints current state
-    // on top — order matters: init publishes before Ctrl+L on the input
-    // channel, so the bridge's screen_dump reply lands on the output channel
-    // before the TUI's redraw bytes do.
     outputSub.on("subscribed", () => {
       if (!inputSubRef.current) return;
       inputSubRef.current.publish({ type: "init" });
-      if (useCtrlLRefresh) {
-        inputSubRef.current.publish({ type: "input", data: "\x0c" });
-      }
     });
     outputSub.subscribe();
     outputSubRef.current = outputSub;
@@ -351,7 +334,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
         inputSubRef.current = null;
       }
     };
-  }, [client, sessionId, userId, shellType, isRunning]);
+  }, [client, sessionId, userId]);
 
   return (
     <div
