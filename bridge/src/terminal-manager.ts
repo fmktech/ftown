@@ -1,5 +1,8 @@
 import xtermHeadless, { type Terminal as TerminalType } from '@xterm/headless';
 import serializeAddon from '@xterm/addon-serialize';
+
+import { FTOWN_XTERM_THEME } from './xterm-theme.js';
+
 const { Terminal } = xtermHeadless;
 const { SerializeAddon } = serializeAddon;
 
@@ -46,6 +49,7 @@ export class TerminalManager {
         rows: 40,
         scrollback: this.scrollback,
         allowProposedApi: true,
+        theme: FTOWN_XTERM_THEME,
       });
       const serializer = new SerializeAddon();
       terminal.loadAddon(serializer);

@@ -3,6 +3,8 @@ import { EventEmitter } from 'node:events';
 
 import type { IPty } from 'node-pty';
 
+import { applyTerminalColorEnv } from './xterm-theme.js';
+
 export interface ProcessRunnerEvents {
   data: [string, string];
   complete: [string];
@@ -30,8 +32,8 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
 
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
-      TERM: 'xterm-256color',
     };
+    applyTerminalColorEnv(env);
 
     if (options.hookPort) {
       env.FTOWN_HOOK_PORT = String(options.hookPort);
