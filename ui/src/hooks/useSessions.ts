@@ -14,6 +14,7 @@ import {
   RemoveSessionPayload,
   UpdateSessionParentPayload,
 } from "@/types";
+import { buildCursorAgentCommand } from "@/lib/agent-commands";
 
 interface SessionUpdateMessage {
   type: 'session_update';
@@ -35,7 +36,7 @@ export interface BridgeExecResponse {
 
 interface UseSessionsResult {
   sessions: Session[];
-  createSession: (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; env?: Record<string, string> }) => void;
+  createSession: (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; env?: Record<string, string> }) => void;
   stopSession: (sessionId: string) => void;
   retrySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
@@ -153,7 +154,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
   );
 
   const createSession = useCallback(
-    (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; env?: Record<string, string> }) => {
+    (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; env?: Record<string, string> }) => {
       if (!userId) return;
 
       const shellType = options?.shellType ?? "claude";
@@ -162,6 +163,12 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
         cmd = "/bin/zsh -l";
       } else if (shellType === "opencode") {
         cmd = "opencode";
+      } else if (shellType === "cursor") {
+        cmd = buildCursorAgentCommand({
+          workingDir: options?.workingDir,
+          model: options?.model,
+          cursorSessionId: options?.cursorSessionId,
+        });
       } else if (options?.claudeSessionId) {
         cmd = `claude --allow-dangerously-skip-permissions --resume ${options.claudeSessionId}`;
       } else {
@@ -177,6 +184,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
         bridgeId: options?.bridgeId,
         shellType,
         claudeSessionId: options?.claudeSessionId,
+        cursorSessionId: options?.cursorSessionId,
         env: options?.env,
         ...(prompt ? { initialInput: prompt + "\r", initialInputDelay: 2000 } : {}),
       };

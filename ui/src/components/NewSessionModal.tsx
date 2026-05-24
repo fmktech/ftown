@@ -5,6 +5,7 @@ import { ShellType } from "@/types";
 import { BridgeInfo } from "@/hooks/useBridges";
 import { BridgeExecResponse } from "@/hooks/useSessions";
 import { ClaudeSessionPicker } from "./ClaudeSessionPicker";
+import { CursorSessionPicker } from "./CursorSessionPicker";
 import EnvVarsEditor, { getStoredEnvVars } from "./EnvVarsEditor";
 
 export interface SessionDefaults {
@@ -17,7 +18,7 @@ export interface SessionDefaults {
 interface NewSessionModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSubmit: (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; env?: Record<string, string> }) => void;
+  onSubmit: (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; env?: Record<string, string> }) => void;
   bridges: BridgeInfo[];
   defaults?: SessionDefaults;
   bridgeExec: (command: string, workingDir: string, bridgeId: string) => Promise<BridgeExecResponse>;
@@ -219,10 +220,11 @@ function storePath(hostname: string, path: string): void {
   localStorage.setItem(`ftown:paths:${hostname}`, JSON.stringify(updated));
 }
 
-type TopShell = "claude" | "opencode" | "shell";
+type TopShell = "claude" | "cursor" | "opencode" | "shell";
 type ClaudeFlavor = "standard" | "zai" | "kimi" | "deepseek" | "fireworks";
 
 function shellTypeToTop(s: ShellType | undefined): { top: TopShell; flavor: ClaudeFlavor } {
+  if (s === "cursor") return { top: "cursor", flavor: "standard" };
   if (s === "opencode") return { top: "opencode", flavor: "standard" };
   if (s === "shell") return { top: "shell", flavor: "standard" };
   if (s === "zai") return { top: "claude", flavor: "zai" };
@@ -233,7 +235,7 @@ function shellTypeToTop(s: ShellType | undefined): { top: TopShell; flavor: Clau
 }
 
 function resolveShellType(top: TopShell, flavor: ClaudeFlavor): ShellType {
-  if (top !== "claude") return top;
+  if (top === "cursor" || top === "opencode" || top === "shell") return top;
   if (flavor === "standard") return "claude";
   return flavor;
 }
@@ -248,6 +250,8 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedClaudeSessionId, setSelectedClaudeSessionId] = useState<string | null>(null);
   const [selectedClaudeSummary, setSelectedClaudeSummary] = useState<string | null>(null);
+  const [selectedCursorSessionId, setSelectedCursorSessionId] = useState<string | null>(null);
+  const [selectedCursorSummary, setSelectedCursorSummary] = useState<string | null>(null);
   const [zaiToken, setZaiToken] = useState("");
   const [kimiToken, setKimiToken] = useState("");
   const [deepseekToken, setDeepseekToken] = useState("");
@@ -276,6 +280,8 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       setBridgeId(defaults.bridgeId ?? "");
       setSelectedClaudeSessionId(null);
       setSelectedClaudeSummary(null);
+      setSelectedCursorSessionId(null);
+      setSelectedCursorSummary(null);
       setZaiToken(getStoredZaiToken());
       setKimiToken(getStoredKimiToken());
       setDeepseekToken(getStoredDeepseekToken());
@@ -330,6 +336,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       bridgeId: effectiveBridgeId || undefined,
       shellType,
       claudeSessionId: selectedClaudeSessionId ?? undefined,
+      cursorSessionId: selectedCursorSessionId ?? undefined,
       env,
     });
 
@@ -341,8 +348,10 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setShowSuggestions(false);
     setSelectedClaudeSessionId(null);
     setSelectedClaudeSummary(null);
+    setSelectedCursorSessionId(null);
+    setSelectedCursorSummary(null);
     onClose();
-  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, zaiToken, kimiToken, deepseekToken, fireworksToken, fireworksModels, autoCompactWindow, onSubmit, onClose]);
+  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, zaiToken, kimiToken, deepseekToken, fireworksToken, fireworksModels, autoCompactWindow, onSubmit, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -388,6 +397,20 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                 }}
               >
                 Claude
+              </button>
+              <button
+                type="button"
+                onClick={() => setTopShell("cursor")}
+                className="px-4 py-2 text-sm font-mono transition-colors"
+                style={{
+                  background: topShell === "cursor" ? "#00ff88" : "#0a0a0a",
+                  color: topShell === "cursor" ? "#0a0a0a" : "#888888",
+                  border: `1px solid ${topShell === "cursor" ? "#00ff88" : "#2a2a2a"}`,
+                  borderRight: "none",
+                  fontWeight: topShell === "cursor" ? 700 : 400,
+                }}
+              >
+                Cursor
               </button>
               <button
                 type="button"
@@ -625,6 +648,33 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
               </div>
             )}
           </div>
+
+          {topShell === "cursor" && effectiveBridgeId && workingDir.trim() && (
+            selectedCursorSessionId ? (
+              <div className="flex items-center gap-2 px-3 py-2 border border-[#00ff88]/30 rounded bg-[#00ff88]/5">
+                <span className="text-xs text-[#00ff88] flex-1 truncate font-mono">
+                  Resuming: {selectedCursorSummary || selectedCursorSessionId.slice(0, 20)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => { setSelectedCursorSessionId(null); setSelectedCursorSummary(null); }}
+                  className="text-xs text-[#666] hover:text-[#aaa] transition-colors shrink-0"
+                >
+                  Clear
+                </button>
+              </div>
+            ) : (
+              <CursorSessionPicker
+                bridgeId={effectiveBridgeId}
+                workingDir={workingDir.trim()}
+                onSelect={(sid, summary) => {
+                  setSelectedCursorSessionId(sid);
+                  setSelectedCursorSummary(summary);
+                }}
+                bridgeExec={bridgeExec}
+              />
+            )
+          )}
 
           {(shellType === "claude" || shellType === "zai") && effectiveBridgeId && workingDir.trim() && (
             selectedClaudeSessionId ? (

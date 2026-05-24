@@ -1,4 +1,4 @@
-export type ShellType = 'claude' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks';
+export type ShellType = 'claude' | 'cursor' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks';
 
 export interface Session {
   id: string;
@@ -13,6 +13,7 @@ export interface Session {
   shellType?: ShellType;
   model?: string;
   claudeSessionId?: string;
+  cursorSessionId?: string;
   env?: Record<string, string>;
   parentSessionId?: string;
 }
@@ -49,6 +50,7 @@ export interface CreateSessionPayload {
   shellType?: ShellType;
   model?: string;
   claudeSessionId?: string;
+  cursorSessionId?: string;
   parentSessionId?: string;
 }
 

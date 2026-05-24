@@ -16,6 +16,7 @@ import { SessionStore } from './session-store.js';
 import { LocalApiServer } from './local-api-server.js';
 import { TerminalManager } from './terminal-manager.js';
 import { installClaudeHooks } from './hook-installer.js';
+import { installCursorHooks } from './cursor-hook-installer.js';
 
 import type { HookEvent } from './local-api-server.js';
 
@@ -141,6 +142,7 @@ program
 
     const notifyScriptPath = resolve(__dirname, '..', 'hooks', 'notify.sh');
     installClaudeHooks(notifyScriptPath);
+    installCursorHooks(notifyScriptPath);
 
     const bridgeStateDir = join(homedir(), '.ftown');
     const bridgePointerPath = join(bridgeStateDir, 'bridge.json');
@@ -313,6 +315,7 @@ program
               shellType: payload.shellType,
               model: payload.model,
               claudeSessionId: payload.claudeSessionId,
+              cursorSessionId: payload.cursorSessionId,
               env: payload.env,
               parentSessionId,
             };

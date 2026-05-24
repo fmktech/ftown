@@ -265,6 +265,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
 
     const isTUIShell =
       shellType === "claude" ||
+      shellType === "cursor" ||
       shellType === "zai" ||
       shellType === "kimi" ||
       shellType === "deepseek" ||

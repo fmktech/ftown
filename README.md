@@ -1,6 +1,6 @@
 # ftown
 
-A Claude Code orchestrator that lets you manage and stream remote CLI sessions through a web dashboard.
+A remote CLI agent orchestrator that lets you manage and stream **Claude Code** and **Cursor Agent** sessions through a web dashboard.
 
 ## Demo
 
@@ -27,7 +27,9 @@ https://github.com/user-attachments/assets/e9c1ce70-70b0-4ba0-81d8-080d4eeef445
 
 ## Features
 
+- **Claude Code** and **Cursor Agent** (`agent`) interactive sessions with resume support
 - Real-time terminal streaming from remote machines to browser
+- Hook forwarding to the dashboard (Claude `~/.claude/settings.json`, Cursor `~/.cursor/hooks.json`)
 - Multiple concurrent sessions with session management
 - Multi-bridge support (connect multiple machines)
 - Mobile-optimized responsive UI
@@ -40,6 +42,7 @@ https://github.com/user-attachments/assets/e9c1ce70-70b0-4ba0-81d8-080d4eeef445
 - Node.js 22+
 - PostgreSQL database (e.g., [Neon](https://neon.tech))
 - [Centrifugo](https://centrifugal.dev) v5 server
+- On bridge machines: [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and/or [Cursor CLI](https://cursor.com/docs/cli/overview) (`curl https://cursor.com/install -fsS | bash`, then `agent login`)
 
 ## Quick Start
 
@@ -322,7 +325,7 @@ sudo docker run -d --name centrifugo \
 
 #### Bridge
 
-On any machine where you want to run Claude sessions:
+On any machine where you want to run Claude or Cursor Agent sessions:
 
 ```bash
 npx ftown-bridge --token <jwt> --api-url https://your-domain.vercel.app
