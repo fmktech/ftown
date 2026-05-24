@@ -48,6 +48,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [mobileTab, setMobileTab] = useState<"sessions" | "terminal">("sessions");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sessionOrder, setSessionOrder] = useState<string[]>([]);
+  const [bridgeOrder, setBridgeOrder] = useState<string[]>([]);
   const [hiddenSessionIds, setHiddenSessionIds] = useState<Set<string>>(new Set());
   const [showUserMenu, setShowUserMenu] = useState(false);
   const terminalRef = useRef<TerminalHandle>(null);
@@ -59,6 +60,9 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     setSidebarCollapsed(localStorage.getItem("ftown:sidebarCollapsed") === "true");
     try {
       setSessionOrder(JSON.parse(localStorage.getItem("ftown:sessionOrder") ?? "[]"));
+    } catch { /* ignore */ }
+    try {
+      setBridgeOrder(JSON.parse(localStorage.getItem("ftown:bridgeOrder") ?? "[]"));
     } catch { /* ignore */ }
     try {
       const raw = localStorage.getItem("ftown:hiddenSessions");
@@ -102,7 +106,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     return () => document.removeEventListener("mousedown", handler);
   }, [showUserMenu]);
 
-  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, setSessionParent, removeSession, refreshSessions, bridgeExec } = useSessions(client, userId);
+  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, removeSession, refreshSessions, bridgeExec } = useSessions(client, userId);
   const { bridges, hasBridges } = useBridges(client, userId);
   const sessionActivity = useAllSessionEvents(client, rawSessions, userId);
 
@@ -153,14 +157,19 @@ print('hooks installed')
         ? { ...s, status: "disconnected" as const }
         : s
     );
-    if (sessionOrder.length === 0) return mapped;
+    if (sessionOrder.length === 0 && bridgeOrder.length === 0) return mapped;
     const orderMap = new Map(sessionOrder.map((id, i) => [id, i]));
     return [...mapped].sort((a, b) => {
+      const bridgeAi = bridgeOrder.indexOf(a.bridgeId);
+      const bridgeBi = bridgeOrder.indexOf(b.bridgeId);
+      const bOrderA = bridgeAi === -1 ? Infinity : bridgeAi;
+      const bOrderB = bridgeBi === -1 ? Infinity : bridgeBi;
+      if (bOrderA !== bOrderB) return bOrderA - bOrderB;
       const ai = orderMap.get(a.id) ?? Infinity;
       const bi = orderMap.get(b.id) ?? Infinity;
       return ai - bi;
     });
-  }, [rawSessions, activeBridgeIds, sessionOrder]);
+  }, [rawSessions, activeBridgeIds, sessionOrder, bridgeOrder]);
 
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
 
@@ -168,6 +177,33 @@ print('hooks installed')
     setSessionOrder(orderedIds);
     localStorage.setItem("ftown:sessionOrder", JSON.stringify(orderedIds));
   }, []);
+
+  const handleReorderBridges = useCallback((orderedBridgeIds: string[]) => {
+    setBridgeOrder(orderedBridgeIds);
+    localStorage.setItem("ftown:bridgeOrder", JSON.stringify(orderedBridgeIds));
+
+    setSessionOrder((prevOrder) => {
+      const byBridge = new Map<string, string[]>();
+      for (const s of rawSessions) {
+        const arr = byBridge.get(s.bridgeId) ?? [];
+        arr.push(s.id);
+        byBridge.set(s.bridgeId, arr);
+      }
+
+      const orderMap = new Map(prevOrder.map((id, i) => [id, i]));
+      for (const [, ids] of byBridge) {
+        ids.sort((a, b) => (orderMap.get(a) ?? Infinity) - (orderMap.get(b) ?? Infinity));
+      }
+
+      const newOrder = orderedBridgeIds.flatMap((bid) => byBridge.get(bid) ?? []);
+      for (const [bid, ids] of byBridge) {
+        if (!orderedBridgeIds.includes(bid)) newOrder.push(...ids);
+      }
+
+      localStorage.setItem("ftown:sessionOrder", JSON.stringify(newOrder));
+      return newOrder;
+    });
+  }, [rawSessions]);
 
   const handleCreateSession = useCallback(
     (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; env?: Record<string, string> }) => {
@@ -609,7 +645,7 @@ print('hooks installed')
                     color: "var(--text-muted)",
                   }}
                 >
-                  Sessions
+                  Bridges
                 </span>
                 <div className="flex items-center gap-2">
                   <span
@@ -647,14 +683,16 @@ print('hooks installed')
           <div className="flex-1 overflow-y-auto">
             <SessionList
               sessions={sessions}
+              bridges={bridges}
+              bridgeOrder={bridgeOrder}
               selectedSessionId={selectedSessionId}
               onSelectSession={handleSelectSession}
               onRenameSession={renameSession}
-              onSetSessionParent={setSessionParent}
               onStopSession={stopSession}
               onRemoveSession={handleRemoveSession}
               onCloneSession={handleCloneSession}
               onReorderSessions={handleReorderSessions}
+              onReorderBridges={handleReorderBridges}
               sessionActivity={sessionActivity}
               collapsed={isDesktop && sidebarCollapsed}
               hiddenSessionIds={hiddenSessionIds}

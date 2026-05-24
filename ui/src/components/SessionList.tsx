@@ -1,12 +1,15 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback, type ReactElement } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo, type ReactElement } from "react";
 import { createPortal } from "react-dom";
 import { Session, SessionStatus } from "@/types";
 import { SessionActivity } from "@/hooks/useAllSessionEvents";
+import { BridgeInfo } from "@/hooks/useBridges";
 
 interface SessionListProps {
   sessions: Session[];
+  bridges: BridgeInfo[];
+  bridgeOrder: string[];
   selectedSessionId: string | null;
   onSelectSession: (sessionId: string) => void;
   onRenameSession?: (sessionId: string, name: string) => void;
@@ -14,7 +17,7 @@ interface SessionListProps {
   onRemoveSession?: (sessionId: string) => void;
   onCloneSession?: (session: Session) => void;
   onReorderSessions?: (orderedIds: string[]) => void;
-  onSetSessionParent?: (sessionId: string, parentSessionId: string | null) => void;
+  onReorderBridges?: (orderedBridgeIds: string[]) => void;
   sessionActivity?: Map<string, SessionActivity>;
   collapsed?: boolean;
   hiddenSessionIds?: Set<string>;
@@ -26,6 +29,15 @@ interface ContextMenuState {
   session: Session;
   x: number;
   y: number;
+}
+
+type DragKind = "bridge" | "session";
+type DropZone = "above" | "below";
+
+interface DragState {
+  kind: DragKind;
+  id: string;
+  bridgeId?: string;
 }
 
 function StatusBadge({ status, activity }: { status: SessionStatus; activity?: "thinking" | "tool_use" | "idle" }) {
@@ -68,6 +80,18 @@ function formatTimestamp(timestamp: string): string {
   const diffHours = Math.floor(diffMins / 60);
   if (diffHours < 24) return `${diffHours}h`;
   return date.toLocaleDateString();
+}
+
+function bridgeLabel(bridgeId: string, bridges: BridgeInfo[]): string {
+  const info = bridges.find((b) => b.bridgeId === bridgeId);
+  if (info?.hostname && info.hostname !== "unknown") return info.hostname;
+  return bridgeId.length > 20 ? `${bridgeId.slice(0, 18)}…` : bridgeId;
+}
+
+function computeDropZone(e: React.DragEvent): DropZone {
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  const offset = e.clientY - rect.top;
+  return offset < rect.height / 2 ? "above" : "below";
 }
 
 function ContextMenu({
@@ -226,15 +250,32 @@ function ContextMenu({
   );
 }
 
-export function SessionList({ sessions, selectedSessionId, onSelectSession, onRenameSession, onStopSession, onRemoveSession, onCloneSession, onReorderSessions, onSetSessionParent, sessionActivity, collapsed, hiddenSessionIds, onHideSession, onUnhideSession }: SessionListProps) {
+export function SessionList({
+  sessions,
+  bridges,
+  bridgeOrder,
+  selectedSessionId,
+  onSelectSession,
+  onRenameSession,
+  onStopSession,
+  onRemoveSession,
+  onCloneSession,
+  onReorderSessions,
+  onReorderBridges,
+  sessionActivity,
+  collapsed,
+  hiddenSessionIds,
+  onHideSession,
+  onUnhideSession,
+}: SessionListProps) {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
-  const [dragOverId, setDragOverId] = useState<string | null>(null);
-  const [dragOverPosition, setDragOverPosition] = useState<"above" | "below" | "onto" | null>(null);
+  const [dragOverKey, setDragOverKey] = useState<string | null>(null);
+  const [dragOverZone, setDragOverZone] = useState<DropZone | null>(null);
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
-  const [collapsedParents, setCollapsedParents] = useState<Set<string>>(new Set());
-  const draggedIdRef = useRef<string | null>(null);
+  const [collapsedBridges, setCollapsedBridges] = useState<Set<string>>(new Set());
+  const dragRef = useRef<DragState | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressFired = useRef(false);
@@ -243,11 +284,41 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
   const hiddenSessions = sessions.filter((s) => hiddenSet.has(s.id));
 
   useEffect(() => {
+    try {
+      const raw = localStorage.getItem("ftown:collapsedBridges");
+      if (raw) setCollapsedBridges(new Set(JSON.parse(raw)));
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
     if (editingSessionId && inputRef.current) {
       inputRef.current.focus();
       inputRef.current.select();
     }
   }, [editingSessionId]);
+
+  const onlineBridgeIds = useMemo(() => new Set(bridges.map((b) => b.bridgeId)), [bridges]);
+
+  const orderedBridgeIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const b of bridges) ids.add(b.bridgeId);
+    for (const s of visibleSessions) ids.add(s.bridgeId);
+    const ordered = bridgeOrder.filter((id) => ids.has(id));
+    for (const id of ids) {
+      if (!ordered.includes(id)) ordered.push(id);
+    }
+    return ordered;
+  }, [bridges, visibleSessions, bridgeOrder]);
+
+  const sessionsByBridge = useMemo(() => {
+    const map = new Map<string, Session[]>();
+    for (const s of visibleSessions) {
+      const arr = map.get(s.bridgeId) ?? [];
+      arr.push(s);
+      map.set(s.bridgeId, arr);
+    }
+    return map;
+  }, [visibleSessions]);
 
   const closeContextMenu = useCallback(() => {
     setContextMenu(null);
@@ -265,22 +336,20 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
     setEditingSessionId(null);
   }
 
-  function cancelEditing(): void {
-    setEditingSessionId(null);
-  }
-
   function handleContextMenu(e: React.MouseEvent, session: Session): void {
     e.preventDefault();
     e.stopPropagation();
-    setContextMenu({
-      session,
-      x: e.clientX,
-      y: e.clientY,
-    });
+    setContextMenu({ session, x: e.clientX, y: e.clientY });
   }
 
-  function handleDragStart(e: React.DragEvent, sessionId: string): void {
-    draggedIdRef.current = sessionId;
+  function clearDragState(): void {
+    dragRef.current = null;
+    setDragOverKey(null);
+    setDragOverZone(null);
+  }
+
+  function handleDragStart(e: React.DragEvent, state: DragState): void {
+    dragRef.current = state;
     e.dataTransfer.effectAllowed = "move";
     if (e.currentTarget instanceof HTMLElement) {
       e.currentTarget.style.opacity = "0.4";
@@ -288,117 +357,121 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
   }
 
   function handleDragEnd(e: React.DragEvent): void {
-    draggedIdRef.current = null;
-    setDragOverId(null);
-    setDragOverPosition(null);
+    clearDragState();
     if (e.currentTarget instanceof HTMLElement) {
       e.currentTarget.style.opacity = "1";
     }
   }
 
-  function computeDropZone(e: React.DragEvent): "above" | "below" | "onto" {
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const offset = e.clientY - rect.top;
-    const topStrip = rect.height * 0.2;
-    const bottomStrip = rect.height * 0.8;
-    if (offset < topStrip) return "above";
-    if (offset > bottomStrip) return "below";
-    return "onto";
-  }
-
-  function handleDragOver(e: React.DragEvent, sessionId: string): void {
+  function handleDragOver(e: React.DragEvent, key: string, accept: DragKind): void {
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
-    if (!draggedIdRef.current || draggedIdRef.current === sessionId) {
-      setDragOverId(null);
-      setDragOverPosition(null);
+    const drag = dragRef.current;
+    if (!drag || drag.kind !== accept) {
+      setDragOverKey(null);
+      setDragOverZone(null);
       return;
     }
-    setDragOverId(sessionId);
-    setDragOverPosition(computeDropZone(e));
+    if (drag.kind === "bridge" && drag.id === key.replace("bridge:", "")) {
+      setDragOverKey(null);
+      setDragOverZone(null);
+      return;
+    }
+    if (drag.kind === "session" && drag.id === key.replace("session:", "")) {
+      setDragOverKey(null);
+      setDragOverZone(null);
+      return;
+    }
+    setDragOverKey(key);
+    setDragOverZone(computeDropZone(e));
   }
 
-  function handleDrop(e: React.DragEvent, targetId: string): void {
+  function handleBridgeDrop(e: React.DragEvent, targetBridgeId: string): void {
     e.preventDefault();
-    const draggedId = draggedIdRef.current;
-    if (!draggedId || draggedId === targetId) {
-      setDragOverId(null);
-      setDragOverPosition(null);
-      draggedIdRef.current = null;
+    const drag = dragRef.current;
+    if (!drag || drag.kind !== "bridge" || !onReorderBridges) {
+      clearDragState();
+      return;
+    }
+    const draggedId = drag.id;
+    if (draggedId === targetBridgeId) {
+      clearDragState();
       return;
     }
 
     const zone = computeDropZone(e);
-
-    if (zone === "onto") {
-      if (onSetSessionParent) {
-        const draggedSession = sessions.find((s) => s.id === draggedId);
-        const targetSession = sessions.find((s) => s.id === targetId);
-        if (draggedSession && targetSession) {
-          const isCycle = targetSession.parentSessionId === draggedSession.id;
-          const alreadyChild = draggedSession.parentSessionId === targetSession.id;
-          if (!isCycle && !alreadyChild) {
-            onSetSessionParent(draggedId, targetId);
-          }
-        }
-      }
-      setDragOverId(null);
-      setDragOverPosition(null);
-      draggedIdRef.current = null;
-      return;
-    }
-
-    if (!onReorderSessions) {
-      setDragOverId(null);
-      setDragOverPosition(null);
-      draggedIdRef.current = null;
-      return;
-    }
-
-    const ids = sessions.map((s) => s.id);
+    const ids = [...orderedBridgeIds];
     const fromIdx = ids.indexOf(draggedId);
-    const toIdx = ids.indexOf(targetId);
-    if (fromIdx === -1 || toIdx === -1) return;
+    const toIdx = ids.indexOf(targetBridgeId);
+    if (fromIdx === -1 || toIdx === -1) {
+      clearDragState();
+      return;
+    }
 
     ids.splice(fromIdx, 1);
-    const insertIdx = zone === "above" ? ids.indexOf(targetId) : ids.indexOf(targetId) + 1;
+    const insertIdx = zone === "above" ? ids.indexOf(targetBridgeId) : ids.indexOf(targetBridgeId) + 1;
     ids.splice(insertIdx, 0, draggedId);
-    onReorderSessions(ids);
-
-    setDragOverId(null);
-    setDragOverPosition(null);
-    draggedIdRef.current = null;
+    onReorderBridges(ids);
+    clearDragState();
   }
 
-  const sessionListToRender = visibleSessions;
-
-  const visibleIdSet = new Set(sessionListToRender.map((s) => s.id));
-  const childrenByParent = new Map<string, Session[]>();
-  const rootSessions: Session[] = [];
-  for (const s of sessionListToRender) {
-    const pid = s.parentSessionId;
-    if (pid && visibleIdSet.has(pid)) {
-      const arr = childrenByParent.get(pid) ?? [];
-      arr.push(s);
-      childrenByParent.set(pid, arr);
-    } else {
-      rootSessions.push(s);
+  function handleSessionDrop(e: React.DragEvent, targetSession: Session): void {
+    e.preventDefault();
+    const drag = dragRef.current;
+    if (!drag || drag.kind !== "session" || !onReorderSessions) {
+      clearDragState();
+      return;
     }
-  }
-  for (const arr of childrenByParent.values()) {
-    arr.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+    const draggedId = drag.id;
+    if (draggedId === targetSession.id || drag.bridgeId !== targetSession.bridgeId) {
+      clearDragState();
+      return;
+    }
+
+    const zone = computeDropZone(e);
+    const bridgeSessions = sessionsByBridge.get(targetSession.bridgeId) ?? [];
+    const ids = bridgeSessions.map((s) => s.id);
+    const fromIdx = ids.indexOf(draggedId);
+    const toIdx = ids.indexOf(targetSession.id);
+    if (fromIdx === -1 || toIdx === -1) {
+      clearDragState();
+      return;
+    }
+
+    ids.splice(fromIdx, 1);
+    const insertIdx = zone === "above" ? ids.indexOf(targetSession.id) : ids.indexOf(targetSession.id) + 1;
+    ids.splice(insertIdx, 0, draggedId);
+
+    const newOrder: string[] = [];
+    const seenBridges = new Set<string>();
+    for (const bid of orderedBridgeIds) {
+      seenBridges.add(bid);
+      if (bid === targetSession.bridgeId) {
+        newOrder.push(...ids);
+      } else {
+        newOrder.push(...(sessionsByBridge.get(bid)?.map((s) => s.id) ?? []));
+      }
+    }
+    for (const [bid, bridgeSessionsList] of sessionsByBridge) {
+      if (!seenBridges.has(bid)) {
+        newOrder.push(...bridgeSessionsList.map((s) => s.id));
+      }
+    }
+    onReorderSessions(newOrder);
+    clearDragState();
   }
 
-  function toggleCollapsed(id: string): void {
-    setCollapsedParents((prev) => {
+  function toggleBridgeCollapsed(bridgeId: string): void {
+    setCollapsedBridges((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(bridgeId)) next.delete(bridgeId);
+      else next.add(bridgeId);
+      localStorage.setItem("ftown:collapsedBridges", JSON.stringify([...next]));
       return next;
     });
   }
 
-  if (sessionListToRender.length === 0 && hiddenSessions.length === 0) {
+  if (visibleSessions.length === 0 && hiddenSessions.length === 0) {
     if (collapsed) return null;
     return (
       <div
@@ -411,291 +484,333 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
     );
   }
 
-  function renderRow(session: Session, isChild: boolean): ReactElement | null {
+  function renderSessionRow(session: Session): ReactElement {
     const isSelected = session.id === selectedSessionId;
     const displayName = session.name || session.prompt.slice(0, 36);
-    const kids = childrenByParent.get(session.id);
-    const hasChildren = !isChild && !!kids && kids.length > 0;
-    const isCollapsedParent = collapsedParents.has(session.id);
+    const dropKey = `session:${session.id}`;
+    const isDragOver = dragOverKey === dropKey;
 
     if (collapsed) {
-          const act = sessionActivity?.get(session.id);
-          const isRunning = session.status === "running";
-          const isIdle = isRunning && act?.activity === "idle";
-          const isThinking = isRunning && act?.activity === "thinking";
-          const isToolUse = isRunning && act?.activity === "tool_use";
+      const act = sessionActivity?.get(session.id);
+      const isRunning = session.status === "running";
+      const isIdle = isRunning && act?.activity === "idle";
+      const isThinking = isRunning && act?.activity === "thinking";
+      const isToolUse = isRunning && act?.activity === "tool_use";
 
-          const borderColor = session.status === "error" ? "var(--status-error)"
-            : session.status === "pending" ? "var(--status-pending)"
-            : isThinking ? "#ff8800"
-            : isToolUse ? "#eedd00"
-            : isRunning ? "#666"
-            : "transparent";
+      const borderColor = session.status === "error" ? "var(--status-error)"
+        : session.status === "pending" ? "var(--status-pending)"
+        : isThinking ? "#ff8800"
+        : isToolUse ? "#eedd00"
+        : isRunning ? "#666"
+        : "transparent";
 
-          const tooltip = isThinking ? `${displayName}\nthinking...`
-            : isToolUse ? `${displayName}\nusing ${act?.toolName ?? "tool"}`
-            : `${displayName}\n${session.status}`;
+      const tooltip = isThinking ? `${displayName}\nthinking...`
+        : isToolUse ? `${displayName}\nusing ${act?.toolName ?? "tool"}`
+        : `${displayName}\n${session.status}`;
 
-          return (
-            <button
-              key={session.id}
-              onClick={() => onSelectSession(session.id)}
-              onContextMenu={(e) => handleContextMenu(e, session)}
-              title={tooltip}
+      return (
+        <button
+          key={session.id}
+          onClick={() => onSelectSession(session.id)}
+          onContextMenu={(e) => handleContextMenu(e, session)}
+          title={tooltip}
+          style={{
+            width: "100%",
+            display: "flex",
+            flexDirection: "column",
+            gap: 2,
+            borderBottom: "1px solid var(--border-subtle)",
+            borderLeft: `3px solid ${borderColor !== "transparent" ? borderColor : isSelected ? "var(--accent)" : "transparent"}`,
+            background: isSelected ? "var(--bg-elevated)" : "transparent",
+            cursor: "pointer",
+            transition: "background 0.12s ease, border-color 0.3s ease",
+            padding: "6px 8px",
+            fontFamily: "var(--font-mono)",
+          }}
+          onMouseEnter={(e) => {
+            if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)";
+          }}
+          onMouseLeave={(e) => {
+            if (!isSelected) e.currentTarget.style.background = "transparent";
+          }}
+        >
+          <span style={{
+            fontSize: 10,
+            fontWeight: isSelected ? 600 : 400,
+            color: isSelected ? "var(--text-primary)" : "var(--text-secondary)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            lineHeight: 1.3,
+          }}>
+            {displayName.slice(0, 10)}
+          </span>
+        </button>
+      );
+    }
+
+    return (
+      <button
+        key={session.id}
+        draggable
+        onDragStart={(e) => handleDragStart(e, { kind: "session", id: session.id, bridgeId: session.bridgeId })}
+        onDragEnd={handleDragEnd}
+        onDragOver={(e) => handleDragOver(e, dropKey, "session")}
+        onDragLeave={() => { setDragOverKey(null); setDragOverZone(null); }}
+        onDrop={(e) => handleSessionDrop(e, session)}
+        onClick={() => {
+          if (longPressFired.current) return;
+          onSelectSession(session.id);
+        }}
+        onContextMenu={(e) => handleContextMenu(e, session)}
+        onTouchStart={(e) => {
+          longPressFired.current = false;
+          const touch = e.touches[0];
+          longPressTimer.current = setTimeout(() => {
+            longPressFired.current = true;
+            setContextMenu({ session, x: touch.clientX, y: touch.clientY });
+          }, 500);
+        }}
+        onTouchEnd={() => {
+          if (longPressTimer.current) {
+            clearTimeout(longPressTimer.current);
+            longPressTimer.current = null;
+          }
+        }}
+        onTouchMove={() => {
+          if (longPressTimer.current) {
+            clearTimeout(longPressTimer.current);
+            longPressTimer.current = null;
+          }
+        }}
+        style={{
+          width: "100%",
+          textAlign: "left",
+          padding: "10px 16px 10px 28px",
+          borderBottom: "1px solid var(--border-subtle)",
+          borderTop: isDragOver && dragOverZone === "above" ? "2px solid var(--accent)" : "none",
+          ...(isDragOver && dragOverZone === "below" ? { borderBottom: "2px solid var(--accent)" } : {}),
+          borderLeft: `2px solid ${isSelected ? "var(--accent)" : "transparent"}`,
+          background: isSelected ? "var(--bg-elevated)" : "transparent",
+          cursor: "grab",
+          transition: "background 0.12s ease, border-color 0.12s ease",
+          fontFamily: "var(--font-mono)",
+          display: "block",
+        }}
+        onMouseEnter={(e) => {
+          if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)";
+        }}
+        onMouseLeave={(e) => {
+          if (!isSelected) e.currentTarget.style.background = "transparent";
+        }}
+      >
+        <div className="flex items-center justify-between gap-2 mb-1">
+          {editingSessionId === session.id ? (
+            <input
+              ref={inputRef}
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitRename();
+                if (e.key === "Escape") setEditingSessionId(null);
+              }}
+              onBlur={commitRename}
+              onClick={(e) => e.stopPropagation()}
               style={{
-                width: "100%",
-                display: "flex",
-                flexDirection: "column",
-                gap: 2,
-                borderBottom: "1px solid var(--border-subtle)",
-                borderLeft: `3px solid ${borderColor !== "transparent" ? borderColor : isSelected ? "var(--accent)" : "transparent"}`,
-                background: isSelected ? "var(--bg-elevated)" : "transparent",
-                cursor: "pointer",
-                transition: "background 0.12s ease, border-color 0.3s ease",
-                padding: isChild ? "6px 8px 6px 20px" : "6px 8px",
+                fontSize: 12,
+                fontWeight: 600,
+                color: "var(--text-primary)",
+                background: "var(--bg-void)",
+                border: "1px solid var(--accent-dim)",
+                borderRadius: 3,
+                padding: "1px 4px",
+                outline: "none",
+                flex: 1,
+                minWidth: 0,
                 fontFamily: "var(--font-mono)",
               }}
-              onMouseEnter={(e) => {
-                if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)";
+            />
+          ) : (
+            <span
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                startEditing(session);
               }}
-              onMouseLeave={(e) => {
-                if (!isSelected) e.currentTarget.style.background = "transparent";
-              }}
-            >
-              <span style={{
-                fontSize: 10,
+              style={{
+                fontSize: 12,
                 fontWeight: isSelected ? 600 : 400,
                 color: isSelected ? "var(--text-primary)" : "var(--text-secondary)",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
-                lineHeight: 1.3,
-              }}>
-                {displayName.slice(0, 10)}
-              </span>
+                flex: 1,
+                minWidth: 0,
+                cursor: "default",
+              }}
+            >
+              {displayName}
+            </span>
+          )}
+          <StatusBadge status={session.status} activity={sessionActivity?.get(session.id)?.activity} />
+        </div>
 
-
-            </button>
+        {session.status === "running" && (() => {
+          const act = sessionActivity?.get(session.id);
+          if (!act || act.activity === "idle") return null;
+          const isThinking = act.activity === "thinking";
+          return (
+            <div
+              style={{
+                fontSize: 10,
+                color: isThinking ? "var(--status-pending)" : "var(--accent)",
+                fontStyle: "italic",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                marginBottom: 2,
+                ...(isThinking ? { animation: "pulse-pending 2s ease-in-out infinite" } : {}),
+              }}
+            >
+              {isThinking ? "thinking..." : `using ${act.toolName ?? "tool"}`}
+            </div>
           );
-        }
+        })()}
 
-        return (
-          <button
-            key={session.id}
-            draggable
-            onDragStart={(e) => handleDragStart(e, session.id)}
-            onDragEnd={handleDragEnd}
-            onDragOver={(e) => handleDragOver(e, session.id)}
-            onDragLeave={() => { setDragOverId(null); setDragOverPosition(null); }}
-            onDrop={(e) => handleDrop(e, session.id)}
-            onClick={() => {
-              if (longPressFired.current) return;
-              onSelectSession(session.id);
-            }}
-            onContextMenu={(e) => handleContextMenu(e, session)}
-            onTouchStart={(e) => {
-              longPressFired.current = false;
-              const touch = e.touches[0];
-              const x = touch.clientX;
-              const y = touch.clientY;
-              longPressTimer.current = setTimeout(() => {
-                longPressFired.current = true;
-                setContextMenu({ session, x, y });
-              }, 500);
-            }}
-            onTouchEnd={() => {
-              if (longPressTimer.current) {
-                clearTimeout(longPressTimer.current);
-                longPressTimer.current = null;
-              }
-            }}
-            onTouchMove={() => {
-              if (longPressTimer.current) {
-                clearTimeout(longPressTimer.current);
-                longPressTimer.current = null;
-              }
-            }}
+        {session.name && (
+          <p
             style={{
-              width: "100%",
-              textAlign: "left",
-              padding: isChild ? "10px 16px 10px 32px" : "10px 16px",
-              borderBottom: "1px solid var(--border-subtle)",
-              borderTop: dragOverId === session.id && dragOverPosition === "above" ? "2px solid var(--accent)" : "none",
-              ...(dragOverId === session.id && dragOverPosition === "below" ? { borderBottom: "2px solid var(--accent)" } : {}),
-              borderLeft: `2px solid ${isSelected ? "var(--accent)" : "transparent"}`,
-              background: dragOverId === session.id && dragOverPosition === "onto"
-                ? "var(--accent-dim, rgba(0, 255, 136, 0.15))"
-                : isSelected ? "var(--bg-elevated)" : "transparent",
-              boxShadow: dragOverId === session.id && dragOverPosition === "onto"
-                ? "inset 0 0 0 2px var(--accent)"
-                : "none",
-              cursor: "grab",
-              transition: "background 0.12s ease, border-color 0.12s ease",
-              fontFamily: "var(--font-mono)",
-              display: "block",
-            }}
-            onMouseEnter={(e) => {
-              if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)";
-            }}
-            onMouseLeave={(e) => {
-              if (!isSelected) e.currentTarget.style.background = "transparent";
+              fontSize: 10,
+              color: "var(--text-muted)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              marginBottom: 4,
             }}
           >
-            {/* Title row */}
-            <div className="flex items-center justify-between gap-2 mb-1">
-              {hasChildren && (
-                <span
-                  role="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    toggleCollapsed(session.id);
-                  }}
-                  style={{
-                    fontSize: 10,
-                    color: "var(--text-faint)",
-                    cursor: "pointer",
-                    width: 12,
-                    display: "inline-block",
-                    textAlign: "center",
-                    userSelect: "none",
-                  }}
-                >
-                  {isCollapsedParent ? "▸" : "▾"}
-                </span>
-              )}
-              {editingSessionId === session.id ? (
-                <input
-                  ref={inputRef}
-                  value={editValue}
-                  onChange={(e) => setEditValue(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") commitRename();
-                    if (e.key === "Escape") cancelEditing();
-                  }}
-                  onBlur={commitRename}
-                  onClick={(e) => e.stopPropagation()}
-                  style={{
-                    fontSize: 12,
-                    fontWeight: 600,
-                    color: "var(--text-primary)",
-                    background: "var(--bg-void)",
-                    border: "1px solid var(--accent-dim)",
-                    borderRadius: 3,
-                    padding: "1px 4px",
-                    outline: "none",
-                    flex: 1,
-                    minWidth: 0,
-                    fontFamily: "var(--font-mono)",
-                  }}
-                />
-              ) : (
-                <span
-                  onDoubleClick={(e) => {
-                    e.stopPropagation();
-                    startEditing(session);
-                  }}
-                  style={{
-                    fontSize: 12,
-                    fontWeight: isSelected ? 600 : 400,
-                    color: isSelected ? "var(--text-primary)" : "var(--text-secondary)",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                    flex: 1,
-                    minWidth: 0,
-                    cursor: "default",
-                  }}
-                >
-                  {displayName}
-                </span>
-              )}
-              <StatusBadge status={session.status} activity={sessionActivity?.get(session.id)?.activity} />
-            </div>
+            {session.prompt}
+          </p>
+        )}
 
-            {/* Activity indicator */}
-            {session.status === "running" && (() => {
-              const act = sessionActivity?.get(session.id);
-              if (!act || act.activity === "idle") return null;
-              const isThinking = act.activity === "thinking";
-              return (
-                <div
-                  style={{
-                    fontSize: 10,
-                    color: isThinking ? "var(--status-pending)" : "var(--accent)",
-                    fontStyle: "italic",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                    marginBottom: 2,
-                    ...(isThinking ? { animation: "pulse-pending 2s ease-in-out infinite" } : {}),
-                  }}
-                >
-                  {isThinking ? "thinking..." : `using ${act.toolName ?? "tool"}`}
-                </div>
-              );
-            })()}
-
-            {/* Prompt preview */}
-            {session.name && (
-              <p
-                style={{
-                  fontSize: 10,
-                  color: "var(--text-muted)",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                  marginBottom: 4,
-                }}
-              >
-                {session.prompt}
-              </p>
-            )}
-
-            {/* Meta row */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span
-                  style={{
-                    fontSize: 9,
-                    fontWeight: 600,
-                    letterSpacing: "0.06em",
-                    padding: "1px 4px",
-                    borderRadius: 3,
-                    background: session.shellType === "shell" ? "rgba(255, 170, 0, 0.12)" : session.shellType === "cursor" ? "rgba(168, 180, 255, 0.12)" : session.shellType === "zai" ? "rgba(100, 149, 237, 0.12)" : session.shellType === "kimi" ? "rgba(255, 105, 180, 0.12)" : session.shellType === "opencode" ? "rgba(186, 85, 211, 0.12)" : session.shellType === "deepseek" ? "rgba(0, 191, 255, 0.12)" : "rgba(0, 255, 136, 0.08)",
-                    color: session.shellType === "shell" ? "var(--status-pending)" : session.shellType === "cursor" ? "#A8B4FF" : session.shellType === "zai" ? "#6495ED" : session.shellType === "kimi" ? "#FF69B4" : session.shellType === "opencode" ? "#BA55D3" : session.shellType === "deepseek" ? "#00BFFF" : "var(--accent)",
-                    border: `1px solid ${session.shellType === "shell" ? "rgba(255, 170, 0, 0.2)" : session.shellType === "cursor" ? "rgba(168, 180, 255, 0.25)" : session.shellType === "zai" ? "rgba(100, 149, 237, 0.2)" : session.shellType === "kimi" ? "rgba(255, 105, 180, 0.2)" : session.shellType === "opencode" ? "rgba(186, 85, 211, 0.2)" : session.shellType === "deepseek" ? "rgba(0, 191, 255, 0.2)" : "rgba(0, 255, 136, 0.15)"}`,
-                    textTransform: "uppercase",
-                    fontFamily: "var(--font-mono)",
-                  }}
-                >
-                  {session.shellType === "shell" ? "zsh" : session.shellType === "cursor" ? "cursor" : session.shellType === "zai" ? "z.ai" : session.shellType === "kimi" ? "kimi" : session.shellType === "opencode" ? "opencode" : session.shellType === "deepseek" ? "deepseek" : "claude"}
-                </span>
-                {session.model && session.shellType !== "shell" && (
-                  <span style={{ fontSize: 10, color: "var(--text-faint)" }}>
-                    {session.model}
-                  </span>
-                )}
-              </div>
-              <span style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>
-                {formatTimestamp(session.createdAt)}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span
+              style={{
+                fontSize: 9,
+                fontWeight: 600,
+                letterSpacing: "0.06em",
+                padding: "1px 4px",
+                borderRadius: 3,
+                background: session.shellType === "shell" ? "rgba(255, 170, 0, 0.12)" : session.shellType === "cursor" ? "rgba(168, 180, 255, 0.12)" : session.shellType === "zai" ? "rgba(100, 149, 237, 0.12)" : session.shellType === "kimi" ? "rgba(255, 105, 180, 0.12)" : session.shellType === "opencode" ? "rgba(186, 85, 211, 0.12)" : session.shellType === "deepseek" ? "rgba(0, 191, 255, 0.12)" : "rgba(0, 255, 136, 0.08)",
+                color: session.shellType === "shell" ? "var(--status-pending)" : session.shellType === "cursor" ? "#A8B4FF" : session.shellType === "zai" ? "#6495ED" : session.shellType === "kimi" ? "#FF69B4" : session.shellType === "opencode" ? "#BA55D3" : session.shellType === "deepseek" ? "#00BFFF" : "var(--accent)",
+                border: `1px solid ${session.shellType === "shell" ? "rgba(255, 170, 0, 0.2)" : session.shellType === "cursor" ? "rgba(168, 180, 255, 0.25)" : session.shellType === "zai" ? "rgba(100, 149, 237, 0.2)" : session.shellType === "kimi" ? "rgba(255, 105, 180, 0.2)" : session.shellType === "opencode" ? "rgba(186, 85, 211, 0.2)" : session.shellType === "deepseek" ? "rgba(0, 191, 255, 0.2)" : "rgba(0, 255, 136, 0.15)"}`,
+                textTransform: "uppercase",
+                fontFamily: "var(--font-mono)",
+              }}
+            >
+              {session.shellType === "shell" ? "zsh" : session.shellType === "cursor" ? "cursor" : session.shellType === "zai" ? "z.ai" : session.shellType === "kimi" ? "kimi" : session.shellType === "opencode" ? "opencode" : session.shellType === "deepseek" ? "deepseek" : "claude"}
+            </span>
+            {session.model && session.shellType !== "shell" && (
+              <span style={{ fontSize: 10, color: "var(--text-faint)" }}>
+                {session.model}
               </span>
-            </div>
+            )}
+          </div>
+          <span style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>
+            {formatTimestamp(session.createdAt)}
+          </span>
+        </div>
+      </button>
+    );
+  }
+
+  function renderBridgeFolder(bridgeId: string): ReactElement | null {
+    const bridgeSessions = sessionsByBridge.get(bridgeId) ?? [];
+    if (bridgeSessions.length === 0 && collapsed) return null;
+
+    const isBridgeCollapsed = collapsedBridges.has(bridgeId);
+    const isOnline = onlineBridgeIds.has(bridgeId);
+    const label = bridgeLabel(bridgeId, bridges);
+    const dropKey = `bridge:${bridgeId}`;
+    const isDragOver = dragOverKey === dropKey;
+
+    if (collapsed) {
+      return (
+        <div key={bridgeId} className="flex flex-col">
+          {bridgeSessions.map((session) => renderSessionRow(session))}
+        </div>
+      );
+    }
+
+    return (
+      <div key={bridgeId} className="flex flex-col">
+        <div
+          draggable
+          onDragStart={(e) => handleDragStart(e, { kind: "bridge", id: bridgeId })}
+          onDragEnd={handleDragEnd}
+          onDragOver={(e) => handleDragOver(e, dropKey, "bridge")}
+          onDragLeave={() => { setDragOverKey(null); setDragOverZone(null); }}
+          onDrop={(e) => handleBridgeDrop(e, bridgeId)}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "8px 12px",
+            borderBottom: "1px solid var(--border-subtle)",
+            borderTop: isDragOver && dragOverZone === "above" ? "2px solid var(--accent)" : "none",
+            ...(isDragOver && dragOverZone === "below" ? { borderBottom: "2px solid var(--accent)" } : {}),
+            background: "var(--bg-base)",
+            cursor: "grab",
+            fontFamily: "var(--font-mono)",
+            userSelect: "none",
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-base)"; }}
+        >
+          <button
+            type="button"
+            onClick={() => toggleBridgeCollapsed(bridgeId)}
+            style={{
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              color: "var(--text-faint)",
+              fontSize: 10,
+              padding: 0,
+              width: 12,
+              lineHeight: 1,
+              fontFamily: "var(--font-mono)",
+            }}
+          >
+            {isBridgeCollapsed ? "▸" : "▾"}
           </button>
-        );
+          <span
+            style={{
+              fontSize: 11,
+              fontWeight: 600,
+              color: "var(--text-secondary)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              flex: 1,
+              minWidth: 0,
+            }}
+            title={bridgeId}
+          >
+            {label}
+          </span>
+          <span className={`status-dot ${isOnline ? "status-dot-running" : "status-dot-done"}`} />
+          <span style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>
+            {bridgeSessions.length}
+          </span>
+        </div>
+        {!isBridgeCollapsed && bridgeSessions.map((session) => renderSessionRow(session))}
+      </div>
+    );
   }
 
   return (
     <div className="flex flex-col">
-      {rootSessions.map((session) => {
-        const kids = childrenByParent.get(session.id) ?? [];
-        const isCollapsedParent = collapsedParents.has(session.id);
-        return (
-          <div key={session.id} className="flex flex-col">
-            {renderRow(session, false)}
-            {kids.length > 0 && !isCollapsedParent && kids.map((child) => renderRow(child, true))}
-          </div>
-        );
-      })}
+      {orderedBridgeIds.map((bridgeId) => renderBridgeFolder(bridgeId))}
 
       {hiddenSessions.length > 0 && !collapsed && (
         <div className="flex flex-col">
@@ -733,7 +848,7 @@ export function SessionList({ sessions, selectedSessionId, onSelectSession, onRe
                 style={{
                   width: "100%",
                   textAlign: "left",
-                  padding: "8px 16px",
+                  padding: "8px 16px 8px 28px",
                   borderBottom: "1px solid var(--border-subtle)",
                   borderLeft: `2px solid ${isSelected ? "var(--accent)" : "transparent"}`,
                   background: isSelected ? "var(--bg-elevated)" : "transparent",
