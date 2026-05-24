@@ -23,15 +23,18 @@ export const FTOWN_XTERM_THEME = {
   brightWhite: '#e8e8f0',
 } as const;
 
-/** Ink-based CLIs (Cursor Agent) emit no ANSI colors unless truecolor is advertised. */
+/**
+ * Ink-based CLIs (Cursor Agent) emit no ANSI colors unless truecolor is advertised.
+ * The bridge process often inherits NO_COLOR=1 from Cursor IDE — strip it for PTY children
+ * unless the user explicitly opts out via session env (NO_COLOR=1 or FTOWN_NO_COLOR=1).
+ */
 export function applyTerminalColorEnv(env: Record<string, string>): void {
-  if (!env.TERM) {
-    env.TERM = 'xterm-256color';
+  env.TERM = env.TERM || 'xterm-256color';
+
+  if (env.FTOWN_NO_COLOR === '1' || env.NO_COLOR === '1' || env.NO_COLOR === 'true') {
+    return;
   }
-  if (!env.COLORTERM) {
-    env.COLORTERM = 'truecolor';
-  }
-  if (!env.NO_COLOR && env.FORCE_COLOR === undefined) {
-    env.FORCE_COLOR = '3';
-  }
+
+  env.COLORTERM = 'truecolor';
+  env.FORCE_COLOR = '3';
 }

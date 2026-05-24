@@ -16,7 +16,8 @@ import { SessionStore } from './session-store.js';
 import { LocalApiServer } from './local-api-server.js';
 import { TerminalManager } from './terminal-manager.js';
 import { installClaudeHooks } from './hook-installer.js';
-import { installCursorHooks } from './cursor-hook-installer.js';
+import { installCursorHooks, installProjectCursorHooks } from './cursor-hook-installer.js';
+import { registerSessionWorkspace, unregisterSession } from './session-registry.js';
 
 import type { HookEvent } from './local-api-server.js';
 
@@ -249,6 +250,7 @@ program
       } catch (err) {
         console.error(`[Bridge] Failed to handle completion for session ${sessionId}:`, err);
       }
+      unregisterSession(sessionId);
     });
 
     runner.on('error', async (sessionId, error) => {
@@ -265,6 +267,7 @@ program
       } catch (err) {
         console.error(`[Bridge] Failed to handle error for session ${sessionId}:`, err);
       }
+      unregisterSession(sessionId);
       terminalManager.destroy(sessionId);
     });
 
@@ -323,6 +326,11 @@ program
             await store.saveSession(session);
             await centrifugo.publishSessionUpdate(userId, session);
 
+            registerSessionWorkspace(sessionId, payload.workingDir);
+            if (payload.shellType === 'cursor' && payload.workingDir) {
+              installProjectCursorHooks(payload.workingDir, notifyScriptPath);
+            }
+
             runner.run(sessionId, payload.command, {
               workingDir: payload.workingDir,
               env: payload.env,
@@ -359,6 +367,7 @@ program
                 await store.saveSession(session);
                 await centrifugo.publishSessionUpdate(userId, session);
               }
+              unregisterSession(payload.sessionId);
             }
 
             response = { requestId: command.requestId, success: true, data: { stopped } };

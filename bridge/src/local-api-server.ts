@@ -8,6 +8,7 @@ import type { SessionStore } from './session-store.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { TerminalManager } from './terminal-manager.js';
+import { registerSessionConversation, resolveSessionIdFromHookPayload } from './session-registry.js';
 
 export interface HookPayload {
   ftown_session_id: string;
@@ -466,13 +467,20 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         const body = Buffer.concat(chunks).toString('utf-8');
         const payload = JSON.parse(body) as Record<string, unknown>;
 
-        const ftownSessionId = payload.ftown_session_id as string | undefined;
         const hookEventName = payload.hook_event_name as string | undefined;
+        let ftownSessionId =
+          (payload.ftown_session_id as string | undefined) ??
+          resolveSessionIdFromHookPayload(payload);
 
         if (!ftownSessionId || !hookEventName) {
           res.writeHead(200);
           res.end('{"ok":true}');
           return;
+        }
+
+        const conversationId = payload.conversation_id;
+        if (typeof conversationId === 'string' && conversationId) {
+          registerSessionConversation(ftownSessionId, conversationId);
         }
 
         console.log(`[LocalApiServer] Received ${hookEventName} for ftown session ${ftownSessionId}`);

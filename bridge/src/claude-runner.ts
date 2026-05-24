@@ -33,7 +33,9 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
     };
-    applyTerminalColorEnv(env);
+    // Cursor IDE sets NO_COLOR=1 on the bridge process; do not pass that to PTY agents.
+    delete env.NO_COLOR;
+    delete env.FORCE_COLOR;
 
     if (options.hookPort) {
       env.FTOWN_HOOK_PORT = String(options.hookPort);
@@ -47,6 +49,8 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
     if (options.env) {
       Object.assign(env, options.env);
     }
+
+    applyTerminalColorEnv(env);
 
     console.log(`[ProcessRunner] Spawning command in ${cwd}: ${command}`);
 
