@@ -47,6 +47,84 @@ function LayersIcon() {
   );
 }
 
+function AgentIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 8V4H8" />
+      <rect x="4" y="12" width="16" height="8" rx="2" />
+      <path d="M2 12h2" />
+      <path d="M20 12h2" />
+      <path d="M12 12v0" />
+      <path d="M9 16v.01" />
+      <path d="M15 16v.01" />
+    </svg>
+  );
+}
+
+function RefreshIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+      <path d="M3 3v5h5" />
+      <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+      <path d="M16 16h5v5" />
+    </svg>
+  );
+}
+
+function ZapIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+    </svg>
+  );
+}
+
+const SUPPORTED_AGENTS = [
+  { name: "Claude Code", detail: "Anthropic + API providers" },
+  { name: "Cursor Agent", detail: "agent CLI" },
+  { name: "opencode", detail: "interactive CLI" },
+  { name: "Shell", detail: "zsh on bridge" },
+] as const;
+
+const FEATURES = [
+  {
+    icon: <AgentIcon />,
+    title: "Multi-agent orchestration",
+    desc: "Run Claude Code, Cursor Agent, opencode, or a raw shell — each as a full interactive TUI streamed to your browser.",
+  },
+  {
+    icon: <TerminalIcon />,
+    title: "Real-time terminal streaming",
+    desc: "PTY output flows over WebSocket with scrollback replay, resize sync, and mobile-friendly controls.",
+  },
+  {
+    icon: <LayersIcon />,
+    title: "Multi-bridge & multi-session",
+    desc: "Connect many machines with ftown-bridge. Run parallel agent sessions and organize them from one dashboard.",
+  },
+  {
+    icon: <RefreshIcon />,
+    title: "Resume where you left off",
+    desc: "Pick up prior Claude or Cursor Agent chats per workspace. Bridge exec lists sessions from the remote machine.",
+  },
+  {
+    icon: <ZapIcon />,
+    title: "Hook events in the UI",
+    desc: "Bridge installs notify hooks into Claude and Cursor configs so tool use and activity show up live in the dashboard.",
+  },
+  {
+    icon: <GlobeIcon />,
+    title: "Access anywhere",
+    desc: "Mobile-optimized layout, PWA install, and connection diagnostics — manage agents from phone or desktop.",
+  },
+  {
+    icon: <ShieldIcon />,
+    title: "Self-hosted & private",
+    desc: "Your stack: Next.js UI, Centrifugo pub/sub, PostgreSQL auth, and bridges on your own hardware or cloud.",
+  },
+] as const;
+
 export default async function LandingPage() {
   const session = await auth();
   if (session?.user?.email) {
@@ -139,7 +217,7 @@ export default async function LandingPage() {
             >
               Orchestrate{" "}
               <span style={{ color: "var(--accent)", textShadow: "0 0 24px var(--accent-glow)" }}>
-                Claude Code
+                coding agents
               </span>
               {" "}from anywhere
             </h1>
@@ -149,14 +227,54 @@ export default async function LandingPage() {
                 fontSize: 14,
                 color: "var(--text-secondary)",
                 lineHeight: 1.7,
-                maxWidth: 480,
-                marginBottom: 32,
+                maxWidth: 520,
+                marginBottom: 20,
               }}
             >
-              Stream remote CLI sessions to your browser in real-time.
-              Manage multiple machines, multiple sessions, all from a single dashboard.
-              Self-hosted. Open source.
+              ftown is a self-hosted control plane for remote CLI agents. Stream interactive
+              sessions to your browser, connect multiple bridges, resume chats, and watch hook
+              activity — without SSH port forwarding or screen sharing.
             </p>
+
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 8,
+                marginBottom: 28,
+                maxWidth: 520,
+              }}
+            >
+              {SUPPORTED_AGENTS.map((agent) => (
+                <span
+                  key={agent.name}
+                  style={{
+                    fontSize: 11,
+                    fontFamily: "var(--font-mono)",
+                    padding: "4px 10px",
+                    borderRadius: 4,
+                    border: "1px solid var(--border-muted)",
+                    background: "var(--bg-surface)",
+                    color: "var(--text-secondary)",
+                  }}
+                  title={agent.detail}
+                >
+                  {agent.name}
+                </span>
+              ))}
+              <span
+                style={{
+                  fontSize: 11,
+                  fontFamily: "var(--font-mono)",
+                  padding: "4px 10px",
+                  borderRadius: 4,
+                  border: "1px dashed var(--border-muted)",
+                  color: "var(--text-faint)",
+                }}
+              >
+                + z.ai · Kimi · DeepSeek · Fireworks via Claude
+              </span>
+            </div>
 
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
               <Link
@@ -243,7 +361,7 @@ export default async function LandingPage() {
           <div style={{ textAlign: "center", flexShrink: 0 }}>
             <div style={{ border: "1px solid var(--border-muted)", borderRadius: 6, padding: "10px 16px" }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>Bridge</div>
-              <div style={{ fontSize: 10, color: "var(--text-muted)" }}>node-pty</div>
+              <div style={{ fontSize: 10, color: "var(--text-muted)" }}>agents · PTY</div>
             </div>
           </div>
         </div>
@@ -263,36 +381,43 @@ export default async function LandingPage() {
         </div>
 
         {/* Features */}
-        <div
-          style={{
-            marginTop: 48,
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
-            gap: 16,
-            maxWidth: 640,
-            width: "100%",
-          }}
-        >
-          {[
-            { icon: <TerminalIcon />, title: "Real-time streaming", desc: "Terminal output flows from remote machines to your browser via WebSocket" },
-            { icon: <LayersIcon />, title: "Multi-session", desc: "Run and manage multiple Claude sessions across multiple machines simultaneously" },
-            { icon: <GlobeIcon />, title: "Access anywhere", desc: "Mobile-optimized dashboard — manage sessions from your phone or tablet" },
-            { icon: <ShieldIcon />, title: "Self-hosted", desc: "Deploy on your own infrastructure. Your code and conversations stay private." },
-          ].map((f) => (
-            <div
-              key={f.title}
-              style={{
-                padding: "16px 20px",
-                background: "var(--bg-surface)",
-                border: "1px solid var(--border-subtle)",
-                borderRadius: 8,
-              }}
-            >
-              <div style={{ color: "var(--accent)", marginBottom: 8 }}>{f.icon}</div>
-              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-primary)", marginBottom: 4 }}>{f.title}</div>
-              <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>{f.desc}</div>
-            </div>
-          ))}
+        <div style={{ marginTop: 56, width: "100%", maxWidth: 960 }}>
+          <div
+            style={{
+              fontSize: 11,
+              fontWeight: 600,
+              color: "var(--text-muted)",
+              marginBottom: 16,
+              textTransform: "uppercase",
+              letterSpacing: "0.08em",
+              textAlign: "center",
+            }}
+          >
+            Capabilities
+          </div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+              gap: 16,
+            }}
+          >
+            {FEATURES.map((f) => (
+              <div
+                key={f.title}
+                style={{
+                  padding: "16px 20px",
+                  background: "var(--bg-surface)",
+                  border: "1px solid var(--border-subtle)",
+                  borderRadius: 8,
+                }}
+              >
+                <div style={{ color: "var(--accent)", marginBottom: 8 }}>{f.icon}</div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-primary)", marginBottom: 4 }}>{f.title}</div>
+                <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>{f.desc}</div>
+              </div>
+            ))}
+          </div>
         </div>
       </main>
 

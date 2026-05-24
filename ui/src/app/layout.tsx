@@ -5,8 +5,9 @@ import { ServiceWorkerRegister } from "./sw-register";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "ftown - Claude Code Orchestrator",
-  description: "Manage and view Claude Code sessions running on remote CLI bridges",
+  title: "ftown — Remote coding agent orchestration",
+  description:
+    "Self-hosted dashboard to stream and manage Claude Code, Cursor Agent, and other CLI agents across remote bridges.",
   manifest: "/manifest.json",
   icons: {
     icon: "/icon.svg",

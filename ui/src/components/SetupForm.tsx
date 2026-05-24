@@ -65,7 +65,7 @@ export function SetupForm({ onConnect }: SetupFormProps) {
     <div className="min-h-screen flex items-center justify-center p-4">
       <div className="w-full max-w-md border border-[#2a2a2a] bg-[#111111] rounded-lg p-8">
         <h1 className="text-xl font-bold text-[#00ff88] mb-2">ftown</h1>
-        <p className="text-[#888888] text-sm mb-8">Claude Code Orchestrator</p>
+        <p className="text-[#888888] text-sm mb-8">Remote coding agent orchestration</p>
 
         <div className="space-y-4">
           <div>

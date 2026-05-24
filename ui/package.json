@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
-  "description": "Web dashboard for ftown — manage and stream remote Claude Code sessions",
+  "description": "Web dashboard for ftown — orchestrate remote Claude Code, Cursor Agent, and CLI sessions",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/fmktech/ftown.git",

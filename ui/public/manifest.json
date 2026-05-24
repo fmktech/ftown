@@ -1,7 +1,7 @@
 {
   "name": "ftown",
   "short_name": "ftown",
-  "description": "Claude Code Orchestrator",
+  "description": "Remote coding agent orchestration",
   "start_url": "/",
   "display": "standalone",
   "theme_color": "#060608",
