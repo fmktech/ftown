@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Centrifuge, Subscription } from "centrifuge";
 import { Session } from "@/types";
+import { hookEventToActivity, extractToolLabel } from "@/lib/hook-events";
 import { TokenUsage } from "./useSessionEvents";
 
 export interface SessionActivity {
@@ -46,37 +47,29 @@ export function useAllSessionEvents(
       const msg = ctx.data as HookEventMessage;
       if (msg.type !== "hook_event") return;
 
+      const activity = hookEventToActivity(msg.eventName);
+      if (!activity) return;
+
       setActivityMap((prev) => {
         const current = prev.get(sessionId) ?? { activity: "idle" as const };
-        let updated: SessionActivity;
+        const toolName =
+          activity === "tool_use"
+            ? extractToolLabel(msg.eventName, msg.data)
+            : undefined;
 
-        switch (msg.eventName) {
-          case "UserPromptSubmit":
-            updated = { ...current, activity: "thinking", toolName: undefined };
-            break;
-          case "PreToolUse":
-            updated = {
-              ...current,
-              activity: "tool_use",
-              toolName: msg.data.tool_name as string | undefined,
-            };
-            break;
-          case "PostToolUse":
-            updated = { ...current, activity: "thinking", toolName: undefined };
-            break;
-          case "Stop":
-            updated = {
-              ...current,
-              activity: "idle",
-              toolName: undefined,
-              ...(msg.usage
-                ? { usage: { inputTokens: msg.usage.inputTokens, outputTokens: msg.usage.outputTokens } }
-                : {}),
-            };
-            break;
-          default:
-            return prev;
-        }
+        const updated: SessionActivity = {
+          ...current,
+          activity,
+          toolName: activity === "tool_use" ? toolName : undefined,
+          ...(activity === "idle" && msg.usage
+            ? {
+                usage: {
+                  inputTokens: msg.usage.inputTokens,
+                  outputTokens: msg.usage.outputTokens,
+                },
+              }
+            : {}),
+        };
 
         const next = new Map(prev);
         next.set(sessionId, updated);
@@ -119,20 +112,17 @@ export function useAllSessionEvents(
       sessions.filter((s) => s.status === "running").map((s) => s.id)
     );
 
-    // Unsubscribe from sessions no longer running
     for (const sessionId of subsRef.current.keys()) {
       if (!runningIds.has(sessionId)) {
         unsubscribe(sessionId);
       }
     }
 
-    // Subscribe to new running sessions
     for (const id of runningIds) {
       subscribe(id);
     }
   }, [client, userId, sessions, subscribe, unsubscribe]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       for (const sessionId of subsRef.current.keys()) {

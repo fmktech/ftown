@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import { Centrifuge, Subscription } from "centrifuge";
+import { hookEventToActivity } from "@/lib/hook-events";
 
 export interface TokenUsage {
   inputTokens: number;
@@ -64,21 +65,9 @@ export function useSessionEvents(
         });
       }
 
-      switch (msg.eventName) {
-        case "Stop":
-        case "stop":
-          setActivity("idle");
-          break;
-        case "PreToolUse":
-        case "preToolUse":
-          setActivity("tool_use");
-          break;
-        case "PostToolUse":
-        case "postToolUse":
-          setActivity("thinking");
-          break;
-        case "Notification":
-          break;
+      const next = hookEventToActivity(msg.eventName);
+      if (next) {
+        setActivity(next);
       }
     });
 
