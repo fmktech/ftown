@@ -139,33 +139,58 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
       installedHookBridges.current.add(bridge.bridgeId);
 
       const script = `
-mkdir -p ~/.ftown
-cat > ~/.ftown/notify.sh << 'HOOKEOF'
-#!/bin/bash
-INPUT=$(cat)
-PORT="\${FTOWN_HOOK_PORT}"
-SID="\${FTOWN_SESSION_ID}"
-[ -z "$PORT" ] || [ -z "$SID" ] && exit 0
-echo "$INPUT" | jq -c --arg sid "$SID" '. + {ftown_session_id: $sid}' | curl -s -X POST "http://localhost:\${PORT}/hook" -H "Content-Type: application/json" -d @- > /dev/null 2>&1
-exit 0
-HOOKEOF
-chmod +x ~/.ftown/notify.sh
-python3 -c "
+NOTIFY="$HOME/.ftown/notify.sh"
+if [ ! -x "$NOTIFY" ]; then
+  echo "ftown notify.sh missing (start ftown-bridge on this machine first)"
+  exit 0
+fi
+python3 << 'PY'
 import json, os
-p = os.path.expanduser('~/.claude/settings.json')
-s = {}
+
+notify = os.path.expanduser("~/.ftown/notify.sh")
+
+def is_ftown_notify(cmd):
+    return isinstance(cmd, str) and cmd.endswith("notify.sh") and (
+        ".ftown/" in cmd or "/ftown/bridge/hooks/" in cmd or cmd.endswith("/hooks/notify.sh")
+    )
+
+# Claude ~/.claude/settings.json
+claude_path = os.path.expanduser("~/.claude/settings.json")
+claude = {}
 try:
-    with open(p) as f: s = json.load(f)
-except: pass
-h = s.get('hooks', {})
-e = {'matcher': '', 'hooks': [{'type': 'command', 'command': os.path.expanduser('~/.ftown/notify.sh'), 'async': True}]}
-for ev in ['UserPromptSubmit','Stop','PreToolUse','PostToolUse','Notification']:
-    h[ev] = [e]
-s['hooks'] = h
-os.makedirs(os.path.dirname(p), exist_ok=True)
-with open(p, 'w') as f: json.dump(s, f, indent=2)
-print('hooks installed')
-"`;
+    with open(claude_path) as f:
+        claude = json.load(f)
+except FileNotFoundError:
+    pass
+hooks = claude.setdefault("hooks", {})
+entry = {"matcher": "", "hooks": [{"type": "command", "command": notify, "async": True}]}
+for ev in ["UserPromptSubmit", "Stop", "PreToolUse", "PostToolUse", "Notification"]:
+    hooks[ev] = [entry]
+os.makedirs(os.path.dirname(claude_path), exist_ok=True)
+with open(claude_path, "w") as f:
+    json.dump(claude, f, indent=2)
+
+# Cursor ~/.cursor/hooks.json
+cursor_path = os.path.expanduser("~/.cursor/hooks.json")
+cursor = {"version": 1, "hooks": {}}
+try:
+    with open(cursor_path) as f:
+        cursor = json.load(f)
+except FileNotFoundError:
+    pass
+cursor.setdefault("version", 1)
+ch = cursor.setdefault("hooks", {})
+for ev in [
+    "sessionStart", "preToolUse", "postToolUse", "beforeShellExecution",
+    "afterShellExecution", "afterFileEdit", "stop", "beforeSubmitPrompt",
+]:
+    ch[ev] = [{"command": notify}]
+os.makedirs(os.path.dirname(cursor_path), exist_ok=True)
+with open(cursor_path, "w") as f:
+    json.dump(cursor, f, indent=2)
+
+print("ftown hooks point at", notify)
+PY`;
       bridgeExec(script, "~", bridge.bridgeId).catch(() => {});
     }
   }, [bridges, bridgeExec]);
@@ -273,7 +298,11 @@ print('hooks installed')
       localStorage.setItem("ftown:hiddenBridges", JSON.stringify([...next]));
       return next;
     });
-  }, []);
+    const selected = rawSessions.find((s) => s.id === selectedSessionId);
+    if (selected?.bridgeId === bridgeId) {
+      setSelectedSessionId(null);
+    }
+  }, [rawSessions, selectedSessionId]);
 
   const handleUnhideBridge = useCallback((bridgeId: string) => {
     setHiddenBridgeIds((prev) => {
@@ -740,6 +769,7 @@ print('hooks installed')
               sessionActivity={sessionActivity}
               collapsed={isDesktop && sidebarCollapsed}
               hiddenSessionIds={hiddenSessionIds}
+              hiddenBridgeIds={hiddenBridgeIds}
               onHideSession={handleHideSession}
               onUnhideSession={handleUnhideSession}
               hiddenBridgeIds={hiddenBridgeIds}

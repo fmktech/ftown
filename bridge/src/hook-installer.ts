@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 
 const HOOK_EVENTS = ['Notification', 'Stop', 'PreToolUse', 'PostToolUse', 'UserPromptSubmit'] as const;
 
-const NOTIFY_SUFFIX = '/hooks/notify.sh';
+import { isFtownNotifyCommand } from './install-notify-script.js';
 
 interface HookCommandEntry {
   type?: string;
@@ -83,7 +83,7 @@ export function installClaudeHooks(notifyScriptPath: string): void {
       if (!Array.isArray(inner)) continue;
       for (let j = 0; j < inner.length; j++) {
         const h = inner[j];
-        if (isObject(h) && typeof h.command === 'string' && h.command.endsWith(NOTIFY_SUFFIX)) {
+        if (isObject(h) && typeof h.command === 'string' && isFtownNotifyCommand(h.command)) {
           foundIndex = i;
           foundHookIndex = j;
           break;

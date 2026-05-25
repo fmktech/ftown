@@ -41,6 +41,7 @@ export type CommandType = 'create_session' | 'stop_session' | 'list_sessions' | 
 
 export interface CreateSessionPayload {
   command: string;
+  prompt?: string;
   name?: string;
   workingDir?: string;
   bridgeId?: string;

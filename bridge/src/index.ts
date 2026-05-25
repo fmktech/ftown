@@ -7,7 +7,7 @@ import { homedir, hostname as osHostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 
 import { CentrifugoClient } from './centrifugo-client.js';
@@ -18,7 +18,11 @@ import { TerminalManager } from './terminal-manager.js';
 import { installClaudeHooks } from './hook-installer.js';
 import { installCursorHooks, installProjectCursorHooks } from './cursor-hook-installer.js';
 import { installHarness, harnessOnPath, pathHint, writeHarnessAgentGuide, agentGuidePath } from './harness-installer.js';
+import { installNotifyScript } from './install-notify-script.js';
+import { installFtownSessionsSkill } from './install-ftown-skill.js';
+import { installFtownSessionsCli } from './install-ftown-cli.js';
 import { registerSessionWorkspace, unregisterSession } from './session-registry.js';
+import { createFtownSession } from './create-ftown-session.js';
 
 import type { HookEvent } from './local-api-server.js';
 
@@ -142,9 +146,32 @@ program
     console.log(`[Bridge] Local API server started on port ${hookPort}`);
     localApiServer.setDependencies(store, runner, centrifugo, userId, terminalManager);
 
-    const notifyScriptPath = resolve(__dirname, '..', 'hooks', 'notify.sh');
+    const bundledNotifyPath = resolve(__dirname, '..', 'hooks', 'notify.sh');
+    const notifyScriptPath = installNotifyScript(bundledNotifyPath);
     installClaudeHooks(notifyScriptPath);
     installCursorHooks(notifyScriptPath);
+
+    const wireTerminalInput = (sessionId: string): void => {
+      centrifugo.subscribeToTerminalInput(
+        userId,
+        sessionId,
+        (sid, data) => { runner.write(sid, data); },
+        (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
+        (sid) => { publishScreenDump(sid); },
+      );
+    };
+
+    localApiServer.setSessionFactory({
+      store,
+      runner,
+      centrifugo,
+      userId,
+      bridgeId,
+      hookPort,
+      hookToken: apiToken,
+      notifyScriptPath,
+      wireTerminalInput,
+    });
 
     const harnessCliPath = resolve(__dirname, 'harness-cli.js');
     const harness = installHarness(harnessCliPath);
@@ -155,6 +182,15 @@ program
       const hint = pathHint();
       if (hint) console.log(`[Bridge] ${hint}`);
     }
+
+    const bundledSkillDir = resolve(__dirname, '..', 'skills', 'ftown-sessions');
+    installFtownSessionsSkill(bundledSkillDir);
+
+    const cliBundlePath = existsSync(resolve(__dirname, 'ftown-sessions-cli.js'))
+      ? resolve(__dirname, 'ftown-sessions-cli.js')
+      : resolve(__dirname, '..', 'dist', 'ftown-sessions-cli.js');
+    const cliPath = installFtownSessionsCli(cliBundlePath);
+    console.log(`[Bridge] Installed CLI at ${cliPath}`);
 
     const bridgeStateDir = join(homedir(), '.ftown');
     const bridgePointerPath = join(bridgeStateDir, 'bridge.json');
@@ -309,57 +345,33 @@ program
         switch (command.type) {
           case 'create_session': {
             const payload = command.payload as CreateSessionPayload;
-
-            let parentSessionId: string | undefined;
-            if (payload.parentSessionId) {
-              const proposed = await store.loadSession(payload.parentSessionId);
-              if (proposed) {
-                parentSessionId = proposed.parentSessionId ?? proposed.id;
-              }
-            }
-
-            const sessionId = uuidv4();
-            const session: Session = {
-              id: sessionId,
-              name: payload.name ?? payload.command.slice(0, 80),
-              command: payload.command,
-              status: 'running',
-              bridgeId,
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-              workingDir: payload.workingDir,
-              shellType: payload.shellType,
-              model: payload.model,
-              claudeSessionId: payload.claudeSessionId,
-              cursorSessionId: payload.cursorSessionId,
-              env: payload.env,
-              parentSessionId,
-            };
-
-            await store.saveSession(session);
-            await centrifugo.publishSessionUpdate(userId, session);
-
-            registerSessionWorkspace(sessionId, payload.workingDir);
-            if (payload.shellType === 'cursor' && payload.workingDir) {
-              installProjectCursorHooks(payload.workingDir, notifyScriptPath);
-            }
-
-            runner.run(sessionId, payload.command, {
-              workingDir: payload.workingDir,
-              env: payload.env,
-              initialInput: payload.initialInput,
-              initialInputDelay: payload.initialInputDelay,
-              hookPort,
-              hookToken: apiToken,
-            });
-
-            centrifugo.subscribeToTerminalInput(
-              userId, sessionId,
-              (sid, data) => { runner.write(sid, data); },
-              (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
-              (sid) => { publishScreenDump(sid); },
+            const session = await createFtownSession(
+              {
+                store,
+                runner,
+                centrifugo,
+                userId,
+                bridgeId,
+                hookPort,
+                hookToken: apiToken,
+                notifyScriptPath,
+                wireTerminalInput,
+              },
+              {
+                command: payload.command,
+                prompt: payload.prompt,
+                name: payload.name,
+                workingDir: payload.workingDir,
+                shellType: payload.shellType,
+                model: payload.model,
+                claudeSessionId: payload.claudeSessionId,
+                cursorSessionId: payload.cursorSessionId,
+                env: payload.env,
+                parentSessionId: payload.parentSessionId,
+                initialInput: payload.initialInput,
+                initialInputDelay: payload.initialInputDelay,
+              },
             );
-
             response = { requestId: command.requestId, success: true, data: { session } };
             break;
           }

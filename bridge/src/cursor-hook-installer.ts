@@ -14,7 +14,7 @@ const CURSOR_HOOK_EVENTS = [
   'beforeSubmitPrompt',
 ] as const;
 
-const NOTIFY_SUFFIX = '/hooks/notify.sh';
+import { isFtownNotifyCommand } from './install-notify-script.js';
 
 interface CursorHookEntry {
   command?: string;
@@ -83,7 +83,7 @@ function mergeHooksFile(settingsPath: string, notifyScriptPath: string, label: s
       (entry) =>
         isObject(entry) &&
         typeof entry.command === 'string' &&
-        entry.command.endsWith(NOTIFY_SUFFIX),
+        isFtownNotifyCommand(entry.command),
     );
 
     if (foundIndex === -1) {

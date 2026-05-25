@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Dev/repo launcher — production copy lives at ~/.ftown/ftown-sessions
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec node "${ROOT}/dist/ftown-sessions-cli.js" "$@"

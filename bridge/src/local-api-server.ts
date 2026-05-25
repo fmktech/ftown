@@ -9,6 +9,11 @@ import type { ProcessRunner } from './claude-runner.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { TerminalManager } from './terminal-manager.js';
 import { registerSessionConversation, resolveSessionIdFromHookPayload } from './session-registry.js';
+import {
+  createFtownSession,
+  parseCreateSessionBody,
+  type CreateFtownSessionDeps,
+} from './create-ftown-session.js';
 
 export interface HookPayload {
   ftown_session_id: string;
@@ -94,6 +99,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private runner: ProcessRunner | null = null;
   private centrifugo: CentrifugoClient | null = null;
   private terminalManager: TerminalManager | null = null;
+  private sessionDeps: CreateFtownSessionDeps | null = null;
   private userId: string = '';
   private authToken: string = '';
   private port: number = 0;
@@ -114,6 +120,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     this.centrifugo = centrifugo;
     this.userId = userId;
     this.terminalManager = terminalManager ?? null;
+  }
+
+  setSessionFactory(deps: CreateFtownSessionDeps): void {
+    this.sessionDeps = deps;
   }
 
   async start(): Promise<number> {
@@ -207,6 +217,48 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     if (path === '/api/sessions' && req.method === 'GET') {
       const sessions = await this.store.listSessions();
       jsonResponse(res, 200, { sessions });
+      return;
+    }
+
+    // POST /api/sessions — create a new agent session (same as UI create_session)
+    if (path === '/api/sessions' && req.method === 'POST') {
+      if (!this.sessionDeps) {
+        jsonResponse(res, 503, { error: 'Session factory not ready' });
+        return;
+      }
+
+      const body = await parseBody(req);
+      const callerHeader = req.headers['x-ftown-session-id'];
+      const callerSessionId =
+        typeof callerHeader === 'string' && callerHeader.trim()
+          ? callerHeader.trim()
+          : undefined;
+
+      const useCallerAsParent = body.parentSessionId === true || body.parentSessionId === 'caller';
+      if (useCallerAsParent) {
+        delete body.parentSessionId;
+      }
+
+      const input = parseCreateSessionBody(
+        body,
+        useCallerAsParent ? callerSessionId : undefined,
+      );
+
+      if (!input.command && !input.shellType && !input.prompt) {
+        jsonResponse(res, 400, {
+          error: 'Provide shellType, prompt, and/or command',
+        });
+        return;
+      }
+
+      try {
+        const session = await createFtownSession(this.sessionDeps, input);
+        jsonResponse(res, 201, { session });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const status = message === 'Parent session not found' ? 400 : 500;
+        jsonResponse(res, status, { error: message });
+      }
       return;
     }
 

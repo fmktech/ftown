@@ -6,11 +6,14 @@
   "main": "dist/index.js",
   "bin": {
     "ftown-bridge": "dist/index.js",
-    "ftown-harness": "dist/harness-cli.js"
+    "ftown-harness": "dist/harness-cli.js",
+    "ftown-sessions": "bin/ftown-sessions"
   },
   "files": [
     "dist",
-    "hooks"
+    "bin",
+    "hooks",
+    "skills"
   ],
   "scripts": {
     "build": "tsc",

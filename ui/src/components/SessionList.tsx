@@ -317,8 +317,8 @@ export function SessionList({
   const longPressFired = useRef(false);
   const hiddenSet = hiddenSessionIds ?? new Set<string>();
   const hiddenBridgeSet = hiddenBridgeIds ?? new Set<string>();
-  const visibleSessions = sessions.filter((s) => !hiddenSet.has(s.id));
-  const hiddenSessions = sessions.filter((s) => hiddenSet.has(s.id));
+  const visibleSessions = sessions.filter((s) => !hiddenSet.has(s.id) && !hiddenBridgeSet.has(s.bridgeId));
+  const hiddenSessions = sessions.filter((s) => hiddenSet.has(s.id) && !hiddenBridgeSet.has(s.bridgeId));
 
   useEffect(() => {
     try {
@@ -517,7 +517,7 @@ export function SessionList({
     });
   }
 
-  if (visibleSessions.length === 0 && hiddenSessions.length === 0) {
+  if (visibleSessions.length === 0 && visibleBridgeIds.length === 0 && hiddenSessions.length === 0 && hiddenBridgeIdsList.length === 0) {
     if (collapsed) return null;
     return (
       <div
