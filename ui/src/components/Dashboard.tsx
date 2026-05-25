@@ -772,7 +772,6 @@ PY`;
               hiddenBridgeIds={hiddenBridgeIds}
               onHideSession={handleHideSession}
               onUnhideSession={handleUnhideSession}
-              hiddenBridgeIds={hiddenBridgeIds}
               onHideBridge={handleHideBridge}
               onUnhideBridge={handleUnhideBridge}
               onCreateSession={handleCreateSessionOnBridge}
