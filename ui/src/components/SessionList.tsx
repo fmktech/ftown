@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { Session, SessionStatus } from "@/types";
 import { SessionActivity } from "@/hooks/useAllSessionEvents";
 import { BridgeInfo } from "@/hooks/useBridges";
+import { reorderByDrop } from "@/lib/bridge-order";
 
 interface SessionListProps {
   sessions: Session[];
@@ -23,13 +24,15 @@ interface SessionListProps {
   hiddenSessionIds?: Set<string>;
   onHideSession?: (sessionId: string) => void;
   onUnhideSession?: (sessionId: string) => void;
+  hiddenBridgeIds?: Set<string>;
+  onHideBridge?: (bridgeId: string) => void;
+  onUnhideBridge?: (bridgeId: string) => void;
+  onCreateSession?: (bridgeId: string) => void;
 }
 
-interface ContextMenuState {
-  session: Session;
-  x: number;
-  y: number;
-}
+type ContextMenuState =
+  | { kind: "session"; session: Session; x: number; y: number }
+  | { kind: "bridge"; bridgeId: string; x: number; y: number };
 
 type DragKind = "bridge" | "session";
 type DropZone = "above" | "below";
@@ -94,29 +97,32 @@ function computeDropZone(e: React.DragEvent): DropZone {
   return offset < rect.height / 2 ? "above" : "below";
 }
 
-function ContextMenu({
-  menu,
-  onRename,
-  onStop,
-  onRemove,
-  onClone,
-  onHide,
-  onUnhide,
-  isHidden,
-  onClose,
-}: {
-  menu: ContextMenuState;
-  onRename: (session: Session) => void;
-  onStop: (sessionId: string) => void;
-  onRemove: (sessionId: string) => void;
-  onClone: (session: Session) => void;
-  onHide: (sessionId: string) => void;
-  onUnhide: (sessionId: string) => void;
-  isHidden: boolean;
-  onClose: () => void;
-}) {
-  const menuRef = useRef<HTMLDivElement>(null);
+const menuButtonStyle = {
+  display: "block" as const,
+  width: "100%",
+  textAlign: "left" as const,
+  padding: "6px 12px",
+  background: "transparent",
+  border: "none",
+  cursor: "pointer",
+  fontFamily: "var(--font-mono)",
+  fontSize: 11,
+};
 
+const contextMenuPanelStyle = {
+  position: "fixed" as const,
+  zIndex: 9999,
+  background: "var(--bg-elevated)",
+  border: "1px solid var(--border-muted)",
+  borderRadius: 6,
+  padding: "4px 0",
+  minWidth: 120,
+  boxShadow: "0 4px 12px rgba(0, 0, 0, 0.4)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 11,
+};
+
+function useDismissContextMenu(onClose: () => void, menuRef: React.RefObject<HTMLDivElement | null>): void {
   useEffect(() => {
     function handleClickOutside(e: MouseEvent | TouchEvent): void {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
@@ -140,111 +146,136 @@ function ContextMenu({
       document.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("scroll", handleScroll, true);
     };
-  }, [onClose]);
+  }, [onClose, menuRef]);
+}
+
+function ContextMenuButton({
+  label,
+  onClick,
+  color = "var(--text-secondary)",
+  disabled = false,
+}: {
+  label: string;
+  onClick: () => void;
+  color?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        ...menuButtonStyle,
+        color: disabled ? "var(--text-faint)" : color,
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.5 : 1,
+      }}
+      onMouseEnter={(e) => {
+        if (!disabled) e.currentTarget.style.background = "var(--bg-hover)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = "transparent";
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+function SessionContextMenu({
+  menu,
+  onRename,
+  onStop,
+  onRemove,
+  onClone,
+  onHide,
+  onUnhide,
+  isHidden,
+  onClose,
+}: {
+  menu: Extract<ContextMenuState, { kind: "session" }>;
+  onRename: (session: Session) => void;
+  onStop: (sessionId: string) => void;
+  onRemove: (sessionId: string) => void;
+  onClone: (session: Session) => void;
+  onHide: (sessionId: string) => void;
+  onUnhide: (sessionId: string) => void;
+  isHidden: boolean;
+  onClose: () => void;
+}) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  useDismissContextMenu(onClose, menuRef);
 
   const isRunning = menu.session.status === "running" || menu.session.status === "pending";
-
-  const menuButtonStyle = {
-    display: "block" as const,
-    width: "100%",
-    textAlign: "left" as const,
-    padding: "6px 12px",
-    background: "transparent",
-    border: "none",
-    cursor: "pointer",
-    fontFamily: "var(--font-mono)",
-    fontSize: 11,
-  };
 
   return createPortal(
     <div
       ref={menuRef}
-      style={{
-        position: "fixed",
-        top: menu.y,
-        left: menu.x,
-        zIndex: 9999,
-        background: "var(--bg-elevated)",
-        border: "1px solid var(--border-muted)",
-        borderRadius: 6,
-        padding: "4px 0",
-        minWidth: 120,
-        boxShadow: "0 4px 12px rgba(0, 0, 0, 0.4)",
-        fontFamily: "var(--font-mono)",
-        fontSize: 11,
-      }}
+      style={{ ...contextMenuPanelStyle, top: menu.y, left: menu.x }}
     >
-      <button
-        onClick={() => {
-          onRename(menu.session);
-          onClose();
-        }}
-        style={{ ...menuButtonStyle, color: "var(--text-secondary)" }}
-        onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-        onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-      >
-        Rename
-      </button>
-      <button
-        onClick={() => {
-          onClone(menu.session);
-          onClose();
-        }}
-        style={{ ...menuButtonStyle, color: "var(--text-secondary)" }}
-        onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-        onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-      >
-        Clone
-      </button>
+      <ContextMenuButton label="Rename" onClick={() => { onRename(menu.session); onClose(); }} />
+      <ContextMenuButton label="Clone" onClick={() => { onClone(menu.session); onClose(); }} />
       {isHidden ? (
-        <button
-          onClick={() => {
-            onUnhide(menu.session.id);
-            onClose();
-          }}
-          style={{ ...menuButtonStyle, color: "var(--text-secondary)" }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-        >
-          Unhide
-        </button>
+        <ContextMenuButton label="Unhide" onClick={() => { onUnhide(menu.session.id); onClose(); }} />
       ) : (
-        <button
-          onClick={() => {
-            onHide(menu.session.id);
-            onClose();
-          }}
-          style={{ ...menuButtonStyle, color: "var(--text-secondary)" }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-        >
-          Hide
-        </button>
+        <ContextMenuButton label="Hide" onClick={() => { onHide(menu.session.id); onClose(); }} />
       )}
       {isRunning && (
-        <button
-          onClick={() => {
-            onStop(menu.session.id);
-            onClose();
-          }}
-          style={{ ...menuButtonStyle, color: "var(--status-error)" }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-        >
-          Stop
-        </button>
+        <ContextMenuButton
+          label="Stop"
+          color="var(--status-error)"
+          onClick={() => { onStop(menu.session.id); onClose(); }}
+        />
       )}
-      <button
+      <ContextMenuButton
+        label="Remove"
+        color="var(--status-error)"
+        onClick={() => { onRemove(menu.session.id); onClose(); }}
+      />
+    </div>,
+    document.body
+  );
+}
+
+function BridgeContextMenu({
+  menu,
+  isOnline,
+  isHidden,
+  onCreateSession,
+  onHide,
+  onUnhide,
+  onClose,
+}: {
+  menu: Extract<ContextMenuState, { kind: "bridge" }>;
+  isOnline: boolean;
+  isHidden: boolean;
+  onCreateSession: (bridgeId: string) => void;
+  onHide: (bridgeId: string) => void;
+  onUnhide: (bridgeId: string) => void;
+  onClose: () => void;
+}) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  useDismissContextMenu(onClose, menuRef);
+
+  return createPortal(
+    <div
+      ref={menuRef}
+      style={{ ...contextMenuPanelStyle, top: menu.y, left: menu.x }}
+    >
+      <ContextMenuButton
+        label="Create session"
+        disabled={!isOnline}
         onClick={() => {
-          onRemove(menu.session.id);
+          if (!isOnline) return;
+          onCreateSession(menu.bridgeId);
           onClose();
         }}
-        style={{ ...menuButtonStyle, color: "var(--status-error)" }}
-        onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-        onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-      >
-        Remove
-      </button>
+      />
+      {isHidden ? (
+        <ContextMenuButton label="Unhide" onClick={() => { onUnhide(menu.bridgeId); onClose(); }} />
+      ) : (
+        <ContextMenuButton label="Hide" onClick={() => { onHide(menu.bridgeId); onClose(); }} />
+      )}
     </div>,
     document.body
   );
@@ -267,6 +298,10 @@ export function SessionList({
   hiddenSessionIds,
   onHideSession,
   onUnhideSession,
+  hiddenBridgeIds,
+  onHideBridge,
+  onUnhideBridge,
+  onCreateSession,
 }: SessionListProps) {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -274,12 +309,14 @@ export function SessionList({
   const [dragOverKey, setDragOverKey] = useState<string | null>(null);
   const [dragOverZone, setDragOverZone] = useState<DropZone | null>(null);
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
+  const [hiddenBridgesExpanded, setHiddenBridgesExpanded] = useState(false);
   const [collapsedBridges, setCollapsedBridges] = useState<Set<string>>(new Set());
   const dragRef = useRef<DragState | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressFired = useRef(false);
   const hiddenSet = hiddenSessionIds ?? new Set<string>();
+  const hiddenBridgeSet = hiddenBridgeIds ?? new Set<string>();
   const visibleSessions = sessions.filter((s) => !hiddenSet.has(s.id));
   const hiddenSessions = sessions.filter((s) => hiddenSet.has(s.id));
 
@@ -299,16 +336,27 @@ export function SessionList({
 
   const onlineBridgeIds = useMemo(() => new Set(bridges.map((b) => b.bridgeId)), [bridges]);
 
-  const orderedBridgeIds = useMemo(() => {
+  const knownBridgeIds = useMemo(() => {
     const ids = new Set<string>();
     for (const b of bridges) ids.add(b.bridgeId);
     for (const s of visibleSessions) ids.add(s.bridgeId);
-    const ordered = bridgeOrder.filter((id) => ids.has(id));
-    for (const id of ids) {
-      if (!ordered.includes(id)) ordered.push(id);
-    }
-    return ordered;
-  }, [bridges, visibleSessions, bridgeOrder]);
+    return ids;
+  }, [bridges, visibleSessions]);
+
+  const orderedBridgeIds = useMemo(
+    () => bridgeOrder.filter((id) => knownBridgeIds.has(id)),
+    [bridgeOrder, knownBridgeIds],
+  );
+
+  const visibleBridgeIds = useMemo(
+    () => orderedBridgeIds.filter((id) => !hiddenBridgeSet.has(id)),
+    [orderedBridgeIds, hiddenBridgeSet],
+  );
+
+  const hiddenBridgeIdsList = useMemo(
+    () => orderedBridgeIds.filter((id) => hiddenBridgeSet.has(id)),
+    [orderedBridgeIds, hiddenBridgeSet],
+  );
 
   const sessionsByBridge = useMemo(() => {
     const map = new Map<string, Session[]>();
@@ -339,7 +387,13 @@ export function SessionList({
   function handleContextMenu(e: React.MouseEvent, session: Session): void {
     e.preventDefault();
     e.stopPropagation();
-    setContextMenu({ session, x: e.clientX, y: e.clientY });
+    setContextMenu({ kind: "session", session, x: e.clientX, y: e.clientY });
+  }
+
+  function handleBridgeContextMenu(e: React.MouseEvent, bridgeId: string): void {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ kind: "bridge", bridgeId, x: e.clientX, y: e.clientY });
   }
 
   function clearDragState(): void {
@@ -351,9 +405,9 @@ export function SessionList({
   function handleDragStart(e: React.DragEvent, state: DragState): void {
     dragRef.current = state;
     e.dataTransfer.effectAllowed = "move";
-    if (e.currentTarget instanceof HTMLElement) {
-      e.currentTarget.style.opacity = "0.4";
-    }
+    e.dataTransfer.setData("text/plain", state.id);
+    const el = e.currentTarget instanceof HTMLElement ? e.currentTarget : null;
+    if (el) el.style.opacity = "0.4";
   }
 
   function handleDragEnd(e: React.DragEvent): void {
@@ -400,18 +454,10 @@ export function SessionList({
     }
 
     const zone = computeDropZone(e);
-    const ids = [...orderedBridgeIds];
-    const fromIdx = ids.indexOf(draggedId);
-    const toIdx = ids.indexOf(targetBridgeId);
-    if (fromIdx === -1 || toIdx === -1) {
-      clearDragState();
-      return;
+    const reordered = reorderByDrop(orderedBridgeIds, draggedId, targetBridgeId, zone);
+    if (reordered) {
+      onReorderBridges(reordered);
     }
-
-    ids.splice(fromIdx, 1);
-    const insertIdx = zone === "above" ? ids.indexOf(targetBridgeId) : ids.indexOf(targetBridgeId) + 1;
-    ids.splice(insertIdx, 0, draggedId);
-    onReorderBridges(ids);
     clearDragState();
   }
 
@@ -568,7 +614,7 @@ export function SessionList({
           const touch = e.touches[0];
           longPressTimer.current = setTimeout(() => {
             longPressFired.current = true;
-            setContextMenu({ session, x: touch.clientX, y: touch.clientY });
+            setContextMenu({ kind: "session", session, x: touch.clientX, y: touch.clientY });
           }, 500);
         }}
         onTouchEnd={() => {
@@ -744,9 +790,6 @@ export function SessionList({
     return (
       <div key={bridgeId} className="flex flex-col">
         <div
-          draggable
-          onDragStart={(e) => handleDragStart(e, { kind: "bridge", id: bridgeId })}
-          onDragEnd={handleDragEnd}
           onDragOver={(e) => handleDragOver(e, dropKey, "bridge")}
           onDragLeave={() => { setDragOverKey(null); setDragOverZone(null); }}
           onDrop={(e) => handleBridgeDrop(e, bridgeId)}
@@ -759,16 +802,39 @@ export function SessionList({
             borderTop: isDragOver && dragOverZone === "above" ? "2px solid var(--accent)" : "none",
             ...(isDragOver && dragOverZone === "below" ? { borderBottom: "2px solid var(--accent)" } : {}),
             background: "var(--bg-base)",
-            cursor: "grab",
             fontFamily: "var(--font-mono)",
             userSelect: "none",
           }}
+          onContextMenu={(e) => handleBridgeContextMenu(e, bridgeId)}
           onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
           onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-base)"; }}
         >
+          <span
+            draggable
+            onDragStart={(e) => {
+              e.stopPropagation();
+              handleDragStart(e, { kind: "bridge", id: bridgeId });
+            }}
+            onDragEnd={handleDragEnd}
+            title="Drag to reorder"
+            style={{
+              cursor: "grab",
+              color: "var(--text-faint)",
+              fontSize: 10,
+              lineHeight: 1,
+              padding: "0 2px",
+              flexShrink: 0,
+              letterSpacing: "-2px",
+            }}
+          >
+            ⠿
+          </span>
           <button
             type="button"
-            onClick={() => toggleBridgeCollapsed(bridgeId)}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleBridgeCollapsed(bridgeId);
+            }}
             style={{
               background: "none",
               border: "none",
@@ -810,7 +876,36 @@ export function SessionList({
 
   return (
     <div className="flex flex-col">
-      {orderedBridgeIds.map((bridgeId) => renderBridgeFolder(bridgeId))}
+      {visibleBridgeIds.map((bridgeId) => renderBridgeFolder(bridgeId))}
+
+      {hiddenBridgeIdsList.length > 0 && !collapsed && (
+        <div className="flex flex-col">
+          <button
+            onClick={() => setHiddenBridgesExpanded((v) => !v)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: "8px 16px",
+              borderBottom: "1px solid var(--border-subtle)",
+              borderTop: "1px solid var(--border-subtle)",
+              background: "var(--bg-base)",
+              cursor: "pointer",
+              fontFamily: "var(--font-mono)",
+              fontSize: 11,
+              color: "var(--text-muted)",
+              letterSpacing: "0.06em",
+              textTransform: "uppercase",
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-base)"; }}
+          >
+            <span>Hidden bridges ({hiddenBridgeIdsList.length})</span>
+            <span style={{ fontSize: 10, opacity: 0.6 }}>{hiddenBridgesExpanded ? "▾" : "▸"}</span>
+          </button>
+          {hiddenBridgesExpanded && hiddenBridgeIdsList.map((bridgeId) => renderBridgeFolder(bridgeId))}
+        </div>
+      )}
 
       {hiddenSessions.length > 0 && !collapsed && (
         <div className="flex flex-col">
@@ -887,8 +982,8 @@ export function SessionList({
         </div>
       )}
 
-      {contextMenu && onStopSession && onRemoveSession && (
-        <ContextMenu
+      {contextMenu?.kind === "session" && onStopSession && onRemoveSession && (
+        <SessionContextMenu
           menu={contextMenu}
           onRename={startEditing}
           onStop={onStopSession}
@@ -897,6 +992,17 @@ export function SessionList({
           onHide={onHideSession ?? (() => {})}
           onUnhide={onUnhideSession ?? (() => {})}
           isHidden={hiddenSet.has(contextMenu.session.id)}
+          onClose={closeContextMenu}
+        />
+      )}
+      {contextMenu?.kind === "bridge" && (
+        <BridgeContextMenu
+          menu={contextMenu}
+          isOnline={onlineBridgeIds.has(contextMenu.bridgeId)}
+          isHidden={hiddenBridgeSet.has(contextMenu.bridgeId)}
+          onCreateSession={onCreateSession ?? (() => {})}
+          onHide={onHideBridge ?? (() => {})}
+          onUnhide={onUnhideBridge ?? (() => {})}
           onClose={closeContextMenu}
         />
       )}

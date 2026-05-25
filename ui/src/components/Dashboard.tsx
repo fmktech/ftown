@@ -12,6 +12,7 @@ import { Terminal, TerminalHandle } from "./Terminal";
 import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
 import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
 import { ConnectionDiagnostics } from "./ConnectionDiagnostics";
+import { mergeBridgeOrder } from "@/lib/bridge-order";
 
 interface DashboardProps {
   client: Centrifuge | null;
@@ -50,6 +51,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [sessionOrder, setSessionOrder] = useState<string[]>([]);
   const [bridgeOrder, setBridgeOrder] = useState<string[]>([]);
   const [hiddenSessionIds, setHiddenSessionIds] = useState<Set<string>>(new Set());
+  const [hiddenBridgeIds, setHiddenBridgeIds] = useState<Set<string>>(new Set());
   const [showUserMenu, setShowUserMenu] = useState(false);
   const terminalRef = useRef<TerminalHandle>(null);
   const mobileControlRef = useRef<MobileControlBarHandle>(null);
@@ -67,6 +69,10 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     try {
       const raw = localStorage.getItem("ftown:hiddenSessions");
       if (raw) setHiddenSessionIds(new Set(JSON.parse(raw)));
+    } catch { /* ignore */ }
+    try {
+      const raw = localStorage.getItem("ftown:hiddenBridges");
+      if (raw) setHiddenBridgeIds(new Set(JSON.parse(raw)));
     } catch { /* ignore */ }
   }, []);
 
@@ -108,6 +114,21 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
 
   const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, removeSession, refreshSessions, bridgeExec } = useSessions(client, userId);
   const { bridges, hasBridges } = useBridges(client, userId);
+
+  // Keep bridgeOrder stable when bridges connect/disconnect; only append new ids (sorted).
+  useEffect(() => {
+    const knownIds: string[] = [];
+    for (const b of bridges) knownIds.push(b.bridgeId);
+    for (const s of rawSessions) {
+      if (!knownIds.includes(s.bridgeId)) knownIds.push(s.bridgeId);
+    }
+    setBridgeOrder((prev) => {
+      const next = mergeBridgeOrder(prev, knownIds);
+      if (next.length === prev.length && next.every((id, i) => id === prev[i])) return prev;
+      localStorage.setItem("ftown:bridgeOrder", JSON.stringify(next));
+      return next;
+    });
+  }, [bridges, rawSessions]);
   const sessionActivity = useAllSessionEvents(client, rawSessions, userId);
 
   const installedHookBridges = useRef(new Set<string>());
@@ -243,6 +264,29 @@ print('hooks installed')
       localStorage.setItem("ftown:hiddenSessions", JSON.stringify([...next]));
       return next;
     });
+  }, []);
+
+  const handleHideBridge = useCallback((bridgeId: string) => {
+    setHiddenBridgeIds((prev) => {
+      const next = new Set(prev);
+      next.add(bridgeId);
+      localStorage.setItem("ftown:hiddenBridges", JSON.stringify([...next]));
+      return next;
+    });
+  }, []);
+
+  const handleUnhideBridge = useCallback((bridgeId: string) => {
+    setHiddenBridgeIds((prev) => {
+      const next = new Set(prev);
+      next.delete(bridgeId);
+      localStorage.setItem("ftown:hiddenBridges", JSON.stringify([...next]));
+      return next;
+    });
+  }, []);
+
+  const handleCreateSessionOnBridge = useCallback((bridgeId: string) => {
+    setSessionDefaults({ bridgeId });
+    setShowNewSession(true);
   }, []);
 
   const handleSelectSession = useCallback((id: string | null) => {
@@ -698,6 +742,10 @@ print('hooks installed')
               hiddenSessionIds={hiddenSessionIds}
               onHideSession={handleHideSession}
               onUnhideSession={handleUnhideSession}
+              hiddenBridgeIds={hiddenBridgeIds}
+              onHideBridge={handleHideBridge}
+              onUnhideBridge={handleUnhideBridge}
+              onCreateSession={handleCreateSessionOnBridge}
             />
           </div>
         </aside>

@@ -33,7 +33,8 @@ export function useBridges(client: Centrifuge | null, userId: string | null): Us
             hostname: data.hostname ?? "unknown",
             connectedAt: data.connectedAt ?? "",
           };
-        });
+        })
+        .sort((a, b) => a.bridgeId.localeCompare(b.bridgeId));
       setBridges(bridgeList);
     } catch {
       setBridges([]);
@@ -72,7 +73,7 @@ export function useBridges(client: Centrifuge | null, userId: string | null): Us
       };
       setBridges((prev) => {
         if (prev.some((b) => b.clientId === bridge.clientId)) return prev;
-        return [...prev, bridge];
+        return [...prev, bridge].sort((a, b) => a.bridgeId.localeCompare(b.bridgeId));
       });
     });
 
