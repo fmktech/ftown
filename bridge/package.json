@@ -5,7 +5,8 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "ftown-bridge": "dist/index.js"
+    "ftown-bridge": "dist/index.js",
+    "ftown-harness": "dist/harness-cli.js"
   },
   "files": [
     "dist",
@@ -15,7 +16,8 @@
     "build": "tsc",
     "prepublishOnly": "npm run build",
     "start": "tsx src/index.ts",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "harness": "tsx src/harness-cli.ts"
   },
   "engines": {
     "node": ">=22"

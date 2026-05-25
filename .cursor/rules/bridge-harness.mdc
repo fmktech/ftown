@@ -1,0 +1,20 @@
+---
+description: Use auto-deployed ftown-harness CLI for local bridge sessions (never curl/lsof for bridge API)
+globs:
+alwaysApply: true
+---
+
+# ftown bridge harness
+
+When inspecting or controlling **local ftown-bridge** sessions (terminals, agents, logs):
+
+1. Use **`~/.ftown/bin/ftown-harness`** only (deployed automatically when bridge runs).
+2. Read **`~/.ftown/harness-agent.md`** first if it exists — current port and copy-paste workflow.
+3. Default sequence: `status` → `here -n 25` → `ls --tail 3` → `grep -C 2` as needed.
+4. `status=error` / `alive=false` does **not** mean no logs — `here` and `tail` still work.
+5. Do **not** use `curl`, `wget`, `lsof`, or Bash `fetch` against `127.0.0.1` for bridge API.
+6. Do **not** use `send` without `--dry-run` first unless the user explicitly asked to drive a live terminal.
+
+If `~/.ftown/bridge.json` is missing, bridge is not running — ask user to start `ftown-bridge` from the UI CLI token.
+
+Skill: `bridge/skills/bridge-harness/SKILL.md`

@@ -86,6 +86,18 @@ Start a bridge by copying the CLI token command from the web UI (click "CLI Toke
 npx ftown-bridge --token <jwt> --api-url http://localhost:3000
 ```
 
+On start, the bridge **auto-deploys** a local harness CLI:
+
+- `~/.ftown/bin/ftown-harness` — list/tail/grep sessions, resolve workspace via `here`
+- `~/.ftown/harness-agent.md` — agent cheat sheet (regenerated each start)
+- `~/.ftown/bridge.json` — port + token while bridge is running
+
+```bash
+~/.ftown/bin/ftown-harness status
+~/.ftown/bin/ftown-harness here -n 20
+~/.ftown/bin/ftown-harness ls
+```
+
 ## Configuration
 
 ### Environment Variables (UI)

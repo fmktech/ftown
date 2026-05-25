@@ -17,6 +17,7 @@ import { LocalApiServer } from './local-api-server.js';
 import { TerminalManager } from './terminal-manager.js';
 import { installClaudeHooks } from './hook-installer.js';
 import { installCursorHooks, installProjectCursorHooks } from './cursor-hook-installer.js';
+import { installHarness, harnessOnPath, pathHint, writeHarnessAgentGuide, agentGuidePath } from './harness-installer.js';
 import { registerSessionWorkspace, unregisterSession } from './session-registry.js';
 
 import type { HookEvent } from './local-api-server.js';
@@ -145,6 +146,16 @@ program
     installClaudeHooks(notifyScriptPath);
     installCursorHooks(notifyScriptPath);
 
+    const harnessCliPath = resolve(__dirname, 'harness-cli.js');
+    const harness = installHarness(harnessCliPath);
+    writeHarnessAgentGuide({ wrapperPath: harness.wrapperPath, port: hookPort, bridgeId });
+    console.log(`[Bridge] Harness CLI: ${harness.wrapperPath}`);
+    console.log(`[Bridge] Agent guide:  ${agentGuidePath()}`);
+    if (!harnessOnPath()) {
+      const hint = pathHint();
+      if (hint) console.log(`[Bridge] ${hint}`);
+    }
+
     const bridgeStateDir = join(homedir(), '.ftown');
     const bridgePointerPath = join(bridgeStateDir, 'bridge.json');
     try {
@@ -157,6 +168,8 @@ program
           bridgeId,
           pid: process.pid,
           startedAt: new Date().toISOString(),
+          harness: harness.wrapperPath,
+          harnessCli: harness.cliPath,
         }, null, 2),
         { mode: 0o600 },
       );
