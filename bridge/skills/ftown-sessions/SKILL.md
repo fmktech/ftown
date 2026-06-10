@@ -47,6 +47,17 @@ Skill copy (same binary via wrapper): `scripts/ftown-sessions` in this skill dir
 
 # Liveness
 ~/.ftown/ftown-sessions running <session-id>
+
+# Stop and remove a session (kept as a tombstone in the archive)
+~/.ftown/ftown-sessions remove <session-id>
+
+# List archived (removed) sessions: id, name, removedAt, shellType
+~/.ftown/ftown-sessions archive
+
+# Recreate a removed session from its tombstone (resumes the agent
+# conversation when a claude/cursor session id was recorded; the revived
+# session gets a NEW id)
+~/.ftown/ftown-sessions revive <session-id>
 ```
 
 ## Messaging
@@ -130,6 +141,9 @@ The CLI wraps the loopback API. Raw access if needed:
 | POST | `/api/sessions/:id/grep` | Search |
 | POST | `/api/sessions/:id/keys` | Send keys |
 | POST | `/api/sessions/:id/message` | Deliver a message line (`{ text, from? }`) |
+| DELETE | `/api/sessions/:id` | Remove (tombstone-archived) |
+| GET | `/api/archive` | List removed-session tombstones |
+| POST | `/api/sessions/:id/revive` | Recreate a removed session (new id) |
 
 ## If the CLI is missing
 

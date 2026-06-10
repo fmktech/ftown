@@ -120,6 +120,9 @@ Commands:
   keys <session-id> <text>      Send keys to a running session
   tell <target> <message...>    Send a text message to another session's terminal
   running <session-id>          Check if session PTY is running
+  remove <session-id>           Stop and remove a session (archived as a tombstone)
+  archive                       List archived (removed) sessions
+  revive <session-id>           Recreate a removed session from its tombstone
 
 Tell targets (one of):
   <session-id>                  Explicit target session id
@@ -306,6 +309,42 @@ async function main(): Promise<void> {
         break;
       }
 
+      case 'remove': {
+        const id = rest.find((a) => !a.startsWith('--'));
+        if (!id) throw new Error('Missing session-id');
+        const { data } = await api('DELETE', `/api/sessions/${id}`);
+        console.log(jsonOut ? JSON.stringify(data, null, 2) : `removed ${id}`);
+        break;
+      }
+
+      case 'archive': {
+        const { data } = await api('GET', '/api/archive');
+        const archived =
+          (data as { archived?: Array<Record<string, unknown>> }).archived ?? [];
+        const summary = archived.map((s) => ({
+          id: s.id,
+          name: s.name,
+          removedAt: s.removedAt,
+          shellType: s.shellType,
+        }));
+        console.log(
+          jsonOut
+            ? JSON.stringify({ archived: summary }, null, 2)
+            : summary
+                .map((s) => `${s.id}  ${s.removedAt}  ${s.shellType ?? ''}  ${s.name ?? ''}`.trimEnd())
+                .join('\n'),
+        );
+        break;
+      }
+
+      case 'revive': {
+        const id = rest.find((a) => !a.startsWith('--'));
+        if (!id) throw new Error('Missing session-id');
+        const { data } = await api('POST', `/api/sessions/${id}/revive`);
+        console.log(jsonOut ? JSON.stringify(data, null, 2) : formatCreated(data));
+        break;
+      }
+
       default:
         usage();
         process.exit(1);
@@ -328,9 +367,11 @@ function formatSessionList(data: unknown): string {
 }
 
 function formatCreated(data: unknown): string {
-  const session = (data as { session?: Record<string, unknown> }).session;
+  const { session, resumed } = data as { session?: Record<string, unknown>; resumed?: boolean };
   if (!session) return JSON.stringify(data, null, 2);
-  return `created ${session.id}  ${session.name}  (${session.status})`;
+  // revive responses carry resumed; a fresh conversation lost its context.
+  const resumeNote = resumed === undefined ? '' : resumed ? '  [resumed]' : '  [fresh conversation]';
+  return `created ${session.id}  ${session.name}  (${session.status})${resumeNote}`;
 }
 
 main();

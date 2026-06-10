@@ -23,6 +23,7 @@ import { installFtownSessionsSkill } from './install-ftown-skill.js';
 import { installFtownSessionsCli } from './install-ftown-cli.js';
 import { registerSessionWorkspace, unregisterSession } from './session-registry.js';
 import { createFtownSession } from './create-ftown-session.js';
+import { removeFtownSession } from './remove-ftown-session.js';
 import { buildSessionCommand } from './agent-commands.js';
 import { isTmuxAvailable, killTmuxSession, listFtownTmuxSessions } from './tmux.js';
 
@@ -620,21 +621,13 @@ program
               break;
             }
 
-            runner.stop(payload.sessionId);
+            const removed = await removeFtownSession(
+              { store, runner, centrifugo, userId },
+              payload.sessionId,
+              { onlyIfFinished: payload.onlyIfFinished },
+            );
 
-            const sessionToRemove = await store.loadSession(payload.sessionId);
-            await store.deleteSession(payload.sessionId);
-
-            if (sessionToRemove) {
-              const removedSession: Session = {
-                ...sessionToRemove,
-                status: 'removed' as Session['status'],
-                updatedAt: new Date().toISOString(),
-              };
-              await centrifugo.publishSessionUpdate(userId, removedSession);
-            }
-
-            response = { requestId: command.requestId, success: true, data: { removed: true } };
+            response = { requestId: command.requestId, success: true, data: { removed: removed !== null } };
             break;
           }
 
@@ -773,15 +766,26 @@ program
       const sessions = await store.listSessions();
 
       // Reap tmux sessions for OUR dead store records (removed records, failed
-      // kills) before resurrection re-creates any. Tmux sessions with ids we
-      // have no record of are left alone — they may belong to another bridge
-      // running on this machine.
+      // kills) before resurrection re-creates any. Archived tombstones count as
+      // dead too: remove_session deletes the store record, so a failed tmux
+      // kill would otherwise leave a permanently invisible live agent. Tmux
+      // sessions with ids we have no record of are left alone — they may
+      // belong to another bridge running on this machine.
       if (isTmuxAvailable()) {
-        const deadIds = new Set(
-          sessions
+        const archived = await store.listArchived();
+        const deadIds = new Set([
+          ...sessions
             .filter((s) => s.status !== 'running' && s.status !== 'pending')
             .map((s) => s.id),
-        );
+          ...archived.map((a) => a.id),
+        ]);
+        // A live store record outranks any tombstone for the same id (crash
+        // between archive and delete leaves both): never reap resurrectables.
+        for (const s of sessions) {
+          if (s.status === 'running' || s.status === 'pending') {
+            deadIds.delete(s.id);
+          }
+        }
         for (const tmuxId of listFtownTmuxSessions()) {
           if (deadIds.has(tmuxId)) {
             console.log(`[Bridge] Killing tmux session for dead session ${tmuxId}`);

@@ -41,7 +41,7 @@ interface UseSessionsResult {
   retrySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
   setSessionParent: (sessionId: string, parentSessionId: string | null) => void;
-  removeSession: (sessionId: string) => void;
+  removeSession: (sessionId: string, onlyIfFinished?: boolean) => void;
   refreshSessions: () => void;
   bridgeExec: (command: string, workingDir: string, bridgeId: string) => Promise<BridgeExecResponse>;
   lastResponse: CommandResponse | null;
@@ -264,10 +264,10 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
   );
 
   const removeSession = useCallback(
-    (sessionId: string) => {
+    (sessionId: string, onlyIfFinished?: boolean) => {
       if (!userId) return;
 
-      const payload: RemoveSessionPayload = { sessionId };
+      const payload: RemoveSessionPayload = { sessionId, onlyIfFinished };
       const command: Command = {
         type: "remove_session",
         payload,

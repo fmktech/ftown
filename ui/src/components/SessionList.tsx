@@ -15,7 +15,7 @@ interface SessionListProps {
   onSelectSession: (sessionId: string) => void;
   onRenameSession?: (sessionId: string, name: string) => void;
   onStopSession?: (sessionId: string) => void;
-  onRemoveSession?: (sessionId: string) => void;
+  onRemoveSession?: (sessionId: string, onlyIfFinished?: boolean) => void;
   onCloneSession?: (session: Session) => void;
   onReorderSessions?: (orderedIds: string[]) => void;
   onReorderBridges?: (orderedBridgeIds: string[]) => void;
@@ -410,6 +410,9 @@ export function SessionList({
   const [collapsedBridges, setCollapsedBridges] = useState<Set<string>>(new Set());
   const [collapsedSessions, setCollapsedSessions] = useState<Set<string>>(new Set());
   const dragRef = useRef<DragState | null>(null);
+  // Inline opacity React rendered on the dragged row, restored on drag end —
+  // hardcoding "1" would permanently clear the 0.55 dim on finished rows.
+  const dragStartOpacity = useRef<string>("");
   const inputRef = useRef<HTMLInputElement>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressFired = useRef(false);
@@ -509,13 +512,16 @@ export function SessionList({
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", state.id);
     const el = e.currentTarget instanceof HTMLElement ? e.currentTarget : null;
-    if (el) el.style.opacity = "0.4";
+    if (el) {
+      dragStartOpacity.current = el.style.opacity;
+      el.style.opacity = "0.4";
+    }
   }
 
   function handleDragEnd(e: React.DragEvent): void {
     clearDragState();
     if (e.currentTarget instanceof HTMLElement) {
-      e.currentTarget.style.opacity = "1";
+      e.currentTarget.style.opacity = dragStartOpacity.current;
     }
   }
 
@@ -654,6 +660,7 @@ export function SessionList({
     const dropKey = `session:${session.id}`;
     const isDragOver = dragOverKey === dropKey;
     const depth = treeProps?.depth ?? 0;
+    const isFinished = session.status === "completed" || session.status === "error";
 
     if (collapsed) {
       const act = sessionActivity?.get(session.id);
@@ -691,6 +698,7 @@ export function SessionList({
             transition: "background 0.12s ease, border-color 0.3s ease",
             padding: "6px 8px",
             fontFamily: "var(--font-mono)",
+            opacity: isFinished ? 0.55 : 1,
           }}
           onMouseEnter={(e) => {
             if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)";
@@ -761,6 +769,7 @@ export function SessionList({
           transition: "background 0.12s ease, border-color 0.12s ease",
           fontFamily: "var(--font-mono)",
           display: "block",
+          opacity: isFinished ? 0.55 : 1,
         }}
         onMouseEnter={(e) => {
           if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)";
@@ -939,6 +948,9 @@ export function SessionList({
     const isBridgeCollapsed = collapsedBridges.has(bridgeId);
     const isOnline = onlineBridgeIds.has(bridgeId);
     const label = bridgeLabel(bridgeId, bridges);
+    const finishedSessions = bridgeSessions.filter(
+      (s) => s.status === "completed" || s.status === "error",
+    );
     const dropKey = `bridge:${bridgeId}`;
     const isDragOver = dragOverKey === dropKey;
 
@@ -1027,6 +1039,39 @@ export function SessionList({
           >
             {label}
           </span>
+          {finishedSessions.length > 0 && onRemoveSession && (
+            <button
+              type="button"
+              disabled={!isOnline}
+              title={isOnline
+                ? `Clear ${finishedSessions.length} completed/error session${finishedSessions.length === 1 ? "" : "s"}`
+                : "Bridge is offline — sessions cannot be removed"}
+              onClick={(e) => {
+                e.stopPropagation();
+                const count = finishedSessions.length;
+                if (!window.confirm(`Remove ${count} completed/error session${count === 1 ? "" : "s"} from ${label}?`)) return;
+                // onlyIfFinished: the bridge re-checks status, so a session
+                // retried back to running since this render is not killed.
+                for (const s of finishedSessions) onRemoveSession(s.id, true);
+              }}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: isOnline ? "pointer" : "default",
+                opacity: isOnline ? 1 : 0.4,
+                color: "var(--text-faint)",
+                fontSize: 10,
+                padding: "0 2px",
+                lineHeight: 1,
+                flexShrink: 0,
+                fontFamily: "var(--font-mono)",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = "var(--status-error)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-faint)"; }}
+            >
+              ✕
+            </button>
+          )}
           <span className={`status-dot ${isOnline ? "status-dot-running" : "status-dot-done"}`} />
           <span style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>
             {bridgeSessions.length}

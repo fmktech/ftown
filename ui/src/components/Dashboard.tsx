@@ -275,8 +275,8 @@ PY`;
     }
   }, [selectedSessionId, selectedSession?.shellType, markSessionIdle]);
 
-  const handleRemoveSession = useCallback((sessionId: string) => {
-    removeSession(sessionId);
+  const handleRemoveSession = useCallback((sessionId: string, onlyIfFinished?: boolean) => {
+    removeSession(sessionId, onlyIfFinished);
     if (selectedSessionId === sessionId) {
       setSelectedSessionId(null);
     }

@@ -81,7 +81,10 @@ export function buildOrchestratorBriefing(params: OrchestratorBriefingParams): s
     `automatically briefed to report back to you via tell, and their reports arrive in ` +
     `your terminal as messages starting with [ftown msg from <name>]. Inspect any session ` +
     `with ~/.ftown/ftown-sessions list / screen <id> / grep <id> --pattern <re>, and ` +
-    `message one with tell <id> "<text>".`
+    `message one with tell <id> "<text>". Workers you no longer need should be cleaned ` +
+    `up with ~/.ftown/ftown-sessions remove <id> — they are archived and can be brought ` +
+    `back with revive <id> (the worker's conversation is resumed only if its agent ` +
+    `session id was recorded before removal; otherwise it restarts fresh).`
   );
 }
 

@@ -55,7 +55,9 @@ interface TmuxAttachParams {
 export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
   private readonly activeProcesses: Map<string, IPty> = new Map();
   private readonly runtimes: Map<string, SessionRuntime> = new Map();
-  /** Sessions whose tmux session is being killed via stop(); suppresses reattach. */
+  /** Sessions being killed via stop(); suppresses tmux reattach and exit-event
+   * emission — callers of stop() persist the final status themselves, and a
+   * late 'complete'/'error' save can resurrect a record removal just deleted. */
   private readonly stopping: Set<string> = new Set();
   /** Sessions detaching on shutdown; the tmux session stays alive, emit nothing. */
   private readonly detachOnly: Set<string> = new Set();
@@ -154,6 +156,13 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
         return true;
       }
       return isTmux;
+    }
+
+    // Direct runtime: mark stopping so the PTY onExit emits nothing — like the
+    // tmux path, the caller owns the final status, and emitting here races
+    // remove_session's delete with a status save that recreates the record.
+    if (!isTmux) {
+      this.stopping.add(sessionId);
     }
 
     proc.kill();
@@ -370,6 +379,10 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
       this.activeProcesses.delete(sessionId);
       this.runtimes.delete(sessionId);
       this.lastSizes.delete(sessionId);
+      if (this.stopping.delete(sessionId)) {
+        // stop() initiated this exit; the caller persists the final status.
+        return;
+      }
       if (exitCode === 0 || exitCode === null || exitCode === undefined) {
         this.emit('complete', sessionId);
       } else {

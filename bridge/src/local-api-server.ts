@@ -5,7 +5,8 @@ import { timingSafeEqual } from 'node:crypto';
 import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 
 import type { SessionStore } from './session-store.js';
-import type { ShellType } from './types.js';
+import type { Session, ShellType } from './types.js';
+import { buildSessionCommand } from './agent-commands.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { TerminalManager } from './terminal-manager.js';
@@ -15,6 +16,7 @@ import {
   parseCreateSessionBody,
   type CreateFtownSessionDeps,
 } from './create-ftown-session.js';
+import { removeFtownSession } from './remove-ftown-session.js';
 
 export interface HookPayload {
   ftown_session_id: string;
@@ -285,7 +287,21 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return;
     }
 
+    // GET /api/archive — tombstones of removed sessions, newest last.
+    // env is stripped: it can carry API keys and only revive (server-side)
+    // needs it.
+    if (path === '/api/archive' && req.method === 'GET') {
+      const archived = (await this.store.listArchived()).map((record) => {
+        const sanitized = { ...record };
+        delete sanitized.env;
+        return sanitized;
+      });
+      jsonResponse(res, 200, { archived });
+      return;
+    }
+
     const sessionMatch = path.match(/^\/api\/sessions\/([^/]+)$/);
+    const sessionReviveMatch = path.match(/^\/api\/sessions\/([^/]+)\/revive$/);
     const sessionScreenMatch = path.match(/^\/api\/sessions\/([^/]+)\/screen$/);
     const sessionGrepMatch = path.match(/^\/api\/sessions\/([^/]+)\/grep$/);
     const sessionKeysMatch = path.match(/^\/api\/sessions\/([^/]+)\/keys$/);
@@ -302,6 +318,118 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         return;
       }
       jsonResponse(res, 200, { session });
+      return;
+    }
+
+    // DELETE /api/sessions/:id — remove the session (archived as a tombstone)
+    if (sessionMatch && req.method === 'DELETE') {
+      const sessionId = sessionMatch[1];
+
+      if (!this.runner || !this.centrifugo || !this.userId) {
+        jsonResponse(res, 503, { error: 'Server not ready' });
+        return;
+      }
+
+      const session = await this.store.loadSession(sessionId);
+      if (!session) {
+        jsonResponse(res, 404, { error: 'Session not found' });
+        return;
+      }
+
+      await removeFtownSession(
+        { store: this.store, runner: this.runner, centrifugo: this.centrifugo, userId: this.userId },
+        sessionId,
+      );
+
+      jsonResponse(res, 200, { removed: true, sessionId });
+      return;
+    }
+
+    // POST /api/sessions/:id/revive — recreate a removed session from its tombstone
+    if (sessionReviveMatch && req.method === 'POST') {
+      const sessionId = sessionReviveMatch[1];
+
+      if (!this.sessionDeps) {
+        jsonResponse(res, 503, { error: 'Session factory not ready' });
+        return;
+      }
+
+      const archived = await this.store.listArchived();
+      // Newest tombstone wins when a session was removed and revived repeatedly.
+      const tombstone = archived.filter((record) => record.id === sessionId).pop();
+      if (!tombstone) {
+        jsonResponse(res, 404, { error: 'Archived session not found' });
+        return;
+      }
+
+      const sessions = await this.store.listSessions();
+      // Revive can mint several store sessions sharing one agent id over time,
+      // so every match must be checked, not just the first. isRunning only
+      // reflects attached PTYs; a live tmux session the bridge has not (yet)
+      // reattached — restart window, failed reattach — counts as running too,
+      // as does a store record still marked running before resurrection runs.
+      const isLive = (s: Session): boolean =>
+        this.runner
+          ? this.runner.isRunning(s.id) || this.runner.hasTmuxSession(s.id) || s.status === 'running'
+          : s.status === 'running';
+      const conflict = sessions.find(
+        (s) =>
+          ((tombstone.claudeSessionId && s.claudeSessionId === tombstone.claudeSessionId) ||
+            (tombstone.cursorSessionId && s.cursorSessionId === tombstone.cursorSessionId)) &&
+          isLive(s),
+      );
+      if (conflict) {
+        jsonResponse(res, 409, {
+          error: `Session ${conflict.id} is already running with the same agent session id`,
+        });
+        return;
+      }
+
+      const parentSessionId = tombstone.parentSessionId
+        ? (await this.store.loadSession(tombstone.parentSessionId)) ? tombstone.parentSessionId : undefined
+        : undefined;
+
+      // Custom-command sessions (command override at create time) must rerun
+      // their command verbatim — the builder would silently swap in a stock
+      // claude session. Builder-generated commands are rebuilt instead so the
+      // tombstone's agent session id is injected as --resume (matching
+      // resurrectSession's heuristic).
+      const builderDefault = buildSessionCommand({
+        shellType: tombstone.shellType,
+        workingDir: tombstone.workingDir,
+        model: tombstone.model,
+      });
+      const builderResume = buildSessionCommand({
+        shellType: tombstone.shellType,
+        workingDir: tombstone.workingDir,
+        model: tombstone.model,
+        claudeSessionId: tombstone.claudeSessionId,
+        cursorSessionId: tombstone.cursorSessionId,
+      });
+      const isCustomCommand = Boolean(tombstone.command)
+        && tombstone.command !== builderDefault
+        && tombstone.command !== builderResume;
+
+      try {
+        const session = await createFtownSession(this.sessionDeps, {
+          command: isCustomCommand ? tombstone.command : undefined,
+          name: tombstone.name,
+          workingDir: tombstone.workingDir,
+          env: tombstone.env,
+          shellType: tombstone.shellType,
+          model: tombstone.model,
+          claudeSessionId: tombstone.claudeSessionId,
+          cursorSessionId: tombstone.cursorSessionId,
+          parentSessionId,
+        });
+        // resumed=false means a fresh conversation (no agent session id was
+        // recorded before removal); callers should not assume context survived.
+        const resumed = session.command.includes(' --resume ');
+        jsonResponse(res, 201, { session, resumed });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        jsonResponse(res, 500, { error: message });
+      }
       return;
     }
 

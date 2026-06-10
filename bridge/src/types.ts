@@ -23,6 +23,11 @@ export interface Session {
 
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error';
 
+/** Tombstone written to <dataDir>/archive.jsonl when a session is removed. */
+export interface ArchivedSession extends Session {
+  removedAt: string;
+}
+
 export interface SessionMessage {
   sessionId: string;
   type: SessionMessageType;
@@ -87,6 +92,8 @@ export interface UpdateSessionParentPayload {
 
 export interface RemoveSessionPayload {
   sessionId: string;
+  /** Only remove if the session is completed/error (bulk-clear race guard). */
+  onlyIfFinished?: boolean;
 }
 
 export interface ClearTerminalPayload {
