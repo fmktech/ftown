@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Block commits containing secrets. Enable with:
+#   git config core.hooksPath .githooks
+set -euo pipefail
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks not installed (brew install gitleaks) — refusing to commit unscanned." >&2
+  exit 1
+fi
+
+exec gitleaks git --pre-commit --staged --redact -v

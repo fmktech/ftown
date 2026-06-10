@@ -1,0 +1,44 @@
+# gitleaks config — extends the default ruleset with ftown-specific rules.
+title = "ftown gitleaks config"
+
+[extend]
+useDefault = true
+
+# Centrifugo config secrets are plain JSON fields the default rules miss.
+[[rules]]
+id = "centrifugo-config-secret"
+description = "Centrifugo secret material in config files"
+regex = '''(?i)"(token_hmac_secret_key|api_key|admin_password|admin_secret)"\s*:\s*"([^"]{8,})"'''
+secretGroup = 2
+
+[rules.allowlist]
+# Placeholder values in the committed example/dev config and docs.
+regexes = [
+  '''your-centrifugo[a-z-]*''',
+  '''^admin$''',
+  '''^admin-secret$''',
+  '''^<[^>]+>$''',
+]
+
+[[rules]]
+id = "ftown-env-secret"
+description = "ftown env-style secret assignment"
+regex = '''(?i)(CENTRIFUGO_TOKEN_SECRET|AUTH_SECRET|FTOWN_HOOK_TOKEN|DATABASE_URL)\s*=\s*['"]?([^\s'"]{8,})'''
+secretGroup = 2
+
+[rules.allowlist]
+regexes = [
+  '''(\$\{?[A-Z_]+\}?|<[^>]+>|\.\.\.|xxx+|changeme|example|redacted)''',
+  # Code assignments (env.FTOWN_HOOK_TOKEN = options.hookToken), not literals.
+  '''^(options|process|env|deps|this|params|String)[.(]''',
+  # Documentation placeholders.
+  '''^your-''',
+  '''://user:password@''',
+]
+
+[allowlist]
+description = "Global allowlist"
+paths = [
+  '''node_modules''',
+  '''\.gitleaks\.toml$''',
+]
