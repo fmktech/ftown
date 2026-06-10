@@ -18,7 +18,7 @@ export interface SessionDefaults {
 interface NewSessionModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSubmit: (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; env?: Record<string, string> }) => void;
+  onSubmit: (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; env?: Record<string, string>; orchestrator?: boolean }) => void;
   bridges: BridgeInfo[];
   defaults?: SessionDefaults;
   bridgeExec: (command: string, workingDir: string, bridgeId: string) => Promise<BridgeExecResponse>;
@@ -258,6 +258,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const [fireworksToken, setFireworksToken] = useState("");
   const [fireworksModels, setFireworksModels] = useState<FireworksModels>(FIREWORKS_DEFAULT_MODELS);
   const [autoCompactWindow, setAutoCompactWindow] = useState("");
+  const [orchestrator, setOrchestrator] = useState(false);
 
   const effectiveBridgeId = bridgeId || (bridges.length > 0 ? bridges[0].bridgeId : "");
   const selectedBridge = bridges.find((b) => b.bridgeId === effectiveBridgeId);
@@ -288,6 +289,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       setFireworksToken(getStoredFireworksToken());
       setFireworksModels(getStoredFireworksModels());
       setAutoCompactWindow(getStoredAutoCompactWindow());
+      setOrchestrator(false);
     }
   }, [isOpen, defaults]);
 
@@ -338,6 +340,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       claudeSessionId: selectedClaudeSessionId ?? undefined,
       cursorSessionId: selectedCursorSessionId ?? undefined,
       env,
+      orchestrator: shellType !== "shell" && orchestrator ? true : undefined,
     });
 
     setName("");
@@ -350,8 +353,9 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setSelectedClaudeSummary(null);
     setSelectedCursorSessionId(null);
     setSelectedCursorSummary(null);
+    setOrchestrator(false);
     onClose();
-  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, zaiToken, kimiToken, deepseekToken, fireworksToken, fireworksModels, autoCompactWindow, onSubmit, onClose]);
+  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, zaiToken, kimiToken, deepseekToken, fireworksToken, fireworksModels, autoCompactWindow, orchestrator, onSubmit, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -586,6 +590,25 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
               </div>
             )}
           </div>
+
+          {shellType !== "shell" && (
+            <div>
+              <label className="flex items-start gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={orchestrator}
+                  onChange={(e) => setOrchestrator(e.target.checked)}
+                  className="mt-0.5 accent-[#00ff88]"
+                />
+                <span>
+                  <span className="block text-sm text-[#888888]">Orchestrator</span>
+                  <span className="block text-xs text-[#555]">
+                    Brief this agent on spawning and driving worker sessions
+                  </span>
+                </span>
+              </label>
+            </div>
+          )}
 
           <div>
             <label className="block text-sm text-[#888888] mb-1">Bridge</label>

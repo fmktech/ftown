@@ -252,7 +252,7 @@ PY`;
   }, [rawSessions]);
 
   const handleCreateSession = useCallback(
-    (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; env?: Record<string, string> }) => {
+    (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; env?: Record<string, string>; orchestrator?: boolean }) => {
       createSession(prompt, options);
     },
     [createSession]

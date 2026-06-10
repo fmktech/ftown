@@ -85,6 +85,7 @@ export interface CreateSessionPayload {
   initialInput?: string;
   initialInputDelay?: number;
   parentSessionId?: string;
+  orchestrator?: boolean;
 }
 
 export interface StopSessionPayload {
