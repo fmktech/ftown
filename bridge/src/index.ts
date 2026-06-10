@@ -7,7 +7,7 @@ import { homedir, hostname as osHostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
-import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 
 import { CentrifugoClient } from './centrifugo-client.js';
@@ -88,10 +88,25 @@ program
   .requiredOption('--token <jwt>', 'Auth token (JWT signed with Centrifugo secret)')
   .requiredOption('--api-url <url>', 'ftown UI API URL (e.g. https://ftown.vercel.app)')
   .option('--data-dir <path>', 'Directory for session data', './data')
-  .option('--bridge-id <id>', 'Bridge instance ID')
+  .option('--bridge-id <id>', 'Bridge instance ID (default: persisted per data dir)')
   .action(async (opts: { token: string; apiUrl: string; dataDir: string; bridgeId?: string }) => {
-    const bridgeId = opts.bridgeId ?? uuidv4();
     const dataDir = resolve(opts.dataDir);
+    // Bridge identity sticks to the data dir so a plain restart auto-resumes:
+    // same id → same dashboard entry, sessions reattach without any flags.
+    const bridgeIdPath = join(dataDir, 'bridge-id');
+    let persistedBridgeId: string | undefined;
+    try {
+      persistedBridgeId = readFileSync(bridgeIdPath, 'utf8').trim() || undefined;
+    } catch {
+      persistedBridgeId = undefined;
+    }
+    const bridgeId = opts.bridgeId ?? persistedBridgeId ?? uuidv4();
+    try {
+      mkdirSync(dataDir, { recursive: true });
+      writeFileSync(bridgeIdPath, `${bridgeId}\n`, { mode: 0o600 });
+    } catch (err) {
+      console.error('[Bridge] Failed to persist bridge id:', err instanceof Error ? err.message : String(err));
+    }
 
     console.log('[Bridge] Authenticating with API...');
     const auth = await fetchBridgeToken(opts.apiUrl, opts.token, bridgeId);
