@@ -129,7 +129,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
       return next;
     });
   }, [bridges, rawSessions]);
-  const sessionActivity = useAllSessionEvents(client, rawSessions, userId);
+  const { sessionActivity, markSessionIdle } = useAllSessionEvents(client, rawSessions, userId);
 
   const installedHookBridges = useRef(new Set<string>());
 
@@ -265,6 +265,15 @@ PY`;
   const handleRetrySession = useCallback(() => {
     if (selectedSessionId) retrySession(selectedSessionId);
   }, [selectedSessionId, retrySession]);
+
+  // Claude's Stop hook does not fire on user interrupt, so a lone ESC leaves the
+  // dashboard stuck on "thinking"/"tool_use". Optimistically clear it locally.
+  // Cursor reports interrupts via postToolUseFailure, so it needs no heuristic.
+  const handleTerminalInterrupt = useCallback(() => {
+    if (selectedSessionId && selectedSession?.shellType !== "cursor") {
+      markSessionIdle(selectedSessionId);
+    }
+  }, [selectedSessionId, selectedSession?.shellType, markSessionIdle]);
 
   const handleRemoveSession = useCallback((sessionId: string) => {
     removeSession(sessionId);
@@ -791,6 +800,7 @@ PY`;
             usage={selectedSessionId ? sessionActivity.get(selectedSessionId)?.usage : undefined}
             onMobileTap={() => mobileControlRef.current?.focusInput()}
             shellType={selectedSession?.shellType}
+            onInterrupt={handleTerminalInterrupt}
           />
           {selectedSessionId && (
             <MobileControlBar ref={mobileControlRef} onSendInput={(data) => terminalRef.current?.sendInput(data)} />

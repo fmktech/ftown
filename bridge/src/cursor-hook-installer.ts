@@ -7,10 +7,12 @@ const CURSOR_HOOK_EVENTS = [
   'sessionStart',
   'preToolUse',
   'postToolUse',
+  'postToolUseFailure',
   'beforeShellExecution',
   'afterShellExecution',
   'afterFileEdit',
   'stop',
+  'sessionEnd',
   'beforeSubmitPrompt',
 ] as const;
 

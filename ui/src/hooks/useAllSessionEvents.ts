@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Centrifuge, Subscription } from "centrifuge";
 import { Session } from "@/types";
 import { hookEventToActivity, extractToolLabel } from "@/lib/hook-events";
@@ -23,11 +23,17 @@ interface HookEventMessage {
   };
 }
 
+export interface AllSessionEvents {
+  sessionActivity: Map<string, SessionActivity>;
+  /** Optimistically clear a session's activity (e.g. on a local ESC interrupt). */
+  markSessionIdle: (sessionId: string) => void;
+}
+
 export function useAllSessionEvents(
   client: Centrifuge | null,
   sessions: Session[],
   userId: string
-): Map<string, SessionActivity> {
+): AllSessionEvents {
   const [activityMap, setActivityMap] = useState<Map<string, SessionActivity>>(new Map());
   const subsRef = useRef<Map<string, Subscription>>(new Map());
   const clientRef = useRef(client);
@@ -132,5 +138,31 @@ export function useAllSessionEvents(
     };
   }, [unsubscribe]);
 
-  return activityMap;
+  const markSessionIdle = useCallback((sessionId: string) => {
+    setActivityMap((prev) => {
+      const current = prev.get(sessionId);
+      if (!current || current.activity === "idle") return prev;
+      const next = new Map(prev);
+      next.set(sessionId, { ...current, activity: "idle", toolName: undefined });
+      return next;
+    });
+  }, []);
+
+  // Status guard at the source: activity is only meaningful for live sessions.
+  // A session that completed/errored/stopped keeps its last hook activity in
+  // activityMap, but that state is stale — drop it so every consumer reads
+  // idle/absent for anything that is not running/pending.
+  const sessionActivity = useMemo(() => {
+    const liveStatus = new Map(sessions.map((s) => [s.id, s.status]));
+    const effective = new Map<string, SessionActivity>();
+    for (const [sessionId, activity] of activityMap) {
+      const status = liveStatus.get(sessionId);
+      if (status === "running" || status === "pending") {
+        effective.set(sessionId, activity);
+      }
+    }
+    return effective;
+  }, [activityMap, sessions]);
+
+  return { sessionActivity, markSessionIdle };
 }

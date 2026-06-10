@@ -2,7 +2,7 @@ import { existsSync, readFileSync, renameSync, writeFileSync, mkdirSync } from '
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 
-const HOOK_EVENTS = ['Notification', 'Stop', 'PreToolUse', 'PostToolUse', 'UserPromptSubmit'] as const;
+const HOOK_EVENTS = ['Notification', 'Stop', 'SessionEnd', 'PreToolUse', 'PostToolUse', 'UserPromptSubmit'] as const;
 
 import { isFtownNotifyCommand } from './install-notify-script.js';
 

@@ -24,6 +24,14 @@ interface TerminalProps {
   usage?: TokenUsage;
   onMobileTap?: () => void;
   shellType?: ShellType;
+  /** Fired when a lone ESC (interrupt) keystroke is sent, for optimistic idle. */
+  onInterrupt?: () => void;
+}
+
+/** A standalone ESC is an interrupt; arrow/function keys are multi-byte CSI/SS3
+ *  sequences that merely start with ESC, so only a lone \x1b counts. */
+function isLoneInterrupt(data: string): boolean {
+  return data === "\x1b";
 }
 
 function formatTokenCount(n: number): string {
@@ -32,13 +40,14 @@ function formatTokenCount(n: number): string {
   return String(n);
 }
 
-export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ client, sessionId, userId, isRunning, sessionName, usage, onMobileTap, shellType }, ref) {
+export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ client, sessionId, userId, isRunning, sessionName, usage, onMobileTap, shellType, onInterrupt }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const outputSubRef = useRef<Subscription | null>(null);
   const inputSubRef = useRef<Subscription | null>(null);
   const onMobileTapRef = useRef(onMobileTap);
+  const onInterruptRef = useRef(onInterrupt);
   const shellTypeRef = useRef(shellType);
   const didScrollRef = useRef(false);
   const [scrolledUp, setScrolledUp] = useState(false);
@@ -47,6 +56,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     sendInput(data: string) {
       if (inputSubRef.current) {
         inputSubRef.current.publish({ type: "input", data });
+        if (isLoneInterrupt(data)) onInterruptRef.current?.();
       }
     },
     refit() {
@@ -55,6 +65,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
   }), []);
 
   useEffect(() => { onMobileTapRef.current = onMobileTap; }, [onMobileTap]);
+  useEffect(() => { onInterruptRef.current = onInterrupt; }, [onInterrupt]);
   useEffect(() => { shellTypeRef.current = shellType; }, [shellType]);
   // Initialize xterm once
   useEffect(() => {
@@ -309,6 +320,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     const dataDisposable = term.onData((data) => {
       if (inputSubRef.current) {
         inputSubRef.current.publish({ type: "input", data });
+        if (isLoneInterrupt(data)) onInterruptRef.current?.();
       }
     });
 

@@ -297,8 +297,24 @@ program
       return run;
     }
 
+    // Synthetic activity reset: some stop paths never produce a real Stop/stop
+    // hook (Claude's Stop hook doesn't fire on user interrupt, SessionEnd may be
+    // absent, runner exits/crashes). Publishing a synthetic Stop event guarantees
+    // every dashboard clears its "thinking"/"tool_use" indicator. Idle is
+    // idempotent, so an extra synthetic Stop after a real one is harmless.
+    function publishSyntheticStop(sessionId: string, reason: 'complete' | 'error' | 'stopped'): void {
+      centrifugo.publishHookEvent(userId, sessionId, {
+        type: 'hook_event',
+        eventName: 'Stop',
+        data: { synthetic: true, reason },
+      }).catch((err) => {
+        console.error(`[Bridge] Failed to publish synthetic stop for ${sessionId}:`, err);
+      });
+    }
+
     runner.on('complete', (sessionId) => {
       flushBuffer(sessionId);
+      publishSyntheticStop(sessionId, 'complete');
       withSessionWrite(sessionId, async () => {
         const session = await store.loadSession(sessionId);
         if (session) {
@@ -317,6 +333,7 @@ program
 
     runner.on('error', (sessionId, error) => {
       flushBuffer(sessionId);
+      publishSyntheticStop(sessionId, 'error');
       withSessionWrite(sessionId, async () => {
         const session = await store.loadSession(sessionId);
         if (session) {
@@ -455,6 +472,7 @@ program
 
             const stopped = runner.stop(payload.sessionId);
             if (stopped) {
+              publishSyntheticStop(payload.sessionId, 'stopped');
               await withSessionWrite(payload.sessionId, async () => {
                 const session = await store.loadSession(payload.sessionId);
                 if (session) {
@@ -754,18 +772,20 @@ program
 
       const sessions = await store.listSessions();
 
-      // Reap tmux sessions that no longer correspond to a live store session
-      // (removed records, failed kills) before resurrection re-creates any.
+      // Reap tmux sessions for OUR dead store records (removed records, failed
+      // kills) before resurrection re-creates any. Tmux sessions with ids we
+      // have no record of are left alone — they may belong to another bridge
+      // running on this machine.
       if (isTmuxAvailable()) {
-        const liveIds = new Set(
+        const deadIds = new Set(
           sessions
-            .filter((s) => s.status === 'running' || s.status === 'pending')
+            .filter((s) => s.status !== 'running' && s.status !== 'pending')
             .map((s) => s.id),
         );
-        for (const orphanId of listFtownTmuxSessions()) {
-          if (!liveIds.has(orphanId)) {
-            console.log(`[Bridge] Killing orphaned tmux session ${orphanId}`);
-            await killTmuxSession(orphanId);
+        for (const tmuxId of listFtownTmuxSessions()) {
+          if (deadIds.has(tmuxId)) {
+            console.log(`[Bridge] Killing tmux session for dead session ${tmuxId}`);
+            await killTmuxSession(tmuxId);
           }
         }
       }

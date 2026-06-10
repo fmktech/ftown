@@ -20,6 +20,11 @@ export function hookEventToActivity(eventName: string): HookActivity | null {
       return "thinking";
     case "Stop":
     case "stop":
+    case "SessionEnd":
+    case "sessionEnd":
+    case "postToolUseFailure":
+      // A cancelled/failed tool means nothing is running; the truthful state is
+      // idle regardless of data.is_interrupt.
       return "idle";
     default:
       return null;
