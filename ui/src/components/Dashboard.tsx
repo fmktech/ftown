@@ -252,7 +252,7 @@ PY`;
   }, [rawSessions]);
 
   const handleCreateSession = useCallback(
-    (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; env?: Record<string, string> }) => {
+    (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; env?: Record<string, string>; orchestrator?: boolean }) => {
       createSession(prompt, options);
     },
     [createSession]
@@ -608,7 +608,7 @@ PY`;
             <button
               className="btn-ghost"
               onClick={async () => {
-                const text = `npx ftown-bridge --token ${token} --api-url ${window.location.origin}`;
+                const text = `npx -y ftown-bridge@latest --token ${token} --api-url ${window.location.origin}`;
                 try {
                   await navigator.clipboard.writeText(text);
                 } catch {
@@ -640,7 +640,7 @@ PY`;
               letterSpacing: "0.02em",
             }}
           >
-            npx ftown-bridge --token {token} --api-url {typeof window !== "undefined" ? window.location.origin : ""}
+            npx -y ftown-bridge@latest --token {token} --api-url {typeof window !== "undefined" ? window.location.origin : ""}
           </code>
         </div>
       )}

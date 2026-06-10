@@ -5,6 +5,7 @@ import { timingSafeEqual } from 'node:crypto';
 import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 
 import type { SessionStore } from './session-store.js';
+import type { ShellType } from './types.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { TerminalManager } from './terminal-manager.js';
@@ -25,6 +26,8 @@ export interface HookEvent {
   sessionId: string;
   eventName: string;
   data: Record<string, unknown>;
+  /** How the session id was attributed; 'workspace' is an untrusted directory fallback. */
+  source?: string;
 }
 
 interface HookServerEvents {
@@ -84,6 +87,26 @@ function extractBearer(req: IncomingMessage): string | null {
   const header = req.headers['x-bridge-token'];
   if (typeof header === 'string' && header) return header.trim();
   return null;
+}
+
+const MAX_MESSAGE_LENGTH = 2000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Messages are sanitized to a single line, so a delayed plain CR submits everywhere.
+// (ESC+CR reads as Alt+Enter — insert newline — on current Claude Code.)
+function submitSuffixFor(_shellType: ShellType | undefined): string {
+  return '\r';
+}
+
+// Strip control chars and collapse whitespace so a message cannot inject keystrokes.
+function sanitizeMessageText(text: string): string {
+  return text
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function getQueryInt(url: URL, name: string, defaultValue: number): number {
@@ -266,6 +289,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     const sessionScreenMatch = path.match(/^\/api\/sessions\/([^/]+)\/screen$/);
     const sessionGrepMatch = path.match(/^\/api\/sessions\/([^/]+)\/grep$/);
     const sessionKeysMatch = path.match(/^\/api\/sessions\/([^/]+)\/keys$/);
+    const sessionMessageMatch = path.match(/^\/api\/sessions\/([^/]+)\/message$/);
     const sessionResizeMatch = path.match(/^\/api\/sessions\/([^/]+)\/resize$/);
     const sessionRunningMatch = path.match(/^\/api\/sessions\/([^/]+)\/running$/);
 
@@ -477,6 +501,69 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return;
     }
 
+    // POST /api/sessions/:id/message — deliver a short text line into another session's PTY
+    if (sessionMessageMatch && req.method === 'POST') {
+      const sessionId = sessionMessageMatch[1];
+      const body = await parseBody(req);
+      const rawText = body.text;
+
+      if (typeof rawText !== 'string' || !rawText.trim()) {
+        jsonResponse(res, 400, { error: 'Missing text' });
+        return;
+      }
+      if (rawText.length > MAX_MESSAGE_LENGTH) {
+        jsonResponse(res, 400, { error: `Message too long (max ${MAX_MESSAGE_LENGTH} chars)` });
+        return;
+      }
+
+      const text = sanitizeMessageText(rawText);
+      if (!text) {
+        jsonResponse(res, 400, { error: 'Message empty after sanitization' });
+        return;
+      }
+
+      const session = await this.store.loadSession(sessionId);
+      if (!session) {
+        jsonResponse(res, 404, { error: 'Session not found' });
+        return;
+      }
+
+      if (!this.runner) {
+        jsonResponse(res, 503, { error: 'Runner not available' });
+        return;
+      }
+      if (!this.runner.isRunning(sessionId)) {
+        jsonResponse(res, 409, { error: 'Session not running' });
+        return;
+      }
+
+      let sender = 'unknown';
+      const from = typeof body.from === 'string' ? body.from.trim() : '';
+      if (from) {
+        const fromSession = await this.store.loadSession(from);
+        if (fromSession) sender = fromSession.name || from.slice(0, 8);
+      }
+
+      // Plain shells would execute the message as a command; deliver it as a quoted no-op
+      // (`: '...'`) — interactive zsh has no '#' comments by default.
+      const isAgent = session.shellType && session.shellType !== 'shell';
+      const line = isAgent
+        ? `[ftown msg from ${sender}] ${text}`
+        : `: '[ftown msg from ${sender}] ${text.replace(/'/g, '')}'`;
+      const wrote = this.runner.write(sessionId, line);
+      if (!wrote) {
+        jsonResponse(res, 409, { error: 'Session not running' });
+        return;
+      }
+      // Composer TUIs detect pastes by input arrival rate; the submit CR must come well
+      // after that window or it is treated as a pasted newline.
+      await delay(600);
+      this.runner.write(sessionId, submitSuffixFor(session.shellType));
+
+      jsonResponse(res, 200, { delivered: true, sessionId, from: sender });
+      return;
+    }
+
     // POST /api/sessions/:id/resize
     if (sessionResizeMatch && req.method === 'POST') {
       const sessionId = sessionResizeMatch[1];
@@ -534,9 +621,16 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         const payload = JSON.parse(body) as Record<string, unknown>;
 
         const hookEventName = payload.hook_event_name as string | undefined;
-        let ftownSessionId =
-          (payload.ftown_session_id as string | undefined) ??
-          resolveSessionIdFromHookPayload(payload);
+        let ftownSessionId = payload.ftown_session_id as string | undefined;
+        // notify.sh reports how it attributed the session id.
+        let source = typeof payload.ftown_session_source === 'string'
+          ? payload.ftown_session_source
+          : undefined;
+        if (!ftownSessionId) {
+          const resolved = resolveSessionIdFromHookPayload(payload);
+          ftownSessionId = resolved?.sessionId;
+          source = resolved?.source;
+        }
 
         if (!ftownSessionId || !hookEventName) {
           res.writeHead(200);
@@ -545,18 +639,21 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         }
 
         const conversationId = payload.conversation_id;
-        if (typeof conversationId === 'string' && conversationId) {
+        // Workspace attribution may belong to a foreign agent running in the
+        // same directory; never let it claim the conversation mapping.
+        if (typeof conversationId === 'string' && conversationId && source !== 'workspace') {
           registerSessionConversation(ftownSessionId, conversationId);
         }
 
         console.log(`[LocalApiServer] Received ${hookEventName} for ftown session ${ftownSessionId}`);
 
-        const { ftown_session_id: _, ...rest } = payload;
+        const { ftown_session_id: _, ftown_session_source: __, ...rest } = payload;
 
         const hookEvent: HookEvent = {
           sessionId: ftownSessionId,
           eventName: hookEventName,
           data: rest as Record<string, unknown>,
+          source,
         };
 
         this.emit('event', hookEvent);

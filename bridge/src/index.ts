@@ -23,6 +23,8 @@ import { installFtownSessionsSkill } from './install-ftown-skill.js';
 import { installFtownSessionsCli } from './install-ftown-cli.js';
 import { registerSessionWorkspace, unregisterSession } from './session-registry.js';
 import { createFtownSession } from './create-ftown-session.js';
+import { buildSessionCommand } from './agent-commands.js';
+import { isTmuxAvailable, killTmuxSession, listFtownTmuxSessions } from './tmux.js';
 
 import type { HookEvent } from './local-api-server.js';
 
@@ -124,16 +126,9 @@ program
     }
 
     const store = new SessionStore(dataDir);
-
-    const staleSessiones = await store.listSessions();
-    for (const s of staleSessiones) {
-      if (s.status === 'running' || s.status === 'pending') {
-        s.status = 'error';
-        s.updatedAt = new Date().toISOString();
-        await store.saveSession(s);
-        console.log(`[Bridge] Marked stale session ${s.id} as error`);
-      }
-    }
+    // Sessions left in a live state by a previous bridge are handled by
+    // resurrectSessions() once Centrifugo is connected (tmux reattach,
+    // resume respawn, or marked as error).
 
     const terminalManager = new TerminalManager(50000, 120);
 
@@ -285,9 +280,26 @@ program
       }
     });
 
-    runner.on('complete', async (sessionId) => {
+    // Per-session write queue so concurrent load/modify/save flows (hooks,
+    // runner exit handlers, stop_session) cannot interleave and resurrect a
+    // stale status.
+    const sessionWrites = new Map<string, Promise<void>>();
+    function withSessionWrite(sessionId: string, task: () => Promise<void>): Promise<void> {
+      const prev = sessionWrites.get(sessionId) ?? Promise.resolve();
+      const run = prev.then(task);
+      const settled = run.catch(() => undefined);
+      sessionWrites.set(sessionId, settled);
+      void settled.finally(() => {
+        if (sessionWrites.get(sessionId) === settled) {
+          sessionWrites.delete(sessionId);
+        }
+      });
+      return run;
+    }
+
+    runner.on('complete', (sessionId) => {
       flushBuffer(sessionId);
-      try {
+      withSessionWrite(sessionId, async () => {
         const session = await store.loadSession(sessionId);
         if (session) {
           session.status = 'completed';
@@ -296,15 +308,16 @@ program
           await centrifugo.publishSessionUpdate(userId, session);
         }
         console.log(`[Bridge] Session ${sessionId} completed`);
-      } catch (err) {
+      }).catch((err) => {
         console.error(`[Bridge] Failed to handle completion for session ${sessionId}:`, err);
-      }
-      unregisterSession(sessionId);
+      }).finally(() => {
+        unregisterSession(sessionId);
+      });
     });
 
-    runner.on('error', async (sessionId, error) => {
+    runner.on('error', (sessionId, error) => {
       flushBuffer(sessionId);
-      try {
+      withSessionWrite(sessionId, async () => {
         const session = await store.loadSession(sessionId);
         if (session) {
           session.status = 'error';
@@ -313,12 +326,65 @@ program
           await centrifugo.publishSessionUpdate(userId, session);
         }
         console.error(`[Bridge] Session ${sessionId} error:`, error.message);
-      } catch (err) {
+      }).catch((err) => {
         console.error(`[Bridge] Failed to handle error for session ${sessionId}:`, err);
-      }
-      unregisterSession(sessionId);
-      terminalManager.destroy(sessionId);
+      }).finally(() => {
+        unregisterSession(sessionId);
+        terminalManager.destroy(sessionId);
+      });
     });
+
+    // Last persisted agent session ids, to skip disk reads on the hot hook path.
+    const agentIdCache = new Map<string, { claude?: string; cursor?: string }>();
+
+    async function persistAgentSessionIds(hookEvent: HookEvent): Promise<void> {
+      // Workspace-fallback attribution may come from a foreign agent the user
+      // ran manually in the same directory; never persist its ids.
+      if (hookEvent.source === 'workspace') return;
+
+      const rawClaudeId = hookEvent.data['session_id'];
+      const rawCursorId = hookEvent.data['conversation_id'];
+      // Claude Code hooks carry session_id; Cursor hooks carry conversation_id.
+      const claudeId = typeof rawClaudeId === 'string' && rawClaudeId ? rawClaudeId : undefined;
+      const cursorId = typeof rawCursorId === 'string' && rawCursorId ? rawCursorId : undefined;
+      if (!claudeId && !cursorId) return;
+
+      const cached = agentIdCache.get(hookEvent.sessionId);
+      if (cached
+        && (!claudeId || cached.claude === claudeId)
+        && (!cursorId || cached.cursor === cursorId)) {
+        return;
+      }
+
+      const session = await store.loadSession(hookEvent.sessionId);
+      if (!session) return;
+
+      let changed = false;
+      if (claudeId && session.claudeSessionId !== claudeId) {
+        session.claudeSessionId = claudeId;
+        changed = true;
+      }
+      if (cursorId && session.cursorSessionId !== cursorId) {
+        session.cursorSessionId = cursorId;
+        changed = true;
+      }
+      if (!changed) {
+        agentIdCache.set(hookEvent.sessionId, {
+          claude: session.claudeSessionId,
+          cursor: session.cursorSessionId,
+        });
+        return;
+      }
+
+      session.updatedAt = new Date().toISOString();
+      await store.saveSession(session);
+      // Cache only after a successful save, so a failed persist is retried.
+      agentIdCache.set(hookEvent.sessionId, {
+        claude: session.claudeSessionId,
+        cursor: session.cursorSessionId,
+      });
+      await centrifugo.publishSessionUpdate(userId, session);
+    }
 
     localApiServer.on('event', (hookEvent: HookEvent) => {
       centrifugo.publishHookEvent(userId, hookEvent.sessionId, {
@@ -329,6 +395,9 @@ program
         console.error('[Bridge] Failed to handle hook event:', err);
       });
 
+      withSessionWrite(hookEvent.sessionId, () => persistAgentSessionIds(hookEvent)).catch((err) => {
+        console.error(`[Bridge] Failed to persist agent session id for ${hookEvent.sessionId}:`, err);
+      });
     });
 
     async function handleCommand(command: Command): Promise<void> {
@@ -370,6 +439,7 @@ program
                 parentSessionId: payload.parentSessionId,
                 initialInput: payload.initialInput,
                 initialInputDelay: payload.initialInputDelay,
+                orchestrator: payload.orchestrator,
               },
             );
             response = { requestId: command.requestId, success: true, data: { session } };
@@ -385,13 +455,15 @@ program
 
             const stopped = runner.stop(payload.sessionId);
             if (stopped) {
-              const session = await store.loadSession(payload.sessionId);
-              if (session) {
-                session.status = 'completed';
-                session.updatedAt = new Date().toISOString();
-                await store.saveSession(session);
-                await centrifugo.publishSessionUpdate(userId, session);
-              }
+              await withSessionWrite(payload.sessionId, async () => {
+                const session = await store.loadSession(payload.sessionId);
+                if (session) {
+                  session.status = 'completed';
+                  session.updatedAt = new Date().toISOString();
+                  await store.saveSession(session);
+                  await centrifugo.publishSessionUpdate(userId, session);
+                }
+              });
               unregisterSession(payload.sessionId);
             }
 
@@ -452,6 +524,7 @@ program
               env: existingSession.env,
               hookPort,
               hookToken: apiToken,
+              parentSessionId: existingSession.parentSessionId,
             });
 
             centrifugo.subscribeToTerminalInput(
@@ -598,6 +671,121 @@ program
       }
     }
 
+    async function markSessionDead(session: Session): Promise<void> {
+      session.status = 'error';
+      session.updatedAt = new Date().toISOString();
+      await store.saveSession(session);
+      await centrifugo.publishSessionUpdate(userId, session);
+      console.log(`[Bridge] Marked stale session ${session.id} as error`);
+    }
+
+    async function resurrectSession(sessionId: string): Promise<void> {
+      // Commands run concurrently with the resurrection loop; act on fresh
+      // state so a session stopped or removed mid-loop is not respawned.
+      const session = await store.loadSession(sessionId);
+      if (!session || (session.status !== 'running' && session.status !== 'pending')) return;
+      if (runner.isRunning(session.id)) return;
+
+      if (runner.reattach(session.id, {
+        workingDir: session.workingDir,
+        parentSessionId: session.parentSessionId,
+      })) {
+        session.status = 'running';
+        session.bridgeId = bridgeId;
+        session.updatedAt = new Date().toISOString();
+        await store.saveSession(session);
+        await centrifugo.publishSessionUpdate(userId, session);
+        wireTerminalInput(session.id);
+        registerSessionWorkspace(session.id, session.workingDir);
+        console.log(`[Bridge] Resurrected session ${session.id} via tmux reattach`);
+        return;
+      }
+
+      const shellType = session.shellType ?? 'claude';
+      const canResume = shellType === 'cursor'
+        ? Boolean(session.cursorSessionId?.trim())
+        : shellType !== 'shell' && shellType !== 'opencode' && Boolean(session.claudeSessionId?.trim());
+
+      if (canResume) {
+        // Sessions created with a custom command rerun it verbatim (matching
+        // retry_session): injecting --resume into arbitrary commands could
+        // break wrappers, and rebuilding would drop their flags.
+        const defaultCommand = buildSessionCommand({
+          shellType: session.shellType,
+          workingDir: session.workingDir,
+          model: session.model,
+        });
+        const isCustomCommand = Boolean(session.command) && session.command !== defaultCommand;
+        const resumeCommand = isCustomCommand && session.command
+          ? session.command
+          : buildSessionCommand({
+              shellType: session.shellType,
+              workingDir: session.workingDir,
+              model: session.model,
+              claudeSessionId: session.claudeSessionId,
+              cursorSessionId: session.cursorSessionId,
+            });
+        session.status = 'running';
+        session.bridgeId = bridgeId;
+        session.runtime = runner.getPreferredRuntime();
+        session.updatedAt = new Date().toISOString();
+        await store.saveSession(session);
+        await centrifugo.publishSessionUpdate(userId, session);
+        runner.run(session.id, resumeCommand, {
+          workingDir: session.workingDir,
+          env: session.env,
+          hookPort,
+          hookToken: apiToken,
+          parentSessionId: session.parentSessionId,
+        });
+        wireTerminalInput(session.id);
+        registerSessionWorkspace(session.id, session.workingDir);
+        console.log(`[Bridge] Resurrected session ${session.id} via resume respawn: ${resumeCommand}`);
+        return;
+      }
+
+      await markSessionDead(session);
+    }
+
+    let resurrectionStarted = false;
+    async function resurrectSessions(): Promise<void> {
+      if (resurrectionStarted) return;
+      resurrectionStarted = true;
+
+      const sessions = await store.listSessions();
+
+      // Reap tmux sessions that no longer correspond to a live store session
+      // (removed records, failed kills) before resurrection re-creates any.
+      if (isTmuxAvailable()) {
+        const liveIds = new Set(
+          sessions
+            .filter((s) => s.status === 'running' || s.status === 'pending')
+            .map((s) => s.id),
+        );
+        for (const orphanId of listFtownTmuxSessions()) {
+          if (!liveIds.has(orphanId)) {
+            console.log(`[Bridge] Killing orphaned tmux session ${orphanId}`);
+            await killTmuxSession(orphanId);
+          }
+        }
+      }
+
+      for (const session of sessions) {
+        if (session.status !== 'running' && session.status !== 'pending') continue;
+        try {
+          await resurrectSession(session.id);
+        } catch (err) {
+          console.error(`[Bridge] Failed to resurrect session ${session.id}:`, err);
+          try {
+            const current = await store.loadSession(session.id);
+            if (current) await markSessionDead(current);
+          } catch (markErr) {
+            console.error(`[Bridge] Failed to mark session ${session.id} as error:`, markErr);
+          }
+        }
+      }
+    }
+
     centrifugo.connect();
     centrifugo.joinBridgesChannel(userId, bridgeId);
     centrifugo.subscribeToSessions(userId);
@@ -612,6 +800,9 @@ program
     setTimeout(() => {
       ready = true;
       console.log('[Bridge] Ready and listening for commands');
+      resurrectSessions().catch((err) => {
+        console.error('[Bridge] Session resurrection failed:', err);
+      });
     }, 2000);
 
     const shutdown = (): void => {

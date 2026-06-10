@@ -49,6 +49,26 @@ Skill copy (same binary via wrapper): `scripts/ftown-sessions` in this skill dir
 ~/.ftown/ftown-sessions running <session-id>
 ```
 
+## Messaging
+
+Send a short text line into another session's terminal. The message is sanitized
+(control characters stripped, capped at 2000 chars) and delivered as
+`[ftown msg from <sender>] <text>` followed by submit, so the target agent reads it
+as a normal prompt.
+
+```bash
+# Tell a specific session
+~/.ftown/ftown-sessions tell <session-id> "tests are green, ship it"
+
+# Tell my parent / children / siblings (resolved via FTOWN_SESSION_ID)
+~/.ftown/ftown-sessions tell --parent "child finished phase 1"
+~/.ftown/ftown-sessions tell --children "pause and report status"
+~/.ftown/ftown-sessions tell --siblings "I grabbed the lock, stand by"
+```
+
+Sender is resolved from `FTOWN_SESSION_ID` (falls back to `unknown` when unset).
+Fan-out targets are messaged sequentially, one JSON result line per target.
+
 ### Create options
 
 | Flag | Description |
@@ -60,6 +80,7 @@ Skill copy (same binary via wrapper): `scripts/ftown-sessions` in this skill dir
 | `--command` | Full command override (skips `--shell` builder) |
 | `--parent` | Set parent to `$FTOWN_SESSION_ID` |
 | `--parent-id` | Explicit parent session UUID |
+| `--orchestrator` | Brief the new agent (non-`shell`) to spawn and coordinate sibling sessions |
 | `--model` | Cursor model name |
 
 Returns JSON with the new `session.id` — use that id for `screen` / `grep` / `keys`.
@@ -82,7 +103,20 @@ $CLI grep <child-id> --pattern 'FAIL|Error'
 Spawned ftown sessions receive:
 
 - `FTOWN_SESSION_ID` — this session (use with `--parent`)
+- `FTOWN_PARENT_SESSION_ID` — the parent session id, set on children spawned with `--parent` / `--parent-id`
 - `FTOWN_HOOK_PORT` / `FTOWN_HOOK_TOKEN` — hook forwarding (not for cross-session control)
+
+Agent children (any `--shell` except `shell`) spawned with a parent also get an
+automatic one-paragraph briefing prepended to their first input: it states their
+name/id and parent name/id, and how to reach parent and siblings via `tell`. The
+creator's `--prompt` follows after a `Task:` line.
+
+An agent session created with `--orchestrator` additionally gets a one-paragraph
+briefing teaching it to spawn worker sessions with `create --parent`, that those
+children report back via `tell` (arriving as `[ftown msg from <name>]` lines in its
+terminal), and how to inspect/message any session with `list` / `screen` / `grep` /
+`tell`. When both apply, the child paragraph comes first, then the orchestrator
+paragraph, separated by a blank line.
 
 ## HTTP API (optional)
 
@@ -95,6 +129,7 @@ The CLI wraps the loopback API. Raw access if needed:
 | GET | `/api/sessions/:id/screen` | Terminal lines |
 | POST | `/api/sessions/:id/grep` | Search |
 | POST | `/api/sessions/:id/keys` | Send keys |
+| POST | `/api/sessions/:id/message` | Deliver a message line (`{ text, from? }`) |
 
 ## If the CLI is missing
 

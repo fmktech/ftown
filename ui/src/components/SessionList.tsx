@@ -97,6 +97,103 @@ function computeDropZone(e: React.DragEvent): DropZone {
   return offset < rect.height / 2 ? "above" : "below";
 }
 
+interface SessionTreeNode {
+  session: Session;
+  children: SessionTreeNode[];
+}
+
+interface FlatSessionRow {
+  session: Session;
+  depth: number;
+  hasChildren: boolean;
+  descendantCount: number;
+}
+
+interface SessionRowTreeProps {
+  depth: number;
+  hasChildren: boolean;
+  isCollapsed: boolean;
+  descendantCount: number;
+  onToggleCollapse: () => void;
+}
+
+/**
+ * Build a parent→child forest from a pre-sorted list of sessions.
+ *
+ * A session nests under another only when its parentSessionId points to another
+ * session present in the SAME list (callers pass per-bridge visible sessions).
+ * Sessions with a missing, self-referential, or out-of-list parent become roots.
+ * Ancestor cycles (A→B→A) are detected via a per-node walk and demoted to roots
+ * so no node is lost and traversal can never loop. Sibling order mirrors the
+ * incoming order because we iterate the list once in place.
+ */
+function buildSessionTree(orderedSessions: Session[]): SessionTreeNode[] {
+  const byId = new Map<string, Session>();
+  const nodeById = new Map<string, SessionTreeNode>();
+  for (const s of orderedSessions) {
+    byId.set(s.id, s);
+    nodeById.set(s.id, { session: s, children: [] });
+  }
+
+  const hasAncestorCycle = (startId: string): boolean => {
+    const seen = new Set<string>();
+    let current: string | undefined = startId;
+    while (current !== undefined) {
+      if (seen.has(current)) return true;
+      seen.add(current);
+      current = byId.get(current)?.parentSessionId;
+    }
+    return false;
+  };
+
+  const roots: SessionTreeNode[] = [];
+  for (const s of orderedSessions) {
+    const node = nodeById.get(s.id);
+    if (node === undefined) continue;
+    const parentId = s.parentSessionId;
+    const parentNode =
+      parentId !== undefined && parentId !== s.id ? nodeById.get(parentId) : undefined;
+    if (parentNode !== undefined && !hasAncestorCycle(s.id)) {
+      parentNode.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  }
+  return roots;
+}
+
+function countTreeDescendants(node: SessionTreeNode): number {
+  let total = 0;
+  for (const child of node.children) {
+    total += 1 + countTreeDescendants(child);
+  }
+  return total;
+}
+
+/** Depth-first flatten that skips the subtree of any collapsed parent. */
+function flattenSessionTree(
+  roots: SessionTreeNode[],
+  collapsedSessions: Set<string>,
+): FlatSessionRow[] {
+  const rows: FlatSessionRow[] = [];
+  const walk = (nodes: SessionTreeNode[], depth: number): void => {
+    for (const node of nodes) {
+      const hasChildren = node.children.length > 0;
+      rows.push({
+        session: node.session,
+        depth,
+        hasChildren,
+        descendantCount: hasChildren ? countTreeDescendants(node) : 0,
+      });
+      if (hasChildren && !collapsedSessions.has(node.session.id)) {
+        walk(node.children, depth + 1);
+      }
+    }
+  };
+  walk(roots, 0);
+  return rows;
+}
+
 const menuButtonStyle = {
   display: "block" as const,
   width: "100%",
@@ -311,6 +408,7 @@ export function SessionList({
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
   const [hiddenBridgesExpanded, setHiddenBridgesExpanded] = useState(false);
   const [collapsedBridges, setCollapsedBridges] = useState<Set<string>>(new Set());
+  const [collapsedSessions, setCollapsedSessions] = useState<Set<string>>(new Set());
   const dragRef = useRef<DragState | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -324,6 +422,10 @@ export function SessionList({
     try {
       const raw = localStorage.getItem("ftown:collapsedBridges");
       if (raw) setCollapsedBridges(new Set(JSON.parse(raw)));
+    } catch { /* ignore */ }
+    try {
+      const raw = localStorage.getItem("ftown:collapsedSessions");
+      if (raw) setCollapsedSessions(new Set(JSON.parse(raw)));
     } catch { /* ignore */ }
   }, []);
 
@@ -476,7 +578,13 @@ export function SessionList({
 
     const zone = computeDropZone(e);
     const bridgeSessions = sessionsByBridge.get(targetSession.bridgeId) ?? [];
-    const ids = bridgeSessions.map((s) => s.id);
+    // Compute indices against the full DFS tree order (the same order rendered),
+    // not the raw flat array, so dragging matches what the user sees. Use an
+    // empty collapsed set so collapsed subtrees keep their position and all
+    // session ids remain in the persisted order.
+    const ids = flattenSessionTree(buildSessionTree(bridgeSessions), new Set<string>()).map(
+      (row) => row.session.id,
+    );
     const fromIdx = ids.indexOf(draggedId);
     const toIdx = ids.indexOf(targetSession.id);
     if (fromIdx === -1 || toIdx === -1) {
@@ -517,6 +625,16 @@ export function SessionList({
     });
   }
 
+  function toggleSessionCollapsed(sessionId: string): void {
+    setCollapsedSessions((prev) => {
+      const next = new Set(prev);
+      if (next.has(sessionId)) next.delete(sessionId);
+      else next.add(sessionId);
+      localStorage.setItem("ftown:collapsedSessions", JSON.stringify([...next]));
+      return next;
+    });
+  }
+
   if (visibleSessions.length === 0 && visibleBridgeIds.length === 0 && hiddenSessions.length === 0 && hiddenBridgeIdsList.length === 0) {
     if (collapsed) return null;
     return (
@@ -530,11 +648,12 @@ export function SessionList({
     );
   }
 
-  function renderSessionRow(session: Session): ReactElement {
+  function renderSessionRow(session: Session, treeProps?: SessionRowTreeProps): ReactElement {
     const isSelected = session.id === selectedSessionId;
     const displayName = session.name || session.prompt.slice(0, 36);
     const dropKey = `session:${session.id}`;
     const isDragOver = dragOverKey === dropKey;
+    const depth = treeProps?.depth ?? 0;
 
     if (collapsed) {
       const act = sessionActivity?.get(session.id);
@@ -632,11 +751,11 @@ export function SessionList({
         style={{
           width: "100%",
           textAlign: "left",
-          padding: "10px 16px 10px 28px",
+          padding: `10px 16px 10px ${28 + depth * 16}px`,
           borderBottom: "1px solid var(--border-subtle)",
           borderTop: isDragOver && dragOverZone === "above" ? "2px solid var(--accent)" : "none",
           ...(isDragOver && dragOverZone === "below" ? { borderBottom: "2px solid var(--accent)" } : {}),
-          borderLeft: `2px solid ${isSelected ? "var(--accent)" : "transparent"}`,
+          borderLeft: `2px solid ${isSelected ? "var(--accent)" : depth > 0 ? "var(--border-muted)" : "transparent"}`,
           background: isSelected ? "var(--bg-elevated)" : "transparent",
           cursor: "grab",
           transition: "background 0.12s ease, border-color 0.12s ease",
@@ -651,6 +770,30 @@ export function SessionList({
         }}
       >
         <div className="flex items-center justify-between gap-2 mb-1">
+          <div className="flex items-center gap-1.5" style={{ flex: 1, minWidth: 0 }}>
+          {treeProps?.hasChildren ? (
+            <span
+              role="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                treeProps.onToggleCollapse();
+              }}
+              title={treeProps.isCollapsed ? "Expand children" : "Collapse children"}
+              style={{
+                cursor: "pointer",
+                color: "var(--text-faint)",
+                fontSize: 9,
+                width: 10,
+                lineHeight: 1,
+                flexShrink: 0,
+                userSelect: "none",
+              }}
+            >
+              {treeProps.isCollapsed ? "▸" : "▾"}
+            </span>
+          ) : depth > 0 ? (
+            <span style={{ width: 10, flexShrink: 0 }} />
+          ) : null}
           {editingSessionId === session.id ? (
             <input
               ref={inputRef}
@@ -697,6 +840,26 @@ export function SessionList({
               {displayName}
             </span>
           )}
+          {treeProps?.isCollapsed && treeProps.descendantCount > 0 && (
+            <span
+              title={`${treeProps.descendantCount} hidden child session${treeProps.descendantCount === 1 ? "" : "s"}`}
+              style={{
+                fontSize: 9,
+                fontWeight: 600,
+                lineHeight: 1,
+                padding: "1px 5px",
+                borderRadius: 8,
+                flexShrink: 0,
+                color: "var(--accent)",
+                background: "rgba(0, 255, 136, 0.08)",
+                border: "1px solid rgba(0, 255, 136, 0.15)",
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              {treeProps.descendantCount}
+            </span>
+          )}
+          </div>
           <StatusBadge status={session.status} activity={sessionActivity?.get(session.id)?.activity} />
         </div>
 
@@ -869,7 +1032,16 @@ export function SessionList({
             {bridgeSessions.length}
           </span>
         </div>
-        {!isBridgeCollapsed && bridgeSessions.map((session) => renderSessionRow(session))}
+        {!isBridgeCollapsed &&
+          flattenSessionTree(buildSessionTree(bridgeSessions), collapsedSessions).map((row) =>
+            renderSessionRow(row.session, {
+              depth: row.depth,
+              hasChildren: row.hasChildren,
+              isCollapsed: collapsedSessions.has(row.session.id),
+              descendantCount: row.descendantCount,
+              onToggleCollapse: () => toggleSessionCollapsed(row.session.id),
+            }),
+          )}
       </div>
     );
   }

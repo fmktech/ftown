@@ -57,7 +57,7 @@ export function buildSessionCommand(input: BuildSessionCommandInput): string {
     });
   }
   if (input.claudeSessionId?.trim()) {
-    return `claude --allow-dangerously-skip-permissions --resume ${input.claudeSessionId.trim()}`;
+    return `claude --allow-dangerously-skip-permissions --resume ${shellQuote(input.claudeSessionId.trim())}`;
   }
   return 'claude --allow-dangerously-skip-permissions';
 }

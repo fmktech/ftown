@@ -1,5 +1,7 @@
 export type ShellType = 'claude' | 'cursor' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks';
 
+export type SessionRuntime = 'tmux' | 'direct';
+
 export interface Session {
   id: string;
   name: string;
@@ -16,6 +18,7 @@ export interface Session {
   cursorSessionId?: string;
   env?: Record<string, string>;
   parentSessionId?: string;
+  runtime?: SessionRuntime;
 }
 
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error';
@@ -53,6 +56,7 @@ export interface CreateSessionPayload {
   claudeSessionId?: string;
   cursorSessionId?: string;
   parentSessionId?: string;
+  orchestrator?: boolean;
 }
 
 export interface BridgeExecPayload {
