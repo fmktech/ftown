@@ -34,6 +34,7 @@ export interface CreateFtownSessionInput {
   parentSessionId?: string;
   initialInput?: string;
   initialInputDelay?: number;
+  orchestrator?: boolean;
 }
 
 export async function resolveParentSessionId(
@@ -63,6 +64,25 @@ export function buildChildBriefing(params: ChildBriefingParams): string {
     `Report results/questions to your parent with: ~/.ftown/ftown-sessions tell --parent "<message>" ` +
     `— message siblings with tell --siblings, and inspect peers with ` +
     `~/.ftown/ftown-sessions list / screen <id>. Your parent can read your terminal at any time.`
+  );
+}
+
+interface OrchestratorBriefingParams {
+  sessionName: string;
+  sessionId: string;
+}
+
+/** One compact paragraph injected into an orchestrator agent's first input. */
+export function buildOrchestratorBriefing(params: OrchestratorBriefingParams): string {
+  return (
+    `[ftown] You are running inside ftown session '${params.sessionName}' ` +
+    `(${params.sessionId}) and can orchestrate sibling agent sessions on this machine. ` +
+    `Spawn workers with: ~/.ftown/ftown-sessions create --shell claude|cursor|shell ` +
+    `--parent --workdir <dir> --name <name> --prompt "<task>" — children are ` +
+    `automatically briefed to report back to you via tell, and their reports arrive in ` +
+    `your terminal as messages starting with [ftown msg from <name>]. Inspect any session ` +
+    `with ~/.ftown/ftown-sessions list / screen <id> / grep <id> --pattern <re>, and ` +
+    `message one with tell <id> "<text>".`
   );
 }
 
@@ -114,8 +134,9 @@ export async function createFtownSession(
   // Agent sessions (anything but a plain 'shell') spawned by a parent get a
   // one-paragraph briefing prepended to their first input so they know their
   // place in the session tree and how to talk to parent/siblings.
-  const briefing =
-    parentSessionId && parentName && input.shellType !== 'shell'
+  const isAgent = input.shellType !== 'shell';
+  const childBriefing =
+    parentSessionId && parentName && isAgent
       ? buildChildBriefing({
           childName: session.name,
           childId: sessionId,
@@ -123,6 +144,12 @@ export async function createFtownSession(
           parentId: parentSessionId,
         })
       : undefined;
+  const orchestratorBriefing =
+    input.orchestrator && isAgent
+      ? buildOrchestratorBriefing({ sessionName: session.name, sessionId })
+      : undefined;
+  // Orchestrator paragraph follows the child paragraph, separated by a blank line.
+  const briefing = [childBriefing, orchestratorBriefing].filter(Boolean).join('\n\n') || undefined;
 
   // Composer TUIs need the submit CR sent separately after the paste settles —
   // a CR inside the pasted chunk becomes a newline, and ESC+CR reads as
@@ -193,5 +220,6 @@ export function parseCreateSessionBody(
     initialInput: typeof body.initialInput === 'string' ? body.initialInput : undefined,
     initialInputDelay:
       typeof body.initialInputDelay === 'number' ? body.initialInputDelay : undefined,
+    orchestrator: body.orchestrator === true,
   };
 }

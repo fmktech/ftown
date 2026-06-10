@@ -135,6 +135,7 @@ Create options:
   --command <cmd>               Full command override
   --parent                      Link parent to FTOWN_SESSION_ID or X-Ftown-Session-Id
   --parent-id <uuid>            Explicit parent session id
+  --orchestrator                Brief the new agent to spawn and coordinate sibling sessions
   --model <name>                Model (cursor)
   --json                        Output raw JSON (default for most commands)
 
@@ -176,6 +177,7 @@ async function main(): Promise<void> {
         const model = flag(rest, '--model');
         const parentId = flag(rest, '--parent-id');
         const useParent = hasFlag(rest, '--parent');
+        const orchestrator = hasFlag(rest, '--orchestrator');
 
         const body: Record<string, unknown> = {};
         if (shellType) body.shellType = shellType;
@@ -186,6 +188,7 @@ async function main(): Promise<void> {
         if (model) body.model = model;
         if (parentId) body.parentSessionId = parentId;
         else if (useParent) body.parentSessionId = true;
+        if (orchestrator) body.orchestrator = true;
 
         const caller = process.env.FTOWN_SESSION_ID?.trim();
         const headers =

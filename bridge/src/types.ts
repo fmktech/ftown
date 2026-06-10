@@ -56,6 +56,7 @@ export interface CreateSessionPayload {
   claudeSessionId?: string;
   cursorSessionId?: string;
   parentSessionId?: string;
+  orchestrator?: boolean;
 }
 
 export interface BridgeExecPayload {

@@ -439,6 +439,7 @@ program
                 parentSessionId: payload.parentSessionId,
                 initialInput: payload.initialInput,
                 initialInputDelay: payload.initialInputDelay,
+                orchestrator: payload.orchestrator,
               },
             );
             response = { requestId: command.requestId, success: true, data: { session } };
