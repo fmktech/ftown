@@ -7,7 +7,7 @@ import { homedir, hostname as osHostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 
 import { CentrifugoClient } from './centrifugo-client.js';
@@ -80,6 +80,30 @@ async function fetchBridgeToken(apiUrl: string, authToken: string, bridgeId: str
   return res.json() as Promise<BridgeAuthResponse>;
 }
 
+/**
+ * Default data dir is ~/.ftown/data (machine-stable, like the rest of ~/.ftown).
+ * Older bridges defaulted to ./data relative to the launch cwd — if that legacy
+ * dir holds sessions and the new default does not exist yet, migrate it once so
+ * an upgraded bridge still resurrects its sessions.
+ */
+function resolveDefaultDataDir(): string {
+  const defaultDir = join(homedir(), '.ftown', 'data');
+  const legacyDir = resolve('./data');
+  if (!existsSync(defaultDir) && existsSync(join(legacyDir, 'sessions'))) {
+    try {
+      mkdirSync(dirname(defaultDir), { recursive: true });
+      renameSync(legacyDir, defaultDir);
+      console.log(`[Bridge] Migrated legacy data dir ${legacyDir} -> ${defaultDir}`);
+    } catch (err) {
+      console.error(
+        `[Bridge] Failed to migrate legacy data dir (${err instanceof Error ? err.message : String(err)}); using ${legacyDir}`,
+      );
+      return legacyDir;
+    }
+  }
+  return defaultDir;
+}
+
 const program = new Commander();
 
 program
@@ -87,10 +111,10 @@ program
   .description('ftown orchestrator bridge for Centrifugo')
   .requiredOption('--token <jwt>', 'Auth token (JWT signed with Centrifugo secret)')
   .requiredOption('--api-url <url>', 'ftown UI API URL (e.g. https://ftown.vercel.app)')
-  .option('--data-dir <path>', 'Directory for session data', './data')
+  .option('--data-dir <path>', 'Directory for session data (default: ~/.ftown/data)')
   .option('--bridge-id <id>', 'Bridge instance ID (default: persisted per data dir)')
-  .action(async (opts: { token: string; apiUrl: string; dataDir: string; bridgeId?: string }) => {
-    const dataDir = resolve(opts.dataDir);
+  .action(async (opts: { token: string; apiUrl: string; dataDir?: string; bridgeId?: string }) => {
+    const dataDir = opts.dataDir ? resolve(opts.dataDir) : resolveDefaultDataDir();
     // Bridge identity sticks to the data dir so a plain restart auto-resumes:
     // same id → same dashboard entry, sessions reattach without any flags.
     const bridgeIdPath = join(dataDir, 'bridge-id');
