@@ -16,7 +16,7 @@ import { SessionStore } from './session-store.js';
 import { LocalApiServer } from './local-api-server.js';
 import { TerminalManager } from './terminal-manager.js';
 import { installClaudeHooks } from './hook-installer.js';
-import { installCursorHooks, installProjectCursorHooks } from './cursor-hook-installer.js';
+import { installCursorHooks } from './cursor-hook-installer.js';
 import { installHarness, harnessOnPath, pathHint, writeHarnessAgentGuide, agentGuidePath } from './harness-installer.js';
 import { installNotifyScript } from './install-notify-script.js';
 import { installFtownSessionsSkill } from './install-ftown-skill.js';

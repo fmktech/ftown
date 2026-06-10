@@ -115,16 +115,3 @@ function mergeHooksFile(settingsPath: string, notifyScriptPath: string, label: s
 export function installCursorHooks(notifyScriptPath: string): void {
   mergeHooksFile(join(homedir(), '.cursor', 'hooks.json'), notifyScriptPath, 'hooks.json');
 }
-
-/** Project-level .cursor/hooks.json — Cursor CLI prefers this when agent runs in a repo. */
-export function installProjectCursorHooks(projectRoot: string, notifyScriptPath: string): void {
-  const root = resolve(projectRoot);
-  const settingsPath = join(root, '.cursor', 'hooks.json');
-  try {
-    mkdirSync(join(root, '.cursor'), { recursive: true });
-    mergeHooksFile(settingsPath, notifyScriptPath, `project hooks (${root})`);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[CursorHookInstaller] project failed: ${msg}`);
-  }
-}

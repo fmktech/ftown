@@ -1,7 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 
 import { buildSessionCommand } from './agent-commands.js';
-import { installProjectCursorHooks } from './cursor-hook-installer.js';
 import { registerSessionWorkspace } from './session-registry.js';
 
 import type { CentrifugoClient } from './centrifugo-client.js';
@@ -127,9 +126,6 @@ export async function createFtownSession(
   await deps.centrifugo.publishSessionUpdate(deps.userId, session);
 
   registerSessionWorkspace(sessionId, input.workingDir);
-  if (input.shellType === 'cursor' && input.workingDir) {
-    installProjectCursorHooks(input.workingDir, deps.notifyScriptPath);
-  }
 
   // Agent sessions (anything but a plain 'shell') spawned by a parent get a
   // one-paragraph briefing prepended to their first input so they know their
