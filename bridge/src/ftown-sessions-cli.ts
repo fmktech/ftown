@@ -59,6 +59,45 @@ async function api(
   return { status: res.status, data };
 }
 
+interface SessionInfo {
+  id: string;
+  name?: string;
+  parentSessionId?: string;
+}
+
+async function listSessionInfo(): Promise<SessionInfo[]> {
+  const { data } = await api('GET', '/api/sessions');
+  return (data as { sessions?: SessionInfo[] }).sessions ?? [];
+}
+
+async function resolveFanout(
+  mode: 'parent' | 'children' | 'siblings',
+  self: string | undefined,
+): Promise<string[]> {
+  if (!self) {
+    throw new Error(`--${mode} requires FTOWN_SESSION_ID to be set`);
+  }
+  const sessions = await listSessionInfo();
+  const me = sessions.find((s) => s.id === self);
+
+  if (mode === 'parent') {
+    const parent = me?.parentSessionId;
+    if (!parent) throw new Error('Current session has no parent');
+    return [parent];
+  }
+
+  if (mode === 'children') {
+    return sessions.filter((s) => s.parentSessionId === self).map((s) => s.id);
+  }
+
+  // siblings
+  const parent = me?.parentSessionId;
+  if (!parent) throw new Error('Current session has no parent (cannot resolve siblings)');
+  return sessions
+    .filter((s) => s.parentSessionId === parent && s.id !== self)
+    .map((s) => s.id);
+}
+
 function flag(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
   if (i === -1 || i + 1 >= args.length) return undefined;
@@ -79,7 +118,14 @@ Commands:
   screen <session-id>           Print terminal lines
   grep <session-id>             Search terminal output
   keys <session-id> <text>      Send keys to a running session
+  tell <target> <message...>    Send a text message to another session's terminal
   running <session-id>          Check if session PTY is running
+
+Tell targets (one of):
+  <session-id>                  Explicit target session id
+  --parent                      Message FTOWN_SESSION_ID's parent session
+  --children                    Message all sessions parented to FTOWN_SESSION_ID
+  --siblings                    Message sessions sharing my parent (excluding me)
 
 Create options:
   --shell <type>                cursor | claude | shell | opencode (default: claude)
@@ -199,6 +245,53 @@ async function main(): Promise<void> {
         if (!id || !keys) throw new Error('Usage: keys <session-id> <text>');
         await api('POST', `/api/sessions/${id}/keys`, { keys });
         console.log(JSON.stringify({ sent: true, sessionId: id }));
+        break;
+      }
+
+      case 'tell': {
+        const useParent = hasFlag(rest, '--parent');
+        const useChildren = hasFlag(rest, '--children');
+        const useSiblings = hasFlag(rest, '--siblings');
+        const fanCount = [useParent, useChildren, useSiblings].filter(Boolean).length;
+        if (fanCount > 1) {
+          throw new Error('Use only one of --parent, --children, --siblings');
+        }
+
+        const positional = rest.filter((a) => !a.startsWith('--'));
+        const self = process.env.FTOWN_SESSION_ID?.trim();
+
+        let targets: string[];
+        let message: string;
+
+        if (fanCount === 1) {
+          message = positional.join(' ');
+          targets = await resolveFanout(
+            useParent ? 'parent' : useChildren ? 'children' : 'siblings',
+            self,
+          );
+        } else {
+          const target = positional[0];
+          message = positional.slice(1).join(' ');
+          if (!target) {
+            throw new Error('Usage: tell <target|--parent|--children|--siblings> <message...>');
+          }
+          targets = [target];
+        }
+
+        if (!message) throw new Error('Missing message');
+        if (targets.length === 0) throw new Error('No matching target sessions');
+
+        for (const target of targets) {
+          const reqBody: Record<string, unknown> = { text: message };
+          if (self) reqBody.from = self;
+          try {
+            const { data } = await api('POST', `/api/sessions/${target}/message`, reqBody);
+            console.log(JSON.stringify({ target, ...(data as Record<string, unknown>) }));
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.log(JSON.stringify({ target, error: msg }));
+          }
+        }
         break;
       }
 

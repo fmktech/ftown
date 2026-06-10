@@ -57,21 +57,33 @@ export function unregisterSession(sessionId: string): void {
   saveRegistry(data);
 }
 
-export function resolveSessionIdFromHookPayload(payload: Record<string, unknown>): string | undefined {
+/**
+ * How a hook payload was attributed to a ftown session. 'workspace' is an
+ * ambiguous directory fallback — it may match a foreign agent the user ran
+ * manually in a registered directory, so it must not be trusted for writes.
+ */
+export type HookSessionSource = 'payload' | 'conversation' | 'workspace';
+
+export interface ResolvedHookSession {
+  sessionId: string;
+  source: HookSessionSource;
+}
+
+export function resolveSessionIdFromHookPayload(payload: Record<string, unknown>): ResolvedHookSession | undefined {
   const ftownId = payload.ftown_session_id;
-  if (typeof ftownId === 'string' && ftownId) return ftownId;
+  if (typeof ftownId === 'string' && ftownId) return { sessionId: ftownId, source: 'payload' };
 
   const data = loadRegistry();
   const conversationId = payload.conversation_id;
   if (typeof conversationId === 'string' && conversationId) {
     const byConv = data.byConversation[conversationId];
-    if (byConv) return byConv;
+    if (byConv) return { sessionId: byConv, source: 'conversation' };
   }
 
   const roots = payload.workspace_roots;
   if (Array.isArray(roots) && typeof roots[0] === 'string' && roots[0]) {
     const byWs = data.byWorkspace[resolve(roots[0])];
-    if (byWs) return byWs;
+    if (byWs) return { sessionId: byWs, source: 'workspace' };
   }
 
   return undefined;

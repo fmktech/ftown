@@ -48,6 +48,24 @@ export async function resolveParentSessionId(
   return proposed.parentSessionId ?? proposed.id;
 }
 
+interface ChildBriefingParams {
+  childName: string;
+  childId: string;
+  parentName: string;
+  parentId: string;
+}
+
+/** One compact paragraph injected into a child agent's first input. */
+export function buildChildBriefing(params: ChildBriefingParams): string {
+  return (
+    `[ftown] You are child session '${params.childName}' (${params.childId}), ` +
+    `spawned by parent '${params.parentName}' (${params.parentId}). ` +
+    `Report results/questions to your parent with: ~/.ftown/ftown-sessions tell --parent "<message>" ` +
+    `— message siblings with tell --siblings, and inspect peers with ` +
+    `~/.ftown/ftown-sessions list / screen <id>. Your parent can read your terminal at any time.`
+  );
+}
+
 export async function createFtownSession(
   deps: CreateFtownSessionDeps,
   input: CreateFtownSessionInput,
@@ -56,8 +74,13 @@ export async function createFtownSession(
   const prompt = input.prompt?.trim() ?? '';
 
   let parentSessionId: string | undefined;
+  let parentName: string | undefined;
   if (input.parentSessionId) {
     parentSessionId = await resolveParentSessionId(deps.store, input.parentSessionId);
+    if (parentSessionId) {
+      const parentSession = await deps.store.loadSession(parentSessionId);
+      parentName = parentSession?.name ?? parentSessionId.slice(0, 8);
+    }
   }
 
   const sessionId = uuidv4();
@@ -77,6 +100,7 @@ export async function createFtownSession(
     cursorSessionId: input.cursorSessionId,
     env: input.env,
     parentSessionId,
+    runtime: deps.runner.getPreferredRuntime(),
   };
 
   await deps.store.saveSession(session);
@@ -87,17 +111,51 @@ export async function createFtownSession(
     installProjectCursorHooks(input.workingDir, deps.notifyScriptPath);
   }
 
-  const initialInput =
-    input.initialInput ?? (prompt ? `${prompt}\r` : undefined);
-  const initialInputDelay = input.initialInputDelay ?? (prompt ? 2000 : undefined);
+  // Agent sessions (anything but a plain 'shell') spawned by a parent get a
+  // one-paragraph briefing prepended to their first input so they know their
+  // place in the session tree and how to talk to parent/siblings.
+  const briefing =
+    parentSessionId && parentName && input.shellType !== 'shell'
+      ? buildChildBriefing({
+          childName: session.name,
+          childId: sessionId,
+          parentName,
+          parentId: parentSessionId,
+        })
+      : undefined;
+
+  // Composer TUIs need the submit CR sent separately after the paste settles —
+  // a CR inside the pasted chunk becomes a newline, and ESC+CR reads as
+  // Alt+Enter (newline) on current Claude Code, so plain CR it is.
+  const promptSubmitSuffix = '\r';
+
+  let initialInput: string | undefined;
+  let initialInputDelay: number | undefined;
+  let submitSuffix: string | undefined;
+  if (briefing) {
+    initialInput = prompt ? `${briefing}\n\nTask: ${prompt}` : briefing;
+    initialInputDelay = input.initialInputDelay ?? 2000;
+    submitSuffix = promptSubmitSuffix;
+  } else if (input.initialInput !== undefined) {
+    // Raw passthrough: callers own the submit keystrokes; suppress the default CR.
+    initialInput = input.initialInput;
+    initialInputDelay = input.initialInputDelay;
+    submitSuffix = '';
+  } else {
+    initialInput = prompt || undefined;
+    initialInputDelay = input.initialInputDelay ?? (prompt ? 2000 : undefined);
+    submitSuffix = promptSubmitSuffix;
+  }
 
   deps.runner.run(sessionId, command, {
     workingDir: input.workingDir,
     env: input.env,
     initialInput,
     initialInputDelay,
+    submitSuffix,
     hookPort: deps.hookPort,
     hookToken: deps.hookToken,
+    parentSessionId,
   });
 
   deps.wireTerminalInput(sessionId);
