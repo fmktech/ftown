@@ -80,6 +80,10 @@ function tmuxConfigPath(): string {
       'setw -g aggressive-resize on',
       'set -s escape-time 0',
       'set -g default-terminal "xterm-256color"',
+      // Inline TUIs (Claude Code) ignore PageUp/PageDown, so use them to scroll
+      // tmux history via copy-mode (-e exits at the bottom). Alternate-screen
+      // apps (less, htop) consume the keys themselves — pass through for them.
+      'bind-key -n PPage if-shell -F "#{alternate_on}" "send-keys PPage" "copy-mode -eu"',
     ].join('\n') + '\n',
   );
   return path;
