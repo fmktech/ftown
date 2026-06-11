@@ -36,11 +36,11 @@ Skill copy (same binary via wrapper): `scripts/ftown-sessions` in this skill dir
 # Metadata
 ~/.ftown/ftown-sessions get <session-id>
 
-# Terminal output (plain lines; add --json for structured)
+# Terminal output (JSON by default; add --plain for raw lines)
 ~/.ftown/ftown-sessions screen <session-id> --limit 200
 
-# Search output
-~/.ftown/ftown-sessions grep <session-id> --pattern 'error|failed'
+# Search output (--offset/--limit paginate screen and grep)
+~/.ftown/ftown-sessions grep <session-id> --pattern 'error|failed' --offset 0 --limit 100
 
 # Type into another running session
 ~/.ftown/ftown-sessions keys <session-id> 'y'
@@ -115,6 +115,7 @@ Spawned ftown sessions receive:
 
 - `FTOWN_SESSION_ID` — this session (use with `--parent`)
 - `FTOWN_PARENT_SESSION_ID` — the parent session id, set on children spawned with `--parent` / `--parent-id`
+- `FTOWN_ORCHESTRATOR` — set to `1` on sessions created with `--orchestrator`
 - `FTOWN_HOOK_PORT` / `FTOWN_HOOK_TOKEN` — hook forwarding (not for cross-session control)
 
 Agent children (any `--shell` except `shell`) spawned with a parent also get an
@@ -122,12 +123,12 @@ automatic one-paragraph briefing prepended to their first input: it states their
 name/id and parent name/id, and how to reach parent and siblings via `tell`. The
 creator's `--prompt` follows after a `Task:` line.
 
-An agent session created with `--orchestrator` additionally gets a one-paragraph
-briefing teaching it to spawn worker sessions with `create --parent`, that those
-children report back via `tell` (arriving as `[ftown msg from <name>]` lines in its
-terminal), and how to inspect/message any session with `list` / `screen` / `grep` /
-`tell`. When both apply, the child paragraph comes first, then the orchestrator
-paragraph, separated by a blank line.
+An agent session created with `--orchestrator` additionally gets `FTOWN_ORCHESTRATOR=1`
+in its environment and a compact pointer briefing directing it to the **ftown-orchestrator**
+skill (installed at `~/.ftown/skills/ftown-orchestrator`, linked from ~/.agents/skills and
+~/.claude/skills), which contains the full orchestrator playbook for spawning workers,
+monitoring them, and cleaning up. When both apply, the child paragraph
+comes first, then the orchestrator pointer, separated by a blank line.
 
 ## HTTP API (optional)
 
@@ -140,6 +141,7 @@ The CLI wraps the loopback API. Raw access if needed:
 | GET | `/api/sessions/:id/screen` | Terminal lines |
 | POST | `/api/sessions/:id/grep` | Search |
 | POST | `/api/sessions/:id/keys` | Send keys |
+| GET | `/api/sessions/:id/running` | PTY liveness |
 | POST | `/api/sessions/:id/message` | Deliver a message line (`{ text, from? }`) |
 | DELETE | `/api/sessions/:id` | Remove (tombstone-archived) |
 | GET | `/api/archive` | List removed-session tombstones |
@@ -147,4 +149,4 @@ The CLI wraps the loopback API. Raw access if needed:
 
 ## If the CLI is missing
 
-Start or restart **ftown-bridge** on this machine. It installs `~/.ftown/ftown-sessions`, `~/.ftown/notify.sh`, and updates this skill under `~/.agents/skills/ftown-sessions/`.
+Start or restart **ftown-bridge** on this machine. It installs `~/.ftown/ftown-sessions`, `~/.ftown/notify.sh`, and updates this skill under `~/.ftown/skills/ftown-sessions/` (linked into ~/.agents/skills and ~/.claude/skills).

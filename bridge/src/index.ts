@@ -19,7 +19,7 @@ import { installClaudeHooks } from './hook-installer.js';
 import { installCursorHooks } from './cursor-hook-installer.js';
 import { installHarness, harnessOnPath, pathHint, writeHarnessAgentGuide, agentGuidePath } from './harness-installer.js';
 import { installNotifyScript } from './install-notify-script.js';
-import { installFtownSessionsSkill } from './install-ftown-skill.js';
+import { installFtownSkill } from './install-ftown-skill.js';
 import { installFtownSessionsCli } from './install-ftown-cli.js';
 import { registerSessionWorkspace, unregisterSession } from './session-registry.js';
 import { createFtownSession } from './create-ftown-session.js';
@@ -218,8 +218,8 @@ program
       if (hint) console.log(`[Bridge] ${hint}`);
     }
 
-    const bundledSkillDir = resolve(__dirname, '..', 'skills', 'ftown-sessions');
-    installFtownSessionsSkill(bundledSkillDir);
+    installFtownSkill('ftown-sessions', resolve(__dirname, '..', 'skills', 'ftown-sessions'));
+    installFtownSkill('ftown-orchestrator', resolve(__dirname, '..', 'skills', 'ftown-orchestrator'));
 
     const cliBundlePath = existsSync(resolve(__dirname, 'ftown-sessions-cli.js'))
       ? resolve(__dirname, 'ftown-sessions-cli.js')

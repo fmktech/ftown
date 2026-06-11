@@ -71,20 +71,15 @@ interface OrchestratorBriefingParams {
   sessionId: string;
 }
 
-/** One compact paragraph injected into an orchestrator agent's first input. */
+/** Compact pointer injected into an orchestrator agent's first input. */
 export function buildOrchestratorBriefing(params: OrchestratorBriefingParams): string {
   return (
-    `[ftown] You are running inside ftown session '${params.sessionName}' ` +
-    `(${params.sessionId}) and can orchestrate sibling agent sessions on this machine. ` +
-    `Spawn workers with: ~/.ftown/ftown-sessions create --shell claude|cursor|shell ` +
-    `--parent --workdir <dir> --name <name> --prompt "<task>" — children are ` +
-    `automatically briefed to report back to you via tell, and their reports arrive in ` +
-    `your terminal as messages starting with [ftown msg from <name>]. Inspect any session ` +
-    `with ~/.ftown/ftown-sessions list / screen <id> / grep <id> --pattern <re>, and ` +
-    `message one with tell <id> "<text>". Workers you no longer need should be cleaned ` +
-    `up with ~/.ftown/ftown-sessions remove <id> — they are archived and can be brought ` +
-    `back with revive <id> (the worker's conversation is resumed only if its agent ` +
-    `session id was recorded before removal; otherwise it restarts fresh).`
+    `[ftown] You are an ORCHESTRATOR running inside ftown session '${params.sessionName}' ` +
+    `(${params.sessionId}). Use the 'ftown-orchestrator' skill (installed at ` +
+    `~/.ftown/skills/ftown-orchestrator, linked from ~/.agents/skills and ~/.claude/skills — ` +
+    `read its SKILL.md if not auto-loaded) to spawn and coordinate worker agent sessions ` +
+    `via ~/.ftown/ftown-sessions. Children you spawn with --parent report back as ` +
+    `[ftown msg from <name>] lines in your terminal.`
   );
 }
 
@@ -105,6 +100,14 @@ export async function createFtownSession(
     }
   }
 
+  const isAgent = input.shellType !== 'shell';
+  // Orchestrator sessions receive FTOWN_ORCHESTRATOR=1 so skills and hooks can
+  // detect the role without relying solely on the typed briefing.
+  const sessionEnv: Record<string, string> | undefined =
+    input.orchestrator && isAgent
+      ? { ...input.env, FTOWN_ORCHESTRATOR: '1' }
+      : input.env;
+
   const sessionId = uuidv4();
   const session: Session = {
     id: sessionId,
@@ -120,7 +123,7 @@ export async function createFtownSession(
     model: input.model,
     claudeSessionId: input.claudeSessionId,
     cursorSessionId: input.cursorSessionId,
-    env: input.env,
+    env: sessionEnv,
     parentSessionId,
     runtime: deps.runner.getPreferredRuntime(),
   };
@@ -133,7 +136,6 @@ export async function createFtownSession(
   // Agent sessions (anything but a plain 'shell') spawned by a parent get a
   // one-paragraph briefing prepended to their first input so they know their
   // place in the session tree and how to talk to parent/siblings.
-  const isAgent = input.shellType !== 'shell';
   const childBriefing =
     parentSessionId && parentName && isAgent
       ? buildChildBriefing({
@@ -175,7 +177,7 @@ export async function createFtownSession(
 
   deps.runner.run(sessionId, command, {
     workingDir: input.workingDir,
-    env: input.env,
+    env: sessionEnv,
     initialInput,
     initialInputDelay,
     submitSuffix,
