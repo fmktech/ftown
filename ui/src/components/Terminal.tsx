@@ -118,22 +118,6 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     term.unicode.activeVersion = "11";
     fitAddon.fit();
 
-    // Plain PageUp/PageDown scroll the viewport when the app runs on the normal
-    // screen buffer (inline TUIs like Claude Code ignore \e[5~ there, so the key
-    // is otherwise dead). Alternate-screen apps (less, htop) still receive it.
-    term.attachCustomKeyEventHandler((ev) => {
-      if (
-        ev.type === "keydown" &&
-        (ev.key === "PageUp" || ev.key === "PageDown") &&
-        !ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey &&
-        term.buffer.active.type === "normal"
-      ) {
-        term.scrollPages(ev.key === "PageUp" ? -1 : 1);
-        return false;
-      }
-      return true;
-    });
-
     xtermRef.current = term;
     fitAddonRef.current = fitAddon;
 
