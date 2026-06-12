@@ -9,6 +9,7 @@ export function buildCursorAgentCommand(options: {
   workingDir?: string;
   model?: string;
   cursorSessionId?: string;
+  initialPrompt?: string;
 }): string {
   const parts = ['agent', '--force'];
 
@@ -24,6 +25,10 @@ export function buildCursorAgentCommand(options: {
     parts.push('--resume', shellQuote(options.cursorSessionId.trim()));
   }
 
+  if (options.initialPrompt?.trim()) {
+    parts.push(shellQuote(options.initialPrompt));
+  }
+
   return parts.join(' ');
 }
 
@@ -34,6 +39,8 @@ export interface BuildSessionCommandInput {
   claudeSessionId?: string;
   cursorSessionId?: string;
   command?: string;
+  /** Initial prompt passed as a CLI argument — avoids racing the TUI with typed input. */
+  initialPrompt?: string;
 }
 
 export function buildSessionCommand(input: BuildSessionCommandInput): string {
@@ -54,10 +61,14 @@ export function buildSessionCommand(input: BuildSessionCommandInput): string {
       workingDir: input.workingDir,
       model: input.model,
       cursorSessionId: input.cursorSessionId,
+      initialPrompt: input.initialPrompt,
     });
   }
   if (input.claudeSessionId?.trim()) {
     return `claude --allow-dangerously-skip-permissions --resume ${shellQuote(input.claudeSessionId.trim())}`;
+  }
+  if (input.initialPrompt?.trim()) {
+    return `claude --allow-dangerously-skip-permissions ${shellQuote(input.initialPrompt)}`;
   }
   return 'claude --allow-dangerously-skip-permissions';
 }

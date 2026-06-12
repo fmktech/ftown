@@ -90,6 +90,8 @@ export async function createFtownSession(
   deps: CreateFtownSessionDeps,
   input: CreateFtownSessionInput,
 ): Promise<Session> {
+  // Base command (no prompt arg) — persisted on the session and used for the
+  // default name; the prompt-bearing launch command must not be replayed on revive.
   const command = buildSessionCommand(input);
   const prompt = input.prompt?.trim() ?? '';
 
@@ -184,7 +186,27 @@ export async function createFtownSession(
     submitSuffix = promptSubmitSuffix;
   }
 
-  deps.runner.run(sessionId, command, {
+  // claude and cursor accept the initial prompt as a CLI argument — far more
+  // reliable than racing the composer TUI with delayed keystrokes. Typed
+  // injection remains for custom commands, resumes, and raw passthrough.
+  const shellTypeForPrompt = input.shellType ?? 'claude';
+  const promptAsCliArg =
+    initialInput !== undefined &&
+    input.initialInput === undefined &&
+    !input.command?.trim() &&
+    ((shellTypeForPrompt === 'claude' && !input.claudeSessionId?.trim()) ||
+      (shellTypeForPrompt === 'cursor' && !input.cursorSessionId?.trim()));
+
+  const launchCommand = promptAsCliArg
+    ? buildSessionCommand({ ...input, initialPrompt: initialInput })
+    : command;
+  if (promptAsCliArg) {
+    initialInput = undefined;
+    initialInputDelay = undefined;
+    submitSuffix = undefined;
+  }
+
+  deps.runner.run(sessionId, launchCommand, {
     workingDir: input.workingDir,
     env: sessionEnv,
     initialInput,
