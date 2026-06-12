@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
     paths: ['bridge/**']
+  workflow_dispatch:
 
 permissions:
   contents: write # push the bridge-vX.Y.Z release tag
