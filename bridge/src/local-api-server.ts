@@ -102,6 +102,11 @@ const MAX_MAIL_BODY_LENGTH = 64 * 1024;
 const MAX_MAIL_WAIT_SECONDS = 30;
 const MAIL_NUDGE_DELAY_MS = 5_000;
 const MAIL_NUDGE_MIN_INTERVAL_MS = 30_000;
+// While an agent is mid-turn its Stop hook pump delivers mail at turn end, so
+// nudging would only queue a stale prompt; re-check periodically in case the
+// turn never reaches Stop, and ignore busy markers old enough to be a crash.
+const MAIL_NUDGE_BUSY_RECHECK_MS = 60_000;
+const AGENT_BUSY_STALE_MS = 30 * 60_000;
 
 const MAIL_TYPES: ReadonlyArray<MailMessage['type']> = ['message', 'task', 'result', 'escalation'];
 
@@ -147,6 +152,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private nudgeTimers: Map<string, NodeJS.Timeout> = new Map();
   private pendingNudgeFrom: Map<string, string> = new Map();
   private lastNudgeAt: Map<string, number> = new Map();
+  private agentBusySince: Map<string, number> = new Map();
   private userId: string = '';
   private authToken: string = '';
   private port: number = 0;
@@ -967,6 +973,12 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return;
     }
 
+    const busySince = this.agentBusySince.get(sessionId);
+    if (busySince !== undefined && Date.now() - busySince < AGENT_BUSY_STALE_MS) {
+      this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_BUSY_RECHECK_MS);
+      return;
+    }
+
     const sinceLast = Date.now() - (this.lastNudgeAt.get(sessionId) ?? 0);
     if (sinceLast < MAIL_NUDGE_MIN_INTERVAL_MS) {
       // Rate-limited: retry once the window reopens (mail may still be unread).
@@ -1014,6 +1026,12 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           res.writeHead(200);
           res.end('{"ok":true}');
           return;
+        }
+
+        if (hookEventName === 'UserPromptSubmit' || hookEventName === 'PreToolUse' || hookEventName === 'PostToolUse') {
+          this.agentBusySince.set(ftownSessionId, Date.now());
+        } else if (hookEventName === 'Stop' || hookEventName === 'SessionEnd') {
+          this.agentBusySince.delete(ftownSessionId);
         }
 
         const conversationId = payload.conversation_id;
