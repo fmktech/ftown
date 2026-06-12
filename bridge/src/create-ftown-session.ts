@@ -132,7 +132,13 @@ export async function createFtownSession(
   };
 
   await deps.store.saveSession(session);
-  await deps.centrifugo.publishSessionUpdate(deps.userId, session);
+  try {
+    await deps.centrifugo.publishSessionUpdate(deps.userId, session);
+  } catch (err) {
+    // UI sync failure must not fail session creation — resurrection treats
+    // publish errors the same way.
+    console.error(`[Bridge] Failed to publish session create for ${sessionId}:`, err);
+  }
 
   registerSessionWorkspace(sessionId, input.workingDir);
 
