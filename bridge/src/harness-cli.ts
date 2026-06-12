@@ -2,7 +2,7 @@
 /**
  * Local bridge harness — talks to ftown-bridge LocalApiServer via ~/.ftown/bridge.json
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Command } from 'commander';
@@ -41,6 +41,29 @@ interface GrepMatch {
 interface RegistryData {
   byWorkspace: Record<string, string>;
   byConversation: Record<string, string>;
+}
+
+type MailType = 'message' | 'task' | 'result' | 'escalation';
+const MAIL_TYPES: readonly MailType[] = ['message', 'task', 'result', 'escalation'];
+
+interface MailMessage {
+  id: string;
+  ts: string;
+  from: string;
+  fromName?: string;
+  to: string;
+  type: MailType;
+  threadId?: string;
+  body: string;
+  deliveredAt?: string;
+  deliveredVia?: string;
+}
+
+interface HookInput {
+  hook_event_name?: string;
+  session_id?: string;
+  conversation_id?: string;
+  stop_hook_active?: boolean;
 }
 
 function loadPointer(): BridgePointer {
@@ -443,6 +466,207 @@ async function cmdSend(
   emit(opts.json, { ...plan, sent: true }, `sent ${keys.length} bytes to ${session.name} (submit=${opts.submit})`);
 }
 
+function formatMailMessage(m: MailMessage): string {
+  return `[${m.ts}] ${m.fromName ?? m.from} (${m.type}): ${m.body}`;
+}
+
+function resolveOwnSessionId(): string | undefined {
+  const env = process.env.FTOWN_SESSION_ID?.trim();
+  if (env) return env;
+  return resolveWorkspaceSessionId(process.cwd())?.id;
+}
+
+async function fetchInbox(
+  pointer: BridgePointer,
+  sessionId: string,
+  opts: { wait?: number; peek?: boolean; limit?: number; all?: boolean },
+): Promise<MailMessage[]> {
+  const params = new URLSearchParams();
+  params.set('wait', String(opts.wait ?? 0));
+  if (opts.peek) params.set('peek', '1');
+  if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+  if (opts.all) params.set('all', '1');
+  const { messages } = await api<{ messages: MailMessage[] }>(
+    pointer,
+    'GET',
+    `/api/sessions/${sessionId}/inbox?${params.toString()}`,
+  );
+  return messages ?? [];
+}
+
+async function cmdMailSend(
+  pointer: BridgePointer,
+  opts: {
+    target?: string;
+    text: string;
+    type?: string;
+    thread?: string;
+    parent: boolean;
+    json: boolean;
+  },
+): Promise<void> {
+  if (!opts.text) throw new Error('Missing message text');
+  if (opts.type !== undefined && !MAIL_TYPES.includes(opts.type as MailType)) {
+    throw new Error(`Invalid --type "${opts.type}" — use one of: ${MAIL_TYPES.join(', ')}`);
+  }
+
+  const sessions = await listSessions(pointer);
+  let targetId: string;
+  if (opts.parent) {
+    const parent = process.env.FTOWN_PARENT_SESSION_ID?.trim();
+    if (!parent) throw new Error('--parent requires FTOWN_PARENT_SESSION_ID to be set');
+    targetId = parent;
+  } else {
+    if (!opts.target) throw new Error('Missing target (session id/name, or use --parent)');
+    targetId = resolveSessionId(sessions, opts.target);
+  }
+
+  const self = process.env.FTOWN_SESSION_ID?.trim();
+  const from = self ?? 'external';
+  const fromName = self ? sessions.find((s) => s.id === self)?.name : undefined;
+
+  const body: Record<string, unknown> = { body: opts.text, from };
+  if (fromName) body.fromName = fromName;
+  if (opts.type) body.type = opts.type;
+  if (opts.thread) body.threadId = opts.thread;
+
+  const { id } = await api<{ id: string }>(pointer, 'POST', `/api/sessions/${targetId}/inbox`, body);
+  emit(
+    opts.json,
+    { id, to: targetId, from, type: opts.type ?? 'message' },
+    `mail ${id} sent to ${targetId}`,
+  );
+}
+
+async function cmdMailRead(
+  pointer: BridgePointer,
+  opts: { peek: boolean; limit?: number; all: boolean; json: boolean },
+): Promise<void> {
+  const sessionId = resolveOwnSessionId();
+  if (!sessionId) {
+    throw new Error('Cannot resolve own session — set FTOWN_SESSION_ID or run inside a registered workspace');
+  }
+  const messages = await fetchInbox(pointer, sessionId, {
+    wait: 0,
+    peek: opts.peek,
+    limit: opts.limit,
+    all: opts.all,
+  });
+  if (opts.json) {
+    emit(true, { sessionId, messages }, '');
+    return;
+  }
+  if (messages.length === 0) {
+    console.log('(no mail)');
+    return;
+  }
+  for (const m of messages) console.log(formatMailMessage(m));
+}
+
+function pumpCountPath(sessionId: string): string {
+  return `/tmp/ftown-mail-pump-${sessionId}.count`;
+}
+
+function readPumpCount(sessionId: string): number {
+  try {
+    const n = parseInt(readFileSync(pumpCountPath(sessionId), 'utf8').trim(), 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writePumpCount(sessionId: string, count: number): void {
+  try {
+    writeFileSync(pumpCountPath(sessionId), `${count}\n`);
+  } catch {
+    /* never break the hook */
+  }
+}
+
+async function readStdinText(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+async function resolvePumpSessionId(
+  pointer: BridgePointer,
+  hook: HookInput,
+): Promise<string | undefined> {
+  const env = process.env.FTOWN_SESSION_ID?.trim();
+  if (env) return env;
+  // Cursor hooks report conversation_id, Claude Code hooks report session_id;
+  // the registry maps either via byConversation.
+  const conversation = hook.conversation_id?.trim() || hook.session_id?.trim();
+  if (!conversation) return undefined;
+  const { sessionId } = await api<{ sessionId?: string }>(
+    pointer,
+    'GET',
+    `/api/inbox/resolve?conversation=${encodeURIComponent(conversation)}`,
+  );
+  return sessionId || undefined;
+}
+
+const PUMP_STOP_BLOCK_LIMIT = 20;
+
+/** Mail pump for Claude Code hooks. MUST always exit 0 and never write noise. */
+async function cmdHookPump(): Promise<void> {
+  const killer = setTimeout(() => process.exit(0), 28_000);
+  killer.unref();
+
+  try {
+    if (process.stdin.isTTY) return;
+    const raw = await readStdinText();
+    const hook = JSON.parse(raw) as HookInput;
+    const event = hook.hook_event_name;
+    if (event !== 'Stop' && event !== 'UserPromptSubmit' && event !== 'SessionStart') return;
+
+    const pointer = loadPointer();
+    const sessionId = await resolvePumpSessionId(pointer, hook);
+    if (!sessionId) return;
+
+    if (event === 'Stop') {
+      if (hook.stop_hook_active === true && readPumpCount(sessionId) >= PUMP_STOP_BLOCK_LIMIT) {
+        writePumpCount(sessionId, 0);
+        return;
+      }
+      const messages = await fetchInbox(pointer, sessionId, { wait: 25 });
+      if (messages.length === 0) {
+        writePumpCount(sessionId, 0);
+        return;
+      }
+      writePumpCount(sessionId, readPumpCount(sessionId) + 1);
+      const formatted = messages.map(formatMailMessage).join('\n');
+      console.log(
+        JSON.stringify({
+          decision: 'block',
+          reason:
+            `[ftown mail] You received message(s) while finishing your turn:\n${formatted}\n` +
+            'Handle them now; reply with `ftown-harness mail send ...` where appropriate.',
+        }),
+      );
+      return;
+    }
+
+    const messages = await fetchInbox(pointer, sessionId, { wait: 0 });
+    if (messages.length === 0) return;
+    const formatted = messages.map(formatMailMessage).join('\n');
+    console.log(
+      JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: event,
+          additionalContext: `[ftown mail]\n${formatted}`,
+        },
+      }),
+    );
+  } catch {
+    /* bridge down, bad JSON, timeout — never break the session */
+  }
+}
+
 const program = new Command();
 program
   .name('ftown-harness')
@@ -529,6 +753,60 @@ program
       dryRun: !!opts.dryRun,
       json: !!cmd.parent?.opts().json,
     });
+  });
+
+const mail = program
+  .command('mail')
+  .description('Per-session inbox: send and read inter-agent mail');
+
+mail
+  .command('send [target] [text...]')
+  .description('Send mail to a session (id/name, or --parent)')
+  .option('--type <t>', `Mail type: ${MAIL_TYPES.join(' | ')}`)
+  .option('--thread <id>', 'Thread id for grouping replies')
+  .option('-p, --parent', 'Send to FTOWN_PARENT_SESSION_ID')
+  .action(
+    async (
+      target: string | undefined,
+      textParts: string[],
+      opts: { type?: string; thread?: string; parent?: boolean },
+      cmd: Command,
+    ) => {
+      const pointer = loadPointer();
+      const parts = opts.parent && target !== undefined ? [target, ...textParts] : textParts;
+      await cmdMailSend(pointer, {
+        target: opts.parent ? undefined : target,
+        text: parts.join(' '),
+        type: opts.type,
+        thread: opts.thread,
+        parent: !!opts.parent,
+        json: !!cmd.parent?.parent?.opts().json,
+      });
+    },
+  );
+
+mail
+  .command('read')
+  .description('Read own inbox (FTOWN_SESSION_ID or cwd workspace session)')
+  .option('--peek', 'Do not mark messages as delivered')
+  .option('--limit <n>', 'Max messages')
+  .option('--all', 'Include already-delivered messages')
+  .action(async (opts: { peek?: boolean; limit?: string; all?: boolean }, cmd: Command) => {
+    const pointer = loadPointer();
+    await cmdMailRead(pointer, {
+      peek: !!opts.peek,
+      limit: opts.limit !== undefined ? parseInt(opts.limit, 10) || undefined : undefined,
+      all: !!opts.all,
+      json: !!cmd.parent?.parent?.opts().json,
+    });
+  });
+
+program
+  .command('hook-pump')
+  .description('Claude Code hook: deliver pending mail (reads hook JSON from stdin)')
+  .action(async () => {
+    await cmdHookPump();
+    process.exit(0);
   });
 
 program.parseAsync(process.argv).catch((err: unknown) => {

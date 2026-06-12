@@ -60,9 +60,11 @@ export function buildChildBriefing(params: ChildBriefingParams): string {
   return (
     `[ftown] You are child session '${params.childName}' (${params.childId}), ` +
     `spawned by parent '${params.parentName}' (${params.parentId}). ` +
-    `Report results/questions to your parent with: ~/.ftown/ftown-sessions tell --parent "<message>" ` +
-    `— message siblings with tell --siblings, and inspect peers with ` +
-    `~/.ftown/ftown-sessions list / screen <id>. Your parent can read your terminal at any time.`
+    `Mail from other agents arrives automatically as [ftown mail] context at turn boundaries. ` +
+    `Report results/questions to your parent with: ftown-harness mail send --parent "<message>" ` +
+    `(add --type result or --type escalation when reporting). Check mail explicitly with: ` +
+    `ftown-harness mail read. Inspect peers with ~/.ftown/ftown-sessions list / screen <id>. ` +
+    `Your parent can read your terminal at any time.`
   );
 }
 
@@ -78,8 +80,9 @@ export function buildOrchestratorBriefing(params: OrchestratorBriefingParams): s
     `(${params.sessionId}). Use the 'ftown-orchestrator' skill (installed at ` +
     `~/.ftown/skills/ftown-orchestrator, linked from ~/.agents/skills and ~/.claude/skills — ` +
     `read its SKILL.md if not auto-loaded) to spawn and coordinate worker agent sessions ` +
-    `via ~/.ftown/ftown-sessions. Children you spawn with --parent report back as ` +
-    `[ftown msg from <name>] lines in your terminal.`
+    `via ~/.ftown/ftown-sessions. Children you spawn with --parent report back via mail — ` +
+    `their messages arrive automatically as [ftown mail] context at your turn boundaries; ` +
+    `check on demand with ftown-harness mail read.`
   );
 }
 

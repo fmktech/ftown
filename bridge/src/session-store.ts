@@ -14,7 +14,8 @@ export class SessionStore {
     this.archivePath = join(dataDir, 'archive.jsonl');
   }
 
-  private sessionDir(sessionId: string): string {
+  /** Per-session data dir (session.json, terminal.log, inbox.jsonl). */
+  sessionDir(sessionId: string): string {
     return join(this.sessionsDir, sessionId);
   }
 

@@ -46,6 +46,11 @@ export function registerSessionConversation(sessionId: string, conversationId: s
   saveRegistry(data);
 }
 
+export function resolveSessionIdByConversation(conversationId: string): string | undefined {
+  if (!conversationId) return undefined;
+  return loadRegistry().byConversation[conversationId];
+}
+
 export function unregisterSession(sessionId: string): void {
   const data = loadRegistry();
   for (const [path, id] of Object.entries(data.byWorkspace)) {

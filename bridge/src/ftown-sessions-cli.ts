@@ -108,6 +108,37 @@ function hasFlag(args: string[], name: string): boolean {
   return args.includes(name);
 }
 
+/** Positional args, skipping flags and the values of value-taking flags. */
+function positionals(args: string[], valueFlags: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.startsWith('--')) {
+      if (valueFlags.includes(a)) i++;
+      continue;
+    }
+    out.push(a);
+  }
+  return out;
+}
+
+const MAIL_TYPES = ['message', 'task', 'result', 'escalation'] as const;
+
+interface MailMessage {
+  id: string;
+  ts: string;
+  from: string;
+  fromName?: string;
+  to: string;
+  type: (typeof MAIL_TYPES)[number];
+  threadId?: string;
+  body: string;
+}
+
+function formatMailMessage(m: MailMessage): string {
+  return `[${m.ts}] ${m.fromName ?? m.from} (${m.type}): ${m.body}`;
+}
+
 function usage(): void {
   console.error(`Usage: ftown-sessions <command> [options]
 
@@ -118,7 +149,8 @@ Commands:
   screen <session-id>           Print terminal lines
   grep <session-id>             Search terminal output
   keys <session-id> <text>      Send keys to a running session
-  tell <target> <message...>    Send a text message to another session's terminal
+  tell <target> <message...>    Send mail to another session's inbox
+  inbox | mail                  Read own inbox (requires FTOWN_SESSION_ID)
   running <session-id>          Check if session PTY is running
   remove <session-id>           Stop and remove a session (archived as a tombstone)
   archive                       List archived (removed) sessions
@@ -129,6 +161,17 @@ Tell targets (one of):
   --parent                      Message FTOWN_SESSION_ID's parent session
   --children                    Message all sessions parented to FTOWN_SESSION_ID
   --siblings                    Message sessions sharing my parent (excluding me)
+
+Tell options:
+  --type <t>                    message | task | result | escalation (default: message)
+  --thread <id>                 Thread id for grouping replies
+  --keys                        Inject as terminal keystrokes instead of mail (last resort)
+
+Inbox options:
+  --peek                        Do not mark messages as delivered
+  --limit <n>                   Max messages
+  --all                         Include already-delivered messages
+  --json                        Raw JSON output
 
 Create options:
   --shell <type>                cursor | claude | shell | opencode (default: claude)
@@ -258,12 +301,18 @@ async function main(): Promise<void> {
         const useParent = hasFlag(rest, '--parent');
         const useChildren = hasFlag(rest, '--children');
         const useSiblings = hasFlag(rest, '--siblings');
+        const useKeys = hasFlag(rest, '--keys');
+        const mailType = flag(rest, '--type');
+        const threadId = flag(rest, '--thread');
         const fanCount = [useParent, useChildren, useSiblings].filter(Boolean).length;
         if (fanCount > 1) {
           throw new Error('Use only one of --parent, --children, --siblings');
         }
+        if (mailType && !(MAIL_TYPES as readonly string[]).includes(mailType)) {
+          throw new Error(`Invalid --type "${mailType}" — use one of: ${MAIL_TYPES.join(', ')}`);
+        }
 
-        const positional = rest.filter((a) => !a.startsWith('--'));
+        const positional = positionals(rest, ['--type', '--thread']);
         const self = process.env.FTOWN_SESSION_ID?.trim();
 
         let targets: string[];
@@ -287,16 +336,53 @@ async function main(): Promise<void> {
         if (!message) throw new Error('Missing message');
         if (targets.length === 0) throw new Error('No matching target sessions');
 
+        const fromName = self
+          ? (await listSessionInfo()).find((s) => s.id === self)?.name
+          : undefined;
+
         for (const target of targets) {
-          const reqBody: Record<string, unknown> = { text: message };
-          if (self) reqBody.from = self;
           try {
-            const { data } = await api('POST', `/api/sessions/${target}/message`, reqBody);
-            console.log(JSON.stringify({ target, ...(data as Record<string, unknown>) }));
+            if (useKeys) {
+              // Explicit keystroke injection into the target terminal (legacy path).
+              const reqBody: Record<string, unknown> = { text: message };
+              if (self) reqBody.from = self;
+              const { data } = await api('POST', `/api/sessions/${target}/message`, reqBody);
+              console.log(JSON.stringify({ target, ...(data as Record<string, unknown>) }));
+            } else {
+              const reqBody: Record<string, unknown> = { body: message };
+              if (self) reqBody.from = self;
+              if (fromName) reqBody.fromName = fromName;
+              if (mailType) reqBody.type = mailType;
+              if (threadId) reqBody.threadId = threadId;
+              const { data } = await api('POST', `/api/sessions/${target}/inbox`, reqBody);
+              console.log(JSON.stringify({ target, ...(data as Record<string, unknown>) }));
+            }
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             console.log(JSON.stringify({ target, error: msg }));
           }
+        }
+        break;
+      }
+
+      case 'inbox':
+      case 'mail': {
+        const self = process.env.FTOWN_SESSION_ID?.trim();
+        if (!self) throw new Error('inbox requires FTOWN_SESSION_ID to be set');
+        const params = new URLSearchParams();
+        params.set('wait', '0');
+        if (hasFlag(rest, '--peek')) params.set('peek', '1');
+        if (hasFlag(rest, '--all')) params.set('all', '1');
+        const limit = flag(rest, '--limit');
+        if (limit) params.set('limit', limit);
+        const { data } = await api('GET', `/api/sessions/${self}/inbox?${params.toString()}`);
+        const messages = (data as { messages?: MailMessage[] }).messages ?? [];
+        if (hasFlag(rest, '--json')) {
+          console.log(JSON.stringify({ messages }, null, 2));
+        } else if (messages.length === 0) {
+          console.log('(no mail)');
+        } else {
+          for (const m of messages) console.log(formatMailMessage(m));
         }
         break;
       }

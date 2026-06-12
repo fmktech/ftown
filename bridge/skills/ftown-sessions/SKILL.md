@@ -60,24 +60,33 @@ Skill copy (same binary via wrapper): `scripts/ftown-sessions` in this skill dir
 ~/.ftown/ftown-sessions revive <session-id>
 ```
 
-## Messaging
+## Messaging (mail)
 
-Send a short text line into another session's terminal. The message is sanitized
-(control characters stripped, capped at 2000 chars) and delivered as
-`[ftown msg from <sender>] <text>` followed by submit, so the target agent reads it
-as a normal prompt.
+`tell` posts to the target session's **inbox**. Mail is delivered into the
+recipient's context automatically at turn boundaries (as `[ftown mail]`
+context), so there is no keystroke injection by default.
 
 ```bash
 # Tell a specific session
 ~/.ftown/ftown-sessions tell <session-id> "tests are green, ship it"
 
+# Mail type / threading
+~/.ftown/ftown-sessions tell <session-id> --type task "implement the API client"
+~/.ftown/ftown-sessions tell <session-id> --type result --thread <id> "done, 0 failures"
+
 # Tell my parent / children / siblings (resolved via FTOWN_SESSION_ID)
 ~/.ftown/ftown-sessions tell --parent "child finished phase 1"
 ~/.ftown/ftown-sessions tell --children "pause and report status"
 ~/.ftown/ftown-sessions tell --siblings "I grabbed the lock, stand by"
+
+# Last resort: inject as terminal keystrokes instead of mail
+~/.ftown/ftown-sessions tell <session-id> --keys "wake up"
+
+# Read my own inbox (requires FTOWN_SESSION_ID; alias: mail)
+~/.ftown/ftown-sessions inbox            # --peek / --limit N / --all / --json
 ```
 
-Sender is resolved from `FTOWN_SESSION_ID` (falls back to `unknown` when unset).
+Sender is resolved from `FTOWN_SESSION_ID` (omitted when unset).
 Fan-out targets are messaged sequentially, one JSON result line per target.
 
 ### Create options
@@ -120,8 +129,8 @@ Spawned ftown sessions receive:
 
 Agent children (any `--shell` except `shell`) spawned with a parent also get an
 automatic one-paragraph briefing prepended to their first input: it states their
-name/id and parent name/id, and how to reach parent and siblings via `tell`. The
-creator's `--prompt` follows after a `Task:` line.
+name/id and parent name/id, and how to mail the parent via
+`ftown-harness mail send --parent`. The creator's `--prompt` follows after a `Task:` line.
 
 An agent session created with `--orchestrator` additionally gets `FTOWN_ORCHESTRATOR=1`
 in its environment and a compact pointer briefing directing it to the **ftown-orchestrator**
@@ -142,7 +151,9 @@ The CLI wraps the loopback API. Raw access if needed:
 | POST | `/api/sessions/:id/grep` | Search |
 | POST | `/api/sessions/:id/keys` | Send keys |
 | GET | `/api/sessions/:id/running` | PTY liveness |
-| POST | `/api/sessions/:id/message` | Deliver a message line (`{ text, from? }`) |
+| POST | `/api/sessions/:id/inbox` | Send mail (`{ body, from?, fromName?, type?, threadId? }`) |
+| GET | `/api/sessions/:id/inbox` | Read mail (`?wait=&peek=&limit=&all=`) |
+| POST | `/api/sessions/:id/message` | Inject a message line as keystrokes (`{ text, from? }`) |
 | DELETE | `/api/sessions/:id` | Remove (tombstone-archived) |
 | GET | `/api/archive` | List removed-session tombstones |
 | POST | `/api/sessions/:id/revive` | Recreate a removed session (new id) |

@@ -94,12 +94,30 @@ ${h} grep <name> "error|FAIL" -C 2
 | \`here\` | \`${h} here -n 30\` — walks up from cwd to find workspace |
 | \`tail\` | \`${h} tail ftown -n 40\` |
 | \`grep\` | \`${h} grep legbi "pattern" -C 2\` |
+| \`mail send\` | \`${h} mail send <session> --type task "do X"\` — inter-agent mail |
+| \`mail read\` | \`${h} mail read\` (\`--peek\`, \`--limit N\`, \`--all\`) |
 | \`send\` | \`${h} send ftown "text" -s --dry-run\` first; **only if user asked** |
 | \`--json\` | \`${h} --json ls\` — machine-readable output |
 
 ## Session names
 
 Resolve by exact name → unique substring → id prefix. Ambiguous names print choices.
+
+## Mail (per-session inbox)
+
+\`\`\`bash
+${h} mail send <session> "message"            # plain message
+${h} mail send <child> --type task "do X"     # task for a worker
+${h} mail send --parent --type result "done"  # report to parent (uses FTOWN_PARENT_SESSION_ID)
+${h} mail read                                # pending mail; --peek keeps it undelivered
+\`\`\`
+
+Types: \`message | task | result | escalation\`; \`--thread <id>\` groups replies.
+Mail reaches the recipient automatically: a synchronous \`hook-pump\` hook
+(Stop / UserPromptSubmit / SessionStart in \`~/.claude/settings.json\`) checks the
+inbox at turn boundaries and injects pending mail as \`[ftown mail]\` context —
+on Stop it holds the agent's turn open so messages get handled immediately.
+Prefer mail over \`send\` (keystroke injection) for agent-to-agent communication.
 
 ## Submit keys (\`-s\`)
 

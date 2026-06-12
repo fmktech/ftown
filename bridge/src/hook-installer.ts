@@ -3,8 +3,18 @@ import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 
 const HOOK_EVENTS = ['Notification', 'Stop', 'SessionEnd', 'PreToolUse', 'PostToolUse', 'UserPromptSubmit'] as const;
+const MAIL_PUMP_EVENTS = ['Stop', 'UserPromptSubmit', 'SessionStart'] as const;
 
 import { isFtownNotifyCommand } from './install-notify-script.js';
+
+/** Matches `ftown-harness hook-pump` in both bare and absolute-path forms. */
+export function isFtownMailPumpCommand(command: string): boolean {
+  return command.includes('ftown-harness') && command.includes('hook-pump');
+}
+
+function mailPumpCommand(): string {
+  return `${join(homedir(), '.ftown', 'bin', 'ftown-harness')} hook-pump`;
+}
 
 interface HookCommandEntry {
   type?: string;
@@ -26,6 +36,40 @@ interface SettingsShape {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+interface UpsertSpec {
+  matches: (command: string) => boolean;
+  desired: HookCommandEntry;
+  /** Returns true when an existing entry was modified. */
+  repair: (entry: HookCommandEntry) => boolean;
+  counters: { added: number; repaired: number; kept: number };
+}
+
+function upsertHookEntry(
+  hooks: Record<string, HookMatcherEntry[]>,
+  event: string,
+  spec: UpsertSpec,
+): void {
+  const existing = hooks[event];
+  const list: HookMatcherEntry[] = Array.isArray(existing) ? existing : [];
+  hooks[event] = list;
+
+  for (const entry of list) {
+    if (!isObject(entry)) continue;
+    const inner = entry.hooks;
+    if (!Array.isArray(inner)) continue;
+    for (const h of inner) {
+      if (isObject(h) && typeof h.command === 'string' && spec.matches(h.command)) {
+        if (spec.repair(h)) spec.counters.repaired++;
+        else spec.counters.kept++;
+        return;
+      }
+    }
+  }
+
+  list.push({ matcher: '', hooks: [{ ...spec.desired }] });
+  spec.counters.added++;
 }
 
 export function installClaudeHooks(notifyScriptPath: string): void {
@@ -65,49 +109,35 @@ export function installClaudeHooks(notifyScriptPath: string): void {
   }
   const hooks = parsed.hooks as Record<string, HookMatcherEntry[]>;
 
-  let added = 0;
-  let repaired = 0;
-  let kept = 0;
+  const counters = { added: 0, repaired: 0, kept: 0 };
 
   for (const event of HOOK_EVENTS) {
-    const existing = hooks[event];
-    const list: HookMatcherEntry[] = Array.isArray(existing) ? existing : [];
-    hooks[event] = list;
+    upsertHookEntry(hooks, event, {
+      matches: isFtownNotifyCommand,
+      desired: { type: 'command', command: notifyScriptPath, async: true },
+      repair: (h) => {
+        if (h.command === notifyScriptPath) return false;
+        h.command = notifyScriptPath;
+        return true;
+      },
+      counters,
+    });
+  }
 
-    let foundIndex = -1;
-    let foundHookIndex = -1;
-    for (let i = 0; i < list.length; i++) {
-      const entry = list[i];
-      if (!isObject(entry)) continue;
-      const inner = (entry as HookMatcherEntry).hooks;
-      if (!Array.isArray(inner)) continue;
-      for (let j = 0; j < inner.length; j++) {
-        const h = inner[j];
-        if (isObject(h) && typeof h.command === 'string' && isFtownNotifyCommand(h.command)) {
-          foundIndex = i;
-          foundHookIndex = j;
-          break;
-        }
-      }
-      if (foundIndex !== -1) break;
-    }
-
-    if (foundIndex === -1) {
-      list.push({
-        matcher: '',
-        hooks: [{ type: 'command', command: notifyScriptPath, async: true }],
-      });
-      added++;
-    } else {
-      const inner = list[foundIndex].hooks as HookCommandEntry[];
-      const target = inner[foundHookIndex];
-      if (target.command === notifyScriptPath) {
-        kept++;
-      } else {
-        target.command = notifyScriptPath;
-        repaired++;
-      }
-    }
+  const pumpCommand = mailPumpCommand();
+  for (const event of MAIL_PUMP_EVENTS) {
+    upsertHookEntry(hooks, event, {
+      matches: isFtownMailPumpCommand,
+      desired: { type: 'command', command: pumpCommand, timeout: 30 },
+      repair: (h) => {
+        if (h.command === pumpCommand && h.timeout === 30 && h.async === undefined) return false;
+        h.command = pumpCommand;
+        h.timeout = 30;
+        delete h.async;
+        return true;
+      },
+      counters,
+    });
   }
 
   const serialized = JSON.stringify(parsed, null, 2) + '\n';
@@ -121,5 +151,7 @@ export function installClaudeHooks(notifyScriptPath: string): void {
     return;
   }
 
-  console.log(`[HookInstaller] settings.json: added ${added}, repaired ${repaired}, kept ${kept}`);
+  console.log(
+    `[HookInstaller] settings.json: added ${counters.added}, repaired ${counters.repaired}, kept ${counters.kept}`,
+  );
 }

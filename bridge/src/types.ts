@@ -28,6 +28,20 @@ export interface ArchivedSession extends Session {
   removedAt: string;
 }
 
+/** Inter-agent mail stored in <dataDir>/sessions/<id>/inbox.jsonl. */
+export interface MailMessage {
+  id: string;            // `${Date.now().toString(36)}-${random6}`
+  ts: string;            // ISO timestamp
+  from: string;          // sender ftown session id, or 'external'
+  fromName?: string;     // friendly sender name
+  to: string;            // recipient ftown session id
+  type: 'message' | 'task' | 'result' | 'escalation';
+  threadId?: string;
+  body: string;          // plain text, capped at 64KB
+  deliveredAt?: string;  // ISO, set when handed to the session (not for peek)
+  deliveredVia?: 'poll' | 'drain' | 'nudge' | 'cli';
+}
+
 export interface SessionMessage {
   sessionId: string;
   type: SessionMessageType;

@@ -5,12 +5,18 @@ import { timingSafeEqual } from 'node:crypto';
 import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 
 import type { SessionStore } from './session-store.js';
-import type { Session, ShellType } from './types.js';
+import type { MailStore } from './mail-store.js';
+import { createMailMessage } from './mail-store.js';
+import type { MailMessage, Session, ShellType } from './types.js';
 import { buildSessionCommand } from './agent-commands.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { TerminalManager } from './terminal-manager.js';
-import { registerSessionConversation, resolveSessionIdFromHookPayload } from './session-registry.js';
+import {
+  registerSessionConversation,
+  resolveSessionIdByConversation,
+  resolveSessionIdFromHookPayload,
+} from './session-registry.js';
 import {
   createFtownSession,
   parseCreateSessionBody,
@@ -92,6 +98,17 @@ function extractBearer(req: IncomingMessage): string | null {
 }
 
 const MAX_MESSAGE_LENGTH = 2000;
+const MAX_MAIL_BODY_LENGTH = 64 * 1024;
+const MAX_MAIL_WAIT_SECONDS = 30;
+const MAIL_NUDGE_DELAY_MS = 5_000;
+const MAIL_NUDGE_MIN_INTERVAL_MS = 30_000;
+
+const MAIL_TYPES: ReadonlyArray<MailMessage['type']> = ['message', 'task', 'result', 'escalation'];
+
+/** Pending long-poll request for a session's inbox. */
+interface MailWaiter {
+  deliver: (messages: MailMessage[]) => void;
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -125,12 +142,21 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private centrifugo: CentrifugoClient | null = null;
   private terminalManager: TerminalManager | null = null;
   private sessionDeps: CreateFtownSessionDeps | null = null;
+  private mailStore: MailStore | null = null;
+  private mailWaiters: Map<string, MailWaiter> = new Map();
+  private nudgeTimers: Map<string, NodeJS.Timeout> = new Map();
+  private pendingNudgeFrom: Map<string, string> = new Map();
+  private lastNudgeAt: Map<string, number> = new Map();
   private userId: string = '';
   private authToken: string = '';
   private port: number = 0;
 
   setAuthToken(token: string): void {
     this.authToken = token;
+  }
+
+  setMailStore(mailStore: MailStore): void {
+    this.mailStore = mailStore;
   }
 
   setDependencies(
@@ -176,6 +202,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   }
 
   stop(): void {
+    for (const timer of this.nudgeTimers.values()) clearTimeout(timer);
+    this.nudgeTimers.clear();
+    for (const waiter of [...this.mailWaiters.values()]) waiter.deliver([]);
+    this.mailWaiters.clear();
     if (this.server) {
       this.server.close();
       this.server = null;
@@ -300,12 +330,30 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return;
     }
 
+    // GET /api/inbox/resolve?conversation=<id> — ftown session id for an agent
+    // conversation id (fallback for hooks missing FTOWN_SESSION_ID).
+    if (path === '/api/inbox/resolve' && req.method === 'GET') {
+      const conversation = url.searchParams.get('conversation');
+      if (!conversation) {
+        jsonResponse(res, 400, { error: 'Missing conversation' });
+        return;
+      }
+      const sessionId = resolveSessionIdByConversation(conversation);
+      if (!sessionId) {
+        jsonResponse(res, 404, { error: 'Unknown conversation' });
+        return;
+      }
+      jsonResponse(res, 200, { sessionId });
+      return;
+    }
+
     const sessionMatch = path.match(/^\/api\/sessions\/([^/]+)$/);
     const sessionReviveMatch = path.match(/^\/api\/sessions\/([^/]+)\/revive$/);
     const sessionScreenMatch = path.match(/^\/api\/sessions\/([^/]+)\/screen$/);
     const sessionGrepMatch = path.match(/^\/api\/sessions\/([^/]+)\/grep$/);
     const sessionKeysMatch = path.match(/^\/api\/sessions\/([^/]+)\/keys$/);
     const sessionMessageMatch = path.match(/^\/api\/sessions\/([^/]+)\/message$/);
+    const sessionInboxMatch = path.match(/^\/api\/sessions\/([^/]+)\/inbox$/);
     const sessionResizeMatch = path.match(/^\/api\/sessions\/([^/]+)\/resize$/);
     const sessionRunningMatch = path.match(/^\/api\/sessions\/([^/]+)\/running$/);
 
@@ -672,23 +720,25 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         if (fromSession) sender = fromSession.name || from.slice(0, 8);
       }
 
-      // Plain shells would execute the message as a command; deliver it as a quoted no-op
-      // (`: '...'`) — interactive zsh has no '#' comments by default.
-      const isAgent = session.shellType && session.shellType !== 'shell';
-      const line = isAgent
-        ? `[ftown msg from ${sender}] ${text}`
-        : `: '[ftown msg from ${sender}] ${text.replace(/'/g, '')}'`;
-      const wrote = this.runner.write(sessionId, line);
+      const wrote = await this.injectPtyLine(session, sender, text);
       if (!wrote) {
         jsonResponse(res, 409, { error: 'Session not running' });
         return;
       }
-      // Composer TUIs detect pastes by input arrival rate; the submit CR must come well
-      // after that window or it is treated as a pasted newline.
-      await delay(600);
-      this.runner.write(sessionId, submitSuffixFor(session.shellType));
 
       jsonResponse(res, 200, { delivered: true, sessionId, from: sender });
+      return;
+    }
+
+    // POST /api/sessions/:id/inbox — store mail for a session (long-poll kick or nudge)
+    if (sessionInboxMatch && req.method === 'POST') {
+      await this.handleInboxPost(req, res, sessionInboxMatch[1]);
+      return;
+    }
+
+    // GET /api/sessions/:id/inbox — read mail (peek, drain, or long poll)
+    if (sessionInboxMatch && req.method === 'GET') {
+      await this.handleInboxGet(res, sessionInboxMatch[1], url);
       return;
     }
 
@@ -734,6 +784,206 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     }
 
     jsonResponse(res, 404, { error: 'Not found' });
+  }
+
+  // Plain shells would execute the message as a command; deliver it as a quoted no-op
+  // (`: '...'`) — interactive zsh has no '#' comments by default.
+  private async injectPtyLine(session: Session, sender: string, text: string): Promise<boolean> {
+    if (!this.runner) return false;
+    const isAgent = session.shellType && session.shellType !== 'shell';
+    const line = isAgent
+      ? `[ftown msg from ${sender}] ${text}`
+      : `: '[ftown msg from ${sender}] ${text.replace(/'/g, '')}'`;
+    if (!this.runner.write(session.id, line)) return false;
+    // Composer TUIs detect pastes by input arrival rate; the submit CR must come well
+    // after that window or it is treated as a pasted newline.
+    await delay(600);
+    this.runner.write(session.id, submitSuffixFor(session.shellType));
+    return true;
+  }
+
+  private async handleInboxPost(
+    req: IncomingMessage,
+    res: ServerResponse,
+    sessionId: string,
+  ): Promise<void> {
+    if (!this.store || !this.mailStore) {
+      jsonResponse(res, 503, { error: 'Mail store not ready' });
+      return;
+    }
+
+    const session = await this.store.loadSession(sessionId);
+    if (!session) {
+      jsonResponse(res, 404, { error: 'Session not found' });
+      return;
+    }
+
+    const body = await parseBody(req);
+    const text = body.body;
+    if (typeof text !== 'string' || !text.trim()) {
+      jsonResponse(res, 400, { error: 'Missing body' });
+      return;
+    }
+    if (text.length > MAX_MAIL_BODY_LENGTH) {
+      jsonResponse(res, 400, { error: `Body too long (max ${MAX_MAIL_BODY_LENGTH} chars)` });
+      return;
+    }
+
+    let type: MailMessage['type'] = 'message';
+    if (body.type !== undefined) {
+      if (typeof body.type !== 'string' || !MAIL_TYPES.includes(body.type as MailMessage['type'])) {
+        jsonResponse(res, 400, { error: `Invalid type (expected one of: ${MAIL_TYPES.join(', ')})` });
+        return;
+      }
+      type = body.type as MailMessage['type'];
+    }
+
+    const from = typeof body.from === 'string' && body.from.trim() ? body.from.trim() : 'external';
+    const fromName =
+      typeof body.fromName === 'string' && body.fromName.trim() ? body.fromName.trim() : undefined;
+    const threadId =
+      typeof body.threadId === 'string' && body.threadId.trim() ? body.threadId.trim() : undefined;
+
+    const msg = createMailMessage({ from, fromName, to: session.id, type, threadId, body: text });
+    await this.mailStore.append(msg);
+
+    const waiter = this.mailWaiters.get(session.id);
+    if (waiter) {
+      const undelivered = await this.mailStore.listUndelivered(session.id);
+      const marked = await this.mailStore.markDelivered(
+        session.id,
+        undelivered.map((m) => m.id),
+        'poll',
+      );
+      waiter.deliver(marked);
+    } else {
+      this.scheduleMailNudge(session.id, fromName ?? from);
+    }
+
+    jsonResponse(res, 201, { id: msg.id });
+  }
+
+  private async handleInboxGet(res: ServerResponse, sessionId: string, url: URL): Promise<void> {
+    if (!this.store || !this.mailStore) {
+      jsonResponse(res, 503, { error: 'Mail store not ready' });
+      return;
+    }
+    const mailStore = this.mailStore;
+
+    const session = await this.store.loadSession(sessionId);
+    if (!session) {
+      jsonResponse(res, 404, { error: 'Session not found' });
+      return;
+    }
+
+    const wait = Math.min(getQueryInt(url, 'wait', 0), MAX_MAIL_WAIT_SECONDS);
+    const peek = getQueryInt(url, 'peek', 0) === 1;
+    const all = url.searchParams.get('all') === '1';
+    const limit = getQueryInt(url, 'limit', 50);
+
+    if (peek) {
+      const messages = all
+        ? await mailStore.listAll(session.id, limit)
+        : await mailStore.listUndelivered(session.id);
+      jsonResponse(res, 200, { messages });
+      return;
+    }
+
+    const undelivered = await mailStore.listUndelivered(session.id);
+    if (undelivered.length > 0 || wait <= 0) {
+      const marked = await mailStore.markDelivered(
+        session.id,
+        undelivered.map((m) => m.id),
+        wait > 0 ? 'poll' : 'drain',
+      );
+      jsonResponse(res, 200, { messages: marked });
+      return;
+    }
+
+    // Long poll: hold until mail arrives or `wait` seconds elapse. One waiter
+    // per session — a newer waiter resolves the previous one with [].
+    const existing = this.mailWaiters.get(session.id);
+    if (existing) existing.deliver([]);
+
+    let settled = false;
+    const waiter: MailWaiter = {
+      deliver: (messages: MailMessage[]) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (this.mailWaiters.get(session.id) === waiter) {
+          this.mailWaiters.delete(session.id);
+        }
+        jsonResponse(res, 200, { messages });
+      },
+    };
+    const timer = setTimeout(() => {
+      // Guard each async step on settled: once the client disconnects (or a new
+      // waiter replaced this one) we must not mark messages delivered — they
+      // would be lost without ever reaching a session.
+      if (settled || this.mailWaiters.get(session.id) !== waiter) return;
+      mailStore
+        .listUndelivered(session.id)
+        .then((pending) => {
+          if (settled || pending.length === 0) return [] as MailMessage[];
+          return mailStore.markDelivered(session.id, pending.map((m) => m.id), 'poll');
+        })
+        .then((marked) => waiter.deliver(marked))
+        .catch(() => waiter.deliver([]));
+    }, wait * 1000);
+    this.mailWaiters.set(session.id, waiter);
+
+    res.on('close', () => {
+      if (this.mailWaiters.get(session.id) !== waiter) return;
+      settled = true;
+      clearTimeout(timer);
+      this.mailWaiters.delete(session.id);
+    });
+  }
+
+  // Debounced wake-up for mail that no long-poll consumed: after 5s, if it is still
+  // undelivered and the session is running, inject a one-line pointer to the
+  // harness mail command. At most one nudge per session per 30s; senders coalesce.
+  private scheduleMailNudge(sessionId: string, fromLabel: string, delayMs = MAIL_NUDGE_DELAY_MS): void {
+    this.pendingNudgeFrom.set(sessionId, fromLabel);
+    if (this.nudgeTimers.has(sessionId)) return;
+    const timer = setTimeout(() => {
+      this.nudgeTimers.delete(sessionId);
+      this.fireMailNudge(sessionId).catch((err) => {
+        console.error('[LocalApiServer] Mail nudge failed:', err instanceof Error ? err.message : String(err));
+      });
+    }, delayMs);
+    timer.unref();
+    this.nudgeTimers.set(sessionId, timer);
+  }
+
+  private async fireMailNudge(sessionId: string): Promise<void> {
+    if (!this.store || !this.mailStore || !this.runner) return;
+
+    const fromLabel = this.pendingNudgeFrom.get(sessionId) ?? 'ftown';
+    const undelivered = await this.mailStore.listUndelivered(sessionId);
+    if (undelivered.length === 0) {
+      this.pendingNudgeFrom.delete(sessionId);
+      return;
+    }
+
+    const sinceLast = Date.now() - (this.lastNudgeAt.get(sessionId) ?? 0);
+    if (sinceLast < MAIL_NUDGE_MIN_INTERVAL_MS) {
+      // Rate-limited: retry once the window reopens (mail may still be unread).
+      this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_MIN_INTERVAL_MS - sinceLast);
+      return;
+    }
+
+    this.pendingNudgeFrom.delete(sessionId);
+    if (!this.runner.isRunning(sessionId)) return;
+    const session = await this.store.loadSession(sessionId);
+    if (!session) return;
+
+    this.lastNudgeAt.set(sessionId, Date.now());
+    const text = sanitizeMessageText(
+      `You have new ftown mail from ${fromLabel} — run \`~/.ftown/bin/ftown-harness mail read\` to read it.`,
+    );
+    await this.injectPtyLine(session, 'ftown-mail', text);
   }
 
   private handleHook(req: IncomingMessage, res: ServerResponse): void {

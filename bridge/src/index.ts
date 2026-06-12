@@ -13,6 +13,7 @@ import { randomBytes } from 'node:crypto';
 import { CentrifugoClient } from './centrifugo-client.js';
 import { ProcessRunner } from './claude-runner.js';
 import { SessionStore } from './session-store.js';
+import { MailStore } from './mail-store.js';
 import { LocalApiServer } from './local-api-server.js';
 import { TerminalManager } from './terminal-manager.js';
 import { installClaudeHooks } from './hook-installer.js';
@@ -180,6 +181,8 @@ program
     const hookPort = await localApiServer.start();
     console.log(`[Bridge] Local API server started on port ${hookPort}`);
     localApiServer.setDependencies(store, runner, centrifugo, userId, terminalManager);
+    const mailStore = new MailStore((sessionId) => store.sessionDir(sessionId));
+    localApiServer.setMailStore(mailStore);
 
     const bundledNotifyPath = resolve(__dirname, '..', 'hooks', 'notify.sh');
     const notifyScriptPath = installNotifyScript(bundledNotifyPath);

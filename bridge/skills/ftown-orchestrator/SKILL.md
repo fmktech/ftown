@@ -32,8 +32,8 @@ worker's parent to `$FTOWN_SESSION_ID`.
 
 Returns JSON containing `session.id` — save it to poll the worker later.
 Workers spawned with `--parent` are auto-briefed to report back via
-`tell --parent`; their reports arrive in **your** terminal as lines like:
-`[ftown msg from review-auth] done, found 3 issues`.
+`mail send --parent`; their reports arrive in **your** inbox and are delivered
+automatically as `[ftown mail]` context at your turn boundaries.
 
 ## Monitoring workers
 
@@ -49,15 +49,32 @@ Workers spawned with `--parent` are auto-briefed to report back via
 ```
 
 Poll `screen` or `grep` rather than waiting blindly — workers don't always
-remember to `tell` you when they finish.
+remember to mail you when they finish.
 
-## Messaging
+## Messaging (mail)
+
+Each session has an inbox. Mail is delivered into the recipient's context
+automatically at turn boundaries — no keystroke injection needed.
 
 ```bash
-~/.ftown/ftown-sessions tell <session-id> "clarification or new task"
-~/.ftown/ftown-sessions tell --children "pause and report status"
-~/.ftown/ftown-sessions tell --siblings "I grabbed the lock, stand by"
+# Send work / instructions to a child
+ftown-harness mail send <child> --type task "implement the API client"
+
+# Reply in a thread, or escalate
+ftown-harness mail send <child> --thread <id> "use the v2 endpoint"
+
+# Read your own inbox on demand (you also get mail automatically)
+ftown-harness mail read
 ```
+
+Children report back with `mail send --parent --type result` (or
+`--type escalation` when blocked). Fan-out still works via
+`~/.ftown/ftown-sessions tell --children "pause and report status"` (now mail
+under the hood; one of `--parent | --children | --siblings`).
+
+If a worker is idle and must be woken right now, terminal keystroke injection
+(`ftown-harness send <id> "..." -s` or `tell --keys`) is the **last resort** —
+prefer mail, which arrives at the next turn boundary.
 
 ## Cleanup
 
@@ -75,9 +92,10 @@ Clean up workers you no longer need to keep the session list tidy.
 ## Practical guidance
 
 - **Parallelize** independent tasks: spawn multiple workers before waiting for any.
-- **Poll, don't block**: use `screen` / `grep` to check progress; avoid issuing a
-  long blocking `tell --children "report when done"` and then stalling.
-- **Name workers clearly**: `--name` shows in `list` output and in `[ftown msg from …]` lines.
+- **Poll, don't block**: use `screen` / `grep` to check progress; mail from
+  workers reaches you automatically at turn boundaries, so keep working.
+- **Name workers clearly**: `--name` shows in `list` output and as the sender
+  name on incoming mail.
 - **Check `list` first**: see what's already running before spawning duplicates.
 
 ## If the CLI is missing
