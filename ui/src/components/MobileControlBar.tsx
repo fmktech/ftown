@@ -10,14 +10,44 @@ interface MobileControlBarProps {
   onSendInput: (data: string) => void;
 }
 
-const BUTTONS: { label: string; data: string }[] = [
-  { label: "ESC", data: "\x1b" },
-  { label: "^C", data: "\x03" },
-  { label: "⇧Tab", data: "\x1b[Z" },
-  { label: "\u2191", data: "\x1b[A" },
-  { label: "\u2193", data: "\x1b[B" },
-  { label: "\u21B5", data: "\r" },
+// PgUp/PgDn reach the bridge tmux server, which scrolls history via copy-mode
+// for inline TUIs (Claude Code) and passes through to alternate-screen apps.
+const BUTTON_ROWS: { label: string; data: string }[][] = [
+  [
+    { label: "ESC", data: "\x1b" },
+    { label: "^C", data: "\x03" },
+    { label: "⇧Tab", data: "\x1b[Z" },
+    { label: "\u2191", data: "\x1b[A" },
+    { label: "\u2193", data: "\x1b[B" },
+    { label: "\u21B5", data: "\r" },
+  ],
+  [
+    { label: "PgUp", data: "\x1b[5~" },
+    { label: "PgDn", data: "\x1b[6~" },
+    { label: "\u2190", data: "\x1b[D" },
+    { label: "\u2192", data: "\x1b[C" },
+  ],
 ];
+
+const keyButtonStyle: React.CSSProperties = {
+  minWidth: 44,
+  minHeight: 40,
+  flex: 1,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  background: "var(--bg-elevated)",
+  border: "1px solid var(--border-muted)",
+  borderRadius: 6,
+  color: "var(--text-secondary)",
+  fontSize: 13,
+  fontFamily: "var(--font-mono)",
+  fontWeight: 600,
+  cursor: "pointer",
+  touchAction: "manipulation",
+  userSelect: "none",
+  WebkitUserSelect: "none",
+};
 
 export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControlBarProps>(
   function MobileControlBar({ onSendInput }, ref) {
@@ -98,72 +128,45 @@ export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControl
           />
         </div>
 
-        {/* Control buttons row */}
-        <div className="flex items-center justify-around px-2 gap-1" style={{ paddingTop: 4, paddingBottom: 2 }}>
-          {/* Keyboard toggle button */}
-          <button
-            className="mobile-ctrl-btn"
-            style={{
-              minWidth: 44,
-              minHeight: 40,
-              flex: 1,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              background: "var(--accent)",
-              border: "1px solid var(--accent)",
-              borderRadius: 6,
-              color: "var(--bg-void)",
-              fontSize: 16,
-              fontWeight: 700,
-              cursor: "pointer",
-              touchAction: "manipulation",
-              userSelect: "none",
-              WebkitUserSelect: "none",
-            }}
-            onTouchEnd={(e) => { e.preventDefault(); focusInput(); }}
-            onClick={(e) => { e.preventDefault(); focusInput(); }}
+        {/* Control button rows */}
+        {BUTTON_ROWS.map((row, rowIndex) => (
+          <div
+            key={rowIndex}
+            className="flex items-center justify-around px-2 gap-1"
+            style={{ paddingTop: rowIndex === 0 ? 4 : 2, paddingBottom: 2 }}
           >
-            {"\u2328"}
-          </button>
-          {BUTTONS.map((btn) => (
-            <button
-              key={btn.label}
-              className="mobile-ctrl-btn"
-              style={{
-                minWidth: 44,
-                minHeight: 40,
-                flex: 1,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                background: "var(--bg-elevated)",
-                border: "1px solid var(--border-muted)",
-                borderRadius: 6,
-                color: "var(--text-secondary)",
-                fontSize: 13,
-                fontFamily: "var(--font-mono)",
-                fontWeight: 600,
-                cursor: "pointer",
-                touchAction: "manipulation",
-                userSelect: "none",
-                WebkitUserSelect: "none",
-              }}
-              onTouchEnd={(e) => {
-                e.preventDefault();
-                onSendInput(btn.data);
-                focusInput();
-              }}
-              onClick={(e) => {
-                e.preventDefault();
-                onSendInput(btn.data);
-                focusInput();
-              }}
-            >
-              {btn.label}
-            </button>
-          ))}
-        </div>
+            {rowIndex === 0 && (
+              // Keyboard toggle button
+              <button
+                className="mobile-ctrl-btn"
+                style={{ ...keyButtonStyle, background: "var(--accent)", border: "1px solid var(--accent)", color: "var(--bg-void)", fontSize: 16, fontWeight: 700 }}
+                onTouchEnd={(e) => { e.preventDefault(); focusInput(); }}
+                onClick={(e) => { e.preventDefault(); focusInput(); }}
+              >
+                {"\u2328"}
+              </button>
+            )}
+            {row.map((btn) => (
+              <button
+                key={btn.label}
+                className="mobile-ctrl-btn"
+                style={keyButtonStyle}
+                onTouchEnd={(e) => {
+                  e.preventDefault();
+                  onSendInput(btn.data);
+                  focusInput();
+                }}
+                onClick={(e) => {
+                  e.preventDefault();
+                  onSendInput(btn.data);
+                  focusInput();
+                }}
+              >
+                {btn.label}
+              </button>
+            ))}
+          </div>
+        ))}
       </div>
     );
   }
