@@ -151,15 +151,16 @@ export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControl
                 key={btn.label}
                 className="mobile-ctrl-btn"
                 style={keyButtonStyle}
+                // Don't steal focus from the hidden input: the soft keyboard
+                // stays open if it was open, and stays closed if it wasn't.
+                onMouseDown={(e) => e.preventDefault()}
                 onTouchEnd={(e) => {
                   e.preventDefault();
                   onSendInput(btn.data);
-                  focusInput();
                 }}
                 onClick={(e) => {
                   e.preventDefault();
                   onSendInput(btn.data);
-                  focusInput();
                 }}
               >
                 {btn.label}
