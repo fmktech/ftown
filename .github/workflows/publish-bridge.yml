@@ -1,0 +1,61 @@
+name: Publish bridge to npm
+
+on:
+  push:
+    branches: [main]
+    paths: ['bridge/**']
+
+permissions:
+  contents: write # push the bridge-vX.Y.Z release tag
+  id-token: write # npm trusted publishing (OIDC)
+
+concurrency:
+  group: publish-bridge
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bridge
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+
+      # Trusted publishing needs npm >= 11.5.1
+      - name: Update npm
+        run: npm install -g npm@latest
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Check whether the version is unpublished
+        id: version
+        run: |
+          LOCAL=$(node -p "require('./package.json').version")
+          PUBLISHED=$(npm view ftown-bridge version 2>/dev/null || echo "none")
+          echo "local=$LOCAL published=$PUBLISHED"
+          if [ "$LOCAL" = "$PUBLISHED" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "version=$LOCAL" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish
+        if: steps.version.outputs.publish == 'true'
+        run: npm publish
+
+      - name: Tag release
+        if: steps.version.outputs.publish == 'true'
+        run: |
+          git tag "bridge-v${{ steps.version.outputs.version }}"
+          git push origin "bridge-v${{ steps.version.outputs.version }}"
