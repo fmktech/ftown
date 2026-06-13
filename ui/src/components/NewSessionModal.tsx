@@ -24,10 +24,6 @@ interface NewSessionModalProps {
   bridgeExec: (command: string, workingDir: string, bridgeId: string) => Promise<BridgeExecResponse>;
 }
 
-const ZAI_TOKEN_KEY = "ftown:zaiToken";
-const KIMI_TOKEN_KEY = "ftown:kimiToken";
-const DEEPSEEK_TOKEN_KEY = "ftown:deepseekToken";
-const FIREWORKS_TOKEN_KEY = "ftown:fireworksToken";
 const FIREWORKS_MODELS_KEY = "ftown:fireworksModels";
 
 const FIREWORKS_MODEL_OPTIONS = [
@@ -104,62 +100,6 @@ function setStoredAutoCompactWindow(value: string): void {
   }
 }
 
-function getStoredZaiToken(): string {
-  if (typeof window === "undefined") return "";
-  try {
-    return localStorage.getItem(ZAI_TOKEN_KEY) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function setStoredZaiToken(token: string): void {
-  if (typeof window === "undefined") return;
-  localStorage.setItem(ZAI_TOKEN_KEY, token);
-}
-
-function getStoredKimiToken(): string {
-  if (typeof window === "undefined") return "";
-  try {
-    return localStorage.getItem(KIMI_TOKEN_KEY) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function setStoredKimiToken(token: string): void {
-  if (typeof window === "undefined") return;
-  localStorage.setItem(KIMI_TOKEN_KEY, token);
-}
-
-function getStoredDeepseekToken(): string {
-  if (typeof window === "undefined") return "";
-  try {
-    return localStorage.getItem(DEEPSEEK_TOKEN_KEY) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function setStoredDeepseekToken(token: string): void {
-  if (typeof window === "undefined") return;
-  localStorage.setItem(DEEPSEEK_TOKEN_KEY, token);
-}
-
-function getStoredFireworksToken(): string {
-  if (typeof window === "undefined") return "";
-  try {
-    return localStorage.getItem(FIREWORKS_TOKEN_KEY) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function setStoredFireworksToken(token: string): void {
-  if (typeof window === "undefined") return;
-  localStorage.setItem(FIREWORKS_TOKEN_KEY, token);
-}
-
 function getStoredFireworksModels(): FireworksModels {
   if (typeof window === "undefined") return FIREWORKS_DEFAULT_MODELS;
   try {
@@ -202,9 +142,8 @@ function setStoredZaiModels(models: ZaiModels): void {
   localStorage.setItem(ZAI_MODELS_KEY, JSON.stringify(models));
 }
 
-function getZaiDefaultEnv(token: string, models: ZaiModels): Record<string, string> {
+function getZaiDefaultEnv(models: ZaiModels): Record<string, string> {
   return {
-    ANTHROPIC_AUTH_TOKEN: token,
     ANTHROPIC_BASE_URL: "https://api.z.ai/api/anthropic",
     ANTHROPIC_DEFAULT_HAIKU_MODEL: models.haiku,
     ANTHROPIC_DEFAULT_OPUS_MODEL: models.opus,
@@ -214,18 +153,16 @@ function getZaiDefaultEnv(token: string, models: ZaiModels): Record<string, stri
   };
 }
 
-function getKimiDefaultEnv(token: string): Record<string, string> {
+function getKimiDefaultEnv(): Record<string, string> {
   return {
-    ANTHROPIC_API_KEY: token,
     ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/",
     API_TIMEOUT_MS: "3000000",
     CLAUDE_CODE_AUTO_COMPACT_WINDOW: "256000",
   };
 }
 
-function getDeepseekDefaultEnv(token: string): Record<string, string> {
+function getDeepseekDefaultEnv(): Record<string, string> {
   return {
-    ANTHROPIC_API_KEY: token,
     ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic",
     ANTHROPIC_DEFAULT_OPUS_MODEL: "deepseek-v4-pro",
     ANTHROPIC_DEFAULT_SONNET_MODEL: "deepseek-v4-pro",
@@ -235,9 +172,8 @@ function getDeepseekDefaultEnv(token: string): Record<string, string> {
   };
 }
 
-function getFireworksDefaultEnv(token: string, models: FireworksModels): Record<string, string> {
+function getFireworksDefaultEnv(models: FireworksModels): Record<string, string> {
   return {
-    ANTHROPIC_AUTH_TOKEN: token,
     ANTHROPIC_BASE_URL: "https://api.fireworks.ai/inference",
     ANTHROPIC_MODEL: models.opus,
     ANTHROPIC_SMALL_FAST_MODEL: models.haiku,
@@ -287,6 +223,22 @@ function resolveShellType(top: TopShell, flavor: ClaudeFlavor): ShellType {
   return flavor;
 }
 
+function ProviderTokenHint({ provider, envVar }: { provider: string; envVar: string }) {
+  return (
+    <div className="px-3 py-2.5 border border-[#2a2a2a] rounded bg-[#0a0a0a]">
+      <div className="text-xs text-[#888888]">
+        Set your {provider} token on the bridge machine — the bridge maps it onto the session's auth var:
+      </div>
+      <code className="block mt-1.5 text-xs text-[#00ff88] font-mono break-all">
+        export {envVar}=YOUR_TOKEN
+      </code>
+      <div className="text-[11px] text-[#555] mt-1.5">
+        Put it where the bridge launches (e.g. <span className="font-mono">~/.zshrc</span>). Tokens never pass through the UI.
+      </div>
+    </div>
+  );
+}
+
 export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, bridgeExec }: NewSessionModalProps) {
   const [name, setName] = useState("");
   const [workingDir, setWorkingDir] = useState("");
@@ -299,10 +251,6 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const [selectedClaudeSummary, setSelectedClaudeSummary] = useState<string | null>(null);
   const [selectedCursorSessionId, setSelectedCursorSessionId] = useState<string | null>(null);
   const [selectedCursorSummary, setSelectedCursorSummary] = useState<string | null>(null);
-  const [zaiToken, setZaiToken] = useState("");
-  const [kimiToken, setKimiToken] = useState("");
-  const [deepseekToken, setDeepseekToken] = useState("");
-  const [fireworksToken, setFireworksToken] = useState("");
   const [fireworksModels, setFireworksModels] = useState<FireworksModels>(FIREWORKS_DEFAULT_MODELS);
   const [zaiModels, setZaiModels] = useState<ZaiModels>(ZAI_DEFAULT_MODELS);
   const [autoCompactWindow, setAutoCompactWindow] = useState("");
@@ -331,10 +279,6 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       setSelectedClaudeSummary(null);
       setSelectedCursorSessionId(null);
       setSelectedCursorSummary(null);
-      setZaiToken(getStoredZaiToken());
-      setKimiToken(getStoredKimiToken());
-      setDeepseekToken(getStoredDeepseekToken());
-      setFireworksToken(getStoredFireworksToken());
       setFireworksModels(getStoredFireworksModels());
       setZaiModels(getStoredZaiModels());
       setAutoCompactWindow(getStoredAutoCompactWindow());
@@ -350,23 +294,15 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     let env: Record<string, string> | undefined;
 
     if (shellType === "zai") {
-      const trimmedToken = zaiToken.trim();
-      if (trimmedToken) setStoredZaiToken(trimmedToken);
       setStoredZaiModels(zaiModels);
-      env = { ...getStoredEnvVars(), ...getZaiDefaultEnv(trimmedToken, zaiModels) };
+      env = { ...getStoredEnvVars(), ...getZaiDefaultEnv(zaiModels) };
     } else if (shellType === "kimi") {
-      const trimmedToken = kimiToken.trim();
-      if (trimmedToken) setStoredKimiToken(trimmedToken);
-      env = { ...getStoredEnvVars(), ...getKimiDefaultEnv(trimmedToken) };
+      env = { ...getStoredEnvVars(), ...getKimiDefaultEnv() };
     } else if (shellType === "deepseek") {
-      const trimmedToken = deepseekToken.trim();
-      if (trimmedToken) setStoredDeepseekToken(trimmedToken);
-      env = { ...getStoredEnvVars(), ...getDeepseekDefaultEnv(trimmedToken) };
+      env = { ...getStoredEnvVars(), ...getDeepseekDefaultEnv() };
     } else if (shellType === "fireworks") {
-      const trimmedToken = fireworksToken.trim();
-      if (trimmedToken) setStoredFireworksToken(trimmedToken);
       setStoredFireworksModels(fireworksModels);
-      env = { ...getStoredEnvVars(), ...getFireworksDefaultEnv(trimmedToken, fireworksModels) };
+      env = { ...getStoredEnvVars(), ...getFireworksDefaultEnv(fireworksModels) };
     } else {
       const storedEnv = getStoredEnvVars();
       env = Object.keys(storedEnv).length > 0 ? storedEnv : undefined;
@@ -405,7 +341,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setSelectedCursorSummary(null);
     setOrchestrator(false);
     onClose();
-  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, zaiToken, kimiToken, deepseekToken, fireworksToken, fireworksModels, zaiModels, autoCompactWindow, orchestrator, onSubmit, onClose]);
+  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, fireworksModels, zaiModels, autoCompactWindow, orchestrator, onSubmit, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -470,18 +406,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
 
             {shellType === "zai" && (
               <div className="mt-3 space-y-2">
-                <div>
-                  <label className="block text-sm text-[#888888] mb-1">z.ai API Token</label>
-                  <input
-                    type="password"
-                    value={zaiToken}
-                    onChange={(e) => setZaiToken(e.target.value)}
-                    placeholder="Enter your z.ai API token"
-                    className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] font-mono"
-                    onKeyDown={handleKeyDown}
-                    autoComplete="new-password"
-                  />
-                </div>
+                <ProviderTokenHint provider="z.ai" envVar="ZAI_API_TOKEN" />
                 {(["opus", "sonnet", "haiku"] as const).map((slot) => (
                   <div key={slot}>
                     <label className="block text-xs text-[#666] mb-1 uppercase tracking-wider">
@@ -508,49 +433,16 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
             )}
 
             {shellType === "kimi" && (
-              <div className="mt-3">
-                <label className="block text-sm text-[#888888] mb-1">Kimi API Token</label>
-                <input
-                  type="password"
-                  value={kimiToken}
-                  onChange={(e) => setKimiToken(e.target.value)}
-                  placeholder="Enter your Kimi API token"
-                  className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] font-mono"
-                  onKeyDown={handleKeyDown}
-                  autoComplete="new-password"
-                />
-              </div>
+              <ProviderTokenHint provider="Kimi" envVar="KIMI_API_TOKEN" />
             )}
 
             {shellType === "deepseek" && (
-              <div className="mt-3">
-                <label className="block text-sm text-[#888888] mb-1">DeepSeek API Token</label>
-                <input
-                  type="password"
-                  value={deepseekToken}
-                  onChange={(e) => setDeepseekToken(e.target.value)}
-                  placeholder="Enter your DeepSeek API token"
-                  className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] font-mono"
-                  onKeyDown={handleKeyDown}
-                  autoComplete="new-password"
-                />
-              </div>
+              <ProviderTokenHint provider="DeepSeek" envVar="DEEPSEEK_API_TOKEN" />
             )}
 
             {shellType === "fireworks" && (
               <div className="mt-3 space-y-2">
-                <div>
-                  <label className="block text-sm text-[#888888] mb-1">Fireworks API Token</label>
-                  <input
-                    type="password"
-                    value={fireworksToken}
-                    onChange={(e) => setFireworksToken(e.target.value)}
-                    placeholder="Enter your Fireworks API token"
-                    className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] font-mono"
-                    onKeyDown={handleKeyDown}
-                    autoComplete="new-password"
-                  />
-                </div>
+                <ProviderTokenHint provider="Fireworks" envVar="FIREWORKS_API_TOKEN" />
                 {(["opus", "sonnet", "haiku"] as const).map((slot) => (
                   <div key={slot}>
                     <label className="block text-xs text-[#666] mb-1 uppercase tracking-wider">

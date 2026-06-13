@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildChildBriefing, parseCreateSessionBody } from './create-ftown-session.js';
+import { buildChildBriefing, parseCreateSessionBody, resolveProviderAuthEnv } from './create-ftown-session.js';
 
 // FIX C: ftown-workflows children must be spawnable WITHOUT the standard child briefing,
 // because that briefing tells the child to report via mail — which conflicts with the
@@ -26,6 +26,52 @@ describe('parseCreateSessionBody — suppressBriefing plumbing', () => {
     assert.strictEqual(input.prompt, 'do x');
     assert.strictEqual(input.shellType, 'claude');
     assert.strictEqual(input.suppressBriefing, true);
+  });
+});
+
+// Provider API tokens live on the bridge machine under provider-specific keys and are
+// mapped onto the Anthropic auth var at session creation — so secrets never travel
+// through the browser or the spawn command.
+describe('resolveProviderAuthEnv — provider token mapping', () => {
+  it('maps ZAI_API_TOKEN -> ANTHROPIC_AUTH_TOKEN for the zai flavor', () => {
+    assert.deepEqual(
+      resolveProviderAuthEnv('zai', { ZAI_API_TOKEN: 'tok-zai' }),
+      { ANTHROPIC_AUTH_TOKEN: 'tok-zai' },
+    );
+  });
+
+  it('maps FIREWORKS_API_TOKEN -> ANTHROPIC_AUTH_TOKEN for the fireworks flavor', () => {
+    assert.deepEqual(
+      resolveProviderAuthEnv('fireworks', { FIREWORKS_API_TOKEN: 'tok-fw' }),
+      { ANTHROPIC_AUTH_TOKEN: 'tok-fw' },
+    );
+  });
+
+  it('maps KIMI_API_TOKEN -> ANTHROPIC_API_KEY for the kimi flavor', () => {
+    assert.deepEqual(
+      resolveProviderAuthEnv('kimi', { KIMI_API_TOKEN: 'tok-kimi' }),
+      { ANTHROPIC_API_KEY: 'tok-kimi' },
+    );
+  });
+
+  it('maps DEEPSEEK_API_TOKEN -> ANTHROPIC_API_KEY for the deepseek flavor', () => {
+    assert.deepEqual(
+      resolveProviderAuthEnv('deepseek', { DEEPSEEK_API_TOKEN: 'tok-ds' }),
+      { ANTHROPIC_API_KEY: 'tok-ds' },
+    );
+  });
+
+  it('returns nothing when the provider token is absent', () => {
+    assert.deepEqual(resolveProviderAuthEnv('zai', {}), {});
+  });
+
+  it('returns nothing for non-provider shell types (plain claude/cursor/codex/shell)', () => {
+    assert.deepEqual(resolveProviderAuthEnv('claude', { ANTHROPIC_API_KEY: 'x' }), {});
+    assert.deepEqual(resolveProviderAuthEnv(undefined, {}), {});
+  });
+
+  it('does not leak another provider token into this flavor', () => {
+    assert.deepEqual(resolveProviderAuthEnv('kimi', { ZAI_API_TOKEN: 'tok-zai' }), {});
   });
 });
 

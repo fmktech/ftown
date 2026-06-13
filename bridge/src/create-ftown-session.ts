@@ -89,6 +89,31 @@ export function buildOrchestratorBriefing(params: OrchestratorBriefingParams): s
   );
 }
 
+/**
+ * Provider API tokens live on the bridge machine under provider-specific keys
+ * (ZAI_API_TOKEN, KIMI_API_TOKEN, DEEPSEEK_API_TOKEN, FIREWORKS_API_TOKEN) so
+ * secrets never travel through the browser or the spawn command. Map the
+ * matching token onto the Anthropic auth var the CLI expects. Returns an empty
+ * object for unknown/absent mappings (plain claude/cursor/codex/shell).
+ */
+const PROVIDER_AUTH_ENV: Record<string, { source: string; target: string }> = {
+  zai: { source: 'ZAI_API_TOKEN', target: 'ANTHROPIC_AUTH_TOKEN' },
+  fireworks: { source: 'FIREWORKS_API_TOKEN', target: 'ANTHROPIC_AUTH_TOKEN' },
+  kimi: { source: 'KIMI_API_TOKEN', target: 'ANTHROPIC_API_KEY' },
+  deepseek: { source: 'DEEPSEEK_API_TOKEN', target: 'ANTHROPIC_API_KEY' },
+};
+
+export function resolveProviderAuthEnv(
+  shellType: ShellType | undefined,
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+): Record<string, string> {
+  const mapping = shellType ? PROVIDER_AUTH_ENV[shellType] : undefined;
+  if (!mapping) return {};
+  const token = env[mapping.source];
+  if (!token) return {};
+  return { [mapping.target]: token };
+}
+
 export async function createFtownSession(
   deps: CreateFtownSessionDeps,
   input: CreateFtownSessionInput,
@@ -109,12 +134,19 @@ export async function createFtownSession(
   }
 
   const isAgent = input.shellType !== 'shell';
-  // Orchestrator sessions receive FTOWN_ORCHESTRATOR=1 so skills and hooks can
-  // detect the role without relying solely on the typed briefing.
+  // Provider API tokens are read from the bridge's environment (provider-
+  // specific keys) and mapped onto the Anthropic auth var here — so the UI-
+  // supplied env (base URL, model overrides) never carries a secret.
+  const providerAuth = resolveProviderAuthEnv(input.shellType, process.env);
+  const isOrchestratorAgent = input.orchestrator && isAgent;
   const sessionEnv: Record<string, string> | undefined =
-    input.orchestrator && isAgent
-      ? { ...input.env, FTOWN_ORCHESTRATOR: '1' }
-      : input.env;
+    input.env || Object.keys(providerAuth).length > 0 || isOrchestratorAgent
+      ? {
+          ...(input.env ?? {}),
+          ...providerAuth,
+          ...(isOrchestratorAgent ? { FTOWN_ORCHESTRATOR: '1' } : {}),
+        }
+      : undefined;
 
   const sessionId = uuidv4();
   const session: Session = {
