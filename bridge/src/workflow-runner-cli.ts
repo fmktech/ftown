@@ -16,6 +16,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 
+import { ensureClaudeWorkdirTrust } from './claude-trust.js';
 import {
   parseResultFile,
   runWorkflow,
@@ -93,6 +94,11 @@ class HttpBridgeClient implements BridgeClient {
   }
 
   async createSession(opts: SpawnSpec): Promise<{ id: string }> {
+    // Pre-trust the worker's working dir so a claude worker does not block on the
+    // "Do you trust this folder?" dialog (which --dangerously-skip-permissions ignores).
+    if (opts.shellType === 'claude' && opts.workingDir) {
+      ensureClaudeWorkdirTrust(opts.workingDir);
+    }
     const body: Record<string, unknown> = {
       prompt: opts.prompt,
       shellType: opts.shellType,
@@ -325,8 +331,10 @@ async function main(): Promise<void> {
     args: parsedArgs,
     defaultShell: parseShell(flag(rest, '--shell')) ?? 'claude',
   };
+  // Default child workdir to the orchestrator's cwd so workers never launch in an
+  // undefined/untrusted directory; the trust pre-acceptance above keys off this.
   const workdir = flag(rest, '--workdir');
-  if (workdir) opts.workdir = resolve(workdir);
+  opts.workdir = workdir ? resolve(workdir) : process.cwd();
   const concurrency = parseIntFlag(concurrencyRaw, '--concurrency', 1);
   if (concurrency !== undefined) opts.maxConcurrent = concurrency;
   const timeout = parseIntFlag(timeoutRaw, '--timeout', 0);
