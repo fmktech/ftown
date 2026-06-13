@@ -23,6 +23,7 @@ import { installHarness, harnessOnPath, pathHint, writeHarnessAgentGuide, agentG
 import { installNotifyScript } from './install-notify-script.js';
 import { installFtownSkill } from './install-ftown-skill.js';
 import { installFtownSessionsCli } from './install-ftown-cli.js';
+import { installFtownWorkflowsCli } from './install-ftown-workflows-cli.js';
 import { registerSessionWorkspace, unregisterSession } from './session-registry.js';
 import { createFtownSession } from './create-ftown-session.js';
 import { removeFtownSession } from './remove-ftown-session.js';
@@ -235,6 +236,13 @@ program
       : resolve(__dirname, '..', 'dist', 'ftown-sessions-cli.js');
     const cliPath = installFtownSessionsCli(cliBundlePath);
     console.log(`[Bridge] Installed CLI at ${cliPath}`);
+
+    installFtownSkill('ftown-workflows', resolve(__dirname, '..', 'skills', 'ftown-workflows'));
+    const workflowsCliBundlePath = existsSync(resolve(__dirname, 'workflow-runner-cli.js'))
+      ? resolve(__dirname, 'workflow-runner-cli.js')
+      : resolve(__dirname, '..', 'dist', 'workflow-runner-cli.js');
+    const workflowsCliPath = installFtownWorkflowsCli(workflowsCliBundlePath);
+    console.log(`[Bridge] Installed workflows CLI at ${workflowsCliPath}`);
 
     const bridgeStateDir = join(homedir(), '.ftown');
     const bridgePointerPath = join(bridgeStateDir, 'bridge.json');

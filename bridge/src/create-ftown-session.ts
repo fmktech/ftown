@@ -36,6 +36,7 @@ export interface CreateFtownSessionInput {
   initialInput?: string;
   initialInputDelay?: number;
   orchestrator?: boolean;
+  suppressBriefing?: boolean;
 }
 
 export async function resolveParentSessionId(
@@ -151,7 +152,7 @@ export async function createFtownSession(
   // one-paragraph briefing prepended to their first input so they know their
   // place in the session tree and how to talk to parent/siblings.
   const childBriefing =
-    parentSessionId && parentName && isAgent
+    !input.suppressBriefing && parentSessionId && parentName && isAgent
       ? buildChildBriefing({
           childName: session.name,
           childId: sessionId,
@@ -160,7 +161,7 @@ export async function createFtownSession(
         })
       : undefined;
   const orchestratorBriefing =
-    input.orchestrator && isAgent
+    !input.suppressBriefing && input.orchestrator && isAgent
       ? buildOrchestratorBriefing({ sessionName: session.name, sessionId })
       : undefined;
   // Orchestrator paragraph follows the child paragraph, separated by a blank line.
@@ -265,5 +266,6 @@ export function parseCreateSessionBody(
     initialInputDelay:
       typeof body.initialInputDelay === 'number' ? body.initialInputDelay : undefined,
     orchestrator: body.orchestrator === true,
+    suppressBriefing: body.suppressBriefing === true,
   };
 }

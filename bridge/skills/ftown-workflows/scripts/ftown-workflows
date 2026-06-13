@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Delegates to the bridge-installed CLI (~/.ftown/ftown-workflows).
+set -euo pipefail
+exec "${HOME}/.ftown/ftown-workflows" "$@"

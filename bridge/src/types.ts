@@ -78,6 +78,7 @@ export interface CreateSessionPayload {
   codexSessionId?: string;
   parentSessionId?: string;
   orchestrator?: boolean;
+  suppressBriefing?: boolean;
 }
 
 export interface BridgeExecPayload {
