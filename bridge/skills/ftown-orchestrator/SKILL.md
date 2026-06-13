@@ -48,13 +48,16 @@ automatically as `[ftown mail]` context at your turn boundaries.
 ~/.ftown/ftown-sessions running <session-id>
 ```
 
-Poll `screen` or `grep` rather than waiting blindly — workers don't always
-remember to mail you when they finish.
+The best wait pattern: **end your turn**. Worker mail blocks your Stop hook
+and wakes you with the messages — no polling loop needed. Use `screen` /
+`grep` to investigate workers that have gone quiet for too long.
 
 ## Messaging (mail)
 
-Each session has an inbox. Mail is delivered into the recipient's context
-automatically at turn boundaries — no keystroke injection needed.
+Each session has an inbox. Claude sessions receive mail automatically at turn
+boundaries via hooks — no keystroke injection. Cursor and shell sessions have
+no hooks: when idle they get a one-line nudge telling them to run
+`ftown-harness mail read`, so expect slightly slower pickup there.
 
 ```bash
 # Send work / instructions to a child

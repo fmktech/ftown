@@ -94,7 +94,7 @@ Fan-out targets are messaged sequentially, one JSON result line per target.
 | Flag | Description |
 |------|-------------|
 | `--shell` | `cursor`, `claude`, `shell`, `opencode`, … (default `claude`) |
-| `--prompt` | Initial message sent after spawn |
+| `--prompt` | Initial task — passed as a CLI launch argument to `claude`/`cursor` (typed after boot for other shells) |
 | `--workdir` | Working directory |
 | `--name` | Dashboard label |
 | `--command` | Full command override (skips `--shell` builder) |
