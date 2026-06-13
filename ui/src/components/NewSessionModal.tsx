@@ -388,8 +388,12 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
           <div>
             <label className="block text-sm text-[#888888] mb-1">Shell Type</label>
             <select
-              value={topShell}
-              onChange={(e) => setTopShell(e.target.value as TopShell)}
+              value={shellType}
+              onChange={(e) => {
+                const { top, flavor } = shellTypeToTop(e.target.value as ShellType);
+                setTopShell(top);
+                setClaudeFlavor(flavor);
+              }}
               className="w-full px-3 py-2 text-sm font-mono rounded"
               style={{
                 background: "#0a0a0a",
@@ -398,50 +402,22 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                 outline: "none",
               }}
             >
-              <option value="claude">Claude Code</option>
-              <option value="cursor">Cursor Agent</option>
-              <option value="codex">Codex</option>
-              <option value="opencode">opencode</option>
-              <option value="shell">Shell (zsh)</option>
+              <optgroup label="Claude Code">
+                <option value="claude">Claude Code</option>
+                <option value="zai">Claude Code · z.ai</option>
+                <option value="kimi">Claude Code · Kimi</option>
+                <option value="deepseek">Claude Code · DeepSeek</option>
+                <option value="fireworks">Claude Code · Fireworks</option>
+              </optgroup>
+              <optgroup label="Other agents">
+                <option value="cursor">Cursor Agent</option>
+                <option value="codex">Codex</option>
+                <option value="opencode">opencode</option>
+              </optgroup>
+              <optgroup label="Plain">
+                <option value="shell">Shell (zsh)</option>
+              </optgroup>
             </select>
-
-            {topShell === "claude" && (
-              <div className="mt-3">
-                <label className="block text-xs text-[#666] mb-1 uppercase tracking-wider">Flavor</label>
-                <div className="flex gap-0">
-                  {(["standard", "zai", "kimi", "deepseek", "fireworks"] as ClaudeFlavor[]).map((f, i, arr) => {
-                    const labels: Record<ClaudeFlavor, string> = {
-                      standard: "Standard",
-                      zai: "z.ai",
-                      kimi: "Kimi",
-                      deepseek: "DeepSeek",
-                      fireworks: "Fireworks",
-                    };
-                    const active = claudeFlavor === f;
-                    const isFirst = i === 0;
-                    const isLast = i === arr.length - 1;
-                    return (
-                      <button
-                        key={f}
-                        type="button"
-                        onClick={() => setClaudeFlavor(f)}
-                        className="px-3 py-1.5 text-xs font-mono transition-colors"
-                        style={{
-                          background: active ? "#00ff88" : "#0a0a0a",
-                          color: active ? "#0a0a0a" : "#888888",
-                          border: `1px solid ${active ? "#00ff88" : "#2a2a2a"}`,
-                          borderRight: isLast ? undefined : "none",
-                          borderRadius: isFirst ? "4px 0 0 4px" : isLast ? "0 4px 4px 0" : "0",
-                          fontWeight: active ? 700 : 400,
-                        }}
-                      >
-                        {labels[f]}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
 
             {shellType === "zai" && (
               <div className="mt-3">
