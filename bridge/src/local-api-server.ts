@@ -101,6 +101,13 @@ const MAX_MESSAGE_LENGTH = 2000;
 const MAX_MAIL_BODY_LENGTH = 64 * 1024;
 const MAX_MAIL_WAIT_SECONDS = 30;
 const MAIL_NUDGE_DELAY_MS = 5_000;
+// Hooked agents (claude/codex and claude flavors) get mail through their Stop
+// pump; the nudge is only a safety net for them, so wait much longer before
+// typing into their pane — fast nudges race the pump and queue stale prompts.
+const MAIL_NUDGE_DELAY_HOOKED_MS = 60_000;
+const HOOKED_SHELL_TYPES: ReadonlySet<string> = new Set([
+  'claude', 'codex', 'zai', 'kimi', 'deepseek', 'fireworks',
+]);
 const MAIL_NUDGE_MIN_INTERVAL_MS = 30_000;
 // While an agent is mid-turn its Stop hook pump delivers mail at turn end, so
 // nudging would only queue a stale prompt; re-check periodically in case the
@@ -869,7 +876,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       );
       waiter.deliver(marked);
     } else {
-      this.scheduleMailNudge(session.id, fromName ?? from);
+      const nudgeDelay = HOOKED_SHELL_TYPES.has(session.shellType ?? 'claude')
+        ? MAIL_NUDGE_DELAY_HOOKED_MS
+        : MAIL_NUDGE_DELAY_MS;
+      this.scheduleMailNudge(session.id, fromName ?? from, nudgeDelay);
     }
 
     jsonResponse(res, 201, { id: msg.id });
