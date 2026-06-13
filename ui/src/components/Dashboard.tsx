@@ -367,7 +367,10 @@ PY`;
       <header
         className="shrink-0 flex items-center justify-between px-4"
         style={{
-          height: 44,
+          height: "calc(44px + env(safe-area-inset-top))",
+          paddingTop: "env(safe-area-inset-top)",
+          paddingLeft: "max(16px, env(safe-area-inset-left))",
+          paddingRight: "max(16px, env(safe-area-inset-right))",
           borderBottom: "1px solid var(--border-muted)",
           background: "linear-gradient(180deg, var(--bg-surface) 0%, var(--bg-base) 100%)",
         }}

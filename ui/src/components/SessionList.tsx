@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback, useMemo, type ReactElement } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, type ReactElement } from "react";
 import { createPortal } from "react-dom";
 import { Session, SessionStatus } from "@/types";
 import { SessionActivity } from "@/hooks/useAllSessionEvents";
@@ -246,6 +246,30 @@ function useDismissContextMenu(onClose: () => void, menuRef: React.RefObject<HTM
   }, [onClose, menuRef]);
 }
 
+// Keep a context menu fully on screen: measure it after mount and clamp the
+// desired (x, y) into the viewport with a small margin. Without this, menus
+// opened on rows near the bottom of the list render partly off-screen.
+function useClampedMenuPosition(
+  x: number,
+  y: number,
+  menuRef: React.RefObject<HTMLDivElement | null>,
+): { top: number; left: number } {
+  const [pos, setPos] = useState({ top: y, left: x });
+  useLayoutEffect(() => {
+    const el = menuRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const margin = 8;
+    const maxLeft = window.innerWidth - rect.width - margin;
+    const maxTop = window.innerHeight - rect.height - margin;
+    setPos({
+      top: Math.max(margin, Math.min(y, maxTop)),
+      left: Math.max(margin, Math.min(x, maxLeft)),
+    });
+  }, [x, y, menuRef]);
+  return pos;
+}
+
 function ContextMenuButton({
   label,
   onClick,
@@ -302,13 +326,14 @@ function SessionContextMenu({
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
   useDismissContextMenu(onClose, menuRef);
+  const pos = useClampedMenuPosition(menu.x, menu.y, menuRef);
 
   const isRunning = menu.session.status === "running" || menu.session.status === "pending";
 
   return createPortal(
     <div
       ref={menuRef}
-      style={{ ...contextMenuPanelStyle, top: menu.y, left: menu.x }}
+      style={{ ...contextMenuPanelStyle, top: pos.top, left: pos.left }}
     >
       <ContextMenuButton label="Rename" onClick={() => { onRename(menu.session); onClose(); }} />
       <ContextMenuButton label="Clone" onClick={() => { onClone(menu.session); onClose(); }} />
@@ -353,11 +378,12 @@ function BridgeContextMenu({
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
   useDismissContextMenu(onClose, menuRef);
+  const pos = useClampedMenuPosition(menu.x, menu.y, menuRef);
 
   return createPortal(
     <div
       ref={menuRef}
-      style={{ ...contextMenuPanelStyle, top: menu.y, left: menu.x }}
+      style={{ ...contextMenuPanelStyle, top: pos.top, left: pos.left }}
     >
       <ContextMenuButton
         label="Create session"
@@ -869,7 +895,32 @@ export function SessionList({
             </span>
           )}
           </div>
-          <StatusBadge status={session.status} activity={sessionActivity?.get(session.id)?.activity} />
+          <div className="flex items-center gap-1.5" style={{ flexShrink: 0 }}>
+            <StatusBadge status={session.status} activity={sessionActivity?.get(session.id)?.activity} />
+            <span
+              role="button"
+              aria-label="Session actions"
+              title="Session actions"
+              onClick={(e) => {
+                e.stopPropagation();
+                const r = e.currentTarget.getBoundingClientRect();
+                setContextMenu({ kind: "session", session, x: r.right, y: r.bottom + 4 });
+              }}
+              style={{
+                cursor: "pointer",
+                color: "var(--text-faint)",
+                fontSize: 16,
+                lineHeight: 1,
+                padding: "2px 4px",
+                userSelect: "none",
+                flexShrink: 0,
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
+              onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-faint)")}
+            >
+              ⋮
+            </span>
+          </div>
         </div>
 
         {session.status === "running" && (() => {
