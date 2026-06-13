@@ -88,6 +88,31 @@ const SUPPORTED_AGENTS = [
   { name: "Shell", detail: "zsh on bridge" },
 ] as const;
 
+const STEPS = [
+  {
+    n: "1",
+    title: "Run the bridge",
+    desc: "Start ftown-bridge on any machine — laptop, server, or VM. It installs the CLI and registers itself with your dashboard.",
+  },
+  {
+    n: "2",
+    title: "Open your browser",
+    desc: "Sign in to the ftown UI from desktop or phone. Every bridge and its agent sessions show up live — no SSH, no port forwarding.",
+  },
+  {
+    n: "3",
+    title: "Orchestrate the swarm",
+    desc: "Spawn Claude Code, Cursor, Codex, opencode, or a shell. Run them in parallel, resume chats, and drive them all from anywhere.",
+  },
+] as const;
+
+const STATS = [
+  { value: "5", label: "agent CLIs supported" },
+  { value: "∞", label: "parallel sessions" },
+  { value: "100%", label: "self-hosted" },
+  { value: "MIT", label: "open source" },
+] as const;
+
 const FEATURES = [
   {
     icon: <AgentIcon />,
@@ -216,11 +241,11 @@ export default async function LandingPage() {
                 letterSpacing: "-0.02em",
               }}
             >
-              Orchestrate{" "}
+              A swarm of{" "}
               <span style={{ color: "var(--accent)", textShadow: "0 0 24px var(--accent-glow)" }}>
                 coding agents
               </span>
-              {" "}from anywhere
+              , driven from any browser
             </h1>
 
             <p
@@ -232,9 +257,10 @@ export default async function LandingPage() {
                 marginBottom: 20,
               }}
             >
-              ftown is a self-hosted control plane for remote CLI agents. Stream interactive
-              sessions to your browser, connect multiple bridges, resume chats, and watch hook
-              activity — without SSH port forwarding or screen sharing.
+              Stop SSHing in to babysit agents. ftown streams Claude Code, Cursor, Codex and
+              more as live terminals to your browser — across every machine you own, from your
+              phone or your desktop. Self-hosted, on the subscriptions you already pay for. No
+              port forwarding, no screen sharing.
             </p>
 
             <div
@@ -367,6 +393,86 @@ export default async function LandingPage() {
           </div>
         </div>
 
+        {/* Three steps */}
+        <div style={{ marginTop: 56, width: "100%", maxWidth: 960 }}>
+          <div
+            style={{
+              fontSize: 11,
+              fontWeight: 600,
+              color: "var(--text-muted)",
+              marginBottom: 16,
+              textTransform: "uppercase",
+              letterSpacing: "0.08em",
+              textAlign: "center",
+            }}
+          >
+            Three steps, no SSH
+          </div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+              gap: 16,
+            }}
+          >
+            {STEPS.map((s) => (
+              <div
+                key={s.n}
+                style={{
+                  padding: "20px 22px",
+                  background: "var(--bg-surface)",
+                  border: "1px solid var(--border-subtle)",
+                  borderRadius: 8,
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 800,
+                    fontFamily: "var(--font-mono)",
+                    color: "var(--accent)",
+                    border: "1px solid var(--border-muted)",
+                    borderRadius: 6,
+                    width: 28,
+                    height: 28,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    marginBottom: 12,
+                    textShadow: "0 0 12px var(--accent-glow)",
+                  }}
+                >
+                  {s.n}
+                </div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)", marginBottom: 6 }}>{s.title}</div>
+                <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.6 }}>{s.desc}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Stats row */}
+        <div
+          style={{
+            marginTop: 40,
+            width: "100%",
+            maxWidth: 960,
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+            gap: 16,
+            padding: "24px 0",
+            borderTop: "1px solid var(--border-subtle)",
+            borderBottom: "1px solid var(--border-subtle)",
+          }}
+        >
+          {STATS.map((s) => (
+            <div key={s.label} style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 28, fontWeight: 800, color: "var(--accent)", textShadow: "0 0 16px var(--accent-glow)", fontFamily: "var(--font-mono)" }}>{s.value}</div>
+              <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>{s.label}</div>
+            </div>
+          ))}
+        </div>
+
         {/* Desktop demo — full width */}
         <div style={{ marginTop: 48, width: "100%", maxWidth: 960 }}>
           <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.08em" }}>Desktop</div>
@@ -418,6 +524,54 @@ export default async function LandingPage() {
                 <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>{f.desc}</div>
               </div>
             ))}
+          </div>
+        </div>
+
+        {/* Closing CTA */}
+        <div
+          style={{
+            marginTop: 64,
+            width: "100%",
+            maxWidth: 720,
+            textAlign: "center",
+            padding: "40px 32px",
+            background: "var(--bg-surface)",
+            border: "1px solid var(--border-muted)",
+            borderRadius: 12,
+            boxShadow: "0 0 32px color-mix(in srgb, var(--accent) 8%, transparent)",
+          }}
+        >
+          <h2
+            style={{
+              fontSize: "clamp(22px, 4vw, 32px)",
+              fontWeight: 800,
+              color: "var(--text-primary)",
+              letterSpacing: "-0.02em",
+              marginBottom: 12,
+            }}
+          >
+            Start your{" "}
+            <span style={{ color: "var(--accent)", textShadow: "0 0 24px var(--accent-glow)" }}>swarm</span>
+          </h2>
+          <p style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.6, maxWidth: 460, margin: "0 auto 24px" }}>
+            Self-host it free, or try the hosted version while it&apos;s open. Drive your agents
+            from any browser in minutes.
+          </p>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", justifyContent: "center" }}>
+            <Link
+              href="/register"
+              className="btn-accent"
+              style={{ fontSize: 13, padding: "10px 24px", textDecoration: "none", display: "inline-block" }}
+            >
+              Self-host (Open Source)
+            </Link>
+            <Link
+              href="/register"
+              className="btn-ghost"
+              style={{ fontSize: 13, padding: "10px 24px", textDecoration: "none", display: "inline-block", border: "1px solid var(--accent)", color: "var(--accent)" }}
+            >
+              Try Hosted — Free for limited time
+            </Link>
           </div>
         </div>
       </main>
