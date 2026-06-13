@@ -20,9 +20,11 @@ import {
 import {
   createFtownSession,
   parseCreateSessionBody,
+  ProviderAuthMissingError,
   type CreateFtownSessionDeps,
 } from './create-ftown-session.js';
 import { removeFtownSession } from './remove-ftown-session.js';
+import { toWireSession } from './session-wire.js';
 
 export interface HookPayload {
   ftown_session_id: string;
@@ -52,6 +54,20 @@ function jsonResponse(res: ServerResponse, status: number, data: unknown): void 
 }
 
 class BadRequestError extends Error {}
+
+/**
+ * A blocked provider create/revive (mapped flavor with no machine token anywhere)
+ * is a client-fixable 422, not a 500. The body carries the provider, the
+ * KEY-bearing error message, and the `ftown env set` fix — NEVER a token value.
+ */
+export function providerAuthMissingResponse(
+  err: ProviderAuthMissingError,
+): { status: 422; body: { error: string; provider: string; fix: string } } {
+  return {
+    status: 422,
+    body: { error: err.message, provider: err.provider, fix: err.fix },
+  };
+}
 
 function parseBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
@@ -284,7 +300,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     // GET /api/sessions
     if (path === '/api/sessions' && req.method === 'GET') {
       const sessions = await this.store.listSessions();
-      jsonResponse(res, 200, { sessions });
+      jsonResponse(res, 200, { sessions: sessions.map(toWireSession) });
       return;
     }
 
@@ -321,8 +337,13 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
 
       try {
         const session = await createFtownSession(this.sessionDeps, input);
-        jsonResponse(res, 201, { session });
+        jsonResponse(res, 201, { session: toWireSession(session) });
       } catch (err) {
+        if (err instanceof ProviderAuthMissingError) {
+          const r = providerAuthMissingResponse(err);
+          jsonResponse(res, r.status, r.body);
+          return;
+        }
         const message = err instanceof Error ? err.message : String(err);
         const status = message === 'Parent session not found' ? 400 : 500;
         jsonResponse(res, status, { error: message });
@@ -378,7 +399,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         jsonResponse(res, 404, { error: 'Session not found' });
         return;
       }
-      jsonResponse(res, 200, { session });
+      jsonResponse(res, 200, { session: toWireSession(session) });
       return;
     }
 
@@ -492,8 +513,13 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         const resumed =
           session.command.includes(' --resume ') ||
           /(^|\s)codex(\s+\S+)*\s+resume\s/.test(session.command);
-        jsonResponse(res, 201, { session, resumed });
+        jsonResponse(res, 201, { session: toWireSession(session), resumed });
       } catch (err) {
+        if (err instanceof ProviderAuthMissingError) {
+          const r = providerAuthMissingResponse(err);
+          jsonResponse(res, r.status, r.body);
+          return;
+        }
         const message = err instanceof Error ? err.message : String(err);
         jsonResponse(res, 500, { error: message });
       }
@@ -553,7 +579,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         await this.centrifugo.publishSessionUpdate(this.userId, session);
       }
 
-      jsonResponse(res, 200, { session });
+      jsonResponse(res, 200, { session: toWireSession(session) });
       return;
     }
 

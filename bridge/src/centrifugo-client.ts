@@ -5,6 +5,7 @@ import type { Subscription, PublicationContext } from 'centrifuge';
 import { hostname } from 'node:os';
 
 import type { Command, CommandResponse, Session, BridgePresenceInfo } from './types.js';
+import { toWireSession } from './session-wire.js';
 
 type TerminalInputHandler = (sessionId: string, data: string) => void;
 type TerminalResizeHandler = (sessionId: string, cols: number, rows: number) => void;
@@ -98,7 +99,7 @@ export class CentrifugoClient {
     try {
       await this.client.publish(channel, {
         type: 'session_update',
-        session,
+        session: toWireSession(session),
         timestamp: new Date().toISOString(),
       });
     } catch (err) {

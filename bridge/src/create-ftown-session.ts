@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 
 import { buildSessionCommand } from './agent-commands.js';
 import { ensureCodexWorkdirTrust } from './codex-installer.js';
+import { PROVIDER_AUTH_ENV, loadProviderEnv } from './provider-env-store.js';
 import { registerSessionWorkspace } from './session-registry.js';
 
 import type { CentrifugoClient } from './centrifugo-client.js';
@@ -92,26 +93,90 @@ export function buildOrchestratorBriefing(params: OrchestratorBriefingParams): s
 /**
  * Provider API tokens live on the bridge machine under provider-specific keys
  * (ZAI_API_TOKEN, KIMI_API_TOKEN, DEEPSEEK_API_TOKEN, FIREWORKS_API_TOKEN) so
- * secrets never travel through the browser or the spawn command. Map the
- * matching token onto the Anthropic auth var the CLI expects. Returns an empty
- * object for unknown/absent mappings (plain claude/cursor/codex/shell).
+ * secrets never travel through the browser or the spawn command. A flavor's
+ * source token may arrive from three places, resolved last-wins:
+ * processEnv (the bridge's own environment), storeEnv (~/.ftown/env.json), and
+ * inputEnv (the per-create body). The matching token is mapped onto the
+ * Anthropic auth var the CLI expects.
  */
-const PROVIDER_AUTH_ENV: Record<string, { source: string; target: string }> = {
-  zai: { source: 'ZAI_API_TOKEN', target: 'ANTHROPIC_AUTH_TOKEN' },
-  fireworks: { source: 'FIREWORKS_API_TOKEN', target: 'ANTHROPIC_AUTH_TOKEN' },
-  kimi: { source: 'KIMI_API_TOKEN', target: 'ANTHROPIC_API_KEY' },
-  deepseek: { source: 'DEEPSEEK_API_TOKEN', target: 'ANTHROPIC_API_KEY' },
-};
+export interface ProviderEnvSources {
+  inputEnv?: Record<string, string | undefined>;
+  storeEnv?: Record<string, string | undefined>;
+  processEnv: Record<string, string | undefined>;
+}
 
+/**
+ * Raised when a MAPPED provider flavor is requested but its source token is
+ * absent from every configured source. The message names the provider, the
+ * env-var KEY, and the `ftown env set` remedy — NEVER a token value.
+ */
+export class ProviderAuthMissingError extends Error {
+  readonly provider: string;
+  readonly source: string;
+  readonly fix: string;
+
+  constructor(provider: string, source: string, fix: string) {
+    super(
+      `Provider '${provider}' requires a machine token, but ${source} is not set ` +
+        `in the bridge env, ~/.ftown/env.json, or the create request. Fix: ${fix}`,
+    );
+    this.name = 'ProviderAuthMissingError';
+    this.provider = provider;
+    this.source = source;
+    this.fix = fix;
+  }
+}
+
+/**
+ * Last-wins merge of the three sources for SOURCE-token lookup: inputEnv beats
+ * storeEnv beats processEnv (object-spread order — later spreads override).
+ */
+function mergeProviderSources(sources: ProviderEnvSources): Record<string, string | undefined> {
+  return { ...sources.processEnv, ...(sources.storeEnv ?? {}), ...(sources.inputEnv ?? {}) };
+}
+
+/**
+ * TOTAL resolver: returns {} for an unmapped flavor (plain
+ * claude/cursor/codex/shell/opencode or undefined) OR when the source token is
+ * absent in every source. Otherwise maps the source token onto the flavor's
+ * Anthropic auth target.
+ */
 export function resolveProviderAuthEnv(
   shellType: ShellType | undefined,
-  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+  sources: ProviderEnvSources,
 ): Record<string, string> {
-  const mapping = shellType ? PROVIDER_AUTH_ENV[shellType] : undefined;
+  const mapping = PROVIDER_AUTH_ENV[shellType ?? ''];
   if (!mapping) return {};
-  const token = env[mapping.source];
+  const token = mergeProviderSources(sources)[mapping.source];
   if (!token) return {};
   return { [mapping.target]: token };
+}
+
+/**
+ * Non-throwing guard twin: returns the ProviderAuthMissingError a mapped flavor
+ * would raise when its source token is absent everywhere, or undefined when the
+ * flavor is unmapped or a token is present. Used by resurrection to re-block a
+ * dead session whose token has since disappeared.
+ */
+export function findMissingProviderAuth(
+  shellType: ShellType | undefined,
+  sources: ProviderEnvSources,
+): ProviderAuthMissingError | undefined {
+  const mapping = PROVIDER_AUTH_ENV[shellType ?? ''];
+  if (!mapping) return undefined;
+  const token = mergeProviderSources(sources)[mapping.source];
+  if (token) return undefined;
+  const provider = shellType ?? '';
+  return new ProviderAuthMissingError(provider, mapping.source, `ftown env set ${provider} <token>`);
+}
+
+/** Throwing guard: surfaces the missing-token error for a mapped flavor. */
+export function assertProviderAuthAvailable(
+  shellType: ShellType | undefined,
+  sources: ProviderEnvSources,
+): void {
+  const missing = findMissingProviderAuth(shellType, sources);
+  if (missing) throw missing;
 }
 
 export async function createFtownSession(
@@ -134,10 +199,18 @@ export async function createFtownSession(
   }
 
   const isAgent = input.shellType !== 'shell';
-  // Provider API tokens are read from the bridge's environment (provider-
-  // specific keys) and mapped onto the Anthropic auth var here — so the UI-
-  // supplied env (base URL, model overrides) never carries a secret.
-  const providerAuth = resolveProviderAuthEnv(input.shellType, process.env);
+  // Provider API tokens are read from the bridge's environment, the
+  // ~/.ftown/env.json store, and the per-create input (last-wins) and mapped
+  // onto the Anthropic auth var here — so the UI-supplied env (base URL, model
+  // overrides) never carries a secret. Fail loudly BEFORE persisting the
+  // session when a mapped flavor has no token anywhere.
+  const sources: ProviderEnvSources = {
+    processEnv: process.env,
+    storeEnv: loadProviderEnv(),
+    inputEnv: input.env,
+  };
+  assertProviderAuthAvailable(input.shellType, sources);
+  const providerAuth = resolveProviderAuthEnv(input.shellType, sources);
   const isOrchestratorAgent = input.orchestrator && isAgent;
   const sessionEnv: Record<string, string> | undefined =
     input.env || Object.keys(providerAuth).length > 0 || isOrchestratorAgent

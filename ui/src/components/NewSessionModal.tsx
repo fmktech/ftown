@@ -18,7 +18,7 @@ export interface SessionDefaults {
 interface NewSessionModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSubmit: (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; env?: Record<string, string>; orchestrator?: boolean }) => void;
+  onSubmit: (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; env?: Record<string, string>; orchestrator?: boolean }) => void | Promise<void>;
   bridges: BridgeInfo[];
   defaults?: SessionDefaults;
   bridgeExec: (command: string, workingDir: string, bridgeId: string) => Promise<BridgeExecResponse>;
@@ -223,17 +223,17 @@ function resolveShellType(top: TopShell, flavor: ClaudeFlavor): ShellType {
   return flavor;
 }
 
-function ProviderTokenHint({ provider, envVar }: { provider: string; envVar: string }) {
+function ProviderTokenHint({ provider, envVar, flavor }: { provider: string; envVar: string; flavor: string }) {
   return (
     <div className="px-3 py-2.5 border border-[#2a2a2a] rounded bg-[#0a0a0a]">
       <div className="text-xs text-[#888888]">
-        Set your {provider} token on the bridge machine — the bridge maps it onto the session's auth var:
+        Register your {provider} token on the bridge machine — the bridge maps it onto the session&apos;s auth var:
       </div>
       <code className="block mt-1.5 text-xs text-[#00ff88] font-mono break-all">
-        export {envVar}=YOUR_TOKEN
+        ftown env set {flavor} &lt;token&gt;
       </code>
       <div className="text-[11px] text-[#555] mt-1.5">
-        Put it where the bridge launches (e.g. <span className="font-mono">~/.zshrc</span>). Tokens never pass through the UI.
+        Or export <span className="font-mono">{envVar}</span> where the bridge launches (e.g. <span className="font-mono">~/.zshrc</span>). Tokens never pass through the UI.
       </div>
     </div>
   );
@@ -255,6 +255,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const [zaiModels, setZaiModels] = useState<ZaiModels>(ZAI_DEFAULT_MODELS);
   const [autoCompactWindow, setAutoCompactWindow] = useState("");
   const [orchestrator, setOrchestrator] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const effectiveBridgeId = bridgeId || (bridges.length > 0 ? bridges[0].bridgeId : "");
   const selectedBridge = bridges.find((b) => b.bridgeId === effectiveBridgeId);
@@ -283,10 +284,18 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       setZaiModels(getStoredZaiModels());
       setAutoCompactWindow(getStoredAutoCompactWindow());
       setOrchestrator(false);
+      setSubmitError(null);
     }
   }, [isOpen, defaults]);
 
-  const handleSubmit = useCallback(() => {
+  // A submit failure (e.g. missing provider auth) is tied to the chosen shell
+  // type; switching shells invalidates the previous error so clear the banner.
+  useEffect(() => {
+    setSubmitError(null);
+  }, [shellType]);
+
+  const handleSubmit = useCallback(async () => {
+    setSubmitError(null);
     if (hostname && workingDir.trim()) {
       storePath(hostname, workingDir.trim());
     }
@@ -318,16 +327,21 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       }
     }
 
-    onSubmit("", {
-      name: name.trim() || undefined,
-      workingDir: workingDir.trim() || undefined,
-      bridgeId: effectiveBridgeId || undefined,
-      shellType,
-      claudeSessionId: selectedClaudeSessionId ?? undefined,
-      cursorSessionId: selectedCursorSessionId ?? undefined,
-      env,
-      orchestrator: shellType !== "shell" && orchestrator ? true : undefined,
-    });
+    try {
+      await onSubmit("", {
+        name: name.trim() || undefined,
+        workingDir: workingDir.trim() || undefined,
+        bridgeId: effectiveBridgeId || undefined,
+        shellType,
+        claudeSessionId: selectedClaudeSessionId ?? undefined,
+        cursorSessionId: selectedCursorSessionId ?? undefined,
+        env,
+        orchestrator: shellType !== "shell" && orchestrator ? true : undefined,
+      });
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : String(err));
+      return;
+    }
 
     setName("");
     setWorkingDir("");
@@ -349,7 +363,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
         onClose();
       }
       if (e.key === "Enter" && e.metaKey) {
-        handleSubmit();
+        void handleSubmit();
       }
     },
     [onClose, handleSubmit]
@@ -406,7 +420,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
 
             {shellType === "zai" && (
               <div className="mt-3 space-y-2">
-                <ProviderTokenHint provider="z.ai" envVar="ZAI_API_TOKEN" />
+                <ProviderTokenHint provider="z.ai" envVar="ZAI_API_TOKEN" flavor="zai" />
                 {(["opus", "sonnet", "haiku"] as const).map((slot) => (
                   <div key={slot}>
                     <label className="block text-xs text-[#666] mb-1 uppercase tracking-wider">
@@ -433,16 +447,16 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
             )}
 
             {shellType === "kimi" && (
-              <ProviderTokenHint provider="Kimi" envVar="KIMI_API_TOKEN" />
+              <ProviderTokenHint provider="Kimi" envVar="KIMI_API_TOKEN" flavor="kimi" />
             )}
 
             {shellType === "deepseek" && (
-              <ProviderTokenHint provider="DeepSeek" envVar="DEEPSEEK_API_TOKEN" />
+              <ProviderTokenHint provider="DeepSeek" envVar="DEEPSEEK_API_TOKEN" flavor="deepseek" />
             )}
 
             {shellType === "fireworks" && (
               <div className="mt-3 space-y-2">
-                <ProviderTokenHint provider="Fireworks" envVar="FIREWORKS_API_TOKEN" />
+                <ProviderTokenHint provider="Fireworks" envVar="FIREWORKS_API_TOKEN" flavor="fireworks" />
                 {(["opus", "sonnet", "haiku"] as const).map((slot) => (
                   <div key={slot}>
                     <label className="block text-xs text-[#666] mb-1 uppercase tracking-wider">
@@ -627,6 +641,12 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
           )}
 
           <EnvVarsEditor />
+
+          {submitError && (
+            <div className="px-3 py-2.5 border border-[#ff5555]/40 rounded bg-[#ff5555]/10 text-xs text-[#ff8888] break-words">
+              {submitError}
+            </div>
+          )}
 
           <div className="flex gap-3 justify-end pt-2">
             <button

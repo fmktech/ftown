@@ -20,6 +20,7 @@ export interface Session {
   env?: Record<string, string>;
   parentSessionId?: string;
   runtime?: SessionRuntime;
+  errorReason?: string;
 }
 
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error';

@@ -42,7 +42,7 @@ export interface BridgeExecResponse {
 
 interface UseSessionsResult {
   sessions: Session[];
-  createSession: (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; env?: Record<string, string>; orchestrator?: boolean }) => void;
+  createSession: (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; env?: Record<string, string>; orchestrator?: boolean }) => Promise<void>;
   stopSession: (sessionId: string) => void;
   retrySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
@@ -177,55 +177,75 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
   );
 
   const createSession = useCallback(
-    (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; codexSessionId?: string; env?: Record<string, string>; orchestrator?: boolean }) => {
-      if (!userId) return;
+    (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; codexSessionId?: string; env?: Record<string, string>; orchestrator?: boolean }): Promise<void> => {
+      return new Promise<void>((resolve, reject) => {
+        if (!userId) {
+          reject(new Error("Not connected"));
+          return;
+        }
 
-      const shellType = options?.shellType ?? "claude";
-      let cmd: string;
-      if (shellType === "shell") {
-        cmd = "/bin/zsh -l";
-      } else if (shellType === "opencode") {
-        cmd = "opencode";
-      } else if (shellType === "cursor") {
-        cmd = buildCursorAgentCommand({
+        const shellType = options?.shellType ?? "claude";
+        let cmd: string;
+        if (shellType === "shell") {
+          cmd = "/bin/zsh -l";
+        } else if (shellType === "opencode") {
+          cmd = "opencode";
+        } else if (shellType === "cursor") {
+          cmd = buildCursorAgentCommand({
+            workingDir: options?.workingDir,
+            model: options?.model,
+            cursorSessionId: options?.cursorSessionId,
+          });
+        } else if (shellType === "codex") {
+          cmd = buildCodexCommand({
+            model: options?.model,
+            codexSessionId: options?.codexSessionId,
+          });
+        } else if (options?.claudeSessionId) {
+          cmd = `claude --allow-dangerously-skip-permissions --resume ${options.claudeSessionId}`;
+        } else {
+          cmd = "claude --allow-dangerously-skip-permissions";
+        }
+
+        const payload: CreateSessionPayload = {
+          command: cmd,
+          prompt,
+          name: options?.name,
+          model: options?.model,
           workingDir: options?.workingDir,
-          model: options?.model,
+          bridgeId: options?.bridgeId,
+          shellType,
+          claudeSessionId: options?.claudeSessionId,
           cursorSessionId: options?.cursorSessionId,
-        });
-      } else if (shellType === "codex") {
-        cmd = buildCodexCommand({
-          model: options?.model,
           codexSessionId: options?.codexSessionId,
+          env: options?.env,
+          ...(options?.orchestrator && shellType !== "shell" ? { orchestrator: true } : {}),
+          ...(prompt ? { initialInput: prompt + "\r", initialInputDelay: 2000 } : {}),
+        };
+
+        const requestId = uuidv4();
+        const timeout = setTimeout(() => {
+          pendingCallbacksRef.current.delete(requestId);
+          reject(new Error("create_session timed out"));
+        }, 30_000);
+
+        pendingCallbacksRef.current.set(requestId, (resp) => {
+          clearTimeout(timeout);
+          if (resp.success) {
+            resolve();
+          } else {
+            reject(new Error(resp.error ?? "create_session failed"));
+          }
         });
-      } else if (options?.claudeSessionId) {
-        cmd = `claude --allow-dangerously-skip-permissions --resume ${options.claudeSessionId}`;
-      } else {
-        cmd = "claude --allow-dangerously-skip-permissions";
-      }
 
-      const payload: CreateSessionPayload = {
-        command: cmd,
-        prompt,
-        name: options?.name,
-        model: options?.model,
-        workingDir: options?.workingDir,
-        bridgeId: options?.bridgeId,
-        shellType,
-        claudeSessionId: options?.claudeSessionId,
-        cursorSessionId: options?.cursorSessionId,
-        codexSessionId: options?.codexSessionId,
-        env: options?.env,
-        ...(options?.orchestrator && shellType !== "shell" ? { orchestrator: true } : {}),
-        ...(prompt ? { initialInput: prompt + "\r", initialInputDelay: 2000 } : {}),
-      };
+        const command: Command = {
+          type: "create_session",
+          payload,
+          requestId,
+        };
 
-      const command: Command = {
-        type: "create_session",
-        payload,
-        requestId: uuidv4(),
-      };
-
-      publishCommand(command);
+        publishCommand(command);
+      });
     },
     [userId, publishCommand]
   );

@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, unlinkS
 import { randomBytes } from 'node:crypto';
 
 import { CentrifugoClient } from './centrifugo-client.js';
+import { toWireSession } from './session-wire.js';
 import { ProcessRunner } from './claude-runner.js';
 import { SessionStore } from './session-store.js';
 import { MailStore } from './mail-store.js';
@@ -24,8 +25,10 @@ import { installNotifyScript } from './install-notify-script.js';
 import { installFtownSkill } from './install-ftown-skill.js';
 import { installFtownSessionsCli } from './install-ftown-cli.js';
 import { installFtownWorkflowsCli } from './install-ftown-workflows-cli.js';
+import { installFtownEnvCli } from './install-ftown-env-cli.js';
 import { registerSessionWorkspace, unregisterSession } from './session-registry.js';
-import { createFtownSession } from './create-ftown-session.js';
+import { createFtownSession, findMissingProviderAuth } from './create-ftown-session.js';
+import { loadProviderEnv } from './provider-env-store.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { buildSessionCommand } from './agent-commands.js';
 import { isTmuxAvailable, killTmuxSession, listFtownTmuxSessions } from './tmux.js';
@@ -243,6 +246,12 @@ program
       : resolve(__dirname, '..', 'dist', 'workflow-runner-cli.js');
     const workflowsCliPath = installFtownWorkflowsCli(workflowsCliBundlePath);
     console.log(`[Bridge] Installed workflows CLI at ${workflowsCliPath}`);
+
+    const envCliBundlePath = existsSync(resolve(__dirname, 'ftown-env-cli.js'))
+      ? resolve(__dirname, 'ftown-env-cli.js')
+      : resolve(__dirname, '..', 'dist', 'ftown-env-cli.js');
+    const envCliPath = installFtownEnvCli(envCliBundlePath);
+    console.log(`[Bridge] Installed env CLI at ${envCliPath}`);
 
     const bridgeStateDir = join(homedir(), '.ftown');
     const bridgePointerPath = join(bridgeStateDir, 'bridge.json');
@@ -528,7 +537,7 @@ program
                 orchestrator: payload.orchestrator,
               },
             );
-            response = { requestId: command.requestId, success: true, data: { session } };
+            response = { requestId: command.requestId, success: true, data: { session: toWireSession(session) } };
             break;
           }
 
@@ -560,7 +569,7 @@ program
 
           case 'list_sessions': {
             const sessions = await store.listSessions();
-            response = { requestId: command.requestId, success: true, data: { sessions } };
+            response = { requestId: command.requestId, success: true, data: { sessions: sessions.map(toWireSession) } };
             break;
           }
 
@@ -572,7 +581,7 @@ program
             }
 
             const session = await store.loadSession(payload.sessionId);
-            response = { requestId: command.requestId, success: true, data: { session } };
+            response = { requestId: command.requestId, success: true, data: { session: session ? toWireSession(session) : session } };
             break;
           }
 
@@ -621,7 +630,7 @@ program
               (sid) => { publishScreenDump(sid); },
             );
 
-            response = { requestId: command.requestId, success: true, data: { session: existingSession } };
+            response = { requestId: command.requestId, success: true, data: { session: toWireSession(existingSession) } };
             break;
           }
 
@@ -656,7 +665,7 @@ program
             await store.saveSession(target);
             await centrifugo.publishSessionUpdate(userId, target);
 
-            response = { requestId: command.requestId, success: true, data: { session: target } };
+            response = { requestId: command.requestId, success: true, data: { session: toWireSession(target) } };
             break;
           }
 
@@ -678,7 +687,7 @@ program
             await store.saveSession(sessionToRename);
             await centrifugo.publishSessionUpdate(userId, sessionToRename);
 
-            response = { requestId: command.requestId, success: true, data: { session: sessionToRename } };
+            response = { requestId: command.requestId, success: true, data: { session: toWireSession(sessionToRename) } };
             break;
           }
 
@@ -750,8 +759,9 @@ program
       }
     }
 
-    async function markSessionDead(session: Session): Promise<void> {
+    async function markSessionDead(session: Session, reason?: string): Promise<void> {
       session.status = 'error';
+      session.errorReason = reason;
       session.updatedAt = new Date().toISOString();
       await store.saveSession(session);
       await centrifugo.publishSessionUpdate(userId, session);
@@ -771,6 +781,7 @@ program
       })) {
         session.status = 'running';
         session.bridgeId = bridgeId;
+        session.errorReason = undefined;
         session.updatedAt = new Date().toISOString();
         await store.saveSession(session);
         await centrifugo.publishSessionUpdate(userId, session);
@@ -807,9 +818,18 @@ program
               cursorSessionId: session.cursorSessionId,
               codexSessionId: session.codexSessionId,
             });
+        const miss = findMissingProviderAuth(session.shellType, {
+          processEnv: process.env,
+          storeEnv: loadProviderEnv(),
+        });
+        if (miss) {
+          await markSessionDead(session, miss.message);
+          return;
+        }
         session.status = 'running';
         session.bridgeId = bridgeId;
         session.runtime = runner.getPreferredRuntime();
+        session.errorReason = undefined;
         session.updatedAt = new Date().toISOString();
         await store.saveSession(session);
         await centrifugo.publishSessionUpdate(userId, session);
