@@ -51,11 +51,36 @@ const FIREWORKS_DEFAULT_MODELS: FireworksModels = {
   haiku: "accounts/fireworks/models/gpt-oss-120b",
 };
 
+const ZAI_MODELS_KEY = "ftown:zaiModels";
+
+const ZAI_MODEL_OPTIONS = [
+  "glm-5.2[1m]",
+  "glm-5.2",
+  "glm-4.6",
+  "glm-4.5-air",
+  "glm-4.5",
+  "GLM-5.1",
+  "GLM-5-Turbo",
+  "GLM-4.7-Flash",
+] as const;
+
+interface ZaiModels {
+  opus: string;
+  sonnet: string;
+  haiku: string;
+}
+
+const ZAI_DEFAULT_MODELS: ZaiModels = {
+  opus: "glm-5.2[1m]",
+  sonnet: "glm-5.2[1m]",
+  haiku: "glm-4.5-air",
+};
+
 const AUTO_COMPACT_WINDOW_KEY = "ftown:autoCompactWindow";
 
 const FLAVOR_AUTO_COMPACT_DEFAULTS: Record<"standard" | "zai" | "kimi" | "deepseek" | "fireworks", string> = {
   standard: "",
-  zai: "200000",
+  zai: "1000000",
   kimi: "256000",
   deepseek: "1000000",
   fireworks: "200000",
@@ -156,15 +181,36 @@ function setStoredFireworksModels(models: FireworksModels): void {
   localStorage.setItem(FIREWORKS_MODELS_KEY, JSON.stringify(models));
 }
 
-function getZaiDefaultEnv(token: string): Record<string, string> {
+function getStoredZaiModels(): ZaiModels {
+  if (typeof window === "undefined") return ZAI_DEFAULT_MODELS;
+  try {
+    const raw = localStorage.getItem(ZAI_MODELS_KEY);
+    if (!raw) return ZAI_DEFAULT_MODELS;
+    const parsed = JSON.parse(raw) as Partial<ZaiModels>;
+    return {
+      opus: parsed.opus ?? ZAI_DEFAULT_MODELS.opus,
+      sonnet: parsed.sonnet ?? ZAI_DEFAULT_MODELS.sonnet,
+      haiku: parsed.haiku ?? ZAI_DEFAULT_MODELS.haiku,
+    };
+  } catch {
+    return ZAI_DEFAULT_MODELS;
+  }
+}
+
+function setStoredZaiModels(models: ZaiModels): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(ZAI_MODELS_KEY, JSON.stringify(models));
+}
+
+function getZaiDefaultEnv(token: string, models: ZaiModels): Record<string, string> {
   return {
     ANTHROPIC_AUTH_TOKEN: token,
     ANTHROPIC_BASE_URL: "https://api.z.ai/api/anthropic",
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: "GLM-4.7-Flash",
-    ANTHROPIC_DEFAULT_OPUS_MODEL: "GLM-5.1",
-    ANTHROPIC_DEFAULT_SONNET_MODEL: "GLM-5-Turbo",
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: models.haiku,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: models.opus,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: models.sonnet,
     API_TIMEOUT_MS: "3000000",
-    CLAUDE_CODE_AUTO_COMPACT_WINDOW: "200000",
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: "1000000",
   };
 }
 
@@ -258,6 +304,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const [deepseekToken, setDeepseekToken] = useState("");
   const [fireworksToken, setFireworksToken] = useState("");
   const [fireworksModels, setFireworksModels] = useState<FireworksModels>(FIREWORKS_DEFAULT_MODELS);
+  const [zaiModels, setZaiModels] = useState<ZaiModels>(ZAI_DEFAULT_MODELS);
   const [autoCompactWindow, setAutoCompactWindow] = useState("");
   const [orchestrator, setOrchestrator] = useState(false);
 
@@ -289,6 +336,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       setDeepseekToken(getStoredDeepseekToken());
       setFireworksToken(getStoredFireworksToken());
       setFireworksModels(getStoredFireworksModels());
+      setZaiModels(getStoredZaiModels());
       setAutoCompactWindow(getStoredAutoCompactWindow());
       setOrchestrator(false);
     }
@@ -304,7 +352,8 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     if (shellType === "zai") {
       const trimmedToken = zaiToken.trim();
       if (trimmedToken) setStoredZaiToken(trimmedToken);
-      env = { ...getStoredEnvVars(), ...getZaiDefaultEnv(trimmedToken) };
+      setStoredZaiModels(zaiModels);
+      env = { ...getStoredEnvVars(), ...getZaiDefaultEnv(trimmedToken, zaiModels) };
     } else if (shellType === "kimi") {
       const trimmedToken = kimiToken.trim();
       if (trimmedToken) setStoredKimiToken(trimmedToken);
@@ -356,7 +405,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setSelectedCursorSummary(null);
     setOrchestrator(false);
     onClose();
-  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, zaiToken, kimiToken, deepseekToken, fireworksToken, fireworksModels, autoCompactWindow, orchestrator, onSubmit, onClose]);
+  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, zaiToken, kimiToken, deepseekToken, fireworksToken, fireworksModels, zaiModels, autoCompactWindow, orchestrator, onSubmit, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -420,17 +469,41 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
             </select>
 
             {shellType === "zai" && (
-              <div className="mt-3">
-                <label className="block text-sm text-[#888888] mb-1">z.ai API Token</label>
-                <input
-                  type="password"
-                  value={zaiToken}
-                  onChange={(e) => setZaiToken(e.target.value)}
-                  placeholder="Enter your z.ai API token"
-                  className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] font-mono"
-                  onKeyDown={handleKeyDown}
-                  autoComplete="new-password"
-                />
+              <div className="mt-3 space-y-2">
+                <div>
+                  <label className="block text-sm text-[#888888] mb-1">z.ai API Token</label>
+                  <input
+                    type="password"
+                    value={zaiToken}
+                    onChange={(e) => setZaiToken(e.target.value)}
+                    placeholder="Enter your z.ai API token"
+                    className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] font-mono"
+                    onKeyDown={handleKeyDown}
+                    autoComplete="new-password"
+                  />
+                </div>
+                {(["opus", "sonnet", "haiku"] as const).map((slot) => (
+                  <div key={slot}>
+                    <label className="block text-xs text-[#666] mb-1 uppercase tracking-wider">
+                      {slot} model
+                    </label>
+                    <input
+                      type="text"
+                      value={zaiModels[slot]}
+                      onChange={(e) =>
+                        setZaiModels((prev) => ({ ...prev, [slot]: e.target.value }))
+                      }
+                      list="zai-model-options"
+                      placeholder={`default: ${ZAI_DEFAULT_MODELS[slot]}`}
+                      className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-xs text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] font-mono"
+                    />
+                  </div>
+                ))}
+                <datalist id="zai-model-options">
+                  {ZAI_MODEL_OPTIONS.map((m) => (
+                    <option key={m} value={m} />
+                  ))}
+                </datalist>
               </div>
             )}
 
