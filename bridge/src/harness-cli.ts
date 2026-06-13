@@ -633,7 +633,7 @@ async function cmdHookPump(): Promise<void> {
         writePumpCount(sessionId, 0);
         return;
       }
-      const messages = await fetchInbox(pointer, sessionId, { wait: 25 });
+      const messages = await fetchInbox(pointer, sessionId, { wait: 0 });
       if (messages.length === 0) {
         writePumpCount(sessionId, 0);
         return;
