@@ -1,6 +1,6 @@
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error' | 'disconnected';
 
-export type ShellType = 'claude' | 'cursor' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks';
+export type ShellType = 'claude' | 'cursor' | 'codex' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks';
 
 export interface Session {
   id: string;
@@ -15,6 +15,7 @@ export interface Session {
   shellType?: ShellType;
   claudeSessionId?: string;
   cursorSessionId?: string;
+  codexSessionId?: string;
   command?: string;
   parentSessionId?: string;
 }
@@ -81,6 +82,7 @@ export interface CreateSessionPayload {
   shellType?: ShellType;
   claudeSessionId?: string;
   cursorSessionId?: string;
+  codexSessionId?: string;
   env?: Record<string, string>;
   initialInput?: string;
   initialInputDelay?: number;

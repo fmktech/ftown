@@ -32,12 +32,44 @@ export function buildCursorAgentCommand(options: {
   return parts.join(' ');
 }
 
+export function buildCodexCommand(options: {
+  model?: string;
+  codexSessionId?: string;
+  initialPrompt?: string;
+}): string {
+  // --dangerously-bypass-hook-trust silences the interactive hook-trust review
+  // for our installed ~/.codex/hooks.json entries (harmless warning banner).
+  const parts = [
+    'codex',
+    '--dangerously-bypass-approvals-and-sandbox',
+    '--dangerously-bypass-hook-trust',
+  ];
+
+  if (options.codexSessionId?.trim()) {
+    // Resume must not replay the original prompt — codex restores the thread.
+    parts.push('resume', shellQuote(options.codexSessionId.trim()));
+    return parts.join(' ');
+  }
+
+  if (options.model?.trim()) {
+    parts.push('-m', shellQuote(options.model.trim()));
+  }
+
+  if (options.initialPrompt?.trim()) {
+    // The positional prompt is auto-submitted by the codex TUI.
+    parts.push(shellQuote(options.initialPrompt));
+  }
+
+  return parts.join(' ');
+}
+
 export interface BuildSessionCommandInput {
   shellType?: ShellType;
   workingDir?: string;
   model?: string;
   claudeSessionId?: string;
   cursorSessionId?: string;
+  codexSessionId?: string;
   command?: string;
   /** Initial prompt passed as a CLI argument — avoids racing the TUI with typed input. */
   initialPrompt?: string;
@@ -61,6 +93,14 @@ export function buildSessionCommand(input: BuildSessionCommandInput): string {
       workingDir: input.workingDir,
       model: input.model,
       cursorSessionId: input.cursorSessionId,
+      initialPrompt: input.initialPrompt,
+    });
+  }
+  if (shellType === 'codex') {
+    // Workdir comes from the runner cwd — codex needs no -C flag.
+    return buildCodexCommand({
+      model: input.model,
+      codexSessionId: input.codexSessionId,
       initialPrompt: input.initialPrompt,
     });
   }

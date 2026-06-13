@@ -18,6 +18,7 @@ import { LocalApiServer } from './local-api-server.js';
 import { TerminalManager } from './terminal-manager.js';
 import { installClaudeHooks } from './hook-installer.js';
 import { installCursorHooks } from './cursor-hook-installer.js';
+import { codexBinaryAvailable, ensureCodexHooks } from './codex-installer.js';
 import { installHarness, harnessOnPath, pathHint, writeHarnessAgentGuide, agentGuidePath } from './harness-installer.js';
 import { installNotifyScript } from './install-notify-script.js';
 import { installFtownSkill } from './install-ftown-skill.js';
@@ -213,6 +214,11 @@ program
 
     const harnessCliPath = resolve(__dirname, 'harness-cli.js');
     const harness = installHarness(harnessCliPath);
+    // Codex reads Claude-style hooks from ~/.codex/hooks.json; skip silently
+    // when the codex binary is not installed on this machine.
+    if (await codexBinaryAvailable()) {
+      ensureCodexHooks(harness.wrapperPath, notifyScriptPath);
+    }
     writeHarnessAgentGuide({ wrapperPath: harness.wrapperPath, port: hookPort, bridgeId });
     console.log(`[Bridge] Harness CLI: ${harness.wrapperPath}`);
     console.log(`[Bridge] Agent guide:  ${agentGuidePath()}`);
@@ -395,34 +401,41 @@ program
     });
 
     // Last persisted agent session ids, to skip disk reads on the hot hook path.
-    const agentIdCache = new Map<string, { claude?: string; cursor?: string }>();
+    const agentIdCache = new Map<string, { claude?: string; cursor?: string; codex?: string; isCodex?: boolean }>();
 
     async function persistAgentSessionIds(hookEvent: HookEvent): Promise<void> {
       // Workspace-fallback attribution may come from a foreign agent the user
       // ran manually in the same directory; never persist its ids.
       if (hookEvent.source === 'workspace') return;
 
-      const rawClaudeId = hookEvent.data['session_id'];
+      const rawAgentId = hookEvent.data['session_id'];
       const rawCursorId = hookEvent.data['conversation_id'];
-      // Claude Code hooks carry session_id; Cursor hooks carry conversation_id.
-      const claudeId = typeof rawClaudeId === 'string' && rawClaudeId ? rawClaudeId : undefined;
+      // Claude Code AND Codex hooks carry session_id (which field it lands in
+      // depends on the session's shellType); Cursor hooks carry conversation_id.
+      const agentId = typeof rawAgentId === 'string' && rawAgentId ? rawAgentId : undefined;
       const cursorId = typeof rawCursorId === 'string' && rawCursorId ? rawCursorId : undefined;
-      if (!claudeId && !cursorId) return;
+      if (!agentId && !cursorId) return;
 
       const cached = agentIdCache.get(hookEvent.sessionId);
       if (cached
-        && (!claudeId || cached.claude === claudeId)
+        && (!agentId || (cached.isCodex ? cached.codex === agentId : cached.claude === agentId))
         && (!cursorId || cached.cursor === cursorId)) {
         return;
       }
 
       const session = await store.loadSession(hookEvent.sessionId);
       if (!session) return;
+      const isCodex = session.shellType === 'codex';
 
       let changed = false;
-      if (claudeId && session.claudeSessionId !== claudeId) {
-        session.claudeSessionId = claudeId;
-        changed = true;
+      if (agentId) {
+        if (isCodex && session.codexSessionId !== agentId) {
+          session.codexSessionId = agentId;
+          changed = true;
+        } else if (!isCodex && session.claudeSessionId !== agentId) {
+          session.claudeSessionId = agentId;
+          changed = true;
+        }
       }
       if (cursorId && session.cursorSessionId !== cursorId) {
         session.cursorSessionId = cursorId;
@@ -432,6 +445,8 @@ program
         agentIdCache.set(hookEvent.sessionId, {
           claude: session.claudeSessionId,
           cursor: session.cursorSessionId,
+          codex: session.codexSessionId,
+          isCodex,
         });
         return;
       }
@@ -442,6 +457,8 @@ program
       agentIdCache.set(hookEvent.sessionId, {
         claude: session.claudeSessionId,
         cursor: session.cursorSessionId,
+        codex: session.codexSessionId,
+        isCodex,
       });
       await centrifugo.publishSessionUpdate(userId, session);
     }
@@ -495,6 +512,7 @@ program
                 model: payload.model,
                 claudeSessionId: payload.claudeSessionId,
                 cursorSessionId: payload.cursorSessionId,
+                codexSessionId: payload.codexSessionId,
                 env: payload.env,
                 parentSessionId: payload.parentSessionId,
                 initialInput: payload.initialInput,
@@ -757,7 +775,9 @@ program
       const shellType = session.shellType ?? 'claude';
       const canResume = shellType === 'cursor'
         ? Boolean(session.cursorSessionId?.trim())
-        : shellType !== 'shell' && shellType !== 'opencode' && Boolean(session.claudeSessionId?.trim());
+        : shellType === 'codex'
+          ? Boolean(session.codexSessionId?.trim())
+          : shellType !== 'shell' && shellType !== 'opencode' && Boolean(session.claudeSessionId?.trim());
 
       if (canResume) {
         // Sessions created with a custom command rerun it verbatim (matching
@@ -777,6 +797,7 @@ program
               model: session.model,
               claudeSessionId: session.claudeSessionId,
               cursorSessionId: session.cursorSessionId,
+              codexSessionId: session.codexSessionId,
             });
         session.status = 'running';
         session.bridgeId = bridgeId;

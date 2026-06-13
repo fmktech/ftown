@@ -83,6 +83,7 @@ function ZapIcon() {
 const SUPPORTED_AGENTS = [
   { name: "Claude Code", detail: "Anthropic + API providers" },
   { name: "Cursor Agent", detail: "agent CLI" },
+  { name: "Codex", detail: "OpenAI Codex CLI" },
   { name: "opencode", detail: "interactive CLI" },
   { name: "Shell", detail: "zsh on bridge" },
 ] as const;
@@ -91,7 +92,7 @@ const FEATURES = [
   {
     icon: <AgentIcon />,
     title: "Multi-agent orchestration",
-    desc: "Run Claude Code, Cursor Agent, opencode, or a raw shell — each as a full interactive TUI streamed to your browser.",
+    desc: "Run Claude Code, Cursor Agent, Codex, opencode, or a raw shell — each as a full interactive TUI streamed to your browser.",
   },
   {
     icon: <TerminalIcon />,

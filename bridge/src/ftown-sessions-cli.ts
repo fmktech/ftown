@@ -174,7 +174,7 @@ Inbox options:
   --json                        Raw JSON output
 
 Create options:
-  --shell <type>                cursor | claude | shell | opencode (default: claude)
+  --shell <type>                cursor | claude | codex | shell | opencode (default: claude)
   --prompt <text>               Initial message
   --workdir <path>              Working directory
   --name <label>                Dashboard name
@@ -182,7 +182,7 @@ Create options:
   --parent                      Link parent to FTOWN_SESSION_ID or X-Ftown-Session-Id
   --parent-id <uuid>            Explicit parent session id
   --orchestrator                Brief the new agent to spawn and coordinate sibling sessions
-  --model <name>                Model (cursor)
+  --model <name>                Model (cursor, codex)
   --json                        Output raw JSON (default for most commands)
 
 Screen/grep options:

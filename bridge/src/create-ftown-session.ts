@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 
 import { buildSessionCommand } from './agent-commands.js';
+import { ensureCodexWorkdirTrust } from './codex-installer.js';
 import { registerSessionWorkspace } from './session-registry.js';
 
 import type { CentrifugoClient } from './centrifugo-client.js';
@@ -29,6 +30,7 @@ export interface CreateFtownSessionInput {
   model?: string;
   claudeSessionId?: string;
   cursorSessionId?: string;
+  codexSessionId?: string;
   env?: Record<string, string>;
   parentSessionId?: string;
   initialInput?: string;
@@ -128,6 +130,7 @@ export async function createFtownSession(
     model: input.model,
     claudeSessionId: input.claudeSessionId,
     cursorSessionId: input.cursorSessionId,
+    codexSessionId: input.codexSessionId,
     env: sessionEnv,
     parentSessionId,
     runtime: deps.runner.getPreferredRuntime(),
@@ -186,16 +189,17 @@ export async function createFtownSession(
     submitSuffix = promptSubmitSuffix;
   }
 
-  // claude and cursor accept the initial prompt as a CLI argument — far more
-  // reliable than racing the composer TUI with delayed keystrokes. Typed
-  // injection remains for custom commands, resumes, and raw passthrough.
+  // claude, cursor, and codex accept the initial prompt as a CLI argument —
+  // far more reliable than racing the composer TUI with delayed keystrokes.
+  // Typed injection remains for custom commands, resumes, and raw passthrough.
   const shellTypeForPrompt = input.shellType ?? 'claude';
   const promptAsCliArg =
     initialInput !== undefined &&
     input.initialInput === undefined &&
     !input.command?.trim() &&
     ((shellTypeForPrompt === 'claude' && !input.claudeSessionId?.trim()) ||
-      (shellTypeForPrompt === 'cursor' && !input.cursorSessionId?.trim()));
+      (shellTypeForPrompt === 'cursor' && !input.cursorSessionId?.trim()) ||
+      (shellTypeForPrompt === 'codex' && !input.codexSessionId?.trim()));
 
   const launchCommand = promptAsCliArg
     ? buildSessionCommand({ ...input, initialPrompt: initialInput })
@@ -204,6 +208,12 @@ export async function createFtownSession(
     initialInput = undefined;
     initialInputDelay = undefined;
     submitSuffix = undefined;
+  }
+
+  if (input.shellType === 'codex') {
+    // Codex blocks on an interactive "Do you trust this directory?" prompt
+    // unless the resolved workdir is trusted in ~/.codex/config.toml.
+    ensureCodexWorkdirTrust(input.workingDir ?? process.cwd());
   }
 
   deps.runner.run(sessionId, launchCommand, {
@@ -247,6 +257,8 @@ export function parseCreateSessionBody(
       typeof body.claudeSessionId === 'string' ? body.claudeSessionId : undefined,
     cursorSessionId:
       typeof body.cursorSessionId === 'string' ? body.cursorSessionId : undefined,
+    codexSessionId:
+      typeof body.codexSessionId === 'string' ? body.codexSessionId : undefined,
     env: env && typeof env === 'object' ? env : undefined,
     parentSessionId,
     initialInput: typeof body.initialInput === 'string' ? body.initialInput : undefined,

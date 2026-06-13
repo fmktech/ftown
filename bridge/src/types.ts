@@ -1,4 +1,4 @@
-export type ShellType = 'claude' | 'cursor' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks';
+export type ShellType = 'claude' | 'cursor' | 'codex' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks';
 
 export type SessionRuntime = 'tmux' | 'direct';
 
@@ -16,6 +16,7 @@ export interface Session {
   model?: string;
   claudeSessionId?: string;
   cursorSessionId?: string;
+  codexSessionId?: string;
   env?: Record<string, string>;
   parentSessionId?: string;
   runtime?: SessionRuntime;
@@ -74,6 +75,7 @@ export interface CreateSessionPayload {
   model?: string;
   claudeSessionId?: string;
   cursorSessionId?: string;
+  codexSessionId?: string;
   parentSessionId?: string;
   orchestrator?: boolean;
 }

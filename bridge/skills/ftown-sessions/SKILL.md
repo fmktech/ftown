@@ -55,7 +55,7 @@ Skill copy (same binary via wrapper): `scripts/ftown-sessions` in this skill dir
 ~/.ftown/ftown-sessions archive
 
 # Recreate a removed session from its tombstone (resumes the agent
-# conversation when a claude/cursor session id was recorded; the revived
+# conversation when a claude/cursor/codex session id was recorded; the revived
 # session gets a NEW id)
 ~/.ftown/ftown-sessions revive <session-id>
 ```
@@ -64,7 +64,9 @@ Skill copy (same binary via wrapper): `scripts/ftown-sessions` in this skill dir
 
 `tell` posts to the target session's **inbox**. Mail is delivered into the
 recipient's context automatically at turn boundaries (as `[ftown mail]`
-context), so there is no keystroke injection by default.
+context), so there is no keystroke injection by default. Claude and codex
+sessions get this hook-based delivery; cursor and shell sessions rely on an
+idle one-line nudge to run `ftown-harness mail read` instead.
 
 ```bash
 # Tell a specific session
@@ -93,15 +95,15 @@ Fan-out targets are messaged sequentially, one JSON result line per target.
 
 | Flag | Description |
 |------|-------------|
-| `--shell` | `cursor`, `claude`, `shell`, `opencode`, … (default `claude`) |
-| `--prompt` | Initial task — passed as a CLI launch argument to `claude`/`cursor` (typed after boot for other shells) |
+| `--shell` | `cursor`, `claude`, `codex`, `shell`, `opencode`, … (default `claude`) |
+| `--prompt` | Initial task — passed as a CLI launch argument to `claude`/`cursor`/`codex` (typed after boot for other shells) |
 | `--workdir` | Working directory |
 | `--name` | Dashboard label |
 | `--command` | Full command override (skips `--shell` builder) |
 | `--parent` | Set parent to `$FTOWN_SESSION_ID` |
 | `--parent-id` | Explicit parent session UUID |
 | `--orchestrator` | Brief the new agent (non-`shell`) to spawn and coordinate sibling sessions |
-| `--model` | Cursor model name |
+| `--model` | Cursor / codex model name |
 
 Returns JSON with the new `session.id` — use that id for `screen` / `grep` / `keys`.
 

@@ -918,14 +918,14 @@ export function SessionList({
                 letterSpacing: "0.06em",
                 padding: "1px 4px",
                 borderRadius: 3,
-                background: session.shellType === "shell" ? "rgba(255, 170, 0, 0.12)" : session.shellType === "cursor" ? "rgba(168, 180, 255, 0.12)" : session.shellType === "zai" ? "rgba(100, 149, 237, 0.12)" : session.shellType === "kimi" ? "rgba(255, 105, 180, 0.12)" : session.shellType === "opencode" ? "rgba(186, 85, 211, 0.12)" : session.shellType === "deepseek" ? "rgba(0, 191, 255, 0.12)" : "rgba(0, 255, 136, 0.08)",
-                color: session.shellType === "shell" ? "var(--status-pending)" : session.shellType === "cursor" ? "#A8B4FF" : session.shellType === "zai" ? "#6495ED" : session.shellType === "kimi" ? "#FF69B4" : session.shellType === "opencode" ? "#BA55D3" : session.shellType === "deepseek" ? "#00BFFF" : "var(--accent)",
-                border: `1px solid ${session.shellType === "shell" ? "rgba(255, 170, 0, 0.2)" : session.shellType === "cursor" ? "rgba(168, 180, 255, 0.25)" : session.shellType === "zai" ? "rgba(100, 149, 237, 0.2)" : session.shellType === "kimi" ? "rgba(255, 105, 180, 0.2)" : session.shellType === "opencode" ? "rgba(186, 85, 211, 0.2)" : session.shellType === "deepseek" ? "rgba(0, 191, 255, 0.2)" : "rgba(0, 255, 136, 0.15)"}`,
+                background: session.shellType === "shell" ? "rgba(255, 170, 0, 0.12)" : session.shellType === "cursor" ? "rgba(168, 180, 255, 0.12)" : session.shellType === "codex" ? "rgba(16, 163, 127, 0.12)" : session.shellType === "zai" ? "rgba(100, 149, 237, 0.12)" : session.shellType === "kimi" ? "rgba(255, 105, 180, 0.12)" : session.shellType === "opencode" ? "rgba(186, 85, 211, 0.12)" : session.shellType === "deepseek" ? "rgba(0, 191, 255, 0.12)" : "rgba(0, 255, 136, 0.08)",
+                color: session.shellType === "shell" ? "var(--status-pending)" : session.shellType === "cursor" ? "#A8B4FF" : session.shellType === "codex" ? "#10A37F" : session.shellType === "zai" ? "#6495ED" : session.shellType === "kimi" ? "#FF69B4" : session.shellType === "opencode" ? "#BA55D3" : session.shellType === "deepseek" ? "#00BFFF" : "var(--accent)",
+                border: `1px solid ${session.shellType === "shell" ? "rgba(255, 170, 0, 0.2)" : session.shellType === "cursor" ? "rgba(168, 180, 255, 0.25)" : session.shellType === "codex" ? "rgba(16, 163, 127, 0.25)" : session.shellType === "zai" ? "rgba(100, 149, 237, 0.2)" : session.shellType === "kimi" ? "rgba(255, 105, 180, 0.2)" : session.shellType === "opencode" ? "rgba(186, 85, 211, 0.2)" : session.shellType === "deepseek" ? "rgba(0, 191, 255, 0.2)" : "rgba(0, 255, 136, 0.15)"}`,
                 textTransform: "uppercase",
                 fontFamily: "var(--font-mono)",
               }}
             >
-              {session.shellType === "shell" ? "zsh" : session.shellType === "cursor" ? "cursor" : session.shellType === "zai" ? "z.ai" : session.shellType === "kimi" ? "kimi" : session.shellType === "opencode" ? "opencode" : session.shellType === "deepseek" ? "deepseek" : "claude"}
+              {session.shellType === "shell" ? "zsh" : session.shellType === "cursor" ? "cursor" : session.shellType === "codex" ? "codex" : session.shellType === "zai" ? "z.ai" : session.shellType === "kimi" ? "kimi" : session.shellType === "opencode" ? "opencode" : session.shellType === "deepseek" ? "deepseek" : "claude"}
             </span>
             {session.model && session.shellType !== "shell" && (
               <span style={{ fontSize: 10, color: "var(--text-faint)" }}>

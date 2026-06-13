@@ -114,8 +114,9 @@ ${h} mail read                                # pending mail; --peek keeps it un
 
 Types: \`message | task | result | escalation\`; \`--thread <id>\` groups replies.
 Mail reaches the recipient automatically: a synchronous \`hook-pump\` hook
-(Stop / UserPromptSubmit / SessionStart in \`~/.claude/settings.json\`) checks the
-inbox at turn boundaries and injects pending mail as \`[ftown mail]\` context —
+(Stop / UserPromptSubmit / SessionStart in \`~/.claude/settings.json\` for claude,
+\`~/.codex/hooks.json\` for codex) checks the inbox at turn boundaries and
+injects pending mail as \`[ftown mail]\` context —
 on Stop it holds the agent's turn open so messages get handled immediately.
 Cursor and shell sessions have no hooks; when idle they get a one-line nudge
 to run \`ftown-harness mail read\` instead.

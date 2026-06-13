@@ -18,8 +18,8 @@ See the **ftown-sessions** skill for the full CLI reference.
 
 ## Spawning workers
 
-`--shell` accepts `claude`, `cursor`, `shell`, `opencode`, …; `--parent` sets the
-worker's parent to `$FTOWN_SESSION_ID`.
+`--shell` accepts `claude`, `cursor`, `codex`, `shell`, `opencode`, …; `--parent`
+sets the worker's parent to `$FTOWN_SESSION_ID`.
 
 ```bash
 ~/.ftown/ftown-sessions create \
@@ -54,9 +54,9 @@ and wakes you with the messages — no polling loop needed. Use `screen` /
 
 ## Messaging (mail)
 
-Each session has an inbox. Claude sessions receive mail automatically at turn
-boundaries via hooks — no keystroke injection. Cursor and shell sessions have
-no hooks: when idle they get a one-line nudge telling them to run
+Each session has an inbox. Claude and codex sessions receive mail automatically
+at turn boundaries via hooks — no keystroke injection. Cursor and shell sessions
+have no hooks: when idle they get a one-line nudge telling them to run
 `ftown-harness mail read`, so expect slightly slower pickup there.
 
 ```bash

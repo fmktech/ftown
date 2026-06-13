@@ -220,11 +220,12 @@ function storePath(hostname: string, path: string): void {
   localStorage.setItem(`ftown:paths:${hostname}`, JSON.stringify(updated));
 }
 
-type TopShell = "claude" | "cursor" | "opencode" | "shell";
+type TopShell = "claude" | "cursor" | "codex" | "opencode" | "shell";
 type ClaudeFlavor = "standard" | "zai" | "kimi" | "deepseek" | "fireworks";
 
 function shellTypeToTop(s: ShellType | undefined): { top: TopShell; flavor: ClaudeFlavor } {
   if (s === "cursor") return { top: "cursor", flavor: "standard" };
+  if (s === "codex") return { top: "codex", flavor: "standard" };
   if (s === "opencode") return { top: "opencode", flavor: "standard" };
   if (s === "shell") return { top: "shell", flavor: "standard" };
   if (s === "zai") return { top: "claude", flavor: "zai" };
@@ -235,7 +236,7 @@ function shellTypeToTop(s: ShellType | undefined): { top: TopShell; flavor: Clau
 }
 
 function resolveShellType(top: TopShell, flavor: ClaudeFlavor): ShellType {
-  if (top === "cursor" || top === "opencode" || top === "shell") return top;
+  if (top === "cursor" || top === "codex" || top === "opencode" || top === "shell") return top;
   if (flavor === "standard") return "claude";
   return flavor;
 }
@@ -415,6 +416,20 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                 }}
               >
                 Cursor
+              </button>
+              <button
+                type="button"
+                onClick={() => setTopShell("codex")}
+                className="px-4 py-2 text-sm font-mono transition-colors"
+                style={{
+                  background: topShell === "codex" ? "#00ff88" : "#0a0a0a",
+                  color: topShell === "codex" ? "#0a0a0a" : "#888888",
+                  border: `1px solid ${topShell === "codex" ? "#00ff88" : "#2a2a2a"}`,
+                  borderRight: "none",
+                  fontWeight: topShell === "codex" ? 700 : 400,
+                }}
+              >
+                Codex
               </button>
               <button
                 type="button"

@@ -14,7 +14,7 @@ import {
   RemoveSessionPayload,
   UpdateSessionParentPayload,
 } from "@/types";
-import { buildCursorAgentCommand } from "@/lib/agent-commands";
+import { buildCodexCommand, buildCursorAgentCommand } from "@/lib/agent-commands";
 
 interface SessionUpdateMessage {
   type: 'session_update';
@@ -154,7 +154,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
   );
 
   const createSession = useCallback(
-    (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; env?: Record<string, string>; orchestrator?: boolean }) => {
+    (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; codexSessionId?: string; env?: Record<string, string>; orchestrator?: boolean }) => {
       if (!userId) return;
 
       const shellType = options?.shellType ?? "claude";
@@ -168,6 +168,11 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
           workingDir: options?.workingDir,
           model: options?.model,
           cursorSessionId: options?.cursorSessionId,
+        });
+      } else if (shellType === "codex") {
+        cmd = buildCodexCommand({
+          model: options?.model,
+          codexSessionId: options?.codexSessionId,
         });
       } else if (options?.claudeSessionId) {
         cmd = `claude --allow-dangerously-skip-permissions --resume ${options.claudeSessionId}`;
@@ -185,6 +190,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
         shellType,
         claudeSessionId: options?.claudeSessionId,
         cursorSessionId: options?.cursorSessionId,
+        codexSessionId: options?.codexSessionId,
         env: options?.env,
         ...(options?.orchestrator && shellType !== "shell" ? { orchestrator: true } : {}),
         ...(prompt ? { initialInput: prompt + "\r", initialInputDelay: 2000 } : {}),

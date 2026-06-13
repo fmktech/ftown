@@ -429,7 +429,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       const conflict = sessions.find(
         (s) =>
           ((tombstone.claudeSessionId && s.claudeSessionId === tombstone.claudeSessionId) ||
-            (tombstone.cursorSessionId && s.cursorSessionId === tombstone.cursorSessionId)) &&
+            (tombstone.cursorSessionId && s.cursorSessionId === tombstone.cursorSessionId) ||
+            (tombstone.codexSessionId && s.codexSessionId === tombstone.codexSessionId)) &&
           isLive(s),
       );
       if (conflict) {
@@ -459,6 +460,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         model: tombstone.model,
         claudeSessionId: tombstone.claudeSessionId,
         cursorSessionId: tombstone.cursorSessionId,
+        codexSessionId: tombstone.codexSessionId,
       });
       const isCustomCommand = Boolean(tombstone.command)
         && tombstone.command !== builderDefault
@@ -474,11 +476,15 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           model: tombstone.model,
           claudeSessionId: tombstone.claudeSessionId,
           cursorSessionId: tombstone.cursorSessionId,
+          codexSessionId: tombstone.codexSessionId,
           parentSessionId,
         });
         // resumed=false means a fresh conversation (no agent session id was
         // recorded before removal); callers should not assume context survived.
-        const resumed = session.command.includes(' --resume ');
+        // Codex resumes via a `resume <id>` subcommand instead of a --resume flag.
+        const resumed =
+          session.command.includes(' --resume ') ||
+          /(^|\s)codex(\s+\S+)*\s+resume\s/.test(session.command);
         jsonResponse(res, 201, { session, resumed });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

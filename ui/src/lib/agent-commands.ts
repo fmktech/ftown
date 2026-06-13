@@ -24,3 +24,25 @@ export function buildCursorAgentCommand(options: {
 
   return parts.join(" ");
 }
+
+export function buildCodexCommand(options: {
+  model?: string;
+  codexSessionId?: string;
+}): string {
+  const parts = [
+    "codex",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--dangerously-bypass-hook-trust",
+  ];
+
+  if (options.codexSessionId?.trim()) {
+    parts.push("resume", shellQuote(options.codexSessionId.trim()));
+    return parts.join(" ");
+  }
+
+  if (options.model?.trim()) {
+    parts.push("-m", shellQuote(options.model.trim()));
+  }
+
+  return parts.join(" ");
+}
