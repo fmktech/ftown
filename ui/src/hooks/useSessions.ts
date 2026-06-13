@@ -16,6 +16,12 @@ import {
 } from "@/types";
 import { buildCodexCommand, buildCursorAgentCommand } from "@/lib/agent-commands";
 
+// How long an optimistically-removed session id stays "tombstoned": a late
+// status update or an in-flight list_sessions snapshot for that id is ignored
+// for this window so a just-deleted row cannot reappear before the bridge's
+// authoritative 'removed' broadcast arrives.
+const REMOVED_TOMBSTONE_MS = 12_000;
+
 interface SessionUpdateMessage {
   type: 'session_update';
   session: Session;
@@ -41,7 +47,7 @@ interface UseSessionsResult {
   retrySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
   setSessionParent: (sessionId: string, parentSessionId: string | null) => void;
-  removeSession: (sessionId: string, onlyIfFinished?: boolean) => void;
+  removeSession: (sessionId: string, onlyIfFinished?: boolean, ownerOnline?: boolean) => void;
   refreshSessions: () => void;
   bridgeExec: (command: string, workingDir: string, bridgeId: string) => Promise<BridgeExecResponse>;
   lastResponse: CommandResponse | null;
@@ -53,6 +59,9 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
   const sessionsSubRef = useRef<Subscription | null>(null);
   const commandsSubRef = useRef<Subscription | null>(null);
   const pendingCallbacksRef = useRef<Map<string, (response: CommandResponse) => void>>(new Map());
+  // sessionId -> tombstone expiry (ms). Set on optimistic delete; consulted by
+  // the publication/merge handlers to keep a removed row from resurrecting.
+  const recentlyRemovedRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
     if (!client || !userId) return;
@@ -69,6 +78,19 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
       }
     }
 
+    // A session the user just deleted is removed optimistically. While its
+    // tombstone is live, ignore any late update or stale snapshot that names it
+    // so the row does not flicker back in before the bridge confirms removal.
+    const isRecentlyRemoved = (id: string): boolean => {
+      const expiry = recentlyRemovedRef.current.get(id);
+      if (expiry === undefined) return false;
+      if (expiry <= Date.now()) {
+        recentlyRemovedRef.current.delete(id);
+        return false;
+      }
+      return true;
+    };
+
     const sessionsSub = client.newSubscription(sessionsChannel);
 
     sessionsSub.on("publication", (ctx) => {
@@ -77,7 +99,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
       if (data.type === 'session_update' && data.session) {
         if ((data.session.status as string) === 'removed') {
           setSessions((prev) => prev.filter((s) => s.id !== data.session.id));
-        } else {
+        } else if (!isRecentlyRemoved(data.session.id)) {
           setSessions((prev) => {
             const idx = prev.findIndex((s) => s.id === data.session.id);
             if (idx >= 0) {
@@ -114,6 +136,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
             setSessions((prev) => {
               const merged = new Map(prev.map((s) => [s.id, s]));
               for (const s of responseData.sessions!) {
+                if (isRecentlyRemoved(s.id)) continue;
                 merged.set(s.id, s);
               }
               return Array.from(merged.values());
@@ -270,8 +293,31 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
   );
 
   const removeSession = useCallback(
-    (sessionId: string, onlyIfFinished?: boolean) => {
+    (sessionId: string, onlyIfFinished?: boolean, ownerOnline: boolean = true) => {
       if (!userId) return;
+
+      // Explicit deletes are optimistic: when the owning bridge is online,
+      // removeFtownSession always removes an existing session, so the outcome is
+      // decided the moment the user acts. Drop the row now instead of waiting for
+      // the 'removed' broadcast to round-trip (which can be slow or dropped,
+      // leaving the row until a manual refresh). A tombstone makes the removal
+      // sticky so a late status update or in-flight list snapshot cannot
+      // resurrect it.
+      //
+      // Two cases are deliberately NOT optimistic, to avoid faking a delete that
+      // never happens: (a) onlyIfFinished bulk-clear, where the bridge may decline
+      // a finished session retried back to running; (b) ownerOnline === false,
+      // where the command is dropped (the commands channel has no history) and the
+      // session genuinely still exists — the row must truthfully stay until the
+      // bridge reconnects and processes the removal.
+      if (!onlyIfFinished && ownerOnline) {
+        const now = Date.now();
+        for (const [id, exp] of recentlyRemovedRef.current) {
+          if (exp <= now) recentlyRemovedRef.current.delete(id);
+        }
+        recentlyRemovedRef.current.set(sessionId, now + REMOVED_TOMBSTONE_MS);
+        setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+      }
 
       const payload: RemoveSessionPayload = { sessionId, onlyIfFinished };
       const command: Command = {

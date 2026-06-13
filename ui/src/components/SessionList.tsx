@@ -442,6 +442,11 @@ export function SessionList({
   const inputRef = useRef<HTMLInputElement>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressFired = useRef(false);
+  // Parent ids whose subtree has already had the default-collapse applied. A
+  // parent the user later expands stays expanded because it is never reprocessed;
+  // this is persisted so reloads honor that choice instead of re-folding it.
+  const seenParentsRef = useRef<Set<string>>(new Set());
+  const collapseDefaultsReadyRef = useRef(false);
   const hiddenSet = hiddenSessionIds ?? new Set<string>();
   const hiddenBridgeSet = hiddenBridgeIds ?? new Set<string>();
   const visibleSessions = sessions.filter((s) => !hiddenSet.has(s.id) && !hiddenBridgeSet.has(s.bridgeId));
@@ -456,7 +461,45 @@ export function SessionList({
       const raw = localStorage.getItem("ftown:collapsedSessions");
       if (raw) setCollapsedSessions(new Set(JSON.parse(raw)));
     } catch { /* ignore */ }
+    try {
+      const raw = localStorage.getItem("ftown:seenParents");
+      if (raw) seenParentsRef.current = new Set(JSON.parse(raw));
+    } catch { /* ignore */ }
+    // Gate the default-collapse effect until persisted state is restored, so it
+    // never folds a parent the user had previously expanded.
+    collapseDefaultsReadyRef.current = true;
   }, []);
+
+  // Collapse each orchestrator's subagents by default: the first time a session
+  // is seen acting as a parent, fold its subtree. Tracking seen parents (rather
+  // than collapsing on every render) means a parent the user later expands stays
+  // expanded, and that choice persists across reloads alongside collapsedSessions.
+  useEffect(() => {
+    if (!collapseDefaultsReadyRef.current) return;
+
+    const present = new Set(sessions.map((s) => s.id));
+    const newParents: string[] = [];
+    for (const s of sessions) {
+      const parentId = s.parentSessionId;
+      if (!parentId || parentId === s.id || !present.has(parentId)) continue;
+      if (seenParentsRef.current.has(parentId)) continue;
+      seenParentsRef.current.add(parentId);
+      newParents.push(parentId);
+    }
+    if (newParents.length === 0) return;
+
+    try {
+      localStorage.setItem("ftown:seenParents", JSON.stringify([...seenParentsRef.current]));
+    } catch { /* ignore */ }
+    setCollapsedSessions((prev) => {
+      const next = new Set(prev);
+      for (const id of newParents) next.add(id);
+      try {
+        localStorage.setItem("ftown:collapsedSessions", JSON.stringify([...next]));
+      } catch { /* ignore */ }
+      return next;
+    });
+  }, [sessions]);
 
   useEffect(() => {
     if (editingSessionId && inputRef.current) {

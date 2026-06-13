@@ -276,11 +276,16 @@ PY`;
   }, [selectedSessionId, selectedSession?.shellType, markSessionIdle]);
 
   const handleRemoveSession = useCallback((sessionId: string, onlyIfFinished?: boolean) => {
-    removeSession(sessionId, onlyIfFinished);
+    // Only let removeSession drop the row optimistically when the owning bridge
+    // is online; otherwise the remove_session command is dropped (no command
+    // history) and the session genuinely persists, so the row must stay put.
+    const ownerBridgeId = rawSessions.find((s) => s.id === sessionId)?.bridgeId;
+    const ownerOnline = ownerBridgeId !== undefined && activeBridgeIds.has(ownerBridgeId);
+    removeSession(sessionId, onlyIfFinished, ownerOnline);
     if (selectedSessionId === sessionId) {
       setSelectedSessionId(null);
     }
-  }, [removeSession, selectedSessionId]);
+  }, [removeSession, selectedSessionId, rawSessions, activeBridgeIds]);
 
   const handleHideSession = useCallback((sessionId: string) => {
     setHiddenSessionIds((prev) => {
