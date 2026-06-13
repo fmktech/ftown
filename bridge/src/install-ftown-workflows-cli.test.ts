@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, it } from 'node:test';
+import assert from 'node:assert/strict';
 
 import { installFtownWorkflowsCli } from './install-ftown-workflows-cli.js';
 
@@ -33,25 +34,25 @@ describe('installFtownWorkflowsCli', () => {
   it('copies BOTH the cli and the engine module so the runtime import resolves (FIX B)', () => {
     installFtownWorkflowsCli(fakeCli);
     const ftown = join(tmp, '.ftown');
-    expect(existsSync(join(ftown, 'ftown-workflows-cli.js'))).toBe(true);
+    assert.strictEqual(existsSync(join(ftown, 'ftown-workflows-cli.js')), true);
     // The critical regression: without the sibling engine copy the installed CLI is
     // dead on arrival ("Cannot find module './workflow-runner.js'").
-    expect(existsSync(join(ftown, 'workflow-runner.js'))).toBe(true);
-    expect(readFileSync(join(ftown, 'workflow-runner.js'), 'utf8')).toContain('ENGINE');
+    assert.strictEqual(existsSync(join(ftown, 'workflow-runner.js')), true);
+    assert.ok(readFileSync(join(ftown, 'workflow-runner.js'), 'utf8').includes('ENGINE'));
   });
 
   it('writes an executable launcher under $HOME/.ftown and returns its path', () => {
     const launcher = installFtownWorkflowsCli(fakeCli);
-    expect(launcher).toBe(join(tmp, '.ftown', 'ftown-workflows'));
-    expect(existsSync(launcher)).toBe(true);
+    assert.strictEqual(launcher, join(tmp, '.ftown', 'ftown-workflows'));
+    assert.strictEqual(existsSync(launcher), true);
     // executable bit set for at least the owner
-    expect(statSync(launcher).mode & 0o100).toBeTruthy();
-    expect(readFileSync(launcher, 'utf8')).toContain('ftown-workflows-cli.js');
+    assert.ok(statSync(launcher).mode & 0o100);
+    assert.ok(readFileSync(launcher, 'utf8').includes('ftown-workflows-cli.js'));
   });
 
   it('writes the shared ~/.ftown/package.json ESM marker', () => {
     installFtownWorkflowsCli(fakeCli);
-    expect(JSON.parse(readFileSync(join(tmp, '.ftown', 'package.json'), 'utf8'))).toEqual({
+    assert.deepStrictEqual(JSON.parse(readFileSync(join(tmp, '.ftown', 'package.json'), 'utf8')), {
       type: 'module',
     });
   });

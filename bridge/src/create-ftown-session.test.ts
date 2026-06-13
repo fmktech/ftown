@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
 
 import { buildChildBriefing, parseCreateSessionBody } from './create-ftown-session.js';
 
@@ -8,23 +9,23 @@ import { buildChildBriefing, parseCreateSessionBody } from './create-ftown-sessi
 // create-session body and parsed here.
 describe('parseCreateSessionBody — suppressBriefing plumbing', () => {
   it('parses suppressBriefing: true', () => {
-    expect(parseCreateSessionBody({ suppressBriefing: true }).suppressBriefing).toBe(true);
+    assert.strictEqual(parseCreateSessionBody({ suppressBriefing: true }).suppressBriefing, true);
   });
 
   it('defaults suppressBriefing to false when absent', () => {
-    expect(parseCreateSessionBody({ prompt: 'do x' }).suppressBriefing).toBe(false);
+    assert.strictEqual(parseCreateSessionBody({ prompt: 'do x' }).suppressBriefing, false);
   });
 
   it('only accepts the strict boolean true (not truthy strings)', () => {
-    expect(parseCreateSessionBody({ suppressBriefing: 'yes' }).suppressBriefing).toBe(false);
-    expect(parseCreateSessionBody({ suppressBriefing: 1 }).suppressBriefing).toBe(false);
+    assert.strictEqual(parseCreateSessionBody({ suppressBriefing: 'yes' }).suppressBriefing, false);
+    assert.strictEqual(parseCreateSessionBody({ suppressBriefing: 1 }).suppressBriefing, false);
   });
 
   it('still passes through the other create fields', () => {
     const input = parseCreateSessionBody({ prompt: 'do x', shellType: 'claude', suppressBriefing: true });
-    expect(input.prompt).toBe('do x');
-    expect(input.shellType).toBe('claude');
-    expect(input.suppressBriefing).toBe(true);
+    assert.strictEqual(input.prompt, 'do x');
+    assert.strictEqual(input.shellType, 'claude');
+    assert.strictEqual(input.suppressBriefing, true);
   });
 });
 
@@ -39,6 +40,6 @@ describe('buildChildBriefing', () => {
       parentName: 'orch',
       parentId: 'p1',
     });
-    expect(briefing).toContain('mail send --parent');
+    assert.ok(briefing.includes('mail send --parent'));
   });
 });

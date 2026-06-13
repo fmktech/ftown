@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
 
 import {
   buildAgentPrompt,
@@ -15,6 +16,25 @@ import {
   type WorkflowContext,
   type WorkflowEvent,
 } from './workflow-runner.js';
+
+// like(actual, expected): asserts every key in `expected` deep-equals the same key
+// on `actual` (the node:test equivalent of vitest's toMatchObject for the cases used here).
+function like(actual: any, expected: Record<string, unknown>): void {
+  for (const k of Object.keys(expected)) assert.deepStrictEqual(actual[k], expected[k]);
+}
+
+// deepIncludes(arr, expected): true iff some element of `arr` deep-equals `expected`
+// (the node:test equivalent of vitest's toContainEqual).
+function deepIncludes(arr: unknown[], expected: unknown): boolean {
+  return arr.some((el) => {
+    try {
+      assert.deepStrictEqual(el, expected);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Fakes — fully in-memory, no network, no real fs, no real timers.
@@ -171,15 +191,15 @@ function run(
 describe('buildAgentPrompt', () => {
   it('includes the task and literally contains the result file path', () => {
     const prompt = buildAgentPrompt('Review the diff', '/wf/run1/rev.json');
-    expect(prompt).toContain('Review the diff');
-    expect(prompt).toContain('/wf/run1/rev.json');
+    assert.ok(prompt.includes('Review the diff'));
+    assert.ok(prompt.includes('/wf/run1/rev.json'));
   });
 
   it('reinforces the file-only protocol (ONLY accepted output channel, no mail)', () => {
     const prompt = buildAgentPrompt('Do it', '/wf/run1/x.json');
-    expect(prompt).toContain('/wf/run1/x.json');
-    expect(prompt).toContain('ONLY accepted output channel');
-    expect(prompt).toContain('Do NOT report via ftown-harness mail');
+    assert.ok(prompt.includes('/wf/run1/x.json'));
+    assert.ok(prompt.includes('ONLY accepted output channel'));
+    assert.ok(prompt.includes('Do NOT report via ftown-harness mail'));
   });
 
   it('embeds the schema text only when a schema is provided', () => {
@@ -189,35 +209,35 @@ describe('buildAgentPrompt', () => {
       required: ['widgetCount'],
     };
     const withSchema = buildAgentPrompt('Count widgets', '/wf/run1/count.json', schema);
-    expect(withSchema).toContain('/wf/run1/count.json');
+    assert.ok(withSchema.includes('/wf/run1/count.json'));
     // distinctive token from the schema, robust to pretty vs compact JSON
-    expect(withSchema).toContain('widgetCount');
+    assert.ok(withSchema.includes('widgetCount'));
 
     const withoutSchema = buildAgentPrompt('Count widgets', '/wf/run1/count.json');
-    expect(withoutSchema).not.toContain('widgetCount');
+    assert.ok(!withoutSchema.includes('widgetCount'));
   });
 });
 
 describe('parseResultFile', () => {
   it('parses a valid ok:true result', () => {
-    expect(parseResultFile('{"ok":true,"result":"x"}')).toEqual({ ok: true, result: 'x' });
+    assert.deepStrictEqual(parseResultFile('{"ok":true,"result":"x"}'), { ok: true, result: 'x' });
   });
 
   it('parses a valid ok:false result', () => {
-    expect(parseResultFile('{"ok":false,"error":"bad"}')).toEqual({ ok: false, error: 'bad' });
+    assert.deepStrictEqual(parseResultFile('{"ok":false,"error":"bad"}'), { ok: false, error: 'bad' });
   });
 
   it('returns null for empty text (no file / partial write)', () => {
-    expect(parseResultFile('')).toBeNull();
+    assert.strictEqual(parseResultFile(''), null);
   });
 
   it('returns null for non-JSON garbage', () => {
-    expect(parseResultFile('not json {')).toBeNull();
+    assert.strictEqual(parseResultFile('not json {'), null);
   });
 
   it('returns null when JSON parses but has no boolean ok', () => {
-    expect(parseResultFile('{"result":"x"}')).toBeNull();
-    expect(parseResultFile('{"ok":"true"}')).toBeNull(); // ok must be a boolean
+    assert.strictEqual(parseResultFile('{"result":"x"}'), null);
+    assert.strictEqual(parseResultFile('{"ok":"true"}'), null); // ok must be a boolean
   });
 });
 
@@ -232,19 +252,19 @@ describe('agent()', () => {
 
     const out = await run(deps, (ctx) => ctx.agent('review the PR', { label: 'rev' }));
 
-    expect(out).toBe('hello');
-    expect(bridge.created).toHaveLength(1);
-    expect(bridge.removed).toHaveLength(1);
+    assert.strictEqual(out, 'hello');
+    assert.strictEqual(bridge.created.length, 1);
+    assert.strictEqual(bridge.removed.length, 1);
 
     // The spawn spec wires the child to the orchestrator and embeds the result path.
     const spec = bridge.created[0];
-    expect(spec.parentSessionId).toBe('self-1');
-    expect(spec.shellType).toBe('claude'); // default shell
-    expect(spec.prompt).toContain(store.resultPath('run1', 'rev'));
+    assert.strictEqual(spec.parentSessionId, 'self-1');
+    assert.strictEqual(spec.shellType, 'claude'); // default shell
+    assert.ok(spec.prompt.includes(store.resultPath('run1', 'rev')));
 
     // Lifecycle events.
-    expect(starts(logger)[0]).toMatchObject({ label: 'rev', sessionId: 's1' });
-    expect(dones(logger)[0]).toMatchObject({ label: 'rev', ok: true, cached: false });
+    like(starts(logger)[0], { label: 'rev', sessionId: 's1' });
+    like(dones(logger)[0], { label: 'rev', ok: true, cached: false });
   });
 
   it('with a schema returns the parsed result object (not coerced to a string)', async () => {
@@ -255,7 +275,7 @@ describe('agent()', () => {
       ctx.agent('extract', { label: 'x', schema: { type: 'object' } }),
     );
 
-    expect(out).toEqual({ name: 'Ada', score: 9 });
+    assert.deepStrictEqual(out, { name: 'Ada', score: 9 });
   });
 
   it('resume: an existing valid result is returned without spawning', async () => {
@@ -265,9 +285,9 @@ describe('agent()', () => {
 
     const out = await run(deps, (ctx) => ctx.agent('redo', { label: 'rev' }));
 
-    expect(out).toBe('cached');
-    expect(bridge.created).toHaveLength(0); // never spawned
-    expect(dones(logger)[0]).toMatchObject({ cached: true });
+    assert.strictEqual(out, 'cached');
+    assert.strictEqual(bridge.created.length, 0); // never spawned
+    like(dones(logger)[0], { cached: true });
   });
 
   it('session exits without writing a result → returns null, session removed', async () => {
@@ -277,12 +297,12 @@ describe('agent()', () => {
 
     const out = await run(deps, (ctx) => ctx.agent('do work', { label: 'rev' }));
 
-    expect(out).toBeNull();
-    expect(bridge.created).toHaveLength(1);
-    expect(bridge.removed).toHaveLength(1); // cleaned up even on failure
+    assert.strictEqual(out, null);
+    assert.strictEqual(bridge.created.length, 1);
+    assert.strictEqual(bridge.removed.length, 1); // cleaned up even on failure
     const failed =
       errors(logger).length > 0 || dones(logger).some((d) => d.ok === false);
-    expect(failed).toBe(true);
+    assert.strictEqual(failed, true);
   });
 
   it('timeout: result never appears while still running → returns null, session removed', async () => {
@@ -294,11 +314,11 @@ describe('agent()', () => {
       ctx.agent('hang', { label: 't', timeoutMs: 30, pollIntervalMs: 10 }),
     );
 
-    expect(out).toBeNull();
-    expect(bridge.removed).toHaveLength(1);
+    assert.strictEqual(out, null);
+    assert.strictEqual(bridge.removed.length, 1);
     const failed =
       errors(logger).length > 0 || dones(logger).some((d) => d.ok === false);
-    expect(failed).toBe(true);
+    assert.strictEqual(failed, true);
   });
 
   it('startup race: isRunning is false on the first poll then true — agent waits instead of bailing', async () => {
@@ -311,10 +331,10 @@ describe('agent()', () => {
 
     const out = await run(deps, (ctx) => ctx.agent('health check', { label: 'ping' }));
 
-    expect(out).toBe('pong');
-    expect(bridge.created).toHaveLength(1);
-    expect(bridge.removed).toHaveLength(1);
-    expect(dones(logger)[0]).toMatchObject({ ok: true, cached: false });
+    assert.strictEqual(out, 'pong');
+    assert.strictEqual(bridge.created.length, 1);
+    assert.strictEqual(bridge.removed.length, 1);
+    like(dones(logger)[0], { ok: true, cached: false });
   });
 
   it('ran then exited without writing a result → returns null (everRunning path)', async () => {
@@ -327,8 +347,8 @@ describe('agent()', () => {
       ctx.agent('crash', { label: 'rev', pollIntervalMs: 50 }),
     );
 
-    expect(out).toBeNull();
-    expect(bridge.removed).toHaveLength(1);
+    assert.strictEqual(out, null);
+    assert.strictEqual(bridge.removed.length, 1);
   });
 
   it('ok:false result → returns null (never throws), session removed', async () => {
@@ -337,12 +357,12 @@ describe('agent()', () => {
 
     const out = await run(deps, (ctx) => ctx.agent('try', { label: 'rev' }));
 
-    expect(out).toBeNull();
-    expect(bridge.created).toHaveLength(1);
-    expect(bridge.removed).toHaveLength(1);
+    assert.strictEqual(out, null);
+    assert.strictEqual(bridge.created.length, 1);
+    assert.strictEqual(bridge.removed.length, 1);
     const failed =
       errors(logger).length > 0 || dones(logger).some((d) => d.ok === false);
-    expect(failed).toBe(true);
+    assert.strictEqual(failed, true);
   });
 });
 
@@ -364,7 +384,7 @@ describe('parallel()', () => {
       ]),
     );
 
-    expect(out).toEqual(['a', null, 'c']);
+    assert.deepStrictEqual(out, ['a', null, 'c']);
   });
 });
 
@@ -392,7 +412,7 @@ describe('pipeline()', () => {
     // item 1: 1 -> 10 -> '10-0'
     // item 2: 2 -> 20 -> throws  -> null
     // item 3: 3 -> 30 -> '30-2'   (no barrier: not blocked by item 2's failure)
-    expect(out).toEqual(['10-0', null, '30-2']);
+    assert.deepStrictEqual(out, ['10-0', null, '30-2']);
   });
 });
 
@@ -415,11 +435,11 @@ describe('concurrency', () => {
       { maxConcurrent: 2 },
     )) as Array<string | null>;
 
-    expect(bridge.created).toHaveLength(5); // every agent ran
-    expect(bridge.removed).toHaveLength(5); // every session cleaned up
-    expect(bridge.peak).toBeLessThanOrEqual(2); // the hard cap
-    expect(bridge.peak).toBe(2); // and it actually overlapped (real concurrency)
-    expect(out.every((r) => r === 'hello')).toBe(true);
+    assert.strictEqual(bridge.created.length, 5); // every agent ran
+    assert.strictEqual(bridge.removed.length, 5); // every session cleaned up
+    assert.ok(bridge.peak <= 2); // the hard cap
+    assert.strictEqual(bridge.peak, 2); // and it actually overlapped (real concurrency)
+    assert.strictEqual(out.every((r) => r === 'hello'), true);
   });
 });
 
@@ -448,13 +468,13 @@ describe('budget', () => {
       remaining: number;
     };
 
-    expect(out.r1).toBe('hello');
-    expect(out.r2).toBe('hello');
-    expect(out.r3).toBeNull(); // budget exhausted
-    expect(bridge.created).toHaveLength(2); // third never spawned
-    expect(out.spent).toBe(2);
-    expect(out.remaining).toBe(0);
-    expect(errors(logger).some((e) => /budget/i.test(e.error))).toBe(true);
+    assert.strictEqual(out.r1, 'hello');
+    assert.strictEqual(out.r2, 'hello');
+    assert.strictEqual(out.r3, null); // budget exhausted
+    assert.strictEqual(bridge.created.length, 2); // third never spawned
+    assert.strictEqual(out.spent, 2);
+    assert.strictEqual(out.remaining, 0);
+    assert.strictEqual(errors(logger).some((e) => /budget/i.test(e.error)), true);
   });
 
   it('exposes args and an unbounded budget by default', async () => {
@@ -471,10 +491,10 @@ describe('budget', () => {
       { args: { foo: 1 } },
     )) as { args: unknown; spent: number; remaining: number; maxAgents: number | null };
 
-    expect(out.args).toEqual({ foo: 1 });
-    expect(out.spent).toBe(0);
-    expect(out.remaining).toBe(Infinity); // maxAgents null => unbounded
-    expect(out.maxAgents).toBeNull();
+    assert.deepStrictEqual(out.args, { foo: 1 });
+    assert.strictEqual(out.spent, 0);
+    assert.strictEqual(out.remaining, Infinity); // maxAgents null => unbounded
+    assert.strictEqual(out.maxAgents, null);
   });
 });
 
@@ -491,8 +511,8 @@ describe('phase() and log()', () => {
       ctx.log('working');
     });
 
-    expect(logger.events).toContainEqual({ kind: 'phase', title: 'analyze' });
-    expect(logger.events).toContainEqual({ kind: 'log', message: 'working' });
+    assert.ok(deepIncludes(logger.events, { kind: 'phase', title: 'analyze' }));
+    assert.ok(deepIncludes(logger.events, { kind: 'log', message: 'working' }));
   });
 });
 
@@ -508,9 +528,9 @@ describe('NaN hardening', () => {
       maxConcurrent: NaN,
     });
 
-    expect(out).toBe('hello');
-    expect(bridge.created).toHaveLength(1);
-    expect(bridge.removed).toHaveLength(1);
+    assert.strictEqual(out, 'hello');
+    assert.strictEqual(bridge.created.length, 1);
+    assert.strictEqual(bridge.removed.length, 1);
   });
 
   it('defaultTimeoutMs NaN falls back to a finite default — absent agent returns null', async () => {
@@ -525,8 +545,8 @@ describe('NaN hardening', () => {
       { defaultTimeoutMs: NaN },
     );
 
-    expect(out).toBeNull();
-    expect(bridge.removed).toHaveLength(1);
+    assert.strictEqual(out, null);
+    assert.strictEqual(bridge.removed.length, 1);
   });
 
   it('maxAgents NaN is treated as unbounded (null budget) — spawns are not blocked', async () => {
@@ -545,10 +565,10 @@ describe('NaN hardening', () => {
       { maxAgents: NaN },
     )) as { r: unknown; remaining: number; maxAgents: number | null };
 
-    expect(out.r).toBe('hello');
-    expect(out.remaining).toBe(Infinity);
-    expect(out.maxAgents).toBeNull();
-    expect(bridge.created).toHaveLength(1);
+    assert.strictEqual(out.r, 'hello');
+    assert.strictEqual(out.remaining, Infinity);
+    assert.strictEqual(out.maxAgents, null);
+    assert.strictEqual(bridge.created.length, 1);
   });
 });
 
@@ -564,10 +584,10 @@ describe('pollInterval floor', () => {
       ctx.agent('go', { label: 'a', pollIntervalMs: 0 }),
     );
 
-    expect(out).toBe('hello');
-    expect(bridge.created).toHaveLength(1);
-    expect(clock.slept.length).toBeGreaterThan(0);
-    expect(clock.slept.every((ms) => ms >= 50)).toBe(true);
+    assert.strictEqual(out, 'hello');
+    assert.strictEqual(bridge.created.length, 1);
+    assert.ok(clock.slept.length > 0);
+    assert.strictEqual(clock.slept.every((ms) => ms >= 50), true);
   });
 });
 
@@ -582,7 +602,7 @@ describe('mapOk no-schema', () => {
 
     const out = await run(deps, (ctx) => ctx.agent('go', { label: 'a' }));
 
-    expect(out).toBe('{"a":1}');
+    assert.strictEqual(out, '{"a":1}');
   });
 });
 
@@ -602,8 +622,8 @@ describe('cache-read throw', () => {
 
     // The first (cache) read threw; the engine swallowed it, spawned, and the
     // poll read recovered the result. The call resolved — it never rejected.
-    expect(out).toBe('recovered');
-    expect(bridge.created).toHaveLength(1);
-    expect(bridge.removed).toHaveLength(1);
+    assert.strictEqual(out, 'recovered');
+    assert.strictEqual(bridge.created.length, 1);
+    assert.strictEqual(bridge.removed.length, 1);
   });
 });
