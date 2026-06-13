@@ -901,12 +901,21 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return;
     }
 
+    // The listen window is earned, not universal: a session with no mail
+    // relationships (no parent, no children, not an orchestrator) gets an
+    // instant stop instead of holding its Stop hook open for `wait` seconds.
+    // Late mail for everyone is still covered by the idle nudge.
+    let effectiveWait = wait;
+    if (wait > 0 && !(await this.participatesInMail(session))) {
+      effectiveWait = 0;
+    }
+
     const undelivered = await mailStore.listUndelivered(session.id);
-    if (undelivered.length > 0 || wait <= 0) {
+    if (undelivered.length > 0 || effectiveWait <= 0) {
       const marked = await mailStore.markDelivered(
         session.id,
         undelivered.map((m) => m.id),
-        wait > 0 ? 'poll' : 'drain',
+        effectiveWait > 0 ? 'poll' : 'drain',
       );
       jsonResponse(res, 200, { messages: marked });
       return;
@@ -942,7 +951,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         })
         .then((marked) => waiter.deliver(marked))
         .catch(() => waiter.deliver([]));
-    }, wait * 1000);
+    }, effectiveWait * 1000);
     this.mailWaiters.set(session.id, waiter);
 
     res.on('close', () => {
@@ -967,6 +976,19 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     }, delayMs);
     timer.unref();
     this.nudgeTimers.set(sessionId, timer);
+  }
+
+  /** A session earns the Stop-hook listen window only if mail can plausibly
+   *  arrive: it has a parent, has children, was marked an orchestrator, or has
+   *  exchanged mail before. */
+  private async participatesInMail(session: Session): Promise<boolean> {
+    if (session.parentSessionId) return true;
+    if (session.env?.FTOWN_ORCHESTRATOR === '1') return true;
+    if (!this.store || !this.mailStore) return false;
+    const sessions = await this.store.listSessions();
+    if (sessions.some((s) => s.parentSessionId === session.id)) return true;
+    const history = await this.mailStore.listAll(session.id, 1);
+    return history.length > 0;
   }
 
   private async fireMailNudge(sessionId: string): Promise<void> {
