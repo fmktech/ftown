@@ -276,7 +276,17 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
 
     const inputSub = client.newSubscription(inputChannel);
     inputSub.on("subscribed", () => {
-      inputSub.publish({ type: "resize", cols: term.cols, rows: term.rows });
+      // A same-size resize is a no-op for tmux, so a switched-in terminal can
+      // keep a stale layout. Bounce cols by one and back to force a re-wrap
+      // and full redraw at the real window size.
+      if (term.cols > 2) {
+        inputSub.publish({ type: "resize", cols: term.cols - 1, rows: term.rows });
+        setTimeout(() => {
+          inputSub.publish({ type: "resize", cols: term.cols, rows: term.rows });
+        }, 120);
+      } else {
+        inputSub.publish({ type: "resize", cols: term.cols, rows: term.rows });
+      }
     });
     inputSub.subscribe();
     inputSubRef.current = inputSub;
