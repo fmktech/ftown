@@ -387,79 +387,23 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
         <div className="space-y-4">
           <div>
             <label className="block text-sm text-[#888888] mb-1">Shell Type</label>
-            <div className="flex gap-0">
-              <button
-                type="button"
-                onClick={() => setTopShell("claude")}
-                className="px-4 py-2 text-sm font-mono transition-colors"
-                style={{
-                  background: topShell === "claude" ? "#00ff88" : "#0a0a0a",
-                  color: topShell === "claude" ? "#0a0a0a" : "#888888",
-                  border: `1px solid ${topShell === "claude" ? "#00ff88" : "#2a2a2a"}`,
-                  borderRight: "none",
-                  borderRadius: "4px 0 0 4px",
-                  fontWeight: topShell === "claude" ? 700 : 400,
-                }}
-              >
-                Claude
-              </button>
-              <button
-                type="button"
-                onClick={() => setTopShell("cursor")}
-                className="px-4 py-2 text-sm font-mono transition-colors"
-                style={{
-                  background: topShell === "cursor" ? "#00ff88" : "#0a0a0a",
-                  color: topShell === "cursor" ? "#0a0a0a" : "#888888",
-                  border: `1px solid ${topShell === "cursor" ? "#00ff88" : "#2a2a2a"}`,
-                  borderRight: "none",
-                  fontWeight: topShell === "cursor" ? 700 : 400,
-                }}
-              >
-                Cursor
-              </button>
-              <button
-                type="button"
-                onClick={() => setTopShell("codex")}
-                className="px-4 py-2 text-sm font-mono transition-colors"
-                style={{
-                  background: topShell === "codex" ? "#00ff88" : "#0a0a0a",
-                  color: topShell === "codex" ? "#0a0a0a" : "#888888",
-                  border: `1px solid ${topShell === "codex" ? "#00ff88" : "#2a2a2a"}`,
-                  borderRight: "none",
-                  fontWeight: topShell === "codex" ? 700 : 400,
-                }}
-              >
-                Codex
-              </button>
-              <button
-                type="button"
-                onClick={() => setTopShell("opencode")}
-                className="px-4 py-2 text-sm font-mono transition-colors"
-                style={{
-                  background: topShell === "opencode" ? "#00ff88" : "#0a0a0a",
-                  color: topShell === "opencode" ? "#0a0a0a" : "#888888",
-                  border: `1px solid ${topShell === "opencode" ? "#00ff88" : "#2a2a2a"}`,
-                  borderRight: "none",
-                  fontWeight: topShell === "opencode" ? 700 : 400,
-                }}
-              >
-                opencode
-              </button>
-              <button
-                type="button"
-                onClick={() => setTopShell("shell")}
-                className="px-4 py-2 text-sm font-mono transition-colors"
-                style={{
-                  background: topShell === "shell" ? "#00ff88" : "#0a0a0a",
-                  color: topShell === "shell" ? "#0a0a0a" : "#888888",
-                  border: `1px solid ${topShell === "shell" ? "#00ff88" : "#2a2a2a"}`,
-                  borderRadius: "0 4px 4px 0",
-                  fontWeight: topShell === "shell" ? 700 : 400,
-                }}
-              >
-                Shell (zsh)
-              </button>
-            </div>
+            <select
+              value={topShell}
+              onChange={(e) => setTopShell(e.target.value as TopShell)}
+              className="w-full px-3 py-2 text-sm font-mono rounded"
+              style={{
+                background: "#0a0a0a",
+                color: "#e0e0e0",
+                border: "1px solid #2a2a2a",
+                outline: "none",
+              }}
+            >
+              <option value="claude">Claude Code</option>
+              <option value="cursor">Cursor Agent</option>
+              <option value="codex">Codex</option>
+              <option value="opencode">opencode</option>
+              <option value="shell">Shell (zsh)</option>
+            </select>
 
             {topShell === "claude" && (
               <div className="mt-3">
