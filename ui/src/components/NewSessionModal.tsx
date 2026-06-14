@@ -254,7 +254,6 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const [fireworksModels, setFireworksModels] = useState<FireworksModels>(FIREWORKS_DEFAULT_MODELS);
   const [zaiModels, setZaiModels] = useState<ZaiModels>(ZAI_DEFAULT_MODELS);
   const [autoCompactWindow, setAutoCompactWindow] = useState("");
-  const [orchestrator, setOrchestrator] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   const effectiveBridgeId = bridgeId || (bridges.length > 0 ? bridges[0].bridgeId : "");
@@ -283,7 +282,6 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       setFireworksModels(getStoredFireworksModels());
       setZaiModels(getStoredZaiModels());
       setAutoCompactWindow(getStoredAutoCompactWindow());
-      setOrchestrator(false);
       setSubmitError(null);
     }
   }, [isOpen, defaults]);
@@ -336,7 +334,6 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
         claudeSessionId: selectedClaudeSessionId ?? undefined,
         cursorSessionId: selectedCursorSessionId ?? undefined,
         env,
-        orchestrator: shellType !== "shell" && orchestrator ? true : undefined,
       });
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : String(err));
@@ -353,9 +350,8 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setSelectedClaudeSummary(null);
     setSelectedCursorSessionId(null);
     setSelectedCursorSummary(null);
-    setOrchestrator(false);
     onClose();
-  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, fireworksModels, zaiModels, autoCompactWindow, orchestrator, onSubmit, onClose]);
+  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, fireworksModels, zaiModels, autoCompactWindow, onSubmit, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -506,21 +502,13 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
           </div>
 
           {shellType !== "shell" && (
-            <div>
-              <label className="flex items-start gap-2 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={orchestrator}
-                  onChange={(e) => setOrchestrator(e.target.checked)}
-                  className="mt-0.5 accent-[#00ff88]"
-                />
-                <span>
-                  <span className="block text-sm text-[#888888]">Orchestrator</span>
-                  <span className="block text-xs text-[#555]">
-                    Brief this agent on spawning and driving worker sessions
-                  </span>
-                </span>
-              </label>
+            <div className="rounded border border-[#1a1a1a] px-3 py-2">
+              <span className="block text-sm text-[#888888]">Need an orchestrator?</span>
+              <span className="block text-xs text-[#555]">
+                Start a normal session and ask it to use the{" "}
+                <span className="text-[#00ff88]">ftown-orchestrator</span> skill to spawn
+                and coordinate worker sessions.
+              </span>
             </div>
           )}
 
