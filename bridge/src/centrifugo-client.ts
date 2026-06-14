@@ -46,8 +46,16 @@ function truncateData(data: Record<string, unknown>): Record<string, unknown> {
 export class CentrifugoClient {
   private readonly client: Centrifuge;
   private readonly subscriptions: Map<string, Subscription> = new Map();
+  private readonly onReconnect?: () => void | Promise<void>;
+  private hasConnected = false;
 
-  constructor(url: string, token: string, getToken: () => Promise<string>) {
+  constructor(
+    url: string,
+    token: string,
+    getToken: () => Promise<string>,
+    opts?: { onReconnect?: () => void | Promise<void> },
+  ) {
+    this.onReconnect = opts?.onReconnect;
     this.client = new Centrifuge(url, {
       token,
       getToken,
@@ -60,6 +68,12 @@ export class CentrifugoClient {
 
     this.client.on('connected', (ctx) => {
       console.log(`[Centrifugo] Connected to ${ctx.transport}`);
+      // First 'connected' is the initial connect (startup resurrection already
+      // publishes the sessions). Every later 'connected' is a reconnect after a
+      // transport drop — re-sync so the UI, which does not re-fetch on its own,
+      // recovers instead of showing a stale/empty list.
+      if (this.hasConnected) void this.runOnReconnect();
+      this.hasConnected = true;
     });
 
     this.client.on('disconnected', (ctx) => {
@@ -73,6 +87,15 @@ export class CentrifugoClient {
     this.client.on('error', (ctx) => {
       console.error(`[Centrifugo] Error:`, ctx.error);
     });
+  }
+
+  private async runOnReconnect(): Promise<void> {
+    if (!this.onReconnect) return;
+    try {
+      await this.onReconnect();
+    } catch (err) {
+      console.error('[Centrifugo] onReconnect handler failed:', err);
+    }
   }
 
   connect(): void {

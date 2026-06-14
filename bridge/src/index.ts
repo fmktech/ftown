@@ -181,7 +181,18 @@ program
     const terminalManager = new TerminalManager(50000, 120);
 
     const runner = new ProcessRunner();
-    const centrifugo = new CentrifugoClient(centrifugoUrl, auth.token, getToken);
+    const centrifugo = new CentrifugoClient(centrifugoUrl, auth.token, getToken, {
+      // On a transport reconnect, re-publish the session snapshot. The UI does
+      // not re-request its list on reconnect, so without this its session list
+      // goes stale/empty after a Centrifugo blip until a page reload.
+      onReconnect: async () => {
+        const sessions = await store.listSessions();
+        for (const session of sessions) {
+          await centrifugo.publishSessionUpdate(userId, session);
+        }
+        console.log(`[Bridge] Re-synced ${sessions.length} session(s) after Centrifugo reconnect`);
+      },
+    });
     const localApiServer = new LocalApiServer();
     const apiToken = randomBytes(32).toString('hex');
     localApiServer.setAuthToken(apiToken);

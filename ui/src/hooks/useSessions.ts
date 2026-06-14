@@ -146,15 +146,19 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
       }
     });
 
+    // Re-request the session list on every (re)subscribe — not just the first —
+    // so the UI recovers its list after a Centrifugo reconnect instead of
+    // showing a stale/empty list until a page reload.
+    commandsSub.on("subscribed", () => {
+      commandsSub.publish({
+        type: "list_sessions",
+        payload: {},
+        requestId: uuidv4(),
+      });
+    });
+
     commandsSub.subscribe();
     commandsSubRef.current = commandsSub;
-
-    // Load existing sessions from bridges on connect
-    commandsSub.publish({
-      type: "list_sessions",
-      payload: {},
-      requestId: uuidv4(),
-    });
 
     return () => {
       sessionsSub.removeAllListeners();
