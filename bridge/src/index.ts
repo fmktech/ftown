@@ -26,6 +26,8 @@ import { installFtownSkill } from './install-ftown-skill.js';
 import { installFtownSessionsCli } from './install-ftown-cli.js';
 import { installFtownWorkflowsCli } from './install-ftown-workflows-cli.js';
 import { installFtownEnvCli } from './install-ftown-env-cli.js';
+import { installFtownCommandCli } from './install-ftown-command-cli.js';
+import { ensureFtownOnPath } from './ensure-ftown-path.js';
 import { registerSessionWorkspace, unregisterSession } from './session-registry.js';
 import { createFtownSession, findMissingProviderAuth } from './create-ftown-session.js';
 import { loadProviderEnv } from './provider-env-store.js';
@@ -252,6 +254,21 @@ program
       : resolve(__dirname, '..', 'dist', 'ftown-env-cli.js');
     const envCliPath = installFtownEnvCli(envCliBundlePath);
     console.log(`[Bridge] Installed env CLI at ${envCliPath}`);
+
+    const ftownCliBundlePath = existsSync(resolve(__dirname, 'ftown-cli.js'))
+      ? resolve(__dirname, 'ftown-cli.js')
+      : resolve(__dirname, '..', 'dist', 'ftown-cli.js');
+    const ftownCommandPath = installFtownCommandCli(ftownCliBundlePath);
+    console.log(`[Bridge] Installed ftown command at ${ftownCommandPath}`);
+
+    const pathSetup = ensureFtownOnPath();
+    if (pathSetup.skipped) {
+      console.log('[Bridge] PATH setup skipped (FTOWN_SKIP_PATH_SETUP)');
+    } else if (pathSetup.updated.length > 0) {
+      console.log(`[Bridge] Added ~/.ftown to PATH in: ${pathSetup.updated.join(', ')}`);
+    } else {
+      console.log('[Bridge] PATH already includes ~/.ftown (no profiles changed)');
+    }
 
     const bridgeStateDir = join(homedir(), '.ftown');
     const bridgePointerPath = join(bridgeStateDir, 'bridge.json');

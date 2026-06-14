@@ -1,11 +1,12 @@
 {
   "name": "ftown-bridge",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "CLI bridge for ftown — generic PTY-over-Centrifugo relay",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
     "ftown-bridge": "dist/index.js",
+    "ftown": "dist/ftown-cli.js",
     "ftown-harness": "dist/harness-cli.js",
     "ftown-env": "dist/ftown-env-cli.js",
     "ftown-sessions": "bin/ftown-sessions",
