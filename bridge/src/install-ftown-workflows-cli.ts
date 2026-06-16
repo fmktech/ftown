@@ -17,13 +17,17 @@ export function installFtownWorkflowsCli(compiledCliPath: string): string {
   copyFileSync(compiledCliPath, cliJsPath);
   chmodSync(cliJsPath, 0o644);
 
-  // The compiled CLI does `import './workflow-runner.js'` at runtime, so the engine
-  // module must sit alongside it. The engine has no further local imports, so a
-  // single sibling copy is sufficient.
+  // The compiled CLI imports sibling modules at runtime, so each local dependency
+  // must sit alongside it in ~/.ftown.
   const engineSrc = join(dirname(compiledCliPath), 'workflow-runner.js');
   const engineDest = join(ftownDir, 'workflow-runner.js');
   copyFileSync(engineSrc, engineDest);
   chmodSync(engineDest, 0o644);
+
+  const claudeTrustSrc = join(dirname(compiledCliPath), 'claude-trust.js');
+  const claudeTrustDest = join(ftownDir, 'claude-trust.js');
+  copyFileSync(claudeTrustSrc, claudeTrustDest);
+  chmodSync(claudeTrustDest, 0o644);
 
   const launcher = `#!/usr/bin/env bash
 set -euo pipefail

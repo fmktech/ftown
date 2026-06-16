@@ -93,6 +93,35 @@ class HttpBridgeClient implements BridgeClient {
     return { status: res.status, data };
   }
 
+  private async sleep(ms: number): Promise<void> {
+    await new Promise<void>((resolve) => setTimeout(resolve, ms));
+  }
+
+  private cursorTrustKey(lines: string[], workdir?: string): string | null {
+    const text = lines.join('\n');
+    if (!text.includes('Workspace Trust Required')) return null;
+    if (!text.includes('Do you trust the contents of this directory?')) return null;
+    if (workdir && !text.includes(workdir)) return null;
+    if (text.includes('[a] Trust this workspace')) return 'a';
+    if (text.includes('[y]') || /\b[Yy]es\b/.test(text)) return 'y';
+    return null;
+  }
+
+  private async acceptCursorWorkspaceTrust(sessionId: string, workdir?: string): Promise<void> {
+    // Cursor Agent's `--trust` only applies to headless `--print` mode. Workflow
+    // workers are interactive PTYs, so accept only the exact workspace-trust prompt.
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const { data } = await this.api('GET', `/api/sessions/${sessionId}/screen?offset=0&limit=120`);
+      const lines = (data as { lines?: string[] }).lines ?? [];
+      const key = this.cursorTrustKey(lines, workdir);
+      if (key) {
+        await this.api('POST', `/api/sessions/${sessionId}/keys`, { keys: key });
+        return;
+      }
+      await this.sleep(500);
+    }
+  }
+
   async createSession(opts: SpawnSpec): Promise<{ id: string }> {
     // Pre-trust the worker's working dir so a claude worker does not block on the
     // "Do you trust this folder?" dialog (which --dangerously-skip-permissions ignores).
@@ -116,6 +145,9 @@ class HttpBridgeClient implements BridgeClient {
     const session = (data as { session?: { id?: string } }).session;
     if (!session?.id) {
       throw new Error('createSession: bridge did not return a session id');
+    }
+    if (opts.shellType === 'cursor' && opts.workingDir) {
+      await this.acceptCursorWorkspaceTrust(session.id, opts.workingDir);
     }
     return { id: session.id };
   }

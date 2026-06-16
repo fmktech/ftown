@@ -16,12 +16,16 @@ describe('installFtownWorkflowsCli', () => {
   beforeEach(() => {
     realHome = process.env.HOME;
     tmp = mkdtempSync(join(tmpdir(), 'ftw-install-'));
-    // A fake compiled dist dir containing BOTH the cli and its sibling engine module.
+    // A fake compiled dist dir containing the cli and its sibling runtime modules.
     const dist = join(tmp, 'dist');
     mkdirSync(dist, { recursive: true });
     fakeCli = join(dist, 'workflow-runner-cli.js');
-    writeFileSync(fakeCli, "#!/usr/bin/env node\nimport './workflow-runner.js';\n");
+    writeFileSync(
+      fakeCli,
+      "#!/usr/bin/env node\nimport './workflow-runner.js';\nimport './claude-trust.js';\n",
+    );
     writeFileSync(join(dist, 'workflow-runner.js'), 'export const ENGINE = true;\n');
+    writeFileSync(join(dist, 'claude-trust.js'), 'export const TRUST = true;\n');
     process.env.HOME = tmp;
   });
 
@@ -31,7 +35,7 @@ describe('installFtownWorkflowsCli', () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  it('copies BOTH the cli and the engine module so the runtime import resolves (FIX B)', () => {
+  it('copies the cli and sibling modules so runtime imports resolve', () => {
     installFtownWorkflowsCli(fakeCli);
     const ftown = join(tmp, '.ftown');
     assert.strictEqual(existsSync(join(ftown, 'ftown-workflows-cli.js')), true);
@@ -39,6 +43,8 @@ describe('installFtownWorkflowsCli', () => {
     // dead on arrival ("Cannot find module './workflow-runner.js'").
     assert.strictEqual(existsSync(join(ftown, 'workflow-runner.js')), true);
     assert.ok(readFileSync(join(ftown, 'workflow-runner.js'), 'utf8').includes('ENGINE'));
+    assert.strictEqual(existsSync(join(ftown, 'claude-trust.js')), true);
+    assert.ok(readFileSync(join(ftown, 'claude-trust.js'), 'utf8').includes('TRUST'));
   });
 
   it('writes an executable launcher under $HOME/.ftown and returns its path', () => {

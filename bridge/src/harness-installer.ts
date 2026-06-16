@@ -1,16 +1,40 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
+import { dirname, join, parse } from 'node:path';
 
-const FTOWN_DIR = join(homedir(), '.ftown');
-const BIN_DIR = join(FTOWN_DIR, 'bin');
-const HARNESS_WRAPPER = join(BIN_DIR, 'ftown-harness');
-const HARNESS_CLI_PATH_FILE = join(FTOWN_DIR, 'harness-cli.path');
+const require = createRequire(import.meta.url);
+const HARNESS_RUNTIME_DEPS = ['commander'] as const;
 
-const WRAPPER_SCRIPT = `#!/usr/bin/env bash
+function paths(home = homedir()): {
+  ftownDir: string;
+  binDir: string;
+  wrapper: string;
+  cliPathFile: string;
+  runtimeDir: string;
+  cliCopy: string;
+  formatCopy: string;
+  agentGuide: string;
+} {
+  const ftownDir = join(home, '.ftown');
+  const binDir = join(ftownDir, 'bin');
+  return {
+    ftownDir,
+    binDir,
+    wrapper: join(binDir, 'ftown-harness'),
+    cliPathFile: join(ftownDir, 'harness-cli.path'),
+    runtimeDir: join(ftownDir, 'harness-runtime'),
+    cliCopy: join(ftownDir, 'harness-runtime', 'harness-cli.js'),
+    formatCopy: join(ftownDir, 'harness-runtime', 'harness-format.js'),
+    agentGuide: join(ftownDir, 'harness-agent.md'),
+  };
+}
+
+function wrapperScript(cliPathFile: string): string {
+  return `#!/usr/bin/env bash
 # Auto-deployed by ftown-bridge — do not edit
 set -euo pipefail
-CLI_PATH_FILE="${HARNESS_CLI_PATH_FILE.replace(/\\/g, '\\\\')}"
+CLI_PATH_FILE="${cliPathFile.replace(/\\/g, '\\\\')}"
 if [[ ! -f "$CLI_PATH_FILE" ]]; then
   echo "ftown-harness: bridge not running (missing $CLI_PATH_FILE)" >&2
   exit 1
@@ -22,6 +46,7 @@ if [[ ! -f "$CLI" ]]; then
 fi
 exec node "$CLI" "$@"
 `;
+}
 
 export interface HarnessInstallResult {
   wrapperPath: string;
@@ -29,33 +54,61 @@ export interface HarnessInstallResult {
   binDir: string;
 }
 
+function findPackageRoot(entrypoint: string): string {
+  let dir = dirname(entrypoint);
+  const root = parse(dir).root;
+  for (;;) {
+    if (existsSync(join(dir, 'package.json'))) return dir;
+    if (dir === root) {
+      throw new Error(`Could not find package root for ${entrypoint}`);
+    }
+    dir = dirname(dir);
+  }
+}
+
+function copyRuntimeDependency(dep: (typeof HARNESS_RUNTIME_DEPS)[number], fromDir: string, runtimeDir: string): void {
+  const entrypoint = require.resolve(dep, { paths: [fromDir] });
+  const packageDir = findPackageRoot(entrypoint);
+  const dest = join(runtimeDir, 'node_modules', dep);
+  cpSync(packageDir, dest, { recursive: true, force: true });
+}
+
 /** Deploy ftown-harness wrapper under ~/.ftown/bin (idempotent). */
 export function installHarness(harnessCliPath: string): HarnessInstallResult {
-  const cliPath = harnessCliPath;
+  const p = paths();
+  const cliPath = p.cliCopy;
 
-  mkdirSync(BIN_DIR, { recursive: true, mode: 0o700 });
-  writeFileSync(HARNESS_CLI_PATH_FILE, cliPath + '\n', { mode: 0o600 });
-  writeFileSync(HARNESS_WRAPPER, WRAPPER_SCRIPT, { mode: 0o755 });
+  mkdirSync(p.binDir, { recursive: true, mode: 0o700 });
+  mkdirSync(p.runtimeDir, { recursive: true, mode: 0o700 });
+  copyFileSync(harnessCliPath, p.cliCopy);
+  chmodSync(p.cliCopy, 0o644);
+  copyFileSync(join(dirname(harnessCliPath), 'harness-format.js'), p.formatCopy);
+  chmodSync(p.formatCopy, 0o644);
+  for (const dep of HARNESS_RUNTIME_DEPS) {
+    copyRuntimeDependency(dep, dirname(harnessCliPath), p.runtimeDir);
+  }
+  writeFileSync(p.cliPathFile, cliPath + '\n', { mode: 0o600 });
+  writeFileSync(p.wrapper, wrapperScript(p.cliPathFile), { mode: 0o755 });
 
   return {
-    wrapperPath: HARNESS_WRAPPER,
+    wrapperPath: p.wrapper,
     cliPath,
-    binDir: BIN_DIR,
+    binDir: p.binDir,
   };
 }
 
 export function harnessOnPath(): boolean {
+  const { ftownDir, binDir } = paths();
   const pathEnv = process.env.PATH ?? '';
-  return pathEnv.split(':').some((p) => p === BIN_DIR || p === join(FTOWN_DIR, 'bin'));
+  return pathEnv.split(':').some((p) => p === binDir || p === join(ftownDir, 'bin'));
 }
 
 export function pathHint(): string {
-  return existsSync(HARNESS_WRAPPER)
-    ? `Add to PATH: export PATH="${BIN_DIR}:$PATH"`
+  const { wrapper, binDir } = paths();
+  return existsSync(wrapper)
+    ? `Add to PATH: export PATH="${binDir}:$PATH"`
     : '';
 }
-
-const AGENT_GUIDE = join(FTOWN_DIR, 'harness-agent.md');
 
 /** Agent-facing cheat sheet — rewritten on every bridge start. */
 export function writeHarnessAgentGuide(opts: {
@@ -139,10 +192,11 @@ Prefer mail over \`send\` (keystroke injection) for agent-to-agent communication
 
 Allowed Bash: \`${h}\` subcommands (short output). Do not use curl/wget/fetch to \`127.0.0.1\` for bridge API.
 `;
-  mkdirSync(FTOWN_DIR, { recursive: true, mode: 0o700 });
-  writeFileSync(AGENT_GUIDE, body, { mode: 0o600 });
+  const { ftownDir, agentGuide } = paths();
+  mkdirSync(ftownDir, { recursive: true, mode: 0o700 });
+  writeFileSync(agentGuide, body, { mode: 0o600 });
 }
 
 export function agentGuidePath(): string {
-  return AGENT_GUIDE;
+  return paths().agentGuide;
 }

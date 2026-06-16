@@ -1,5 +1,5 @@
 /**
- * example.flow.mjs — template workflow: parallel code review fan-out + synthesis.
+ * example.flow.mjs - template workflow: review files, verify each finding, synthesize.
  *
  * Run it inside an ftown session:
  *
@@ -9,114 +9,162 @@
  *
  * Add --run-id <previous-id> to resume a partial run without re-running
  * steps whose result files already exist.
- *
- * The script exports a default async function that receives a WorkflowContext.
- * The engine wires FTOWN_SESSION_ID from the calling session so children are
- * registered as its children and are cleaned up on completion.
  */
+
+const FINDINGS_SCHEMA = {
+  type: 'object',
+  required: ['findings'],
+  properties: {
+    findings: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['title', 'file', 'severity', 'evidence'],
+        properties: {
+          title: { type: 'string' },
+          file: { type: 'string' },
+          severity: { type: 'string' },
+          evidence: { type: 'string' },
+          recommendation: { type: 'string' },
+        },
+      },
+    },
+  },
+};
+
+const VERDICT_SCHEMA = {
+  type: 'object',
+  required: ['isReal', 'reason'],
+  properties: {
+    isReal: { type: 'boolean' },
+    reason: { type: 'string' },
+  },
+};
+
+const REPORT_SCHEMA = {
+  type: 'object',
+  required: ['summary', 'confirmed', 'rejected'],
+  properties: {
+    summary: { type: 'string' },
+    confirmed: { type: 'array', items: { type: 'string' } },
+    rejected: { type: 'array', items: { type: 'string' } },
+  },
+};
+
+function requireAgentResult(value, label) {
+  if (value == null) {
+    throw new Error(`${label} failed; aborting dependent workflow phases`);
+  }
+  return value;
+}
+
+function stepKey(value) {
+  return String(value).replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '') || 'item';
+}
+
+function asFindings(value) {
+  return value && Array.isArray(value.findings) ? value.findings : [];
+}
 
 /**
  * @param {import('../../../src/workflow-runner.js').WorkflowContext} ctx
  */
 export default async function (ctx) {
-  // ── 1. Unpack args ──────────────────────────────────────────────────────────
-  // ctx.args is whatever was passed via --args (JSON-parsed).
-  // Provide a sensible fallback so the example runs without arguments too.
-  const files = /** @type {string[]} */ (
-    Array.isArray(ctx.args?.files)
-      ? ctx.args.files
-      : ['src/auth.ts', 'src/api.ts', 'src/db.ts']
-  );
+  const files = Array.isArray(ctx.args?.files)
+    ? ctx.args.files
+    : ['src/auth.ts', 'src/api.ts', 'src/db.ts'];
 
   ctx.phase('Setup');
   ctx.log(`Reviewing ${files.length} file(s): ${files.join(', ')}`);
   ctx.log(`Budget: ${ctx.budget.maxAgents ?? 'unlimited'} agents`);
 
-  // ── 2. Fan-out: one reviewer per file, all running in parallel ───────────────
-  // ctx.parallel() is a BARRIER — it waits for every thunk before returning.
-  // A thunk that errors or whose agent returns null produces a null entry;
-  // the whole call never rejects.
-  // The concurrency cap (--concurrency, default 4) limits how many real sessions
-  // run simultaneously — you can safely pass more thunks than the cap.
-  ctx.phase('Review');
-
-  const reviews = await ctx.parallel(
-    files.map((file) => async () => {
-      // Each thunk is an async function returning a string (or null on failure).
-      const result = await ctx.agent(
-        // The prompt is the full task description for this child session.
-        // Keep it self-contained — the child has no other context.
-        `You are a code reviewer. Review the file \`${file}\` for:
-- Security vulnerabilities (auth bypass, injection, secret leakage)
-- Correctness bugs (off-by-one, null dereference, missing error handling)
-- Style issues that reduce readability
-
-Reply with a concise bullet-point list. Start with "## ${file}".`,
+  const reviewed = await ctx.pipeline(
+    files,
+    async (file) => {
+      const review = await ctx.agent(
+        `Review ${file} for correctness, security, and maintainability bugs.
+Return only concrete findings with evidence. Do not include style preferences.`,
         {
-          // label becomes the step key and the result filename.
-          // Unique, filesystem-safe labels enable per-step resume.
-          label: `review-${file.replace(/[^a-z0-9]/gi, '-')}`,
-          // phase groups events in the log output.
-          phase: 'review',
-          // shell defaults to 'claude'; override here if needed.
-          // shell: 'claude',
+          label: `review-${stepKey(file)}`,
+          phase: 'Review',
+          schema: FINDINGS_SCHEMA,
         },
       );
 
-      if (result == null) {
-        ctx.log(`WARN: review of ${file} failed or timed out`);
+      return {
+        file,
+        findings: asFindings(requireAgentResult(review, `review ${file}`)),
+      };
+    },
+    async (review) => {
+      if (review.findings.length === 0) {
+        ctx.log(`No findings reported for ${review.file}`);
+        return { file: review.file, confirmed: [], rejected: [] };
       }
-      return result;
-    }),
-  );
 
-  // ── 3. Filter out any failed reviews before synthesising ────────────────────
-  const successfulReviews = reviews.filter(
-    /** @param {string | null} r */ (r) => r != null,
-  );
+      const verified = await ctx.parallel(
+        review.findings.map((finding, index) => async () => {
+          const verdict = await ctx.agent(
+            `Try to refute this finding. Default to isReal=false if the evidence is weak,
+not reproducible, or not actually caused by the code.
 
-  if (successfulReviews.length === 0) {
-    ctx.log('ERROR: all reviews failed — cannot synthesise');
-    return null;
-  }
+Finding:
+${JSON.stringify(finding, null, 2)}`,
+            {
+              label: `verify-${stepKey(review.file)}-${index}`,
+              phase: 'Verify',
+              schema: VERDICT_SCHEMA,
+            },
+          );
 
-  ctx.log(`${successfulReviews.length}/${files.length} reviews succeeded`);
+          return {
+            finding,
+            verdict: requireAgentResult(verdict, `verify ${review.file} #${index + 1}`),
+          };
+        }),
+      );
 
-  // ── 4. Single synthesis agent consolidates all reviewer findings ─────────────
-  // This is a sequential step — one agent, no parallelism needed.
-  ctx.phase('Synthesise');
+      const kept = [];
+      const rejected = [];
+      for (const item of verified.filter(Boolean)) {
+        if (item.verdict.isReal === true) kept.push(item.finding);
+        else rejected.push({ finding: item.finding, reason: item.verdict.reason });
+      }
 
-  const synthesis = await ctx.agent(
-    `You are a senior engineer writing a final code-review report.
-Below are ${successfulReviews.length} individual file reviews.
-Consolidate them into a single report with:
-1. An executive summary (2-3 sentences).
-2. Critical issues (must fix before merge).
-3. Minor issues (nice to fix).
-4. Positive observations.
-
---- REVIEWS ---
-${successfulReviews.join('\n\n---\n\n')}`,
-    {
-      label: 'synthesis',
-      phase: 'synthesise',
-      // Use schema to get a structured JSON response instead of a string.
-      // When schema is set, agent() returns the parsed object (or null).
-      // Comment it out to get a plain string instead.
-      schema: {
-        type: 'object',
-        required: ['summary', 'critical', 'minor', 'positives'],
-        properties: {
-          summary: { type: 'string' },
-          critical: { type: 'array', items: { type: 'string' } },
-          minor: { type: 'array', items: { type: 'string' } },
-          positives: { type: 'array', items: { type: 'string' } },
-        },
-      },
+      return { file: review.file, confirmed: kept, rejected };
     },
   );
 
-  // ── 5. Return value is printed by the CLI (pretty by default, --json for raw) ─
+  const completed = reviewed.filter(Boolean);
+  const confirmed = completed.flatMap((entry) => entry.confirmed);
+  const rejected = completed.flatMap((entry) => entry.rejected);
+
+  ctx.phase('Synthesis');
+  if (confirmed.length === 0) {
+    ctx.log('No confirmed findings survived verification');
+    return {
+      summary: 'No confirmed findings survived adversarial verification.',
+      confirmed: [],
+      rejected: rejected.map((entry) => entry.finding.title),
+    };
+  }
+
+  const report = await ctx.agent(
+    `Write a concise final code-review report from these verified findings.
+Group by severity and include evidence. Mention rejected findings only if useful.
+
+Confirmed:
+${JSON.stringify(confirmed, null, 2)}
+
+Rejected:
+${JSON.stringify(rejected, null, 2)}`,
+    {
+      label: 'synthesis',
+      phase: 'Synthesis',
+      schema: REPORT_SCHEMA,
+    },
+  );
+
   ctx.log(`Done. Budget used: ${ctx.budget.spent()} agent spawn(s).`);
-  return synthesis;
+  return requireAgentResult(report, 'synthesis');
 }
