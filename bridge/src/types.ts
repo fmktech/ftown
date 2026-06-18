@@ -80,6 +80,7 @@ export interface CreateSessionPayload {
   parentSessionId?: string;
   orchestrator?: boolean;
   suppressBriefing?: boolean;
+  createMissingWorkingDir?: boolean;
 }
 
 export interface BridgeExecPayload {

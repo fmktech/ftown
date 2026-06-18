@@ -1,14 +1,80 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 import {
   assertProviderAuthAvailable,
   buildChildBriefing,
+  createFtownSession,
+  nextAvailableGeneratedName,
   findMissingProviderAuth,
   parseCreateSessionBody,
+  prepareWorkingDir,
   ProviderAuthMissingError,
   resolveProviderAuthEnv,
+  WorkingDirMissingError,
 } from './create-ftown-session.js';
+import type { CreateFtownSessionDeps } from './create-ftown-session.js';
+import type { Session } from './types.js';
+
+function restoreHome(realHome: string | undefined): void {
+  if (realHome === undefined) delete process.env.HOME;
+  else process.env.HOME = realHome;
+}
+
+function fakeSession(name: string): Session {
+  return {
+    id: name,
+    name,
+    command: 'cmd',
+    status: 'running',
+    bridgeId: 'bridge',
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  };
+}
+
+function fakeDeps(existingSessions: Session[] = []): {
+  deps: CreateFtownSessionDeps;
+  saved: Session[];
+  runs: Array<{ sessionId: string; command: string; workingDir?: string }>;
+} {
+  const sessions = [...existingSessions];
+  const saved: Session[] = [];
+  const runs: Array<{ sessionId: string; command: string; workingDir?: string }> = [];
+
+  return {
+    saved,
+    runs,
+    deps: {
+      store: {
+        loadSession: async (id: string) => sessions.find((session) => session.id === id) ?? null,
+        listSessions: async () => sessions,
+        saveSession: async (session: Session) => {
+          saved.push(session);
+          sessions.unshift(session);
+        },
+      } as CreateFtownSessionDeps['store'],
+      runner: {
+        getPreferredRuntime: () => 'direct',
+        run: (sessionId: string, command: string, opts: { workingDir?: string }) => {
+          runs.push({ sessionId, command, workingDir: opts.workingDir });
+        },
+      } as CreateFtownSessionDeps['runner'],
+      centrifugo: {
+        publishSessionUpdate: async () => {},
+      } as CreateFtownSessionDeps['centrifugo'],
+      userId: 'user',
+      bridgeId: 'bridge',
+      hookPort: 1,
+      hookToken: 'token',
+      notifyScriptPath: '/tmp/notify.sh',
+      wireTerminalInput: () => {},
+    },
+  };
+}
 
 // FIX C: ftown-workflows children must be spawnable WITHOUT the standard child briefing,
 // because that briefing tells the child to report via mail — which conflicts with the
@@ -33,6 +99,131 @@ describe('parseCreateSessionBody — suppressBriefing plumbing', () => {
     assert.strictEqual(input.prompt, 'do x');
     assert.strictEqual(input.shellType, 'claude');
     assert.strictEqual(input.suppressBriefing, true);
+  });
+});
+
+describe('parseCreateSessionBody — missing working dir confirmation plumbing', () => {
+  it('parses createMissingWorkingDir only when strictly true', () => {
+    assert.strictEqual(
+      parseCreateSessionBody({ createMissingWorkingDir: true }).createMissingWorkingDir,
+      true,
+    );
+    assert.strictEqual(
+      parseCreateSessionBody({ createMissingWorkingDir: 'true' }).createMissingWorkingDir,
+      false,
+    );
+    assert.strictEqual(parseCreateSessionBody({}).createMissingWorkingDir, false);
+  });
+});
+
+describe('prepareWorkingDir', () => {
+  it('throws a structured error when the working directory is absent', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ftw-missing-wd-'));
+    const missing = join(root, 'missing', 'nested');
+    try {
+      assert.throws(
+        () => prepareWorkingDir(missing, false),
+        (err: unknown) => {
+          assert.ok(err instanceof WorkingDirMissingError);
+          assert.strictEqual(err.code, 'working_dir_missing');
+          assert.strictEqual(err.workingDir, resolve(missing));
+          return true;
+        },
+      );
+      assert.strictEqual(existsSync(missing), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('creates a missing working directory only when explicitly allowed', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ftw-create-wd-'));
+    const missing = join(root, 'missing', 'nested');
+    try {
+      assert.strictEqual(prepareWorkingDir(missing, true), resolve(missing));
+      assert.strictEqual(existsSync(missing), true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects paths that exist but are not directories', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ftw-file-wd-'));
+    const file = join(root, 'file.txt');
+    try {
+      writeFileSync(file, 'not a directory');
+      assert.throws(() => prepareWorkingDir(file, true), /not a directory/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('nextAvailableGeneratedName', () => {
+  it('appends numeric suffixes when the generated name already exists', () => {
+    assert.strictEqual(nextAvailableGeneratedName('medieval-new5', []), 'medieval-new5');
+    assert.strictEqual(
+      nextAvailableGeneratedName('medieval-new5', ['medieval-new5', 'medieval-new5_1']),
+      'medieval-new5_2',
+    );
+  });
+});
+
+describe('createFtownSession — working directory and generated name preflight', () => {
+  it('blocks a missing working directory before saving or running the Codex CLI', async () => {
+    const realHome = process.env.HOME;
+    const home = mkdtempSync(join(tmpdir(), 'ftw-home-'));
+    const root = mkdtempSync(join(tmpdir(), 'ftw-create-preflight-'));
+    const missing = join(root, 'missing-project');
+    process.env.HOME = home;
+    const harness = fakeDeps();
+
+    try {
+      await assert.rejects(
+        () => createFtownSession(harness.deps, { shellType: 'codex', workingDir: missing }),
+        (err: unknown) => {
+          assert.ok(err instanceof WorkingDirMissingError);
+          assert.strictEqual(err.workingDir, resolve(missing));
+          return true;
+        },
+      );
+      assert.strictEqual(harness.saved.length, 0);
+      assert.strictEqual(harness.runs.length, 0);
+      assert.strictEqual(existsSync(missing), false);
+    } finally {
+      restoreHome(realHome);
+      rmSync(home, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('uses the workspace basename as the generated session name and suffixes collisions', async () => {
+    const realHome = process.env.HOME;
+    const home = mkdtempSync(join(tmpdir(), 'ftw-home-'));
+    const root = mkdtempSync(join(tmpdir(), 'ftw-name-wd-'));
+    const workdir = join(root, 'medieval-new5');
+    mkdirSync(workdir);
+    process.env.HOME = home;
+    const harness = fakeDeps([
+      fakeSession('medieval-new5'),
+      fakeSession('medieval-new5_1'),
+    ]);
+
+    try {
+      const session = await createFtownSession(harness.deps, {
+        shellType: 'shell',
+        workingDir: workdir,
+      });
+      assert.strictEqual(session.name, 'medieval-new5_2');
+      assert.strictEqual(session.workingDir, resolve(workdir));
+      assert.strictEqual(harness.saved.length, 1);
+      assert.strictEqual(harness.runs.length, 1);
+      assert.strictEqual(harness.runs[0].workingDir, resolve(workdir));
+    } finally {
+      restoreHome(realHome);
+      rmSync(home, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

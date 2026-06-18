@@ -29,7 +29,7 @@ import { installFtownEnvCli } from './install-ftown-env-cli.js';
 import { installFtownCommandCli } from './install-ftown-command-cli.js';
 import { ensureFtownOnPath } from './ensure-ftown-path.js';
 import { registerSessionWorkspace, unregisterSession } from './session-registry.js';
-import { createFtownSession, findMissingProviderAuth } from './create-ftown-session.js';
+import { createFtownSession, findMissingProviderAuth, WorkingDirMissingError } from './create-ftown-session.js';
 import { loadProviderEnv } from './provider-env-store.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { buildSessionCommand } from './agent-commands.js';
@@ -563,6 +563,8 @@ program
                 initialInput: payload.initialInput,
                 initialInputDelay: payload.initialInputDelay,
                 orchestrator: payload.orchestrator,
+                suppressBriefing: payload.suppressBriefing,
+                createMissingWorkingDir: payload.createMissingWorkingDir,
               },
             );
             response = { requestId: command.requestId, success: true, data: { session: toWireSession(session) } };
@@ -777,7 +779,18 @@ program
         }
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : String(err);
-        response = { requestId: command.requestId, success: false, error: errorMessage };
+        response = err instanceof WorkingDirMissingError
+          ? {
+              requestId: command.requestId,
+              success: false,
+              error: errorMessage,
+              data: {
+                code: err.code,
+                workingDir: err.workingDir,
+                canCreate: true,
+              },
+            }
+          : { requestId: command.requestId, success: false, error: errorMessage };
       }
 
       try {

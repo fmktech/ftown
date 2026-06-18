@@ -21,6 +21,7 @@ import {
   createFtownSession,
   parseCreateSessionBody,
   ProviderAuthMissingError,
+  WorkingDirMissingError,
   type CreateFtownSessionDeps,
 } from './create-ftown-session.js';
 import { removeFtownSession } from './remove-ftown-session.js';
@@ -66,6 +67,20 @@ export function providerAuthMissingResponse(
   return {
     status: 422,
     body: { error: err.message, provider: err.provider, fix: err.fix },
+  };
+}
+
+export function workingDirMissingResponse(
+  err: WorkingDirMissingError,
+): { status: 422; body: { error: string; code: string; workingDir: string; canCreate: boolean } } {
+  return {
+    status: 422,
+    body: {
+      error: err.message,
+      code: err.code,
+      workingDir: err.workingDir,
+      canCreate: true,
+    },
   };
 }
 
@@ -344,6 +359,11 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           jsonResponse(res, r.status, r.body);
           return;
         }
+        if (err instanceof WorkingDirMissingError) {
+          const r = workingDirMissingResponse(err);
+          jsonResponse(res, r.status, r.body);
+          return;
+        }
         const message = err instanceof Error ? err.message : String(err);
         const status = message === 'Parent session not found' ? 400 : 500;
         jsonResponse(res, status, { error: message });
@@ -515,14 +535,19 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           /(^|\s)codex(\s+\S+)*\s+resume\s/.test(session.command);
         jsonResponse(res, 201, { session: toWireSession(session), resumed });
       } catch (err) {
-        if (err instanceof ProviderAuthMissingError) {
-          const r = providerAuthMissingResponse(err);
-          jsonResponse(res, r.status, r.body);
-          return;
+          if (err instanceof ProviderAuthMissingError) {
+            const r = providerAuthMissingResponse(err);
+            jsonResponse(res, r.status, r.body);
+            return;
+          }
+          if (err instanceof WorkingDirMissingError) {
+            const r = workingDirMissingResponse(err);
+            jsonResponse(res, r.status, r.body);
+            return;
+          }
+          const message = err instanceof Error ? err.message : String(err);
+          jsonResponse(res, 500, { error: message });
         }
-        const message = err instanceof Error ? err.message : String(err);
-        jsonResponse(res, 500, { error: message });
-      }
       return;
     }
 

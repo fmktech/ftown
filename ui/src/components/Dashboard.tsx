@@ -3,8 +3,8 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { Centrifuge } from "centrifuge";
 import { ConnectionStatus } from "@/hooks/useCentrifugo";
-import { Session, ShellType } from "@/types";
-import { useSessions } from "@/hooks/useSessions";
+import { Session } from "@/types";
+import { CreateSessionOptions, useSessions } from "@/hooks/useSessions";
 import { useBridges } from "@/hooks/useBridges";
 import { useAllSessionEvents } from "@/hooks/useAllSessionEvents";
 import { SessionList } from "./SessionList";
@@ -252,7 +252,7 @@ PY`;
   }, [rawSessions]);
 
   const handleCreateSession = useCallback(
-    (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; env?: Record<string, string>; orchestrator?: boolean }): Promise<void> => {
+    (prompt: string, options: CreateSessionOptions): Promise<void> => {
       return createSession(prompt, options);
     },
     [createSession]

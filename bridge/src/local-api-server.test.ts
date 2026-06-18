@@ -1,8 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ProviderAuthMissingError } from './create-ftown-session.js';
-import { providerAuthMissingResponse } from './local-api-server.js';
+import { ProviderAuthMissingError, WorkingDirMissingError } from './create-ftown-session.js';
+import { providerAuthMissingResponse, workingDirMissingResponse } from './local-api-server.js';
 
 // A blocked provider create/revive must surface as a 422 carrying the provider,
 // the env-var KEY-bearing message, and the `ftown env set` fix — and NEVER the
@@ -43,5 +43,18 @@ describe('providerAuthMissingResponse', () => {
       assert.strictEqual(response.body.provider, provider);
       assert.strictEqual(response.body.fix, `ftown env set ${provider} <token>`);
     }
+  });
+});
+
+describe('workingDirMissingResponse', () => {
+  it('maps a WorkingDirMissingError to a 422 with a createable code and path', () => {
+    const err = new WorkingDirMissingError('/tmp/missing-project');
+    const response = workingDirMissingResponse(err);
+
+    assert.strictEqual(response.status, 422);
+    assert.strictEqual(response.body.error, err.message);
+    assert.strictEqual(response.body.code, 'working_dir_missing');
+    assert.strictEqual(response.body.workingDir, '/tmp/missing-project');
+    assert.strictEqual(response.body.canCreate, true);
   });
 });

@@ -40,9 +40,38 @@ export interface BridgeExecResponse {
   exitCode?: number;
 }
 
+export interface CreateSessionOptions {
+  name?: string;
+  model?: string;
+  workingDir?: string;
+  bridgeId?: string;
+  shellType?: ShellType;
+  claudeSessionId?: string;
+  cursorSessionId?: string;
+  codexSessionId?: string;
+  env?: Record<string, string>;
+  orchestrator?: boolean;
+  createMissingWorkingDir?: boolean;
+}
+
+export class CreateSessionBridgeError extends Error {
+  readonly code?: string;
+  readonly workingDir?: string;
+  readonly canCreate?: boolean;
+
+  constructor(message: string, data?: unknown) {
+    super(message);
+    this.name = "CreateSessionBridgeError";
+    const payload = data as { code?: unknown; workingDir?: unknown; canCreate?: unknown } | undefined;
+    this.code = typeof payload?.code === "string" ? payload.code : undefined;
+    this.workingDir = typeof payload?.workingDir === "string" ? payload.workingDir : undefined;
+    this.canCreate = payload?.canCreate === true;
+  }
+}
+
 interface UseSessionsResult {
   sessions: Session[];
-  createSession: (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; env?: Record<string, string>; orchestrator?: boolean }) => Promise<void>;
+  createSession: (prompt: string, options?: CreateSessionOptions) => Promise<void>;
   stopSession: (sessionId: string) => void;
   retrySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
@@ -181,7 +210,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
   );
 
   const createSession = useCallback(
-    (prompt: string, options?: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; codexSessionId?: string; env?: Record<string, string>; orchestrator?: boolean }): Promise<void> => {
+    (prompt: string, options?: CreateSessionOptions): Promise<void> => {
       return new Promise<void>((resolve, reject) => {
         if (!userId) {
           reject(new Error("Not connected"));
@@ -224,6 +253,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
           codexSessionId: options?.codexSessionId,
           env: options?.env,
           ...(options?.orchestrator && shellType !== "shell" ? { orchestrator: true } : {}),
+          ...(options?.createMissingWorkingDir ? { createMissingWorkingDir: true } : {}),
           ...(prompt ? { initialInput: prompt + "\r", initialInputDelay: 2000 } : {}),
         };
 
@@ -238,7 +268,7 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
           if (resp.success) {
             resolve();
           } else {
-            reject(new Error(resp.error ?? "create_session failed"));
+            reject(new CreateSessionBridgeError(resp.error ?? "create_session failed", resp.data));
           }
         });
 

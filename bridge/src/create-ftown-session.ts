@@ -1,4 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
+import { existsSync, mkdirSync, statSync } from 'node:fs';
+import { basename, resolve } from 'node:path';
 
 import { buildSessionCommand } from './agent-commands.js';
 import { ensureCodexWorkdirTrust } from './codex-installer.js';
@@ -38,6 +40,7 @@ export interface CreateFtownSessionInput {
   initialInputDelay?: number;
   orchestrator?: boolean;
   suppressBriefing?: boolean;
+  createMissingWorkingDir?: boolean;
 }
 
 export async function resolveParentSessionId(
@@ -127,6 +130,49 @@ export class ProviderAuthMissingError extends Error {
   }
 }
 
+export class WorkingDirMissingError extends Error {
+  readonly code = 'working_dir_missing';
+  readonly workingDir: string;
+
+  constructor(workingDir: string) {
+    super(`Working directory does not exist: ${workingDir}`);
+    this.name = 'WorkingDirMissingError';
+    this.workingDir = workingDir;
+  }
+}
+
+export function prepareWorkingDir(
+  workingDir: string | undefined,
+  createMissingWorkingDir: boolean | undefined,
+): string | undefined {
+  const trimmed = workingDir?.trim();
+  if (!trimmed) return undefined;
+
+  const resolved = resolve(trimmed);
+  if (!existsSync(resolved)) {
+    if (!createMissingWorkingDir) {
+      throw new WorkingDirMissingError(resolved);
+    }
+    mkdirSync(resolved, { recursive: true });
+  }
+
+  if (!statSync(resolved).isDirectory()) {
+    throw new Error(`Working directory is not a directory: ${resolved}`);
+  }
+
+  return resolved;
+}
+
+export function nextAvailableGeneratedName(baseName: string, existingNames: Iterable<string>): string {
+  const existing = new Set(existingNames);
+  if (!existing.has(baseName)) return baseName;
+
+  for (let i = 1; ; i += 1) {
+    const candidate = `${baseName}_${i}`;
+    if (!existing.has(candidate)) return candidate;
+  }
+}
+
 /**
  * Last-wins merge of the three sources for SOURCE-token lookup: inputEnv beats
  * storeEnv beats processEnv (object-spread order — later spreads override).
@@ -183,9 +229,6 @@ export async function createFtownSession(
   deps: CreateFtownSessionDeps,
   input: CreateFtownSessionInput,
 ): Promise<Session> {
-  // Base command (no prompt arg) — persisted on the session and used for the
-  // default name; the prompt-bearing launch command must not be replayed on revive.
-  const command = buildSessionCommand(input);
   const prompt = input.prompt?.trim() ?? '';
 
   let parentSessionId: string | undefined;
@@ -221,17 +264,35 @@ export async function createFtownSession(
         }
       : undefined;
 
+  const workingDir = prepareWorkingDir(input.workingDir, input.createMissingWorkingDir);
+  const effectiveInput: CreateFtownSessionInput = { ...input, workingDir };
+  // Base command (no prompt arg) — persisted on the session and used for the
+  // default name; the prompt-bearing launch command must not be replayed on revive.
+  const command = buildSessionCommand(effectiveInput);
+
+  const explicitName = input.name?.trim();
+  const shouldSuffixGeneratedName = !explicitName && Boolean(workingDir);
+  const generatedBaseName =
+    (workingDir ? basename(workingDir) : '') || (prompt || command).slice(0, 80);
+  const sessionName = explicitName
+    ?? (shouldSuffixGeneratedName
+      ? nextAvailableGeneratedName(
+          generatedBaseName,
+          (await deps.store.listSessions()).map((session) => session.name),
+        )
+      : generatedBaseName);
+
   const sessionId = uuidv4();
   const session: Session = {
     id: sessionId,
-    name: input.name ?? (prompt || command).slice(0, 80),
+    name: sessionName,
     command,
     prompt: prompt || undefined,
     status: 'running',
     bridgeId: deps.bridgeId,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    workingDir: input.workingDir,
+    workingDir,
     shellType: input.shellType,
     model: input.model,
     claudeSessionId: input.claudeSessionId,
@@ -251,7 +312,7 @@ export async function createFtownSession(
     console.error(`[Bridge] Failed to publish session create for ${sessionId}:`, err);
   }
 
-  registerSessionWorkspace(sessionId, input.workingDir);
+  registerSessionWorkspace(sessionId, workingDir);
 
   // Agent sessions (anything but a plain 'shell') spawned by a parent get a
   // one-paragraph briefing prepended to their first input so they know their
@@ -298,17 +359,17 @@ export async function createFtownSession(
   // claude, cursor, and codex accept the initial prompt as a CLI argument —
   // far more reliable than racing the composer TUI with delayed keystrokes.
   // Typed injection remains for custom commands, resumes, and raw passthrough.
-  const shellTypeForPrompt = input.shellType ?? 'claude';
+  const shellTypeForPrompt = effectiveInput.shellType ?? 'claude';
   const promptAsCliArg =
     initialInput !== undefined &&
-    input.initialInput === undefined &&
-    !input.command?.trim() &&
-    ((shellTypeForPrompt === 'claude' && !input.claudeSessionId?.trim()) ||
-      (shellTypeForPrompt === 'cursor' && !input.cursorSessionId?.trim()) ||
-      (shellTypeForPrompt === 'codex' && !input.codexSessionId?.trim()));
+    effectiveInput.initialInput === undefined &&
+    !effectiveInput.command?.trim() &&
+    ((shellTypeForPrompt === 'claude' && !effectiveInput.claudeSessionId?.trim()) ||
+      (shellTypeForPrompt === 'cursor' && !effectiveInput.cursorSessionId?.trim()) ||
+      (shellTypeForPrompt === 'codex' && !effectiveInput.codexSessionId?.trim()));
 
   const launchCommand = promptAsCliArg
-    ? buildSessionCommand({ ...input, initialPrompt: initialInput })
+    ? buildSessionCommand({ ...effectiveInput, initialPrompt: initialInput })
     : command;
   if (promptAsCliArg) {
     initialInput = undefined;
@@ -316,14 +377,14 @@ export async function createFtownSession(
     submitSuffix = undefined;
   }
 
-  if (input.shellType === 'codex') {
+  if (effectiveInput.shellType === 'codex') {
     // Codex blocks on an interactive "Do you trust this directory?" prompt
     // unless the resolved workdir is trusted in ~/.codex/config.toml.
-    ensureCodexWorkdirTrust(input.workingDir ?? process.cwd());
+    ensureCodexWorkdirTrust(workingDir ?? process.cwd());
   }
 
   deps.runner.run(sessionId, launchCommand, {
-    workingDir: input.workingDir,
+    workingDir,
     env: sessionEnv,
     initialInput,
     initialInputDelay,
@@ -372,5 +433,6 @@ export function parseCreateSessionBody(
       typeof body.initialInputDelay === 'number' ? body.initialInputDelay : undefined,
     orchestrator: body.orchestrator === true,
     suppressBriefing: body.suppressBriefing === true,
+    createMissingWorkingDir: body.createMissingWorkingDir === true,
   };
 }

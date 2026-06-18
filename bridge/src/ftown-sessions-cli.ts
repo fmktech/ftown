@@ -177,6 +177,7 @@ Create options:
   --shell <type>                cursor | claude | codex | shell | opencode (default: claude)
   --prompt <text>               Initial message
   --workdir <path>              Working directory
+  --create-workdir              Create --workdir if it does not exist
   --name <label>                Dashboard name
   --command <cmd>               Full command override
   --parent                      Link parent to FTOWN_SESSION_ID or X-Ftown-Session-Id
@@ -224,6 +225,7 @@ async function main(): Promise<void> {
         const parentId = flag(rest, '--parent-id');
         const useParent = hasFlag(rest, '--parent');
         const orchestrator = hasFlag(rest, '--orchestrator');
+        const createWorkdir = hasFlag(rest, '--create-workdir');
 
         const body: Record<string, unknown> = {};
         if (shellType) body.shellType = shellType;
@@ -235,6 +237,7 @@ async function main(): Promise<void> {
         if (parentId) body.parentSessionId = parentId;
         else if (useParent) body.parentSessionId = true;
         if (orchestrator) body.orchestrator = true;
+        if (createWorkdir) body.createMissingWorkingDir = true;
 
         const caller = process.env.FTOWN_SESSION_ID?.trim();
         const headers =

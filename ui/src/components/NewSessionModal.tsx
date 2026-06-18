@@ -3,7 +3,7 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
 import { ShellType } from "@/types";
 import { BridgeInfo } from "@/hooks/useBridges";
-import { BridgeExecResponse } from "@/hooks/useSessions";
+import { BridgeExecResponse, CreateSessionBridgeError, CreateSessionOptions } from "@/hooks/useSessions";
 import { ClaudeSessionPicker } from "./ClaudeSessionPicker";
 import { CursorSessionPicker } from "./CursorSessionPicker";
 import EnvVarsEditor, { getStoredEnvVars } from "./EnvVarsEditor";
@@ -18,7 +18,7 @@ export interface SessionDefaults {
 interface NewSessionModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSubmit: (prompt: string, options: { name?: string; model?: string; workingDir?: string; bridgeId?: string; shellType?: ShellType; claudeSessionId?: string; cursorSessionId?: string; env?: Record<string, string>; orchestrator?: boolean }) => void | Promise<void>;
+  onSubmit: (prompt: string, options: CreateSessionOptions) => void | Promise<void>;
   bridges: BridgeInfo[];
   defaults?: SessionDefaults;
   bridgeExec: (command: string, workingDir: string, bridgeId: string) => Promise<BridgeExecResponse>;
@@ -255,6 +255,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const [zaiModels, setZaiModels] = useState<ZaiModels>(ZAI_DEFAULT_MODELS);
   const [autoCompactWindow, setAutoCompactWindow] = useState("");
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [missingWorkingDir, setMissingWorkingDir] = useState<string | null>(null);
 
   const effectiveBridgeId = bridgeId || (bridges.length > 0 ? bridges[0].bridgeId : "");
   const selectedBridge = bridges.find((b) => b.bridgeId === effectiveBridgeId);
@@ -283,6 +284,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       setZaiModels(getStoredZaiModels());
       setAutoCompactWindow(getStoredAutoCompactWindow());
       setSubmitError(null);
+      setMissingWorkingDir(null);
     }
   }, [isOpen, defaults]);
 
@@ -290,10 +292,12 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   // type; switching shells invalidates the previous error so clear the banner.
   useEffect(() => {
     setSubmitError(null);
+    setMissingWorkingDir(null);
   }, [shellType]);
 
-  const handleSubmit = useCallback(async () => {
+  const handleSubmit = useCallback(async (createMissingWorkingDir = false) => {
     setSubmitError(null);
+    setMissingWorkingDir(null);
     if (hostname && workingDir.trim()) {
       storePath(hostname, workingDir.trim());
     }
@@ -334,8 +338,18 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
         claudeSessionId: selectedClaudeSessionId ?? undefined,
         cursorSessionId: selectedCursorSessionId ?? undefined,
         env,
+        createMissingWorkingDir: createMissingWorkingDir || undefined,
       });
     } catch (err) {
+      if (
+        err instanceof CreateSessionBridgeError
+        && err.code === "working_dir_missing"
+        && err.workingDir
+        && err.canCreate
+      ) {
+        setMissingWorkingDir(err.workingDir);
+        return;
+      }
       setSubmitError(err instanceof Error ? err.message : String(err));
       return;
     }
@@ -546,6 +560,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
               value={workingDir}
               onChange={(e) => {
                 setWorkingDir(e.target.value);
+                setMissingWorkingDir(null);
                 setShowSuggestions(true);
               }}
               onFocus={() => setShowSuggestions(true)}
@@ -630,6 +645,29 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
 
           <EnvVarsEditor />
 
+          {missingWorkingDir && (
+            <div className="px-3 py-2.5 border border-[#ffaa00]/40 rounded bg-[#ffaa00]/10 text-xs text-[#ffd28a] space-y-2">
+              <div>Working directory does not exist.</div>
+              <code className="block font-mono break-all text-[#ffe0a8]">{missingWorkingDir}</code>
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setMissingWorkingDir(null)}
+                  className="px-3 py-1.5 border border-[#3a3220] rounded text-[#b89b66] hover:text-[#ffe0a8] hover:border-[#6f5630] transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleSubmit(true)}
+                  className="px-3 py-1.5 bg-[#ffaa00] text-[#0a0a0a] font-bold rounded hover:bg-[#ffbf3d] transition-colors"
+                >
+                  Create Folder
+                </button>
+              </div>
+            </div>
+          )}
+
           {submitError && (
             <div className="px-3 py-2.5 border border-[#ff5555]/40 rounded bg-[#ff5555]/10 text-xs text-[#ff8888] break-words">
               {submitError}
@@ -644,7 +682,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
               Cancel
             </button>
             <button
-              onClick={handleSubmit}
+              onClick={() => void handleSubmit()}
               className="px-4 py-2 bg-[#00ff88] text-[#0a0a0a] font-bold rounded text-sm hover:bg-[#00cc6e] transition-colors"
             >
               Create Session

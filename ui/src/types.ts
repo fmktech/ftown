@@ -88,6 +88,7 @@ export interface CreateSessionPayload {
   initialInputDelay?: number;
   parentSessionId?: string;
   orchestrator?: boolean;
+  createMissingWorkingDir?: boolean;
 }
 
 export interface StopSessionPayload {
