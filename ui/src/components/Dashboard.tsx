@@ -58,6 +58,20 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const rootRef = useRef<HTMLDivElement>(null);
   const userMenuRef = useRef<HTMLDivElement>(null);
 
+  const scheduleTerminalRenderAdjustment = useCallback(() => {
+    const refit = () => terminalRef.current?.refit({ forceResize: true });
+    const frame = window.requestAnimationFrame(refit);
+    const timers = [
+      window.setTimeout(refit, 80),
+      window.setTimeout(refit, 250),
+    ];
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      for (const timer of timers) window.clearTimeout(timer);
+    };
+  }, []);
+
   useEffect(() => {
     setSidebarCollapsed(localStorage.getItem("ftown:sidebarCollapsed") === "true");
     try {
@@ -219,6 +233,11 @@ PY`;
 
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
 
+  useEffect(() => {
+    if (!selectedSessionId) return undefined;
+    return scheduleTerminalRenderAdjustment();
+  }, [selectedSessionId, scheduleTerminalRenderAdjustment]);
+
   const handleReorderSessions = useCallback((orderedIds: string[]) => {
     setSessionOrder(orderedIds);
     localStorage.setItem("ftown:sessionOrder", JSON.stringify(orderedIds));
@@ -252,10 +271,11 @@ PY`;
   }, [rawSessions]);
 
   const handleCreateSession = useCallback(
-    (prompt: string, options: CreateSessionOptions): Promise<void> => {
-      return createSession(prompt, options);
+    async (prompt: string, options: CreateSessionOptions): Promise<void> => {
+      await createSession(prompt, options);
+      scheduleTerminalRenderAdjustment();
     },
-    [createSession]
+    [createSession, scheduleTerminalRenderAdjustment]
   );
 
   const handleStopSession = useCallback(() => {
@@ -340,9 +360,9 @@ PY`;
   const handleMobileTabSwitch = useCallback((tab: "sessions" | "terminal") => {
     setMobileTab(tab);
     if (tab === "terminal") {
-      requestAnimationFrame(() => terminalRef.current?.refit());
+      scheduleTerminalRenderAdjustment();
     }
-  }, []);
+  }, [scheduleTerminalRenderAdjustment]);
 
   const handleCloneSession = useCallback((session: Session) => {
     setSessionDefaults({

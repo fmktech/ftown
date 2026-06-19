@@ -14,6 +14,7 @@ const execAsync = promisify(exec);
  * protocol are Claude-compatible. Stop/UserPromptSubmit must omit "matcher".
  */
 const CODEX_HOOK_EVENTS = ['Stop', 'UserPromptSubmit', 'SessionStart'] as const;
+const CODEX_NOTIFY_TIMEOUT_SECONDS = 10;
 
 interface HookCommandEntry {
   type?: string;
@@ -148,10 +149,18 @@ export function ensureCodexHooks(
 
     upsertCodexHookEntry(hooks, event, {
       matches: isFtownNotifyCommand,
-      desired: { type: 'command', command: notifyScriptPath, async: true },
+      desired: { type: 'command', command: notifyScriptPath, timeout: CODEX_NOTIFY_TIMEOUT_SECONDS },
       repair: (h) => {
-        if (h.command === notifyScriptPath) return false;
+        if (
+          h.command === notifyScriptPath
+          && h.timeout === CODEX_NOTIFY_TIMEOUT_SECONDS
+          && h.async === undefined
+        ) {
+          return false;
+        }
         h.command = notifyScriptPath;
+        h.timeout = CODEX_NOTIFY_TIMEOUT_SECONDS;
+        delete h.async;
         return true;
       },
       counters,

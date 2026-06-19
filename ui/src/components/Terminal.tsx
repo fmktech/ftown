@@ -12,7 +12,7 @@ import "@xterm/xterm/css/xterm.css";
 
 export interface TerminalHandle {
   sendInput: (data: string) => void;
-  refit: () => void;
+  refit: (options?: { forceResize?: boolean }) => void;
 }
 
 interface TerminalProps {
@@ -49,18 +49,55 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
   const onMobileTapRef = useRef(onMobileTap);
   const onInterruptRef = useRef(onInterrupt);
   const shellTypeRef = useRef(shellType);
+  const sessionIdRef = useRef(sessionId);
+  const inputSubSessionIdRef = useRef<string | null>(null);
+  const resizeBounceTimerRef = useRef<number | null>(null);
   const didScrollRef = useRef(false);
   const [scrolledUp, setScrolledUp] = useState(false);
+  sessionIdRef.current = sessionId;
+
+  const publishTerminalResize = (forceResize = false) => {
+    const term = xtermRef.current;
+    const inputSub = inputSubRef.current;
+    if (!term || !inputSub || !sessionIdRef.current || inputSubSessionIdRef.current !== sessionIdRef.current) return;
+
+    if (resizeBounceTimerRef.current !== null) {
+      window.clearTimeout(resizeBounceTimerRef.current);
+      resizeBounceTimerRef.current = null;
+    }
+
+    if (forceResize && term.cols > 2) {
+      inputSub.publish({ type: "resize", cols: term.cols - 1, rows: term.rows });
+      resizeBounceTimerRef.current = window.setTimeout(() => {
+        resizeBounceTimerRef.current = null;
+        if (
+          inputSubRef.current === inputSub
+          && inputSubSessionIdRef.current === sessionIdRef.current
+          && xtermRef.current === term
+        ) {
+          inputSub.publish({ type: "resize", cols: term.cols, rows: term.rows });
+        }
+      }, 120);
+      return;
+    }
+
+    inputSub.publish({ type: "resize", cols: term.cols, rows: term.rows });
+  };
+
+  const fitAndSyncResize = (forceResize = false) => {
+    fitAddonRef.current?.fit();
+    publishTerminalResize(forceResize);
+  };
 
   useImperativeHandle(ref, () => ({
     sendInput(data: string) {
-      if (inputSubRef.current) {
+      if (inputSubRef.current && inputSubSessionIdRef.current === sessionIdRef.current) {
         inputSubRef.current.publish({ type: "input", data });
         if (isLoneInterrupt(data)) onInterruptRef.current?.();
       }
     },
-    refit() {
-      fitAddonRef.current?.fit();
+    refit(options) {
+      fitAndSyncResize(options?.forceResize === true);
     },
   }), []);
 
@@ -226,6 +263,10 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
         container.removeEventListener("wheel", onWheel, { capture: true } as EventListenerOptions);
         viewport?.removeEventListener("wheel", onWheel, { capture: true } as EventListenerOptions);
       }
+      if (resizeBounceTimerRef.current !== null) {
+        window.clearTimeout(resizeBounceTimerRef.current);
+        resizeBounceTimerRef.current = null;
+      }
       scrollDisposable.dispose();
       resizeObserver.disconnect();
       term.dispose();
@@ -262,6 +303,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       inputSubRef.current.unsubscribe();
       client.removeSubscription(inputSubRef.current);
       inputSubRef.current = null;
+      inputSubSessionIdRef.current = null;
     }
 
     // Subscribe to terminal input channel FIRST so we can publish resize
@@ -279,17 +321,11 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       // A same-size resize is a no-op for tmux, so a switched-in terminal can
       // keep a stale layout. Bounce cols by one and back to force a re-wrap
       // and full redraw at the real window size.
-      if (term.cols > 2) {
-        inputSub.publish({ type: "resize", cols: term.cols - 1, rows: term.rows });
-        setTimeout(() => {
-          inputSub.publish({ type: "resize", cols: term.cols, rows: term.rows });
-        }, 120);
-      } else {
-        inputSub.publish({ type: "resize", cols: term.cols, rows: term.rows });
-      }
+      fitAndSyncResize(true);
     });
-    inputSub.subscribe();
     inputSubRef.current = inputSub;
+    inputSubSessionIdRef.current = sessionId;
+    inputSub.subscribe();
 
     // Subscribe to terminal output AFTER input. On subscribed, request init
     // dump — bridge will have already processed our resize on the input
@@ -320,7 +356,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     // On output sub ready, request a screen_dump from the bridge to restore
     // prior conversation state and scrollback (xterm-headless serialize).
     outputSub.on("subscribed", () => {
-      if (!inputSubRef.current) return;
+      if (!inputSubRef.current || inputSubSessionIdRef.current !== sessionIdRef.current) return;
       inputSubRef.current.publish({ type: "init" });
     });
     outputSub.subscribe();
@@ -328,14 +364,14 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
 
     // Wire xterm input to centrifugo
     const dataDisposable = term.onData((data) => {
-      if (inputSubRef.current) {
+      if (inputSubRef.current && inputSubSessionIdRef.current === sessionIdRef.current) {
         inputSubRef.current.publish({ type: "input", data });
         if (isLoneInterrupt(data)) onInterruptRef.current?.();
       }
     });
 
     const resizeDisposable = term.onResize(({ cols, rows }) => {
-      if (inputSubRef.current) {
+      if (inputSubRef.current && inputSubSessionIdRef.current === sessionIdRef.current) {
         inputSubRef.current.publish({ type: "resize", cols, rows });
       }
     });
@@ -354,6 +390,11 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
         inputSubRef.current.unsubscribe();
         client.removeSubscription(inputSubRef.current);
         inputSubRef.current = null;
+        inputSubSessionIdRef.current = null;
+      }
+      if (resizeBounceTimerRef.current !== null) {
+        window.clearTimeout(resizeBounceTimerRef.current);
+        resizeBounceTimerRef.current = null;
       }
     };
   }, [client, sessionId, userId]);
