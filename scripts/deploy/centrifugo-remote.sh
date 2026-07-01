@@ -116,13 +116,17 @@ detect_systemd() {
 }
 
 set_sudo() {
-  if [ -w "$LIVE_CONFIG" ]; then
-    SUDO=""
-  elif [ ! -e "$LIVE_CONFIG" ] && [ -w "$(dirname "$LIVE_CONFIG")" ]; then
+  # We create sibling files next to the live config (timestamped .bak, atomic
+  # .new/.restore temps) and rewrite it, so we need write access to the
+  # DIRECTORY, not just the file. Testing only the file's writability missed the
+  # common case of a writable config inside a root-owned dir (e.g. a docker
+  # bind-mount at /opt/centrifugo owned by root).
+  dir="$(dirname "$LIVE_CONFIG")"
+  if [ -w "$dir" ] && { [ ! -e "$LIVE_CONFIG" ] || [ -w "$LIVE_CONFIG" ]; }; then
     SUDO=""
   else
     command -v sudo >/dev/null 2>&1 \
-      || die "need root to write $LIVE_CONFIG but sudo is not available"
+      || die "need root to write in $dir but sudo is not available"
     SUDO="sudo"
   fi
 }
@@ -142,6 +146,14 @@ install_config() {
   # centrifugo never sees a half-written config.
   tmp="${LIVE_CONFIG}.new.${TS}"
   $SUDO cp "$NEW_CONFIG" "$tmp"
+  # Preserve the original config's ownership + mode so the container/service
+  # keeps reading it and the secret file isn't left newly world-readable.
+  if [ -n "$BACKUP" ] && [ -f "$BACKUP" ]; then
+    $SUDO chown --reference="$BACKUP" "$tmp" 2>/dev/null || true
+    $SUDO chmod --reference="$BACKUP" "$tmp" 2>/dev/null || true
+  else
+    $SUDO chmod 600 "$tmp" 2>/dev/null || true
+  fi
   $SUDO mv "$tmp" "$LIVE_CONFIG"
   log "installed new config -> $LIVE_CONFIG"
 }
