@@ -48,6 +48,7 @@
     "@xterm/headless": "^6.0.0",
     "centrifuge": "^5.2.2",
     "commander": "^13.1.0",
+    "cron-parser": "^4.9.0",
     "node-pty": "^1.2.0-beta.12",
     "uuid": "^11.1.0",
     "ws": "^8.18.0"

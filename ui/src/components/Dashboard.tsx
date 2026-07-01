@@ -3,14 +3,17 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { Centrifuge } from "centrifuge";
 import { ConnectionStatus } from "@/hooks/useCentrifugo";
-import { Session } from "@/types";
+import { Session, Loop, LoopDraft } from "@/types";
 import { CreateSessionOptions, useSessions } from "@/hooks/useSessions";
 import { useBridges } from "@/hooks/useBridges";
+import { useLoops } from "@/hooks/useLoops";
 import { useAllSessionEvents } from "@/hooks/useAllSessionEvents";
 import { SessionList } from "./SessionList";
+import { LoopList } from "./LoopList";
 import { Terminal, TerminalHandle } from "./Terminal";
 import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
 import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
+import { LoopFormModal } from "./LoopFormModal";
 import { ConnectionDiagnostics } from "./ConnectionDiagnostics";
 import { mergeBridgeOrder } from "@/lib/bridge-order";
 
@@ -44,6 +47,8 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [showNewSession, setShowNewSession] = useState(false);
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
+  const [showLoopForm, setShowLoopForm] = useState(false);
+  const [editingLoop, setEditingLoop] = useState<Loop | null>(null);
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
   const [mobileTab, setMobileTab] = useState<"sessions" | "terminal">("sessions");
@@ -126,8 +131,9 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     return () => document.removeEventListener("mousedown", handler);
   }, [showUserMenu]);
 
-  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, removeSession, refreshSessions, bridgeExec } = useSessions(client, userId);
+  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, removeSession, refreshSessions, bridgeExec, sendCommand, sendCommandCollect } = useSessions(client, userId);
   const { bridges, hasBridges } = useBridges(client, userId);
+  const { loops, createLoop, updateLoop, deleteLoop, runLoopNow } = useLoops(client, userId, sendCommand, sendCommandCollect);
 
   // Keep bridgeOrder stable when bridges connect/disconnect; only append new ids (sorted).
   useEffect(() => {
@@ -232,6 +238,12 @@ PY`;
   }, [rawSessions, activeBridgeIds, sessionOrder, bridgeOrder]);
 
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
+
+  // Loop-run sessions (loopId set) nest under their Loop in LoopList instead
+  // of appearing as top-level rows in SessionList; `sessions` itself stays
+  // the full combined set for Terminal/selection/activity tracking.
+  const normalSessions = useMemo(() => sessions.filter((s) => !s.loopId), [sessions]);
+  const loopRunSessions = useMemo(() => sessions.filter((s) => s.loopId), [sessions]);
 
   useEffect(() => {
     if (!selectedSessionId) return undefined;
@@ -373,6 +385,57 @@ PY`;
     setShowNewSession(true);
   }, []);
 
+  const handleOpenNewLoop = useCallback(() => {
+    setEditingLoop(null);
+    setShowLoopForm(true);
+  }, []);
+
+  const handleEditLoop = useCallback((loop: Loop) => {
+    setEditingLoop(loop);
+    setShowLoopForm(true);
+  }, []);
+
+  const handleCloseLoopForm = useCallback(() => {
+    setShowLoopForm(false);
+    setEditingLoop(null);
+  }, []);
+
+  const handleSubmitLoop = useCallback(
+    async (draft: LoopDraft): Promise<void> => {
+      if (editingLoop) {
+        // Route by the loop's OWNING bridge, never the (locked) form value — a
+        // loop cannot be moved, and only its owner bridge holds the record.
+        await updateLoop(editingLoop.bridgeId, editingLoop.id, draft);
+      } else {
+        await createLoop(draft);
+      }
+    },
+    [editingLoop, updateLoop, createLoop]
+  );
+
+  const handleRunLoopNow = useCallback(
+    (loop: Loop) => {
+      runLoopNow(loop.bridgeId, loop.id).catch((err) => console.error("run_loop_now failed", err));
+    },
+    [runLoopNow]
+  );
+
+  const handleToggleLoopEnabled = useCallback(
+    (loop: Loop) => {
+      updateLoop(loop.bridgeId, loop.id, { enabled: !loop.enabled }).catch((err) =>
+        console.error("update_loop failed", err)
+      );
+    },
+    [updateLoop]
+  );
+
+  const handleDeleteLoop = useCallback(
+    (loop: Loop) => {
+      deleteLoop(loop.bridgeId, loop.id).catch((err) => console.error("delete_loop failed", err));
+    },
+    [deleteLoop]
+  );
+
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed(prev => {
       const next = !prev;
@@ -446,6 +509,20 @@ PY`;
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               <line x1="8" y1="3" x2="8" y2="13" />
               <line x1="3" y1="8" x2="13" y2="8" />
+            </svg>
+          </button>
+
+          <button
+            className="btn-ghost"
+            onClick={handleOpenNewLoop}
+            disabled={!hasBridges}
+            title={hasBridges ? "Create a new loop" : "No bridges online — start a bridge first"}
+            style={{ padding: "4px 8px", lineHeight: 1, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M2 8a6 6 0 0 1 10.5-4M14 8a6 6 0 0 1-10.5 4" />
+              <path d="M12.5 4H14V2.5" />
+              <path d="M3.5 12H2v1.5" />
             </svg>
           </button>
 
@@ -791,8 +868,22 @@ PY`;
           </div>
 
           <div className="flex-1 overflow-y-auto">
+            <LoopList
+              loops={loops}
+              runs={loopRunSessions}
+              bridges={bridges}
+              selectedSessionId={selectedSessionId}
+              onSelectSession={handleSelectSession}
+              onRunNow={handleRunLoopNow}
+              onToggleEnabled={handleToggleLoopEnabled}
+              onEdit={handleEditLoop}
+              onDelete={handleDeleteLoop}
+              onStopSession={stopSession}
+              onRemoveSession={handleRemoveSession}
+              collapsed={isDesktop && sidebarCollapsed}
+            />
             <SessionList
-              sessions={sessions}
+              sessions={normalSessions}
               bridges={bridges}
               bridgeOrder={bridgeOrder}
               selectedSessionId={selectedSessionId}
@@ -844,6 +935,14 @@ PY`;
         bridges={bridges}
         defaults={sessionDefaults}
         bridgeExec={bridgeExec}
+      />
+
+      <LoopFormModal
+        isOpen={showLoopForm}
+        onClose={handleCloseLoopForm}
+        onSubmit={handleSubmitLoop}
+        bridges={bridges}
+        editingLoop={editingLoop}
       />
 
       <ConnectionDiagnostics

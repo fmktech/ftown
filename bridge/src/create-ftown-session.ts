@@ -41,6 +41,7 @@ export interface CreateFtownSessionInput {
   orchestrator?: boolean;
   suppressBriefing?: boolean;
   createMissingWorkingDir?: boolean;
+  loopId?: string;
 }
 
 export async function resolveParentSessionId(
@@ -301,6 +302,7 @@ export async function createFtownSession(
     env: sessionEnv,
     parentSessionId,
     runtime: deps.runner.getPreferredRuntime(),
+    loopId: input.loopId,
   };
 
   await deps.store.saveSession(session);

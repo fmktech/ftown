@@ -79,6 +79,20 @@ interface UseSessionsResult {
   removeSession: (sessionId: string, onlyIfFinished?: boolean, ownerOnline?: boolean) => void;
   refreshSessions: () => void;
   bridgeExec: (command: string, workingDir: string, bridgeId: string) => Promise<BridgeExecResponse>;
+  /**
+   * Generalized RPC helper over the same `commands:rpc#{userId}` channel/
+   * pendingCallbacksRef/30s-timeout pattern as bridgeExec, exposed so other
+   * hooks (e.g. useLoops) can issue commands without opening a second
+   * subscription to the channel this hook already owns.
+   */
+  sendCommand: (command: Command) => Promise<CommandResponse>;
+  /**
+   * Broadcast variant of sendCommand: publishes once and RESOLVES WITH EVERY
+   * response received within `windowMs` (default 1500ms), so a fan-out command
+   * with no bridgeId (e.g. list_loops) merges replies from all connected
+   * bridges instead of only the first responder.
+   */
+  sendCommandCollect: (command: Command, windowMs?: number) => Promise<CommandResponse[]>;
   lastResponse: CommandResponse | null;
 }
 
@@ -88,6 +102,12 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
   const sessionsSubRef = useRef<Subscription | null>(null);
   const commandsSubRef = useRef<Subscription | null>(null);
   const pendingCallbacksRef = useRef<Map<string, (response: CommandResponse) => void>>(new Map());
+  // Broadcast-collect callbacks: unlike pendingCallbacksRef (which resolves on
+  // the FIRST response and deletes itself), these accumulate EVERY response for
+  // a requestId until a time window closes — so a broadcast command (e.g.
+  // list_loops with no bridgeId) can merge replies from every connected bridge
+  // instead of silently dropping all but the fastest.
+  const collectingCallbacksRef = useRef<Map<string, (response: CommandResponse) => void>>(new Map());
   // sessionId -> tombstone expiry (ms). Set on optimistic delete; consulted by
   // the publication/merge handlers to keep a removed row from resurrecting.
   const recentlyRemovedRef = useRef<Map<string, number>>(new Map());
@@ -158,6 +178,11 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
           pendingCallbacksRef.current.delete(data.response.requestId);
           cb(data.response);
         }
+
+        // Broadcast collectors accumulate every bridge's reply (not deleted here;
+        // the collect window clears them on timeout).
+        const collector = collectingCallbacksRef.current.get(data.response.requestId);
+        if (collector) collector(data.response);
 
         if (data.response.success && data.response.data) {
           const responseData = data.response.data as { sessions?: Session[] };
@@ -427,6 +452,55 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
     [userId, publishCommand]
   );
 
+  const sendCommand = useCallback(
+    (command: Command): Promise<CommandResponse> => {
+      return new Promise((resolve, reject) => {
+        if (!commandsSubRef.current) {
+          reject(new Error("Not connected"));
+          return;
+        }
+
+        const timeout = setTimeout(() => {
+          pendingCallbacksRef.current.delete(command.requestId);
+          reject(new Error(`${command.type} timed out`));
+        }, 30_000);
+
+        pendingCallbacksRef.current.set(command.requestId, (resp) => {
+          clearTimeout(timeout);
+          resolve(resp);
+        });
+
+        publishCommand(command);
+      });
+    },
+    [publishCommand]
+  );
+
+  const sendCommandCollect = useCallback(
+    (command: Command, windowMs = 1500): Promise<CommandResponse[]> => {
+      return new Promise((resolve, reject) => {
+        if (!commandsSubRef.current) {
+          reject(new Error("Not connected"));
+          return;
+        }
+
+        const responses: CommandResponse[] = [];
+        collectingCallbacksRef.current.set(command.requestId, (resp) => {
+          responses.push(resp);
+        });
+        // Fixed window rather than resolve-on-first: a broadcast has an unknown
+        // number of responders, so we collect until the window closes.
+        setTimeout(() => {
+          collectingCallbacksRef.current.delete(command.requestId);
+          resolve(responses);
+        }, windowMs);
+
+        publishCommand(command);
+      });
+    },
+    [publishCommand]
+  );
+
   return {
     sessions,
     createSession,
@@ -437,6 +511,8 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
     removeSession,
     refreshSessions,
     bridgeExec,
+    sendCommand,
+    sendCommandCollect,
     lastResponse,
   };
 }

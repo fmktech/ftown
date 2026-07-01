@@ -29,9 +29,12 @@ import { installFtownEnvCli } from './install-ftown-env-cli.js';
 import { installFtownCommandCli } from './install-ftown-command-cli.js';
 import { ensureFtownOnPath } from './ensure-ftown-path.js';
 import { registerSessionWorkspace, unregisterSession } from './session-registry.js';
-import { createFtownSession, findMissingProviderAuth, WorkingDirMissingError } from './create-ftown-session.js';
+import { createFtownSession, findMissingProviderAuth, WorkingDirMissingError, type CreateFtownSessionDeps } from './create-ftown-session.js';
 import { loadProviderEnv } from './provider-env-store.js';
 import { removeFtownSession } from './remove-ftown-session.js';
+import { createLoop, deleteLoop, getLoop, listLoops, updateLoop, upsertLoop } from './loop-store.js';
+import { LoopScheduler, LOOP_TICK_INTERVAL_MS } from './loop-scheduler.js';
+import { validateLoopDraft, validateLoopPatch } from './loop-validation.js';
 import { buildSessionCommand } from './agent-commands.js';
 import { isTmuxAvailable, killTmuxSession, listFtownTmuxSessions } from './tmux.js';
 
@@ -43,9 +46,15 @@ import type {
   Command,
   CommandResponse,
   CreateSessionPayload,
+  CreateLoopPayload,
+  DeleteLoopPayload,
   GetHistoryPayload,
+  GetLoopRunsPayload,
+  LoopDraft,
   RemoveSessionPayload,
   RenameSessionPayload,
+  RunLoopNowPayload,
+  UpdateLoopPayload,
   UpdateSessionParentPayload,
   Session,
   StopSessionPayload,
@@ -190,7 +199,13 @@ program
         for (const session of sessions) {
           await centrifugo.publishSessionUpdate(userId, session);
         }
-        console.log(`[Bridge] Re-synced ${sessions.length} session(s) after Centrifugo reconnect`);
+        const loops = listLoops();
+        for (const loop of loops) {
+          await centrifugo.publishLoopUpdate(userId, loop);
+        }
+        console.log(
+          `[Bridge] Re-synced ${sessions.length} session(s) and ${loops.length} loop(s) after Centrifugo reconnect`,
+        );
       },
     });
     const localApiServer = new LocalApiServer();
@@ -217,7 +232,7 @@ program
       );
     };
 
-    localApiServer.setSessionFactory({
+    const sessionFactoryDeps: CreateFtownSessionDeps = {
       store,
       runner,
       centrifugo,
@@ -227,6 +242,19 @@ program
       hookToken: apiToken,
       notifyScriptPath,
       wireTerminalInput,
+    };
+    localApiServer.setSessionFactory(sessionFactoryDeps);
+
+    // Scheduled-loops engine. It fires loop runs IN-PROCESS via createFtownSession
+    // (avoiding the external-caller parent-identity restriction) and reaps old runs
+    // via removeFtownSession — both injected as closures over the real deps.
+    const scheduler = new LoopScheduler({
+      store,
+      runner,
+      centrifugo,
+      userId,
+      spawnSession: (input) => createFtownSession(sessionFactoryDeps, input),
+      removeSession: (id, options) => removeFtownSession({ store, runner, centrifugo, userId }, id, options),
     });
 
     const harnessCliPath = resolve(__dirname, 'harness-cli.js');
@@ -769,6 +797,125 @@ program
             break;
           }
 
+          case 'create_loop': {
+            const payload = command.payload as CreateLoopPayload;
+            const error = validateLoopDraft(payload);
+            if (error) {
+              response = { requestId: command.requestId, success: false, error };
+              break;
+            }
+            // bridgeId is forced to THIS bridge (the routing guard already proved
+            // payload.bridgeId === bridgeId), so a loop is always owned by its runner.
+            const draft: LoopDraft = {
+              name: payload.name.trim(),
+              bridgeId,
+              schedule: payload.schedule,
+              harness: payload.harness,
+              workdir: payload.workdir,
+              task: payload.task,
+              model: payload.model,
+              enabled: payload.enabled,
+              overlapPolicy: payload.overlapPolicy,
+              retention: payload.retention,
+              preflight: payload.preflight,
+              postflight: payload.postflight,
+              maxRuntimeMs: payload.maxRuntimeMs,
+            };
+            const loop = createLoop(draft);
+            await centrifugo.publishLoopUpdate(userId, loop);
+            response = { requestId: command.requestId, success: true, data: { loop } };
+            break;
+          }
+
+          case 'list_loops': {
+            response = { requestId: command.requestId, success: true, data: { loops: listLoops() } };
+            break;
+          }
+
+          case 'update_loop': {
+            const payload = command.payload as UpdateLoopPayload;
+            if (!payload.loopId) {
+              response = { requestId: command.requestId, success: false, error: 'Missing loopId' };
+              break;
+            }
+            const patchError = validateLoopPatch(payload.patch);
+            if (patchError) {
+              response = { requestId: command.requestId, success: false, error: patchError };
+              break;
+            }
+            const loop = updateLoop(payload.loopId, payload.patch);
+            if (!loop) {
+              response = { requestId: command.requestId, success: false, error: 'Loop not found' };
+              break;
+            }
+            await centrifugo.publishLoopUpdate(userId, loop);
+            response = { requestId: command.requestId, success: true, data: { loop } };
+            break;
+          }
+
+          case 'delete_loop': {
+            const payload = command.payload as DeleteLoopPayload;
+            if (!payload.loopId) {
+              response = { requestId: command.requestId, success: false, error: 'Missing loopId' };
+              break;
+            }
+            const existingLoop = getLoop(payload.loopId);
+            const removed = deleteLoop(payload.loopId);
+            if (removed) {
+              // Stop any in-flight run and drop scheduler tracking so a
+              // just-deleted loop never leaves a live AI session with nothing
+              // left to finalize/prune it.
+              if (existingLoop) scheduler.onLoopDeleted(existingLoop);
+              await centrifugo.publishLoopRemoved(userId, payload.loopId);
+            }
+            response = { requestId: command.requestId, success: true, data: { removed } };
+            break;
+          }
+
+          case 'run_loop_now': {
+            const payload = command.payload as RunLoopNowPayload;
+            if (!payload.loopId) {
+              response = { requestId: command.requestId, success: false, error: 'Missing loopId' };
+              break;
+            }
+            const loop = getLoop(payload.loopId);
+            if (!loop) {
+              response = { requestId: command.requestId, success: true, data: { fired: false, reason: 'not_found' } };
+              break;
+            }
+            // A skip-policy loop with a live run cannot be manually fired either —
+            // report overlap synchronously (the async tick would otherwise swallow it).
+            if (
+              loop.overlapPolicy === 'skip' &&
+              loop.lastStatus === 'running' &&
+              loop.lastSessionId &&
+              runner.isRunning(loop.lastSessionId)
+            ) {
+              response = { requestId: command.requestId, success: true, data: { fired: false, reason: 'overlap' } };
+              break;
+            }
+            loop.runNowRequested = true;
+            loop.updatedAt = new Date().toISOString();
+            upsertLoop(loop);
+            await centrifugo.publishLoopUpdate(userId, loop);
+            scheduler.kick();
+            response = { requestId: command.requestId, success: true, data: { fired: true } };
+            break;
+          }
+
+          case 'get_loop_runs': {
+            const payload = command.payload as GetLoopRunsPayload;
+            if (!payload.loopId) {
+              response = { requestId: command.requestId, success: false, error: 'Missing loopId' };
+              break;
+            }
+            const runs = (await store.listSessions())
+              .filter((session) => session.loopId === payload.loopId)
+              .map(toWireSession);
+            response = { requestId: command.requestId, success: true, data: { runs } };
+            break;
+          }
+
           default: {
             response = {
               requestId: command.requestId,
@@ -945,6 +1092,7 @@ program
     centrifugo.connect();
     centrifugo.joinBridgesChannel(userId, bridgeId);
     centrifugo.subscribeToSessions(userId);
+    centrifugo.subscribeToLoops(userId);
 
     let ready = false;
     centrifugo.subscribeToCommands(userId, (command) => {
@@ -954,15 +1102,34 @@ program
       });
     });
     setTimeout(() => {
-      ready = true;
-      console.log('[Bridge] Ready and listening for commands');
-      resurrectSessions().catch((err) => {
-        console.error('[Bridge] Session resurrection failed:', err);
-      });
+      void (async () => {
+        ready = true;
+        console.log('[Bridge] Ready and listening for commands');
+        try {
+          await resurrectSessions();
+        } catch (err) {
+          console.error('[Bridge] Session resurrection failed:', err);
+        }
+        // Loops start AFTER resurrection: skip missed fires, push the current loop
+        // snapshot to the UI, then begin the 30s tick.
+        try {
+          await scheduler.reconcileOnStart();
+          for (const loop of listLoops()) {
+            await centrifugo.publishLoopUpdate(userId, loop).catch((err) => {
+              console.error(`[Bridge] Failed to publish loop ${loop.id} on ready:`, err);
+            });
+          }
+          scheduler.start();
+          console.log(`[Bridge] Loop scheduler started (tick every ${LOOP_TICK_INTERVAL_MS}ms)`);
+        } catch (err) {
+          console.error('[Bridge] Loop scheduler failed to start:', err);
+        }
+      })();
     }, 2000);
 
     const shutdown = (): void => {
       console.log('\n[Bridge] Shutting down...');
+      scheduler.stop();
       localApiServer.stop();
       runner.stopAll();
       centrifugo.disconnect();
