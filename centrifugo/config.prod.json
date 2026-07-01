@@ -4,7 +4,9 @@
   "admin": true,
   "admin_password": "__CENTRIFUGO_ADMIN_PASSWORD__",
   "admin_secret": "__CENTRIFUGO_ADMIN_SECRET__",
-  "allowed_origins": ["*"],
+  "allowed_origins": [
+    "*"
+  ],
   "allow_anonymous_connect_without_token": false,
   "token_audience": "ftown:centrifugo",
   "allow_user_limited_channels": true,
@@ -27,7 +29,8 @@
       "allow_history_for_subscriber": true,
       "history_size": 20,
       "history_ttl": "5m",
-      "force_recovery": false
+      "force_recovery": false,
+      "allow_publish_for_client": true
     },
     {
       "name": "sessions",
@@ -36,22 +39,15 @@
       "allow_user_limited_channels": true,
       "history_size": 0,
       "history_ttl": "0s",
-      "force_recovery": false
-    },
-    {
-      "name": "loops",
-      "allow_publish_for_subscriber": true,
-      "allow_subscribe_for_client": true,
-      "allow_user_limited_channels": true,
-      "history_size": 0,
-      "history_ttl": "0s",
-      "force_recovery": false
+      "force_recovery": false,
+      "allow_publish_for_client": true
     },
     {
       "name": "terminal-input",
       "allow_publish_for_subscriber": true,
       "allow_subscribe_for_client": true,
-      "allow_user_limited_channels": true
+      "allow_user_limited_channels": true,
+      "allow_publish_for_client": true
     },
     {
       "name": "events",
@@ -59,13 +55,15 @@
       "allow_subscribe_for_client": true,
       "allow_user_limited_channels": true,
       "history_size": 100,
-      "history_ttl": "1h"
+      "history_ttl": "1h",
+      "allow_publish_for_client": true
     },
     {
       "name": "commands",
       "allow_publish_for_subscriber": true,
       "allow_subscribe_for_client": true,
-      "allow_user_limited_channels": true
+      "allow_user_limited_channels": true,
+      "allow_publish_for_client": true
     },
     {
       "name": "bridges",
@@ -75,7 +73,18 @@
       "presence": true,
       "join_leave": true,
       "force_push_join_leave": true,
-      "allow_presence_for_subscriber": true
+      "allow_presence_for_subscriber": true,
+      "allow_publish_for_client": true
+    },
+    {
+      "name": "loops",
+      "allow_publish_for_subscriber": true,
+      "allow_publish_for_client": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true,
+      "history_size": 0,
+      "history_ttl": "0s",
+      "force_recovery": false
     }
   ],
   "tls_autocert": true,
