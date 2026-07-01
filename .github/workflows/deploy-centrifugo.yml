@@ -1,0 +1,200 @@
+name: Deploy centrifugo config
+
+# SECURITY: this repo is PUBLIC and this workflow reads production secrets.
+# It therefore runs ONLY on trusted refs — never on pull_request /
+# pull_request_target (a forked PR could exfiltrate the secrets):
+#   - push to main touching the centrifugo config, this workflow, or the deploy
+#     scripts
+#   - manual workflow_dispatch (used for the first run — see
+#     docs/centrifugo-deploy.md)
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'centrifugo/**'
+      - '.github/workflows/deploy-centrifugo.yml'
+      - 'scripts/deploy/**'
+  workflow_dispatch:
+
+# One deploy at a time; never cancel an in-flight deploy (a half-applied config
+# swap on the host would be worse than waiting).
+concurrency:
+  group: deploy-centrifugo
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      # Committed template with __CENTRIFUGO_*__ placeholders (no real secrets).
+      TEMPLATE: centrifugo/config.prod.json
+      # Per-run scratch dir on the remote host.
+      REMOTE_DIR: /tmp/centrifugo-deploy-${{ github.run_id }}
+      # NB: RENDER_DIR / RENDERED are NOT set here. They depend on $RUNNER_TEMP,
+      # and the `runner` context is not allowed in jobs.<id>.env (GitHub rejects
+      # the whole workflow). They are exported to $GITHUB_ENV in "Set up paths".
+    steps:
+      - uses: actions/checkout@v4
+
+      # $RUNNER_TEMP is only available inside step run: contexts, so resolve the
+      # rendered-config paths here and publish them to later steps.
+      - name: Set up paths
+        run: |
+          set -euo pipefail
+          {
+            echo "RENDER_DIR=$RUNNER_TEMP/centrifugo"
+            echo "RENDERED=$RUNNER_TEMP/centrifugo/config.prod.json"
+          } >> "$GITHUB_ENV"
+
+      # Substitute the four placeholders with GitHub secrets. Fails if any
+      # secret is empty or any placeholder survives; never prints the rendered
+      # file (only field/env NAMES).
+      - name: Render config from secrets
+        env:
+          CENTRIFUGO_TOKEN_HMAC_SECRET_KEY: ${{ secrets.CENTRIFUGO_TOKEN_HMAC_SECRET_KEY }}
+          CENTRIFUGO_API_KEY: ${{ secrets.CENTRIFUGO_API_KEY }}
+          CENTRIFUGO_ADMIN_PASSWORD: ${{ secrets.CENTRIFUGO_ADMIN_PASSWORD }}
+          CENTRIFUGO_ADMIN_SECRET: ${{ secrets.CENTRIFUGO_ADMIN_SECRET }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RENDER_DIR"
+          python3 - <<'PY'
+          import json, os, sys
+
+          template = os.environ["TEMPLATE"]
+          out = os.environ["RENDERED"]
+          keys = {
+              "CENTRIFUGO_TOKEN_HMAC_SECRET_KEY": "token_hmac_secret_key",
+              "CENTRIFUGO_API_KEY": "api_key",
+              "CENTRIFUGO_ADMIN_PASSWORD": "admin_password",
+              "CENTRIFUGO_ADMIN_SECRET": "admin_secret",
+          }
+
+          missing = [e for e in keys if not os.environ.get(e)]
+          if missing:
+              sys.exit("ERROR: missing/empty secret(s): " + ", ".join(sorted(missing)))
+
+          with open(template, encoding="utf-8") as f:
+              text = f.read()
+
+          for env_name in keys:
+              placeholder = "__" + env_name + "__"
+              if placeholder not in text:
+                  sys.exit("ERROR: placeholder " + placeholder + " missing from template (drift)")
+              # json.dumps(...)[1:-1] escapes the value so the result stays valid
+              # JSON while reusing the quotes already in the template.
+              text = text.replace(placeholder, json.dumps(os.environ[env_name])[1:-1])
+
+          if "__CENTRIFUGO_" in text:
+              sys.exit("ERROR: a __CENTRIFUGO_*__ placeholder survived rendering")
+
+          data = json.loads(text)
+          for env_name, field in keys.items():
+              if data.get(field) != os.environ[env_name]:
+                  sys.exit("ERROR: field " + field + " did not render to its secret value")
+
+          fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+          with open(fd, "w", encoding="utf-8") as f:
+              f.write(text)
+
+          print("render OK -> fields: " + ", ".join(sorted(keys.values())))
+          PY
+
+      # Validate the config. `jq empty` proves the RENDERED file is well-formed
+      # JSON (no secrets printed). `checkconfig` is a purely STRUCTURAL check, so
+      # we run it against the committed PLACEHOLDER template — never mounting the
+      # real-secret render into the third-party image (whose tag is mutable).
+      - name: Validate rendered config
+        run: |
+          set -euo pipefail
+          jq empty "$RENDERED"
+          docker run --rm -v "$PWD/centrifugo":/cfg:ro centrifugo/centrifugo:v5 \
+            centrifugo checkconfig -c /cfg/config.prod.json
+
+      - name: Install SSH key
+        env:
+          CENTRIFUGO_SSH_KEY: ${{ secrets.CENTRIFUGO_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CENTRIFUGO_SSH_KEY}" ]; then
+            echo "ERROR: CENTRIFUGO_SSH_KEY secret is empty" >&2
+            exit 1
+          fi
+          umask 077
+          printf '%s\n' "$CENTRIFUGO_SSH_KEY" > "$RUNNER_TEMP/centrifugo.pem"
+          chmod 600 "$RUNNER_TEMP/centrifugo.pem"
+
+      - name: Deploy to host
+        env:
+          CENTRIFUGO_HOST: ${{ vars.CENTRIFUGO_HOST }}
+          CENTRIFUGO_SSH_USER: ${{ vars.CENTRIFUGO_SSH_USER }}
+          # OPTIONAL host-key pin (ssh-keyscan output). When set, the SSH handshake
+          # is authenticated against it (StrictHostKeyChecking=yes), which blocks
+          # an on-path MITM from capturing the rendered secrets. When unset the
+          # deploy still runs (trust-on-first-use) but is NOT MITM-protected — see
+          # the loud warning below and docs/centrifugo-deploy.md.
+          CENTRIFUGO_KNOWN_HOSTS: ${{ vars.CENTRIFUGO_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CENTRIFUGO_HOST}" ] || [ -z "${CENTRIFUGO_SSH_USER}" ]; then
+            echo "ERROR: CENTRIFUGO_HOST and CENTRIFUGO_SSH_USER repo variables must be set" >&2
+            exit 1
+          fi
+          KEY="$RUNNER_TEMP/centrifugo.pem"
+          KNOWN_HOSTS="$RUNNER_TEMP/known_hosts"
+          TARGET="${CENTRIFUGO_SSH_USER}@${CENTRIFUGO_HOST}"
+          # Prefer a pinned host key (real MITM protection). Host public keys are
+          # not secret, so this comes from a repo VARIABLE. Without it we fall back
+          # to trust-on-first-use, which — on an ephemeral runner with a fresh
+          # empty known_hosts every run — does NOT authenticate the handshake.
+          if [ -n "${CENTRIFUGO_KNOWN_HOSTS:-}" ]; then
+            umask 077
+            printf '%s\n' "$CENTRIFUGO_KNOWN_HOSTS" > "$KNOWN_HOSTS"
+            STRICT="yes"
+            echo "Host-key pinning ENABLED (StrictHostKeyChecking=yes) via CENTRIFUGO_KNOWN_HOSTS."
+          else
+            : > "$KNOWN_HOSTS"
+            STRICT="accept-new"
+            echo "WARNING: CENTRIFUGO_KNOWN_HOSTS is not set — using trust-on-first-use." >&2
+            echo "WARNING: the SSH handshake is NOT authenticated, so an on-path attacker" >&2
+            echo "WARNING: could capture the rendered config. Set the CENTRIFUGO_KNOWN_HOSTS" >&2
+            echo "WARNING: repo variable to pin the host key (see docs/centrifugo-deploy.md)." >&2
+          fi
+          SSH_OPTS="-i $KEY -o StrictHostKeyChecking=$STRICT -o UserKnownHostsFile=$KNOWN_HOSTS"
+          # SC2029: $REMOTE_DIR is intentionally expanded on the runner side.
+          # shellcheck disable=SC2086,SC2029
+          ssh $SSH_OPTS "$TARGET" "mkdir -p '$REMOTE_DIR' && chmod 700 '$REMOTE_DIR'"
+          # shellcheck disable=SC2086
+          scp $SSH_OPTS "$RENDERED" "$TARGET:$REMOTE_DIR/config.prod.json"
+          # Tighten the uploaded real-secret config to 0600 (scp lands it ~0644).
+          # shellcheck disable=SC2086,SC2029
+          ssh $SSH_OPTS "$TARGET" "chmod 600 '$REMOTE_DIR/config.prod.json'"
+          # shellcheck disable=SC2086
+          scp $SSH_OPTS scripts/deploy/centrifugo-remote.sh "$TARGET:$REMOTE_DIR/centrifugo-remote.sh"
+          # The remote script self-detects docker vs systemd, backs up, swaps,
+          # restarts, health-checks, rolls back on failure, and self-deletes the
+          # uploaded secret config on exit. Its non-zero exit fails this step
+          # (and the job) loudly.
+          # shellcheck disable=SC2086,SC2029
+          ssh $SSH_OPTS "$TARGET" "bash '$REMOTE_DIR/centrifugo-remote.sh' '$REMOTE_DIR/config.prod.json'"
+
+      # Always (even on failure) wipe the rendered config (real secrets) from the
+      # host scratch dir AND delete the local SSH key. Best-effort remote cleanup
+      # so it never masks an earlier failure; the keyfile is always removed.
+      - name: Cleanup
+        if: always()
+        env:
+          CENTRIFUGO_HOST: ${{ vars.CENTRIFUGO_HOST }}
+          CENTRIFUGO_SSH_USER: ${{ vars.CENTRIFUGO_SSH_USER }}
+        run: |
+          set -u
+          KEY="$RUNNER_TEMP/centrifugo.pem"
+          if [ -f "$KEY" ] && [ -n "${CENTRIFUGO_HOST:-}" ] && [ -n "${CENTRIFUGO_SSH_USER:-}" ]; then
+            ssh -i "$KEY" -o StrictHostKeyChecking=accept-new \
+              -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+              "${CENTRIFUGO_SSH_USER}@${CENTRIFUGO_HOST}" "rm -rf '$REMOTE_DIR'" || true
+          fi
+          rm -f "$KEY"
