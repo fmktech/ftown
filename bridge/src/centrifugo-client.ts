@@ -4,7 +4,7 @@ import WebSocket from 'ws';
 import type { Subscription, PublicationContext } from 'centrifuge';
 import { hostname } from 'node:os';
 
-import type { Command, CommandResponse, Session, BridgePresenceInfo } from './types.js';
+import type { Command, CommandResponse, Loop, Session, BridgePresenceInfo } from './types.js';
 import { toWireSession } from './session-wire.js';
 
 type TerminalInputHandler = (sessionId: string, data: string) => void;
@@ -127,6 +127,34 @@ export class CentrifugoClient {
       });
     } catch (err) {
       console.error(`[Centrifugo] Failed to publish session update to ${channel}:`, err);
+      throw err;
+    }
+  }
+
+  subscribeToLoops(userId: string): void {
+    const channel = `loops:updates#${userId}`;
+    const sub = this.client.newSubscription(channel);
+    sub.subscribe();
+    this.subscriptions.set(channel, sub);
+  }
+
+  async publishLoopUpdate(userId: string, loop: Loop): Promise<void> {
+    const channel = `loops:updates#${userId}`;
+    // Loop carries no secret env-like field, so — unlike sessions — nothing is stripped.
+    try {
+      await this.client.publish(channel, { type: 'loop_update', loop, timestamp: new Date().toISOString() });
+    } catch (err) {
+      console.error(`[Centrifugo] Failed to publish loop update to ${channel}:`, err);
+      throw err;
+    }
+  }
+
+  async publishLoopRemoved(userId: string, loopId: string): Promise<void> {
+    const channel = `loops:updates#${userId}`;
+    try {
+      await this.client.publish(channel, { type: 'loop_removed', loopId, timestamp: new Date().toISOString() });
+    } catch (err) {
+      console.error(`[Centrifugo] Failed to publish loop removed to ${channel}:`, err);
       throw err;
     }
   }

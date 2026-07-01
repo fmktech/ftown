@@ -18,7 +18,73 @@ export interface Session {
   codexSessionId?: string;
   command?: string;
   parentSessionId?: string;
+  loopId?: string; // set on loop-run sessions; groups the run under its Loop in the UI
 }
+
+// ---------------------------------------------------------------------------
+// Scheduled Loops
+// ---------------------------------------------------------------------------
+
+export type LoopHarness = 'claude' | 'cursor' | 'codex' | 'opencode' | 'shell';
+
+export type LoopRunStatus = 'ok' | 'error' | 'running' | 'skipped';
+
+export type LoopSchedule =
+  | { kind: 'interval'; everyMs: number }
+  | { kind: 'cron'; expression: string; tz?: string };
+
+export interface LoopFlight {
+  command: string;
+  timeoutMs?: number;
+}
+
+export interface LoopPostflight {
+  command: string;
+  timeoutMs?: number;
+  /** Run postflight even when the fire was preflight-skipped. Default false. */
+  runOnSkip?: boolean;
+}
+
+export interface LoopRetention {
+  /** Keep newest N run-sessions; prune older ones. null = keep all. Default 10. */
+  autoClearAfterRuns: number | null;
+}
+
+/** Client-authored fields (create/edit form). */
+export interface LoopDraft {
+  name: string;
+  bridgeId: string;                 // REQUIRED: which bridge owns/runs this loop
+  schedule: LoopSchedule;
+  harness: LoopHarness;
+  workdir?: string;
+  task: string;                     // prompt run each fire; may contain "{{preflight}}"
+  model?: string;
+  enabled: boolean;
+  overlapPolicy: 'skip' | 'allow';  // default 'skip'
+  retention: LoopRetention;
+  preflight?: LoopFlight;
+  postflight?: LoopPostflight;
+  /** Optional deterministic backstop: force-stop + mark 'error' if a flight runs longer. */
+  maxRuntimeMs?: number;
+}
+
+/** Full server-authoritative record (LoopDraft + runtime state). */
+export interface Loop extends LoopDraft {
+  id: string;
+  createdAt: string;                // ISO
+  updatedAt: string;                // ISO
+  lastRunAt?: string;               // ISO — fire time of the most recent flight
+  nextRunAt?: string;               // ISO — authoritative, computed on the bridge
+  lastStatus?: LoopRunStatus;
+  lastSessionId?: string;           // id of the most recent run-Session
+  runCount: number;                 // real AI/flight runs spawned
+  skipCount: number;                // preflight-abort skips
+  /** Transient manual-fire flag; set by run_loop_now, cleared on the next tick. */
+  runNowRequested?: boolean;
+}
+
+/** A "run" is exactly a Session whose loopId === loop.id. No separate store record. */
+export type LoopRun = Session & { loopId: string };
 
 export type SessionMessageType = 'assistant' | 'user' | 'system' | 'tool_use' | 'tool_result';
 
@@ -64,7 +130,12 @@ export interface SessionMessage {
   raw?: ClaudeStreamEvent;
 }
 
-export type CommandType = 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'update_session_parent';
+export type CommandType =
+  | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history'
+  | 'retry_session' | 'rename_session' | 'remove_session' | 'bridge_exec'
+  | 'update_session_parent'
+  | 'create_loop' | 'list_loops' | 'update_loop'
+  | 'delete_loop' | 'run_loop_now' | 'get_loop_runs';
 
 export interface Command {
   type: CommandType;
@@ -122,7 +193,14 @@ export interface BridgeExecPayload {
   bridgeId?: string;
 }
 
-export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | UpdateSessionParentPayload | Record<string, unknown>;
+export interface CreateLoopPayload extends LoopDraft { bridgeId: string }
+export interface ListLoopsPayload { bridgeId?: string }
+export interface UpdateLoopPayload { bridgeId: string; loopId: string; patch: Partial<LoopDraft> }
+export interface DeleteLoopPayload { bridgeId: string; loopId: string }
+export interface RunLoopNowPayload { bridgeId: string; loopId: string }
+export interface GetLoopRunsPayload { bridgeId: string; loopId: string }
+
+export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | UpdateSessionParentPayload | CreateLoopPayload | ListLoopsPayload | UpdateLoopPayload | DeleteLoopPayload | RunLoopNowPayload | GetLoopRunsPayload | Record<string, unknown>;
 
 export interface CommandResponse {
   requestId: string;

@@ -227,6 +227,27 @@ describe('createFtownSession — working directory and generated name preflight'
   });
 });
 
+describe('createFtownSession — loopId passthrough (§4g loop-run tagging)', () => {
+  it('round-trips input.loopId onto the persisted Session, and leaves it undefined when absent', async () => {
+    const realHome = process.env.HOME;
+    const home = mkdtempSync(join(tmpdir(), 'ftw-home-'));
+    process.env.HOME = home;
+    try {
+      const tagged = fakeDeps();
+      const withLoop = await createFtownSession(tagged.deps, { shellType: 'shell', loopId: 'loop-42' });
+      assert.strictEqual(withLoop.loopId, 'loop-42');
+      assert.strictEqual(tagged.saved[0].loopId, 'loop-42');
+
+      const plain = fakeDeps();
+      const withoutLoop = await createFtownSession(plain.deps, { shellType: 'shell' });
+      assert.strictEqual(withoutLoop.loopId, undefined);
+    } finally {
+      restoreHome(realHome);
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
 // Provider API tokens live on the bridge machine under provider-specific keys and are
 // mapped onto the Anthropic auth var at session creation — so secrets never travel
 // through the browser or the spawn command. The source token may arrive via the bridge
