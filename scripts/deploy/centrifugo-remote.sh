@@ -188,93 +188,45 @@ is_up() {
   esac
 }
 
-# Host-loopback probe: works for a native (systemd) install, a --network host
-# container, or one that publishes its ports. Prints nothing; returns 0 only on
-# a positive answer.
-probe_host() {
-  command -v curl >/dev/null 2>&1 || return 1
-  # Prefer the internal /health endpoint when an internal_port is configured.
+# HTTP liveness, probed from the host where this script runs (over SSH). Order:
+#   1. best-effort internal /health (in-container for docker, else host loopback)
+#      — an immediate positive when reachable, but UNreachability is NOT a
+#      failure: prod intentionally does not expose the internal/admin port, so
+#      probing it must never roll back a healthy deploy.
+#   2. authoritative: the PUBLIC port on the host loopback. ANY HTTP response
+#      (e.g. 400 to a non-websocket request) proves centrifugo is answering.
+# Returns 0 only when centrifugo positively answered somewhere.
+http_ok() {
+  # (1) best-effort internal /health — never fatal on failure
   if [ -n "$INTERNAL_PORT" ]; then
-    if curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:${INTERNAL_PORT}/health"; then
+    if [ "$LAYOUT" = docker ] \
+      && docker exec "$CONTAINER" sh -c \
+           "command -v curl >/dev/null 2>&1 && curl -fsS -o /dev/null --max-time 3 http://127.0.0.1:${INTERNAL_PORT}/health" \
+           >/dev/null 2>&1; then
+      return 0
+    fi
+    if command -v curl >/dev/null 2>&1 \
+      && curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:${INTERNAL_PORT}/health" >/dev/null 2>&1; then
       return 0
     fi
   fi
-  # Fall back to the public websocket endpoint: ANY HTTP status (400 = "you
-  # didn't send a websocket upgrade") proves centrifugo is answering.
-  if [ -n "$PORT" ]; then
-    code="$(curl -ksS -o /dev/null -w '%{http_code}' --max-time 3 \
-      "https://127.0.0.1:${PORT}/connection/websocket" 2>/dev/null || echo 000)"
-    if [ -n "$code" ] && [ "$code" != "000" ]; then
-      return 0
-    fi
-  fi
-  return 1
-}
-
-# Probe from INSIDE the container so health works regardless of whether the host
-# publishes centrifugo's ports (a bridged container without -p wouldn't be
-# reachable on 127.0.0.1 from the host — the exact case that used to make the
-# health check roll back a perfectly good config).
-probe_docker() {
-  if [ -n "$INTERNAL_PORT" ]; then
-    for client in wget curl; do
-      rc=0
-      case "$client" in
-        wget) docker exec "$CONTAINER" wget --no-verbose --tries=1 --spider \
-                --timeout=3 "http://127.0.0.1:${INTERNAL_PORT}/health" \
-                >/dev/null 2>&1 || rc=$? ;;
-        curl) docker exec "$CONTAINER" curl -fsS -o /dev/null --max-time 3 \
-                "http://127.0.0.1:${INTERNAL_PORT}/health" >/dev/null 2>&1 || rc=$? ;;
-      esac
-      if [ "$rc" -eq 0 ]; then
-        return 0
-      fi
-      # 126/127 = this client isn't in the image; try the next. Any other
-      # non-zero is authoritative (centrifugo not answering inside the
-      # container), so report unhealthy — the retry loop absorbs slow starts.
-      if [ "$rc" -ne 126 ] && [ "$rc" -ne 127 ]; then
-        return 1
-      fi
+  # (2) authoritative: the public port answers on the host loopback (TLS then
+  # plain). A crash-looping / mis-configured centrifugo that never binds the
+  # port yields 000 on every attempt across the retry window -> rollback fires.
+  if [ -n "$PORT" ] && command -v curl >/dev/null 2>&1; then
+    for scheme in https http; do
+      code="$(curl -ksS -o /dev/null -w '%{http_code}' --max-time 3 "${scheme}://127.0.0.1:${PORT}/" 2>/dev/null || echo 000)"
+      [ -n "$code" ] && [ "$code" != "000" ] && return 0
     done
   fi
-  # No usable in-container client (or no internal_port). Try the host loopback.
-  if probe_host; then
-    return 0
-  fi
-  # We could neither probe inside the container nor over the host loopback, so
-  # we cannot actually disprove health. Degrade to container-running state
-  # rather than roll back (and discard) a config we can't show is bad.
-  log "WARN: could not HTTP-probe centrifugo (no in-container client; host loopback unreachable); relying on container-running state only"
-  return 0
-}
-
-http_probe() {
-  case "$LAYOUT" in
-    docker)
-      probe_docker
-      ;;
-    systemd)
-      # Native install: the host loopback is authoritative.
-      if probe_host; then
-        return 0
-      fi
-      if ! command -v curl >/dev/null 2>&1; then
-        log "WARN: curl not found; health relies on process state only"
-        return 0
-      fi
-      return 1
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  return 1
 }
 
 health_check() {
   i=1
   while [ "$i" -le 30 ]; do
-    if is_up && http_probe; then
-      log "health check passed (attempt $i/30)"
+    if is_up && http_ok; then
+      log "health check passed (attempt $i/30): running and answering on the public port"
       return 0
     fi
     log "health check attempt $i/30 not ready; retrying in 2s"
