@@ -31,6 +31,11 @@ coverage/
 
 .secrets/
 config.prod.json
+# The committed centrifugo prod config is a sanitized TEMPLATE (placeholders
+# only, no real secrets) rendered from GitHub secrets by the deploy workflow;
+# it must be tracked so CI can check it out. .secrets/config.prod.json stays
+# ignored via the .secrets/ rule above.
+!centrifugo/config.prod.json
 node-compile-cache/
 
 *.pem

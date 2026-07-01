@@ -18,6 +18,10 @@ regexes = [
   '''^admin$''',
   '''^admin-secret$''',
   '''^<[^>]+>$''',
+  # CI render placeholders in centrifugo/config.prod.json — substituted from
+  # GitHub secrets at deploy time (see .github/workflows/deploy-centrifugo.yml).
+  # Scoped to the exact __CENTRIFUGO_*__ token shape so the rule is not weakened.
+  '''^__CENTRIFUGO_[A-Z_]+__$''',
 ]
 
 [[rules]]

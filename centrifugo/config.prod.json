@@ -1,0 +1,98 @@
+{
+  "token_hmac_secret_key": "__CENTRIFUGO_TOKEN_HMAC_SECRET_KEY__",
+  "api_key": "__CENTRIFUGO_API_KEY__",
+  "admin": true,
+  "admin_password": "__CENTRIFUGO_ADMIN_PASSWORD__",
+  "admin_secret": "__CENTRIFUGO_ADMIN_SECRET__",
+  "allowed_origins": ["*"],
+  "allow_anonymous_connect_without_token": false,
+  "token_audience": "ftown:centrifugo",
+  "allow_user_limited_channels": true,
+  "allow_publish_for_subscriber": false,
+  "allow_subscribe_for_client": false,
+  "allow_history_for_subscriber": true,
+  "presence": true,
+  "join_leave": true,
+  "force_push_join_leave": true,
+  "allow_presence_for_subscriber": true,
+  "history_size": 500,
+  "history_ttl": "24h",
+  "force_recovery": true,
+  "namespaces": [
+    {
+      "name": "terminal",
+      "allow_publish_for_subscriber": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true,
+      "allow_history_for_subscriber": true,
+      "history_size": 20,
+      "history_ttl": "5m",
+      "force_recovery": false
+    },
+    {
+      "name": "sessions",
+      "allow_publish_for_subscriber": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true,
+      "history_size": 0,
+      "history_ttl": "0s",
+      "force_recovery": false
+    },
+    {
+      "name": "loops",
+      "allow_publish_for_subscriber": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true,
+      "history_size": 0,
+      "history_ttl": "0s",
+      "force_recovery": false
+    },
+    {
+      "name": "terminal-input",
+      "allow_publish_for_subscriber": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true
+    },
+    {
+      "name": "events",
+      "allow_publish_for_subscriber": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true,
+      "history_size": 100,
+      "history_ttl": "1h"
+    },
+    {
+      "name": "commands",
+      "allow_publish_for_subscriber": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true
+    },
+    {
+      "name": "bridges",
+      "allow_publish_for_subscriber": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true,
+      "presence": true,
+      "join_leave": true,
+      "force_push_join_leave": true,
+      "allow_presence_for_subscriber": true
+    }
+  ],
+  "tls_autocert": true,
+  "tls_autocert_host_whitelist": "centrifugo.webcraw.ai,wss.ftown.ia.br",
+  "tls_autocert_cache_dir": "/centrifugo/autocert",
+  "tls_autocert_http": true,
+  "tls_autocert_http_addr": ":80",
+  "address": "0.0.0.0",
+  "port": 443,
+  "internal_port": 9000,
+  "client_channel_limit": 256,
+  "websocket_message_size_limit": 33554432,
+  "websocket_compression": true,
+  "websocket_compression_min_size": 1024,
+  "client_queue_max_size": 67108864,
+  "client_stale_close_delay": "30s",
+  "ping_interval": "10s",
+  "pong_timeout": "5s",
+  "log_level": "info"
+}
