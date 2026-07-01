@@ -95,7 +95,7 @@
   "address": "0.0.0.0",
   "port": 443,
   "internal_port": 9000,
-  "client_channel_limit": 256,
+  "client_channel_limit": 4096,
   "websocket_message_size_limit": 33554432,
   "websocket_compression": true,
   "websocket_compression_min_size": 1024,
