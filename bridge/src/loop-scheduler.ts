@@ -472,7 +472,7 @@ export class LoopScheduler {
       }
 
       const task = loop.task.replaceAll('{{preflight}}', preflightOut);
-      const session = await this.spawnSession({
+      const spawnInput: CreateFtownSessionInput = {
         shellType: loop.harness,
         prompt: task,
         workingDir: loop.workdir,
@@ -482,7 +482,16 @@ export class LoopScheduler {
         suppressBriefing: true, // no child/orchestrator briefing paragraph in the task
         name: `${loop.name} · ${iso(now)}`,
         // parentSessionId intentionally omitted — loopId is the sole grouping key.
-      });
+      };
+      if (loop.harness === 'shell') {
+        // Loop shell runs are one-shot jobs, not interactive terminals. Persist
+        // the task as prompt metadata, but execute it as the command and suppress
+        // typed injection so the shell exits when the job is done.
+        spawnInput.command = task;
+        spawnInput.initialInput = '';
+      }
+
+      const session = await this.spawnSession(spawnInput);
 
       const updated = await this.persist(loop.id, (l) => {
         l.lastRunAt = iso(now);

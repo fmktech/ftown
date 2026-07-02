@@ -209,7 +209,7 @@ export interface ListLoopsPayload { bridgeId?: string }
 export interface UpdateLoopPayload { bridgeId: string; loopId: string; patch: Partial<LoopDraft> }
 export interface DeleteLoopPayload { bridgeId: string; loopId: string }
 export interface RunLoopNowPayload { bridgeId: string; loopId: string }
-export interface GetLoopRunsPayload { bridgeId: string; loopId: string }
+export interface GetLoopRunsPayload { bridgeId?: string; loopId: string }
 
 export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | ClearTerminalPayload | UpdateSessionParentPayload | CreateLoopPayload | ListLoopsPayload | UpdateLoopPayload | DeleteLoopPayload | RunLoopNowPayload | GetLoopRunsPayload | Record<string, unknown>;
 

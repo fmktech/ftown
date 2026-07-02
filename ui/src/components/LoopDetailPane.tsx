@@ -8,6 +8,7 @@ interface LoopDetailPaneProps {
   runs: LoopRunRecord[];
   selectedRunId: string | null;
   loadingRuns?: boolean;
+  runsError?: string | null;
   onSelectRun: (runId: string) => void;
   onRunNow: (loop: Loop) => void;
   onToggleEnabled: (loop: Loop) => void;
@@ -66,6 +67,7 @@ export function LoopDetailPane({
   runs,
   selectedRunId,
   loadingRuns,
+  runsError,
   onSelectRun,
   onRunNow,
   onToggleEnabled,
@@ -166,7 +168,7 @@ export function LoopDetailPane({
           </div>
           {runs.length === 0 && (
             <div style={{ padding: 14, fontSize: 12, color: "var(--text-faint)" }}>
-              {loadingRuns ? "Loading runs" : "No runs yet"}
+              {runsError ? `Run history unavailable: ${runsError}` : loadingRuns ? "Loading runs" : "No runs yet"}
             </div>
           )}
           {runs.map((run) => {
