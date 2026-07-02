@@ -6,7 +6,7 @@ import { v4 as uuidv4 } from "uuid";
 import {
   Loop,
   LoopDraft,
-  Session,
+  LoopRunRecord,
   Command,
   CommandResponse,
   CreateLoopPayload,
@@ -43,7 +43,7 @@ interface UseLoopsResult {
   deleteLoop: (bridgeId: string, loopId: string) => Promise<boolean>;
   runLoopNow: (bridgeId: string, loopId: string) => Promise<RunLoopNowResult>;
   refreshLoops: () => Promise<void>;
-  getLoopRuns: (bridgeId: string, loopId: string) => Promise<Session[]>;
+  getLoopRuns: (bridgeId: string, loopId: string) => Promise<LoopRunRecord[]>;
 }
 
 /**
@@ -266,8 +266,8 @@ export function useLoops(
   }, [userId, sendCommandCollect]);
 
   const getLoopRuns = useCallback(
-    (bridgeId: string, loopId: string): Promise<Session[]> => {
-      return new Promise<Session[]>((resolve, reject) => {
+    (bridgeId: string, loopId: string): Promise<LoopRunRecord[]> => {
+      return new Promise<LoopRunRecord[]>((resolve, reject) => {
         if (!userId) {
           reject(new Error("Not connected"));
           return;
@@ -282,7 +282,7 @@ export function useLoops(
               reject(new Error(resp.error ?? "get_loop_runs failed"));
               return;
             }
-            const data = resp.data as { runs?: Session[] } | undefined;
+            const data = resp.data as { runs?: LoopRunRecord[] } | undefined;
             resolve(data?.runs ?? []);
           })
           .catch(reject);

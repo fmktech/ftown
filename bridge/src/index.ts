@@ -33,6 +33,7 @@ import { createFtownSession, findMissingProviderAuth, WorkingDirMissingError, ty
 import { loadProviderEnv } from './provider-env-store.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { createLoop, deleteLoop, getLoop, listLoops, updateLoop, upsertLoop } from './loop-store.js';
+import { deleteLoopRunRecords, listLoopRunRecordsWithFallback } from './loop-run-store.js';
 import { LoopScheduler, LOOP_TICK_INTERVAL_MS } from './loop-scheduler.js';
 import { validateLoopDraft, validateLoopPatch } from './loop-validation.js';
 import { buildSessionCommand } from './agent-commands.js';
@@ -868,6 +869,7 @@ program
               // just-deleted loop never leaves a live AI session with nothing
               // left to finalize/prune it.
               if (existingLoop) scheduler.onLoopDeleted(existingLoop);
+              deleteLoopRunRecords(payload.loopId);
               await centrifugo.publishLoopRemoved(userId, payload.loopId);
             }
             response = { requestId: command.requestId, success: true, data: { removed } };
@@ -911,9 +913,10 @@ program
               response = { requestId: command.requestId, success: false, error: 'Missing loopId' };
               break;
             }
-            const runs = (await store.listSessions())
-              .filter((session) => session.loopId === payload.loopId)
-              .map(toWireSession);
+            const sessions = (await store.listSessions()).map(toWireSession);
+            const runs = await listLoopRunRecordsWithFallback(payload.loopId, sessions, (sessionId) =>
+              store.loadTerminalLog(sessionId),
+            );
             response = { requestId: command.requestId, success: true, data: { runs } };
             break;
           }
