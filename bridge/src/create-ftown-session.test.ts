@@ -402,8 +402,10 @@ describe('createFtownSession — provider runtime env', () => {
       const session = await createFtownSession(harness.deps, {
         shellType: 'zai',
         prompt: 'do provider work',
+        loopId: 'loop-zai',
       });
 
+      assert.strictEqual(session.loopId, 'loop-zai');
       assert.strictEqual(session.env?.ANTHROPIC_BASE_URL, 'https://api.z.ai/api/anthropic');
       assert.strictEqual(session.env?.ANTHROPIC_DEFAULT_OPUS_MODEL, 'glm-5.2[1m]');
       assert.strictEqual(session.env?.ANTHROPIC_AUTH_TOKEN, 'tok-zai');
