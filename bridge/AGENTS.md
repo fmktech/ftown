@@ -10,6 +10,18 @@
 
 Implement harness features in `src/harness-cli.ts` and `src/harness-installer.ts`. Bridge wires install in `src/index.ts` next to hook installation.
 
+## Versioning
+
+Any PR that changes `bridge/**` must bump `bridge/package.json` and keep
+`bridge/package-lock.json` in sync. CI enforces this because `main` publishes
+the bridge package to npm.
+
+Use:
+
+```bash
+npm version patch --no-git-tag-version
+```
+
 ### Dev
 
 ```bash
