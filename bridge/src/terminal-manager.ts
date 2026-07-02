@@ -30,7 +30,6 @@ export interface GrepResult {
 interface ManagedTerminal {
   terminal: TerminalType;
   serializer: InstanceType<typeof SerializeAddon>;
-  rawBuffer: string;
 }
 
 /**
@@ -84,7 +83,7 @@ export class TerminalManager {
       });
       const serializer = new SerializeAddon();
       terminal.loadAddon(serializer);
-      managed = { terminal, serializer, rawBuffer: '' };
+      managed = { terminal, serializer };
       this.terminals.set(sessionId, managed);
     }
     return managed;
@@ -93,21 +92,6 @@ export class TerminalManager {
   write(sessionId: string, data: string): void {
     const managed = this.ensureTerminal(sessionId);
     managed.terminal.write(data, () => {});
-    managed.rawBuffer += data;
-  }
-
-  flushRawLog(sessionId: string): string {
-    const managed = this.terminals.get(sessionId);
-    if (!managed) return '';
-    const data = managed.rawBuffer;
-    managed.rawBuffer = '';
-    return data;
-  }
-
-  getRawBuffer(sessionId: string): string {
-    const managed = this.terminals.get(sessionId);
-    if (!managed) return '';
-    return managed.rawBuffer;
   }
 
   serialize(sessionId: string, scrollback?: number): string {
