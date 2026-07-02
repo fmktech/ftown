@@ -43,7 +43,7 @@ interface UseLoopsResult {
   deleteLoop: (bridgeId: string, loopId: string) => Promise<boolean>;
   runLoopNow: (bridgeId: string, loopId: string) => Promise<RunLoopNowResult>;
   refreshLoops: () => Promise<void>;
-  getLoopRuns: (bridgeId: string, loopId: string) => Promise<LoopRunRecord[]>;
+  getLoopRuns: (bridgeId: string | undefined, loopId: string) => Promise<LoopRunRecord[]>;
 }
 
 /**
@@ -266,29 +266,49 @@ export function useLoops(
   }, [userId, sendCommandCollect]);
 
   const getLoopRuns = useCallback(
-    (bridgeId: string, loopId: string): Promise<LoopRunRecord[]> => {
+    (bridgeId: string | undefined, loopId: string): Promise<LoopRunRecord[]> => {
       return new Promise<LoopRunRecord[]>((resolve, reject) => {
         if (!userId) {
           reject(new Error("Not connected"));
           return;
         }
 
-        const payload: GetLoopRunsPayload = { bridgeId, loopId };
+        const payload: GetLoopRunsPayload = bridgeId ? { bridgeId, loopId } : { loopId };
         const command: Command = { type: "get_loop_runs", payload, requestId: uuidv4() };
 
-        sendCommand(command)
-          .then((resp) => {
-            if (!resp.success) {
-              reject(new Error(resp.error ?? "get_loop_runs failed"));
+        sendCommandCollect(command, 1500)
+          .then((responses) => {
+            const successfulRuns: LoopRunRecord[] = [];
+            let firstError: string | undefined;
+            for (const resp of responses) {
+              if (!resp.success) {
+                firstError ??= resp.error;
+                continue;
+              }
+              const data = resp.data as { runs?: LoopRunRecord[] } | undefined;
+              if (Array.isArray(data?.runs)) successfulRuns.push(...data.runs);
+            }
+
+            if (successfulRuns.length > 0) {
+              const byId = new Map<string, LoopRunRecord>();
+              for (const run of successfulRuns) byId.set(run.id, run);
+              resolve(
+                Array.from(byId.values()).sort(
+                  (a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt)
+                )
+              );
               return;
             }
-            const data = resp.data as { runs?: LoopRunRecord[] } | undefined;
-            resolve(data?.runs ?? []);
+            if (responses.some((resp) => resp.success)) {
+              resolve([]);
+              return;
+            }
+            reject(new Error(firstError ?? "No bridge responded with loop runs"));
           })
           .catch(reject);
       });
     },
-    [userId, sendCommand]
+    [userId, sendCommandCollect]
   );
 
   return {

@@ -293,6 +293,19 @@ describe('LoopScheduler — fire (interval/cron due)', () => {
     assert.strictEqual(h.loops.snapshot('loop-1').nextRunAt, iso(300_000));
   });
 
+  it('runs shell loops as one-shot commands instead of interactive shells', async () => {
+    const h = makeHarness();
+    h.loops.seed(loopFixture({ harness: 'shell', task: 'echo done; pwd' }));
+
+    await h.scheduler.tick(0);
+
+    assert.strictEqual(h.spawnCalls.length, 1);
+    assert.strictEqual(h.spawnCalls[0].shellType, 'shell');
+    assert.strictEqual(h.spawnCalls[0].prompt, 'echo done; pwd');
+    assert.strictEqual(h.spawnCalls[0].command, 'echo done; pwd');
+    assert.strictEqual(h.spawnCalls[0].initialInput, '');
+  });
+
   it('does not fire a loop that is not due', async () => {
     const h = makeHarness();
     h.loops.seed(loopFixture({ nextRunAt: iso(10_000) }));

@@ -50,6 +50,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [selectedLoopRunId, setSelectedLoopRunId] = useState<string | null>(null);
   const [selectedLoopRuns, setSelectedLoopRuns] = useState<LoopRunRecord[]>([]);
   const [loopRunsLoading, setLoopRunsLoading] = useState(false);
+  const [loopRunsError, setLoopRunsError] = useState<string | null>(null);
   const [showNewSession, setShowNewSession] = useState(false);
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
   const [showLoopForm, setShowLoopForm] = useState(false);
@@ -254,22 +255,31 @@ PY`;
       setSelectedLoopRuns([]);
       setSelectedLoopRunId(null);
       setLoopRunsLoading(false);
+      setLoopRunsError(null);
       return;
     }
 
     let cancelled = false;
+    const routeBridgeId = activeBridgeIds.has(selectedLoop.bridgeId) ? selectedLoop.bridgeId : undefined;
     setLoopRunsLoading(true);
-    getLoopRuns(selectedLoop.bridgeId, selectedLoop.id)
+    setLoopRunsError(null);
+    getLoopRuns(routeBridgeId, selectedLoop.id)
       .then((runs) => {
         if (cancelled) return;
         setSelectedLoopRuns(runs);
+        setLoopRunsError(null);
         setSelectedLoopRunId((current) => {
           if (current && runs.some((run) => run.id === current)) return current;
           return runs[0]?.id ?? null;
         });
       })
       .catch((err) => {
-        if (!cancelled) console.error("get_loop_runs failed", err);
+        if (!cancelled) {
+          console.error("get_loop_runs failed", err);
+          setLoopRunsError(err instanceof Error ? err.message : String(err));
+          setSelectedLoopRuns([]);
+          setSelectedLoopRunId(null);
+        }
       })
       .finally(() => {
         if (!cancelled) setLoopRunsLoading(false);
@@ -278,7 +288,7 @@ PY`;
     return () => {
       cancelled = true;
     };
-  }, [selectedLoop?.id, selectedLoop?.bridgeId, selectedLoop?.runCount, selectedLoop?.skipCount, selectedLoop?.lastStatus, selectedLoop?.lastSessionId, selectedLoop?.updatedAt, getLoopRuns]);
+  }, [selectedLoop?.id, selectedLoop?.bridgeId, selectedLoop?.runCount, selectedLoop?.skipCount, selectedLoop?.lastStatus, selectedLoop?.lastSessionId, selectedLoop?.updatedAt, activeBridgeIds, getLoopRuns]);
 
   useEffect(() => {
     if (!selectedSessionId) return undefined;
@@ -962,6 +972,7 @@ PY`;
               runs={selectedLoopRuns}
               selectedRunId={selectedLoopRunId}
               loadingRuns={loopRunsLoading}
+              runsError={loopRunsError}
               onSelectRun={setSelectedLoopRunId}
               onRunNow={handleRunLoopNow}
               onToggleEnabled={handleToggleLoopEnabled}

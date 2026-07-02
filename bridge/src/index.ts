@@ -32,6 +32,7 @@ import { registerSessionWorkspace, unregisterSession } from './session-registry.
 import { createFtownSession, findMissingProviderAuth, WorkingDirMissingError, type CreateFtownSessionDeps } from './create-ftown-session.js';
 import { loadProviderEnv } from './provider-env-store.js';
 import { removeFtownSession } from './remove-ftown-session.js';
+import { shouldResurrectStoredSession } from './session-resurrection.js';
 import { createLoop, deleteLoop, getLoop, listLoops, updateLoop, upsertLoop } from './loop-store.js';
 import { deleteLoopRunRecords, listLoopRunRecordsWithFallback } from './loop-run-store.js';
 import { LoopScheduler, LOOP_TICK_INTERVAL_MS } from './loop-scheduler.js';
@@ -1078,8 +1079,14 @@ program
         }
       }
 
+      let deferredLoopRuns = 0;
       for (const session of sessions) {
-        if (session.status !== 'running' && session.status !== 'pending') continue;
+        if (session.loopId) {
+          if (session.status !== 'running' && session.status !== 'pending') continue;
+          deferredLoopRuns += 1;
+          continue;
+        }
+        if (!shouldResurrectStoredSession(session)) continue;
         try {
           await resurrectSession(session.id);
         } catch (err) {
@@ -1091,6 +1098,9 @@ program
             console.error(`[Bridge] Failed to mark session ${session.id} as error:`, markErr);
           }
         }
+      }
+      if (deferredLoopRuns > 0) {
+        console.log(`[Bridge] Deferred ${deferredLoopRuns} loop-run session(s) to the loop scheduler`);
       }
     }
 
