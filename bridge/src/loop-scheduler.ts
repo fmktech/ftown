@@ -1,11 +1,17 @@
 import { spawn } from 'node:child_process';
 
 import { computeNextRun, isDue } from './loop-schedule.js';
+import {
+  pruneLoopRunRecords,
+  recordForSession,
+  skippedRunRecord,
+  upsertLoopRunRecord,
+} from './loop-run-store.js';
 import { listLoops, mutateLoopRuntime, type LoopRuntimeMutator } from './loop-store.js';
 
 import type { CreateFtownSessionInput } from './create-ftown-session.js';
 import type { RemoveFtownSessionOptions } from './remove-ftown-session.js';
-import type { Loop, Session } from './types.js';
+import type { Loop, LoopRunRecord, Session } from './types.js';
 
 /** Base tick cadence; also the finalize grace so a just-spawned PTY is not mistaken for exited. */
 export const LOOP_TICK_INTERVAL_MS = 30_000;
@@ -55,6 +61,11 @@ export interface LoopStoreApi {
   mutateLoopRuntime(id: string, fn: LoopRuntimeMutator): Loop | null;
 }
 
+export interface LoopRunRecordStoreApi {
+  upsertLoopRunRecord(record: LoopRunRecord): LoopRunRecord;
+  pruneLoopRunRecords(loopId: string, keep: number | null, preserveIds?: Iterable<string | undefined>): void;
+}
+
 export interface SchedulerDeps {
   store: SchedulerStore;
   runner: SchedulerRunner;
@@ -66,6 +77,8 @@ export interface SchedulerDeps {
   removeSession: RemoveSession;
   /** Loop persistence. Defaults to the real ~/.ftown/loops.json store. */
   loops?: LoopStoreApi;
+  /** Durable loop-run log persistence. Defaults to the real ~/.ftown/loop-runs.json store. */
+  runRecords?: LoopRunRecordStoreApi;
   /** Flight runner. Defaults to the exec-based runFlightCommand. */
   runFlight?: RunFlight;
   /** Clock seam. Defaults to Date.now. */
@@ -209,6 +222,7 @@ export class LoopScheduler {
   private readonly spawnSession: SpawnSession;
   private readonly removeSession: RemoveSession;
   private readonly loops: LoopStoreApi;
+  private readonly runRecords: LoopRunRecordStoreApi;
   private readonly runFlight: RunFlight;
   private readonly now: () => number;
 
@@ -233,6 +247,7 @@ export class LoopScheduler {
     this.spawnSession = deps.spawnSession;
     this.removeSession = deps.removeSession;
     this.loops = deps.loops ?? { listLoops, mutateLoopRuntime };
+    this.runRecords = deps.runRecords ?? { upsertLoopRunRecord, pruneLoopRunRecords };
     this.runFlight = deps.runFlight ?? runFlightCommand;
     this.now = deps.now ?? ((): number => Date.now());
   }
@@ -431,15 +446,24 @@ export class LoopScheduler {
         const r = await this.runFlight(loop.preflight.command, loop.workdir, loop.preflight.timeoutMs);
         preflightOut = r.stdout;
         if (r.exitCode !== 0) {
+          const skippedAt = iso(now);
+          const details = [
+            `Preflight exited with code ${r.exitCode}.`,
+            r.stdout ? `\nstdout:\n${r.stdout}` : '',
+            r.stderr ? `\nstderr:\n${r.stderr}` : '',
+          ].join('');
           // ABORT: skip (not error), no session, no run-node.
           const skipped = await this.persist(loop.id, (l) => {
-            l.lastRunAt = iso(now);
+            l.lastRunAt = skippedAt;
             l.nextRunAt = iso(nextRunMs);
             l.runNowRequested = false;
             l.lastStatus = 'skipped';
             l.skipCount += 1;
-            l.updatedAt = iso(now);
+            l.updatedAt = skippedAt;
           });
+          if (skipped) {
+            this.runRecords.upsertLoopRunRecord(skippedRunRecord(loop, skippedAt, details));
+          }
           if (skipped && loop.postflight?.runOnSkip) {
             await this.runPostflight(loop, { status: 'skipped', sessionId: '', output: '' });
           }
@@ -477,6 +501,7 @@ export class LoopScheduler {
         await this.removeSession(session.id).catch(() => undefined);
         return;
       }
+      this.runRecords.upsertLoopRunRecord(recordForSession(updated, session, iso(now)));
       this.track(loop.id, session.id, now);
     } catch (err) {
       // A failure after the schedule was computed: record error + persist so the
@@ -496,6 +521,7 @@ export class LoopScheduler {
    *  loop's tracked/latest run), then run postflight + retention for it. */
   private async finalizeRun(loop: Loop, now: number, runId: string, forcedError: boolean): Promise<void> {
     const tracked = this.inFlight.get(loop.id);
+    const startedMs = tracked?.get(runId) ?? Date.parse(loop.lastRunAt ?? iso(now));
     if (tracked) {
       tracked.delete(runId);
       if (tracked.size === 0) this.inFlight.delete(loop.id);
@@ -503,7 +529,10 @@ export class LoopScheduler {
 
     const run = runId ? await this.store.loadSession(runId) : null;
     const status: 'ok' | 'error' = forcedError ? 'error' : resolveRunStatus(run);
-    const output = truncateTail(runId ? await this.store.loadTerminalLog(runId) : '', 65_536);
+    const fullOutput = runId ? await this.store.loadTerminalLog(runId) : '';
+    const output = truncateTail(fullOutput, 65_536);
+    const outputBytes = Buffer.byteLength(fullOutput, 'utf8');
+    const tailBytes = Buffer.byteLength(output, 'utf8');
 
     // Only the loop's most-recently-STARTED run (lastSessionId) drives the badge;
     // an older overlapping 'allow' run finalizes silently (still postflight +
@@ -513,6 +542,36 @@ export class LoopScheduler {
       l.updatedAt = iso(now);
     });
     void updated;
+
+    const baseRecord = run
+      ? recordForSession(loop, run, Number.isFinite(startedMs) ? iso(startedMs) : run.createdAt)
+      : {
+          id: runId,
+          loopId: loop.id,
+          bridgeId: loop.bridgeId,
+          sessionId: runId,
+          name: `${loop.name} · ${runId}`,
+          status,
+          startedAt: Number.isFinite(startedMs) ? iso(startedMs) : iso(now),
+          updatedAt: iso(now),
+          harness: loop.harness,
+          workdir: loop.workdir,
+          task: loop.task,
+          model: loop.model,
+          sessionStatus: undefined,
+        };
+    this.runRecords.upsertLoopRunRecord({
+      ...baseRecord,
+      status,
+      sessionStatus: run?.status,
+      errorReason: forcedError ? 'max_runtime_exceeded' : run?.errorReason,
+      updatedAt: iso(now),
+      finishedAt: iso(now),
+      durationMs: Math.max(0, now - (Number.isFinite(startedMs) ? startedMs : now)),
+      logTail: output,
+      logBytes: outputBytes,
+      logTruncated: outputBytes > tailBytes,
+    });
 
     if (loop.postflight) {
       await this.runPostflight(loop, { status, sessionId: runId, output });
@@ -546,6 +605,7 @@ export class LoopScheduler {
       if (run.id === loop.lastSessionId) continue;
       await this.removeSession(run.id, { onlyIfFinished: true });
     }
+    this.runRecords.pruneLoopRunRecords(loop.id, keep, [loop.lastSessionId, ...runs.filter((run) => this.runner.isRunning(run.id)).map((run) => run.id)]);
   }
 
   private async persist(id: string, fn: LoopRuntimeMutator): Promise<Loop | null> {

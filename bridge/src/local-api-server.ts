@@ -13,6 +13,7 @@ import type { ProcessRunner } from './claude-runner.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { TerminalManager } from './terminal-manager.js';
 import { createLoop, deleteLoop, getLoop, listLoops, updateLoop, upsertLoop } from './loop-store.js';
+import { deleteLoopRunRecords, listLoopRunRecordsWithFallback } from './loop-run-store.js';
 import { validateLoopDraft, validateLoopPatch } from './loop-validation.js';
 import {
   registerSessionConversation,
@@ -522,6 +523,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       const removed = deleteLoop(loopId);
       if (removed) {
         if (existingLoop) this.loopApi.scheduler.onLoopDeleted(existingLoop);
+        deleteLoopRunRecords(loopId);
         await this.centrifugo.publishLoopRemoved(this.userId, loopId);
       }
       jsonResponse(res, 200, { removed, loopId });
@@ -563,9 +565,11 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     // GET /api/loops/:id/runs
     if (loopRunsMatch && req.method === 'GET') {
       const loopId = loopRunsMatch[1];
-      const runs = (await this.store.listSessions())
-        .filter((session) => session.loopId === loopId)
-        .map(toWireSession);
+      const store = this.store;
+      const sessions = (await store.listSessions()).map(toWireSession);
+      const runs = await listLoopRunRecordsWithFallback(loopId, sessions, (sessionId) =>
+        store.loadTerminalLog(sessionId),
+      );
       jsonResponse(res, 200, { runs });
       return;
     }

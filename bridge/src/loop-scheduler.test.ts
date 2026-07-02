@@ -6,6 +6,7 @@ import {
   runFlightCommand,
   type FlightResult,
   type LoopStoreApi,
+  type LoopRunRecordStoreApi,
   type RemoveSession,
   type RunFlight,
   type SchedulerCentrifugo,
@@ -15,7 +16,7 @@ import {
 } from './loop-scheduler.js';
 import type { CreateFtownSessionInput } from './create-ftown-session.js';
 import type { RemoveFtownSessionOptions } from './remove-ftown-session.js';
-import type { Loop, LoopDraft, Session } from './types.js';
+import type { Loop, LoopDraft, LoopRunRecord, Session } from './types.js';
 
 // ---------------------------------------------------------------------------
 // In-memory fakes — no real fs, timers, PTYs or network. Mirrors the DI style
@@ -94,6 +95,26 @@ class FakeCentrifugo implements SchedulerCentrifugo {
   }
 }
 
+class FakeLoopRunRecords implements LoopRunRecordStoreApi {
+  records = new Map<string, LoopRunRecord>();
+  prunes: Array<{ loopId: string; keep: number | null; preserveIds: Array<string | undefined> }> = [];
+  upsertLoopRunRecord(record: LoopRunRecord): LoopRunRecord {
+    this.records.set(record.id, structuredClone(record));
+    return structuredClone(record);
+  }
+  pruneLoopRunRecords(loopId: string, keep: number | null, preserveIds: Iterable<string | undefined> = []): void {
+    this.prunes.push({ loopId, keep, preserveIds: [...preserveIds] });
+  }
+  snapshot(id: string): LoopRunRecord {
+    const record = this.records.get(id);
+    if (!record) throw new Error(`no run record ${id}`);
+    return structuredClone(record);
+  }
+  byLoop(loopId: string): LoopRunRecord[] {
+    return [...this.records.values()].filter((record) => record.loopId === loopId).map((record) => structuredClone(record));
+  }
+}
+
 interface FlightCall {
   command: string;
   cwd?: string;
@@ -106,6 +127,7 @@ function makeHarness() {
   const runner = new FakeRunner();
   const store = new FakeStore();
   const centrifugo = new FakeCentrifugo();
+  const runRecords = new FakeLoopRunRecords();
 
   let nowValue = 0;
   const setNow = (n: number): void => {
@@ -160,6 +182,7 @@ function makeHarness() {
     spawnSession,
     removeSession,
     loops,
+    runRecords,
     runFlight,
     now: () => nowValue,
   });
@@ -169,6 +192,7 @@ function makeHarness() {
     runner,
     store,
     centrifugo,
+    runRecords,
     scheduler,
     spawnCalls,
     removed,
@@ -248,6 +272,12 @@ describe('LoopScheduler — fire (interval/cron due)', () => {
     assert.ok(loop.lastSessionId);
     assert.strictEqual(loop.nextRunAt, iso(60_000)); // advanced by interval
     assert.strictEqual(loop.lastRunAt, iso(0));
+
+    const record = h.runRecords.snapshot(loop.lastSessionId!);
+    assert.strictEqual(record.loopId, 'loop-1');
+    assert.strictEqual(record.sessionId, loop.lastSessionId);
+    assert.strictEqual(record.status, 'running');
+    assert.strictEqual(record.startedAt, iso(0));
   });
 
   it('a fire with no preflight passes the task verbatim and no env', async () => {
@@ -297,6 +327,10 @@ describe('LoopScheduler — preflight skip', () => {
     assert.strictEqual(loop.runCount, 0);
     assert.strictEqual(loop.nextRunAt, iso(60_000));
     assert.strictEqual(h.flightCalls.length, 1); // only the preflight ran
+    const records = h.runRecords.byLoop('loop-1');
+    assert.strictEqual(records.length, 1);
+    assert.strictEqual(records[0].status, 'skipped');
+    assert.match(records[0].logTail ?? '', /Preflight exited with code 3/);
   });
 
   it('runs postflight on a preflight-skip only when runOnSkip is set', async () => {
@@ -401,6 +435,13 @@ describe('LoopScheduler — finalize', () => {
       FTOWN_RUN_SESSION_ID: 'run-x',
       FTOWN_RUN_OUTPUT: 'TERMINAL OUTPUT',
     });
+    const record = h.runRecords.snapshot('run-x');
+    assert.strictEqual(record.status, 'ok');
+    assert.strictEqual(record.sessionStatus, 'completed');
+    assert.strictEqual(record.finishedAt, iso(40_000));
+    assert.strictEqual(record.durationMs, 40_000);
+    assert.strictEqual(record.logTail, 'TERMINAL OUTPUT');
+    assert.strictEqual(record.logBytes, Buffer.byteLength('TERMINAL OUTPUT', 'utf8'));
   });
 
   it('does not finalize while still inside the grace window', async () => {
@@ -473,6 +514,7 @@ describe('LoopScheduler — retention prune', () => {
       ['r2', 'r1'],
     );
     assert.ok(h.removed.every((r) => r.opts?.onlyIfFinished === true));
+    assert.deepStrictEqual(h.runRecords.prunes, [{ loopId: 'loop-1', keep: 1, preserveIds: ['r3', 'r0'] }]);
   });
 
   it('keeps everything when autoClearAfterRuns is null', async () => {

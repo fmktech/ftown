@@ -3,13 +3,14 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { Centrifuge } from "centrifuge";
 import { ConnectionStatus } from "@/hooks/useCentrifugo";
-import { Session, Loop, LoopDraft } from "@/types";
+import { Session, Loop, LoopDraft, LoopRunRecord } from "@/types";
 import { CreateSessionOptions, useSessions } from "@/hooks/useSessions";
 import { useBridges } from "@/hooks/useBridges";
 import { useLoops } from "@/hooks/useLoops";
 import { useAllSessionEvents } from "@/hooks/useAllSessionEvents";
 import { SessionList } from "./SessionList";
 import { LoopList } from "./LoopList";
+import { LoopDetailPane } from "./LoopDetailPane";
 import { Terminal, TerminalHandle } from "./Terminal";
 import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
 import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
@@ -45,6 +46,10 @@ function ConnectionDot({ status }: { status: ConnectionStatus }) {
 
 export function Dashboard({ client, connectionStatus, connectionError, userId, token, centrifugoUrl, onDisconnect }: DashboardProps) {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [selectedLoopId, setSelectedLoopId] = useState<string | null>(null);
+  const [selectedLoopRunId, setSelectedLoopRunId] = useState<string | null>(null);
+  const [selectedLoopRuns, setSelectedLoopRuns] = useState<LoopRunRecord[]>([]);
+  const [loopRunsLoading, setLoopRunsLoading] = useState(false);
   const [showNewSession, setShowNewSession] = useState(false);
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
   const [showLoopForm, setShowLoopForm] = useState(false);
@@ -133,7 +138,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
 
   const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, removeSession, refreshSessions, bridgeExec, sendCommand, sendCommandCollect } = useSessions(client, userId);
   const { bridges, hasBridges } = useBridges(client, userId);
-  const { loops, createLoop, updateLoop, deleteLoop, runLoopNow } = useLoops(client, userId, sendCommand, sendCommandCollect);
+  const { loops, createLoop, updateLoop, deleteLoop, runLoopNow, getLoopRuns } = useLoops(client, userId, sendCommand, sendCommandCollect);
 
   // Keep bridgeOrder stable when bridges connect/disconnect; only append new ids (sorted).
   useEffect(() => {
@@ -238,12 +243,42 @@ PY`;
   }, [rawSessions, activeBridgeIds, sessionOrder, bridgeOrder]);
 
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
+  const selectedLoop = selectedLoopId ? loops.find((loop) => loop.id === selectedLoopId) ?? null : null;
 
-  // Loop-run sessions (loopId set) nest under their Loop in LoopList instead
-  // of appearing as top-level rows in SessionList; `sessions` itself stays
-  // the full combined set for Terminal/selection/activity tracking.
+  // Loop-run sessions are represented through LoopRunRecord in the loop detail
+  // pane, so they no longer appear as top-level sidebar sessions.
   const normalSessions = useMemo(() => sessions.filter((s) => !s.loopId), [sessions]);
-  const loopRunSessions = useMemo(() => sessions.filter((s) => s.loopId), [sessions]);
+
+  useEffect(() => {
+    if (!selectedLoop) {
+      setSelectedLoopRuns([]);
+      setSelectedLoopRunId(null);
+      setLoopRunsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLoopRunsLoading(true);
+    getLoopRuns(selectedLoop.bridgeId, selectedLoop.id)
+      .then((runs) => {
+        if (cancelled) return;
+        setSelectedLoopRuns(runs);
+        setSelectedLoopRunId((current) => {
+          if (current && runs.some((run) => run.id === current)) return current;
+          return runs[0]?.id ?? null;
+        });
+      })
+      .catch((err) => {
+        if (!cancelled) console.error("get_loop_runs failed", err);
+      })
+      .finally(() => {
+        if (!cancelled) setLoopRunsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedLoop?.id, selectedLoop?.bridgeId, selectedLoop?.runCount, selectedLoop?.skipCount, selectedLoop?.lastStatus, selectedLoop?.lastSessionId, selectedLoop?.updatedAt, getLoopRuns]);
 
   useEffect(() => {
     if (!selectedSessionId) return undefined;
@@ -366,7 +401,17 @@ PY`;
 
   const handleSelectSession = useCallback((id: string | null) => {
     setSelectedSessionId(id);
+    if (id) {
+      setSelectedLoopId(null);
+      setSelectedLoopRunId(null);
+    }
     if (id) setMobileTab("terminal");
+  }, []);
+
+  const handleSelectLoop = useCallback((loopId: string) => {
+    setSelectedLoopId(loopId);
+    setSelectedSessionId(null);
+    setMobileTab("terminal");
   }, []);
 
   const handleMobileTabSwitch = useCallback((tab: "sessions" | "terminal") => {
@@ -432,8 +477,13 @@ PY`;
   const handleDeleteLoop = useCallback(
     (loop: Loop) => {
       deleteLoop(loop.bridgeId, loop.id).catch((err) => console.error("delete_loop failed", err));
+      if (selectedLoopId === loop.id) {
+        setSelectedLoopId(null);
+        setSelectedLoopRunId(null);
+        setSelectedLoopRuns([]);
+      }
     },
-    [deleteLoop]
+    [deleteLoop, selectedLoopId]
   );
 
   const toggleSidebar = useCallback(() => {
@@ -870,16 +920,13 @@ PY`;
           <div className="flex-1 overflow-y-auto">
             <LoopList
               loops={loops}
-              runs={loopRunSessions}
               bridges={bridges}
-              selectedSessionId={selectedSessionId}
-              onSelectSession={handleSelectSession}
+              selectedLoopId={selectedLoopId}
+              onSelectLoop={handleSelectLoop}
               onRunNow={handleRunLoopNow}
               onToggleEnabled={handleToggleLoopEnabled}
               onEdit={handleEditLoop}
               onDelete={handleDeleteLoop}
-              onStopSession={stopSession}
-              onRemoveSession={handleRemoveSession}
               collapsed={isDesktop && sidebarCollapsed}
             />
             <SessionList
@@ -909,19 +956,32 @@ PY`;
 
         {/* Terminal area */}
         <main className={`flex-1 flex-col min-h-0 min-w-0 ${mobileTab === "terminal" ? "flex" : "hidden"} md:flex`}>
-          <Terminal
-            ref={terminalRef}
-            client={client}
-            sessionId={selectedSessionId}
-            userId={userId}
-            isRunning={selectedSession?.status === "running"}
-            sessionName={selectedSession?.name ?? selectedSession?.prompt?.slice(0, 48) ?? null}
-            usage={selectedSessionId ? sessionActivity.get(selectedSessionId)?.usage : undefined}
-            onMobileTap={() => mobileControlRef.current?.focusInput()}
-            shellType={selectedSession?.shellType}
-            onInterrupt={handleTerminalInterrupt}
-          />
-          {selectedSessionId && (
+          {selectedLoop ? (
+            <LoopDetailPane
+              loop={selectedLoop}
+              runs={selectedLoopRuns}
+              selectedRunId={selectedLoopRunId}
+              loadingRuns={loopRunsLoading}
+              onSelectRun={setSelectedLoopRunId}
+              onRunNow={handleRunLoopNow}
+              onToggleEnabled={handleToggleLoopEnabled}
+              onEdit={handleEditLoop}
+            />
+          ) : (
+            <Terminal
+              ref={terminalRef}
+              client={client}
+              sessionId={selectedSessionId}
+              userId={userId}
+              isRunning={selectedSession?.status === "running"}
+              sessionName={selectedSession?.name ?? selectedSession?.prompt?.slice(0, 48) ?? null}
+              usage={selectedSessionId ? sessionActivity.get(selectedSessionId)?.usage : undefined}
+              onMobileTap={() => mobileControlRef.current?.focusInput()}
+              shellType={selectedSession?.shellType}
+              onInterrupt={handleTerminalInterrupt}
+            />
+          )}
+          {selectedSessionId && !selectedLoop && (
             <MobileControlBar ref={mobileControlRef} onSendInput={(data) => terminalRef.current?.sendInput(data)} />
           )}
         </main>

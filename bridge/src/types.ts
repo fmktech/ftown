@@ -89,8 +89,31 @@ export interface Loop extends LoopDraft {
   runNowRequested?: boolean;
 }
 
-/** A "run" is exactly a Session whose loopId === loop.id. No separate store record. */
+/** Legacy shape: older bridges exposed loop runs as sessions tagged with loopId. */
 export type LoopRun = Session & { loopId: string };
+
+export interface LoopRunRecord {
+  /** Stable UI id. For spawned runs this is the session id; skipped runs mint their own id. */
+  id: string;
+  loopId: string;
+  bridgeId: string;
+  sessionId?: string;
+  name: string;
+  status: LoopRunStatus;
+  startedAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  durationMs?: number;
+  harness?: LoopHarness;
+  workdir?: string;
+  task?: string;
+  model?: string;
+  sessionStatus?: SessionStatus;
+  errorReason?: string;
+  logTail?: string;
+  logBytes?: number;
+  logTruncated?: boolean;
+}
 
 /** Inter-agent mail stored in <dataDir>/sessions/<id>/inbox.jsonl. */
 export interface MailMessage {

@@ -6,10 +6,11 @@ import { join } from 'node:path';
 
 import { ProviderAuthMissingError, WorkingDirMissingError } from './create-ftown-session.js';
 import { LocalApiServer, providerAuthMissingResponse, workingDirMissingResponse } from './local-api-server.js';
+import { upsertLoopRunRecord } from './loop-run-store.js';
 import { SessionStore } from './session-store.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { ProcessRunner } from './claude-runner.js';
-import type { Loop } from './types.js';
+import type { Loop, LoopRunRecord, Session } from './types.js';
 
 async function api(
   port: number,
@@ -147,6 +148,49 @@ describe('LocalApiServer loop routes', () => {
       assert.strictEqual(runNow.status, 200);
       assert.strictEqual(runNow.data.fired, true);
       assert.strictEqual(kicks, 1);
+
+      const runSession: Session = {
+        id: 'run-1',
+        name: 'nightly run',
+        command: 'codex',
+        status: 'completed',
+        bridgeId: 'bridge-1',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:05.000Z',
+        loopId: loop.id,
+        shellType: 'codex',
+        prompt: 'run checks',
+      };
+      await store.saveSession(runSession);
+      await store.appendTerminalData(runSession.id, 'persisted output');
+      const runs = await api(port, token, 'GET', `/api/loops/${loop.id}/runs`);
+      assert.strictEqual(runs.status, 200);
+      const records = runs.data.runs as LoopRunRecord[];
+      assert.strictEqual(records.length, 1);
+      assert.strictEqual(records[0].sessionId, 'run-1');
+      assert.strictEqual(records[0].status, 'ok');
+      assert.strictEqual(records[0].logTail, 'persisted output');
+      await store.deleteSession(runSession.id);
+      upsertLoopRunRecord({
+        id: 'run-1',
+        loopId: loop.id,
+        bridgeId: 'bridge-1',
+        sessionId: 'run-1',
+        name: 'nightly run',
+        status: 'ok',
+        startedAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:05.000Z',
+        finishedAt: '2026-01-01T00:00:05.000Z',
+        durationMs: 5000,
+        logTail: 'durable record output',
+        logBytes: 21,
+        logTruncated: false,
+      });
+      const durableRuns = await api(port, token, 'GET', `/api/loops/${loop.id}/runs`);
+      assert.strictEqual(durableRuns.status, 200);
+      const durableRecords = durableRuns.data.runs as LoopRunRecord[];
+      assert.strictEqual(durableRecords.length, 1);
+      assert.strictEqual(durableRecords[0].logTail, 'durable record output');
 
       const pause = await api(port, token, 'PATCH', `/api/loops/${loop.id}`, { enabled: false });
       assert.strictEqual(pause.status, 200);

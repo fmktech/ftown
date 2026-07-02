@@ -83,8 +83,30 @@ export interface Loop extends LoopDraft {
   runNowRequested?: boolean;
 }
 
-/** A "run" is exactly a Session whose loopId === loop.id. No separate store record. */
+/** Legacy shape from older bridges that exposed loop runs as sessions. */
 export type LoopRun = Session & { loopId: string };
+
+export interface LoopRunRecord {
+  id: string;
+  loopId: string;
+  bridgeId: string;
+  sessionId?: string;
+  name: string;
+  status: LoopRunStatus;
+  startedAt: string;
+  updatedAt: string;
+  finishedAt?: string;
+  durationMs?: number;
+  harness?: LoopHarness;
+  workdir?: string;
+  task?: string;
+  model?: string;
+  sessionStatus?: SessionStatus;
+  errorReason?: string;
+  logTail?: string;
+  logBytes?: number;
+  logTruncated?: boolean;
+}
 
 export type SessionMessageType = 'assistant' | 'user' | 'system' | 'tool_use' | 'tool_result';
 
