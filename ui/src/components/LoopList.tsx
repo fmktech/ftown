@@ -41,6 +41,71 @@ function formatTimestamp(timestamp?: string): string {
   return date.toLocaleDateString();
 }
 
+function formatRelative(timestamp?: string): string {
+  if (!timestamp) return "not scheduled";
+  const date = new Date(timestamp);
+  const ms = date.getTime();
+  if (Number.isNaN(ms)) return "unknown";
+
+  const diffMs = ms - Date.now();
+  const absMins = Math.floor(Math.abs(diffMs) / 60000);
+  const suffix = diffMs >= 0 ? "" : " ago";
+  const prefix = diffMs >= 0 ? "in " : "";
+
+  if (Math.abs(diffMs) < 60000) return diffMs >= 0 ? "due now" : "just now";
+  if (absMins < 60) return `${prefix}${absMins}m${suffix}`;
+  const absHours = Math.floor(absMins / 60);
+  if (absHours < 24) return `${prefix}${absHours}h${suffix}`;
+  const absDays = Math.floor(absHours / 24);
+  if (absDays < 7) return `${prefix}${absDays}d${suffix}`;
+  return date.toLocaleDateString();
+}
+
+function nextRunLabel(loop: Loop): string {
+  if (loop.runNowRequested) return "queued now";
+  if (!loop.enabled) return loop.nextRunAt ? `paused · target ${formatRelative(loop.nextRunAt)}` : "paused";
+  return loop.nextRunAt ? `next ${formatRelative(loop.nextRunAt)}` : "not scheduled";
+}
+
+function loopAccent(loop: Loop): string {
+  if (!loop.enabled) return "var(--status-done)";
+  if (loop.lastStatus === "error") return "var(--status-error)";
+  if (loop.lastStatus === "running" || loop.runNowRequested) return "var(--accent)";
+  if (loop.lastStatus === "skipped") return "var(--status-pending)";
+  return "var(--border-muted)";
+}
+
+function LoopMetric({ label, value, tone }: { label: string; value: number | string; tone?: "warn" | "ok" }) {
+  const color = tone === "warn" ? "var(--status-pending)" : tone === "ok" ? "var(--accent)" : "var(--text-faint)";
+  const background = tone === "warn" ? "rgba(255, 170, 0, 0.08)" : tone === "ok" ? "rgba(0, 255, 136, 0.07)" : "rgba(255, 255, 255, 0.03)";
+  const border = tone === "warn" ? "rgba(255, 170, 0, 0.18)" : tone === "ok" ? "rgba(0, 255, 136, 0.16)" : "var(--border-subtle)";
+
+  return (
+    <span
+      title={`${label}: ${value}`}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        minHeight: 16,
+        padding: "1px 5px",
+        borderRadius: 4,
+        border: `1px solid ${border}`,
+        background,
+        color,
+        fontSize: 9,
+        fontWeight: 600,
+        lineHeight: 1.2,
+        fontVariantNumeric: "tabular-nums",
+        whiteSpace: "nowrap",
+      }}
+    >
+      <span style={{ color: "var(--text-faint)", fontWeight: 500 }}>{label}</span>
+      {value}
+    </span>
+  );
+}
+
 // Reuses the session status-dot CSS tokens/classes (status-dot / status-dot-*
 // / animate-running) so a Loop's badge reads consistently with session
 // status without importing SessionList's private StatusBadge (SessionList
@@ -140,6 +205,10 @@ export function LoopList({
 
   if (loops.length === 0) return null;
 
+  const activeCount = loops.filter((loop) => loop.enabled).length;
+  const runningCount = loops.filter((loop) => loop.lastStatus === "running" || loop.runNowRequested).length;
+  const errorCount = loops.filter((loop) => loop.lastStatus === "error").length;
+
   if (collapsed) {
     return (
       <div className="flex flex-col">
@@ -154,9 +223,7 @@ export function LoopList({
               flexDirection: "column",
               gap: 2,
               borderBottom: "1px solid var(--border-subtle)",
-              borderLeft: `3px solid ${
-                loop.lastStatus === "error" ? "var(--status-error)" : loop.lastStatus === "running" ? "#666" : "transparent"
-              }`,
+              borderLeft: `3px solid ${loopAccent(loop)}`,
               background: "transparent",
               cursor: "pointer",
               padding: "6px 8px",
@@ -164,10 +231,11 @@ export function LoopList({
               opacity: loop.enabled ? 1 : 0.55,
             }}
           >
+            <span className={`status-dot ${loop.lastStatus === "error" ? "status-dot-error" : loop.lastStatus === "running" ? "status-dot-running animate-running" : loop.enabled ? "status-dot-done" : "status-dot-done"}`} />
             <span
               style={{
                 fontSize: 10,
-                color: "var(--text-secondary)",
+                color: loop.enabled ? "var(--text-secondary)" : "var(--text-faint)",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
@@ -193,9 +261,16 @@ export function LoopList({
           color: "var(--text-muted)",
           borderBottom: "1px solid var(--border-subtle)",
           background: "var(--bg-base)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 8,
         }}
       >
-        Loops ({loops.length})
+        <span>Loops ({loops.length})</span>
+        <span style={{ color: "var(--text-faint)", fontWeight: 500, letterSpacing: "0.04em", textTransform: "none" }}>
+          {activeCount} active{runningCount > 0 ? ` · ${runningCount} running` : ""}{errorCount > 0 ? ` · ${errorCount} error` : ""}
+        </span>
       </div>
 
       {loops.map((loop) => {
@@ -207,11 +282,12 @@ export function LoopList({
             <div
               style={{
                 display: "flex",
-                alignItems: "center",
+                alignItems: "flex-start",
                 gap: 6,
-                padding: "8px 12px",
+                padding: "9px 12px",
                 borderBottom: "1px solid var(--border-subtle)",
-                background: "transparent",
+                borderLeft: `3px solid ${loopAccent(loop)}`,
+                background: loop.runNowRequested ? "rgba(0, 255, 136, 0.03)" : "transparent",
                 fontFamily: "var(--font-mono)",
               }}
             >
@@ -228,6 +304,7 @@ export function LoopList({
                   fontSize: 10,
                   padding: 0,
                   width: 12,
+                  marginTop: 2,
                   lineHeight: 1,
                   fontFamily: "var(--font-mono)",
                   opacity: loopRuns.length === 0 ? 0.3 : 1,
@@ -253,37 +330,34 @@ export function LoopList({
                   >
                     {loop.name}
                   </span>
-                  {loopRuns.length > 0 && (
-                    <span
-                      title={`${loopRuns.length} run session${loopRuns.length === 1 ? "" : "s"}`}
-                      style={{
-                        fontSize: 9,
-                        fontWeight: 600,
-                        lineHeight: 1,
-                        padding: "1px 5px",
-                        borderRadius: 8,
-                        flexShrink: 0,
-                        color: "var(--accent)",
-                        background: "rgba(0, 255, 136, 0.08)",
-                        border: "1px solid rgba(0, 255, 136, 0.15)",
-                        fontVariantNumeric: "tabular-nums",
-                      }}
-                    >
-                      {loopRuns.length}
-                    </span>
-                  )}
+                  <LoopStatusBadge loop={loop} />
                 </div>
-                <div className="flex items-center gap-2" style={{ marginTop: 2 }}>
-                  <span style={{ fontSize: 10, color: "var(--text-faint)" }}>
-                    {describeSchedule(loop.schedule)} · {bridgeLabel(loop.bridgeId, bridges)}
+                <div className="flex items-center gap-2" style={{ marginTop: 3, minWidth: 0 }}>
+                  <span
+                    title={describeSchedule(loop.schedule)}
+                    style={{
+                      fontSize: 10,
+                      color: "var(--text-secondary)",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {describeSchedule(loop.schedule)}
                   </span>
-                  {loop.skipCount > 0 && (
-                    <span style={{ fontSize: 10, color: "var(--status-pending)" }}>{loop.skipCount} skipped</span>
-                  )}
+                  <span style={{ fontSize: 10, color: loop.runNowRequested ? "var(--accent)" : "var(--text-faint)", whiteSpace: "nowrap" }}>
+                    {nextRunLabel(loop)}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5" style={{ marginTop: 5, flexWrap: "wrap" }}>
+                  <LoopMetric label="runs" value={loop.runCount} tone={loop.runCount > 0 ? "ok" : undefined} />
+                  <LoopMetric label="kept" value={loopRuns.length} />
+                  {loop.skipCount > 0 && <LoopMetric label="skips" value={loop.skipCount} tone="warn" />}
+                  <span style={{ fontSize: 9, color: "var(--text-faint)" }}>
+                    {loop.harness} · {bridgeLabel(loop.bridgeId, bridges)}
+                  </span>
                 </div>
               </div>
-
-              <LoopStatusBadge loop={loop} />
 
               <div className="flex items-center gap-1" style={{ flexShrink: 0 }}>
                 <button

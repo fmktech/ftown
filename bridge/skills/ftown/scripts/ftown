@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Delegates to the bridge-installed top-level ftown dispatcher.
+set -euo pipefail
+exec "${HOME}/.ftown/ftown" "$@"

@@ -1,0 +1,4 @@
+interface:
+  display_name: "ftown"
+  short_description: "Control ftown sessions, loops, orchestration, and workflows."
+  default_prompt: "Use ftown to manage sessions, loops, or workflows."

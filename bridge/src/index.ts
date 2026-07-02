@@ -22,7 +22,7 @@ import { installCursorHooks } from './cursor-hook-installer.js';
 import { codexBinaryAvailable, ensureCodexHooks } from './codex-installer.js';
 import { installHarness, harnessOnPath, pathHint, writeHarnessAgentGuide, agentGuidePath } from './harness-installer.js';
 import { installNotifyScript } from './install-notify-script.js';
-import { installFtownSkill } from './install-ftown-skill.js';
+import { installFtownSkill, removeFtownSkill } from './install-ftown-skill.js';
 import { installFtownSessionsCli } from './install-ftown-cli.js';
 import { installFtownWorkflowsCli } from './install-ftown-workflows-cli.js';
 import { installFtownEnvCli } from './install-ftown-env-cli.js';
@@ -256,6 +256,7 @@ program
       spawnSession: (input) => createFtownSession(sessionFactoryDeps, input),
       removeSession: (id, options) => removeFtownSession({ store, runner, centrifugo, userId }, id, options),
     });
+    localApiServer.setLoopApi({ bridgeId, scheduler });
 
     const harnessCliPath = resolve(__dirname, 'harness-cli.js');
     const harness = installHarness(harnessCliPath);
@@ -272,8 +273,10 @@ program
       if (hint) console.log(`[Bridge] ${hint}`);
     }
 
-    installFtownSkill('ftown-sessions', resolve(__dirname, '..', 'skills', 'ftown-sessions'));
-    installFtownSkill('ftown-orchestrator', resolve(__dirname, '..', 'skills', 'ftown-orchestrator'));
+    installFtownSkill('ftown', resolve(__dirname, '..', 'skills', 'ftown'));
+    for (const legacySkill of ['ftown-sessions', 'ftown-loops', 'ftown-orchestrator', 'ftown-workflows']) {
+      removeFtownSkill(legacySkill);
+    }
 
     const cliBundlePath = existsSync(resolve(__dirname, 'ftown-sessions-cli.js'))
       ? resolve(__dirname, 'ftown-sessions-cli.js')
@@ -281,7 +284,6 @@ program
     const cliPath = installFtownSessionsCli(cliBundlePath);
     console.log(`[Bridge] Installed CLI at ${cliPath}`);
 
-    installFtownSkill('ftown-workflows', resolve(__dirname, '..', 'skills', 'ftown-workflows'));
     const workflowsCliBundlePath = existsSync(resolve(__dirname, 'workflow-runner-cli.js'))
       ? resolve(__dirname, 'workflow-runner-cli.js')
       : resolve(__dirname, '..', 'dist', 'workflow-runner-cli.js');

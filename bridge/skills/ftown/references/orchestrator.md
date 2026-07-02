@@ -1,20 +1,10 @@
----
-name: ftown-orchestrator
-description: >-
-  Spawn and coordinate worker ftown agent sessions on this machine. Activates when
-  the session env has FTOWN_ORCHESTRATOR=1, the first input contains an [ftown]
-  orchestrator briefing, or the user asks to orchestrate, coordinate, or spawn
-  worker agent sessions. Teaches spawning and coordinating sibling ftown agent
-  sessions via ~/.ftown/ftown-sessions CLI.
----
-
 # ftown orchestrator playbook
 
 You are running inside an ftown session (your id is in `$FTOWN_SESSION_ID`) and
 can coordinate worker agent sessions on this machine using the
 `~/.ftown/ftown-sessions` CLI.
 
-See the **ftown-sessions** skill for the full CLI reference.
+See `references/sessions.md` for the full session CLI reference.
 
 ## Spawning workers
 
@@ -92,6 +82,25 @@ prefer mail, which arrives at the next turn boundary.
 
 Clean up workers you no longer need to keep the session list tidy.
 
+## Recurring work
+
+For unattended recurring work, create a scheduled loop instead of keeping an
+orchestrator alive to poll or sleep. See `references/loops.md` for the full loop
+workflow:
+
+```bash
+~/.ftown/ftown-sessions loop create \
+  --name repo-watch \
+  --every 30m \
+  --shell codex \
+  --workdir /path/to/repo \
+  --task "Inspect recent changes, run the focused checks, and report issues"
+```
+
+Loop runs show as normal ftown sessions grouped under their loop in the
+dashboard. Use `~/.ftown/ftown-sessions loop runs <loop-id>` to inspect run
+sessions from the CLI.
+
 ## Practical guidance
 
 - **Parallelize** independent tasks: spawn multiple workers before waiting for any.
@@ -104,5 +113,5 @@ Clean up workers you no longer need to keep the session list tidy.
 ## If the CLI is missing
 
 Start or restart **ftown-bridge** on this machine. It installs
-`~/.ftown/ftown-sessions` and updates this skill under
-`~/.ftown/skills/ftown-orchestrator/` (linked into ~/.agents/skills and ~/.claude/skills).
+`~/.ftown/ftown-sessions` and updates the unified skill under
+`~/.ftown/skills/ftown/` (linked into ~/.agents/skills and ~/.claude/skills).

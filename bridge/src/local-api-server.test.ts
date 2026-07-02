@@ -1,8 +1,33 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { ProviderAuthMissingError, WorkingDirMissingError } from './create-ftown-session.js';
-import { providerAuthMissingResponse, workingDirMissingResponse } from './local-api-server.js';
+import { LocalApiServer, providerAuthMissingResponse, workingDirMissingResponse } from './local-api-server.js';
+import { SessionStore } from './session-store.js';
+import type { CentrifugoClient } from './centrifugo-client.js';
+import type { ProcessRunner } from './claude-runner.js';
+import type { Loop } from './types.js';
+
+async function api(
+  port: number,
+  token: string,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<{ status: number; data: Record<string, unknown> }> {
+  const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  return { status: res.status, data: (await res.json()) as Record<string, unknown> };
+}
 
 // A blocked provider create/revive must surface as a 422 carrying the provider,
 // the env-var KEY-bearing message, and the `ftown env set` fix — and NEVER the
@@ -56,5 +81,87 @@ describe('workingDirMissingResponse', () => {
     assert.strictEqual(response.body.code, 'working_dir_missing');
     assert.strictEqual(response.body.workingDir, '/tmp/missing-project');
     assert.strictEqual(response.body.canCreate, true);
+  });
+});
+
+describe('LocalApiServer loop routes', () => {
+  it('creates, lists, runs, pauses, and deletes bridge-owned loops', async () => {
+    const realHome = process.env.HOME;
+    const home = mkdtempSync(join(tmpdir(), 'ftw-loop-api-'));
+    process.env.HOME = home;
+
+    const server = new LocalApiServer();
+    const token = 'test-token';
+    const published: Loop[] = [];
+    const removed: string[] = [];
+    const deleted: Loop[] = [];
+    let kicks = 0;
+
+    const store = new SessionStore(join(home, 'data'));
+    const runner = { isRunning: () => false } as unknown as ProcessRunner;
+    const centrifugo = {
+      publishLoopUpdate: async (_userId: string, loop: Loop) => {
+        published.push(loop);
+      },
+      publishLoopRemoved: async (_userId: string, loopId: string) => {
+        removed.push(loopId);
+      },
+    } as unknown as CentrifugoClient;
+
+    server.setAuthToken(token);
+    server.setDependencies(store, runner, centrifugo, 'user-1');
+    server.setLoopApi({
+      bridgeId: 'bridge-1',
+      scheduler: {
+        kick: () => {
+          kicks += 1;
+        },
+        onLoopDeleted: (loop) => {
+          deleted.push(loop);
+        },
+      },
+    });
+
+    const port = await server.start();
+    try {
+      const create = await api(port, token, 'POST', '/api/loops', {
+        name: 'nightly',
+        schedule: { kind: 'interval', everyMs: 60_000 },
+        harness: 'codex',
+        task: 'run checks',
+        enabled: true,
+        overlapPolicy: 'skip',
+        retention: { autoClearAfterRuns: 3 },
+      });
+      assert.strictEqual(create.status, 201);
+      const loop = create.data.loop as Loop;
+      assert.strictEqual(loop.bridgeId, 'bridge-1');
+      assert.strictEqual(loop.harness, 'codex');
+      assert.strictEqual(published.length, 1);
+
+      const list = await api(port, token, 'GET', '/api/loops');
+      assert.strictEqual(list.status, 200);
+      assert.strictEqual((list.data.loops as Loop[]).length, 1);
+
+      const runNow = await api(port, token, 'POST', `/api/loops/${loop.id}/run-now`);
+      assert.strictEqual(runNow.status, 200);
+      assert.strictEqual(runNow.data.fired, true);
+      assert.strictEqual(kicks, 1);
+
+      const pause = await api(port, token, 'PATCH', `/api/loops/${loop.id}`, { enabled: false });
+      assert.strictEqual(pause.status, 200);
+      assert.strictEqual((pause.data.loop as Loop).enabled, false);
+
+      const del = await api(port, token, 'DELETE', `/api/loops/${loop.id}`);
+      assert.strictEqual(del.status, 200);
+      assert.strictEqual(del.data.removed, true);
+      assert.deepStrictEqual(removed, [loop.id]);
+      assert.strictEqual(deleted[0].id, loop.id);
+    } finally {
+      server.stop();
+      if (realHome === undefined) delete process.env.HOME;
+      else process.env.HOME = realHome;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

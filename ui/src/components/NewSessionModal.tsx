@@ -517,14 +517,14 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
 
           {shellType !== "shell" && (
             <div className="rounded border border-[#1a1a1a] px-3 py-2">
-              <span className="block text-sm text-[#888888]">Need an orchestrator?</span>
-              <span className="block text-xs text-[#555]">
-                Start a normal session and ask it to use the{" "}
-                <span className="text-[#00ff88]">ftown-orchestrator</span> skill to spawn
-                and coordinate worker sessions.
-              </span>
-            </div>
-          )}
+                <span className="block text-sm text-[#888888]">Need an orchestrator?</span>
+                <span className="block text-xs text-[#555]">
+                  Start a normal session and ask it to use the{" "}
+                <span className="text-[#00ff88]">ftown</span> skill's orchestrator
+                reference to spawn and coordinate worker sessions.
+                </span>
+              </div>
+            )}
 
           <div>
             <label className="block text-sm text-[#888888] mb-1">Bridge</label>
