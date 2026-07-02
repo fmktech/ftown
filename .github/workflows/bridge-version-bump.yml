@@ -1,0 +1,53 @@
+name: Bridge version bump
+
+on:
+  pull_request:
+    paths:
+      - 'bridge/**'
+      - '.github/workflows/bridge-version-bump.yml'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require bridge version bump
+        run: |
+          set -euo pipefail
+
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          CHANGED="$(git diff --name-only "$BASE" "$HEAD" -- 'bridge/**' || true)"
+
+          if [ -z "$CHANGED" ]; then
+            echo "No bridge changes in this PR."
+            exit 0
+          fi
+
+          echo "Bridge files changed:"
+          echo "$CHANGED"
+
+          BASE_VERSION="$(
+            git show "$BASE:bridge/package.json" \
+              | node -pe "JSON.parse(require('fs').readFileSync(0, 'utf8')).version"
+          )"
+          HEAD_VERSION="$(node -p "require('./bridge/package.json').version")"
+
+          echo "base bridge version: $BASE_VERSION"
+          echo "head bridge version: $HEAD_VERSION"
+
+          if [ "$BASE_VERSION" = "$HEAD_VERSION" ]; then
+            echo "::error::This PR changes bridge/** but does not bump bridge/package.json version."
+            echo "Run from bridge/: npm version patch --no-git-tag-version"
+            exit 1
+          fi
+
+          LOCK_VERSION="$(node -p "require('./bridge/package-lock.json').packages[''].version")"
+          if [ "$HEAD_VERSION" != "$LOCK_VERSION" ]; then
+            echo "::error::bridge/package-lock.json root version ($LOCK_VERSION) does not match bridge/package.json ($HEAD_VERSION)."
+            echo "Run from bridge/: npm install --package-lock-only"
+            exit 1
+          fi
