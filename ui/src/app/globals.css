@@ -1,6 +1,8 @@
 @import "tailwindcss";
 
 :root {
+  color-scheme: dark;
+
   --bg-void: #060608;
   --bg-base: #0a0a0d;
   --bg-surface: #0f0f14;
@@ -16,7 +18,7 @@
   --text-primary: #e8e8f0;
   --text-secondary: #aaaac0;
   --text-muted: #9999b8;
-  --text-faint: #8888aa;
+  --text-faint: #a0a0c0; /* was #8888aa — bumped for small-text AA contrast (~5.9:1 on --bg-void) */
 
   --accent: #00ff88;
   --accent-dim: rgba(0, 255, 136, 0.12);
@@ -29,9 +31,76 @@
   --status-pending-glow: rgba(255, 170, 0, 0.3);
   --status-error: #ff4466;
   --status-error-glow: rgba(255, 68, 102, 0.3);
-  --status-done: #444455;
+  --status-done: #55566a; /* was #444455 — make "done" dots visible */
 
   --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, monospace;
+  /* Proportional font for prose ONLY (system stack, zero deps) */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+  /* Semantic status colors for activity/shell badges */
+  --status-thinking: var(--status-pending);
+  --status-tool-use: var(--accent);
+  --shell-claude: #A8B4FF;
+  --shell-codex: #10A37F;
+  --shell-cursor: #6495ED;
+  --shell-opencode: #FF69B4;
+  --shell-shell: #BA55D3;
+  --shell-generic: #00BFFF;
+
+  /* Radius scale */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* Shadow / glow scale */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
+  --shadow-glow-accent: 0 0 12px var(--accent-glow);
+
+  /* Focus ring */
+  --focus-ring: 0 0 0 2px var(--bg-void), 0 0 0 4px var(--accent);
+}
+
+/* Focus-visible: keyboard focus ring applied everywhere interactive */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+.btn-accent:focus-visible,
+.btn-ghost:focus-visible,
+.btn-danger:focus-visible,
+.btn-warn:focus-visible,
+.mobile-tab:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Respect OS-level reduced-motion preference */
+@media (prefers-reduced-motion: reduce) {
+  .animate-running,
+  .animate-pending,
+  .fade-in {
+    animation: none !important;
+  }
+  * {
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Shared loading skeleton */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-elevated) 25%, var(--bg-hover) 50%, var(--bg-elevated) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease-in-out infinite;
+  border-radius: var(--radius-sm);
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; }
 }
 
 *, *::before, *::after {
@@ -162,7 +231,7 @@ body {
 /* Accent glow button */
 .btn-accent {
   background: var(--accent);
-  color: #060608;
+  color: var(--bg-void);
   font-weight: 700;
   font-size: 11px;
   letter-spacing: 0.04em;
@@ -266,6 +335,7 @@ body {
 /* Show mobile control bar only on touch devices */
 .touch-control-bar {
   display: none !important;
+  padding-bottom: env(safe-area-inset-bottom);
 }
 @media (pointer: coarse) {
   .touch-control-bar {

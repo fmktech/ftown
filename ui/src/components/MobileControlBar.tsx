@@ -29,6 +29,16 @@ const BUTTON_ROWS: { label: string; data: string }[][] = [
   ],
 ];
 
+const KEY_LABELS: Record<string, string> = {
+  "↑": "Up arrow",
+  "↓": "Down arrow",
+  "←": "Left arrow",
+  "→": "Right arrow",
+  "↵": "Enter",
+  "⇧Tab": "Shift Tab",
+  "^C": "Control C",
+};
+
 const keyButtonStyle: React.CSSProperties = {
   minWidth: 44,
   minHeight: 40,
@@ -109,6 +119,7 @@ export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControl
           <input
             ref={inputRef}
             type="text"
+            aria-label="Terminal input"
             autoCorrect="off"
             autoCapitalize="off"
             autoComplete="off"
@@ -139,6 +150,7 @@ export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControl
               // Keyboard toggle button
               <button
                 className="mobile-ctrl-btn"
+                aria-label="Show keyboard"
                 style={{ ...keyButtonStyle, background: "var(--accent)", border: "1px solid var(--accent)", color: "var(--bg-void)", fontSize: 16, fontWeight: 700 }}
                 onTouchEnd={(e) => { e.preventDefault(); focusInput(); }}
                 onClick={(e) => { e.preventDefault(); focusInput(); }}
@@ -150,6 +162,7 @@ export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControl
               <button
                 key={btn.label}
                 className="mobile-ctrl-btn"
+                aria-label={KEY_LABELS[btn.label] ?? btn.label}
                 style={keyButtonStyle}
                 // Don't steal focus from the hidden input: the soft keyboard
                 // stays open if it was open, and stays closed if it wasn't.

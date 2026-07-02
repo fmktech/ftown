@@ -141,10 +141,10 @@ function mergeMessages(messages: SessionMessage[]): MergedBlock[] {
 function TextBlock({ block, isLast, isStreaming }: { block: MergedBlock; isLast: boolean; isStreaming: boolean }) {
   return (
     <div className="px-3 py-2">
-      <pre className="text-sm whitespace-pre-wrap break-words text-[#e0e0e0] leading-relaxed">
+      <pre className="text-sm whitespace-pre-wrap break-words text-[var(--text-primary)] leading-relaxed">
         {block.content}
         {isLast && isStreaming && (
-          <span className="inline-block w-2 h-4 bg-[#00ff88] animate-pulse ml-0.5 align-middle" />
+          <span className="inline-block w-2 h-4 bg-[var(--accent)] animate-pulse ml-0.5 align-middle" />
         )}
       </pre>
     </div>
@@ -156,18 +156,21 @@ function ToolUseBlock({ block }: { block: MergedBlock }) {
   const input = block.raw?.content_block?.input;
 
   return (
-    <div className="px-3 py-1.5 bg-[#001a2e] rounded border-l-2 border-[#00bbff]">
+    <div className="px-3 py-1.5 rounded-[var(--radius-sm)] bg-[rgba(0,187,255,0.06)] border-l-2 border-[#00bbff]">
       <button
         onClick={() => setExpanded(!expanded)}
+        aria-expanded={expanded}
         className="flex items-center gap-2 w-full text-left"
       >
-        <span className="text-xs text-[#00bbff] opacity-50">{expanded ? "▼" : "▶"}</span>
-        <span className="text-xs font-bold text-[#00bbff] opacity-70">[TOOL]</span>
-        <span className="text-xs text-[#00bbff]">{block.toolName ?? block.content}</span>
-        <span className="text-xs text-[#333] ml-auto">{new Date(block.timestamp).toLocaleTimeString()}</span>
+        <span className="text-xs text-[#00bbff] opacity-60">{expanded ? "▼" : "▶"}</span>
+        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[var(--radius-sm)] text-[10px] font-semibold bg-[rgba(0,187,255,0.12)] text-[#00bbff]">
+          <span aria-hidden>⚙</span> TOOL
+        </span>
+        <span className="text-xs text-[#66ccff]">{block.toolName ?? block.content}</span>
+        <span className="text-xs text-[var(--text-faint)] ml-auto tabular-nums">{new Date(block.timestamp).toLocaleTimeString()}</span>
       </button>
       {expanded && block.raw && (
-        <pre className="text-xs whitespace-pre-wrap break-words text-[#4a8ab5] leading-relaxed mt-2 max-h-60 overflow-y-auto bg-[#00101a] rounded p-2">
+        <pre className="text-xs whitespace-pre-wrap break-words text-[#7fb8d6] leading-relaxed mt-2 max-h-60 overflow-y-auto bg-[var(--bg-base)] rounded-[var(--radius-sm)] p-2">
           {input ? JSON.stringify(input, null, 2) : JSON.stringify(block.raw, null, 2)}
         </pre>
       )}
@@ -177,22 +180,30 @@ function ToolUseBlock({ block }: { block: MergedBlock }) {
 
 function ToolResultBlock({ block }: { block: MergedBlock }) {
   const [expanded, setExpanded] = useState(false);
-  const preview = block.content.length > 200 ? block.content.slice(0, 200) + "..." : block.content;
+  const truncated = block.content.length > 200;
+  const preview = truncated ? block.content.slice(0, 200) + "..." : block.content;
+  const hiddenChars = block.content.length - 200;
 
   return (
-    <div className="px-3 py-1.5 bg-[#0a0a0a] rounded border-l-2 border-[#333]">
+    <div className="px-3 py-1.5 rounded-[var(--radius-sm)] bg-[var(--bg-base)] border-l-2 border-[var(--border-strong)]">
       <button
         onClick={() => setExpanded(!expanded)}
+        aria-expanded={expanded}
         className="flex items-center gap-2 w-full text-left"
       >
-        <span className="text-xs text-[#555] opacity-50">{expanded ? "▼" : "▶"}</span>
-        <span className="text-xs font-bold text-[#555] opacity-70">[RESULT]</span>
+        <span className="text-xs text-[var(--text-faint)] opacity-60">{expanded ? "▼" : "▶"}</span>
+        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[var(--radius-sm)] text-[10px] font-semibold bg-[var(--bg-overlay)] text-[var(--text-muted)]">
+          <span aria-hidden>←</span> RESULT
+        </span>
         {!expanded && (
-          <span className="text-xs text-[#555] truncate">{preview}</span>
+          <span className="text-xs text-[var(--text-muted)] truncate">{preview}</span>
+        )}
+        {!expanded && truncated && (
+          <span className="text-[10px] text-[var(--text-faint)] shrink-0 ml-auto tabular-nums">+{hiddenChars} chars</span>
         )}
       </button>
       {expanded && (
-        <pre className="text-xs whitespace-pre-wrap break-words text-[#666] leading-relaxed mt-2 max-h-80 overflow-y-auto bg-[#050505] rounded p-2">
+        <pre className="text-xs whitespace-pre-wrap break-words text-[var(--text-muted)] leading-relaxed mt-2 max-h-80 overflow-y-auto bg-[var(--bg-void)] rounded-[var(--radius-sm)] p-2">
           {block.content}
         </pre>
       )}
@@ -204,8 +215,8 @@ function StatusBlock({ block, isLast, isStreaming }: { block: MergedBlock; isLas
   const isActive = isLast && isStreaming;
   return (
     <div className="px-3 py-1 flex items-center gap-2">
-      <span className={`w-1.5 h-1.5 rounded-full ${isActive ? "bg-[#ffcc00] animate-pulse" : "bg-[#444]"}`} />
-      <span className={`text-xs italic ${isActive ? "text-[#ffcc00]" : "text-[#555]"}`}>{block.content}</span>
+      <span className={`w-1.5 h-1.5 rounded-full ${isActive ? "bg-[var(--status-pending)] animate-pulse" : "bg-[var(--status-done)]"}`} />
+      <span className={`text-xs italic ${isActive ? "text-[var(--status-pending)]" : "text-[var(--text-faint)]"}`}>{block.content}</span>
     </div>
   );
 }
@@ -215,15 +226,41 @@ function ResultBlock({ block }: { block: MergedBlock }) {
   if (block.duration !== undefined) meta.push(`${(block.duration / 1000).toFixed(1)}s`);
   if (block.cost !== undefined) meta.push(`$${block.cost.toFixed(4)}`);
 
+  // `is_error` / an error subtype is available via the event's index signature
+  // without any type change — branch to a failure treatment when present.
+  const isError =
+    block.raw?.is_error === true ||
+    (typeof block.raw?.subtype === "string" && block.raw.subtype.includes("error"));
+
+  if (isError) {
+    return (
+      <div className="px-3 py-2 rounded-[var(--radius-sm)] bg-[rgba(255,68,102,0.08)] border-l-2 border-[var(--status-error)]">
+        <div className="flex items-center gap-2">
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[var(--radius-sm)] text-[10px] font-semibold bg-[rgba(255,68,102,0.12)] text-[var(--status-error)]">
+            <span aria-hidden>✗</span> FAILED
+          </span>
+          {meta.length > 0 && (
+            <span className="text-xs text-[var(--status-error)] opacity-70">{meta.join(" | ")}</span>
+          )}
+        </div>
+        <pre className="text-sm whitespace-pre-wrap break-words text-[var(--text-primary)] leading-relaxed mt-1">
+          {block.content}
+        </pre>
+      </div>
+    );
+  }
+
   return (
-    <div className="px-3 py-2 bg-[#0a1a0a] rounded border-l-2 border-[#00ff88]">
+    <div className="px-3 py-2 rounded-[var(--radius-sm)] bg-[var(--accent-dim)] border-l-2 border-[var(--accent)]">
       <div className="flex items-center gap-2">
-        <span className="text-xs font-bold text-[#00ff88]">[DONE]</span>
+        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-[var(--radius-sm)] text-[10px] font-semibold bg-[var(--accent-dim)] text-[var(--accent)]">
+          <span aria-hidden>✓</span> DONE
+        </span>
         {meta.length > 0 && (
-          <span className="text-xs text-[#00ff88] opacity-60">{meta.join(" | ")}</span>
+          <span className="text-xs text-[var(--accent)] opacity-70">{meta.join(" | ")}</span>
         )}
       </div>
-      <pre className="text-sm whitespace-pre-wrap break-words text-[#e0e0e0] leading-relaxed mt-1">
+      <pre className="text-sm whitespace-pre-wrap break-words text-[var(--text-primary)] leading-relaxed mt-1">
         {block.content}
       </pre>
     </div>
@@ -242,10 +279,16 @@ export function SessionStream({ messages, isStreaming, sessionName }: SessionStr
 
   if (!sessionName) {
     return (
-      <div className="flex-1 flex items-center justify-center text-[#555]">
-        <div className="text-center">
-          <p className="text-lg mb-2">No session selected</p>
-          <p className="text-sm">Select a session from the sidebar or create a new one</p>
+      <div className="flex-1 flex items-center justify-center">
+        <div className="flex flex-col items-center justify-center gap-3 py-12 text-center" style={{ animation: "fade-in 0.3s ease-out" }}>
+          <span
+            aria-hidden
+            className="w-10 h-10 flex items-center justify-center rounded-[var(--radius-md)] border border-[var(--border-muted)] text-lg text-[var(--text-faint)]"
+          >
+            ›_
+          </span>
+          <p className="text-[var(--text-muted)] text-sm">No session selected</p>
+          <p className="text-[var(--text-faint)] text-xs">Select a session from the sidebar or create a new one</p>
         </div>
       </div>
     );
@@ -253,11 +296,11 @@ export function SessionStream({ messages, isStreaming, sessionName }: SessionStr
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      <div className="px-4 py-2 border-b border-[#2a2a2a] bg-[#111111] flex items-center justify-between">
-        <span className="text-sm font-medium text-[#e0e0e0]">{sessionName}</span>
+      <div className="px-4 py-2 border-b border-[var(--border-default)] bg-[var(--bg-surface)] flex items-center justify-between">
+        <span className="text-sm font-medium text-[var(--text-primary)] truncate">{sessionName}</span>
         {isStreaming && (
-          <span className="flex items-center gap-2 text-xs text-[#00ff88]">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#00ff88] animate-pulse" />
+          <span className="flex items-center gap-2 text-xs text-[var(--accent)]" aria-live="polite">
+            <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-pulse" />
             streaming...
           </span>
         )}
@@ -266,13 +309,16 @@ export function SessionStream({ messages, isStreaming, sessionName }: SessionStr
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-1">
         {blocks.length === 0 && isStreaming && (
           <div className="flex items-center gap-2 py-4">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#ffcc00] animate-pulse" />
-            <span className="text-sm text-[#ffcc00] italic">Thinking...</span>
+            <span className="w-1.5 h-1.5 rounded-full bg-[var(--status-pending)] animate-pulse" />
+            <span className="text-sm text-[var(--status-pending)] italic">Thinking...</span>
           </div>
         )}
 
         {blocks.length === 0 && !isStreaming && (
-          <p className="text-[#555] text-sm">Waiting for messages...</p>
+          <div className="flex flex-col items-center justify-center gap-3 py-12 text-center" style={{ animation: "fade-in 0.3s ease-out" }}>
+            <span aria-hidden className="text-2xl text-[var(--text-faint)]">›_</span>
+            <p className="text-[var(--text-muted)] text-sm">Waiting for messages…</p>
+          </div>
         )}
 
         {blocks.map((block, idx) => {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { ShellType } from "@/types";
 import { BridgeInfo } from "@/hooks/useBridges";
 import { BridgeExecResponse, CreateSessionBridgeError, CreateSessionOptions } from "@/hooks/useSessions";
@@ -223,16 +223,43 @@ function resolveShellType(top: TopShell, flavor: ClaudeFlavor): ShellType {
   return flavor;
 }
 
+// Canonical input recipe (see design brief §3 Inputs)
+const INPUT_CLASS =
+  "w-full px-3 py-2 rounded-[var(--radius-sm)] bg-[var(--bg-base)] border border-[var(--border-default)] text-[var(--text-primary)] placeholder:text-[var(--text-faint)] outline-none focus-visible:border-[var(--accent)] focus-visible:shadow-[var(--focus-ring)] font-mono";
+
 function ProviderTokenHint({ provider, envVar, flavor }: { provider: string; envVar: string; flavor: string }) {
+  const [copied, setCopied] = useState(false);
+  const command = `ftown env set ${flavor} <token>`;
+
+  const handleCopy = () => {
+    try {
+      void navigator.clipboard?.writeText(command);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // clipboard unavailable — ignore
+    }
+  };
+
   return (
-    <div className="px-3 py-2.5 border border-[#2a2a2a] rounded bg-[#0a0a0a]">
-      <div className="text-xs text-[#888888]">
+    <div className="px-3 py-2.5 border border-[var(--border-default)] rounded-[var(--radius-sm)] bg-[var(--bg-base)]">
+      <div className="text-xs text-[var(--text-muted)]">
         Register your {provider} token on the bridge machine — the bridge maps it onto the session&apos;s auth var:
       </div>
-      <code className="block mt-1.5 text-xs text-[#00ff88] font-mono break-all">
-        ftown env set {flavor} &lt;token&gt;
-      </code>
-      <div className="text-[11px] text-[#555] mt-1.5">
+      <div className="flex items-center gap-2 mt-1.5">
+        <code className="flex-1 text-xs text-[var(--accent)] font-mono break-all">
+          ftown env set {flavor} &lt;token&gt;
+        </code>
+        <button
+          type="button"
+          onClick={handleCopy}
+          aria-label="Copy command to clipboard"
+          className="btn-ghost !px-1.5 !py-1 shrink-0"
+        >
+          {copied ? "✓" : "⧉"}
+        </button>
+      </div>
+      <div className="text-[11px] text-[var(--text-faint)] mt-1.5">
         Or export <span className="font-mono">{envVar}</span> where the bridge launches (e.g. <span className="font-mono">~/.zshrc</span>). Tokens never pass through the UI.
       </div>
     </div>
@@ -256,6 +283,15 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const [autoCompactWindow, setAutoCompactWindow] = useState("");
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [missingWorkingDir, setMissingWorkingDir] = useState<string | null>(null);
+  const firstFieldRef = useRef<HTMLSelectElement>(null);
+
+  // Move focus into the modal when it opens (a11y: focus-in).
+  useEffect(() => {
+    if (isOpen) {
+      const id = window.setTimeout(() => firstFieldRef.current?.focus(), 0);
+      return () => window.clearTimeout(id);
+    }
+  }, [isOpen]);
 
   const effectiveBridgeId = bridgeId || (bridges.length > 0 ? bridges[0].bridgeId : "");
   const selectedBridge = bridges.find((b) => b.bridgeId === effectiveBridgeId);
@@ -383,33 +419,37 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
       onClick={onClose}
       onKeyDown={handleKeyDown}
     >
       <div
-        className="w-full max-w-lg lg:max-w-2xl border border-[#2a2a2a] bg-[#111111] rounded-lg p-6 max-h-[90vh] overflow-y-auto"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="new-session-title"
+        className="w-full max-w-lg lg:max-w-2xl border border-[var(--border-default)] bg-[var(--bg-surface)] rounded-[var(--radius-md)] shadow-[var(--shadow-md)] max-h-[90vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 className="text-lg font-bold text-[#00ff88] mb-4">New Session</h2>
+        <h2
+          id="new-session-title"
+          className="sticky top-0 z-10 bg-[var(--bg-surface)] px-5 py-4 border-b border-[var(--border-muted)] text-lg font-bold text-[var(--accent)]"
+        >
+          New Session
+        </h2>
 
-        <div className="space-y-4">
+        <div className="space-y-4 px-5 py-4">
           <div>
-            <label className="block text-sm text-[#888888] mb-1">Shell Type</label>
+            <label htmlFor="ns-shell-type" className="block text-sm text-[var(--text-muted)] mb-1">Shell Type</label>
             <select
+              id="ns-shell-type"
+              ref={firstFieldRef}
               value={shellType}
               onChange={(e) => {
                 const { top, flavor } = shellTypeToTop(e.target.value as ShellType);
                 setTopShell(top);
                 setClaudeFlavor(flavor);
               }}
-              className="w-full px-3 py-2 text-sm font-mono rounded"
-              style={{
-                background: "#0a0a0a",
-                color: "#e0e0e0",
-                border: "1px solid #2a2a2a",
-                outline: "none",
-              }}
+              className={INPUT_CLASS + " text-sm"}
             >
               <optgroup label="Claude Code">
                 <option value="claude">Claude Code</option>
@@ -433,10 +473,11 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                 <ProviderTokenHint provider="z.ai" envVar="ZAI_API_TOKEN" flavor="zai" />
                 {(["opus", "sonnet", "haiku"] as const).map((slot) => (
                   <div key={slot}>
-                    <label className="block text-xs text-[#666] mb-1 uppercase tracking-wider">
+                    <label htmlFor={`ns-zai-${slot}`} className="block text-xs text-[var(--text-faint)] mb-1 uppercase tracking-wider">
                       {slot} model
                     </label>
                     <input
+                      id={`ns-zai-${slot}`}
                       type="text"
                       value={zaiModels[slot]}
                       onChange={(e) =>
@@ -444,7 +485,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                       }
                       list="zai-model-options"
                       placeholder={`default: ${ZAI_DEFAULT_MODELS[slot]}`}
-                      className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-xs text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] font-mono"
+                      className={INPUT_CLASS + " text-xs"}
                     />
                   </div>
                 ))}
@@ -469,15 +510,16 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                 <ProviderTokenHint provider="Fireworks" envVar="FIREWORKS_API_TOKEN" flavor="fireworks" />
                 {(["opus", "sonnet", "haiku"] as const).map((slot) => (
                   <div key={slot}>
-                    <label className="block text-xs text-[#666] mb-1 uppercase tracking-wider">
+                    <label htmlFor={`ns-fw-${slot}`} className="block text-xs text-[var(--text-faint)] mb-1 uppercase tracking-wider">
                       {slot} model
                     </label>
                     <select
+                      id={`ns-fw-${slot}`}
                       value={fireworksModels[slot]}
                       onChange={(e) =>
                         setFireworksModels((prev) => ({ ...prev, [slot]: e.target.value }))
                       }
-                      className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-xs text-[#e0e0e0] focus:outline-none focus:border-[#00ff88] font-mono"
+                      className={INPUT_CLASS + " text-xs"}
                     >
                       {FIREWORKS_MODEL_OPTIONS.map((m) => (
                         <option key={m} value={m}>
@@ -492,13 +534,14 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
 
             {topShell === "claude" && (
               <div className="mt-3">
-                <label className="block text-sm text-[#888888] mb-1">
+                <label htmlFor="ns-auto-compact" className="block text-sm text-[var(--text-muted)] mb-1">
                   Auto-Compact Window{" "}
-                  <span className="text-xs text-[#555] font-mono normal-case tracking-normal">
+                  <span className="text-xs text-[var(--text-faint)] font-mono normal-case tracking-normal">
                     (CLAUDE_CODE_AUTO_COMPACT_WINDOW)
                   </span>
                 </label>
                 <input
+                  id="ns-auto-compact"
                   type="text"
                   inputMode="numeric"
                   value={autoCompactWindow}
@@ -508,7 +551,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                       ? `default: ${FLAVOR_AUTO_COMPACT_DEFAULTS[claudeFlavor]}`
                       : "tokens (leave blank to disable)"
                   }
-                  className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88] font-mono"
+                  className={INPUT_CLASS + " text-sm"}
                   onKeyDown={handleKeyDown}
                 />
               </div>
@@ -516,47 +559,70 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
           </div>
 
           {shellType !== "shell" && (
-            <div className="rounded border border-[#1a1a1a] px-3 py-2">
-                <span className="block text-sm text-[#888888]">Need an orchestrator?</span>
-                <span className="block text-xs text-[#555]">
+            <div className="rounded-[var(--radius-sm)] border border-[var(--border-muted)] px-3 py-2">
+                <span className="block text-sm text-[var(--text-muted)]">Need an orchestrator?</span>
+                <span className="block text-xs text-[var(--text-faint)]">
                   Start a normal session and ask it to use the{" "}
-                <span className="text-[#00ff88]">ftown</span> skill's orchestrator
+                <span className="text-[var(--accent)]">ftown</span> skill&apos;s orchestrator
                 reference to spawn and coordinate worker sessions.
                 </span>
               </div>
             )}
 
           <div>
-            <label className="block text-sm text-[#888888] mb-1">Bridge</label>
-            <select
-              value={effectiveBridgeId}
-              onChange={(e) => setBridgeId(e.target.value)}
-              className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] focus:outline-none focus:border-[#00ff88]"
-            >
-              {bridges.map((b) => (
-                <option key={b.bridgeId} value={b.bridgeId}>
-                  {b.bridgeId} ({b.hostname})
-                </option>
-              ))}
-            </select>
+            <label htmlFor="ns-bridge" className="block text-sm text-[var(--text-muted)] mb-1">Bridge</label>
+            {bridges.length === 0 ? (
+              <div
+                role="alert"
+                className="px-3 py-2 rounded-[var(--radius-sm)] border border-[var(--status-pending)] bg-[rgba(255,170,0,0.08)] text-xs text-[var(--status-pending)] flex items-start gap-2"
+              >
+                <span aria-hidden>⚠</span>
+                <span>No bridges connected — start ftown-bridge on a machine first.</span>
+              </div>
+            ) : (
+              <select
+                id="ns-bridge"
+                value={effectiveBridgeId}
+                onChange={(e) => setBridgeId(e.target.value)}
+                className={INPUT_CLASS + " text-sm"}
+              >
+                {bridges.map((b) => (
+                  <option key={b.bridgeId} value={b.bridgeId}>
+                    {b.bridgeId} ({b.hostname})
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
 
           <div>
-            <label className="block text-sm text-[#888888] mb-1">Session Name</label>
+            <label htmlFor="ns-name" className="block text-sm text-[var(--text-muted)] mb-1">
+              Session Name{" "}
+              <span className="text-xs text-[var(--text-faint)] normal-case">(optional)</span>
+            </label>
             <input
+              id="ns-name"
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="Optional name for this session"
-              className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88]"
+              className={INPUT_CLASS + " text-sm"}
               onKeyDown={handleKeyDown}
             />
           </div>
 
           <div className="relative">
-            <label className="block text-sm text-[#888888] mb-1">Working Directory</label>
+            <label htmlFor="ns-working-dir" className="block text-sm text-[var(--text-muted)] mb-1">
+              Working Directory{" "}
+              <span className="text-xs text-[var(--text-faint)] normal-case">(optional)</span>
+            </label>
             <input
+              id="ns-working-dir"
               type="text"
+              role="combobox"
+              aria-expanded={showSuggestions && suggestedPaths.length > 0}
+              aria-controls="ns-path-suggestions"
+              aria-autocomplete="list"
               value={workingDir}
               onChange={(e) => {
                 setWorkingDir(e.target.value);
@@ -566,21 +632,28 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
               onFocus={() => setShowSuggestions(true)}
               onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
               placeholder="/path/to/project (optional)"
-              className="w-full bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88]"
+              className={INPUT_CLASS + " text-sm"}
               onKeyDown={handleKeyDown}
             />
             {showSuggestions && suggestedPaths.length > 0 && (
-              <div className="absolute z-10 w-full mt-1 bg-[#1a1a1a] border border-[#2a2a2a] rounded max-h-40 overflow-y-auto">
+              <div
+                id="ns-path-suggestions"
+                role="listbox"
+                aria-label="Recent working directories"
+                className="absolute z-10 w-full mt-1 bg-[var(--bg-overlay)] border border-[var(--border-default)] rounded-[var(--radius-sm)] max-h-40 overflow-y-auto shadow-[var(--shadow-md)]"
+              >
                 {suggestedPaths.map((path) => (
                   <button
                     key={path}
                     type="button"
+                    role="option"
+                    aria-selected={workingDir === path}
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={() => {
                       setWorkingDir(path);
                       setShowSuggestions(false);
                     }}
-                    className="w-full text-left px-3 py-1.5 text-xs text-[#aaa] hover:bg-[#2a2a2a] hover:text-[#e0e0e0] font-mono truncate"
+                    className="w-full text-left px-3 py-1.5 text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] focus-visible:bg-[var(--bg-hover)] font-mono truncate"
                   >
                     {path}
                   </button>
@@ -591,14 +664,14 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
 
           {topShell === "cursor" && effectiveBridgeId && workingDir.trim() && (
             selectedCursorSessionId ? (
-              <div className="flex items-center gap-2 px-3 py-2 border border-[#00ff88]/30 rounded bg-[#00ff88]/5">
-                <span className="text-xs text-[#00ff88] flex-1 truncate font-mono">
+              <div className="flex items-center gap-2 px-3 py-2 border border-[var(--accent)]/30 rounded-[var(--radius-sm)] bg-[var(--accent-dim)]">
+                <span className="text-xs text-[var(--accent)] flex-1 truncate font-mono">
                   Resuming: {selectedCursorSummary || selectedCursorSessionId.slice(0, 20)}
                 </span>
                 <button
                   type="button"
                   onClick={() => { setSelectedCursorSessionId(null); setSelectedCursorSummary(null); }}
-                  className="text-xs text-[#666] hover:text-[#aaa] transition-colors shrink-0"
+                  className="text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors shrink-0"
                 >
                   Clear
                 </button>
@@ -618,14 +691,14 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
 
           {(shellType === "claude" || shellType === "zai") && effectiveBridgeId && workingDir.trim() && (
             selectedClaudeSessionId ? (
-              <div className="flex items-center gap-2 px-3 py-2 border border-[#00ff88]/30 rounded bg-[#00ff88]/5">
-                <span className="text-xs text-[#00ff88] flex-1 truncate font-mono">
+              <div className="flex items-center gap-2 px-3 py-2 border border-[var(--accent)]/30 rounded-[var(--radius-sm)] bg-[var(--accent-dim)]">
+                <span className="text-xs text-[var(--accent)] flex-1 truncate font-mono">
                   Resuming: {selectedClaudeSummary || selectedClaudeSessionId.slice(0, 20)}
                 </span>
                 <button
                   type="button"
                   onClick={() => { setSelectedClaudeSessionId(null); setSelectedClaudeSummary(null); }}
-                  className="text-xs text-[#666] hover:text-[#aaa] transition-colors shrink-0"
+                  className="text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors shrink-0"
                 >
                   Clear
                 </button>
@@ -646,21 +719,28 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
           <EnvVarsEditor />
 
           {missingWorkingDir && (
-            <div className="px-3 py-2.5 border border-[#ffaa00]/40 rounded bg-[#ffaa00]/10 text-xs text-[#ffd28a] space-y-2">
-              <div>Working directory does not exist.</div>
-              <code className="block font-mono break-all text-[#ffe0a8]">{missingWorkingDir}</code>
+            <div
+              role="alert"
+              aria-live="assertive"
+              className="fade-in px-3 py-2.5 border-l-2 border border-[var(--status-pending)] rounded-[var(--radius-sm)] bg-[rgba(255,170,0,0.1)] text-xs text-[var(--status-pending)] space-y-2"
+            >
+              <div className="flex items-start gap-2">
+                <span aria-hidden>⚠</span>
+                <span>Working directory does not exist.</span>
+              </div>
+              <code className="block font-mono break-all text-[var(--status-pending)]">{missingWorkingDir}</code>
               <div className="flex justify-end gap-2 pt-1">
                 <button
                   type="button"
                   onClick={() => setMissingWorkingDir(null)}
-                  className="px-3 py-1.5 border border-[#3a3220] rounded text-[#b89b66] hover:text-[#ffe0a8] hover:border-[#6f5630] transition-colors"
+                  className="btn-ghost"
                 >
                   Cancel
                 </button>
                 <button
                   type="button"
                   onClick={() => void handleSubmit(true)}
-                  className="px-3 py-1.5 bg-[#ffaa00] text-[#0a0a0a] font-bold rounded hover:bg-[#ffbf3d] transition-colors"
+                  className="btn-warn"
                 >
                   Create Folder
                 </button>
@@ -669,27 +749,35 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
           )}
 
           {submitError && (
-            <div className="px-3 py-2.5 border border-[#ff5555]/40 rounded bg-[#ff5555]/10 text-xs text-[#ff8888] break-words">
-              {submitError}
+            <div
+              role="alert"
+              aria-live="assertive"
+              className="fade-in flex items-start gap-2 px-3 py-2.5 border-l-2 border border-[var(--status-error)] rounded-[var(--radius-sm)] bg-[rgba(255,68,102,0.08)] text-xs text-[var(--status-error)] break-words"
+            >
+              <span aria-hidden>⚠</span>
+              <span>{submitError}</span>
             </div>
           )}
+        </div>
 
-          <div className="flex gap-3 justify-end pt-2">
+        <div className="sticky bottom-0 z-10 bg-[var(--bg-surface)] px-5 py-4 border-t border-[var(--border-muted)] flex items-center justify-between gap-2">
+          <p className="text-xs text-[var(--text-faint)]">Cmd+Enter to submit</p>
+          <div className="flex gap-2">
             <button
+              type="button"
               onClick={onClose}
-              className="px-4 py-2 border border-[#2a2a2a] rounded text-sm text-[#888888] hover:text-[#e0e0e0] hover:border-[#444] transition-colors"
+              className="btn-ghost"
             >
               Cancel
             </button>
             <button
+              type="button"
               onClick={() => void handleSubmit()}
-              className="px-4 py-2 bg-[#00ff88] text-[#0a0a0a] font-bold rounded text-sm hover:bg-[#00cc6e] transition-colors"
+              className="btn-accent"
             >
               Create Session
             </button>
           </div>
-
-          <p className="text-xs text-[#444] text-right">Cmd+Enter to submit</p>
         </div>
       </div>
     </div>

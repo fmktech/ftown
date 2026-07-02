@@ -283,6 +283,7 @@ function ContextMenuButton({
 }) {
   return (
     <button
+      role="menuitem"
       onClick={onClick}
       disabled={disabled}
       style={{
@@ -327,13 +328,17 @@ function SessionContextMenu({
   const menuRef = useRef<HTMLDivElement>(null);
   useDismissContextMenu(onClose, menuRef);
   const pos = useClampedMenuPosition(menu.x, menu.y, menuRef);
+  useEffect(() => { menuRef.current?.focus(); }, []);
 
   const isRunning = menu.session.status === "running" || menu.session.status === "pending";
 
   return createPortal(
     <div
       ref={menuRef}
-      style={{ ...contextMenuPanelStyle, top: pos.top, left: pos.left }}
+      role="menu"
+      aria-label="Session actions"
+      tabIndex={-1}
+      style={{ ...contextMenuPanelStyle, top: pos.top, left: pos.left, outline: "none" }}
     >
       <ContextMenuButton label="Rename" onClick={() => { onRename(menu.session); onClose(); }} />
       <ContextMenuButton label="Clone" onClick={() => { onClone(menu.session); onClose(); }} />
@@ -379,11 +384,15 @@ function BridgeContextMenu({
   const menuRef = useRef<HTMLDivElement>(null);
   useDismissContextMenu(onClose, menuRef);
   const pos = useClampedMenuPosition(menu.x, menu.y, menuRef);
+  useEffect(() => { menuRef.current?.focus(); }, []);
 
   return createPortal(
     <div
       ref={menuRef}
-      style={{ ...contextMenuPanelStyle, top: pos.top, left: pos.left }}
+      role="menu"
+      aria-label="Bridge actions"
+      tabIndex={-1}
+      style={{ ...contextMenuPanelStyle, top: pos.top, left: pos.left, outline: "none" }}
     >
       <ContextMenuButton
         label="Create session"
@@ -714,11 +723,12 @@ export function SessionList({
     if (collapsed) return null;
     return (
       <div
-        className="flex flex-col items-center justify-center p-8 fade-in"
+        className="flex flex-col items-center justify-center p-8 text-center fade-in"
         style={{ color: "var(--text-faint)", fontSize: 11, gap: 8 }}
       >
-        <span style={{ fontSize: 20, opacity: 0.4 }}>▣</span>
-        <span>No sessions yet</span>
+        <span aria-hidden style={{ fontSize: 20, color: "var(--text-faint)" }}>›_</span>
+        <span style={{ color: "var(--text-muted)", fontSize: 12 }}>No sessions yet</span>
+        <span style={{ color: "var(--text-faint)" }}>Click + above to start your first session</span>
       </div>
     );
   }
@@ -740,9 +750,9 @@ export function SessionList({
 
       const borderColor = session.status === "error" ? "var(--status-error)"
         : session.status === "pending" ? "var(--status-pending)"
-        : isThinking ? "#ff8800"
-        : isToolUse ? "#eedd00"
-        : isRunning ? "#666"
+        : isThinking ? "var(--status-thinking)"
+        : isToolUse ? "var(--status-tool-use)"
+        : isRunning ? "var(--status-done)"
         : "transparent";
 
       const tooltip = isThinking ? `${displayName}\nthinking...`
@@ -852,9 +862,19 @@ export function SessionList({
           {treeProps?.hasChildren ? (
             <span
               role="button"
+              tabIndex={0}
+              aria-expanded={!treeProps.isCollapsed}
+              aria-label={treeProps.isCollapsed ? "Expand children" : "Collapse children"}
               onClick={(e) => {
                 e.stopPropagation();
                 treeProps.onToggleCollapse();
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  treeProps.onToggleCollapse();
+                }
               }}
               title={treeProps.isCollapsed ? "Expand children" : "Collapse children"}
               style={{
@@ -903,6 +923,7 @@ export function SessionList({
                 e.stopPropagation();
                 startEditing(session);
               }}
+              title={session.prompt || displayName}
               style={{
                 fontSize: 12,
                 fontWeight: isSelected ? 600 : 400,
@@ -942,12 +963,22 @@ export function SessionList({
             <StatusBadge status={session.status} activity={sessionActivity?.get(session.id)?.activity} />
             <span
               role="button"
+              tabIndex={0}
+              aria-haspopup="menu"
               aria-label="Session actions"
               title="Session actions"
               onClick={(e) => {
                 e.stopPropagation();
                 const r = e.currentTarget.getBoundingClientRect();
                 setContextMenu({ kind: "session", session, x: r.right, y: r.bottom + 4 });
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const r = e.currentTarget.getBoundingClientRect();
+                  setContextMenu({ kind: "session", session, x: r.right, y: r.bottom + 4 });
+                }
               }}
               style={{
                 cursor: "pointer",
@@ -974,7 +1005,7 @@ export function SessionList({
             <div
               style={{
                 fontSize: 10,
-                color: isThinking ? "var(--status-pending)" : "var(--accent)",
+                color: isThinking ? "var(--status-thinking)" : "var(--status-tool-use)",
                 fontStyle: "italic",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
@@ -983,6 +1014,9 @@ export function SessionList({
                 ...(isThinking ? { animation: "pulse-pending 2s ease-in-out infinite" } : {}),
               }}
             >
+              <span aria-hidden style={{ fontStyle: "normal", marginRight: 4 }}>
+                {isThinking ? "◌" : "⚙"}
+              </span>
               {isThinking ? "thinking..." : `using ${act.toolName ?? "tool"}`}
             </div>
           );
@@ -1013,7 +1047,7 @@ export function SessionList({
                 padding: "1px 4px",
                 borderRadius: 3,
                 background: session.shellType === "shell" ? "rgba(255, 170, 0, 0.12)" : session.shellType === "cursor" ? "rgba(168, 180, 255, 0.12)" : session.shellType === "codex" ? "rgba(16, 163, 127, 0.12)" : session.shellType === "zai" ? "rgba(100, 149, 237, 0.12)" : session.shellType === "kimi" ? "rgba(255, 105, 180, 0.12)" : session.shellType === "opencode" ? "rgba(186, 85, 211, 0.12)" : session.shellType === "deepseek" ? "rgba(0, 191, 255, 0.12)" : "rgba(0, 255, 136, 0.08)",
-                color: session.shellType === "shell" ? "var(--status-pending)" : session.shellType === "cursor" ? "#A8B4FF" : session.shellType === "codex" ? "#10A37F" : session.shellType === "zai" ? "#6495ED" : session.shellType === "kimi" ? "#FF69B4" : session.shellType === "opencode" ? "#BA55D3" : session.shellType === "deepseek" ? "#00BFFF" : "var(--accent)",
+                color: session.shellType === "shell" ? "var(--status-pending)" : session.shellType === "cursor" ? "var(--shell-claude)" : session.shellType === "codex" ? "var(--shell-codex)" : session.shellType === "zai" ? "var(--shell-cursor)" : session.shellType === "kimi" ? "var(--shell-opencode)" : session.shellType === "opencode" ? "var(--shell-shell)" : session.shellType === "deepseek" ? "var(--shell-generic)" : "var(--accent)",
                 border: `1px solid ${session.shellType === "shell" ? "rgba(255, 170, 0, 0.2)" : session.shellType === "cursor" ? "rgba(168, 180, 255, 0.25)" : session.shellType === "codex" ? "rgba(16, 163, 127, 0.25)" : session.shellType === "zai" ? "rgba(100, 149, 237, 0.2)" : session.shellType === "kimi" ? "rgba(255, 105, 180, 0.2)" : session.shellType === "opencode" ? "rgba(186, 85, 211, 0.2)" : session.shellType === "deepseek" ? "rgba(0, 191, 255, 0.2)" : "rgba(0, 255, 136, 0.15)"}`,
                 textTransform: "uppercase",
                 fontFamily: "var(--font-mono)",
@@ -1027,7 +1061,10 @@ export function SessionList({
               </span>
             )}
           </div>
-          <span style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>
+          <span
+            title={new Date(session.createdAt).toLocaleString()}
+            style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}
+          >
             {formatTimestamp(session.createdAt)}
           </span>
         </div>
