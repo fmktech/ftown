@@ -1,12 +1,3 @@
----
-name: ftown-sessions
-description: >-
-  Observe and control other ftown CLI agent sessions on the same machine. Use the
-  ftown-sessions CLI (~/.ftown/ftown-sessions) to list, create, read, and drive
-  sibling sessions while running inside a ftown-managed Claude Code or Cursor Agent
-  session.
----
-
 # ftown cross-session CLI
 
 **Prefer the CLI** — installed to `~/.ftown/ftown-sessions` whenever `ftown-bridge` is running. It reads `~/.ftown/bridge.json` automatically.
@@ -15,7 +6,8 @@ description: >-
 ~/.ftown/ftown-sessions --help
 ```
 
-Skill copy (same binary via wrapper): `scripts/ftown-sessions` in this skill directory.
+Unified skill wrapper: `scripts/ftown` in this skill directory delegates to the
+top-level `~/.ftown/ftown` dispatcher.
 
 **Trust model:** anyone who can read `bridge.json` can control **every** ftown session on that bridge.
 
@@ -59,6 +51,12 @@ Skill copy (same binary via wrapper): `scripts/ftown-sessions` in this skill dir
 # session gets a NEW id)
 ~/.ftown/ftown-sessions revive <session-id>
 ```
+
+## Scheduled loops
+
+Loop runs are normal sessions tagged with `loopId`. For loop creation,
+schedule syntax, manual runs, pause/resume, and run history, read
+`references/loops.md`.
 
 ## Messaging (mail)
 
@@ -135,11 +133,11 @@ name/id and parent name/id, and how to mail the parent via
 `ftown-harness mail send --parent`. The creator's `--prompt` follows after a `Task:` line.
 
 An agent session created with `--orchestrator` additionally gets `FTOWN_ORCHESTRATOR=1`
-in its environment and a compact pointer briefing directing it to the **ftown-orchestrator**
-skill (installed at `~/.ftown/skills/ftown-orchestrator`, linked from ~/.agents/skills and
-~/.claude/skills), which contains the full orchestrator playbook for spawning workers,
-monitoring them, and cleaning up. When both apply, the child paragraph
-comes first, then the orchestrator pointer, separated by a blank line.
+in its environment and a compact pointer briefing directing it to the unified
+**ftown** skill, whose `references/orchestrator.md` contains the full
+orchestrator playbook for spawning workers, monitoring them, and cleaning up.
+When both apply, the child paragraph comes first, then the orchestrator pointer,
+separated by a blank line.
 
 ## HTTP API (optional)
 
@@ -159,7 +157,15 @@ The CLI wraps the loopback API. Raw access if needed:
 | DELETE | `/api/sessions/:id` | Remove (tombstone-archived) |
 | GET | `/api/archive` | List removed-session tombstones |
 | POST | `/api/sessions/:id/revive` | Recreate a removed session (new id) |
+| GET | `/api/loops` | List scheduled loops |
+| POST | `/api/loops` | Create a scheduled loop on this bridge |
+| GET/PATCH/DELETE | `/api/loops/:id` | Inspect, update, or delete a loop |
+| POST | `/api/loops/:id/run-now` | Request an immediate loop run |
+| GET | `/api/loops/:id/runs` | List run sessions for a loop |
 
 ## If the CLI is missing
 
-Start or restart **ftown-bridge** on this machine. It installs `~/.ftown/ftown-sessions`, `~/.ftown/notify.sh`, and updates this skill under `~/.ftown/skills/ftown-sessions/` (linked into ~/.agents/skills and ~/.claude/skills).
+Start or restart **ftown-bridge** on this machine. It installs
+`~/.ftown/ftown-sessions`, `~/.ftown/notify.sh`, and updates the unified skill
+under `~/.ftown/skills/ftown/` (linked into ~/.agents/skills and
+~/.claude/skills).

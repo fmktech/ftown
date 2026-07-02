@@ -65,6 +65,40 @@ interface SessionInfo {
   parentSessionId?: string;
 }
 
+type LoopHarness = 'claude' | 'cursor' | 'codex' | 'opencode' | 'shell';
+type LoopSchedule =
+  | { kind: 'interval'; everyMs: number }
+  | { kind: 'cron'; expression: string; tz?: string };
+
+interface LoopDraft {
+  name: string;
+  schedule: LoopSchedule;
+  harness: LoopHarness;
+  workdir?: string;
+  task: string;
+  model?: string;
+  enabled: boolean;
+  overlapPolicy: 'skip' | 'allow';
+  retention: { autoClearAfterRuns: number | null };
+  preflight?: { command: string; timeoutMs?: number };
+  postflight?: { command: string; timeoutMs?: number; runOnSkip?: boolean };
+  maxRuntimeMs?: number;
+}
+
+interface LoopInfo extends LoopDraft {
+  id: string;
+  bridgeId: string;
+  createdAt: string;
+  updatedAt: string;
+  lastRunAt?: string;
+  nextRunAt?: string;
+  lastStatus?: 'ok' | 'error' | 'running' | 'skipped';
+  lastSessionId?: string;
+  runCount: number;
+  skipCount: number;
+  runNowRequested?: boolean;
+}
+
 async function listSessionInfo(): Promise<SessionInfo[]> {
   const { data } = await api('GET', '/api/sessions');
   return (data as { sessions?: SessionInfo[] }).sessions ?? [];
@@ -106,6 +140,188 @@ function flag(args: string[], name: string): string | undefined {
 
 function hasFlag(args: string[], name: string): boolean {
   return args.includes(name);
+}
+
+function parseDurationMs(raw: string | undefined, label: string): number | undefined {
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim().toLowerCase();
+  const match = trimmed.match(/^(\d+(?:\.\d+)?)(ms|s|m|h|d)?$/);
+  if (!match) {
+    throw new Error(`${label} must be a duration like 30s, 5m, 2h, or 1000ms`);
+  }
+  const value = Number(match[1]);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative duration`);
+  }
+  const unit = match[2] ?? 'ms';
+  const factor: Record<string, number> = {
+    ms: 1,
+    s: 1000,
+    m: 60_000,
+    h: 3_600_000,
+    d: 86_400_000,
+  };
+  return Math.round(value * factor[unit]);
+}
+
+function parseNonNegativeInt(raw: string | undefined, label: string): number | undefined {
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative integer`);
+  }
+  return value;
+}
+
+function parseRetention(raw: string | undefined): number | null {
+  if (raw === undefined) return 10;
+  const trimmed = raw.trim().toLowerCase();
+  if (trimmed === 'all' || trimmed === 'none' || trimmed === 'null') return null;
+  const value = parseNonNegativeInt(trimmed, '--retention');
+  return value ?? 10;
+}
+
+function parseLoopSchedule(args: string[], required: boolean): LoopSchedule | undefined {
+  const every = flag(args, '--every');
+  const cron = flag(args, '--cron');
+  if (every && cron) throw new Error('Use only one of --every or --cron');
+  if (every) {
+    const everyMs = parseDurationMs(every, '--every');
+    if (!everyMs || everyMs < 1000) throw new Error('--every must be at least 1s');
+    return { kind: 'interval', everyMs };
+  }
+  if (cron) {
+    const schedule: LoopSchedule = { kind: 'cron', expression: cron };
+    const tz = flag(args, '--tz');
+    if (tz) schedule.tz = tz;
+    return schedule;
+  }
+  if (required) throw new Error('Missing schedule: provide --every <duration> or --cron <expr>');
+  return undefined;
+}
+
+function parseLoopHarness(raw: string | undefined): LoopHarness {
+  const harness = (raw ?? 'claude') as LoopHarness;
+  if (!['claude', 'cursor', 'codex', 'opencode', 'shell'].includes(harness)) {
+    throw new Error(`Invalid --shell "${raw}"`);
+  }
+  return harness;
+}
+
+function parseLoopCreate(args: string[]): LoopDraft {
+  const name = flag(args, '--name')?.trim();
+  const task = (flag(args, '--task') ?? flag(args, '--prompt'))?.trim();
+  if (!name) throw new Error('Missing --name');
+  if (!task) throw new Error('Missing --task');
+
+  const preflightCommand = flag(args, '--preflight')?.trim();
+  const postflightCommand = flag(args, '--postflight')?.trim();
+  const maxRuntime =
+    parseDurationMs(flag(args, '--max-runtime'), '--max-runtime') ??
+    parseDurationMs(flag(args, '--max-runtime-ms'), '--max-runtime-ms');
+
+  return {
+    name,
+    schedule: parseLoopSchedule(args, true)!,
+    harness: parseLoopHarness(flag(args, '--shell') ?? flag(args, '--harness')),
+    workdir: flag(args, '--workdir'),
+    task,
+    model: flag(args, '--model'),
+    enabled: !hasFlag(args, '--disabled'),
+    overlapPolicy: hasFlag(args, '--allow-overlap') ? 'allow' : 'skip',
+    retention: { autoClearAfterRuns: parseRetention(flag(args, '--retention')) },
+    preflight: preflightCommand
+      ? {
+          command: preflightCommand,
+          timeoutMs:
+            parseDurationMs(flag(args, '--preflight-timeout'), '--preflight-timeout') ??
+            parseDurationMs(flag(args, '--preflight-timeout-ms'), '--preflight-timeout-ms'),
+        }
+      : undefined,
+    postflight: postflightCommand
+      ? {
+          command: postflightCommand,
+          timeoutMs:
+            parseDurationMs(flag(args, '--postflight-timeout'), '--postflight-timeout') ??
+            parseDurationMs(flag(args, '--postflight-timeout-ms'), '--postflight-timeout-ms'),
+          runOnSkip: hasFlag(args, '--postflight-on-skip') || undefined,
+        }
+      : undefined,
+    maxRuntimeMs: maxRuntime,
+  };
+}
+
+function parseLoopPatch(args: string[]): Partial<LoopDraft> {
+  const patch: Partial<LoopDraft> = {};
+  const name = flag(args, '--name')?.trim();
+  const task = (flag(args, '--task') ?? flag(args, '--prompt'))?.trim();
+  const workdir = flag(args, '--workdir');
+  const model = flag(args, '--model');
+  const shell = flag(args, '--shell') ?? flag(args, '--harness');
+  const retention = flag(args, '--retention');
+  const schedule = parseLoopSchedule(args, false);
+  const maxRuntime = flag(args, '--max-runtime') ?? flag(args, '--max-runtime-ms');
+
+  if (name !== undefined) patch.name = name;
+  if (task !== undefined) patch.task = task;
+  if (workdir !== undefined) patch.workdir = workdir || undefined;
+  if (model !== undefined) patch.model = model || undefined;
+  if (shell !== undefined) patch.harness = parseLoopHarness(shell);
+  if (schedule) patch.schedule = schedule;
+  if (retention !== undefined) patch.retention = { autoClearAfterRuns: parseRetention(retention) };
+  if (hasFlag(args, '--enabled')) patch.enabled = true;
+  if (hasFlag(args, '--disabled')) patch.enabled = false;
+  if (hasFlag(args, '--allow-overlap')) patch.overlapPolicy = 'allow';
+  if (hasFlag(args, '--skip-overlap')) patch.overlapPolicy = 'skip';
+  if (maxRuntime !== undefined) patch.maxRuntimeMs = parseDurationMs(maxRuntime, '--max-runtime');
+
+  const preflightCommand = flag(args, '--preflight');
+  if (preflightCommand !== undefined) {
+    patch.preflight = preflightCommand.trim()
+      ? {
+          command: preflightCommand.trim(),
+          timeoutMs:
+            parseDurationMs(flag(args, '--preflight-timeout'), '--preflight-timeout') ??
+            parseDurationMs(flag(args, '--preflight-timeout-ms'), '--preflight-timeout-ms'),
+        }
+      : undefined;
+  }
+
+  const postflightCommand = flag(args, '--postflight');
+  if (postflightCommand !== undefined) {
+    patch.postflight = postflightCommand.trim()
+      ? {
+          command: postflightCommand.trim(),
+          timeoutMs:
+            parseDurationMs(flag(args, '--postflight-timeout'), '--postflight-timeout') ??
+            parseDurationMs(flag(args, '--postflight-timeout-ms'), '--postflight-timeout-ms'),
+          runOnSkip: hasFlag(args, '--postflight-on-skip') || undefined,
+        }
+      : undefined;
+  }
+
+  if (Object.keys(patch).length === 0) throw new Error('No loop fields to update');
+  return patch;
+}
+
+function formatDuration(ms: number): string {
+  if (ms % 86_400_000 === 0) return `${ms / 86_400_000}d`;
+  if (ms % 3_600_000 === 0) return `${ms / 3_600_000}h`;
+  if (ms % 60_000 === 0) return `${ms / 60_000}m`;
+  if (ms % 1000 === 0) return `${ms / 1000}s`;
+  return `${ms}ms`;
+}
+
+function describeSchedule(schedule: LoopSchedule): string {
+  if (schedule.kind === 'interval') return `every ${formatDuration(schedule.everyMs)}`;
+  return schedule.tz ? `cron ${schedule.expression} (${schedule.tz})` : `cron ${schedule.expression}`;
+}
+
+function formatTimestamp(ts: string | undefined): string {
+  if (!ts) return '-';
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return ts;
+  return date.toISOString();
 }
 
 /** Positional args, skipping flags and the values of value-taking flags. */
@@ -155,6 +371,14 @@ Commands:
   remove <session-id>           Stop and remove a session (archived as a tombstone)
   archive                       List archived (removed) sessions
   revive <session-id>           Recreate a removed session from its tombstone
+  loops | loop list             List scheduled loops
+  loop create [options]         Create a scheduled loop on this bridge
+  loop get <loop-id>            Loop metadata
+  loop update <loop-id> [opts]  Update loop fields
+  loop run <loop-id>            Request an immediate run
+  loop pause|resume <loop-id>   Disable or enable a loop
+  loop delete <loop-id>         Delete a loop, stopping any in-flight run
+  loop runs <loop-id>           List run sessions for a loop
 
 Tell targets (one of):
   <session-id>                  Explicit target session id
@@ -192,6 +416,25 @@ Screen/grep options:
 
 Grep options:
   --pattern <regex>             Required for grep
+
+Loop create/update options:
+  --name <label>                Loop name
+  --task <text>                 Prompt run each time (alias: --prompt)
+  --every <duration>            Interval schedule, e.g. 30s, 5m, 2h
+  --cron <expr>                 Cron schedule, e.g. "*/15 * * * *"
+  --tz <iana-zone>              Cron timezone
+  --shell <type>                claude | cursor | codex | opencode | shell (default: claude)
+  --workdir <path>              Working directory
+  --model <name>                Agent model
+  --disabled                    Create/update as disabled
+  --enabled                     Update as enabled
+  --allow-overlap               Allow concurrent runs (default is skip)
+  --skip-overlap                Update back to skip overlap
+  --retention <n|all>           Keep newest N runs, or all (default: 10)
+  --preflight <cmd>             Shell guard; non-zero skips the run
+  --postflight <cmd>            Shell hook after each run
+  --postflight-on-skip          Also run postflight after preflight skip
+  --max-runtime <duration>      Force-stop a run after duration
 
 Reads ~/.ftown/bridge.json (ftown-bridge must be running).`);
 }
@@ -434,6 +677,103 @@ async function main(): Promise<void> {
         break;
       }
 
+      case 'loops':
+      case 'loop-list': {
+        const { data } = await api('GET', '/api/loops');
+        console.log(jsonOut ? JSON.stringify(data, null, 2) : formatLoopList(data));
+        break;
+      }
+
+      case 'loop': {
+        const sub = rest[0];
+        const loopArgs = rest.slice(1);
+        if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
+          usage();
+          break;
+        }
+
+        switch (sub) {
+          case 'list': {
+            const { data } = await api('GET', '/api/loops');
+            console.log(jsonOut ? JSON.stringify(data, null, 2) : formatLoopList(data));
+            break;
+          }
+
+          case 'create': {
+            const body = parseLoopCreate(loopArgs);
+            const { data } = await api('POST', '/api/loops', body);
+            console.log(jsonOut ? JSON.stringify(data, null, 2) : formatLoopCreated(data));
+            break;
+          }
+
+          case 'get': {
+            const id = loopArgs.find((a) => !a.startsWith('--'));
+            if (!id) throw new Error('Missing loop-id');
+            const { data } = await api('GET', `/api/loops/${id}`);
+            console.log(JSON.stringify(data, null, 2));
+            break;
+          }
+
+          case 'update': {
+            const id = loopArgs.find((a) => !a.startsWith('--'));
+            if (!id) throw new Error('Missing loop-id');
+            const patch = parseLoopPatch(loopArgs.slice(1));
+            const { data } = await api('PATCH', `/api/loops/${id}`, patch);
+            console.log(jsonOut ? JSON.stringify(data, null, 2) : formatLoopCreated(data));
+            break;
+          }
+
+          case 'run':
+          case 'run-now': {
+            const id = loopArgs.find((a) => !a.startsWith('--'));
+            if (!id) throw new Error('Missing loop-id');
+            const { data } = await api('POST', `/api/loops/${id}/run-now`);
+            console.log(jsonOut ? JSON.stringify(data, null, 2) : formatLoopRunNow(data));
+            break;
+          }
+
+          case 'pause':
+          case 'disable': {
+            const id = loopArgs.find((a) => !a.startsWith('--'));
+            if (!id) throw new Error('Missing loop-id');
+            const { data } = await api('PATCH', `/api/loops/${id}`, { enabled: false });
+            console.log(jsonOut ? JSON.stringify(data, null, 2) : formatLoopCreated(data));
+            break;
+          }
+
+          case 'resume':
+          case 'enable': {
+            const id = loopArgs.find((a) => !a.startsWith('--'));
+            if (!id) throw new Error('Missing loop-id');
+            const { data } = await api('PATCH', `/api/loops/${id}`, { enabled: true });
+            console.log(jsonOut ? JSON.stringify(data, null, 2) : formatLoopCreated(data));
+            break;
+          }
+
+          case 'delete':
+          case 'rm': {
+            const id = loopArgs.find((a) => !a.startsWith('--'));
+            if (!id) throw new Error('Missing loop-id');
+            const { data } = await api('DELETE', `/api/loops/${id}`);
+            console.log(jsonOut ? JSON.stringify(data, null, 2) : `deleted ${id}`);
+            break;
+          }
+
+          case 'runs': {
+            const id = loopArgs.find((a) => !a.startsWith('--'));
+            if (!id) throw new Error('Missing loop-id');
+            const { data } = await api('GET', `/api/loops/${id}/runs`);
+            console.log(JSON.stringify(data, null, 2));
+            break;
+          }
+
+          default:
+            usage();
+            process.exit(1);
+        }
+        break;
+      }
+
       default:
         usage();
         process.exit(1);
@@ -461,6 +801,30 @@ function formatCreated(data: unknown): string {
   // revive responses carry resumed; a fresh conversation lost its context.
   const resumeNote = resumed === undefined ? '' : resumed ? '  [resumed]' : '  [fresh conversation]';
   return `created ${session.id}  ${session.name}  (${session.status})${resumeNote}`;
+}
+
+function formatLoopList(data: unknown): string {
+  const loops = (data as { loops?: LoopInfo[] }).loops ?? [];
+  if (loops.length === 0) return '(no loops)';
+  return loops
+    .map((loop) => {
+      const status = loop.enabled ? loop.lastStatus ?? 'never' : 'disabled';
+      return `${loop.id}  ${status}  ${describeSchedule(loop.schedule)}  next:${formatTimestamp(loop.nextRunAt)}  runs:${loop.runCount}  ${loop.name}`;
+    })
+    .join('\n');
+}
+
+function formatLoopCreated(data: unknown): string {
+  const loop = (data as { loop?: LoopInfo }).loop;
+  if (!loop) return JSON.stringify(data, null, 2);
+  const status = loop.enabled ? loop.lastStatus ?? 'never' : 'disabled';
+  return `${loop.id}  ${status}  ${describeSchedule(loop.schedule)}  next:${formatTimestamp(loop.nextRunAt)}  ${loop.name}`;
+}
+
+function formatLoopRunNow(data: unknown): string {
+  const result = data as { fired?: boolean; reason?: string };
+  if (result.fired) return 'run requested';
+  return `not fired${result.reason ? `: ${result.reason}` : ''}`;
 }
 
 main();

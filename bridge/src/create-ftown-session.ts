@@ -85,9 +85,9 @@ interface OrchestratorBriefingParams {
 export function buildOrchestratorBriefing(params: OrchestratorBriefingParams): string {
   return (
     `[ftown] You are an ORCHESTRATOR running inside ftown session '${params.sessionName}' ` +
-    `(${params.sessionId}). Use the 'ftown-orchestrator' skill (installed at ` +
-    `~/.ftown/skills/ftown-orchestrator, linked from ~/.agents/skills and ~/.claude/skills — ` +
-    `read its SKILL.md if not auto-loaded) to spawn and coordinate worker agent sessions ` +
+    `(${params.sessionId}). Use the 'ftown' skill (installed at ` +
+    `~/.ftown/skills/ftown, linked from ~/.agents/skills and ~/.claude/skills — ` +
+    `read its SKILL.md and references/orchestrator.md if not auto-loaded) to spawn and coordinate worker agent sessions ` +
     `via ~/.ftown/ftown-sessions. Children you spawn with --parent report back via mail — ` +
     `their messages arrive automatically as [ftown mail] context at your turn boundaries; ` +
     `check on demand with ftown-harness mail read.`

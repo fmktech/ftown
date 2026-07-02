@@ -1,14 +1,3 @@
----
-name: ftown-workflows
-description: >-
-  Run deterministic, scripted, resumable multi-session workflows across real
-  ftown agent sessions. Activates when the user wants to fan out ftown worker
-  sessions over a work list, run a pipeline or parallel batch across ftown
-  sessions, perform adversarial-verify (majority-vote) across sessions,
-  loop-until-dry over a dataset, or write a repeatable orchestration script
-  instead of doing it by hand.
----
-
 # ftown-workflows
 
 `ftown-workflows` is a **scripted orchestration engine** for real ftown sessions.
@@ -17,10 +6,14 @@ You write a `.mjs` script using a small API (`agent`, `parallel`, `pipeline`,
 cursor / codex), waits for each to write a result file, cleans up, and returns the
 value — all deterministically and repeatably.
 
-This complements the by-hand **ftown-orchestrator** skill (which is the ad-hoc,
-human-in-the-loop playbook). Use ftown-workflows when the work is scripted and
-repeatable; use ftown-orchestrator when you need to improvise or keep a human in
-the loop.
+This complements the by-hand orchestrator playbook in
+`references/orchestrator.md`. Use ftown-workflows when the work is scripted and
+repeatable; use orchestrator guidance when you need to improvise or keep a
+human in the loop.
+
+This is separate from **scheduled loops** managed by `~/.ftown/ftown-sessions
+loop ...`. Scheduled loops create recurring ftown sessions over time. A workflow
+loop is control flow inside one deterministic workflow run.
 
 ## Operating Contract
 
@@ -204,7 +197,7 @@ For long runs, launch in the background and tail the run dir:
 tail -f ~/.ftown/workflows/<run-id>/*.json
 ```
 
-See the runnable template at `skills/ftown-workflows/scripts/example.flow.mjs`.
+See the runnable template at `scripts/example.flow.mjs` in this skill directory.
 
 ## Script API
 
@@ -462,9 +455,9 @@ session. To resume a partial run:
 
 The run id and run directory are printed at startup.
 
-## When to use this vs ftown-orchestrator
+## When to use this vs orchestrator guidance
 
-| | ftown-orchestrator | ftown-workflows |
+| | orchestrator guidance | ftown-workflows |
 |---|---|---|
 | **style** | ad-hoc, by hand | scripted, deterministic |
 | **human in loop** | yes — you direct workers via mail | no — script drives everything |
@@ -475,5 +468,5 @@ The run id and run directory are printed at startup.
 ## If the CLI is missing
 
 Start or restart **ftown-bridge** on this machine. It installs
-`~/.ftown/ftown-workflows` and updates this skill under
-`~/.ftown/skills/ftown-workflows/` (linked into ~/.agents/skills and ~/.claude/skills).
+`~/.ftown/ftown-workflows` and updates the unified skill under
+`~/.ftown/skills/ftown/` (linked into ~/.agents/skills and ~/.claude/skills).

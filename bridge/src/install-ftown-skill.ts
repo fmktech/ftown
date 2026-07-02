@@ -75,6 +75,36 @@ function linkSkillInto(skillsDir: string, skillName: string): void {
   console.warn(`[Bridge] ${linkPath} exists and is not a symlink or directory; skipping link`);
 }
 
+function removeSkillLinkFrom(skillsDir: string, skillName: string): void {
+  const linkPath = join(skillsDir, skillName);
+  let stat;
+  try {
+    stat = lstatSync(linkPath);
+  } catch {
+    return;
+  }
+
+  if (stat.isSymbolicLink()) {
+    let current: string | undefined;
+    try {
+      current = readlinkSync(linkPath);
+    } catch {
+      current = undefined;
+    }
+    if (current === relativeTarget(skillName)) {
+      unlinkSync(linkPath);
+      console.log(`[Bridge] Removed stale skill link: ${linkPath}`);
+    }
+    return;
+  }
+
+  // Old pre-symlink installs wrote the real bridge skill directory here.
+  if (stat.isDirectory() && existsSync(join(linkPath, 'SKILL.md'))) {
+    rmSync(linkPath, { recursive: true, force: true });
+    console.log(`[Bridge] Removed stale skill dir: ${linkPath}`);
+  }
+}
+
 /** Copy bundled skill to ~/.ftown/skills/<name> (canonical) and symlink from ~/.agents/skills and ~/.claude/skills. */
 export function installFtownSkill(skillName: string, bundledSkillDir: string): void {
   const ftownSkillsDir = join(homedir(), '.ftown', 'skills');
@@ -94,4 +124,15 @@ export function installFtownSkill(skillName: string, bundledSkillDir: string): v
 
   linkSkillInto(join(homedir(), '.agents', 'skills'), skillName);
   linkSkillInto(join(homedir(), '.claude', 'skills'), skillName);
+}
+
+/** Remove a bridge-owned skill from the canonical store and known agent skill link dirs. */
+export function removeFtownSkill(skillName: string): void {
+  const dest = ftownSkillPath(skillName);
+  if (existsSync(dest)) {
+    rmSync(dest, { recursive: true, force: true });
+    console.log(`[Bridge] Removed stale skill: ${dest}`);
+  }
+  removeSkillLinkFrom(join(homedir(), '.agents', 'skills'), skillName);
+  removeSkillLinkFrom(join(homedir(), '.claude', 'skills'), skillName);
 }

@@ -1,4 +1,0 @@
-#!/usr/bin/env bash
-# Delegates to the bridge-installed CLI (~/.ftown/ftown-sessions).
-set -euo pipefail
-exec "${HOME}/.ftown/ftown-sessions" "$@"

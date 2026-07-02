@@ -7,11 +7,13 @@ import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 import type { SessionStore } from './session-store.js';
 import type { MailStore } from './mail-store.js';
 import { createMailMessage } from './mail-store.js';
-import type { MailMessage, Session, ShellType } from './types.js';
+import type { Loop, LoopDraft, MailMessage, Session, ShellType } from './types.js';
 import { buildSessionCommand } from './agent-commands.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { TerminalManager } from './terminal-manager.js';
+import { createLoop, deleteLoop, getLoop, listLoops, updateLoop, upsertLoop } from './loop-store.js';
+import { validateLoopDraft, validateLoopPatch } from './loop-validation.js';
 import {
   registerSessionConversation,
   resolveSessionIdByConversation,
@@ -47,6 +49,14 @@ interface HookServerEvents {
 
 interface ApiError {
   error: string;
+}
+
+interface LoopApiDeps {
+  bridgeId: string;
+  scheduler: {
+    kick(): void;
+    onLoopDeleted(loop: Loop): void;
+  };
 }
 
 function jsonResponse(res: ServerResponse, status: number, data: unknown): void {
@@ -191,6 +201,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private pendingNudgeFrom: Map<string, string> = new Map();
   private lastNudgeAt: Map<string, number> = new Map();
   private agentBusySince: Map<string, number> = new Map();
+  private loopApi: LoopApiDeps | null = null;
   private userId: string = '';
   private authToken: string = '';
   private port: number = 0;
@@ -219,6 +230,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
 
   setSessionFactory(deps: CreateFtownSessionDeps): void {
     this.sessionDeps = deps;
+  }
+
+  setLoopApi(deps: LoopApiDeps): void {
+    this.loopApi = deps;
   }
 
   async start(): Promise<number> {
@@ -398,6 +413,160 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         return;
       }
       jsonResponse(res, 200, { sessionId });
+      return;
+    }
+
+    // GET /api/loops — local CLI/skill parity with list_loops RPC.
+    if (path === '/api/loops' && req.method === 'GET') {
+      jsonResponse(res, 200, { loops: listLoops() });
+      return;
+    }
+
+    // POST /api/loops — create a loop owned by this bridge.
+    if (path === '/api/loops' && req.method === 'POST') {
+      if (!this.loopApi || !this.centrifugo || !this.userId) {
+        jsonResponse(res, 503, { error: 'Loop API not ready' });
+        return;
+      }
+
+      const body = await parseBody(req);
+      const payload = { ...body, bridgeId: this.loopApi.bridgeId } as Partial<LoopDraft>;
+      const error = validateLoopDraft(payload);
+      if (error) {
+        jsonResponse(res, 400, { error });
+        return;
+      }
+
+      const draft: LoopDraft = {
+        name: payload.name!.trim(),
+        bridgeId: this.loopApi.bridgeId,
+        schedule: payload.schedule!,
+        harness: payload.harness!,
+        workdir: payload.workdir,
+        task: payload.task!,
+        model: payload.model,
+        enabled: payload.enabled!,
+        overlapPolicy: payload.overlapPolicy!,
+        retention: payload.retention!,
+        preflight: payload.preflight,
+        postflight: payload.postflight,
+        maxRuntimeMs: payload.maxRuntimeMs,
+      };
+
+      try {
+        const loop = createLoop(draft);
+        await this.centrifugo.publishLoopUpdate(this.userId, loop);
+        jsonResponse(res, 201, { loop });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        jsonResponse(res, 400, { error: message });
+      }
+      return;
+    }
+
+    const loopMatch = path.match(/^\/api\/loops\/([^/]+)$/);
+    const loopRunNowMatch = path.match(/^\/api\/loops\/([^/]+)\/run-now$/);
+    const loopRunsMatch = path.match(/^\/api\/loops\/([^/]+)\/runs$/);
+
+    // GET /api/loops/:id
+    if (loopMatch && req.method === 'GET') {
+      const loop = getLoop(loopMatch[1]);
+      if (!loop) {
+        jsonResponse(res, 404, { error: 'Loop not found' });
+        return;
+      }
+      jsonResponse(res, 200, { loop });
+      return;
+    }
+
+    // PATCH /api/loops/:id
+    if (loopMatch && req.method === 'PATCH') {
+      if (!this.centrifugo || !this.userId) {
+        jsonResponse(res, 503, { error: 'Loop API not ready' });
+        return;
+      }
+
+      const loopId = loopMatch[1];
+      const body = await parseBody(req);
+      const patch = body as Partial<LoopDraft>;
+      const error = validateLoopPatch(patch);
+      if (error) {
+        jsonResponse(res, 400, { error });
+        return;
+      }
+
+      try {
+        const loop = updateLoop(loopId, patch);
+        if (!loop) {
+          jsonResponse(res, 404, { error: 'Loop not found' });
+          return;
+        }
+        await this.centrifugo.publishLoopUpdate(this.userId, loop);
+        jsonResponse(res, 200, { loop });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        jsonResponse(res, 400, { error: message });
+      }
+      return;
+    }
+
+    // DELETE /api/loops/:id
+    if (loopMatch && req.method === 'DELETE') {
+      if (!this.loopApi || !this.centrifugo || !this.userId) {
+        jsonResponse(res, 503, { error: 'Loop API not ready' });
+        return;
+      }
+
+      const loopId = loopMatch[1];
+      const existingLoop = getLoop(loopId);
+      const removed = deleteLoop(loopId);
+      if (removed) {
+        if (existingLoop) this.loopApi.scheduler.onLoopDeleted(existingLoop);
+        await this.centrifugo.publishLoopRemoved(this.userId, loopId);
+      }
+      jsonResponse(res, 200, { removed, loopId });
+      return;
+    }
+
+    // POST /api/loops/:id/run-now
+    if (loopRunNowMatch && req.method === 'POST') {
+      if (!this.loopApi || !this.runner || !this.centrifugo || !this.userId) {
+        jsonResponse(res, 503, { error: 'Loop API not ready' });
+        return;
+      }
+
+      const loopId = loopRunNowMatch[1];
+      const loop = getLoop(loopId);
+      if (!loop) {
+        jsonResponse(res, 404, { error: 'Loop not found', fired: false, reason: 'not_found' });
+        return;
+      }
+      if (
+        loop.overlapPolicy === 'skip' &&
+        loop.lastStatus === 'running' &&
+        loop.lastSessionId &&
+        this.runner.isRunning(loop.lastSessionId)
+      ) {
+        jsonResponse(res, 200, { fired: false, reason: 'overlap' });
+        return;
+      }
+
+      loop.runNowRequested = true;
+      loop.updatedAt = new Date().toISOString();
+      upsertLoop(loop);
+      await this.centrifugo.publishLoopUpdate(this.userId, loop);
+      this.loopApi.scheduler.kick();
+      jsonResponse(res, 200, { fired: true, loop });
+      return;
+    }
+
+    // GET /api/loops/:id/runs
+    if (loopRunsMatch && req.method === 'GET') {
+      const loopId = loopRunsMatch[1];
+      const runs = (await this.store.listSessions())
+        .filter((session) => session.loopId === loopId)
+        .map(toWireSession);
+      jsonResponse(res, 200, { runs });
       return;
     }
 
