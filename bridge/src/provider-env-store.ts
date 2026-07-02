@@ -28,6 +28,40 @@ export const PROVIDER_AUTH_ENV: Record<string, ProviderAuthMapping> = {
   deepseek: { source: 'DEEPSEEK_API_TOKEN', target: 'ANTHROPIC_API_KEY' },
 };
 
+export const PROVIDER_RUNTIME_ENV: Record<string, Record<string, string>> = {
+  zai: {
+    ANTHROPIC_BASE_URL: 'https://api.z.ai/api/anthropic',
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm-4.5-air',
+    ANTHROPIC_DEFAULT_OPUS_MODEL: 'glm-5.2[1m]',
+    ANTHROPIC_DEFAULT_SONNET_MODEL: 'glm-5.2[1m]',
+    API_TIMEOUT_MS: '3000000',
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '1000000',
+  },
+  kimi: {
+    ANTHROPIC_BASE_URL: 'https://api.kimi.com/coding/',
+    API_TIMEOUT_MS: '3000000',
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '256000',
+  },
+  deepseek: {
+    ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-v4-flash',
+    ANTHROPIC_DEFAULT_OPUS_MODEL: 'deepseek-v4-pro',
+    ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-v4-pro',
+    API_TIMEOUT_MS: '3000000',
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '1000000',
+  },
+  fireworks: {
+    ANTHROPIC_BASE_URL: 'https://api.fireworks.ai/inference',
+    ANTHROPIC_MODEL: 'accounts/fireworks/models/kimi-k2p6',
+    ANTHROPIC_SMALL_FAST_MODEL: 'accounts/fireworks/models/gpt-oss-120b',
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'accounts/fireworks/models/gpt-oss-120b',
+    ANTHROPIC_DEFAULT_OPUS_MODEL: 'accounts/fireworks/models/kimi-k2p6',
+    ANTHROPIC_DEFAULT_SONNET_MODEL: 'accounts/fireworks/models/deepseek-v4-pro',
+    API_TIMEOUT_MS: '3000000',
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '200000',
+  },
+};
+
 // homedir() is read at call time (it resolves $HOME), so the path follows a
 // test's $HOME override — the same reason claude-trust.ts recomputes per call.
 function envJsonPath(): string {

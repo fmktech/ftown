@@ -8,7 +8,8 @@ See `references/sessions.md` for the full session CLI reference.
 
 ## Spawning workers
 
-`--shell` accepts `claude`, `cursor`, `codex`, `shell`, `opencode`, …; `--parent`
+`--shell` accepts `claude`, `cursor`, `codex`, `shell`, `opencode`, and Claude
+Code provider flavors such as `zai`, `kimi`, `deepseek`, `fireworks`; `--parent`
 sets the worker's parent to `$FTOWN_SESSION_ID`.
 
 ```bash
@@ -24,6 +25,9 @@ Returns JSON containing `session.id` — save it to poll the worker later.
 Workers spawned with `--parent` are auto-briefed to report back via
 `mail send --parent`; their reports arrive in **your** inbox and are delivered
 automatically as `[ftown mail]` context at your turn boundaries.
+Provider-flavored workers require a bridge-host token configured with
+`ftown env set <flavor> <token>`; the bridge supplies their endpoint/model
+environment when it spawns them.
 
 ## Monitoring workers
 

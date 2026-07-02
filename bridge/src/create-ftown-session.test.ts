@@ -14,6 +14,7 @@ import {
   prepareWorkingDir,
   ProviderAuthMissingError,
   resolveProviderAuthEnv,
+  resolveProviderRuntimeEnv,
   WorkingDirMissingError,
 } from './create-ftown-session.js';
 import type { CreateFtownSessionDeps } from './create-ftown-session.js';
@@ -39,11 +40,25 @@ function fakeSession(name: string): Session {
 function fakeDeps(existingSessions: Session[] = []): {
   deps: CreateFtownSessionDeps;
   saved: Session[];
-  runs: Array<{ sessionId: string; command: string; workingDir?: string }>;
+  runs: Array<{
+    sessionId: string;
+    command: string;
+    workingDir?: string;
+    env?: Record<string, string>;
+    initialInput?: string;
+    submitSuffix?: string;
+  }>;
 } {
   const sessions = [...existingSessions];
   const saved: Session[] = [];
-  const runs: Array<{ sessionId: string; command: string; workingDir?: string }> = [];
+  const runs: Array<{
+    sessionId: string;
+    command: string;
+    workingDir?: string;
+    env?: Record<string, string>;
+    initialInput?: string;
+    submitSuffix?: string;
+  }> = [];
 
   return {
     saved,
@@ -59,8 +74,24 @@ function fakeDeps(existingSessions: Session[] = []): {
       } as CreateFtownSessionDeps['store'],
       runner: {
         getPreferredRuntime: () => 'direct',
-        run: (sessionId: string, command: string, opts: { workingDir?: string }) => {
-          runs.push({ sessionId, command, workingDir: opts.workingDir });
+        run: (
+          sessionId: string,
+          command: string,
+          opts: {
+            workingDir?: string;
+            env?: Record<string, string>;
+            initialInput?: string;
+            submitSuffix?: string;
+          },
+        ) => {
+          runs.push({
+            sessionId,
+            command,
+            workingDir: opts.workingDir,
+            env: opts.env,
+            initialInput: opts.initialInput,
+            submitSuffix: opts.submitSuffix,
+          });
         },
       } as CreateFtownSessionDeps['runner'],
       centrifugo: {
@@ -335,6 +366,82 @@ describe('resolveProviderAuthEnv — provider token mapping', () => {
       resolveProviderAuthEnv('kimi', { processEnv: { ZAI_API_TOKEN: 'tok-zai' } }),
       {},
     );
+  });
+});
+
+describe('resolveProviderRuntimeEnv — provider CLI defaults', () => {
+  it('returns the z.ai endpoint, model defaults, timeout, and compaction window', () => {
+    assert.deepEqual(resolveProviderRuntimeEnv('zai'), {
+      ANTHROPIC_BASE_URL: 'https://api.z.ai/api/anthropic',
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm-4.5-air',
+      ANTHROPIC_DEFAULT_OPUS_MODEL: 'glm-5.2[1m]',
+      ANTHROPIC_DEFAULT_SONNET_MODEL: 'glm-5.2[1m]',
+      API_TIMEOUT_MS: '3000000',
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '1000000',
+    });
+  });
+
+  it('returns nothing for non-provider shell types and undefined', () => {
+    for (const shellType of ['claude', 'cursor', 'codex', 'shell', 'opencode'] as const) {
+      assert.deepEqual(resolveProviderRuntimeEnv(shellType), {});
+    }
+    assert.deepEqual(resolveProviderRuntimeEnv(undefined), {});
+  });
+});
+
+describe('createFtownSession — provider runtime env', () => {
+  it('adds z.ai runtime defaults for CLI-spawned sessions and maps only the auth target', async () => {
+    const realHome = process.env.HOME;
+    const home = mkdtempSync(join(tmpdir(), 'ftw-home-'));
+    mkdirSync(join(home, '.ftown'), { recursive: true });
+    writeFileSync(join(home, '.ftown', 'env.json'), JSON.stringify({ ZAI_API_TOKEN: 'tok-zai' }));
+    process.env.HOME = home;
+    const harness = fakeDeps();
+
+    try {
+      const session = await createFtownSession(harness.deps, {
+        shellType: 'zai',
+        prompt: 'do provider work',
+      });
+
+      assert.strictEqual(session.env?.ANTHROPIC_BASE_URL, 'https://api.z.ai/api/anthropic');
+      assert.strictEqual(session.env?.ANTHROPIC_DEFAULT_OPUS_MODEL, 'glm-5.2[1m]');
+      assert.strictEqual(session.env?.ANTHROPIC_AUTH_TOKEN, 'tok-zai');
+      assert.strictEqual(session.env?.ZAI_API_TOKEN, undefined);
+      assert.deepEqual(harness.runs[0].env, session.env);
+      assert.match(harness.runs[0].command, /^claude --allow-dangerously-skip-permissions 'do provider work'$/);
+      assert.strictEqual(harness.runs[0].initialInput, undefined);
+    } finally {
+      restoreHome(realHome);
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('lets caller env override provider defaults while provider auth still wins', async () => {
+    const realHome = process.env.HOME;
+    const home = mkdtempSync(join(tmpdir(), 'ftw-home-'));
+    mkdirSync(join(home, '.ftown'), { recursive: true });
+    writeFileSync(join(home, '.ftown', 'env.json'), JSON.stringify({ ZAI_API_TOKEN: 'tok-zai' }));
+    process.env.HOME = home;
+    const harness = fakeDeps();
+
+    try {
+      const session = await createFtownSession(harness.deps, {
+        shellType: 'zai',
+        env: {
+          ANTHROPIC_BASE_URL: 'https://custom.example/anthropic',
+          ANTHROPIC_DEFAULT_OPUS_MODEL: 'custom-opus',
+          ANTHROPIC_AUTH_TOKEN: 'do-not-use',
+        },
+      });
+
+      assert.strictEqual(session.env?.ANTHROPIC_BASE_URL, 'https://custom.example/anthropic');
+      assert.strictEqual(session.env?.ANTHROPIC_DEFAULT_OPUS_MODEL, 'custom-opus');
+      assert.strictEqual(session.env?.ANTHROPIC_AUTH_TOKEN, 'tok-zai');
+    } finally {
+      restoreHome(realHome);
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 
