@@ -33,6 +33,35 @@ interface ManagedTerminal {
   rawBuffer: string;
 }
 
+/**
+ * Replay a raw pty log through a headless terminal and return the rendered,
+ * human-readable text (scrollback + final screen). Unlike regex ANSI stripping,
+ * this interprets cursor movement and repaints, so TUI output comes out as the
+ * final screen content instead of duplicated frames or control-code residue.
+ * Runs of blank lines are collapsed to one; leading/trailing blanks dropped.
+ */
+export async function renderRawLogToText(raw: string, cols = 120, rows = 40, scrollback = 50000): Promise<string> {
+  if (!raw) return '';
+  const terminal = new Terminal({ cols, rows, scrollback, allowProposedApi: true });
+  try {
+    await new Promise<void>((resolve) => terminal.write(raw, resolve));
+    const buffer = terminal.buffer.active;
+    const lines: string[] = [];
+    for (let i = 0; i < buffer.length; i++) {
+      lines.push(buffer.getLine(i)?.translateToString(true).trimEnd() ?? '');
+    }
+    const collapsed: string[] = [];
+    for (const line of lines) {
+      if (line === '' && (collapsed.length === 0 || collapsed[collapsed.length - 1] === '')) continue;
+      collapsed.push(line);
+    }
+    while (collapsed.length > 0 && collapsed[collapsed.length - 1] === '') collapsed.pop();
+    return collapsed.join('\n');
+  } finally {
+    terminal.dispose();
+  }
+}
+
 export class TerminalManager {
   private readonly terminals: Map<string, ManagedTerminal> = new Map();
   private readonly scrollback: number;

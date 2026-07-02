@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 
 import { computeNextRun, isDue } from './loop-schedule.js';
+import { renderRawLogToText } from './terminal-manager.js';
 import {
   pruneLoopRunRecords,
   recordForSession,
@@ -538,7 +539,10 @@ export class LoopScheduler {
 
     const run = runId ? await this.store.loadSession(runId) : null;
     const status: 'ok' | 'error' = forcedError ? 'error' : resolveRunStatus(run);
-    const fullOutput = runId ? await this.store.loadTerminalLog(runId) : '';
+    const rawOutput = runId ? await this.store.loadTerminalLog(runId) : '';
+    // The pty log is raw terminal traffic (repaints, cursor moves, erase codes);
+    // replay it through a headless terminal so we persist what the screen showed.
+    const fullOutput = await renderRawLogToText(rawOutput);
     const output = truncateTail(fullOutput, 65_536);
     const outputBytes = Buffer.byteLength(fullOutput, 'utf8');
     const tailBytes = Buffer.byteLength(output, 'utf8');

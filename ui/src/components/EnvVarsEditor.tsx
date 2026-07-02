@@ -162,29 +162,49 @@ function ChevronIcon({ open }: { open: boolean }) {
   );
 }
 
+function EyeIcon({ off }: { off: boolean }) {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M1 8s2.5-4.5 7-4.5S15 8 15 8s-2.5 4.5-7 4.5S1 8 1 8Z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx="8" cy="8" r="1.8" stroke="currentColor" strokeWidth="1.2" />
+      {off && <path d="M2 2L14 14" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />}
+    </svg>
+  );
+}
+
 function MaskedValue({ value, name }: { value: string; name: string }) {
   const [revealed, setRevealed] = useState(false);
   const sensitive = isSensitive(name);
 
-  if (!sensitive || revealed) {
-    return (
-      <span
-        className="font-mono text-sm text-[#e0e0e0] truncate cursor-default select-all"
-        onClick={() => sensitive && setRevealed(false)}
-        title={sensitive ? "Click to mask" : undefined}
-      >
-        {value}
-      </span>
-    );
+  if (!sensitive) {
+    return <span className="font-mono text-sm text-[var(--text-primary)] truncate select-all">{value}</span>;
   }
 
   return (
-    <span
-      className="font-mono text-sm text-[#888888] cursor-pointer select-none tracking-widest"
-      onClick={() => setRevealed(true)}
-      title="Click to reveal"
-    >
-      {"●".repeat(Math.min(value.length, 24))}
+    <span className="flex items-center gap-2 min-w-0">
+      <span
+        className={`font-mono text-sm min-w-0 truncate ${
+          revealed ? "text-[var(--text-primary)] select-all" : "text-[var(--text-muted)] select-none tracking-widest"
+        }`}
+      >
+        {revealed ? value : "●".repeat(Math.min(value.length, 24))}
+      </span>
+      <button
+        type="button"
+        onClick={() => setRevealed((r) => !r)}
+        aria-pressed={revealed}
+        aria-label={revealed ? "Hide value" : "Reveal value"}
+        title={revealed ? "Hide value" : "Reveal value"}
+        className="shrink-0 text-[var(--text-faint)] hover:text-[var(--text-secondary)] focus:outline-none focus-visible:shadow-[var(--focus-ring)] rounded-[var(--radius-sm)] p-0.5 cursor-pointer transition-colors"
+      >
+        <EyeIcon off={revealed} />
+      </button>
     </span>
   );
 }
@@ -202,6 +222,7 @@ interface ComboboxProps {
 function VarNameCombobox({ value, onChange, existingKeys }: ComboboxProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState(value);
+  const [activeIndex, setActiveIndex] = useState(-1);
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -233,6 +254,13 @@ function VarNameCombobox({ value, onChange, existingKeys }: ComboboxProps) {
     })).filter((cat) => cat.vars.length > 0);
   }, [search, existingKeys]);
 
+  // Flattened list of selectable names for roving keyboard navigation.
+  const flatNames = useMemo(() => filtered.flatMap((cat) => cat.vars.map((v) => v.name)), [filtered]);
+
+  useEffect(() => {
+    setActiveIndex(-1);
+  }, [search, open]);
+
   const handleSelect = useCallback(
     (name: string) => {
       onChange(name);
@@ -257,10 +285,25 @@ function VarNameCombobox({ value, onChange, existingKeys }: ComboboxProps) {
           setOpen(true);
         }}
         onFocus={() => setOpen(true)}
+        role="combobox"
+        aria-expanded={open}
+        aria-autocomplete="list"
         onKeyDown={(e) => {
           if (e.key === "Escape") {
             setOpen(false);
             inputRef.current?.blur();
+          } else if (e.key === "ArrowDown") {
+            e.preventDefault();
+            setOpen(true);
+            setActiveIndex((i) => (flatNames.length === 0 ? -1 : (i + 1) % flatNames.length));
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setActiveIndex((i) => (flatNames.length === 0 ? -1 : (i <= 0 ? flatNames.length - 1 : i - 1)));
+          } else if (e.key === "Enter") {
+            if (open && activeIndex >= 0 && activeIndex < flatNames.length) {
+              e.preventDefault();
+              handleSelect(flatNames[activeIndex]);
+            }
           }
         }}
       />
@@ -271,20 +314,28 @@ function VarNameCombobox({ value, onChange, existingKeys }: ComboboxProps) {
               <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-[#00ff88] bg-[#0a0a0a] sticky top-0 font-semibold">
                 {cat.label}
               </div>
-              {cat.vars.map((v) => (
-                <button
-                  key={v.name}
-                  type="button"
-                  className="w-full text-left px-3 py-1.5 hover:bg-[#1a1a1a] cursor-pointer transition-colors"
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    handleSelect(v.name);
-                  }}
-                >
-                  <span className="font-mono text-xs text-[#e0e0e0]">{v.name}</span>
-                  <span className="block text-[11px] text-[#555] truncate">{v.description}</span>
-                </button>
-              ))}
+              {cat.vars.map((v) => {
+                const flatIdx = flatNames.indexOf(v.name);
+                const active = flatIdx === activeIndex;
+                return (
+                  <button
+                    key={v.name}
+                    type="button"
+                    aria-selected={active}
+                    className={`w-full text-left px-3 py-1.5 cursor-pointer transition-colors ${
+                      active ? "bg-[var(--bg-hover)]" : "hover:bg-[#1a1a1a]"
+                    }`}
+                    onMouseEnter={() => setActiveIndex(flatIdx)}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      handleSelect(v.name);
+                    }}
+                  >
+                    <span className="font-mono text-xs text-[#e0e0e0]">{v.name}</span>
+                    <span className="block text-[11px] text-[#555] truncate">{v.description}</span>
+                  </button>
+                );
+              })}
             </div>
           ))}
         </div>
@@ -400,6 +451,11 @@ export default function EnvVarsEditor({ value: controlledValue, onChange: contro
       {/* Body */}
       {!collapsed && (
         <div className="border-t border-[#2a2a2a] px-4 py-3 space-y-2">
+          {!isControlled && (
+            <p className="text-[11px] text-[var(--text-faint)]">
+              Stored locally in this browser only — shared across all loops, never synced to the bridge or server.
+            </p>
+          )}
           {/* Existing vars */}
           {sortedKeys.map((key) => (
             <div key={key} className="flex items-center gap-2 group">
@@ -412,7 +468,8 @@ export default function EnvVarsEditor({ value: controlledValue, onChange: contro
               <button
                 type="button"
                 onClick={() => handleDelete(key)}
-                className="opacity-0 group-hover:opacity-100 transition-opacity text-[#555] hover:text-red-400 text-sm px-1 cursor-pointer shrink-0"
+                className="opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 transition-opacity text-[var(--text-faint)] hover:text-[var(--status-error)] focus:outline-none focus-visible:shadow-[var(--focus-ring)] rounded-[var(--radius-sm)] text-sm px-1 cursor-pointer shrink-0"
+                aria-label={`Remove ${key}`}
                 title="Remove"
               >
                 ✕

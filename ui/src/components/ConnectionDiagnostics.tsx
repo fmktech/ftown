@@ -30,15 +30,22 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
 
 function StatusIcon({ status }: { status: DiagnosticCheck["status"] }) {
   const map: Record<string, { symbol: string; color: string }> = {
-    pending: { symbol: "○", color: "var(--text-faint)" },
+    pending: { symbol: "○", color: "var(--text-muted)" },
     running: { symbol: "◌", color: "var(--accent)" },
     pass: { symbol: "✓", color: "var(--status-running)" },
     fail: { symbol: "✗", color: "var(--status-error)" },
     warn: { symbol: "!", color: "var(--status-pending)" },
   };
   const { symbol, color } = map[status] ?? map.pending;
+  const label: Record<string, string> = {
+    pending: "pending",
+    running: "running",
+    pass: "passed",
+    fail: "failed",
+    warn: "warning",
+  };
   return (
-    <span style={{ color, fontWeight: 700, fontFamily: "var(--font-mono)", width: 16, display: "inline-block", textAlign: "center" }}>
+    <span role="img" aria-label={label[status] ?? "pending"} style={{ color, fontWeight: 700, fontFamily: "var(--font-mono)", width: 16, display: "inline-block", textAlign: "center" }}>
       {symbol}
     </span>
   );
@@ -238,7 +245,7 @@ export function ConnectionDiagnostics({ connectionStatus, connectionError, centr
         )}
 
         {checks.length > 0 && (
-          <div style={{ marginBottom: 16, display: "flex", flexDirection: "column", gap: 6 }}>
+          <div aria-live="polite" style={{ marginBottom: 16, display: "flex", flexDirection: "column", gap: 6 }}>
             {checks.map((check, i) => (
               <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                 <StatusIcon status={check.status} />
@@ -287,8 +294,11 @@ export function ConnectionDiagnostics({ connectionStatus, connectionError, centr
             className="btn-accent"
             onClick={runDiagnostics}
             disabled={running}
-            style={{ flex: 1 }}
+            style={{ flex: 1, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6 }}
           >
+            {running && (
+              <span className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" aria-hidden="true" />
+            )}
             {running ? "Running..." : hasRun ? "Re-run Diagnostics" : "Run Diagnostics"}
           </button>
           <button

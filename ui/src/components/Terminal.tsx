@@ -436,6 +436,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
             <div className="flex items-center gap-3">
               {usage && (usage.inputTokens > 0 || usage.outputTokens > 0) && (
                 <span
+                  title="Input tokens / Output tokens"
                   style={{
                     fontSize: 10,
                     color: "var(--text-muted)",
@@ -443,14 +444,17 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
                     letterSpacing: "0.04em",
                   }}
                 >
-                  {formatTokenCount(usage.inputTokens)}in / {formatTokenCount(usage.outputTokens)}out
+                  {formatTokenCount(usage.inputTokens)} in / {formatTokenCount(usage.outputTokens)} out
                 </span>
               )}
 
+              <span className="sr-only" aria-live="polite">
+                {isRunning ? "Session running" : ""}
+              </span>
               {isRunning && (
                 <div className="flex items-center gap-2">
                   <span className="status-dot status-dot-running animate-running" />
-                  <span style={{ fontSize: 10, color: "var(--accent)", letterSpacing: "0.08em" }}>
+                  <span aria-hidden="true" style={{ fontSize: 10, color: "var(--accent)", letterSpacing: "0.08em" }}>
                     running
                   </span>
                 </div>
@@ -499,6 +503,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
               cursor: "pointer",
               boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
             }}
+            aria-label="Scroll to bottom"
             title="Scroll to bottom"
           >
             {"\u2193"}

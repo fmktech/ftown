@@ -13,6 +13,7 @@ export function SetupForm({ onConnect }: SetupFormProps) {
   const [error, setError] = useState<string | null>(null);
   const [generatedToken, setGeneratedToken] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copyStatus, setCopyStatus] = useState("");
 
   const generateUserId = useCallback(() => {
     setUserId(uuidv4().slice(0, 8));
@@ -56,67 +57,101 @@ export function SetupForm({ onConnect }: SetupFormProps) {
 
   const handleCopyToken = useCallback(async () => {
     if (!generatedToken) return;
-    await navigator.clipboard.writeText(generatedToken);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(generatedToken);
+      setCopied(true);
+      setCopyStatus("Token copied to clipboard");
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setError("Could not copy to clipboard — please copy manually");
+    }
   }, [generatedToken]);
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4">
-      <div className="w-full max-w-md border border-[#2a2a2a] bg-[#111111] rounded-lg p-8">
-        <h1 className="text-xl font-bold text-[#00ff88] mb-2">ftown</h1>
-        <p className="text-[#888888] text-sm mb-8">Remote coding agent orchestration</p>
+      <div className="w-full max-w-sm sm:max-w-md rounded-[var(--radius-md)] border border-[var(--border-muted)] bg-[var(--bg-surface)] p-6 sm:p-8">
+        <h1 className="text-xl font-bold text-[var(--accent)] mb-2">ftown</h1>
+        <p className="text-[var(--text-secondary)] text-sm mb-8 font-[family-name:var(--font-sans)]">
+          Remote coding agent orchestration
+        </p>
 
         <div className="space-y-4">
           <div>
-            <label className="block text-sm text-[#888888] mb-1">User ID</label>
+            <label htmlFor="userId" className="block text-sm text-[var(--text-secondary)] mb-1">
+              User ID
+            </label>
             <div className="flex gap-2">
               <input
+                id="userId"
                 type="text"
                 value={userId}
                 onChange={(e) => setUserId(e.target.value)}
                 placeholder="Enter or generate..."
-                className="flex-1 bg-[#0a0a0a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#555] focus:outline-none focus:border-[#00ff88]"
+                className="flex-1 px-3 py-2 rounded-[var(--radius-sm)] bg-[var(--bg-base)] border border-[var(--border-default)] text-sm text-[var(--text-primary)] placeholder:text-[var(--text-faint)] outline-none focus-visible:border-[var(--accent)] focus-visible:shadow-[var(--focus-ring)]"
               />
               <button
+                type="button"
                 onClick={generateUserId}
-                className="px-3 py-2 bg-[#1a1a1a] border border-[#2a2a2a] rounded text-xs text-[#888888] hover:text-[#e0e0e0] hover:border-[#444] transition-colors"
+                className="btn-ghost min-h-[44px] sm:min-h-0"
               >
                 Generate
               </button>
             </div>
+            <p className="mt-1 text-xs text-[var(--text-faint)]">
+              Used to identify this device when connecting CLI bridges
+            </p>
           </div>
 
           {error && (
-            <div className="text-[#ff4444] text-sm bg-[#1a0000] border border-[#330000] rounded px-3 py-2">
-              {error}
+            <div
+              role="alert"
+              aria-live="assertive"
+              className="fade-in flex items-start gap-2 px-3 py-2 rounded-[var(--radius-sm)] bg-[rgba(255,68,102,0.08)] border border-[var(--status-error)] text-[var(--status-error)] text-sm"
+            >
+              <span aria-hidden="true">⚠</span>
+              <span>{error}</span>
             </div>
           )}
 
           <button
+            type="button"
             onClick={handleConnect}
             disabled={loading}
-            className="w-full py-2 bg-[#00ff88] text-[#0a0a0a] font-bold rounded hover:bg-[#00cc6e] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="btn-accent w-full !py-2.5 flex items-center justify-center gap-2"
           >
+            {loading && (
+              <span
+                className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin"
+                aria-hidden="true"
+              />
+            )}
             {loading ? "Connecting..." : "Connect"}
           </button>
 
           {generatedToken && (
-            <div className="mt-4 border border-[#2a2a2a] rounded p-3 bg-[#0a0a0a]">
+            <div
+              aria-live="polite"
+              className="fade-in mt-4 rounded-[var(--radius-sm)] border border-[var(--border-default)] p-3 bg-[var(--bg-base)]"
+            >
               <div className="flex items-center justify-between mb-2">
-                <span className="text-xs text-[#888888]">JWT Token (for CLI bridges)</span>
+                <span className="text-xs text-[var(--text-secondary)]">JWT Token (for CLI bridges)</span>
                 <button
+                  type="button"
                   onClick={handleCopyToken}
-                  className="text-xs px-2 py-1 bg-[#1a1a1a] border border-[#2a2a2a] rounded text-[#00ff88] hover:bg-[#222] transition-colors"
+                  className="btn-ghost !text-[var(--accent)] min-h-[36px]"
                 >
                   {copied ? "Copied!" : "Copy for CLI"}
                 </button>
               </div>
-              <p className="text-xs text-[#666] break-all font-mono leading-relaxed">
+              <p className="text-xs text-[var(--text-faint)] break-all font-mono leading-relaxed">
                 {generatedToken}
               </p>
             </div>
           )}
+
+          <span className="sr-only" role="status" aria-live="polite">
+            {copyStatus}
+          </span>
         </div>
       </div>
     </div>

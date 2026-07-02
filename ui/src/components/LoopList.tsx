@@ -2,6 +2,7 @@
 
 import { Loop } from "@/types";
 import { BridgeInfo } from "@/hooks/useBridges";
+import { describeSchedule } from "@/lib/loop-schedule";
 
 interface LoopListProps {
   loops: Loop[];
@@ -103,6 +104,8 @@ export function LoopList({
           <button
             key={loop.id}
             onClick={() => onSelectLoop(loop.id)}
+            aria-label={`${loop.name} — ${statusLabel(loop)} — ${nextDueLabel(loop)}`}
+            aria-current={loop.id === selectedLoopId ? "true" : undefined}
             title={`${loop.name}\n${statusLabel(loop)}\n${nextDueLabel(loop)}`}
             style={{
               width: "100%",
@@ -169,6 +172,7 @@ export function LoopList({
             key={loop.id}
             role="button"
             tabIndex={0}
+            aria-current={selected ? "true" : undefined}
             onClick={() => onSelectLoop(loop.id)}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") onSelectLoop(loop.id);
@@ -227,6 +231,20 @@ export function LoopList({
               >
                 {loop.harness}
               </span>
+            </div>
+
+            <div
+              title={describeSchedule(loop.schedule)}
+              style={{
+                marginTop: 3,
+                fontSize: 9,
+                color: "var(--text-faint)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {describeSchedule(loop.schedule)}
             </div>
 
             {selected && (

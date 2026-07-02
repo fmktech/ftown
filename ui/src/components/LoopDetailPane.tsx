@@ -55,7 +55,7 @@ function statusLabel(loop: Loop): string {
 
 function DetailMetric({ label, value }: { label: string; value: string | number }) {
   return (
-    <div style={{ minWidth: 110 }}>
+    <div style={{ minWidth: 0 }}>
       <div style={{ fontSize: 10, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.08em" }}>{label}</div>
       <div style={{ marginTop: 3, fontSize: 12, color: "var(--text-secondary)", fontFamily: "var(--font-mono)" }}>{value}</div>
     </div>
@@ -133,7 +133,14 @@ export function LoopDetailPane({
           </div>
         </div>
 
-        <div className="flex items-center gap-6" style={{ marginTop: 14, flexWrap: "wrap" }}>
+        <div
+          style={{
+            marginTop: 14,
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(90px, 1fr))",
+            gap: 16,
+          }}
+        >
           <DetailMetric label="Next due" value={formatAbsolute(loop.nextRunAt)} />
           <DetailMetric label="Last run" value={formatAbsolute(loop.lastRunAt)} />
           <DetailMetric label="Runs" value={loop.runCount} />
@@ -164,12 +171,30 @@ export function LoopDetailPane({
               fontWeight: 650,
             }}
           >
-            Runs {loadingRuns ? "..." : `(${runs.length})`}
+            {loadingRuns ? (
+              <span className="flex items-center gap-1.5">
+                Runs <span className="status-dot status-dot-running animate-running" aria-hidden />
+              </span>
+            ) : (
+              `Runs (${runs.length})`
+            )}
           </div>
           {runs.length === 0 && (
-            <div style={{ padding: 14, fontSize: 12, color: "var(--text-faint)" }}>
-              {runsError ? `Run history unavailable: ${runsError}` : loadingRuns ? "Loading runs" : "No runs yet"}
-            </div>
+            runsError ? (
+              <div
+                role="alert"
+                style={{ padding: 14, fontSize: 12, color: "var(--status-error)" }}
+              >
+                <span aria-hidden>⚠</span> Run history unavailable: {runsError}
+              </div>
+            ) : loadingRuns ? (
+              <div style={{ padding: 14, fontSize: 12, color: "var(--text-faint)", display: "flex", alignItems: "center", gap: 8 }}>
+                <span className="status-dot status-dot-running animate-running" aria-hidden />
+                Loading runs
+              </div>
+            ) : (
+              <div style={{ padding: 14, fontSize: 12, color: "var(--text-faint)" }}>No runs yet</div>
+            )
           )}
           {runs.map((run) => {
             const selected = run.id === selectedRun?.id;
@@ -177,6 +202,7 @@ export function LoopDetailPane({
               <button
                 key={run.id}
                 type="button"
+                aria-current={selected ? "true" : undefined}
                 onClick={() => onSelectRun(run.id)}
                 style={{
                   width: "100%",
@@ -238,7 +264,14 @@ export function LoopDetailPane({
                     {selectedRun.status}
                   </span>
                 </div>
-                <div className="flex items-center gap-6" style={{ marginTop: 12, flexWrap: "wrap" }}>
+                <div
+                  style={{
+                    marginTop: 12,
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fit, minmax(90px, 1fr))",
+                    gap: 16,
+                  }}
+                >
                   <DetailMetric label="Started" value={formatAbsolute(selectedRun.startedAt)} />
                   <DetailMetric label="Finished" value={formatAbsolute(selectedRun.finishedAt)} />
                   <DetailMetric label="Duration" value={formatDuration(selectedRun.durationMs)} />
@@ -270,10 +303,11 @@ export function LoopDetailPane({
                 <pre
                   style={{
                     marginTop: 6,
-                    minHeight: 260,
+                    maxHeight: 480,
+                    overflowY: "auto",
                     whiteSpace: "pre-wrap",
                     wordBreak: "break-word",
-                    color: selectedRun.logTail ? "var(--text-secondary)" : "var(--text-faint)",
+                    color: selectedRun.logTail?.trim() ? "var(--text-secondary)" : "var(--text-faint)",
                     background: "var(--bg-surface)",
                     border: "1px solid var(--border-subtle)",
                     borderRadius: 6,
@@ -283,7 +317,7 @@ export function LoopDetailPane({
                     fontFamily: "var(--font-mono)",
                   }}
                 >
-                  {selectedRun.logTail || (selectedRun.status === "running" ? "Run is still active; log will persist when it finishes." : "No persisted output captured for this run.")}
+                  {selectedRun.logTail?.trim() || (selectedRun.status === "running" ? "Run is still active; log will persist when it finishes." : "No persisted output captured for this run.")}
                 </pre>
               </div>
             </>
