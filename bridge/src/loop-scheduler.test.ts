@@ -457,6 +457,37 @@ describe('LoopScheduler — finalize', () => {
     assert.strictEqual(record.logBytes, Buffer.byteLength('TERMINAL OUTPUT', 'utf8'));
   });
 
+  it('renders the raw pty log to readable text for the persisted log tail', async () => {
+    const h = makeHarness();
+    const rawLog = '\x1b[?1049h\x1b[22;0;0t\x1b[?1h\x1b=\x1b[H\x1b[2Jhello world\r\n\x1b[K\r\n\x1b[K\r\n\x1b[Kdone\r\n\x1b[K\r\n';
+    h.store.sessions.set('run-x', runSession('run-x', 'loop-1', 0, 'completed'));
+    h.store.logs.set('run-x', rawLog);
+    h.loops.seed(
+      loopFixture({ lastStatus: 'running', lastSessionId: 'run-x', lastRunAt: iso(0), nextRunAt: iso(10_000_000) }),
+    );
+
+    await h.scheduler.tick(40_000);
+
+    const record = h.runRecords.snapshot('run-x');
+    assert.strictEqual(record.logTail, 'hello world\n\ndone');
+    assert.strictEqual(record.logBytes, Buffer.byteLength('hello world\n\ndone', 'utf8'));
+  });
+
+  it('renders TUI repaints to the final screen content, not duplicated frames', async () => {
+    const h = makeHarness();
+    // Two full-screen "frames" drawn over each other: only the last should persist.
+    const rawLog = '\x1b[H\x1b[2Jframe one\r\n\x1b[H\x1b[2Jframe two\r\n';
+    h.store.sessions.set('run-x', runSession('run-x', 'loop-1', 0, 'completed'));
+    h.store.logs.set('run-x', rawLog);
+    h.loops.seed(
+      loopFixture({ lastStatus: 'running', lastSessionId: 'run-x', lastRunAt: iso(0), nextRunAt: iso(10_000_000) }),
+    );
+
+    await h.scheduler.tick(40_000);
+
+    assert.strictEqual(h.runRecords.snapshot('run-x').logTail, 'frame two');
+  });
+
   it('does not finalize while still inside the grace window', async () => {
     const h = makeHarness();
     h.store.sessions.set('run-x', runSession('run-x', 'loop-1', 0, 'completed'));
