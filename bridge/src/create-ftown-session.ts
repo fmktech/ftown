@@ -4,7 +4,7 @@ import { basename, resolve } from 'node:path';
 
 import { buildSessionCommand } from './agent-commands.js';
 import { ensureCodexWorkdirTrust } from './codex-installer.js';
-import { PROVIDER_AUTH_ENV, loadProviderEnv } from './provider-env-store.js';
+import { PROVIDER_AUTH_ENV, PROVIDER_RUNTIME_ENV, loadProviderEnv } from './provider-env-store.js';
 import { registerSessionWorkspace } from './session-registry.js';
 
 import type { CentrifugoClient } from './centrifugo-client.js';
@@ -199,6 +199,10 @@ export function resolveProviderAuthEnv(
   return { [mapping.target]: token };
 }
 
+export function resolveProviderRuntimeEnv(shellType: ShellType | undefined): Record<string, string> {
+  return { ...(PROVIDER_RUNTIME_ENV[shellType ?? ''] ?? {}) };
+}
+
 /**
  * Non-throwing guard twin: returns the ProviderAuthMissingError a mapped flavor
  * would raise when its source token is absent everywhere, or undefined when the
@@ -254,11 +258,18 @@ export async function createFtownSession(
     inputEnv: input.env,
   };
   assertProviderAuthAvailable(input.shellType, sources);
+  const providerRuntime = resolveProviderRuntimeEnv(input.shellType);
   const providerAuth = resolveProviderAuthEnv(input.shellType, sources);
   const isOrchestratorAgent = input.orchestrator && isAgent;
+  const shouldSetSessionEnv =
+    Boolean(input.env)
+    || Object.keys(providerRuntime).length > 0
+    || Object.keys(providerAuth).length > 0
+    || isOrchestratorAgent;
   const sessionEnv: Record<string, string> | undefined =
-    input.env || Object.keys(providerAuth).length > 0 || isOrchestratorAgent
+    shouldSetSessionEnv
       ? {
+          ...providerRuntime,
           ...(input.env ?? {}),
           ...providerAuth,
           ...(isOrchestratorAgent ? { FTOWN_ORCHESTRATOR: '1' } : {}),
@@ -362,11 +373,14 @@ export async function createFtownSession(
   // far more reliable than racing the composer TUI with delayed keystrokes.
   // Typed injection remains for custom commands, resumes, and raw passthrough.
   const shellTypeForPrompt = effectiveInput.shellType ?? 'claude';
+  const claudeCliCompatibleShell =
+    shellTypeForPrompt === 'claude'
+    || Object.prototype.hasOwnProperty.call(PROVIDER_RUNTIME_ENV, shellTypeForPrompt);
   const promptAsCliArg =
     initialInput !== undefined &&
     effectiveInput.initialInput === undefined &&
     !effectiveInput.command?.trim() &&
-    ((shellTypeForPrompt === 'claude' && !effectiveInput.claudeSessionId?.trim()) ||
+    ((claudeCliCompatibleShell && !effectiveInput.claudeSessionId?.trim()) ||
       (shellTypeForPrompt === 'cursor' && !effectiveInput.cursorSessionId?.trim()) ||
       (shellTypeForPrompt === 'codex' && !effectiveInput.codexSessionId?.trim()));
 

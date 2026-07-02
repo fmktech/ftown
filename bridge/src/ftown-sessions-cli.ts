@@ -398,7 +398,7 @@ Inbox options:
   --json                        Raw JSON output
 
 Create options:
-  --shell <type>                cursor | claude | codex | shell | opencode (default: claude)
+  --shell <type>                cursor | claude | codex | shell | opencode | zai | kimi | deepseek | fireworks (default: claude)
   --prompt <text>               Initial message
   --workdir <path>              Working directory
   --create-workdir              Create --workdir if it does not exist

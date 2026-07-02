@@ -93,8 +93,8 @@ Fan-out targets are messaged sequentially, one JSON result line per target.
 
 | Flag | Description |
 |------|-------------|
-| `--shell` | `cursor`, `claude`, `codex`, `shell`, `opencode`, … (default `claude`) |
-| `--prompt` | Initial task — passed as a CLI launch argument to `claude`/`cursor`/`codex` (typed after boot for other shells) |
+| `--shell` | `cursor`, `claude`, `codex`, `shell`, `opencode`, or Claude Code provider flavors `zai`, `kimi`, `deepseek`, `fireworks` (default `claude`) |
+| `--prompt` | Initial task — passed as a CLI launch argument to `claude`/Claude provider flavors/`cursor`/`codex` (typed after boot for other shells) |
 | `--workdir` | Working directory |
 | `--name` | Dashboard label |
 | `--command` | Full command override (skips `--shell` builder) |
@@ -102,6 +102,10 @@ Fan-out targets are messaged sequentially, one JSON result line per target.
 | `--parent-id` | Explicit parent session UUID |
 | `--orchestrator` | Brief the new agent (non-`shell`) to spawn and coordinate sibling sessions |
 | `--model` | Cursor / codex model name |
+
+Provider-flavored shells (`zai`, `kimi`, `deepseek`, `fireworks`) run Claude
+Code with provider-specific default endpoint/model environment. They require a
+machine token on the bridge host, e.g. `ftown env set zai <token>`.
 
 Returns JSON with the new `session.id` — use that id for `screen` / `grep` / `keys`.
 
