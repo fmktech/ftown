@@ -58,6 +58,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
   const [mobileTab, setMobileTab] = useState<"sessions" | "terminal">("sessions");
+  const [sidebarTab, setSidebarTab] = useState<"sessions" | "crons">("sessions");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sessionOrder, setSessionOrder] = useState<string[]>([]);
   const [bridgeOrder, setBridgeOrder] = useState<string[]>([]);
@@ -85,6 +86,8 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
 
   useEffect(() => {
     setSidebarCollapsed(localStorage.getItem("ftown:sidebarCollapsed") === "true");
+    const savedSidebarTab = localStorage.getItem("ftown:sidebarTab");
+    if (savedSidebarTab === "sessions" || savedSidebarTab === "crons") setSidebarTab(savedSidebarTab);
     try {
       setSessionOrder(JSON.parse(localStorage.getItem("ftown:sessionOrder") ?? "[]"));
     } catch { /* ignore */ }
@@ -249,6 +252,7 @@ PY`;
   // Loop-run sessions are represented through LoopRunRecord in the loop detail
   // pane, so they no longer appear as top-level sidebar sessions.
   const normalSessions = useMemo(() => sessions.filter((s) => !s.loopId), [sessions]);
+  const cronLoopCount = useMemo(() => loops.filter((loop) => loop.schedule.kind === "cron").length, [loops]);
 
   useEffect(() => {
     if (!selectedLoop) {
@@ -414,14 +418,23 @@ PY`;
     if (id) {
       setSelectedLoopId(null);
       setSelectedLoopRunId(null);
+      setSidebarTab("sessions");
+      setMobileTab("terminal");
     }
-    if (id) setMobileTab("terminal");
   }, []);
 
   const handleSelectLoop = useCallback((loopId: string) => {
     setSelectedLoopId(loopId);
     setSelectedSessionId(null);
+    setSidebarTab("crons");
     setMobileTab("terminal");
+  }, []);
+
+  const handleSidebarTabSwitch = useCallback((tab: "sessions" | "crons") => {
+    setSidebarTab(tab);
+    try {
+      localStorage.setItem("ftown:sidebarTab", tab);
+    } catch { /* ignore */ }
   }, []);
 
   const handleMobileTabSwitch = useCallback((tab: "sessions" | "terminal") => {
@@ -840,7 +853,7 @@ PY`;
           className={`mobile-tab ${mobileTab === "sessions" ? "mobile-tab-active" : ""}`}
           onClick={() => handleMobileTabSwitch("sessions")}
         >
-          Sessions{sessions.length > 0 ? ` (${sessions.length})` : ""}
+          Workspace
         </button>
         <button
           className={`mobile-tab ${mobileTab === "terminal" ? "mobile-tab-active" : ""}`}
@@ -944,39 +957,93 @@ PY`;
           </div>
 
           <div className="flex-1 overflow-y-auto">
-            <LoopList
-              loops={loops}
-              bridges={bridges}
-              selectedLoopId={selectedLoopId}
-              onSelectLoop={handleSelectLoop}
-              onRunNow={handleRunLoopNow}
-              onToggleEnabled={handleToggleLoopEnabled}
-              onEdit={handleEditLoop}
-              onDelete={handleDeleteLoop}
-              collapsed={isDesktop && sidebarCollapsed}
-            />
-            <SessionList
-              sessions={normalSessions}
-              bridges={bridges}
-              bridgeOrder={bridgeOrder}
-              selectedSessionId={selectedSessionId}
-              onSelectSession={handleSelectSession}
-              onRenameSession={renameSession}
-              onStopSession={stopSession}
-              onRemoveSession={handleRemoveSession}
-              onCloneSession={handleCloneSession}
-              onReorderSessions={handleReorderSessions}
-              onReorderBridges={handleReorderBridges}
-              sessionActivity={sessionActivity}
-              collapsed={isDesktop && sidebarCollapsed}
-              hiddenSessionIds={hiddenSessionIds}
-              hiddenBridgeIds={hiddenBridgeIds}
-              onHideSession={handleHideSession}
-              onUnhideSession={handleUnhideSession}
-              onHideBridge={handleHideBridge}
-              onUnhideBridge={handleUnhideBridge}
-              onCreateSession={handleCreateSessionOnBridge}
-            />
+            {isDesktop && sidebarCollapsed ? (
+              <div
+                role="tablist"
+                aria-label="Sidebar sections"
+                className="sidebar-tabs-collapsed"
+              >
+                <button
+                  role="tab"
+                  aria-selected={sidebarTab === "sessions"}
+                  aria-label={`Sessions (${normalSessions.length})`}
+                  title={`Sessions (${normalSessions.length})`}
+                  onClick={() => handleSidebarTabSwitch("sessions")}
+                  className={`sidebar-tab-icon ${sidebarTab === "sessions" ? "sidebar-tab-active" : ""}`}
+                >
+                  ▤
+                </button>
+                <button
+                  role="tab"
+                  aria-selected={sidebarTab === "crons"}
+                  aria-label={`Crons (${cronLoopCount})`}
+                  title={`Crons (${cronLoopCount})`}
+                  onClick={() => handleSidebarTabSwitch("crons")}
+                  className={`sidebar-tab-icon ${sidebarTab === "crons" ? "sidebar-tab-active" : ""}`}
+                >
+                  ◷
+                </button>
+              </div>
+            ) : (
+              <div
+                role="tablist"
+                aria-label="Sidebar sections"
+                className="sidebar-tabs sidebar-tabs-sticky"
+              >
+                <button
+                  role="tab"
+                  aria-selected={sidebarTab === "sessions"}
+                  onClick={() => handleSidebarTabSwitch("sessions")}
+                  className={`sidebar-tab ${sidebarTab === "sessions" ? "sidebar-tab-active" : ""}`}
+                >
+                  Sessions <span className="sidebar-tab-count">{normalSessions.length}</span>
+                </button>
+                <button
+                  role="tab"
+                  aria-selected={sidebarTab === "crons"}
+                  onClick={() => handleSidebarTabSwitch("crons")}
+                  className={`sidebar-tab ${sidebarTab === "crons" ? "sidebar-tab-active" : ""}`}
+                >
+                  Crons <span className="sidebar-tab-count">{cronLoopCount}</span>
+                </button>
+              </div>
+            )}
+            {sidebarTab === "crons" ? (
+              <LoopList
+                loops={loops}
+                bridges={bridges}
+                selectedLoopId={selectedLoopId}
+                onSelectLoop={handleSelectLoop}
+                onRunNow={handleRunLoopNow}
+                onToggleEnabled={handleToggleLoopEnabled}
+                onEdit={handleEditLoop}
+                onDelete={handleDeleteLoop}
+                collapsed={isDesktop && sidebarCollapsed}
+              />
+            ) : (
+              <SessionList
+                sessions={normalSessions}
+                bridges={bridges}
+                bridgeOrder={bridgeOrder}
+                selectedSessionId={selectedSessionId}
+                onSelectSession={handleSelectSession}
+                onRenameSession={renameSession}
+                onStopSession={stopSession}
+                onRemoveSession={handleRemoveSession}
+                onCloneSession={handleCloneSession}
+                onReorderSessions={handleReorderSessions}
+                onReorderBridges={handleReorderBridges}
+                sessionActivity={sessionActivity}
+                collapsed={isDesktop && sidebarCollapsed}
+                hiddenSessionIds={hiddenSessionIds}
+                hiddenBridgeIds={hiddenBridgeIds}
+                onHideSession={handleHideSession}
+                onUnhideSession={handleUnhideSession}
+                onHideBridge={handleHideBridge}
+                onUnhideBridge={handleUnhideBridge}
+                onCreateSession={handleCreateSessionOnBridge}
+              />
+            )}
           </div>
         </aside>
 

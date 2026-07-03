@@ -95,7 +95,19 @@ export function LoopList({
       return aNext - bNext;
     });
 
-  if (cronLoops.length === 0) return null;
+  if (cronLoops.length === 0) {
+    if (collapsed) return null;
+    return (
+      <div
+        className="flex flex-col items-center justify-center text-center"
+        style={{ color: "var(--text-faint)", fontSize: 11, gap: 8, padding: "32px 16px" }}
+      >
+        <span aria-hidden style={{ fontSize: 20, color: "var(--text-faint)" }}>◷</span>
+        <span style={{ color: "var(--text-muted)", fontSize: 12 }}>No crons yet</span>
+        <span style={{ color: "var(--text-faint)" }}>Schedule a recurring agent run to see it here</span>
+      </div>
+    );
+  }
 
   if (collapsed) {
     return (
@@ -141,31 +153,16 @@ export function LoopList({
     );
   }
 
-  return (
-    <div className="flex flex-col">
-      <div
-        style={{
-          padding: "8px 16px",
-          fontSize: 10,
-          fontWeight: 600,
-          letterSpacing: "0.12em",
-          textTransform: "uppercase",
-          color: "var(--text-muted)",
-          borderBottom: "1px solid var(--border-subtle)",
-          background: "var(--bg-base)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 8,
-        }}
-      >
-        <span>Cron</span>
-        <span style={{ color: "var(--text-faint)", fontWeight: 500, letterSpacing: "0.04em", textTransform: "none" }}>
-          {cronLoops.length}
-        </span>
-      </div>
+  // Group cron loops under per-bridge headers, mirroring SessionList. Map
+  // preserves first-appearance order, so groups follow the next-run sort above.
+  const groups = new Map<string, Loop[]>();
+  for (const loop of cronLoops) {
+    const arr = groups.get(loop.bridgeId) ?? [];
+    arr.push(loop);
+    groups.set(loop.bridgeId, arr);
+  }
 
-      {cronLoops.map((loop) => {
+  const renderLoopRow = (loop: Loop) => {
         const selected = loop.id === selectedLoopId;
         return (
           <div
@@ -301,7 +298,46 @@ export function LoopList({
             )}
           </div>
         );
-      })}
+  };
+
+  return (
+    <div className="flex flex-col">
+      {[...groups.entries()].map(([bridgeId, bridgeLoops]) => (
+        <div key={bridgeId} className="flex flex-col">
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "8px 12px",
+              borderBottom: "1px solid var(--border-subtle)",
+              background: "var(--bg-base)",
+              fontFamily: "var(--font-mono)",
+              userSelect: "none",
+            }}
+          >
+            <span
+              title={bridgeId}
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                color: "var(--text-secondary)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                flex: 1,
+                minWidth: 0,
+              }}
+            >
+              {bridgeLabel(bridgeId, bridges)}
+            </span>
+            <span style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>
+              {bridgeLoops.length}
+            </span>
+          </div>
+          {bridgeLoops.map((loop) => renderLoopRow(loop))}
+        </div>
+      ))}
     </div>
   );
 }
