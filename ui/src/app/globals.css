@@ -325,6 +325,104 @@ body {
   border-bottom-color: var(--accent);
 }
 
+/* Sidebar tab switcher */
+.sidebar-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+.sidebar-tabs-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+.sidebar-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 6px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+@media (min-width: 768px) {
+  .sidebar-tab { min-height: 32px; }
+}
+.sidebar-tab:hover {
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+}
+.sidebar-tab-active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  background: var(--bg-elevated);
+}
+.sidebar-tab-count {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.sidebar-tab-active .sidebar-tab-count { color: var(--accent); }
+.sidebar-tab:focus-visible,
+.sidebar-tab-icon:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Sidebar tab switcher — collapsed (60px) icon-only variant */
+.sidebar-tabs-collapsed {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+.sidebar-tab-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  font-size: 15px;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-left: 2px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.sidebar-tab-icon:hover {
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+}
+.sidebar-tab-icon.sidebar-tab-active {
+  color: var(--accent);
+  background: var(--bg-elevated);
+}
+
 /* Mobile control buttons */
 .mobile-ctrl-btn:active {
   background: var(--accent-dim) !important;
