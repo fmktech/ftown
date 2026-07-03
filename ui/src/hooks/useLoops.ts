@@ -64,6 +64,33 @@ export function useLoops(
   const [loops, setLoops] = useState<Loop[]>([]);
   const loopsSubRef = useRef<Subscription | null>(null);
 
+  // Secondary/CLI-parity path (§2c): loop state is delivered push-first over
+  // loops:updates, so this merges by id rather than replacing the list. bridgeId
+  // is omitted so EVERY connected bridge answers; sendCommandCollect gathers all
+  // replies within its window and each responder's loops are merged (a single-
+  // shot sendCommand would keep only the fastest bridge's loops).
+  const refreshLoops = useCallback((): Promise<void> => {
+    if (!userId) return Promise.resolve();
+
+    const payload: ListLoopsPayload = {};
+    const command: Command = { type: "list_loops", payload, requestId: uuidv4() };
+
+    return sendCommandCollect(command).then((responses) => {
+      const incoming: Loop[] = [];
+      for (const resp of responses) {
+        if (!resp.success || !resp.data) continue;
+        const data = resp.data as { loops?: Loop[] };
+        if (Array.isArray(data.loops)) incoming.push(...data.loops);
+      }
+      if (incoming.length === 0) return;
+      setLoops((prev) => {
+        const merged = new Map(prev.map((l) => [l.id, l]));
+        for (const loop of incoming) merged.set(loop.id, loop);
+        return Array.from(merged.values());
+      });
+    });
+  }, [userId, sendCommandCollect]);
+
   useEffect(() => {
     if (!client || !userId) return;
 
@@ -96,6 +123,16 @@ export function useLoops(
       }
     });
 
+    // Request the loop list on every (re)subscribe — mirroring useSessions'
+    // list_sessions — otherwise a fresh page load shows no loops until the next
+    // run publishes a loop_update. The commands RPC sub (owned by useSessions)
+    // may ack a beat later than this sub, so one delayed retry covers that race.
+    loopsSub.on("subscribed", () => {
+      void refreshLoops().catch(() => {
+        setTimeout(() => void refreshLoops().catch(() => undefined), 2000);
+      });
+    });
+
     loopsSub.subscribe();
     loopsSubRef.current = loopsSub;
 
@@ -105,7 +142,7 @@ export function useLoops(
       client.removeSubscription(loopsSub);
       loopsSubRef.current = null;
     };
-  }, [client, userId]);
+  }, [client, userId, refreshLoops]);
 
   const createLoop = useCallback(
     (draft: LoopDraft): Promise<Loop> => {
@@ -236,34 +273,6 @@ export function useLoops(
     },
     [userId, sendCommand]
   );
-
-  // Secondary/CLI-parity path (§2c): loop state is delivered push-first over
-  // loops:updates, so this merges by id rather than replacing the list, and is
-  // only needed for an explicit manual "refresh" affordance. bridgeId is omitted
-  // so EVERY connected bridge answers; sendCommandCollect gathers all replies
-  // within its window and each responder's loops are merged (a single-shot
-  // sendCommand would keep only the fastest bridge's loops).
-  const refreshLoops = useCallback((): Promise<void> => {
-    if (!userId) return Promise.resolve();
-
-    const payload: ListLoopsPayload = {};
-    const command: Command = { type: "list_loops", payload, requestId: uuidv4() };
-
-    return sendCommandCollect(command).then((responses) => {
-      const incoming: Loop[] = [];
-      for (const resp of responses) {
-        if (!resp.success || !resp.data) continue;
-        const data = resp.data as { loops?: Loop[] };
-        if (Array.isArray(data.loops)) incoming.push(...data.loops);
-      }
-      if (incoming.length === 0) return;
-      setLoops((prev) => {
-        const merged = new Map(prev.map((l) => [l.id, l]));
-        for (const loop of incoming) merged.set(loop.id, loop);
-        return Array.from(merged.values());
-      });
-    });
-  }, [userId, sendCommandCollect]);
 
   const getLoopRuns = useCallback(
     (bridgeId: string | undefined, loopId: string): Promise<LoopRunRecord[]> => {
