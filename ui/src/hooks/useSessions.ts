@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Centrifuge, Subscription } from "centrifuge";
+import { Centrifuge, Subscription, SubscriptionState } from "centrifuge";
+import type { PublicationContext } from "centrifuge";
 import { v4 as uuidv4 } from "uuid";
 import {
   Session,
@@ -118,14 +119,17 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
     const sessionsChannel = `sessions:updates#${userId}`;
     const commandsChannel = `commands:rpc#${userId}`;
 
-    for (const ch of [sessionsChannel, commandsChannel]) {
-      const existing = client.getSubscription(ch);
-      if (existing) {
-        existing.removeAllListeners();
-        existing.unsubscribe();
-        client.removeSubscription(existing);
-      }
+    // sessionsChannel is exclusively owned by this hook: always start clean.
+    const existingSessionsSub = client.getSubscription(sessionsChannel);
+    if (existingSessionsSub) {
+      existingSessionsSub.removeAllListeners();
+      existingSessionsSub.unsubscribe();
+      client.removeSubscription(existingSessionsSub);
     }
+    // commandsChannel is shared: useCentrifugo may already have created (and
+    // attached an inbound-signal listener to) this Subscription before this
+    // effect runs. Reuse it instead of tearing it down, so that listener
+    // survives — Centrifuge only allows one Subscription object per channel.
 
     // A session the user just deleted is removed optimistically. While its
     // tombstone is live, ignore any late update or stale snapshot that names it
@@ -165,9 +169,15 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
     sessionsSub.subscribe();
     sessionsSubRef.current = sessionsSub;
 
-    const commandsSub = client.newSubscription(commandsChannel);
+    const commandsSub =
+      client.getSubscription(commandsChannel) ?? client.newSubscription(commandsChannel);
 
-    commandsSub.on("publication", (ctx) => {
+    // Named handlers so cleanup can off() exactly these listeners: the shared
+    // commands subscription must never see removeAllListeners()/unsubscribe(),
+    // or useCentrifugo's inbound-signal listener would be silently stripped
+    // (e.g. under StrictMode double-mount, where this cleanup runs while
+    // useCentrifugo's listener must stay alive).
+    const onCommandsPublication = (ctx: PublicationContext) => {
       const data = ctx.data as CommandResponseMessage;
 
       if (data.type === 'command_response' && data.response) {
@@ -198,29 +208,40 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
           }
         }
       }
-    });
+    };
+    commandsSub.on("publication", onCommandsPublication);
 
     // Re-request the session list on every (re)subscribe — not just the first —
     // so the UI recovers its list after a Centrifugo reconnect instead of
     // showing a stale/empty list until a page reload.
-    commandsSub.on("subscribed", () => {
+    const requestSessionList = () => {
       commandsSub.publish({
         type: "list_sessions",
         payload: {},
         requestId: uuidv4(),
       });
-    });
+    };
+    commandsSub.on("subscribed", requestSessionList);
 
     commandsSub.subscribe();
+    // The shared subscription may already be live (e.g. StrictMode remount
+    // reusing useCentrifugo's subscription): 'subscribed' won't re-fire then,
+    // so request the initial list explicitly.
+    if (commandsSub.state === SubscriptionState.Subscribed) {
+      requestSessionList();
+    }
     commandsSubRef.current = commandsSub;
 
     return () => {
+      // Exclusively owned: full teardown.
       sessionsSub.removeAllListeners();
       sessionsSub.unsubscribe();
       client.removeSubscription(sessionsSub);
-      commandsSub.removeAllListeners();
-      commandsSub.unsubscribe();
-      client.removeSubscription(commandsSub);
+      // Shared with useCentrifugo: detach ONLY this hook's listeners. The
+      // subscription's lifecycle ends with the client (client.disconnect in
+      // useCentrifugo's teardown) — never unsubscribe/remove it here.
+      commandsSub.off("publication", onCommandsPublication);
+      commandsSub.off("subscribed", requestSessionList);
       sessionsSubRef.current = null;
       commandsSubRef.current = null;
     };

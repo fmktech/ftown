@@ -12,7 +12,7 @@ interface DashboardClientProps {
 }
 
 export function DashboardClient({ userId, token, centrifugoUrl }: DashboardClientProps) {
-  const { client, status, error } = useCentrifugo(token, centrifugoUrl);
+  const { client, status, error, transport } = useCentrifugo(token, centrifugoUrl, userId);
 
   const handleDisconnect = useCallback(() => {
     signOut({ callbackUrl: "/login" });
@@ -26,6 +26,7 @@ export function DashboardClient({ userId, token, centrifugoUrl }: DashboardClien
       userId={userId}
       token={token}
       centrifugoUrl={centrifugoUrl}
+      transport={transport}
       onDisconnect={handleDisconnect}
     />
   );

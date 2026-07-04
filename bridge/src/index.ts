@@ -9,8 +9,12 @@ import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+import { cleanup as ndcCleanup } from 'node-datachannel';
 
 import { CentrifugoClient } from './centrifugo-client.js';
+import { WatchRegistry } from './direct-transport/watch-registry.js';
+import { DirectPeerManager } from './direct-transport/peer-manager.js';
+import { PublishRouter } from './direct-transport/publish-router.js';
 import { toWireSession } from './session-wire.js';
 import { ProcessRunner } from './claude-runner.js';
 import { SessionStore } from './session-store.js';
@@ -210,6 +214,37 @@ program
         );
       },
     });
+    // Direct transport (WebRTC DataChannel) data plane. Peers attach per session;
+    // terminal output/screen fan out to them directly, and to Centrifugo only when
+    // the session has an unexpired remote watcher (R2). Signaling and watch
+    // heartbeats ride the existing commands:rpc channel.
+    const watchRegistry = new WatchRegistry();
+    const directPeers = new DirectPeerManager({
+      bridgeId,
+      sendSignal: (msg) => {
+        centrifugo.publishSignal(userId, msg).catch((err) => {
+          console.error('[Bridge] Failed to publish WebRTC signal:', err);
+        });
+      },
+      onInput: (sid, data) => { runner.write(sid, data); },
+      onResize: (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
+      onAttach: (sid) => terminalManager.serialize(sid, 20000) ?? '',
+    });
+    const publishRouter = new PublishRouter({
+      registry: watchRegistry,
+      peerManager: directPeers,
+      centrifugo,
+      userId,
+      // Watch messages fan out to every bridge on commands:rpc; only register
+      // watchers for sessions this bridge actually serves terminal data for.
+      isKnownSession: (sid) => runner.isRunning(sid) || terminalManager.has(sid),
+    });
+    // Every NEW remote watcher (first, each additional distinct client, or a
+    // post-expiry re-registration) ⇒ push a full screen resync so the joining
+    // Centrifugo-fallback client renders before incremental output (R1). The
+    // dump is channel-wide; existing viewers re-render idempotently.
+    watchRegistry.onNewWatcher((sid) => publishScreenDump(sid));
+
     const localApiServer = new LocalApiServer();
     const apiToken = randomBytes(32).toString('hex');
     localApiServer.setAuthToken(apiToken);
@@ -346,9 +381,7 @@ program
       // Phase 1: viewport-only dump (~rows*cols bytes) for instant render.
       const viewportRaw = terminalManager.serialize(sid, 0);
       if (viewportRaw) {
-        centrifugo.publishTerminalScreen(userId, sid, viewportRaw).catch((err) => {
-          console.error(`[Bridge] Failed to publish viewport screen for ${sid}:`, err);
-        });
+        publishRouter.publishTerminalScreen(sid, viewportRaw);
       }
 
       // Phase 2: full dump with scrollback. Client re-renders on top of phase 1.
@@ -364,9 +397,7 @@ program
       }
       if (!raw) return;
       if (raw === viewportRaw) return;
-      centrifugo.publishTerminalScreen(userId, sid, raw).catch((err) => {
-        console.error(`[Bridge] Failed to publish full screen for ${sid}:`, err);
-      });
+      publishRouter.publishTerminalScreen(sid, raw);
     }
 
     function handleClientResize(sid: string, cols: number, rows: number): void {
@@ -389,9 +420,7 @@ program
       store.appendTerminalData(sessionId, buf).catch((err) => {
         console.error(`[Bridge] Failed to store terminal data for ${sessionId}:`, err);
       });
-      centrifugo.publishTerminalData(userId, sessionId, buf).catch((err) => {
-        console.error(`[Bridge] Failed to publish terminal data for ${sessionId}:`, err);
-      });
+      publishRouter.publishTerminalData(sessionId, buf);
     }
 
     runner.on('data', (sessionId, data) => {
@@ -1115,6 +1144,8 @@ program
       handleCommand(command).catch((err) => {
         console.error(`[Bridge] Unhandled error in command handler:`, err);
       });
+    }, (directCommand) => {
+      publishRouter.handleCommand(directCommand);
     });
     setTimeout(() => {
       void (async () => {
@@ -1147,6 +1178,10 @@ program
       scheduler.stop();
       localApiServer.stop();
       runner.stopAll();
+      directPeers.closeAll();
+      watchRegistry.dispose();
+      // node-datachannel module-level cleanup — avoids the native crash-on-exit race.
+      try { ndcCleanup(); } catch { /* native lib already torn down */ }
       centrifugo.disconnect();
       process.exit(0);
     };

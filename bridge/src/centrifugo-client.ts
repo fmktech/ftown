@@ -6,12 +6,19 @@ import { hostname } from 'node:os';
 
 import type { Command, CommandResponse, Loop, Session, BridgePresenceInfo } from './types.js';
 import { toWireSession } from './session-wire.js';
+import {
+  isSignalMessage,
+  isWatchMessage,
+  type DirectCommandMessage,
+  type SignalMessage,
+} from './direct-transport/contract.js';
 
 type TerminalInputHandler = (sessionId: string, data: string) => void;
 type TerminalResizeHandler = (sessionId: string, cols: number, rows: number) => void;
 type TerminalInitHandler = (sessionId: string) => void;
 
 type CommandHandler = (command: Command) => void;
+type DirectCommandHandler = (msg: DirectCommandMessage) => void;
 
 const MAX_PUBLISH_BYTES = 460_000;
 
@@ -207,7 +214,7 @@ export class CentrifugoClient {
     this.subscriptions.set(channel, sub);
   }
 
-  subscribeToCommands(userId: string, handler: CommandHandler): void {
+  subscribeToCommands(userId: string, handler: CommandHandler, onDirectCommand?: DirectCommandHandler): void {
     const channel = `commands:rpc#${userId}`;
 
     const existingSub = this.subscriptions.get(channel);
@@ -221,6 +228,14 @@ export class CentrifugoClient {
     sub.on('publication', (ctx: PublicationContext) => {
       const data = ctx.data as Record<string, unknown>;
       if (data.type === 'command_response') {
+        return;
+      }
+      if (onDirectCommand && (isSignalMessage(data) || isWatchMessage(data))) {
+        try {
+          onDirectCommand(data as unknown as DirectCommandMessage);
+        } catch (err) {
+          console.error(`[Centrifugo] Direct command handler failed on ${channel}:`, err);
+        }
         return;
       }
       const command = data as unknown as Command;
@@ -302,6 +317,16 @@ export class CentrifugoClient {
       await this.client.publish(channel, truncateData(event));
     } catch (err) {
       console.error(`[Centrifugo] Failed to publish hook event to ${channel}:`, err);
+    }
+  }
+
+  /** Publishes a bridge-originated WebRTC signaling message on the commands channel. */
+  async publishSignal(userId: string, msg: SignalMessage): Promise<void> {
+    const channel = `commands:rpc#${userId}`;
+    try {
+      await this.client.publish(channel, msg as unknown as Record<string, unknown>);
+    } catch (err) {
+      console.error(`[Centrifugo] Failed to publish signal to ${channel}:`, err);
     }
   }
 
