@@ -15,20 +15,30 @@ https://github.com/user-attachments/assets/e9c1ce70-70b0-4ba0-81d8-080d4eeef445
 ## Architecture
 
 ```
-┌─────────────┐     WebSocket      ┌────────────┐     WebSocket      ┌─────────────┐
-│   Browser    │◄──────────────────►│ Centrifugo  │◄──────────────────►│   Bridge    │
-│  (Next.js)   │                    │  (pub/sub)  │                    │ (node-pty)  │
-└─────────────┘                    └────────────┘                    └─────────────┘
+                        ┌─────────────┐
+                   ┌────┤  Centrifugo  ├────┐
+                   │    │  (pub/sub)   │    │
+              WebSocket └─────────────┘ WebSocket
+         (control · signaling · fallback data)
+                   │                     │
+                   ▼                     ▼
+            ┌─────────────┐       ┌─────────────┐
+            │   Browser   │◄─────►│   Bridge    │
+            │  (Next.js)  │       │ (node-pty)  │
+            └─────────────┘       └─────────────┘
+                  WebRTC DataChannel — direct P2P
+                 terminal I/O (localhost / LAN)
 ```
 
-- **UI** (`/ui`) — Next.js 15 web dashboard with real-time terminal streaming via xterm.js
-- **Bridge** (`/bridge`) — CLI tool that runs on remote machines, spawns processes via PTY and relays I/O through Centrifugo
-- **Centrifugo** (`/centrifugo`) — WebSocket messaging server connecting bridge and UI in real-time
+- **UI** (`/ui`) — Next.js 15 web dashboard with real-time terminal streaming, preferring a direct WebRTC connection to the bridge
+- **Bridge** (`/bridge`) — CLI tool that runs on remote machines, spawns processes via PTY and relays I/O directly to the browser (or through Centrifugo when direct pairing isn't possible)
+- **Centrifugo** (`/centrifugo`) — WebSocket messaging server handling sessions, presence, and signaling, and serving as the fallback data plane for terminal I/O
 
 ## Features
 
 - **Claude Code** and **Cursor Agent** (`agent`) interactive sessions with resume support
-- Real-time terminal streaming from remote machines to browser
+- Real-time terminal streaming from remote machines to browser — direct peer-to-peer over localhost/LAN, falling back to Centrifugo automatically for remote access
+- Local-first, private transport: terminal output never touches the cloud while you're on the same machine or network — it's only relayed through Centrifugo while a remote viewer is actively watching
 - Hook forwarding to the dashboard (Claude `~/.claude/settings.json`, Cursor `~/.cursor/hooks.json`)
 - Multiple concurrent sessions with session management
 - Multi-bridge support (connect multiple machines)

@@ -37,6 +37,15 @@ function ShieldIcon() {
   );
 }
 
+function LockIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <rect x="3" y="11" width="18" height="11" rx="2" />
+      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+    </svg>
+  );
+}
+
 function LayersIcon() {
   return (
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
@@ -122,7 +131,7 @@ const FEATURES = [
   {
     icon: <TerminalIcon />,
     title: "Real-time terminal streaming",
-    desc: "PTY output flows over WebSocket with scrollback replay, resize sync, and mobile-friendly controls.",
+    desc: "PTY output flows directly to your browser over WebRTC when you're on the same machine or network, with scrollback replay, resize sync, and mobile-friendly controls.",
   },
   {
     icon: <LayersIcon />,
@@ -147,7 +156,12 @@ const FEATURES = [
   {
     icon: <ShieldIcon />,
     title: "Self-hosted & private",
-    desc: "Your stack: Next.js UI, Centrifugo pub/sub, PostgreSQL auth, and bridges on your own hardware or cloud.",
+    desc: "Your stack: Next.js UI, Centrifugo for sessions and signaling, PostgreSQL auth, and bridges on your own hardware or cloud.",
+  },
+  {
+    icon: <LockIcon />,
+    title: "Terminal data stays on your network",
+    desc: "On localhost or LAN, terminal I/O pairs peer-to-peer and never touches the cloud. Centrifugo only relays it while a remote viewer is actively watching.",
   },
 ] as const;
 
@@ -328,34 +342,48 @@ export default async function LandingPage() {
 
         {/* Architecture diagram */}
         <div className="mt-12 sm:mt-16 w-full max-w-[560px] overflow-x-auto">
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-3 sm:gap-0 p-6 sm:px-8 bg-[var(--bg-surface)] border border-[var(--border-muted)] rounded-[var(--radius-md)]">
-            <div className="text-center shrink-0 border border-[var(--border-muted)] rounded-[var(--radius-md)] px-4 py-2.5">
-              <div className="text-xs font-semibold text-[var(--text-primary)]">Browser</div>
-              <div className="text-[11px] text-[var(--text-muted)]">Next.js</div>
+          <div className="flex flex-col items-center gap-3 p-6 sm:px-8 bg-[var(--bg-surface)] border border-[var(--border-muted)] rounded-[var(--radius-md)]">
+            {/* Centrifugo: control plane, signaling, fallback */}
+            <div className="text-center shrink-0 border border-[var(--border-muted)] rounded-[var(--radius-md)] px-4 py-2">
+              <div className="text-xs font-semibold text-[var(--text-primary)]">Centrifugo</div>
+              <div className="text-[11px] text-[var(--text-muted)]">control · signaling · fallback</div>
             </div>
 
-            <div className="flex flex-row sm:flex-col items-center justify-center gap-1 px-0 sm:px-2 py-1 sm:py-0">
-              <span className="text-[11px] text-[var(--text-faint)] whitespace-nowrap">WebSocket</span>
-              <span aria-hidden="true" className="text-[var(--text-faint)] text-xs rotate-90 sm:rotate-0">
-                ↔
+            <div className="flex items-center justify-center gap-10 sm:gap-16">
+              <span aria-hidden="true" className="text-[var(--text-faint)] text-xs -rotate-45">
+                ↙
+              </span>
+              <span className="text-[10px] text-[var(--text-faint)] whitespace-nowrap -mx-4 sm:-mx-8">
+                WebSocket
+              </span>
+              <span aria-hidden="true" className="text-[var(--text-faint)] text-xs rotate-45">
+                ↘
               </span>
             </div>
 
-            <div className="text-center shrink-0 border border-[var(--accent)] rounded-[var(--radius-md)] px-4 py-2.5 shadow-[var(--shadow-glow-accent)]">
-              <div className="text-xs font-semibold text-[var(--accent)]">Centrifugo</div>
-              <div className="text-[11px] text-[var(--text-muted)]">pub/sub</div>
-            </div>
+            {/* Browser <-> Bridge: direct P2P data plane */}
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-3 sm:gap-0 w-full">
+              <div className="text-center shrink-0 border border-[var(--border-muted)] rounded-[var(--radius-md)] px-4 py-2.5">
+                <div className="text-xs font-semibold text-[var(--text-primary)]">Browser</div>
+                <div className="text-[11px] text-[var(--text-muted)]">Next.js</div>
+              </div>
 
-            <div className="flex flex-row sm:flex-col items-center justify-center gap-1 px-0 sm:px-2 py-1 sm:py-0">
-              <span className="text-[11px] text-[var(--text-faint)] whitespace-nowrap">WebSocket</span>
-              <span aria-hidden="true" className="text-[var(--text-faint)] text-xs rotate-90 sm:rotate-0">
-                ↔
-              </span>
-            </div>
+              <div className="flex flex-row sm:flex-col items-center justify-center gap-1 px-0 sm:px-2 py-1 sm:py-0">
+                <span className="text-[11px] text-[var(--accent)] whitespace-nowrap text-center">
+                  WebRTC P2P
+                </span>
+                <span aria-hidden="true" className="text-[var(--accent)] text-xs rotate-90 sm:rotate-0">
+                  ↔
+                </span>
+              </div>
 
-            <div className="text-center shrink-0 border border-[var(--border-muted)] rounded-[var(--radius-md)] px-4 py-2.5">
-              <div className="text-xs font-semibold text-[var(--text-primary)]">Bridge</div>
-              <div className="text-[11px] text-[var(--text-muted)]">agents · PTY</div>
+              <div className="text-center shrink-0 border border-[var(--accent)] rounded-[var(--radius-md)] px-4 py-2.5 shadow-[var(--shadow-glow-accent)]">
+                <div className="text-xs font-semibold text-[var(--accent)]">Bridge</div>
+                <div className="text-[11px] text-[var(--text-muted)]">agents · PTY</div>
+              </div>
+            </div>
+            <div className="text-[10px] text-[var(--text-faint)] text-center">
+              terminal I/O — direct on localhost/LAN, Centrifugo relay when remote
             </div>
           </div>
         </div>
