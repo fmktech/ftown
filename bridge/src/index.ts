@@ -86,7 +86,12 @@ interface BridgeAuthResponse {
   userId: string;
 }
 
-async function fetchBridgeToken(apiUrl: string, authToken: string, bridgeId: string): Promise<BridgeAuthResponse> {
+async function fetchBridgeToken(
+  apiUrl: string,
+  authToken: string,
+  bridgeId: string,
+  local: { localPort: number; localNonce: string },
+): Promise<BridgeAuthResponse> {
   const res = await fetch(`${apiUrl}/api/auth/bridge`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -94,6 +99,10 @@ async function fetchBridgeToken(apiUrl: string, authToken: string, bridgeId: str
       token: authToken,
       bridgeId,
       hostname: osHostname(),
+      // Embedded in the Centrifugo connection JWT `info` claim so the owning
+      // user's clients discover the loopback WS rung via presence (L2).
+      localPort: local.localPort,
+      localNonce: local.localNonce,
     }),
   });
 
@@ -157,8 +166,22 @@ program
       console.error('[Bridge] Failed to persist bridge id:', err instanceof Error ? err.message : String(err));
     }
 
+    // The local API server binds before the token fetch: its ephemeral port and
+    // the per-process loopback nonce ride the auth request so the UI can embed
+    // them in the Centrifugo connection JWT `info` claim (presence advert, L2).
+    // Binding needs no post-auth state — dependencies/routes are wired later.
+    const localApiServer = new LocalApiServer();
+    const apiToken = randomBytes(32).toString('hex');
+    localApiServer.setAuthToken(apiToken);
+    const hookPort = await localApiServer.start();
+    console.log(`[Bridge] Local API server started on port ${hookPort}`);
+    const localNonce = randomBytes(16).toString('hex');
+
     console.log('[Bridge] Authenticating with API...');
-    const auth = await fetchBridgeToken(opts.apiUrl, opts.token, bridgeId);
+    const auth = await fetchBridgeToken(opts.apiUrl, opts.token, bridgeId, {
+      localPort: hookPort,
+      localNonce,
+    });
     const userId = auth.userId;
     const centrifugoUrl = auth.centrifugoUrl;
 
@@ -179,6 +202,9 @@ program
           refreshToken: auth.refreshToken,
           bridgeId,
           hostname: osHostname(),
+          // Same process ⇒ same port/nonce; the refresh route re-embeds them.
+          localPort: hookPort,
+          localNonce,
         }),
       });
       if (!res.ok) {
@@ -235,8 +261,7 @@ program
     // Loopback WebSocket rung: same DirectMessage protocol as WebRTC, tunneled
     // over TCP on the existing 127.0.0.1 local API server. Bypasses VPN/endpoint
     // filters that kill UDP hairpin. Input/resize/attach feed the SAME sinks as
-    // the WebRTC peer manager; upgrades are gated on a per-process nonce (L1/L2).
-    const localNonce = randomBytes(16).toString('hex');
+    // the WebRTC peer manager; upgrades are gated on the per-process nonce (L1/L2).
     let apiOrigin = '';
     try { apiOrigin = new URL(opts.apiUrl).origin; } catch { /* leave empty; only localhost origins accepted */ }
     const loopbackServer = new LoopbackPeerServer({
@@ -263,12 +288,7 @@ program
     // dump is channel-wide; existing viewers re-render idempotently.
     watchRegistry.onNewWatcher((sid) => publishScreenDump(sid));
 
-    const localApiServer = new LocalApiServer();
-    const apiToken = randomBytes(32).toString('hex');
-    localApiServer.setAuthToken(apiToken);
-    const hookPort = await localApiServer.start();
-    console.log(`[Bridge] Local API server started on port ${hookPort}`);
-    // Bind the loopback WS upgrade handler now that the ephemeral port is bound.
+    // Bind the loopback WS upgrade handler onto the already-listening server.
     const loopbackHttpServer = localApiServer.getHttpServer();
     if (loopbackHttpServer) {
       loopbackServer.attach(loopbackHttpServer);
@@ -1169,7 +1189,7 @@ program
     }
 
     centrifugo.connect();
-    centrifugo.joinBridgesChannel(userId, bridgeId, { localPort: hookPort, localNonce });
+    centrifugo.joinBridgesChannel(userId, bridgeId);
     centrifugo.subscribeToSessions(userId);
     centrifugo.subscribeToLoops(userId);
 

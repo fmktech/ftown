@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type BrowserContext, type Page } from "@playwright/test";
 import {
   sharedEmail,
   registerUser,
@@ -17,102 +17,154 @@ import {
 } from "../helpers/centrifugo";
 
 /**
- * Direct-transport e2e. Exercises the real browser data plane against a real
- * bridge + Centrifugo. See docs/plans/direct-transport-contract.md.
+ * Transport-ladder e2e: loopback WS → WebRTC → Centrifugo.
+ * See docs/plans/direct-transport-contract.md + docs/plans/loopback-transport-addendum.md.
  *
- * Assertions are scoped to the specific session id (derived from the
- * transport-independent terminal-input:<sid> channel the bridge creates on every
+ * On a same-machine stack the loopback rung always wins, so each test pins the
+ * ladder to one rung via two browser-side knobs (no product code involved):
+ *
+ *  - BLOCK LOOPBACK: LoopbackPeer connects with the browser-global
+ *    `new WebSocket("ws://127.0.0.1:{port}/ws?nonce=…")` (loopback-peer.ts),
+ *    while the Centrifuge client targets `ws://localhost:8000/...` — the
+ *    hostnames differ, so we wrap window.WebSocket and redirect ONLY
+ *    `ws://127.0.0.1` URLs to a dead port (127.0.0.1:1). The socket fails with
+ *    natural WebSocket error/close semantics (connection refused), which the
+ *    ladder treats as a rung failure (addendum L4) and falls through.
+ *    Centrifugo traffic is untouched.
+ *  - BLOCK WEBRTC: RTCPeerConnection undefined ⇒ pairing throws ⇒ next rung.
+ *
+ * | Test | loopback | WebRTC | expected badge | terminal:<sid> subscriber |
+ * |------|----------|--------|----------------|---------------------------|
+ * | A    | blocked  | on     | P2P            | absent                    |
+ * | B'   | on       | off    | Local          | absent                    |
+ * | C    | blocked  | off    | Cloud          | PRESENT                   |
+ *
+ * B' is the WARP-immunity headline: the loopback rung is pure TCP on 127.0.0.1
+ * and must work even where VPN endpoint filters kill WebRTC's UDP.
+ *
+ * Assertions are scoped to the session id (derived from the transport-
+ * independent terminal-input:<sid> channel the bridge creates on every
  * session), so stale channels from earlier sessions never confound the result.
- *
- * Test A proves the WebRTC direct path: terminal works while the session's
- * Centrifugo terminal:<sid> channel has NO subscriber (R3). Test B disables
- * WebRTC and proves the watcher-gated Centrifugo fallback: terminal works AND
- * terminal:<sid> HAS a subscriber (R2).
  */
 
-test.describe("direct-transport", () => {
-  test("A: direct path — terminal works with no Centrifugo terminal:<sid> subscriber", async ({
-    page,
-  }) => {
-    const email = sharedEmail();
-    const marker = `E2EDIRECT${Date.now()}`;
-    const sessionName = `direct-${Date.now()}`;
-
-    await registerUser(email);
-    await login(page, email);
-    await waitForBridgeOnline(page);
-
-    // Control plane must be alive on commands:rpc#<email>.
-    const rpc = await waitForChannels(
-      () => commandsRpcClients(email),
-      (n) => n >= 1,
-    );
-    expect(rpc, "commands:rpc#<email> should have a subscriber").toBeGreaterThanOrEqual(1);
-
-    const before = await sessionIdsFor(email);
-    await createShellSession(page, sessionName);
-    const sessionId = await waitForNewSessionId(email, before);
-
-    await openSession(page, sessionName);
-    await runMarkerInTerminal(page, marker);
-
-    // Terminal is demonstrably working. On the direct path the client MUST NOT
-    // subscribe to terminal:<sid>#<email> (R3) and the bridge never publishes
-    // there (no watcher), so the channel must have NO subscriber. Poll briefly to
-    // let any transient settle, then assert absence holds.
-    const present = await waitForChannels(
-      () => terminalChannelPresent(sessionId, email),
-      (p) => p === false,
-      { timeoutMs: 3000 },
-    );
-    expect(
-      present,
-      `direct path must have NO subscriber on terminal:${sessionId}#${email}`,
-    ).toBe(false);
-
-    expect(await commandsRpcClients(email)).toBeGreaterThanOrEqual(1);
+async function blockLoopbackWs(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    const NativeWS = window.WebSocket;
+    const Wrapped = function (this: unknown, url: string | URL, protocols?: string | string[]) {
+      let target = String(url);
+      if (target.startsWith("ws://127.0.0.1")) {
+        // Dead port ⇒ immediate connection refused ⇒ rung falls through (L4).
+        target = "ws://127.0.0.1:1/e2e-blocked";
+      }
+      return new NativeWS(target, protocols);
+    } as unknown as typeof WebSocket;
+    Wrapped.prototype = NativeWS.prototype;
+    Object.defineProperties(Wrapped, {
+      CONNECTING: { value: NativeWS.CONNECTING },
+      OPEN: { value: NativeWS.OPEN },
+      CLOSING: { value: NativeWS.CLOSING },
+      CLOSED: { value: NativeWS.CLOSED },
+    });
+    window.WebSocket = Wrapped;
   });
+}
 
-  test("B: fallback path — WebRTC disabled ⇒ Centrifugo terminal:<sid> subscriber active", async ({
+async function blockWebRtc(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    Object.defineProperty(window, "RTCPeerConnection", { value: undefined });
+  });
+}
+
+/** Login → create shell session → prove the terminal round-trips a marker. */
+async function terminalFlow(page: Page, sessionName: string, marker: string): Promise<string> {
+  const email = sharedEmail();
+  await registerUser(email);
+  await login(page, email);
+  await waitForBridgeOnline(page);
+
+  const before = await sessionIdsFor(email);
+  await createShellSession(page, sessionName);
+  const sessionId = await waitForNewSessionId(email, before);
+  await openSession(page, sessionName);
+  await runMarkerInTerminal(page, marker);
+  return sessionId;
+}
+
+/** The transport badge pill renders exactly one of P2P / Local / Cloud ("…" while connecting). */
+async function expectBadge(page: Page, label: "P2P" | "Local" | "Cloud"): Promise<void> {
+  await expect(page.locator("text=/^(P2P|Local|Cloud)$/").first()).toHaveText(label, {
+    timeout: 15_000,
+  });
+}
+
+test.describe("transport ladder", () => {
+  test("A: WebRTC rung — loopback blocked ⇒ badge P2P, no terminal:<sid> subscriber", async ({
     browser,
   }) => {
     const context = await browser.newContext();
-    // Force the transport's silent fallback: any pairing attempt throws because
-    // RTCPeerConnection is undefined, so HybridTerminalTransport goes to Centrifugo.
-    await context.addInitScript(() => {
-      Object.defineProperty(window, "RTCPeerConnection", { value: undefined });
-    });
+    await blockLoopbackWs(context);
     const page = await context.newPage();
-
     const email = sharedEmail();
-    const marker = `E2EFALLBACK${Date.now()}`;
-    const sessionName = `fallback-${Date.now()}`;
 
     try {
-      await registerUser(email);
-      await login(page, email);
-      await waitForBridgeOnline(page);
+      const sessionId = await terminalFlow(page, `webrtc-${Date.now()}`, `E2EDIRECT${Date.now()}`);
+      await expectBadge(page, "P2P");
 
-      const before = await sessionIdsFor(email);
-      await createShellSession(page, sessionName);
-      const sessionId = await waitForNewSessionId(email, before);
+      const present = await waitForChannels(
+        () => terminalChannelPresent(sessionId, email),
+        (p) => p === false,
+        { timeoutMs: 3000 },
+      );
+      expect(present, `P2P rung must leave terminal:${sessionId} unsubscribed (R3)`).toBe(false);
+      expect(await commandsRpcClients(email)).toBeGreaterThanOrEqual(1);
+    } finally {
+      await context.close();
+    }
+  });
 
-      await openSession(page, sessionName);
-      await runMarkerInTerminal(page, marker);
+  test("B': loopback rung — WebRTC disabled ⇒ badge Local, no terminal:<sid> subscriber", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext();
+    await blockWebRtc(context);
+    const page = await context.newPage();
+    const email = sharedEmail();
 
-      // Fallback path: the client subscribes to terminal:<sid>#<email> and sends
-      // terminal_watch, so the bridge publishes there (R2). The channel must have
-      // a subscriber.
+    try {
+      const sessionId = await terminalFlow(page, `local-${Date.now()}`, `E2ELOCAL${Date.now()}`);
+      await expectBadge(page, "Local");
+
+      const present = await waitForChannels(
+        () => terminalChannelPresent(sessionId, email),
+        (p) => p === false,
+        { timeoutMs: 3000 },
+      );
+      expect(present, `Local rung must leave terminal:${sessionId} unsubscribed (R3/L5)`).toBe(false);
+      expect(await commandsRpcClients(email)).toBeGreaterThanOrEqual(1);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("C: cloud fallback — WebRTC disabled AND loopback blocked ⇒ badge Cloud, subscriber present", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext();
+    await blockWebRtc(context);
+    await blockLoopbackWs(context);
+    const page = await context.newPage();
+    const email = sharedEmail();
+
+    try {
+      const sessionId = await terminalFlow(page, `cloud-${Date.now()}`, `E2ECLOUD${Date.now()}`);
+      await expectBadge(page, "Cloud");
+
       const present = await waitForChannels(
         () => terminalChannelPresent(sessionId, email),
         (p) => p === true,
         { timeoutMs: 8000 },
       );
-      expect(
-        present,
-        `fallback path must have a subscriber on terminal:${sessionId}#${email}`,
-      ).toBe(true);
-
+      expect(present, `Cloud fallback must subscribe terminal:${sessionId} (R2)`).toBe(true);
       expect(await commandsRpcClients(email)).toBeGreaterThanOrEqual(1);
     } finally {
       await context.close();

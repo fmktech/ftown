@@ -26,11 +26,17 @@ L1. The bridge exposes a WebSocket upgrade at path `/ws` on its EXISTING
     `?nonce=<LOCAL_NONCE>` matching the bridge's current nonce AND an Origin
     header that is either the configured api-url origin or a localhost origin.
     Reject otherwise (HTTP 403 before upgrade).
-L2. The bridge advertises `{ localPort: number, localNonce: string }` inside its
-    EXISTING bridges:presence join payload/info. The nonce is generated per
-    bridge process start (crypto-random, ≥16 bytes hex). Presence is only
-    visible to the owning user's JWT holders — nonce possession + loopback
-    reachability proves same user, same machine.
+L2. The bridge advertises `{ localPort: number, localNonce: string }` via the
+    connection JWT `info` claim: it sends both fields in the POST
+    /api/auth/bridge (and refresh) body — the UI route validates them
+    (localPort integer 1-65535, localNonce 32-char lowercase hex; both-or-
+    neither, else 400) and embeds them in the Centrifugo connection token's
+    `info`, which Centrifugo exposes as presence `conn_info` on
+    bridges:presence. (Subscription `data:` is NOT used — Centrifugo ignores
+    it without a subscribe proxy; bug caught by e2e.) The nonce is generated
+    per bridge process start (crypto-random, 16 bytes hex), never logged.
+    Presence is only visible to the owning user's JWT holders — nonce
+    possession + loopback reachability proves same user, same machine.
 L3. Wire protocol over the WS: EXACTLY the DirectMessage JSON frames from
     contract.ts (hello/hello_ack/attach/detach/screen/output/input/resize/
     ping/pong), same semantics, same seq rules, same chunking limits. hello_ack
