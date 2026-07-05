@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Centrifuge } from "centrifuge";
+import { Centrifuge, UnauthorizedError } from "centrifuge";
 import { v4 as uuidv4 } from "uuid";
 import { HybridTerminalTransport } from "@/lib/direct-transport/hybrid-terminal-transport";
 import {
@@ -11,6 +11,72 @@ import {
 } from "@/lib/direct-transport/contract";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
+
+/**
+ * Decodes the `exp` (seconds since epoch) claim of a JWT without verifying
+ * its signature. Only used to decide whether to withhold an initial connect
+ * token we already know the server would reject as expired — the server
+ * remains the sole source of truth for validity.
+ */
+function decodeJwtExpMs(token: string): number | null {
+  try {
+    const payload = token.split(".")[1];
+    if (!payload) return null;
+    const base64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+    const json = atob(padded);
+    const claims = JSON.parse(json) as { exp?: unknown };
+    return typeof claims.exp === "number" ? claims.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Clock-skew buffer so a token on the verge of expiry is treated as expired. */
+const TOKEN_EXPIRY_SKEW_MS = 5_000;
+
+function isTokenExpired(token: string): boolean {
+  const expMs = decodeJwtExpMs(token);
+  // Undecodable exp: let the server be the judge, don't preemptively drop it.
+  if (expMs === null) return false;
+  return expMs <= Date.now() + TOKEN_EXPIRY_SKEW_MS;
+}
+
+/**
+ * Mints a fresh Centrifugo connect token from the session-gated token route.
+ * centrifuge-js calls this whenever it needs a token: on the very first
+ * connect if we withheld a stale initial token (see isTokenExpired above),
+ * and automatically on server-signaled token expiry (connect error code 109,
+ * "token expired") or a scheduled proactive refresh — no manual reconnect
+ * wiring needed.
+ *
+ * A 401 here means the NextAuth session itself is gone (not just the
+ * Centrifugo token). Throwing UnauthorizedError makes centrifuge-js fail the
+ * connection permanently instead of retrying forever, which the caller turns
+ * into a clear re-login prompt (see the "disconnected" handler below).
+ */
+async function fetchCentrifugoToken(): Promise<string> {
+  const response = await fetch("/api/auth/token", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+  });
+
+  if (response.status === 401) {
+    throw new UnauthorizedError("session expired");
+  }
+  if (!response.ok) {
+    throw new Error(`Failed to refresh Centrifugo token (status ${response.status})`);
+  }
+
+  const data = (await response.json()) as { token: string };
+  try {
+    localStorage.setItem("ftown_token", data.token);
+  } catch {
+    // Best-effort cache only; refresh keeps working without it.
+  }
+  return data.token;
+}
 
 interface UseCentrifugoResult {
   client: Centrifuge | null;
@@ -56,8 +122,14 @@ export function useCentrifugo(
 
     cleanup();
 
+    // A stale initial token would just get rejected by the server (connect
+    // error 109) before getToken kicks in on the retry — skip that wasted
+    // round trip and let getToken mint a fresh one right away.
+    const initialToken = isTokenExpired(token) ? "" : token;
+
     const client = new Centrifuge(centrifugoUrl, {
-      token,
+      token: initialToken,
+      getToken: fetchCentrifugoToken,
     });
 
     client.on("connecting", () => {
@@ -71,6 +143,19 @@ export function useCentrifugo(
     });
 
     client.on("disconnected", (ctx) => {
+      // getToken threw UnauthorizedError (401 from /api/auth/token): the
+      // NextAuth session itself is gone, not just the Centrifugo token.
+      // centrifuge-js stops retrying in this case (reason "unauthorized"),
+      // so surface a clear re-login path instead of a silently dead
+      // dashboard.
+      if (ctx.reason === "unauthorized") {
+        setStatus("error");
+        setError("Session expired — please sign in again.");
+        if (typeof window !== "undefined") {
+          window.location.href = "/login";
+        }
+        return;
+      }
       setStatus("disconnected");
       if (ctx.reason && ctx.reason !== "clean disconnect") {
         setError(`Disconnected: ${ctx.reason}`);
