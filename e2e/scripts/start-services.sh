@@ -46,7 +46,7 @@ for i in $(seq 1 60); do
 done
 
 # --- register the run user ---
-node -e "fetch('http://localhost:3000/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:process.env.E2E_USER_EMAIL,password:'e2e-password-123'})}).then(async r=>{if(r.status!==201&&r.status!==409){console.error('register failed',r.status,await r.text());process.exit(1)}console.log('[start] register',r.status)})"
+node -e "fetch('http://localhost:3000/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:process.env.E2E_USER_EMAIL,password:'e2e-password-123'})}).then(async r=>{if(!r.ok){console.error('register failed',r.status,await r.text());process.exit(1)}console.log('[start] register',r.status)})"
 
 # --- bridge (scratch HOME, dist build) ---
 BRIDGE_TOKEN="$(node -e "const jwt=require('$E2E_DIR/node_modules/jsonwebtoken');console.log(jwt.sign({sub:process.env.E2E_USER_EMAIL},process.env.CENTRIFUGO_TOKEN_SECRET,{audience:'ftown:centrifugo',expiresIn:'24h'}))")"
