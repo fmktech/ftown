@@ -164,7 +164,7 @@ The CLI wraps the loopback API. Raw access if needed:
 | GET | `/api/loops` | List scheduled loops |
 | POST | `/api/loops` | Create a scheduled loop on this bridge |
 | GET/PATCH/DELETE | `/api/loops/:id` | Inspect, update, or delete a loop |
-| POST | `/api/loops/:id/run-now` | Request an immediate loop run |
+| POST | `/api/loops/:id/run-now` | Request an immediate loop run; returns 404 `reason: not_found` if the loop no longer exists |
 | GET | `/api/loops/:id/runs` | List run sessions for a loop |
 
 ## If the CLI is missing

@@ -83,6 +83,7 @@ interface LoopDraft {
   preflight?: { command: string; timeoutMs?: number };
   postflight?: { command: string; timeoutMs?: number; runOnSkip?: boolean };
   maxRuntimeMs?: number;
+  group?: string;
 }
 
 interface LoopInfo extends LoopDraft {
@@ -248,6 +249,7 @@ function parseLoopCreate(args: string[]): LoopDraft {
         }
       : undefined,
     maxRuntimeMs: maxRuntime,
+    group: flag(args, '--group'),
   };
 }
 
@@ -274,6 +276,8 @@ function parseLoopPatch(args: string[]): Partial<LoopDraft> {
   if (hasFlag(args, '--allow-overlap')) patch.overlapPolicy = 'allow';
   if (hasFlag(args, '--skip-overlap')) patch.overlapPolicy = 'skip';
   if (maxRuntime !== undefined) patch.maxRuntimeMs = parseDurationMs(maxRuntime, '--max-runtime');
+  const group = flag(args, '--group');
+  if (group !== undefined) patch.group = group;
 
   const preflightCommand = flag(args, '--preflight');
   if (preflightCommand !== undefined) {
@@ -435,6 +439,7 @@ Loop create/update options:
   --postflight <cmd>            Shell hook after each run
   --postflight-on-skip          Also run postflight after preflight skip
   --max-runtime <duration>      Force-stop a run after duration
+  --group <label>               Optional label the UI uses to fold loops into groups; pass "" on update to clear
 
 Reads ~/.ftown/bridge.json (ftown-bridge must be running).`);
 }
