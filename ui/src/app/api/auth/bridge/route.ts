@@ -1,10 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import jwt from "jsonwebtoken";
 
+import { parseLocalAdvert } from "./local-advert";
+
 interface BridgeTokenRequestBody {
   token: string;
   bridgeId: string;
   hostname: string;
+  /** Loopback WS rung advert (optional; absent on old bridges). */
+  localPort?: unknown;
+  localNonce?: unknown;
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -51,6 +56,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
+  const advert = parseLocalAdvert(body);
+  if (advert && "error" in advert) {
+    return NextResponse.json({ error: advert.error }, { status: 400 });
+  }
+
   const centrifugoToken = jwt.sign(
     {
       sub: decoded.sub,
@@ -58,6 +68,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         bridgeId: body.bridgeId,
         hostname: body.hostname,
         connectedAt: new Date().toISOString(),
+        ...(advert ?? {}),
       },
     },
     secret,

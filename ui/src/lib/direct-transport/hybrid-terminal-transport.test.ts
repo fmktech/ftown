@@ -369,6 +369,9 @@ describe('HybridTerminalTransport', () => {
 
     transport2.sendInput('session-2', 'ls\n');
     transport2.sendResize('session-2', 80, 24);
+    // The publish chain settles the in-flight input publish on a microtask before the
+    // queued resize frame goes out — flush before asserting the recorded frames.
+    await flush();
     const inputSub = centrifuge2.getSubscription(`terminal-input:session-2#${USER_ID}`);
     expect(inputSub).not.toBeNull();
     expect(inputSub!.publishCalls).toContainEqual({ type: 'input', data: 'ls\n' });
@@ -833,12 +836,12 @@ describe('HybridTerminalTransport — pre-attach input/resize buffering', () => 
 
     const inputSub = centrifuge.getSubscription(`terminal-input:session-1#${USER_ID}`);
     expect(inputSub).not.toBeNull();
-    // Latest resize (as the cols-1 -> cols redraw bounce) then inputs in order.
+    // Latest resize (as the cols-1 -> cols redraw bounce) then the inputs in order;
+    // the publish chain coalesces adjacent inputs, so 'a'+'b' arrive as one frame.
     expect(inputSub!.publishCalls).toEqual([
       { type: 'resize', cols: 99, rows: 40 },
       { type: 'resize', cols: 100, rows: 40 },
-      { type: 'input', data: 'a' },
-      { type: 'input', data: 'b' },
+      { type: 'input', data: 'ab' },
     ]);
   });
 
@@ -1186,24 +1189,242 @@ describe('HybridTerminalTransport — flush onto a still-subscribing input chann
 
     const inputSub = centrifuge.getSubscription(`terminal-input:session-1#${USER_ID}`) as QueuingFakeSubscription;
     expect(inputSub).not.toBeNull();
-    // The flush must have been handed to publish() (queued), not dropped or deferred
-    // past the subscribing window... (resize arrives as the cols-1 -> cols bounce)
-    expect(inputSub.publishCalls).toEqual([
-      { type: 'resize', cols: 99, rows: 40 },
-      { type: 'resize', cols: 100, rows: 40 },
-      { type: 'input', data: 'a' },
-      { type: 'input', data: 'b' },
-    ]);
-    // ...but nothing is on the wire until the subscription becomes active.
+    // Single-in-flight chain: only the FIRST frame is handed to publish() while the
+    // subscription is still subscribing (it parks); frames 2+ are held in the chain
+    // until it settles. Handing all frames over while one is parked is exactly the
+    // transposition window the chain fixes.
+    expect(inputSub.publishCalls).toEqual([{ type: 'resize', cols: 99, rows: 40 }]);
+    // Nothing is on the wire until the subscription becomes active.
     expect(inputSub.delivered).toEqual([]);
 
     inputSub.simulateSubscribed();
     await flush();
+    // The parked frame settles, the chain drains, and delivery preserves order —
+    // adjacent inputs coalesced into one frame.
     expect(inputSub.delivered).toEqual([
       { type: 'resize', cols: 99, rows: 40 },
       { type: 'resize', cols: 100, rows: 40 },
-      { type: 'input', data: 'a' },
-      { type: 'input', data: 'b' },
+      { type: 'input', data: 'ab' },
     ]);
+  });
+});
+
+/**
+ * Keystroke ordering on the centrifugo input path (coordinator regression suite).
+ * Root cause under fix: per-keystroke fire-and-forget `publish()` calls could overtake
+ * each other when centrifuge parks publishes during a 'subscribing' window (non-uniform
+ * await depth). Spec under test:
+ * - Per-session outbound buffer + single-in-flight publish chain: at most ONE
+ *   `{type:'input'}` publish in flight; input arriving meanwhile is buffered and
+ *   coalesced into the next publish once the in-flight one settles.
+ * - Resize enters the same chain as its own message (relative input/resize order kept).
+ * - A rejected publish drops that payload and continues the chain (no re-send, no stall).
+ *
+ * Ordering is asserted by reconstructing the typed stream from the RECORDED publish
+ * payloads in call order — coalescing may merge keystrokes, so the invariant is that
+ * the concatenation of input payloads (with resize as an ordered token) equals what was
+ * typed, in order.
+ */
+describe('HybridTerminalTransport — centrifugo input path keystroke ordering', () => {
+  /** publish() timing is scripted per test: manual settle or immediate resolution. */
+  class ScriptedPublishSubscription extends FakeSubscription {
+    /** 'manual' queues every publish for explicit settle; 'immediate' resolves instantly. */
+    publishMode: 'manual' | 'immediate' = 'immediate';
+    pendingPublishes: Array<{ data: unknown; resolve: () => void; reject: (e: Error) => void }> = [];
+
+    override publish(data: unknown): Promise<unknown> {
+      this.publishCalls.push(data);
+      if (this.publishMode === 'immediate') return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+        this.pendingPublishes.push({ data, resolve, reject });
+      });
+    }
+
+    settleNext(outcome: 'resolve' | 'reject' = 'resolve'): void {
+      const next = this.pendingPublishes.shift();
+      if (!next) throw new Error('no pending publish to settle');
+      if (outcome === 'resolve') next.resolve();
+      else next.reject(new Error('publish failed'));
+    }
+  }
+
+  class ScriptedPublishClient extends FakeCentrifugeClient {
+    override newSubscription(channel: string): FakeSubscription {
+      const sub = new ScriptedPublishSubscription(channel);
+      this.subs.set(channel, sub);
+      return sub;
+    }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    FakePeer.instances = [];
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Transport with a rejecting webrtc peer so the session lands on centrifugo. */
+  async function centrifugoSession() {
+    const centrifuge = new ScriptedPublishClient();
+    const publishCommand = vi.fn<(msg: DirectCommandMessage) => void>();
+    const peerFactory = vi.fn((opts: PeerFactoryOpts) => {
+      const p = new FakePeer(opts.bridgeId);
+      p.connectMode = 'reject';
+      return p;
+    });
+    const deps = { centrifuge, userId: USER_ID, clientId: CLIENT_ID, publishCommand, peerFactory };
+    const transport = new HybridTerminalTransport(
+      deps as unknown as ConstructorParameters<typeof HybridTerminalTransport>[0],
+    );
+    transport.subscribeTerminal('session-1', 'bridge-1', handlers());
+    await flush();
+    expect(transport.getMode('session-1')).toBe('centrifugo');
+    const inputSub = centrifuge.getSubscription(
+      `terminal-input:session-1#${USER_ID}`,
+    ) as ScriptedPublishSubscription;
+    expect(inputSub).not.toBeNull();
+    return { transport, inputSub };
+  }
+
+  /** Recorded publish payloads reduced to an ordered token string: input chars + '<resize>'. */
+  function tokenStream(sub: ScriptedPublishSubscription): string {
+    return sub.publishCalls
+      .map((p) => {
+        const msg = p as { type?: string; data?: string };
+        if (msg.type === 'input') return msg.data ?? '';
+        if (msg.type === 'resize') return '<resize>';
+        return `<unexpected:${String(msg.type)}>`;
+      })
+      .join('');
+  }
+
+  it('parked-first-publish vs immediate followers: recorded input payloads reconstruct the typed order', async () => {
+    const { transport, inputSub } = await centrifugoSession();
+    // First publish settles late (delayed macrotask); anything published after it
+    // would settle immediately — the classic overtake window.
+    let first = true;
+    inputSub.publish = function (this: ScriptedPublishSubscription, data: unknown): Promise<unknown> {
+      this.publishCalls.push(data);
+      if (first) {
+        first = false;
+        return new Promise<void>((resolve) => {
+          setTimeout(resolve, 50);
+        });
+      }
+      return Promise.resolve();
+    };
+
+    transport.sendInput('session-1', 'a');
+    transport.sendInput('session-1', 'b');
+    transport.sendInput('session-1', 'c');
+
+    await vi.advanceTimersByTimeAsync(100);
+    await flush();
+
+    expect(tokenStream(inputSub)).toBe('abc');
+  });
+
+  it("mid-stream 'subscribed'→'subscribing'→'subscribed' flip while typing keeps the typed order", async () => {
+    const { transport, inputSub } = await centrifugoSession();
+    // Model the flip through publish timing: while "subscribing", centrifuge parks the
+    // publish until the subscription is active again; while "subscribed" it resolves.
+    const parked: Array<() => void> = [];
+    let subscribing = false;
+    inputSub.publish = function (this: ScriptedPublishSubscription, data: unknown): Promise<unknown> {
+      this.publishCalls.push(data);
+      if (subscribing) {
+        return new Promise<void>((resolve) => {
+          parked.push(resolve);
+        });
+      }
+      return Promise.resolve();
+    };
+
+    transport.sendInput('session-1', 'a');
+    await flush();
+
+    subscribing = true; // connection blip: subscription re-enters 'subscribing'
+    transport.sendInput('session-1', 'b');
+    transport.sendInput('session-1', 'c');
+    await flush();
+
+    subscribing = false; // 'subscribed' again: parked publishes go through
+    for (const release of parked.splice(0)) release();
+    await flush();
+
+    transport.sendInput('session-1', 'd');
+    await flush();
+
+    expect(tokenStream(inputSub)).toBe('abcd');
+  });
+
+  it('exactly one publish in flight: typing during an unresolved publish coalesces into ONE follow-up', async () => {
+    const { transport, inputSub } = await centrifugoSession();
+    inputSub.publishMode = 'manual';
+
+    transport.sendInput('session-1', 'a');
+    await flush();
+    expect(inputSub.publishCalls).toEqual([{ type: 'input', data: 'a' }]);
+
+    // While 'a' is still in flight, further keystrokes must NOT trigger publishes.
+    transport.sendInput('session-1', 'b');
+    transport.sendInput('session-1', 'c');
+    await flush();
+    expect(inputSub.publishCalls).toHaveLength(1);
+
+    // Settling the in-flight publish releases exactly one coalesced follow-up.
+    inputSub.settleNext('resolve');
+    await flush();
+    expect(inputSub.publishCalls).toHaveLength(2);
+    expect(inputSub.publishCalls[1]).toEqual({ type: 'input', data: 'bc' });
+
+    inputSub.settleNext('resolve');
+    await flush();
+    expect(inputSub.publishCalls).toHaveLength(2);
+  });
+
+  it('a rejected publish drops its payload and continues the chain without re-sending', async () => {
+    const { transport, inputSub } = await centrifugoSession();
+    inputSub.publishMode = 'manual';
+
+    transport.sendInput('session-1', 'a');
+    transport.sendInput('session-1', 'b');
+    await flush();
+    expect(inputSub.publishCalls).toEqual([{ type: 'input', data: 'a' }]);
+
+    // 'a' fails on the wire: it is dropped (no re-send) and the chain moves on to 'b'.
+    inputSub.settleNext('reject');
+    await flush();
+
+    expect(inputSub.publishCalls).toHaveLength(2);
+    expect(inputSub.publishCalls[1]).toEqual({ type: 'input', data: 'b' });
+
+    inputSub.settleNext('resolve');
+    await flush();
+    // Nothing further: 'a' must not reappear anywhere in the stream.
+    expect(inputSub.publishCalls).toHaveLength(2);
+    expect(tokenStream(inputSub)).toBe('ab'); // recorded once each, in order
+  });
+
+  it('resize enters the chain in order: input → resize → input relative order is preserved', async () => {
+    const { transport, inputSub } = await centrifugoSession();
+    inputSub.publishMode = 'manual';
+
+    transport.sendInput('session-1', 'a');
+    transport.sendResize('session-1', 80, 24);
+    transport.sendInput('session-1', 'b');
+    await flush();
+
+    // Drain the chain regardless of how the frames were batched.
+    while (inputSub.pendingPublishes.length > 0) {
+      inputSub.settleNext('resolve');
+      await flush();
+    }
+
+    expect(tokenStream(inputSub)).toBe('a<resize>b');
+    const resizeCall = inputSub.publishCalls.find((p) => (p as { type?: string }).type === 'resize');
+    expect(resizeCall).toEqual({ type: 'resize', cols: 80, rows: 24 });
   });
 });

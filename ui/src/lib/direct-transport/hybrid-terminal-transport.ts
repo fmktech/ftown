@@ -81,6 +81,11 @@ interface PendingResize {
   rows: number;
 }
 
+/** Outbound frame on the centrifugo terminal-input channel (existing wire shapes). */
+type OutboundInputFrame =
+  | { type: 'input'; data: string }
+  | { type: 'resize'; cols: number; rows: number };
+
 /**
  * Max UTF-16 code units of input buffered during the connecting window before
  * drop-oldest kicks in (an oversized single chunk keeps its tail instead).
@@ -104,6 +109,17 @@ interface SessionEntry {
   pendingInputChars: number;
   /** Latest resize buffered while the ladder runs; coalesced to newest only. */
   pendingResize: PendingResize | null;
+  /**
+   * Outbound queue for the centrifugo input path. centrifuge publish() has
+   * non-uniform await depth: publishes issued while the sub is 'subscribing'
+   * park internally until 'subscribed', while later ones take an
+   * already-resolved fast path and OVERTAKE them at the synchronous
+   * _addCommand point — transposing adjacent keystrokes on the wire. Keeping
+   * exactly ONE publish in flight makes command order == keystroke order
+   * regardless of centrifuge state transitions; adjacent input frames coalesce.
+   */
+  outQueue: OutboundInputFrame[];
+  publishInFlight: boolean;
 }
 
 /**
@@ -166,6 +182,8 @@ export class HybridTerminalTransport implements TerminalTransportApi {
       pendingInput: [],
       pendingInputChars: 0,
       pendingResize: null,
+      outQueue: [],
+      publishInFlight: false,
     };
     this.sessions.set(sessionId, entry);
 
@@ -526,9 +544,18 @@ export class HybridTerminalTransport implements TerminalTransportApi {
 
   private dispatchInput(entry: SessionEntry, data: string): void {
     if (entry.direct) {
+      // Direct/loopback frames are synchronous sends — already FIFO.
       this.peers.get(entry.bridgeId)?.peer?.sendInput(entry.sessionId, data);
     } else if (entry.inputSub) {
-      void entry.inputSub.publish({ type: 'input', data });
+      const tail = entry.outQueue[entry.outQueue.length - 1];
+      if (tail && tail.type === 'input') {
+        // Coalesce adjacent input into one publish — fewer round-trips while
+        // preserving byte order (a resize in between breaks the run).
+        tail.data += data;
+      } else {
+        entry.outQueue.push({ type: 'input', data });
+      }
+      this.pumpOutQueue(entry);
     }
   }
 
@@ -536,8 +563,30 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     if (entry.direct) {
       this.peers.get(entry.bridgeId)?.peer?.sendResize(entry.sessionId, cols, rows);
     } else if (entry.inputSub) {
-      void entry.inputSub.publish({ type: 'resize', cols, rows });
+      // Resize rides the same chain so it stays ordered relative to input.
+      entry.outQueue.push({ type: 'resize', cols, rows });
+      this.pumpOutQueue(entry);
     }
+  }
+
+  /**
+   * Single-in-flight publish chain for the centrifugo input path (see
+   * SessionEntry.outQueue). A rejected publish drops that payload and continues
+   * the chain — terminal input is not safely retryable (a duplicate keystroke
+   * is worse than a dropped one).
+   */
+  private pumpOutQueue(entry: SessionEntry): void {
+    if (entry.publishInFlight || entry.disposed || !entry.inputSub) return;
+    const frame = entry.outQueue.shift();
+    if (!frame) return;
+    entry.publishInFlight = true;
+    void entry.inputSub
+      .publish(frame)
+      .catch(() => {})
+      .then(() => {
+        entry.publishInFlight = false;
+        this.pumpOutQueue(entry);
+      });
   }
 
   // --- presence advert ---------------------------------------------------
@@ -633,6 +682,9 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     entry.pendingInput = [];
     entry.pendingInputChars = 0;
     entry.pendingResize = null;
+    // Drop the outbound publish chain: an in-flight continuation bails on the
+    // disposed/inputSub-null guard in pumpOutQueue.
+    entry.outQueue = [];
 
     if (entry.direct) {
       this.peers.get(entry.bridgeId)?.peer?.detach(entry.sessionId);
