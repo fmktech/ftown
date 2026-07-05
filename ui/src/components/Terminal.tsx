@@ -8,7 +8,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { TokenUsage } from "@/hooks/useSessionEvents";
 import { ShellType } from "@/types";
 import { useTerminal } from "@/hooks/useTerminal";
-import { TerminalTransportApi } from "@/lib/direct-transport/contract";
+import { TerminalTransportApi, TerminalTransportMode } from "@/lib/direct-transport/contract";
 import "@xterm/xterm/css/xterm.css";
 
 export interface TerminalHandle {
@@ -41,6 +41,67 @@ function formatTokenCount(n: number): string {
   return String(n);
 }
 
+interface TransportModeBadgeConfig {
+  label: string;
+  title: string;
+  color: string;
+  glow?: string;
+}
+
+const TRANSPORT_MODE_BADGES: Record<TerminalTransportMode, TransportModeBadgeConfig> = {
+  direct: {
+    label: "P2P",
+    title: "Terminal connected directly over WebRTC — data stays on your network.",
+    color: "var(--accent)",
+    glow: "var(--accent-glow)",
+  },
+  centrifugo: {
+    label: "Cloud",
+    title: "Terminal relayed through the cloud (Centrifugo).",
+    color: "var(--text-muted)",
+  },
+  connecting: {
+    label: "…",
+    title: "Negotiating the fastest available terminal connection.",
+    color: "var(--text-faint)",
+  },
+};
+
+function TransportModeBadge({ mode }: { mode: TerminalTransportMode | null }) {
+  if (!mode) return null;
+  const config = TRANSPORT_MODE_BADGES[mode];
+
+  return (
+    <span
+      title={config.title}
+      className="flex items-center gap-1 shrink-0"
+      style={{
+        fontSize: 10,
+        lineHeight: 1,
+        letterSpacing: "0.04em",
+        color: config.color,
+        background: "var(--bg-elevated)",
+        border: "1px solid var(--border-muted)",
+        borderRadius: "var(--radius-sm)",
+        padding: "3px 6px",
+      }}
+    >
+      <span
+        aria-hidden="true"
+        style={{
+          width: 5,
+          height: 5,
+          borderRadius: "50%",
+          background: config.color,
+          boxShadow: config.glow ? `0 0 5px ${config.glow}` : undefined,
+          flexShrink: 0,
+        }}
+      />
+      {config.label}
+    </span>
+  );
+}
+
 export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ transport, sessionId, bridgeId, isRunning, sessionName, usage, onMobileTap, shellType, onInterrupt }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
@@ -67,7 +128,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     if (data) term.write(data);
   }, []);
 
-  const { subscribe, sendInput, sendResize } = useTerminal(transport, sessionId, bridgeId, handleOutput, handleScreen);
+  const { subscribe, sendInput, sendResize, mode } = useTerminal(transport, sessionId, bridgeId, handleOutput, handleScreen);
   const sendInputRef = useRef(sendInput);
   sendInputRef.current = sendInput;
   const sendResizeRef = useRef(sendResize);
@@ -363,6 +424,8 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
             </div>
 
             <div className="flex items-center gap-3">
+              <TransportModeBadge mode={mode} />
+
               {usage && (usage.inputTokens > 0 || usage.outputTokens > 0) && (
                 <span
                   title="Input tokens / Output tokens"
