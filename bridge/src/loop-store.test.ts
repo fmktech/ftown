@@ -198,6 +198,41 @@ describe('loop-store', () => {
     });
   });
 
+  describe('group field', () => {
+    it('trims group on create', () => {
+      const loop = createLoop(draft({ group: '  infra  ' }));
+      assert.strictEqual(loop.group, 'infra');
+    });
+
+    it('normalizes a blank/whitespace-only group to undefined on create', () => {
+      const blank = createLoop(draft({ group: '   ' }));
+      assert.strictEqual(blank.group, undefined);
+      const empty = createLoop(draft({ group: '' }));
+      assert.strictEqual(empty.group, undefined);
+      const absent = createLoop(draft());
+      assert.strictEqual(absent.group, undefined);
+    });
+
+    it('trims group on update', () => {
+      const loop = createLoop(draft());
+      const updated = updateLoop(loop.id, { group: '  ops  ' });
+      assert.strictEqual(updated!.group, 'ops');
+    });
+
+    it('clears group when update patch sends an empty string', () => {
+      const loop = createLoop(draft({ group: 'infra' }));
+      const cleared = updateLoop(loop.id, { group: '' });
+      assert.strictEqual(cleared!.group, undefined);
+      assert.strictEqual(getLoop(loop.id)!.group, undefined);
+    });
+
+    it('leaves group untouched when the patch omits it', () => {
+      const loop = createLoop(draft({ group: 'infra' }));
+      const updated = updateLoop(loop.id, { name: 'renamed' });
+      assert.strictEqual(updated!.group, 'infra');
+    });
+  });
+
   describe('bridge ownership is immutable', () => {
     it('ignores a patch that tries to move a loop to another bridge', () => {
       const loop = createLoop(draft({ bridgeId: 'bridge-A' }));

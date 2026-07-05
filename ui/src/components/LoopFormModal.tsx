@@ -46,6 +46,7 @@ function storePath(hostname: string, path: string): void {
 
 export function LoopFormModal({ isOpen, onClose, onSubmit, bridges, editingLoop }: LoopFormModalProps) {
   const [name, setName] = useState("");
+  const [group, setGroup] = useState("");
   const [bridgeId, setBridgeId] = useState("");
   const [scheduleKind, setScheduleKind] = useState<"interval" | "cron">("interval");
   const [everyValue, setEveryValue] = useState("5");
@@ -103,6 +104,7 @@ export function LoopFormModal({ isOpen, onClose, onSubmit, bridges, editingLoop 
 
     if (editingLoop) {
       setName(editingLoop.name);
+      setGroup(editingLoop.group ?? "");
       setBridgeId(editingLoop.bridgeId);
       if (editingLoop.schedule.kind === "interval") {
         setScheduleKind("interval");
@@ -131,6 +133,7 @@ export function LoopFormModal({ isOpen, onClose, onSubmit, bridges, editingLoop 
       setMaxRuntimeMs(editingLoop.maxRuntimeMs ? String(editingLoop.maxRuntimeMs) : "");
     } else {
       setName("");
+      setGroup("");
       setBridgeId(defaultBridgeId);
       setScheduleKind("interval");
       setEveryValue("5");
@@ -220,6 +223,7 @@ export function LoopFormModal({ isOpen, onClose, onSubmit, bridges, editingLoop 
 
     const draft: LoopDraft = {
       name: trimmedName,
+      group: editingLoop && !group.trim() ? '' : (group.trim() || undefined),
       bridgeId: effectiveBridgeId,
       schedule,
       harness,
@@ -256,6 +260,7 @@ export function LoopFormModal({ isOpen, onClose, onSubmit, bridges, editingLoop 
     }
   }, [
     name,
+    group,
     effectiveBridgeId,
     task,
     scheduleKind,
@@ -320,6 +325,18 @@ export function LoopFormModal({ isOpen, onClose, onSubmit, bridges, editingLoop 
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="Nightly cleanup, PR triage, etc."
+              className="w-full bg-[var(--bg-base)] border border-[var(--border-default)] rounded px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-faint)] focus:outline-none focus-visible:border-[var(--accent)] focus-visible:shadow-[var(--focus-ring)]"
+              onKeyDown={handleKeyDown}
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm text-[var(--text-secondary)] mb-1">Group</label>
+            <input
+              type="text"
+              value={group}
+              onChange={(e) => setGroup(e.target.value)}
+              placeholder="Software Factory — optional, used for folding"
               className="w-full bg-[var(--bg-base)] border border-[var(--border-default)] rounded px-3 py-2 text-sm text-[var(--text-primary)] placeholder-[var(--text-faint)] focus:outline-none focus-visible:border-[var(--accent)] focus-visible:shadow-[var(--focus-ring)]"
               onKeyDown={handleKeyDown}
             />

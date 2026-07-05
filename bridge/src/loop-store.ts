@@ -43,6 +43,12 @@ function saveLoops(data: LoopsFile): void {
   renameSync(tmp, path); // atomic
 }
 
+/** Trim `group`; blank/whitespace-only collapses to undefined (field absent). */
+function normalizeGroup(group: string | undefined): string | undefined {
+  const trimmed = group?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 export function listLoops(): Loop[] {
   return loadLoops().loops;
 }
@@ -68,6 +74,9 @@ export function createLoop(draft: LoopDraft): Loop {
     runCount: 0,
     skipCount: 0,
   };
+  const group = normalizeGroup(draft.group);
+  if (group) loop.group = group;
+  else delete loop.group;
   data.loops.push(loop);
   saveLoops(data);
   return loop;
@@ -97,6 +106,11 @@ export function updateLoop(id: string, patch: Partial<LoopDraft>): Loop | null {
   };
   if (patch.schedule) {
     updated.nextRunAt = new Date(computeNextRun(updated.schedule, Date.now())).toISOString();
+  }
+  if ('group' in patch) {
+    const group = normalizeGroup(patch.group);
+    if (group) updated.group = group;
+    else delete updated.group;
   }
 
   data.loops[index] = updated;

@@ -39,7 +39,7 @@ import { createFtownSession, findMissingProviderAuth, WorkingDirMissingError, ty
 import { loadProviderEnv } from './provider-env-store.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { shouldResurrectStoredSession } from './session-resurrection.js';
-import { createLoop, deleteLoop, getLoop, listLoops, updateLoop, upsertLoop } from './loop-store.js';
+import { createLoop, deleteLoop, getLoop, listLoops, mutateLoopRuntime, updateLoop } from './loop-store.js';
 import { deleteLoopRunRecords, listLoopRunRecordsWithFallback } from './loop-run-store.js';
 import { LoopScheduler, LOOP_TICK_INTERVAL_MS } from './loop-scheduler.js';
 import { validateLoopDraft, validateLoopPatch } from './loop-validation.js';
@@ -908,6 +908,7 @@ program
               preflight: payload.preflight,
               postflight: payload.postflight,
               maxRuntimeMs: payload.maxRuntimeMs,
+              group: payload.group,
             };
             const loop = createLoop(draft);
             await centrifugo.publishLoopUpdate(userId, loop);
@@ -983,10 +984,19 @@ program
               response = { requestId: command.requestId, success: true, data: { fired: false, reason: 'overlap' } };
               break;
             }
-            loop.runNowRequested = true;
-            loop.updatedAt = new Date().toISOString();
-            upsertLoop(loop);
-            await centrifugo.publishLoopUpdate(userId, loop);
+            // Reload-check-write via mutateLoopRuntime: if the loop was deleted
+            // between the getLoop() above and this write, this returns null and
+            // nothing is written/published — a stale in-memory snapshot must
+            // never be upserted back, or a deleted loop resurrects.
+            const updated = mutateLoopRuntime(payload.loopId, (l) => {
+              l.runNowRequested = true;
+              l.updatedAt = new Date().toISOString();
+            });
+            if (!updated) {
+              response = { requestId: command.requestId, success: true, data: { fired: false, reason: 'not_found' } };
+              break;
+            }
+            await centrifugo.publishLoopUpdate(userId, updated);
             scheduler.kick();
             response = { requestId: command.requestId, success: true, data: { fired: true } };
             break;

@@ -118,6 +118,11 @@ export function LoopDetailPane({
             <div style={{ marginTop: 6, fontSize: 12, color: "var(--text-secondary)", fontFamily: "var(--font-mono)" }}>
               {describeSchedule(loop.schedule)}
             </div>
+            {loop.group && (
+              <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-faint)", fontFamily: "var(--font-mono)" }}>
+                Group: {loop.group}
+              </div>
+            )}
           </div>
 
           <div className="flex items-center gap-2" style={{ flexShrink: 0 }}>

@@ -66,6 +66,8 @@ export interface LoopDraft {
   postflight?: LoopPostflight;
   /** Optional deterministic backstop: force-stop + mark 'error' if a flight runs longer. */
   maxRuntimeMs?: number;
+  /** Optional free-text grouping label (e.g. "Software Factory"), used to fold related loops in the UI. */
+  group?: string;
 }
 
 /** Full server-authoritative record (LoopDraft + runtime state). */

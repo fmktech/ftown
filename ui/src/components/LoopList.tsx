@@ -1,8 +1,11 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { Loop } from "@/types";
 import { BridgeInfo } from "@/hooks/useBridges";
 import { describeSchedule } from "@/lib/loop-schedule";
+
+const FOLD_STORAGE_KEY = "ftown:loopList:collapsedSections";
 
 interface LoopListProps {
   loops: Loop[];
@@ -87,6 +90,35 @@ export function LoopList({
   onDelete,
   collapsed,
 }: LoopListProps) {
+  // Fold state for the two-level bridge → group hierarchy below. Keyed by
+  // `bridgeId` (level 1) or `${bridgeId} ${group}` (level 2); absence from the
+  // set means expanded (the default). Persisted so a reload keeps the user's
+  // fold choices, mirroring SessionList's collapsedBridges/collapsedSessions.
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(FOLD_STORAGE_KEY);
+      if (raw) setCollapsedSections(new Set(JSON.parse(raw)));
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  function toggleSection(sectionId: string): void {
+    setCollapsedSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(sectionId)) next.delete(sectionId);
+      else next.add(sectionId);
+      try {
+        localStorage.setItem(FOLD_STORAGE_KEY, JSON.stringify([...next]));
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }
+
   const cronLoops = loops
     .filter((loop) => loop.schedule.kind === "cron")
     .sort((a, b) => {
@@ -300,44 +332,128 @@ export function LoopList({
         );
   };
 
+  const renderSectionHeader = (params: {
+    sectionId: string;
+    label: string;
+    count: number;
+    isCollapsed: boolean;
+    onToggle: () => void;
+    indent?: boolean;
+  }) => {
+    const { sectionId, label, count, isCollapsed, onToggle, indent } = params;
+    return (
+      <div
+        key={sectionId}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          padding: indent ? "6px 12px 6px 24px" : "8px 12px",
+          borderBottom: "1px solid var(--border-subtle)",
+          background: indent ? "var(--bg-elevated)" : "var(--bg-base)",
+          fontFamily: "var(--font-mono)",
+          userSelect: "none",
+        }}
+      >
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggle();
+          }}
+          style={{
+            background: "none",
+            border: "none",
+            cursor: "pointer",
+            color: "var(--text-faint)",
+            fontSize: 10,
+            padding: 0,
+            width: 12,
+            lineHeight: 1,
+            fontFamily: "var(--font-mono)",
+          }}
+        >
+          {isCollapsed ? "▸" : "▾"}
+        </button>
+        <span
+          title={label}
+          style={{
+            fontSize: indent ? 10 : 11,
+            fontWeight: 600,
+            color: "var(--text-secondary)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            flex: 1,
+            minWidth: 0,
+          }}
+        >
+          {label}
+        </span>
+        <span style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>{count}</span>
+      </div>
+    );
+  };
+
   return (
     <div className="flex flex-col">
-      {[...groups.entries()].map(([bridgeId, bridgeLoops]) => (
-        <div key={bridgeId} className="flex flex-col">
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              padding: "8px 12px",
-              borderBottom: "1px solid var(--border-subtle)",
-              background: "var(--bg-base)",
-              fontFamily: "var(--font-mono)",
-              userSelect: "none",
-            }}
-          >
-            <span
-              title={bridgeId}
-              style={{
-                fontSize: 11,
-                fontWeight: 600,
-                color: "var(--text-secondary)",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-                flex: 1,
-                minWidth: 0,
-              }}
-            >
-              {bridgeLabel(bridgeId, bridges)}
-            </span>
-            <span style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>
-              {bridgeLoops.length}
-            </span>
+      {[...groups.entries()].map(([bridgeId, bridgeLoops]) => {
+        const bridgeSectionId = bridgeId;
+        const isBridgeCollapsed = collapsedSections.has(bridgeSectionId);
+
+        // Nest loops with a non-empty group under a collapsible group header;
+        // ungrouped loops render directly under the bridge section. Groups are
+        // sorted alphabetically; ungrouped loops render last (no existing
+        // precedent for "misc" ordering in this codebase, so appending them
+        // after named groups keeps named groups visually primary).
+        const byGroup = new Map<string, Loop[]>();
+        const ungrouped: Loop[] = [];
+        for (const loop of bridgeLoops) {
+          const group = loop.group?.trim();
+          if (!group) {
+            ungrouped.push(loop);
+            continue;
+          }
+          const arr = byGroup.get(group) ?? [];
+          arr.push(loop);
+          byGroup.set(group, arr);
+        }
+        const sortedGroups = [...byGroup.entries()].sort(([a], [b]) => a.localeCompare(b));
+
+        return (
+          <div key={bridgeId} className="flex flex-col">
+            {renderSectionHeader({
+              sectionId: bridgeSectionId,
+              label: bridgeLabel(bridgeId, bridges),
+              count: bridgeLoops.length,
+              isCollapsed: isBridgeCollapsed,
+              onToggle: () => toggleSection(bridgeSectionId),
+            })}
+            {!isBridgeCollapsed && (
+              <>
+                {sortedGroups.map(([group, groupLoops]) => {
+                  const groupSectionId = `${bridgeId} ${group}`;
+                  const isGroupCollapsed = collapsedSections.has(groupSectionId);
+                  return (
+                    <div key={groupSectionId} className="flex flex-col">
+                      {renderSectionHeader({
+                        sectionId: groupSectionId,
+                        label: group,
+                        count: groupLoops.length,
+                        isCollapsed: isGroupCollapsed,
+                        onToggle: () => toggleSection(groupSectionId),
+                        indent: true,
+                      })}
+                      {!isGroupCollapsed && groupLoops.map((loop) => renderLoopRow(loop))}
+                    </div>
+                  );
+                })}
+                {ungrouped.map((loop) => renderLoopRow(loop))}
+              </>
+            )}
           </div>
-          {bridgeLoops.map((loop) => renderLoopRow(loop))}
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

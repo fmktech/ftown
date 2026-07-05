@@ -6,6 +6,7 @@ import { join } from 'node:path';
 
 import { ProviderAuthMissingError, WorkingDirMissingError } from './create-ftown-session.js';
 import { LocalApiServer, providerAuthMissingResponse, workingDirMissingResponse } from './local-api-server.js';
+import { deleteLoop, getLoop, listLoops, mutateLoopRuntime } from './loop-store.js';
 import { upsertLoopRunRecord } from './loop-run-store.js';
 import { SessionStore } from './session-store.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
@@ -206,6 +207,173 @@ describe('LocalApiServer loop routes', () => {
       if (realHome === undefined) delete process.env.HOME;
       else process.env.HOME = realHome;
       rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+/** Shared harness for the run-now/group tests below: a real LocalApiServer
+ * backed by a throwaway ~/.ftown, with recording centrifugo/scheduler stubs. */
+function setupLoopApiServer() {
+  const realHome = process.env.HOME;
+  const home = mkdtempSync(join(tmpdir(), 'ftw-loop-api-'));
+  process.env.HOME = home;
+
+  const server = new LocalApiServer();
+  const token = 'test-token';
+  const published: Loop[] = [];
+  let kicks = 0;
+
+  const store = new SessionStore(join(home, 'data'));
+  const runner = { isRunning: () => false } as unknown as ProcessRunner;
+  const centrifugo = {
+    publishLoopUpdate: async (_userId: string, loop: Loop) => {
+      published.push(loop);
+    },
+    publishLoopRemoved: async () => {},
+  } as unknown as CentrifugoClient;
+
+  server.setAuthToken(token);
+  server.setDependencies(store, runner, centrifugo, 'user-1');
+  server.setLoopApi({
+    bridgeId: 'bridge-1',
+    scheduler: {
+      kick: () => {
+        kicks += 1;
+      },
+      onLoopDeleted: () => {},
+    },
+  });
+
+  return {
+    server,
+    token,
+    published,
+    kicks: () => kicks,
+    async cleanup() {
+      server.stop();
+      if (realHome === undefined) delete process.env.HOME;
+      else process.env.HOME = realHome;
+      rmSync(home, { recursive: true, force: true });
+    },
+  };
+}
+
+describe('LocalApiServer run-now — deleted loop is never resurrected', () => {
+  it('run-now on an id that no longer exists returns not_found and writes/publishes nothing', async () => {
+    const h = setupLoopApiServer();
+    try {
+      const port = await h.server.start();
+      const create = await api(port, h.token, 'POST', '/api/loops', {
+        name: 'nightly',
+        schedule: { kind: 'interval', everyMs: 60_000 },
+        harness: 'codex',
+        task: 'run checks',
+        enabled: true,
+        overlapPolicy: 'skip',
+        retention: { autoClearAfterRuns: 3 },
+      });
+      const loop = create.data.loop as Loop;
+      h.published.length = 0;
+
+      deleteLoop(loop.id); // simulates a delete_loop that lands first
+
+      const runNow = await api(port, h.token, 'POST', `/api/loops/${loop.id}/run-now`);
+      assert.strictEqual(runNow.status, 404);
+      assert.strictEqual(runNow.data.fired, false);
+      assert.strictEqual(runNow.data.reason, 'not_found');
+      assert.strictEqual(getLoop(loop.id), undefined, 'loop stays deleted, not resurrected');
+      assert.deepStrictEqual(listLoops(), []);
+      assert.strictEqual(h.published.length, 0, 'no loop_update publish for a deleted loop');
+      assert.strictEqual(h.kicks(), 0);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it('mutateLoopRuntime (the primitive the run-now handlers use) leaves loops.json untouched when the loop is deleted before the write lands', async () => {
+    const h = setupLoopApiServer();
+    try {
+      const port = await h.server.start();
+      const create = await api(port, h.token, 'POST', '/api/loops', {
+        name: 'nightly',
+        schedule: { kind: 'interval', everyMs: 60_000 },
+        harness: 'codex',
+        task: 'run checks',
+        enabled: true,
+        overlapPolicy: 'skip',
+        retention: { autoClearAfterRuns: 3 },
+      });
+      const loop = create.data.loop as Loop;
+
+      // Mirrors exactly what the fixed run-now handlers do: getLoop() to
+      // decide overlap, then write the manual-fire flag via
+      // mutateLoopRuntime — but here the loop is deleted in between.
+      assert.ok(getLoop(loop.id), 'precondition: loop exists before the race');
+      deleteLoop(loop.id); // a concurrent delete_loop wins the race
+      const result = mutateLoopRuntime(loop.id, (l) => {
+        l.runNowRequested = true;
+        l.updatedAt = new Date().toISOString();
+      });
+
+      assert.strictEqual(result, null, 'the write is skipped, not resurrected');
+      assert.deepStrictEqual(listLoops(), []);
+    } finally {
+      await h.cleanup();
+    }
+  });
+});
+
+describe('LocalApiServer loop group field', () => {
+  it('trims group on create and clears it on an empty-string PATCH', async () => {
+    const h = setupLoopApiServer();
+    try {
+      const port = await h.server.start();
+      const create = await api(port, h.token, 'POST', '/api/loops', {
+        name: 'nightly',
+        schedule: { kind: 'interval', everyMs: 60_000 },
+        harness: 'codex',
+        task: 'run checks',
+        enabled: true,
+        overlapPolicy: 'skip',
+        retention: { autoClearAfterRuns: 3 },
+        group: '  infra  ',
+      });
+      assert.strictEqual(create.status, 201);
+      const loop = create.data.loop as Loop;
+      assert.strictEqual(loop.group, 'infra');
+
+      const list = await api(port, h.token, 'GET', '/api/loops');
+      assert.strictEqual((list.data.loops as Loop[])[0].group, 'infra');
+
+      const renamed = await api(port, h.token, 'PATCH', `/api/loops/${loop.id}`, { group: '  ops  ' });
+      assert.strictEqual((renamed.data.loop as Loop).group, 'ops');
+
+      const cleared = await api(port, h.token, 'PATCH', `/api/loops/${loop.id}`, { group: '' });
+      assert.strictEqual(cleared.status, 200);
+      assert.strictEqual((cleared.data.loop as Loop).group, undefined);
+      assert.strictEqual(getLoop(loop.id)!.group, undefined);
+    } finally {
+      await h.cleanup();
+    }
+  });
+
+  it('a blank/whitespace-only group on create is stored as absent', async () => {
+    const h = setupLoopApiServer();
+    try {
+      const port = await h.server.start();
+      const create = await api(port, h.token, 'POST', '/api/loops', {
+        name: 'nightly',
+        schedule: { kind: 'interval', everyMs: 60_000 },
+        harness: 'codex',
+        task: 'run checks',
+        enabled: true,
+        overlapPolicy: 'skip',
+        retention: { autoClearAfterRuns: 3 },
+        group: '   ',
+      });
+      assert.strictEqual((create.data.loop as Loop).group, undefined);
+    } finally {
+      await h.cleanup();
     }
   });
 });
