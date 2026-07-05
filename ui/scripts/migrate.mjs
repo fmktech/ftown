@@ -9,7 +9,9 @@
 //
 // Connection: standard Postgres TCP via `pg` (node-postgres), NOT the serverless
 // HTTP driver, for portability/testability. Reads MIGRATION_DATABASE_URL, falling
-// back to DATABASE_URL. The URL must be a direct `postgresql://` string.
+// back to DATABASE_URL. A direct (unpooled) `postgresql://` endpoint is
+// recommended for migrations; the runner uses only simple-protocol queries so it
+// also works against a Neon pooler string.
 //
 // Invoked by .github/workflows/migrate.yml on push to main.
 
@@ -63,9 +65,14 @@ async function main() {
       try {
         await client.query('BEGIN');
         await client.query(sql);
+        // Simple-protocol query (no bind params) so the runner is safe against a
+        // pooled/PgBouncer connection string too; `name` is a controlled *.sql
+        // filename and single quotes are escaped defensively.
         await client.query(
-          'INSERT INTO schema_migrations (name) VALUES ($1)',
-          [name],
+          `INSERT INTO schema_migrations (name) VALUES ('${name.replace(
+            /'/g,
+            "''",
+          )}')`,
         );
         await client.query('COMMIT');
         console.log(`applied ${name}`);
