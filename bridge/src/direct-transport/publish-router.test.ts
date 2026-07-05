@@ -252,3 +252,104 @@ describe('PublishRouter isKnownSession gating', () => {
     assert.strictEqual(watchRegistry.hasWatchers('not-mine'), false);
   });
 });
+
+/**
+ * Loopback fan-out (docs/plans/loopback-transport-addendum.md): PublishRouter gains an
+ * OPTIONAL `loopback` option (additive, `LoopbackPeerServerLike`); output/screen fan out
+ * to BOTH the WebRTC peer manager and the loopback server, and `hasAttachedPeers` is the
+ * OR of both. These tests exercise `makeRouterWithLoopback` below, which is this test
+ * file's interpretation of the addition — the frozen surface names the option `loopback`
+ * and its shape (`sendOutput`/`sendScreen`/`hasAttachedPeers`) but does not itself name a
+ * `PublishRouter.hasAttachedPeers` method; we assume one is added per "hasAttachedPeers =
+ * either" in the addendum text.
+ */
+class FakeLoopbackServer {
+  public sendOutputCalls: Array<[string, string]> = [];
+  public sendScreenCalls: Array<[string, string]> = [];
+  private attached = new Set<string>();
+
+  sendOutput(sessionId: string, data: string): void {
+    this.sendOutputCalls.push([sessionId, data]);
+  }
+
+  sendScreen(sessionId: string, data: string): void {
+    this.sendScreenCalls.push([sessionId, data]);
+  }
+
+  hasAttachedPeers(sessionId: string): boolean {
+    return this.attached.has(sessionId);
+  }
+
+  /** Test helper: flips a session into "attached" state on the loopback fake. */
+  simulateAttach(sessionId: string): void {
+    this.attached.add(sessionId);
+  }
+}
+
+function makeRouterWithLoopback(isKnownSession?: (sessionId: string) => boolean) {
+  const watchRegistry = new FakeWatchRegistry();
+  const peerManager = new FakePeerManager();
+  const loopback = new FakeLoopbackServer();
+  const centrifugo = new FakeCentrifugoClient();
+  const router = new PublishRouter({
+    registry: watchRegistry as unknown as WatchRegistry,
+    peerManager: peerManager as unknown as DirectPeerManager,
+    centrifugo,
+    userId: USER_ID,
+    isKnownSession,
+    loopback,
+  } as never);
+  return { router, watchRegistry, peerManager, loopback, centrifugo };
+}
+
+describe('PublishRouter loopback fan-out (addendum)', () => {
+  it('publishTerminalData reaches both the WebRTC peer manager and the loopback server', async () => {
+    const { router, peerManager, loopback } = makeRouterWithLoopback();
+    await router.publishTerminalData('sess-1', 'hello');
+    assert.deepStrictEqual(peerManager.sendOutputCalls, [['sess-1', 'hello']]);
+    assert.deepStrictEqual(loopback.sendOutputCalls, [['sess-1', 'hello']]);
+  });
+
+  it('publishTerminalScreen reaches both the WebRTC peer manager and the loopback server', async () => {
+    const { router, peerManager, loopback } = makeRouterWithLoopback();
+    await router.publishTerminalScreen('sess-1', 'SCREEN');
+    assert.deepStrictEqual(peerManager.sendScreenCalls, [['sess-1', 'SCREEN']]);
+    assert.deepStrictEqual(loopback.sendScreenCalls, [['sess-1', 'SCREEN']]);
+  });
+
+  it('R2 Centrifugo watch-gating is unchanged when a loopback server is registered', async () => {
+    const { router, watchRegistry, centrifugo } = makeRouterWithLoopback();
+
+    await router.publishTerminalData('sess-1', 'pre-watch');
+    assert.deepStrictEqual(centrifugo.calls, []);
+
+    watchRegistry.simulateFirstWatcher('sess-1');
+    await router.publishTerminalData('sess-1', 'post-watch');
+    assert.ok(centrifugo.calls.some((c) => c.kind === 'data' && c.payload === 'post-watch'));
+  });
+
+  it('hasAttachedPeers is true when only the WebRTC peer manager has an attached peer', () => {
+    const { router, peerManager } = makeRouterWithLoopback();
+    peerManager.hasAttachedPeers = () => true;
+    assert.strictEqual((router as unknown as { hasAttachedPeers(id: string): boolean }).hasAttachedPeers('sess-1'), true);
+  });
+
+  it('hasAttachedPeers is true when only the loopback server has an attached peer', () => {
+    const { router, loopback } = makeRouterWithLoopback();
+    loopback.simulateAttach('sess-1');
+    assert.strictEqual((router as unknown as { hasAttachedPeers(id: string): boolean }).hasAttachedPeers('sess-1'), true);
+  });
+
+  it('hasAttachedPeers is false when neither transport has an attached peer', () => {
+    const { router } = makeRouterWithLoopback();
+    assert.strictEqual((router as unknown as { hasAttachedPeers(id: string): boolean }).hasAttachedPeers('sess-1'), false);
+  });
+
+  it('without a loopback option, PublishRouter behaves exactly as before (no loopback fan-out)', async () => {
+    const { router, peerManager } = makeRouter();
+    await router.publishTerminalData('sess-1', 'hello');
+    await router.publishTerminalScreen('sess-1', 'SCREEN');
+    assert.deepStrictEqual(peerManager.sendOutputCalls, [['sess-1', 'hello']]);
+    assert.deepStrictEqual(peerManager.sendScreenCalls, [['sess-1', 'SCREEN']]);
+  });
+});

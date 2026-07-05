@@ -261,6 +261,15 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     });
   }
 
+  /**
+   * The underlying loopback http.Server, for attaching a WebSocket upgrade
+   * handler (loopback WS rung). Null until `start()` resolves. The HTTP request
+   * handler keeps its own loopback-only guard; upgrade guarding is the caller's.
+   */
+  getHttpServer(): Server | null {
+    return this.server;
+  }
+
   stop(): void {
     for (const timer of this.nudgeTimers.values()) clearTimeout(timer);
     this.nudgeTimers.clear();

@@ -13,6 +13,18 @@ export const PAIR_TIMEOUT_MS = 4_000;
 export const PING_INTERVAL_MS = 15_000;
 export const WATCH_HEARTBEAT_MS = 20_000;
 export const WATCH_TTL_MS = 60_000;
+/** Loopback WS rung: TCP connect + hello round-trip budget on 127.0.0.1. */
+export const LOOPBACK_TIMEOUT_MS = 1_500;
+
+/**
+ * Local-rung reachability info a bridge advertises inside its bridges:presence
+ * connInfo. Presence visibility is scoped to the owning user's JWT, so nonce
+ * possession + loopback reachability proves same user, same machine (L2).
+ */
+export interface BridgeLocalAdvert {
+  localPort: number;
+  localNonce: string;
+}
 
 /** Signaling + watch messages, published on the commands:rpc#{userId} channel. */
 export type SignalType = 'webrtc_offer' | 'webrtc_answer' | 'webrtc_ice' | 'webrtc_close';
@@ -63,7 +75,7 @@ export type DirectMessage =
   | { kind: 'ping' }
   | { kind: 'pong' };
 
-export type TerminalTransportMode = 'direct' | 'centrifugo' | 'connecting';
+export type TerminalTransportMode = 'direct' | 'local' | 'centrifugo' | 'connecting';
 
 /**
  * Why a session ended up on the centrifugo fallback path. `null` when direct

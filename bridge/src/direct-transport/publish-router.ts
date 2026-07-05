@@ -8,11 +8,20 @@ export interface CentrifugoPublisher {
   publishTerminalScreen(userId: string, sessionId: string, raw: string): Promise<void>;
 }
 
+/** Minimal view of the loopback WS rung (LoopbackPeerServer) the router fans to. */
+export interface LoopbackPeerServerLike {
+  sendOutput(sessionId: string, data: string): void;
+  sendScreen(sessionId: string, data: string): void;
+  hasAttachedPeers(sessionId: string): boolean;
+}
+
 export interface PublishRouterOptions {
   registry: WatchRegistry;
   peerManager: DirectPeerManager;
   centrifugo: CentrifugoPublisher;
   userId: string;
+  /** Optional loopback WS rung; output/screen fan out to it as well as WebRTC. */
+  loopback?: LoopbackPeerServerLike;
   /**
    * Optional guard: only register watchers for sessions this bridge owns (watch
    * messages fan out to every bridge on the shared commands channel). Defaults
@@ -31,6 +40,7 @@ export class PublishRouter {
   private readonly peerManager: DirectPeerManager;
   private readonly centrifugo: CentrifugoPublisher;
   private readonly userId: string;
+  private readonly loopback?: LoopbackPeerServerLike;
   private readonly isKnownSession: (sessionId: string) => boolean;
 
   constructor(options: PublishRouterOptions) {
@@ -38,11 +48,21 @@ export class PublishRouter {
     this.peerManager = options.peerManager;
     this.centrifugo = options.centrifugo;
     this.userId = options.userId;
+    this.loopback = options.loopback;
     this.isKnownSession = options.isKnownSession ?? (() => true);
+  }
+
+  /** R2 gating: a session is direct-attached if EITHER local rung has a peer. */
+  hasAttachedPeers(sessionId: string): boolean {
+    return (
+      this.peerManager.hasAttachedPeers(sessionId) ||
+      (this.loopback?.hasAttachedPeers(sessionId) ?? false)
+    );
   }
 
   publishTerminalData(sessionId: string, data: string): void {
     this.peerManager.sendOutput(sessionId, data);
+    this.loopback?.sendOutput(sessionId, data);
     if (this.registry.hasWatchers(sessionId)) {
       this.centrifugo.publishTerminalData(this.userId, sessionId, data).catch((err) => {
         console.error(`[DirectTransport] Failed to publish terminal data for ${sessionId}:`, err);
@@ -52,6 +72,7 @@ export class PublishRouter {
 
   publishTerminalScreen(sessionId: string, screen: string): void {
     this.peerManager.sendScreen(sessionId, screen);
+    this.loopback?.sendScreen(sessionId, screen);
     if (this.registry.hasWatchers(sessionId)) {
       this.centrifugo.publishTerminalScreen(this.userId, sessionId, screen).catch((err) => {
         console.error(`[DirectTransport] Failed to publish terminal screen for ${sessionId}:`, err);

@@ -264,4 +264,8 @@ export interface BridgePresenceInfo {
   bridgeId: string;
   hostname: string;
   connectedAt: string;
+  /** Loopback WS rung: ephemeral 127.0.0.1 port of the local API server. */
+  localPort?: number;
+  /** Loopback WS rung: per-process nonce required to upgrade at /ws. */
+  localNonce?: string;
 }
