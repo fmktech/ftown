@@ -7,8 +7,12 @@
 --
 -- Apply against an existing database. schema.sql holds the equivalent
 -- fresh-install definitions.
-
-BEGIN;
+--
+-- Idempotent: safe to re-run, and safe whether or not login_attempts still
+-- exists and whether or not the new tables already exist (e.g. a prior MANUAL
+-- apply before schema_migrations tracking existed). The migration runner
+-- (ui/scripts/migrate.mjs) wraps this file in a single transaction, so this
+-- file must NOT open its own BEGIN/COMMIT.
 
 CREATE TABLE IF NOT EXISTS rate_limit_attempts (
   scope        TEXT        NOT NULL,
@@ -19,11 +23,18 @@ CREATE TABLE IF NOT EXISTS rate_limit_attempts (
   PRIMARY KEY (scope, key)
 );
 
--- Migrate existing login attempt counters (no-op if login_attempts is absent).
-INSERT INTO rate_limit_attempts (scope, key, failed_count, locked_until, updated_at)
-SELECT 'login', email, failed_count, locked_until, updated_at
-FROM login_attempts
-ON CONFLICT (scope, key) DO NOTHING;
+-- Migrate existing login attempt counters. Guarded so it is a true no-op when
+-- login_attempts has already been dropped (a re-run, or fresh install where it
+-- never existed). ON CONFLICT keeps re-runs from duplicating rows.
+DO $$
+BEGIN
+  IF to_regclass('public.login_attempts') IS NOT NULL THEN
+    INSERT INTO rate_limit_attempts (scope, key, failed_count, locked_until, updated_at)
+    SELECT 'login', email, failed_count, locked_until, updated_at
+    FROM login_attempts
+    ON CONFLICT (scope, key) DO NOTHING;
+  END IF;
+END $$;
 
 DROP TABLE IF EXISTS login_attempts;
 
@@ -33,5 +44,3 @@ CREATE TABLE IF NOT EXISTS bridge_refresh (
   current_jti TEXT        NOT NULL,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
-COMMIT;

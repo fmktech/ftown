@@ -352,8 +352,24 @@ sudo docker run -d --name centrifugo \
 #### Database on Neon
 
 1. Create a project at [neon.tech](https://neon.tech)
-2. Run `schema.sql` against the database (use the Neon SQL editor or `psql`)
+2. Run `ui/schema.sql` against the database once for a fresh install (use the Neon SQL editor or `psql`)
 3. Copy the connection string to Vercel env vars
+
+##### Migrations (auto-applied on merge to main)
+
+Incremental schema changes live in `ui/migrations/*.sql`. They are applied
+**automatically** by the `.github/workflows/migrate.yml` GitHub Actions workflow
+on every push to `main` (and via manual **workflow_dispatch**) — no more manual
+"apply the SQL to Neon before deploy" step.
+
+One-time setup: add a repo secret **`MIGRATION_DATABASE_URL`** = a Neon **direct**
+`postgresql://` connection string (the standard TCP host, **not** the
+`@neondatabase/serverless` HTTP host the app uses). The runner
+(`ui/scripts/migrate.mjs`) tracks applied files in a `schema_migrations` table,
+runs each pending migration in a single transaction, and is idempotent (safe to
+re-run, and safe even if a migration was already applied by hand). The workflow
+runs concurrently with Vercel's deploy on the same push; migrations are kept
+additive so that window is safe.
 
 #### Bridge
 
