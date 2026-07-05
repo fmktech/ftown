@@ -115,6 +115,40 @@ async function fetchBridgeToken(
 }
 
 /**
+ * Exchange a (rotating) refresh token for a fresh Centrifugo connect token.
+ *
+ * The server rotates the refresh token on every use (audit finding F3): the
+ * response carries a NEW refreshToken that supersedes the one just sent, so the
+ * caller must persist it and send the newest value next time. Reusing an old
+ * refresh token is rejected.
+ */
+async function refreshBridgeToken(
+  apiUrl: string,
+  refreshToken: string,
+  bridgeId: string,
+  local: { localPort: number; localNonce: string },
+): Promise<BridgeAuthResponse> {
+  const res = await fetch(`${apiUrl}/api/auth/bridge/refresh`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      refreshToken,
+      bridgeId,
+      hostname: osHostname(),
+      localPort: local.localPort,
+      localNonce: local.localNonce,
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Token refresh failed (${res.status}): ${body}`);
+  }
+
+  return res.json() as Promise<BridgeAuthResponse>;
+}
+
+/**
  * Default data dir is ~/.ftown/data (machine-stable, like the rest of ~/.ftown).
  * Older bridges defaulted to ./data relative to the launch cwd — if that legacy
  * dir holds sessions and the new default does not exist yet, migrate it once so
@@ -143,7 +177,7 @@ const program = new Commander();
 program
   .name('ftown-bridge')
   .description('ftown orchestrator bridge for Centrifugo')
-  .requiredOption('--token <jwt>', 'Auth token (JWT signed with Centrifugo secret)')
+  .requiredOption('--token <jwt>', 'Bridge bootstrap token from the ftown dashboard (short-lived; used once to onboard, then a rotating refresh token is stored)')
   .requiredOption('--api-url <url>', 'ftown UI API URL (e.g. https://ftown.vercel.app)')
   .option('--data-dir <path>', 'Directory for session data (default: ~/.ftown/data)')
   .option('--bridge-id <id>', 'Bridge instance ID (default: persisted per data dir)')
@@ -177,11 +211,49 @@ program
     console.log(`[Bridge] Local API server started on port ${hookPort}`);
     const localNonce = randomBytes(16).toString('hex');
 
-    console.log('[Bridge] Authenticating with API...');
-    const auth = await fetchBridgeToken(opts.apiUrl, opts.token, bridgeId, {
-      localPort: hookPort,
-      localNonce,
-    });
+    // The bootstrap token (--token) is single-use and short-lived (F1). Once a
+    // bridge has onboarded it persists its rotating refresh token (F3) and
+    // resumes from that on restart, so the bootstrap token is never reused.
+    const local = { localPort: hookPort, localNonce };
+    const refreshTokenPath = join(dataDir, 'refresh-token');
+
+    let persistedRefreshToken: string | undefined;
+    try {
+      persistedRefreshToken = readFileSync(refreshTokenPath, 'utf8').trim() || undefined;
+    } catch {
+      persistedRefreshToken = undefined;
+    }
+
+    const persistRefreshToken = (token: string): void => {
+      try {
+        writeFileSync(refreshTokenPath, `${token}\n`, { mode: 0o600 });
+      } catch (err) {
+        console.error(
+          '[Bridge] Failed to persist refresh token:',
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    };
+
+    let auth: BridgeAuthResponse;
+    if (persistedRefreshToken) {
+      console.log('[Bridge] Resuming from stored refresh token...');
+      try {
+        auth = await refreshBridgeToken(opts.apiUrl, persistedRefreshToken, bridgeId, local);
+      } catch (err) {
+        console.warn(
+          '[Bridge] Stored refresh token rejected, falling back to bootstrap token:',
+          err instanceof Error ? err.message : String(err),
+        );
+        auth = await fetchBridgeToken(opts.apiUrl, opts.token, bridgeId, local);
+      }
+    } else {
+      console.log('[Bridge] Authenticating with API...');
+      auth = await fetchBridgeToken(opts.apiUrl, opts.token, bridgeId, local);
+    }
+    let currentRefreshToken = auth.refreshToken;
+    persistRefreshToken(currentRefreshToken);
+
     const userId = auth.userId;
     const centrifugoUrl = auth.centrifugoUrl;
 
@@ -195,25 +267,14 @@ program
 
     async function getToken(): Promise<string> {
       console.log('[Bridge] Refreshing Centrifugo token...');
-      const res = await fetch(`${opts.apiUrl}/api/auth/bridge/refresh`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          refreshToken: auth.refreshToken,
-          bridgeId,
-          hostname: osHostname(),
-          // Same process ⇒ same port/nonce; the refresh route re-embeds them.
-          localPort: hookPort,
-          localNonce,
-        }),
-      });
-      if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`Token refresh failed (${res.status}): ${body}`);
-      }
-      const data = await res.json() as { token: string };
+      // Same process ⇒ same port/nonce; the refresh route re-embeds them.
+      const refreshed = await refreshBridgeToken(opts.apiUrl, currentRefreshToken, bridgeId, local);
+      // F3: the refresh token rotated — adopt and persist the new one so the
+      // next refresh (and any restart) uses it. The old one is now rejected.
+      currentRefreshToken = refreshed.refreshToken;
+      persistRefreshToken(currentRefreshToken);
       console.log('[Bridge] Token refreshed successfully');
-      return data.token;
+      return refreshed.token;
     }
 
     const store = new SessionStore(dataDir);

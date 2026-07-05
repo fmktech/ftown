@@ -1,6 +1,6 @@
 # ftown
 
-A remote CLI agent orchestrator that lets you manage and stream **Claude Code** and **Cursor Agent** sessions through a web dashboard.
+A remote CLI agent orchestrator that lets you manage and stream **Claude Code** and **Cursor Agent** sessions through a web dashboard. Terminal streaming climbs a transport ladder — local loopback, then WebRTC P2P, then Centrifugo — so output stays on your machine or network whenever possible, and automatically upgrades back to a direct connection once it can. Recurring agent work runs as scheduled **loops**: cron or interval triggers that spawn full sessions with guardrails, instead of a hand-rolled polling script.
 
 ## Demo
 
@@ -19,26 +19,39 @@ https://github.com/user-attachments/assets/e9c1ce70-70b0-4ba0-81d8-080d4eeef445
                    ┌────┤  Centrifugo  ├────┐
                    │    │  (pub/sub)   │    │
               WebSocket └─────────────┘ WebSocket
-         (control · signaling · fallback data)
+       (control · signaling · rung 3: cloud fallback)
                    │                     │
                    ▼                     ▼
             ┌─────────────┐       ┌─────────────┐
             │   Browser   │◄─────►│   Bridge    │
             │  (Next.js)  │       │ (node-pty)  │
             └─────────────┘       └─────────────┘
-                  WebRTC DataChannel — direct P2P
-                 terminal I/O (localhost / LAN)
+       rung 1: loopback WS — ws://127.0.0.1 (same machine)
+       rung 2: WebRTC DataChannel — direct P2P (localhost / LAN)
+     self-healing: browser keeps retrying rung 1 → 2 while on rung 3
 ```
 
-- **UI** (`/ui`) — Next.js 15 web dashboard with real-time terminal streaming, preferring a direct WebRTC connection to the bridge
-- **Bridge** (`/bridge`) — CLI tool that runs on remote machines, spawns processes via PTY and relays I/O directly to the browser (or through Centrifugo when direct pairing isn't possible)
-- **Centrifugo** (`/centrifugo`) — WebSocket messaging server handling sessions, presence, and signaling, and serving as the fallback data plane for terminal I/O
+- **UI** (`/ui`) — Next.js 15 web dashboard with real-time terminal streaming, climbing the transport ladder (local → P2P → Centrifugo) to reach the bridge
+- **Bridge** (`/bridge`) — CLI tool that runs on remote machines, spawns processes via PTY, serves a loopback WebSocket for same-machine access, and relays I/O directly to the browser over WebRTC (or through Centrifugo when neither direct rung is possible)
+- **Centrifugo** (`/centrifugo`) — WebSocket messaging server handling sessions, presence, and signaling, and serving as the last-resort (rung 3) data plane for terminal I/O
 
 ## Features
 
+### Direct transport ladder
+
+- Every session tries three rungs in order, falling through automatically: **Local** (loopback WebSocket, same machine, plain TCP so it survives VPNs/endpoint filters like Cloudflare WARP that block UDP/WebRTC) → **P2P** (WebRTC DataChannel over LAN/localhost, STUN only, no TURN) → **Cloud** (Centrifugo relay, the reliable fallback used only when both direct rungs fail)
+- Live **Local / P2P / Cloud** badges in the terminal UI, each with a hoverable diagnostic tooltip explaining exactly why you're on that rung (e.g. "P2P unavailable — connection blocked (VPN or firewall may be interfering)")
+- **Self-healing auto-upgrade**: while on Cloud, the browser keeps retrying the ladder in the background (backoff 15s → 30s → 60s → 120s with jitter, plus immediate retry on network-online / tab-visible events) and seamlessly flips a live session from Cloud to Local/P2P with a full screen resync — no reload
+- Local-first, private transport: terminal output never touches the cloud while you're on the same machine or network; Centrifugo relays only while a remote viewer is actively watching
+- Loopback WS is gated by a per-process random nonce plus Origin check; presence adverts are scoped to the owning user's JWT
+
+### Loops
+
+- First-class scheduled recurring agent runs — interval or cron+timezone — each firing a normal session with guardrails (preflight/postflight, max runtime, overlap/retention policy); see [Loops](#loops) below
+
+### Everything else
+
 - **Claude Code** and **Cursor Agent** (`agent`) interactive sessions with resume support
-- Real-time terminal streaming from remote machines to browser — direct peer-to-peer over localhost/LAN, falling back to Centrifugo automatically for remote access
-- Local-first, private transport: terminal output never touches the cloud while you're on the same machine or network — it's only relayed through Centrifugo while a remote viewer is actively watching
 - Hook forwarding to the dashboard (Claude `~/.claude/settings.json`, Cursor `~/.cursor/hooks.json`)
 - Multiple concurrent sessions with session management
 - Multi-bridge support (connect multiple machines)
@@ -46,6 +59,26 @@ https://github.com/user-attachments/assets/e9c1ce70-70b0-4ba0-81d8-080d4eeef445
 - Authentication via NextAuth with rate-limited login
 - Auto-refreshing bridge tokens (30-day refresh tokens)
 - Connection diagnostics overlay for troubleshooting
+
+## Loops
+
+Loops replace fragile "keep an agent awake and polling" patterns with a durable scheduled primitive — cron for agents, with the full session UX (watch live, scroll back, take over) on every run.
+
+Each loop is a schedule + harness + task prompt owned by the bridge; every fire spawns a normal ftown session, grouped under the loop in the dashboard.
+
+```bash
+ftown-sessions loop create \
+  --cron "0 9 * * 1-5" --tz America/New_York \
+  --harness claude --workdir ~/projects/ftown \
+  --preflight "git fetch && git log origin/main..HEAD --oneline" \
+  "Review overnight commits on main: {{preflight}}. Flag anything that needs attention."
+```
+
+- **Schedules** — interval (`--every 30s|5m|2h|1d`) or cron with timezone (`--cron "0 9 * * 1-5" --tz America/New_York`); create via the dashboard's loop modal or the CLI
+- **Harness choice** — claude, cursor, codex, opencode, or plain shell, each with its own configurable workdir and model
+- **Guardrails** — `--preflight <cmd>` (a non-zero exit skips the run; its stdout is injected into the prompt via `{{preflight}}`), `--postflight <cmd>` (receives run status, session id, and output), `--max-runtime` to force-stop a run
+- **Overlap & retention** — overlapping runs are skipped by default (`--allow-overlap` to permit them); retention keeps only the newest N runs
+- **Lifecycle** — pause/resume, fire a one-shot run manually, edit a loop live, and see run history with status dots (running/done/error/skipped/paused) plus next-due time in the dashboard
 
 ## Prerequisites
 
@@ -90,11 +123,20 @@ npm install
 npm run build
 ```
 
-Start a bridge by copying the CLI token command from the web UI (click "CLI Token"):
+Start a bridge with a **bootstrap token**. In the dashboard, click **Generate
+bridge token** (it fetches a fresh, short-lived ~10 min token from the
+session-gated `POST /api/auth/bridge/bootstrap`, audience `ftown:bridge-bootstrap`,
+and copies it to your clipboard):
 
 ```bash
-npx ftown-bridge --token <jwt> --api-url http://localhost:3000
+npx ftown-bridge --token <bootstrap-jwt> --api-url http://localhost:3000
 ```
+
+The bootstrap token is used **once** to onboard the bridge; it is then exchanged
+for a 30-day rotating refresh token stored under the bridge data dir
+(`~/.ftown/data/refresh-token`, `0600`). Restarts resume from that token, so the
+bootstrap token does not need to stay valid — generate a fresh one each time you
+onboard a new bridge.
 
 On start, the bridge **auto-deploys** a local harness CLI:
 
@@ -196,7 +238,8 @@ npm start  # Runs on port 3000
 npx ftown-bridge --token <jwt> --api-url http://192.168.1.100:3000
 ```
 
-Copy the token from the web UI at `http://192.168.1.100:3000` (click "CLI Token").
+Get the token via **Generate bridge token** in the dashboard at
+`http://192.168.1.100:3000` (see Quick Start above).
 
 ---
 
@@ -342,8 +385,24 @@ sudo docker run -d --name centrifugo \
 #### Database on Neon
 
 1. Create a project at [neon.tech](https://neon.tech)
-2. Run `schema.sql` against the database (use the Neon SQL editor or `psql`)
+2. Run `ui/schema.sql` against the database once for a fresh install (use the Neon SQL editor or `psql`)
 3. Copy the connection string to Vercel env vars
+
+##### Migrations (auto-applied on merge to main)
+
+Incremental schema changes live in `ui/migrations/*.sql`. They are applied
+**automatically** by the `.github/workflows/migrate.yml` GitHub Actions workflow
+on every push to `main` (and via manual **workflow_dispatch**) — no more manual
+"apply the SQL to Neon before deploy" step.
+
+One-time setup: add a repo secret **`MIGRATION_DATABASE_URL`** = a Neon **direct**
+`postgresql://` connection string (the standard TCP host, **not** the
+`@neondatabase/serverless` HTTP host the app uses). The runner
+(`ui/scripts/migrate.mjs`) tracks applied files in a `schema_migrations` table,
+runs each pending migration in a single transaction, and is idempotent (safe to
+re-run, and safe even if a migration was already applied by hand). The workflow
+runs concurrently with Vercel's deploy on the same push; migrations are kept
+additive so that window is safe.
 
 #### Bridge
 

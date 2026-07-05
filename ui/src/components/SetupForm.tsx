@@ -11,7 +11,10 @@ export function SetupForm({ onConnect }: SetupFormProps) {
   const [userId, setUserId] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [generatedToken, setGeneratedToken] = useState<string | null>(null);
+  // Bridge bootstrap token — SEPARATE from the browser's own Centrifugo connect
+  // token. It is fetched fresh on click because it expires in ~10 minutes.
+  const [bridgeToken, setBridgeToken] = useState<string | null>(null);
+  const [bridgeLoading, setBridgeLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [copyStatus, setCopyStatus] = useState("");
 
@@ -29,6 +32,8 @@ export function SetupForm({ onConnect }: SetupFormProps) {
     setError(null);
 
     try {
+      // Browser's own dashboard connection: a Centrifugo CONNECT token
+      // (aud "ftown:centrifugo"). Unchanged — this is not a bridge credential.
       const response = await fetch("/api/auth/token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -41,7 +46,6 @@ export function SetupForm({ onConnect }: SetupFormProps) {
       }
 
       const data = await response.json() as { token: string; centrifugoUrl: string };
-      setGeneratedToken(data.token);
 
       localStorage.setItem("ftown_token", data.token);
       localStorage.setItem("ftown_userId", finalUserId);
@@ -55,17 +59,53 @@ export function SetupForm({ onConnect }: SetupFormProps) {
     }
   }, [userId, onConnect]);
 
-  const handleCopyToken = useCallback(async () => {
-    if (!generatedToken) return;
+  const handleGenerateBridgeToken = useCallback(async () => {
+    setBridgeLoading(true);
+    setError(null);
+    setCopied(false);
     try {
-      await navigator.clipboard.writeText(generatedToken);
+      // Session-gated bootstrap token (aud "ftown:bridge-bootstrap"), which is
+      // the only audience /api/auth/bridge accepts to onboard a bridge. Fetched
+      // on click so the copied value is always fresh within its ~10 min window.
+      const response = await fetch("/api/auth/bridge/bootstrap", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      if (!response.ok) {
+        const data = await response.json() as { error: string };
+        throw new Error(data.error || "Failed to generate bridge token");
+      }
+
+      const data = await response.json() as { token: string };
+      setBridgeToken(data.token);
+
+      try {
+        await navigator.clipboard.writeText(data.token);
+        setCopied(true);
+        setCopyStatus("Bridge token copied to clipboard");
+        setTimeout(() => setCopied(false), 2000);
+      } catch {
+        setCopyStatus("Bridge token generated — copy it manually below");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      setBridgeLoading(false);
+    }
+  }, []);
+
+  const handleCopyBridgeToken = useCallback(async () => {
+    if (!bridgeToken) return;
+    try {
+      await navigator.clipboard.writeText(bridgeToken);
       setCopied(true);
-      setCopyStatus("Token copied to clipboard");
+      setCopyStatus("Bridge token copied to clipboard");
       setTimeout(() => setCopied(false), 2000);
     } catch {
       setError("Could not copy to clipboard — please copy manually");
     }
-  }, [generatedToken]);
+  }, [bridgeToken]);
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4">
@@ -128,23 +168,43 @@ export function SetupForm({ onConnect }: SetupFormProps) {
             {loading ? "Connecting..." : "Connect"}
           </button>
 
-          {generatedToken && (
+          <div className="pt-2 border-t border-[var(--border-muted)]">
+            <button
+              type="button"
+              onClick={handleGenerateBridgeToken}
+              disabled={bridgeLoading}
+              className="btn-ghost w-full !py-2.5 flex items-center justify-center gap-2 !text-[var(--accent)]"
+            >
+              {bridgeLoading && (
+                <span
+                  className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin"
+                  aria-hidden="true"
+                />
+              )}
+              {bridgeLoading ? "Generating..." : "Generate bridge token"}
+            </button>
+            <p className="mt-1 text-xs text-[var(--text-faint)]">
+              Short-lived — expires in 10 min. Generate a fresh one each time you connect a bridge.
+            </p>
+          </div>
+
+          {bridgeToken && (
             <div
               aria-live="polite"
-              className="fade-in mt-4 rounded-[var(--radius-sm)] border border-[var(--border-default)] p-3 bg-[var(--bg-base)]"
+              className="fade-in mt-2 rounded-[var(--radius-sm)] border border-[var(--border-default)] p-3 bg-[var(--bg-base)]"
             >
               <div className="flex items-center justify-between mb-2">
-                <span className="text-xs text-[var(--text-secondary)]">JWT Token (for CLI bridges)</span>
+                <span className="text-xs text-[var(--text-secondary)]">Bridge connect token</span>
                 <button
                   type="button"
-                  onClick={handleCopyToken}
+                  onClick={handleCopyBridgeToken}
                   className="btn-ghost !text-[var(--accent)] min-h-[36px]"
                 >
-                  {copied ? "Copied!" : "Copy for CLI"}
+                  {copied ? "Copied!" : "Copy bridge token"}
                 </button>
               </div>
               <p className="text-xs text-[var(--text-faint)] break-all font-mono leading-relaxed">
-                {generatedToken}
+                {bridgeToken}
               </p>
             </div>
           )}

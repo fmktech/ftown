@@ -15,7 +15,11 @@ export function sharedEmail(): string {
   return email;
 }
 
-/** Register via the same endpoint the app exposes. Idempotent (tolerates 409). */
+/**
+ * Register via the same endpoint the app exposes. Idempotent: F4 made register
+ * non-enumerating, so it returns a generic 200 for both new and existing
+ * accounts — any 2xx is success.
+ */
 export async function registerUser(email: string): Promise<void> {
   const res = await fetch(`${UI_BASE_URL}/api/auth/register`, {
     method: "POST",
@@ -23,7 +27,7 @@ export async function registerUser(email: string): Promise<void> {
     body: JSON.stringify({ email, password: PASSWORD }),
   });
   const body = await res.text();
-  if (res.status !== 201 && res.status !== 409) {
+  if (!res.ok) {
     throw new Error(`register failed: ${res.status} ${body}`);
   }
 }

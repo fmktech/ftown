@@ -7,7 +7,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "ftown — Remote coding agent orchestration",
   description:
-    "Self-hosted dashboard to stream and manage Claude Code, Cursor Agent, and other CLI agents across remote bridges.",
+    "Self-hosted dashboard to stream Claude Code, Cursor Agent, and other CLI agents with local-first/P2P terminals and scheduled loops.",
   manifest: "/manifest.json",
   icons: {
     icon: "/icon.svg",

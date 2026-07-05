@@ -1,8 +1,10 @@
 // Create the schema the UI expects. Connects straight to the Postgres container
 // over TCP (NOT through the neon shim). Idempotent.
 //
-// users:          ui/src/app/api/auth/register/route.ts + ui/src/lib/auth.ts
-// login_attempts: ui/src/lib/login-rate-limit.ts
+// users:               ui/src/app/api/auth/register/route.ts + ui/src/lib/auth.ts
+// rate_limit_attempts: ui/src/lib/login-rate-limit.ts (login + register)
+// bridge_refresh:      ui/src/app/api/auth/bridge/refresh/route.ts (jti rotation)
+// Mirrors ui/schema.sql (kept in sync with the auth-hardening migration).
 import pg from "pg";
 
 const { Client } = pg;
@@ -23,10 +25,19 @@ CREATE TABLE IF NOT EXISTS users (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS login_attempts (
-  email text PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS rate_limit_attempts (
+  scope text NOT NULL,
+  key text NOT NULL,
   failed_count integer NOT NULL DEFAULT 0,
   locked_until timestamptz,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (scope, key)
+);
+
+CREATE TABLE IF NOT EXISTS bridge_refresh (
+  bridge_id text PRIMARY KEY,
+  sub text NOT NULL,
+  current_jti text NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 `;
@@ -34,4 +45,4 @@ CREATE TABLE IF NOT EXISTS login_attempts (
 await client.connect();
 await client.query(DDL);
 await client.end();
-console.log("[setup-db] schema ready (users, login_attempts)");
+console.log("[setup-db] schema ready (users, rate_limit_attempts, bridge_refresh)");

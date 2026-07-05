@@ -1,0 +1,51 @@
+# Apply pending DB migrations to production on merge to main.
+#
+# Requires the repo secret MIGRATION_DATABASE_URL: a Neon DIRECT postgres://
+# connection string (the standard TCP host, e.g. ...-pooler is fine but it must
+# be a `postgresql://` URL — NOT the @neondatabase/serverless HTTP host used by
+# the app runtime). The runner (ui/scripts/migrate.mjs) connects over TCP via pg.
+#
+# NOTES:
+# - main-only: runs on push to main and via manual dispatch. It deliberately does
+#   NOT run on pull_request, so prod secrets are never exposed to PR/fork branches.
+# - Races Vercel's deploy on the same push: both trigger from the merge commit and
+#   run concurrently. Our migrations are additive (CREATE TABLE IF NOT EXISTS, guarded
+#   data copy), so the brief window where new code meets the old schema — or new
+#   schema meets old code — is safe. Keep future migrations additive/backwards
+#   compatible to preserve this property.
+# - The concurrency group serializes the migrator itself so two quick pushes can't
+#   race each other into the same database.
+# - FIRST run still needs the MIGRATION_DATABASE_URL secret configured in the repo.
+
+name: migrate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ui/migrations/**
+      - ui/scripts/migrate.mjs
+      - .github/workflows/migrate.yml
+  workflow_dispatch:
+
+concurrency:
+  group: db-migrate
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install deps
+        working-directory: ui
+        run: npm ci
+      - name: Apply migrations
+        working-directory: ui
+        run: node scripts/migrate.mjs
+        env:
+          MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import jwt from "jsonwebtoken";
 import { auth } from "@/lib/auth";
+import { getRequiredSecret } from "@/lib/secrets";
 
 export async function POST(): Promise<NextResponse> {
   const session = await auth();
@@ -8,12 +9,15 @@ export async function POST(): Promise<NextResponse> {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const secret = process.env.CENTRIFUGO_TOKEN_SECRET;
-  if (!secret) {
-    return NextResponse.json(
-      { error: "CENTRIFUGO_TOKEN_SECRET not configured" },
-      { status: 500 }
+  let secret: string;
+  try {
+    secret = getRequiredSecret("CENTRIFUGO_TOKEN_SECRET");
+  } catch (err) {
+    console.error(
+      "[auth/token] secret misconfiguration:",
+      err instanceof Error ? err.message : String(err),
     );
+    return NextResponse.json({ error: "Server misconfiguration" }, { status: 500 });
   }
 
   const token = jwt.sign({ sub: session.user.email }, secret, { audience: "ftown:centrifugo", expiresIn: "24h" });
