@@ -90,11 +90,20 @@ npm install
 npm run build
 ```
 
-Start a bridge by copying the CLI token command from the web UI (click "CLI Token"):
+Start a bridge with a **bootstrap token**. In the dashboard, click **Generate
+bridge token** (it fetches a fresh, short-lived ~10 min token from the
+session-gated `POST /api/auth/bridge/bootstrap`, audience `ftown:bridge-bootstrap`,
+and copies it to your clipboard):
 
 ```bash
-npx ftown-bridge --token <jwt> --api-url http://localhost:3000
+npx ftown-bridge --token <bootstrap-jwt> --api-url http://localhost:3000
 ```
+
+The bootstrap token is used **once** to onboard the bridge; it is then exchanged
+for a 30-day rotating refresh token stored under the bridge data dir
+(`~/.ftown/data/refresh-token`, `0600`). Restarts resume from that token, so the
+bootstrap token does not need to stay valid — generate a fresh one each time you
+onboard a new bridge.
 
 On start, the bridge **auto-deploys** a local harness CLI:
 
@@ -196,7 +205,8 @@ npm start  # Runs on port 3000
 npx ftown-bridge --token <jwt> --api-url http://192.168.1.100:3000
 ```
 
-Copy the token from the web UI at `http://192.168.1.100:3000` (click "CLI Token").
+Get the token via **Generate bridge token** in the dashboard at
+`http://192.168.1.100:3000` (see Quick Start above).
 
 ---
 

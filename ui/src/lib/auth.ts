@@ -3,6 +3,7 @@ import Credentials from "next-auth/providers/credentials";
 import { compare } from "bcryptjs";
 import { getDb } from "@/lib/db";
 import { checkLoginRateLimit, recordFailedLogin, resetLoginAttempts } from "@/lib/login-rate-limit";
+import { getRequiredSecret } from "@/lib/secrets";
 
 interface DbUser {
   id: string;
@@ -11,6 +12,9 @@ interface DbUser {
 }
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
+  // F2: fail-fast if AUTH_SECRET is missing or weak — never run sessions on a
+  // weak/absent signing key.
+  secret: getRequiredSecret("AUTH_SECRET"),
   providers: [
     Credentials({
       credentials: {

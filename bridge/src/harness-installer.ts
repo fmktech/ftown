@@ -186,7 +186,7 @@ Prefer mail over \`send\` (keystroke injection) for agent-to-agent communication
 
 ## When bridge is down
 
-\`${h}\` exits with a clear error. Start bridge from ftown UI → CLI Token → \`npx ftown-bridge --token ... --api-url ...\`
+\`${h}\` exits with a clear error. Start bridge from ftown UI → Connect a bridge → copy the bootstrap token → \`npx ftown-bridge --token ... --api-url ...\`
 
 ## context-mode
 
