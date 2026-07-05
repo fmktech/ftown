@@ -20,6 +20,20 @@ jobs:
       - name: Install zsh + tmux
         run: sudo apt-get update && sudo apt-get install -y zsh tmux
 
+      # Runner images ship group/other-writable zsh function/completion dirs, so
+      # compinit (run by Ubuntu's /etc/zsh/zshrc for interactive shells) prompts
+      # "insecure directories ... [y] or abort" when the bridge spawns
+      # `/bin/zsh -l`, and the session never reaches a prompt. Tighten every dir
+      # compaudit flags (compaudit is a zsh autoload, so invoke it via zsh), then
+      # verify a clean audit. Belt-and-braces with the skip_global_compinit knob
+      # written into the bridge's scratch HOME by start-services.sh.
+      - name: Fix zsh insecure completion directories
+        run: |
+          zsh -c 'autoload -Uz compaudit; compaudit' 2>/dev/null \
+            | xargs -r sudo chmod -R g-w,o-w || true
+          echo "remaining insecure dirs (want none):"
+          zsh -c 'autoload -Uz compaudit; compaudit' || true
+
       # Postgres + Neon HTTP shim (:443) + Centrifugo (:8000). The shim lets the
       # UI's @neondatabase/serverless neon() driver reach Postgres unmodified.
       - name: Start infra (postgres + neon-http-shim + centrifugo)

@@ -15,6 +15,17 @@ set -a; source "$E2E_DIR/env.sh"; set +a
 BRIDGE_HOME="$E2E_DIR/.bridge-home"
 rm -rf "$BRIDGE_HOME"; mkdir -p "$BRIDGE_HOME"
 
+# Sessions spawn `/bin/zsh -l` with HOME=$BRIDGE_HOME. On Ubuntu the global
+# /etc/zsh/zshrc runs compinit unless skip_global_compinit is set, and runner
+# images ship group-writable completion dirs, so compinit would block on an
+# interactive "insecure directories" prompt and the terminal never reaches a
+# prompt. ~/.zshenv is sourced BEFORE /etc/zsh/zshrc, so the knob wins. The
+# ~/.zshrc suppresses zsh-newuser-install and keeps completion working without
+# the security audit (-u = allow insecure dirs). The bridge appends its PATH
+# export to .zshenv on startup — appending to this file is fine.
+printf 'skip_global_compinit=1\n' > "$BRIDGE_HOME/.zshenv"
+printf 'autoload -Uz compinit\ncompinit -u\n' > "$BRIDGE_HOME/.zshrc"
+
 : "${E2E_USER_EMAIL:=e2e+$(date +%s)@ftown.test}"
 export E2E_USER_EMAIL
 echo "$E2E_USER_EMAIL" > "$E2E_DIR/.run-email"
