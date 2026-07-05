@@ -18,3 +18,5 @@ export const CENTRIFUGO_API_URL =
 export const UI_BASE_URL = process.env.UI_BASE_URL ?? "http://localhost:3000";
 
 export const TOKEN_AUDIENCE = "ftown:centrifugo";
+// F1: /api/auth/bridge now requires a distinct bootstrap audience.
+export const BRIDGE_BOOTSTRAP_AUDIENCE = "ftown:bridge-bootstrap";
