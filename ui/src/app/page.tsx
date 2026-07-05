@@ -89,6 +89,15 @@ function ZapIcon() {
   );
 }
 
+function ClockIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="12 6 12 12 16 14" />
+    </svg>
+  );
+}
+
 const SUPPORTED_AGENTS = [
   { name: "Claude Code", detail: "Anthropic + API providers" },
   { name: "Cursor Agent", detail: "agent CLI" },
@@ -120,6 +129,31 @@ const STATS = [
   { value: "∞", label: "parallel sessions" },
   { value: "100%", label: "self-hosted" },
   { value: "MIT", label: "open source" },
+] as const;
+
+const TRANSPORT_LADDER = [
+  {
+    rung: "Local",
+    glow: true,
+    desc: "Loopback WebSocket, plain TCP — survives VPNs and endpoint filters like Cloudflare WARP that block UDP/WebRTC. Data never leaves the machine.",
+  },
+  {
+    rung: "P2P",
+    glow: true,
+    desc: "WebRTC DataChannel over LAN or localhost, STUN only. Data stays on your network.",
+  },
+  {
+    rung: "Cloud",
+    glow: false,
+    desc: "Centrifugo relay — the reliable fallback used only when both direct rungs fail.",
+  },
+] as const;
+
+const LOOP_GUARDRAILS = [
+  { label: "Preflight", desc: "A non-zero exit skips the run; stdout gets injected into the prompt." },
+  { label: "Max runtime", desc: "Force-stops runs past a time limit." },
+  { label: "Overlap guard", desc: "Skips a fire by default if the previous run is still going." },
+  { label: "Retention", desc: "Keeps only the newest N runs per loop." },
 ] as const;
 
 const FEATURES = [
@@ -162,6 +196,11 @@ const FEATURES = [
     icon: <LockIcon />,
     title: "Terminal data stays on your network",
     desc: "On localhost or LAN, terminal I/O pairs peer-to-peer and never touches the cloud. Centrifugo only relays it while a remote viewer is actively watching.",
+  },
+  {
+    icon: <ClockIcon />,
+    title: "Scheduled loops",
+    desc: "Cron for agents — fire a harness on an interval or cron schedule with preflight/postflight guardrails. Every run is a full session you can watch live or scroll back through.",
   },
 ] as const;
 
@@ -296,7 +335,12 @@ export default async function LandingPage() {
             <p className="font-[family-name:var(--font-sans)] text-sm sm:text-base text-[var(--text-secondary)] leading-relaxed max-w-[52ch] mb-6">
               ftown streams Claude Code, Cursor, Codex, opencode, and shells from any
               machine to your desktop or phone — no SSH, no port forwarding. Self-hosted,
-              on the subscriptions you already pay for.
+              on the subscriptions you already pay for. Terminals stay{" "}
+              <span className="text-[var(--accent)] [text-shadow:0_0_16px_var(--accent-glow)]">
+                local or P2P
+              </span>{" "}
+              whenever possible, and scheduled loops keep agents firing on a cron even
+              when nobody&apos;s watching.
             </p>
 
             <div className="flex flex-wrap gap-2 mb-7 max-w-[520px]">
@@ -388,6 +432,42 @@ export default async function LandingPage() {
           </div>
         </div>
 
+        {/* Transport ladder */}
+        <div className="mt-8 w-full max-w-[720px]">
+          <div className="text-[11px] font-semibold tracking-[0.08em] uppercase text-[var(--text-muted)] mb-4 text-center">
+            Every session tries the ladder, in order
+          </div>
+          <div className="grid sm:grid-cols-3 gap-3">
+            {TRANSPORT_LADDER.map((t) => (
+              <div
+                key={t.rung}
+                className="rounded-[var(--radius-md)] bg-[var(--bg-surface)] border border-[var(--border-muted)] p-4"
+              >
+                <span
+                  className="inline-flex items-center gap-1.5 text-[10px] font-[family-name:var(--font-mono)] tracking-[0.04em] bg-[var(--bg-elevated)] border border-[var(--border-muted)] rounded-[var(--radius-sm)] px-1.5 py-[3px] mb-2.5"
+                >
+                  <span
+                    aria-hidden="true"
+                    className={`w-[5px] h-[5px] rounded-full ${
+                      t.glow
+                        ? "bg-[var(--accent)] shadow-[0_0_5px_var(--accent-glow)]"
+                        : "bg-[var(--text-muted)]"
+                    }`}
+                  />
+                  {t.rung}
+                </span>
+                <div className="font-[family-name:var(--font-sans)] text-[13px] text-[var(--text-secondary)] leading-relaxed">
+                  {t.desc}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 text-[11px] text-[var(--text-faint)] text-center">
+            While on Cloud, the browser keeps retrying Local and P2P in the background and
+            seamlessly flips a live session back up the ladder with a full screen resync — no reload.
+          </div>
+        </div>
+
         {/* How it works */}
         <div className="mt-14 sm:mt-20 w-full max-w-[960px]">
           <div className="text-[11px] font-semibold tracking-[0.08em] uppercase text-[var(--text-muted)] mb-4 text-center">
@@ -429,6 +509,49 @@ export default async function LandingPage() {
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+
+        {/* Loops */}
+        <div className="mt-14 sm:mt-20 w-full max-w-[960px] rounded-[var(--radius-lg)] bg-[var(--bg-surface)] border border-[var(--border-muted)] p-6 sm:p-8">
+          <div className="flex flex-col lg:flex-row gap-8 lg:gap-10">
+            <div className="flex-1 min-w-0">
+              <div className="text-[11px] font-semibold tracking-[0.08em] uppercase text-[var(--accent)] mb-2">
+                Scheduled loops
+              </div>
+              <div className="text-[11px] font-semibold tracking-[0.08em] uppercase text-[var(--text-muted)] mb-4 text-center">
+                Cron for agents
+              </div>
+              <p className="font-[family-name:var(--font-sans)] text-[13px] sm:text-sm text-[var(--text-secondary)] leading-relaxed mb-4 max-w-[52ch]">
+                Replace &quot;keep an agent awake and polling&quot; hacks with a first-class
+                schedule. Fire a loop on an interval (<code className="font-[family-name:var(--font-mono)] text-[var(--text-primary)]">every 5m</code>) or
+                cron with a timezone, pick the harness — Claude Code, Cursor, Codex,
+                opencode, or shell — plus workdir and model. Every fire spawns a full
+                session grouped under the loop: watch it live, scroll back, or take over.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {LOOP_GUARDRAILS.map((g) => (
+                  <span
+                    key={g.label}
+                    className="text-[11px] font-[family-name:var(--font-mono)] px-2.5 py-1 rounded-[var(--radius-sm)] border border-[var(--border-muted)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]"
+                    title={g.desc}
+                  >
+                    {g.label}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <div className="lg:w-[280px] shrink-0 rounded-[var(--radius-md)] border border-[var(--border-muted)] bg-[var(--bg-elevated)] p-4">
+              <div className="text-[11px] font-semibold tracking-[0.08em] uppercase text-[var(--text-muted)] mb-3">
+                Per-loop controls
+              </div>
+              <ul className="text-[13px] text-[var(--text-secondary)] leading-relaxed space-y-1.5 list-none">
+                <li>Pause / resume, manual fire</li>
+                <li>Live edits</li>
+                <li>Run history with status dots</li>
+                <li>Postflight hook on completion</li>
+              </ul>
+            </div>
           </div>
         </div>
 
