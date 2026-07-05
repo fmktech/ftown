@@ -80,6 +80,22 @@ jobs:
             e2e/bridge.log
           retention-days: 7
 
+      # Self-explaining failures: dump compose state, healthcheck history and
+      # container logs when any step failed (runs before teardown removes them).
+      - name: Dump infra logs on failure
+        if: failure()
+        working-directory: e2e
+        run: |
+          docker compose ps -a || true
+          echo "===== centrifugo healthcheck history ====="
+          docker inspect --format '{{json .State.Health}}' e2e-centrifugo-1 || true
+          echo "===== centrifugo logs ====="
+          docker compose logs centrifugo || true
+          echo "===== neon-http-shim logs ====="
+          docker compose logs neon-http-shim || true
+          echo "===== postgres logs ====="
+          docker compose logs postgres || true
+
       - name: Tear down infra
         if: always()
         working-directory: e2e

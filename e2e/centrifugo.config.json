@@ -97,5 +97,6 @@
   "client_stale_close_delay": "30s",
   "ping_interval": "10s",
   "pong_timeout": "5s",
-  "log_level": "info"
+  "log_level": "info",
+  "health": true
 }
