@@ -1,6 +1,7 @@
 import {
   WATCH_HEARTBEAT_MS,
   type DirectCommandMessage,
+  type FallbackReason,
   type SignalMessage,
   type TerminalDataHandlers,
   type TerminalTransportApi,
@@ -43,6 +44,8 @@ interface PeerEntry {
   peer: WebRtcPeerApi | null;
   status: PeerStatus;
   sessions: Set<string>;
+  /** Why this bridge's peer is on the failed/fallback path; null while connecting/direct. */
+  reason: FallbackReason;
 }
 
 interface SessionEntry {
@@ -55,6 +58,8 @@ interface SessionEntry {
   outputSub: CentrifugoSubscriptionLike | null;
   inputSub: CentrifugoSubscriptionLike | null;
   watchTimer: ReturnType<typeof setInterval> | null;
+  /** Why this session is on the centrifugo path; null when direct/connecting. */
+  reason: FallbackReason;
 }
 
 /**
@@ -103,6 +108,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
       outputSub: null,
       inputSub: null,
       watchTimer: null,
+      reason: null,
     };
     this.sessions.set(sessionId, entry);
 
@@ -112,7 +118,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     if (pe.status === 'direct' && pe.peer) {
       this.goDirect(entry, pe.peer);
     } else if (pe.status === 'failed') {
-      this.goCentrifugo(entry);
+      this.goCentrifugo(entry, pe.reason);
     }
     // 'connecting': stay in the default 'connecting' mode until the peer resolves.
 
@@ -141,6 +147,10 @@ export class HybridTerminalTransport implements TerminalTransportApi {
 
   getMode(sessionId: string): TerminalTransportMode {
     return this.sessions.get(sessionId)?.mode ?? 'connecting';
+  }
+
+  getFallbackReason(sessionId: string): FallbackReason {
+    return this.sessions.get(sessionId)?.reason ?? null;
   }
 
   onModeChange(cb: (sessionId: string, mode: TerminalTransportMode) => void): () => void {
@@ -190,12 +200,17 @@ export class HybridTerminalTransport implements TerminalTransportApi {
       });
     } catch {
       // WebRTC unsupported/blocked (e.g. Safari): fall back for this bridge.
-      const failed: PeerEntry = { peer: null, status: 'failed', sessions: new Set() };
+      const failed: PeerEntry = {
+        peer: null,
+        status: 'failed',
+        sessions: new Set(),
+        reason: 'pairing_failed',
+      };
       this.peers.set(bridgeId, failed);
       return failed;
     }
 
-    const pe: PeerEntry = { peer, status: 'connecting', sessions: new Set() };
+    const pe: PeerEntry = { peer, status: 'connecting', sessions: new Set(), reason: null };
     this.peers.set(bridgeId, pe);
 
     peer.onClose(() => this.onPeerDown(bridgeId));
@@ -223,13 +238,17 @@ export class HybridTerminalTransport implements TerminalTransportApi {
   private onPeerDown(bridgeId: string): void {
     const pe = this.peers.get(bridgeId);
     if (!pe || pe.status === 'failed') return;
+    // A peer that reached 'direct' was an open connection that closed mid-session;
+    // one still 'connecting' never finished pairing at all.
+    const reason: FallbackReason = pe.status === 'direct' ? 'peer_lost' : 'pairing_failed';
     pe.status = 'failed';
     pe.peer = null;
+    pe.reason = reason;
     if (this.disposed) return;
     for (const sessionId of pe.sessions) {
       const entry = this.sessions.get(sessionId);
       if (entry && !entry.disposed) {
-        this.goCentrifugo(entry);
+        this.goCentrifugo(entry, reason);
       }
     }
   }
@@ -237,6 +256,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
   private goDirect(entry: SessionEntry, peer: WebRtcPeerApi): void {
     if (entry.disposed) return;
     entry.direct = true;
+    entry.reason = null;
     // Bridge replies to attach with a `screen` frame before any `output` (R1).
     peer.attach(entry.sessionId, {
       onScreen: (data) => entry.handlers.onScreen(data),
@@ -245,7 +265,8 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     this.setMode(entry, 'direct');
   }
 
-  private goCentrifugo(entry: SessionEntry): void {
+  private goCentrifugo(entry: SessionEntry, reason: FallbackReason): void {
+    entry.reason = reason;
     if (entry.disposed || entry.mode === 'centrifugo') return;
     entry.direct = false;
 

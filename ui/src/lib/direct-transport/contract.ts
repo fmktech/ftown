@@ -65,6 +65,14 @@ export type DirectMessage =
 
 export type TerminalTransportMode = 'direct' | 'centrifugo' | 'connecting';
 
+/**
+ * Why a session ended up on the centrifugo fallback path. `null` when direct
+ * (or not yet resolved). UI-only diagnostic — additive extension to the
+ * frozen wire contract above (no wire-format change), following the same
+ * precedent as `onNewWatcher`.
+ */
+export type FallbackReason = 'pairing_failed' | 'peer_lost' | null;
+
 export interface TerminalDataHandlers {
   /** Incremental output chunk. */
   onOutput: (data: string) => void;
@@ -88,5 +96,7 @@ export interface TerminalTransportApi {
   sendResize(sessionId: string, cols: number, rows: number): void;
   getMode(sessionId: string): TerminalTransportMode;
   onModeChange(cb: (sessionId: string, mode: TerminalTransportMode) => void): () => void;
+  /** Why the session is on the centrifugo path; `null` for direct/connecting. */
+  getFallbackReason(sessionId: string): FallbackReason;
   dispose(): void;
 }

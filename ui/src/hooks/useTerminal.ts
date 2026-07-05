@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useCallback, useState } from "react";
-import { TerminalTransportApi, TerminalTransportMode } from "@/lib/direct-transport/contract";
+import { FallbackReason, TerminalTransportApi, TerminalTransportMode } from "@/lib/direct-transport/contract";
 
 interface UseTerminalResult {
   subscribe: () => void;
@@ -10,6 +10,8 @@ interface UseTerminalResult {
   /** Current data-path for this session; null until subscribed. Exposed for
    *  future UI badges — no visual consumer yet. */
   mode: TerminalTransportMode | null;
+  /** Why `mode` is 'centrifugo' (pairing failed vs peer lost); null otherwise. */
+  fallbackReason: FallbackReason;
 }
 
 /**
@@ -32,6 +34,7 @@ export function useTerminal(
   const onScreenRef = useRef(onScreen);
   onScreenRef.current = onScreen;
   const [mode, setMode] = useState<TerminalTransportMode | null>(null);
+  const [fallbackReason, setFallbackReason] = useState<FallbackReason>(null);
 
   const cleanup = useCallback(() => {
     if (unsubscribeRef.current) {
@@ -44,6 +47,7 @@ export function useTerminal(
     cleanup();
     if (!transport || !sessionId || !bridgeId) {
       setMode(null);
+      setFallbackReason(null);
       return;
     }
 
@@ -52,13 +56,17 @@ export function useTerminal(
       onScreen: (data) => onScreenRef.current(data),
     });
     setMode(transport.getMode(sessionId));
+    setFallbackReason(transport.getFallbackReason(sessionId));
   }, [transport, sessionId, bridgeId, cleanup]);
 
   // Track mode transitions (e.g. direct <-> centrifugo fallback) for this session.
   useEffect(() => {
     if (!transport || !sessionId) return undefined;
     return transport.onModeChange((changedSessionId, newMode) => {
-      if (changedSessionId === sessionId) setMode(newMode);
+      if (changedSessionId === sessionId) {
+        setMode(newMode);
+        setFallbackReason(transport.getFallbackReason(changedSessionId));
+      }
     });
   }, [transport, sessionId]);
 
@@ -84,5 +92,5 @@ export function useTerminal(
     [transport, sessionId]
   );
 
-  return { subscribe, sendInput, sendResize, mode };
+  return { subscribe, sendInput, sendResize, mode, fallbackReason };
 }
