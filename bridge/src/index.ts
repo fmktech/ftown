@@ -15,6 +15,7 @@ import { CentrifugoClient } from './centrifugo-client.js';
 import { WatchRegistry } from './direct-transport/watch-registry.js';
 import { DirectPeerManager } from './direct-transport/peer-manager.js';
 import { PublishRouter } from './direct-transport/publish-router.js';
+import { LoopbackPeerServer } from './direct-transport/loopback-server.js';
 import { toWireSession } from './session-wire.js';
 import { ProcessRunner } from './claude-runner.js';
 import { SessionStore } from './session-store.js';
@@ -85,7 +86,12 @@ interface BridgeAuthResponse {
   userId: string;
 }
 
-async function fetchBridgeToken(apiUrl: string, authToken: string, bridgeId: string): Promise<BridgeAuthResponse> {
+async function fetchBridgeToken(
+  apiUrl: string,
+  authToken: string,
+  bridgeId: string,
+  local: { localPort: number; localNonce: string },
+): Promise<BridgeAuthResponse> {
   const res = await fetch(`${apiUrl}/api/auth/bridge`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -93,6 +99,10 @@ async function fetchBridgeToken(apiUrl: string, authToken: string, bridgeId: str
       token: authToken,
       bridgeId,
       hostname: osHostname(),
+      // Embedded in the Centrifugo connection JWT `info` claim so the owning
+      // user's clients discover the loopback WS rung via presence (L2).
+      localPort: local.localPort,
+      localNonce: local.localNonce,
     }),
   });
 
@@ -156,8 +166,22 @@ program
       console.error('[Bridge] Failed to persist bridge id:', err instanceof Error ? err.message : String(err));
     }
 
+    // The local API server binds before the token fetch: its ephemeral port and
+    // the per-process loopback nonce ride the auth request so the UI can embed
+    // them in the Centrifugo connection JWT `info` claim (presence advert, L2).
+    // Binding needs no post-auth state — dependencies/routes are wired later.
+    const localApiServer = new LocalApiServer();
+    const apiToken = randomBytes(32).toString('hex');
+    localApiServer.setAuthToken(apiToken);
+    const hookPort = await localApiServer.start();
+    console.log(`[Bridge] Local API server started on port ${hookPort}`);
+    const localNonce = randomBytes(16).toString('hex');
+
     console.log('[Bridge] Authenticating with API...');
-    const auth = await fetchBridgeToken(opts.apiUrl, opts.token, bridgeId);
+    const auth = await fetchBridgeToken(opts.apiUrl, opts.token, bridgeId, {
+      localPort: hookPort,
+      localNonce,
+    });
     const userId = auth.userId;
     const centrifugoUrl = auth.centrifugoUrl;
 
@@ -178,6 +202,9 @@ program
           refreshToken: auth.refreshToken,
           bridgeId,
           hostname: osHostname(),
+          // Same process ⇒ same port/nonce; the refresh route re-embeds them.
+          localPort: hookPort,
+          localNonce,
         }),
       });
       if (!res.ok) {
@@ -231,9 +258,24 @@ program
       onResize: (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
       onAttach: (sid) => terminalManager.serialize(sid, 20000) ?? '',
     });
+    // Loopback WebSocket rung: same DirectMessage protocol as WebRTC, tunneled
+    // over TCP on the existing 127.0.0.1 local API server. Bypasses VPN/endpoint
+    // filters that kill UDP hairpin. Input/resize/attach feed the SAME sinks as
+    // the WebRTC peer manager; upgrades are gated on the per-process nonce (L1/L2).
+    let apiOrigin = '';
+    try { apiOrigin = new URL(opts.apiUrl).origin; } catch { /* leave empty; only localhost origins accepted */ }
+    const loopbackServer = new LoopbackPeerServer({
+      bridgeId,
+      nonce: localNonce,
+      allowedOrigins: apiOrigin ? [apiOrigin] : [],
+      onInput: (sid, data) => { runner.write(sid, data); },
+      onResize: (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
+      onAttach: (sid) => terminalManager.serialize(sid, 20000) ?? '',
+    });
     const publishRouter = new PublishRouter({
       registry: watchRegistry,
       peerManager: directPeers,
+      loopback: loopbackServer,
       centrifugo,
       userId,
       // Watch messages fan out to every bridge on commands:rpc; only register
@@ -246,11 +288,12 @@ program
     // dump is channel-wide; existing viewers re-render idempotently.
     watchRegistry.onNewWatcher((sid) => publishScreenDump(sid));
 
-    const localApiServer = new LocalApiServer();
-    const apiToken = randomBytes(32).toString('hex');
-    localApiServer.setAuthToken(apiToken);
-    const hookPort = await localApiServer.start();
-    console.log(`[Bridge] Local API server started on port ${hookPort}`);
+    // Bind the loopback WS upgrade handler onto the already-listening server.
+    const loopbackHttpServer = localApiServer.getHttpServer();
+    if (loopbackHttpServer) {
+      loopbackServer.attach(loopbackHttpServer);
+      console.log(`[Bridge] Loopback WS rung ready at ws://127.0.0.1:${hookPort}/ws`);
+    }
     localApiServer.setDependencies(store, runner, centrifugo, userId, terminalManager);
     const mailStore = new MailStore((sessionId) => store.sessionDir(sessionId));
     localApiServer.setMailStore(mailStore);
@@ -1190,6 +1233,7 @@ program
       scheduler.stop();
       localApiServer.stop();
       runner.stopAll();
+      loopbackServer.closeAll();
       directPeers.closeAll();
       watchRegistry.dispose();
       // node-datachannel module-level cleanup — avoids the native crash-on-exit race.

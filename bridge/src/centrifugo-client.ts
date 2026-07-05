@@ -265,6 +265,9 @@ export class CentrifugoClient {
     this.subscriptions.set(channel, sub);
   }
 
+  // The loopback rung advert (localPort/localNonce) rides the connection JWT's
+  // `info` claim, not subscription data — Centrifugo ignores subscribe data
+  // without a subscribe proxy; presence exposes conn_info only.
   joinBridgesChannel(userId: string, bridgeId: string): void {
     const channel = `bridges:presence#${userId}`;
 
