@@ -55,6 +55,12 @@ const TRANSPORT_MODE_BADGES: Record<TerminalTransportMode, TransportModeBadgeCon
     color: "var(--accent)",
     glow: "var(--accent-glow)",
   },
+  local: {
+    label: "Local",
+    title: "Terminal connected over a local socket — data never leaves this machine.",
+    color: "var(--accent)",
+    glow: "var(--accent-glow)",
+  },
   centrifugo: {
     label: "Cloud",
     title: "Terminal relayed through the cloud (Centrifugo).",

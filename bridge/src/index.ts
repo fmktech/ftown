@@ -15,6 +15,7 @@ import { CentrifugoClient } from './centrifugo-client.js';
 import { WatchRegistry } from './direct-transport/watch-registry.js';
 import { DirectPeerManager } from './direct-transport/peer-manager.js';
 import { PublishRouter } from './direct-transport/publish-router.js';
+import { LoopbackPeerServer } from './direct-transport/loopback-server.js';
 import { toWireSession } from './session-wire.js';
 import { ProcessRunner } from './claude-runner.js';
 import { SessionStore } from './session-store.js';
@@ -231,9 +232,25 @@ program
       onResize: (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
       onAttach: (sid) => terminalManager.serialize(sid, 20000) ?? '',
     });
+    // Loopback WebSocket rung: same DirectMessage protocol as WebRTC, tunneled
+    // over TCP on the existing 127.0.0.1 local API server. Bypasses VPN/endpoint
+    // filters that kill UDP hairpin. Input/resize/attach feed the SAME sinks as
+    // the WebRTC peer manager; upgrades are gated on a per-process nonce (L1/L2).
+    const localNonce = randomBytes(16).toString('hex');
+    let apiOrigin = '';
+    try { apiOrigin = new URL(opts.apiUrl).origin; } catch { /* leave empty; only localhost origins accepted */ }
+    const loopbackServer = new LoopbackPeerServer({
+      bridgeId,
+      nonce: localNonce,
+      allowedOrigins: apiOrigin ? [apiOrigin] : [],
+      onInput: (sid, data) => { runner.write(sid, data); },
+      onResize: (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
+      onAttach: (sid) => terminalManager.serialize(sid, 20000) ?? '',
+    });
     const publishRouter = new PublishRouter({
       registry: watchRegistry,
       peerManager: directPeers,
+      loopback: loopbackServer,
       centrifugo,
       userId,
       // Watch messages fan out to every bridge on commands:rpc; only register
@@ -251,6 +268,12 @@ program
     localApiServer.setAuthToken(apiToken);
     const hookPort = await localApiServer.start();
     console.log(`[Bridge] Local API server started on port ${hookPort}`);
+    // Bind the loopback WS upgrade handler now that the ephemeral port is bound.
+    const loopbackHttpServer = localApiServer.getHttpServer();
+    if (loopbackHttpServer) {
+      loopbackServer.attach(loopbackHttpServer);
+      console.log(`[Bridge] Loopback WS rung ready at ws://127.0.0.1:${hookPort}/ws`);
+    }
     localApiServer.setDependencies(store, runner, centrifugo, userId, terminalManager);
     const mailStore = new MailStore((sessionId) => store.sessionDir(sessionId));
     localApiServer.setMailStore(mailStore);
@@ -1146,7 +1169,7 @@ program
     }
 
     centrifugo.connect();
-    centrifugo.joinBridgesChannel(userId, bridgeId);
+    centrifugo.joinBridgesChannel(userId, bridgeId, { localPort: hookPort, localNonce });
     centrifugo.subscribeToSessions(userId);
     centrifugo.subscribeToLoops(userId);
 
@@ -1190,6 +1213,7 @@ program
       scheduler.stop();
       localApiServer.stop();
       runner.stopAll();
+      loopbackServer.closeAll();
       directPeers.closeAll();
       watchRegistry.dispose();
       // node-datachannel module-level cleanup — avoids the native crash-on-exit race.

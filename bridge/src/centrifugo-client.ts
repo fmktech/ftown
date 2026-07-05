@@ -265,13 +265,19 @@ export class CentrifugoClient {
     this.subscriptions.set(channel, sub);
   }
 
-  joinBridgesChannel(userId: string, bridgeId: string): void {
+  joinBridgesChannel(
+    userId: string,
+    bridgeId: string,
+    local?: { localPort: number; localNonce: string },
+  ): void {
     const channel = `bridges:presence#${userId}`;
 
     const presenceInfo: BridgePresenceInfo = {
       bridgeId,
       hostname: hostname(),
       connectedAt: new Date().toISOString(),
+      localPort: local?.localPort,
+      localNonce: local?.localNonce,
     };
 
     const sub = this.client.newSubscription(channel, {
