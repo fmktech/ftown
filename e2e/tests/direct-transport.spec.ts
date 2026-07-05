@@ -156,7 +156,11 @@ test.describe("transport ladder", () => {
     const email = sharedEmail();
 
     try {
-      const sessionId = await terminalFlow(page, `cloud-${Date.now()}`, `E2ECLOUD${Date.now()}`);
+      // Long fast-typed marker (30+ chars, keyboard.type at full speed): live
+      // regression check on the cloud input path's keystroke-ordering fix — the
+      // exact string must round-trip; any transposition fails the assert.
+      const longMarker = `E2ECLOUD${Date.now()}${String(Math.random()).slice(2, 14)}`;
+      const sessionId = await terminalFlow(page, `cloud-${Date.now()}`, longMarker);
       await expectBadge(page, "Cloud");
 
       const present = await waitForChannels(
