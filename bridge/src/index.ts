@@ -9,8 +9,12 @@ import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+import { cleanup as ndcCleanup } from 'node-datachannel';
 
 import { CentrifugoClient } from './centrifugo-client.js';
+import { WatchRegistry } from './direct-transport/watch-registry.js';
+import { DirectPeerManager } from './direct-transport/peer-manager.js';
+import { PublishRouter } from './direct-transport/publish-router.js';
 import { toWireSession } from './session-wire.js';
 import { ProcessRunner } from './claude-runner.js';
 import { SessionStore } from './session-store.js';
@@ -21,6 +25,7 @@ import { installClaudeHooks } from './hook-installer.js';
 import { installCursorHooks } from './cursor-hook-installer.js';
 import { codexBinaryAvailable, ensureCodexHooks } from './codex-installer.js';
 import { installHarness, harnessOnPath, pathHint, writeHarnessAgentGuide, agentGuidePath } from './harness-installer.js';
+import type { HarnessInstallResult } from './harness-installer.js';
 import { installNotifyScript } from './install-notify-script.js';
 import { installFtownSkill, removeFtownSkill } from './install-ftown-skill.js';
 import { installFtownSessionsCli } from './install-ftown-cli.js';
@@ -210,6 +215,37 @@ program
         );
       },
     });
+    // Direct transport (WebRTC DataChannel) data plane. Peers attach per session;
+    // terminal output/screen fan out to them directly, and to Centrifugo only when
+    // the session has an unexpired remote watcher (R2). Signaling and watch
+    // heartbeats ride the existing commands:rpc channel.
+    const watchRegistry = new WatchRegistry();
+    const directPeers = new DirectPeerManager({
+      bridgeId,
+      sendSignal: (msg) => {
+        centrifugo.publishSignal(userId, msg).catch((err) => {
+          console.error('[Bridge] Failed to publish WebRTC signal:', err);
+        });
+      },
+      onInput: (sid, data) => { runner.write(sid, data); },
+      onResize: (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
+      onAttach: (sid) => terminalManager.serialize(sid, 20000) ?? '',
+    });
+    const publishRouter = new PublishRouter({
+      registry: watchRegistry,
+      peerManager: directPeers,
+      centrifugo,
+      userId,
+      // Watch messages fan out to every bridge on commands:rpc; only register
+      // watchers for sessions this bridge actually serves terminal data for.
+      isKnownSession: (sid) => runner.isRunning(sid) || terminalManager.has(sid),
+    });
+    // Every NEW remote watcher (first, each additional distinct client, or a
+    // post-expiry re-registration) ⇒ push a full screen resync so the joining
+    // Centrifugo-fallback client renders before incremental output (R1). The
+    // dump is channel-wide; existing viewers re-render idempotently.
+    watchRegistry.onNewWatcher((sid) => publishScreenDump(sid));
+
     const localApiServer = new LocalApiServer();
     const apiToken = randomBytes(32).toString('hex');
     localApiServer.setAuthToken(apiToken);
@@ -260,19 +296,30 @@ program
     });
     localApiServer.setLoopApi({ bridgeId, scheduler });
 
-    const harnessCliPath = resolve(__dirname, 'harness-cli.js');
-    const harness = installHarness(harnessCliPath);
-    // Codex reads Claude-style hooks from ~/.codex/hooks.json; skip silently
-    // when the codex binary is not installed on this machine.
-    if (await codexBinaryAvailable()) {
-      ensureCodexHooks(harness.wrapperPath, notifyScriptPath);
-    }
-    writeHarnessAgentGuide({ wrapperPath: harness.wrapperPath, port: hookPort, bridgeId });
-    console.log(`[Bridge] Harness CLI: ${harness.wrapperPath}`);
-    console.log(`[Bridge] Agent guide:  ${agentGuidePath()}`);
-    if (!harnessOnPath()) {
-      const hint = pathHint();
-      if (hint) console.log(`[Bridge] ${hint}`);
+    // Compiled sibling of this module (running from dist), else the sibling
+    // dist/ directory (running from src via `tsx watch` in dev). If neither
+    // exists — dev mode without a build — skip installation instead of
+    // crashing; the harness CLI is a packaged artifact, not source.
+    const harnessCliPath = existsSync(resolve(__dirname, 'harness-cli.js'))
+      ? resolve(__dirname, 'harness-cli.js')
+      : resolve(__dirname, '..', 'dist', 'harness-cli.js');
+    let harness: HarnessInstallResult | undefined;
+    if (existsSync(harnessCliPath)) {
+      harness = installHarness(harnessCliPath);
+      // Codex reads Claude-style hooks from ~/.codex/hooks.json; skip silently
+      // when the codex binary is not installed on this machine.
+      if (await codexBinaryAvailable()) {
+        ensureCodexHooks(harness.wrapperPath, notifyScriptPath);
+      }
+      writeHarnessAgentGuide({ wrapperPath: harness.wrapperPath, port: hookPort, bridgeId });
+      console.log(`[Bridge] Harness CLI: ${harness.wrapperPath}`);
+      console.log(`[Bridge] Agent guide:  ${agentGuidePath()}`);
+      if (!harnessOnPath()) {
+        const hint = pathHint();
+        if (hint) console.log(`[Bridge] ${hint}`);
+      }
+    } else {
+      console.warn('[Bridge] harness CLI not built (run `npm run build`) — skipping harness install in dev mode');
     }
 
     installFtownSkill('ftown', resolve(__dirname, '..', 'skills', 'ftown'));
@@ -325,8 +372,8 @@ program
           bridgeId,
           pid: process.pid,
           startedAt: new Date().toISOString(),
-          harness: harness.wrapperPath,
-          harnessCli: harness.cliPath,
+          harness: harness?.wrapperPath,
+          harnessCli: harness?.cliPath,
         }, null, 2),
         { mode: 0o600 },
       );
@@ -346,9 +393,7 @@ program
       // Phase 1: viewport-only dump (~rows*cols bytes) for instant render.
       const viewportRaw = terminalManager.serialize(sid, 0);
       if (viewportRaw) {
-        centrifugo.publishTerminalScreen(userId, sid, viewportRaw).catch((err) => {
-          console.error(`[Bridge] Failed to publish viewport screen for ${sid}:`, err);
-        });
+        publishRouter.publishTerminalScreen(sid, viewportRaw);
       }
 
       // Phase 2: full dump with scrollback. Client re-renders on top of phase 1.
@@ -364,9 +409,7 @@ program
       }
       if (!raw) return;
       if (raw === viewportRaw) return;
-      centrifugo.publishTerminalScreen(userId, sid, raw).catch((err) => {
-        console.error(`[Bridge] Failed to publish full screen for ${sid}:`, err);
-      });
+      publishRouter.publishTerminalScreen(sid, raw);
     }
 
     function handleClientResize(sid: string, cols: number, rows: number): void {
@@ -389,9 +432,7 @@ program
       store.appendTerminalData(sessionId, buf).catch((err) => {
         console.error(`[Bridge] Failed to store terminal data for ${sessionId}:`, err);
       });
-      centrifugo.publishTerminalData(userId, sessionId, buf).catch((err) => {
-        console.error(`[Bridge] Failed to publish terminal data for ${sessionId}:`, err);
-      });
+      publishRouter.publishTerminalData(sessionId, buf);
     }
 
     runner.on('data', (sessionId, data) => {
@@ -1115,6 +1156,8 @@ program
       handleCommand(command).catch((err) => {
         console.error(`[Bridge] Unhandled error in command handler:`, err);
       });
+    }, (directCommand) => {
+      publishRouter.handleCommand(directCommand);
     });
     setTimeout(() => {
       void (async () => {
@@ -1147,6 +1190,10 @@ program
       scheduler.stop();
       localApiServer.stop();
       runner.stopAll();
+      directPeers.closeAll();
+      watchRegistry.dispose();
+      // node-datachannel module-level cleanup — avoids the native crash-on-exit race.
+      try { ndcCleanup(); } catch { /* native lib already torn down */ }
       centrifugo.disconnect();
       process.exit(0);
     };

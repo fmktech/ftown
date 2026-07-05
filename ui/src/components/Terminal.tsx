@@ -1,13 +1,14 @@
 "use client";
 
-import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from "react";
-import { Centrifuge, Subscription } from "centrifuge";
+import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { TokenUsage } from "@/hooks/useSessionEvents";
 import { ShellType } from "@/types";
+import { useTerminal } from "@/hooks/useTerminal";
+import { TerminalTransportApi } from "@/lib/direct-transport/contract";
 import "@xterm/xterm/css/xterm.css";
 
 export interface TerminalHandle {
@@ -16,9 +17,9 @@ export interface TerminalHandle {
 }
 
 interface TerminalProps {
-  client: Centrifuge | null;
+  transport: TerminalTransportApi | null;
   sessionId: string | null;
-  userId: string | null;
+  bridgeId: string | null;
   isRunning: boolean;
   sessionName?: string | null;
   usage?: TokenUsage;
@@ -40,26 +41,41 @@ function formatTokenCount(n: number): string {
   return String(n);
 }
 
-export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ client, sessionId, userId, isRunning, sessionName, usage, onMobileTap, shellType, onInterrupt }, ref) {
+export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ transport, sessionId, bridgeId, isRunning, sessionName, usage, onMobileTap, shellType, onInterrupt }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
-  const outputSubRef = useRef<Subscription | null>(null);
-  const inputSubRef = useRef<Subscription | null>(null);
   const onMobileTapRef = useRef(onMobileTap);
   const onInterruptRef = useRef(onInterrupt);
   const shellTypeRef = useRef(shellType);
   const sessionIdRef = useRef(sessionId);
-  const inputSubSessionIdRef = useRef<string | null>(null);
   const resizeBounceTimerRef = useRef<number | null>(null);
   const didScrollRef = useRef(false);
   const [scrolledUp, setScrolledUp] = useState(false);
   sessionIdRef.current = sessionId;
 
+  const handleOutput = useCallback((data: string) => {
+    xtermRef.current?.write(data);
+  }, []);
+
+  // Full screen resync (was the `screen_dump` branch): reset then write,
+  // matching prior semantics exactly.
+  const handleScreen = useCallback((data: string) => {
+    const term = xtermRef.current;
+    if (!term) return;
+    term.reset();
+    if (data) term.write(data);
+  }, []);
+
+  const { subscribe, sendInput, sendResize } = useTerminal(transport, sessionId, bridgeId, handleOutput, handleScreen);
+  const sendInputRef = useRef(sendInput);
+  sendInputRef.current = sendInput;
+  const sendResizeRef = useRef(sendResize);
+  sendResizeRef.current = sendResize;
+
   const publishTerminalResize = (forceResize = false) => {
     const term = xtermRef.current;
-    const inputSub = inputSubRef.current;
-    if (!term || !inputSub || !sessionIdRef.current || inputSubSessionIdRef.current !== sessionIdRef.current) return;
+    if (!term || !sessionIdRef.current) return;
 
     if (resizeBounceTimerRef.current !== null) {
       window.clearTimeout(resizeBounceTimerRef.current);
@@ -67,21 +83,17 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     }
 
     if (forceResize && term.cols > 2) {
-      inputSub.publish({ type: "resize", cols: term.cols - 1, rows: term.rows });
+      sendResizeRef.current(term.cols - 1, term.rows);
       resizeBounceTimerRef.current = window.setTimeout(() => {
         resizeBounceTimerRef.current = null;
-        if (
-          inputSubRef.current === inputSub
-          && inputSubSessionIdRef.current === sessionIdRef.current
-          && xtermRef.current === term
-        ) {
-          inputSub.publish({ type: "resize", cols: term.cols, rows: term.rows });
+        if (xtermRef.current === term && sessionIdRef.current) {
+          sendResizeRef.current(term.cols, term.rows);
         }
       }, 120);
       return;
     }
 
-    inputSub.publish({ type: "resize", cols: term.cols, rows: term.rows });
+    sendResizeRef.current(term.cols, term.rows);
   };
 
   const fitAndSyncResize = (forceResize = false) => {
@@ -91,10 +103,8 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
 
   useImperativeHandle(ref, () => ({
     sendInput(data: string) {
-      if (inputSubRef.current && inputSubSessionIdRef.current === sessionIdRef.current) {
-        inputSubRef.current.publish({ type: "input", data });
-        if (isLoneInterrupt(data)) onInterruptRef.current?.();
-      }
+      sendInputRef.current(data);
+      if (isLoneInterrupt(data)) onInterruptRef.current?.();
     },
     refit(options) {
       fitAndSyncResize(options?.forceResize === true);
@@ -208,9 +218,9 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       if (lines === 0) return;
       accumulatedDelta -= lines * LINE_HEIGHT;
 
-      if (shellTypeRef.current === "opencode" && inputSubRef.current) {
+      if (shellTypeRef.current === "opencode") {
         const seq = lines < 0 ? "\x1b\x19" : "\x1b\x05";
-        inputSubRef.current.publish({ type: "input", data: seq.repeat(Math.abs(lines)) });
+        sendInputRef.current(seq.repeat(Math.abs(lines)));
       } else {
         term.scrollLines(lines);
       }
@@ -236,7 +246,6 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
 
     if (shellType === "opencode") {
       onWheel = (e: WheelEvent) => {
-        if (!inputSubRef.current) return;
         e.preventDefault();
         e.stopPropagation();
         wheelAccum += e.deltaY;
@@ -247,7 +256,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
         const seq = e.shiftKey
           ? (lines < 0 ? "\x1b\x15" : "\x1b\x04")
           : (lines < 0 ? "\x1b\x19" : "\x1b\x05");
-        inputSubRef.current.publish({ type: "input", data: seq.repeat(count) });
+        sendInputRef.current(seq.repeat(count));
       };
 
       container.addEventListener("wheel", onWheel, { passive: false, capture: true });
@@ -277,9 +286,9 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
 
   const prevSessionIdRef = useRef<string | null>(null);
 
-  // Subscribe to centrifugo channels when sessionId changes
+  // Subscribe via the terminal transport when sessionId changes
   useEffect(() => {
-    if (!client || !sessionId || !userId || !xtermRef.current) return;
+    if (!transport || !sessionId || !bridgeId || !xtermRef.current) return;
 
     const term = xtermRef.current;
 
@@ -291,113 +300,33 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
       prevSessionIdRef.current = sessionId;
     }
 
-    // Clean up previous subscriptions
-    if (outputSubRef.current) {
-      outputSubRef.current.removeAllListeners();
-      outputSubRef.current.unsubscribe();
-      client.removeSubscription(outputSubRef.current);
-      outputSubRef.current = null;
-    }
-    if (inputSubRef.current) {
-      inputSubRef.current.removeAllListeners();
-      inputSubRef.current.unsubscribe();
-      client.removeSubscription(inputSubRef.current);
-      inputSubRef.current = null;
-      inputSubSessionIdRef.current = null;
-    }
+    // subscribe() tears down any previous subscription itself; the transport
+    // attaches and delivers a full `screen` resync before incremental output.
+    subscribe();
+    // A same-size resize is a no-op for tmux, so a switched-in terminal can
+    // keep a stale layout. Bounce cols by one and back to force a re-wrap
+    // and full redraw at the real window size.
+    fitAndSyncResize(true);
 
-    // Subscribe to terminal input channel FIRST so we can publish resize
-    // before the output subscription's presence-join triggers a screen dump.
-    const inputChannel = `terminal-input:${sessionId}#${userId}`;
-    const existingIn = client.getSubscription(inputChannel);
-    if (existingIn) {
-      existingIn.removeAllListeners();
-      existingIn.unsubscribe();
-      client.removeSubscription(existingIn);
-    }
-
-    const inputSub = client.newSubscription(inputChannel);
-    inputSub.on("subscribed", () => {
-      // A same-size resize is a no-op for tmux, so a switched-in terminal can
-      // keep a stale layout. Bounce cols by one and back to force a re-wrap
-      // and full redraw at the real window size.
-      fitAndSyncResize(true);
-    });
-    inputSubRef.current = inputSub;
-    inputSubSessionIdRef.current = sessionId;
-    inputSub.subscribe();
-
-    // Subscribe to terminal output AFTER input. On subscribed, request init
-    // dump — bridge will have already processed our resize on the input
-    // channel, so the dump renders at the client's cols.
-    const outputChannel = `terminal:${sessionId}#${userId}`;
-    const existingOut = client.getSubscription(outputChannel);
-    if (existingOut) {
-      existingOut.removeAllListeners();
-      existingOut.unsubscribe();
-      client.removeSubscription(existingOut);
-    }
-
-    const outputSub = client.newSubscription(outputChannel);
-    outputSub.on("publication", (ctx) => {
-      const msg = ctx.data as { type: string; data?: string; raw?: string; lines?: string[] };
-      if (msg.type === "output" && msg.data) {
-        term.write(msg.data);
-      }
-      if (msg.type === "screen_dump") {
-        term.reset();
-        if (msg.raw) {
-          term.write(msg.raw);
-        } else if (msg.lines) {
-          term.write(msg.lines.join("\r\n"));
-        }
-      }
-    });
-    // On output sub ready, request a screen_dump from the bridge to restore
-    // prior conversation state and scrollback (xterm-headless serialize).
-    outputSub.on("subscribed", () => {
-      if (!inputSubRef.current || inputSubSessionIdRef.current !== sessionIdRef.current) return;
-      inputSubRef.current.publish({ type: "init" });
-    });
-    outputSub.subscribe();
-    outputSubRef.current = outputSub;
-
-    // Wire xterm input to centrifugo
+    // Wire xterm input to the transport
     const dataDisposable = term.onData((data) => {
-      if (inputSubRef.current && inputSubSessionIdRef.current === sessionIdRef.current) {
-        inputSubRef.current.publish({ type: "input", data });
-        if (isLoneInterrupt(data)) onInterruptRef.current?.();
-      }
+      sendInputRef.current(data);
+      if (isLoneInterrupt(data)) onInterruptRef.current?.();
     });
 
     const resizeDisposable = term.onResize(({ cols, rows }) => {
-      if (inputSubRef.current && inputSubSessionIdRef.current === sessionIdRef.current) {
-        inputSubRef.current.publish({ type: "resize", cols, rows });
-      }
+      sendResizeRef.current(cols, rows);
     });
 
     return () => {
       dataDisposable.dispose();
       resizeDisposable.dispose();
-      if (outputSubRef.current) {
-        outputSubRef.current.removeAllListeners();
-        outputSubRef.current.unsubscribe();
-        client.removeSubscription(outputSubRef.current);
-        outputSubRef.current = null;
-      }
-      if (inputSubRef.current) {
-        inputSubRef.current.removeAllListeners();
-        inputSubRef.current.unsubscribe();
-        client.removeSubscription(inputSubRef.current);
-        inputSubRef.current = null;
-        inputSubSessionIdRef.current = null;
-      }
       if (resizeBounceTimerRef.current !== null) {
         window.clearTimeout(resizeBounceTimerRef.current);
         resizeBounceTimerRef.current = null;
       }
     };
-  }, [client, sessionId, userId]);
+  }, [transport, sessionId, bridgeId, subscribe]);
 
   return (
     <div

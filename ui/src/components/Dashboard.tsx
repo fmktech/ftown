@@ -3,6 +3,7 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { Centrifuge } from "centrifuge";
 import { ConnectionStatus } from "@/hooks/useCentrifugo";
+import { TerminalTransportApi } from "@/lib/direct-transport/contract";
 import { Session, Loop, LoopDraft, LoopRunRecord } from "@/types";
 import { CreateSessionOptions, useSessions } from "@/hooks/useSessions";
 import { useBridges } from "@/hooks/useBridges";
@@ -25,6 +26,9 @@ interface DashboardProps {
   userId: string;
   token: string;
   centrifugoUrl: string;
+  /** One HybridTerminalTransport per live Centrifugo connection; consumed by
+   *  useTerminal once the terminal component is wired to it. */
+  transport: TerminalTransportApi | null;
   onDisconnect: () => void;
 }
 
@@ -44,7 +48,7 @@ function ConnectionDot({ status }: { status: ConnectionStatus }) {
   );
 }
 
-export function Dashboard({ client, connectionStatus, connectionError, userId, token, centrifugoUrl, onDisconnect }: DashboardProps) {
+export function Dashboard({ client, connectionStatus, connectionError, userId, token, centrifugoUrl, transport, onDisconnect }: DashboardProps) {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedLoopId, setSelectedLoopId] = useState<string | null>(null);
   const [selectedLoopRunId, setSelectedLoopRunId] = useState<string | null>(null);
@@ -1064,9 +1068,9 @@ PY`;
           ) : (
             <Terminal
               ref={terminalRef}
-              client={client}
+              transport={transport}
               sessionId={selectedSessionId}
-              userId={userId}
+              bridgeId={selectedSession?.bridgeId ?? null}
               isRunning={selectedSession?.status === "running"}
               sessionName={selectedSession?.name ?? selectedSession?.prompt?.slice(0, 48) ?? null}
               usage={selectedSessionId ? sessionActivity.get(selectedSessionId)?.usage : undefined}

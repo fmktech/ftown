@@ -1,0 +1,23 @@
+{
+  "name": "ftown-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "gen-certs": "bash scripts/gen-certs.sh",
+    "infra:up": "npm run gen-certs && docker compose up -d --build --wait",
+    "infra:down": "docker compose down -v",
+    "setup-db": "node scripts/setup-db.mjs",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1",
+    "@types/jsonwebtoken": "^9.0.9",
+    "@types/node": "^22.13.14",
+    "@types/pg": "^8.11.10",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.1",
+    "typescript": "^5.8.2"
+  }
+}
