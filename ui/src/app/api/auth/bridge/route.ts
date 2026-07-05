@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { randomUUID } from "node:crypto";
 import jwt from "jsonwebtoken";
 
 import { parseLocalAdvert } from "./local-advert";
+import { getRequiredSecret } from "@/lib/secrets";
+import { setBridgeRefreshJti } from "@/lib/bridge-refresh";
 
 interface BridgeTokenRequestBody {
   token: string;
@@ -13,13 +16,15 @@ interface BridgeTokenRequestBody {
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  const secret = process.env.CENTRIFUGO_TOKEN_SECRET;
-
-  if (!secret) {
-    return NextResponse.json(
-      { error: "CENTRIFUGO_TOKEN_SECRET not configured" },
-      { status: 500 }
+  let secret: string;
+  try {
+    secret = getRequiredSecret("CENTRIFUGO_TOKEN_SECRET");
+  } catch (err) {
+    console.error(
+      "[auth/bridge] secret misconfiguration:",
+      err instanceof Error ? err.message : String(err),
     );
+    return NextResponse.json({ error: "Server misconfiguration" }, { status: 500 });
   }
 
   let body: BridgeTokenRequestBody;
@@ -39,9 +44,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
+  // F1: only a session-gated bootstrap token (distinct audience) may be
+  // exchanged for a bridge identity + 30-day refresh token. A plain Centrifugo
+  // connect token (aud "ftown:centrifugo") is rejected here.
   let decoded: { sub: string };
   try {
-    decoded = jwt.verify(body.token, secret, { audience: "ftown:centrifugo" }) as { sub: string };
+    decoded = jwt.verify(body.token, secret, {
+      audience: "ftown:bridge-bootstrap",
+    }) as { sub: string };
   } catch {
     return NextResponse.json(
       { error: "Invalid or expired token" },
@@ -75,11 +85,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     { audience: "ftown:centrifugo", expiresIn: "24h" },
   );
 
+  // F3: establish the current refresh jti for this bridge and embed it. A
+  // re-bootstrap deliberately supersedes any previously issued refresh token.
+  const refreshJti = randomUUID();
+  await setBridgeRefreshJti(body.bridgeId, decoded.sub, refreshJti);
+
   const refreshToken = jwt.sign(
     {
       sub: decoded.sub,
       bridgeId: body.bridgeId,
       type: "bridge_refresh",
+      jti: refreshJti,
     },
     secret,
     { audience: "ftown:bridge-refresh", expiresIn: "30d" },
