@@ -8,7 +8,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { TokenUsage } from "@/hooks/useSessionEvents";
 import { ShellType } from "@/types";
 import { useTerminal } from "@/hooks/useTerminal";
-import { TerminalTransportApi, TerminalTransportMode } from "@/lib/direct-transport/contract";
+import { FallbackReason, TerminalTransportApi, TerminalTransportMode } from "@/lib/direct-transport/contract";
 import "@xterm/xterm/css/xterm.css";
 
 export interface TerminalHandle {
@@ -67,13 +67,30 @@ const TRANSPORT_MODE_BADGES: Record<TerminalTransportMode, TransportModeBadgeCon
   },
 };
 
-function TransportModeBadge({ mode }: { mode: TerminalTransportMode | null }) {
+/** Cloud-mode tooltip text, varied by why the fallback happened — label stays "Cloud" always. */
+const CENTRIFUGO_REASON_TITLES: Record<Exclude<FallbackReason, null>, string> = {
+  pairing_failed:
+    "P2P unavailable — connection blocked (VPN or firewall may be interfering). Terminal relayed through the cloud.",
+  peer_lost: "P2P connection lost — terminal relayed through the cloud.",
+};
+
+function TransportModeBadge({
+  mode,
+  fallbackReason,
+}: {
+  mode: TerminalTransportMode | null;
+  fallbackReason?: FallbackReason;
+}) {
   if (!mode) return null;
   const config = TRANSPORT_MODE_BADGES[mode];
+  const title =
+    mode === "centrifugo" && fallbackReason
+      ? CENTRIFUGO_REASON_TITLES[fallbackReason]
+      : config.title;
 
   return (
     <span
-      title={config.title}
+      title={title}
       className="flex items-center gap-1 shrink-0"
       style={{
         fontSize: 10,
@@ -128,7 +145,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     if (data) term.write(data);
   }, []);
 
-  const { subscribe, sendInput, sendResize, mode } = useTerminal(transport, sessionId, bridgeId, handleOutput, handleScreen);
+  const { subscribe, sendInput, sendResize, mode, fallbackReason } = useTerminal(transport, sessionId, bridgeId, handleOutput, handleScreen);
   const sendInputRef = useRef(sendInput);
   sendInputRef.current = sendInput;
   const sendResizeRef = useRef(sendResize);
@@ -424,7 +441,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
             </div>
 
             <div className="flex items-center gap-3">
-              <TransportModeBadge mode={mode} />
+              <TransportModeBadge mode={mode} fallbackReason={fallbackReason} />
 
               {usage && (usage.inputTokens > 0 || usage.outputTokens > 0) && (
                 <span

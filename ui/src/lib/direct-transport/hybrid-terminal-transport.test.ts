@@ -392,6 +392,30 @@ describe('HybridTerminalTransport', () => {
     expect(publishCommand).not.toHaveBeenCalled();
   });
 
+  it('getFallbackReason: pairing failure -> pairing_failed, peer close mid-session -> peer_lost, direct -> null', async () => {
+    const { transport: failing } = makeTransport((opts) => {
+      const p = new FakePeer(opts.bridgeId);
+      p.connectMode = 'reject';
+      return p;
+    });
+    failing.subscribeTerminal('session-1', 'bridge-1', handlers());
+    await flush();
+    expect(failing.getMode('session-1')).toBe('centrifugo');
+    expect(failing.getFallbackReason('session-1')).toBe('pairing_failed');
+
+    const { transport: direct } = makeTransport((opts) => new FakePeer(opts.bridgeId));
+    direct.subscribeTerminal('session-2', 'bridge-2', handlers());
+    await flush();
+    expect(direct.getMode('session-2')).toBe('direct');
+    expect(direct.getFallbackReason('session-2')).toBeNull();
+
+    const peer = FakePeer.instances.find((p) => p.bridgeId === 'bridge-2')!;
+    peer.simulateClose();
+    await flush();
+    expect(direct.getMode('session-2')).toBe('centrifugo');
+    expect(direct.getFallbackReason('session-2')).toBe('peer_lost');
+  });
+
   it('dispose() unwatches sessions that were on the centrifugo fallback path', async () => {
     const { transport, publishCommand } = makeTransport((opts) => {
       const p = new FakePeer(opts.bridgeId);
