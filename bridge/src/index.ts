@@ -25,6 +25,7 @@ import { installClaudeHooks } from './hook-installer.js';
 import { installCursorHooks } from './cursor-hook-installer.js';
 import { codexBinaryAvailable, ensureCodexHooks } from './codex-installer.js';
 import { installHarness, harnessOnPath, pathHint, writeHarnessAgentGuide, agentGuidePath } from './harness-installer.js';
+import type { HarnessInstallResult } from './harness-installer.js';
 import { installNotifyScript } from './install-notify-script.js';
 import { installFtownSkill, removeFtownSkill } from './install-ftown-skill.js';
 import { installFtownSessionsCli } from './install-ftown-cli.js';
@@ -295,19 +296,30 @@ program
     });
     localApiServer.setLoopApi({ bridgeId, scheduler });
 
-    const harnessCliPath = resolve(__dirname, 'harness-cli.js');
-    const harness = installHarness(harnessCliPath);
-    // Codex reads Claude-style hooks from ~/.codex/hooks.json; skip silently
-    // when the codex binary is not installed on this machine.
-    if (await codexBinaryAvailable()) {
-      ensureCodexHooks(harness.wrapperPath, notifyScriptPath);
-    }
-    writeHarnessAgentGuide({ wrapperPath: harness.wrapperPath, port: hookPort, bridgeId });
-    console.log(`[Bridge] Harness CLI: ${harness.wrapperPath}`);
-    console.log(`[Bridge] Agent guide:  ${agentGuidePath()}`);
-    if (!harnessOnPath()) {
-      const hint = pathHint();
-      if (hint) console.log(`[Bridge] ${hint}`);
+    // Compiled sibling of this module (running from dist), else the sibling
+    // dist/ directory (running from src via `tsx watch` in dev). If neither
+    // exists — dev mode without a build — skip installation instead of
+    // crashing; the harness CLI is a packaged artifact, not source.
+    const harnessCliPath = existsSync(resolve(__dirname, 'harness-cli.js'))
+      ? resolve(__dirname, 'harness-cli.js')
+      : resolve(__dirname, '..', 'dist', 'harness-cli.js');
+    let harness: HarnessInstallResult | undefined;
+    if (existsSync(harnessCliPath)) {
+      harness = installHarness(harnessCliPath);
+      // Codex reads Claude-style hooks from ~/.codex/hooks.json; skip silently
+      // when the codex binary is not installed on this machine.
+      if (await codexBinaryAvailable()) {
+        ensureCodexHooks(harness.wrapperPath, notifyScriptPath);
+      }
+      writeHarnessAgentGuide({ wrapperPath: harness.wrapperPath, port: hookPort, bridgeId });
+      console.log(`[Bridge] Harness CLI: ${harness.wrapperPath}`);
+      console.log(`[Bridge] Agent guide:  ${agentGuidePath()}`);
+      if (!harnessOnPath()) {
+        const hint = pathHint();
+        if (hint) console.log(`[Bridge] ${hint}`);
+      }
+    } else {
+      console.warn('[Bridge] harness CLI not built (run `npm run build`) — skipping harness install in dev mode');
     }
 
     installFtownSkill('ftown', resolve(__dirname, '..', 'skills', 'ftown'));
@@ -360,8 +372,8 @@ program
           bridgeId,
           pid: process.pid,
           startedAt: new Date().toISOString(),
-          harness: harness.wrapperPath,
-          harnessCli: harness.cliPath,
+          harness: harness?.wrapperPath,
+          harnessCli: harness?.cliPath,
         }, null, 2),
         { mode: 0o600 },
       );

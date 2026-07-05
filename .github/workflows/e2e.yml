@@ -1,0 +1,86 @@
+name: e2e
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  direct-transport-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # The bridge spawns sessions with a hardcoded `/bin/zsh -l`; tmux is the
+      # preferred PTY runtime (falls back to direct node-pty if absent).
+      - name: Install zsh + tmux
+        run: sudo apt-get update && sudo apt-get install -y zsh tmux
+
+      # Postgres + Neon HTTP shim (:443) + Centrifugo (:8000). The shim lets the
+      # UI's @neondatabase/serverless neon() driver reach Postgres unmodified.
+      - name: Start infra (postgres + neon-http-shim + centrifugo)
+        working-directory: e2e
+        run: |
+          bash scripts/gen-certs.sh
+          docker compose up -d --build --wait
+          docker compose ps
+
+      - name: Create DB schema
+        working-directory: e2e
+        run: |
+          npm ci
+          node scripts/setup-db.mjs
+
+      - name: Build UI
+        working-directory: ui
+        run: |
+          npm ci
+          set -a; E2E_DIR="$GITHUB_WORKSPACE/e2e" source "$GITHUB_WORKSPACE/e2e/env.sh"; set +a
+          npm run build
+
+      - name: Build bridge
+        working-directory: bridge
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install Playwright chromium
+        working-directory: e2e
+        run: npx playwright install --with-deps chromium
+
+      - name: Start UI + bridge (recorded PIDs, scratch HOME)
+        run: bash e2e/scripts/start-services.sh
+
+      - name: Run Playwright e2e
+        working-directory: e2e
+        run: |
+          set -a
+          E2E_DIR="$PWD" source env.sh
+          export E2E_USER_EMAIL="$(cat .run-email)"
+          set +a
+          npx playwright test
+
+      - name: Stop UI + bridge (only recorded PIDs)
+        if: always()
+        run: bash e2e/scripts/stop-services.sh
+
+      - name: Upload Playwright report + traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+            e2e/ui.log
+            e2e/bridge.log
+          retention-days: 7
+
+      - name: Tear down infra
+        if: always()
+        working-directory: e2e
+        run: docker compose down -v

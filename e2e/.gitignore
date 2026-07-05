@@ -1,0 +1,7 @@
+node_modules/
+certs/
+playwright-report/
+test-results/
+.bridge-home/
+*.log
+.run-email
