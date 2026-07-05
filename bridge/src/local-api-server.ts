@@ -12,7 +12,7 @@ import { buildSessionCommand } from './agent-commands.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { TerminalManager } from './terminal-manager.js';
-import { createLoop, deleteLoop, getLoop, listLoops, updateLoop, upsertLoop } from './loop-store.js';
+import { createLoop, deleteLoop, getLoop, listLoops, mutateLoopRuntime, updateLoop } from './loop-store.js';
 import { deleteLoopRunRecords, listLoopRunRecordsWithFallback } from './loop-run-store.js';
 import { validateLoopDraft, validateLoopPatch } from './loop-validation.js';
 import {
@@ -461,6 +461,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         preflight: payload.preflight,
         postflight: payload.postflight,
         maxRuntimeMs: payload.maxRuntimeMs,
+        group: payload.group,
       };
 
       try {
@@ -562,12 +563,21 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         return;
       }
 
-      loop.runNowRequested = true;
-      loop.updatedAt = new Date().toISOString();
-      upsertLoop(loop);
-      await this.centrifugo.publishLoopUpdate(this.userId, loop);
+      // Reload-check-write via mutateLoopRuntime: if the loop was deleted
+      // between the getLoop() above and this write, this returns null and
+      // nothing is written/published — a stale in-memory snapshot must never
+      // be upserted back, or a deleted loop resurrects.
+      const updated = mutateLoopRuntime(loopId, (l) => {
+        l.runNowRequested = true;
+        l.updatedAt = new Date().toISOString();
+      });
+      if (!updated) {
+        jsonResponse(res, 404, { error: 'Loop not found', fired: false, reason: 'not_found' });
+        return;
+      }
+      await this.centrifugo.publishLoopUpdate(this.userId, updated);
       this.loopApi.scheduler.kick();
-      jsonResponse(res, 200, { fired: true, loop });
+      jsonResponse(res, 200, { fired: true, loop: updated });
       return;
     }
 

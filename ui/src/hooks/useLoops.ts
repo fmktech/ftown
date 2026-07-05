@@ -65,10 +65,16 @@ export function useLoops(
   const loopsSubRef = useRef<Subscription | null>(null);
 
   // Secondary/CLI-parity path (§2c): loop state is delivered push-first over
-  // loops:updates, so this merges by id rather than replacing the list. bridgeId
-  // is omitted so EVERY connected bridge answers; sendCommandCollect gathers all
-  // replies within its window and each responder's loops are merged (a single-
-  // shot sendCommand would keep only the fastest bridge's loops).
+  // loops:updates, but refreshLoops itself is the authoritative snapshot for a
+  // manual/soft refresh — it REPLACES loops state with only what the freshly
+  // collected list_loops responses report, so a loop deleted on the bridge
+  // (and thus absent from the fresh response) is dropped from UI state instead
+  // of lingering from a stale merge. bridgeId is omitted so EVERY connected
+  // bridge answers; sendCommandCollect gathers all replies within its window
+  // and each responder's loops are unioned into the new snapshot (a single-
+  // shot sendCommand would keep only the fastest bridge's loops). If NO bridge
+  // responds successfully at all (e.g. a transient connectivity blip), the
+  // existing state is left untouched rather than wiped to empty.
   const refreshLoops = useCallback((): Promise<void> => {
     if (!userId) return Promise.resolve();
 
@@ -77,17 +83,17 @@ export function useLoops(
 
     return sendCommandCollect(command).then((responses) => {
       const incoming: Loop[] = [];
+      let sawSuccess = false;
       for (const resp of responses) {
         if (!resp.success || !resp.data) continue;
+        sawSuccess = true;
         const data = resp.data as { loops?: Loop[] };
         if (Array.isArray(data.loops)) incoming.push(...data.loops);
       }
-      if (incoming.length === 0) return;
-      setLoops((prev) => {
-        const merged = new Map(prev.map((l) => [l.id, l]));
-        for (const loop of incoming) merged.set(loop.id, loop);
-        return Array.from(merged.values());
-      });
+      if (!sawSuccess) return;
+      const byId = new Map<string, Loop>();
+      for (const loop of incoming) byId.set(loop.id, loop);
+      setLoops(Array.from(byId.values()));
     });
   }, [userId, sendCommandCollect]);
 

@@ -61,6 +61,10 @@ $CLI loop create \
 ~/.ftown/ftown-sessions loop delete <loop-id>
 ```
 
+Running `loop run` (or the REST/RPC run-now trigger) against a loop that was
+just deleted now fails with `not_found` instead of resurrecting it — a
+run-now request never re-creates a deleted loop.
+
 ## Options
 
 | Flag | Meaning |
@@ -77,6 +81,7 @@ $CLI loop create \
 | `--postflight <cmd>` | Shell hook after a run. Receives `FTOWN_RUN_STATUS`, `FTOWN_RUN_SESSION_ID`, and `FTOWN_RUN_OUTPUT`. |
 | `--postflight-on-skip` | Also run postflight after a preflight skip. |
 | `--max-runtime <duration>` | Force-stop a run and mark the loop error after this duration. |
+| `--group <label>` | Optional label used by the UI to fold crons under Bridge → Group; pass `--group ""` on update to clear. |
 
 ## Notes
 
