@@ -97,23 +97,38 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Server misconfiguration" }, { status: 500 });
   }
 
-  const token = jwt.sign({ sub: consumed.sub }, secret, {
-    audience: "ftown:centrifugo",
-    expiresIn: "24h",
-  });
-
-  const refreshToken = jwt.sign(
-    { sub: consumed.sub, jti: consumed.refreshJti },
-    secret,
-    { audience: "ftown:bridge-refresh", expiresIn: "30d" },
-  );
-
-  await upsertBridgeRefresh({
+  // HIGH-1 defense in depth: the owner-scoped upsert is a no-op (returns false)
+  // if this bridgeId is already owned by a different sub. In that case do NOT
+  // issue credentials for a bridge that belongs to someone else; the bridge
+  // treats `denied` as a hard stop.
+  const upserted = await upsertBridgeRefresh({
     bridgeId: consumed.bridgeId,
     sub: consumed.sub,
     jti: consumed.refreshJti,
     hostname: consumed.hostname,
   });
+  if (!upserted) {
+    return NextResponse.json({ status: "denied" } satisfies PairPollResponse);
+  }
+
+  const token = jwt.sign({ sub: consumed.sub }, secret, {
+    audience: "ftown:centrifugo",
+    expiresIn: "24h",
+  });
+
+  // HIGH-2: the refresh token claim set MUST match /api/auth/bridge exactly
+  // ({ sub, bridgeId, type: 'bridge_refresh', jti }); the refresh route REQUIRES
+  // type + bridgeId, so omitting them 401s every paired bridge's first refresh.
+  const refreshToken = jwt.sign(
+    {
+      sub: consumed.sub,
+      bridgeId: consumed.bridgeId,
+      type: "bridge_refresh",
+      jti: consumed.refreshJti,
+    },
+    secret,
+    { audience: "ftown:bridge-refresh", expiresIn: "30d" },
+  );
 
   return NextResponse.json({
     status: "approved",

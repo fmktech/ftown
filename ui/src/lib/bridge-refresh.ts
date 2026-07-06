@@ -41,11 +41,15 @@ export async function setBridgeRefreshJti(
   jti: string
 ): Promise<void> {
   const sql = getDb();
+  // HIGH-1: owner-scoped upsert. A conflicting row owned by a DIFFERENT sub is
+  // never overwritten (the WHERE makes it a 0-row no-op). Same-sub re-bootstrap
+  // still rotates the jti, which the /api/auth/bridge bootstrap flow relies on.
   await sql.query(
     `INSERT INTO bridge_refresh (bridge_id, sub, current_jti, updated_at)
      VALUES ($1, $2, $3, NOW())
      ON CONFLICT (bridge_id)
-     DO UPDATE SET sub = EXCLUDED.sub, current_jti = EXCLUDED.current_jti, updated_at = NOW()`,
+     DO UPDATE SET sub = EXCLUDED.sub, current_jti = EXCLUDED.current_jti, updated_at = NOW()
+     WHERE bridge_refresh.sub = EXCLUDED.sub`,
     [bridgeId, sub, jti]
   );
 }
@@ -82,16 +86,39 @@ export async function upsertBridgeRefresh(r: {
   sub: string;
   jti: string;
   hostname: string | null;
-}): Promise<void> {
+}): Promise<boolean> {
   const sql = getDb();
-  await sql.query(
+  // HIGH-1: owner-scoped upsert. If bridge_id already belongs to a DIFFERENT sub
+  // the ON CONFLICT ... WHERE guard makes this a 0-row no-op, so a paired bridge
+  // can never be taken over by another account. Returns true when a row was
+  // actually inserted/updated, false when the guard blocked the write.
+  const rows = (await sql.query(
     `INSERT INTO bridge_refresh (bridge_id, sub, current_jti, hostname, last_seen, updated_at)
      VALUES ($1, $2, $3, $4, NOW(), NOW())
      ON CONFLICT (bridge_id)
      DO UPDATE SET sub = EXCLUDED.sub, current_jti = EXCLUDED.current_jti,
-                   hostname = EXCLUDED.hostname, last_seen = NOW(), updated_at = NOW()`,
+                   hostname = EXCLUDED.hostname, last_seen = NOW(), updated_at = NOW()
+     WHERE bridge_refresh.sub = EXCLUDED.sub
+     RETURNING bridge_id`,
     [r.bridgeId, r.sub, r.jti, r.hostname]
-  );
+  )) as { bridge_id: string }[];
+
+  return rows.length === 1;
+}
+
+/**
+ * Return the sub that owns `bridgeId` (the first account that paired it), or
+ * null if no bridge_refresh row exists yet. Used by /pair/approve to reject
+ * cross-account takeover before minting tokens (HIGH-1).
+ */
+export async function getBridgeRefreshOwner(bridgeId: string): Promise<string | null> {
+  const sql = getDb();
+  const rows = (await sql.query(
+    `SELECT sub FROM bridge_refresh WHERE bridge_id = $1`,
+    [bridgeId]
+  )) as { sub: string }[];
+
+  return rows.length === 1 ? rows[0].sub : null;
 }
 
 /**

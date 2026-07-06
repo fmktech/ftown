@@ -67,6 +67,18 @@ export async function createPairingRequest(r: {
   );
 }
 
+/**
+ * Row hygiene (MED-3): opportunistically purge long-dead requests. Deletes rows
+ * whose TTL lapsed more than an hour ago so the table stays bounded without a
+ * cron. Called best-effort from /pair/start.
+ */
+export async function deleteExpiredRequests(): Promise<void> {
+  const sql = getDb();
+  await sql.query(
+    `DELETE FROM pairing_requests WHERE expires_at < now() - interval '1 hour'`
+  );
+}
+
 export async function getByDeviceCode(deviceCode: string): Promise<PairingRequestRow | null> {
   const sql = getDb();
   const rows = (await sql.query(

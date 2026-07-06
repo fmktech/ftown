@@ -9,6 +9,7 @@ process.env.NEXT_PUBLIC_CENTRIFUGO_URL = "wss://centrifugo.test.example";
 
 vi.mock("@/lib/pairing-store", () => ({
   createPairingRequest: vi.fn(),
+  deleteExpiredRequests: vi.fn(),
   getByDeviceCode: vi.fn(),
   getByUserCode: vi.fn(),
   approvePairingRequest: vi.fn(),
@@ -27,6 +28,7 @@ vi.mock("@/lib/pairing", async (importOriginal) => {
 
 vi.mock("@/lib/bridge-refresh", () => ({
   upsertBridgeRefresh: vi.fn(),
+  getBridgeRefreshOwner: vi.fn(),
   getDevicesForSub: vi.fn(),
   revokeDevice: vi.fn(),
 }));
@@ -53,7 +55,7 @@ import {
   denyPairingRequest,
   consumePairingRequest,
 } from "@/lib/pairing-store";
-import { upsertBridgeRefresh } from "@/lib/bridge-refresh";
+import { upsertBridgeRefresh, getBridgeRefreshOwner } from "@/lib/bridge-refresh";
 import { auth } from "@/lib/auth";
 import { checkRateLimit } from "@/lib/login-rate-limit";
 
@@ -64,6 +66,7 @@ const mockApprove = vi.mocked(approvePairingRequest);
 const mockDeny = vi.mocked(denyPairingRequest);
 const mockConsume = vi.mocked(consumePairingRequest);
 const mockUpsertBridgeRefresh = vi.mocked(upsertBridgeRefresh);
+const mockGetBridgeRefreshOwner = vi.mocked(getBridgeRefreshOwner);
 const mockAuth = vi.mocked(auth);
 const mockCheckRateLimit = vi.mocked(checkRateLimit);
 
@@ -95,6 +98,9 @@ function row(overrides: Partial<PairingRequestRow>): PairingRequestRow {
 beforeEach(() => {
   vi.clearAllMocks();
   mockCheckRateLimit.mockResolvedValue({ allowed: true });
+  // Default: bridge is unclaimed and the owner-scoped upsert succeeds.
+  mockGetBridgeRefreshOwner.mockResolvedValue(null);
+  mockUpsertBridgeRefresh.mockResolvedValue(true);
 });
 
 describe("POST /api/auth/bridge/pair/start", () => {
@@ -214,9 +220,12 @@ describe("POST /api/auth/bridge/pair/poll", () => {
 
     const refreshDecoded = jwt.verify(body.refreshToken, TEST_SECRET, {
       audience: "ftown:bridge-refresh",
-    }) as { sub: string; jti: string };
+    }) as { sub: string; jti: string; type: string; bridgeId: string };
     expect(refreshDecoded.sub).toBe("user@example.com");
     expect(refreshDecoded.jti).toBeTruthy();
+    // HIGH-2: refresh claim set must match /api/auth/bridge exactly.
+    expect(refreshDecoded.type).toBe("bridge_refresh");
+    expect(refreshDecoded.bridgeId).toBe("bridge-1");
 
     expect(mockConsume).toHaveBeenCalledWith("fixed-device-code");
     expect(mockUpsertBridgeRefresh).toHaveBeenCalledWith({
@@ -225,6 +234,24 @@ describe("POST /api/auth/bridge/pair/poll", () => {
       jti: expect.any(String),
       hostname: "host-1",
     });
+  });
+
+  it("approved but owner-scoped upsert is blocked (different owner) -> {status:'denied'}, no tokens", async () => {
+    const approvedRow = row({
+      status: "approved",
+      sub: "user@example.com",
+      refreshJti: "jti-123",
+      bridgeId: "bridge-1",
+      hostname: "host-1",
+    });
+    mockGetByDeviceCode.mockResolvedValueOnce(approvedRow);
+    mockConsume.mockResolvedValueOnce(approvedRow);
+    mockUpsertBridgeRefresh.mockResolvedValueOnce(false);
+
+    const { POST } = await import("./poll/route");
+    const res = await POST(jsonRequest(pollUrl, { deviceCode: "fixed-device-code" }));
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ status: "denied" });
   });
 
   it("approved but consume races to null -> {status:'consumed'}", async () => {
@@ -267,6 +294,51 @@ describe("POST /api/auth/bridge/pair/approve", () => {
     const res = await POST(jsonRequest(approveUrl, { userCode: "ABCD-1234" }));
     expect(res.status).toBe(400);
   });
+
+  it("HIGH-1: bridge owned by a DIFFERENT account -> 409, does not approve", async () => {
+    mockAuth.mockResolvedValueOnce({ user: { email: "attacker@example.com" } } as never);
+    mockGetByUserCode.mockResolvedValueOnce(row({ status: "pending", bridgeId: "bridge-1" }));
+    mockGetBridgeRefreshOwner.mockResolvedValueOnce("owner@example.com");
+    const { POST } = await import("./approve/route");
+    const res = await POST(jsonRequest(approveUrl, { userCode: "ABCD-1234" }));
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toEqual({
+      error: "This bridge is registered to another account.",
+    });
+    expect(mockApprove).not.toHaveBeenCalled();
+  });
+
+  it("HIGH-1: bridge unclaimed (owner null) -> approves", async () => {
+    mockAuth.mockResolvedValueOnce({ user: { email: "user@example.com" } } as never);
+    mockGetByUserCode.mockResolvedValueOnce(row({ status: "pending", bridgeId: "bridge-1" }));
+    mockGetBridgeRefreshOwner.mockResolvedValueOnce(null);
+    mockApprove.mockResolvedValueOnce(row({ status: "approved", sub: "user@example.com" }));
+    const { POST } = await import("./approve/route");
+    const res = await POST(jsonRequest(approveUrl, { userCode: "ABCD-1234" }));
+    expect(res.status).toBe(200);
+    expect(mockApprove).toHaveBeenCalledWith("ABCD-1234", "user@example.com", expect.any(String));
+  });
+
+  it("HIGH-1: bridge owned by the SAME account -> approves", async () => {
+    mockAuth.mockResolvedValueOnce({ user: { email: "user@example.com" } } as never);
+    mockGetByUserCode.mockResolvedValueOnce(row({ status: "pending", bridgeId: "bridge-1" }));
+    mockGetBridgeRefreshOwner.mockResolvedValueOnce("user@example.com");
+    mockApprove.mockResolvedValueOnce(row({ status: "approved", sub: "user@example.com" }));
+    const { POST } = await import("./approve/route");
+    const res = await POST(jsonRequest(approveUrl, { userCode: "ABCD-1234" }));
+    expect(res.status).toBe(200);
+    expect(mockApprove).toHaveBeenCalledWith("ABCD-1234", "user@example.com", expect.any(String));
+  });
+
+  it("MED-4: rate-limited -> 429, does not approve", async () => {
+    mockAuth.mockResolvedValueOnce({ user: { email: "user@example.com" } } as never);
+    mockCheckRateLimit.mockResolvedValueOnce({ allowed: false, retryAfterMs: 5000 });
+    const { POST } = await import("./approve/route");
+    const res = await POST(jsonRequest(approveUrl, { userCode: "ABCD-1234" }));
+    expect(res.status).toBe(429);
+    expect(mockCheckRateLimit).toHaveBeenCalledWith("pair-approve", "user@example.com");
+    expect(mockApprove).not.toHaveBeenCalled();
+  });
 });
 
 describe("POST /api/auth/bridge/pair/deny", () => {
@@ -288,6 +360,16 @@ describe("POST /api/auth/bridge/pair/deny", () => {
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual({ ok: true });
     expect(mockDeny).toHaveBeenCalledWith("ABCD-1234");
+  });
+
+  it("MED-4: rate-limited -> 429, does not deny", async () => {
+    mockAuth.mockResolvedValueOnce({ user: { email: "user@example.com" } } as never);
+    mockCheckRateLimit.mockResolvedValueOnce({ allowed: false, retryAfterMs: 5000 });
+    const { POST } = await import("./deny/route");
+    const res = await POST(jsonRequest(denyUrl, { userCode: "ABCD-1234" }));
+    expect(res.status).toBe(429);
+    expect(mockCheckRateLimit).toHaveBeenCalledWith("pair-deny", "user@example.com");
+    expect(mockDeny).not.toHaveBeenCalled();
   });
 });
 
@@ -340,5 +422,15 @@ describe("POST /api/auth/bridge/pair/lookup", () => {
       platform: "linux",
       createdAt: pendingRow.createdAt,
     });
+  });
+
+  it("MED-4: rate-limited -> 429, does not look up", async () => {
+    mockAuth.mockResolvedValueOnce({ user: { email: "user@example.com" } } as never);
+    mockCheckRateLimit.mockResolvedValueOnce({ allowed: false, retryAfterMs: 5000 });
+    const { POST } = await import("./lookup/route");
+    const res = await POST(jsonRequest(lookupUrl, { userCode: "ABCD-1234" }));
+    expect(res.status).toBe(429);
+    expect(mockCheckRateLimit).toHaveBeenCalledWith("pair-lookup", "user@example.com");
+    expect(mockGetByUserCode).not.toHaveBeenCalled();
   });
 });

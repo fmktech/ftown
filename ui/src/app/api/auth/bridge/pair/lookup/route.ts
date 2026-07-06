@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { getByUserCode } from "@/lib/pairing-store";
+import { checkRateLimit, recordAttempt, type RateLimitConfig } from "@/lib/login-rate-limit";
 
 export const runtime = "nodejs";
 
@@ -11,11 +12,29 @@ interface PairLookupRequestBody {
 
 const NOT_FOUND_RESPONSE = { error: "That code is invalid or expired." } as const;
 
+const PAIR_LOOKUP_RATE_LIMIT: RateLimitConfig = {
+  maxAttempts: 30,
+  lockoutMs: 10 * 60 * 1000, // 10 minutes
+};
+
+const PAIR_LOOKUP_SCOPE = "pair-lookup";
+
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const session = await auth();
-  if (!session?.user?.email) {
+  const email = session?.user?.email;
+  if (!email) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+
+  // MED-4: throttle userCode brute-forcing by a logged-in attacker.
+  const rateLimit = await checkRateLimit(PAIR_LOOKUP_SCOPE, email);
+  if (!rateLimit.allowed) {
+    return NextResponse.json(
+      { error: "Too many attempts. Try again later." },
+      { status: 429 }
+    );
+  }
+  await recordAttempt(PAIR_LOOKUP_SCOPE, email, PAIR_LOOKUP_RATE_LIMIT);
 
   let body: PairLookupRequestBody;
   try {
