@@ -4,7 +4,7 @@ import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { Centrifuge } from "centrifuge";
 import { ConnectionStatus } from "@/hooks/useCentrifugo";
 import { TerminalTransportApi } from "@/lib/direct-transport/contract";
-import { Session, Loop, LoopDraft, LoopRunRecord } from "@/types";
+import { Session, ShellType, Loop, LoopDraft, LoopRunRecord } from "@/types";
 import { CreateSessionOptions, useSessions } from "@/hooks/useSessions";
 import { useBridges } from "@/hooks/useBridges";
 import { useLoops } from "@/hooks/useLoops";
@@ -253,6 +253,17 @@ PY`;
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
   const selectedLoop = selectedLoopId ? loops.find((loop) => loop.id === selectedLoopId) ?? null : null;
 
+  // Mirrors the run-selection fallback in LoopDetailPane so the two stay in sync.
+  const selectedLoopRun = useMemo(
+    () => selectedLoopRuns.find((run) => run.id === selectedLoopRunId) ?? selectedLoopRuns[0] ?? null,
+    [selectedLoopRuns, selectedLoopRunId]
+  );
+  // The Session backing a still-running run, if the bridge still reports it live.
+  const liveLoopRunSession = useMemo(() => {
+    if (!selectedLoopRun || selectedLoopRun.status !== "running" || !selectedLoopRun.sessionId) return null;
+    return sessions.find((s) => s.id === selectedLoopRun.sessionId) ?? null;
+  }, [selectedLoopRun, sessions]);
+
   // Loop-run sessions are represented through LoopRunRecord in the loop detail
   // pane, so they no longer appear as top-level sidebar sessions.
   const normalSessions = useMemo(() => sessions.filter((s) => !s.loopId), [sessions]);
@@ -354,11 +365,19 @@ PY`;
   // Claude's Stop hook does not fire on user interrupt, so a lone ESC leaves the
   // dashboard stuck on "thinking"/"tool_use". Optimistically clear it locally.
   // Cursor reports interrupts via postToolUseFailure, so it needs no heuristic.
+  const markInterruptIdle = useCallback((sessionId: string | null, shellType?: ShellType) => {
+    if (sessionId && shellType !== "cursor") markSessionIdle(sessionId);
+  }, [markSessionIdle]);
+
   const handleTerminalInterrupt = useCallback(() => {
-    if (selectedSessionId && selectedSession?.shellType !== "cursor") {
-      markSessionIdle(selectedSessionId);
-    }
-  }, [selectedSessionId, selectedSession?.shellType, markSessionIdle]);
+    markInterruptIdle(selectedSessionId, selectedSession?.shellType);
+  }, [selectedSessionId, selectedSession?.shellType, markInterruptIdle]);
+
+  // Same optimistic-idle heuristic as handleTerminalInterrupt, targeted at the
+  // live session backing the currently viewed loop run instead of the sidebar selection.
+  const handleLoopRunInterrupt = useCallback(() => {
+    markInterruptIdle(liveLoopRunSession?.id ?? null, liveLoopRunSession?.shellType);
+  }, [liveLoopRunSession, markInterruptIdle]);
 
   const handleRemoveSession = useCallback((sessionId: string, onlyIfFinished?: boolean) => {
     // Only let removeSession drop the row optimistically when the owning bridge
@@ -1064,6 +1083,11 @@ PY`;
               onRunNow={handleRunLoopNow}
               onToggleEnabled={handleToggleLoopEnabled}
               onEdit={handleEditLoop}
+              liveSession={liveLoopRunSession}
+              transport={transport}
+              usage={liveLoopRunSession ? sessionActivity.get(liveLoopRunSession.id)?.usage : undefined}
+              terminalRef={terminalRef}
+              onInterrupt={handleLoopRunInterrupt}
             />
           ) : (
             <Terminal

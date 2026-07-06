@@ -1,7 +1,11 @@
 "use client";
 
-import { Loop, LoopRunRecord, LoopRunStatus } from "@/types";
+import { Ref } from "react";
+import { Session, Loop, LoopRunRecord, LoopRunStatus } from "@/types";
 import { describeSchedule } from "@/lib/loop-schedule";
+import { Terminal, TerminalHandle } from "./Terminal";
+import { TerminalTransportApi } from "@/lib/direct-transport/contract";
+import { TokenUsage } from "@/hooks/useSessionEvents";
 
 interface LoopDetailPaneProps {
   loop: Loop | null;
@@ -13,6 +17,13 @@ interface LoopDetailPaneProps {
   onRunNow: (loop: Loop) => void;
   onToggleEnabled: (loop: Loop) => void;
   onEdit: (loop: Loop) => void;
+  /** The Session backing the currently selected run, when that run is still
+   *  live and its session is known to the bridge; null otherwise. */
+  liveSession: Session | null;
+  transport: TerminalTransportApi | null;
+  usage?: TokenUsage;
+  terminalRef: Ref<TerminalHandle>;
+  onInterrupt: () => void;
 }
 
 function formatAbsolute(timestamp?: string): string {
@@ -72,6 +83,11 @@ export function LoopDetailPane({
   onRunNow,
   onToggleEnabled,
   onEdit,
+  liveSession,
+  transport,
+  usage,
+  terminalRef,
+  onInterrupt,
 }: LoopDetailPaneProps) {
   if (!loop) {
     return (
@@ -82,6 +98,11 @@ export function LoopDetailPane({
   }
 
   const selectedRun = runs.find((run) => run.id === selectedRunId) ?? runs[0] ?? null;
+  const isLive =
+    !!liveSession &&
+    !!selectedRun &&
+    selectedRun.status === "running" &&
+    selectedRun.sessionId === liveSession.id;
 
   return (
     <div className="flex-1 flex flex-col min-h-0 min-w-0" style={{ background: "var(--bg-base)" }}>
@@ -284,6 +305,19 @@ export function LoopDetailPane({
                 </div>
               </div>
 
+              {isLive && liveSession ? (
+                <Terminal
+                  ref={terminalRef}
+                  transport={transport}
+                  sessionId={liveSession.id}
+                  bridgeId={liveSession.bridgeId}
+                  isRunning={liveSession.status === "running"}
+                  sessionName={liveSession.name}
+                  usage={usage}
+                  shellType={liveSession.shellType}
+                  onInterrupt={onInterrupt}
+                />
+              ) : (
               <div className="flex-1 min-h-0" style={{ overflow: "auto", padding: 18 }}>
                 <div style={{ marginBottom: 12 }}>
                   <div style={{ fontSize: 10, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
@@ -325,6 +359,7 @@ export function LoopDetailPane({
                   {selectedRun.logTail?.trim() || (selectedRun.status === "running" ? "Run is still active; log will persist when it finishes." : "No persisted output captured for this run.")}
                 </pre>
               </div>
+              )}
             </>
           )}
         </section>
