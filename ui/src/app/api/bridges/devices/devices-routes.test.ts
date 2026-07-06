@@ -36,7 +36,7 @@ describe("GET /api/bridges/devices", () => {
   it("no session -> 401", async () => {
     mockAuth.mockResolvedValueOnce(null as never);
     const { GET } = await import("./route");
-    const res = await GET(new NextRequest("http://localhost/api/bridges/devices"));
+    const res = await GET();
     expect(res.status).toBe(401);
     expect(mockGetDevicesForSub).not.toHaveBeenCalled();
   });
@@ -50,7 +50,7 @@ describe("GET /api/bridges/devices", () => {
     mockGetDevicesForSub.mockResolvedValueOnce(devices);
 
     const { GET } = await import("./route");
-    const res = await GET(new NextRequest("http://localhost/api/bridges/devices"));
+    const res = await GET();
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual({ devices });
     expect(mockGetDevicesForSub).toHaveBeenCalledWith("user@example.com");

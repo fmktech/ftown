@@ -41,6 +41,8 @@ vi.mock("@/lib/secrets", () => ({
 
 vi.mock("@/lib/login-rate-limit", () => ({
   checkRateLimit: vi.fn(async () => ({ allowed: true })),
+  recordAttempt: vi.fn(async () => {}),
+  resetAttempts: vi.fn(async () => {}),
 }));
 
 import {
