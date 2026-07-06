@@ -17,6 +17,7 @@ interface LoopDetailPaneProps {
   onRunNow: (loop: Loop) => void;
   onToggleEnabled: (loop: Loop) => void;
   onEdit: (loop: Loop) => void;
+  onDelete: (loop: Loop) => void;
   /** The Session backing the currently selected run, when that run is still
    *  live and its session is known to the bridge; null otherwise. */
   liveSession: Session | null;
@@ -83,6 +84,7 @@ export function LoopDetailPane({
   onRunNow,
   onToggleEnabled,
   onEdit,
+  onDelete,
   liveSession,
   transport,
   usage,
@@ -155,6 +157,15 @@ export function LoopDetailPane({
             </button>
             <button type="button" className="btn-ghost" onClick={() => onEdit(loop)}>
               Edit
+            </button>
+            <button
+              type="button"
+              className="btn-danger"
+              onClick={() => {
+                if (window.confirm(`Delete loop "${loop.name}"?`)) onDelete(loop);
+              }}
+            >
+              Delete
             </button>
           </div>
         </div>

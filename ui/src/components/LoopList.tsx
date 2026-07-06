@@ -1,11 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Loop } from "@/types";
 import { BridgeInfo } from "@/hooks/useBridges";
 import { describeSchedule } from "@/lib/loop-schedule";
+import { ContextMenu, ContextMenuButton } from "./ContextMenu";
 
 const FOLD_STORAGE_KEY = "ftown:loopList:collapsedSections";
+
+interface LoopMenuState {
+  loopId: string;
+  x: number;
+  y: number;
+}
 
 interface LoopListProps {
   loops: Loop[];
@@ -95,6 +102,28 @@ export function LoopList({
   // set means expanded (the default). Persisted so a reload keeps the user's
   // fold choices, mirroring SessionList's collapsedBridges/collapsedSessions.
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
+  const [contextMenu, setContextMenu] = useState<LoopMenuState | null>(null);
+
+  const closeContextMenu = useCallback(() => setContextMenu(null), []);
+
+  function openContextMenu(e: React.MouseEvent<HTMLDivElement>, loop: Loop): void {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ loopId: loop.id, x: e.clientX, y: e.clientY });
+  }
+
+  // If the loop backing the open menu disappears from `loops` (e.g. deleted
+  // elsewhere, or a websocket update drops it), close the menu instead of
+  // leaving it open with stale/nonexistent data.
+  useEffect(() => {
+    if (contextMenu && !loops.some((l) => l.id === contextMenu.loopId)) {
+      setContextMenu(null);
+    }
+  }, [loops, contextMenu]);
+
+  // Re-derived from the live `loops` prop on every render so the menu never
+  // acts on a stale captured Loop (e.g. stale enabled/pause state).
+  const activeMenuLoop = contextMenu ? loops.find((l) => l.id === contextMenu.loopId) ?? null : null;
 
   useEffect(() => {
     try {
@@ -194,7 +223,7 @@ export function LoopList({
     groups.set(loop.bridgeId, arr);
   }
 
-  const renderLoopRow = (loop: Loop) => {
+  const renderLoopRow = (loop: Loop, indent?: boolean) => {
         const selected = loop.id === selectedLoopId;
         return (
           <div
@@ -202,14 +231,16 @@ export function LoopList({
             role="button"
             tabIndex={0}
             aria-current={selected ? "true" : undefined}
+            aria-haspopup="menu"
             onClick={() => onSelectLoop(loop.id)}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") onSelectLoop(loop.id);
             }}
+            onContextMenu={(e) => openContextMenu(e, loop)}
             style={{
               width: "100%",
               textAlign: "left",
-              padding: "9px 12px",
+              padding: indent ? "9px 12px 9px 24px" : "9px 12px",
               borderBottom: "1px solid var(--border-subtle)",
               borderLeft: `3px solid ${selected ? "var(--accent)" : loopAccent(loop)}`,
               background: selected ? "var(--bg-elevated)" : loop.runNowRequested ? "rgba(0, 255, 136, 0.03)" : "transparent",
@@ -242,6 +273,39 @@ export function LoopList({
                 {loop.name}
               </span>
               <span style={{ fontSize: 10, color: "var(--text-faint)", whiteSpace: "nowrap" }}>{statusLabel(loop)}</span>
+              <span
+                role="button"
+                tabIndex={0}
+                aria-haspopup="menu"
+                aria-label="Loop actions"
+                title="Loop actions"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const r = e.currentTarget.getBoundingClientRect();
+                  setContextMenu({ loopId: loop.id, x: r.right, y: r.bottom + 4 });
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const r = e.currentTarget.getBoundingClientRect();
+                    setContextMenu({ loopId: loop.id, x: r.right, y: r.bottom + 4 });
+                  }
+                }}
+                style={{
+                  cursor: "pointer",
+                  color: "var(--text-faint)",
+                  fontSize: 14,
+                  lineHeight: 1,
+                  padding: "2px 4px",
+                  userSelect: "none",
+                  flexShrink: 0,
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
+                onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-faint)")}
+              >
+                ⋮
+              </span>
             </div>
 
             <div className="flex items-center justify-between gap-2" style={{ marginTop: 5, minWidth: 0 }}>
@@ -275,59 +339,6 @@ export function LoopList({
             >
               {describeSchedule(loop.schedule)}
             </div>
-
-            {selected && (
-              <div className="flex items-center gap-1.5" style={{ marginTop: 7 }}>
-                <button
-                  type="button"
-                  title="Run now"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onRunNow(loop);
-                  }}
-                  className="btn-ghost"
-                  style={{ padding: "2px 6px", fontSize: 10, border: "none" }}
-                >
-                  Run
-                </button>
-                <button
-                  type="button"
-                  title={loop.enabled ? "Pause" : "Resume"}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onToggleEnabled(loop);
-                  }}
-                  className="btn-ghost"
-                  style={{ padding: "2px 6px", fontSize: 10, border: "none" }}
-                >
-                  {loop.enabled ? "Pause" : "Resume"}
-                </button>
-                <button
-                  type="button"
-                  title="Edit loop"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onEdit(loop);
-                  }}
-                  className="btn-ghost"
-                  style={{ padding: "2px 6px", fontSize: 10, border: "none" }}
-                >
-                  Edit
-                </button>
-                <button
-                  type="button"
-                  title="Delete loop"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (window.confirm(`Delete loop "${loop.name}"?`)) onDelete(loop);
-                  }}
-                  className="btn-danger"
-                  style={{ padding: "2px 6px", fontSize: 10, border: "none" }}
-                >
-                  Del
-                </button>
-              </div>
-            )}
           </div>
         );
   };
@@ -444,7 +455,7 @@ export function LoopList({
                         onToggle: () => toggleSection(groupSectionId),
                         indent: true,
                       })}
-                      {!isGroupCollapsed && groupLoops.map((loop) => renderLoopRow(loop))}
+                      {!isGroupCollapsed && groupLoops.map((loop) => renderLoopRow(loop, true))}
                     </div>
                   );
                 })}
@@ -454,6 +465,45 @@ export function LoopList({
           </div>
         );
       })}
+
+      {contextMenu && activeMenuLoop && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          ariaLabel="Loop actions"
+          onClose={closeContextMenu}
+        >
+          <ContextMenuButton
+            label="Run now"
+            onClick={() => {
+              onRunNow(activeMenuLoop);
+              closeContextMenu();
+            }}
+          />
+          <ContextMenuButton
+            label={activeMenuLoop.enabled ? "Pause" : "Resume"}
+            onClick={() => {
+              onToggleEnabled(activeMenuLoop);
+              closeContextMenu();
+            }}
+          />
+          <ContextMenuButton
+            label="Edit"
+            onClick={() => {
+              onEdit(activeMenuLoop);
+              closeContextMenu();
+            }}
+          />
+          <ContextMenuButton
+            label="Delete"
+            color="var(--status-error)"
+            onClick={() => {
+              closeContextMenu();
+              if (window.confirm(`Delete loop "${activeMenuLoop.name}"?`)) onDelete(activeMenuLoop);
+            }}
+          />
+        </ContextMenu>
+      )}
     </div>
   );
 }
