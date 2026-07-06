@@ -119,15 +119,15 @@ export function LoopList({
     });
   }
 
-  const cronLoops = loops
-    .filter((loop) => loop.schedule.kind === "cron")
+  const visibleLoops = loops
+    .slice()
     .sort((a, b) => {
       const aNext = a.nextRunAt ? Date.parse(a.nextRunAt) : Number.POSITIVE_INFINITY;
       const bNext = b.nextRunAt ? Date.parse(b.nextRunAt) : Number.POSITIVE_INFINITY;
       return aNext - bNext;
     });
 
-  if (cronLoops.length === 0) {
+  if (visibleLoops.length === 0) {
     if (collapsed) return null;
     return (
       <div
@@ -135,7 +135,7 @@ export function LoopList({
         style={{ color: "var(--text-faint)", fontSize: 11, gap: 8, padding: "32px 16px" }}
       >
         <span aria-hidden style={{ fontSize: 20, color: "var(--text-faint)" }}>◷</span>
-        <span style={{ color: "var(--text-muted)", fontSize: 12 }}>No crons yet</span>
+        <span style={{ color: "var(--text-muted)", fontSize: 12 }}>No loops yet</span>
         <span style={{ color: "var(--text-faint)" }}>Schedule a recurring agent run to see it here</span>
       </div>
     );
@@ -144,7 +144,7 @@ export function LoopList({
   if (collapsed) {
     return (
       <div className="flex flex-col">
-        {cronLoops.map((loop) => (
+        {visibleLoops.map((loop) => (
           <button
             key={loop.id}
             onClick={() => onSelectLoop(loop.id)}
@@ -185,10 +185,10 @@ export function LoopList({
     );
   }
 
-  // Group cron loops under per-bridge headers, mirroring SessionList. Map
+  // Group loops under per-bridge headers, mirroring SessionList. Map
   // preserves first-appearance order, so groups follow the next-run sort above.
   const groups = new Map<string, Loop[]>();
-  for (const loop of cronLoops) {
+  for (const loop of visibleLoops) {
     const arr = groups.get(loop.bridgeId) ?? [];
     arr.push(loop);
     groups.set(loop.bridgeId, arr);
@@ -304,7 +304,7 @@ export function LoopList({
                 </button>
                 <button
                   type="button"
-                  title="Edit cron"
+                  title="Edit loop"
                   onClick={(e) => {
                     e.stopPropagation();
                     onEdit(loop);
@@ -316,10 +316,10 @@ export function LoopList({
                 </button>
                 <button
                   type="button"
-                  title="Delete cron"
+                  title="Delete loop"
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (window.confirm(`Delete cron "${loop.name}"?`)) onDelete(loop);
+                    if (window.confirm(`Delete loop "${loop.name}"?`)) onDelete(loop);
                   }}
                   className="btn-danger"
                   style={{ padding: "2px 6px", fontSize: 10, border: "none" }}
