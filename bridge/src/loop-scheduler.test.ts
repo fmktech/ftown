@@ -340,10 +340,10 @@ describe('LoopScheduler — preflight skip', () => {
     assert.strictEqual(loop.runCount, 0);
     assert.strictEqual(loop.nextRunAt, iso(60_000));
     assert.strictEqual(h.flightCalls.length, 1); // only the preflight ran
-    const records = h.runRecords.byLoop('loop-1');
-    assert.strictEqual(records.length, 1);
-    assert.strictEqual(records[0].status, 'skipped');
-    assert.match(records[0].logTail ?? '', /Preflight exited with code 3/);
+    // No run record is persisted for a preflight skip — diagnostics live on the loop.
+    assert.strictEqual(h.runRecords.byLoop('loop-1').length, 0);
+    assert.strictEqual(loop.lastSkipAt, iso(0));
+    assert.match(loop.lastSkipReason ?? '', /Preflight exited with code 3/);
   });
 
   it('runs postflight on a preflight-skip only when runOnSkip is set', async () => {

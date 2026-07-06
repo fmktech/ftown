@@ -81,6 +81,8 @@ export interface Loop extends LoopDraft {
   lastSessionId?: string;           // id of the most recent run-Session
   runCount: number;                 // real AI/flight runs spawned
   skipCount: number;                // preflight-abort skips
+  lastSkipAt?: string;              // ISO — fire time of the most recent preflight skip
+  lastSkipReason?: string;          // preflight exit code + trimmed stderr/stdout, capped at 512 chars
   /** Transient manual-fire flag; set by run_loop_now, cleared on the next tick. */
   runNowRequested?: boolean;
 }
