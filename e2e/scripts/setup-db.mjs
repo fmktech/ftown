@@ -4,7 +4,9 @@
 // users:               ui/src/app/api/auth/register/route.ts + ui/src/lib/auth.ts
 // rate_limit_attempts: ui/src/lib/login-rate-limit.ts (login + register)
 // bridge_refresh:      ui/src/app/api/auth/bridge/refresh/route.ts (jti rotation)
-// Mirrors ui/schema.sql (kept in sync with the auth-hardening migration).
+// pairing_requests:    ui/src/lib/pairing-store.ts (device pairing flow)
+// Mirrors ui/schema.sql (kept in sync with the auth-hardening + device-pairing
+// migrations).
 import pg from "pg";
 
 const { Client } = pg;
@@ -40,9 +42,30 @@ CREATE TABLE IF NOT EXISTS bridge_refresh (
   current_jti text NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE bridge_refresh ADD COLUMN IF NOT EXISTS hostname text;
+ALTER TABLE bridge_refresh ADD COLUMN IF NOT EXISTS last_seen timestamptz;
+
+CREATE TABLE IF NOT EXISTS pairing_requests (
+  device_code text PRIMARY KEY,
+  user_code text UNIQUE NOT NULL,
+  bridge_id text NOT NULL,
+  hostname text,
+  platform text,
+  status text NOT NULL DEFAULT 'pending',
+  sub text,
+  refresh_jti text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NOT NULL,
+  approved_at timestamptz
+);
+
+CREATE INDEX IF NOT EXISTS idx_pairing_user_code ON pairing_requests(user_code);
 `;
 
 await client.connect();
 await client.query(DDL);
 await client.end();
-console.log("[setup-db] schema ready (users, rate_limit_attempts, bridge_refresh)");
+console.log(
+  "[setup-db] schema ready (users, rate_limit_attempts, bridge_refresh, pairing_requests)",
+);
