@@ -1083,6 +1083,7 @@ PY`;
               onRunNow={handleRunLoopNow}
               onToggleEnabled={handleToggleLoopEnabled}
               onEdit={handleEditLoop}
+              onDelete={handleDeleteLoop}
               liveSession={liveLoopRunSession}
               transport={transport}
               usage={liveLoopRunSession ? sessionActivity.get(liveLoopRunSession.id)?.usage : undefined}
