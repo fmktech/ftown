@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { genDeviceCode, genUserCode, PAIR_REQUEST_TTL_MS, PAIR_POLL_INTERVAL_MS } from "@/lib/pairing";
-import { createPairingRequest } from "@/lib/pairing-store";
+import { createPairingRequest, deleteExpiredRequests } from "@/lib/pairing-store";
 import { checkRateLimit, recordAttempt, type RateLimitConfig } from "@/lib/login-rate-limit";
 
 export const runtime = "nodejs";
@@ -62,6 +62,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
   await recordAttempt(PAIR_START_SCOPE, ip, PAIR_START_RATE_LIMIT);
+
+  // MED-3: best-effort row hygiene. A cleanup failure must never fail the
+  // pairing request itself.
+  try {
+    await deleteExpiredRequests();
+  } catch (err) {
+    console.error(
+      "[auth/bridge/pair/start] expired-request cleanup failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
 
   const hostname = typeof body.hostname === "string" ? body.hostname : null;
   const platform = typeof body.platform === "string" ? body.platform : null;
