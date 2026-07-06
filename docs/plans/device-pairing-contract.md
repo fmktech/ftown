@@ -32,8 +32,14 @@ P1. Codes: `deviceCode` = 32-byte base64url (high-entropy secret, the poll crede
     `PAIR_REQUEST_TTL_MS` (600_000). Poll `intervalMs` = 5_000.
 P2. `/pair/start` and `/pair/poll` are UNauthenticated (the bridge has no session) but
     rate-limited (reuse the scope-keyed limiter: scope `pair-start` keyed by IP,
-    scope `pair-poll` keyed by deviceCode). `/pair/approve` and `/pair/lookup` and the
-    devices/revoke routes are SESSION-gated (`auth()`), 401 otherwise.
+    scope `pair-poll` keyed by deviceCode). `/pair/approve`, `/pair/deny`,
+    `/pair/lookup` and the devices/revoke routes are SESSION-gated (`auth()`), 401
+    otherwise. SECURITY (MED-4): approve/deny/lookup are ALSO rate-limited by the
+    session user email (scopes `pair-approve`/`pair-deny`/`pair-lookup`) to throttle
+    userCode brute-forcing by a logged-in attacker.
+P2b. Row hygiene (MED-3): `pairing_requests` rows are cleaned up opportunistically —
+    `/pair/start` first DELETEs rows where `expires_at < now() - interval '1 hour'`
+    (bounded growth without a cron). `pairing-store.ts` owns a `deleteExpiredRequests()`.
 P3. `/pair/poll` responses (200 body, never leak other requests): `{status:"pending"}`
     while unapproved; `{status:"expired"}` past TTL; `{status:"denied"}` if denied;
     `{status:"approved", token, refreshToken, centrifugoUrl, userId}` exactly once —
@@ -42,11 +48,18 @@ P3. `/pair/poll` responses (200 body, never leak other requests): `{status:"pend
     deviceCode → `{status:"unknown"}`. Slow-down protection: polling faster than
     `intervalMs` may return `{status:"slow_down"}` (advisory; bridge respects intervalMs).
 P4. Approval binds `sub = session.user.email`, mints a connect token (aud
-    `ftown:centrifugo`, 24h) + refresh token (aud `ftown:bridge-refresh`, 30d, with a
-    `jti`), and upserts `bridge_refresh(bridge_id, sub, current_jti, hostname,
-    last_seen)` for the request's bridgeId — identical token semantics to the current
-    `/api/auth/bridge`. A user may only approve/deny requests; a request is bound to
-    the FIRST approver and cannot be re-bound.
+    `ftown:centrifugo`, 24h) + refresh token (aud `ftown:bridge-refresh`, 30d) whose
+    claim set is IDENTICAL to `/api/auth/bridge`: `{ sub, jti, type: 'bridge_refresh',
+    bridgeId }` (the refresh route REQUIRES `type` and `bridgeId` — omitting them breaks
+    every paired bridge's first refresh). Upserts `bridge_refresh(bridge_id, sub,
+    current_jti, hostname, last_seen)`.
+    OWNERSHIP (SECURITY — HIGH-1): a bridgeId is owned by the first sub that pairs it.
+    `upsertBridgeRefresh` MUST be owner-scoped — `ON CONFLICT (bridge_id) DO UPDATE …
+    WHERE bridge_refresh.sub = EXCLUDED.sub` — so it can never overwrite a row owned by
+    a different user (a mismatch updates 0 rows). `/pair/approve` MUST pre-check: if the
+    request's bridgeId already has a `bridge_refresh` row with a DIFFERENT sub, reject
+    with 409 `{error:'This bridge is registered to another account.'}` and do NOT
+    approve. A request is bound to the FIRST approver and cannot be re-bound.
 P5. `/pair/lookup` `{ userCode }` (session-gated) → `{ bridgeId, hostname, platform,
     createdAt }` for the pending request, so the approve page can show what it's
     approving. Unknown/expired → 404.
