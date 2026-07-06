@@ -5,7 +5,6 @@ import { renderRawLogToText } from './terminal-manager.js';
 import {
   pruneLoopRunRecords,
   recordForSession,
-  skippedRunRecord,
   upsertLoopRunRecord,
 } from './loop-run-store.js';
 import { listLoops, mutateLoopRuntime, type LoopRuntimeMutator } from './loop-store.js';
@@ -448,11 +447,9 @@ export class LoopScheduler {
         preflightOut = r.stdout;
         if (r.exitCode !== 0) {
           const skippedAt = iso(now);
-          const details = [
-            `Preflight exited with code ${r.exitCode}.`,
-            r.stdout ? `\nstdout:\n${r.stdout}` : '',
-            r.stderr ? `\nstderr:\n${r.stderr}` : '',
-          ].join('');
+          const reasonSource = r.stderr.trim() || r.stdout.trim();
+          const reasonFull = `Preflight exited with code ${r.exitCode}.${reasonSource ? ` ${reasonSource}` : ''}`;
+          const reason = reasonFull.length > 512 ? `${reasonFull.slice(0, 511)}…` : reasonFull;
           // ABORT: skip (not error), no session, no run-node.
           const skipped = await this.persist(loop.id, (l) => {
             l.lastRunAt = skippedAt;
@@ -460,11 +457,10 @@ export class LoopScheduler {
             l.runNowRequested = false;
             l.lastStatus = 'skipped';
             l.skipCount += 1;
+            l.lastSkipAt = skippedAt;
+            l.lastSkipReason = reason;
             l.updatedAt = skippedAt;
           });
-          if (skipped) {
-            this.runRecords.upsertLoopRunRecord(skippedRunRecord(loop, skippedAt, details));
-          }
           if (skipped && loop.postflight?.runOnSkip) {
             await this.runPostflight(loop, { status: 'skipped', sessionId: '', output: '' });
           }

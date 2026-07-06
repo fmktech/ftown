@@ -65,11 +65,26 @@ function statusLabel(loop: Loop): string {
   return loop.lastStatus ?? "idle";
 }
 
-function DetailMetric({ label, value }: { label: string; value: string | number }) {
+function DetailMetric({ label, value, sublabel }: { label: string; value: string | number; sublabel?: string }) {
   return (
     <div style={{ minWidth: 0 }}>
       <div style={{ fontSize: 10, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: "0.08em" }}>{label}</div>
       <div style={{ marginTop: 3, fontSize: 12, color: "var(--text-secondary)", fontFamily: "var(--font-mono)" }}>{value}</div>
+      {sublabel && (
+        <div
+          title={sublabel}
+          style={{
+            marginTop: 2,
+            fontSize: 10,
+            color: "var(--text-faint)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {sublabel}
+        </div>
+      )}
     </div>
   );
 }
@@ -181,7 +196,11 @@ export function LoopDetailPane({
           <DetailMetric label="Next due" value={formatAbsolute(loop.nextRunAt)} />
           <DetailMetric label="Last run" value={formatAbsolute(loop.lastRunAt)} />
           <DetailMetric label="Runs" value={loop.runCount} />
-          <DetailMetric label="Skips" value={loop.skipCount} />
+          <DetailMetric
+            label="Skips"
+            value={loop.skipCount}
+            sublabel={loop.lastSkipAt ? `last: ${formatAbsolute(loop.lastSkipAt)}${loop.lastSkipReason ? ` — ${loop.lastSkipReason}` : ""}` : undefined}
+          />
           <DetailMetric label="Harness" value={loop.harness} />
           <DetailMetric label="Retention" value={loop.retention.autoClearAfterRuns == null ? "all" : loop.retention.autoClearAfterRuns} />
         </div>
