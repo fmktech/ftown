@@ -251,6 +251,8 @@ program
         bridgeId,
         hostname: osHostname(),
         platform: process.platform,
+        localPort: local.localPort,
+        localNonce: local.localNonce,
         log: (msg) => console.log(msg),
       });
     };

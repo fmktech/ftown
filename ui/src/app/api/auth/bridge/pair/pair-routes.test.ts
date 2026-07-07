@@ -204,7 +204,13 @@ describe("POST /api/auth/bridge/pair/poll", () => {
     mockConsume.mockResolvedValueOnce(approvedRow);
 
     const { POST } = await import("./poll/route");
-    const res = await POST(jsonRequest(pollUrl, { deviceCode: "fixed-device-code" }));
+    const res = await POST(
+      jsonRequest(pollUrl, {
+        deviceCode: "fixed-device-code",
+        localPort: 51234,
+        localNonce: "0123456789abcdef0123456789abcdef",
+      }),
+    );
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.status).toBe("approved");
@@ -215,8 +221,26 @@ describe("POST /api/auth/bridge/pair/poll", () => {
 
     const connectDecoded = jwt.verify(body.token, TEST_SECRET, {
       audience: "ftown:centrifugo",
-    }) as { sub: string };
+    }) as {
+      sub: string;
+      info: {
+        bridgeId: string;
+        hostname: string;
+        connectedAt: string;
+        localPort?: number;
+        localNonce?: string;
+      };
+    };
     expect(connectDecoded.sub).toBe("user@example.com");
+    // Presence filtering (useBridges.ts) drops any connInfo without bridgeId, so
+    // the connect token MUST carry the same `info` claim as /api/auth/bridge.
+    expect(connectDecoded.info.bridgeId).toBe("bridge-1");
+    expect(connectDecoded.info.hostname).toBe("host-1");
+    expect(typeof connectDecoded.info.connectedAt).toBe("string");
+    // The loopback advert from the poll body is embedded so the owner's clients
+    // discover the loopback rung via presence.
+    expect(connectDecoded.info.localPort).toBe(51234);
+    expect(connectDecoded.info.localNonce).toBe("0123456789abcdef0123456789abcdef");
 
     const refreshDecoded = jwt.verify(body.refreshToken, TEST_SECRET, {
       audience: "ftown:bridge-refresh",
