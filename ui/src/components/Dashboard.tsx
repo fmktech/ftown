@@ -61,9 +61,6 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [editingLoop, setEditingLoop] = useState<Loop | null>(null);
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
-  const [bridgeToken, setBridgeToken] = useState<string | null>(null);
-  const [bridgeTokenLoading, setBridgeTokenLoading] = useState(false);
-  const [bridgeTokenError, setBridgeTokenError] = useState<string | null>(null);
   const [mobileTab, setMobileTab] = useState<"sessions" | "terminal">("sessions");
   const [sidebarTab, setSidebarTab] = useState<"sessions" | "crons">("sessions");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -470,39 +467,6 @@ PY`;
     }
   }, [scheduleTerminalRenderAdjustment]);
 
-  const generateBridgeToken = useCallback(async () => {
-    setBridgeTokenLoading(true);
-    setBridgeTokenError(null);
-    try {
-      const res = await fetch("/api/auth/bridge/bootstrap", {
-        method: "POST",
-        credentials: "include",
-      });
-      if (!res.ok) {
-        if (res.status === 401) {
-          setBridgeTokenError("Session expired — reload the page and sign in again.");
-        } else {
-          setBridgeTokenError("Couldn't generate a bridge token — try again.");
-        }
-        setBridgeToken(null);
-        return;
-      }
-      const data = (await res.json()) as { token: string };
-      setBridgeToken(data.token);
-    } catch {
-      setBridgeTokenError("Couldn't generate a bridge token — try again.");
-      setBridgeToken(null);
-    } finally {
-      setBridgeTokenLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (showToken) {
-      void generateBridgeToken();
-    }
-  }, [showToken, generateBridgeToken]);
-
   const handleCloneSession = useCallback((session: Session) => {
     setSessionDefaults({
       workingDir: session.workingDir,
@@ -675,7 +639,7 @@ PY`;
             onClick={() => setShowToken(!showToken)}
             style={showToken ? { color: "var(--accent)", borderColor: "var(--accent-dim)" } : {}}
           >
-            Bridge Command
+            Connect a bridge
           </button>
 
           {selectedSession?.status === "running" && (
@@ -858,82 +822,54 @@ PY`;
         >
           <div className="flex items-center justify-between mb-2">
             <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-              Start your bridge with:
+              Connect a bridge:
             </span>
-            <div className="flex items-center gap-2">
-              <button
-                className="btn-ghost"
-                onClick={() => void generateBridgeToken()}
-                disabled={bridgeTokenLoading}
-              >
-                Regenerate
-              </button>
-              <button
-                className="btn-ghost"
-                onClick={async () => {
-                  if (!bridgeToken) return;
-                  const text = `npx -y ftown-bridge@latest --token ${bridgeToken} --api-url ${window.location.origin}`;
-                  try {
-                    await navigator.clipboard.writeText(text);
-                  } catch {
-                    const ta = document.createElement("textarea");
-                    ta.value = text;
-                    document.body.appendChild(ta);
-                    ta.select();
-                    document.execCommand("copy");
-                    document.body.removeChild(ta);
-                  }
-                  setTokenCopied(true);
-                  setTimeout(() => setTokenCopied(false), 2000);
-                }}
-                disabled={bridgeTokenLoading || !bridgeToken}
-                style={tokenCopied ? { color: "var(--accent)", borderColor: "var(--accent-dim)" } : {}}
-              >
-                {tokenCopied ? "✓ Copied" : "Copy"}
-              </button>
-            </div>
+            <button
+              className="btn-ghost"
+              onClick={async () => {
+                const text = `npx -y ftown-bridge@latest --api-url ${window.location.origin}`;
+                try {
+                  await navigator.clipboard.writeText(text);
+                } catch {
+                  const ta = document.createElement("textarea");
+                  ta.value = text;
+                  document.body.appendChild(ta);
+                  ta.select();
+                  document.execCommand("copy");
+                  document.body.removeChild(ta);
+                }
+                setTokenCopied(true);
+                setTimeout(() => setTokenCopied(false), 2000);
+              }}
+              style={tokenCopied ? { color: "var(--accent)", borderColor: "var(--accent-dim)" } : {}}
+            >
+              {tokenCopied ? "✓ Copied" : "Copy"}
+            </button>
           </div>
-          {bridgeTokenError ? (
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                fontSize: 11,
-                color: "var(--status-error, #e5484d)",
-                background: "var(--bg-void)",
-                border: "1px solid var(--border-subtle)",
-                borderRadius: 4,
-                padding: "6px 10px",
-                fontFamily: "var(--font-mono)",
-              }}
-            >
-              <span>{bridgeTokenError}</span>
-              <button className="btn-ghost" onClick={() => void generateBridgeToken()}>
-                Retry
-              </button>
-            </div>
-          ) : (
-            <code
-              style={{
-                display: "block",
-                fontSize: 11,
-                color: "var(--text-muted)",
-                background: "var(--bg-void)",
-                border: "1px solid var(--border-subtle)",
-                borderRadius: 4,
-                padding: "6px 10px",
-                fontFamily: "var(--font-mono)",
-                letterSpacing: "0.02em",
-              }}
-            >
-              {bridgeTokenLoading || !bridgeToken
-                ? "Generating…"
-                : `npx -y ftown-bridge@latest --token ${bridgeToken} --api-url ${typeof window !== "undefined" ? window.location.origin : ""}`}
-            </code>
-          )}
+          <code
+            style={{
+              display: "block",
+              fontSize: 11,
+              color: "var(--text-muted)",
+              background: "var(--bg-void)",
+              border: "1px solid var(--border-subtle)",
+              borderRadius: 4,
+              padding: "6px 10px",
+              fontFamily: "var(--font-mono)",
+              letterSpacing: "0.02em",
+            }}
+          >
+            npx -y ftown-bridge@latest --api-url {typeof window !== "undefined" ? window.location.origin : ""}
+          </code>
           <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 6 }}>
-            Token expires in 10 minutes — click Regenerate if it&apos;s been a while.
+            Run this on the machine, then approve it here:{" "}
+            <a href="/pair" style={{ color: "var(--accent)" }}>
+              Approve a device
+            </a>
+            {" · "}
+            <a href="/devices" style={{ color: "var(--accent)" }}>
+              Manage devices
+            </a>
           </div>
         </div>
       )}
