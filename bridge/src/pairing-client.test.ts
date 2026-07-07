@@ -5,6 +5,8 @@ import { runPairing } from './pairing-client.js';
 
 const API = 'https://ftown.example';
 const DEVICE_CODE = 'super-secret-device-code-32bytes';
+const LOCAL_PORT = 51234;
+const LOCAL_NONCE = '0123456789abcdef0123456789abcdef';
 const START = {
   deviceCode: DEVICE_CODE,
   userCode: 'ABCD-2345',
@@ -100,6 +102,8 @@ describe('runPairing', () => {
       bridgeId: 'bridge-1',
       hostname: 'host',
       platform: 'darwin',
+      localPort: LOCAL_PORT,
+      localNonce: LOCAL_NONCE,
       fetchImpl,
       sleepImpl: clock.sleepImpl,
       log: () => {},
@@ -119,7 +123,7 @@ describe('runPairing', () => {
     restoreClock = clock.restore;
 
     await assert.rejects(
-      runPairing({ apiUrl: API, bridgeId: 'b', hostname: 'h', platform: 'p', fetchImpl, sleepImpl: clock.sleepImpl, log: () => {} }),
+      runPairing({ apiUrl: API, bridgeId: 'b', hostname: 'h', platform: 'p', localPort: LOCAL_PORT, localNonce: LOCAL_NONCE, fetchImpl, sleepImpl: clock.sleepImpl, log: () => {} }),
       /Pairing denied/,
     );
   });
@@ -130,7 +134,7 @@ describe('runPairing', () => {
     restoreClock = clock.restore;
 
     await assert.rejects(
-      runPairing({ apiUrl: API, bridgeId: 'b', hostname: 'h', platform: 'p', fetchImpl, sleepImpl: clock.sleepImpl, log: () => {} }),
+      runPairing({ apiUrl: API, bridgeId: 'b', hostname: 'h', platform: 'p', localPort: LOCAL_PORT, localNonce: LOCAL_NONCE, fetchImpl, sleepImpl: clock.sleepImpl, log: () => {} }),
       /expired/,
     );
   });
@@ -142,7 +146,7 @@ describe('runPairing', () => {
     restoreClock = clock.restore;
 
     await assert.rejects(
-      runPairing({ apiUrl: API, bridgeId: 'b', hostname: 'h', platform: 'p', fetchImpl, sleepImpl: clock.sleepImpl, log: () => {} }),
+      runPairing({ apiUrl: API, bridgeId: 'b', hostname: 'h', platform: 'p', localPort: LOCAL_PORT, localNonce: LOCAL_NONCE, fetchImpl, sleepImpl: clock.sleepImpl, log: () => {} }),
       /Pairing timed out/,
     );
   });
@@ -157,6 +161,7 @@ describe('runPairing', () => {
 
     await runPairing({
       apiUrl: API, bridgeId: 'b', hostname: 'h', platform: 'p',
+      localPort: LOCAL_PORT, localNonce: LOCAL_NONCE,
       fetchImpl, sleepImpl: clock.sleepImpl, log: () => {},
     });
 
@@ -172,6 +177,7 @@ describe('runPairing', () => {
 
     const result = await runPairing({
       apiUrl: API, bridgeId: 'b', hostname: 'h', platform: 'p',
+      localPort: LOCAL_PORT, localNonce: LOCAL_NONCE,
       fetchImpl, sleepImpl: clock.sleepImpl,
       log: (msg) => logged.push(msg),
     });
@@ -186,5 +192,9 @@ describe('runPairing', () => {
     // Sanity: the deviceCode DID travel over the wire (to /pair/poll), just not to log.
     const pollReq = requests.find((r) => r.url.endsWith('/pair/poll'));
     assert.equal((pollReq?.body as { deviceCode?: string }).deviceCode, DEVICE_CODE);
+    // The loopback advert (localPort/localNonce) rides the poll body so the poll
+    // route can embed it in the Centrifugo connect token's presence `info` claim.
+    assert.equal((pollReq?.body as { localPort?: number }).localPort, LOCAL_PORT);
+    assert.equal((pollReq?.body as { localNonce?: string }).localNonce, LOCAL_NONCE);
   });
 });

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import jwt from "jsonwebtoken";
 
+import { parseLocalAdvert } from "../../local-advert";
 import { getByDeviceCode, consumePairingRequest } from "@/lib/pairing-store";
 import { upsertBridgeRefresh } from "@/lib/bridge-refresh";
 import { getRequiredSecret } from "@/lib/secrets";
@@ -10,6 +11,9 @@ export const runtime = "nodejs";
 
 interface PairPollRequestBody {
   deviceCode: string;
+  /** Loopback WS rung advert (optional; absent on old bridges). */
+  localPort?: unknown;
+  localNonce?: unknown;
 }
 
 type PairPollStatus =
@@ -111,10 +115,24 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ status: "denied" } satisfies PairPollResponse);
   }
 
-  const token = jwt.sign({ sub: consumed.sub }, secret, {
-    audience: "ftown:centrifugo",
-    expiresIn: "24h",
-  });
+  const advert = parseLocalAdvert(body);
+  if (advert && "error" in advert) {
+    return NextResponse.json({ error: advert.error }, { status: 400 });
+  }
+
+  const token = jwt.sign(
+    {
+      sub: consumed.sub,
+      info: {
+        bridgeId: consumed.bridgeId,
+        hostname: consumed.hostname,
+        connectedAt: new Date().toISOString(),
+        ...(advert ?? {}),
+      },
+    },
+    secret,
+    { audience: "ftown:centrifugo", expiresIn: "24h" },
+  );
 
   // HIGH-2: the refresh token claim set MUST match /api/auth/bridge exactly
   // ({ sub, bridgeId, type: 'bridge_refresh', jti }); the refresh route REQUIRES
