@@ -267,7 +267,7 @@ PY`;
   // Loop-run sessions are represented through LoopRunRecord in the loop detail
   // pane, so they no longer appear as top-level sidebar sessions.
   const normalSessions = useMemo(() => sessions.filter((s) => !s.loopId), [sessions]);
-  const cronLoopCount = useMemo(() => loops.filter((loop) => loop.schedule.kind === "cron").length, [loops]);
+  const cronLoopCount = useMemo(() => loops.length, [loops]);
 
   useEffect(() => {
     if (!selectedLoop) {
