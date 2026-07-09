@@ -1,6 +1,6 @@
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error' | 'disconnected';
 
-export type ShellType = 'claude' | 'cursor' | 'codex' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks';
+export type ShellType = 'claude' | 'cursor' | 'codex' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks' | 'grok';
 
 export interface Session {
   id: string;
@@ -25,7 +25,7 @@ export interface Session {
 // Scheduled Loops
 // ---------------------------------------------------------------------------
 
-export type LoopHarness = 'claude' | 'cursor' | 'codex' | 'opencode' | 'shell';
+export type LoopHarness = 'claude' | 'cursor' | 'codex' | 'opencode' | 'shell' | 'grok';
 
 export type LoopRunStatus = 'ok' | 'error' | 'running' | 'skipped';
 

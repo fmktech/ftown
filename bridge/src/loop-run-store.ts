@@ -136,6 +136,7 @@ function fallbackRecord(loopId: string, session: Session): LoopRunRecord {
       session.shellType === 'claude' ||
       session.shellType === 'cursor' ||
       session.shellType === 'codex' ||
+      session.shellType === 'grok' ||
       session.shellType === 'opencode' ||
       session.shellType === 'shell'
         ? session.shellType
