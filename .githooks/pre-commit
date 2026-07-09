@@ -1,8 +1,32 @@
 #!/usr/bin/env bash
-# Block commits containing secrets. Enable with:
+# Pre-commit checks. Enable with:
 #   git config core.hooksPath .githooks
 set -euo pipefail
 
+# --- Non-blocking warning: bridge/ changed without a version bump ---------
+# npm publish is gated on bridge/package.json's version (CI check "Require
+# bridge version bump"; the publish-bridge workflow triggers on bridge/**
+# pushes). Catch a missing bump locally, before push. Wrapped in `set +e` so a
+# failure here can NEVER block a commit — this is advisory only.
+set +e
+bridge_changed="$(git diff --cached --name-only -- 'bridge/' 2>/dev/null)"
+if [ -n "$bridge_changed" ]; then
+  ver_re='s/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+  staged_ver="$(git show ':bridge/package.json'   2>/dev/null | sed -n "$ver_re" | head -1)"
+  head_ver="$(git show 'HEAD:bridge/package.json' 2>/dev/null | sed -n "$ver_re" | head -1)"
+  if [ -n "$head_ver" ] && [ "$staged_ver" = "$head_ver" ]; then
+    echo "" >&2
+    echo "⚠  bridge/ changed but bridge/package.json version is unchanged (${staged_ver})." >&2
+    echo "   npm publish is gated on a version bump. If this should ship, run:" >&2
+    echo "     (cd bridge && npm version patch --no-git-tag-version && npm install --package-lock-only)" >&2
+    echo "   then re-stage bridge/package.json + package-lock.json." >&2
+    echo "   (warning only — your commit will proceed)" >&2
+    echo "" >&2
+  fi
+fi
+set -e
+
+# --- Secret scan (blocking) ------------------------------------------------
 if ! command -v gitleaks >/dev/null 2>&1; then
   echo "pre-commit: gitleaks not installed (brew install gitleaks) — refusing to commit unscanned." >&2
   exit 1

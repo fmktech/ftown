@@ -45,6 +45,7 @@ import { LoopScheduler, LOOP_TICK_INTERVAL_MS } from './loop-scheduler.js';
 import { validateLoopDraft, validateLoopPatch } from './loop-validation.js';
 import { buildSessionCommand } from './agent-commands.js';
 import { isTmuxAvailable, killTmuxSession, listFtownTmuxSessions } from './tmux.js';
+import { runPairing } from './pairing-client.js';
 
 import type { HookEvent } from './local-api-server.js';
 
@@ -177,11 +178,11 @@ const program = new Commander();
 program
   .name('ftown-bridge')
   .description('ftown orchestrator bridge for Centrifugo')
-  .requiredOption('--token <jwt>', 'Bridge bootstrap token from the ftown dashboard (short-lived; used once to onboard, then a rotating refresh token is stored)')
+  .option('--token <jwt>', 'Bridge bootstrap token from the ftown dashboard (short-lived; used once to onboard, then a rotating refresh token is stored). Optional: with no token and no stored refresh token, the bridge runs interactive device pairing instead.')
   .requiredOption('--api-url <url>', 'ftown UI API URL (e.g. https://ftown.vercel.app)')
   .option('--data-dir <path>', 'Directory for session data (default: ~/.ftown/data)')
   .option('--bridge-id <id>', 'Bridge instance ID (default: persisted per data dir)')
-  .action(async (opts: { token: string; apiUrl: string; dataDir?: string; bridgeId?: string }) => {
+  .action(async (opts: { token?: string; apiUrl: string; dataDir?: string; bridgeId?: string }) => {
     const dataDir = opts.dataDir ? resolve(opts.dataDir) : resolveDefaultDataDir();
     // Bridge identity sticks to the data dir so a plain restart auto-resumes:
     // same id → same dashboard entry, sessions reattach without any flags.
@@ -235,6 +236,27 @@ program
       }
     };
 
+    // Onboarding precedence (P7): stored refresh token → else --token exchange →
+    // else interactive device pairing. Pairing yields the SAME token bundle shape
+    // as /api/auth/bridge, so all three paths converge on `auth` and the identical
+    // refresh-token persist/resume logic below.
+    const onboard = async (): Promise<BridgeAuthResponse> => {
+      if (opts.token) {
+        console.log('[Bridge] Authenticating with API...');
+        return fetchBridgeToken(opts.apiUrl, opts.token, bridgeId, local);
+      }
+      console.log('[Bridge] No bootstrap token or stored session — starting device pairing...');
+      return runPairing({
+        apiUrl: opts.apiUrl,
+        bridgeId,
+        hostname: osHostname(),
+        platform: process.platform,
+        localPort: local.localPort,
+        localNonce: local.localNonce,
+        log: (msg) => console.log(msg),
+      });
+    };
+
     let auth: BridgeAuthResponse;
     if (persistedRefreshToken) {
       console.log('[Bridge] Resuming from stored refresh token...');
@@ -242,14 +264,13 @@ program
         auth = await refreshBridgeToken(opts.apiUrl, persistedRefreshToken, bridgeId, local);
       } catch (err) {
         console.warn(
-          '[Bridge] Stored refresh token rejected, falling back to bootstrap token:',
+          '[Bridge] Stored refresh token rejected, falling back to bootstrap token / pairing:',
           err instanceof Error ? err.message : String(err),
         );
-        auth = await fetchBridgeToken(opts.apiUrl, opts.token, bridgeId, local);
+        auth = await onboard();
       }
     } else {
-      console.log('[Bridge] Authenticating with API...');
-      auth = await fetchBridgeToken(opts.apiUrl, opts.token, bridgeId, local);
+      auth = await onboard();
     }
     let currentRefreshToken = auth.refreshToken;
     persistRefreshToken(currentRefreshToken);

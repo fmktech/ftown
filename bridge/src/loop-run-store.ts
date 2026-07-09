@@ -1,7 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { v4 as uuidv4 } from 'uuid';
 
 import type { Loop, LoopRunRecord, Session } from './types.js';
 
@@ -13,12 +12,16 @@ function runStorePath(): string {
   return join(homedir(), '.ftown', 'loop-runs.json');
 }
 
+/** Legacy 'skipped' run records were persisted before skip diagnostics moved onto the
+ *  Loop object (lastSkipAt/lastSkipReason). Filtering them out here — on every load —
+ *  shrinks existing bloated loop-runs.json files as soon as the store is next saved. */
 function loadFile(): LoopRunsFile {
   try {
     const path = runStorePath();
     if (!existsSync(path)) return { runs: [] };
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<LoopRunsFile>;
-    return { runs: Array.isArray(parsed.runs) ? parsed.runs : [] };
+    const runs = Array.isArray(parsed.runs) ? parsed.runs : [];
+    return { runs: runs.filter((run) => run.status !== 'skipped') };
   } catch {
     return { runs: [] };
   }
@@ -98,27 +101,6 @@ export function recordForSession(loop: Loop, session: Session, startedAt = sessi
     model: session.model ?? loop.model,
     sessionStatus: session.status,
     errorReason: session.errorReason,
-  };
-}
-
-export function skippedRunRecord(loop: Loop, startedAt: string, details: string): LoopRunRecord {
-  return {
-    id: uuidv4(),
-    loopId: loop.id,
-    bridgeId: loop.bridgeId,
-    name: `${loop.name} · skipped ${startedAt}`,
-    status: 'skipped',
-    startedAt,
-    updatedAt: startedAt,
-    finishedAt: startedAt,
-    durationMs: 0,
-    harness: loop.harness,
-    workdir: loop.workdir,
-    task: loop.task,
-    model: loop.model,
-    logTail: details,
-    logBytes: Buffer.byteLength(details, 'utf8'),
-    logTruncated: false,
   };
 }
 

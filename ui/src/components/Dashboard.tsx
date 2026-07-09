@@ -267,7 +267,7 @@ PY`;
   // Loop-run sessions are represented through LoopRunRecord in the loop detail
   // pane, so they no longer appear as top-level sidebar sessions.
   const normalSessions = useMemo(() => sessions.filter((s) => !s.loopId), [sessions]);
-  const cronLoopCount = useMemo(() => loops.filter((loop) => loop.schedule.kind === "cron").length, [loops]);
+  const cronLoopCount = useMemo(() => loops.length, [loops]);
 
   useEffect(() => {
     if (!selectedLoop) {
@@ -639,7 +639,7 @@ PY`;
             onClick={() => setShowToken(!showToken)}
             style={showToken ? { color: "var(--accent)", borderColor: "var(--accent-dim)" } : {}}
           >
-            Bridge Command
+            Connect a bridge
           </button>
 
           {selectedSession?.status === "running" && (
@@ -822,12 +822,12 @@ PY`;
         >
           <div className="flex items-center justify-between mb-2">
             <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-              Start your bridge with:
+              Connect a bridge:
             </span>
             <button
               className="btn-ghost"
               onClick={async () => {
-                const text = `npx -y ftown-bridge@latest --token ${token} --api-url ${window.location.origin}`;
+                const text = `npx -y ftown-bridge@latest --api-url ${window.location.origin}`;
                 try {
                   await navigator.clipboard.writeText(text);
                 } catch {
@@ -859,8 +859,18 @@ PY`;
               letterSpacing: "0.02em",
             }}
           >
-            npx -y ftown-bridge@latest --token {token} --api-url {typeof window !== "undefined" ? window.location.origin : ""}
+            npx -y ftown-bridge@latest --api-url {typeof window !== "undefined" ? window.location.origin : ""}
           </code>
+          <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 6 }}>
+            Run this on the machine, then approve it here:{" "}
+            <a href="/pair" style={{ color: "var(--accent)" }}>
+              Approve a device
+            </a>
+            {" · "}
+            <a href="/devices" style={{ color: "var(--accent)" }}>
+              Manage devices
+            </a>
+          </div>
         </div>
       )}
 
