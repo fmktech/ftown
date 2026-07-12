@@ -16,6 +16,10 @@ import { Terminal, TerminalHandle } from "./Terminal";
 import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
 import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
 import { LoopFormModal } from "./LoopFormModal";
+import { FactoryList } from "./factory/FactoryList";
+import { FactoryPane } from "./factory/FactoryPane";
+import { deriveFactories } from "./factory/useFactory";
+import type { FactoryInfo } from "./factory/types";
 import { ConnectionDiagnostics } from "./ConnectionDiagnostics";
 import { mergeBridgeOrder } from "@/lib/bridge-order";
 
@@ -62,7 +66,8 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
   const [mobileTab, setMobileTab] = useState<"sessions" | "terminal">("sessions");
-  const [sidebarTab, setSidebarTab] = useState<"sessions" | "crons">("sessions");
+  const [sidebarTab, setSidebarTab] = useState<"sessions" | "crons" | "factory">("sessions");
+  const [selectedFactory, setSelectedFactory] = useState<FactoryInfo | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sessionOrder, setSessionOrder] = useState<string[]>([]);
   const [bridgeOrder, setBridgeOrder] = useState<string[]>([]);
@@ -91,7 +96,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   useEffect(() => {
     setSidebarCollapsed(localStorage.getItem("ftown:sidebarCollapsed") === "true");
     const savedSidebarTab = localStorage.getItem("ftown:sidebarTab");
-    if (savedSidebarTab === "sessions" || savedSidebarTab === "crons") setSidebarTab(savedSidebarTab);
+    if (savedSidebarTab === "sessions" || savedSidebarTab === "crons" || savedSidebarTab === "factory") setSidebarTab(savedSidebarTab);
     try {
       setSessionOrder(JSON.parse(localStorage.getItem("ftown:sessionOrder") ?? "[]"));
     } catch { /* ignore */ }
@@ -267,7 +272,8 @@ PY`;
   // Loop-run sessions are represented through LoopRunRecord in the loop detail
   // pane, so they no longer appear as top-level sidebar sessions.
   const normalSessions = useMemo(() => sessions.filter((s) => !s.loopId), [sessions]);
-  const cronLoopCount = useMemo(() => loops.filter((loop) => loop.schedule.kind === "cron").length, [loops]);
+  const loopCount = loops.length;
+  const factories = useMemo(() => deriveFactories(loops), [loops]);
 
   useEffect(() => {
     if (!selectedLoop) {
@@ -441,6 +447,7 @@ PY`;
     if (id) {
       setSelectedLoopId(null);
       setSelectedLoopRunId(null);
+      setSelectedFactory(null);
       setSidebarTab("sessions");
       setMobileTab("terminal");
     }
@@ -449,11 +456,20 @@ PY`;
   const handleSelectLoop = useCallback((loopId: string) => {
     setSelectedLoopId(loopId);
     setSelectedSessionId(null);
+    setSelectedFactory(null);
     setSidebarTab("crons");
     setMobileTab("terminal");
   }, []);
 
-  const handleSidebarTabSwitch = useCallback((tab: "sessions" | "crons") => {
+  const handleSelectFactory = useCallback((factory: FactoryInfo) => {
+    setSelectedFactory(factory);
+    setSelectedSessionId(null);
+    setSelectedLoopId(null);
+    setSelectedLoopRunId(null);
+    setMobileTab("terminal");
+  }, []);
+
+  const handleSidebarTabSwitch = useCallback((tab: "sessions" | "crons" | "factory") => {
     setSidebarTab(tab);
     try {
       localStorage.setItem("ftown:sidebarTab", tab);
@@ -1009,13 +1025,25 @@ PY`;
                 <button
                   role="tab"
                   aria-selected={sidebarTab === "crons"}
-                  aria-label={`Crons (${cronLoopCount})`}
-                  title={`Crons (${cronLoopCount})`}
+                  aria-label={`Crons (${loopCount})`}
+                  title={`Crons (${loopCount})`}
                   onClick={() => handleSidebarTabSwitch("crons")}
                   className={`sidebar-tab-icon ${sidebarTab === "crons" ? "sidebar-tab-active" : ""}`}
                 >
                   ◷
                 </button>
+                {factories.length > 0 && (
+                  <button
+                    role="tab"
+                    aria-selected={sidebarTab === "factory"}
+                    aria-label={`Factory (${factories.length})`}
+                    title={`Factory (${factories.length})`}
+                    onClick={() => handleSidebarTabSwitch("factory")}
+                    className={`sidebar-tab-icon ${sidebarTab === "factory" ? "sidebar-tab-active" : ""}`}
+                  >
+                    ▦
+                  </button>
+                )}
               </div>
             ) : (
               <div
@@ -1037,11 +1065,28 @@ PY`;
                   onClick={() => handleSidebarTabSwitch("crons")}
                   className={`sidebar-tab ${sidebarTab === "crons" ? "sidebar-tab-active" : ""}`}
                 >
-                  Crons <span className="sidebar-tab-count">{cronLoopCount}</span>
+                  Crons <span className="sidebar-tab-count">{loopCount}</span>
                 </button>
+                {factories.length > 0 && (
+                  <button
+                    role="tab"
+                    aria-selected={sidebarTab === "factory"}
+                    onClick={() => handleSidebarTabSwitch("factory")}
+                    className={`sidebar-tab ${sidebarTab === "factory" ? "sidebar-tab-active" : ""}`}
+                  >
+                    Factory <span className="sidebar-tab-count">{factories.length}</span>
+                  </button>
+                )}
               </div>
             )}
-            {sidebarTab === "crons" ? (
+            {sidebarTab === "factory" ? (
+              <FactoryList
+                factories={factories}
+                selectedProject={selectedFactory?.project ?? null}
+                onSelect={handleSelectFactory}
+                collapsed={isDesktop && sidebarCollapsed}
+              />
+            ) : sidebarTab === "crons" ? (
               <LoopList
                 loops={loops}
                 bridges={bridges}
@@ -1082,7 +1127,18 @@ PY`;
 
         {/* Terminal area */}
         <main className={`flex-1 flex-col min-h-0 min-w-0 ${mobileTab === "terminal" ? "flex" : "hidden"} md:flex`}>
-          {selectedLoop ? (
+          {selectedFactory ? (
+            <FactoryPane
+              key={selectedFactory.project}
+              factory={selectedFactory}
+              bridgeExec={bridgeExec}
+              sessions={normalSessions}
+              onOpenSession={(id) => {
+                setSelectedFactory(null);
+                handleSelectSession(id);
+              }}
+            />
+          ) : selectedLoop ? (
             <LoopDetailPane
               loop={selectedLoop}
               runs={selectedLoopRuns}
@@ -1114,7 +1170,7 @@ PY`;
               onInterrupt={handleTerminalInterrupt}
             />
           )}
-          {selectedSessionId && !selectedLoop && (
+          {selectedSessionId && !selectedLoop && !selectedFactory && (
             <MobileControlBar ref={mobileControlRef} onSendInput={(data) => terminalRef.current?.sendInput(data)} />
           )}
         </main>
