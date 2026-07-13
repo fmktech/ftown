@@ -1,17 +1,35 @@
-import { readFile, writeFile, mkdir, readdir, appendFile, rm, truncate } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir, appendFile, rm, truncate, stat, open, rename } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { existsSync } from 'node:fs';
 
 import type { ArchivedSession, Session } from './types.js';
 
+/**
+ * Retained tail size for a session's terminal.log. A misbehaving child (e.g. a
+ * TUI stuck in a runaway repaint loop) can otherwise stream unbounded output
+ * and grow this file without limit — observed in the wild at 2.5 GB and still
+ * climbing, which also makes the full-file `loadTerminalLog` read exceed V8's
+ * max string length and throw. The on-disk file is only ever consumed as
+ * "recent output" (download/search); the live screen is driven by a separate
+ * in-memory emulator, so keeping just the tail is lossless for viewers.
+ */
+const DEFAULT_MAX_TERMINAL_LOG_BYTES = 64 * 1024 * 1024;
+const NEWLINE = 0x0a;
+
 export class SessionStore {
   private readonly sessionsDir: string;
   private readonly archivePath: string;
   private readonly writeLocks: Map<string, Promise<void>> = new Map();
+  private readonly maxTerminalLogBytes: number;
 
-  constructor(dataDir: string) {
+  constructor(dataDir: string, options: { maxTerminalLogBytes?: number } = {}) {
     this.sessionsDir = join(dataDir, 'sessions');
     this.archivePath = join(dataDir, 'archive.jsonl');
+
+    const envCap = Number(process.env.FTOWN_MAX_TERMINAL_LOG_BYTES);
+    this.maxTerminalLogBytes =
+      options.maxTerminalLogBytes ??
+      (Number.isFinite(envCap) && envCap > 0 ? envCap : DEFAULT_MAX_TERMINAL_LOG_BYTES);
   }
 
   /** Per-session data dir (session.json, terminal.log, inbox.jsonl). */
@@ -69,9 +87,58 @@ export class SessionStore {
     const filePath = this.terminalLogPath(sessionId);
 
     const prevLock = this.writeLocks.get(sessionId) ?? Promise.resolve();
-    const newLock = prevLock.then(() => appendFile(filePath, data, 'utf-8'));
+    const newLock = prevLock
+      .then(() => appendFile(filePath, data, 'utf-8'))
+      .then(() => this.trimTerminalLogIfNeeded(filePath));
     this.writeLocks.set(sessionId, newLock);
     await newLock;
+  }
+
+  /**
+   * Cap a terminal.log's on-disk size. Runs inside the per-session write lock,
+   * so it never races an append. The file is allowed to grow to 2x the retained
+   * size before being rewritten down to the tail — this amortises the rewrite
+   * cost while bounding disk use to at most 2x `maxTerminalLogBytes` per session.
+   * The partial first line of the retained tail is dropped so consumers never
+   * start mid-line (or mid-escape-sequence), and a one-line marker records that
+   * older output was discarded. Best-effort: any failure is swallowed so it can
+   * never poison the write-lock chain and stall future appends.
+   */
+  private async trimTerminalLogIfNeeded(filePath: string): Promise<void> {
+    try {
+      const { size } = await stat(filePath);
+      if (size <= this.maxTerminalLogBytes * 2) {
+        return;
+      }
+
+      const keep = this.maxTerminalLogBytes;
+      const fh = await open(filePath, 'r');
+      let tail: Buffer;
+      try {
+        const buf = Buffer.alloc(keep);
+        const { bytesRead } = await fh.read(buf, 0, keep, size - keep);
+        tail = buf.subarray(0, bytesRead);
+      } finally {
+        await fh.close();
+      }
+
+      // Drop the (almost certainly partial) first line so the retained log
+      // begins on a clean line boundary.
+      const nl = tail.indexOf(NEWLINE);
+      const body = nl >= 0 ? tail.subarray(nl + 1) : tail;
+      const marker = Buffer.from(
+        `[ftown] terminal.log truncated — retaining last ${keep} bytes\r\n`,
+        'utf-8',
+      );
+
+      // Rewrite via a temp file + atomic rename so a concurrent full-file reader
+      // (loadTerminalLog runs outside the lock) never observes a partial file.
+      const tmpPath = `${filePath}.trim-${process.pid}.tmp`;
+      await writeFile(tmpPath, Buffer.concat([marker, body]));
+      await rename(tmpPath, filePath);
+    } catch (err) {
+      console.error(`[SessionStore] Failed to trim terminal log ${filePath}:`, err);
+    }
   }
 
   async deleteSession(sessionId: string): Promise<void> {
