@@ -482,10 +482,15 @@ PY`;
     setMobileTab("terminal");
   }, []);
 
+  // Like handleSelectSession, but stays on the Factory sidebar tab — opening a
+  // worker from the factory view shows its terminal without leaving the view.
   const handleOpenFactorySession = useCallback((id: string) => {
     setSelectedFactoryKey(null);
-    handleSelectSession(id);
-  }, [handleSelectSession]);
+    setSelectedSessionId(id);
+    setSelectedLoopId(null);
+    setSelectedLoopRunId(null);
+    setMobileTab("terminal");
+  }, []);
 
   const handleSidebarTabSwitch = useCallback((tab: "sessions" | "crons" | "factory") => {
     setSidebarTab(tab);
