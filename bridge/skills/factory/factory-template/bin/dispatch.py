@@ -9,8 +9,9 @@ Responsibilities in a single tick: run the fticket scheduler, dead-letter stragg
 claim queued tickets up to capacity and spawn one worker session per claim (rejecting
 first-stage tickets with a missing/empty request.md and tickets with 3+ zero-progress
 claim expiries — both dead-lettered instead of respawned), track worker_id -> session_id
-in .ffactory/workers.json and reap the recorded session when a claim expires or the
-ticket is dead-lettered (backstop; workers normally self-close), and forward
+in .ffactory/workers.json and reap the recorded session on every event that retires a
+worker's claim (claim expiry, dead-letter, or a normal terminal outcome — advance,
+complete, reject, release; backstops the worker's own self-close), and forward
 dead-letter/orphan events to the operator session. All coordination is server-side and
 atomic (claims fence), so two dispatchers may race safely with no lockfile.
 """
@@ -39,10 +40,14 @@ FTOWN_CLI = str(Path(os.environ.get("FTOWN_SESSIONS_BIN", "~/.ftown/ftown-sessio
 
 TERMINAL_STATUSES = (Status.DONE, Status.DEAD_LETTER)
 FORWARD_EVENTS = (EventType.TICKET_DEAD_LETTER, EventType.TICKET_ORPHANED)
-# Reap (ftown remove) the recorded session: the worker crashed/hung past its claim TTL,
-# or its ticket was killed under it. Prune-only: the worker finished and self-closes.
-REAP_EVENTS = (EventType.TICKET_CLAIM_EXPIRED, EventType.TICKET_DEAD_LETTER)
-PRUNE_EVENTS = (
+# Reap (ftown remove) the recorded session on every lifecycle event that retires a
+# worker's claim: crash/hang past claim TTL, ticket killed under it, or a normal
+# terminal outcome. Self-close is LLM compliance, not a guarantee — the dispatcher backs
+# it up by removing the session itself; an already-self-closed session errors harmlessly
+# (non-fatal, stderr-logged in ftown_remove).
+REAP_EVENTS = (
+    EventType.TICKET_CLAIM_EXPIRED,
+    EventType.TICKET_DEAD_LETTER,
     EventType.TICKET_ADVANCED,
     EventType.TICKET_COMPLETED,
     EventType.TICKET_REJECTED,
@@ -137,8 +142,10 @@ def compose_briefing(
     ]
     if operator_session == "-":
         lines.append(
-            "You have no parent session: skip the ftown mail step and end your "
-            "final message with the one-line result instead."
+            "You have no parent session: skip only the `tell --parent` mail command and "
+            "end your final message with the one-line result instead. The self-close "
+            'command (`~/.ftown/ftown-sessions remove "$FTOWN_SESSION_ID"`) is still '
+            "MANDATORY and must be the very last command you run."
         )
     return "\n".join(lines)
 
@@ -374,7 +381,7 @@ def reap_workers(workers: dict[str, dict], ev) -> None:
         if entry and entry.get("session_id"):
             ftown_remove(str(entry["session_id"]))
         return
-    if ev.type in REAP_EVENTS or ev.type in PRUNE_EVENTS:
+    if ev.type in REAP_EVENTS:
         stale = [
             wid
             for wid, e in workers.items()
@@ -382,7 +389,7 @@ def reap_workers(workers: dict[str, dict], ev) -> None:
         ]
         for wid in stale:
             entry = workers.pop(wid)
-            if ev.type in REAP_EVENTS and entry.get("session_id"):
+            if entry.get("session_id"):
                 ftown_remove(str(entry["session_id"]))
 
 
