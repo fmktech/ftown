@@ -18,6 +18,7 @@ Your spawn prompt defines these values. Refer to them exactly as named:
 - `EPOCH` — your claim fence token. Pass it to every `--epoch` flag shown below.
 - `WORKER_ID` — your identity, exactly as given here (the dispatcher derives it before
   your session exists; use it verbatim, never substitute `$FTOWN_SESSION_ID`).
+  ($FTOWN_SESSION_ID is your session id — used only for the final self-close.)
 
 ## The fts commands you are allowed to use
 
@@ -47,7 +48,7 @@ directly.
 4. **Heartbeat:** run `fts renew` after EVERY substantial step (any test run, file written,
    long command). If renew ever fails (`ClaimExpired`, `ClaimFenced`, `NotClaimOwner`):
    STOP IMMEDIATELY. Do not write anything more, do not "finish up". Another worker owns
-   the ticket now. Mail your parent that you were fenced, and exit.
+   the ticket now. Mail your parent that you were fenced, then self-close (step 7) and exit.
 5. Run your skill's GATE checklist. Every box must be checked with evidence, not assumed.
 6. Outcome — exactly one of:
    - PASS: `fts complete` then (if `NEXT_STAGE` != `-`) `fts advance`.
@@ -55,11 +56,15 @@ directly.
      structured reason your skill defines.
    - STUCK (missing input, broken environment, contradictory requirements): do NOT
      complete, do NOT reject. Mail your parent the exact blocker and exit; your claim
-     will expire and the ticket re-queues.
-7. Mail a result summary and exit:
+     will expire and the ticket re-queues. Then self-close (step 7) — never leave your
+     session idling.
+7. Mail a result summary, then self-close. This applies to EVERY outcome — PASS, REJECT,
+   and STUCK alike — and the self-close command must be the very last command you run;
+   nothing after it executes:
    ```bash
    ~/.ftown/ftown-sessions tell --parent --type result \
      "ticket $TICKET_ID $STAGE: <PASS|REJECTED|STUCK> — <one sentence>"
+   ~/.ftown/ftown-sessions remove "$FTOWN_SESSION_ID"   # self-close; your session ends here
    ```
 
 ## Hard rules

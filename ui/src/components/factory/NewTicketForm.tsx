@@ -5,6 +5,7 @@ import type { NewTicketFormProps } from "./types";
 
 export function NewTicketForm({ stages, onCreate, onClose }: NewTicketFormProps) {
   const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
   const [stage, setStage] = useState(stages[0] ?? "");
   const [priority, setPriority] = useState(0);
   const [kind, setKind] = useState<"task" | "epic">("task");
@@ -17,7 +18,8 @@ export function NewTicketForm({ stages, onCreate, onClose }: NewTicketFormProps)
     return () => window.clearTimeout(id);
   }, []);
 
-  const canSubmit = title.trim() !== "" && stages.length > 0 && !submitting;
+  const canSubmit =
+    title.trim() !== "" && description.trim() !== "" && stages.length > 0 && !submitting;
 
   const handleSubmit = useCallback(async () => {
     if (!canSubmit) return;
@@ -26,6 +28,7 @@ export function NewTicketForm({ stages, onCreate, onClose }: NewTicketFormProps)
     try {
       await onCreate({
         title: title.trim(),
+        description: description.trim(),
         stage,
         priority,
         kind,
@@ -35,7 +38,7 @@ export function NewTicketForm({ stages, onCreate, onClose }: NewTicketFormProps)
       setError(err instanceof Error ? err.message : String(err));
       setSubmitting(false);
     }
-  }, [canSubmit, onCreate, onClose, title, stage, priority, kind]);
+  }, [canSubmit, onCreate, onClose, title, description, stage, priority, kind]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -79,6 +82,23 @@ export function NewTicketForm({ stages, onCreate, onClose }: NewTicketFormProps)
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="Ticket title"
+              disabled={submitting}
+              className="w-full resize-none rounded border border-zinc-700/60 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-zinc-500 disabled:opacity-60"
+              onKeyDown={handleKeyDown}
+            />
+          </div>
+
+          <div>
+            <label htmlFor="nt-description" className="mb-1 block text-xs text-zinc-400">
+              Description
+            </label>
+            <textarea
+              id="nt-description"
+              required
+              rows={6}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="What should be built / investigated? This becomes the ticket's request.md — the groom worker's input."
               disabled={submitting}
               className="w-full resize-none rounded border border-zinc-700/60 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-zinc-500 disabled:opacity-60"
               onKeyDown={handleKeyDown}

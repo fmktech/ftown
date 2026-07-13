@@ -161,6 +161,8 @@ export function writeSkillCmd(relPath: string, content: string): string {
 
 export interface NewTicketInput {
   title: string;
+  /** Becomes the ticket's request.md — the groom stage's required input. */
+  description: string;
   stage: string; // must be one of snapshot.stages
   priority: number;
   kind: "task" | "epic";
@@ -176,10 +178,15 @@ export function slugify(s: string): string {
   return slug || "ticket";
 }
 
-/** mkdir the artifact folder, then create the ticket; stdout is the new id. */
+/** mkdir the folder, seed request.md (groom's required input — a ticket
+ *  without it can never leave the first stage), then create; stdout is the
+ *  new id. request.md travels base64 to survive any content. */
 export function createTicketCmd(input: NewTicketInput, folder: string): string {
+  const requestMd = `# ${input.title.trim()}\n\n${input.description.trim()}\n`;
   return (
-    `mkdir -p ${shellQuote(folder)} && ${FTS_BIN} create --db ${FACTORY_DB}` +
+    `mkdir -p ${shellQuote(folder)}` +
+    ` && printf '%s' ${shellQuote(toBase64(requestMd))} | base64 --decode > ${shellQuote(`${folder}/request.md`)}` +
+    ` && ${FTS_BIN} create --db ${FACTORY_DB}` +
     ` --title ${shellQuote(input.title)} --stage ${shellQuote(input.stage)}` +
     ` --folder ${shellQuote(folder)} --priority ${Math.floor(input.priority)}` +
     ` --kind ${input.kind}`
