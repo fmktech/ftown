@@ -128,10 +128,21 @@ export function toBase64(s: string): string {
 /** Readers wait for the write lock instead of failing instantly (SQLITE_BUSY). */
 export const SQLITE_BUSY_TIMEOUT_MS = 3000;
 
-export const STAGES_CMD = `sqlite3 -cmd ".timeout ${SQLITE_BUSY_TIMEOUT_MS}" "file:${FACTORY_DB}?mode=ro" -json "SELECT name, ord FROM stages ORDER BY ord"`;
+/** NOT mode=ro: a read-only handle cannot create the WAL -shm sidecar, so it
+ *  fails with SQLITE_CANTOPEN(14) whenever the factory is idle (last writer
+ *  deletes the sidecars on clean close). We open normally — the commands are
+ *  SELECT-only — and guard existence first so a missing db is a clear error
+ *  instead of an accidentally created empty file. */
+function sqliteRead(sql: string): string {
+  return `test -f ${FACTORY_DB} || { echo "no factory db at ${FACTORY_DB}" >&2; exit 2; }; sqlite3 -cmd ".timeout ${SQLITE_BUSY_TIMEOUT_MS}" ${FACTORY_DB} -json "${sql}"`;
+}
+
+export const STAGES_CMD = sqliteRead("SELECT name, ord FROM stages ORDER BY ord");
 
 /** Board scope: all live tickets + 48h of terminal history (bounds the 5s poll). */
-export const TICKETS_CMD = `sqlite3 -cmd ".timeout ${SQLITE_BUSY_TIMEOUT_MS}" "file:${FACTORY_DB}?mode=ro" -json "SELECT id,kind,title,stage,status,priority,bounce_count,orphaned,blocked_on,dead_letter_reason,created_at_ms,updated_at_ms FROM tickets WHERE status IN ('queued','claimed','in_progress','blocked') OR updated_at_ms >= (CAST(strftime('%s','now') AS INTEGER)*1000 - 172800000) ORDER BY priority DESC, id"`;
+export const TICKETS_CMD = sqliteRead(
+  "SELECT id,kind,title,stage,status,priority,bounce_count,orphaned,blocked_on,dead_letter_reason,created_at_ms,updated_at_ms FROM tickets WHERE status IN ('queued','claimed','in_progress','blocked') OR updated_at_ms >= (CAST(strftime('%s','now') AS INTEGER)*1000 - 172800000) ORDER BY priority DESC, id",
+);
 
 /** Matches transient SQLite contention errors that a later poll will clear. */
 export const SQLITE_TRANSIENT_RE = /database is locked|database table is locked|SQLITE_BUSY/i;
