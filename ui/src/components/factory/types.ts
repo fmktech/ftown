@@ -190,13 +190,22 @@ export interface NewFactoryInput {
   project: string;
 }
 
+/** Canonical ffactory checkout on a bridge host (skill + factory-template source). */
+export const FFACTORY_CHECKOUT = "~/projects/ffactory";
+
 export function factoryInitPrompt(input: NewFactoryInput): string {
   return (
-    `/factory init ${input.repoPath} — deploy a software factory for project ` +
-    `"${input.project}" in this repo: copy the factory template, set the project ` +
-    `name in factory/factory.yaml, initialize the FTS database, then run factory up ` +
-    `to register the grouped ftown loops. If the /factory skill is not available, ` +
-    `read ~/.claude/skills/factory/SKILL.md and follow it exactly.`
+    `Deploy a software factory for project "${input.project}" in ${input.repoPath}.\n\n` +
+    `Step 1 — ensure the factory skill is installed on this machine: if ` +
+    `~/.claude/skills/factory/SKILL.md does not exist, install it from the ffactory ` +
+    `checkout (mkdir -p ~/.claude/skills && cp -r ${FFACTORY_CHECKOUT}/skills/factory ` +
+    `~/.claude/skills/factory). If ${FFACTORY_CHECKOUT} does not exist either, STOP and ` +
+    `report that the ffactory repo must be cloned to ${FFACTORY_CHECKOUT} on this host ` +
+    `first — do not improvise a factory from memory.\n\n` +
+    `Step 2 — read ~/.claude/skills/factory/SKILL.md and follow its "init" procedure ` +
+    `exactly for this repo (project name "${input.project}"; the template lives at ` +
+    `${FFACTORY_CHECKOUT}/factory-template), then follow its "up" procedure to register ` +
+    `the grouped ftown loops. Report the loop names and group when done.`
   );
 }
 
