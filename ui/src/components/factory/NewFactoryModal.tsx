@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { NewFactoryModalProps } from "./types";
+import { FACTORY_INIT_HARNESSES, type FactoryInitHarness, type NewFactoryModalProps } from "./types";
 
 const INPUT_CLASS =
   "w-full px-3 py-2 rounded-[var(--radius-sm)] bg-[var(--bg-base)] border border-[var(--border-default)] text-[var(--text-primary)] placeholder:text-[var(--text-faint)] outline-none focus-visible:border-[var(--accent)] focus-visible:shadow-[var(--focus-ring)] font-mono";
@@ -10,6 +10,8 @@ export function NewFactoryModal(props: NewFactoryModalProps) {
   const { bridges, onSubmit, onClose } = props;
 
   const [bridgeId, setBridgeId] = useState(bridges.length === 1 ? bridges[0].bridgeId : "");
+  const [harness, setHarness] = useState<FactoryInitHarness>("claude");
+  const [model, setModel] = useState("");
   const [repoPath, setRepoPath] = useState("");
   const [project, setProject] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -50,13 +52,20 @@ export function NewFactoryModal(props: NewFactoryModalProps) {
     setSubmitting(true);
     setSubmitError(null);
     try {
-      await onSubmit({ bridgeId, repoPath: repoPathTrimmed, project: projectTrimmed });
+      const modelTrimmed = model.trim();
+      await onSubmit({
+        bridgeId,
+        repoPath: repoPathTrimmed,
+        project: projectTrimmed,
+        harness,
+        ...(modelTrimmed ? { model: modelTrimmed } : {}),
+      });
       onClose();
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : String(err));
       setSubmitting(false);
     }
-  }, [isValid, submitting, onSubmit, bridgeId, repoPathTrimmed, projectTrimmed, onClose]);
+  }, [isValid, submitting, onSubmit, bridgeId, repoPathTrimmed, projectTrimmed, harness, model, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -127,6 +136,39 @@ export function NewFactoryModal(props: NewFactoryModalProps) {
                 ))}
               </select>
             )}
+          </div>
+
+          <div>
+            <label htmlFor="nf-harness" className="block text-sm text-[var(--text-muted)] mb-1">
+              Agent
+            </label>
+            <select
+              id="nf-harness"
+              value={harness}
+              onChange={(e) => setHarness(e.target.value as FactoryInitHarness)}
+              className={INPUT_CLASS + " text-sm"}
+            >
+              {FACTORY_INIT_HARNESSES.map((h) => (
+                <option key={h} value={h}>
+                  {h}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label htmlFor="nf-model" className="block text-sm text-[var(--text-muted)] mb-1">
+              Model
+            </label>
+            <input
+              id="nf-model"
+              type="text"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder="harness default"
+              className={INPUT_CLASS + " text-sm"}
+              onKeyDown={handleKeyDown}
+            />
           </div>
 
           <div>

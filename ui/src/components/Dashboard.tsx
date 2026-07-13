@@ -528,7 +528,8 @@ PY`;
       await createSession(factoryInitPrompt(input), {
         bridgeId: input.bridgeId,
         workingDir: input.repoPath,
-        shellType: "claude",
+        shellType: input.harness,
+        model: input.model,
         name: `factory-init-${input.project}`,
       });
       setShowNewFactory(false);

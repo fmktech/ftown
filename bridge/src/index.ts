@@ -446,6 +446,7 @@ program
     }
 
     installFtownSkill('ftown', resolve(__dirname, '..', 'skills', 'ftown'));
+    installFtownSkill('factory', resolve(__dirname, '..', 'skills', 'factory'));
     for (const legacySkill of ['ftown-sessions', 'ftown-loops', 'ftown-orchestrator', 'ftown-workflows']) {
       removeFtownSkill(legacySkill);
     }

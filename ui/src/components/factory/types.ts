@@ -2,7 +2,7 @@
 // from "@/types"; they must not modify it. All data access goes through
 // bridgeExec (shell on the bridge host, cwd = FactoryInfo.repoRoot).
 
-import type { Session } from "@/types";
+import type { Session, ShellType } from "@/types";
 import type { BridgeExecResponse } from "@/hooks/useSessions";
 
 // ---------------------------------------------------------------------------
@@ -184,28 +184,42 @@ export function createTicketCmd(input: NewTicketInput, folder: string): string {
 // Factory creation — spawn a claude agent session that runs the /factory skill
 // ---------------------------------------------------------------------------
 
+/** Agent harnesses that can run the factory-init deployment session. */
+export const FACTORY_INIT_HARNESSES = [
+  "claude",
+  "codex",
+  "cursor",
+  "opencode",
+  "zai",
+  "kimi",
+  "deepseek",
+  "fireworks",
+] as const satisfies readonly ShellType[];
+
+export type FactoryInitHarness = (typeof FACTORY_INIT_HARNESSES)[number];
+
 export interface NewFactoryInput {
   bridgeId: string;
   repoPath: string; // absolute path on the bridge host
   project: string;
+  harness: FactoryInitHarness; // default "claude"
+  model?: string; // harness default when absent
 }
 
-/** Canonical ffactory checkout on a bridge host (skill + factory-template source). */
-export const FFACTORY_CHECKOUT = "~/projects/ffactory";
+/** The bridge installs its bundled factory skill here at startup (>=0.19.0). */
+export const FACTORY_SKILL_PATH = "~/.ftown/skills/factory/SKILL.md";
 
 export function factoryInitPrompt(input: NewFactoryInput): string {
   return (
     `Deploy a software factory for project "${input.project}" in ${input.repoPath}.\n\n` +
-    `Step 1 — ensure the factory skill is installed on this machine: if ` +
-    `~/.claude/skills/factory/SKILL.md does not exist, install it from the ffactory ` +
-    `checkout (mkdir -p ~/.claude/skills && cp -r ${FFACTORY_CHECKOUT}/skills/factory ` +
-    `~/.claude/skills/factory). If ${FFACTORY_CHECKOUT} does not exist either, STOP and ` +
-    `report that the ffactory repo must be cloned to ${FFACTORY_CHECKOUT} on this host ` +
-    `first — do not improvise a factory from memory.\n\n` +
-    `Step 2 — read ~/.claude/skills/factory/SKILL.md and follow its "init" procedure ` +
-    `exactly for this repo (project name "${input.project}"; the template lives at ` +
-    `${FFACTORY_CHECKOUT}/factory-template), then follow its "up" procedure to register ` +
-    `the grouped ftown loops. Report the loop names and group when done.`
+    `Read ${FACTORY_SKILL_PATH} (installed by the ftown bridge; the project template ` +
+    `lives next to it at ~/.ftown/skills/factory/factory-template) and follow its ` +
+    `"init" procedure exactly for this repo with project name "${input.project}", then ` +
+    `follow its "up" procedure to register the grouped ftown loops. Report the loop ` +
+    `names and group when done.\n\n` +
+    `If ${FACTORY_SKILL_PATH} does not exist, STOP and report that the ftown bridge on ` +
+    `this host must be upgraded to >=0.19.0 (which bundles the factory skill) — do not ` +
+    `improvise a factory from memory.`
   );
 }
 

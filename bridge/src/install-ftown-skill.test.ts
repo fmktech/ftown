@@ -46,6 +46,15 @@ describe('ftown skill installer', () => {
     assert.strictEqual(existsSync(join(home, '.claude', 'skills', 'ftown')), true);
   });
 
+  it('installs a second skill name to its own canonical dir and agent links', () => {
+    installFtownSkill('factory', bundled);
+
+    const canonical = join(home, '.ftown', 'skills', 'factory');
+    assert.ok(readFileSync(join(canonical, 'SKILL.md'), 'utf8').includes('# test'));
+    assert.strictEqual(existsSync(join(home, '.agents', 'skills', 'factory')), true);
+    assert.strictEqual(existsSync(join(home, '.claude', 'skills', 'factory')), true);
+  });
+
   it('removes legacy split skills from the canonical store and agent link dirs', () => {
     installFtownSkill('ftown-sessions', bundled);
 
