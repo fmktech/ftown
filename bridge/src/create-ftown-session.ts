@@ -382,7 +382,8 @@ export async function createFtownSession(
     !effectiveInput.command?.trim() &&
     ((claudeCliCompatibleShell && !effectiveInput.claudeSessionId?.trim()) ||
       (shellTypeForPrompt === 'cursor' && !effectiveInput.cursorSessionId?.trim()) ||
-      (shellTypeForPrompt === 'codex' && !effectiveInput.codexSessionId?.trim()));
+      (shellTypeForPrompt === 'codex' && !effectiveInput.codexSessionId?.trim()) ||
+      shellTypeForPrompt === 'grok');
 
   const launchCommand = promptAsCliArg
     ? buildSessionCommand({ ...effectiveInput, initialPrompt: initialInput })

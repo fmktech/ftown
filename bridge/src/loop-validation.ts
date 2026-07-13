@@ -12,6 +12,7 @@ export const LOOP_HARNESSES: ReadonlySet<string> = new Set([
   'claude',
   'cursor',
   'codex',
+  'grok',
   'opencode',
   'shell',
 ]);

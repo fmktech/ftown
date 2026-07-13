@@ -15,7 +15,7 @@ import {
   RemoveSessionPayload,
   UpdateSessionParentPayload,
 } from "@/types";
-import { buildCodexCommand, buildCursorAgentCommand } from "@/lib/agent-commands";
+import { buildCodexCommand, buildCursorAgentCommand, buildGrokCommand } from "@/lib/agent-commands";
 
 // How long an optimistically-removed session id stays "tombstoned": a late
 // status update or an in-flight list_sessions snapshot for that id is ignored
@@ -279,6 +279,10 @@ export function useSessions(client: Centrifuge | null, userId: string | null): U
           cmd = buildCodexCommand({
             model: options?.model,
             codexSessionId: options?.codexSessionId,
+          });
+        } else if (shellType === "grok") {
+          cmd = buildGrokCommand({
+            model: options?.model,
           });
         } else if (options?.claudeSessionId) {
           cmd = `claude --allow-dangerously-skip-permissions --resume ${options.claudeSessionId}`;

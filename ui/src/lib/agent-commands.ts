@@ -46,3 +46,20 @@ export function buildCodexCommand(options: {
 
   return parts.join(" ");
 }
+
+export function buildGrokCommand(options: {
+  model?: string;
+  initialPrompt?: string;
+}): string {
+  const parts = ["grok", "--always-approve"];
+
+  if (options.model?.trim()) {
+    parts.push("-m", shellQuote(options.model.trim()));
+  }
+
+  if (options.initialPrompt?.trim()) {
+    parts.push(shellQuote(options.initialPrompt));
+  }
+
+  return parts.join(" ");
+}
