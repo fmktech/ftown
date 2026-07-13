@@ -130,7 +130,8 @@ export const SQLITE_BUSY_TIMEOUT_MS = 3000;
 
 export const STAGES_CMD = `sqlite3 -cmd ".timeout ${SQLITE_BUSY_TIMEOUT_MS}" "file:${FACTORY_DB}?mode=ro" -json "SELECT name, ord FROM stages ORDER BY ord"`;
 
-export const TICKETS_CMD = `sqlite3 -cmd ".timeout ${SQLITE_BUSY_TIMEOUT_MS}" "file:${FACTORY_DB}?mode=ro" -json "SELECT id,kind,title,stage,status,priority,bounce_count,orphaned,blocked_on,dead_letter_reason,created_at_ms,updated_at_ms FROM tickets ORDER BY priority DESC, id"`;
+/** Board scope: all live tickets + 48h of terminal history (bounds the 5s poll). */
+export const TICKETS_CMD = `sqlite3 -cmd ".timeout ${SQLITE_BUSY_TIMEOUT_MS}" "file:${FACTORY_DB}?mode=ro" -json "SELECT id,kind,title,stage,status,priority,bounce_count,orphaned,blocked_on,dead_letter_reason,created_at_ms,updated_at_ms FROM tickets WHERE status IN ('queued','claimed','in_progress','blocked') OR updated_at_ms >= (CAST(strftime('%s','now') AS INTEGER)*1000 - 172800000) ORDER BY priority DESC, id"`;
 
 /** Matches transient SQLite contention errors that a later poll will clear. */
 export const SQLITE_TRANSIENT_RE = /database is locked|database table is locked|SQLITE_BUSY/i;
@@ -145,8 +146,13 @@ export function readSkillCmd(relPath: string): string {
   return `cat ${shellQuote(relPath)}`;
 }
 
+/** Atomic write: decode to a temp file, rename over the target only on success
+ *  — a failed decode or killed exec never truncates the existing skill, and
+ *  concurrent readers (factory workers) never see a partial file. */
 export function writeSkillCmd(relPath: string, content: string): string {
-  return `printf '%s' ${shellQuote(toBase64(content))} | base64 --decode > ${shellQuote(relPath)}`;
+  const target = shellQuote(relPath);
+  const tmp = shellQuote(`${relPath}.tmp-write`);
+  return `{ printf '%s' ${shellQuote(toBase64(content))} | base64 --decode > ${tmp} && mv ${tmp} ${target}; } || { rm -f ${tmp}; exit 1; }`;
 }
 
 // ---------------------------------------------------------------------------
@@ -231,8 +237,15 @@ export function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/** Stage names are user-authored and unrestricted (dots etc.) — match greedily
+ *  after the ticket id instead of assuming a charset. */
 export function workerSessionRe(project: string): RegExp {
-  return new RegExp(`^${escapeRegExp(project)}-t(\\d+)-([A-Za-z0-9_-]+)$`);
+  return new RegExp(`^${escapeRegExp(project)}-t(\\d+)-(.+)$`);
+}
+
+/** Identity for selection/dedupe — project names may repeat across bridges. */
+export function factoryKey(f: FactoryInfo): string {
+  return `${f.bridgeId}:${f.project}`;
 }
 
 /** A factory worker run: an ftown Session matched by workerSessionRe. */
@@ -265,7 +278,8 @@ export interface UseFactoryResult {
 
 export interface FactoryListProps {
   factories: FactoryInfo[];
-  selectedProject: string | null;
+  /** factoryKey() of the selected factory — bridge-aware, unlike project alone. */
+  selectedKey: string | null;
   onSelect: (factory: FactoryInfo) => void;
   collapsed: boolean;
   /** Opens the new-factory modal (owned by Dashboard). Hidden when absent. */

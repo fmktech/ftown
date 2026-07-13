@@ -21,7 +21,7 @@ import { FactoryPane } from "./factory/FactoryPane";
 import { NewFactoryModal } from "./factory/NewFactoryModal";
 import { deriveFactories } from "./factory/useFactory";
 import type { FactoryInfo, NewFactoryInput } from "./factory/types";
-import { factoryInitPrompt } from "./factory/types";
+import { factoryInitPrompt, factoryKey } from "./factory/types";
 import { ConnectionDiagnostics } from "./ConnectionDiagnostics";
 import { mergeBridgeOrder } from "@/lib/bridge-order";
 
@@ -70,7 +70,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [tokenCopied, setTokenCopied] = useState(false);
   const [mobileTab, setMobileTab] = useState<"sessions" | "terminal">("sessions");
   const [sidebarTab, setSidebarTab] = useState<"sessions" | "crons" | "factory">("sessions");
-  const [selectedFactory, setSelectedFactory] = useState<FactoryInfo | null>(null);
+  const [selectedFactoryKey, setSelectedFactoryKey] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sessionOrder, setSessionOrder] = useState<string[]>([]);
   const [bridgeOrder, setBridgeOrder] = useState<string[]>([]);
@@ -260,6 +260,11 @@ PY`;
 
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
   const selectedLoop = selectedLoopId ? loops.find((loop) => loop.id === selectedLoopId) ?? null : null;
+  const factories = useMemo(() => deriveFactories(loops), [loops]);
+  const selectedFactory = useMemo(
+    () => (selectedFactoryKey ? factories.find((f) => factoryKey(f) === selectedFactoryKey) ?? null : null),
+    [factories, selectedFactoryKey]
+  );
 
   // Mirrors the run-selection fallback in LoopDetailPane so the two stay in sync.
   const selectedLoopRun = useMemo(
@@ -276,7 +281,6 @@ PY`;
   // pane, so they no longer appear as top-level sidebar sessions.
   const normalSessions = useMemo(() => sessions.filter((s) => !s.loopId), [sessions]);
   const loopCount = loops.length;
-  const factories = useMemo(() => deriveFactories(loops), [loops]);
 
   useEffect(() => {
     if (!selectedLoop) {
@@ -450,7 +454,7 @@ PY`;
     if (id) {
       setSelectedLoopId(null);
       setSelectedLoopRunId(null);
-      setSelectedFactory(null);
+      setSelectedFactoryKey(null);
       setSidebarTab("sessions");
       setMobileTab("terminal");
     }
@@ -459,18 +463,23 @@ PY`;
   const handleSelectLoop = useCallback((loopId: string) => {
     setSelectedLoopId(loopId);
     setSelectedSessionId(null);
-    setSelectedFactory(null);
+    setSelectedFactoryKey(null);
     setSidebarTab("crons");
     setMobileTab("terminal");
   }, []);
 
   const handleSelectFactory = useCallback((factory: FactoryInfo) => {
-    setSelectedFactory(factory);
+    setSelectedFactoryKey(factoryKey(factory));
     setSelectedSessionId(null);
     setSelectedLoopId(null);
     setSelectedLoopRunId(null);
     setMobileTab("terminal");
   }, []);
+
+  const handleOpenFactorySession = useCallback((id: string) => {
+    setSelectedFactoryKey(null);
+    handleSelectSession(id);
+  }, [handleSelectSession]);
 
   const handleSidebarTabSwitch = useCallback((tab: "sessions" | "crons" | "factory") => {
     setSidebarTab(tab);
@@ -1100,7 +1109,7 @@ PY`;
             {sidebarTab === "factory" ? (
               <FactoryList
                 factories={factories}
-                selectedProject={selectedFactory?.project ?? null}
+                selectedKey={selectedFactoryKey}
                 onSelect={handleSelectFactory}
                 collapsed={isDesktop && sidebarCollapsed}
                 onCreateFactory={() => setShowNewFactory(true)}
@@ -1148,14 +1157,11 @@ PY`;
         <main className={`flex-1 flex-col min-h-0 min-w-0 ${mobileTab === "terminal" ? "flex" : "hidden"} md:flex`}>
           {selectedFactory ? (
             <FactoryPane
-              key={selectedFactory.project}
+              key={selectedFactoryKey}
               factory={selectedFactory}
               bridgeExec={bridgeExec}
               sessions={normalSessions}
-              onOpenSession={(id) => {
-                setSelectedFactory(null);
-                handleSelectSession(id);
-              }}
+              onOpenSession={handleOpenFactorySession}
             />
           ) : selectedLoop ? (
             <LoopDetailPane

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type {
   FactoryBoardProps,
   FactoryTicket,
@@ -277,30 +277,33 @@ export function FactoryBoard({
     [showTicket],
   );
 
+  const columns = useMemo<Array<{ stage: string; tickets: FactoryTicket[] }>>(() => {
+    const knownStages = snapshot?.stages ?? [];
+    const knownSet = new Set(knownStages);
+    const byStage = new Map<string, FactoryTicket[]>();
+    for (const stage of knownStages) byStage.set(stage, []);
+    const unknownTickets: FactoryTicket[] = [];
+    for (const ticket of snapshot?.tickets ?? []) {
+      if (knownSet.has(ticket.stage)) {
+        byStage.get(ticket.stage)?.push(ticket);
+      } else {
+        unknownTickets.push(ticket);
+      }
+    }
+    const result: Array<{ stage: string; tickets: FactoryTicket[] }> =
+      knownStages.map((stage) => ({ stage, tickets: byStage.get(stage) ?? [] }));
+    if (unknownTickets.length > 0) {
+      result.push({ stage: "unknown", tickets: unknownTickets });
+    }
+    return result;
+  }, [snapshot]);
+
   if (loading) {
     return (
       <div className="flex flex-1 items-center justify-center py-16 text-sm text-zinc-500">
         <span className="animate-pulse">Loading factory…</span>
       </div>
     );
-  }
-
-  const knownStages = snapshot?.stages ?? [];
-  const knownSet = new Set(knownStages);
-  const byStage = new Map<string, FactoryTicket[]>();
-  for (const stage of knownStages) byStage.set(stage, []);
-  const unknownTickets: FactoryTicket[] = [];
-  for (const ticket of snapshot?.tickets ?? []) {
-    if (knownSet.has(ticket.stage)) {
-      byStage.get(ticket.stage)?.push(ticket);
-    } else {
-      unknownTickets.push(ticket);
-    }
-  }
-  const columns: Array<{ stage: string; tickets: FactoryTicket[] }> =
-    knownStages.map((stage) => ({ stage, tickets: byStage.get(stage) ?? [] }));
-  if (unknownTickets.length > 0) {
-    columns.push({ stage: "unknown", tickets: unknownTickets });
   }
 
   return (

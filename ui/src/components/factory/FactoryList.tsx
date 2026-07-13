@@ -1,6 +1,6 @@
 "use client";
 
-import type { FactoryInfo, FactoryListProps } from "./types";
+import { factoryKey, type FactoryInfo, type FactoryListProps } from "./types";
 
 function repoBasename(repoRoot: string): string {
   const parts = repoRoot.split("/").filter(Boolean);
@@ -39,7 +39,7 @@ function NewFactoryButton({ onCreateFactory }: { onCreateFactory: () => void }) 
   );
 }
 
-export function FactoryList({ factories, selectedProject, onSelect, collapsed, onCreateFactory }: FactoryListProps) {
+export function FactoryList({ factories, selectedKey, onSelect, collapsed, onCreateFactory }: FactoryListProps) {
   if (factories.length === 0) {
     if (collapsed) return null;
     return (
@@ -73,10 +73,10 @@ export function FactoryList({ factories, selectedProject, onSelect, collapsed, o
     return (
       <div className="flex flex-col">
         {factories.map((factory) => {
-          const selected = factory.project === selectedProject;
+          const selected = factoryKey(factory) === selectedKey;
           return (
             <button
-              key={factory.project}
+              key={factoryKey(factory)}
               onClick={() => onSelect(factory)}
               aria-label={`${factory.project} — ${factory.repoRoot}`}
               aria-current={selected ? "true" : undefined}
@@ -130,10 +130,10 @@ export function FactoryList({ factories, selectedProject, onSelect, collapsed, o
         </div>
       )}
       {factories.map((factory) => {
-        const selected = factory.project === selectedProject;
+        const selected = factoryKey(factory) === selectedKey;
         return (
           <div
-            key={factory.project}
+            key={factoryKey(factory)}
             role="button"
             tabIndex={0}
             aria-current={selected ? "true" : undefined}

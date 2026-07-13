@@ -38,6 +38,7 @@ export function FactoryRuns({ factory, sessions, onOpenSession }: FactoryRunsPro
     const re = workerSessionRe(factory.project);
     const runs: WorkerRun[] = [];
     for (const session of sessions) {
+      if (session.bridgeId !== factory.bridgeId) continue;
       const match = re.exec(session.name);
       if (match) {
         runs.push({ session, ticketId: Number(match[1]), stage: match[2] });

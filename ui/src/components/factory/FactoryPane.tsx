@@ -134,22 +134,20 @@ export function FactoryPane({ factory, bridgeExec, sessions, onOpenSession }: Fa
         />
       )}
 
-      <div className="flex-1 min-h-0 overflow-hidden">
-        {tab === "board" && (
-          <FactoryBoard
-            snapshot={snapshot}
-            error={error}
-            loading={loading}
-            onRefresh={refresh}
-            showTicket={showTicket}
-          />
-        )}
-        {tab === "skills" && (
-          <SkillEditor listSkills={listSkills} readSkill={readSkill} writeSkill={writeSkill} />
-        )}
-        {tab === "runs" && (
-          <FactoryRuns factory={factory} sessions={sessions} onOpenSession={onOpenSession} />
-        )}
+      <div className={tab === "board" ? "flex-1 min-h-0 overflow-hidden" : "hidden"}>
+        <FactoryBoard
+          snapshot={snapshot}
+          error={error}
+          loading={loading}
+          onRefresh={refresh}
+          showTicket={showTicket}
+        />
+      </div>
+      <div className={tab === "skills" ? "flex-1 min-h-0 overflow-hidden" : "hidden"}>
+        <SkillEditor listSkills={listSkills} readSkill={readSkill} writeSkill={writeSkill} />
+      </div>
+      <div className={tab === "runs" ? "flex-1 min-h-0 overflow-hidden" : "hidden"}>
+        <FactoryRuns factory={factory} sessions={sessions} onOpenSession={onOpenSession} />
       </div>
     </div>
   );
