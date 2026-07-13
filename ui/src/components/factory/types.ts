@@ -273,6 +273,19 @@ export interface WorkerRun {
   stage: string;
 }
 
+/** The factory a session belongs to (bridge + name pattern), or null. Used to
+ *  move worker sessions out of the Sessions list and under their factory. */
+export function factoryWorkerOf(
+  session: Session,
+  factories: FactoryInfo[],
+): FactoryInfo | null {
+  for (const f of factories) {
+    if (session.bridgeId !== f.bridgeId) continue;
+    if (workerSessionRe(f.project).test(session.name)) return f;
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Hook contract (implemented in useFactory.ts)
 // ---------------------------------------------------------------------------
@@ -302,6 +315,12 @@ export interface FactoryListProps {
   collapsed: boolean;
   /** Opens the new-factory modal (owned by Dashboard). Hidden when absent. */
   onCreateFactory?: () => void;
+  /** All sessions; each factory row nests its workers (factoryWorkerOf). */
+  sessions: Session[];
+  /** Selecting a nested worker session opens its terminal. */
+  onOpenSession: (sessionId: string) => void;
+  /** Currently open session id — highlights the nested worker row. */
+  selectedSessionId: string | null;
 }
 
 export interface NewTicketFormProps {

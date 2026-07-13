@@ -21,7 +21,7 @@ import { FactoryPane } from "./factory/FactoryPane";
 import { NewFactoryModal } from "./factory/NewFactoryModal";
 import { deriveFactories } from "./factory/useFactory";
 import type { FactoryInfo, NewFactoryInput } from "./factory/types";
-import { factoryInitPrompt, factoryKey } from "./factory/types";
+import { factoryInitPrompt, factoryKey, factoryWorkerOf } from "./factory/types";
 import { ConnectionDiagnostics } from "./ConnectionDiagnostics";
 import { mergeBridgeOrder } from "@/lib/bridge-order";
 
@@ -280,6 +280,12 @@ PY`;
   // Loop-run sessions are represented through LoopRunRecord in the loop detail
   // pane, so they no longer appear as top-level sidebar sessions.
   const normalSessions = useMemo(() => sessions.filter((s) => !s.loopId), [sessions]);
+  // Factory worker sessions are nested under their factory in the Factory tab
+  // instead of appearing as top-level sidebar sessions.
+  const nonFactorySessions = useMemo(
+    () => normalSessions.filter((s) => factoryWorkerOf(s, factories) === null),
+    [normalSessions, factories]
+  );
   const loopCount = loops.length;
 
   useEffect(() => {
@@ -1042,8 +1048,8 @@ PY`;
                 <button
                   role="tab"
                   aria-selected={sidebarTab === "sessions"}
-                  aria-label={`Sessions (${normalSessions.length})`}
-                  title={`Sessions (${normalSessions.length})`}
+                  aria-label={`Sessions (${nonFactorySessions.length})`}
+                  title={`Sessions (${nonFactorySessions.length})`}
                   onClick={() => handleSidebarTabSwitch("sessions")}
                   className={`sidebar-tab-icon ${sidebarTab === "sessions" ? "sidebar-tab-active" : ""}`}
                 >
@@ -1084,7 +1090,7 @@ PY`;
                   onClick={() => handleSidebarTabSwitch("sessions")}
                   className={`sidebar-tab ${sidebarTab === "sessions" ? "sidebar-tab-active" : ""}`}
                 >
-                  Sessions <span className="sidebar-tab-count">{normalSessions.length}</span>
+                  Sessions <span className="sidebar-tab-count">{nonFactorySessions.length}</span>
                 </button>
                 <button
                   role="tab"
@@ -1113,6 +1119,9 @@ PY`;
                 onSelect={handleSelectFactory}
                 collapsed={isDesktop && sidebarCollapsed}
                 onCreateFactory={() => setShowNewFactory(true)}
+                sessions={normalSessions}
+                onOpenSession={handleOpenFactorySession}
+                selectedSessionId={selectedSessionId}
               />
             ) : sidebarTab === "crons" ? (
               <LoopList
@@ -1128,7 +1137,7 @@ PY`;
               />
             ) : (
               <SessionList
-                sessions={normalSessions}
+                sessions={nonFactorySessions}
                 bridges={bridges}
                 bridgeOrder={bridgeOrder}
                 selectedSessionId={selectedSessionId}

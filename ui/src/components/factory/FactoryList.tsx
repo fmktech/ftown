@@ -1,6 +1,13 @@
 "use client";
 
-import { factoryKey, type FactoryInfo, type FactoryListProps } from "./types";
+import { useMemo, useState } from "react";
+import type { Session, SessionStatus } from "@/types";
+import {
+  factoryKey,
+  factoryWorkerOf,
+  type FactoryInfo,
+  type FactoryListProps,
+} from "./types";
 
 function repoBasename(repoRoot: string): string {
   const parts = repoRoot.split("/").filter(Boolean);
@@ -9,6 +16,35 @@ function repoBasename(repoRoot: string): string {
 
 function initial(factory: FactoryInfo): string {
   return factory.project.slice(0, 1).toUpperCase() || "?";
+}
+
+function formatRelative(timestamp: string): string {
+  const ms = new Date(timestamp).getTime();
+  if (Number.isNaN(ms)) return "unknown";
+  const diffMs = Date.now() - ms;
+  if (diffMs < 60000) return "just now";
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(ms).toLocaleDateString();
+}
+
+function statusDotClass(status: SessionStatus): string {
+  switch (status) {
+    case "running":
+      return "bg-green-500 animate-pulse";
+    case "pending":
+      return "bg-zinc-400";
+    case "completed":
+      return "bg-zinc-600";
+    case "error":
+      return "bg-red-500";
+    case "disconnected":
+      return "bg-amber-500";
+  }
 }
 
 function NewFactoryButton({ onCreateFactory }: { onCreateFactory: () => void }) {
@@ -39,7 +75,150 @@ function NewFactoryButton({ onCreateFactory }: { onCreateFactory: () => void }) 
   );
 }
 
-export function FactoryList({ factories, selectedKey, onSelect, collapsed, onCreateFactory }: FactoryListProps) {
+function WorkerRow({
+  session,
+  selected,
+  onOpenSession,
+}: {
+  session: Session;
+  selected: boolean;
+  onOpenSession: (sessionId: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        onOpenSession(session.id);
+      }}
+      aria-current={selected ? "true" : undefined}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        width: "100%",
+        textAlign: "left",
+        padding: "5px 12px 5px 30px",
+        border: "none",
+        borderLeft: `3px solid ${selected ? "var(--accent)" : "transparent"}`,
+        background: selected ? "var(--bg-elevated)" : "transparent",
+        cursor: "pointer",
+        fontFamily: "var(--font-mono)",
+      }}
+      onMouseEnter={(e) => {
+        if (!selected) e.currentTarget.style.background = "var(--bg-hover)";
+      }}
+      onMouseLeave={(e) => {
+        if (!selected) e.currentTarget.style.background = "transparent";
+      }}
+    >
+      <span
+        aria-hidden="true"
+        className={`h-2 w-2 shrink-0 rounded-full ${statusDotClass(session.status)}`}
+        style={{ borderRadius: "50%", width: 6, height: 6, flexShrink: 0 }}
+      />
+      <span
+        title={session.name}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          fontSize: 11,
+          color: selected ? "var(--text-primary)" : "var(--text-secondary)",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {session.name}
+      </span>
+      <span style={{ fontSize: 10, color: "var(--text-faint)", flexShrink: 0 }}>
+        {formatRelative(session.createdAt)}
+      </span>
+    </button>
+  );
+}
+
+function WorkerSection({
+  workers,
+  expanded,
+  onToggle,
+  selectedSessionId,
+  onOpenSession,
+}: {
+  workers: Session[];
+  expanded: boolean;
+  onToggle: () => void;
+  selectedSessionId: string | null;
+  onOpenSession: (sessionId: string) => void;
+}) {
+  if (workers.length === 0) return null;
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggle();
+        }}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 4,
+          width: "100%",
+          textAlign: "left",
+          padding: "4px 12px 4px 18px",
+          border: "none",
+          background: "transparent",
+          cursor: "pointer",
+          fontFamily: "var(--font-mono)",
+          fontSize: 10,
+          color: "var(--text-faint)",
+        }}
+      >
+        <span aria-hidden>{expanded ? "▾" : "▸"}</span>
+        <span>workers ({workers.length})</span>
+      </button>
+      {expanded && (
+        <div className="flex flex-col">
+          {workers.map((session) => (
+            <WorkerRow
+              key={session.id}
+              session={session}
+              selected={session.id === selectedSessionId}
+              onOpenSession={onOpenSession}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function FactoryList({
+  factories,
+  selectedKey,
+  onSelect,
+  collapsed,
+  onCreateFactory,
+  sessions,
+  onOpenSession,
+  selectedSessionId,
+}: FactoryListProps) {
+  const [collapsedWorkers, setCollapsedWorkers] = useState<Record<string, boolean>>({});
+
+  const workersByFactoryKey = useMemo(() => {
+    const map = new Map<string, Session[]>();
+    for (const factory of factories) {
+      const key = factoryKey(factory);
+      const matches = sessions.filter((session) => factoryWorkerOf(session, [factory]) !== null);
+      matches.sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+      );
+      map.set(key, matches);
+    }
+    return map;
+  }, [sessions, factories]);
+
   if (factories.length === 0) {
     if (collapsed) return null;
     return (
@@ -131,9 +310,12 @@ export function FactoryList({ factories, selectedKey, onSelect, collapsed, onCre
       )}
       {factories.map((factory) => {
         const selected = factoryKey(factory) === selectedKey;
+        const fKey = factoryKey(factory);
+        const workers = workersByFactoryKey.get(fKey) ?? [];
+        const workersExpanded = collapsedWorkers[fKey] !== true;
         return (
+        <div key={fKey} style={{ borderBottom: "1px solid var(--border-subtle)" }}>
           <div
-            key={factoryKey(factory)}
             role="button"
             tabIndex={0}
             aria-current={selected ? "true" : undefined}
@@ -145,7 +327,6 @@ export function FactoryList({ factories, selectedKey, onSelect, collapsed, onCre
               width: "100%",
               textAlign: "left",
               padding: "9px 12px",
-              borderBottom: "1px solid var(--border-subtle)",
               borderLeft: `3px solid ${selected ? "var(--accent)" : "var(--border-muted)"}`,
               background: selected ? "var(--bg-elevated)" : "transparent",
               cursor: "pointer",
@@ -193,6 +374,16 @@ export function FactoryList({ factories, selectedKey, onSelect, collapsed, onCre
               </span>
             </div>
           </div>
+          <WorkerSection
+            workers={workers}
+            expanded={workersExpanded}
+            onToggle={() =>
+              setCollapsedWorkers((prev) => ({ ...prev, [fKey]: workersExpanded }))
+            }
+            selectedSessionId={selectedSessionId}
+            onOpenSession={onOpenSession}
+          />
+        </div>
         );
       })}
     </div>
