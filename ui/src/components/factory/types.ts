@@ -150,6 +150,57 @@ export function writeSkillCmd(relPath: string, content: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Ticket creation
+// ---------------------------------------------------------------------------
+
+export interface NewTicketInput {
+  title: string;
+  stage: string; // must be one of snapshot.stages
+  priority: number;
+  kind: "task" | "epic";
+}
+
+/** Folder slug for a new ticket: lowercase alnum-dash, capped, never empty. */
+export function slugify(s: string): string {
+  const slug = s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+  return slug || "ticket";
+}
+
+/** mkdir the artifact folder, then create the ticket; stdout is the new id. */
+export function createTicketCmd(input: NewTicketInput, folder: string): string {
+  return (
+    `mkdir -p ${shellQuote(folder)} && ${FTS_BIN} create --db ${FACTORY_DB}` +
+    ` --title ${shellQuote(input.title)} --stage ${shellQuote(input.stage)}` +
+    ` --folder ${shellQuote(folder)} --priority ${Math.floor(input.priority)}` +
+    ` --kind ${input.kind}`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Factory creation — spawn a claude agent session that runs the /factory skill
+// ---------------------------------------------------------------------------
+
+export interface NewFactoryInput {
+  bridgeId: string;
+  repoPath: string; // absolute path on the bridge host
+  project: string;
+}
+
+export function factoryInitPrompt(input: NewFactoryInput): string {
+  return (
+    `/factory init ${input.repoPath} — deploy a software factory for project ` +
+    `"${input.project}" in this repo: copy the factory template, set the project ` +
+    `name in factory/factory.yaml, initialize the FTS database, then run factory up ` +
+    `to register the grouped ftown loops. If the /factory skill is not available, ` +
+    `read ~/.claude/skills/factory/SKILL.md and follow it exactly.`
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Worker sessions — the dispatcher names workers "<project>-t<ticketId>-<stage>"
 // ---------------------------------------------------------------------------
 
@@ -181,6 +232,8 @@ export interface UseFactoryResult {
   listSkills: () => Promise<SkillFile[]>;
   readSkill: (relPath: string) => Promise<string>;
   writeSkill: (relPath: string, content: string) => Promise<void>;
+  /** mkdir folder + fts create; resolves the new ticket id, then refreshes. */
+  createTicket: (input: NewTicketInput) => Promise<number>;
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +245,20 @@ export interface FactoryListProps {
   selectedProject: string | null;
   onSelect: (factory: FactoryInfo) => void;
   collapsed: boolean;
+  /** Opens the new-factory modal (owned by Dashboard). Hidden when absent. */
+  onCreateFactory?: () => void;
+}
+
+export interface NewTicketFormProps {
+  stages: string[]; // snapshot.stages; disable submit while empty
+  onCreate: (input: NewTicketInput) => Promise<number>;
+  onClose: () => void;
+}
+
+export interface NewFactoryModalProps {
+  bridges: Array<{ bridgeId: string; label: string }>;
+  onSubmit: (input: NewFactoryInput) => Promise<void>;
+  onClose: () => void;
 }
 
 export interface FactoryPaneProps {

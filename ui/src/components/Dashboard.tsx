@@ -18,8 +18,10 @@ import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
 import { LoopFormModal } from "./LoopFormModal";
 import { FactoryList } from "./factory/FactoryList";
 import { FactoryPane } from "./factory/FactoryPane";
+import { NewFactoryModal } from "./factory/NewFactoryModal";
 import { deriveFactories } from "./factory/useFactory";
-import type { FactoryInfo } from "./factory/types";
+import type { FactoryInfo, NewFactoryInput } from "./factory/types";
+import { factoryInitPrompt } from "./factory/types";
 import { ConnectionDiagnostics } from "./ConnectionDiagnostics";
 import { mergeBridgeOrder } from "@/lib/bridge-order";
 
@@ -62,6 +64,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [showNewSession, setShowNewSession] = useState(false);
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
   const [showLoopForm, setShowLoopForm] = useState(false);
+  const [showNewFactory, setShowNewFactory] = useState(false);
   const [editingLoop, setEditingLoop] = useState<Loop | null>(null);
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
@@ -518,6 +521,20 @@ PY`;
       }
     },
     [editingLoop, updateLoop, createLoop]
+  );
+
+  const handleCreateFactory = useCallback(
+    async (input: NewFactoryInput): Promise<void> => {
+      await createSession(factoryInitPrompt(input), {
+        bridgeId: input.bridgeId,
+        workingDir: input.repoPath,
+        shellType: "claude",
+        name: `factory-init-${input.project}`,
+      });
+      setShowNewFactory(false);
+      handleSidebarTabSwitch("sessions");
+    },
+    [createSession, handleSidebarTabSwitch]
   );
 
   const handleRunLoopNow = useCallback(
@@ -1032,7 +1049,7 @@ PY`;
                 >
                   ◷
                 </button>
-                {factories.length > 0 && (
+                {(factories.length > 0 || sidebarTab === "factory") && (
                   <button
                     role="tab"
                     aria-selected={sidebarTab === "factory"}
@@ -1067,7 +1084,7 @@ PY`;
                 >
                   Crons <span className="sidebar-tab-count">{loopCount}</span>
                 </button>
-                {factories.length > 0 && (
+                {(factories.length > 0 || sidebarTab === "factory") && (
                   <button
                     role="tab"
                     aria-selected={sidebarTab === "factory"}
@@ -1085,6 +1102,7 @@ PY`;
                 selectedProject={selectedFactory?.project ?? null}
                 onSelect={handleSelectFactory}
                 collapsed={isDesktop && sidebarCollapsed}
+                onCreateFactory={() => setShowNewFactory(true)}
               />
             ) : sidebarTab === "crons" ? (
               <LoopList
@@ -1193,6 +1211,14 @@ PY`;
         bridges={bridges}
         editingLoop={editingLoop}
       />
+
+      {showNewFactory && (
+        <NewFactoryModal
+          bridges={bridges.map((b) => ({ bridgeId: b.bridgeId, label: b.hostname }))}
+          onSubmit={handleCreateFactory}
+          onClose={() => setShowNewFactory(false)}
+        />
+      )}
 
       <ConnectionDiagnostics
         connectionStatus={connectionStatus}

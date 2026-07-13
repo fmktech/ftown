@@ -9,6 +9,7 @@ import {
   FactorySnapshot,
   FactoryTicket,
   LIST_SKILLS_CMD,
+  NewTicketInput,
   SKILL_PATH_RE,
   SkillFile,
   SQLITE_TRANSIENT_RE,
@@ -16,8 +17,10 @@ import {
   TICKETS_CMD,
   TicketDetail,
   UseFactoryResult,
+  createTicketCmd,
   readSkillCmd,
   showTicketCmd,
+  slugify,
   writeSkillCmd,
 } from "./types";
 
@@ -247,6 +250,37 @@ export function useFactory(
     [bridgeExec, bridgeId, repoRoot],
   );
 
+  const createTicket = useCallback(
+    async (input: NewTicketInput): Promise<number> => {
+      if (repoRoot === null || bridgeId === null) {
+        throw new Error("no factory selected");
+      }
+      const title = input.title.trim();
+      if (!title) throw new Error("title required");
+      if (!input.stage) throw new Error("stage required");
+      const folder = `.ffactory/tickets/${slugify(title)}-${Date.now().toString(36)}`;
+      const res = await bridgeExec(
+        createTicketCmd({ ...input, title }, folder),
+        repoRoot,
+        bridgeId,
+      );
+      if ((res.exitCode ?? 0) !== 0) {
+        throw new Error(trimmedStderr(res.stderr) || "fts create failed");
+      }
+      const stdout = res.stdout.trim();
+      const match = /\d+/.exec(stdout);
+      if (!match) {
+        throw new Error(
+          `could not parse ticket id from: ${stdout.slice(0, 120)}`,
+        );
+      }
+      const id = Number.parseInt(match[0], 10);
+      refresh();
+      return id;
+    },
+    [bridgeExec, bridgeId, refresh, repoRoot],
+  );
+
   return {
     snapshot,
     error,
@@ -256,5 +290,6 @@ export function useFactory(
     listSkills,
     readSkill,
     writeSkill,
+    createTicket,
   };
 }

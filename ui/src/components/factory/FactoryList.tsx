@@ -11,7 +11,35 @@ function initial(factory: FactoryInfo): string {
   return factory.project.slice(0, 1).toUpperCase() || "?";
 }
 
-export function FactoryList({ factories, selectedProject, onSelect, collapsed }: FactoryListProps) {
+function NewFactoryButton({ onCreateFactory }: { onCreateFactory: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onCreateFactory}
+      aria-label="New factory…"
+      title="New factory…"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: 22,
+        height: 22,
+        borderRadius: 5,
+        border: "1px solid var(--border-subtle)",
+        background: "var(--bg-elevated)",
+        color: "var(--text-secondary)",
+        cursor: "pointer",
+        fontSize: 13,
+        lineHeight: 1,
+        flexShrink: 0,
+      }}
+    >
+      ＋
+    </button>
+  );
+}
+
+export function FactoryList({ factories, selectedProject, onSelect, collapsed, onCreateFactory }: FactoryListProps) {
   if (factories.length === 0) {
     if (collapsed) return null;
     return (
@@ -27,6 +55,16 @@ export function FactoryList({ factories, selectedProject, onSelect, collapsed }:
           Deploy one with the /factory skill — loops grouped &quot;Factory: &lt;project&gt;&quot;
           appear here.
         </span>
+        {onCreateFactory && (
+          <button
+            type="button"
+            onClick={onCreateFactory}
+            className="btn-ghost"
+            style={{ marginTop: 4 }}
+          >
+            New factory…
+          </button>
+        )}
       </div>
     );
   }
@@ -83,6 +121,14 @@ export function FactoryList({ factories, selectedProject, onSelect, collapsed }:
 
   return (
     <div className="flex flex-col">
+      {onCreateFactory && (
+        <div
+          className="flex items-center justify-end"
+          style={{ padding: "6px 8px", borderBottom: "1px solid var(--border-subtle)" }}
+        >
+          <NewFactoryButton onCreateFactory={onCreateFactory} />
+        </div>
+      )}
       {factories.map((factory) => {
         const selected = factory.project === selectedProject;
         return (

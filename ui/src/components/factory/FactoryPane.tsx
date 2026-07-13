@@ -6,6 +6,7 @@ import { useFactory } from "./useFactory";
 import { FactoryBoard } from "./FactoryBoard";
 import { SkillEditor } from "./SkillEditor";
 import { FactoryRuns } from "./FactoryRuns";
+import { NewTicketForm } from "./NewTicketForm";
 
 type FactoryTab = "board" | "skills" | "runs";
 
@@ -17,8 +18,18 @@ const TABS: { id: FactoryTab; label: string }[] = [
 
 export function FactoryPane({ factory, bridgeExec, sessions, onOpenSession }: FactoryPaneProps) {
   const [tab, setTab] = useState<FactoryTab>("board");
-  const { snapshot, error, loading, refresh, showTicket, listSkills, readSkill, writeSkill } =
-    useFactory(factory, bridgeExec);
+  const [showNewTicket, setShowNewTicket] = useState(false);
+  const {
+    snapshot,
+    error,
+    loading,
+    refresh,
+    showTicket,
+    listSkills,
+    readSkill,
+    writeSkill,
+    createTicket,
+  } = useFactory(factory, bridgeExec);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -94,7 +105,34 @@ export function FactoryPane({ factory, bridgeExec, sessions, onOpenSession }: Fa
             );
           })}
         </div>
+        <button
+          type="button"
+          onClick={() => setShowNewTicket(true)}
+          disabled={snapshot === null}
+          style={{
+            flexShrink: 0,
+            padding: "4px 10px",
+            fontSize: 11,
+            fontFamily: "var(--font-mono)",
+            cursor: "pointer",
+            border: "1px solid var(--border-subtle)",
+            borderRadius: 6,
+            background: "transparent",
+            color: "var(--text-faint)",
+            opacity: snapshot === null ? 0.5 : 1,
+          }}
+        >
+          ＋ Ticket
+        </button>
       </div>
+
+      {showNewTicket && (
+        <NewTicketForm
+          stages={snapshot?.stages ?? []}
+          onCreate={createTicket}
+          onClose={() => setShowNewTicket(false)}
+        />
+      )}
 
       <div className="flex-1 min-h-0 overflow-hidden">
         {tab === "board" && (
