@@ -125,9 +125,15 @@ export function toBase64(s: string): string {
   return btoa(bin);
 }
 
-export const STAGES_CMD = `sqlite3 "file:${FACTORY_DB}?mode=ro" -json "SELECT name, ord FROM stages ORDER BY ord"`;
+/** Readers wait for the write lock instead of failing instantly (SQLITE_BUSY). */
+export const SQLITE_BUSY_TIMEOUT_MS = 3000;
 
-export const TICKETS_CMD = `sqlite3 "file:${FACTORY_DB}?mode=ro" -json "SELECT id,kind,title,stage,status,priority,bounce_count,orphaned,blocked_on,dead_letter_reason,created_at_ms,updated_at_ms FROM tickets ORDER BY priority DESC, id"`;
+export const STAGES_CMD = `sqlite3 -cmd ".timeout ${SQLITE_BUSY_TIMEOUT_MS}" "file:${FACTORY_DB}?mode=ro" -json "SELECT name, ord FROM stages ORDER BY ord"`;
+
+export const TICKETS_CMD = `sqlite3 -cmd ".timeout ${SQLITE_BUSY_TIMEOUT_MS}" "file:${FACTORY_DB}?mode=ro" -json "SELECT id,kind,title,stage,status,priority,bounce_count,orphaned,blocked_on,dead_letter_reason,created_at_ms,updated_at_ms FROM tickets ORDER BY priority DESC, id"`;
+
+/** Matches transient SQLite contention errors that a later poll will clear. */
+export const SQLITE_TRANSIENT_RE = /database is locked|database table is locked|SQLITE_BUSY/i;
 
 export function showTicketCmd(id: number): string {
   return `${FTS_BIN} show --db ${FACTORY_DB} ${Math.floor(id)} --json`;

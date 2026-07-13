@@ -11,6 +11,7 @@ import {
   LIST_SKILLS_CMD,
   SKILL_PATH_RE,
   SkillFile,
+  SQLITE_TRANSIENT_RE,
   STAGES_CMD,
   TICKETS_CMD,
   TicketDetail,
@@ -19,6 +20,10 @@ import {
   showTicketCmd,
   writeSkillCmd,
 } from "./types";
+
+/** A transient lock is tolerated silently for this many consecutive polls
+ *  before it surfaces as an error (~15s at the default 5s poll interval). */
+const TRANSIENT_FAILURE_THRESHOLD = 3;
 
 /** Derive the set of factories from a bridge's loops (dispatch + triage loops
  *  created by `factory up` share group/workdir — dedupe by project). */
@@ -80,6 +85,9 @@ export function useFactory(
 
   const identityRef = useRef<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Consecutive poll failures whose error text matched SQLITE_TRANSIENT_RE.
+  // Reset on any successful poll and whenever the factory identity changes.
+  const transientFailureCountRef = useRef(0);
 
   const doPoll = useCallback(async () => {
     if (repoRoot === null || bridgeId === null || identityKey === null) return;
@@ -94,8 +102,22 @@ export function useFactory(
         (res) => (res.exitCode ?? 0) !== 0,
       );
       if (failed) {
-        setError(execErrorMessage("factory query failed", failed.stderr));
+        const message = execErrorMessage("factory query failed", failed.stderr);
+        const combinedText = `${failed.stderr ?? ""}\n${failed.stdout ?? ""}`;
+        if (SQLITE_TRANSIENT_RE.test(combinedText)) {
+          transientFailureCountRef.current += 1;
+          if (transientFailureCountRef.current >= TRANSIENT_FAILURE_THRESHOLD) {
+            setError(message);
+          }
+          // else: stay quiet — snapshot is already retained, previous error
+          // state (if any) is left as-is; a lock this short will likely
+          // clear by the next poll.
+        } else {
+          transientFailureCountRef.current = 0;
+          setError(message);
+        }
       } else {
+        transientFailureCountRef.current = 0;
         const stageRows = parseJsonRows<{ name: string; ord: number }>(
           stagesRes.stdout,
         );
@@ -108,7 +130,16 @@ export function useFactory(
       }
     } catch (err) {
       if (identityRef.current !== key) return;
-      setError(shortMessage(err));
+      const message = shortMessage(err);
+      if (SQLITE_TRANSIENT_RE.test(message)) {
+        transientFailureCountRef.current += 1;
+        if (transientFailureCountRef.current >= TRANSIENT_FAILURE_THRESHOLD) {
+          setError(message);
+        }
+      } else {
+        transientFailureCountRef.current = 0;
+        setError(message);
+      }
     } finally {
       if (identityRef.current === key) setLoading(false);
     }
@@ -116,6 +147,7 @@ export function useFactory(
 
   useEffect(() => {
     identityRef.current = identityKey;
+    transientFailureCountRef.current = 0;
     setSnapshot(null);
     setError(null);
     if (identityKey === null) {
