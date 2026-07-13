@@ -10,7 +10,7 @@ export function NewTicketForm({ stages, onCreate, onClose }: NewTicketFormProps)
   const [kind, setKind] = useState<"task" | "epic">("task");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const titleRef = useRef<HTMLInputElement>(null);
+  const titleRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     const id = window.setTimeout(() => titleRef.current?.focus(), 0);
@@ -56,7 +56,7 @@ export function NewTicketForm({ stages, onCreate, onClose }: NewTicketFormProps)
         role="dialog"
         aria-modal="true"
         aria-labelledby="new-ticket-title"
-        className="w-full max-w-sm rounded border border-zinc-700/60 bg-zinc-900 shadow-xl"
+        className="w-full max-w-lg rounded border border-zinc-700/60 bg-zinc-900 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <h2
@@ -71,16 +71,16 @@ export function NewTicketForm({ stages, onCreate, onClose }: NewTicketFormProps)
             <label htmlFor="nt-title" className="mb-1 block text-xs text-zinc-400">
               Title
             </label>
-            <input
+            <textarea
               id="nt-title"
               ref={titleRef}
-              type="text"
               required
+              rows={3}
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="Ticket title"
               disabled={submitting}
-              className="w-full rounded border border-zinc-700/60 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-zinc-500 disabled:opacity-60"
+              className="w-full resize-none rounded border border-zinc-700/60 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-zinc-500 disabled:opacity-60"
               onKeyDown={handleKeyDown}
             />
           </div>
