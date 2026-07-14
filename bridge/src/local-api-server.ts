@@ -6,10 +6,9 @@ import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 
 import type { SessionStore } from './session-store.js';
 import type { MailStore } from './mail-store.js';
-import { createMailMessage } from './mail-store.js';
-import type { Loop, LoopDraft, MailMessage, Session, ShellType } from './types.js';
+import type { Loop, LoopDraft, Session } from './types.js';
 import { buildSessionCommand } from './agent-commands.js';
-import { HOOKED_SHELL_TYPES } from './harness-registry.js';
+import { MailDeliveryService, sanitizeMessageText } from './mail-delivery.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { TerminalManager } from './terminal-manager.js';
@@ -141,45 +140,6 @@ function extractBearer(req: IncomingMessage): string | null {
 }
 
 const MAX_MESSAGE_LENGTH = 2000;
-const MAX_MAIL_BODY_LENGTH = 64 * 1024;
-const MAX_MAIL_WAIT_SECONDS = 30;
-const MAIL_NUDGE_DELAY_MS = 5_000;
-// Hooked agents (claude/codex and claude flavors) get mail through their Stop
-// pump; the nudge is only a safety net for them, so wait much longer before
-// typing into their pane — fast nudges race the pump and queue stale prompts.
-const MAIL_NUDGE_DELAY_HOOKED_MS = 60_000;
-const MAIL_NUDGE_MIN_INTERVAL_MS = 30_000;
-// While an agent is mid-turn its Stop hook pump delivers mail at turn end, so
-// nudging would only queue a stale prompt; re-check periodically in case the
-// turn never reaches Stop, and ignore busy markers old enough to be a crash.
-const MAIL_NUDGE_BUSY_RECHECK_MS = 60_000;
-const AGENT_BUSY_STALE_MS = 30 * 60_000;
-
-const MAIL_TYPES: ReadonlyArray<MailMessage['type']> = ['message', 'task', 'result', 'escalation'];
-
-/** Pending long-poll request for a session's inbox. */
-interface MailWaiter {
-  deliver: (messages: MailMessage[]) => void;
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// Messages are sanitized to a single line, so a delayed plain CR submits everywhere.
-// (ESC+CR reads as Alt+Enter — insert newline — on current Claude Code.)
-function submitSuffixFor(_shellType: ShellType | undefined): string {
-  return '\r';
-}
-
-// Strip control chars and collapse whitespace so a message cannot inject keystrokes.
-function sanitizeMessageText(text: string): string {
-  return text
-    .replace(/[\u0000-\u001f\u007f]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
 function getQueryInt(url: URL, name: string, defaultValue: number): number {
   const val = url.searchParams.get(name);
   if (!val) return defaultValue;
@@ -194,12 +154,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private centrifugo: CentrifugoClient | null = null;
   private terminalManager: TerminalManager | null = null;
   private sessionDeps: CreateFtownSessionDeps | null = null;
-  private mailStore: MailStore | null = null;
-  private mailWaiters: Map<string, MailWaiter> = new Map();
-  private nudgeTimers: Map<string, NodeJS.Timeout> = new Map();
-  private pendingNudgeFrom: Map<string, string> = new Map();
-  private lastNudgeAt: Map<string, number> = new Map();
-  private agentBusySince: Map<string, number> = new Map();
+  private mail: MailDeliveryService = new MailDeliveryService();
   private loopApi: LoopApiDeps | null = null;
   private userId: string = '';
   private authToken: string = '';
@@ -210,7 +165,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   }
 
   setMailStore(mailStore: MailStore): void {
-    this.mailStore = mailStore;
+    this.mail.setMailStore(mailStore);
   }
 
   setDependencies(
@@ -225,6 +180,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     this.centrifugo = centrifugo;
     this.userId = userId;
     this.terminalManager = terminalManager ?? null;
+    this.mail.setStore(store);
+    this.mail.setRunner(runner);
   }
 
   setSessionFactory(deps: CreateFtownSessionDeps): void {
@@ -269,10 +226,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   }
 
   stop(): void {
-    for (const timer of this.nudgeTimers.values()) clearTimeout(timer);
-    this.nudgeTimers.clear();
-    for (const waiter of [...this.mailWaiters.values()]) waiter.deliver([]);
-    this.mailWaiters.clear();
+    this.mail.stop();
     if (this.server) {
       this.server.close();
       this.server = null;
@@ -980,7 +934,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         if (fromSession) sender = fromSession.name || from.slice(0, 8);
       }
 
-      const wrote = await this.injectPtyLine(session, sender, text);
+      const wrote = await this.mail.injectPtyLine(session, sender, text);
       if (!wrote) {
         jsonResponse(res, 409, { error: 'Session not running' });
         return;
@@ -1046,28 +1000,12 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     jsonResponse(res, 404, { error: 'Not found' });
   }
 
-  // Plain shells would execute the message as a command; deliver it as a quoted no-op
-  // (`: '...'`) — interactive zsh has no '#' comments by default.
-  private async injectPtyLine(session: Session, sender: string, text: string): Promise<boolean> {
-    if (!this.runner) return false;
-    const isAgent = session.shellType && session.shellType !== 'shell';
-    const line = isAgent
-      ? `[ftown msg from ${sender}] ${text}`
-      : `: '[ftown msg from ${sender}] ${text.replace(/'/g, '')}'`;
-    if (!this.runner.write(session.id, line)) return false;
-    // Composer TUIs detect pastes by input arrival rate; the submit CR must come well
-    // after that window or it is treated as a pasted newline.
-    await delay(600);
-    this.runner.write(session.id, submitSuffixFor(session.shellType));
-    return true;
-  }
-
   private async handleInboxPost(
     req: IncomingMessage,
     res: ServerResponse,
     sessionId: string,
   ): Promise<void> {
-    if (!this.store || !this.mailStore) {
+    if (!this.store || !this.mail.isReady()) {
       jsonResponse(res, 503, { error: 'Mail store not ready' });
       return;
     }
@@ -1079,59 +1017,20 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     }
 
     const body = await parseBody(req);
-    const text = body.body;
-    if (typeof text !== 'string' || !text.trim()) {
-      jsonResponse(res, 400, { error: 'Missing body' });
-      return;
-    }
-    if (text.length > MAX_MAIL_BODY_LENGTH) {
-      jsonResponse(res, 400, { error: `Body too long (max ${MAX_MAIL_BODY_LENGTH} chars)` });
+    const result = await this.mail.acceptMail(session, body);
+    if (!result.ok) {
+      jsonResponse(res, 400, { error: result.error });
       return;
     }
 
-    let type: MailMessage['type'] = 'message';
-    if (body.type !== undefined) {
-      if (typeof body.type !== 'string' || !MAIL_TYPES.includes(body.type as MailMessage['type'])) {
-        jsonResponse(res, 400, { error: `Invalid type (expected one of: ${MAIL_TYPES.join(', ')})` });
-        return;
-      }
-      type = body.type as MailMessage['type'];
-    }
-
-    const from = typeof body.from === 'string' && body.from.trim() ? body.from.trim() : 'external';
-    const fromName =
-      typeof body.fromName === 'string' && body.fromName.trim() ? body.fromName.trim() : undefined;
-    const threadId =
-      typeof body.threadId === 'string' && body.threadId.trim() ? body.threadId.trim() : undefined;
-
-    const msg = createMailMessage({ from, fromName, to: session.id, type, threadId, body: text });
-    await this.mailStore.append(msg);
-
-    const waiter = this.mailWaiters.get(session.id);
-    if (waiter) {
-      const undelivered = await this.mailStore.listUndelivered(session.id);
-      const marked = await this.mailStore.markDelivered(
-        session.id,
-        undelivered.map((m) => m.id),
-        'poll',
-      );
-      waiter.deliver(marked);
-    } else {
-      const nudgeDelay = HOOKED_SHELL_TYPES.has(session.shellType ?? 'claude')
-        ? MAIL_NUDGE_DELAY_HOOKED_MS
-        : MAIL_NUDGE_DELAY_MS;
-      this.scheduleMailNudge(session.id, fromName ?? from, nudgeDelay);
-    }
-
-    jsonResponse(res, 201, { id: msg.id });
+    jsonResponse(res, 201, { id: result.id });
   }
 
   private async handleInboxGet(res: ServerResponse, sessionId: string, url: URL): Promise<void> {
-    if (!this.store || !this.mailStore) {
+    if (!this.store || !this.mail.isReady()) {
       jsonResponse(res, 503, { error: 'Mail store not ready' });
       return;
     }
-    const mailStore = this.mailStore;
 
     const session = await this.store.loadSession(sessionId);
     if (!session) {
@@ -1139,142 +1038,24 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return;
     }
 
-    const wait = Math.min(getQueryInt(url, 'wait', 0), MAX_MAIL_WAIT_SECONDS);
-    const peek = getQueryInt(url, 'peek', 0) === 1;
-    const all = url.searchParams.get('all') === '1';
-    const limit = getQueryInt(url, 'limit', 50);
-
-    if (peek) {
-      const messages = all
-        ? await mailStore.listAll(session.id, limit)
-        : await mailStore.listUndelivered(session.id);
-      jsonResponse(res, 200, { messages });
-      return;
-    }
-
-    // The listen window is earned, not universal: a session with no mail
-    // relationships (no parent, no children, not an orchestrator) gets an
-    // instant stop instead of holding its Stop hook open for `wait` seconds.
-    // Late mail for everyone is still covered by the idle nudge.
-    let effectiveWait = wait;
-    if (wait > 0 && !(await this.participatesInMail(session))) {
-      effectiveWait = 0;
-    }
-
-    const undelivered = await mailStore.listUndelivered(session.id);
-    if (undelivered.length > 0 || effectiveWait <= 0) {
-      const marked = await mailStore.markDelivered(
-        session.id,
-        undelivered.map((m) => m.id),
-        effectiveWait > 0 ? 'poll' : 'drain',
-      );
-      jsonResponse(res, 200, { messages: marked });
-      return;
-    }
-
-    // Long poll: hold until mail arrives or `wait` seconds elapse. One waiter
-    // per session — a newer waiter resolves the previous one with [].
-    const existing = this.mailWaiters.get(session.id);
-    if (existing) existing.deliver([]);
-
-    let settled = false;
-    const waiter: MailWaiter = {
-      deliver: (messages: MailMessage[]) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (this.mailWaiters.get(session.id) === waiter) {
-          this.mailWaiters.delete(session.id);
-        }
-        jsonResponse(res, 200, { messages });
-      },
-    };
-    const timer = setTimeout(() => {
-      // Guard each async step on settled: once the client disconnects (or a new
-      // waiter replaced this one) we must not mark messages delivered — they
-      // would be lost without ever reaching a session.
-      if (settled || this.mailWaiters.get(session.id) !== waiter) return;
-      mailStore
-        .listUndelivered(session.id)
-        .then((pending) => {
-          if (settled || pending.length === 0) return [] as MailMessage[];
-          return mailStore.markDelivered(session.id, pending.map((m) => m.id), 'poll');
-        })
-        .then((marked) => waiter.deliver(marked))
-        .catch(() => waiter.deliver([]));
-    }, effectiveWait * 1000);
-    this.mailWaiters.set(session.id, waiter);
-
-    res.on('close', () => {
-      if (this.mailWaiters.get(session.id) !== waiter) return;
-      settled = true;
-      clearTimeout(timer);
-      this.mailWaiters.delete(session.id);
+    const result = await this.mail.readMail(session, {
+      wait: getQueryInt(url, 'wait', 0),
+      peek: getQueryInt(url, 'peek', 0) === 1,
+      all: url.searchParams.get('all') === '1',
+      limit: getQueryInt(url, 'limit', 50),
     });
-  }
 
-  // Debounced wake-up for mail that no long-poll consumed: after 5s, if it is still
-  // undelivered and the session is running, inject a one-line pointer to the
-  // harness mail command. At most one nudge per session per 30s; senders coalesce.
-  private scheduleMailNudge(sessionId: string, fromLabel: string, delayMs = MAIL_NUDGE_DELAY_MS): void {
-    this.pendingNudgeFrom.set(sessionId, fromLabel);
-    if (this.nudgeTimers.has(sessionId)) return;
-    const timer = setTimeout(() => {
-      this.nudgeTimers.delete(sessionId);
-      this.fireMailNudge(sessionId).catch((err) => {
-        console.error('[LocalApiServer] Mail nudge failed:', err instanceof Error ? err.message : String(err));
-      });
-    }, delayMs);
-    timer.unref();
-    this.nudgeTimers.set(sessionId, timer);
-  }
-
-  /** A session earns the Stop-hook listen window only if mail can plausibly
-   *  arrive: it has a parent, has children, was marked an orchestrator, or has
-   *  exchanged mail before. */
-  private async participatesInMail(session: Session): Promise<boolean> {
-    if (session.parentSessionId) return true;
-    if (session.env?.FTOWN_ORCHESTRATOR === '1') return true;
-    if (!this.store || !this.mailStore) return false;
-    const sessions = await this.store.listSessions();
-    if (sessions.some((s) => s.parentSessionId === session.id)) return true;
-    const history = await this.mailStore.listAll(session.id, 1);
-    return history.length > 0;
-  }
-
-  private async fireMailNudge(sessionId: string): Promise<void> {
-    if (!this.store || !this.mailStore || !this.runner) return;
-
-    const fromLabel = this.pendingNudgeFrom.get(sessionId) ?? 'ftown';
-    const undelivered = await this.mailStore.listUndelivered(sessionId);
-    if (undelivered.length === 0) {
-      this.pendingNudgeFrom.delete(sessionId);
+    if (result.kind === 'immediate') {
+      jsonResponse(res, 200, { messages: result.messages });
       return;
     }
 
-    const busySince = this.agentBusySince.get(sessionId);
-    if (busySince !== undefined && Date.now() - busySince < AGENT_BUSY_STALE_MS) {
-      this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_BUSY_RECHECK_MS);
-      return;
-    }
-
-    const sinceLast = Date.now() - (this.lastNudgeAt.get(sessionId) ?? 0);
-    if (sinceLast < MAIL_NUDGE_MIN_INTERVAL_MS) {
-      // Rate-limited: retry once the window reopens (mail may still be unread).
-      this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_MIN_INTERVAL_MS - sinceLast);
-      return;
-    }
-
-    this.pendingNudgeFrom.delete(sessionId);
-    if (!this.runner.isRunning(sessionId)) return;
-    const session = await this.store.loadSession(sessionId);
-    if (!session) return;
-
-    this.lastNudgeAt.set(sessionId, Date.now());
-    const text = sanitizeMessageText(
-      `You have new ftown mail from ${fromLabel} — run \`~/.ftown/bin/ftown-harness mail read\` to read it.`,
-    );
-    await this.injectPtyLine(session, 'ftown-mail', text);
+    // Long poll: the promise resolves when mail arrives or the wait elapses.
+    // On client disconnect abandon the waiter — the promise then never resolves
+    // and no response is written (the socket is gone anyway).
+    res.on('close', result.abandon);
+    const messages = await result.messages;
+    jsonResponse(res, 200, { messages });
   }
 
   private handleHook(req: IncomingMessage, res: ServerResponse): void {
@@ -1308,9 +1089,9 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         }
 
         if (hookEventName === 'UserPromptSubmit' || hookEventName === 'PreToolUse' || hookEventName === 'PostToolUse') {
-          this.agentBusySince.set(ftownSessionId, Date.now());
+          this.mail.markAgentBusy(ftownSessionId);
         } else if (hookEventName === 'Stop' || hookEventName === 'SessionEnd') {
-          this.agentBusySince.delete(ftownSessionId);
+          this.mail.markAgentIdle(ftownSessionId);
         }
 
         const conversationId = payload.conversation_id;
