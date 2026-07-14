@@ -7,7 +7,6 @@ import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 import type { SessionStore } from './session-store.js';
 import type { MailStore } from './mail-store.js';
 import type { Loop, LoopDraft, Session } from './types.js';
-import { buildSessionCommand } from './agent-commands.js';
 import { MailDeliveryService, sanitizeMessageText } from './mail-delivery.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
@@ -22,6 +21,7 @@ import {
 } from './session-registry.js';
 import {
   createFtownSession,
+  deriveRelaunchCommand,
   parseCreateSessionBody,
   ProviderAuthMissingError,
   WorkingDirMissingError,
@@ -636,27 +636,12 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         ? (await this.store.loadSession(tombstone.parentSessionId)) ? tombstone.parentSessionId : undefined
         : undefined;
 
-      // Custom-command sessions (command override at create time) must rerun
+      // Custom-command tombstones (command override at create time) must rerun
       // their command verbatim — the builder would silently swap in a stock
-      // claude session. Builder-generated commands are rebuilt instead so the
-      // tombstone's agent session id is injected as --resume (matching
-      // resurrectSession's heuristic).
-      const builderDefault = buildSessionCommand({
-        shellType: tombstone.shellType,
-        workingDir: tombstone.workingDir,
-        model: tombstone.model,
-      });
-      const builderResume = buildSessionCommand({
-        shellType: tombstone.shellType,
-        workingDir: tombstone.workingDir,
-        model: tombstone.model,
-        claudeSessionId: tombstone.claudeSessionId,
-        cursorSessionId: tombstone.cursorSessionId,
-        codexSessionId: tombstone.codexSessionId,
-      });
-      const isCustomCommand = Boolean(tombstone.command)
-        && tombstone.command !== builderDefault
-        && tombstone.command !== builderResume;
+      // claude session. Builder-generated commands are rebuilt by
+      // createFtownSession instead, so the tombstone's agent session id is
+      // injected as --resume. The classification lives in the session module.
+      const { isCustom: isCustomCommand } = deriveRelaunchCommand(tombstone);
 
       try {
         const session = await createFtownSession(this.sessionDeps, {

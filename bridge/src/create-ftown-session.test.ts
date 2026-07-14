@@ -4,15 +4,19 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
+import { buildSessionCommand } from './agent-commands.js';
 import {
   assertProviderAuthAvailable,
   buildChildBriefing,
+  canResumeStoredSession,
   createFtownSession,
+  deriveRelaunchCommand,
   nextAvailableGeneratedName,
   findMissingProviderAuth,
   parseCreateSessionBody,
   prepareWorkingDir,
   ProviderAuthMissingError,
+  relaunchFtownSession,
   resolveProviderAuthEnv,
   resolveProviderRuntimeEnv,
   WorkingDirMissingError,
@@ -37,28 +41,26 @@ function fakeSession(name: string): Session {
   };
 }
 
+interface RecordedRun {
+  sessionId: string;
+  command: string;
+  workingDir?: string;
+  env?: Record<string, string>;
+  initialInput?: string;
+  submitSuffix?: string;
+  hookPort?: number;
+  hookToken?: string;
+  parentSessionId?: string;
+}
+
 function fakeDeps(existingSessions: Session[] = []): {
   deps: CreateFtownSessionDeps;
   saved: Session[];
-  runs: Array<{
-    sessionId: string;
-    command: string;
-    workingDir?: string;
-    env?: Record<string, string>;
-    initialInput?: string;
-    submitSuffix?: string;
-  }>;
+  runs: RecordedRun[];
 } {
   const sessions = [...existingSessions];
   const saved: Session[] = [];
-  const runs: Array<{
-    sessionId: string;
-    command: string;
-    workingDir?: string;
-    env?: Record<string, string>;
-    initialInput?: string;
-    submitSuffix?: string;
-  }> = [];
+  const runs: RecordedRun[] = [];
 
   return {
     saved,
@@ -82,6 +84,9 @@ function fakeDeps(existingSessions: Session[] = []): {
             env?: Record<string, string>;
             initialInput?: string;
             submitSuffix?: string;
+            hookPort?: number;
+            hookToken?: string;
+            parentSessionId?: string;
           },
         ) => {
           runs.push({
@@ -91,6 +96,9 @@ function fakeDeps(existingSessions: Session[] = []): {
             env: opts.env,
             initialInput: opts.initialInput,
             submitSuffix: opts.submitSuffix,
+            hookPort: opts.hookPort,
+            hookToken: opts.hookToken,
+            parentSessionId: opts.parentSessionId,
           });
         },
       } as CreateFtownSessionDeps['runner'],
@@ -538,6 +546,190 @@ describe('findMissingProviderAuth — non-throwing guard twin', () => {
   it('returns undefined for unmapped shell types and undefined', () => {
     assert.strictEqual(findMissingProviderAuth('claude', { processEnv: {} }), undefined);
     assert.strictEqual(findMissingProviderAuth(undefined, { processEnv: {} }), undefined);
+  });
+});
+
+// The custom-vs-builder relaunch-command heuristic has exactly one home: the session
+// module. Resurrection and the revive route both consume it from here.
+describe('deriveRelaunchCommand — single home of the relaunch heuristic', () => {
+  const stored = {
+    shellType: 'claude' as const,
+    workingDir: undefined,
+    model: undefined,
+    claudeSessionId: 'sess-abc',
+    cursorSessionId: undefined,
+    codexSessionId: undefined,
+  };
+  const builderDefault = buildSessionCommand({ shellType: 'claude' });
+  const builderResume = buildSessionCommand({ shellType: 'claude', claudeSessionId: 'sess-abc' });
+
+  it('rebuilds a builder-default stored command into the resume command', () => {
+    const derived = deriveRelaunchCommand({ ...stored, command: builderDefault });
+    assert.deepEqual(derived, { command: builderResume, isCustom: false });
+    assert.match(derived.command, /--resume 'sess-abc'/);
+  });
+
+  it('treats a stored command matching the resume build as builder-generated too', () => {
+    assert.deepEqual(deriveRelaunchCommand({ ...stored, command: builderResume }), {
+      command: builderResume,
+      isCustom: false,
+    });
+  });
+
+  it('reruns a custom command verbatim instead of injecting --resume', () => {
+    const derived = deriveRelaunchCommand({ ...stored, command: 'my-wrapper --flag' });
+    assert.deepEqual(derived, { command: 'my-wrapper --flag', isCustom: true });
+  });
+
+  it('KNOWN LIMITATION: a pre-model-fix claude session (stored command lacks --model) is misclassified as custom and relaunched without --model or --resume', () => {
+    const derived = deriveRelaunchCommand({
+      ...stored,
+      model: 'opus',
+      // Stored before the builder emitted --model, so it no longer matches the builder output.
+      command: buildSessionCommand({ shellType: 'claude' }),
+    });
+    assert.strictEqual(derived.isCustom, true);
+    assert.strictEqual(derived.command, buildSessionCommand({ shellType: 'claude' }));
+    assert.doesNotMatch(derived.command, /--resume|--model/);
+  });
+});
+
+describe('canResumeStoredSession — which stored sessions can resume', () => {
+  it('routes each harness to its own recorded agent-session id', () => {
+    assert.strictEqual(canResumeStoredSession({ shellType: 'claude', claudeSessionId: 'c' }), true);
+    assert.strictEqual(canResumeStoredSession({ shellType: undefined, claudeSessionId: 'c' }), true);
+    assert.strictEqual(canResumeStoredSession({ shellType: 'cursor', cursorSessionId: 'u' }), true);
+    assert.strictEqual(canResumeStoredSession({ shellType: 'codex', codexSessionId: 'x' }), true);
+    assert.strictEqual(canResumeStoredSession({ shellType: 'cursor', claudeSessionId: 'c' }), false);
+    assert.strictEqual(canResumeStoredSession({ shellType: 'codex', claudeSessionId: 'c' }), false);
+  });
+
+  it('never resumes plain shells, opencode, or sessions with no recorded id', () => {
+    assert.strictEqual(canResumeStoredSession({ shellType: 'shell', claudeSessionId: 'c' }), false);
+    assert.strictEqual(canResumeStoredSession({ shellType: 'opencode', claudeSessionId: 'c' }), false);
+    assert.strictEqual(canResumeStoredSession({ shellType: 'claude' }), false);
+    assert.strictEqual(canResumeStoredSession({ shellType: 'claude', claudeSessionId: '  ' }), false);
+  });
+});
+
+// All three session-launch entry points — fresh create with a resume id, the
+// retry_session RPC, and restart resurrection — must hand the runner the same
+// invocation. This is the lock on "how is a session launched has one answer".
+describe('relaunchFtownSession — entry-point parity with createFtownSession', () => {
+  it('fresh create with a resume id, retry, and resume relaunch produce the same runner.run invocation', async () => {
+    const realHome = process.env.HOME;
+    const home = mkdtempSync(join(tmpdir(), 'ftw-home-'));
+    process.env.HOME = home;
+    const harness = fakeDeps();
+
+    try {
+      const session = await createFtownSession(harness.deps, {
+        shellType: 'claude',
+        claudeSessionId: 'sess-abc',
+      });
+      session.status = 'error';
+      await relaunchFtownSession(harness.deps, session, 'retry');
+      session.status = 'error';
+      await relaunchFtownSession(harness.deps, session, 'resume');
+
+      assert.strictEqual(harness.runs.length, 3);
+      const shape = (run: RecordedRun) => ({
+        sessionId: run.sessionId,
+        command: run.command,
+        workingDir: run.workingDir,
+        env: run.env,
+        hookPort: run.hookPort,
+        hookToken: run.hookToken,
+        parentSessionId: run.parentSessionId,
+      });
+      const [create, retry, resume] = harness.runs.map(shape);
+      assert.match(create.command, /--resume 'sess-abc'/);
+      assert.deepEqual(retry, create);
+      assert.deepEqual(resume, create);
+    } finally {
+      restoreHome(realHome);
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('retry reruns the stored command verbatim and leaves runtime/errorReason untouched', async () => {
+    const realHome = process.env.HOME;
+    const home = mkdtempSync(join(tmpdir(), 'ftw-home-'));
+    process.env.HOME = home;
+    const harness = fakeDeps();
+    const session: Session = {
+      ...fakeSession('retry-me'),
+      command: 'my-wrapper --flag',
+      status: 'error',
+      errorReason: 'boom',
+      runtime: 'tmux',
+      bridgeId: 'old-bridge',
+      env: { FOO: 'bar' },
+      parentSessionId: 'parent-1',
+    };
+
+    try {
+      const command = await relaunchFtownSession(harness.deps, session, 'retry');
+      assert.strictEqual(command, 'my-wrapper --flag');
+      assert.strictEqual(session.status, 'running');
+      assert.strictEqual(session.bridgeId, 'bridge');
+      assert.strictEqual(session.errorReason, 'boom');
+      assert.strictEqual(session.runtime, 'tmux');
+      assert.strictEqual(harness.saved.length, 1);
+      assert.deepEqual(harness.runs[0], {
+        sessionId: 'retry-me',
+        command: 'my-wrapper --flag',
+        workingDir: undefined,
+        env: { FOO: 'bar' },
+        initialInput: undefined,
+        submitSuffix: undefined,
+        hookPort: 1,
+        hookToken: 'token',
+        parentSessionId: 'parent-1',
+      });
+    } finally {
+      restoreHome(realHome);
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('resume relaunch derives the command via the heuristic, refreshes runtime, and clears errorReason', async () => {
+    const realHome = process.env.HOME;
+    const home = mkdtempSync(join(tmpdir(), 'ftw-home-'));
+    process.env.HOME = home;
+    const harness = fakeDeps();
+    const session: Session = {
+      ...fakeSession('resume-me'),
+      command: buildSessionCommand({ shellType: 'claude' }),
+      shellType: 'claude',
+      claudeSessionId: 'sess-xyz',
+      status: 'error',
+      errorReason: 'stale',
+      runtime: 'tmux',
+    };
+
+    try {
+      const command = await relaunchFtownSession(harness.deps, session, 'resume');
+      assert.strictEqual(command, buildSessionCommand({ shellType: 'claude', claudeSessionId: 'sess-xyz' }));
+      assert.strictEqual(session.status, 'running');
+      assert.strictEqual(session.errorReason, undefined);
+      assert.strictEqual(session.runtime, 'direct');
+      assert.strictEqual(harness.runs[0].command, command);
+    } finally {
+      restoreHome(realHome);
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to retry a session with no stored command (pre-v0.2.0 records)', async () => {
+    const harness = fakeDeps();
+    const session: Session = { ...fakeSession('no-cmd'), command: '', status: 'error' };
+    await assert.rejects(
+      () => relaunchFtownSession(harness.deps, session, 'retry'),
+      /Session has no command to relaunch/,
+    );
+    assert.strictEqual(harness.saved.length, 0);
+    assert.strictEqual(harness.runs.length, 0);
   });
 });
 

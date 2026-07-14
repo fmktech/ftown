@@ -35,7 +35,7 @@ import { installFtownEnvCli } from './install-ftown-env-cli.js';
 import { installFtownCommandCli } from './install-ftown-command-cli.js';
 import { ensureFtownOnPath } from './ensure-ftown-path.js';
 import { registerSessionWorkspace, unregisterSession } from './session-registry.js';
-import { createFtownSession, findMissingProviderAuth, WorkingDirMissingError, type CreateFtownSessionDeps } from './create-ftown-session.js';
+import { canResumeStoredSession, createFtownSession, findMissingProviderAuth, relaunchFtownSession, WorkingDirMissingError, type CreateFtownSessionDeps } from './create-ftown-session.js';
 import { loadProviderEnv } from './provider-env-store.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { shouldResurrectStoredSession } from './session-resurrection.js';
@@ -43,7 +43,6 @@ import { createLoop, deleteLoop, getLoop, listLoops, mutateLoopRuntime, updateLo
 import { deleteLoopRunRecords, listLoopRunRecordsWithFallback } from './loop-run-store.js';
 import { LoopScheduler, LOOP_TICK_INTERVAL_MS } from './loop-scheduler.js';
 import { validateLoopDraft, validateLoopPatch } from './loop-validation.js';
-import { buildSessionCommand } from './agent-commands.js';
 import { isTmuxAvailable, killTmuxSession, listFtownTmuxSessions } from './tmux.js';
 import { runPairing } from './pairing-client.js';
 
@@ -838,26 +837,7 @@ program
               break;
             }
 
-            existingSession.status = 'running';
-            existingSession.bridgeId = bridgeId;
-            existingSession.updatedAt = new Date().toISOString();
-            await store.saveSession(existingSession);
-            await centrifugo.publishSessionUpdate(userId, existingSession);
-
-            runner.run(existingSession.id, existingSession.command, {
-              workingDir: existingSession.workingDir,
-              env: existingSession.env,
-              hookPort,
-              hookToken: apiToken,
-              parentSessionId: existingSession.parentSessionId,
-            });
-
-            centrifugo.subscribeToTerminalInput(
-              userId, existingSession.id,
-              (sid, data) => { runner.write(sid, data); },
-              (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
-              (sid) => { publishScreenDump(sid); },
-            );
+            await relaunchFtownSession(sessionFactoryDeps, existingSession, 'retry');
 
             response = { requestId: command.requestId, success: true, data: { session: toWireSession(existingSession) } };
             break;
@@ -1162,33 +1142,7 @@ program
         return;
       }
 
-      const shellType = session.shellType ?? 'claude';
-      const canResume = shellType === 'cursor'
-        ? Boolean(session.cursorSessionId?.trim())
-        : shellType === 'codex'
-          ? Boolean(session.codexSessionId?.trim())
-          : shellType !== 'shell' && shellType !== 'opencode' && Boolean(session.claudeSessionId?.trim());
-
-      if (canResume) {
-        // Sessions created with a custom command rerun it verbatim (matching
-        // retry_session): injecting --resume into arbitrary commands could
-        // break wrappers, and rebuilding would drop their flags.
-        const defaultCommand = buildSessionCommand({
-          shellType: session.shellType,
-          workingDir: session.workingDir,
-          model: session.model,
-        });
-        const isCustomCommand = Boolean(session.command) && session.command !== defaultCommand;
-        const resumeCommand = isCustomCommand && session.command
-          ? session.command
-          : buildSessionCommand({
-              shellType: session.shellType,
-              workingDir: session.workingDir,
-              model: session.model,
-              claudeSessionId: session.claudeSessionId,
-              cursorSessionId: session.cursorSessionId,
-              codexSessionId: session.codexSessionId,
-            });
+      if (canResumeStoredSession(session)) {
         const miss = findMissingProviderAuth(session.shellType, {
           processEnv: process.env,
           storeEnv: loadProviderEnv(),
@@ -1197,22 +1151,9 @@ program
           await markSessionDead(session, miss.message);
           return;
         }
-        session.status = 'running';
-        session.bridgeId = bridgeId;
-        session.runtime = runner.getPreferredRuntime();
-        session.errorReason = undefined;
-        session.updatedAt = new Date().toISOString();
-        await store.saveSession(session);
-        await centrifugo.publishSessionUpdate(userId, session);
-        runner.run(session.id, resumeCommand, {
-          workingDir: session.workingDir,
-          env: session.env,
-          hookPort,
-          hookToken: apiToken,
-          parentSessionId: session.parentSessionId,
-        });
-        wireTerminalInput(session.id);
-        registerSessionWorkspace(session.id, session.workingDir);
+        // The custom-vs-rebuilt resume-command decision lives in
+        // deriveRelaunchCommand, inside relaunchFtownSession.
+        const resumeCommand = await relaunchFtownSession(sessionFactoryDeps, session, 'resume');
         console.log(`[Bridge] Resurrected session ${session.id} via resume respawn: ${resumeCommand}`);
         return;
       }
