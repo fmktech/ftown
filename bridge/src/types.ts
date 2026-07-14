@@ -1,4 +1,4 @@
-export type ShellType = 'claude' | 'cursor' | 'codex' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks';
+export type ShellType = 'claude' | 'cursor' | 'codex' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks' | 'grok';
 
 export type SessionRuntime = 'tmux' | 'direct';
 
@@ -31,7 +31,7 @@ export interface ArchivedSession extends Session {
   removedAt: string;
 }
 
-export type LoopHarness = 'claude' | 'cursor' | 'codex' | 'opencode' | 'shell';
+export type LoopHarness = 'claude' | 'cursor' | 'codex' | 'grok' | 'opencode' | 'shell';
 
 export type LoopRunStatus = 'ok' | 'error' | 'running' | 'skipped';
 

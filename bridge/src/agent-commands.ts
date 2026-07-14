@@ -63,6 +63,25 @@ export function buildCodexCommand(options: {
   return parts.join(' ');
 }
 
+export function buildGrokCommand(options: {
+  model?: string;
+  initialPrompt?: string;
+}): string {
+  // --always-approve auto-approves all tool executions for unattended runs.
+  const parts = ['grok', '--always-approve'];
+
+  if (options.model?.trim()) {
+    parts.push('-m', shellQuote(options.model.trim()));
+  }
+
+  if (options.initialPrompt?.trim()) {
+    // The positional prompt is auto-submitted by the grok TUI.
+    parts.push(shellQuote(options.initialPrompt));
+  }
+
+  return parts.join(' ');
+}
+
 export interface BuildSessionCommandInput {
   shellType?: ShellType;
   workingDir?: string;
@@ -101,6 +120,13 @@ export function buildSessionCommand(input: BuildSessionCommandInput): string {
     return buildCodexCommand({
       model: input.model,
       codexSessionId: input.codexSessionId,
+      initialPrompt: input.initialPrompt,
+    });
+  }
+  if (shellType === 'grok') {
+    // Workdir comes from the runner cwd — grok inherits process cwd, no --cwd.
+    return buildGrokCommand({
+      model: input.model,
       initialPrompt: input.initialPrompt,
     });
   }

@@ -65,7 +65,7 @@ interface SessionInfo {
   parentSessionId?: string;
 }
 
-type LoopHarness = 'claude' | 'cursor' | 'codex' | 'opencode' | 'shell';
+type LoopHarness = 'claude' | 'cursor' | 'codex' | 'grok' | 'opencode' | 'shell';
 type LoopSchedule =
   | { kind: 'interval'; everyMs: number }
   | { kind: 'cron'; expression: string; tz?: string };
@@ -203,7 +203,7 @@ function parseLoopSchedule(args: string[], required: boolean): LoopSchedule | un
 
 function parseLoopHarness(raw: string | undefined): LoopHarness {
   const harness = (raw ?? 'claude') as LoopHarness;
-  if (!['claude', 'cursor', 'codex', 'opencode', 'shell'].includes(harness)) {
+  if (!['claude', 'cursor', 'codex', 'grok', 'opencode', 'shell'].includes(harness)) {
     throw new Error(`Invalid --shell "${raw}"`);
   }
   return harness;

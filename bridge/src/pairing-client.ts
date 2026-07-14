@@ -16,6 +16,16 @@ export interface RunPairingOptions {
   bridgeId: string;
   hostname: string;
   platform: string;
+  /**
+   * Loopback WS rung advert embedded so the owning user's clients discover the
+   * loopback rung via presence (matches the auth/refresh path).
+   */
+  localPort: number;
+  /**
+   * Loopback WS rung advert embedded so the owning user's clients discover the
+   * loopback rung via presence (matches the auth/refresh path).
+   */
+  localNonce: string;
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch;
   /** Injectable for tests; defaults to a real setTimeout-based sleep. */
@@ -70,6 +80,8 @@ export async function runPairing(opts: RunPairingOptions): Promise<PairingResult
     bridgeId,
     hostname,
     platform,
+    localPort,
+    localNonce,
     fetchImpl = fetch,
     sleepImpl = realSleep,
     log = (msg: string): void => console.log(msg),
@@ -103,6 +115,8 @@ export async function runPairing(opts: RunPairingOptions): Promise<PairingResult
 
     const poll = await postJson<PairPollResponse>(fetchImpl, `${apiUrl}/api/auth/bridge/pair/poll`, {
       deviceCode,
+      localPort,
+      localNonce,
     });
 
     switch (poll.status) {

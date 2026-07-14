@@ -72,6 +72,11 @@ const ZAI_DEFAULT_MODELS: ZaiModels = {
   haiku: "glm-4.5-air",
 };
 
+const GROK_MODEL_OPTIONS = [
+  "grok-4.5",
+  "grok-composer-2.5-fast",
+] as const;
+
 const AUTO_COMPACT_WINDOW_KEY = "ftown:autoCompactWindow";
 
 const FLAVOR_AUTO_COMPACT_DEFAULTS: Record<"standard" | "zai" | "kimi" | "deepseek" | "fireworks", string> = {
@@ -202,12 +207,13 @@ function storePath(hostname: string, path: string): void {
   localStorage.setItem(`ftown:paths:${hostname}`, JSON.stringify(updated));
 }
 
-type TopShell = "claude" | "cursor" | "codex" | "opencode" | "shell";
+type TopShell = "claude" | "cursor" | "codex" | "grok" | "opencode" | "shell";
 type ClaudeFlavor = "standard" | "zai" | "kimi" | "deepseek" | "fireworks";
 
 function shellTypeToTop(s: ShellType | undefined): { top: TopShell; flavor: ClaudeFlavor } {
   if (s === "cursor") return { top: "cursor", flavor: "standard" };
   if (s === "codex") return { top: "codex", flavor: "standard" };
+  if (s === "grok") return { top: "grok", flavor: "standard" };
   if (s === "opencode") return { top: "opencode", flavor: "standard" };
   if (s === "shell") return { top: "shell", flavor: "standard" };
   if (s === "zai") return { top: "claude", flavor: "zai" };
@@ -218,7 +224,7 @@ function shellTypeToTop(s: ShellType | undefined): { top: TopShell; flavor: Clau
 }
 
 function resolveShellType(top: TopShell, flavor: ClaudeFlavor): ShellType {
-  if (top === "cursor" || top === "codex" || top === "opencode" || top === "shell") return top;
+  if (top === "cursor" || top === "codex" || top === "grok" || top === "opencode" || top === "shell") return top;
   if (flavor === "standard") return "claude";
   return flavor;
 }
@@ -280,6 +286,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const [selectedCursorSummary, setSelectedCursorSummary] = useState<string | null>(null);
   const [fireworksModels, setFireworksModels] = useState<FireworksModels>(FIREWORKS_DEFAULT_MODELS);
   const [zaiModels, setZaiModels] = useState<ZaiModels>(ZAI_DEFAULT_MODELS);
+  const [grokModel, setGrokModel] = useState<string>(GROK_MODEL_OPTIONS[0]);
   const [autoCompactWindow, setAutoCompactWindow] = useState("");
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [missingWorkingDir, setMissingWorkingDir] = useState<string | null>(null);
@@ -318,6 +325,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       setSelectedCursorSummary(null);
       setFireworksModels(getStoredFireworksModels());
       setZaiModels(getStoredZaiModels());
+      setGrokModel(GROK_MODEL_OPTIONS[0]);
       setAutoCompactWindow(getStoredAutoCompactWindow());
       setSubmitError(null);
       setMissingWorkingDir(null);
@@ -368,6 +376,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     try {
       await onSubmit("", {
         name: name.trim() || undefined,
+        model: shellType === "grok" ? grokModel : undefined,
         workingDir: workingDir.trim() || undefined,
         bridgeId: effectiveBridgeId || undefined,
         shellType,
@@ -394,6 +403,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setWorkingDir("");
     setTopShell("claude");
     setClaudeFlavor("standard");
+    setGrokModel(GROK_MODEL_OPTIONS[0]);
     setBridgeId("");
     setShowSuggestions(false);
     setSelectedClaudeSessionId(null);
@@ -401,7 +411,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setSelectedCursorSessionId(null);
     setSelectedCursorSummary(null);
     onClose();
-  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, fireworksModels, zaiModels, autoCompactWindow, onSubmit, onClose]);
+  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, fireworksModels, zaiModels, grokModel, autoCompactWindow, onSubmit, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -461,6 +471,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
               <optgroup label="Other agents">
                 <option value="cursor">Cursor Agent</option>
                 <option value="codex">Codex</option>
+                <option value="grok">Grok</option>
                 <option value="opencode">opencode</option>
               </optgroup>
               <optgroup label="Plain">
@@ -529,6 +540,26 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                     </select>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {shellType === "grok" && (
+              <div className="mt-3">
+                <label htmlFor="ns-grok-model" className="block text-sm text-[var(--text-muted)] mb-1">
+                  Model
+                </label>
+                <select
+                  id="ns-grok-model"
+                  value={grokModel}
+                  onChange={(e) => setGrokModel(e.target.value)}
+                  className={INPUT_CLASS + " text-sm"}
+                >
+                  {GROK_MODEL_OPTIONS.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
               </div>
             )}
 
