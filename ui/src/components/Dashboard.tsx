@@ -6,6 +6,7 @@ import { ConnectionStatus } from "@/hooks/useCentrifugo";
 import { TerminalTransportApi } from "@/lib/direct-transport/contract";
 import { Session, ShellType, Loop, LoopDraft, LoopRunRecord } from "@/types";
 import { CreateSessionOptions, useSessions } from "@/hooks/useSessions";
+import { useBridgeRpc } from "@/hooks/useBridgeRpc";
 import { useBridges } from "@/hooks/useBridges";
 import { useLoops } from "@/hooks/useLoops";
 import { useAllSessionEvents } from "@/hooks/useAllSessionEvents";
@@ -24,6 +25,9 @@ import type { FactoryInfo, NewFactoryInput } from "./factory/types";
 import { factoryInitPrompt, factoryKey, factoryWorkerOf } from "./factory/types";
 import { ConnectionDiagnostics } from "./ConnectionDiagnostics";
 import { mergeBridgeOrder } from "@/lib/bridge-order";
+import { StatusDot } from "@/lib/StatusDot";
+import { usePersistentState, useHiddenSet, type PersistCodec } from "@/lib/use-persistent-state";
+import { loopGroupKey } from "@/lib/loop-group-key";
 
 interface DashboardProps {
   client: Centrifuge | null;
@@ -38,21 +42,13 @@ interface DashboardProps {
   onDisconnect: () => void;
 }
 
-function ConnectionDot({ status }: { status: ConnectionStatus }) {
-  const map: Record<ConnectionStatus, { cls: string; pulse: boolean }> = {
-    connected:    { cls: "status-dot-running",  pulse: false },
-    connecting:   { cls: "status-dot-pending",  pulse: true  },
-    disconnected: { cls: "status-dot-done",     pulse: false },
-    error:        { cls: "status-dot-error",    pulse: false },
-  };
-  const { cls, pulse } = map[status] ?? { cls: "status-dot-done", pulse: false };
-  return (
-    <span
-      className={`status-dot ${cls} ${pulse ? "animate-pending" : ""}`}
-      title={status}
-    />
-  );
-}
+type SidebarTab = "sessions" | "crons" | "factory";
+
+// Stored as the raw tab name (historical format) rather than JSON.
+const SIDEBAR_TAB_CODEC: PersistCodec<SidebarTab> = {
+  serialize: (v) => v,
+  deserialize: (raw) => (raw === "crons" || raw === "factory" ? raw : "sessions"),
+};
 
 export function Dashboard({ client, connectionStatus, connectionError, userId, token, centrifugoUrl, transport, onDisconnect }: DashboardProps) {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -69,15 +65,17 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
   const [mobileTab, setMobileTab] = useState<"sessions" | "terminal">("sessions");
-  const [sidebarTab, setSidebarTab] = useState<"sessions" | "crons" | "factory">("sessions");
+  const [sidebarTab, setSidebarTab] = usePersistentState<SidebarTab>("ftown:sidebarTab", "sessions", SIDEBAR_TAB_CODEC);
   const [selectedFactoryKey, setSelectedFactoryKey] = useState<string | null>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [sessionOrder, setSessionOrder] = useState<string[]>([]);
-  const [bridgeOrder, setBridgeOrder] = useState<string[]>([]);
-  const [hiddenSessionIds, setHiddenSessionIds] = useState<Set<string>>(new Set());
-  const [hiddenBridgeIds, setHiddenBridgeIds] = useState<Set<string>>(new Set());
-  const [hiddenLoopIds, setHiddenLoopIds] = useState<Set<string>>(new Set());
-  const [hiddenFactoryKeys, setHiddenFactoryKeys] = useState<Set<string>>(new Set());
+  const [sidebarCollapsed, setSidebarCollapsed] = usePersistentState<boolean>("ftown:sidebarCollapsed", false);
+  const [sessionOrder, setSessionOrder] = usePersistentState<string[]>("ftown:sessionOrder", []);
+  const [bridgeOrder, setBridgeOrder] = usePersistentState<string[]>("ftown:bridgeOrder", []);
+  const { hidden: hiddenSessionIds, hide: handleHideSession, unhide: handleUnhideSession } = useHiddenSet("ftown:hiddenSessions");
+  const { hidden: hiddenBridgeIds, hide: hideBridge, unhide: handleUnhideBridge } = useHiddenSet("ftown:hiddenBridges");
+  const { hidden: hiddenLoopIds, hide: hideLoop, unhide: handleUnhideLoop } = useHiddenSet("ftown:hiddenLoops");
+  const { hidden: hiddenFactoryKeys, hide: hideFactory, unhide: handleUnhideFactory } = useHiddenSet("ftown:hiddenFactories");
+  const { hidden: hiddenLoopGroupKeys, hide: hideLoopGroup, unhide: handleUnhideLoopGroup } = useHiddenSet("ftown:hiddenLoopGroups");
+  const { hidden: hiddenCronBridgeIds, hide: hideCronBridge, unhide: handleUnhideCronBridge } = useHiddenSet("ftown:hiddenCronBridges");
   const [showUserMenu, setShowUserMenu] = useState(false);
   const terminalRef = useRef<TerminalHandle>(null);
   const mobileControlRef = useRef<MobileControlBarHandle>(null);
@@ -96,34 +94,6 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
       window.cancelAnimationFrame(frame);
       for (const timer of timers) window.clearTimeout(timer);
     };
-  }, []);
-
-  useEffect(() => {
-    setSidebarCollapsed(localStorage.getItem("ftown:sidebarCollapsed") === "true");
-    const savedSidebarTab = localStorage.getItem("ftown:sidebarTab");
-    if (savedSidebarTab === "sessions" || savedSidebarTab === "crons" || savedSidebarTab === "factory") setSidebarTab(savedSidebarTab);
-    try {
-      setSessionOrder(JSON.parse(localStorage.getItem("ftown:sessionOrder") ?? "[]"));
-    } catch { /* ignore */ }
-    try {
-      setBridgeOrder(JSON.parse(localStorage.getItem("ftown:bridgeOrder") ?? "[]"));
-    } catch { /* ignore */ }
-    try {
-      const raw = localStorage.getItem("ftown:hiddenSessions");
-      if (raw) setHiddenSessionIds(new Set(JSON.parse(raw)));
-    } catch { /* ignore */ }
-    try {
-      const raw = localStorage.getItem("ftown:hiddenBridges");
-      if (raw) setHiddenBridgeIds(new Set(JSON.parse(raw)));
-    } catch { /* ignore */ }
-    try {
-      const raw = localStorage.getItem("ftown:hiddenLoops");
-      if (raw) setHiddenLoopIds(new Set(JSON.parse(raw)));
-    } catch { /* ignore */ }
-    try {
-      const raw = localStorage.getItem("ftown:hiddenFactories");
-      if (raw) setHiddenFactoryKeys(new Set(JSON.parse(raw)));
-    } catch { /* ignore */ }
   }, []);
 
   // Resize layout when mobile keyboard opens/closes
@@ -162,9 +132,13 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     return () => document.removeEventListener("mousedown", handler);
   }, [showUserMenu]);
 
-  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, removeSession, refreshSessions, bridgeExec, sendCommand, sendCommandCollect } = useSessions(client, userId);
+  // The bridge-RPC transport over `commands:rpc#{userId}` is created ONCE here;
+  // sessions, loops, and factory consume it as peers.
+  const rpc = useBridgeRpc(client, userId);
+  const { bridgeExec } = rpc;
+  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, removeSession, refreshSessions } = useSessions(client, userId, rpc);
   const { bridges, hasBridges } = useBridges(client, userId);
-  const { loops, createLoop, updateLoop, deleteLoop, runLoopNow, getLoopRuns } = useLoops(client, userId, sendCommand, sendCommandCollect);
+  const { loops, createLoop, updateLoop, deleteLoop, runLoopNow, getLoopRuns } = useLoops(client, userId, rpc);
 
   // Keep bridgeOrder stable when bridges connect/disconnect; only append new ids (sorted).
   useEffect(() => {
@@ -176,10 +150,9 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     setBridgeOrder((prev) => {
       const next = mergeBridgeOrder(prev, knownIds);
       if (next.length === prev.length && next.every((id, i) => id === prev[i])) return prev;
-      localStorage.setItem("ftown:bridgeOrder", JSON.stringify(next));
       return next;
     });
-  }, [bridges, rawSessions]);
+  }, [bridges, rawSessions, setBridgeOrder]);
   const { sessionActivity, markSessionIdle } = useAllSessionEvents(client, rawSessions, userId);
 
   const installedHookBridges = useRef(new Set<string>());
@@ -296,7 +269,13 @@ PY`;
     () => normalSessions.filter((s) => factoryWorkerOf(s, factories) === null),
     [normalSessions, factories]
   );
-  const loopCount = loops.filter((loop) => !hiddenLoopIds.has(loop.id)).length;
+  const loopCount = loops.filter((loop) => {
+    if (hiddenLoopIds.has(loop.id)) return false;
+    const groupKey = loop.group ? loopGroupKey(loop.bridgeId, loop.group) : null;
+    if (groupKey && hiddenLoopGroupKeys.has(groupKey)) return false;
+    if (hiddenCronBridgeIds.has(loop.bridgeId)) return false;
+    return true;
+  }).length;
   const factoryCount = factories.filter((f) => !hiddenFactoryKeys.has(factoryKey(f))).length;
 
   useEffect(() => {
@@ -346,12 +325,10 @@ PY`;
 
   const handleReorderSessions = useCallback((orderedIds: string[]) => {
     setSessionOrder(orderedIds);
-    localStorage.setItem("ftown:sessionOrder", JSON.stringify(orderedIds));
-  }, []);
+  }, [setSessionOrder]);
 
   const handleReorderBridges = useCallback((orderedBridgeIds: string[]) => {
     setBridgeOrder(orderedBridgeIds);
-    localStorage.setItem("ftown:bridgeOrder", JSON.stringify(orderedBridgeIds));
 
     setSessionOrder((prevOrder) => {
       const byBridge = new Map<string, string[]>();
@@ -371,10 +348,9 @@ PY`;
         if (!orderedBridgeIds.includes(bid)) newOrder.push(...ids);
       }
 
-      localStorage.setItem("ftown:sessionOrder", JSON.stringify(newOrder));
       return newOrder;
     });
-  }, [rawSessions]);
+  }, [rawSessions, setBridgeOrder, setSessionOrder]);
 
   const handleCreateSession = useCallback(
     async (prompt: string, options: CreateSessionOptions): Promise<void> => {
@@ -421,83 +397,45 @@ PY`;
     }
   }, [removeSession, selectedSessionId, rawSessions, activeBridgeIds]);
 
-  const handleHideSession = useCallback((sessionId: string) => {
-    setHiddenSessionIds((prev) => {
-      const next = new Set(prev);
-      next.add(sessionId);
-      localStorage.setItem("ftown:hiddenSessions", JSON.stringify([...next]));
-      return next;
-    });
-  }, []);
-
-  const handleUnhideSession = useCallback((sessionId: string) => {
-    setHiddenSessionIds((prev) => {
-      const next = new Set(prev);
-      next.delete(sessionId);
-      localStorage.setItem("ftown:hiddenSessions", JSON.stringify([...next]));
-      return next;
-    });
-  }, []);
-
+  // Hiding a loop/factory/bridge also clears its selection; plain hides come
+  // straight from useHiddenSet (handleHideSession/handleUnhide* above).
   const handleHideLoop = useCallback((loopId: string) => {
-    setHiddenLoopIds((prev) => {
-      const next = new Set(prev);
-      next.add(loopId);
-      localStorage.setItem("ftown:hiddenLoops", JSON.stringify([...next]));
-      return next;
-    });
+    hideLoop(loopId);
     setSelectedLoopId((prev) => (prev === loopId ? null : prev));
-  }, []);
+  }, [hideLoop]);
 
-  const handleUnhideLoop = useCallback((loopId: string) => {
-    setHiddenLoopIds((prev) => {
-      const next = new Set(prev);
-      next.delete(loopId);
-      localStorage.setItem("ftown:hiddenLoops", JSON.stringify([...next]));
-      return next;
+  const handleHideLoopGroup = useCallback((groupKey: string) => {
+    hideLoopGroup(groupKey);
+    setSelectedLoopId((prev) => {
+      if (!prev) return prev;
+      const selected = loops.find((loop) => loop.id === prev);
+      if (selected?.group && loopGroupKey(selected.bridgeId, selected.group) === groupKey) return null;
+      return prev;
     });
-  }, []);
+  }, [hideLoopGroup, loops]);
+
+  const handleHideCronBridge = useCallback((bridgeId: string) => {
+    hideCronBridge(bridgeId);
+    setSelectedLoopId((prev) => {
+      if (!prev) return prev;
+      const selected = loops.find((loop) => loop.id === prev);
+      if (selected && selected.bridgeId === bridgeId) return null;
+      return prev;
+    });
+  }, [hideCronBridge, loops]);
 
   const handleHideFactory = useCallback((key: string) => {
-    setHiddenFactoryKeys((prev) => {
-      const next = new Set(prev);
-      next.add(key);
-      localStorage.setItem("ftown:hiddenFactories", JSON.stringify([...next]));
-      return next;
-    });
+    hideFactory(key);
     setSelectedFactoryKey((prev) => (prev === key ? null : prev));
-  }, []);
-
-  const handleUnhideFactory = useCallback((key: string) => {
-    setHiddenFactoryKeys((prev) => {
-      const next = new Set(prev);
-      next.delete(key);
-      localStorage.setItem("ftown:hiddenFactories", JSON.stringify([...next]));
-      return next;
-    });
-  }, []);
+  }, [hideFactory]);
 
   const handleHideBridge = useCallback((bridgeId: string) => {
-    setHiddenBridgeIds((prev) => {
-      const next = new Set(prev);
-      next.add(bridgeId);
-      localStorage.setItem("ftown:hiddenBridges", JSON.stringify([...next]));
-      return next;
-    });
+    hideBridge(bridgeId);
     const selected = rawSessions.find((s) => s.id === selectedSessionId);
     if (selected?.bridgeId === bridgeId) {
       setSelectedSessionId(null);
     }
-  }, [rawSessions, selectedSessionId]);
-
-  const handleUnhideBridge = useCallback((bridgeId: string) => {
-    setHiddenBridgeIds((prev) => {
-      const next = new Set(prev);
-      next.delete(bridgeId);
-      localStorage.setItem("ftown:hiddenBridges", JSON.stringify([...next]));
-      return next;
-    });
-  }, []);
+  }, [hideBridge, rawSessions, selectedSessionId]);
 
   const handleCreateSessionOnBridge = useCallback((bridgeId: string) => {
     setSessionDefaults({ bridgeId });
@@ -541,12 +479,9 @@ PY`;
     setMobileTab("terminal");
   }, []);
 
-  const handleSidebarTabSwitch = useCallback((tab: "sessions" | "crons" | "factory") => {
+  const handleSidebarTabSwitch = useCallback((tab: SidebarTab) => {
     setSidebarTab(tab);
-    try {
-      localStorage.setItem("ftown:sidebarTab", tab);
-    } catch { /* ignore */ }
-  }, []);
+  }, [setSidebarTab]);
 
   const handleMobileTabSwitch = useCallback((tab: "sessions" | "terminal") => {
     setMobileTab(tab);
@@ -636,13 +571,9 @@ PY`;
   );
 
   const toggleSidebar = useCallback(() => {
-    setSidebarCollapsed(prev => {
-      const next = !prev;
-      localStorage.setItem("ftown:sidebarCollapsed", String(next));
-      setTimeout(() => terminalRef.current?.refit(), 250);
-      return next;
-    });
-  }, []);
+    setSidebarCollapsed((prev) => !prev);
+    setTimeout(() => terminalRef.current?.refit(), 250);
+  }, [setSidebarCollapsed]);
 
   return (
     <div
@@ -770,9 +701,7 @@ PY`;
             className="flex items-center gap-1.5"
             title={bridges.map((b) => `${b.bridgeId} (${b.hostname})`).join("\n")}
           >
-            <span
-              className={`status-dot ${hasBridges ? "status-dot-running" : "status-dot-error"}`}
-            />
+            <StatusDot kind={hasBridges ? "connected" : "error"} />
             <span style={{ fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
               {bridges.length} {bridges.length === 1 ? "bridge" : "bridges"}
             </span>
@@ -782,7 +711,7 @@ PY`;
 
           {/* Connection status */}
           <div className="flex items-center gap-1.5">
-            <ConnectionDot status={connectionStatus} />
+            <StatusDot kind={connectionStatus} title={connectionStatus} />
             <span
               style={{
                 fontSize: 11,
@@ -1194,6 +1123,12 @@ PY`;
                 hiddenLoopIds={hiddenLoopIds}
                 onHideLoop={handleHideLoop}
                 onUnhideLoop={handleUnhideLoop}
+                hiddenLoopGroupKeys={hiddenLoopGroupKeys}
+                onHideLoopGroup={handleHideLoopGroup}
+                onUnhideLoopGroup={handleUnhideLoopGroup}
+                hiddenCronBridgeIds={hiddenCronBridgeIds}
+                onHideCronBridge={handleHideCronBridge}
+                onUnhideCronBridge={handleUnhideCronBridge}
               />
             ) : (
               <SessionList

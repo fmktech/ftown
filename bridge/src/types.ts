@@ -1,4 +1,8 @@
-export type ShellType = 'claude' | 'cursor' | 'codex' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks' | 'grok';
+// Derived from the harness registry (single source of truth for supported
+// harnesses); re-exported here so existing `from './types.js'` imports keep working.
+// Type-only, so this adds no runtime dependency on harness-registry.js.
+export type { LoopHarness, ShellType } from './harness-registry.js';
+import type { LoopHarness, ShellType } from './harness-registry.js';
 
 export type SessionRuntime = 'tmux' | 'direct';
 
@@ -30,8 +34,6 @@ export type SessionStatus = 'pending' | 'running' | 'completed' | 'error';
 export interface ArchivedSession extends Session {
   removedAt: string;
 }
-
-export type LoopHarness = 'claude' | 'cursor' | 'codex' | 'grok' | 'opencode' | 'shell';
 
 export type LoopRunStatus = 'ok' | 'error' | 'running' | 'skipped';
 

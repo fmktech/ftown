@@ -228,7 +228,13 @@ class StderrLogger implements Logger {
 
 // ---- argv parsing ----
 
-const SHELLS: readonly WorkflowShell[] = ['claude', 'cursor', 'codex', 'opencode', 'shell'];
+// Kept as a literal (this CLI is sibling-copied into ~/.ftown, so it must not
+// gain a runtime import of harness-registry.js), but asserted against the
+// registry-derived WorkflowShell type so any drift is a compile error.
+type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+const SHELLS = ['claude', 'cursor', 'codex', 'opencode', 'shell'] as const satisfies readonly WorkflowShell[];
+const _shellsCoverEveryWorkflowShell: Equals<WorkflowShell, (typeof SHELLS)[number]> = true;
+void _shellsCoverEveryWorkflowShell;
 
 function flag(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);

@@ -5,8 +5,6 @@ import { v4 as uuidv4 } from 'uuid';
 import { resolve, dirname, join } from 'node:path';
 import { homedir, hostname as osHostname } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { exec } from 'node:child_process';
-import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { cleanup as ndcCleanup } from 'node-datachannel';
@@ -34,120 +32,24 @@ import { installFtownWorkflowsCli } from './install-ftown-workflows-cli.js';
 import { installFtownEnvCli } from './install-ftown-env-cli.js';
 import { installFtownCommandCli } from './install-ftown-command-cli.js';
 import { ensureFtownOnPath } from './ensure-ftown-path.js';
-import { registerSessionWorkspace, unregisterSession } from './session-registry.js';
-import { createFtownSession, findMissingProviderAuth, WorkingDirMissingError, type CreateFtownSessionDeps } from './create-ftown-session.js';
-import { loadProviderEnv } from './provider-env-store.js';
+import { unregisterSession } from './session-registry.js';
+import { createFtownSession, type CreateFtownSessionDeps } from './create-ftown-session.js';
+import { createCommandHandler } from './command-rpc.js';
 import { removeFtownSession } from './remove-ftown-session.js';
-import { shouldResurrectStoredSession } from './session-resurrection.js';
-import { createLoop, deleteLoop, getLoop, listLoops, mutateLoopRuntime, updateLoop } from './loop-store.js';
-import { deleteLoopRunRecords, listLoopRunRecordsWithFallback } from './loop-run-store.js';
+import { SessionResurrection } from './session-resurrection.js';
+import { TerminalPump } from './terminal-pump.js';
+import { AgentSessionIdPersister } from './session-ids.js';
+import { fetchBridgeToken, refreshBridgeToken, type BridgeAuthResponse } from './bridge-auth.js';
+import { listLoops } from './loop-store.js';
 import { LoopScheduler, LOOP_TICK_INTERVAL_MS } from './loop-scheduler.js';
-import { validateLoopDraft, validateLoopPatch } from './loop-validation.js';
-import { buildSessionCommand } from './agent-commands.js';
-import { isTmuxAvailable, killTmuxSession, listFtownTmuxSessions } from './tmux.js';
+import { LoopController } from './loop-controller.js';
+import { SessionController } from './session-controller.js';
 import { runPairing } from './pairing-client.js';
 
 import type { HookEvent } from './local-api-server.js';
 
-import type {
-  BridgeExecPayload,
-  ClearTerminalPayload,
-  Command,
-  CommandResponse,
-  CreateSessionPayload,
-  CreateLoopPayload,
-  DeleteLoopPayload,
-  GetHistoryPayload,
-  GetLoopRunsPayload,
-  LoopDraft,
-  RemoveSessionPayload,
-  RenameSessionPayload,
-  RunLoopNowPayload,
-  UpdateLoopPayload,
-  UpdateSessionParentPayload,
-  Session,
-  StopSessionPayload,
-} from './types.js';
-
-const execAsync = promisify(exec);
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-
-interface ExecError {
-  stdout: string;
-  stderr: string;
-  code: number;
-}
-
-interface BridgeAuthResponse {
-  token: string;
-  refreshToken: string;
-  centrifugoUrl: string;
-  userId: string;
-}
-
-async function fetchBridgeToken(
-  apiUrl: string,
-  authToken: string,
-  bridgeId: string,
-  local: { localPort: number; localNonce: string },
-): Promise<BridgeAuthResponse> {
-  const res = await fetch(`${apiUrl}/api/auth/bridge`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      token: authToken,
-      bridgeId,
-      hostname: osHostname(),
-      // Embedded in the Centrifugo connection JWT `info` claim so the owning
-      // user's clients discover the loopback WS rung via presence (L2).
-      localPort: local.localPort,
-      localNonce: local.localNonce,
-    }),
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Bridge auth failed (${res.status}): ${body}`);
-  }
-
-  return res.json() as Promise<BridgeAuthResponse>;
-}
-
-/**
- * Exchange a (rotating) refresh token for a fresh Centrifugo connect token.
- *
- * The server rotates the refresh token on every use (audit finding F3): the
- * response carries a NEW refreshToken that supersedes the one just sent, so the
- * caller must persist it and send the newest value next time. Reusing an old
- * refresh token is rejected.
- */
-async function refreshBridgeToken(
-  apiUrl: string,
-  refreshToken: string,
-  bridgeId: string,
-  local: { localPort: number; localNonce: string },
-): Promise<BridgeAuthResponse> {
-  const res = await fetch(`${apiUrl}/api/auth/bridge/refresh`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      refreshToken,
-      bridgeId,
-      hostname: osHostname(),
-      localPort: local.localPort,
-      localNonce: local.localNonce,
-    }),
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Token refresh failed (${res.status}): ${body}`);
-  }
-
-  return res.json() as Promise<BridgeAuthResponse>;
-}
 
 /**
  * Default data dir is ~/.ftown/data (machine-stable, like the rest of ~/.ftown).
@@ -421,6 +323,60 @@ program
     });
     localApiServer.setLoopApi({ bridgeId, scheduler });
 
+    // Terminal output pump: buffers runner PTY output and owns the runner
+    // 'complete'/'error' lifecycle handlers (loop-run status transitions the
+    // loop scheduler depends on).
+    const pump = new TerminalPump({
+      store,
+      terminalManager,
+      publishTerminalData: (sid, data) => publishRouter.publishTerminalData(sid, data),
+      publishSessionUpdate: (session) => centrifugo.publishSessionUpdate(userId, session),
+      publishHookEvent: (sid, event) => centrifugo.publishHookEvent(userId, sid, event),
+      unregisterSession: (sid) => unregisterSession(sid),
+    });
+    pump.attach(runner);
+
+    // Resurrection engine for sessions left live by a previous bridge process.
+    const resurrection = new SessionResurrection({
+      store,
+      runner,
+      bridgeId,
+      sessionFactoryDeps,
+      publishSessionUpdate: (session) => centrifugo.publishSessionUpdate(userId, session),
+      wireTerminalInput,
+    });
+
+    // Persists Claude/Cursor/Codex-native session ids from hook events.
+    const agentIdPersister = new AgentSessionIdPersister({
+      store,
+      publishSessionUpdate: (session) => centrifugo.publishSessionUpdate(userId, session),
+    });
+
+    // Transport-agnostic controllers: each loop/session operation is defined
+    // once here; the RPC switch below and the local HTTP router are thin
+    // adapters that only marshal wire formats around these calls.
+    const loopController = new LoopController({
+      bridgeId,
+      scheduler,
+      isSessionRunning: (sid) => runner.isRunning(sid),
+      publishLoopUpdate: (loop) => centrifugo.publishLoopUpdate(userId, loop),
+      publishLoopRemoved: (loopId) => centrifugo.publishLoopRemoved(userId, loopId),
+      listWireSessions: async () => (await store.listSessions()).map(toWireSession),
+      loadTerminalLog: (sid) => store.loadTerminalLog(sid),
+    });
+    const sessionController = new SessionController({
+      store,
+      runner,
+      publishSessionUpdate: (session) => centrifugo.publishSessionUpdate(userId, session),
+      removeSession: (id, options) => removeFtownSession({ store, runner, centrifugo, userId }, id, options),
+      sessionFactory: sessionFactoryDeps,
+      publishSyntheticStop: (sid, reason) => pump.publishSyntheticStop(sid, reason),
+      withSessionWrite: (sid, task) => pump.withSessionWrite(sid, task),
+      unregisterSession: (sid) => unregisterSession(sid),
+      flushTerminalBuffer: (sid) => pump.flush(sid),
+      destroyTerminal: (sid) => terminalManager.destroy(sid),
+    });
+
     // Compiled sibling of this module (running from dist), else the sibling
     // dist/ directory (running from src via `tsx watch` in dev). If neither
     // exists — dev mode without a build — skip installation instead of
@@ -543,170 +499,6 @@ program
       terminalManager.resize(sid, cols, rows);
     }
 
-    const outputBuffers = new Map<string, string>();
-    const flushTimers = new Map<string, ReturnType<typeof setTimeout>>();
-    const FLUSH_INTERVAL_MS = 16;
-    const MAX_BUFFER_BYTES = 32_000;
-
-    function flushBuffer(sessionId: string): void {
-      const buf = outputBuffers.get(sessionId);
-      if (!buf) return;
-      outputBuffers.delete(sessionId);
-      const timer = flushTimers.get(sessionId);
-      if (timer) clearTimeout(timer);
-      flushTimers.delete(sessionId);
-      store.appendTerminalData(sessionId, buf).catch((err) => {
-        console.error(`[Bridge] Failed to store terminal data for ${sessionId}:`, err);
-      });
-      publishRouter.publishTerminalData(sessionId, buf);
-    }
-
-    runner.on('data', (sessionId, data) => {
-      terminalManager.write(sessionId, data);
-
-      const existing = outputBuffers.get(sessionId) ?? '';
-      outputBuffers.set(sessionId, existing + data);
-      if ((existing.length + data.length) >= MAX_BUFFER_BYTES) {
-        flushBuffer(sessionId);
-      } else if (!flushTimers.has(sessionId)) {
-        flushTimers.set(sessionId, setTimeout(() => flushBuffer(sessionId), FLUSH_INTERVAL_MS));
-      }
-    });
-
-    // Per-session write queue so concurrent load/modify/save flows (hooks,
-    // runner exit handlers, stop_session) cannot interleave and resurrect a
-    // stale status.
-    const sessionWrites = new Map<string, Promise<void>>();
-    function withSessionWrite(sessionId: string, task: () => Promise<void>): Promise<void> {
-      const prev = sessionWrites.get(sessionId) ?? Promise.resolve();
-      const run = prev.then(task);
-      const settled = run.catch(() => undefined);
-      sessionWrites.set(sessionId, settled);
-      void settled.finally(() => {
-        if (sessionWrites.get(sessionId) === settled) {
-          sessionWrites.delete(sessionId);
-        }
-      });
-      return run;
-    }
-
-    // Synthetic activity reset: some stop paths never produce a real Stop/stop
-    // hook (Claude's Stop hook doesn't fire on user interrupt, SessionEnd may be
-    // absent, runner exits/crashes). Publishing a synthetic Stop event guarantees
-    // every dashboard clears its "thinking"/"tool_use" indicator. Idle is
-    // idempotent, so an extra synthetic Stop after a real one is harmless.
-    function publishSyntheticStop(sessionId: string, reason: 'complete' | 'error' | 'stopped'): void {
-      centrifugo.publishHookEvent(userId, sessionId, {
-        type: 'hook_event',
-        eventName: 'Stop',
-        data: { synthetic: true, reason },
-      }).catch((err) => {
-        console.error(`[Bridge] Failed to publish synthetic stop for ${sessionId}:`, err);
-      });
-    }
-
-    runner.on('complete', (sessionId) => {
-      flushBuffer(sessionId);
-      publishSyntheticStop(sessionId, 'complete');
-      withSessionWrite(sessionId, async () => {
-        const session = await store.loadSession(sessionId);
-        if (session) {
-          session.status = 'completed';
-          session.updatedAt = new Date().toISOString();
-          await store.saveSession(session);
-          await centrifugo.publishSessionUpdate(userId, session);
-        }
-        console.log(`[Bridge] Session ${sessionId} completed`);
-      }).catch((err) => {
-        console.error(`[Bridge] Failed to handle completion for session ${sessionId}:`, err);
-      }).finally(() => {
-        unregisterSession(sessionId);
-      });
-    });
-
-    runner.on('error', (sessionId, error) => {
-      flushBuffer(sessionId);
-      publishSyntheticStop(sessionId, 'error');
-      withSessionWrite(sessionId, async () => {
-        const session = await store.loadSession(sessionId);
-        if (session) {
-          session.status = 'error';
-          session.updatedAt = new Date().toISOString();
-          await store.saveSession(session);
-          await centrifugo.publishSessionUpdate(userId, session);
-        }
-        console.error(`[Bridge] Session ${sessionId} error:`, error.message);
-      }).catch((err) => {
-        console.error(`[Bridge] Failed to handle error for session ${sessionId}:`, err);
-      }).finally(() => {
-        unregisterSession(sessionId);
-        terminalManager.destroy(sessionId);
-      });
-    });
-
-    // Last persisted agent session ids, to skip disk reads on the hot hook path.
-    const agentIdCache = new Map<string, { claude?: string; cursor?: string; codex?: string; isCodex?: boolean }>();
-
-    async function persistAgentSessionIds(hookEvent: HookEvent): Promise<void> {
-      // Workspace-fallback attribution may come from a foreign agent the user
-      // ran manually in the same directory; never persist its ids.
-      if (hookEvent.source === 'workspace') return;
-
-      const rawAgentId = hookEvent.data['session_id'];
-      const rawCursorId = hookEvent.data['conversation_id'];
-      // Claude Code AND Codex hooks carry session_id (which field it lands in
-      // depends on the session's shellType); Cursor hooks carry conversation_id.
-      const agentId = typeof rawAgentId === 'string' && rawAgentId ? rawAgentId : undefined;
-      const cursorId = typeof rawCursorId === 'string' && rawCursorId ? rawCursorId : undefined;
-      if (!agentId && !cursorId) return;
-
-      const cached = agentIdCache.get(hookEvent.sessionId);
-      if (cached
-        && (!agentId || (cached.isCodex ? cached.codex === agentId : cached.claude === agentId))
-        && (!cursorId || cached.cursor === cursorId)) {
-        return;
-      }
-
-      const session = await store.loadSession(hookEvent.sessionId);
-      if (!session) return;
-      const isCodex = session.shellType === 'codex';
-
-      let changed = false;
-      if (agentId) {
-        if (isCodex && session.codexSessionId !== agentId) {
-          session.codexSessionId = agentId;
-          changed = true;
-        } else if (!isCodex && session.claudeSessionId !== agentId) {
-          session.claudeSessionId = agentId;
-          changed = true;
-        }
-      }
-      if (cursorId && session.cursorSessionId !== cursorId) {
-        session.cursorSessionId = cursorId;
-        changed = true;
-      }
-      if (!changed) {
-        agentIdCache.set(hookEvent.sessionId, {
-          claude: session.claudeSessionId,
-          cursor: session.cursorSessionId,
-          codex: session.codexSessionId,
-          isCodex,
-        });
-        return;
-      }
-
-      session.updatedAt = new Date().toISOString();
-      await store.saveSession(session);
-      // Cache only after a successful save, so a failed persist is retried.
-      agentIdCache.set(hookEvent.sessionId, {
-        claude: session.claudeSessionId,
-        cursor: session.cursorSessionId,
-        codex: session.codexSessionId,
-        isCodex,
-      });
-      await centrifugo.publishSessionUpdate(userId, session);
-    }
-
     localApiServer.on('event', (hookEvent: HookEvent) => {
       centrifugo.publishHookEvent(userId, hookEvent.sessionId, {
         type: 'hook_event',
@@ -716,570 +508,17 @@ program
         console.error('[Bridge] Failed to handle hook event:', err);
       });
 
-      withSessionWrite(hookEvent.sessionId, () => persistAgentSessionIds(hookEvent)).catch((err) => {
+      pump.withSessionWrite(hookEvent.sessionId, () => agentIdPersister.persist(hookEvent)).catch((err) => {
         console.error(`[Bridge] Failed to persist agent session id for ${hookEvent.sessionId}:`, err);
       });
     });
 
-    async function handleCommand(command: Command): Promise<void> {
-      console.log(`[Bridge] Received command: ${command.type} (requestId: ${command.requestId})`);
-
-      const payloadBridgeId = (command.payload as Record<string, unknown>).bridgeId as string | undefined;
-      if (payloadBridgeId && payloadBridgeId !== bridgeId) {
-        return;
-      }
-
-      let response: CommandResponse;
-
-      try {
-        switch (command.type) {
-          case 'create_session': {
-            const payload = command.payload as CreateSessionPayload;
-            const session = await createFtownSession(
-              {
-                store,
-                runner,
-                centrifugo,
-                userId,
-                bridgeId,
-                hookPort,
-                hookToken: apiToken,
-                notifyScriptPath,
-                wireTerminalInput,
-              },
-              {
-                command: payload.command,
-                prompt: payload.prompt,
-                name: payload.name,
-                workingDir: payload.workingDir,
-                shellType: payload.shellType,
-                model: payload.model,
-                claudeSessionId: payload.claudeSessionId,
-                cursorSessionId: payload.cursorSessionId,
-                codexSessionId: payload.codexSessionId,
-                env: payload.env,
-                parentSessionId: payload.parentSessionId,
-                initialInput: payload.initialInput,
-                initialInputDelay: payload.initialInputDelay,
-                orchestrator: payload.orchestrator,
-                suppressBriefing: payload.suppressBriefing,
-                createMissingWorkingDir: payload.createMissingWorkingDir,
-              },
-            );
-            response = { requestId: command.requestId, success: true, data: { session: toWireSession(session) } };
-            break;
-          }
-
-          case 'stop_session': {
-            const payload = command.payload as StopSessionPayload;
-            if (!payload.sessionId) {
-              response = { requestId: command.requestId, success: false, error: 'Missing sessionId' };
-              break;
-            }
-
-            const stopped = runner.stop(payload.sessionId);
-            if (stopped) {
-              publishSyntheticStop(payload.sessionId, 'stopped');
-              await withSessionWrite(payload.sessionId, async () => {
-                const session = await store.loadSession(payload.sessionId);
-                if (session) {
-                  session.status = 'completed';
-                  session.updatedAt = new Date().toISOString();
-                  await store.saveSession(session);
-                  await centrifugo.publishSessionUpdate(userId, session);
-                }
-              });
-              unregisterSession(payload.sessionId);
-            }
-
-            response = { requestId: command.requestId, success: true, data: { stopped } };
-            break;
-          }
-
-          case 'list_sessions': {
-            const sessions = await store.listSessions();
-            response = { requestId: command.requestId, success: true, data: { sessions: sessions.map(toWireSession) } };
-            break;
-          }
-
-          case 'get_history': {
-            const payload = command.payload as GetHistoryPayload;
-            if (!payload.sessionId) {
-              response = { requestId: command.requestId, success: false, error: 'Missing sessionId' };
-              break;
-            }
-
-            const session = await store.loadSession(payload.sessionId);
-            response = { requestId: command.requestId, success: true, data: { session: session ? toWireSession(session) : session } };
-            break;
-          }
-
-          case 'retry_session': {
-            const payload = command.payload as StopSessionPayload;
-
-            if (!payload.sessionId) {
-              response = { requestId: command.requestId, success: false, error: 'Missing sessionId' };
-              break;
-            }
-
-            const existingSession = await store.loadSession(payload.sessionId);
-            if (!existingSession) {
-              response = { requestId: command.requestId, success: false, error: 'Session not found' };
-              break;
-            }
-
-            if (existingSession.status === 'running') {
-              response = { requestId: command.requestId, success: false, error: 'Session is already running' };
-              break;
-            }
-
-            if (!existingSession.command) {
-              response = { requestId: command.requestId, success: false, error: 'Session has no command (created before v0.2.0)' };
-              break;
-            }
-
-            existingSession.status = 'running';
-            existingSession.bridgeId = bridgeId;
-            existingSession.updatedAt = new Date().toISOString();
-            await store.saveSession(existingSession);
-            await centrifugo.publishSessionUpdate(userId, existingSession);
-
-            runner.run(existingSession.id, existingSession.command, {
-              workingDir: existingSession.workingDir,
-              env: existingSession.env,
-              hookPort,
-              hookToken: apiToken,
-              parentSessionId: existingSession.parentSessionId,
-            });
-
-            centrifugo.subscribeToTerminalInput(
-              userId, existingSession.id,
-              (sid, data) => { runner.write(sid, data); },
-              (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
-              (sid) => { publishScreenDump(sid); },
-            );
-
-            response = { requestId: command.requestId, success: true, data: { session: toWireSession(existingSession) } };
-            break;
-          }
-
-          case 'update_session_parent': {
-            const payload = command.payload as UpdateSessionParentPayload;
-            if (!payload.sessionId) {
-              response = { requestId: command.requestId, success: false, error: 'Missing sessionId' };
-              break;
-            }
-
-            const target = await store.loadSession(payload.sessionId);
-            if (!target) {
-              response = { requestId: command.requestId, success: false, error: 'Session not found' };
-              break;
-            }
-
-            if (payload.parentSessionId === null || payload.parentSessionId === undefined || payload.parentSessionId === '') {
-              target.parentSessionId = undefined;
-            } else if (payload.parentSessionId === target.id) {
-              response = { requestId: command.requestId, success: false, error: 'Session cannot be its own parent' };
-              break;
-            } else {
-              const proposed = await store.loadSession(payload.parentSessionId);
-              if (!proposed) {
-                response = { requestId: command.requestId, success: false, error: 'Parent session not found' };
-                break;
-              }
-              target.parentSessionId = proposed.parentSessionId ?? proposed.id;
-            }
-
-            target.updatedAt = new Date().toISOString();
-            await store.saveSession(target);
-            await centrifugo.publishSessionUpdate(userId, target);
-
-            response = { requestId: command.requestId, success: true, data: { session: toWireSession(target) } };
-            break;
-          }
-
-          case 'rename_session': {
-            const payload = command.payload as RenameSessionPayload;
-            if (!payload.sessionId || !payload.name) {
-              response = { requestId: command.requestId, success: false, error: 'Missing sessionId or name' };
-              break;
-            }
-
-            const sessionToRename = await store.loadSession(payload.sessionId);
-            if (!sessionToRename) {
-              response = { requestId: command.requestId, success: false, error: 'Session not found' };
-              break;
-            }
-
-            sessionToRename.name = payload.name;
-            sessionToRename.updatedAt = new Date().toISOString();
-            await store.saveSession(sessionToRename);
-            await centrifugo.publishSessionUpdate(userId, sessionToRename);
-
-            response = { requestId: command.requestId, success: true, data: { session: toWireSession(sessionToRename) } };
-            break;
-          }
-
-          case 'remove_session': {
-            const payload = command.payload as RemoveSessionPayload;
-            if (!payload.sessionId) {
-              response = { requestId: command.requestId, success: false, error: 'Missing sessionId' };
-              break;
-            }
-
-            const removed = await removeFtownSession(
-              { store, runner, centrifugo, userId },
-              payload.sessionId,
-              { onlyIfFinished: payload.onlyIfFinished },
-            );
-
-            response = { requestId: command.requestId, success: true, data: { removed: removed !== null } };
-            break;
-          }
-
-          case 'bridge_exec': {
-            const payload = command.payload as BridgeExecPayload;
-
-            try {
-              const { stdout, stderr } = await execAsync(payload.command, {
-                cwd: payload.workingDir ?? process.cwd(),
-                timeout: payload.timeout ?? 30000,
-                maxBuffer: 1024 * 1024,
-              });
-              response = { requestId: command.requestId, success: true, data: { stdout, stderr, exitCode: 0 } };
-            } catch (err) {
-              const execErr = err as ExecError;
-              response = { requestId: command.requestId, success: true, data: { stdout: execErr.stdout, stderr: execErr.stderr, exitCode: execErr.code } };
-            }
-            break;
-          }
-
-          case 'clear_terminal': {
-            const payload = command.payload as ClearTerminalPayload;
-            if (!payload.sessionId) {
-              response = { requestId: command.requestId, success: false, error: 'Missing sessionId' };
-              break;
-            }
-
-            flushBuffer(payload.sessionId);
-            await store.clearTerminalLog(payload.sessionId);
-            terminalManager.destroy(payload.sessionId);
-            response = { requestId: command.requestId, success: true, data: { cleared: true } };
-            break;
-          }
-
-          case 'create_loop': {
-            const payload = command.payload as CreateLoopPayload;
-            const error = validateLoopDraft(payload);
-            if (error) {
-              response = { requestId: command.requestId, success: false, error };
-              break;
-            }
-            // bridgeId is forced to THIS bridge (the routing guard already proved
-            // payload.bridgeId === bridgeId), so a loop is always owned by its runner.
-            const draft: LoopDraft = {
-              name: payload.name.trim(),
-              bridgeId,
-              schedule: payload.schedule,
-              harness: payload.harness,
-              workdir: payload.workdir,
-              task: payload.task,
-              model: payload.model,
-              enabled: payload.enabled,
-              overlapPolicy: payload.overlapPolicy,
-              retention: payload.retention,
-              preflight: payload.preflight,
-              postflight: payload.postflight,
-              maxRuntimeMs: payload.maxRuntimeMs,
-              group: payload.group,
-            };
-            const loop = createLoop(draft);
-            await centrifugo.publishLoopUpdate(userId, loop);
-            response = { requestId: command.requestId, success: true, data: { loop } };
-            break;
-          }
-
-          case 'list_loops': {
-            response = { requestId: command.requestId, success: true, data: { loops: listLoops() } };
-            break;
-          }
-
-          case 'update_loop': {
-            const payload = command.payload as UpdateLoopPayload;
-            if (!payload.loopId) {
-              response = { requestId: command.requestId, success: false, error: 'Missing loopId' };
-              break;
-            }
-            const patchError = validateLoopPatch(payload.patch);
-            if (patchError) {
-              response = { requestId: command.requestId, success: false, error: patchError };
-              break;
-            }
-            const loop = updateLoop(payload.loopId, payload.patch);
-            if (!loop) {
-              response = { requestId: command.requestId, success: false, error: 'Loop not found' };
-              break;
-            }
-            await centrifugo.publishLoopUpdate(userId, loop);
-            response = { requestId: command.requestId, success: true, data: { loop } };
-            break;
-          }
-
-          case 'delete_loop': {
-            const payload = command.payload as DeleteLoopPayload;
-            if (!payload.loopId) {
-              response = { requestId: command.requestId, success: false, error: 'Missing loopId' };
-              break;
-            }
-            const existingLoop = getLoop(payload.loopId);
-            const removed = deleteLoop(payload.loopId);
-            if (removed) {
-              // Stop any in-flight run and drop scheduler tracking so a
-              // just-deleted loop never leaves a live AI session with nothing
-              // left to finalize/prune it.
-              if (existingLoop) scheduler.onLoopDeleted(existingLoop);
-              deleteLoopRunRecords(payload.loopId);
-              await centrifugo.publishLoopRemoved(userId, payload.loopId);
-            }
-            response = { requestId: command.requestId, success: true, data: { removed } };
-            break;
-          }
-
-          case 'run_loop_now': {
-            const payload = command.payload as RunLoopNowPayload;
-            if (!payload.loopId) {
-              response = { requestId: command.requestId, success: false, error: 'Missing loopId' };
-              break;
-            }
-            const loop = getLoop(payload.loopId);
-            if (!loop) {
-              response = { requestId: command.requestId, success: true, data: { fired: false, reason: 'not_found' } };
-              break;
-            }
-            // A skip-policy loop with a live run cannot be manually fired either —
-            // report overlap synchronously (the async tick would otherwise swallow it).
-            if (
-              loop.overlapPolicy === 'skip' &&
-              loop.lastStatus === 'running' &&
-              loop.lastSessionId &&
-              runner.isRunning(loop.lastSessionId)
-            ) {
-              response = { requestId: command.requestId, success: true, data: { fired: false, reason: 'overlap' } };
-              break;
-            }
-            // Reload-check-write via mutateLoopRuntime: if the loop was deleted
-            // between the getLoop() above and this write, this returns null and
-            // nothing is written/published — a stale in-memory snapshot must
-            // never be upserted back, or a deleted loop resurrects.
-            const updated = mutateLoopRuntime(payload.loopId, (l) => {
-              l.runNowRequested = true;
-              l.updatedAt = new Date().toISOString();
-            });
-            if (!updated) {
-              response = { requestId: command.requestId, success: true, data: { fired: false, reason: 'not_found' } };
-              break;
-            }
-            await centrifugo.publishLoopUpdate(userId, updated);
-            scheduler.kick();
-            response = { requestId: command.requestId, success: true, data: { fired: true } };
-            break;
-          }
-
-          case 'get_loop_runs': {
-            const payload = command.payload as GetLoopRunsPayload;
-            if (!payload.loopId) {
-              response = { requestId: command.requestId, success: false, error: 'Missing loopId' };
-              break;
-            }
-            const sessions = (await store.listSessions()).map(toWireSession);
-            const runs = await listLoopRunRecordsWithFallback(payload.loopId, sessions, (sessionId) =>
-              store.loadTerminalLog(sessionId),
-            );
-            response = { requestId: command.requestId, success: true, data: { runs } };
-            break;
-          }
-
-          default: {
-            response = {
-              requestId: command.requestId,
-              success: false,
-              error: `Unknown command type: ${command.type}`,
-            };
-          }
-        }
-      } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : String(err);
-        response = err instanceof WorkingDirMissingError
-          ? {
-              requestId: command.requestId,
-              success: false,
-              error: errorMessage,
-              data: {
-                code: err.code,
-                workingDir: err.workingDir,
-                canCreate: true,
-              },
-            }
-          : { requestId: command.requestId, success: false, error: errorMessage };
-      }
-
-      try {
-        await centrifugo.publishCommandResponse(userId, response);
-      } catch (err) {
-        console.error(`[Bridge] Failed to publish command response:`, err);
-      }
-    }
-
-    async function markSessionDead(session: Session, reason?: string): Promise<void> {
-      session.status = 'error';
-      session.errorReason = reason;
-      session.updatedAt = new Date().toISOString();
-      await store.saveSession(session);
-      await centrifugo.publishSessionUpdate(userId, session);
-      console.log(`[Bridge] Marked stale session ${session.id} as error`);
-    }
-
-    async function resurrectSession(sessionId: string): Promise<void> {
-      // Commands run concurrently with the resurrection loop; act on fresh
-      // state so a session stopped or removed mid-loop is not respawned.
-      const session = await store.loadSession(sessionId);
-      if (!session || (session.status !== 'running' && session.status !== 'pending')) return;
-      if (runner.isRunning(session.id)) return;
-
-      if (runner.reattach(session.id, {
-        workingDir: session.workingDir,
-        parentSessionId: session.parentSessionId,
-      })) {
-        session.status = 'running';
-        session.bridgeId = bridgeId;
-        session.errorReason = undefined;
-        session.updatedAt = new Date().toISOString();
-        await store.saveSession(session);
-        await centrifugo.publishSessionUpdate(userId, session);
-        wireTerminalInput(session.id);
-        registerSessionWorkspace(session.id, session.workingDir);
-        console.log(`[Bridge] Resurrected session ${session.id} via tmux reattach`);
-        return;
-      }
-
-      const shellType = session.shellType ?? 'claude';
-      const canResume = shellType === 'cursor'
-        ? Boolean(session.cursorSessionId?.trim())
-        : shellType === 'codex'
-          ? Boolean(session.codexSessionId?.trim())
-          : shellType !== 'shell' && shellType !== 'opencode' && Boolean(session.claudeSessionId?.trim());
-
-      if (canResume) {
-        // Sessions created with a custom command rerun it verbatim (matching
-        // retry_session): injecting --resume into arbitrary commands could
-        // break wrappers, and rebuilding would drop their flags.
-        const defaultCommand = buildSessionCommand({
-          shellType: session.shellType,
-          workingDir: session.workingDir,
-          model: session.model,
-        });
-        const isCustomCommand = Boolean(session.command) && session.command !== defaultCommand;
-        const resumeCommand = isCustomCommand && session.command
-          ? session.command
-          : buildSessionCommand({
-              shellType: session.shellType,
-              workingDir: session.workingDir,
-              model: session.model,
-              claudeSessionId: session.claudeSessionId,
-              cursorSessionId: session.cursorSessionId,
-              codexSessionId: session.codexSessionId,
-            });
-        const miss = findMissingProviderAuth(session.shellType, {
-          processEnv: process.env,
-          storeEnv: loadProviderEnv(),
-        });
-        if (miss) {
-          await markSessionDead(session, miss.message);
-          return;
-        }
-        session.status = 'running';
-        session.bridgeId = bridgeId;
-        session.runtime = runner.getPreferredRuntime();
-        session.errorReason = undefined;
-        session.updatedAt = new Date().toISOString();
-        await store.saveSession(session);
-        await centrifugo.publishSessionUpdate(userId, session);
-        runner.run(session.id, resumeCommand, {
-          workingDir: session.workingDir,
-          env: session.env,
-          hookPort,
-          hookToken: apiToken,
-          parentSessionId: session.parentSessionId,
-        });
-        wireTerminalInput(session.id);
-        registerSessionWorkspace(session.id, session.workingDir);
-        console.log(`[Bridge] Resurrected session ${session.id} via resume respawn: ${resumeCommand}`);
-        return;
-      }
-
-      await markSessionDead(session);
-    }
-
-    let resurrectionStarted = false;
-    async function resurrectSessions(): Promise<void> {
-      if (resurrectionStarted) return;
-      resurrectionStarted = true;
-
-      const sessions = await store.listSessions();
-
-      // Reap tmux sessions for OUR dead store records (removed records, failed
-      // kills) before resurrection re-creates any. Archived tombstones count as
-      // dead too: remove_session deletes the store record, so a failed tmux
-      // kill would otherwise leave a permanently invisible live agent. Tmux
-      // sessions with ids we have no record of are left alone — they may
-      // belong to another bridge running on this machine.
-      if (isTmuxAvailable()) {
-        const archived = await store.listArchived();
-        const deadIds = new Set([
-          ...sessions
-            .filter((s) => s.status !== 'running' && s.status !== 'pending')
-            .map((s) => s.id),
-          ...archived.map((a) => a.id),
-        ]);
-        // A live store record outranks any tombstone for the same id (crash
-        // between archive and delete leaves both): never reap resurrectables.
-        for (const s of sessions) {
-          if (s.status === 'running' || s.status === 'pending') {
-            deadIds.delete(s.id);
-          }
-        }
-        for (const tmuxId of listFtownTmuxSessions()) {
-          if (deadIds.has(tmuxId)) {
-            console.log(`[Bridge] Killing tmux session for dead session ${tmuxId}`);
-            await killTmuxSession(tmuxId);
-          }
-        }
-      }
-
-      let deferredLoopRuns = 0;
-      for (const session of sessions) {
-        if (session.loopId) {
-          if (session.status !== 'running' && session.status !== 'pending') continue;
-          deferredLoopRuns += 1;
-          continue;
-        }
-        if (!shouldResurrectStoredSession(session)) continue;
-        try {
-          await resurrectSession(session.id);
-        } catch (err) {
-          console.error(`[Bridge] Failed to resurrect session ${session.id}:`, err);
-          try {
-            const current = await store.loadSession(session.id);
-            if (current) await markSessionDead(current);
-          } catch (markErr) {
-            console.error(`[Bridge] Failed to mark session ${session.id} as error:`, markErr);
-          }
-        }
-      }
-      if (deferredLoopRuns > 0) {
-        console.log(`[Bridge] Deferred ${deferredLoopRuns} loop-run session(s) to the loop scheduler`);
-      }
-    }
+    const handleCommand = createCommandHandler({
+      bridgeId,
+      sessionController,
+      loopController,
+      publishCommandResponse: (response) => centrifugo.publishCommandResponse(userId, response),
+    });
 
     centrifugo.connect();
     centrifugo.joinBridgesChannel(userId, bridgeId);
@@ -1300,7 +539,7 @@ program
         ready = true;
         console.log('[Bridge] Ready and listening for commands');
         try {
-          await resurrectSessions();
+          await resurrection.resurrectSessions();
         } catch (err) {
           console.error('[Bridge] Session resurrection failed:', err);
         }

@@ -6,11 +6,17 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-
-interface BridgePointer {
-  port: number;
-  token: string;
-}
+import {
+  MAIL_TYPES,
+  formatMailMessage,
+  type BridgePointer,
+  type LoopDraft,
+  type LoopHarness,
+  type LoopInfo,
+  type LoopSchedule,
+  type MailMessage,
+  type Session,
+} from './wire-types.js';
 
 function loadBridge(): BridgePointer {
   const path = join(homedir(), '.ftown', 'bridge.json');
@@ -59,46 +65,7 @@ async function api(
   return { status: res.status, data };
 }
 
-interface SessionInfo {
-  id: string;
-  name?: string;
-  parentSessionId?: string;
-}
-
-type LoopHarness = 'claude' | 'cursor' | 'codex' | 'grok' | 'opencode' | 'shell';
-type LoopSchedule =
-  | { kind: 'interval'; everyMs: number }
-  | { kind: 'cron'; expression: string; tz?: string };
-
-interface LoopDraft {
-  name: string;
-  schedule: LoopSchedule;
-  harness: LoopHarness;
-  workdir?: string;
-  task: string;
-  model?: string;
-  enabled: boolean;
-  overlapPolicy: 'skip' | 'allow';
-  retention: { autoClearAfterRuns: number | null };
-  preflight?: { command: string; timeoutMs?: number };
-  postflight?: { command: string; timeoutMs?: number; runOnSkip?: boolean };
-  maxRuntimeMs?: number;
-  group?: string;
-}
-
-interface LoopInfo extends LoopDraft {
-  id: string;
-  bridgeId: string;
-  createdAt: string;
-  updatedAt: string;
-  lastRunAt?: string;
-  nextRunAt?: string;
-  lastStatus?: 'ok' | 'error' | 'running' | 'skipped';
-  lastSessionId?: string;
-  runCount: number;
-  skipCount: number;
-  runNowRequested?: boolean;
-}
+type SessionInfo = Session;
 
 async function listSessionInfo(): Promise<SessionInfo[]> {
   const { data } = await api('GET', '/api/sessions');
@@ -340,23 +307,6 @@ function positionals(args: string[], valueFlags: string[]): string[] {
     out.push(a);
   }
   return out;
-}
-
-const MAIL_TYPES = ['message', 'task', 'result', 'escalation'] as const;
-
-interface MailMessage {
-  id: string;
-  ts: string;
-  from: string;
-  fromName?: string;
-  to: string;
-  type: (typeof MAIL_TYPES)[number];
-  threadId?: string;
-  body: string;
-}
-
-function formatMailMessage(m: MailMessage): string {
-  return `[${m.ts}] ${m.fromName ?? m.from} (${m.type}): ${m.body}`;
 }
 
 function usage(): void {

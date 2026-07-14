@@ -7,29 +7,19 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Command } from 'commander';
 import { cleanTerminalLine, formatLogLines, isDisplayableLine } from './harness-format.js';
+import {
+  MAIL_TYPES,
+  formatMailMessage,
+  submitSuffix,
+  type BridgePointer,
+  type MailMessage,
+  type MailType,
+  type Session,
+} from './wire-types.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const BRIDGE_JSON = join(homedir(), '.ftown', 'bridge.json');
 const REGISTRY_JSON = join(homedir(), '.ftown', 'session-registry.json');
-
-interface BridgePointer {
-  port: number;
-  token: string;
-  bridgeId?: string;
-  pid?: number;
-  startedAt?: string;
-  harness?: string;
-  harnessCli?: string;
-}
-
-interface Session {
-  id: string;
-  name: string;
-  status: string;
-  workingDir?: string;
-  shellType?: string;
-  model?: string;
-}
 
 interface GrepMatch {
   lineNumber: number;
@@ -41,22 +31,6 @@ interface GrepMatch {
 interface RegistryData {
   byWorkspace: Record<string, string>;
   byConversation: Record<string, string>;
-}
-
-type MailType = 'message' | 'task' | 'result' | 'escalation';
-const MAIL_TYPES: readonly MailType[] = ['message', 'task', 'result', 'escalation'];
-
-interface MailMessage {
-  id: string;
-  ts: string;
-  from: string;
-  fromName?: string;
-  to: string;
-  type: MailType;
-  threadId?: string;
-  body: string;
-  deliveredAt?: string;
-  deliveredVia?: string;
 }
 
 interface HookInput {
@@ -179,16 +153,6 @@ function resolveWorkspaceSessionId(cwd: string): { id: string; workspace: string
     dir = parent;
   }
   return undefined;
-}
-
-function submitSuffix(shellType?: string): string {
-  switch (shellType) {
-    case 'claude':
-    case 'cursor':
-      return '\x1b\r';
-    default:
-      return '\r';
-  }
 }
 
 async function fetchTail(pointer: BridgePointer, id: string, n: number): Promise<string[]> {
@@ -464,10 +428,6 @@ async function cmdSend(
 
   await api(pointer, 'POST', `/api/sessions/${id}/keys`, { keys });
   emit(opts.json, { ...plan, sent: true }, `sent ${keys.length} bytes to ${session.name} (submit=${opts.submit})`);
-}
-
-function formatMailMessage(m: MailMessage): string {
-  return `[${m.ts}] ${m.fromName ?? m.from} (${m.type}): ${m.body}`;
 }
 
 function resolveOwnSessionId(): string | undefined {

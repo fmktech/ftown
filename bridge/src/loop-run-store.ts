@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+import { isLoopHarness } from './harness-registry.js';
+
 import type { Loop, LoopRunRecord, Session } from './types.js';
 
 interface LoopRunsFile {
@@ -114,15 +116,7 @@ function fallbackRecord(loopId: string, session: Session): LoopRunRecord {
     status: session.status === 'error' ? 'error' : session.status === 'completed' ? 'ok' : 'running',
     startedAt: session.createdAt,
     updatedAt: session.updatedAt,
-    harness:
-      session.shellType === 'claude' ||
-      session.shellType === 'cursor' ||
-      session.shellType === 'codex' ||
-      session.shellType === 'grok' ||
-      session.shellType === 'opencode' ||
-      session.shellType === 'shell'
-        ? session.shellType
-        : undefined,
+    harness: isLoopHarness(session.shellType) ? session.shellType : undefined,
     workdir: session.workingDir,
     task: session.prompt,
     model: session.model,

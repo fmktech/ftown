@@ -4,6 +4,7 @@ import { basename, resolve } from 'node:path';
 
 import { buildSessionCommand } from './agent-commands.js';
 import { ensureCodexWorkdirTrust } from './codex-installer.js';
+import { harnessAcceptsPromptAsCliArg } from './harness-registry.js';
 import { PROVIDER_AUTH_ENV, PROVIDER_RUNTIME_ENV, loadProviderEnv } from './provider-env-store.js';
 import { registerSessionWorkspace } from './session-registry.js';
 
@@ -230,6 +231,116 @@ export function assertProviderAuthAvailable(
   if (missing) throw missing;
 }
 
+/** The stored-session fields relaunch derivation needs — satisfied by both live records and tombstones. */
+export type RelaunchCommandSource = Pick<
+  Session,
+  'command' | 'shellType' | 'workingDir' | 'model' | 'claudeSessionId' | 'cursorSessionId' | 'codexSessionId'
+>;
+
+/**
+ * Single home of the custom-vs-default relaunch-command heuristic (previously
+ * duplicated by resurrection and the revive route). Sessions created with a
+ * custom command must rerun it verbatim: injecting --resume into arbitrary
+ * commands could break wrappers, and rebuilding would drop their flags.
+ * Builder-generated commands are rebuilt instead, so the recorded agent
+ * session id is injected as a resume argument. A stored command that matches
+ * either the plain builder output or the resume-bearing builder output counts
+ * as builder-generated.
+ *
+ * Known limitation (preserved, not fixed): claude sessions created before the
+ * builder started emitting --model store a command WITHOUT --model. When such
+ * a session carries a model, its stored command no longer matches the builder
+ * output, so it is misclassified as custom and relaunched verbatim — without
+ * --model and without --resume.
+ */
+export function deriveRelaunchCommand(session: RelaunchCommandSource): {
+  command: string;
+  isCustom: boolean;
+} {
+  const builderBase = {
+    shellType: session.shellType,
+    workingDir: session.workingDir,
+    model: session.model,
+  };
+  const builderDefault = buildSessionCommand(builderBase);
+  const builderResume = buildSessionCommand({
+    ...builderBase,
+    claudeSessionId: session.claudeSessionId,
+    cursorSessionId: session.cursorSessionId,
+    codexSessionId: session.codexSessionId,
+  });
+  const isCustom =
+    Boolean(session.command) &&
+    session.command !== builderDefault &&
+    session.command !== builderResume;
+  return { command: isCustom ? session.command : builderResume, isCustom };
+}
+
+/** Whether a stored session recorded the agent-session id its harness needs to resume. */
+export function canResumeStoredSession(
+  session: Pick<Session, 'shellType' | 'claudeSessionId' | 'cursorSessionId' | 'codexSessionId'>,
+): boolean {
+  const shellType = session.shellType ?? 'claude';
+  if (shellType === 'cursor') return Boolean(session.cursorSessionId?.trim());
+  if (shellType === 'codex') return Boolean(session.codexSessionId?.trim());
+  return shellType !== 'shell' && shellType !== 'opencode' && Boolean(session.claudeSessionId?.trim());
+}
+
+/**
+ * 'retry'  — manual retry of a dead session: rerun its stored command verbatim.
+ * 'resume' — resurrection after a bridge restart: derive the command via
+ *            deriveRelaunchCommand, refresh the runtime, and clear errorReason.
+ */
+export type RelaunchMode = 'retry' | 'resume';
+
+/**
+ * Relaunch an EXISTING session record — the one launch path shared by the
+ * retry_session RPC and bridge-restart resurrection. Unlike createFtownSession
+ * it mints no id, generates no name, injects no briefing, and creates no
+ * record: it flips the existing record back to running, respawns the process,
+ * and rewires the terminal. Mutates `session` in place and returns the
+ * launched command.
+ *
+ * The publish is deliberately unguarded (matching the pre-refactor call
+ * sites): retry surfaces publish failures as a command error response, and
+ * resurrection's caller marks the session dead.
+ */
+export async function relaunchFtownSession(
+  deps: CreateFtownSessionDeps,
+  session: Session,
+  mode: RelaunchMode,
+): Promise<string> {
+  const command = mode === 'retry' ? session.command : deriveRelaunchCommand(session).command;
+  if (!command) {
+    throw new Error('Session has no command to relaunch');
+  }
+
+  session.status = 'running';
+  session.bridgeId = deps.bridgeId;
+  if (mode === 'resume') {
+    session.runtime = deps.runner.getPreferredRuntime();
+    session.errorReason = undefined;
+  }
+  session.updatedAt = new Date().toISOString();
+  await deps.store.saveSession(session);
+  await deps.centrifugo.publishSessionUpdate(deps.userId, session);
+
+  deps.runner.run(session.id, command, {
+    workingDir: session.workingDir,
+    env: session.env,
+    hookPort: deps.hookPort,
+    hookToken: deps.hookToken,
+    parentSessionId: session.parentSessionId,
+  });
+
+  deps.wireTerminalInput(session.id);
+  if (mode === 'resume') {
+    registerSessionWorkspace(session.id, session.workingDir);
+  }
+
+  return command;
+}
+
 export async function createFtownSession(
   deps: CreateFtownSessionDeps,
   input: CreateFtownSessionInput,
@@ -369,21 +480,16 @@ export async function createFtownSession(
     submitSuffix = promptSubmitSuffix;
   }
 
-  // claude, cursor, and codex accept the initial prompt as a CLI argument —
-  // far more reliable than racing the composer TUI with delayed keystrokes.
-  // Typed injection remains for custom commands, resumes, and raw passthrough.
+  // Some harnesses accept the initial prompt as a CLI argument — far more
+  // reliable than racing the composer TUI with delayed keystrokes. The registry
+  // says which (and which resume field suppresses it); typed injection remains
+  // for custom commands, resumes, and raw passthrough.
   const shellTypeForPrompt = effectiveInput.shellType ?? 'claude';
-  const claudeCliCompatibleShell =
-    shellTypeForPrompt === 'claude'
-    || Object.prototype.hasOwnProperty.call(PROVIDER_RUNTIME_ENV, shellTypeForPrompt);
   const promptAsCliArg =
     initialInput !== undefined &&
     effectiveInput.initialInput === undefined &&
     !effectiveInput.command?.trim() &&
-    ((claudeCliCompatibleShell && !effectiveInput.claudeSessionId?.trim()) ||
-      (shellTypeForPrompt === 'cursor' && !effectiveInput.cursorSessionId?.trim()) ||
-      (shellTypeForPrompt === 'codex' && !effectiveInput.codexSessionId?.trim()) ||
-      shellTypeForPrompt === 'grok');
+    harnessAcceptsPromptAsCliArg(shellTypeForPrompt, effectiveInput);
 
   const launchCommand = promptAsCliArg
     ? buildSessionCommand({ ...effectiveInput, initialPrompt: initialInput })

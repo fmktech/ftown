@@ -1,7 +1,9 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { Session, SessionStatus } from "@/types";
+import type { Session } from "@/types";
+import { relativeTime } from "@/lib/relative-time";
+import { StatusDot } from "@/lib/StatusDot";
 import {
   factoryKey,
   factoryWorkerOf,
@@ -16,35 +18,6 @@ function repoBasename(repoRoot: string): string {
 
 function initial(factory: FactoryInfo): string {
   return factory.project.slice(0, 1).toUpperCase() || "?";
-}
-
-function formatRelative(timestamp: string): string {
-  const ms = new Date(timestamp).getTime();
-  if (Number.isNaN(ms)) return "unknown";
-  const diffMs = Date.now() - ms;
-  if (diffMs < 60000) return "just now";
-  const mins = Math.floor(diffMs / 60000);
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d ago`;
-  return new Date(ms).toLocaleDateString();
-}
-
-function statusDotClass(status: SessionStatus): string {
-  switch (status) {
-    case "running":
-      return "bg-green-500 animate-pulse";
-    case "pending":
-      return "bg-zinc-400";
-    case "completed":
-      return "bg-zinc-600";
-    case "error":
-      return "bg-red-500";
-    case "disconnected":
-      return "bg-amber-500";
-  }
 }
 
 function NewFactoryButton({ onCreateFactory }: { onCreateFactory: () => void }) {
@@ -112,11 +85,7 @@ function WorkerRow({
         if (!selected) e.currentTarget.style.background = "transparent";
       }}
     >
-      <span
-        aria-hidden="true"
-        className={`h-2 w-2 shrink-0 rounded-full ${statusDotClass(session.status)}`}
-        style={{ borderRadius: "50%", width: 6, height: 6, flexShrink: 0 }}
-      />
+      <StatusDot kind={session.status} />
       <span
         title={session.name}
         style={{
@@ -132,7 +101,7 @@ function WorkerRow({
         {session.name}
       </span>
       <span style={{ fontSize: 10, color: "var(--text-faint)", flexShrink: 0 }}>
-        {formatRelative(session.createdAt)}
+        {relativeTime(session.createdAt)}
       </span>
     </button>
   );
@@ -194,7 +163,7 @@ function WorkerSection({
   );
 }
 
-function HideFactoryButton({ onHide }: { onHide: () => void }) {
+function HideFactoryButton({ onHide, rowHovered }: { onHide: () => void; rowHovered: boolean }) {
   return (
     <button
       type="button"
@@ -218,14 +187,18 @@ function HideFactoryButton({ onHide }: { onHide: () => void }) {
         fontSize: 11,
         lineHeight: 1,
         flexShrink: 0,
+        opacity: rowHovered ? 1 : 0.4,
+        transition: "opacity 0.15s ease, color 0.15s ease, background 0.15s ease",
       }}
       onMouseEnter={(e) => {
         e.currentTarget.style.color = "var(--text-primary)";
         e.currentTarget.style.background = "var(--bg-hover)";
+        e.currentTarget.style.opacity = "1";
       }}
       onMouseLeave={(e) => {
         e.currentTarget.style.color = "var(--text-faint)";
         e.currentTarget.style.background = "transparent";
+        e.currentTarget.style.opacity = rowHovered ? "1" : "0.4";
       }}
     >
       ✕
@@ -431,8 +404,8 @@ export function FactoryList({
               >
                 {repoBasename(factory.repoRoot)}
               </span>
-              {onHideFactory && hovered && (
-                <HideFactoryButton onHide={() => onHideFactory(fKey)} />
+              {onHideFactory && (
+                <HideFactoryButton onHide={() => onHideFactory(fKey)} rowHovered={hovered} />
               )}
             </div>
           </div>

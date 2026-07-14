@@ -1,37 +1,9 @@
 "use client";
 
 import { useMemo } from "react";
-import type { SessionStatus } from "@/types";
+import { relativeTime } from "@/lib/relative-time";
+import { StatusDot } from "@/lib/StatusDot";
 import { workerSessionRe, type FactoryRunsProps, type WorkerRun } from "./types";
-
-function formatRelative(timestamp: string): string {
-  const ms = new Date(timestamp).getTime();
-  if (Number.isNaN(ms)) return "unknown";
-  const diffMs = Date.now() - ms;
-  if (diffMs < 60000) return "just now";
-  const mins = Math.floor(diffMs / 60000);
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d ago`;
-  return new Date(ms).toLocaleDateString();
-}
-
-function statusDotClass(status: SessionStatus): string {
-  switch (status) {
-    case "running":
-      return "bg-green-500 animate-pulse";
-    case "pending":
-      return "bg-zinc-400";
-    case "completed":
-      return "bg-zinc-600";
-    case "error":
-      return "bg-red-500";
-    case "disconnected":
-      return "bg-amber-500";
-  }
-}
 
 export function FactoryRuns({ factory, sessions, onOpenSession }: FactoryRunsProps) {
   const groups = useMemo(() => {
@@ -86,10 +58,7 @@ export function FactoryRuns({ factory, sessions, onOpenSession }: FactoryRunsPro
                 onClick={() => onOpenSession(session.id)}
                 className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-zinc-800/60"
               >
-                <span
-                  className={`h-2 w-2 shrink-0 rounded-full ${statusDotClass(session.status)}`}
-                  aria-hidden="true"
-                />
+                <StatusDot kind={session.status} />
                 <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-xs text-zinc-300">
                   {stage}
                 </span>
@@ -97,7 +66,7 @@ export function FactoryRuns({ factory, sessions, onOpenSession }: FactoryRunsPro
                   {session.name}
                 </span>
                 <span className="shrink-0 text-xs text-zinc-500">
-                  {formatRelative(session.createdAt)}
+                  {relativeTime(session.createdAt)}
                 </span>
               </button>
             ))}
