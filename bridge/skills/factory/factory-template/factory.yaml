@@ -1,0 +1,36 @@
+# Factory definition — checked into the project repo. Runtime state lives in
+# .ffactory/ (gitignored). Copied from ffactory/factory-template by `factory init`.
+
+project: my-project            # used to namespace ftown loops and worker names
+operator_session: "-"          # ftown session id for digests/worker mail; "-" = none
+
+limits:
+  max_sessions: 6              # global concurrent worker cap for this factory
+  bounce_limit: 3              # rejections before auto dead-letter (fts config)
+  claim_ttl_ms: 1800000        # default claim TTL (30m); stages may override
+  max_ticket_age_h: 48         # dispatcher dead-letters tickets older than this
+  dispatch_every: 30s          # dispatcher loop interval (skip-overlap)
+
+# Harness per stage: claude | codex | cursor | zai | kimi | deepseek | fireworks
+# next: where advance() sends the ticket on success (- = terminal)
+# bounce: where reject() sends it (- = rejection not allowed)
+stages:
+  - { name: groom,     harness: claude, model: sonnet, max_workers: 1, next: design,    bounce: "-" }
+  - { name: design,    harness: claude, model: opus,   max_workers: 1, next: implement, bounce: groom }
+  - { name: implement, harness: codex,                 max_workers: 3, next: review,    bounce: design,    claim_ttl_ms: 2700000 }
+  - { name: review,    harness: claude, model: opus,   max_workers: 2, next: qa,        bounce: implement }
+  - { name: qa,        harness: claude, model: sonnet, max_workers: 1, next: pr,        bounce: implement }
+  - { name: pr,        harness: claude, model: sonnet, max_workers: 1, next: "-",         bounce: implement, allow_push: true }
+
+resources:                     # shared surfaces workers must lease before touching
+  - { name: staging, mode_policy: exclusive_only }
+
+triage:
+  every: 10m                   # interval sweep; preflight skips (no session) when idle
+  harness: claude
+  model: sonnet
+
+digest:
+  cron: "0 9 * * *"            # daily shift report mailed to operator_session
+  harness: claude
+  model: sonnet

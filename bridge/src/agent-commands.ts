@@ -130,11 +130,14 @@ export function buildSessionCommand(input: BuildSessionCommandInput): string {
       initialPrompt: input.initialPrompt,
     });
   }
+  const parts = ['claude', '--allow-dangerously-skip-permissions'];
+  if (input.model?.trim()) {
+    parts.push('--model', shellQuote(input.model.trim()));
+  }
   if (input.claudeSessionId?.trim()) {
-    return `claude --allow-dangerously-skip-permissions --resume ${shellQuote(input.claudeSessionId.trim())}`;
+    parts.push('--resume', shellQuote(input.claudeSessionId.trim()));
+  } else if (input.initialPrompt?.trim()) {
+    parts.push(shellQuote(input.initialPrompt));
   }
-  if (input.initialPrompt?.trim()) {
-    return `claude --allow-dangerously-skip-permissions ${shellQuote(input.initialPrompt)}`;
-  }
-  return 'claude --allow-dangerously-skip-permissions';
+  return parts.join(' ');
 }

@@ -16,6 +16,12 @@ import { Terminal, TerminalHandle } from "./Terminal";
 import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
 import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
 import { LoopFormModal } from "./LoopFormModal";
+import { FactoryList } from "./factory/FactoryList";
+import { FactoryPane } from "./factory/FactoryPane";
+import { NewFactoryModal } from "./factory/NewFactoryModal";
+import { deriveFactories } from "./factory/useFactory";
+import type { FactoryInfo, NewFactoryInput } from "./factory/types";
+import { factoryInitPrompt, factoryKey, factoryWorkerOf } from "./factory/types";
 import { ConnectionDiagnostics } from "./ConnectionDiagnostics";
 import { mergeBridgeOrder } from "@/lib/bridge-order";
 
@@ -58,11 +64,13 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [showNewSession, setShowNewSession] = useState(false);
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
   const [showLoopForm, setShowLoopForm] = useState(false);
+  const [showNewFactory, setShowNewFactory] = useState(false);
   const [editingLoop, setEditingLoop] = useState<Loop | null>(null);
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
   const [mobileTab, setMobileTab] = useState<"sessions" | "terminal">("sessions");
-  const [sidebarTab, setSidebarTab] = useState<"sessions" | "crons">("sessions");
+  const [sidebarTab, setSidebarTab] = useState<"sessions" | "crons" | "factory">("sessions");
+  const [selectedFactoryKey, setSelectedFactoryKey] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sessionOrder, setSessionOrder] = useState<string[]>([]);
   const [bridgeOrder, setBridgeOrder] = useState<string[]>([]);
@@ -91,7 +99,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   useEffect(() => {
     setSidebarCollapsed(localStorage.getItem("ftown:sidebarCollapsed") === "true");
     const savedSidebarTab = localStorage.getItem("ftown:sidebarTab");
-    if (savedSidebarTab === "sessions" || savedSidebarTab === "crons") setSidebarTab(savedSidebarTab);
+    if (savedSidebarTab === "sessions" || savedSidebarTab === "crons" || savedSidebarTab === "factory") setSidebarTab(savedSidebarTab);
     try {
       setSessionOrder(JSON.parse(localStorage.getItem("ftown:sessionOrder") ?? "[]"));
     } catch { /* ignore */ }
@@ -252,6 +260,11 @@ PY`;
 
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
   const selectedLoop = selectedLoopId ? loops.find((loop) => loop.id === selectedLoopId) ?? null : null;
+  const factories = useMemo(() => deriveFactories(loops), [loops]);
+  const selectedFactory = useMemo(
+    () => (selectedFactoryKey ? factories.find((f) => factoryKey(f) === selectedFactoryKey) ?? null : null),
+    [factories, selectedFactoryKey]
+  );
 
   // Mirrors the run-selection fallback in LoopDetailPane so the two stay in sync.
   const selectedLoopRun = useMemo(
@@ -267,7 +280,13 @@ PY`;
   // Loop-run sessions are represented through LoopRunRecord in the loop detail
   // pane, so they no longer appear as top-level sidebar sessions.
   const normalSessions = useMemo(() => sessions.filter((s) => !s.loopId), [sessions]);
-  const cronLoopCount = useMemo(() => loops.length, [loops]);
+  // Factory worker sessions are nested under their factory in the Factory tab
+  // instead of appearing as top-level sidebar sessions.
+  const nonFactorySessions = useMemo(
+    () => normalSessions.filter((s) => factoryWorkerOf(s, factories) === null),
+    [normalSessions, factories]
+  );
+  const loopCount = loops.length;
 
   useEffect(() => {
     if (!selectedLoop) {
@@ -441,6 +460,7 @@ PY`;
     if (id) {
       setSelectedLoopId(null);
       setSelectedLoopRunId(null);
+      setSelectedFactoryKey(null);
       setSidebarTab("sessions");
       setMobileTab("terminal");
     }
@@ -449,11 +469,30 @@ PY`;
   const handleSelectLoop = useCallback((loopId: string) => {
     setSelectedLoopId(loopId);
     setSelectedSessionId(null);
+    setSelectedFactoryKey(null);
     setSidebarTab("crons");
     setMobileTab("terminal");
   }, []);
 
-  const handleSidebarTabSwitch = useCallback((tab: "sessions" | "crons") => {
+  const handleSelectFactory = useCallback((factory: FactoryInfo) => {
+    setSelectedFactoryKey(factoryKey(factory));
+    setSelectedSessionId(null);
+    setSelectedLoopId(null);
+    setSelectedLoopRunId(null);
+    setMobileTab("terminal");
+  }, []);
+
+  // Like handleSelectSession, but stays on the Factory sidebar tab — opening a
+  // worker from the factory view shows its terminal without leaving the view.
+  const handleOpenFactorySession = useCallback((id: string) => {
+    setSelectedFactoryKey(null);
+    setSelectedSessionId(id);
+    setSelectedLoopId(null);
+    setSelectedLoopRunId(null);
+    setMobileTab("terminal");
+  }, []);
+
+  const handleSidebarTabSwitch = useCallback((tab: "sessions" | "crons" | "factory") => {
     setSidebarTab(tab);
     try {
       localStorage.setItem("ftown:sidebarTab", tab);
@@ -502,6 +541,21 @@ PY`;
       }
     },
     [editingLoop, updateLoop, createLoop]
+  );
+
+  const handleCreateFactory = useCallback(
+    async (input: NewFactoryInput): Promise<void> => {
+      await createSession(factoryInitPrompt(input), {
+        bridgeId: input.bridgeId,
+        workingDir: input.repoPath,
+        shellType: input.harness,
+        model: input.model,
+        name: `factory-init-${input.project}`,
+      });
+      setShowNewFactory(false);
+      handleSidebarTabSwitch("sessions");
+    },
+    [createSession, handleSidebarTabSwitch]
   );
 
   const handleRunLoopNow = useCallback(
@@ -999,8 +1053,8 @@ PY`;
                 <button
                   role="tab"
                   aria-selected={sidebarTab === "sessions"}
-                  aria-label={`Sessions (${normalSessions.length})`}
-                  title={`Sessions (${normalSessions.length})`}
+                  aria-label={`Sessions (${nonFactorySessions.length})`}
+                  title={`Sessions (${nonFactorySessions.length})`}
                   onClick={() => handleSidebarTabSwitch("sessions")}
                   className={`sidebar-tab-icon ${sidebarTab === "sessions" ? "sidebar-tab-active" : ""}`}
                 >
@@ -1009,13 +1063,25 @@ PY`;
                 <button
                   role="tab"
                   aria-selected={sidebarTab === "crons"}
-                  aria-label={`Crons (${cronLoopCount})`}
-                  title={`Crons (${cronLoopCount})`}
+                  aria-label={`Crons (${loopCount})`}
+                  title={`Crons (${loopCount})`}
                   onClick={() => handleSidebarTabSwitch("crons")}
                   className={`sidebar-tab-icon ${sidebarTab === "crons" ? "sidebar-tab-active" : ""}`}
                 >
                   ◷
                 </button>
+                {(factories.length > 0 || sidebarTab === "factory") && (
+                  <button
+                    role="tab"
+                    aria-selected={sidebarTab === "factory"}
+                    aria-label={`Factory (${factories.length})`}
+                    title={`Factory (${factories.length})`}
+                    onClick={() => handleSidebarTabSwitch("factory")}
+                    className={`sidebar-tab-icon ${sidebarTab === "factory" ? "sidebar-tab-active" : ""}`}
+                  >
+                    ▦
+                  </button>
+                )}
               </div>
             ) : (
               <div
@@ -1029,7 +1095,7 @@ PY`;
                   onClick={() => handleSidebarTabSwitch("sessions")}
                   className={`sidebar-tab ${sidebarTab === "sessions" ? "sidebar-tab-active" : ""}`}
                 >
-                  Sessions <span className="sidebar-tab-count">{normalSessions.length}</span>
+                  Sessions <span className="sidebar-tab-count">{nonFactorySessions.length}</span>
                 </button>
                 <button
                   role="tab"
@@ -1037,11 +1103,32 @@ PY`;
                   onClick={() => handleSidebarTabSwitch("crons")}
                   className={`sidebar-tab ${sidebarTab === "crons" ? "sidebar-tab-active" : ""}`}
                 >
-                  Crons <span className="sidebar-tab-count">{cronLoopCount}</span>
+                  Crons <span className="sidebar-tab-count">{loopCount}</span>
                 </button>
+                {(factories.length > 0 || sidebarTab === "factory") && (
+                  <button
+                    role="tab"
+                    aria-selected={sidebarTab === "factory"}
+                    onClick={() => handleSidebarTabSwitch("factory")}
+                    className={`sidebar-tab ${sidebarTab === "factory" ? "sidebar-tab-active" : ""}`}
+                  >
+                    Factory <span className="sidebar-tab-count">{factories.length}</span>
+                  </button>
+                )}
               </div>
             )}
-            {sidebarTab === "crons" ? (
+            {sidebarTab === "factory" ? (
+              <FactoryList
+                factories={factories}
+                selectedKey={selectedFactoryKey}
+                onSelect={handleSelectFactory}
+                collapsed={isDesktop && sidebarCollapsed}
+                onCreateFactory={() => setShowNewFactory(true)}
+                sessions={normalSessions}
+                onOpenSession={handleOpenFactorySession}
+                selectedSessionId={selectedSessionId}
+              />
+            ) : sidebarTab === "crons" ? (
               <LoopList
                 loops={loops}
                 bridges={bridges}
@@ -1055,7 +1142,7 @@ PY`;
               />
             ) : (
               <SessionList
-                sessions={normalSessions}
+                sessions={nonFactorySessions}
                 bridges={bridges}
                 bridgeOrder={bridgeOrder}
                 selectedSessionId={selectedSessionId}
@@ -1082,7 +1169,15 @@ PY`;
 
         {/* Terminal area */}
         <main className={`flex-1 flex-col min-h-0 min-w-0 ${mobileTab === "terminal" ? "flex" : "hidden"} md:flex`}>
-          {selectedLoop ? (
+          {selectedFactory ? (
+            <FactoryPane
+              key={selectedFactoryKey}
+              factory={selectedFactory}
+              bridgeExec={bridgeExec}
+              sessions={normalSessions}
+              onOpenSession={handleOpenFactorySession}
+            />
+          ) : selectedLoop ? (
             <LoopDetailPane
               loop={selectedLoop}
               runs={selectedLoopRuns}
@@ -1114,7 +1209,7 @@ PY`;
               onInterrupt={handleTerminalInterrupt}
             />
           )}
-          {selectedSessionId && !selectedLoop && (
+          {selectedSessionId && !selectedLoop && !selectedFactory && (
             <MobileControlBar ref={mobileControlRef} onSendInput={(data) => terminalRef.current?.sendInput(data)} />
           )}
         </main>
@@ -1137,6 +1232,14 @@ PY`;
         bridges={bridges}
         editingLoop={editingLoop}
       />
+
+      {showNewFactory && (
+        <NewFactoryModal
+          bridges={bridges.map((b) => ({ bridgeId: b.bridgeId, label: b.hostname }))}
+          onSubmit={handleCreateFactory}
+          onClose={() => setShowNewFactory(false)}
+        />
+      )}
 
       <ConnectionDiagnostics
         connectionStatus={connectionStatus}

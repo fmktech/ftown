@@ -75,22 +75,38 @@ if not os.path.isdir(root):
     print("[]")
     raise SystemExit(0)
 results = []
-for store in glob.glob(os.path.join(root, "*/store.db")):
-    chat_id = os.path.basename(os.path.dirname(store))
+for d in glob.glob(os.path.join(root, "*/")):
+    chat_id = os.path.basename(os.path.dirname(d))
     ts, summary = "", ""
+    meta_json = None
     try:
-        conn = sqlite3.connect(store)
-        row = conn.execute("SELECT value FROM meta WHERE key = '0'").fetchone()
-        conn.close()
-        if row and row[0]:
-            raw = row[0]
-            if isinstance(raw, str) and all(c in "0123456789abcdef" for c in raw[:32].lower()):
-                raw = bytes.fromhex(raw).decode("utf-8")
-            meta = json.loads(raw) if isinstance(raw, str) else {}
-            summary = (meta.get("name") or "").strip()
-            ts = str(meta.get("createdAt") or meta.get("updatedAt") or "")
+        with open(os.path.join(d, "meta.json")) as f:
+            meta_json = json.load(f)
     except Exception:
-        pass
+        meta_json = None
+    if meta_json is not None and meta_json.get("hasConversation") is False:
+        continue
+    if meta_json is not None:
+        summary = (meta_json.get("title") or "").strip()
+        ts = str(meta_json.get("updatedAtMs") or meta_json.get("createdAtMs") or "")
+    if not summary:
+        store = os.path.join(d, "store.db")
+        try:
+            conn = sqlite3.connect(store)
+            row = conn.execute("SELECT value FROM meta WHERE key = '0'").fetchone()
+            conn.close()
+            if row and row[0]:
+                raw = row[0]
+                if isinstance(raw, str) and all(c in "0123456789abcdef" for c in raw[:32].lower()):
+                    raw = bytes.fromhex(raw).decode("utf-8")
+                sqlite_meta = json.loads(raw) if isinstance(raw, str) else {}
+                summary = (sqlite_meta.get("name") or "").strip()
+                if not ts:
+                    ts = str(sqlite_meta.get("createdAt") or sqlite_meta.get("updatedAt") or "")
+        except Exception:
+            pass
+    if summary in ("Agent", "New Agent"):
+        summary = ""
     results.append((chat_id, ts, summary))
 results.sort(key=lambda x: x[1], reverse=True)
 for sid, ts, summary in results[:20]:
