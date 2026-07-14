@@ -1,3 +1,4 @@
+import { LOOP_HARNESS_TYPES } from './harness-registry.js';
 import { computeNextRun } from './loop-schedule.js';
 
 import type { LoopDraft, LoopSchedule } from './types.js';
@@ -8,14 +9,8 @@ import type { LoopDraft, LoopSchedule } from './types.js';
  * Every validator returns an error string, or null when the input is valid.
  */
 
-export const LOOP_HARNESSES: ReadonlySet<string> = new Set([
-  'claude',
-  'cursor',
-  'codex',
-  'grok',
-  'opencode',
-  'shell',
-]);
+/** Derived from the harness registry — the harnesses with validForLoop. */
+export const LOOP_HARNESSES: ReadonlySet<string> = new Set(LOOP_HARNESS_TYPES);
 
 /** Validate a loop schedule (interval floor + cron parseability). */
 export function validateSchedule(schedule: LoopSchedule | undefined): string | null {

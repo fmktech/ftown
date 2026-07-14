@@ -9,6 +9,7 @@ import type { MailStore } from './mail-store.js';
 import { createMailMessage } from './mail-store.js';
 import type { Loop, LoopDraft, MailMessage, Session, ShellType } from './types.js';
 import { buildSessionCommand } from './agent-commands.js';
+import { HOOKED_SHELL_TYPES } from './harness-registry.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { TerminalManager } from './terminal-manager.js';
@@ -147,9 +148,6 @@ const MAIL_NUDGE_DELAY_MS = 5_000;
 // pump; the nudge is only a safety net for them, so wait much longer before
 // typing into their pane — fast nudges race the pump and queue stale prompts.
 const MAIL_NUDGE_DELAY_HOOKED_MS = 60_000;
-const HOOKED_SHELL_TYPES: ReadonlySet<string> = new Set([
-  'claude', 'codex', 'zai', 'kimi', 'deepseek', 'fireworks',
-]);
 const MAIL_NUDGE_MIN_INTERVAL_MS = 30_000;
 // While an agent is mid-turn its Stop hook pump delivers mail at turn end, so
 // nudging would only queue a stale prompt; re-check periodically in case the

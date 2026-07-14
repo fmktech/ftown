@@ -1,86 +1,16 @@
+import { HARNESSES } from './harness-registry.js';
+
+import type { HarnessSpec } from './harness-registry.js';
 import type { ShellType } from './types.js';
 
-/** Shell-escape a value for use inside zsh -c '...' */
-export function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-export function buildCursorAgentCommand(options: {
-  workingDir?: string;
-  model?: string;
-  cursorSessionId?: string;
-  initialPrompt?: string;
-}): string {
-  const parts = ['agent', '--force'];
-
-  if (options.workingDir?.trim()) {
-    parts.push('--workspace', shellQuote(options.workingDir.trim()));
-  }
-
-  if (options.model?.trim()) {
-    parts.push('--model', shellQuote(options.model.trim()));
-  }
-
-  if (options.cursorSessionId?.trim()) {
-    parts.push('--resume', shellQuote(options.cursorSessionId.trim()));
-  }
-
-  if (options.initialPrompt?.trim()) {
-    parts.push(shellQuote(options.initialPrompt));
-  }
-
-  return parts.join(' ');
-}
-
-export function buildCodexCommand(options: {
-  model?: string;
-  codexSessionId?: string;
-  initialPrompt?: string;
-}): string {
-  // --dangerously-bypass-hook-trust silences the interactive hook-trust review
-  // for our installed ~/.codex/hooks.json entries (harmless warning banner).
-  const parts = [
-    'codex',
-    '--dangerously-bypass-approvals-and-sandbox',
-    '--dangerously-bypass-hook-trust',
-  ];
-
-  if (options.codexSessionId?.trim()) {
-    // Resume must not replay the original prompt — codex restores the thread.
-    parts.push('resume', shellQuote(options.codexSessionId.trim()));
-    return parts.join(' ');
-  }
-
-  if (options.model?.trim()) {
-    parts.push('-m', shellQuote(options.model.trim()));
-  }
-
-  if (options.initialPrompt?.trim()) {
-    // The positional prompt is auto-submitted by the codex TUI.
-    parts.push(shellQuote(options.initialPrompt));
-  }
-
-  return parts.join(' ');
-}
-
-export function buildGrokCommand(options: {
-  model?: string;
-  initialPrompt?: string;
-}): string {
-  // --always-approve auto-approves all tool executions for unattended runs.
-  const parts = ['grok', '--always-approve'];
-
-  if (options.model?.trim()) {
-    parts.push('-m', shellQuote(options.model.trim()));
-  }
-
-  if (options.initialPrompt?.trim()) {
-    // The positional prompt is auto-submitted by the grok TUI.
-    parts.push(shellQuote(options.initialPrompt));
-  }
-
-  return parts.join(' ');
-}
+// The per-harness builders live in the registry; re-exported here so existing
+// importers (and tests) keep their import paths.
+export {
+  shellQuote,
+  buildCursorAgentCommand,
+  buildCodexCommand,
+  buildGrokCommand,
+} from './harness-registry.js';
 
 export interface BuildSessionCommandInput {
   shellType?: ShellType;
@@ -100,44 +30,8 @@ export function buildSessionCommand(input: BuildSessionCommandInput): string {
   }
 
   const shellType = input.shellType ?? 'claude';
-
-  if (shellType === 'shell') {
-    return '/bin/zsh -l';
-  }
-  if (shellType === 'opencode') {
-    return 'opencode';
-  }
-  if (shellType === 'cursor') {
-    return buildCursorAgentCommand({
-      workingDir: input.workingDir,
-      model: input.model,
-      cursorSessionId: input.cursorSessionId,
-      initialPrompt: input.initialPrompt,
-    });
-  }
-  if (shellType === 'codex') {
-    // Workdir comes from the runner cwd — codex needs no -C flag.
-    return buildCodexCommand({
-      model: input.model,
-      codexSessionId: input.codexSessionId,
-      initialPrompt: input.initialPrompt,
-    });
-  }
-  if (shellType === 'grok') {
-    // Workdir comes from the runner cwd — grok inherits process cwd, no --cwd.
-    return buildGrokCommand({
-      model: input.model,
-      initialPrompt: input.initialPrompt,
-    });
-  }
-  const parts = ['claude', '--allow-dangerously-skip-permissions'];
-  if (input.model?.trim()) {
-    parts.push('--model', shellQuote(input.model.trim()));
-  }
-  if (input.claudeSessionId?.trim()) {
-    parts.push('--resume', shellQuote(input.claudeSessionId.trim()));
-  } else if (input.initialPrompt?.trim()) {
-    parts.push(shellQuote(input.initialPrompt));
-  }
-  return parts.join(' ');
+  // Runtime shellType may come from unvalidated JSON — unknown values fall back
+  // to the claude launch, exactly like the old if/else chain's final branch.
+  const spec: HarnessSpec = (HARNESSES as Record<string, HarnessSpec>)[shellType] ?? HARNESSES.claude;
+  return spec.buildCommand(input);
 }

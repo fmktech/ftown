@@ -4,6 +4,7 @@ import { basename, resolve } from 'node:path';
 
 import { buildSessionCommand } from './agent-commands.js';
 import { ensureCodexWorkdirTrust } from './codex-installer.js';
+import { harnessAcceptsPromptAsCliArg } from './harness-registry.js';
 import { PROVIDER_AUTH_ENV, PROVIDER_RUNTIME_ENV, loadProviderEnv } from './provider-env-store.js';
 import { registerSessionWorkspace } from './session-registry.js';
 
@@ -369,21 +370,16 @@ export async function createFtownSession(
     submitSuffix = promptSubmitSuffix;
   }
 
-  // claude, cursor, and codex accept the initial prompt as a CLI argument —
-  // far more reliable than racing the composer TUI with delayed keystrokes.
-  // Typed injection remains for custom commands, resumes, and raw passthrough.
+  // Some harnesses accept the initial prompt as a CLI argument — far more
+  // reliable than racing the composer TUI with delayed keystrokes. The registry
+  // says which (and which resume field suppresses it); typed injection remains
+  // for custom commands, resumes, and raw passthrough.
   const shellTypeForPrompt = effectiveInput.shellType ?? 'claude';
-  const claudeCliCompatibleShell =
-    shellTypeForPrompt === 'claude'
-    || Object.prototype.hasOwnProperty.call(PROVIDER_RUNTIME_ENV, shellTypeForPrompt);
   const promptAsCliArg =
     initialInput !== undefined &&
     effectiveInput.initialInput === undefined &&
     !effectiveInput.command?.trim() &&
-    ((claudeCliCompatibleShell && !effectiveInput.claudeSessionId?.trim()) ||
-      (shellTypeForPrompt === 'cursor' && !effectiveInput.cursorSessionId?.trim()) ||
-      (shellTypeForPrompt === 'codex' && !effectiveInput.codexSessionId?.trim()) ||
-      shellTypeForPrompt === 'grok');
+    harnessAcceptsPromptAsCliArg(shellTypeForPrompt, effectiveInput);
 
   const launchCommand = promptAsCliArg
     ? buildSessionCommand({ ...effectiveInput, initialPrompt: initialInput })

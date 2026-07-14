@@ -54,7 +54,11 @@ export type WorkflowEvent =
 
 // ---- Spawn + result wire types ----
 
-export type WorkflowShell = 'claude' | 'cursor' | 'codex' | 'opencode' | 'shell';
+// Derived from the harness registry (keys with validForWorkflow). Type-only
+// re-export: this module is sibling-copied into ~/.ftown, so it must not gain
+// a runtime import of harness-registry.js — types are erased at compile time.
+export type { WorkflowShell } from './harness-registry.js';
+import type { WorkflowShell } from './harness-registry.js';
 
 /** What the engine asks BridgeClient to create. */
 export interface SpawnSpec {
