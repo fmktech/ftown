@@ -11,9 +11,8 @@ import { MailDeliveryService, sanitizeMessageText } from './mail-delivery.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { TerminalManager } from './terminal-manager.js';
-import { createLoop, deleteLoop, getLoop, listLoops, mutateLoopRuntime, updateLoop } from './loop-store.js';
-import { deleteLoopRunRecords, listLoopRunRecordsWithFallback } from './loop-run-store.js';
-import { validateLoopDraft, validateLoopPatch } from './loop-validation.js';
+import { LoopController } from './loop-controller.js';
+import { SessionController } from './session-controller.js';
 import {
   registerSessionConversation,
   resolveSessionIdByConversation,
@@ -159,6 +158,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private userId: string = '';
   private authToken: string = '';
   private port: number = 0;
+  private loopController: LoopController | null = null;
+  private sessionController: SessionController | null = null;
 
   setAuthToken(token: string): void {
     this.authToken = token;
@@ -182,14 +183,61 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     this.terminalManager = terminalManager ?? null;
     this.mail.setStore(store);
     this.mail.setRunner(runner);
+    this.invalidateControllers();
   }
 
   setSessionFactory(deps: CreateFtownSessionDeps): void {
     this.sessionDeps = deps;
+    this.invalidateControllers();
   }
 
   setLoopApi(deps: LoopApiDeps): void {
     this.loopApi = deps;
+    this.invalidateControllers();
+  }
+
+  /** Controllers are lazy snapshots of the injected deps; rebuild on re-wiring. */
+  private invalidateControllers(): void {
+    this.loopController = null;
+    this.sessionController = null;
+  }
+
+  /**
+   * Transport-agnostic loop operations (shared with the Centrifugo RPC switch
+   * in index.ts). Null until setDependencies + setLoopApi have both run —
+   * index.ts wires them in one synchronous block, so no request can observe a
+   * half-wired server.
+   */
+  private getLoopController(): LoopController | null {
+    if (this.loopController) return this.loopController;
+    const { store, runner, centrifugo, userId, loopApi } = this;
+    if (!store || !runner || !centrifugo || !userId || !loopApi) return null;
+    this.loopController = new LoopController({
+      bridgeId: loopApi.bridgeId,
+      scheduler: loopApi.scheduler,
+      isSessionRunning: (sid) => runner.isRunning(sid),
+      publishLoopUpdate: (loop) => centrifugo.publishLoopUpdate(userId, loop),
+      publishLoopRemoved: (loopId) => centrifugo.publishLoopRemoved(userId, loopId),
+      listWireSessions: async () => (await store.listSessions()).map(toWireSession),
+      loadTerminalLog: (sid) => store.loadTerminalLog(sid),
+    });
+    return this.loopController;
+  }
+
+  /** Transport-agnostic session operations (shared with the RPC switch). */
+  private getSessionController(): SessionController | null {
+    if (this.sessionController) return this.sessionController;
+    const { store, runner, centrifugo, userId } = this;
+    if (!store || !runner || !centrifugo || !userId) return null;
+    this.sessionController = new SessionController({
+      store,
+      runner,
+      publishSessionUpdate: (session) => centrifugo.publishSessionUpdate(userId, session),
+      removeSession: (id, options) =>
+        removeFtownSession({ store, runner, centrifugo, userId }, id, options),
+      ...(this.sessionDeps ? { sessionFactory: this.sessionDeps } : {}),
+    });
+    return this.sessionController;
   }
 
   async start(): Promise<number> {
@@ -291,7 +339,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
 
     // GET /api/sessions
     if (path === '/api/sessions' && req.method === 'GET') {
-      const sessions = await this.store.listSessions();
+      const sessions = await (this.getSessionController()?.list() ?? this.store.listSessions());
       jsonResponse(res, 200, { sessions: sessions.map(toWireSession) });
       return;
     }
@@ -327,8 +375,14 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         return;
       }
 
+      const controller = this.getSessionController();
+      if (!controller) {
+        jsonResponse(res, 503, { error: 'Session factory not ready' });
+        return;
+      }
+
       try {
-        const session = await createFtownSession(this.sessionDeps, input);
+        const session = await controller.create(input);
         jsonResponse(res, 201, { session: toWireSession(session) });
       } catch (err) {
         if (err instanceof ProviderAuthMissingError) {
@@ -378,170 +432,90 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return;
     }
 
-    // GET /api/loops — local CLI/skill parity with list_loops RPC.
-    if (path === '/api/loops' && req.method === 'GET') {
-      jsonResponse(res, 200, { loops: listLoops() });
-      return;
-    }
-
-    // POST /api/loops — create a loop owned by this bridge.
-    if (path === '/api/loops' && req.method === 'POST') {
-      if (!this.loopApi || !this.centrifugo || !this.userId) {
-        jsonResponse(res, 503, { error: 'Loop API not ready' });
-        return;
-      }
-
-      const body = await parseBody(req);
-      const payload = { ...body, bridgeId: this.loopApi.bridgeId } as Partial<LoopDraft>;
-      const error = validateLoopDraft(payload);
-      if (error) {
-        jsonResponse(res, 400, { error });
-        return;
-      }
-
-      const draft: LoopDraft = {
-        name: payload.name!.trim(),
-        bridgeId: this.loopApi.bridgeId,
-        schedule: payload.schedule!,
-        harness: payload.harness!,
-        workdir: payload.workdir,
-        task: payload.task!,
-        model: payload.model,
-        enabled: payload.enabled!,
-        overlapPolicy: payload.overlapPolicy!,
-        retention: payload.retention!,
-        preflight: payload.preflight,
-        postflight: payload.postflight,
-        maxRuntimeMs: payload.maxRuntimeMs,
-        group: payload.group,
-      };
-
-      try {
-        const loop = createLoop(draft);
-        await this.centrifugo.publishLoopUpdate(this.userId, loop);
-        jsonResponse(res, 201, { loop });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        jsonResponse(res, 400, { error: message });
-      }
-      return;
-    }
-
     const loopMatch = path.match(/^\/api\/loops\/([^/]+)$/);
     const loopRunNowMatch = path.match(/^\/api\/loops\/([^/]+)\/run-now$/);
     const loopRunsMatch = path.match(/^\/api\/loops\/([^/]+)\/runs$/);
+    const isLoopRoute =
+      path === '/api/loops' || Boolean(loopMatch) || Boolean(loopRunNowMatch) || Boolean(loopRunsMatch);
 
-    // GET /api/loops/:id
-    if (loopMatch && req.method === 'GET') {
-      const loop = getLoop(loopMatch[1]);
-      if (!loop) {
-        jsonResponse(res, 404, { error: 'Loop not found' });
-        return;
-      }
-      jsonResponse(res, 200, { loop });
-      return;
-    }
-
-    // PATCH /api/loops/:id
-    if (loopMatch && req.method === 'PATCH') {
-      if (!this.centrifugo || !this.userId) {
+    if (isLoopRoute) {
+      const loops = this.getLoopController();
+      if (!loops) {
         jsonResponse(res, 503, { error: 'Loop API not ready' });
         return;
       }
 
-      const loopId = loopMatch[1];
-      const body = await parseBody(req);
-      const patch = body as Partial<LoopDraft>;
-      const error = validateLoopPatch(patch);
-      if (error) {
-        jsonResponse(res, 400, { error });
+      // GET /api/loops — local CLI/skill parity with list_loops RPC.
+      if (path === '/api/loops' && req.method === 'GET') {
+        jsonResponse(res, 200, { loops: loops.list() });
         return;
       }
 
-      try {
-        const loop = updateLoop(loopId, patch);
-        if (!loop) {
-          jsonResponse(res, 404, { error: 'Loop not found' });
+      // POST /api/loops — create a loop owned by this bridge.
+      if (path === '/api/loops' && req.method === 'POST') {
+        const body = await parseBody(req);
+        const result = await loops.create(body as Partial<LoopDraft>);
+        if (!result.ok) {
+          jsonResponse(res, 400, { error: result.message });
           return;
         }
-        await this.centrifugo.publishLoopUpdate(this.userId, loop);
-        jsonResponse(res, 200, { loop });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        jsonResponse(res, 400, { error: message });
-      }
-      return;
-    }
-
-    // DELETE /api/loops/:id
-    if (loopMatch && req.method === 'DELETE') {
-      if (!this.loopApi || !this.centrifugo || !this.userId) {
-        jsonResponse(res, 503, { error: 'Loop API not ready' });
+        jsonResponse(res, 201, { loop: result.loop });
         return;
       }
 
-      const loopId = loopMatch[1];
-      const existingLoop = getLoop(loopId);
-      const removed = deleteLoop(loopId);
-      if (removed) {
-        if (existingLoop) this.loopApi.scheduler.onLoopDeleted(existingLoop);
-        deleteLoopRunRecords(loopId);
-        await this.centrifugo.publishLoopRemoved(this.userId, loopId);
-      }
-      jsonResponse(res, 200, { removed, loopId });
-      return;
-    }
-
-    // POST /api/loops/:id/run-now
-    if (loopRunNowMatch && req.method === 'POST') {
-      if (!this.loopApi || !this.runner || !this.centrifugo || !this.userId) {
-        jsonResponse(res, 503, { error: 'Loop API not ready' });
+      // GET /api/loops/:id
+      if (loopMatch && req.method === 'GET') {
+        const result = loops.get(loopMatch[1]);
+        if (!result.ok) {
+          jsonResponse(res, 404, { error: result.message });
+          return;
+        }
+        jsonResponse(res, 200, { loop: result.loop });
         return;
       }
 
-      const loopId = loopRunNowMatch[1];
-      const loop = getLoop(loopId);
-      if (!loop) {
-        jsonResponse(res, 404, { error: 'Loop not found', fired: false, reason: 'not_found' });
-        return;
-      }
-      if (
-        loop.overlapPolicy === 'skip' &&
-        loop.lastStatus === 'running' &&
-        loop.lastSessionId &&
-        this.runner.isRunning(loop.lastSessionId)
-      ) {
-        jsonResponse(res, 200, { fired: false, reason: 'overlap' });
+      // PATCH /api/loops/:id
+      if (loopMatch && req.method === 'PATCH') {
+        const body = await parseBody(req);
+        const result = await loops.update(loopMatch[1], body as Partial<LoopDraft>);
+        if (!result.ok) {
+          jsonResponse(res, result.code === 'not_found' ? 404 : 400, { error: result.message });
+          return;
+        }
+        jsonResponse(res, 200, { loop: result.loop });
         return;
       }
 
-      // Reload-check-write via mutateLoopRuntime: if the loop was deleted
-      // between the getLoop() above and this write, this returns null and
-      // nothing is written/published — a stale in-memory snapshot must never
-      // be upserted back, or a deleted loop resurrects.
-      const updated = mutateLoopRuntime(loopId, (l) => {
-        l.runNowRequested = true;
-        l.updatedAt = new Date().toISOString();
-      });
-      if (!updated) {
-        jsonResponse(res, 404, { error: 'Loop not found', fired: false, reason: 'not_found' });
+      // DELETE /api/loops/:id
+      if (loopMatch && req.method === 'DELETE') {
+        const loopId = loopMatch[1];
+        const { removed } = await loops.delete(loopId);
+        jsonResponse(res, 200, { removed, loopId });
         return;
       }
-      await this.centrifugo.publishLoopUpdate(this.userId, updated);
-      this.loopApi.scheduler.kick();
-      jsonResponse(res, 200, { fired: true, loop: updated });
-      return;
-    }
 
-    // GET /api/loops/:id/runs
-    if (loopRunsMatch && req.method === 'GET') {
-      const loopId = loopRunsMatch[1];
-      const store = this.store;
-      const sessions = (await store.listSessions()).map(toWireSession);
-      const runs = await listLoopRunRecordsWithFallback(loopId, sessions, (sessionId) =>
-        store.loadTerminalLog(sessionId),
-      );
-      jsonResponse(res, 200, { runs });
+      // POST /api/loops/:id/run-now
+      if (loopRunNowMatch && req.method === 'POST') {
+        const outcome = await loops.runNow(loopRunNowMatch[1]);
+        if (!outcome.fired) {
+          if (outcome.reason === 'not_found') {
+            jsonResponse(res, 404, { error: 'Loop not found', fired: false, reason: 'not_found' });
+            return;
+          }
+          jsonResponse(res, 200, { fired: false, reason: 'overlap' });
+          return;
+        }
+        jsonResponse(res, 200, { fired: true, loop: outcome.loop });
+        return;
+      }
+
+      // GET /api/loops/:id/runs
+      if (loopRunsMatch && req.method === 'GET') {
+        jsonResponse(res, 200, { runs: await loops.runs(loopRunsMatch[1]) });
+        return;
+      }
+
+      jsonResponse(res, 404, { error: 'Not found' });
       return;
     }
 
@@ -558,7 +532,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     // GET /api/sessions/:id
     if (sessionMatch && req.method === 'GET') {
       const sessionId = sessionMatch[1];
-      const session = await this.store.loadSession(sessionId);
+      const session = await (this.getSessionController()?.get(sessionId) ?? this.store.loadSession(sessionId));
       if (!session) {
         jsonResponse(res, 404, { error: 'Session not found' });
         return;
@@ -571,21 +545,19 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     if (sessionMatch && req.method === 'DELETE') {
       const sessionId = sessionMatch[1];
 
-      if (!this.runner || !this.centrifugo || !this.userId) {
+      const controller = this.getSessionController();
+      if (!controller) {
         jsonResponse(res, 503, { error: 'Server not ready' });
         return;
       }
 
-      const session = await this.store.loadSession(sessionId);
+      const session = await controller.get(sessionId);
       if (!session) {
         jsonResponse(res, 404, { error: 'Session not found' });
         return;
       }
 
-      await removeFtownSession(
-        { store: this.store, runner: this.runner, centrifugo: this.centrifugo, userId: this.userId },
-        sessionId,
-      );
+      await controller.remove(sessionId);
 
       jsonResponse(res, 200, { removed: true, sessionId });
       return;
@@ -680,60 +652,34 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return;
     }
 
-    // PATCH /api/sessions/:id
+    // PATCH /api/sessions/:id — rename and/or reparent
     if (sessionMatch && req.method === 'PATCH') {
       const sessionId = sessionMatch[1];
       const body = await parseBody(req);
       const name = body.name as string | undefined;
       const hasParentField = Object.prototype.hasOwnProperty.call(body, 'parentSessionId');
-      const rawParent = body.parentSessionId as string | null | undefined;
 
       if (name === undefined && !hasParentField) {
         jsonResponse(res, 400, { error: 'Nothing to update' });
         return;
       }
 
-      const session = await this.store.loadSession(sessionId);
-      if (!session) {
-        jsonResponse(res, 404, { error: 'Session not found' });
+      const controller = this.getSessionController();
+      if (!controller) {
+        jsonResponse(res, 503, { error: 'Server not ready' });
         return;
       }
 
-      if (name !== undefined) {
-        if (typeof name !== 'string' || !name) {
-          jsonResponse(res, 400, { error: 'Invalid name' });
-          return;
-        }
-        session.name = name;
+      const result = await controller.update(sessionId, {
+        ...(name === undefined ? {} : { name }),
+        ...(hasParentField ? { parent: { value: body.parentSessionId } } : {}),
+      });
+      if (!result.ok) {
+        jsonResponse(res, result.code === 'not_found' ? 404 : 400, { error: result.message });
+        return;
       }
 
-      if (hasParentField) {
-        if (rawParent === null || rawParent === '' || rawParent === undefined) {
-          session.parentSessionId = undefined;
-        } else if (typeof rawParent !== 'string') {
-          jsonResponse(res, 400, { error: 'Invalid parentSessionId' });
-          return;
-        } else if (rawParent === sessionId) {
-          jsonResponse(res, 400, { error: 'Session cannot be its own parent' });
-          return;
-        } else {
-          const proposed = await this.store.loadSession(rawParent);
-          if (!proposed) {
-            jsonResponse(res, 400, { error: 'Parent session not found' });
-            return;
-          }
-          session.parentSessionId = proposed.parentSessionId ?? proposed.id;
-        }
-      }
-
-      session.updatedAt = new Date().toISOString();
-      await this.store.saveSession(session);
-
-      if (this.centrifugo && this.userId) {
-        await this.centrifugo.publishSessionUpdate(this.userId, session);
-      }
-
-      jsonResponse(res, 200, { session: toWireSession(session) });
+      jsonResponse(res, 200, { session: toWireSession(result.session) });
       return;
     }
 

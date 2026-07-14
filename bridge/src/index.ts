@@ -39,10 +39,10 @@ import { canResumeStoredSession, createFtownSession, findMissingProviderAuth, re
 import { loadProviderEnv } from './provider-env-store.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { shouldResurrectStoredSession } from './session-resurrection.js';
-import { createLoop, deleteLoop, getLoop, listLoops, mutateLoopRuntime, updateLoop } from './loop-store.js';
-import { deleteLoopRunRecords, listLoopRunRecordsWithFallback } from './loop-run-store.js';
+import { listLoops } from './loop-store.js';
 import { LoopScheduler, LOOP_TICK_INTERVAL_MS } from './loop-scheduler.js';
-import { validateLoopDraft, validateLoopPatch } from './loop-validation.js';
+import { LoopController } from './loop-controller.js';
+import { SessionController } from './session-controller.js';
 import { isTmuxAvailable, killTmuxSession, listFtownTmuxSessions } from './tmux.js';
 import { runPairing } from './pairing-client.js';
 
@@ -58,7 +58,6 @@ import type {
   DeleteLoopPayload,
   GetHistoryPayload,
   GetLoopRunsPayload,
-  LoopDraft,
   RemoveSessionPayload,
   RenameSessionPayload,
   RunLoopNowPayload,
@@ -420,6 +419,34 @@ program
     });
     localApiServer.setLoopApi({ bridgeId, scheduler });
 
+    // Transport-agnostic controllers: each loop/session operation is defined
+    // once here; the RPC switch below and the local HTTP router are thin
+    // adapters that only marshal wire formats around these calls.
+    // (publishSyntheticStop / withSessionWrite / flushBuffer are hoisted
+    // function declarations defined later in this scope and only invoked once
+    // commands flow — injected as closures rather than restructuring this file.)
+    const loopController = new LoopController({
+      bridgeId,
+      scheduler,
+      isSessionRunning: (sid) => runner.isRunning(sid),
+      publishLoopUpdate: (loop) => centrifugo.publishLoopUpdate(userId, loop),
+      publishLoopRemoved: (loopId) => centrifugo.publishLoopRemoved(userId, loopId),
+      listWireSessions: async () => (await store.listSessions()).map(toWireSession),
+      loadTerminalLog: (sid) => store.loadTerminalLog(sid),
+    });
+    const sessionController = new SessionController({
+      store,
+      runner,
+      publishSessionUpdate: (session) => centrifugo.publishSessionUpdate(userId, session),
+      removeSession: (id, options) => removeFtownSession({ store, runner, centrifugo, userId }, id, options),
+      sessionFactory: sessionFactoryDeps,
+      publishSyntheticStop: (sid, reason) => publishSyntheticStop(sid, reason),
+      withSessionWrite: (sid, task) => withSessionWrite(sid, task),
+      unregisterSession: (sid) => unregisterSession(sid),
+      flushTerminalBuffer: (sid) => flushBuffer(sid),
+      destroyTerminal: (sid) => terminalManager.destroy(sid),
+    });
+
     // Compiled sibling of this module (running from dist), else the sibling
     // dist/ directory (running from src via `tsx watch` in dev). If neither
     // exists — dev mode without a build — skip installation instead of
@@ -734,18 +761,7 @@ program
         switch (command.type) {
           case 'create_session': {
             const payload = command.payload as CreateSessionPayload;
-            const session = await createFtownSession(
-              {
-                store,
-                runner,
-                centrifugo,
-                userId,
-                bridgeId,
-                hookPort,
-                hookToken: apiToken,
-                notifyScriptPath,
-                wireTerminalInput,
-              },
+            const session = await sessionController.create(
               {
                 command: payload.command,
                 prompt: payload.prompt,
@@ -776,27 +792,13 @@ program
               break;
             }
 
-            const stopped = runner.stop(payload.sessionId);
-            if (stopped) {
-              publishSyntheticStop(payload.sessionId, 'stopped');
-              await withSessionWrite(payload.sessionId, async () => {
-                const session = await store.loadSession(payload.sessionId);
-                if (session) {
-                  session.status = 'completed';
-                  session.updatedAt = new Date().toISOString();
-                  await store.saveSession(session);
-                  await centrifugo.publishSessionUpdate(userId, session);
-                }
-              });
-              unregisterSession(payload.sessionId);
-            }
-
+            const { stopped } = await sessionController.stop(payload.sessionId);
             response = { requestId: command.requestId, success: true, data: { stopped } };
             break;
           }
 
           case 'list_sessions': {
-            const sessions = await store.listSessions();
+            const sessions = await sessionController.list();
             response = { requestId: command.requestId, success: true, data: { sessions: sessions.map(toWireSession) } };
             break;
           }
@@ -808,7 +810,7 @@ program
               break;
             }
 
-            const session = await store.loadSession(payload.sessionId);
+            const session = await sessionController.get(payload.sessionId);
             response = { requestId: command.requestId, success: true, data: { session: session ? toWireSession(session) : session } };
             break;
           }
@@ -821,25 +823,10 @@ program
               break;
             }
 
-            const existingSession = await store.loadSession(payload.sessionId);
-            if (!existingSession) {
-              response = { requestId: command.requestId, success: false, error: 'Session not found' };
-              break;
-            }
-
-            if (existingSession.status === 'running') {
-              response = { requestId: command.requestId, success: false, error: 'Session is already running' };
-              break;
-            }
-
-            if (!existingSession.command) {
-              response = { requestId: command.requestId, success: false, error: 'Session has no command (created before v0.2.0)' };
-              break;
-            }
-
-            await relaunchFtownSession(sessionFactoryDeps, existingSession, 'retry');
-
-            response = { requestId: command.requestId, success: true, data: { session: toWireSession(existingSession) } };
+            const result = await sessionController.retry(payload.sessionId);
+            response = result.ok
+              ? { requestId: command.requestId, success: true, data: { session: toWireSession(result.session) } }
+              : { requestId: command.requestId, success: false, error: result.message };
             break;
           }
 
@@ -850,31 +837,12 @@ program
               break;
             }
 
-            const target = await store.loadSession(payload.sessionId);
-            if (!target) {
-              response = { requestId: command.requestId, success: false, error: 'Session not found' };
-              break;
-            }
-
-            if (payload.parentSessionId === null || payload.parentSessionId === undefined || payload.parentSessionId === '') {
-              target.parentSessionId = undefined;
-            } else if (payload.parentSessionId === target.id) {
-              response = { requestId: command.requestId, success: false, error: 'Session cannot be its own parent' };
-              break;
-            } else {
-              const proposed = await store.loadSession(payload.parentSessionId);
-              if (!proposed) {
-                response = { requestId: command.requestId, success: false, error: 'Parent session not found' };
-                break;
-              }
-              target.parentSessionId = proposed.parentSessionId ?? proposed.id;
-            }
-
-            target.updatedAt = new Date().toISOString();
-            await store.saveSession(target);
-            await centrifugo.publishSessionUpdate(userId, target);
-
-            response = { requestId: command.requestId, success: true, data: { session: toWireSession(target) } };
+            const result = await sessionController.update(payload.sessionId, {
+              parent: { value: payload.parentSessionId },
+            });
+            response = result.ok
+              ? { requestId: command.requestId, success: true, data: { session: toWireSession(result.session) } }
+              : { requestId: command.requestId, success: false, error: result.message };
             break;
           }
 
@@ -885,18 +853,10 @@ program
               break;
             }
 
-            const sessionToRename = await store.loadSession(payload.sessionId);
-            if (!sessionToRename) {
-              response = { requestId: command.requestId, success: false, error: 'Session not found' };
-              break;
-            }
-
-            sessionToRename.name = payload.name;
-            sessionToRename.updatedAt = new Date().toISOString();
-            await store.saveSession(sessionToRename);
-            await centrifugo.publishSessionUpdate(userId, sessionToRename);
-
-            response = { requestId: command.requestId, success: true, data: { session: toWireSession(sessionToRename) } };
+            const result = await sessionController.update(payload.sessionId, { name: payload.name });
+            response = result.ok
+              ? { requestId: command.requestId, success: true, data: { session: toWireSession(result.session) } }
+              : { requestId: command.requestId, success: false, error: result.message };
             break;
           }
 
@@ -907,13 +867,11 @@ program
               break;
             }
 
-            const removed = await removeFtownSession(
-              { store, runner, centrifugo, userId },
-              payload.sessionId,
-              { onlyIfFinished: payload.onlyIfFinished },
-            );
+            const { removed } = await sessionController.remove(payload.sessionId, {
+              onlyIfFinished: payload.onlyIfFinished,
+            });
 
-            response = { requestId: command.requestId, success: true, data: { removed: removed !== null } };
+            response = { requestId: command.requestId, success: true, data: { removed } };
             break;
           }
 
@@ -941,46 +899,25 @@ program
               break;
             }
 
-            flushBuffer(payload.sessionId);
-            await store.clearTerminalLog(payload.sessionId);
-            terminalManager.destroy(payload.sessionId);
-            response = { requestId: command.requestId, success: true, data: { cleared: true } };
+            const { cleared } = await sessionController.clearTerminal(payload.sessionId);
+            response = { requestId: command.requestId, success: true, data: { cleared } };
             break;
           }
 
           case 'create_loop': {
             const payload = command.payload as CreateLoopPayload;
-            const error = validateLoopDraft(payload);
-            if (error) {
-              response = { requestId: command.requestId, success: false, error };
-              break;
-            }
-            // bridgeId is forced to THIS bridge (the routing guard already proved
-            // payload.bridgeId === bridgeId), so a loop is always owned by its runner.
-            const draft: LoopDraft = {
-              name: payload.name.trim(),
-              bridgeId,
-              schedule: payload.schedule,
-              harness: payload.harness,
-              workdir: payload.workdir,
-              task: payload.task,
-              model: payload.model,
-              enabled: payload.enabled,
-              overlapPolicy: payload.overlapPolicy,
-              retention: payload.retention,
-              preflight: payload.preflight,
-              postflight: payload.postflight,
-              maxRuntimeMs: payload.maxRuntimeMs,
-              group: payload.group,
-            };
-            const loop = createLoop(draft);
-            await centrifugo.publishLoopUpdate(userId, loop);
-            response = { requestId: command.requestId, success: true, data: { loop } };
+            // bridgeId is forced to THIS bridge inside the controller (the routing
+            // guard already proved payload.bridgeId === bridgeId), so a loop is
+            // always owned by its runner.
+            const result = await loopController.create(payload);
+            response = result.ok
+              ? { requestId: command.requestId, success: true, data: { loop: result.loop } }
+              : { requestId: command.requestId, success: false, error: result.message };
             break;
           }
 
           case 'list_loops': {
-            response = { requestId: command.requestId, success: true, data: { loops: listLoops() } };
+            response = { requestId: command.requestId, success: true, data: { loops: loopController.list() } };
             break;
           }
 
@@ -990,18 +927,10 @@ program
               response = { requestId: command.requestId, success: false, error: 'Missing loopId' };
               break;
             }
-            const patchError = validateLoopPatch(payload.patch);
-            if (patchError) {
-              response = { requestId: command.requestId, success: false, error: patchError };
-              break;
-            }
-            const loop = updateLoop(payload.loopId, payload.patch);
-            if (!loop) {
-              response = { requestId: command.requestId, success: false, error: 'Loop not found' };
-              break;
-            }
-            await centrifugo.publishLoopUpdate(userId, loop);
-            response = { requestId: command.requestId, success: true, data: { loop } };
+            const result = await loopController.update(payload.loopId, payload.patch);
+            response = result.ok
+              ? { requestId: command.requestId, success: true, data: { loop: result.loop } }
+              : { requestId: command.requestId, success: false, error: result.message };
             break;
           }
 
@@ -1011,16 +940,7 @@ program
               response = { requestId: command.requestId, success: false, error: 'Missing loopId' };
               break;
             }
-            const existingLoop = getLoop(payload.loopId);
-            const removed = deleteLoop(payload.loopId);
-            if (removed) {
-              // Stop any in-flight run and drop scheduler tracking so a
-              // just-deleted loop never leaves a live AI session with nothing
-              // left to finalize/prune it.
-              if (existingLoop) scheduler.onLoopDeleted(existingLoop);
-              deleteLoopRunRecords(payload.loopId);
-              await centrifugo.publishLoopRemoved(userId, payload.loopId);
-            }
+            const { removed } = await loopController.delete(payload.loopId);
             response = { requestId: command.requestId, success: true, data: { removed } };
             break;
           }
@@ -1031,37 +951,10 @@ program
               response = { requestId: command.requestId, success: false, error: 'Missing loopId' };
               break;
             }
-            const loop = getLoop(payload.loopId);
-            if (!loop) {
-              response = { requestId: command.requestId, success: true, data: { fired: false, reason: 'not_found' } };
-              break;
-            }
-            // A skip-policy loop with a live run cannot be manually fired either —
-            // report overlap synchronously (the async tick would otherwise swallow it).
-            if (
-              loop.overlapPolicy === 'skip' &&
-              loop.lastStatus === 'running' &&
-              loop.lastSessionId &&
-              runner.isRunning(loop.lastSessionId)
-            ) {
-              response = { requestId: command.requestId, success: true, data: { fired: false, reason: 'overlap' } };
-              break;
-            }
-            // Reload-check-write via mutateLoopRuntime: if the loop was deleted
-            // between the getLoop() above and this write, this returns null and
-            // nothing is written/published — a stale in-memory snapshot must
-            // never be upserted back, or a deleted loop resurrects.
-            const updated = mutateLoopRuntime(payload.loopId, (l) => {
-              l.runNowRequested = true;
-              l.updatedAt = new Date().toISOString();
-            });
-            if (!updated) {
-              response = { requestId: command.requestId, success: true, data: { fired: false, reason: 'not_found' } };
-              break;
-            }
-            await centrifugo.publishLoopUpdate(userId, updated);
-            scheduler.kick();
-            response = { requestId: command.requestId, success: true, data: { fired: true } };
+            const outcome = await loopController.runNow(payload.loopId);
+            response = outcome.fired
+              ? { requestId: command.requestId, success: true, data: { fired: true } }
+              : { requestId: command.requestId, success: true, data: { fired: false, reason: outcome.reason } };
             break;
           }
 
@@ -1071,10 +964,7 @@ program
               response = { requestId: command.requestId, success: false, error: 'Missing loopId' };
               break;
             }
-            const sessions = (await store.listSessions()).map(toWireSession);
-            const runs = await listLoopRunRecordsWithFallback(payload.loopId, sessions, (sessionId) =>
-              store.loadTerminalLog(sessionId),
-            );
+            const runs = await loopController.runs(payload.loopId);
             response = { requestId: command.requestId, success: true, data: { runs } };
             break;
           }
