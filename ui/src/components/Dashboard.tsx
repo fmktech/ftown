@@ -27,6 +27,7 @@ import { ConnectionDiagnostics } from "./ConnectionDiagnostics";
 import { mergeBridgeOrder } from "@/lib/bridge-order";
 import { StatusDot } from "@/lib/StatusDot";
 import { usePersistentState, useHiddenSet, type PersistCodec } from "@/lib/use-persistent-state";
+import { loopGroupKey } from "@/lib/loop-group-key";
 
 interface DashboardProps {
   client: Centrifuge | null;
@@ -73,6 +74,8 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const { hidden: hiddenBridgeIds, hide: hideBridge, unhide: handleUnhideBridge } = useHiddenSet("ftown:hiddenBridges");
   const { hidden: hiddenLoopIds, hide: hideLoop, unhide: handleUnhideLoop } = useHiddenSet("ftown:hiddenLoops");
   const { hidden: hiddenFactoryKeys, hide: hideFactory, unhide: handleUnhideFactory } = useHiddenSet("ftown:hiddenFactories");
+  const { hidden: hiddenLoopGroupKeys, hide: hideLoopGroup, unhide: handleUnhideLoopGroup } = useHiddenSet("ftown:hiddenLoopGroups");
+  const { hidden: hiddenCronBridgeIds, hide: hideCronBridge, unhide: handleUnhideCronBridge } = useHiddenSet("ftown:hiddenCronBridges");
   const [showUserMenu, setShowUserMenu] = useState(false);
   const terminalRef = useRef<TerminalHandle>(null);
   const mobileControlRef = useRef<MobileControlBarHandle>(null);
@@ -266,7 +269,13 @@ PY`;
     () => normalSessions.filter((s) => factoryWorkerOf(s, factories) === null),
     [normalSessions, factories]
   );
-  const loopCount = loops.filter((loop) => !hiddenLoopIds.has(loop.id)).length;
+  const loopCount = loops.filter((loop) => {
+    if (hiddenLoopIds.has(loop.id)) return false;
+    const groupKey = loop.group ? loopGroupKey(loop.bridgeId, loop.group) : null;
+    if (groupKey && hiddenLoopGroupKeys.has(groupKey)) return false;
+    if (hiddenCronBridgeIds.has(loop.bridgeId)) return false;
+    return true;
+  }).length;
   const factoryCount = factories.filter((f) => !hiddenFactoryKeys.has(factoryKey(f))).length;
 
   useEffect(() => {
@@ -394,6 +403,26 @@ PY`;
     hideLoop(loopId);
     setSelectedLoopId((prev) => (prev === loopId ? null : prev));
   }, [hideLoop]);
+
+  const handleHideLoopGroup = useCallback((groupKey: string) => {
+    hideLoopGroup(groupKey);
+    setSelectedLoopId((prev) => {
+      if (!prev) return prev;
+      const selected = loops.find((loop) => loop.id === prev);
+      if (selected?.group && loopGroupKey(selected.bridgeId, selected.group) === groupKey) return null;
+      return prev;
+    });
+  }, [hideLoopGroup, loops]);
+
+  const handleHideCronBridge = useCallback((bridgeId: string) => {
+    hideCronBridge(bridgeId);
+    setSelectedLoopId((prev) => {
+      if (!prev) return prev;
+      const selected = loops.find((loop) => loop.id === prev);
+      if (selected && selected.bridgeId === bridgeId) return null;
+      return prev;
+    });
+  }, [hideCronBridge, loops]);
 
   const handleHideFactory = useCallback((key: string) => {
     hideFactory(key);
@@ -1094,6 +1123,12 @@ PY`;
                 hiddenLoopIds={hiddenLoopIds}
                 onHideLoop={handleHideLoop}
                 onUnhideLoop={handleUnhideLoop}
+                hiddenLoopGroupKeys={hiddenLoopGroupKeys}
+                onHideLoopGroup={handleHideLoopGroup}
+                onUnhideLoopGroup={handleUnhideLoopGroup}
+                hiddenCronBridgeIds={hiddenCronBridgeIds}
+                onHideCronBridge={handleHideCronBridge}
+                onUnhideCronBridge={handleUnhideCronBridge}
               />
             ) : (
               <SessionList

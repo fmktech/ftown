@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Loop } from "@/types";
 import { BridgeInfo } from "@/hooks/useBridges";
 import { describeSchedule } from "@/lib/loop-schedule";
+import { loopGroupKey } from "@/lib/loop-group-key";
 import { relativeTime } from "@/lib/relative-time";
 import { StatusDot } from "@/lib/StatusDot";
 import { usePersistentState, stringSetCodec } from "@/lib/use-persistent-state";
@@ -30,6 +31,12 @@ interface LoopListProps {
   hiddenLoopIds?: Set<string>;
   onHideLoop?: (loopId: string) => void;
   onUnhideLoop?: (loopId: string) => void;
+  hiddenLoopGroupKeys?: Set<string>;
+  onHideLoopGroup?: (key: string) => void;
+  onUnhideLoopGroup?: (key: string) => void;
+  hiddenCronBridgeIds?: Set<string>;
+  onHideCronBridge?: (bridgeId: string) => void;
+  onUnhideCronBridge?: (bridgeId: string) => void;
 }
 
 function bridgeLabel(bridgeId: string, bridges: BridgeInfo[]): string {
@@ -80,6 +87,12 @@ export function LoopList({
   hiddenLoopIds,
   onHideLoop,
   onUnhideLoop,
+  hiddenLoopGroupKeys,
+  onHideLoopGroup,
+  onUnhideLoopGroup,
+  hiddenCronBridgeIds,
+  onHideCronBridge,
+  onUnhideCronBridge,
 }: LoopListProps) {
   // Fold state for the two-level bridge → group hierarchy below. Keyed by
   // `bridgeId` (level 1) or `${bridgeId} ${group}` (level 2); absence from the
@@ -93,6 +106,17 @@ export function LoopList({
   const [contextMenu, setContextMenu] = useState<LoopMenuState | null>(null);
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
   const hiddenSet = hiddenLoopIds ?? new Set<string>();
+  const hiddenGroupKeys = hiddenLoopGroupKeys ?? new Set<string>();
+  const hiddenBridgeIds = hiddenCronBridgeIds ?? new Set<string>();
+
+  // A loop swallowed by a hidden group or hidden bridge is excluded from the
+  // main hierarchy AND from the individually-hidden rows (it is represented by
+  // its group/bridge entry in the Hidden fold instead).
+  const inHiddenGroupOrBridge = (loop: Loop): boolean => {
+    if (hiddenBridgeIds.has(loop.bridgeId)) return true;
+    const group = loop.group?.trim();
+    return !!group && hiddenGroupKeys.has(loopGroupKey(loop.bridgeId, group));
+  };
 
   const closeContextMenu = useCallback(() => setContextMenu(null), []);
 
@@ -131,16 +155,37 @@ export function LoopList({
   };
 
   const visibleLoops = loops
-    .filter((l) => !hiddenSet.has(l.id))
+    .filter((l) => !hiddenSet.has(l.id) && !inHiddenGroupOrBridge(l))
     .slice()
     .sort(sortByNextRun);
 
+  // Individually hidden loops only — loops swallowed by a hidden group/bridge
+  // are represented by that group/bridge entry in the Hidden fold, not listed
+  // per-loop as well.
   const hiddenLoops = loops
-    .filter((l) => hiddenSet.has(l.id))
+    .filter((l) => hiddenSet.has(l.id) && !inHiddenGroupOrBridge(l))
     .slice()
     .sort(sortByNextRun);
 
-  if (visibleLoops.length === 0 && hiddenLoops.length === 0) {
+  // Hidden group entries: parse `${bridgeId}::${group}` back apart for display.
+  const hiddenGroupEntries = [...hiddenGroupKeys]
+    .map((key) => {
+      const sep = key.indexOf("::");
+      return sep === -1
+        ? { key, bridgeId: key, group: key }
+        : { key, bridgeId: key.slice(0, sep), group: key.slice(sep + 2) };
+    })
+    .sort((a, b) => a.group.localeCompare(b.group));
+
+  const hiddenBridgeEntries = [...hiddenBridgeIds].sort((a, b) =>
+    bridgeLabel(a, bridges).localeCompare(bridgeLabel(b, bridges)),
+  );
+
+  // Count entries in the fold (individual loops + group entries + bridge
+  // entries), not the number of loops they contain.
+  const hiddenEntryCount = hiddenLoops.length + hiddenGroupEntries.length + hiddenBridgeEntries.length;
+
+  if (visibleLoops.length === 0 && hiddenEntryCount === 0) {
     if (collapsed) return null;
     return (
       <div
@@ -334,8 +379,10 @@ export function LoopList({
     isCollapsed: boolean;
     onToggle: () => void;
     indent?: boolean;
+    onHide?: () => void;
+    hideTitle?: string;
   }) => {
-    const { sectionId, label, count, isCollapsed, onToggle, indent } = params;
+    const { sectionId, label, count, isCollapsed, onToggle, indent, onHide, hideTitle } = params;
     return (
       <div
         key={sectionId}
@@ -386,6 +433,103 @@ export function LoopList({
           {label}
         </span>
         <span style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>{count}</span>
+        {onHide && (
+          <button
+            type="button"
+            title={hideTitle}
+            aria-label={hideTitle}
+            onClick={(e) => {
+              e.stopPropagation();
+              onHide();
+            }}
+            style={{
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              color: "var(--text-faint)",
+              fontSize: 11,
+              lineHeight: 1,
+              padding: "2px 4px",
+              flexShrink: 0,
+              fontFamily: "var(--font-mono)",
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
+            onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-faint)")}
+          >
+            ✕
+          </button>
+        )}
+      </div>
+    );
+  };
+
+  // A dimmed row in the Hidden fold representing a hidden group (primary =
+  // group label, secondary = bridge label) or a hidden bridge (primary only),
+  // with an inline Unhide action.
+  const renderHiddenEntryRow = (params: {
+    key: string;
+    primary: string;
+    secondary?: string;
+    onUnhide?: () => void;
+  }) => {
+    const { key, primary, secondary, onUnhide } = params;
+    return (
+      <div
+        key={key}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "9px 12px",
+          borderBottom: "1px solid var(--border-subtle)",
+          borderLeft: "3px solid var(--border-muted)",
+          fontFamily: "var(--font-mono)",
+          opacity: 0.55,
+        }}
+      >
+        <span
+          title={secondary ? `${primary} — ${secondary}` : primary}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            fontSize: 12,
+            fontWeight: 600,
+            color: "var(--text-secondary)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {primary}
+          {secondary && (
+            <span style={{ fontWeight: 400, fontSize: 10, color: "var(--text-faint)" }}> · {secondary}</span>
+          )}
+        </span>
+        {onUnhide && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onUnhide();
+            }}
+            style={{
+              background: "none",
+              border: "1px solid var(--border-muted)",
+              borderRadius: 3,
+              cursor: "pointer",
+              color: "var(--text-muted)",
+              fontSize: 10,
+              lineHeight: 1,
+              padding: "3px 6px",
+              flexShrink: 0,
+              fontFamily: "var(--font-mono)",
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
+            onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-muted)")}
+          >
+            Unhide
+          </button>
+        )}
       </div>
     );
   };
@@ -423,6 +567,8 @@ export function LoopList({
               count: bridgeLoops.length,
               isCollapsed: isBridgeCollapsed,
               onToggle: () => toggleSection(bridgeSectionId),
+              onHide: onHideCronBridge ? () => onHideCronBridge(bridgeId) : undefined,
+              hideTitle: "Hide bridge's crons",
             })}
             {!isBridgeCollapsed && (
               <>
@@ -438,6 +584,8 @@ export function LoopList({
                         isCollapsed: isGroupCollapsed,
                         onToggle: () => toggleSection(groupSectionId),
                         indent: true,
+                        onHide: onHideLoopGroup ? () => onHideLoopGroup(loopGroupKey(bridgeId, group)) : undefined,
+                        hideTitle: "Hide group",
                       })}
                       {!isGroupCollapsed && groupLoops.map((loop) => renderLoopRow(loop, true))}
                     </div>
@@ -450,7 +598,7 @@ export function LoopList({
         );
       })}
 
-      {hiddenLoops.length > 0 && !collapsed && (
+      {hiddenEntryCount > 0 && !collapsed && (
         <div className="flex flex-col">
           <button
             onClick={() => setHiddenExpanded((v) => !v)}
@@ -472,10 +620,29 @@ export function LoopList({
             onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
             onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-base)"; }}
           >
-            <span>Hidden ({hiddenLoops.length})</span>
+            <span>Hidden ({hiddenEntryCount})</span>
             <span style={{ fontSize: 10, opacity: 0.6 }}>{hiddenExpanded ? "▾" : "▸"}</span>
           </button>
-          {hiddenExpanded && hiddenLoops.map((loop) => renderLoopRow(loop, false, true))}
+          {hiddenExpanded && (
+            <>
+              {hiddenBridgeEntries.map((bridgeId) =>
+                renderHiddenEntryRow({
+                  key: `bridge:${bridgeId}`,
+                  primary: bridgeLabel(bridgeId, bridges),
+                  onUnhide: onUnhideCronBridge ? () => onUnhideCronBridge(bridgeId) : undefined,
+                }),
+              )}
+              {hiddenGroupEntries.map((entry) =>
+                renderHiddenEntryRow({
+                  key: `group:${entry.key}`,
+                  primary: entry.group,
+                  secondary: bridgeLabel(entry.bridgeId, bridges),
+                  onUnhide: onUnhideLoopGroup ? () => onUnhideLoopGroup(entry.key) : undefined,
+                }),
+              )}
+              {hiddenLoops.map((loop) => renderLoopRow(loop, false, true))}
+            </>
+          )}
         </div>
       )}
 

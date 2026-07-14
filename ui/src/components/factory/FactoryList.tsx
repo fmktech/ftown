@@ -163,7 +163,7 @@ function WorkerSection({
   );
 }
 
-function HideFactoryButton({ onHide }: { onHide: () => void }) {
+function HideFactoryButton({ onHide, rowHovered }: { onHide: () => void; rowHovered: boolean }) {
   return (
     <button
       type="button"
@@ -187,14 +187,18 @@ function HideFactoryButton({ onHide }: { onHide: () => void }) {
         fontSize: 11,
         lineHeight: 1,
         flexShrink: 0,
+        opacity: rowHovered ? 1 : 0.4,
+        transition: "opacity 0.15s ease, color 0.15s ease, background 0.15s ease",
       }}
       onMouseEnter={(e) => {
         e.currentTarget.style.color = "var(--text-primary)";
         e.currentTarget.style.background = "var(--bg-hover)";
+        e.currentTarget.style.opacity = "1";
       }}
       onMouseLeave={(e) => {
         e.currentTarget.style.color = "var(--text-faint)";
         e.currentTarget.style.background = "transparent";
+        e.currentTarget.style.opacity = rowHovered ? "1" : "0.4";
       }}
     >
       ✕
@@ -400,8 +404,8 @@ export function FactoryList({
               >
                 {repoBasename(factory.repoRoot)}
               </span>
-              {onHideFactory && hovered && (
-                <HideFactoryButton onHide={() => onHideFactory(fKey)} />
+              {onHideFactory && (
+                <HideFactoryButton onHide={() => onHideFactory(fKey)} rowHovered={hovered} />
               )}
             </div>
           </div>
