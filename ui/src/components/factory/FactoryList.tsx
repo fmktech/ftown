@@ -194,6 +194,45 @@ function WorkerSection({
   );
 }
 
+function HideFactoryButton({ onHide }: { onHide: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        onHide();
+      }}
+      aria-label="Hide factory"
+      title="Hide factory"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: 18,
+        height: 18,
+        borderRadius: 4,
+        border: "none",
+        background: "transparent",
+        color: "var(--text-faint)",
+        cursor: "pointer",
+        fontSize: 11,
+        lineHeight: 1,
+        flexShrink: 0,
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.color = "var(--text-primary)";
+        e.currentTarget.style.background = "var(--bg-hover)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.color = "var(--text-faint)";
+        e.currentTarget.style.background = "transparent";
+      }}
+    >
+      ✕
+    </button>
+  );
+}
+
 export function FactoryList({
   factories,
   selectedKey,
@@ -203,8 +242,25 @@ export function FactoryList({
   sessions,
   onOpenSession,
   selectedSessionId,
+  hiddenFactoryKeys,
+  onHideFactory,
+  onUnhideFactory,
 }: FactoryListProps) {
   const [collapsedWorkers, setCollapsedWorkers] = useState<Record<string, boolean>>({});
+  const [hoveredKey, setHoveredKey] = useState<string | null>(null);
+  const [hiddenExpanded, setHiddenExpanded] = useState(false);
+
+  const hiddenSet = hiddenFactoryKeys ?? new Set<string>();
+  const visibleFactories = useMemo(
+    () => factories.filter((f) => !hiddenSet.has(factoryKey(f))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [factories, hiddenFactoryKeys],
+  );
+  const hiddenFactories = useMemo(
+    () => factories.filter((f) => hiddenSet.has(factoryKey(f))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [factories, hiddenFactoryKeys],
+  );
 
   const workersByFactoryKey = useMemo(() => {
     const map = new Map<string, Session[]>();
@@ -251,7 +307,7 @@ export function FactoryList({
   if (collapsed) {
     return (
       <div className="flex flex-col">
-        {factories.map((factory) => {
+        {visibleFactories.map((factory) => {
           const selected = factoryKey(factory) === selectedKey;
           return (
             <button
@@ -308,11 +364,12 @@ export function FactoryList({
           <NewFactoryButton onCreateFactory={onCreateFactory} />
         </div>
       )}
-      {factories.map((factory) => {
+      {visibleFactories.map((factory) => {
         const selected = factoryKey(factory) === selectedKey;
         const fKey = factoryKey(factory);
         const workers = workersByFactoryKey.get(fKey) ?? [];
         const workersExpanded = collapsedWorkers[fKey] !== true;
+        const hovered = hoveredKey === fKey;
         return (
         <div key={fKey} style={{ borderBottom: "1px solid var(--border-subtle)" }}>
           <div
@@ -323,6 +380,14 @@ export function FactoryList({
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") onSelect(factory);
             }}
+            onMouseEnter={(e) => {
+              setHoveredKey(fKey);
+              if (!selected) e.currentTarget.style.background = "var(--bg-hover)";
+            }}
+            onMouseLeave={(e) => {
+              setHoveredKey((k) => (k === fKey ? null : k));
+              if (!selected) e.currentTarget.style.background = "transparent";
+            }}
             style={{
               width: "100%",
               textAlign: "left",
@@ -331,12 +396,6 @@ export function FactoryList({
               background: selected ? "var(--bg-elevated)" : "transparent",
               cursor: "pointer",
               fontFamily: "var(--font-mono)",
-            }}
-            onMouseEnter={(e) => {
-              if (!selected) e.currentTarget.style.background = "var(--bg-hover)";
-            }}
-            onMouseLeave={(e) => {
-              if (!selected) e.currentTarget.style.background = "transparent";
             }}
           >
             <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
@@ -372,6 +431,9 @@ export function FactoryList({
               >
                 {repoBasename(factory.repoRoot)}
               </span>
+              {onHideFactory && hovered && (
+                <HideFactoryButton onHide={() => onHideFactory(fKey)} />
+              )}
             </div>
           </div>
           <WorkerSection
@@ -386,6 +448,98 @@ export function FactoryList({
         </div>
         );
       })}
+
+      {hiddenFactories.length > 0 && (
+        <div className="flex flex-col">
+          <button
+            type="button"
+            onClick={() => setHiddenExpanded((v) => !v)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: "8px 12px",
+              borderBottom: "1px solid var(--border-subtle)",
+              borderTop: "1px solid var(--border-subtle)",
+              background: "var(--bg-base)",
+              cursor: "pointer",
+              fontFamily: "var(--font-mono)",
+              fontSize: 11,
+              color: "var(--text-muted)",
+              letterSpacing: "0.06em",
+              textTransform: "uppercase",
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-base)"; }}
+          >
+            <span>hidden ({hiddenFactories.length})</span>
+            <span style={{ fontSize: 10, opacity: 0.6 }}>{hiddenExpanded ? "▾" : "▸"}</span>
+          </button>
+          {hiddenExpanded &&
+            hiddenFactories.map((factory) => {
+              const fKey = factoryKey(factory);
+              return (
+                <div
+                  key={fKey}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => onUnhideFactory?.(fKey)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") onUnhideFactory?.(fKey);
+                  }}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    width: "100%",
+                    textAlign: "left",
+                    padding: "9px 12px",
+                    borderBottom: "1px solid var(--border-subtle)",
+                    background: "transparent",
+                    cursor: "pointer",
+                    fontFamily: "var(--font-mono)",
+                    opacity: 0.55,
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                >
+                  <span aria-hidden style={{ fontSize: 12, flexShrink: 0 }}>
+                    🏭
+                  </span>
+                  <span
+                    title={factory.project}
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      fontSize: 12,
+                      fontWeight: 600,
+                      color: "var(--text-secondary)",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {factory.project}
+                  </span>
+                  {onUnhideFactory && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onUnhideFactory(fKey);
+                      }}
+                      title="Unhide factory"
+                      className="btn-ghost"
+                      style={{ fontSize: 10, flexShrink: 0 }}
+                    >
+                      Unhide
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+        </div>
+      )}
     </div>
   );
 }

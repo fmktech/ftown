@@ -207,6 +207,28 @@ function storePath(hostname: string, path: string): void {
   localStorage.setItem(`ftown:paths:${hostname}`, JSON.stringify(updated));
 }
 
+const LAST_SESSION_DEFAULTS_KEY = "ftown:lastSessionDefaults";
+
+const VALID_SHELL_TYPES: ShellType[] = [
+  "claude",
+  "zai",
+  "kimi",
+  "deepseek",
+  "fireworks",
+  "cursor",
+  "codex",
+  "grok",
+  "opencode",
+  "shell",
+];
+
+interface LastSessionDefaults {
+  bridgeId?: string;
+  shellType?: string;
+  workingDir?: string;
+  model?: string;
+}
+
 type TopShell = "claude" | "cursor" | "codex" | "grok" | "opencode" | "shell";
 type ClaudeFlavor = "standard" | "zai" | "kimi" | "deepseek" | "fireworks";
 
@@ -332,6 +354,47 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     }
   }, [isOpen, defaults]);
 
+  // Fill in any fields not already set by the `defaults` prop from the last
+  // successfully created session. `defaults` (e.g. clone-session) always wins.
+  useEffect(() => {
+    if (!isOpen) return;
+    try {
+      const raw = localStorage.getItem(LAST_SESSION_DEFAULTS_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as LastSessionDefaults;
+
+      if (
+        defaults?.bridgeId === undefined
+        && typeof parsed.bridgeId === "string"
+        && bridges.some((b) => b.bridgeId === parsed.bridgeId)
+      ) {
+        setBridgeId(parsed.bridgeId);
+      }
+
+      const restoredShellType: ShellType | undefined =
+        defaults?.shellType
+        ?? (typeof parsed.shellType === "string" && VALID_SHELL_TYPES.includes(parsed.shellType as ShellType)
+          ? (parsed.shellType as ShellType)
+          : undefined);
+
+      if (defaults?.shellType === undefined && restoredShellType) {
+        const { top, flavor } = shellTypeToTop(restoredShellType);
+        setTopShell(top);
+        setClaudeFlavor(flavor);
+      }
+
+      if (restoredShellType === "grok" && typeof parsed.model === "string") {
+        setGrokModel(parsed.model);
+      }
+
+      if (defaults?.workingDir === undefined && typeof parsed.workingDir === "string") {
+        setWorkingDir(parsed.workingDir);
+      }
+    } catch {
+      // localStorage unavailable or malformed — ignore, form keeps its defaults
+    }
+  }, [isOpen, defaults, bridges]);
+
   // A submit failure (e.g. missing provider auth) is tied to the chosen shell
   // type; switching shells invalidates the previous error so clear the banner.
   useEffect(() => {
@@ -397,6 +460,20 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       }
       setSubmitError(err instanceof Error ? err.message : String(err));
       return;
+    }
+
+    try {
+      const lastDefaults: LastSessionDefaults = {
+        bridgeId: effectiveBridgeId || undefined,
+        shellType,
+        workingDir: workingDir.trim() || undefined,
+      };
+      if (shellType === "grok") {
+        lastDefaults.model = grokModel;
+      }
+      localStorage.setItem(LAST_SESSION_DEFAULTS_KEY, JSON.stringify(lastDefaults));
+    } catch {
+      // localStorage unavailable (private browsing, quota) — ignore
     }
 
     setName("");
