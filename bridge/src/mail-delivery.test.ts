@@ -28,11 +28,13 @@ interface FakeTimer extends MailTimerHandle {
 }
 
 class FakeClock {
-  // Start at a realistic epoch: the rate limiter treats "never nudged" as
-  // lastNudgeAt=0, so a clock starting at 0 would rate-limit the first nudge.
-  private time = 1_000_000_000_000;
+  private time: number;
   private seq = 0;
   private timers = new Map<number, { at: number; fn: () => void }>();
+
+  constructor(startTime = 1_000_000_000_000) {
+    this.time = startTime;
+  }
 
   now = (): number => this.time;
 
@@ -154,8 +156,8 @@ function makeSession(id: string, overrides: Partial<Session> = {}): Session {
   };
 }
 
-function setup() {
-  const clock = new FakeClock();
+function setup(startTime?: number) {
+  const clock = new FakeClock(startTime);
   const store = new FakeSessionStore();
   const mailStore = new FakeMailStore();
   const runner = new FakeRunner();
@@ -262,6 +264,33 @@ describe('MailDeliveryService long poll', () => {
     const undelivered = await mailStore.listUndelivered('s1');
     assert.equal(undelivered.length, 1, 'mail must survive an abandoned long poll');
   });
+
+  it('does not mark mail delivered to a waiter that dies while acceptMail is checking it', async () => {
+    const { store, mailStore, service } = setup();
+    const session = participatingSession('s1');
+    store.add(session);
+
+    const result = await service.readMail(session, { wait: 10, peek: false, all: false, limit: 50 });
+    assert.equal(result.kind, 'longpoll');
+    if (result.kind !== 'longpoll') return;
+
+    // Simulate the client disconnecting in the gap between acceptMail reading
+    // the undelivered list and marking those messages delivered.
+    const realListUndelivered = mailStore.listUndelivered.bind(mailStore);
+    mailStore.listUndelivered = async (sessionId: string) => {
+      mailStore.listUndelivered = realListUndelivered;
+      result.abandon();
+      return realListUndelivered(sessionId);
+    };
+
+    const accepted = await service.acceptMail(session, { body: 'hello', from: 'p1' });
+    assert.equal(accepted.ok, true);
+
+    // Note: abandon() never resolves `result.messages` (the caller already gave
+    // up waiting), so we assert on store state directly rather than awaiting it.
+    const stillUndelivered = await mailStore.listUndelivered('s1');
+    assert.equal(stillUndelivered.length, 1, 'mail must remain undelivered for the next reader, not be lost');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -324,6 +353,45 @@ describe('MailDeliveryService nudges', () => {
     await service.readMail(session, { wait: 0, peek: false, all: false, limit: 50 });
     await clock.advance(60_000);
     assert.equal(runner.nudgeLines().length, 0, 'no nudge for already-delivered mail');
+  });
+
+  it('nudges immediately even on a clock that starts near zero (never-nudged is not epoch 0)', async () => {
+    // A clock near zero would make old code's `lastNudgeAt ?? 0` compute a
+    // tiny `sinceLast`, incorrectly rate-limiting the very first nudge.
+    const { clock, store, runner, service } = setup(500);
+    const session = makeSession('s1', { shellType: 'opencode' });
+    store.add(session);
+    runner.running.add('s1');
+
+    await service.acceptMail(session, { body: 'first', from: 'alice' });
+    await clock.advance(5_600); // debounce (5s) + composer-paste settle (600ms)
+
+    assert.equal(runner.nudgeLines().length, 1, 'the first-ever nudge must not be rate-limited');
+  });
+
+  it('keeps the pending nudge marker when the session is not running, for a later retry', async () => {
+    const { clock, store, runner, service } = setup();
+    const session = makeSession('s1', { shellType: 'opencode' });
+    store.add(session);
+    // Session is not running yet — the nudge timer will fire while it's down.
+
+    await service.acceptMail(session, { body: 'work item', from: 'alice' });
+    await clock.advance(5_600);
+    assert.equal(runner.nudgeLines().length, 0, 'no nudge while the session is down');
+
+    // Session comes back up; an external retry trigger (e.g. a restart hook,
+    // outside this module) re-checks the nudge for this session. Don't await
+    // it yet — injectPtyLine's paste-settle delay is itself clock-driven, so
+    // the clock must advance before this promise can resolve.
+    runner.running.add('s1');
+    const retried = (service as unknown as { fireMailNudge(id: string): Promise<void> }).fireMailNudge('s1');
+    await flushAsync(); // let fireMailNudge reach injectPtyLine's delay before the clock jumps
+    await clock.advance(600); // composer-paste settle for the submit CR
+    await retried;
+
+    const nudges = runner.nudgeLines();
+    assert.equal(nudges.length, 1, 'the retry must still nudge for mail that arrived while down');
+    assert.ok(nudges[0].includes('from alice'), 'the original sender label must survive the not-running skip');
   });
 });
 

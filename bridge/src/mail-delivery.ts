@@ -205,12 +205,19 @@ export class MailDeliveryService {
     const waiter = this.mailWaiters.get(session.id);
     if (waiter) {
       const undelivered = await this.mailStore.listUndelivered(session.id);
-      const marked = await this.mailStore.markDelivered(
-        session.id,
-        undelivered.map((m) => m.id),
-        'poll',
-      );
-      waiter.deliver(marked);
+      // Mirror the timeout path's settled-guard: the waiter may have died
+      // (client disconnected, or a newer waiter replaced it) while we awaited
+      // above. Only mark messages delivered if it is still the live waiter —
+      // otherwise leave them undelivered so the next reader gets them instead
+      // of writing to a dead socket and losing them.
+      if (this.mailWaiters.get(session.id) === waiter && undelivered.length > 0) {
+        const marked = await this.mailStore.markDelivered(
+          session.id,
+          undelivered.map((m) => m.id),
+          'poll',
+        );
+        waiter.deliver(marked);
+      }
     } else {
       const nudgeDelay = HOOKED_SHELL_TYPES.has(session.shellType ?? 'claude')
         ? MAIL_NUDGE_DELAY_HOOKED_MS
@@ -356,18 +363,32 @@ export class MailDeliveryService {
       return;
     }
 
-    const sinceLast = this.now() - (this.lastNudgeAt.get(sessionId) ?? 0);
-    if (sinceLast < MAIL_NUDGE_MIN_INTERVAL_MS) {
-      // Rate-limited: retry once the window reopens (mail may still be unread).
-      this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_MIN_INTERVAL_MS - sinceLast);
-      return;
+    // "Never nudged" must be its own state, not `lastNudgeAt ?? 0` — a clock
+    // that starts near zero (tests, or a freshly booted process) would make
+    // `now() - 0` look like it's already inside the rate-limit window.
+    const lastNudgeAt = this.lastNudgeAt.get(sessionId);
+    if (lastNudgeAt !== undefined) {
+      const sinceLast = this.now() - lastNudgeAt;
+      if (sinceLast < MAIL_NUDGE_MIN_INTERVAL_MS) {
+        // Rate-limited: retry once the window reopens (mail may still be unread).
+        this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_MIN_INTERVAL_MS - sinceLast);
+        return;
+      }
     }
 
-    this.pendingNudgeFrom.delete(sessionId);
+    // The session isn't running (crashed/restarting): don't clear the pending
+    // marker. No timer is armed for this session at this point (the caller
+    // already removed it before invoking us), so clearing it here would lose
+    // the sender label until unrelated new mail happens to call
+    // scheduleMailNudge again. Keeping it means the next opportunity to
+    // re-check this session (new mail via acceptMail, or an external
+    // restart/idle hook re-invoking this nudge check) still knows who to
+    // credit.
     if (!this.runner.isRunning(sessionId)) return;
     const session = await this.store.loadSession(sessionId);
     if (!session) return;
 
+    this.pendingNudgeFrom.delete(sessionId);
     this.lastNudgeAt.set(sessionId, this.now());
     const text = sanitizeMessageText(
       `You have new ftown mail from ${fromLabel} — run \`~/.ftown/bin/ftown-harness mail read\` to read it.`,
