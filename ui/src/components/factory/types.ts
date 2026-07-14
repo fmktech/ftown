@@ -321,6 +321,11 @@ export interface FactoryListProps {
   onOpenSession: (sessionId: string) => void;
   /** Currently open session id — highlights the nested worker row. */
   selectedSessionId: string | null;
+  /** factoryKey()s hidden by the user; hidden factories fold into a "hidden"
+   *  section like SessionList does for sessions. */
+  hiddenFactoryKeys?: Set<string>;
+  onHideFactory?: (key: string) => void;
+  onUnhideFactory?: (key: string) => void;
 }
 
 export interface NewTicketFormProps {
