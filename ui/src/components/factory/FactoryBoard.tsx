@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useRef, useState } from "react";
+import { relativeTime } from "@/lib/relative-time";
 import type {
   FactoryBoardProps,
   FactoryTicket,
@@ -19,29 +20,10 @@ const STATUS_BADGE: Record<TicketStatus, string> = {
   dead_letter: "bg-red-500/15 text-red-300 border-red-500/30",
 };
 
-function formatAgo(ms: number): string {
-  const diff = Date.now() - ms;
-  if (diff < 0 || Number.isNaN(diff)) return "just now";
-  const s = Math.floor(diff / 1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  return `${d}d ago`;
-}
-
 function formatUntil(ms: number): string {
-  const diff = ms - Date.now();
-  if (Number.isNaN(diff)) return "unknown";
-  if (diff <= 0) return `expired ${formatAgo(ms)}`;
-  const s = Math.ceil(diff / 1000);
-  if (s < 60) return `expires in ${s}s`;
-  const m = Math.ceil(s / 60);
-  if (m < 60) return `expires in ${m}m`;
-  const h = Math.floor(m / 60);
-  return `expires in ${h}h ${m % 60}m`;
+  if (Number.isNaN(ms)) return "unknown";
+  if (ms - Date.now() <= 0) return `expired ${relativeTime(ms)}`;
+  return `expires ${relativeTime(ms)}`;
 }
 
 function historyLine(entry: TicketHistoryEntry): string {
@@ -124,7 +106,7 @@ function TicketDetailPanel({
                     <li key={entry.id}>
                       <div className="flex items-baseline gap-1.5">
                         <span className="shrink-0 text-zinc-500">
-                          {formatAgo(entry.at_ms)}
+                          {relativeTime(entry.at_ms)}
                         </span>
                         <span className="font-medium text-zinc-200">
                           {entry.kind}
@@ -202,7 +184,7 @@ function TicketCard({
             </span>
           )}
           <span className="ml-auto text-[10px] text-zinc-500">
-            {formatAgo(ticket.updated_at_ms)}
+            {relativeTime(ticket.updated_at_ms)}
           </span>
         </div>
         {ticket.status === "blocked" && ticket.blocked_on !== null && (
@@ -316,7 +298,7 @@ export function FactoryBoard({
       <div className="mb-2 flex shrink-0 items-center gap-2">
         <span className="text-xs text-zinc-500">
           {snapshot !== null
-            ? `updated ${formatAgo(snapshot.fetchedAt)}`
+            ? `updated ${relativeTime(snapshot.fetchedAt)}`
             : "no data yet"}
         </span>
         <button

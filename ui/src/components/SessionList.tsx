@@ -6,6 +6,8 @@ import { Session, SessionStatus } from "@/types";
 import { SessionActivity } from "@/hooks/useAllSessionEvents";
 import { BridgeInfo } from "@/hooks/useBridges";
 import { reorderByDrop } from "@/lib/bridge-order";
+import { StatusDot, type StatusDotKind } from "@/lib/StatusDot";
+import { usePersistentState, stringSetCodec } from "@/lib/use-persistent-state";
 
 interface SessionListProps {
   sessions: Session[];
@@ -45,14 +47,16 @@ interface DragState {
 
 function StatusBadge({ status, activity }: { status: SessionStatus; activity?: "thinking" | "tool_use" | "idle" }) {
   const isIdle = status === "running" && activity === "idle";
-  const config: Record<SessionStatus, { dot: string; label: string; pulse: string }> = {
-    running:      { dot: isIdle ? "status-dot-pending" : "status-dot-running", label: isIdle ? "idle" : "running", pulse: isIdle ? "" : "animate-running" },
-    completed:    { dot: "status-dot-done",     label: "done",         pulse: "" },
-    error:        { dot: "status-dot-error",    label: "error",        pulse: "" },
-    pending:      { dot: "status-dot-pending",  label: "pending",      pulse: "animate-pending" },
-    disconnected: { dot: "status-dot-done",     label: "disconnected", pulse: "" },
+  // An idle-but-running session renders the pending dot, without its pulse.
+  const kind: StatusDotKind = isIdle ? "pending" : status;
+  const labels: Record<SessionStatus, string> = {
+    running:      isIdle ? "idle" : "running",
+    completed:    "done",
+    error:        "error",
+    pending:      "pending",
+    disconnected: "disconnected",
   };
-  const { dot, label, pulse } = config[status] ?? config.completed;
+  const label = labels[status] ?? "done";
 
   const labelColors: Record<SessionStatus, string> = {
     running:      isIdle ? "var(--status-pending)" : "var(--accent)",
@@ -64,7 +68,7 @@ function StatusBadge({ status, activity }: { status: SessionStatus; activity?: "
 
   return (
     <div className="flex items-center gap-1.5 shrink-0">
-      <span className={`status-dot ${dot} ${pulse}`} />
+      <StatusDot kind={kind} pulse={isIdle ? false : undefined} />
       <span style={{ fontSize: 10, color: labelColors[status] ?? "var(--text-faint)", letterSpacing: "0.06em" }}>
         {label}
       </span>
@@ -193,6 +197,8 @@ function flattenSessionTree(
   walk(roots, 0);
   return rows;
 }
+
+const EMPTY_ID_SET: Set<string> = new Set();
 
 const menuButtonStyle = {
   display: "block" as const,
@@ -442,8 +448,16 @@ export function SessionList({
   const [dragOverZone, setDragOverZone] = useState<DropZone | null>(null);
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
   const [hiddenBridgesExpanded, setHiddenBridgesExpanded] = useState(false);
-  const [collapsedBridges, setCollapsedBridges] = useState<Set<string>>(new Set());
-  const [collapsedSessions, setCollapsedSessions] = useState<Set<string>>(new Set());
+  const [collapsedBridges, setCollapsedBridges] = usePersistentState<Set<string>>(
+    "ftown:collapsedBridges",
+    EMPTY_ID_SET,
+    stringSetCodec,
+  );
+  const [collapsedSessions, setCollapsedSessions] = usePersistentState<Set<string>>(
+    "ftown:collapsedSessions",
+    EMPTY_ID_SET,
+    stringSetCodec,
+  );
   const dragRef = useRef<DragState | null>(null);
   // Inline opacity React rendered on the dragged row, restored on drag end —
   // hardcoding "1" would permanently clear the 0.55 dim on finished rows.
@@ -461,15 +475,10 @@ export function SessionList({
   const visibleSessions = sessions.filter((s) => !hiddenSet.has(s.id) && !hiddenBridgeSet.has(s.bridgeId));
   const hiddenSessions = sessions.filter((s) => hiddenSet.has(s.id) && !hiddenBridgeSet.has(s.bridgeId));
 
+  // seenParents stays a manually-persisted ref (not usePersistentState): the
+  // default-collapse effect below must see the restored set synchronously in
+  // the same mount commit, which state-based hydration cannot guarantee.
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem("ftown:collapsedBridges");
-      if (raw) setCollapsedBridges(new Set(JSON.parse(raw)));
-    } catch { /* ignore */ }
-    try {
-      const raw = localStorage.getItem("ftown:collapsedSessions");
-      if (raw) setCollapsedSessions(new Set(JSON.parse(raw)));
-    } catch { /* ignore */ }
     try {
       const raw = localStorage.getItem("ftown:seenParents");
       if (raw) seenParentsRef.current = new Set(JSON.parse(raw));
@@ -503,12 +512,9 @@ export function SessionList({
     setCollapsedSessions((prev) => {
       const next = new Set(prev);
       for (const id of newParents) next.add(id);
-      try {
-        localStorage.setItem("ftown:collapsedSessions", JSON.stringify([...next]));
-      } catch { /* ignore */ }
       return next;
     });
-  }, [sessions]);
+  }, [sessions, setCollapsedSessions]);
 
   useEffect(() => {
     if (editingSessionId && inputRef.current) {
@@ -704,7 +710,6 @@ export function SessionList({
       const next = new Set(prev);
       if (next.has(bridgeId)) next.delete(bridgeId);
       else next.add(bridgeId);
-      localStorage.setItem("ftown:collapsedBridges", JSON.stringify([...next]));
       return next;
     });
   }
@@ -714,7 +719,6 @@ export function SessionList({
       const next = new Set(prev);
       if (next.has(sessionId)) next.delete(sessionId);
       else next.add(sessionId);
-      localStorage.setItem("ftown:collapsedSessions", JSON.stringify([...next]));
       return next;
     });
   }
@@ -1203,7 +1207,7 @@ export function SessionList({
               ✕
             </button>
           )}
-          <span className={`status-dot ${isOnline ? "status-dot-running" : "status-dot-done"}`} />
+          <StatusDot kind={isOnline ? "connected" : "disconnected"} />
           <span style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>
             {bridgeSessions.length}
           </span>

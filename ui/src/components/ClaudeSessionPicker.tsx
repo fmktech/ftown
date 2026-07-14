@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { BridgeExecResponse } from "@/hooks/useSessions";
+import { relativeTime } from "@/lib/relative-time";
 
 interface ClaudeSession {
   sessionId: string;
@@ -32,25 +33,6 @@ function parseSessionLines(stdout: string): ClaudeSession[] {
       };
     })
     .filter((s) => s.sessionId);
-}
-
-function formatRelativeTime(ts: string): string {
-  if (!ts) return "";
-  try {
-    const d = new Date(ts);
-    if (isNaN(d.getTime())) return "";
-    const diffMs = Date.now() - d.getTime();
-    const mins = Math.floor(diffMs / 60000);
-    if (mins < 1) return "now";
-    if (mins < 60) return `${mins}m ago`;
-    const hours = Math.floor(mins / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    if (days < 7) return `${days}d ago`;
-    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  } catch {
-    return "";
-  }
 }
 
 export function ClaudeSessionPicker({ bridgeId, workingDir, onSelect, bridgeExec }: ClaudeSessionPickerProps) {
@@ -182,7 +164,7 @@ PYEOF`;
               {s.summary || "Empty session"}
             </span>
             <span className="text-[10px] text-[var(--text-faint)] shrink-0 tabular-nums">
-              {formatRelativeTime(s.timestamp)}
+              {relativeTime(s.timestamp)}
             </span>
           </div>
         </button>
