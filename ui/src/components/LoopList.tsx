@@ -24,6 +24,9 @@ interface LoopListProps {
   onEdit: (loop: Loop) => void;
   onDelete: (loop: Loop) => void;
   collapsed?: boolean;
+  hiddenLoopIds?: Set<string>;
+  onHideLoop?: (loopId: string) => void;
+  onUnhideLoop?: (loopId: string) => void;
 }
 
 function bridgeLabel(bridgeId: string, bridges: BridgeInfo[]): string {
@@ -96,6 +99,9 @@ export function LoopList({
   onEdit,
   onDelete,
   collapsed,
+  hiddenLoopIds,
+  onHideLoop,
+  onUnhideLoop,
 }: LoopListProps) {
   // Fold state for the two-level bridge → group hierarchy below. Keyed by
   // `bridgeId` (level 1) or `${bridgeId} ${group}` (level 2); absence from the
@@ -103,6 +109,8 @@ export function LoopList({
   // fold choices, mirroring SessionList's collapsedBridges/collapsedSessions.
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<LoopMenuState | null>(null);
+  const [hiddenExpanded, setHiddenExpanded] = useState(false);
+  const hiddenSet = hiddenLoopIds ?? new Set<string>();
 
   const closeContextMenu = useCallback(() => setContextMenu(null), []);
 
@@ -148,15 +156,23 @@ export function LoopList({
     });
   }
 
-  const visibleLoops = loops
-    .slice()
-    .sort((a, b) => {
-      const aNext = a.nextRunAt ? Date.parse(a.nextRunAt) : Number.POSITIVE_INFINITY;
-      const bNext = b.nextRunAt ? Date.parse(b.nextRunAt) : Number.POSITIVE_INFINITY;
-      return aNext - bNext;
-    });
+  const sortByNextRun = (a: Loop, b: Loop): number => {
+    const aNext = a.nextRunAt ? Date.parse(a.nextRunAt) : Number.POSITIVE_INFINITY;
+    const bNext = b.nextRunAt ? Date.parse(b.nextRunAt) : Number.POSITIVE_INFINITY;
+    return aNext - bNext;
+  };
 
-  if (visibleLoops.length === 0) {
+  const visibleLoops = loops
+    .filter((l) => !hiddenSet.has(l.id))
+    .slice()
+    .sort(sortByNextRun);
+
+  const hiddenLoops = loops
+    .filter((l) => hiddenSet.has(l.id))
+    .slice()
+    .sort(sortByNextRun);
+
+  if (visibleLoops.length === 0 && hiddenLoops.length === 0) {
     if (collapsed) return null;
     return (
       <div
@@ -223,7 +239,7 @@ export function LoopList({
     groups.set(loop.bridgeId, arr);
   }
 
-  const renderLoopRow = (loop: Loop, indent?: boolean) => {
+  const renderLoopRow = (loop: Loop, indent?: boolean, dimmed?: boolean) => {
         const selected = loop.id === selectedLoopId;
         return (
           <div
@@ -246,7 +262,7 @@ export function LoopList({
               background: selected ? "var(--bg-elevated)" : loop.runNowRequested ? "rgba(0, 255, 136, 0.03)" : "transparent",
               cursor: "pointer",
               fontFamily: "var(--font-mono)",
-              opacity: loop.enabled ? 1 : 0.6,
+              opacity: dimmed ? 0.55 : loop.enabled ? 1 : 0.6,
             }}
             onMouseEnter={(e) => {
               if (!selected) e.currentTarget.style.background = "var(--bg-hover)";
@@ -466,6 +482,35 @@ export function LoopList({
         );
       })}
 
+      {hiddenLoops.length > 0 && !collapsed && (
+        <div className="flex flex-col">
+          <button
+            onClick={() => setHiddenExpanded((v) => !v)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: "8px 16px",
+              borderBottom: "1px solid var(--border-subtle)",
+              borderTop: "1px solid var(--border-subtle)",
+              background: "var(--bg-base)",
+              cursor: "pointer",
+              fontFamily: "var(--font-mono)",
+              fontSize: 11,
+              color: "var(--text-muted)",
+              letterSpacing: "0.06em",
+              textTransform: "uppercase",
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-base)"; }}
+          >
+            <span>Hidden ({hiddenLoops.length})</span>
+            <span style={{ fontSize: 10, opacity: 0.6 }}>{hiddenExpanded ? "▾" : "▸"}</span>
+          </button>
+          {hiddenExpanded && hiddenLoops.map((loop) => renderLoopRow(loop, false, true))}
+        </div>
+      )}
+
       {contextMenu && activeMenuLoop && (
         <ContextMenu
           x={contextMenu.x}
@@ -494,6 +539,25 @@ export function LoopList({
               closeContextMenu();
             }}
           />
+          {hiddenSet.has(activeMenuLoop.id)
+            ? onUnhideLoop && (
+                <ContextMenuButton
+                  label="Unhide"
+                  onClick={() => {
+                    onUnhideLoop(activeMenuLoop.id);
+                    closeContextMenu();
+                  }}
+                />
+              )
+            : onHideLoop && (
+                <ContextMenuButton
+                  label="Hide"
+                  onClick={() => {
+                    onHideLoop(activeMenuLoop.id);
+                    closeContextMenu();
+                  }}
+                />
+              )}
           <ContextMenuButton
             label="Delete"
             color="var(--status-error)"

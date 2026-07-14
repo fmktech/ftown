@@ -76,6 +76,8 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [bridgeOrder, setBridgeOrder] = useState<string[]>([]);
   const [hiddenSessionIds, setHiddenSessionIds] = useState<Set<string>>(new Set());
   const [hiddenBridgeIds, setHiddenBridgeIds] = useState<Set<string>>(new Set());
+  const [hiddenLoopIds, setHiddenLoopIds] = useState<Set<string>>(new Set());
+  const [hiddenFactoryKeys, setHiddenFactoryKeys] = useState<Set<string>>(new Set());
   const [showUserMenu, setShowUserMenu] = useState(false);
   const terminalRef = useRef<TerminalHandle>(null);
   const mobileControlRef = useRef<MobileControlBarHandle>(null);
@@ -113,6 +115,14 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     try {
       const raw = localStorage.getItem("ftown:hiddenBridges");
       if (raw) setHiddenBridgeIds(new Set(JSON.parse(raw)));
+    } catch { /* ignore */ }
+    try {
+      const raw = localStorage.getItem("ftown:hiddenLoops");
+      if (raw) setHiddenLoopIds(new Set(JSON.parse(raw)));
+    } catch { /* ignore */ }
+    try {
+      const raw = localStorage.getItem("ftown:hiddenFactories");
+      if (raw) setHiddenFactoryKeys(new Set(JSON.parse(raw)));
     } catch { /* ignore */ }
   }, []);
 
@@ -286,7 +296,8 @@ PY`;
     () => normalSessions.filter((s) => factoryWorkerOf(s, factories) === null),
     [normalSessions, factories]
   );
-  const loopCount = loops.length;
+  const loopCount = loops.filter((loop) => !hiddenLoopIds.has(loop.id)).length;
+  const factoryCount = factories.filter((f) => !hiddenFactoryKeys.has(factoryKey(f))).length;
 
   useEffect(() => {
     if (!selectedLoop) {
@@ -424,6 +435,44 @@ PY`;
       const next = new Set(prev);
       next.delete(sessionId);
       localStorage.setItem("ftown:hiddenSessions", JSON.stringify([...next]));
+      return next;
+    });
+  }, []);
+
+  const handleHideLoop = useCallback((loopId: string) => {
+    setHiddenLoopIds((prev) => {
+      const next = new Set(prev);
+      next.add(loopId);
+      localStorage.setItem("ftown:hiddenLoops", JSON.stringify([...next]));
+      return next;
+    });
+    setSelectedLoopId((prev) => (prev === loopId ? null : prev));
+  }, []);
+
+  const handleUnhideLoop = useCallback((loopId: string) => {
+    setHiddenLoopIds((prev) => {
+      const next = new Set(prev);
+      next.delete(loopId);
+      localStorage.setItem("ftown:hiddenLoops", JSON.stringify([...next]));
+      return next;
+    });
+  }, []);
+
+  const handleHideFactory = useCallback((key: string) => {
+    setHiddenFactoryKeys((prev) => {
+      const next = new Set(prev);
+      next.add(key);
+      localStorage.setItem("ftown:hiddenFactories", JSON.stringify([...next]));
+      return next;
+    });
+    setSelectedFactoryKey((prev) => (prev === key ? null : prev));
+  }, []);
+
+  const handleUnhideFactory = useCallback((key: string) => {
+    setHiddenFactoryKeys((prev) => {
+      const next = new Set(prev);
+      next.delete(key);
+      localStorage.setItem("ftown:hiddenFactories", JSON.stringify([...next]));
       return next;
     });
   }, []);
@@ -1074,8 +1123,8 @@ PY`;
                   <button
                     role="tab"
                     aria-selected={sidebarTab === "factory"}
-                    aria-label={`Factory (${factories.length})`}
-                    title={`Factory (${factories.length})`}
+                    aria-label={`Factory (${factoryCount})`}
+                    title={`Factory (${factoryCount})`}
                     onClick={() => handleSidebarTabSwitch("factory")}
                     className={`sidebar-tab-icon ${sidebarTab === "factory" ? "sidebar-tab-active" : ""}`}
                   >
@@ -1112,7 +1161,7 @@ PY`;
                     onClick={() => handleSidebarTabSwitch("factory")}
                     className={`sidebar-tab ${sidebarTab === "factory" ? "sidebar-tab-active" : ""}`}
                   >
-                    Factory <span className="sidebar-tab-count">{factories.length}</span>
+                    Factory <span className="sidebar-tab-count">{factoryCount}</span>
                   </button>
                 )}
               </div>
@@ -1127,6 +1176,9 @@ PY`;
                 sessions={normalSessions}
                 onOpenSession={handleOpenFactorySession}
                 selectedSessionId={selectedSessionId}
+                hiddenFactoryKeys={hiddenFactoryKeys}
+                onHideFactory={handleHideFactory}
+                onUnhideFactory={handleUnhideFactory}
               />
             ) : sidebarTab === "crons" ? (
               <LoopList
@@ -1139,6 +1191,9 @@ PY`;
                 onEdit={handleEditLoop}
                 onDelete={handleDeleteLoop}
                 collapsed={isDesktop && sidebarCollapsed}
+                hiddenLoopIds={hiddenLoopIds}
+                onHideLoop={handleHideLoop}
+                onUnhideLoop={handleUnhideLoop}
               />
             ) : (
               <SessionList
