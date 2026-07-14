@@ -14,6 +14,7 @@ function paths(home = homedir()): {
   runtimeDir: string;
   cliCopy: string;
   formatCopy: string;
+  wireTypesCopy: string;
   agentGuide: string;
 } {
   const ftownDir = join(home, '.ftown');
@@ -26,6 +27,7 @@ function paths(home = homedir()): {
     runtimeDir: join(ftownDir, 'harness-runtime'),
     cliCopy: join(ftownDir, 'harness-runtime', 'harness-cli.js'),
     formatCopy: join(ftownDir, 'harness-runtime', 'harness-format.js'),
+    wireTypesCopy: join(ftownDir, 'harness-runtime', 'wire-types.js'),
     agentGuide: join(ftownDir, 'harness-agent.md'),
   };
 }
@@ -84,6 +86,8 @@ export function installHarness(harnessCliPath: string): HarnessInstallResult {
   chmodSync(p.cliCopy, 0o644);
   copyFileSync(join(dirname(harnessCliPath), 'harness-format.js'), p.formatCopy);
   chmodSync(p.formatCopy, 0o644);
+  copyFileSync(join(dirname(harnessCliPath), 'wire-types.js'), p.wireTypesCopy);
+  chmodSync(p.wireTypesCopy, 0o644);
   for (const dep of HARNESS_RUNTIME_DEPS) {
     copyRuntimeDependency(dep, dirname(harnessCliPath), p.runtimeDir);
   }
@@ -177,8 +181,7 @@ Prefer mail over \`send\` (keystroke injection) for agent-to-agent communication
 
 ## Submit keys (\`-s\`)
 
-- \`cursor\` / \`claude\`: Escape+Enter (\`\\x1b\\r\`)
-- \`shell\`: Enter (\`\\r\`)
+- All shell types: Enter (\`\\r\`)
 
 ## Registry
 
