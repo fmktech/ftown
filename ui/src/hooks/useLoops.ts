@@ -8,7 +8,6 @@ import {
   LoopDraft,
   LoopRunRecord,
   Command,
-  CommandResponse,
   CreateLoopPayload,
   ListLoopsPayload,
   UpdateLoopPayload,
@@ -16,6 +15,7 @@ import {
   RunLoopNowPayload,
   GetLoopRunsPayload,
 } from "@/types";
+import type { BridgeRpc } from "@/hooks/useBridgeRpc";
 
 interface LoopUpdateMessage {
   type: "loop_update";
@@ -49,20 +49,20 @@ interface UseLoopsResult {
 /**
  * Owns ONLY the `loops:updates#{userId}` subscription (live push state,
  * mirroring useSessions' sessionsSub). RPC (create/update/delete/run-now/
- * list) reuses the existing `commands:rpc#{userId}` channel that useSessions
- * already owns — this hook never calls client.newSubscription for it and
- * instead issues every command through the injected sendCommand, so the two
- * hooks never fight over the same subscription (centrifuge-js throws on a
- * duplicate newSubscription(channel) call).
+ * list) goes through the injected BridgeRpc transport (from useBridgeRpc),
+ * which owns the shared `commands:rpc#{userId}` channel — this hook never
+ * calls client.newSubscription for it, so consumers of the channel never
+ * fight over the same subscription (centrifuge-js throws on a duplicate
+ * newSubscription(channel) call).
  */
 export function useLoops(
   client: Centrifuge | null,
   userId: string | null,
-  sendCommand: (command: Command) => Promise<CommandResponse>,
-  sendCommandCollect: (command: Command, windowMs?: number) => Promise<CommandResponse[]>
+  rpc: Pick<BridgeRpc, "sendCommand" | "sendCommandCollect">
 ): UseLoopsResult {
   const [loops, setLoops] = useState<Loop[]>([]);
   const loopsSubRef = useRef<Subscription | null>(null);
+  const { sendCommand, sendCommandCollect } = rpc;
 
   // Secondary/CLI-parity path (§2c): loop state is delivered push-first over
   // loops:updates, but refreshLoops itself is the authoritative snapshot for a

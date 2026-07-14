@@ -6,6 +6,7 @@ import { ConnectionStatus } from "@/hooks/useCentrifugo";
 import { TerminalTransportApi } from "@/lib/direct-transport/contract";
 import { Session, ShellType, Loop, LoopDraft, LoopRunRecord } from "@/types";
 import { CreateSessionOptions, useSessions } from "@/hooks/useSessions";
+import { useBridgeRpc } from "@/hooks/useBridgeRpc";
 import { useBridges } from "@/hooks/useBridges";
 import { useLoops } from "@/hooks/useLoops";
 import { useAllSessionEvents } from "@/hooks/useAllSessionEvents";
@@ -128,9 +129,13 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     return () => document.removeEventListener("mousedown", handler);
   }, [showUserMenu]);
 
-  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, removeSession, refreshSessions, bridgeExec, sendCommand, sendCommandCollect } = useSessions(client, userId);
+  // The bridge-RPC transport over `commands:rpc#{userId}` is created ONCE here;
+  // sessions, loops, and factory consume it as peers.
+  const rpc = useBridgeRpc(client, userId);
+  const { bridgeExec } = rpc;
+  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, removeSession, refreshSessions } = useSessions(client, userId, rpc);
   const { bridges, hasBridges } = useBridges(client, userId);
-  const { loops, createLoop, updateLoop, deleteLoop, runLoopNow, getLoopRuns } = useLoops(client, userId, sendCommand, sendCommandCollect);
+  const { loops, createLoop, updateLoop, deleteLoop, runLoopNow, getLoopRuns } = useLoops(client, userId, rpc);
 
   // Keep bridgeOrder stable when bridges connect/disconnect; only append new ids (sorted).
   useEffect(() => {
