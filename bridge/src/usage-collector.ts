@@ -4,11 +4,10 @@ import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-import { priceFor } from './model-pricing.js';
-import type { Session, SessionUsage } from './types.js';
+import type { ModelUsage, Session, SessionUsage } from './types.js';
 
 /**
- * Per-session token/cost usage extraction from harness-native session files.
+ * Per-session token usage extraction from harness-native session files.
  *
  * The extractor is keyed by which NATIVE session id is present on the Session,
  * not by shellType: provider flavors (zai/kimi/deepseek/fireworks) run the
@@ -111,14 +110,9 @@ async function collectClaudeUsage(
   const filePath = join(baseDir, claudeProjectSlug(workingDir), `${claudeSessionId}.jsonl`);
   const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let cacheReadTokens = 0;
-  let cacheWriteTokens = 0;
-  let costUsd = 0;
-  let pricingComplete = true;
   let counted = 0;
-  const models: string[] = [];
+  // Keyed by model id; Map preserves first-appearance order.
+  const byModel = new Map<string, ModelUsage>();
   // An assistant message spans MULTIPLE jsonl lines (one per content block),
   // each repeating the same message.id and identical usage — count each
   // message id exactly once or sums double/triple.
@@ -139,32 +133,28 @@ async function collectClaudeUsage(
       seenMessageIds.add(id);
     }
 
-    const input = usage.input_tokens ?? 0;
-    const output = usage.output_tokens ?? 0;
-    const cacheRead = usage.cache_read_input_tokens ?? 0;
-    const cacheWrite = usage.cache_creation_input_tokens ?? 0;
-    inputTokens += input;
-    outputTokens += output;
-    cacheReadTokens += cacheRead;
-    cacheWriteTokens += cacheWrite;
-    counted += 1;
-    if (!models.includes(model)) models.push(model);
-
-    // Models can vary mid-session — price per message, not per session.
-    const price = priceFor(model);
-    if (price) {
-      costUsd +=
-        (input * price.inPerM +
-          output * price.outPerM +
-          cacheRead * price.cacheReadPerM +
-          cacheWrite * price.cacheWritePerM) /
-        1_000_000;
-    } else {
-      pricingComplete = false;
+    // Models can vary mid-session — attribute tokens per message's model.
+    let acc = byModel.get(model);
+    if (!acc) {
+      acc = { model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+      byModel.set(model, acc);
     }
+    acc.inputTokens += usage.input_tokens ?? 0;
+    acc.outputTokens += usage.output_tokens ?? 0;
+    acc.cacheReadTokens += usage.cache_read_input_tokens ?? 0;
+    acc.cacheWriteTokens += usage.cache_creation_input_tokens ?? 0;
+    counted += 1;
   }
 
   if (counted === 0) return null;
+
+  const perModel = [...byModel.values()];
+  const sum = (pick: (m: ModelUsage) => number): number =>
+    perModel.reduce((acc, m) => acc + pick(m), 0);
+  const inputTokens = sum((m) => m.inputTokens);
+  const outputTokens = sum((m) => m.outputTokens);
+  const cacheReadTokens = sum((m) => m.cacheReadTokens);
+  const cacheWriteTokens = sum((m) => m.cacheWriteTokens);
 
   return {
     inputTokens,
@@ -172,8 +162,8 @@ async function collectClaudeUsage(
     cacheReadTokens,
     cacheWriteTokens,
     totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
-    models,
-    ...(pricingComplete ? { costUsd } : {}),
+    models: perModel.map((m) => m.model),
+    perModel,
     harness: 'claude',
     collectedAt: new Date().toISOString(),
   };
@@ -273,20 +263,8 @@ async function collectCodexUsage(
   const outputTokens = lastTotals.output;
   const cacheWriteTokens = 0;
 
-  // With only cumulative totals there is no per-model attribution: cost is
-  // computable only when the whole session ran on a single priced model.
-  let costUsd: number | undefined;
-  if (models.length === 1) {
-    const price = priceFor(models[0]);
-    if (price) {
-      costUsd =
-        (inputTokens * price.inPerM +
-          outputTokens * price.outPerM +
-          cacheReadTokens * price.cacheReadPerM) /
-        1_000_000;
-    }
-  }
-
+  // Codex rollouts carry only cumulative totals — there is no per-model
+  // attribution, so perModel is deliberately absent (models lists what ran).
   return {
     inputTokens,
     outputTokens,
@@ -294,7 +272,6 @@ async function collectCodexUsage(
     cacheWriteTokens,
     totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
     models,
-    ...(costUsd !== undefined ? { costUsd } : {}),
     harness: 'codex',
     collectedAt: new Date().toISOString(),
   };

@@ -6,15 +6,24 @@ import type { LoopHarness, ShellType } from './harness-registry.js';
 
 export type SessionRuntime = 'tmux' | 'direct';
 
-/** Per-session token/cost usage, extracted from harness-native session files. */
+/** Per-model token breakdown within a session. */
+export interface ModelUsage {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+}
+
+/** Per-session token usage, extracted from harness-native session files. */
 export interface SessionUsage {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
   totalTokens: number;           // sum of the four
-  models: string[];              // distinct, order of first appearance
-  costUsd?: number;              // omitted when any model lacks pricing
+  models: string[];              // distinct, first-appearance order (always present)
+  perModel?: ModelUsage[];       // per-model breakdown when attributable (claude); absent for codex totals
   harness: string;               // which extractor produced it
   collectedAt: string;           // ISO
 }

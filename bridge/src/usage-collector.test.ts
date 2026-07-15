@@ -39,7 +39,7 @@ describe('collectSessionUsage — claude extractor', () => {
   const workingDir = '/tmp/proj.x';
   const sessionId = 'aaaa-bbbb';
 
-  it('sums per-message usage, dedupes repeated message ids, skips synthetic rows, prices per model', async () => {
+  it('sums per-message usage, dedupes repeated message ids, skips synthetic rows, attributes per model', async () => {
     const claudeProjectsDir = join(root, 'claude-sums');
     const dir = join(claudeProjectsDir, claudeProjectSlug(workingDir));
     await mkdir(dir, { recursive: true });
@@ -59,7 +59,7 @@ describe('collectSessionUsage — claude extractor', () => {
       // msg2: sonnet-5 again
       claudeLine('msg2', 'claude-sonnet-5', { input_tokens: 10, output_tokens: 20 }),
       'this is not json',
-      // msg3: haiku (second model, date-suffixed id exercising prefix pricing)
+      // msg3: haiku (second model, date-suffixed id)
       claudeLine('msg3', 'claude-haiku-4-5-20251001', {
         input_tokens: 1000, output_tokens: 100,
         cache_read_input_tokens: 200, cache_creation_input_tokens: 400,
@@ -80,35 +80,24 @@ describe('collectSessionUsage — claude extractor', () => {
     assert.equal(usage.cacheWriteTokens, 900);
     assert.equal(usage.totalTokens, 1110 + 320 + 1200 + 900);
     assert.deepEqual(usage.models, ['claude-sonnet-5', 'claude-haiku-4-5-20251001']);
-    // sonnet-5: (100*3 + 200*15 + 1000*0.3 + 500*3.75)/1e6 = 0.005475
-    //         + (10*3 + 20*15)/1e6                          = 0.000330
-    // haiku:    (1000*1 + 100*5 + 200*0.1 + 400*1.25)/1e6   = 0.002020
-    assert.ok(usage.costUsd !== undefined);
-    assert.ok(Math.abs(usage.costUsd - 0.007825) < 1e-9, String(usage.costUsd));
+    // Per-model attribution: msg1 + msg2 land on sonnet-5, msg3 on haiku.
+    assert.deepEqual(usage.perModel, [
+      {
+        model: 'claude-sonnet-5',
+        inputTokens: 110,
+        outputTokens: 220,
+        cacheReadTokens: 1000,
+        cacheWriteTokens: 500,
+      },
+      {
+        model: 'claude-haiku-4-5-20251001',
+        inputTokens: 1000,
+        outputTokens: 100,
+        cacheReadTokens: 200,
+        cacheWriteTokens: 400,
+      },
+    ]);
     assert.ok(usage.collectedAt);
-  });
-
-  it('omits costUsd when any model lacks pricing', async () => {
-    const claudeProjectsDir = join(root, 'claude-unknown');
-    const dir = join(claudeProjectsDir, claudeProjectSlug(workingDir));
-    await mkdir(dir, { recursive: true });
-    await writeFile(
-      join(dir, `${sessionId}.jsonl`),
-      [
-        claudeLine('m1', 'claude-sonnet-5', { input_tokens: 10, output_tokens: 10 }),
-        claudeLine('m2', 'totally-unknown-model', { input_tokens: 5, output_tokens: 5 }),
-      ].join('\n'),
-    );
-
-    const usage = await collectSessionUsage(
-      { shellType: 'claude', claudeSessionId: sessionId, workingDir },
-      { claudeProjectsDir },
-    );
-
-    assert.ok(usage);
-    assert.equal(usage.costUsd, undefined);
-    assert.equal(usage.totalTokens, 30);
-    assert.deepEqual(usage.models, ['claude-sonnet-5', 'totally-unknown-model']);
   });
 
   it('returns null when the transcript file is missing', async () => {
@@ -123,7 +112,7 @@ describe('collectSessionUsage — claude extractor', () => {
 describe('collectSessionUsage — codex extractor', () => {
   const codexSessionId = '019d2b5c-d671-7863-9688-d9be287e46a6';
 
-  it('uses the LAST token_count totals, splits cached from input, cost from single model', async () => {
+  it('uses the LAST token_count totals, splits cached from input, no perModel', async () => {
     const codexSessionsDir = join(root, 'codex-last-wins');
     const dir = join(codexSessionsDir, '2026', '07', '01');
     await mkdir(dir, { recursive: true });
@@ -165,9 +154,8 @@ describe('collectSessionUsage — codex extractor', () => {
     assert.equal(usage.cacheWriteTokens, 0);
     assert.equal(usage.totalTokens, 11305);
     assert.deepEqual(usage.models, ['gpt-5.4-mini']);
-    // (2188*0.25 + 29*2 + 9088*0.025)/1e6
-    assert.ok(usage.costUsd !== undefined);
-    assert.ok(Math.abs(usage.costUsd - 0.0008322) < 1e-9, String(usage.costUsd));
+    // Codex carries only cumulative totals — never a per-model breakdown.
+    assert.equal(usage.perModel, undefined);
   });
 
   it('returns null when no rollout file matches the session id', async () => {

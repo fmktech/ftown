@@ -19,7 +19,19 @@ export interface BridgePointer {
 }
 
 /**
- * Per-session token/cost usage, as returned by GET /api/sessions/:id/usage.
+ * Per-model token breakdown within a session.
+ * Mirror of ModelUsage in ./types.ts — keep the two shapes in sync.
+ */
+export interface ModelUsage {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+}
+
+/**
+ * Per-session token usage, as returned by GET /api/sessions/:id/usage.
  * Mirror of SessionUsage in ./types.ts — keep the two shapes in sync.
  */
 export interface SessionUsage {
@@ -28,8 +40,8 @@ export interface SessionUsage {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   totalTokens: number;           // sum of the four
-  models: string[];              // distinct, order of first appearance
-  costUsd?: number;              // omitted when any model lacks pricing
+  models: string[];              // distinct, first-appearance order (always present)
+  perModel?: ModelUsage[];       // per-model breakdown when attributable (claude); absent for codex totals
   harness: string;               // which extractor produced it
   collectedAt: string;           // ISO
 }

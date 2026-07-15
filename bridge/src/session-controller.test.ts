@@ -219,7 +219,6 @@ describe('SessionController.usage', () => {
       cacheWriteTokens: 4,
       totalTokens: 10,
       models: ['claude-sonnet-5'],
-      costUsd: 0.0001,
       harness: 'claude',
       collectedAt: '2026-01-01T00:00:00.000Z',
       ...overrides,
