@@ -18,6 +18,22 @@ export interface BridgePointer {
   harnessCli?: string;
 }
 
+/**
+ * Per-session token/cost usage, as returned by GET /api/sessions/:id/usage.
+ * Mirror of SessionUsage in ./types.ts — keep the two shapes in sync.
+ */
+export interface SessionUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;           // sum of the four
+  models: string[];              // distinct, order of first appearance
+  costUsd?: number;              // omitted when any model lacks pricing
+  harness: string;               // which extractor produced it
+  collectedAt: string;           // ISO
+}
+
 /** Session shape as returned by GET /api/sessions and /api/sessions/:id. */
 export interface Session {
   id: string;
@@ -27,6 +43,7 @@ export interface Session {
   shellType?: string;
   model?: string;
   parentSessionId?: string;
+  usage?: SessionUsage;
 }
 
 export type MailType = 'message' | 'task' | 'result' | 'escalation';

@@ -1,7 +1,7 @@
 import type { ProcessRunner } from './claude-runner.js';
 import type { SessionStore } from './session-store.js';
 import type { TerminalManager } from './terminal-manager.js';
-import type { Session } from './types.js';
+import type { Session, SessionUsage } from './types.js';
 
 export type SyntheticStopReason = 'complete' | 'error' | 'stopped';
 
@@ -12,6 +12,13 @@ export interface TerminalPumpDeps {
   publishSessionUpdate: (session: Session) => Promise<void>;
   publishHookEvent: (sessionId: string, event: Record<string, unknown>) => Promise<void>;
   unregisterSession: (sessionId: string) => void;
+  /**
+   * Optional (injectable for tests): extract token/cost usage from the
+   * session's harness-native transcript. Fired-and-forgotten after the
+   * terminal status persist on complete/error; a null result never clobbers
+   * previously persisted usage.
+   */
+  collectUsage?: (session: Session) => Promise<SessionUsage | null>;
   /** Test seams; production uses the defaults. */
   flushIntervalMs?: number;
   maxBufferBytes?: number;
@@ -122,6 +129,33 @@ export class TerminalPump {
     });
   }
 
+  /**
+   * Fire-and-forget usage collection after a terminal status persist. Runs
+   * OUTSIDE the caller's write (the collect can take seconds on huge
+   * transcripts); the persist itself is serialized via withSessionWrite.
+   * Guard: a null collection result never clobbers previously saved usage.
+   */
+  private collectAndPersistUsage(sessionId: string): void {
+    const collect = this.deps.collectUsage;
+    if (!collect) return;
+    void (async () => {
+      const session = await this.deps.store.loadSession(sessionId);
+      if (!session) return;
+      const usage = await collect(session);
+      if (!usage) return;
+      await this.withSessionWrite(sessionId, async () => {
+        const fresh = await this.deps.store.loadSession(sessionId);
+        if (!fresh) return;
+        fresh.usage = usage;
+        fresh.updatedAt = new Date().toISOString();
+        await this.deps.store.saveSession(fresh);
+        await this.deps.publishSessionUpdate(fresh);
+      });
+    })().catch((err) => {
+      console.error(`[Bridge] Failed to collect usage for session ${sessionId}:`, err);
+    });
+  }
+
   private handleComplete(sessionId: string): void {
     this.flush(sessionId);
     this.publishSyntheticStop(sessionId, 'complete');
@@ -137,6 +171,7 @@ export class TerminalPump {
     }).catch((err) => {
       console.error(`[Bridge] Failed to handle completion for session ${sessionId}:`, err);
     }).finally(() => {
+      this.collectAndPersistUsage(sessionId);
       this.deps.unregisterSession(sessionId);
     });
   }
@@ -187,6 +222,7 @@ export class TerminalPump {
     }).catch((err) => {
       console.error(`[Bridge] Failed to handle error for session ${sessionId}:`, err);
     }).finally(() => {
+      this.collectAndPersistUsage(sessionId);
       this.deps.unregisterSession(sessionId);
       this.deps.terminalManager.destroy(sessionId);
     });
