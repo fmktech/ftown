@@ -222,7 +222,6 @@ describe('TerminalPump usage collection', () => {
       cacheWriteTokens: 40,
       totalTokens: 100,
       models: ['claude-sonnet-5'],
-      costUsd: 0.001,
       harness: 'claude',
       collectedAt: new Date().toISOString(),
       ...overrides,

@@ -334,26 +334,39 @@ async function fetchUsageRow(id: string): Promise<UsageRow> {
 }
 
 function formatUsageTable(rows: UsageRow[]): string {
-  const header = ['id', 'name', 'models', 'in', 'out', 'cacheR', 'cacheW', 'total', '$cost'];
-  const cost = (u: SessionUsage | null): string =>
-    u?.costUsd === undefined ? '-' : `$${u.costUsd.toFixed(4)}`;
-  const body = rows.map((r) => [
-    r.id.slice(0, 8),
-    r.name,
-    r.usage ? r.usage.models.join(',') : '-',
-    r.usage ? String(r.usage.inputTokens) : '-',
-    r.usage ? String(r.usage.outputTokens) : '-',
-    r.usage ? String(r.usage.cacheReadTokens) : '-',
-    r.usage ? String(r.usage.cacheWriteTokens) : '-',
-    r.usage ? String(r.usage.totalTokens) : '-',
-    cost(r.usage),
-  ]);
+  const header = ['id', 'name', 'model(s)', 'in', 'out', 'cacheR', 'cacheW', 'total'];
+  const body: string[][] = [];
+  for (const r of rows) {
+    const u = r.usage;
+    body.push([
+      r.id.slice(0, 8),
+      r.name,
+      u ? u.models.join(',') : '-',
+      u ? String(u.inputTokens) : '-',
+      u ? String(u.outputTokens) : '-',
+      u ? String(u.cacheReadTokens) : '-',
+      u ? String(u.cacheWriteTokens) : '-',
+      u ? String(u.totalTokens) : '-',
+    ]);
+    // Multi-model sessions get an indented per-model sub-row each.
+    if (u?.perModel && u.perModel.length > 1) {
+      for (const m of u.perModel) {
+        body.push([
+          '',
+          '',
+          `  ${m.model}`,
+          String(m.inputTokens),
+          String(m.outputTokens),
+          String(m.cacheReadTokens),
+          String(m.cacheWriteTokens),
+          String(m.inputTokens + m.outputTokens + m.cacheReadTokens + m.cacheWriteTokens),
+        ]);
+      }
+    }
+  }
   const collected = rows.map((r) => r.usage).filter((u): u is SessionUsage => u !== null);
   const sum = (pick: (u: SessionUsage) => number): number =>
     collected.reduce((acc, u) => acc + pick(u), 0);
-  const costs = collected.map((u) => u.costUsd).filter((c): c is number => c !== undefined);
-  const totalCost =
-    costs.length > 0 ? `$${costs.reduce((a, b) => a + b, 0).toFixed(4)}` : '-';
   body.push([
     'TOTAL',
     '',
@@ -363,7 +376,6 @@ function formatUsageTable(rows: UsageRow[]): string {
     String(sum((u) => u.cacheReadTokens)),
     String(sum((u) => u.cacheWriteTokens)),
     String(sum((u) => u.totalTokens)),
-    totalCost,
   ]);
   const widths = header.map((h, i) =>
     Math.max(h.length, ...body.map((row) => row[i].length)),
@@ -386,7 +398,7 @@ Commands:
   tell <target> <message...>    Send mail to another session's inbox
   inbox | mail                  Read own inbox (requires FTOWN_SESSION_ID)
   running <session-id>          Check if session PTY is running
-  usage <session-id...>         Token/cost usage per session (--json for raw)
+  usage <session-id...>         Model/token usage per session (--json for raw)
   remove <session-id>           Stop and remove a session (archived as a tombstone)
   archive                       List archived (removed) sessions
   revive <session-id>           Recreate a removed session from its tombstone
