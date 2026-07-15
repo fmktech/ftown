@@ -23,6 +23,7 @@ interface Harness {
   published: Array<{ sessionId: string; data: string }>;
   hookEvents: Array<{ sessionId: string; event: Record<string, unknown> }>;
   savedStatuses: string[];
+  savedErrorReasons: Array<string | undefined>;
   publishedSessions: Session[];
   unregistered: string[];
   destroyed: string[];
@@ -37,6 +38,7 @@ function makeHarness(deps: Partial<TerminalPumpDeps> = {}): Harness {
     published: [],
     hookEvents: [],
     savedStatuses: [],
+    savedErrorReasons: [],
     publishedSessions: [],
     unregistered: [],
     destroyed: [],
@@ -47,7 +49,13 @@ function makeHarness(deps: Partial<TerminalPumpDeps> = {}): Harness {
     store: {
       appendTerminalData: async (sessionId, data) => { h.appended.push({ sessionId, data }); },
       loadSession: async () => h.session,
-      saveSession: async (session) => { h.savedStatuses.push(session.status); },
+      saveSession: async (session) => {
+        h.savedStatuses.push(session.status);
+        h.savedErrorReasons.push(session.errorReason);
+      },
+      // The "flushed log" is everything appended so far for the session.
+      loadTerminalLog: async (sessionId) =>
+        h.appended.filter((a) => a.sessionId === sessionId).map((a) => a.data).join(''),
     },
     terminalManager: {
       write: (_sid: string, data: string) => { h.written.push(data); },
@@ -133,6 +141,56 @@ describe('TerminalPump lifecycle handlers', () => {
     assert.deepEqual(h.savedStatuses, ['error']);
     assert.deepEqual(h.unregistered, ['s1']);
     assert.deepEqual(h.destroyed, ['s1']);
+  });
+
+  it('on error: persists errorReason with the message and recent terminal tail, ANSI stripped', async () => {
+    const h = makeHarness();
+    const runner = makeRunnerStub();
+    h.pump.attach(runner as unknown as Pick<ProcessRunner, 'on'>);
+
+    // Colored, multi-line startup output still buffered when the crash lands.
+    h.pump.handleData('s1', '\u001b[31mkeychain\u001b[0m write\nfailed:   token refresh\u001b[2K\r');
+
+    runner.emit('error', 's1', new Error('Process exited with code 1'));
+    await settle();
+
+    assert.deepEqual(h.savedStatuses, ['error']);
+    const reason = h.savedErrorReasons[0];
+    assert.ok(reason, 'errorReason must be persisted');
+    assert.ok(reason.startsWith('Process exited with code 1 — '), reason);
+    assert.ok(reason.includes('keychain write failed: token refresh'), reason);
+    assert.ok(!/\u001b/.test(reason), 'ANSI escapes must be stripped');
+    assert.equal(h.publishedSessions[0]?.errorReason, reason);
+  });
+
+  it('on error: caps errorReason at ~400 chars with a ~300-char tail', async () => {
+    const h = makeHarness();
+    const runner = makeRunnerStub();
+    h.pump.attach(runner as unknown as Pick<ProcessRunner, 'on'>);
+
+    h.pump.handleData('s1', 'x'.repeat(2000) + ' TAIL_MARKER_END');
+    runner.emit('error', 's1', new Error('boom'));
+    await settle();
+
+    const reason = h.savedErrorReasons[0];
+    assert.ok(reason);
+    assert.ok(reason.length <= 400, `length ${reason.length} exceeds cap`);
+    assert.ok(reason.startsWith('boom — '));
+    // The tail keeps the END of the output (the most recent chars).
+    assert.ok(reason.endsWith('TAIL_MARKER_END'), reason.slice(-40));
+    // Tail portion is capped at ~300 chars.
+    assert.ok(reason.length - 'boom — '.length <= 300);
+  });
+
+  it('on error with no terminal output: errorReason is just the message', async () => {
+    const h = makeHarness();
+    const runner = makeRunnerStub();
+    h.pump.attach(runner as unknown as Pick<ProcessRunner, 'on'>);
+
+    runner.emit('error', 's1', new Error('spawn ENOENT'));
+    await settle();
+
+    assert.equal(h.savedErrorReasons[0], 'spawn ENOENT');
   });
 
   it('withSessionWrite serializes tasks per session', async () => {

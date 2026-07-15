@@ -4,7 +4,8 @@ import { basename, resolve } from 'node:path';
 
 import { buildSessionCommand } from './agent-commands.js';
 import { ensureCodexWorkdirTrust } from './codex-installer.js';
-import { harnessAcceptsPromptAsCliArg } from './harness-registry.js';
+import { HARNESSES, harnessAcceptsPromptAsCliArg, type HarnessSpec } from './harness-registry.js';
+import { staggerSpawn } from './spawn-stagger.js';
 import { PROVIDER_AUTH_ENV, PROVIDER_RUNTIME_ENV, loadProviderEnv } from './provider-env-store.js';
 import { registerSessionWorkspace } from './session-registry.js';
 
@@ -231,6 +232,23 @@ export function assertProviderAuthAvailable(
   if (missing) throw missing;
 }
 
+/**
+ * Per-harness spawn stagger, applied immediately before every runner.run
+ * (create AND relaunch). Harnesses with spawnStaggerMs set (currently cursor,
+ * whose startup token refresh races a macOS Keychain write under concurrent
+ * spawns) get their spawns serialized at that gap. NOTE: this delays the
+ * create/relaunch response by up to queueDepth × spawnStaggerMs — intended.
+ */
+async function staggerHarnessSpawn(shellType: ShellType | undefined): Promise<void> {
+  if (!shellType) return;
+  // Widen: the `as const` registry narrows away optional fields it doesn't set.
+  const spec: HarnessSpec | undefined = HARNESSES[shellType];
+  const staggerMs = spec?.spawnStaggerMs;
+  if (staggerMs) {
+    await staggerSpawn(`spawn:${shellType}`, staggerMs);
+  }
+}
+
 /** The stored-session fields relaunch derivation needs — satisfied by both live records and tombstones. */
 export type RelaunchCommandSource = Pick<
   Session,
@@ -324,6 +342,8 @@ export async function relaunchFtownSession(
   session.updatedAt = new Date().toISOString();
   await deps.store.saveSession(session);
   await deps.centrifugo.publishSessionUpdate(deps.userId, session);
+
+  await staggerHarnessSpawn(session.shellType);
 
   deps.runner.run(session.id, command, {
     workingDir: session.workingDir,
@@ -505,6 +525,8 @@ export async function createFtownSession(
     // unless the resolved workdir is trusted in ~/.codex/config.toml.
     ensureCodexWorkdirTrust(workingDir ?? process.cwd());
   }
+
+  await staggerHarnessSpawn(effectiveInput.shellType);
 
   deps.runner.run(sessionId, launchCommand, {
     workingDir,
