@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { SessionController } from './session-controller.js';
 import type { SessionControllerDeps, SessionStoreLike } from './session-controller.js';
-import type { Session } from './types.js';
+import type { Session, SessionUsage } from './types.js';
 
 function makeSession(overrides: Partial<Session> = {}): Session {
   return {
@@ -207,5 +207,90 @@ describe('SessionController.retry', () => {
       code: 'invalid',
       message: 'Session has no command (created before v0.2.0)',
     });
+  });
+});
+
+describe('SessionController.usage', () => {
+  function makeUsage(overrides: Partial<SessionUsage> = {}): SessionUsage {
+    return {
+      inputTokens: 1,
+      outputTokens: 2,
+      cacheReadTokens: 3,
+      cacheWriteTokens: 4,
+      totalTokens: 10,
+      models: ['claude-sonnet-5'],
+      costUsd: 0.0001,
+      harness: 'claude',
+      collectedAt: '2026-01-01T00:00:00.000Z',
+      ...overrides,
+    };
+  }
+
+  it('returns not_found for an unknown session', async () => {
+    const { controller } = setup([]);
+    const result = await controller.usage('nope');
+    assert.deepEqual(result, { ok: false, code: 'not_found', message: 'Session not found' });
+  });
+
+  it('passes through persisted usage without invoking the collector', async () => {
+    const persisted = makeUsage({ totalTokens: 42 });
+    let collectorCalls = 0;
+    const { controller } = setup(
+      [makeSession({ usage: persisted })],
+      { collectUsage: async () => { collectorCalls += 1; return makeUsage(); } },
+    );
+
+    const result = await controller.usage('sess-1');
+    assert.ok(result.ok);
+    assert.deepEqual(result.usage, persisted);
+    assert.equal(collectorCalls, 0);
+  });
+
+  it('collects on demand for a terminal session and persists + publishes the result', async () => {
+    const collectedUsage = makeUsage();
+    const { controller, store, published } = setup(
+      [makeSession({ status: 'completed' })],
+      { collectUsage: async () => collectedUsage },
+    );
+
+    const result = await controller.usage('sess-1');
+    assert.ok(result.ok);
+    assert.deepEqual(result.usage, collectedUsage);
+    assert.equal(store.saved.length, 1);
+    assert.deepEqual(store.saved[0].usage, collectedUsage);
+    assert.deepEqual(published[0]?.usage, collectedUsage);
+  });
+
+  it('collects on demand for a RUNNING session without persisting (numbers still moving)', async () => {
+    const collectedUsage = makeUsage();
+    const { controller, store, published } = setup(
+      [makeSession({ status: 'running' })],
+      { collectUsage: async () => collectedUsage },
+    );
+
+    const result = await controller.usage('sess-1');
+    assert.ok(result.ok);
+    assert.deepEqual(result.usage, collectedUsage);
+    assert.equal(store.saved.length, 0);
+    assert.equal(published.length, 0);
+  });
+
+  it('returns null usage when the collector yields null, without persisting', async () => {
+    const { controller, store } = setup(
+      [makeSession({ status: 'completed' })],
+      { collectUsage: async () => null },
+    );
+
+    const result = await controller.usage('sess-1');
+    assert.ok(result.ok);
+    assert.equal(result.usage, null);
+    assert.equal(store.saved.length, 0);
+  });
+
+  it('returns null usage when no collector is wired', async () => {
+    const { controller } = setup([makeSession({ status: 'completed' })]);
+    const result = await controller.usage('sess-1');
+    assert.ok(result.ok);
+    assert.equal(result.usage, null);
   });
 });

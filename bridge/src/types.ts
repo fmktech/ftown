@@ -6,6 +6,19 @@ import type { LoopHarness, ShellType } from './harness-registry.js';
 
 export type SessionRuntime = 'tmux' | 'direct';
 
+/** Per-session token/cost usage, extracted from harness-native session files. */
+export interface SessionUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;           // sum of the four
+  models: string[];              // distinct, order of first appearance
+  costUsd?: number;              // omitted when any model lacks pricing
+  harness: string;               // which extractor produced it
+  collectedAt: string;           // ISO
+}
+
 export interface Session {
   id: string;
   name: string;
@@ -26,6 +39,7 @@ export interface Session {
   runtime?: SessionRuntime;
   errorReason?: string;
   loopId?: string; // set on loop-run sessions; groups the run under its Loop in the UI
+  usage?: SessionUsage;
 }
 
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error';
@@ -153,7 +167,7 @@ export interface Command {
   requestId: string;
 }
 
-export type CommandType = 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'clear_terminal' | 'update_session_parent' | 'create_loop' | 'list_loops' | 'update_loop' | 'delete_loop' | 'run_loop_now' | 'get_loop_runs';
+export type CommandType = 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'clear_terminal' | 'update_session_parent' | 'get_session_usage' | 'create_loop' | 'list_loops' | 'update_loop' | 'delete_loop' | 'run_loop_now' | 'get_loop_runs';
 
 export interface CreateSessionPayload {
   command: string;
@@ -211,6 +225,11 @@ export interface ClearTerminalPayload {
   sessionId: string;
 }
 
+export interface GetSessionUsagePayload {
+  sessionId: string;
+  bridgeId?: string;
+}
+
 export interface CreateLoopPayload extends LoopDraft { bridgeId: string }
 export interface ListLoopsPayload { bridgeId?: string }
 export interface UpdateLoopPayload { bridgeId: string; loopId: string; patch: Partial<LoopDraft> }
@@ -218,7 +237,7 @@ export interface DeleteLoopPayload { bridgeId: string; loopId: string }
 export interface RunLoopNowPayload { bridgeId: string; loopId: string }
 export interface GetLoopRunsPayload { bridgeId?: string; loopId: string }
 
-export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | ClearTerminalPayload | UpdateSessionParentPayload | CreateLoopPayload | ListLoopsPayload | UpdateLoopPayload | DeleteLoopPayload | RunLoopNowPayload | GetLoopRunsPayload | Record<string, unknown>;
+export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | ClearTerminalPayload | UpdateSessionParentPayload | GetSessionUsagePayload | CreateLoopPayload | ListLoopsPayload | UpdateLoopPayload | DeleteLoopPayload | RunLoopNowPayload | GetLoopRunsPayload | Record<string, unknown>;
 
 export interface CommandResponse {
   requestId: string;

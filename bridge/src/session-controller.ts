@@ -6,7 +6,7 @@ import {
 } from './create-ftown-session.js';
 
 import type { RemoveFtownSessionOptions } from './remove-ftown-session.js';
-import type { Session } from './types.js';
+import type { Session, SessionUsage } from './types.js';
 
 /**
  * Transport-agnostic session operations, defined ONCE and shared by the two
@@ -61,6 +61,9 @@ export interface SessionControllerDeps {
   ): Promise<Session | null>;
   /** Full factory bundle, required by create/retry only. */
   sessionFactory?: CreateFtownSessionDeps;
+  /** Optional: extract token/cost usage from harness-native session files.
+   * Required only by usage(); omitted in adapters that never call it. */
+  collectUsage?(session: Session): Promise<SessionUsage | null>;
   // ---- Runtime closures still owned by index.ts. They are injected rather
   // than restructured out of index.ts (a later task splits that file); only
   // stop/clearTerminal need them, so the HTTP adapter may omit them.
@@ -116,6 +119,37 @@ export class SessionController {
 
   get(sessionId: string): Promise<Session | null> {
     return this.deps.store.loadSession(sessionId);
+  }
+
+  /**
+   * Per-session token/cost usage. Returns the persisted snapshot when
+   * present; otherwise collects on demand (covers live sessions and sessions
+   * that finished before usage collection existed). An on-demand result is
+   * persisted + published only when the session is terminal — a live
+   * session's numbers are still moving, so caching them would go stale.
+   */
+  async usage(
+    sessionId: string,
+  ): Promise<SessionControllerResult<{ usage: SessionUsage | null }>> {
+    const session = await this.deps.store.loadSession(sessionId);
+    if (!session) {
+      return { ok: false, code: 'not_found', message: 'Session not found' };
+    }
+    if (session.usage) {
+      return { ok: true, usage: session.usage };
+    }
+    const collect = this.deps.collectUsage;
+    if (!collect) {
+      return { ok: true, usage: null };
+    }
+    const usage = await collect(session);
+    if (usage && (session.status === 'completed' || session.status === 'error')) {
+      session.usage = usage;
+      session.updatedAt = new Date().toISOString();
+      await this.deps.store.saveSession(session);
+      await this.deps.publishSessionUpdate(session);
+    }
+    return { ok: true, usage };
   }
 
   /** Re-run a finished/dead session's stored command verbatim. */

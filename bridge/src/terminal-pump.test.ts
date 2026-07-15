@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { TerminalPump, type TerminalPumpDeps } from './terminal-pump.js';
 import type { ProcessRunner } from './claude-runner.js';
-import type { Session } from './types.js';
+import type { Session, SessionUsage } from './types.js';
 
 function makeSession(overrides: Partial<Session> = {}): Session {
   return {
@@ -210,6 +210,92 @@ describe('TerminalPump lifecycle handlers', () => {
     releaseFirst();
     await Promise.all([first, second]);
     assert.deepEqual(order, ['first', 'second']);
+  });
+});
+
+describe('TerminalPump usage collection', () => {
+  function makeUsage(overrides: Partial<SessionUsage> = {}): SessionUsage {
+    return {
+      inputTokens: 10,
+      outputTokens: 20,
+      cacheReadTokens: 30,
+      cacheWriteTokens: 40,
+      totalTokens: 100,
+      models: ['claude-sonnet-5'],
+      costUsd: 0.001,
+      harness: 'claude',
+      collectedAt: new Date().toISOString(),
+      ...overrides,
+    };
+  }
+
+  async function waitFor(cond: () => boolean): Promise<void> {
+    for (let i = 0; i < 100 && !cond(); i++) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
+
+  it('on complete: runs the injected collector and persists+publishes non-null usage', async () => {
+    const usage = makeUsage();
+    const collected: string[] = [];
+    const h = makeHarness({
+      collectUsage: async (session) => {
+        collected.push(session.id);
+        return usage;
+      },
+    });
+    const runner = makeRunnerStub();
+    h.pump.attach(runner as unknown as Pick<ProcessRunner, 'on'>);
+
+    runner.emit('complete', 's1');
+    await waitFor(() => h.session.usage !== undefined);
+
+    assert.deepEqual(collected, ['s1']);
+    assert.deepEqual(h.session.usage, usage);
+    const last = h.publishedSessions[h.publishedSessions.length - 1];
+    assert.deepEqual(last?.usage, usage);
+    // status persist first, usage persist second
+    assert.deepEqual(h.savedStatuses, ['completed', 'completed']);
+  });
+
+  it('on error: also collects usage', async () => {
+    const usage = makeUsage({ harness: 'codex' });
+    const h = makeHarness({ collectUsage: async () => usage });
+    const runner = makeRunnerStub();
+    h.pump.attach(runner as unknown as Pick<ProcessRunner, 'on'>);
+
+    runner.emit('error', 's1', new Error('boom'));
+    await waitFor(() => h.session.usage !== undefined);
+
+    assert.deepEqual(h.session.usage, usage);
+  });
+
+  it('a null collector result never clobbers existing usage or triggers an extra save', async () => {
+    const existing = makeUsage({ totalTokens: 999 });
+    const h = makeHarness({ collectUsage: async () => null });
+    h.session.usage = existing;
+    const runner = makeRunnerStub();
+    h.pump.attach(runner as unknown as Pick<ProcessRunner, 'on'>);
+
+    runner.emit('complete', 's1');
+    await settle();
+    await settle();
+
+    assert.deepEqual(h.session.usage, existing);
+    // Only the status persist — no second save from the usage path.
+    assert.deepEqual(h.savedStatuses, ['completed']);
+  });
+
+  it('without a collector dep, completion behaves exactly as before', async () => {
+    const h = makeHarness();
+    const runner = makeRunnerStub();
+    h.pump.attach(runner as unknown as Pick<ProcessRunner, 'on'>);
+
+    runner.emit('complete', 's1');
+    await settle();
+
+    assert.equal(h.session.usage, undefined);
+    assert.deepEqual(h.savedStatuses, ['completed']);
   });
 });
 
