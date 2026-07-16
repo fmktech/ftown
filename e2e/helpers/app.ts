@@ -1,7 +1,14 @@
 import { expect, type Page } from "@playwright/test";
 import { UI_BASE_URL } from "./config";
 
-const PASSWORD = "e2e-password-123";
+/** Default password for every e2e-registered user (CI-local; nothing sensitive). */
+export const E2E_PASSWORD = "e2e-password-123";
+
+/** A registered/loggable user credential pair. */
+export interface UserCreds {
+  email: string;
+  password: string;
+}
 
 /**
  * The run-scoped user email. The bridge's token `sub` and the dashboard user MUST
@@ -16,15 +23,25 @@ export function sharedEmail(): string {
 }
 
 /**
+ * Mint a fresh, unique, not-yet-registered credential pair for an isolated user
+ * (e.g. "user B" in a cross-tenant test). The email is unique per call so two
+ * users never collide within or across runs.
+ */
+export function makeUser(prefix = "e2e-b"): UserCreds {
+  const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return { email: `${prefix}+${unique}@ftown.test`, password: E2E_PASSWORD };
+}
+
+/**
  * Register via the same endpoint the app exposes. Idempotent: F4 made register
  * non-enumerating, so it returns a generic 200 for both new and existing
  * accounts — any 2xx is success.
  */
-export async function registerUser(email: string): Promise<void> {
+export async function registerUser(email: string, password: string = E2E_PASSWORD): Promise<void> {
   const res = await fetch(`${UI_BASE_URL}/api/auth/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password: PASSWORD }),
+    body: JSON.stringify({ email, password }),
   });
   const body = await res.text();
   if (!res.ok) {
@@ -33,12 +50,42 @@ export async function registerUser(email: string): Promise<void> {
 }
 
 /** Fill the /login credentials form and land on /dashboard. */
-export async function login(page: Page, email: string): Promise<void> {
+export async function login(page: Page, email: string, password: string = E2E_PASSWORD): Promise<void> {
   await page.goto("/login");
   await page.locator("#email").fill(email);
-  await page.locator("#password").fill(PASSWORD);
+  await page.locator("#password").fill(password);
   await page.getByRole("button", { name: "Sign In" }).click();
   await page.waitForURL("**/dashboard", { timeout: 30_000 });
+}
+
+/**
+ * Register (idempotent) AND log `page` in as the given user, landing on
+ * /dashboard. Omit `creds` to mint a fresh isolated user — useful for a second
+ * browser context that must act as user B against user A's resources. Returns
+ * the credentials actually used.
+ */
+export async function registerAndLogin(page: Page, creds?: UserCreds): Promise<UserCreds> {
+  const user = creds ?? makeUser();
+  await registerUser(user.email, user.password);
+  await login(page, user.email, user.password);
+  return user;
+}
+
+/**
+ * Fetch the connect token for whoever `page` is currently logged in as, from
+ * POST /api/auth/token. The route returns an HS256 JWT (aud "ftown:centrifugo",
+ * sub = the session email) — the same token the browser uses to connect to
+ * Centrifugo. Uses the page context's auth cookies, so the token is scoped to
+ * that page's user. Throws on non-2xx (e.g. 401 when the page is not logged in).
+ */
+export async function getCentrifugoToken(page: Page): Promise<string> {
+  const res = await page.request.post(`${UI_BASE_URL}/api/auth/token`);
+  if (!res.ok()) {
+    throw new Error(`/api/auth/token failed: ${res.status()} ${await res.text()}`);
+  }
+  const json = (await res.json()) as { token?: string };
+  if (!json.token) throw new Error("/api/auth/token returned no token");
+  return json.token;
 }
 
 /**
