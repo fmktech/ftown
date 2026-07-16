@@ -98,11 +98,6 @@ async function deleteLoopQuietly(id: string | undefined): Promise<void> {
   }
 }
 
-/** No run for the loop is currently in the 'running' state (shell runs finish fast). */
-async function noRunActive(id: string): Promise<boolean> {
-  return (await runsOf(id)).every((r) => r.status !== "running");
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -119,8 +114,10 @@ async function loginAndBridge(page: Page): Promise<void> {
 
 test.describe("loop scheduler / controller", () => {
   test("create -> runs accumulate -> run-now -> disable -> delete", async ({ page }) => {
-    // The natural first fire can take up to one 30s tick; give the whole flow room.
-    test.setTimeout(120_000);
+    // The natural first fire can take up to one 30s tick, and step (3) waits out a
+    // further full tick (>30s) to prove disable stops future fires; give the whole
+    // flow room above the 90s default.
+    test.setTimeout(150_000);
 
     const name = `e2e-loop-${Date.now()}`;
     const marker = `E2ELOOP${Date.now()}`;
@@ -153,14 +150,21 @@ test.describe("loop scheduler / controller", () => {
         })
         .toBeGreaterThanOrEqual(1);
 
-      // (2) run-now adds an extra run. Wait out any in-flight run first so the
-      // skip-overlap guard can't turn our manual fire into a no-op.
-      await expect.poll(() => noRunActive(id), { timeout: 20_000 }).toBe(true);
+      // (2) run-now adds an extra run. The skip-overlap guard keys on the actual
+      // process being ALIVE (runner.isRunning), NOT on the run-record status —
+      // which lingers 'running' for a full ~30s scheduler grace after the shell
+      // process already exited (loop-scheduler finalize grace). A shell `echo`
+      // exits in milliseconds, so run-now fires; poll until fired:true to stay
+      // robust to the rare case where a natural tick's run is momentarily live.
       const before = (await runsOf(id)).length;
 
-      const runNow = await bridgeApiFetch("POST", `/api/loops/${id}/run-now`);
-      expect(runNow.status, "run-now must succeed").toBe(200);
-      expect((runNow.body as { fired: boolean }).fired, "run-now must fire").toBe(true);
+      await expect
+        .poll(async () => {
+          const runNow = await bridgeApiFetch("POST", `/api/loops/${id}/run-now`);
+          expect(runNow.status, "run-now must succeed").toBe(200);
+          return (runNow.body as { fired: boolean }).fired;
+        }, { timeout: 20_000, message: "run-now never fired (kept skipping on overlap)" })
+        .toBe(true);
 
       await expect
         .poll(async () => (await runsOf(id)).length, {
@@ -169,21 +173,26 @@ test.describe("loop scheduler / controller", () => {
         })
         .toBeGreaterThan(before);
 
-      // (3) disable -> no NEW runs accrue. Let anything in flight settle, snapshot,
-      // wait, and assert the count held (a disabled loop is skipped on every tick,
-      // and the next natural tick is 30s away regardless).
+      // (3) disable -> no NEW runs accrue. Disabling does not kill an in-flight run
+      // (it only makes isDue() false on every future tick), and a finalizing run
+      // updates its status WITHOUT adding a run node — so run COUNT, not run
+      // status, is the honest signal here. Snapshot the count just after disabling,
+      // then wait out a FULL scheduler tick (>30s, LOOP_TICK_INTERVAL_MS) — long
+      // enough that an *enabled* interval loop would have fired at least once more —
+      // and assert the count never moved. That is the proof disable stops future
+      // fires, without depending on the 30s run-record finalize grace.
       const disable = await bridgeApiFetch("PATCH", `/api/loops/${id}`, {
         body: { enabled: false },
       });
       expect(disable.status, "disable PATCH must succeed").toBe(200);
       expect((disable.body as { loop: LoopLite }).loop.enabled).toBe(false);
 
-      await expect.poll(() => noRunActive(id), { timeout: 20_000 }).toBe(true);
+      await sleep(2_000); // let any tick racing the disable settle before snapshotting
       const settled = (await runsOf(id)).length;
-      await sleep(6_000);
+      await sleep(35_000); // > one full 30s tick: an enabled loop WOULD fire in this window
       expect(
         (await runsOf(id)).length,
-        "a disabled loop must not accrue new runs",
+        "a disabled loop must not accrue new runs across a full scheduler tick",
       ).toBe(settled);
 
       // (4) delete -> gone from the authoritative loop list.

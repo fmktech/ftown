@@ -6,6 +6,7 @@ import { E2E_DIR, BRIDGE_HOME, UI_BASE_URL } from "./config";
 import { mintBridgeBootstrapToken } from "./jwt";
 import { sharedEmail } from "./app";
 import { waitForBridgePresence } from "./centrifugo";
+import { readBridgePointer } from "./bridge-api";
 
 /**
  * Stop and restart the e2e bridge for resurrection tests. start-services.sh
@@ -48,6 +49,38 @@ async function waitForExit(pid: number, timeoutMs: number): Promise<void> {
   while (isAlive(pid)) {
     if (Date.now() >= deadline) throw new Error(`bridge pid ${pid} did not exit within ${timeoutMs}ms`);
     await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
+/**
+ * Poll until $bridgeHome/.ftown/bridge.json exists, parses, AND advertises the
+ * NEW bridge's pid — i.e. the freshly-spawned process has finished startup and
+ * (re)written its own pointer. This is the readiness gate that presence alone
+ * cannot give us: on SIGTERM the old bridge unlinks bridge.json (index.ts
+ * cleanupPointer), while its Centrifugo presence entry lingers for the presence
+ * TTL. So waitForBridgePresence can return on the STALE old entry seconds before
+ * the new bridge has rewritten the pointer, leaving readBridgePointer to throw
+ * "bridge pointer not found". Gating on pid === expectedPid guarantees we read
+ * the new bridge's advert (fresh port + bearer), never a leftover or half-write.
+ */
+async function waitForBridgePointer(
+  bridgeHome: string,
+  expectedPid: number,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      if (readBridgePointer(bridgeHome).pid === expectedPid) return;
+    } catch {
+      // absent or mid-write — keep polling until the new bridge lands its pointer
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `new bridge (pid ${expectedPid}) never wrote a readable bridge.json under ${bridgeHome} within ${timeoutMs}ms`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, 250));
   }
 }
 
@@ -98,7 +131,13 @@ export async function restartBridge(options: RestartBridgeOptions = {}): Promise
   }
   writeFileSync(pidPath, `${child.pid}\n`);
 
-  // --- wait until the new bridge is online again ---
+  // --- wait until the new bridge is fully ready ---
+  // First block on the NEW bridge's own pointer (pid-matched): this is what the
+  // loopback API (bridgeApiFetch → readBridgePointer) depends on, and it survives
+  // the stale-presence race described on waitForBridgePointer. Then confirm it is
+  // actually online for the UI/resurrection path. bridge.json is written before
+  // Centrifugo join (index.ts), so ordering pointer→presence needs no extra wait.
+  await waitForBridgePointer(bridgeHome, child.pid, 30_000);
   await waitForBridgePresence(email, { min: 1, timeoutMs: options.presenceTimeoutMs ?? 40_000 });
   return child.pid;
 }
