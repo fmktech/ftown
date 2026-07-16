@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { sharedEmail, registerUser, login, waitForBridgeOnline } from "../helpers/app";
+import { sharedEmail, login, waitForBridgeOnline } from "../helpers/app";
 import { createLoopViaUi } from "../helpers/loops";
 import { bridgeApiFetch } from "../helpers/bridge-api";
 
@@ -109,7 +109,6 @@ function sleep(ms: number): Promise<void> {
 
 async function loginAndBridge(page: Page): Promise<void> {
   const email = sharedEmail();
-  await registerUser(email);
   await login(page, email);
   // Bridge presence enables both the "Create a new session" and "Create a new
   // loop" buttons; this waits on the former as the authoritative online signal.

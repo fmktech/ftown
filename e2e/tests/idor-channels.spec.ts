@@ -1,7 +1,6 @@
 import { test, expect, type BrowserContext } from "@playwright/test";
 import {
   sharedEmail,
-  registerUser,
   login,
   waitForBridgeOnline,
   createShellSession,
@@ -29,10 +28,13 @@ import {
  * wall holds by having a fully-valid user B — its OWN, accepted Centrifugo
  * token — attempt to reach into user A's namespace and be refused every time.
  *
- * This is DEFENSIVE regression testing: we assert REJECTION only. We never try
- * to actually exfiltrate data or execute a command; a well-formed probe is used
- * purely so the rejection is the authorization layer's doing, not a malformed
- * frame's.
+ * This is DEFENSIVE regression testing. For the four SUBSCRIBE walls we assert
+ * REJECTION only (a well-formed probe so the rejection is the authorization
+ * layer's doing, not a malformed frame's). The command-channel PUBLISH case is
+ * different: Centrifugo intentionally ACCEPTS a cross-user client publish
+ * (allow_user_limited_channels gates subscribe, not publish), so the wall there
+ * is DEFENSE-IN-DEPTH AT THE BRIDGE — that test asserts A's bridge never ACTS on
+ * B's published command, not that Centrifugo rejects it.
  *
  * "Walled" outcome model (see helpers/centrifugo-raw.ts docstring):
  *   - resolve { ok:false, error.code === 103 }  → per-channel authz denial. WALLED.
@@ -97,7 +99,6 @@ test.describe("IDOR: cross-tenant channel isolation", () => {
     contextA = await browser.newContext();
     const pageA = await contextA.newPage();
     const emailA = sharedEmail();
-    await registerUser(emailA);
     await login(pageA, emailA);
     await waitForBridgeOnline(pageA);
 
@@ -141,29 +142,63 @@ test.describe("IDOR: cross-tenant channel isolation", () => {
     await expectWalled(channel, () => attemptSubscribe(tokenB, channel));
   });
 
-  test("B cannot PUBLISH to A's command/RPC channel", async () => {
-    // The load-bearing wall: the bridge executes any command arriving on
-    // commands:rpc#<email> with no per-caller payload check, so publish-authz is
-    // the ONLY thing stopping B from driving A's bridge. A well-formed-ish
-    // envelope is used so the rejection is authorization's doing, not a bad frame.
+  test("B cannot DRIVE A's bridge by publishing a command (bridge ignores foreign publisher)", async () => {
+    // The command channel is the ONE place Centrifugo does NOT wall B out:
+    // allow_user_limited_channels gates SUBSCRIBE only, and allow_publish_for_client
+    // lets any authenticated client PUBLISH to another user's channel — so B's
+    // publish to commands:rpc#<A> is ACCEPTED (may resolve ok:true). The real wall
+    // is now DEFENSE-IN-DEPTH AT THE BRIDGE, not at Centrifugo: the bridge drops
+    // any publication whose authenticated publisher (ctx.info.user) != the channel
+    // owner. So we assert the behavioral truth — B's create_session never causes
+    // A's bridge to actually spawn a session.
     const channel = `commands:rpc#${tenantA.email}`;
     const bridgeClientsBefore = await commandsRpcClients(tenantA.email);
+    const before = await sessionIdsFor(tenantA.email);
 
-    await expectWalled(channel, () =>
-      attemptPublish(tokenB, channel, { type: "list_sessions", requestId: "idor-probe" }),
-    );
+    // B publishes a REAL create_session to A's command channel. Centrifugo accepts
+    // the publish (that acceptance is no longer the security boundary); the bridge
+    // must ignore it because ctx.info.user == B != A.
+    await attemptPublish(tokenB, channel, {
+      type: "create_session",
+      payload: { command: "/bin/zsh -l", shellType: "shell", name: `idor-B-inject-${Date.now()}` },
+      requestId: `idor-B-${Date.now()}`,
+    });
 
-    // Defense in depth: because Centrifugo rejected the publish, the envelope
-    // never reached A's bridge, so it cannot have acted. The observable proxy is
-    // that A's bridge remains the sole, undisturbed subscriber on its command
-    // channel — B's rejected publish neither joined it nor knocked the bridge off.
-    const bridgeClientsAfter = await commandsRpcClients(tenantA.email);
+    // Give A's bridge a beat to (not) act, then assert A's live-session inventory
+    // is unchanged — the bridge dropped B's foreign publication, so no session was
+    // spawned. sessionIdsFor is a transport-independent inventory (one
+    // terminal-input:<sid>#<A> channel per live session the bridge serves).
+    await new Promise((r) => setTimeout(r, 3000));
+    const afterInject = await sessionIdsFor(tenantA.email);
     expect(
-      bridgeClientsAfter,
-      `A's bridge subscriber count on ${channel} changed after B's rejected publish ` +
-        `(${bridgeClientsBefore} → ${bridgeClientsAfter}) — the bridge may have reacted`,
-    ).toBe(bridgeClientsBefore);
+      [...afterInject].filter((id) => !before.has(id)),
+      `SECURITY: B's create_session published to ${channel} caused A's bridge to spawn a ` +
+        `session — the bridge acted on a FOREIGN publisher. Cross-tenant RCE via command publish.`,
+    ).toEqual([]);
+
+    // The bridge must remain the sole, undisturbed subscriber — B's publish must
+    // not have joined the channel or knocked the bridge off.
+    const bridgeClientsAfter = await commandsRpcClients(tenantA.email);
     expect(bridgeClientsAfter, `A's bridge should still be listening on ${channel}`).toBeGreaterThanOrEqual(1);
+    expect(bridgeClientsBefore).toBeGreaterThanOrEqual(1);
+
+    // Positive control + fail-CLOSED validation: A's OWN publish to the SAME
+    // channel — carrying info.user == A — MUST still drive the bridge. This proves
+    // (a) the guard is not a globally-broken command path, and (b) Centrifugo
+    // actually populates ctx.info.user for client publishes, so the owner's own
+    // commands are not silently broken by the fail-closed guard.
+    const ownResult = await attemptPublish(tenantA.token, channel, {
+      type: "create_session",
+      payload: { command: "/bin/zsh -l", shellType: "shell", name: `idor-A-control-${Date.now()}` },
+      requestId: `idor-A-${Date.now()}`,
+    });
+    expect(
+      ownResult.ok,
+      `A's own publish to ${channel} was rejected by Centrifugo (${JSON.stringify(ownResult.error)}) — ` +
+        `the positive control cannot run`,
+    ).toBe(true);
+    const newId = await waitForNewSessionId(tenantA.email, before);
+    expect(newId, "A's own create_session (info.user == A) should have spawned a new session").toBeTruthy();
   });
 
   test("positive control: B CAN subscribe to B's OWN command/RPC channel", async () => {

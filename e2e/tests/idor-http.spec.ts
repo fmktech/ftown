@@ -1,5 +1,5 @@
 import { test, expect, type APIRequestContext } from "@playwright/test";
-import { makeUser, registerAndLogin, sharedEmail, E2E_PASSWORD } from "../helpers/app";
+import { login, registerUser, makeUser, sharedEmail, E2E_PASSWORD, type UserCreds } from "../helpers/app";
 import { bridgeApiFetch, readBridgePointer } from "../helpers/bridge-api";
 import { UI_BASE_URL } from "../helpers/config";
 
@@ -72,11 +72,23 @@ test.describe("GROUP 1 — bridge loopback API guards", () => {
 });
 
 test.describe("GROUP 2 — UI API route authZ / IDOR", () => {
+  let sharedB: UserCreds;
+
+  test.beforeAll(async () => {
+    // One isolated "B" user shared by every GROUP 2 test that needs a fresh,
+    // non-A identity — registration is rate-limited per CI IP, so we mint B
+    // once here instead of once per test. Sharing is safe: B never pairs a
+    // bridge or owns any resource in any of these tests.
+    sharedB = makeUser("e2e-idor-b");
+    await registerUser(sharedB.email, sharedB.password);
+  });
+
   test("Centrifugo connect-token sub is the session email — body input is ignored", async ({ browser }) => {
     const context = await browser.newContext();
     try {
       const page = await context.newPage();
-      const b = await registerAndLogin(page, makeUser("e2e-idor-b"));
+      await login(page, sharedB.email, sharedB.password);
+      const b = sharedB;
 
       // Attempt to spoof the subject via the request body. The route (POST() with
       // no request param) signs session.user.email and ignores input entirely.
@@ -120,7 +132,7 @@ test.describe("GROUP 2 — UI API route authZ / IDOR", () => {
     try {
       // User A = the harness user that owns the running bridge.
       const aPage = await aCtx.newPage();
-      await registerAndLogin(aPage, { email: sharedEmail(), password: E2E_PASSWORD });
+      await login(aPage, sharedEmail(), E2E_PASSWORD);
 
       // Precondition: A owns pointer.bridgeId and it is not revoked.
       const before = await getDevices(aPage.request);
@@ -131,7 +143,7 @@ test.describe("GROUP 2 — UI API route authZ / IDOR", () => {
 
       // User B = fresh, isolated account.
       const bPage = await bCtx.newPage();
-      await registerAndLogin(bPage, makeUser("e2e-idor-b"));
+      await login(bPage, sharedB.email, sharedB.password);
 
       // B attempts to revoke A's bridge. revokeDevice is scoped by sub, so the
       // UPDATE matches 0 rows for B ⇒ the route returns 404 {error:"Device not found"}.
@@ -164,7 +176,7 @@ test.describe("GROUP 2 — UI API route authZ / IDOR", () => {
     const bCtx = await browser.newContext();
     try {
       const bPage = await bCtx.newPage();
-      await registerAndLogin(bPage, makeUser("e2e-idor-b"));
+      await login(bPage, sharedB.email, sharedB.password);
 
       const { status, body } = await getDevices(bPage.request);
       expect(status, "B's authenticated device list must succeed").toBe(200);

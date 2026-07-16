@@ -1,7 +1,6 @@
 import { test, expect, type BrowserContext, type Page } from "@playwright/test";
 import {
   sharedEmail,
-  registerUser,
   login,
   waitForBridgeOnline,
   createShellSession,
@@ -78,7 +77,6 @@ async function blockWebRtc(context: BrowserContext): Promise<void> {
 /** Login → create shell session → prove the terminal round-trips a marker. */
 async function terminalFlow(page: Page, sessionName: string, marker: string): Promise<string> {
   const email = sharedEmail();
-  await registerUser(email);
   await login(page, email);
   await waitForBridgeOnline(page);
 

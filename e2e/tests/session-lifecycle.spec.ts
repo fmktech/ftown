@@ -1,7 +1,6 @@
 import { test, expect } from "@playwright/test";
 import {
   sharedEmail,
-  registerUser,
   login,
   waitForBridgeOnline,
   createShellSession,
@@ -47,7 +46,6 @@ async function statusOf(sid: string): Promise<string | undefined> {
 test.describe("session lifecycle", () => {
   test("create → interact → stop → remove (controller CRUD round-trip)", async ({ page }) => {
     const email = sharedEmail();
-    await registerUser(email);
     await login(page, email);
     await waitForBridgeOnline(page);
 
@@ -103,7 +101,6 @@ test.describe("session lifecycle", () => {
     test.setTimeout(180_000);
 
     const email = sharedEmail();
-    await registerUser(email);
     await login(page, email);
     await waitForBridgeOnline(page);
 
