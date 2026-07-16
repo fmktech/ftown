@@ -97,6 +97,53 @@ export async function commandsRpcClients(email: string): Promise<number> {
   return channels[`commands:rpc#${email}`]?.num_clients ?? 0;
 }
 
+interface PresenceResult {
+  result?: { presence?: Record<string, unknown> };
+  error?: { message?: string; code?: number };
+}
+
+/**
+ * Number of bridge clients currently present on `bridges:presence#<email>` (0 if
+ * none / bridge offline). Uses the Centrifugo server `presence` API — the same
+ * signal start-services.sh polls to decide the bridge is online, so it is the
+ * authoritative liveness probe for restart/resurrection tests.
+ */
+export async function bridgePresenceCount(email: string): Promise<number> {
+  const res = await fetch(CENTRIFUGO_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-API-Key": CENTRIFUGO_API_KEY,
+    },
+    body: JSON.stringify({
+      method: "presence",
+      params: { channel: `bridges:presence#${email}` },
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`Centrifugo presence API failed: ${res.status} ${await res.text()}`);
+  }
+  const data = (await res.json()) as PresenceResult;
+  if (data.error) return 0;
+  return Object.keys(data.result?.presence ?? {}).length;
+}
+
+/** Poll until `bridges:presence#<email>` has >= `min` clients, or throw on timeout. */
+export async function waitForBridgePresence(
+  email: string,
+  { min = 1, timeoutMs = 40_000, intervalMs = 1000 }: { min?: number; timeoutMs?: number; intervalMs?: number } = {},
+): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const n = await bridgePresenceCount(email);
+    if (n >= min) return n;
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out waiting for bridge presence >= ${min} on bridges:presence#${email} (last=${n})`);
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 /** Poll until `predicate(state)` is true or timeout. Returns final state. */
 export async function waitForChannels<T>(
   produce: () => Promise<T>,

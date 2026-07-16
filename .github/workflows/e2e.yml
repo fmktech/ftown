@@ -2,7 +2,11 @@ name: e2e
 
 on:
   pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
+  schedule:
+    - cron: '0 7 * * *'
 
 jobs:
   direct-transport-e2e:
@@ -14,6 +18,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: 'npm'
+          cache-dependency-path: |
+            ui/package-lock.json
+            bridge/package-lock.json
+            e2e/package-lock.json
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('e2e/package-lock.json') }}
 
       # The bridge spawns sessions with a hardcoded `/bin/zsh -l`; tmux is the
       # preferred PTY runtime (falls back to direct node-pty if absent).
@@ -62,9 +78,15 @@ jobs:
           npm ci
           npm run build
 
-      - name: Install Playwright chromium
+      - name: Install Playwright chromium (browsers + OS deps)
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         working-directory: e2e
         run: npx playwright install --with-deps chromium
+
+      - name: Install Playwright OS deps only (browsers cached)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        working-directory: e2e
+        run: npx playwright install-deps chromium
 
       - name: Start UI + bridge (recorded PIDs, scratch HOME)
         run: bash e2e/scripts/start-services.sh
