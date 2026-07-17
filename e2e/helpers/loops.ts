@@ -6,7 +6,7 @@ import { expect, type Page } from "@playwright/test";
  * targeted by their placeholder / options (stable, user-visible anchors).
  */
 
-export type LoopHarness = "claude" | "cursor" | "codex" | "grok" | "opencode" | "shell";
+export type LoopHarness = "claude" | "cursor" | "codex" | "grok" | "kimi-code" | "opencode" | "shell";
 
 export interface CreateLoopViaUiInput {
   name: string;

@@ -14,7 +14,7 @@ import type { ModelUsage, Session, SessionUsage } from './types.js';
  * claude CLI under the hood and get a claudeSessionId persisted by the hook
  * pipeline, so any session with a claudeSessionId uses the claude extractor
  * regardless of shellType. Sessions with neither a claude nor a codex id
- * (cursor, grok, plain shell) have no structured usage source and yield null.
+ * (cursor, grok, kimi-code, plain shell) have no structured usage source and yield null.
  *
  * TODO(opencode): add an opencode extractor once Session carries an
  * opencodeSessionId (no such field exists yet).
