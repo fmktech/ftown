@@ -47,6 +47,11 @@ export interface HarnessSpec {
   validForLoop: boolean;
   /** Accepted as a workflow child shell (WorkflowShell / ftown-workflows --shell). */
   validForWorkflow: boolean;
+  /**
+   * Minimum gap (ms) enforced between concurrent spawns of this harness
+   * (see spawn-stagger.ts). Unset means spawns are not staggered.
+   */
+  spawnStaggerMs?: number;
 }
 
 export function buildCursorAgentCommand(options: {
@@ -176,6 +181,11 @@ export const HARNESSES = {
     resumeField: 'cursorSessionId',
     validForLoop: true,
     validForWorkflow: true,
+    // Concurrent cursor-agent startups race on a macOS Keychain WRITE during
+    // token refresh (last-writer-wins; corrupts auth from 2 concurrent spawns).
+    // A 250ms spawn stagger fully eliminated it in testing (0/27 at N=9);
+    // 300ms adds margin.
+    spawnStaggerMs: 300,
   },
   codex: {
     // Workdir comes from the runner cwd — codex needs no -C flag.

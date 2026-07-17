@@ -27,6 +27,7 @@ import {
   type CreateFtownSessionDeps,
 } from './create-ftown-session.js';
 import { removeFtownSession } from './remove-ftown-session.js';
+import { collectSessionUsage } from './usage-collector.js';
 import { toWireSession } from './session-wire.js';
 
 export interface HookPayload {
@@ -235,6 +236,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       publishSessionUpdate: (session) => centrifugo.publishSessionUpdate(userId, session),
       removeSession: (id, options) =>
         removeFtownSession({ store, runner, centrifugo, userId }, id, options),
+      collectUsage: (session) => collectSessionUsage(session),
       ...(this.sessionDeps ? { sessionFactory: this.sessionDeps } : {}),
     });
     return this.sessionController;
@@ -528,6 +530,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     const sessionInboxMatch = path.match(/^\/api\/sessions\/([^/]+)\/inbox$/);
     const sessionResizeMatch = path.match(/^\/api\/sessions\/([^/]+)\/resize$/);
     const sessionRunningMatch = path.match(/^\/api\/sessions\/([^/]+)\/running$/);
+    const sessionUsageMatch = path.match(/^\/api\/sessions\/([^/]+)\/usage$/);
 
     // GET /api/sessions/:id
     if (sessionMatch && req.method === 'GET') {
@@ -911,6 +914,22 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       }
 
       jsonResponse(res, 200, { resized: true });
+      return;
+    }
+
+    // GET /api/sessions/:id/usage — per-session token/cost usage
+    if (sessionUsageMatch && req.method === 'GET') {
+      const controller = this.getSessionController();
+      if (!controller) {
+        jsonResponse(res, 503, { error: 'Server not ready' });
+        return;
+      }
+      const result = await controller.usage(sessionUsageMatch[1]);
+      if (!result.ok) {
+        jsonResponse(res, 404, { error: result.message });
+        return;
+      }
+      jsonResponse(res, 200, { usage: result.usage });
       return;
     }
 

@@ -19,6 +19,29 @@ export interface Session {
   command?: string;
   parentSessionId?: string;
   loopId?: string; // set on loop-run sessions; groups the run under its Loop in the UI
+  usage?: SessionUsage;
+}
+
+/** Per-model token breakdown within a session's usage. */
+export interface ModelUsage {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+}
+
+/** Persisted per-session usage totals, recorded by the bridge on session completion/update. */
+export interface SessionUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+  models: string[];
+  perModel?: ModelUsage[];
+  harness: string;
+  collectedAt: string; // ISO
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +184,8 @@ export type CommandType =
   | 'retry_session' | 'rename_session' | 'remove_session' | 'bridge_exec'
   | 'update_session_parent'
   | 'create_loop' | 'list_loops' | 'update_loop'
-  | 'delete_loop' | 'run_loop_now' | 'get_loop_runs';
+  | 'delete_loop' | 'run_loop_now' | 'get_loop_runs'
+  | 'get_session_usage';
 
 export interface Command {
   type: CommandType;

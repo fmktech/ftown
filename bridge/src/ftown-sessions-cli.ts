@@ -16,6 +16,7 @@ import {
   type LoopSchedule,
   type MailMessage,
   type Session,
+  type SessionUsage,
 } from './wire-types.js';
 
 function loadBridge(): BridgePointer {
@@ -309,6 +310,81 @@ function positionals(args: string[], valueFlags: string[]): string[] {
   return out;
 }
 
+
+interface UsageRow {
+  id: string;
+  name: string;
+  usage: SessionUsage | null;
+}
+
+async function fetchUsageRow(id: string): Promise<UsageRow> {
+  const [{ data: usageData }, sessionData] = await Promise.all([
+    api('GET', `/api/sessions/${id}/usage`),
+    api('GET', `/api/sessions/${id}`).then(
+      (r) => r.data,
+      () => null,
+    ),
+  ]);
+  const session = (sessionData as { session?: Session } | null)?.session;
+  return {
+    id,
+    name: session?.name ?? '',
+    usage: (usageData as { usage?: SessionUsage | null }).usage ?? null,
+  };
+}
+
+function formatUsageTable(rows: UsageRow[]): string {
+  const header = ['id', 'name', 'model(s)', 'in', 'out', 'cacheR', 'cacheW', 'total'];
+  const body: string[][] = [];
+  for (const r of rows) {
+    const u = r.usage;
+    body.push([
+      r.id.slice(0, 8),
+      r.name,
+      u ? u.models.join(',') : '-',
+      u ? String(u.inputTokens) : '-',
+      u ? String(u.outputTokens) : '-',
+      u ? String(u.cacheReadTokens) : '-',
+      u ? String(u.cacheWriteTokens) : '-',
+      u ? String(u.totalTokens) : '-',
+    ]);
+    // Multi-model sessions get an indented per-model sub-row each.
+    if (u?.perModel && u.perModel.length > 1) {
+      for (const m of u.perModel) {
+        body.push([
+          '',
+          '',
+          `  ${m.model}`,
+          String(m.inputTokens),
+          String(m.outputTokens),
+          String(m.cacheReadTokens),
+          String(m.cacheWriteTokens),
+          String(m.inputTokens + m.outputTokens + m.cacheReadTokens + m.cacheWriteTokens),
+        ]);
+      }
+    }
+  }
+  const collected = rows.map((r) => r.usage).filter((u): u is SessionUsage => u !== null);
+  const sum = (pick: (u: SessionUsage) => number): number =>
+    collected.reduce((acc, u) => acc + pick(u), 0);
+  body.push([
+    'TOTAL',
+    '',
+    '',
+    String(sum((u) => u.inputTokens)),
+    String(sum((u) => u.outputTokens)),
+    String(sum((u) => u.cacheReadTokens)),
+    String(sum((u) => u.cacheWriteTokens)),
+    String(sum((u) => u.totalTokens)),
+  ]);
+  const widths = header.map((h, i) =>
+    Math.max(h.length, ...body.map((row) => row[i].length)),
+  );
+  const render = (row: string[]): string =>
+    row.map((cell, i) => cell.padEnd(widths[i])).join('  ').trimEnd();
+  return [render(header), ...body.map(render)].join('\n');
+}
+
 function usage(): void {
   console.error(`Usage: ftown-sessions <command> [options]
 
@@ -322,6 +398,7 @@ Commands:
   tell <target> <message...>    Send mail to another session's inbox
   inbox | mail                  Read own inbox (requires FTOWN_SESSION_ID)
   running <session-id>          Check if session PTY is running
+  usage <session-id...>         Model/token usage per session (--json for raw)
   remove <session-id>           Stop and remove a session (archived as a tombstone)
   archive                       List archived (removed) sessions
   revive <session-id>           Recreate a removed session from its tombstone
@@ -593,6 +670,18 @@ async function main(): Promise<void> {
         if (!id) throw new Error('Missing session-id');
         const { data } = await api('GET', `/api/sessions/${id}/running`);
         console.log(JSON.stringify(data, null, 2));
+        break;
+      }
+
+      case 'usage': {
+        const ids = rest.filter((a) => !a.startsWith('--'));
+        if (ids.length === 0) throw new Error('Missing session-id');
+        const rows = await Promise.all(ids.map(fetchUsageRow));
+        if (hasFlag(rest, '--json')) {
+          console.log(JSON.stringify({ sessions: rows }, null, 2));
+        } else {
+          console.log(formatUsageTable(rows));
+        }
         break;
       }
 

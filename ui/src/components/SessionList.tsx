@@ -8,6 +8,7 @@ import { BridgeInfo } from "@/hooks/useBridges";
 import { reorderByDrop } from "@/lib/bridge-order";
 import { StatusDot, type StatusDotKind } from "@/lib/StatusDot";
 import { usePersistentState, stringSetCodec } from "@/lib/use-persistent-state";
+import { formatUsage, formatUsageDetail } from "@/lib/format-usage";
 
 interface SessionListProps {
   sessions: Session[];
@@ -1038,6 +1039,22 @@ export function SessionList({
             }}
           >
             {session.prompt}
+          </p>
+        )}
+
+        {session.usage && (
+          <p
+            title={formatUsageDetail(session.usage)}
+            style={{
+              fontSize: 10,
+              color: "var(--text-faint)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              marginBottom: 4,
+            }}
+          >
+            {formatUsage(session.usage)}
           </p>
         )}
 

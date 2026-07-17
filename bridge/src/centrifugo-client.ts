@@ -22,6 +22,29 @@ type DirectCommandHandler = (msg: DirectCommandMessage) => void;
 
 const MAX_PUBLISH_BYTES = 460_000;
 
+/**
+ * Fail-closed publisher-identity check for inbound client publications on a
+ * user-limited channel `ch#{owner}`.
+ *
+ * Threat: Centrifugo's `allow_user_limited_channels` gates SUBSCRIBE only, not
+ * PUBLISH; with `allow_publish_for_client:true` any authenticated user can
+ * PUBLISH to another user's `commands:rpc#{owner}` / `terminal-input:{sid}#{owner}`.
+ * The bridge executes commands and applies keystrokes from those channels, so an
+ * attacker's publish would be cross-tenant RCE / keystroke injection.
+ *
+ * Defense: Centrifugo attaches the PUBLISHER's authenticated identity to every
+ * client publication as `ctx.info.user` (ClientInfo.user). The bridge and the
+ * owner's UI both connect with token `sub == owner`, so their legitimate
+ * publishes carry `info.user == owner`. We accept ONLY those and drop everything
+ * else — a mismatched publisher, and (fail-closed) any publication whose info is
+ * missing/empty (e.g. a server-API publish with no client context, or an empty
+ * anonymous user). `owner` is always a non-empty email, so the empty-string
+ * anonymous user can never match.
+ */
+function isOwnerPublication(ctx: PublicationContext, owner: string): boolean {
+  return owner.length > 0 && ctx.info?.user === owner;
+}
+
 function byteLen(str: string): number {
   return Buffer.byteLength(str, 'utf8');
 }
@@ -198,6 +221,15 @@ export class CentrifugoClient {
     const sub = this.client.newSubscription(channel);
 
     sub.on('publication', (ctx: PublicationContext) => {
+      // Fail-closed: only the channel owner (info.user == userId) may drive this
+      // terminal. Drop keystroke/resize/init from any other publisher — see
+      // isOwnerPublication for the cross-user-publish threat.
+      if (!isOwnerPublication(ctx, userId)) {
+        console.warn(
+          `[Centrifugo] Dropped foreign publication on ${channel} from user="${ctx.info?.user ?? ''}"`,
+        );
+        return;
+      }
       const msg = ctx.data as { type: string; data?: string; cols?: number; rows?: number };
       if (msg.type === 'input' && msg.data !== undefined) {
         onInput(sessionId, msg.data);
@@ -226,6 +258,18 @@ export class CentrifugoClient {
     const sub = this.client.newSubscription(channel);
 
     sub.on('publication', (ctx: PublicationContext) => {
+      // Fail-closed RCE close: execute commands ONLY from the channel owner
+      // (info.user == userId). The bridge's own command_response/signal echoes
+      // and the owner UI's commands all carry info.user == userId and pass; a
+      // foreign publisher's create_session/kill/bridge_exec is dropped here.
+      // See isOwnerPublication for the cross-user-publish threat. This filters
+      // strictly on publisher identity, never on message type.
+      if (!isOwnerPublication(ctx, userId)) {
+        console.warn(
+          `[Centrifugo] Dropped foreign command publication on ${channel} from user="${ctx.info?.user ?? ''}"`,
+        );
+        return;
+      }
       const data = ctx.data as Record<string, unknown>;
       if (data.type === 'command_response') {
         return;

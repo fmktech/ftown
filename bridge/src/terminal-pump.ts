@@ -1,17 +1,24 @@
 import type { ProcessRunner } from './claude-runner.js';
 import type { SessionStore } from './session-store.js';
 import type { TerminalManager } from './terminal-manager.js';
-import type { Session } from './types.js';
+import type { Session, SessionUsage } from './types.js';
 
 export type SyntheticStopReason = 'complete' | 'error' | 'stopped';
 
 export interface TerminalPumpDeps {
-  store: Pick<SessionStore, 'appendTerminalData' | 'loadSession' | 'saveSession'>;
+  store: Pick<SessionStore, 'appendTerminalData' | 'loadSession' | 'saveSession' | 'loadTerminalLog'>;
   terminalManager: Pick<TerminalManager, 'write' | 'destroy'>;
   publishTerminalData: (sessionId: string, data: string) => void;
   publishSessionUpdate: (session: Session) => Promise<void>;
   publishHookEvent: (sessionId: string, event: Record<string, unknown>) => Promise<void>;
   unregisterSession: (sessionId: string) => void;
+  /**
+   * Optional (injectable for tests): extract token/cost usage from the
+   * session's harness-native transcript. Fired-and-forgotten after the
+   * terminal status persist on complete/error; a null result never clobbers
+   * previously persisted usage.
+   */
+  collectUsage?: (session: Session) => Promise<SessionUsage | null>;
   /** Test seams; production uses the defaults. */
   flushIntervalMs?: number;
   maxBufferBytes?: number;
@@ -19,6 +26,27 @@ export interface TerminalPumpDeps {
 
 const FLUSH_INTERVAL_MS = 16;
 const MAX_BUFFER_BYTES = 32_000;
+
+/** Raw terminal chars considered for the errorReason tail (pre-sanitize). */
+const ERROR_TAIL_RAW_CHARS = 1200;
+/** Max sanitized tail chars kept in errorReason. */
+const ERROR_TAIL_MAX_CHARS = 300;
+/** Hard cap on the whole errorReason string. */
+const ERROR_REASON_MAX_CHARS = 400;
+
+// CSI (\x1b[...X), OSC (\x1b]...BEL/ST), and any leftover lone ESC sequences.
+const ANSI_ESCAPE_RE = new RegExp(
+  '\\x1b\\[[0-9;?]*[ -/]*[@-~]|\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)?|\\x1b[@-_]?',
+  'g',
+);
+
+/** Strip ANSI escapes and collapse all whitespace/control runs to single spaces. */
+function sanitizeTerminalTail(raw: string): string {
+  return raw
+    .replace(ANSI_ESCAPE_RE, '')
+    .replace(/[\s\u0000-\u001f\u007f]+/g, ' ')
+    .trim();
+}
 
 /**
  * Terminal output pump: buffers runner PTY output per session (coalescing into
@@ -101,6 +129,33 @@ export class TerminalPump {
     });
   }
 
+  /**
+   * Fire-and-forget usage collection after a terminal status persist. Runs
+   * OUTSIDE the caller's write (the collect can take seconds on huge
+   * transcripts); the persist itself is serialized via withSessionWrite.
+   * Guard: a null collection result never clobbers previously saved usage.
+   */
+  private collectAndPersistUsage(sessionId: string): void {
+    const collect = this.deps.collectUsage;
+    if (!collect) return;
+    void (async () => {
+      const session = await this.deps.store.loadSession(sessionId);
+      if (!session) return;
+      const usage = await collect(session);
+      if (!usage) return;
+      await this.withSessionWrite(sessionId, async () => {
+        const fresh = await this.deps.store.loadSession(sessionId);
+        if (!fresh) return;
+        fresh.usage = usage;
+        fresh.updatedAt = new Date().toISOString();
+        await this.deps.store.saveSession(fresh);
+        await this.deps.publishSessionUpdate(fresh);
+      });
+    })().catch((err) => {
+      console.error(`[Bridge] Failed to collect usage for session ${sessionId}:`, err);
+    });
+  }
+
   private handleComplete(sessionId: string): void {
     this.flush(sessionId);
     this.publishSyntheticStop(sessionId, 'complete');
@@ -116,17 +171,49 @@ export class TerminalPump {
     }).catch((err) => {
       console.error(`[Bridge] Failed to handle completion for session ${sessionId}:`, err);
     }).finally(() => {
+      this.collectAndPersistUsage(sessionId);
       this.deps.unregisterSession(sessionId);
     });
   }
 
+  /**
+   * `<error message> — <recent terminal tail>` (ANSI-stripped, whitespace
+   * collapsed, capped at ~400 chars) so a startup crash's cause is readable
+   * straight off the session record. The tail comes from the flushed terminal
+   * log; flush() fires its append without awaiting, so the chunk buffered at
+   * error time is re-appended if it hasn't landed on disk yet.
+   */
+  private async buildErrorReason(
+    sessionId: string,
+    error: Error,
+    pendingAtError: string,
+  ): Promise<string> {
+    let log = '';
+    try {
+      log = await this.deps.store.loadTerminalLog(sessionId);
+    } catch {
+      // Tail is best-effort — fall back to whatever was buffered at error time.
+    }
+    const source = pendingAtError && !log.endsWith(pendingAtError)
+      ? log + pendingAtError
+      : log;
+    const tail = sanitizeTerminalTail(source.slice(-ERROR_TAIL_RAW_CHARS))
+      .slice(-ERROR_TAIL_MAX_CHARS);
+    const reason = tail ? `${error.message} — ${tail}` : error.message;
+    return reason.slice(0, ERROR_REASON_MAX_CHARS);
+  }
+
   private handleError(sessionId: string, error: Error): void {
+    // Capture what's still buffered BEFORE flush drains it — the errorReason
+    // tail needs it if the (unawaited) flush append hasn't hit the store yet.
+    const pendingAtError = this.outputBuffers.get(sessionId) ?? '';
     this.flush(sessionId);
     this.publishSyntheticStop(sessionId, 'error');
     this.withSessionWrite(sessionId, async () => {
       const session = await this.deps.store.loadSession(sessionId);
       if (session) {
         session.status = 'error';
+        session.errorReason = await this.buildErrorReason(sessionId, error, pendingAtError);
         session.updatedAt = new Date().toISOString();
         await this.deps.store.saveSession(session);
         await this.deps.publishSessionUpdate(session);
@@ -135,6 +222,7 @@ export class TerminalPump {
     }).catch((err) => {
       console.error(`[Bridge] Failed to handle error for session ${sessionId}:`, err);
     }).finally(() => {
+      this.collectAndPersistUsage(sessionId);
       this.deps.unregisterSession(sessionId);
       this.deps.terminalManager.destroy(sessionId);
     });

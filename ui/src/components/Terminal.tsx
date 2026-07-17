@@ -6,9 +6,10 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { TokenUsage } from "@/hooks/useSessionEvents";
-import { ShellType } from "@/types";
+import { ShellType, SessionUsage } from "@/types";
 import { useTerminal } from "@/hooks/useTerminal";
 import { FallbackReason, TerminalTransportApi, TerminalTransportMode } from "@/lib/direct-transport/contract";
+import { formatTokens, formatUsage, formatUsageDetail } from "@/lib/format-usage";
 import "@xterm/xterm/css/xterm.css";
 
 export interface TerminalHandle {
@@ -23,6 +24,8 @@ interface TerminalProps {
   isRunning: boolean;
   sessionName?: string | null;
   usage?: TokenUsage;
+  /** Persisted usage totals from the session record; shown when no live activity usage is present. */
+  persistedUsage?: SessionUsage;
   onMobileTap?: () => void;
   shellType?: ShellType;
   /** Fired when a lone ESC (interrupt) keystroke is sent, for optimistic idle. */
@@ -33,12 +36,6 @@ interface TerminalProps {
  *  sequences that merely start with ESC, so only a lone \x1b counts. */
 function isLoneInterrupt(data: string): boolean {
   return data === "\x1b";
-}
-
-function formatTokenCount(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return String(n);
 }
 
 interface TransportModeBadgeConfig {
@@ -125,7 +122,7 @@ function TransportModeBadge({
   );
 }
 
-export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ transport, sessionId, bridgeId, isRunning, sessionName, usage, onMobileTap, shellType, onInterrupt }, ref) {
+export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ transport, sessionId, bridgeId, isRunning, sessionName, usage, persistedUsage, onMobileTap, shellType, onInterrupt }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -449,9 +446,9 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
             <div className="flex items-center gap-3">
               <TransportModeBadge mode={mode} fallbackReason={fallbackReason} />
 
-              {usage && (usage.inputTokens > 0 || usage.outputTokens > 0) && (
+              {usage && (usage.inputTokens > 0 || usage.outputTokens > 0) ? (
                 <span
-                  title="Input tokens / Output tokens"
+                  title="Input tokens / Output tokens (live)"
                   style={{
                     fontSize: 10,
                     color: "var(--text-muted)",
@@ -459,9 +456,21 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
                     letterSpacing: "0.04em",
                   }}
                 >
-                  {formatTokenCount(usage.inputTokens)} in / {formatTokenCount(usage.outputTokens)} out
+                  {formatTokens(usage.inputTokens)} in / {formatTokens(usage.outputTokens)} out
                 </span>
-              )}
+              ) : persistedUsage ? (
+                <span
+                  title={formatUsageDetail(persistedUsage)}
+                  style={{
+                    fontSize: 10,
+                    color: "var(--text-muted)",
+                    fontVariantNumeric: "tabular-nums",
+                    letterSpacing: "0.04em",
+                  }}
+                >
+                  {formatUsage(persistedUsage)}
+                </span>
+              ) : null}
 
               <span className="sr-only" aria-live="polite">
                 {isRunning ? "Session running" : ""}

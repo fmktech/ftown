@@ -32,9 +32,9 @@ export interface BridgeRpcSubscriptionLike {
   state: string;
   subscribe(): void;
   publish(data: unknown): Promise<unknown>;
-  on(event: "publication", listener: (ctx: { data: unknown }) => void): unknown;
+  on(event: "publication", listener: (ctx: { data: unknown; info?: { user?: string } }) => void): unknown;
   on(event: "subscribed", listener: () => void): unknown;
-  off(event: "publication", listener: (ctx: { data: unknown }) => void): unknown;
+  off(event: "publication", listener: (ctx: { data: unknown; info?: { user?: string } }) => void): unknown;
   off(event: "subscribed", listener: () => void): unknown;
 }
 
@@ -211,7 +211,15 @@ export function useBridgeRpc(client: CentrifugoClientLike | null, userId: string
     // or useCentrifugo's inbound-signal listener would be silently stripped
     // (e.g. under StrictMode double-mount, where this cleanup runs while
     // useCentrifugo's listener must stay alive).
-    const onCommandsPublication = (ctx: { data: unknown }) => {
+    const onCommandsPublication = (ctx: { data: unknown; info?: { user?: string } }) => {
+      // Fail-closed: Centrifugo gates SUBSCRIBE but not PUBLISH on user-limited
+      // channels, so a foreign authenticated user could publish a spoofed
+      // command_response to resolve/pollute our pending RPCs. Accept only
+      // publications from the channel owner (the bridge connects with sub ==
+      // userId, so its responses carry info.user == userId). Missing/mismatched
+      // publisher identity is dropped.
+      if (ctx.info?.user !== userId) return;
+
       const data = ctx.data as CommandResponseMessage;
 
       if (data.type === "command_response" && data.response) {

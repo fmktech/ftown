@@ -38,6 +38,7 @@ import { createCommandHandler } from './command-rpc.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { SessionResurrection } from './session-resurrection.js';
 import { TerminalPump } from './terminal-pump.js';
+import { collectSessionUsage } from './usage-collector.js';
 import { AgentSessionIdPersister } from './session-ids.js';
 import { fetchBridgeToken, refreshBridgeToken, type BridgeAuthResponse } from './bridge-auth.js';
 import { listLoops } from './loop-store.js';
@@ -333,6 +334,7 @@ program
       publishSessionUpdate: (session) => centrifugo.publishSessionUpdate(userId, session),
       publishHookEvent: (sid, event) => centrifugo.publishHookEvent(userId, sid, event),
       unregisterSession: (sid) => unregisterSession(sid),
+      collectUsage: (session) => collectSessionUsage(session),
     });
     pump.attach(runner);
 
@@ -370,6 +372,7 @@ program
       publishSessionUpdate: (session) => centrifugo.publishSessionUpdate(userId, session),
       removeSession: (id, options) => removeFtownSession({ store, runner, centrifugo, userId }, id, options),
       sessionFactory: sessionFactoryDeps,
+      collectUsage: (session) => collectSessionUsage(session),
       publishSyntheticStop: (sid, reason) => pump.publishSyntheticStop(sid, reason),
       withSessionWrite: (sid, task) => pump.withSessionWrite(sid, task),
       unregisterSession: (sid) => unregisterSession(sid),
