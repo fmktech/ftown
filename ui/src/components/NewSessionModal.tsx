@@ -77,6 +77,15 @@ const GROK_MODEL_OPTIONS = [
   "grok-composer-2.5-fast",
 ] as const;
 
+// kimi-code is a standalone CLI (its own binary), NOT the `kimi` provider-flavor.
+// The default alias k3 is the CLI's own default, so its option value is empty —
+// selecting it omits the -m flag entirely (matching the bridge command builder).
+const KIMI_CODE_MODEL_OPTIONS: readonly { value: string; label: string }[] = [
+  { value: "", label: "k3 (default)" },
+  { value: "kimi-code/kimi-for-coding", label: "kimi-for-coding" },
+  { value: "kimi-code/kimi-for-coding-highspeed", label: "kimi-for-coding-highspeed" },
+] as const;
+
 const AUTO_COMPACT_WINDOW_KEY = "ftown:autoCompactWindow";
 
 const FLAVOR_AUTO_COMPACT_DEFAULTS: Record<"standard" | "zai" | "kimi" | "deepseek" | "fireworks", string> = {
@@ -218,6 +227,7 @@ const VALID_SHELL_TYPES: ShellType[] = [
   "cursor",
   "codex",
   "grok",
+  "kimi-code",
   "opencode",
   "shell",
 ];
@@ -229,13 +239,14 @@ interface LastSessionDefaults {
   model?: string;
 }
 
-type TopShell = "claude" | "cursor" | "codex" | "grok" | "opencode" | "shell";
+type TopShell = "claude" | "cursor" | "codex" | "grok" | "kimi-code" | "opencode" | "shell";
 type ClaudeFlavor = "standard" | "zai" | "kimi" | "deepseek" | "fireworks";
 
 function shellTypeToTop(s: ShellType | undefined): { top: TopShell; flavor: ClaudeFlavor } {
   if (s === "cursor") return { top: "cursor", flavor: "standard" };
   if (s === "codex") return { top: "codex", flavor: "standard" };
   if (s === "grok") return { top: "grok", flavor: "standard" };
+  if (s === "kimi-code") return { top: "kimi-code", flavor: "standard" };
   if (s === "opencode") return { top: "opencode", flavor: "standard" };
   if (s === "shell") return { top: "shell", flavor: "standard" };
   if (s === "zai") return { top: "claude", flavor: "zai" };
@@ -246,7 +257,7 @@ function shellTypeToTop(s: ShellType | undefined): { top: TopShell; flavor: Clau
 }
 
 function resolveShellType(top: TopShell, flavor: ClaudeFlavor): ShellType {
-  if (top === "cursor" || top === "codex" || top === "grok" || top === "opencode" || top === "shell") return top;
+  if (top === "cursor" || top === "codex" || top === "grok" || top === "kimi-code" || top === "opencode" || top === "shell") return top;
   if (flavor === "standard") return "claude";
   return flavor;
 }
@@ -309,6 +320,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const [fireworksModels, setFireworksModels] = useState<FireworksModels>(FIREWORKS_DEFAULT_MODELS);
   const [zaiModels, setZaiModels] = useState<ZaiModels>(ZAI_DEFAULT_MODELS);
   const [grokModel, setGrokModel] = useState<string>(GROK_MODEL_OPTIONS[0]);
+  const [kimiCodeModel, setKimiCodeModel] = useState<string>(KIMI_CODE_MODEL_OPTIONS[0].value);
   const [autoCompactWindow, setAutoCompactWindow] = useState("");
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [missingWorkingDir, setMissingWorkingDir] = useState<string | null>(null);
@@ -348,6 +360,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       setFireworksModels(getStoredFireworksModels());
       setZaiModels(getStoredZaiModels());
       setGrokModel(GROK_MODEL_OPTIONS[0]);
+      setKimiCodeModel(KIMI_CODE_MODEL_OPTIONS[0].value);
       setAutoCompactWindow(getStoredAutoCompactWindow());
       setSubmitError(null);
       setMissingWorkingDir(null);
@@ -385,6 +398,10 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
 
       if (restoredShellType === "grok" && typeof parsed.model === "string") {
         setGrokModel(parsed.model);
+      }
+
+      if (restoredShellType === "kimi-code" && typeof parsed.model === "string") {
+        setKimiCodeModel(parsed.model);
       }
 
       if (defaults?.workingDir === undefined && typeof parsed.workingDir === "string") {
@@ -439,7 +456,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     try {
       await onSubmit("", {
         name: name.trim() || undefined,
-        model: shellType === "grok" ? grokModel : undefined,
+        model: shellType === "grok" ? grokModel : shellType === "kimi-code" ? kimiCodeModel : undefined,
         workingDir: workingDir.trim() || undefined,
         bridgeId: effectiveBridgeId || undefined,
         shellType,
@@ -471,6 +488,9 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       if (shellType === "grok") {
         lastDefaults.model = grokModel;
       }
+      if (shellType === "kimi-code") {
+        lastDefaults.model = kimiCodeModel;
+      }
       localStorage.setItem(LAST_SESSION_DEFAULTS_KEY, JSON.stringify(lastDefaults));
     } catch {
       // localStorage unavailable (private browsing, quota) — ignore
@@ -481,6 +501,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setTopShell("claude");
     setClaudeFlavor("standard");
     setGrokModel(GROK_MODEL_OPTIONS[0]);
+    setKimiCodeModel(KIMI_CODE_MODEL_OPTIONS[0].value);
     setBridgeId("");
     setShowSuggestions(false);
     setSelectedClaudeSessionId(null);
@@ -488,7 +509,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setSelectedCursorSessionId(null);
     setSelectedCursorSummary(null);
     onClose();
-  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, fireworksModels, zaiModels, grokModel, autoCompactWindow, onSubmit, onClose]);
+  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, fireworksModels, zaiModels, grokModel, kimiCodeModel, autoCompactWindow, onSubmit, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -549,6 +570,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                 <option value="cursor">Cursor Agent</option>
                 <option value="codex">Codex</option>
                 <option value="grok">Grok</option>
+                <option value="kimi-code">Kimi Code</option>
                 <option value="opencode">opencode</option>
               </optgroup>
               <optgroup label="Plain">
@@ -634,6 +656,26 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                   {GROK_MODEL_OPTIONS.map((m) => (
                     <option key={m} value={m}>
                       {m}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            {shellType === "kimi-code" && (
+              <div className="mt-3">
+                <label htmlFor="ns-kimi-code-model" className="block text-sm text-[var(--text-muted)] mb-1">
+                  Model
+                </label>
+                <select
+                  id="ns-kimi-code-model"
+                  value={kimiCodeModel}
+                  onChange={(e) => setKimiCodeModel(e.target.value)}
+                  className={INPUT_CLASS + " text-sm"}
+                >
+                  {KIMI_CODE_MODEL_OPTIONS.map((m) => (
+                    <option key={m.value} value={m.value}>
+                      {m.label}
                     </option>
                   ))}
                 </select>

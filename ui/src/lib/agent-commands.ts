@@ -63,3 +63,14 @@ export function buildGrokCommand(options: {
 
   return parts.join(" ");
 }
+
+export function buildKimiCodeCommand(options: { model?: string }): string {
+  // Absolute path: the kimi-code installer adds ~/.kimi-code/bin to PATH only via
+  // .zshrc (interactive); ftown launches with `zsh -l -c` (non-interactive login),
+  // which does not source .zshrc, so a bare `kimi` fails. --yolo auto-approves.
+  const parts = ['"$HOME/.kimi-code/bin/kimi"', '--yolo'];
+  if (options.model?.trim()) {
+    parts.push('-m', shellQuote(options.model.trim()));
+  }
+  return parts.join(' ');
+}

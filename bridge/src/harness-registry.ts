@@ -131,6 +131,18 @@ export function buildGrokCommand(options: {
   return parts.join(' ');
 }
 
+export function buildKimiCodeCommand(options: { model?: string }): string {
+  // Absolute path: the kimi-code installer adds ~/.kimi-code/bin to PATH only
+  // via .zshrc (interactive), but ftown launches agents with `zsh -l -c`
+  // (non-interactive login), which does NOT source .zshrc — so a bare `kimi`
+  // would fail to resolve. --yolo auto-approves all tool actions for unattended runs.
+  const parts = ['"$HOME/.kimi-code/bin/kimi"', '--yolo'];
+  if (options.model?.trim()) {
+    parts.push('-m', shellQuote(options.model.trim()));
+  }
+  return parts.join(' ');
+}
+
 /** claude CLI launch — shared by 'claude' and every claude-rebadged provider flavor. */
 function buildClaudeCommand(input: BuildCommandInput): string {
   const parts = ['claude', '--allow-dangerously-skip-permissions'];
@@ -230,6 +242,14 @@ export const HARNESSES = {
     promptAsCliArg: false,
     validForLoop: true,
     validForWorkflow: true,
+  },
+  'kimi-code': {
+    // Own binary (absolute path); interactive TUI, no positional prompt.
+    buildCommand: (input) => buildKimiCodeCommand({ model: input.model }),
+    hooked: false,
+    promptAsCliArg: false,
+    validForLoop: true,
+    validForWorkflow: false,
   },
   zai: PROVIDER_FLAVOR_SPEC,
   kimi: PROVIDER_FLAVOR_SPEC,

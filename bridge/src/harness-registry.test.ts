@@ -23,7 +23,7 @@ type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 const _shellTypeIsRegistryKeys: Equals<ShellType, keyof typeof HARNESSES> = true;
 const _loopHarnessUnion: Equals<
   LoopHarness,
-  'claude' | 'cursor' | 'codex' | 'shell' | 'grok' | 'opencode'
+  'claude' | 'cursor' | 'codex' | 'shell' | 'grok' | 'kimi-code' | 'opencode'
 > = true;
 const _workflowShellUnion: Equals<
   WorkflowShell,
@@ -37,7 +37,7 @@ describe('harness registry', () => {
   it('contains exactly the historical ShellType set', () => {
     assert.deepEqual(
       [...SHELL_TYPES].sort(),
-      ['claude', 'codex', 'cursor', 'deepseek', 'fireworks', 'grok', 'kimi', 'opencode', 'shell', 'zai'],
+      ['claude', 'codex', 'cursor', 'deepseek', 'fireworks', 'grok', 'kimi', 'kimi-code', 'opencode', 'shell', 'zai'],
     );
   });
 
@@ -85,7 +85,7 @@ describe('harness registry', () => {
   it('derives the historical LOOP_HARNESSES set', () => {
     assert.deepEqual(
       [...LOOP_HARNESS_TYPES].sort(),
-      ['claude', 'codex', 'cursor', 'grok', 'opencode', 'shell'],
+      ['claude', 'codex', 'cursor', 'grok', 'kimi-code', 'opencode', 'shell'],
     );
   });
 
@@ -143,6 +143,18 @@ describe('harness registry', () => {
     it('shell and opencode: never (prompt is typed into the TUI)', () => {
       assert.equal(harnessAcceptsPromptAsCliArg('shell', {}), false);
       assert.equal(harnessAcceptsPromptAsCliArg('opencode', {}), false);
+    });
+
+    it('kimi-code: never (interactive TUI takes no positional prompt)', () => {
+      assert.equal(harnessAcceptsPromptAsCliArg('kimi-code', {}), false);
+      assert.equal(
+        harnessAcceptsPromptAsCliArg('kimi-code', {
+          claudeSessionId: 'a',
+          cursorSessionId: 'b',
+          codexSessionId: 'c',
+        }),
+        false,
+      );
     });
 
     it('blank resume ids do not suppress the CLI arg (trim semantics preserved)', () => {

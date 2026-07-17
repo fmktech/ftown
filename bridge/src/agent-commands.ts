@@ -10,6 +10,7 @@ export {
   buildCursorAgentCommand,
   buildCodexCommand,
   buildGrokCommand,
+  buildKimiCodeCommand,
 } from './harness-registry.js';
 
 export interface BuildSessionCommandInput {
