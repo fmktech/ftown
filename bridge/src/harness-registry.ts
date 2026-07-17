@@ -26,6 +26,12 @@ export interface BuildCommandInput {
   codexSessionId?: string;
   /** Initial prompt passed as a CLI argument — avoids racing the TUI with typed input. */
   initialPrompt?: string;
+  /**
+   * Relaunch is a resurrection resume. Harnesses that resume by working
+   * directory rather than by a captured session id (kimi-code, via `-c`)
+   * consult this flag; id-based harnesses ignore it and use their id fields.
+   */
+  resume?: boolean;
 }
 
 export interface HarnessSpec {
@@ -131,12 +137,19 @@ export function buildGrokCommand(options: {
   return parts.join(' ');
 }
 
-export function buildKimiCodeCommand(options: { model?: string }): string {
+export function buildKimiCodeCommand(options: { model?: string; resume?: boolean }): string {
   // Absolute path: the kimi-code installer adds ~/.kimi-code/bin to PATH only
   // via .zshrc (interactive), but ftown launches agents with `zsh -l -c`
   // (non-interactive login), which does NOT source .zshrc — so a bare `kimi`
   // would fail to resolve. --yolo auto-approves all tool actions for unattended runs.
   const parts = ['"$HOME/.kimi-code/bin/kimi"', '--yolo'];
+  // Resurrection resume: `-c` continues the previous session for the working
+  // directory. ftown launches each kimi-code session with a stable workingDir,
+  // so `-c` on relaunch resumes exactly the conversation that ran there — no
+  // captured session id needed.
+  if (options.resume) {
+    parts.push('-c');
+  }
   if (options.model?.trim()) {
     parts.push('-m', shellQuote(options.model.trim()));
   }
@@ -245,7 +258,7 @@ export const HARNESSES = {
   },
   'kimi-code': {
     // Own binary (absolute path); interactive TUI, no positional prompt.
-    buildCommand: (input) => buildKimiCodeCommand({ model: input.model }),
+    buildCommand: (input) => buildKimiCodeCommand({ model: input.model, resume: input.resume }),
     hooked: false,
     promptAsCliArg: false,
     validForLoop: true,
