@@ -286,6 +286,9 @@ export function deriveRelaunchCommand(session: RelaunchCommandSource): {
     claudeSessionId: session.claudeSessionId,
     cursorSessionId: session.cursorSessionId,
     codexSessionId: session.codexSessionId,
+    // Workdir-based resume (kimi-code `-c`): no id to carry, so signal resume
+    // explicitly. Id-based harnesses ignore this and key off their id fields.
+    resume: true,
   });
   const isCustom =
     Boolean(session.command) &&
@@ -301,6 +304,9 @@ export function canResumeStoredSession(
   const shellType = session.shellType ?? 'claude';
   if (shellType === 'cursor') return Boolean(session.cursorSessionId?.trim());
   if (shellType === 'codex') return Boolean(session.codexSessionId?.trim());
+  // kimi-code resumes by working directory (`-c`), so it needs no captured
+  // session id — a stored kimi-code session is always resumable on restart.
+  if (shellType === 'kimi-code') return true;
   return shellType !== 'shell' && shellType !== 'opencode' && Boolean(session.claudeSessionId?.trim());
 }
 

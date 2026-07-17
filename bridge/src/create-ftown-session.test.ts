@@ -581,6 +581,21 @@ describe('deriveRelaunchCommand — single home of the relaunch heuristic', () =
     assert.deepEqual(derived, { command: 'my-wrapper --flag', isCustom: true });
   });
 
+  it('rebuilds a builder-default kimi-code stored command into the -c resume command (workdir-based)', () => {
+    const kimiStored = {
+      shellType: 'kimi-code' as const,
+      workingDir: '/tmp/work',
+      model: undefined,
+      claudeSessionId: undefined,
+      cursorSessionId: undefined,
+      codexSessionId: undefined,
+    };
+    const kimiDefault = buildSessionCommand({ shellType: 'kimi-code' });
+    const derived = deriveRelaunchCommand({ ...kimiStored, command: kimiDefault });
+    assert.strictEqual(derived.isCustom, false);
+    assert.match(derived.command, /--yolo -c$/);
+  });
+
   it('KNOWN LIMITATION: a pre-model-fix claude session (stored command lacks --model) is misclassified as custom and relaunched without --model or --resume', () => {
     const derived = deriveRelaunchCommand({
       ...stored,
@@ -602,6 +617,11 @@ describe('canResumeStoredSession — which stored sessions can resume', () => {
     assert.strictEqual(canResumeStoredSession({ shellType: 'codex', codexSessionId: 'x' }), true);
     assert.strictEqual(canResumeStoredSession({ shellType: 'cursor', claudeSessionId: 'c' }), false);
     assert.strictEqual(canResumeStoredSession({ shellType: 'codex', claudeSessionId: 'c' }), false);
+  });
+
+  it('resumes kimi-code by working directory — no recorded id required', () => {
+    assert.strictEqual(canResumeStoredSession({ shellType: 'kimi-code' }), true);
+    assert.strictEqual(canResumeStoredSession({ shellType: 'kimi-code', claudeSessionId: '  ' }), true);
   });
 
   it('never resumes plain shells, opencode, or sessions with no recorded id', () => {
