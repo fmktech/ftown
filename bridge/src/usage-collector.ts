@@ -1,5 +1,5 @@
 import { createReadStream } from 'node:fs';
-import { readdir } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -13,8 +13,10 @@ import type { ModelUsage, Session, SessionUsage } from './types.js';
  * not by shellType: provider flavors (zai/kimi/deepseek/fireworks) run the
  * claude CLI under the hood and get a claudeSessionId persisted by the hook
  * pipeline, so any session with a claudeSessionId uses the claude extractor
- * regardless of shellType. Sessions with neither a claude nor a codex id
- * (cursor, grok, plain shell) have no structured usage source and yield null.
+ * regardless of shellType. The kimi-code harness has no native session-id field
+ * on Session, so its extractor keys off workingDir + createdAt instead (see
+ * collectKimiCodeUsage). Sessions with none of these (cursor, grok, plain shell)
+ * have no structured usage source and yield null.
  *
  * TODO(opencode): add an opencode extractor once Session carries an
  * opencodeSessionId (no such field exists yet).
@@ -27,13 +29,21 @@ import type { ModelUsage, Session, SessionUsage } from './types.js';
 export type UsageSessionRef = Pick<
   Session,
   'shellType' | 'claudeSessionId' | 'codexSessionId' | 'workingDir'
->;
+> &
+  // createdAt is only consumed by the kimi-code extractor to disambiguate
+  // sessions sharing a workingDir; optional so non-kimi callers/tests need not set it.
+  Partial<Pick<Session, 'createdAt'>>;
 
 export interface UsageCollectorOptions {
   /** Override for tests. Default: ~/.claude/projects */
   claudeProjectsDir?: string;
   /** Override for tests. Default: ~/.codex/sessions */
   codexSessionsDir?: string;
+  /**
+   * Override for tests. Default: ~/.kimi-code. The kimi-code home dir holding
+   * session_index.jsonl and sessions/<...>/session_<uuid>/.
+   */
+  kimiCodeDir?: string;
   /** Cap on wall-clock read time per collection. Default 15s. */
   timeoutMs?: number;
 }
@@ -60,6 +70,9 @@ export async function collectSessionUsage(
     }
     if (session.codexSessionId) {
       return await collectCodexUsage(session.codexSessionId, options);
+    }
+    if (session.shellType === 'kimi-code' && session.workingDir) {
+      return await collectKimiCodeUsage(session.workingDir, session.createdAt, options);
     }
     return null;
   } catch {
@@ -273,6 +286,157 @@ async function collectCodexUsage(
     totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
     models,
     harness: 'codex',
+    collectedAt: new Date().toISOString(),
+  };
+}
+
+interface KimiIndexLine {
+  sessionId?: string;
+  sessionDir?: string;
+  workDir?: string;
+}
+
+interface KimiUsageRecord {
+  type?: string;
+  model?: string;
+  usage?: {
+    inputOther?: number;
+    output?: number;
+    inputCacheRead?: number;
+    inputCacheCreation?: number;
+  };
+}
+
+/**
+ * Resolve the kimi-code session dir that this ftown session spawned.
+ *
+ * session_index.jsonl is an append log mapping workDir → sessionDir; multiple
+ * lines can share a workDir (successive runs in the same directory). Among the
+ * candidates matching this session's workingDir we pick by OWN creation time:
+ * each candidate's session dir has a state.json whose createdAt is when kimi
+ * started. The ftown session spawned kimi, so the true match is the newest
+ * candidate created at-or-after the ftown session — falling back to the newest
+ * overall when clock skew / a missing state.json leaves none at-or-after.
+ */
+async function resolveKimiSessionDir(
+  baseDir: string,
+  indexPath: string,
+  workingDir: string,
+  sessionCreatedAt: string | undefined,
+  deadline: number,
+): Promise<string | null> {
+  // Dedupe: the same sessionDir can appear on multiple index lines.
+  const dirs = new Set<string>();
+  for await (const raw of jsonlLines(indexPath, deadline)) {
+    const line = raw as KimiIndexLine;
+    if (line?.workDir === workingDir && typeof line.sessionDir === 'string') {
+      dirs.add(line.sessionDir);
+    }
+  }
+  if (dirs.size === 0) return null;
+
+  // Read each candidate's own creation time from its state.json.
+  const candidates: Array<{ dir: string; createdAtMs: number }> = [];
+  for (const dir of dirs) {
+    try {
+      const parsed = JSON.parse(await readFile(join(dir, 'state.json'), 'utf8')) as {
+        createdAt?: string;
+      };
+      const createdAtMs = parsed?.createdAt ? Date.parse(parsed.createdAt) : NaN;
+      candidates.push({ dir, createdAtMs: Number.isNaN(createdAtMs) ? 0 : createdAtMs });
+    } catch {
+      // Missing / unparseable state.json — still a candidate, just undatable.
+      candidates.push({ dir, createdAtMs: 0 });
+    }
+  }
+
+  const sessionMs = sessionCreatedAt ? Date.parse(sessionCreatedAt) : NaN;
+  const newest = (list: Array<{ dir: string; createdAtMs: number }>) =>
+    list.reduce((best, c) => (c.createdAtMs >= best.createdAtMs ? c : best));
+
+  if (!Number.isNaN(sessionMs)) {
+    const atOrAfter = candidates.filter((c) => c.createdAtMs >= sessionMs);
+    if (atOrAfter.length > 0) return newest(atOrAfter).dir;
+  }
+  return newest(candidates).dir;
+}
+
+async function collectKimiCodeUsage(
+  workingDir: string,
+  sessionCreatedAt: string | undefined,
+  options: UsageCollectorOptions,
+): Promise<SessionUsage | null> {
+  const baseDir = options.kimiCodeDir ?? join(homedir(), '.kimi-code');
+  const indexPath = join(baseDir, 'session_index.jsonl');
+  const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+
+  const sessionDir = await resolveKimiSessionDir(
+    baseDir,
+    indexPath,
+    workingDir,
+    sessionCreatedAt,
+    deadline,
+  );
+  if (!sessionDir) return null;
+
+  // Sum usage.record events across every agent's wire.jsonl (main + sub-agents).
+  const agentsDir = join(sessionDir, 'agents');
+  let agentNames: string[];
+  try {
+    const entries = await readdir(agentsDir, { withFileTypes: true });
+    // Sort for deterministic per-model first-appearance order across agents.
+    agentNames = entries.filter((e) => e.isDirectory()).map((e) => e.name).sort();
+  } catch {
+    return null;
+  }
+
+  let counted = 0;
+  // Keyed by model id; Map preserves first-appearance order across agents.
+  const byModel = new Map<string, ModelUsage>();
+
+  for (const agent of agentNames) {
+    const wirePath = join(agentsDir, agent, 'wire.jsonl');
+    for await (const raw of jsonlLines(wirePath, deadline)) {
+      const entry = raw as KimiUsageRecord;
+      if (entry?.type !== 'usage.record') continue;
+      const usage = entry.usage;
+      if (!usage) continue;
+      const model = entry.model ?? '';
+      if (!model) continue;
+
+      let acc = byModel.get(model);
+      if (!acc) {
+        acc = { model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+        byModel.set(model, acc);
+      }
+      // Per-turn incremental records — SUM across all of them.
+      acc.inputTokens += usage.inputOther ?? 0;
+      acc.outputTokens += usage.output ?? 0;
+      acc.cacheReadTokens += usage.inputCacheRead ?? 0;
+      acc.cacheWriteTokens += usage.inputCacheCreation ?? 0;
+      counted += 1;
+    }
+  }
+
+  if (counted === 0) return null;
+
+  const perModel = [...byModel.values()];
+  const sum = (pick: (m: ModelUsage) => number): number =>
+    perModel.reduce((acc, m) => acc + pick(m), 0);
+  const inputTokens = sum((m) => m.inputTokens);
+  const outputTokens = sum((m) => m.outputTokens);
+  const cacheReadTokens = sum((m) => m.cacheReadTokens);
+  const cacheWriteTokens = sum((m) => m.cacheWriteTokens);
+
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+    models: perModel.map((m) => m.model),
+    perModel,
+    harness: 'kimi-code',
     collectedAt: new Date().toISOString(),
   };
 }

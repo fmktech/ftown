@@ -7,6 +7,7 @@ import {
   LOOP_HARNESS_TYPES,
   SHELL_TYPES,
   WORKFLOW_SHELLS,
+  buildKimiCodeCommand,
   harnessAcceptsPromptAsCliArg,
   isLoopHarness,
   isShellType,
@@ -23,7 +24,7 @@ type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 const _shellTypeIsRegistryKeys: Equals<ShellType, keyof typeof HARNESSES> = true;
 const _loopHarnessUnion: Equals<
   LoopHarness,
-  'claude' | 'cursor' | 'codex' | 'shell' | 'grok' | 'opencode'
+  'claude' | 'cursor' | 'codex' | 'shell' | 'grok' | 'kimi-code' | 'opencode'
 > = true;
 const _workflowShellUnion: Equals<
   WorkflowShell,
@@ -37,7 +38,7 @@ describe('harness registry', () => {
   it('contains exactly the historical ShellType set', () => {
     assert.deepEqual(
       [...SHELL_TYPES].sort(),
-      ['claude', 'codex', 'cursor', 'deepseek', 'fireworks', 'grok', 'kimi', 'opencode', 'shell', 'zai'],
+      ['claude', 'codex', 'cursor', 'deepseek', 'fireworks', 'grok', 'kimi', 'kimi-code', 'opencode', 'shell', 'zai'],
     );
   });
 
@@ -85,7 +86,7 @@ describe('harness registry', () => {
   it('derives the historical LOOP_HARNESSES set', () => {
     assert.deepEqual(
       [...LOOP_HARNESS_TYPES].sort(),
-      ['claude', 'codex', 'cursor', 'grok', 'opencode', 'shell'],
+      ['claude', 'codex', 'cursor', 'grok', 'kimi-code', 'opencode', 'shell'],
     );
   });
 
@@ -145,9 +146,50 @@ describe('harness registry', () => {
       assert.equal(harnessAcceptsPromptAsCliArg('opencode', {}), false);
     });
 
+    it('kimi-code: never (interactive TUI takes no positional prompt)', () => {
+      assert.equal(harnessAcceptsPromptAsCliArg('kimi-code', {}), false);
+      assert.equal(
+        harnessAcceptsPromptAsCliArg('kimi-code', {
+          claudeSessionId: 'a',
+          cursorSessionId: 'b',
+          codexSessionId: 'c',
+        }),
+        false,
+      );
+    });
+
     it('blank resume ids do not suppress the CLI arg (trim semantics preserved)', () => {
       assert.equal(harnessAcceptsPromptAsCliArg('claude', { claudeSessionId: '   ' }), true);
       assert.equal(harnessAcceptsPromptAsCliArg('cursor', { cursorSessionId: '' }), true);
     });
+  });
+});
+
+describe('buildKimiCodeCommand', () => {
+  const KIMI = '"$HOME/.kimi-code/bin/kimi"';
+
+  it('no-resume output is unchanged (frozen)', () => {
+    assert.equal(buildKimiCodeCommand({}), `${KIMI} --yolo`);
+    assert.equal(buildKimiCodeCommand({ model: 'k2' }), `${KIMI} --yolo -m 'k2'`);
+  });
+
+  it('resume appends -c after --yolo', () => {
+    assert.equal(buildKimiCodeCommand({ resume: true }), `${KIMI} --yolo -c`);
+  });
+
+  it('resume keeps the model so the resumed session retains it', () => {
+    assert.equal(
+      buildKimiCodeCommand({ resume: true, model: 'k2' }),
+      `${KIMI} --yolo -c -m 'k2'`,
+    );
+  });
+
+  it('registry kimi-code entry threads the resume flag through', () => {
+    assert.equal(HARNESSES['kimi-code'].buildCommand({}), `${KIMI} --yolo`);
+    assert.equal(HARNESSES['kimi-code'].buildCommand({ resume: true }), `${KIMI} --yolo -c`);
+    assert.equal(
+      HARNESSES['kimi-code'].buildCommand({ resume: true, model: 'k2' }),
+      `${KIMI} --yolo -c -m 'k2'`,
+    );
   });
 });

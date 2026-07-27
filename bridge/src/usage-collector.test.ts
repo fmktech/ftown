@@ -167,6 +167,178 @@ describe('collectSessionUsage — codex extractor', () => {
   });
 });
 
+function kimiUsageRecord(model: string, usage: Record<string, number>): string {
+  return JSON.stringify({ type: 'usage.record', model, usage, usageScope: 'turn', time: 1 });
+}
+
+async function writeKimiSession(opts: {
+  kimiCodeDir: string;
+  sessionDir: string;
+  workDir: string;
+  createdAt: string;
+  wireByAgent: Record<string, string[]>;
+}): Promise<void> {
+  await mkdir(opts.sessionDir, { recursive: true });
+  await writeFile(
+    join(opts.sessionDir, 'state.json'),
+    JSON.stringify({ createdAt: opts.createdAt, updatedAt: opts.createdAt, workDir: opts.workDir, agents: {} }),
+  );
+  for (const [agent, lines] of Object.entries(opts.wireByAgent)) {
+    const agentDir = join(opts.sessionDir, 'agents', agent);
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(agentDir, 'wire.jsonl'), lines.join('\n') + '\n');
+  }
+}
+
+describe('collectSessionUsage — kimi-code extractor', () => {
+  const workingDir = '/Users/x/projects/demo';
+  const sessionCreatedAt = '2026-07-17T12:00:00.000Z';
+
+  it('sums usage.record across agents, attributes per model, no costUsd', async () => {
+    const kimiCodeDir = join(root, 'kimi-sums');
+    const sessionDir = join(kimiCodeDir, 'sessions', 'wd_demo_1', 'session_uuid-1');
+    await mkdir(kimiCodeDir, { recursive: true });
+    await writeFile(
+      join(kimiCodeDir, 'session_index.jsonl'),
+      JSON.stringify({ sessionId: 'session_uuid-1', sessionDir, workDir: workingDir }) + '\n' +
+        // duplicate append line for the same sessionDir — must be deduped
+        JSON.stringify({ sessionId: 'session_uuid-1', sessionDir, workDir: workingDir }) + '\n',
+    );
+    await writeKimiSession({
+      kimiCodeDir,
+      sessionDir,
+      workDir: workingDir,
+      createdAt: '2026-07-17T12:00:05.000Z', // >= session createdAt
+      wireByAgent: {
+        // 3 usage.record events, 2 models to exercise perModel
+        main: [
+          JSON.stringify({ type: 'text', model: 'kimi-code/k3' }),
+          kimiUsageRecord('kimi-code/k3', {
+            inputOther: 100, output: 200, inputCacheRead: 1000, inputCacheCreation: 500,
+          }),
+          'not json',
+          kimiUsageRecord('kimi-code/k3', {
+            inputOther: 10, output: 20, inputCacheRead: 5, inputCacheCreation: 0,
+          }),
+          kimiUsageRecord('kimi-code/k2', {
+            inputOther: 1000, output: 100, inputCacheRead: 200, inputCacheCreation: 400,
+          }),
+        ],
+      },
+    });
+
+    const usage = await collectSessionUsage(
+      { shellType: 'kimi-code', workingDir, createdAt: sessionCreatedAt },
+      { kimiCodeDir },
+    );
+
+    assert.ok(usage);
+    assert.equal(usage.harness, 'kimi-code');
+    assert.equal(usage.inputTokens, 1110);
+    assert.equal(usage.outputTokens, 320);
+    assert.equal(usage.cacheReadTokens, 1205);
+    assert.equal(usage.cacheWriteTokens, 900);
+    assert.equal(usage.totalTokens, 1110 + 320 + 1205 + 900);
+    assert.deepEqual(usage.models, ['kimi-code/k3', 'kimi-code/k2']);
+    assert.deepEqual(usage.perModel, [
+      {
+        model: 'kimi-code/k3',
+        inputTokens: 110,
+        outputTokens: 220,
+        cacheReadTokens: 1005,
+        cacheWriteTokens: 500,
+      },
+      {
+        model: 'kimi-code/k2',
+        inputTokens: 1000,
+        outputTokens: 100,
+        cacheReadTokens: 200,
+        cacheWriteTokens: 400,
+      },
+    ]);
+    assert.ok(usage.collectedAt);
+    assert.ok(!('costUsd' in usage));
+  });
+
+  it('sums main + sub-agent wire.jsonl for the session total', async () => {
+    const kimiCodeDir = join(root, 'kimi-multiagent');
+    const sessionDir = join(kimiCodeDir, 'sessions', 'wd_ma_1', 'session_uuid-ma');
+    await mkdir(kimiCodeDir, { recursive: true });
+    await writeFile(
+      join(kimiCodeDir, 'session_index.jsonl'),
+      JSON.stringify({ sessionId: 'session_uuid-ma', sessionDir, workDir: workingDir }) + '\n',
+    );
+    await writeKimiSession({
+      kimiCodeDir,
+      sessionDir,
+      workDir: workingDir,
+      createdAt: '2026-07-17T12:00:01.000Z',
+      wireByAgent: {
+        main: [kimiUsageRecord('kimi-code/k3', { inputOther: 100, output: 10, inputCacheRead: 0, inputCacheCreation: 0 })],
+        'agent-0': [kimiUsageRecord('kimi-code/k3', { inputOther: 5, output: 3, inputCacheRead: 0, inputCacheCreation: 0 })],
+      },
+    });
+
+    const usage = await collectSessionUsage(
+      { shellType: 'kimi-code', workingDir, createdAt: sessionCreatedAt },
+      { kimiCodeDir },
+    );
+    assert.ok(usage);
+    // main (100/10) + agent-0 (5/3) summed into one kimi-code/k3 model
+    assert.equal(usage.inputTokens, 105);
+    assert.equal(usage.outputTokens, 13);
+    assert.deepEqual(usage.models, ['kimi-code/k3']);
+  });
+
+  it('disambiguates two sessions in the same workDir by createdAt (>= session wins, newest)', async () => {
+    const kimiCodeDir = join(root, 'kimi-disambig');
+    const olderDir = join(kimiCodeDir, 'sessions', 'wd_d_1', 'session_older');
+    const newerDir = join(kimiCodeDir, 'sessions', 'wd_d_1', 'session_newer');
+    await mkdir(kimiCodeDir, { recursive: true });
+    await writeFile(
+      join(kimiCodeDir, 'session_index.jsonl'),
+      JSON.stringify({ sessionId: 'session_older', sessionDir: olderDir, workDir: workingDir }) + '\n' +
+        JSON.stringify({ sessionId: 'session_newer', sessionDir: newerDir, workDir: workingDir }) + '\n',
+    );
+    // older kimi session created BEFORE the ftown session — not the spawn
+    await writeKimiSession({
+      kimiCodeDir,
+      sessionDir: olderDir,
+      workDir: workingDir,
+      createdAt: '2026-07-17T11:00:00.000Z',
+      wireByAgent: {
+        main: [kimiUsageRecord('kimi-code/k3', { inputOther: 9, output: 9, inputCacheRead: 0, inputCacheCreation: 0 })],
+      },
+    });
+    // newer kimi session created AFTER the ftown session — the true spawn
+    await writeKimiSession({
+      kimiCodeDir,
+      sessionDir: newerDir,
+      workDir: workingDir,
+      createdAt: '2026-07-17T12:00:03.000Z',
+      wireByAgent: {
+        main: [kimiUsageRecord('kimi-code/k3', { inputOther: 42, output: 7, inputCacheRead: 0, inputCacheCreation: 0 })],
+      },
+    });
+
+    const usage = await collectSessionUsage(
+      { shellType: 'kimi-code', workingDir, createdAt: sessionCreatedAt },
+      { kimiCodeDir },
+    );
+    assert.ok(usage);
+    assert.equal(usage.inputTokens, 42); // the createdAt-matched (newer) session
+    assert.equal(usage.outputTokens, 7);
+  });
+
+  it('returns null when the session index is missing', async () => {
+    const usage = await collectSessionUsage(
+      { shellType: 'kimi-code', workingDir, createdAt: sessionCreatedAt },
+      { kimiCodeDir: join(root, 'kimi-missing') },
+    );
+    assert.equal(usage, null);
+  });
+});
+
 describe('collectSessionUsage — extractor routing', () => {
   it('prefers the claude extractor whenever claudeSessionId is present (provider flavors)', async () => {
     const claudeProjectsDir = join(root, 'routing');

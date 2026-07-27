@@ -9,7 +9,7 @@ export function formatTokens(n: number): string {
 
 /** Strip common vendor-style prefixes from a model id for brevity, e.g. "claude-opus-4" -> "opus-4". */
 function shortModelName(model: string): string {
-  return model.replace(/^(claude-|gpt-|gemini-|grok-)/, "");
+  return model.replace(/^(claude-|gpt-|gemini-|grok-|kimi-code\/|kimi-)/, "");
 }
 
 /** Short one-line summary, e.g. "1.2M in · 45K out · opus-4" (model suffix omitted unless exactly one model). */

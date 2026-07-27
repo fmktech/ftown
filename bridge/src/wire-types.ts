@@ -75,7 +75,7 @@ export interface MailMessage {
   deliveredVia?: string;
 }
 
-export type LoopHarness = 'claude' | 'cursor' | 'codex' | 'grok' | 'opencode' | 'shell';
+export type LoopHarness = 'claude' | 'cursor' | 'codex' | 'grok' | 'kimi-code' | 'opencode' | 'shell';
 
 export type LoopSchedule =
   | { kind: 'interval'; everyMs: number }

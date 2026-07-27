@@ -462,6 +462,7 @@ export function LoopFormModal({ isOpen, onClose, onSubmit, bridges, editingLoop 
                 <option value="cursor">Cursor Agent</option>
                 <option value="codex">Codex</option>
                 <option value="grok">Grok</option>
+                <option value="kimi-code">Kimi Code</option>
                 <option value="opencode">opencode</option>
               </optgroup>
               <optgroup label="Plain">
