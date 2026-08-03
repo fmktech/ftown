@@ -1,0 +1,7 @@
+# v5.4.9 is the final Centrifugo v5 release. Pin the multi-architecture digest
+# so a Fly deploy cannot silently pick up a different upstream image.
+FROM centrifugo/centrifugo:v5.4.9@sha256:90be10af3cb1c73c6b6cff8f6bcf02f8c0537d6aa1ed9f2cfe59a9e776a0c3d5
+
+COPY config.fly.json /centrifugo/config.fly.json
+
+CMD ["centrifugo", "-c", "/centrifugo/config.fly.json"]

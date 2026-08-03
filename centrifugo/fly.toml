@@ -1,0 +1,40 @@
+app = "ftown-centrifugo"
+primary_region = "gru"
+
+kill_signal = "SIGTERM"
+kill_timeout = "30s"
+
+[build]
+  dockerfile = "Dockerfile.fly"
+
+[deploy]
+  # The memory engine requires exactly one Machine. A rolling replacement causes
+  # a short reconnect but never runs two divergent brokers as a steady state.
+  strategy = "rolling"
+  max_unavailable = 1
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 200
+    hard_limit = 240
+
+# The HTTP health endpoint is deliberately bound to loopback:9000 and is not a
+# Fly service. This TCP check proves the public WebSocket listener is accepting
+# connections without exposing /health, /api, or admin endpoints.
+[checks.centrifugo_listener]
+  type = "tcp"
+  port = 8000
+  interval = "15s"
+  timeout = "2s"
+  grace_period = "5s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

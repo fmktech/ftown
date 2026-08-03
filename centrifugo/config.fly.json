@@ -1,0 +1,106 @@
+{
+  "admin": false,
+  "api_disable": true,
+  "allowed_origins": [
+    "https://ftown.ia.br"
+  ],
+  "allow_anonymous_connect_without_token": false,
+  "disallow_anonymous_connection_tokens": true,
+  "token_audience": "ftown:centrifugo",
+  "engine": "memory",
+  "allow_user_limited_channels": true,
+  "allow_publish_for_subscriber": false,
+  "allow_subscribe_for_client": false,
+  "allow_history_for_subscriber": true,
+  "presence": true,
+  "join_leave": true,
+  "force_push_join_leave": true,
+  "allow_presence_for_subscriber": true,
+  "history_size": 500,
+  "history_ttl": "24h",
+  "force_recovery": true,
+  "namespaces": [
+    {
+      "name": "terminal",
+      "allow_publish_for_subscriber": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true,
+      "allow_history_for_subscriber": true,
+      "history_size": 20,
+      "history_ttl": "5m",
+      "force_recovery": false,
+      "allow_publish_for_client": true
+    },
+    {
+      "name": "sessions",
+      "allow_publish_for_subscriber": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true,
+      "history_size": 0,
+      "history_ttl": "0s",
+      "force_recovery": false,
+      "allow_publish_for_client": true
+    },
+    {
+      "name": "terminal-input",
+      "allow_publish_for_subscriber": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true,
+      "allow_publish_for_client": true
+    },
+    {
+      "name": "events",
+      "allow_publish_for_subscriber": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true,
+      "history_size": 100,
+      "history_ttl": "1h",
+      "allow_publish_for_client": true
+    },
+    {
+      "name": "commands",
+      "allow_publish_for_subscriber": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true,
+      "allow_publish_for_client": true
+    },
+    {
+      "name": "bridges",
+      "allow_publish_for_subscriber": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true,
+      "presence": true,
+      "join_leave": true,
+      "force_push_join_leave": true,
+      "allow_presence_for_subscriber": true,
+      "allow_publish_for_client": true
+    },
+    {
+      "name": "loops",
+      "allow_publish_for_subscriber": true,
+      "allow_publish_for_client": true,
+      "allow_subscribe_for_client": true,
+      "allow_user_limited_channels": true,
+      "history_size": 0,
+      "history_ttl": "0s",
+      "force_recovery": false
+    }
+  ],
+  "address": "0.0.0.0",
+  "port": 8000,
+  "internal_address": "127.0.0.1",
+  "internal_port": 9000,
+  "health": true,
+  "client_channel_limit": 512,
+  "client_connection_limit": 240,
+  "client_user_connection_limit": 128,
+  "client_connection_rate_limit": 50,
+  "websocket_message_size_limit": 1048576,
+  "websocket_compression": true,
+  "websocket_compression_min_size": 1024,
+  "client_queue_max_size": 8388608,
+  "client_stale_close_delay": "30s",
+  "ping_interval": "10s",
+  "pong_timeout": "5s",
+  "log_level": "info"
+}

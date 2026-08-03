@@ -243,11 +243,16 @@ Get the token via **Generate bridge token** in the dashboard at
 
 ---
 
-### AWS (Production)
+### Hosted production
 
-This setup uses an EC2 instance for Centrifugo, Vercel for the UI, and Neon for the database. Adjust to your preferred stack.
+The target production layout uses Fly.io for Centrifugo, Vercel for the UI,
+and Neon for the database. See the hardened, rollback-safe
+[Fly.io rollout runbook](docs/centrifugo-fly-rollout.md).
 
-#### Centrifugo on EC2
+#### Legacy Centrifugo on EC2
+
+The EC2 instructions below are retained for rollback and self-hosting. New
+hosted deployments should use the Fly.io runbook above.
 
 **1. Launch an EC2 instance** (t3.micro is sufficient):
 

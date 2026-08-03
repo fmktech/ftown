@@ -1,5 +1,10 @@
 # Centrifugo config deploy
 
+> This is the legacy AWS/EC2 runbook. New deployments use the hardened Fly.io
+> package and cutover procedure in
+> [`centrifugo-fly-rollout.md`](./centrifugo-fly-rollout.md). Keep this runbook
+> until the Fly migration has passed its rollback window.
+
 Automated, drift-proof deployment of the Centrifugo (v5) configuration to the
 production EC2 host.
 
@@ -65,24 +70,21 @@ job runs with `permissions: contents: read`.
 
 Any error fails the job loudly.
 
-**SSH host-key verification.** The workflow reads an OPTIONAL repo variable
+**SSH host-key verification.** The workflow requires the repo variable
 `CENTRIFUGO_KNOWN_HOSTS` (host public keys are not secret):
 
-- **Set** → the key is pinned and the handshake runs with
-  `StrictHostKeyChecking=yes`, which **authenticates the host and blocks an
-  on-path MITM** from capturing the rendered secrets. Populate it with:
+- The key is pinned and the handshake runs with `StrictHostKeyChecking=yes`,
+  which **authenticates the host and blocks an on-path MITM** from capturing the
+  rendered secrets. Populate it with:
 
   ```sh
   ssh-keyscan -t ed25519,ecdsa,rsa ec2-56-124-107-237.sa-east-1.compute.amazonaws.com
   gh variable set CENTRIFUGO_KNOWN_HOSTS < <(ssh-keyscan -t ed25519 ec2-56-124-107-237.sa-east-1.compute.amazonaws.com)
   ```
 
-  (Run `ssh-keyscan` from a trusted network and eyeball the fingerprint first.)
-- **Unset** → the deploy still runs (trust-on-first-use, `accept-new`) so the
-  first drift-fixing run is never blocked, but it prints a **loud warning**: on
-  an ephemeral GitHub runner the `known_hosts` file is empty every run, so TOFU
-  does **not** authenticate the handshake. Set `CENTRIFUGO_KNOWN_HOSTS` to
-  harden.
+  (Run `ssh-keyscan` from a trusted network and verify the fingerprint out of
+  band first.) If the variable is absent, the workflow fails before uploading
+  the rendered secret configuration.
 
 ### The remote script (`centrifugo-remote.sh`)
 

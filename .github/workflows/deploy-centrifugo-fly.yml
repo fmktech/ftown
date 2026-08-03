@@ -1,0 +1,214 @@
+name: Validate and deploy Centrifugo to Fly
+
+on:
+  pull_request:
+    paths:
+      - 'centrifugo/config.fly.json'
+      - 'centrifugo/Dockerfile.fly'
+      - 'centrifugo/.dockerignore'
+      - 'centrifugo/fly.toml'
+      - '.github/workflows/deploy-centrifugo-fly.yml'
+      - 'docs/centrifugo-fly-rollout.md'
+      - 'docs/centrifugo-fly-security-review.md'
+  push:
+    branches: [main]
+    paths:
+      - 'centrifugo/config.fly.json'
+      - 'centrifugo/Dockerfile.fly'
+      - 'centrifugo/.dockerignore'
+      - 'centrifugo/fly.toml'
+      - '.github/workflows/deploy-centrifugo-fly.yml'
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy the validated image to the production Fly app
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  FLY_APP: ftown-centrifugo
+  CENTRIFUGO_IMAGE: ftown-centrifugo:ci
+  CENTRIFUGO_UPSTREAM: centrifugo/centrifugo:v5.4.9@sha256:90be10af3cb1c73c6b6cff8f6bcf02f8c0537d6aa1ed9f2cfe59a9e776a0c3d5
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v4, pinned to prevent tag retargeting.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Assert the hardened Fly surface
+        run: |
+          set -euo pipefail
+          jq -e '
+            .admin == false and
+            .api_disable == true and
+            .allow_anonymous_connect_without_token == false and
+            .disallow_anonymous_connection_tokens == true and
+            .allowed_origins == ["https://ftown.ia.br"] and
+            .address == "0.0.0.0" and
+            .port == 8000 and
+            .internal_address == "127.0.0.1" and
+            .internal_port == 9000 and
+            .websocket_message_size_limit <= 1048576 and
+            .client_queue_max_size <= 8388608 and
+            (has("token_hmac_secret_key") | not) and
+            (has("api_key") | not) and
+            (has("admin_password") | not) and
+            (has("admin_secret") | not) and
+            (has("tls_autocert") | not)
+          ' centrifugo/config.fly.json >/dev/null
+
+      - name: Validate Centrifugo config
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e CENTRIFUGO_TOKEN_HMAC_SECRET_KEY=ci-only-secret-at-least-32-characters \
+            -v "$PWD/centrifugo/config.fly.json:/centrifugo/config.fly.json:ro" \
+            "$CENTRIFUGO_UPSTREAM" \
+            centrifugo checkconfig -c /centrifugo/config.fly.json
+
+      - name: Build Fly image
+        run: |
+          set -euo pipefail
+          docker build --pull=false \
+            -f centrifugo/Dockerfile.fly \
+            -t "$CENTRIFUGO_IMAGE" \
+            centrifugo
+
+      - name: Smoke-test exposed endpoints
+        run: |
+          set -euo pipefail
+          container=ftown-centrifugo-ci
+          cleanup() { docker rm -f "$container" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker run -d --name "$container" \
+            -e CENTRIFUGO_TOKEN_HMAC_SECRET_KEY=ci-only-secret-at-least-32-characters \
+            -p 127.0.0.1:18000:8000 \
+            "$CENTRIFUGO_IMAGE" >/dev/null
+
+          ready=0
+          for _ in $(seq 1 30); do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18000/ || true)"
+            if [ "$status" != "000" ]; then ready=1; break; fi
+            sleep 1
+          done
+          if [ "$ready" != 1 ]; then
+            docker logs "$container"
+            exit 1
+          fi
+
+          for path in / /api /health; do
+            status="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:18000$path")"
+            test "$status" = 404
+          done
+
+          test "$(docker exec "$container" wget -qO- http://127.0.0.1:9000/health)" = '{}'
+
+          python3 - <<'PY'
+          import base64
+          import os
+          import socket
+
+          def handshake(origin):
+              key = base64.b64encode(os.urandom(16)).decode()
+              request = (
+                  "GET /connection/websocket HTTP/1.1\r\n"
+                  "Host: 127.0.0.1:18000\r\n"
+                  "Upgrade: websocket\r\n"
+                  "Connection: Upgrade\r\n"
+                  f"Sec-WebSocket-Key: {key}\r\n"
+                  "Sec-WebSocket-Version: 13\r\n"
+                  f"Origin: {origin}\r\n\r\n"
+              )
+              with socket.create_connection(("127.0.0.1", 18000), timeout=5) as sock:
+                  sock.sendall(request.encode())
+                  return sock.recv(256).split(b"\r\n", 1)[0]
+
+          allowed = handshake("https://ftown.ia.br")
+          if b" 101 " not in allowed:
+              raise SystemExit(f"Allowed WebSocket origin failed: {allowed!r}")
+
+          denied = handshake("https://attacker.example")
+          if b" 101 " in denied:
+              raise SystemExit(f"Untrusted WebSocket origin was accepted: {denied!r}")
+          PY
+
+  deploy:
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy
+    needs: validate
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-centrifugo-fly
+      cancel-in-progress: false
+    steps:
+      # actions/checkout v4.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      # superfly/flyctl-actions v1.6.
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+
+      - name: Verify app and runtime secret
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${FLY_API_TOKEN:-}"
+          flyctl status --app "$FLY_APP" >/dev/null
+          flyctl secrets list --app "$FLY_APP" --json | jq -e '
+            map(.Name // .name) | index("CENTRIFUGO_TOKEN_HMAC_SECRET_KEY") != null
+          ' >/dev/null
+
+      - name: Deploy one memory-engine Machine
+        working-directory: centrifugo
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl deploy --remote-only --ha=false --config fly.toml
+
+      - name: Verify deployment and private checks
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          flyctl status --app "$FLY_APP"
+          flyctl checks list --app "$FLY_APP"
+
+          base="https://${FLY_APP}.fly.dev"
+          for path in / /api /health; do
+            status="$(curl --retry 5 --retry-all-errors --retry-delay 2 \
+              -sS -o /dev/null -w '%{http_code}' "$base$path")"
+            if [ "$status" != 404 ]; then
+              echo "ERROR: expected $path to be hidden (404), got $status" >&2
+              exit 1
+            fi
+          done
+
+          BASE_HOST="${FLY_APP}.fly.dev" python3 - <<'PY'
+          import base64
+          import os
+          import socket
+          import ssl
+
+          host = os.environ["BASE_HOST"]
+          key = base64.b64encode(os.urandom(16)).decode()
+          request = (
+              "GET /connection/websocket HTTP/1.1\r\n"
+              f"Host: {host}\r\n"
+              "Upgrade: websocket\r\n"
+              "Connection: Upgrade\r\n"
+              f"Sec-WebSocket-Key: {key}\r\n"
+              "Sec-WebSocket-Version: 13\r\n"
+              "Origin: https://ftown.ia.br\r\n\r\n"
+          )
+          context = ssl.create_default_context()
+          with socket.create_connection((host, 443), timeout=10) as raw:
+              with context.wrap_socket(raw, server_hostname=host) as sock:
+                  sock.sendall(request.encode())
+                  status = sock.recv(256).split(b"\r\n", 1)[0]
+          if b" 101 " not in status:
+              raise SystemExit(f"Fly WebSocket upgrade failed: {status!r}")
+          PY
