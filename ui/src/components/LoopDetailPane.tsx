@@ -344,6 +344,7 @@ export function LoopDetailPane({
                   isRunning={liveSession.status === "running"}
                   sessionName={liveSession.name}
                   usage={usage}
+                  persistedUsage={liveSession.usage}
                   shellType={liveSession.shellType}
                   onInterrupt={onInterrupt}
                 />

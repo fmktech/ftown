@@ -5,6 +5,7 @@ import { Centrifuge, Subscription } from "centrifuge";
 import { v4 as uuidv4 } from "uuid";
 import {
   Session,
+  SessionUsage,
   ShellType,
   Command,
   CommandResponse,
@@ -25,6 +26,33 @@ export type { BridgeExecResponse } from "@/hooks/useBridgeRpc";
 // for this window so a just-deleted row cannot reappear before the bridge's
 // authoritative 'removed' broadcast arrives.
 const REMOVED_TOMBSTONE_MS = 12_000;
+const LIVE_USAGE_POLL_MS = 15_000;
+
+function isSessionUsage(value: unknown): value is SessionUsage {
+  if (typeof value !== "object" || value === null) return false;
+  const usage = value as Record<string, unknown>;
+  return typeof usage.inputTokens === "number"
+    && typeof usage.outputTokens === "number"
+    && typeof usage.cacheReadTokens === "number"
+    && typeof usage.cacheWriteTokens === "number"
+    && typeof usage.totalTokens === "number"
+    && Array.isArray(usage.models)
+    && usage.models.every((model) => typeof model === "string")
+    && typeof usage.harness === "string"
+    && typeof usage.collectedAt === "string";
+}
+
+function mergeSessionSnapshot(current: Session | undefined, incoming: Session): Session {
+  if (
+    current?.status === "running"
+    && incoming.status === "running"
+    && current.usage
+    && (!incoming.usage || incoming.usage.collectedAt <= current.usage.collectedAt)
+  ) {
+    return { ...incoming, usage: current.usage };
+  }
+  return incoming;
+}
 
 interface SessionUpdateMessage {
   type: 'session_update';
@@ -85,6 +113,10 @@ export function useSessions(
 ): UseSessionsResult {
   const [sessions, setSessions] = useState<Session[]>([]);
   const sessionsSubRef = useRef<Subscription | null>(null);
+  const sessionsRef = useRef<Session[]>([]);
+  const usageRequestsRef = useRef<Set<string>>(new Set());
+  const usageGenerationRef = useRef(0);
+  sessionsRef.current = sessions;
   // sessionId -> tombstone expiry (ms). Set on optimistic delete; consulted by
   // the publication/merge handlers to keep a removed row from resurrecting.
   const recentlyRemovedRef = useRef<Map<string, number>>(new Map());
@@ -130,7 +162,7 @@ export function useSessions(
             const idx = prev.findIndex((s) => s.id === data.session.id);
             if (idx >= 0) {
               const updated = [...prev];
-              updated[idx] = data.session;
+              updated[idx] = mergeSessionSnapshot(prev[idx], data.session);
               return updated;
             }
             return [data.session, ...prev];
@@ -164,7 +196,7 @@ export function useSessions(
           const merged = new Map(prev.map((s) => [s.id, s]));
           for (const s of responseData.sessions!) {
             if (isRecentlyRemoved(s.id)) continue;
-            merged.set(s.id, s);
+            merged.set(s.id, mergeSessionSnapshot(merged.get(s.id), s));
           }
           return Array.from(merged.values());
         });
@@ -188,6 +220,59 @@ export function useSessions(
       unregisterSubscribed();
     };
   }, [userId, onResponse, onSubscribed, publishCommand, isRecentlyRemoved]);
+
+  useEffect(() => {
+    usageGenerationRef.current += 1;
+  }, [client, userId]);
+
+  const pollLiveUsage = useCallback(async () => {
+    if (!userId) return;
+    const running = sessionsRef.current.filter((session) => session.status === "running");
+    await Promise.all(running.map(async (session) => {
+      if (usageRequestsRef.current.has(session.id)) return;
+      usageRequestsRef.current.add(session.id);
+      const requestGeneration = usageGenerationRef.current;
+      try {
+        const response = await sendCommand({
+          type: "get_session_usage",
+          payload: { sessionId: session.id, bridgeId: session.bridgeId },
+          requestId: uuidv4(),
+        });
+        if (!response.success) return;
+        const usage = (response.data as { usage?: unknown } | undefined)?.usage;
+        if (!isSessionUsage(usage) || requestGeneration !== usageGenerationRef.current) return;
+        setSessions((prev) => prev.map((current) =>
+          current.id === session.id
+            && current.status === "running"
+            && current.bridgeId === session.bridgeId
+            ? { ...current, usage }
+            : current
+        ));
+      } catch {
+        // Live usage is best-effort; the next interval retries without
+        // disrupting terminal input or session status updates.
+      } finally {
+        usageRequestsRef.current.delete(session.id);
+      }
+    }));
+  }, [userId, sendCommand]);
+
+  const runningSessionKey = sessions
+    .filter((session) => session.status === "running")
+    .map((session) => session.id)
+    .sort()
+    .join("|");
+
+  useEffect(() => {
+    if (!userId || !runningSessionKey) return;
+    void pollLiveUsage();
+  }, [userId, runningSessionKey, pollLiveUsage]);
+
+  useEffect(() => {
+    if (!userId) return;
+    const interval = window.setInterval(() => void pollLiveUsage(), LIVE_USAGE_POLL_MS);
+    return () => window.clearInterval(interval);
+  }, [userId, pollLiveUsage]);
 
   const createSession = useCallback(
     (prompt: string, options?: CreateSessionOptions): Promise<void> => {

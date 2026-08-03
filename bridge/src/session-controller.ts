@@ -122,9 +122,9 @@ export class SessionController {
   }
 
   /**
-   * Per-session token/cost usage. Returns the persisted snapshot when
-   * present; otherwise collects on demand (covers live sessions and sessions
-   * that finished before usage collection existed). An on-demand result is
+   * Per-session token/cost usage. Returns the persisted snapshot for terminal
+   * sessions; live sessions are always recollected because their totals are
+   * still moving (including a retried session with an older snapshot). An on-demand result is
    * persisted + published only when the session is terminal — a live
    * session's numbers are still moving, so caching them would go stale.
    */
@@ -135,21 +135,22 @@ export class SessionController {
     if (!session) {
       return { ok: false, code: 'not_found', message: 'Session not found' };
     }
-    if (session.usage) {
+    const isTerminal = session.status === 'completed' || session.status === 'error';
+    if (session.usage && isTerminal) {
       return { ok: true, usage: session.usage };
     }
     const collect = this.deps.collectUsage;
     if (!collect) {
-      return { ok: true, usage: null };
+      return { ok: true, usage: session.usage ?? null };
     }
     const usage = await collect(session);
-    if (usage && (session.status === 'completed' || session.status === 'error')) {
+    if (usage && isTerminal) {
       session.usage = usage;
       session.updatedAt = new Date().toISOString();
       await this.deps.store.saveSession(session);
       await this.deps.publishSessionUpdate(session);
     }
-    return { ok: true, usage };
+    return { ok: true, usage: usage ?? session.usage ?? null };
   }
 
   /** Re-run a finished/dead session's stored command verbatim. */
