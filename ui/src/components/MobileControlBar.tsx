@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useCallback, forwardRef, useImperativeHandle } from "react";
+import { useRef, useState, useCallback, forwardRef, useImperativeHandle } from "react";
 
 export interface MobileControlBarHandle {
   focusInput: () => void;
@@ -62,6 +62,7 @@ const keyButtonStyle: React.CSSProperties = {
 export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControlBarProps>(
   function MobileControlBar({ onSendInput }, ref) {
     const inputRef = useRef<HTMLInputElement>(null);
+    const [pasteError, setPasteError] = useState("");
 
     useImperativeHandle(ref, () => ({
       focusInput() {
@@ -105,6 +106,19 @@ export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControl
       inputRef.current?.focus();
     }, []);
 
+    const handlePaste = useCallback(async () => {
+      setPasteError("");
+      try {
+        if (!navigator.clipboard?.readText) {
+          throw new Error("Clipboard access is unavailable");
+        }
+        const text = await navigator.clipboard.readText();
+        if (text) onSendInput(text);
+      } catch {
+        setPasteError("Paste was blocked. Open the keyboard and paste there instead.");
+      }
+    }, [onSendInput]);
+
     return (
       <div
         className="touch-control-bar shrink-0 flex-col"
@@ -139,6 +153,17 @@ export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControl
           />
         </div>
 
+        {pasteError && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="px-3 py-1 text-center"
+            style={{ fontSize: 10, color: "var(--status-pending)" }}
+          >
+            {pasteError}
+          </div>
+        )}
+
         {/* Control button rows */}
         {BUTTON_ROWS.map((row, rowIndex) => (
           <div
@@ -156,6 +181,21 @@ export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControl
                 onClick={(e) => { e.preventDefault(); focusInput(); }}
               >
                 {"\u2328"}
+              </button>
+            )}
+            {rowIndex === 1 && (
+              <button
+                className="mobile-ctrl-btn"
+                aria-label="Paste clipboard into terminal"
+                title={pasteError || "Paste clipboard into terminal"}
+                style={keyButtonStyle}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={(e) => {
+                  e.preventDefault();
+                  void handlePaste();
+                }}
+              >
+                Paste
               </button>
             )}
             {row.map((btn) => (

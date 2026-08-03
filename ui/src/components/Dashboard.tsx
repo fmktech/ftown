@@ -153,7 +153,41 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
       return next;
     });
   }, [bridges, rawSessions, setBridgeOrder]);
-  const { sessionActivity, markSessionIdle } = useAllSessionEvents(client, rawSessions, userId);
+  const { sessionActivity, markSessionIdle, clearSessionAttention } = useAllSessionEvents(client, rawSessions, userId);
+  const latestAttention = useMemo(() => {
+    let latest: { sessionId: string; sessionName: string; title: string; message: string; receivedAt: number } | null = null;
+    for (const [sessionId, activity] of sessionActivity) {
+      if (!activity.attention) continue;
+      const session = rawSessions.find((candidate) => candidate.id === sessionId);
+      const candidate = {
+        sessionId,
+        sessionName: session?.name || session?.prompt?.slice(0, 48) || "Session",
+        ...activity.attention,
+      };
+      if (!latest || candidate.receivedAt > latest.receivedAt) latest = candidate;
+    }
+    return latest;
+  }, [sessionActivity, rawSessions]);
+  const lastNativeAttentionRef = useRef(0);
+
+  useEffect(() => {
+    if (!latestAttention || latestAttention.receivedAt <= lastNativeAttentionRef.current) return;
+    lastNativeAttentionRef.current = latestAttention.receivedAt;
+    if (
+      document.visibilityState === "hidden"
+      && "Notification" in window
+      && window.Notification.permission === "granted"
+    ) {
+      try {
+        new window.Notification(latestAttention.title, {
+          body: `${latestAttention.sessionName}: ${latestAttention.message}`,
+          tag: `ftown-input-${latestAttention.sessionId}`,
+        });
+      } catch {
+        // The in-app alert remains visible when the browser rejects a native notification.
+      }
+    }
+  }, [latestAttention]);
 
   const installedHookBridges = useRef(new Set<string>());
 
@@ -1239,6 +1273,68 @@ PY`;
         token={token}
         onRetry={() => window.location.reload()}
       />
+
+      {latestAttention && (
+        <div
+          role="alert"
+          aria-live="assertive"
+          style={{
+            position: "fixed",
+            right: 16,
+            bottom: isDesktop
+              ? "max(16px, env(safe-area-inset-bottom))"
+              : "calc(max(16px, env(safe-area-inset-bottom)) + 94px)",
+            zIndex: 100,
+            width: "min(360px, calc(100vw - 32px))",
+            padding: 14,
+            borderRadius: "var(--radius-md)",
+            border: "1px solid var(--status-pending)",
+            background: "var(--bg-overlay)",
+            boxShadow: "var(--shadow-lg)",
+          }}
+        >
+          <div className="flex items-start gap-3">
+            <span aria-hidden style={{ color: "var(--status-pending)", fontWeight: 800 }}>!</span>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 12, color: "var(--text-primary)", fontWeight: 700 }}>
+                {latestAttention.title}
+              </div>
+              <div style={{ marginTop: 3, fontSize: 11, color: "var(--text-muted)" }}>
+                {latestAttention.sessionName}: {latestAttention.message}
+              </div>
+              <button
+                type="button"
+                className="btn-warn"
+                style={{ marginTop: 10 }}
+                onClick={() => {
+                  handleSelectSession(latestAttention.sessionId);
+                }}
+              >
+                Open session
+              </button>
+            </div>
+            <button
+              type="button"
+              aria-label="Dismiss notification"
+              title="Dismiss"
+              onClick={() => clearSessionAttention(latestAttention.sessionId)}
+              style={{
+                minWidth: 44,
+                minHeight: 44,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "var(--text-faint)",
+                fontSize: 18,
+                lineHeight: 1,
+                cursor: "pointer",
+              }}
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
 
     </div>
   );

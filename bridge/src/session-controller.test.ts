@@ -245,6 +245,24 @@ describe('SessionController.usage', () => {
     assert.equal(collectorCalls, 0);
   });
 
+  it('recollects persisted usage for a running session instead of returning a stale snapshot', async () => {
+    const persisted = makeUsage({ totalTokens: 10 });
+    const live = makeUsage({ totalTokens: 25 });
+    let collectorCalls = 0;
+    const { controller, store, published } = setup(
+      [makeSession({ status: 'running', usage: persisted })],
+      { collectUsage: async () => { collectorCalls += 1; return live; } },
+    );
+
+    const result = await controller.usage('sess-1');
+
+    assert.ok(result.ok);
+    assert.deepEqual(result.usage, live);
+    assert.equal(collectorCalls, 1);
+    assert.equal(store.saved.length, 0);
+    assert.equal(published.length, 0);
+  });
+
   it('collects on demand for a terminal session and persists + publishes the result', async () => {
     const collectedUsage = makeUsage();
     const { controller, store, published } = setup(

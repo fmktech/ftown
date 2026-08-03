@@ -46,12 +46,12 @@ interface DragState {
   bridgeId?: string;
 }
 
-function StatusBadge({ status, activity }: { status: SessionStatus; activity?: "thinking" | "tool_use" | "idle" }) {
+function StatusBadge({ status, activity, needsInput = false }: { status: SessionStatus; activity?: "thinking" | "tool_use" | "idle"; needsInput?: boolean }) {
   const isIdle = status === "running" && activity === "idle";
   // An idle-but-running session renders the pending dot, without its pulse.
-  const kind: StatusDotKind = isIdle ? "pending" : status;
+  const kind: StatusDotKind = needsInput ? "pending" : isIdle ? "pending" : status;
   const labels: Record<SessionStatus, string> = {
-    running:      isIdle ? "idle" : "running",
+    running:      needsInput ? "input needed" : isIdle ? "idle" : "running",
     completed:    "done",
     error:        "error",
     pending:      "pending",
@@ -60,7 +60,7 @@ function StatusBadge({ status, activity }: { status: SessionStatus; activity?: "
   const label = labels[status] ?? "done";
 
   const labelColors: Record<SessionStatus, string> = {
-    running:      isIdle ? "var(--status-pending)" : "var(--accent)",
+    running:      needsInput || isIdle ? "var(--status-pending)" : "var(--accent)",
     completed:    "var(--text-faint)",
     error:        "var(--status-error)",
     pending:      "var(--status-pending)",
@@ -965,7 +965,11 @@ export function SessionList({
           )}
           </div>
           <div className="flex items-center gap-1.5" style={{ flexShrink: 0 }}>
-            <StatusBadge status={session.status} activity={sessionActivity?.get(session.id)?.activity} />
+            <StatusBadge
+              status={session.status}
+              activity={sessionActivity?.get(session.id)?.activity}
+              needsInput={Boolean(sessionActivity?.get(session.id)?.attention)}
+            />
             <span
               role="button"
               tabIndex={0}
@@ -1001,6 +1005,23 @@ export function SessionList({
             </span>
           </div>
         </div>
+
+        {sessionActivity?.get(session.id)?.attention && (
+          <div
+            title={sessionActivity.get(session.id)?.attention?.message}
+            style={{
+              fontSize: 10,
+              color: "var(--status-pending)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              marginBottom: 2,
+            }}
+          >
+            <span aria-hidden style={{ marginRight: 4 }}>!</span>
+            {sessionActivity.get(session.id)?.attention?.message ?? "Session needs your input"}
+          </div>
+        )}
 
         {session.status === "running" && (() => {
           const act = sessionActivity?.get(session.id);
@@ -1343,7 +1364,11 @@ export function SessionList({
                   >
                     {displayName}
                   </span>
-                  <StatusBadge status={session.status} activity={sessionActivity?.get(session.id)?.activity} />
+                  <StatusBadge
+                    status={session.status}
+                    activity={sessionActivity?.get(session.id)?.activity}
+                    needsInput={Boolean(sessionActivity?.get(session.id)?.attention)}
+                  />
                 </div>
               </button>
             );

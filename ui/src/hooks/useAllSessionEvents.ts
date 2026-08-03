@@ -3,13 +3,14 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Centrifuge, Subscription } from "centrifuge";
 import { Session } from "@/types";
-import { hookEventToActivity, extractToolLabel } from "@/lib/hook-events";
+import { clearsManualInputNotice, hookEventToActivity, extractManualInputNotice, extractToolLabel, type ManualInputNotice } from "@/lib/hook-events";
 import { TokenUsage } from "./useSessionEvents";
 
 export interface SessionActivity {
   activity: "thinking" | "tool_use" | "idle";
   toolName?: string;
   usage?: TokenUsage;
+  attention?: ManualInputNotice;
 }
 
 interface HookEventMessage {
@@ -27,6 +28,7 @@ export interface AllSessionEvents {
   sessionActivity: Map<string, SessionActivity>;
   /** Optimistically clear a session's activity (e.g. on a local ESC interrupt). */
   markSessionIdle: (sessionId: string) => void;
+  clearSessionAttention: (sessionId: string) => void;
 }
 
 export function useAllSessionEvents(
@@ -35,7 +37,7 @@ export function useAllSessionEvents(
   userId: string
 ): AllSessionEvents {
   const [activityMap, setActivityMap] = useState<Map<string, SessionActivity>>(new Map());
-  const subsRef = useRef<Map<string, Subscription>>(new Map());
+  const subsRef = useRef<Map<string, { client: Centrifuge; sub: Subscription }>>(new Map());
   const clientRef = useRef(client);
   const userIdRef = useRef(userId);
   clientRef.current = client;
@@ -53,8 +55,10 @@ export function useAllSessionEvents(
       const msg = ctx.data as HookEventMessage;
       if (msg.type !== "hook_event") return;
 
+      const attention = extractManualInputNotice(msg.eventName, msg.data);
+      const clearsAttention = clearsManualInputNotice(msg.eventName, msg.data);
       const activity = hookEventToActivity(msg.eventName);
-      if (!activity) return;
+      if (!activity && !attention && !clearsAttention) return;
 
       setActivityMap((prev) => {
         const current = prev.get(sessionId) ?? { activity: "idle" as const };
@@ -65,8 +69,14 @@ export function useAllSessionEvents(
 
         const updated: SessionActivity = {
           ...current,
-          activity,
-          toolName: activity === "tool_use" ? toolName : undefined,
+          ...(activity
+            ? {
+                activity,
+                toolName: activity === "tool_use" ? toolName : undefined,
+              }
+            : {}),
+          ...(attention ? { attention } : {}),
+          ...(clearsAttention ? { attention: undefined } : {}),
           ...(activity === "idle" && msg.usage
             ? {
                 usage: {
@@ -97,19 +107,27 @@ export function useAllSessionEvents(
     sub.on("publication", onPublication);
 
     sub.subscribe();
-    subsRef.current.set(sessionId, sub);
+    subsRef.current.set(sessionId, { client: c, sub });
   }, []);
 
   const unsubscribe = useCallback((sessionId: string) => {
-    const c = clientRef.current;
-    const sub = subsRef.current.get(sessionId);
-    if (sub) {
+    const owned = subsRef.current.get(sessionId);
+    if (owned) {
+      const { client: owner, sub } = owned;
       sub.removeAllListeners();
       sub.unsubscribe();
-      if (c) c.removeSubscription(sub);
+      owner.removeSubscription(sub);
     }
     subsRef.current.delete(sessionId);
   }, []);
+
+  // A subscription belongs to the Centrifuge client and user that created it.
+  // Drop all old ownership before the session effect binds to a replacement.
+  useEffect(() => {
+    for (const sessionId of Array.from(subsRef.current.keys())) {
+      unsubscribe(sessionId);
+    }
+  }, [client, userId, unsubscribe]);
 
   useEffect(() => {
     if (!client || !userId) return;
@@ -123,6 +141,18 @@ export function useAllSessionEvents(
         unsubscribe(sessionId);
       }
     }
+
+    setActivityMap((prev) => {
+      const next = new Map(prev);
+      let changed = false;
+      for (const sessionId of next.keys()) {
+        if (!runningIds.has(sessionId)) {
+          next.delete(sessionId);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
 
     for (const id of runningIds) {
       subscribe(id);
@@ -148,6 +178,16 @@ export function useAllSessionEvents(
     });
   }, []);
 
+  const clearSessionAttention = useCallback((sessionId: string) => {
+    setActivityMap((prev) => {
+      const current = prev.get(sessionId);
+      if (!current?.attention) return prev;
+      const next = new Map(prev);
+      next.set(sessionId, { ...current, attention: undefined });
+      return next;
+    });
+  }, []);
+
   // Status guard at the source: activity is only meaningful for live sessions.
   // A session that completed/errored/stopped keeps its last hook activity in
   // activityMap, but that state is stale — drop it so every consumer reads
@@ -164,5 +204,5 @@ export function useAllSessionEvents(
     return effective;
   }, [activityMap, sessions]);
 
-  return { sessionActivity, markSessionIdle };
+  return { sessionActivity, markSessionIdle, clearSessionAttention };
 }

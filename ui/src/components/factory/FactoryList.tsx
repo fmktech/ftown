@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import type { Session } from "@/types";
 import { relativeTime } from "@/lib/relative-time";
 import { StatusDot } from "@/lib/StatusDot";
+import { formatTokens, formatUsageDetail } from "@/lib/format-usage";
 import {
   factoryKey,
   factoryWorkerOf,
@@ -100,6 +101,14 @@ function WorkerRow({
       >
         {session.name}
       </span>
+      {session.usage && (
+        <span
+          title={formatUsageDetail(session.usage)}
+          style={{ fontSize: 10, color: "var(--text-faint)", flexShrink: 0 }}
+        >
+          {formatTokens(session.usage.totalTokens)} tok
+        </span>
+      )}
       <span style={{ fontSize: 10, color: "var(--text-faint)", flexShrink: 0 }}>
         {relativeTime(session.createdAt)}
       </span>

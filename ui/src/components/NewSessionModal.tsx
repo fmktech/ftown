@@ -325,6 +325,9 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [missingWorkingDir, setMissingWorkingDir] = useState<string | null>(null);
   const firstFieldRef = useRef<HTMLSelectElement>(null);
+  const initializedForOpenRef = useRef(false);
+  const pendingRestoredBridgeIdRef = useRef<string | null>(null);
+  const bridgeEditedRef = useRef(false);
 
   // Move focus into the modal when it opens (a11y: focus-in).
   useEffect(() => {
@@ -345,72 +348,76 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     return paths.filter((p) => p.toLowerCase().includes(workingDir.toLowerCase()));
   }, [hostname, workingDir]);
 
+  // Initialize exactly once for each opening. Bridge presence can update while
+  // the modal is open; rerunning this initialization on that update used to
+  // replace a working directory while the user was typing it.
   useEffect(() => {
-    if (isOpen && defaults) {
-      setName(defaults.name ?? "");
-      setWorkingDir(defaults.workingDir ?? "");
-      const { top, flavor } = shellTypeToTop(defaults.shellType ?? "claude");
-      setTopShell(top);
-      setClaudeFlavor(flavor);
-      setBridgeId(defaults.bridgeId ?? "");
-      setSelectedClaudeSessionId(null);
-      setSelectedClaudeSummary(null);
-      setSelectedCursorSessionId(null);
-      setSelectedCursorSummary(null);
-      setFireworksModels(getStoredFireworksModels());
-      setZaiModels(getStoredZaiModels());
-      setGrokModel(GROK_MODEL_OPTIONS[0]);
-      setKimiCodeModel(KIMI_CODE_MODEL_OPTIONS[0].value);
-      setAutoCompactWindow(getStoredAutoCompactWindow());
-      setSubmitError(null);
-      setMissingWorkingDir(null);
+    if (!isOpen) {
+      initializedForOpenRef.current = false;
+      pendingRestoredBridgeIdRef.current = null;
+      bridgeEditedRef.current = false;
+      return;
     }
-  }, [isOpen, defaults]);
+    if (initializedForOpenRef.current) return;
+    initializedForOpenRef.current = true;
 
-  // Fill in any fields not already set by the `defaults` prop from the last
-  // successfully created session. `defaults` (e.g. clone-session) always wins.
-  useEffect(() => {
-    if (!isOpen) return;
+    let parsed: LastSessionDefaults = {};
     try {
       const raw = localStorage.getItem(LAST_SESSION_DEFAULTS_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as LastSessionDefaults;
-
-      if (
-        defaults?.bridgeId === undefined
-        && typeof parsed.bridgeId === "string"
-        && bridges.some((b) => b.bridgeId === parsed.bridgeId)
-      ) {
-        setBridgeId(parsed.bridgeId);
-      }
-
-      const restoredShellType: ShellType | undefined =
-        defaults?.shellType
-        ?? (typeof parsed.shellType === "string" && VALID_SHELL_TYPES.includes(parsed.shellType as ShellType)
-          ? (parsed.shellType as ShellType)
-          : undefined);
-
-      if (defaults?.shellType === undefined && restoredShellType) {
-        const { top, flavor } = shellTypeToTop(restoredShellType);
-        setTopShell(top);
-        setClaudeFlavor(flavor);
-      }
-
-      if (restoredShellType === "grok" && typeof parsed.model === "string") {
-        setGrokModel(parsed.model);
-      }
-
-      if (restoredShellType === "kimi-code" && typeof parsed.model === "string") {
-        setKimiCodeModel(parsed.model);
-      }
-
-      if (defaults?.workingDir === undefined && typeof parsed.workingDir === "string") {
-        setWorkingDir(parsed.workingDir);
+      if (raw) {
+        const candidate: unknown = JSON.parse(raw);
+        if (typeof candidate === "object" && candidate !== null && !Array.isArray(candidate)) {
+          parsed = candidate as LastSessionDefaults;
+        }
       }
     } catch {
-      // localStorage unavailable or malformed — ignore, form keeps its defaults
+      // localStorage unavailable or malformed — initialize from explicit defaults.
     }
+
+    const restoredShellType: ShellType =
+      defaults?.shellType
+      ?? (typeof parsed.shellType === "string" && VALID_SHELL_TYPES.includes(parsed.shellType as ShellType)
+        ? (parsed.shellType as ShellType)
+        : "claude");
+    const { top, flavor } = shellTypeToTop(restoredShellType);
+    const desiredBridgeId = defaults?.bridgeId
+      ?? (typeof parsed.bridgeId === "string" ? parsed.bridgeId : "");
+    const restoredBridgeId = bridges.some((b) => b.bridgeId === desiredBridgeId)
+      ? desiredBridgeId
+      : "";
+    pendingRestoredBridgeIdRef.current = desiredBridgeId && !restoredBridgeId
+      ? desiredBridgeId
+      : null;
+    const restoredWorkingDir = defaults?.workingDir
+      ?? (typeof parsed.workingDir === "string" ? parsed.workingDir : "");
+
+    setName(defaults?.name ?? "");
+    setWorkingDir(restoredWorkingDir);
+    setTopShell(top);
+    setClaudeFlavor(flavor);
+    setBridgeId(restoredBridgeId);
+    setSelectedClaudeSessionId(null);
+    setSelectedClaudeSummary(null);
+    setSelectedCursorSessionId(null);
+    setSelectedCursorSummary(null);
+    setFireworksModels(getStoredFireworksModels());
+    setZaiModels(getStoredZaiModels());
+    setGrokModel(restoredShellType === "grok" && typeof parsed.model === "string" ? parsed.model : GROK_MODEL_OPTIONS[0]);
+    setKimiCodeModel(restoredShellType === "kimi-code" && typeof parsed.model === "string" ? parsed.model : KIMI_CODE_MODEL_OPTIONS[0].value);
+    setAutoCompactWindow(getStoredAutoCompactWindow());
+    setSubmitError(null);
+    setMissingWorkingDir(null);
   }, [isOpen, defaults, bridges]);
+
+  // Bridge discovery is asynchronous. Restore a saved bridge when it arrives,
+  // but never replace a bridge the user selected while the modal was open.
+  useEffect(() => {
+    if (!isOpen || bridgeEditedRef.current) return;
+    const pendingBridgeId = pendingRestoredBridgeIdRef.current;
+    if (!pendingBridgeId || !bridges.some((bridge) => bridge.bridgeId === pendingBridgeId)) return;
+    setBridgeId(pendingBridgeId);
+    pendingRestoredBridgeIdRef.current = null;
+  }, [isOpen, bridges]);
 
   // A submit failure (e.g. missing provider auth) is tied to the chosen shell
   // type; switching shells invalidates the previous error so clear the banner.
@@ -733,7 +740,11 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
               <select
                 id="ns-bridge"
                 value={effectiveBridgeId}
-                onChange={(e) => setBridgeId(e.target.value)}
+                onChange={(e) => {
+                  bridgeEditedRef.current = true;
+                  pendingRestoredBridgeIdRef.current = null;
+                  setBridgeId(e.target.value);
+                }}
                 className={INPUT_CLASS + " text-sm"}
               >
                 {bridges.map((b) => (
