@@ -5,7 +5,7 @@ The Next.js app, database, local bridges, signing code, channel names, and
 existing client URLs stay unchanged. The current HMAC signing secret is copied
 to Fly so already-issued tokens continue to work during cutover and rollback.
 
-The target is one `shared-cpu-1x` Machine with 512 MB in `gru`. Centrifugo uses
+The target is one `shared-cpu-1x` Machine with 256 MB in `gru`. Centrifugo uses
 its memory engine, so the app must stay at exactly one Machine. A rolling deploy
 causes a brief client reconnect; it does not provide zero-downtime failover.
 
