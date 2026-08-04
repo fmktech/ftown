@@ -11,7 +11,9 @@ on:
   push:
     branches: [main]
     paths:
-      - 'centrifugo/**'
+      # Fly-specific files have their own validation/deploy workflow and must not
+      # cause an unrelated restart of the legacy AWS host.
+      - 'centrifugo/config.prod.json'
       - '.github/workflows/deploy-centrifugo.yml'
       - 'scripts/deploy/**'
   workflow_dispatch:
@@ -37,7 +39,8 @@ jobs:
       # and the `runner` context is not allowed in jobs.<id>.env (GitHub rejects
       # the whole workflow). They are exported to $GITHUB_ENV in "Set up paths".
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout v4, pinned to prevent tag retargeting.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       # $RUNNER_TEMP is only available inside step run: contexts, so resolve the
       # rendered-config paths here and publish them to later steps.
@@ -111,7 +114,8 @@ jobs:
         run: |
           set -euo pipefail
           jq empty "$RENDERED"
-          docker run --rm -v "$PWD/centrifugo":/cfg:ro centrifugo/centrifugo:v5 \
+          docker run --rm -v "$PWD/centrifugo":/cfg:ro \
+            centrifugo/centrifugo:v5.4.9@sha256:90be10af3cb1c73c6b6cff8f6bcf02f8c0537d6aa1ed9f2cfe59a9e776a0c3d5 \
             centrifugo checkconfig -c /cfg/config.prod.json
 
       - name: Install SSH key
@@ -131,11 +135,8 @@ jobs:
         env:
           CENTRIFUGO_HOST: ${{ vars.CENTRIFUGO_HOST }}
           CENTRIFUGO_SSH_USER: ${{ vars.CENTRIFUGO_SSH_USER }}
-          # OPTIONAL host-key pin (ssh-keyscan output). When set, the SSH handshake
-          # is authenticated against it (StrictHostKeyChecking=yes), which blocks
-          # an on-path MITM from capturing the rendered secrets. When unset the
-          # deploy still runs (trust-on-first-use) but is NOT MITM-protected — see
-          # the loud warning below and docs/centrifugo-deploy.md.
+          # REQUIRED host-key pin (ssh-keyscan output). The SSH handshake is
+          # authenticated against it before any rendered secrets are uploaded.
           CENTRIFUGO_KNOWN_HOSTS: ${{ vars.CENTRIFUGO_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
@@ -146,24 +147,13 @@ jobs:
           KEY="$RUNNER_TEMP/centrifugo.pem"
           KNOWN_HOSTS="$RUNNER_TEMP/known_hosts"
           TARGET="${CENTRIFUGO_SSH_USER}@${CENTRIFUGO_HOST}"
-          # Prefer a pinned host key (real MITM protection). Host public keys are
-          # not secret, so this comes from a repo VARIABLE. Without it we fall back
-          # to trust-on-first-use, which — on an ephemeral runner with a fresh
-          # empty known_hosts every run — does NOT authenticate the handshake.
-          if [ -n "${CENTRIFUGO_KNOWN_HOSTS:-}" ]; then
-            umask 077
-            printf '%s\n' "$CENTRIFUGO_KNOWN_HOSTS" > "$KNOWN_HOSTS"
-            STRICT="yes"
-            echo "Host-key pinning ENABLED (StrictHostKeyChecking=yes) via CENTRIFUGO_KNOWN_HOSTS."
-          else
-            : > "$KNOWN_HOSTS"
-            STRICT="accept-new"
-            echo "WARNING: CENTRIFUGO_KNOWN_HOSTS is not set — using trust-on-first-use." >&2
-            echo "WARNING: the SSH handshake is NOT authenticated, so an on-path attacker" >&2
-            echo "WARNING: could capture the rendered config. Set the CENTRIFUGO_KNOWN_HOSTS" >&2
-            echo "WARNING: repo variable to pin the host key (see docs/centrifugo-deploy.md)." >&2
+          if [ -z "${CENTRIFUGO_KNOWN_HOSTS:-}" ]; then
+            echo "ERROR: CENTRIFUGO_KNOWN_HOSTS must pin the AWS host key" >&2
+            exit 1
           fi
-          SSH_OPTS="-i $KEY -o StrictHostKeyChecking=$STRICT -o UserKnownHostsFile=$KNOWN_HOSTS"
+          umask 077
+          printf '%s\n' "$CENTRIFUGO_KNOWN_HOSTS" > "$KNOWN_HOSTS"
+          SSH_OPTS="-i $KEY -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KNOWN_HOSTS"
           # SC2029: $REMOTE_DIR is intentionally expanded on the runner side.
           # shellcheck disable=SC2086,SC2029
           ssh $SSH_OPTS "$TARGET" "mkdir -p '$REMOTE_DIR' && chmod 700 '$REMOTE_DIR'"
@@ -192,9 +182,10 @@ jobs:
         run: |
           set -u
           KEY="$RUNNER_TEMP/centrifugo.pem"
-          if [ -f "$KEY" ] && [ -n "${CENTRIFUGO_HOST:-}" ] && [ -n "${CENTRIFUGO_SSH_USER:-}" ]; then
-            ssh -i "$KEY" -o StrictHostKeyChecking=accept-new \
+          KNOWN_HOSTS="$RUNNER_TEMP/known_hosts"
+          if [ -f "$KEY" ] && [ -f "$KNOWN_HOSTS" ] && [ -n "${CENTRIFUGO_HOST:-}" ] && [ -n "${CENTRIFUGO_SSH_USER:-}" ]; then
+            ssh -i "$KEY" -o StrictHostKeyChecking=yes \
               -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
               "${CENTRIFUGO_SSH_USER}@${CENTRIFUGO_HOST}" "rm -rf '$REMOTE_DIR'" || true
           fi
-          rm -f "$KEY"
+          rm -f "$KEY" "$KNOWN_HOSTS"

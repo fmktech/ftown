@@ -6,6 +6,7 @@ import {
   recordAttempt,
   REGISTER_RATE_LIMIT,
 } from "@/lib/login-rate-limit";
+import { isRegistrationEnabled } from "@/lib/registration";
 
 interface RegisterBody {
   email: string;
@@ -39,6 +40,10 @@ function clientIp(request: Request): string {
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
+  if (!isRegistrationEnabled()) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
   let body: RegisterBody;
   try {
     body = (await request.json()) as RegisterBody;
