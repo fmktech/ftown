@@ -51,6 +51,7 @@ import type { HookEvent } from './local-api-server.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const DEFAULT_API_URL = 'https://ftown.ia.br';
 
 /**
  * Default data dir is ~/.ftown/data (machine-stable, like the rest of ~/.ftown).
@@ -82,7 +83,7 @@ program
   .name('ftown-bridge')
   .description('ftown orchestrator bridge for Centrifugo')
   .option('--token <jwt>', 'Bridge bootstrap token from the ftown dashboard (short-lived; used once to onboard, then a rotating refresh token is stored). Optional: with no token and no stored refresh token, the bridge runs interactive device pairing instead.')
-  .requiredOption('--api-url <url>', 'ftown UI API URL (e.g. https://ftown.vercel.app)')
+  .option('--api-url <url>', 'ftown UI API URL', DEFAULT_API_URL)
   .option('--data-dir <path>', 'Directory for session data (default: ~/.ftown/data)')
   .option('--bridge-id <id>', 'Bridge instance ID (default: persisted per data dir)')
   .action(async (opts: { token?: string; apiUrl: string; dataDir?: string; bridgeId?: string }) => {
