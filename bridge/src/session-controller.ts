@@ -207,7 +207,30 @@ export class SessionController {
         if (!proposed) {
           return { ok: false, code: 'invalid', message: 'Parent session not found' };
         }
-        session.parentSessionId = proposed.parentSessionId ?? proposed.id;
+        if (proposed.bridgeId !== session.bridgeId) {
+          return {
+            ok: false,
+            code: 'invalid',
+            message: 'Parent session belongs to another bridge',
+          };
+        }
+        const parentSessionId = proposed.parentSessionId ?? proposed.id;
+        if (parentSessionId === session.id) {
+          return {
+            ok: false,
+            code: 'invalid',
+            message: 'Session cannot be parented under its own descendant',
+          };
+        }
+        const sessions = await this.deps.store.listSessions();
+        if (sessions.some((candidate) => candidate.parentSessionId === session.id)) {
+          return {
+            ok: false,
+            code: 'invalid',
+            message: 'Session with children cannot be reparented',
+          };
+        }
+        session.parentSessionId = parentSessionId;
       }
     }
 

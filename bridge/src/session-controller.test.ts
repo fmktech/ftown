@@ -150,6 +150,60 @@ describe('SessionController.update — reparent', () => {
     assert.equal(h.store.saved.length, 0);
     assert.equal(h.published.length, 0);
   });
+
+  it('rejects moving a parent under its own child', async () => {
+    const h = setup([
+      makeSession({ id: 'parent' }),
+      makeSession({ id: 'child', parentSessionId: 'parent' }),
+    ]);
+
+    const result = await h.controller.update('parent', { parent: { value: 'child' } });
+
+    assert.deepEqual(result, {
+      ok: false,
+      code: 'invalid',
+      message: 'Session cannot be parented under its own descendant',
+    });
+    assert.equal(h.store.saved.length, 0);
+    assert.equal(h.published.length, 0);
+  });
+
+  it('rejects reparenting a session that still has children', async () => {
+    const h = setup([
+      makeSession({ id: 'parent' }),
+      makeSession({ id: 'child', parentSessionId: 'parent' }),
+      makeSession({ id: 'other-root' }),
+    ]);
+
+    const result = await h.controller.update('parent', { parent: { value: 'other-root' } });
+
+    assert.deepEqual(result, {
+      ok: false,
+      code: 'invalid',
+      message: 'Session with children cannot be reparented',
+    });
+    assert.equal(h.store.saved.length, 0);
+    assert.equal(h.published.length, 0);
+  });
+
+  it('rejects a parent that belongs to another bridge', async () => {
+    const h = setup([
+      makeSession({ id: 'child', bridgeId: 'bridge-1' }),
+      makeSession({ id: 'foreign-parent', bridgeId: 'bridge-2' }),
+    ]);
+
+    const result = await h.controller.update('child', {
+      parent: { value: 'foreign-parent' },
+    });
+
+    assert.deepEqual(result, {
+      ok: false,
+      code: 'invalid',
+      message: 'Parent session belongs to another bridge',
+    });
+    assert.equal(h.store.saved.length, 0);
+    assert.equal(h.published.length, 0);
+  });
 });
 
 describe('SessionController.stop', () => {

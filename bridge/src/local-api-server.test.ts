@@ -86,6 +86,75 @@ describe('workingDirMissingResponse', () => {
   });
 });
 
+describe('LocalApiServer session parent route', () => {
+  it('moves and detaches a session through PATCH without allowing a parent cycle', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ftw-session-parent-api-'));
+    const server = new LocalApiServer();
+    const token = 'test-token';
+    const store = new SessionStore(join(home, 'data'));
+    const published: Session[] = [];
+    const runner = { stop: () => false } as unknown as ProcessRunner;
+    const centrifugo = {
+      publishSessionUpdate: async (_userId: string, session: Session) => {
+        published.push(session);
+      },
+    } as unknown as CentrifugoClient;
+
+    const makeSession = (id: string, parentSessionId?: string): Session => ({
+      id,
+      name: id,
+      command: 'claude',
+      status: 'running',
+      bridgeId: 'bridge-1',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      parentSessionId,
+    });
+
+    await store.saveSession(makeSession('parent-a'));
+    await store.saveSession(makeSession('parent-b'));
+    await store.saveSession(makeSession('child', 'parent-a'));
+    await store.saveSession({ ...makeSession('foreign-parent'), bridgeId: 'bridge-2' });
+    server.setAuthToken(token);
+    server.setDependencies(store, runner, centrifugo, 'user-1');
+
+    const port = await server.start();
+    try {
+      const response = await api(port, token, 'PATCH', '/api/sessions/child', {
+        parentSessionId: 'parent-b',
+      });
+
+      assert.strictEqual(response.status, 200);
+      assert.strictEqual((response.data.session as Session).parentSessionId, 'parent-b');
+      assert.strictEqual((await store.loadSession('child'))?.parentSessionId, 'parent-b');
+      assert.strictEqual(published.at(-1)?.parentSessionId, 'parent-b');
+
+      const cycle = await api(port, token, 'PATCH', '/api/sessions/parent-b', {
+        parentSessionId: 'child',
+      });
+      assert.strictEqual(cycle.status, 400);
+      assert.strictEqual(cycle.data.error, 'Session cannot be parented under its own descendant');
+
+      const detached = await api(port, token, 'PATCH', '/api/sessions/child', {
+        parentSessionId: null,
+      });
+      assert.strictEqual(detached.status, 200);
+      assert.strictEqual((detached.data.session as Session).parentSessionId, undefined);
+      assert.strictEqual((await store.loadSession('child'))?.parentSessionId, undefined);
+      assert.strictEqual(published.at(-1)?.parentSessionId, undefined);
+
+      const crossBridge = await api(port, token, 'PATCH', '/api/sessions/child', {
+        parentSessionId: 'foreign-parent',
+      });
+      assert.strictEqual(crossBridge.status, 400);
+      assert.strictEqual(crossBridge.data.error, 'Parent session belongs to another bridge');
+    } finally {
+      server.stop();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('LocalApiServer loop routes', () => {
   it('creates, lists, runs, pauses, and deletes bridge-owned loops', async () => {
     const realHome = process.env.HOME;

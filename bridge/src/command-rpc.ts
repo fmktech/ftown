@@ -137,6 +137,21 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command) =
             response = { requestId: command.requestId, success: false, error: 'Missing sessionId' };
             break;
           }
+          const hasParentField = Object.prototype.hasOwnProperty.call(
+            command.payload,
+            'parentSessionId',
+          );
+          if (
+            !hasParentField ||
+            (payload.parentSessionId !== null && typeof payload.parentSessionId !== 'string')
+          ) {
+            response = {
+              requestId: command.requestId,
+              success: false,
+              error: 'Missing or invalid parentSessionId',
+            };
+            break;
+          }
 
           const result = await sessionController.update(payload.sessionId, {
             parent: { value: payload.parentSessionId },
