@@ -1,58 +1,48 @@
-# Presubmit report: session UX improvements
+# Presubmit report: move sessions between parents
 
-Date: 2026-08-03  
-Base: `origin/main` (`7c575c6`)  
-Branch: `feat/session-live-usage-input-alerts`
+Date: 2026-08-06  
+Base: `origin/main` (`892c26c`)  
+Scope: bridge reparenting validation/API documentation, dashboard drag-and-drop wiring, and browser acceptance coverage.
 
 ## Gate
 
 | Check | Result | Evidence |
 | --- | --- | --- |
-| UI unit tests | ✅ | `cd ui && npm test`: 118/118 passed |
-| Bridge unit tests | ✅ | `cd bridge && npm test`: 520/520 passed |
-| UI typecheck | ✅ | `cd ui && npx tsc --noEmit` completed without errors |
-| UI production build | ✅ | `cd ui && npm run build` compiled, typechecked, and generated all pages |
-| Bridge build | ✅ | `cd bridge && npm run build` (`tsc`) completed without errors |
-| Full E2E regression suite | ✅ | `cd e2e && npx playwright test`: 29 passed, 2 intentionally skipped |
-| Diff hygiene | ✅ | `git diff --check` completed without errors |
-| Lint | ⚠️ advisory | The repository's `next lint` script prompts for first-time ESLint setup; no ESLint config or independently enforced lint gate exists. `next build` still completed its configured lint/type validation. |
-| Format | N/A | No repository format-check script or CI format gate is configured. |
-
-The first isolated Playwright invocation did not inherit the run-scoped `E2E_USER_EMAIL`; that was a harness invocation error, not an application failure. The authoritative rerun used the identity written by `start-services.sh` and passed completely. Services and Docker infrastructure were torn down afterward.
+| Bridge unit tests | ✅ | `npm test -- --run`: 526 passed, 0 failed. |
+| Bridge typecheck/build | ✅ | `npm run build`: `tsc` completed successfully. |
+| Bridge package | ✅ | `npm pack --dry-run`: produced the `ftown-bridge-0.19.5.tgz` manifest. |
+| UI unit tests | ✅ | `npm test -- --run`: 129 passed, 0 failed. |
+| UI typecheck | ✅ | `npx tsc --noEmit`: no errors. |
+| UI production build | ✅ | `npm run build`: completed successfully; existing Edge-runtime and metadata warnings remain. |
+| New browser acceptance | ✅ | Focused Playwright run: center-drop reparent and bridge-root detach passed in Chromium. |
+| Full browser suite | ❌ | 28 passed, 2 skipped, 1 failed: the WebRTC test selected Cloud instead of P2P. The identical failure was reproduced from a clean `origin/main` worktree, so it is an environmental/baseline failure rather than a regression in this diff. |
+| Lint | ⚠️ | The UI lint command launches Next.js's interactive first-time configuration; no repository lint configuration is available for a non-interactive gate. |
+| Format | ⚠️ | No enforced repository format-check script is configured. `git diff --check` passes. |
 
 ## Scorecard
 
-| Aspect | Score | Band | Summary |
+| Aspect | Score | Band | Why |
 | --- | ---: | --- | --- |
-| Functional completeness | 90 | Strong | All requested paths are implemented: mobile paste, live running usage, stable create-session input, and manual-input alerts. |
-| Frontend fluency | 88 | Strong | Accessible error/attention states, mobile-safe positioning, and explicit dismissal are present. |
-| Monorepo awareness | 88 | Strong | Changes use the existing UI/bridge boundaries, BridgeRpc transport, and session usage model. |
-| Convention consistency / pattern fidelity | 89 | Strong | Existing hook normalization, state ownership, formatting helpers, and styling conventions are reused. |
-| Code quality | 87 | Strong | Strictly typed parsing, runtime wire validation, subscription ownership, and stale-response guards cover the main asynchronous risks. |
-| Server communication & state/data flow | 88 | Strong | Live usage remains ephemeral while running, terminal usage remains authoritative, and reconnect/bridge-generation races are guarded. |
-| Testing | 63 | Weak | Broad unit/build/E2E gates are green and focused parser/controller tests were added, but the new user-facing flows lack direct component/E2E coverage. |
-| Commit hygiene & history | 92 | Strong | Four conventional commits separate terminal, modal, attention, and usage concerns; local artifacts are explicitly excluded. |
-| Scope & regression discipline | 88 | Strong | No dependency or infrastructure expansion; the full existing E2E suite remains green. |
-| AI-leveraged understanding | 90 | Strong | The implementation handles stale snapshots, delayed bridge discovery, malformed responses, reconnects, and hook naming variants through existing abstractions. |
+| Functional completeness | 83 | Adequate | Both API and drag workflows are implemented; the new browser happy path now passes. |
+| Frontend fluency | 68 | Weak | Drop zones and feedback are coherent, but drag remains mouse-oriented and the mutation has no visible pending/error state. |
+| Monorepo awareness | 88 | Strong | Changes use the existing bridge controller/RPC, session store, UI hook, and E2E harness. |
+| Convention consistency | 91 | Strong | The implementation follows the established update/save/publish and dashboard state patterns without new dependencies. |
+| Code quality | 72 | Adequate | Drop policy is isolated and typed; the large session-list component still owns substantial event wiring. |
+| Server communication and data flow | 74 | Adequate | UI, RPC, HTTP controller, persistence, and publication are wired end-to-end with authoritative server validation. |
+| Testing | 81 | Adequate | Pure policy, controller, RPC, real HTTP/store, and browser drag behavior are covered. |
+| Commit hygiene | 42 | Poor | The grading panel ran before the work was split into reviewable commits; this is corrected before push. |
+| Scope and regression discipline | 88 | Strong | No dependencies or unrelated product areas changed; the only full-suite failure reproduces on the base revision. |
+| AI-leveraged understanding | 89 | Strong | Existing seams were reused, validation is defense-in-depth, and the separate startup investigation records falsified hypotheses without guessing. |
 
-Weighted overall: **86/100 — Strong**
-
-## Evidence highlights
-
-- `/Users/fkesheh/projects/ftown/ui/src/components/MobileControlBar.tsx:109` routes clipboard text through the existing terminal input callback and exposes clipboard failures visibly.
-- `/Users/fkesheh/projects/ftown/ui/src/components/NewSessionModal.tsx:351` separates one-time form restoration from delayed bridge discovery and user edits.
-- `/Users/fkesheh/projects/ftown/ui/src/hooks/useSessions.ts:31` validates live usage responses and preserves fresher polled totals across stale snapshots.
-- `/Users/fkesheh/projects/ftown/ui/src/hooks/useAllSessionEvents.ts:46` owns per-session attention state and client-specific event subscriptions.
-- `/Users/fkesheh/projects/ftown/bridge/src/session-controller.ts:124` recollects moving usage without persisting or publishing it until the session is terminal.
-- `/Users/fkesheh/projects/ftown/bridge/src/session-controller.test.ts:248` verifies running usage recollection and the absence of terminal-only side effects.
-
-## Follow-up opportunities
-
-1. Add behavioral tests for clipboard success/failure and the create-modal bridge-update regression.
-2. Add hook/UI tests for live polling and the attention popup/sidebar lifecycle.
-3. Replace the dashboard's mobile alert offset with a shared layout token and extract the alert presentation from `Dashboard`.
-4. Configure a non-interactive ESLint command in a dedicated tooling change.
+Weighted score: **79/100**. The two highest-weight differentiators are monorepo awareness and convention consistency.
 
 ## Verdict
 
-**GO.** Every enforced gate is green, the requested behavior is complete, and no aspect is Poor. The direct UI-test coverage gap is recorded as follow-up work rather than a release blocker because both focused logic tests and the full regression suite pass.
+**NO-GO under the strict local gate**, because the repository's enforced full E2E command exits non-zero. The failure is not caused by this change: it reproduces unchanged on `origin/main`, while the newly added drag-and-reparent browser scenario is green. A clean CI environment should be used as the release decision for this environmental WebRTC case.
+
+## Prioritized follow-ups
+
+1. Confirm the full E2E suite in CI or resolve the local WebRTC routing condition that makes the baseline select Cloud instead of P2P.
+2. Keep backend, frontend/E2E, package-version, and investigation/report changes in separate conventional commits.
+3. Add visible failure feedback around `setSessionParent` if reparenting errors need to be recoverable directly from the dashboard.
+4. Capture the exact stdout/stderr from the reported `npx -y ftown-bridge@latest` startup failure; the published package starts and reaches pairing in a clean reproduction.

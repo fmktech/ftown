@@ -6,6 +6,7 @@ import { Session, SessionStatus } from "@/types";
 import { SessionActivity } from "@/hooks/useAllSessionEvents";
 import { BridgeInfo } from "@/hooks/useBridges";
 import { reorderByDrop } from "@/lib/bridge-order";
+import { getSessionDropZone, resolveSessionDrop, type SessionDropZone } from "@/lib/session-drop";
 import { StatusDot, type StatusDotKind } from "@/lib/StatusDot";
 import { usePersistentState, stringSetCodec } from "@/lib/use-persistent-state";
 import { formatUsage, formatUsageDetail } from "@/lib/format-usage";
@@ -20,6 +21,7 @@ interface SessionListProps {
   onStopSession?: (sessionId: string) => void;
   onRemoveSession?: (sessionId: string, onlyIfFinished?: boolean) => void;
   onCloneSession?: (session: Session) => void;
+  onSetSessionParent?: (sessionId: string, parentSessionId: string | null) => void;
   onReorderSessions?: (orderedIds: string[]) => void;
   onReorderBridges?: (orderedBridgeIds: string[]) => void;
   sessionActivity?: Map<string, SessionActivity>;
@@ -37,14 +39,9 @@ type ContextMenuState =
   | { kind: "session"; session: Session; x: number; y: number }
   | { kind: "bridge"; bridgeId: string; x: number; y: number };
 
-type DragKind = "bridge" | "session";
-type DropZone = "above" | "below";
-
-interface DragState {
-  kind: DragKind;
-  id: string;
-  bridgeId?: string;
-}
+type DragState =
+  | { kind: "bridge"; id: string }
+  | { kind: "session"; id: string; bridgeId: string };
 
 function StatusBadge({ status, activity, needsInput = false }: { status: SessionStatus; activity?: "thinking" | "tool_use" | "idle"; needsInput?: boolean }) {
   const isIdle = status === "running" && activity === "idle";
@@ -96,7 +93,7 @@ function bridgeLabel(bridgeId: string, bridges: BridgeInfo[]): string {
   return bridgeId.length > 20 ? `${bridgeId.slice(0, 18)}…` : bridgeId;
 }
 
-function computeDropZone(e: React.DragEvent): DropZone {
+function computeDropZone(e: React.DragEvent): "above" | "below" {
   const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
   const offset = e.clientY - rect.top;
   return offset < rect.height / 2 ? "above" : "below";
@@ -430,6 +427,7 @@ export function SessionList({
   onStopSession,
   onRemoveSession,
   onCloneSession,
+  onSetSessionParent,
   onReorderSessions,
   onReorderBridges,
   sessionActivity,
@@ -446,7 +444,7 @@ export function SessionList({
   const [editValue, setEditValue] = useState("");
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dragOverKey, setDragOverKey] = useState<string | null>(null);
-  const [dragOverZone, setDragOverZone] = useState<DropZone | null>(null);
+  const [dragOverZone, setDragOverZone] = useState<SessionDropZone | null>(null);
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
   const [hiddenBridgesExpanded, setHiddenBridgesExpanded] = useState(false);
   const [collapsedBridges, setCollapsedBridges] = usePersistentState<Set<string>>(
@@ -610,33 +608,88 @@ export function SessionList({
     }
   }
 
-  function handleDragOver(e: React.DragEvent, key: string, accept: DragKind): void {
+  function rejectDragOver(e?: React.DragEvent): void {
+    if (e) e.dataTransfer.dropEffect = "none";
+    setDragOverKey(null);
+    setDragOverZone(null);
+  }
+
+  function handleSessionDragOver(e: React.DragEvent, targetSession: Session): void {
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
     const drag = dragRef.current;
-    if (!drag || drag.kind !== accept) {
-      setDragOverKey(null);
-      setDragOverZone(null);
+    if (!drag || drag.kind !== "session") {
+      rejectDragOver(e);
       return;
     }
-    if (drag.kind === "bridge" && drag.id === key.replace("bridge:", "")) {
-      setDragOverKey(null);
-      setDragOverZone(null);
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const zone = getSessionDropZone(e.clientY - rect.top, rect.height);
+    const action = resolveSessionDrop(
+      {
+        id: drag.id,
+        bridgeId: drag.bridgeId,
+        hasChildren: sessions.some((session) => session.parentSessionId === drag.id),
+      },
+      {
+        kind: "session",
+        id: targetSession.id,
+        bridgeId: targetSession.bridgeId,
+        parentSessionId: targetSession.parentSessionId,
+        zone,
+      },
+    );
+    if (!action || (action.type === "set-parent" && !onSetSessionParent)) {
+      rejectDragOver(e);
       return;
     }
-    if (drag.kind === "session" && drag.id === key.replace("session:", "")) {
-      setDragOverKey(null);
-      setDragOverZone(null);
+    setDragOverKey(`session:${targetSession.id}`);
+    setDragOverZone(zone);
+  }
+
+  function handleBridgeDragOver(e: React.DragEvent, targetBridgeId: string): void {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const drag = dragRef.current;
+    if (!drag) {
+      rejectDragOver(e);
       return;
     }
-    setDragOverKey(key);
-    setDragOverZone(computeDropZone(e));
+    if (drag.kind === "bridge") {
+      if (drag.id === targetBridgeId) {
+        rejectDragOver(e);
+        return;
+      }
+      setDragOverKey(`bridge:${targetBridgeId}`);
+      setDragOverZone(computeDropZone(e));
+      return;
+    }
+    if (drag.bridgeId !== targetBridgeId || !onSetSessionParent) {
+      rejectDragOver(e);
+      return;
+    }
+    setDragOverKey(`bridge:${targetBridgeId}`);
+    setDragOverZone("inside");
   }
 
   function handleBridgeDrop(e: React.DragEvent, targetBridgeId: string): void {
     e.preventDefault();
     const drag = dragRef.current;
-    if (!drag || drag.kind !== "bridge" || !onReorderBridges) {
+    if (!drag) {
+      clearDragState();
+      return;
+    }
+    if (drag.kind === "session") {
+      const action = resolveSessionDrop(
+        { id: drag.id, bridgeId: drag.bridgeId },
+        { kind: "bridge", bridgeId: targetBridgeId },
+      );
+      if (action?.type === "set-parent" && onSetSessionParent) {
+        onSetSessionParent(action.sessionId, action.parentSessionId);
+      }
+      clearDragState();
+      return;
+    }
+    if (drag.kind !== "bridge" || !onReorderBridges) {
       clearDragState();
       return;
     }
@@ -657,17 +710,41 @@ export function SessionList({
   function handleSessionDrop(e: React.DragEvent, targetSession: Session): void {
     e.preventDefault();
     const drag = dragRef.current;
-    if (!drag || drag.kind !== "session" || !onReorderSessions) {
+    if (!drag || drag.kind !== "session") {
       clearDragState();
       return;
     }
-    const draggedId = drag.id;
-    if (draggedId === targetSession.id || drag.bridgeId !== targetSession.bridgeId) {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const action = resolveSessionDrop(
+      {
+        id: drag.id,
+        bridgeId: drag.bridgeId,
+        hasChildren: sessions.some((session) => session.parentSessionId === drag.id),
+      },
+      {
+        kind: "session",
+        id: targetSession.id,
+        bridgeId: targetSession.bridgeId,
+        parentSessionId: targetSession.parentSessionId,
+        zone: getSessionDropZone(e.clientY - rect.top, rect.height),
+      },
+    );
+    if (!action) {
+      clearDragState();
+      return;
+    }
+    if (action.type === "set-parent") {
+      onSetSessionParent?.(action.sessionId, action.parentSessionId);
+      clearDragState();
+      return;
+    }
+    if (!onReorderSessions) {
       clearDragState();
       return;
     }
 
-    const zone = computeDropZone(e);
+    const draggedId = action.sessionId;
+    const zone = action.zone;
     const bridgeSessions = sessionsByBridge.get(targetSession.bridgeId) ?? [];
     // Compute indices against the full DFS tree order (the same order rendered),
     // not the raw flat array, so dragging matches what the user sees. Use an
@@ -812,9 +889,10 @@ export function SessionList({
         draggable
         onDragStart={(e) => handleDragStart(e, { kind: "session", id: session.id, bridgeId: session.bridgeId })}
         onDragEnd={handleDragEnd}
-        onDragOver={(e) => handleDragOver(e, dropKey, "session")}
+        onDragOver={(e) => handleSessionDragOver(e, session)}
         onDragLeave={() => { setDragOverKey(null); setDragOverZone(null); }}
         onDrop={(e) => handleSessionDrop(e, session)}
+        title="Drop on an edge to reorder, or in the center of a root session to move under it"
         onClick={() => {
           if (longPressFired.current) return;
           onSelectSession(session.id);
@@ -847,6 +925,7 @@ export function SessionList({
           borderBottom: "1px solid var(--border-subtle)",
           borderTop: isDragOver && dragOverZone === "above" ? "2px solid var(--accent)" : "none",
           ...(isDragOver && dragOverZone === "below" ? { borderBottom: "2px solid var(--accent)" } : {}),
+          boxShadow: isDragOver && dragOverZone === "inside" ? "inset 0 0 0 2px var(--accent)" : "none",
           borderLeft: `2px solid ${isSelected ? "var(--accent)" : depth > 0 ? "var(--border-muted)" : "transparent"}`,
           background: isSelected ? "var(--bg-elevated)" : "transparent",
           cursor: "grab",
@@ -1138,9 +1217,10 @@ export function SessionList({
     return (
       <div key={bridgeId} className="flex flex-col">
         <div
-          onDragOver={(e) => handleDragOver(e, dropKey, "bridge")}
+          onDragOver={(e) => handleBridgeDragOver(e, bridgeId)}
           onDragLeave={() => { setDragOverKey(null); setDragOverZone(null); }}
           onDrop={(e) => handleBridgeDrop(e, bridgeId)}
+          title="Drop a child session here to move it back to the bridge root"
           style={{
             display: "flex",
             alignItems: "center",
@@ -1149,7 +1229,8 @@ export function SessionList({
             borderBottom: "1px solid var(--border-subtle)",
             borderTop: isDragOver && dragOverZone === "above" ? "2px solid var(--accent)" : "none",
             ...(isDragOver && dragOverZone === "below" ? { borderBottom: "2px solid var(--accent)" } : {}),
-            background: "var(--bg-base)",
+            boxShadow: isDragOver && dragOverZone === "inside" ? "inset 0 0 0 2px var(--accent)" : "none",
+            background: isDragOver && dragOverZone === "inside" ? "var(--bg-hover)" : "var(--bg-base)",
             fontFamily: "var(--font-mono)",
             userSelect: "none",
           }}

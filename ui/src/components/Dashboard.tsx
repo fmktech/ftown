@@ -136,7 +136,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   // sessions, loops, and factory consume it as peers.
   const rpc = useBridgeRpc(client, userId);
   const { bridgeExec } = rpc;
-  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, removeSession, refreshSessions } = useSessions(client, userId, rpc);
+  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, setSessionParent, removeSession, refreshSessions } = useSessions(client, userId, rpc);
   const { bridges, hasBridges } = useBridges(client, userId);
   const { loops, createLoop, updateLoop, deleteLoop, runLoopNow, getLoopRuns } = useLoops(client, userId, rpc);
 
@@ -1175,6 +1175,7 @@ PY`;
                 onStopSession={stopSession}
                 onRemoveSession={handleRemoveSession}
                 onCloneSession={handleCloneSession}
+                onSetSessionParent={setSessionParent}
                 onReorderSessions={handleReorderSessions}
                 onReorderBridges={handleReorderBridges}
                 sessionActivity={sessionActivity}

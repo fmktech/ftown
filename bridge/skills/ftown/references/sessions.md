@@ -151,6 +151,7 @@ The CLI wraps the loopback API. Raw access if needed:
 |--------|------|---------|
 | GET | `/api/sessions` | List |
 | POST | `/api/sessions` | Create |
+| PATCH | `/api/sessions/:id` | Rename and/or move (`{ name?, parentSessionId? }`; `null` moves to the root) |
 | GET | `/api/sessions/:id/screen` | Terminal lines |
 | POST | `/api/sessions/:id/grep` | Search |
 | POST | `/api/sessions/:id/keys` | Send keys |
@@ -166,6 +167,15 @@ The CLI wraps the loopback API. Raw access if needed:
 | GET/PATCH/DELETE | `/api/loops/:id` | Inspect, update, or delete a loop |
 | POST | `/api/loops/:id/run-now` | Request an immediate loop run; returns 404 `reason: not_found` if the loop no longer exists |
 | GET | `/api/loops/:id/runs` | List run sessions for a loop |
+
+To move a session under a different parent, PATCH it with the new parent's id:
+
+```json
+{ "parentSessionId": "new-parent-session-id" }
+```
+
+Set `parentSessionId` to `null` to detach it from its current parent and move it
+back to the bridge root. Parent and child must belong to the same bridge.
 
 ## If the CLI is missing
 
