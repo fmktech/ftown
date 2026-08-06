@@ -31,6 +31,7 @@ export type SessionDropAction =
       sessionId: string;
       targetSessionId: string;
       zone: EdgeDropZone;
+      parentSessionId: string | null;
     };
 
 export function getSessionDropZone(offsetY: number, height: number): SessionDropZone {
@@ -54,11 +55,13 @@ export function resolveSessionDrop(
   if (dragged.id === target.id) return null;
   if (target.zone === "inside" && (dragged.hasChildren || target.parentSessionId)) return null;
   if (target.zone !== "inside") {
+    if (dragged.hasChildren && target.parentSessionId) return null;
     return {
       type: "reorder",
       sessionId: dragged.id,
       targetSessionId: target.id,
       zone: target.zone,
+      parentSessionId: target.parentSessionId ?? null,
     };
   }
   return {

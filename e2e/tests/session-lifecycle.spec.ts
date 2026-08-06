@@ -64,6 +64,41 @@ async function removeSessionQuietly(sid: string): Promise<void> {
 }
 
 test.describe("session lifecycle", () => {
+  test("drag a root between two children to enter their subgroup", async ({ page }) => {
+    const email = sharedEmail();
+    await login(page, email);
+    await waitForBridgeOnline(page);
+
+    const suffix = Date.now();
+    const parentName = `between-parent-${suffix}`;
+    const firstChildName = `between-child-a-${suffix}`;
+    const secondChildName = `between-child-b-${suffix}`;
+    const draggedName = `between-dragged-${suffix}`;
+    const parent = await createGroupedSession(parentName);
+    const firstChild = await createGroupedSession(firstChildName, parent);
+    const secondChild = await createGroupedSession(secondChildName, parent);
+    const dragged = await createGroupedSession(draggedName);
+
+    try {
+      const parentRow = page.getByRole("button", { name: new RegExp(parentName) });
+      await expect(parentRow).toBeVisible({ timeout: 20_000 });
+      await parentRow.getByRole("button", { name: "Expand children" }).click();
+
+      const draggedRow = page.getByRole("button", { name: new RegExp(draggedName) });
+      const secondChildRow = page.getByRole("button", { name: new RegExp(secondChildName) });
+      await expect(draggedRow).toBeVisible();
+      await expect(secondChildRow).toBeVisible();
+      await draggedRow.dragTo(secondChildRow, { targetPosition: { x: 24, y: 1 } });
+
+      await expect.poll(() => parentOf(dragged), { timeout: 20_000 }).toBe(parent);
+    } finally {
+      await removeSessionQuietly(dragged);
+      await removeSessionQuietly(firstChild);
+      await removeSessionQuietly(secondChild);
+      await removeSessionQuietly(parent);
+    }
+  });
+
   test("drag a child to another parent and back to the bridge root", async ({ page }) => {
     const email = sharedEmail();
     await login(page, email);

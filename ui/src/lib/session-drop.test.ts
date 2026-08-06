@@ -50,6 +50,28 @@ describe("resolveSessionDrop", () => {
       sessionId: "session-a",
       targetSessionId: "session-b",
       zone: "above",
+      parentSessionId: null,
+    });
+  });
+
+  it("moves a root into a subgroup when dropped between its children", () => {
+    expect(
+      resolveSessionDrop(
+        { id: "root-a", bridgeId: "bridge-1" },
+        {
+          kind: "session",
+          id: "child-b",
+          bridgeId: "bridge-1",
+          parentSessionId: "parent-b",
+          zone: "above",
+        },
+      ),
+    ).toEqual({
+      type: "reorder",
+      sessionId: "root-a",
+      targetSessionId: "child-b",
+      zone: "above",
+      parentSessionId: "parent-b",
     });
   });
 
@@ -62,6 +84,16 @@ describe("resolveSessionDrop", () => {
         id: "parent-b",
         bridgeId: "bridge-1",
         zone: "inside",
+      }),
+    ).toBeNull();
+
+    expect(
+      resolveSessionDrop(dragged, {
+        kind: "session",
+        id: "child-b",
+        bridgeId: "bridge-1",
+        parentSessionId: "parent-b",
+        zone: "above",
       }),
     ).toBeNull();
   });
