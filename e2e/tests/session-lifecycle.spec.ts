@@ -32,7 +32,7 @@ import { restartBridge } from "../helpers/bridge-process";
  */
 
 interface SessionEnvelope {
-  session?: { status?: string };
+  session?: { id?: string; status?: string; parentSessionId?: string };
   error?: string;
 }
 
@@ -43,7 +43,70 @@ async function statusOf(sid: string): Promise<string | undefined> {
   return body.session?.status ?? `http:${res.status}`;
 }
 
+async function createGroupedSession(name: string, parentSessionId?: string): Promise<string> {
+  const res = await bridgeApiFetch("POST", "/api/sessions", {
+    body: { shellType: "shell", name, parentSessionId },
+  });
+  expect(res.status, `create grouped session: ${JSON.stringify(res.body)}`).toBe(201);
+  const id = (res.body as SessionEnvelope).session?.id;
+  expect(id).toBeTruthy();
+  return id!;
+}
+
+async function parentOf(sid: string): Promise<string | null> {
+  const res = await bridgeApiFetch("GET", `/api/sessions/${sid}`);
+  expect(res.status).toBe(200);
+  return (res.body as SessionEnvelope).session?.parentSessionId ?? null;
+}
+
+async function removeSessionQuietly(sid: string): Promise<void> {
+  await bridgeApiFetch("DELETE", `/api/sessions/${sid}`).catch(() => undefined);
+}
+
 test.describe("session lifecycle", () => {
+  test("drag a child to another parent and back to the bridge root", async ({ page }) => {
+    const email = sharedEmail();
+    await login(page, email);
+    await waitForBridgeOnline(page);
+
+    const suffix = Date.now();
+    const parentAName = `parent-a-${suffix}`;
+    const parentBName = `parent-b-${suffix}`;
+    const childName = `child-${suffix}`;
+    const parentA = await createGroupedSession(parentAName);
+    const parentB = await createGroupedSession(parentBName);
+    const child = await createGroupedSession(childName, parentA);
+
+    try {
+      const parentARow = page.getByRole("button", { name: new RegExp(parentAName) });
+      const parentBRow = page.getByRole("button", { name: new RegExp(parentBName) });
+      await expect(parentARow).toBeVisible({ timeout: 20_000 });
+      await expect(parentBRow).toBeVisible({ timeout: 20_000 });
+      await parentARow.getByRole("button", { name: "Expand children" }).click();
+
+      const childRow = page.getByRole("button", { name: new RegExp(childName) });
+      await expect(childRow).toBeVisible();
+      const parentBBox = await parentBRow.boundingBox();
+      expect(parentBBox).not.toBeNull();
+      await childRow.dragTo(parentBRow, {
+        targetPosition: { x: 24, y: Math.floor(parentBBox!.height / 2) },
+      });
+      await expect.poll(() => parentOf(child), { timeout: 20_000 }).toBe(parentB);
+
+      await parentBRow.getByRole("button", { name: "Expand children" }).click();
+      await expect(childRow).toBeVisible();
+      const bridgeRoot = page.getByTitle(
+        "Drop a child session here to move it back to the bridge root",
+      );
+      await childRow.dragTo(bridgeRoot);
+      await expect.poll(() => parentOf(child), { timeout: 20_000 }).toBeNull();
+    } finally {
+      await removeSessionQuietly(child);
+      await removeSessionQuietly(parentA);
+      await removeSessionQuietly(parentB);
+    }
+  });
+
   test("create → interact → stop → remove (controller CRUD round-trip)", async ({ page }) => {
     const email = sharedEmail();
     await login(page, email);
