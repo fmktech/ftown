@@ -622,6 +622,11 @@ export function SessionList({
       rejectDragOver(e);
       return;
     }
+    const draggedSession = sessions.find((session) => session.id === drag.id);
+    if (!draggedSession) {
+      rejectDragOver(e);
+      return;
+    }
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const zone = getSessionDropZone(e.clientY - rect.top, rect.height);
     const action = resolveSessionDrop(
@@ -638,7 +643,11 @@ export function SessionList({
         zone,
       },
     );
-    if (!action || (action.type === "set-parent" && !onSetSessionParent)) {
+    const needsParentChange =
+      action?.type === "set-parent" ||
+      (action?.type === "reorder" &&
+        (draggedSession.parentSessionId ?? null) !== action.parentSessionId);
+    if (!action || (needsParentChange && !onSetSessionParent)) {
       rejectDragOver(e);
       return;
     }
@@ -714,6 +723,11 @@ export function SessionList({
       clearDragState();
       return;
     }
+    const draggedSession = sessions.find((session) => session.id === drag.id);
+    if (!draggedSession) {
+      clearDragState();
+      return;
+    }
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const action = resolveSessionDrop(
       {
@@ -741,6 +755,14 @@ export function SessionList({
     if (!onReorderSessions) {
       clearDragState();
       return;
+    }
+
+    if ((draggedSession.parentSessionId ?? null) !== action.parentSessionId) {
+      if (!onSetSessionParent) {
+        clearDragState();
+        return;
+      }
+      onSetSessionParent(action.sessionId, action.parentSessionId);
     }
 
     const draggedId = action.sessionId;
@@ -892,7 +914,7 @@ export function SessionList({
         onDragOver={(e) => handleSessionDragOver(e, session)}
         onDragLeave={() => { setDragOverKey(null); setDragOverZone(null); }}
         onDrop={(e) => handleSessionDrop(e, session)}
-        title="Drop on an edge to reorder, or in the center of a root session to move under it"
+        title="Drop on an edge to reorder within that subgroup, or in the center of a root session to move under it"
         onClick={() => {
           if (longPressFired.current) return;
           onSelectSession(session.id);
