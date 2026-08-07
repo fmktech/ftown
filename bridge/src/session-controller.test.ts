@@ -285,6 +285,29 @@ describe('SessionController.usage', () => {
     assert.deepEqual(result, { ok: false, code: 'not_found', message: 'Session not found' });
   });
 
+  it('collects a deduplicated batch and omits sessions that no longer exist', async () => {
+    const first = makeUsage({ totalTokens: 11 });
+    const second = makeUsage({ totalTokens: 22 });
+    const collectorCalls: string[] = [];
+    const { controller } = setup(
+      [
+        makeSession({ id: 'sess-1', status: 'running' }),
+        makeSession({ id: 'sess-2', status: 'running' }),
+      ],
+      {
+        collectUsage: async (session) => {
+          collectorCalls.push(session.id);
+          return session.id === 'sess-1' ? first : second;
+        },
+      },
+    );
+
+    const usages = await controller.usages(['sess-1', 'missing', 'sess-2', 'sess-1']);
+
+    assert.deepEqual(usages, { 'sess-1': first, 'sess-2': second });
+    assert.deepEqual(collectorCalls.sort(), ['sess-1', 'sess-2']);
+  });
+
   it('passes through persisted usage without invoking the collector', async () => {
     const persisted = makeUsage({ totalTokens: 42 });
     let collectorCalls = 0;

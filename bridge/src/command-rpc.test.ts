@@ -53,3 +53,43 @@ test('update_session_parent rejects a missing or invalid parentSessionId', async
     },
   ]);
 });
+
+test('get_sessions_usage returns one id-keyed response for a session batch', async () => {
+  const responses: CommandResponse[] = [];
+  const calls: string[][] = [];
+  const usage = {
+    inputTokens: 1,
+    outputTokens: 2,
+    cacheReadTokens: 3,
+    cacheWriteTokens: 4,
+    totalTokens: 10,
+    models: ['claude-sonnet-5'],
+    harness: 'claude',
+    collectedAt: '2026-08-07T00:00:00.000Z',
+  };
+  const sessionController = {
+    usages: async (sessionIds: string[]) => {
+      calls.push(sessionIds);
+      return { 'session-1': usage };
+    },
+  } as unknown as SessionController;
+  const handler = createCommandHandler({
+    bridgeId: 'bridge-1',
+    sessionController,
+    loopController: {} as LoopController,
+    publishCommandResponse: async (response) => { responses.push(response); },
+  });
+
+  await handler({
+    type: 'get_sessions_usage',
+    payload: { bridgeId: 'bridge-1', sessionIds: ['session-1', 'session-2'] },
+    requestId: 'usage-batch-1',
+  } as unknown as Command);
+
+  assert.deepEqual(calls, [['session-1', 'session-2']]);
+  assert.deepEqual(responses, [{
+    requestId: 'usage-batch-1',
+    success: true,
+    data: { usages: { 'session-1': usage } },
+  }]);
+});

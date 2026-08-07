@@ -153,6 +153,17 @@ export class SessionController {
     return { ok: true, usage: usage ?? session.usage ?? null };
   }
 
+  /** Collect several sessions behind one transport request. Missing sessions are omitted. */
+  async usages(sessionIds: string[]): Promise<Record<string, SessionUsage | null>> {
+    const entries = await Promise.all(
+      Array.from(new Set(sessionIds)).map(async (sessionId) => {
+        const result = await this.usage(sessionId);
+        return result.ok ? ([sessionId, result.usage] as const) : null;
+      }),
+    );
+    return Object.fromEntries(entries.filter((entry) => entry !== null));
+  }
+
   /** Re-run a finished/dead session's stored command verbatim. */
   async retry(sessionId: string): Promise<SessionControllerResult<{ session: Session }>> {
     const factory = this.require(this.deps.sessionFactory, 'sessionFactory');
