@@ -185,7 +185,7 @@ export type CommandType =
   | 'update_session_parent'
   | 'create_loop' | 'list_loops' | 'update_loop'
   | 'delete_loop' | 'run_loop_now' | 'get_loop_runs'
-  | 'get_session_usage';
+  | 'get_session_usage' | 'get_sessions_usage';
 
 export interface Command {
   type: CommandType;
@@ -236,6 +236,16 @@ export interface RemoveSessionPayload {
   onlyIfFinished?: boolean;
 }
 
+export interface GetSessionUsagePayload {
+  sessionId: string;
+  bridgeId?: string;
+}
+
+export interface GetSessionsUsagePayload {
+  sessionIds: string[];
+  bridgeId?: string;
+}
+
 export interface BridgeExecPayload {
   command: string;
   workingDir?: string;
@@ -250,7 +260,7 @@ export interface DeleteLoopPayload { bridgeId: string; loopId: string }
 export interface RunLoopNowPayload { bridgeId: string; loopId: string }
 export interface GetLoopRunsPayload { bridgeId?: string; loopId: string }
 
-export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | UpdateSessionParentPayload | CreateLoopPayload | ListLoopsPayload | UpdateLoopPayload | DeleteLoopPayload | RunLoopNowPayload | GetLoopRunsPayload | Record<string, unknown>;
+export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | CreateLoopPayload | ListLoopsPayload | UpdateLoopPayload | DeleteLoopPayload | RunLoopNowPayload | GetLoopRunsPayload | Record<string, unknown>;
 
 export interface CommandResponse {
   requestId: string;

@@ -17,6 +17,7 @@ import type {
   GetHistoryPayload,
   GetLoopRunsPayload,
   GetSessionUsagePayload,
+  GetSessionsUsagePayload,
   RemoveSessionPayload,
   RenameSessionPayload,
   RunLoopNowPayload,
@@ -231,6 +232,23 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command) =
           response = result.ok
             ? { requestId: command.requestId, success: true, data: { usage: result.usage } }
             : { requestId: command.requestId, success: false, error: result.message };
+          break;
+        }
+
+        case 'get_sessions_usage': {
+          const payload = command.payload as GetSessionsUsagePayload;
+          if (
+            !Array.isArray(payload.sessionIds)
+            || payload.sessionIds.length === 0
+            || payload.sessionIds.length > 200
+            || payload.sessionIds.some((id) => typeof id !== 'string' || !id)
+          ) {
+            response = { requestId: command.requestId, success: false, error: 'Missing or invalid sessionIds' };
+            break;
+          }
+
+          const usages = await sessionController.usages(payload.sessionIds);
+          response = { requestId: command.requestId, success: true, data: { usages } };
           break;
         }
 

@@ -16,6 +16,7 @@ import {
 } from "@/types";
 import type { BridgeRpc } from "@/hooks/useBridgeRpc";
 import { buildCodexCommand, buildCursorAgentCommand, buildGrokCommand, buildKimiCodeCommand } from "@/lib/agent-commands";
+import { buildUsagePollBatches } from "@/lib/live-usage-polling";
 
 // Re-exported for existing consumers (NewSessionModal, session pickers); the
 // type now lives with the transport that produces it.
@@ -27,6 +28,7 @@ export type { BridgeExecResponse } from "@/hooks/useBridgeRpc";
 // authoritative 'removed' broadcast arrives.
 const REMOVED_TOMBSTONE_MS = 12_000;
 const LIVE_USAGE_POLL_MS = 15_000;
+const LIVE_USAGE_COALESCE_MS = 1_000;
 
 function isSessionUsage(value: unknown): value is SessionUsage {
   if (typeof value !== "object" || value === null) return false;
@@ -226,52 +228,61 @@ export function useSessions(
   }, [client, userId]);
 
   const pollLiveUsage = useCallback(async () => {
-    if (!userId) return;
-    const running = sessionsRef.current.filter((session) => session.status === "running");
-    await Promise.all(running.map(async (session) => {
-      if (usageRequestsRef.current.has(session.id)) return;
-      usageRequestsRef.current.add(session.id);
+    if (!userId || (typeof document !== "undefined" && document.visibilityState === "hidden")) return;
+    const batches = buildUsagePollBatches(sessionsRef.current);
+    await Promise.all(batches.map(async (batch) => {
+      const requestKey = `${batch.bridgeId}:${batch.sessionIds.join("|")}`;
+      if (usageRequestsRef.current.has(requestKey)) return;
+      usageRequestsRef.current.add(requestKey);
       const requestGeneration = usageGenerationRef.current;
       try {
         const response = await sendCommand({
-          type: "get_session_usage",
-          payload: { sessionId: session.id, bridgeId: session.bridgeId },
+          type: "get_sessions_usage",
+          payload: { sessionIds: batch.sessionIds, bridgeId: batch.bridgeId },
           requestId: uuidv4(),
         });
         if (!response.success) return;
-        const usage = (response.data as { usage?: unknown } | undefined)?.usage;
-        if (!isSessionUsage(usage) || requestGeneration !== usageGenerationRef.current) return;
-        setSessions((prev) => prev.map((current) =>
-          current.id === session.id
-            && current.status === "running"
-            && current.bridgeId === session.bridgeId
+        const usages = (response.data as { usages?: unknown } | undefined)?.usages;
+        if (typeof usages !== "object" || usages === null || requestGeneration !== usageGenerationRef.current) return;
+        const usageBySession = usages as Record<string, unknown>;
+        setSessions((prev) => prev.map((current) => {
+          const usage = usageBySession[current.id];
+          return current.status === "running"
+            && current.bridgeId === batch.bridgeId
+            && isSessionUsage(usage)
             ? { ...current, usage }
-            : current
-        ));
+            : current;
+        }));
       } catch {
         // Live usage is best-effort; the next interval retries without
         // disrupting terminal input or session status updates.
       } finally {
-        usageRequestsRef.current.delete(session.id);
+        usageRequestsRef.current.delete(requestKey);
       }
     }));
   }, [userId, sendCommand]);
 
-  const runningSessionKey = sessions
-    .filter((session) => session.status === "running")
-    .map((session) => session.id)
-    .sort()
-    .join("|");
+  const usagePollKey = JSON.stringify(buildUsagePollBatches(sessions));
 
   useEffect(() => {
-    if (!userId || !runningSessionKey) return;
-    void pollLiveUsage();
-  }, [userId, runningSessionKey, pollLiveUsage]);
+    if (!userId || usagePollKey === "[]") return;
+    const timeout = window.setTimeout(() => void pollLiveUsage(), LIVE_USAGE_COALESCE_MS);
+    return () => window.clearTimeout(timeout);
+  }, [userId, usagePollKey, pollLiveUsage]);
 
   useEffect(() => {
     if (!userId) return;
     const interval = window.setInterval(() => void pollLiveUsage(), LIVE_USAGE_POLL_MS);
     return () => window.clearInterval(interval);
+  }, [userId, pollLiveUsage]);
+
+  useEffect(() => {
+    if (!userId) return;
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void pollLiveUsage();
+    };
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => document.removeEventListener("visibilitychange", refreshWhenVisible);
   }, [userId, pollLiveUsage]);
 
   const createSession = useCallback(
