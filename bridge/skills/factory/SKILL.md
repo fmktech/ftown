@@ -40,7 +40,8 @@ already initialized (point them at `status`/`up`/`down` instead) — do not over
    ```
    `factory/bin` moves in as-is (no edits). Ask the user for: project name (default: the
    repo directory's basename), an operator ftown session id (optional — default `-`, no
-   operator mail), and any stage routing tweaks (harness/model/max_workers per stage).
+   operator mail), any stage routing tweaks (harness/model/max_workers per stage), and
+   the shared resources workers must lease (default `staging`, exclusive-only).
    Edit `factory/factory.yaml` with their answers.
 4. **Gitignore + state dirs.** Append `.ffactory/` to `$REPO/.gitignore` (create the file
    if absent). `mkdir -p "$REPO/.ffactory/tickets"`.
@@ -53,7 +54,15 @@ already initialized (point them at `status`/`up`/`down` instead) — do not over
    ```
    (substitute the actual stage names in yaml order, `limits.bounce_limit`, and
    `limits.claim_ttl_ms`).
-6. **Register the loops, grouped under one factory label.** The `--group` flag folds all
+6. **Register shared resources.** For every entry under `resources` in `factory.yaml`,
+   register its stable name and policy. For the default template:
+   ```bash
+   fts register-resource --db .ffactory/factory.db \
+     --name staging --policy exclusive_only
+   ```
+   Repeat once per configured resource. Workers acquire these leases FIFO; do not invent
+   resource names at runtime that were not declared in the factory definition.
+7. **Register the loops, grouped under one factory label.** The `--group` flag folds all
    loops together in the ftown dashboard and requires ftown bridge PR #29. If
    `loop create` rejects `--group` as an unknown flag, tell the user their bridge is out
    of date and needs updating — do not silently drop the flag and register ungrouped.
@@ -98,7 +107,7 @@ already initialized (point them at `status`/`up`/`down` instead) — do not over
      --task "FTS_DB=<abs path to .ffactory/factory.db> REPO_ROOT=<abs $REPO> OPERATOR_SESSION=<operator> — Read and follow factory/skills/digest.md."
    ```
    (`--cron`/`--shell`/`--model` from `digest.cron`/`digest.harness`/`digest.model`.)
-7. **Wrap up.** Suggest the user commit `factory/` (not `.ffactory/`). Show them how to
+8. **Wrap up.** Suggest the user commit `factory/` (not `.ffactory/`). Show them how to
    create the first ticket:
    ```bash
    mkdir -p .ffactory/tickets/1
@@ -107,6 +116,21 @@ already initialized (point them at `status`/`up`/`down` instead) — do not over
      --folder .ffactory/tickets/1
    ```
    and how to watch it: `fts serve --db .ffactory/factory.db --port 8377` (dashboard).
+
+## resource leases for an existing factory
+
+Existing factories are never overwritten by `factory init`. To introduce a new shared
+resource safely, add its stable name/policy under `resources` in `factory/factory.yaml`,
+then register it idempotently in the existing database:
+
+```bash
+fts register-resource --db .ffactory/factory.db \
+  --name staging --policy exclusive_only
+fts resources --db .ffactory/factory.db --json
+```
+
+Do not rename a resource while leases/waiters exist; register the new name, migrate users,
+then retire the old name only after `fts resources` shows it idle.
 
 ## up / down
 
@@ -127,13 +151,14 @@ Report all of:
 
 1. `fts board --db .ffactory/factory.db` — ticket counts by stage.
 2. `fts queues --db .ffactory/factory.db` — per-stage claim queues.
-3. `fts doctor --db .ffactory/factory.db` — health checks (flag any failure first).
-4. `~/.ftown/ftown-sessions loop runs <loop-id>` for every loop id registered under
+3. `fts resources --db .ffactory/factory.db` — active leases and FIFO waitlists.
+4. `fts doctor --db .ffactory/factory.db` — health checks (flag any failure first).
+5. `~/.ftown/ftown-sessions loop runs <loop-id>` for every loop id registered under
    `Factory: <project>` (dispatch, triage, and digest if present) — last few runs of
    each, success/error. For triage specifically, also check `loop get <triage-id>` for
    `lastSkipAt`/`lastSkipReason` — frequent skips are healthy (the preflight guard found
    no dead-letter/orphan work).
-5. Active workers: `~/.ftown/ftown-sessions list` filtered to names starting with
+6. Active workers: `~/.ftown/ftown-sessions list` filtered to names starting with
    `<project>-t` (worker sessions the dispatcher spawned, distinct from the loop names
    themselves which start with `<project>-dispatch`/`<project>-triage`/`<project>-digest`).
 

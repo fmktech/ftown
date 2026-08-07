@@ -11,6 +11,12 @@ limits:
   max_ticket_age_h: 48         # dispatcher dead-letters tickets older than this
   dispatch_every: 30s          # dispatcher loop interval (skip-overlap)
 
+# Shared surfaces workers must lease through FTS before use. `factory init`
+# registers these names/policies in the database; add project-specific resources here.
+resources:
+  - name: staging
+    policy: exclusive_only     # both | exclusive_only | shared_only
+
 # Harness per stage: claude | codex | cursor | zai | kimi | deepseek | fireworks
 # next: where advance() sends the ticket on success (- = terminal)
 # bounce: where reject() sends it (- = rejection not allowed)

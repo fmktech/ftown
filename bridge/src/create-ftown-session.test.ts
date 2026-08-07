@@ -8,6 +8,7 @@ import { buildSessionCommand } from './agent-commands.js';
 import {
   assertProviderAuthAvailable,
   buildChildBriefing,
+  buildOrchestratorBriefing,
   canResumeStoredSession,
   createFtownSession,
   deriveRelaunchCommand,
@@ -753,17 +754,29 @@ describe('relaunchFtownSession — entry-point parity with createFtownSession', 
   });
 });
 
-// Sanity: the standard briefing genuinely instructs mail-based reporting — which is
-// exactly what we suppress for workflow children. If this ever changes, the suppression
-// rationale should be revisited.
 describe('buildChildBriefing', () => {
-  it('instructs the child to report via ftown-harness mail (the conflicting channel)', () => {
+  it('prefers fticket coordination when ticket variables are present and keeps mail as fallback', () => {
     const briefing = buildChildBriefing({
       childName: 'worker',
       childId: 'c1',
       parentName: 'orch',
       parentId: 'p1',
     });
-    assert.ok(briefing.includes('mail send --parent'));
+    assert.match(briefing, /FTS_DB.*TICKET_ID/);
+    assert.match(briefing, /fticket.*primary coordination/i);
+    assert.match(briefing, /mail.*fallback/i);
+  });
+});
+
+describe('buildOrchestratorBriefing', () => {
+  it('directs multi-agent teams to fticket before direct messaging', () => {
+    const briefing = buildOrchestratorBriefing({
+      sessionName: 'orch',
+      sessionId: 'p1',
+    });
+
+    assert.match(briefing, /fticket/);
+    assert.match(briefing, /tickets.*context.*status.*resource leases/i);
+    assert.match(briefing, /mail.*fallback/i);
   });
 });

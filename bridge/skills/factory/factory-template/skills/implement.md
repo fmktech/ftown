@@ -186,7 +186,7 @@ Example:
 `CONTRACT | def parse(x: int) -> Date | int cannot carry a timezone the AC requires | take x: str (ISO-8601)`
 
 Before rejecting: verify the branch is committed clean so the partial work survives the
-bounce. Then reject, mail parent, exit.
+bounce. Then reject and exit; the FTS rejection/history is the durable report.
 
 ---
 
@@ -291,7 +291,7 @@ Exactly one of:
   turn into a bounce. Do NOT complete, do NOT reject. Mail parent the exact blocker, exit;
   the claim expires and the ticket re-queues.
 
-Then mail the result summary and exit, per the protocol.
+Then exit per the protocol; do not send a duplicate routine result message.
 
 **Never `git push`, never open a PR** — later stages do that. **Never run destructive git**
 (`reset --hard`, `push --force`, `branch -D`, `worktree remove`) outside your own branch,

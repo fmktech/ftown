@@ -3,7 +3,7 @@ name: ftown
 description: >-
   Control ftown from inside agent sessions: create/list/read/drive sibling
   sessions, send ftown mail, manage recurring scheduled loops, coordinate worker
-  agents, and run deterministic ftown-workflows. Use when a task mentions ftown,
+  agents through fticket when available, and run deterministic ftown-workflows. Use when a task mentions ftown,
   ftown sessions, bridge sessions, child/sibling agents, mail/inbox, scheduled
   loops, recurring agent runs, orchestration, fan-out, or ftown-workflows.
 ---
@@ -22,6 +22,9 @@ sessions and loops.
   read `references/loops.md`.
 - Ad-hoc multi-agent coordination from an orchestrator session:
   read `references/orchestrator.md`.
+- Ticket-backed multi-agent coordination, durable status/context, dependencies, and
+  resource leases: read the installed `fticket` skill. Prefer FTS over direct messages
+  whenever an existing `FTS_DB`/ticket is available.
 - Scripted, resumable, deterministic multi-session fan-out:
   read `references/workflows.md`.
 
@@ -41,6 +44,10 @@ sessions and loops.
 
 # Workflows
 ~/.ftown/ftown-workflows run path/to/script.mjs --workdir "$PWD"
+
+# FTS-backed coordination (when FTS_DB/TICKET_ID are supplied)
+fts show --db "$FTS_DB" "$TICKET_ID" --json
+fts resources --db "$FTS_DB" --json
 ```
 
 Prefer loops for unattended recurrence. Prefer workflows for deterministic

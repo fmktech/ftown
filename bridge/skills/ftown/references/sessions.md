@@ -133,8 +133,11 @@ Spawned ftown sessions receive:
 
 Agent children (any `--shell` except `shell`) spawned with a parent also get an
 automatic one-paragraph briefing prepended to their first input: it states their
-name/id and parent name/id, and how to mail the parent via
-`ftown-harness mail send --parent`. The creator's `--prompt` follows after a `Task:` line.
+name/id and parent name/id. When the task provides `FTS_DB` and `TICKET_ID`, the
+briefing makes fticket the primary coordination plane for context, status, and
+resource leases; mail is reserved for fallback/urgent escalation. Without FTS,
+it explains how to report via `ftown-harness mail send --parent`. The creator's
+`--prompt` follows after a `Task:` line.
 
 An agent session created with `--orchestrator` additionally gets `FTOWN_ORCHESTRATOR=1`
 in its environment and a compact pointer briefing directing it to the unified
