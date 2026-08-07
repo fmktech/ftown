@@ -1,4 +1,5 @@
 import { readFile, writeFile, mkdir, readdir, appendFile, rm, truncate, stat, open, rename } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { existsSync } from 'node:fs';
 
@@ -48,7 +49,19 @@ export class SessionStore {
   async saveSession(session: Session): Promise<void> {
     const dir = this.sessionDir(session.id);
     await mkdir(dir, { recursive: true });
-    await writeFile(this.sessionFilePath(session.id), JSON.stringify(session, null, 2), 'utf-8');
+    const filePath = this.sessionFilePath(session.id);
+    const tempFilePath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+
+    try {
+      // Publish only complete snapshots. Writing the live path in place lets a
+      // concurrent API read observe the truncate/write window and JSON.parse an
+      // incomplete document. A same-directory rename is atomic for readers.
+      await writeFile(tempFilePath, JSON.stringify(session, null, 2), 'utf-8');
+      await rename(tempFilePath, filePath);
+    } catch (error) {
+      await rm(tempFilePath, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 
   async loadSession(sessionId: string): Promise<Session | null> {

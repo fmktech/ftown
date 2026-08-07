@@ -5,6 +5,55 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { SessionStore } from './session-store.js';
+import type { Session } from './types.js';
+
+describe('SessionStore session snapshot persistence', () => {
+  let dir: string;
+
+  before(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'ftown-session-snapshot-'));
+  });
+
+  after(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('never exposes a partial JSON snapshot to concurrent readers', async () => {
+    const store = new SessionStore(dir);
+    const session: Session = {
+      id: 'concurrent-snapshot',
+      name: 'concurrent snapshot',
+      command: 'zsh',
+      status: 'running',
+      shellType: 'shell',
+      bridgeId: 'bridge-1',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      prompt: 'seed',
+    };
+    await store.saveSession(session);
+
+    const failures: unknown[] = [];
+    await Promise.all([
+      (async () => {
+        for (let i = 0; i < 40; i++) {
+          await store.saveSession({ ...session, prompt: `${i}:${'x'.repeat(1_000_000)}` });
+        }
+      })(),
+      (async () => {
+        for (let i = 0; i < 2_500; i++) {
+          try {
+            await store.loadSession(session.id);
+          } catch (error) {
+            failures.push(error);
+          }
+        }
+      })(),
+    ]);
+
+    assert.deepEqual(failures, []);
+  });
+});
 
 describe('SessionStore.appendTerminalData terminal.log cap', () => {
   let dir: string;
