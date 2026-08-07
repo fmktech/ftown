@@ -6,6 +6,37 @@ can coordinate worker agent sessions on this machine using the
 
 See `references/sessions.md` for the full session CLI reference.
 
+## Coordination priority: FTS first
+
+FTS (`fticket`) is the primary coordination plane whenever the task supplies an
+`FTS_DB`/`TICKET_ID` or the repository already has `.ffactory/factory.db`. Read the
+installed `fticket` skill before operating it.
+
+- **Context:** read `fts show --db "$FTS_DB" "$TICKET_ID" --json` and the ticket's
+  immutable artifact folder. Write durable handoffs there instead of sending them in chat.
+- **Status:** use claims, lifecycle transitions, renewals, notes, `fts board`, and
+  `fts events`; these are the shared source of truth for every worker and orchestrator.
+- **Resources:** register named shared surfaces once, then require workers to acquire an
+  exclusive/shared lease before use and release it afterward. A waitlisted lease means
+  the worker must not touch that resource; the FTS scheduler promotes it FIFO.
+- **Dependencies:** express ordering with ticket dependencies rather than messages such as
+  "wait until worker A is done."
+
+Do not initialize a new FTS database merely because one is absent unless creating that
+control plane is within the user's requested scope. When no FTS database/ticket exists,
+or when a fenced worker cannot write to FTS, ftown mail is the fallback. Use mail for
+urgent escalation that needs to wake a human/agent; do not duplicate routine context and
+status in both systems.
+
+Useful inspection commands:
+
+```bash
+fts board --db "$FTS_DB"
+fts show --db "$FTS_DB" "$TICKET_ID" --json
+fts resources --db "$FTS_DB" --json
+fts events --db "$FTS_DB" --after <cursor>
+```
+
 ## Spawning workers
 
 `--shell` accepts `claude`, `cursor`, `codex`, `shell`, `opencode`, and Claude
@@ -21,10 +52,10 @@ sets the worker's parent to `$FTOWN_SESSION_ID`.
   --prompt "Review the auth module and summarize findings"
 ```
 
-Returns JSON containing `session.id` — save it to poll the worker later.
-Workers spawned with `--parent` are auto-briefed to report back via
-`mail send --parent`; their reports arrive in **your** inbox and are delivered
-automatically as `[ftown mail]` context at your turn boundaries.
+Returns JSON containing `session.id` — save it to inspect the worker later. For
+FTS-backed work, put `FTS_DB`, `TICKET_ID`, `WORKER_ID`, and the claim fence in the
+worker briefing; the ticket/artifacts remain the durable handoff. Workers spawned with
+`--parent` are also auto-briefed about the FTS-first policy and mail fallback.
 Provider-flavored workers require a bridge-host token configured with
 `ftown env set <flavor> <token>`; the bridge supplies their endpoint/model
 environment when it spawns them.
@@ -42,11 +73,12 @@ environment when it spawns them.
 ~/.ftown/ftown-sessions running <session-id>
 ```
 
-The best wait pattern: **end your turn**. Worker mail blocks your Stop hook
-and wakes you with the messages — no polling loop needed. Use `screen` /
-`grep` to investigate workers that have gone quiet for too long.
+For FTS-backed work, observe `fts events --after <cursor>`, `fts show`, and
+`fts resources` rather than asking every worker for status. Use `screen` / `grep` to
+investigate a worker whose ticket/claim has gone quiet. When operating without FTS, end
+your turn and let fallback mail wake you instead of running a polling loop.
 
-## Messaging (mail)
+## Messaging fallback (mail)
 
 Each session has an inbox. Claude and codex sessions receive mail automatically
 at turn boundaries via hooks — no keystroke injection. Cursor and shell sessions
@@ -64,14 +96,15 @@ ftown-harness mail send <child> --thread <id> "use the v2 endpoint"
 ftown-harness mail read
 ```
 
-Children report back with `mail send --parent --type result` (or
-`--type escalation` when blocked). Fan-out still works via
+Without FTS, children report back with `mail send --parent --type result` (or
+`--type escalation` when blocked). With FTS, use this only for an urgent escalation or
+when a fenced/unavailable database prevents recording the outcome. Fan-out still works via
 `~/.ftown/ftown-sessions tell --children "pause and report status"` (now mail
 under the hood; one of `--parent | --children | --siblings`).
 
 If a worker is idle and must be woken right now, terminal keystroke injection
 (`ftown-harness send <id> "..." -s` or `tell --keys`) is the **last resort** —
-prefer mail, which arrives at the next turn boundary.
+prefer an FTS update/event, then fallback mail, which arrives at the next turn boundary.
 
 ## Cleanup
 
@@ -108,8 +141,8 @@ sessions from the CLI.
 ## Practical guidance
 
 - **Parallelize** independent tasks: spawn multiple workers before waiting for any.
-- **Poll, don't block**: use `screen` / `grep` to check progress; mail from
-  workers reaches you automatically at turn boundaries, so keep working.
+- **Observe shared state**: prefer `fts events`/`show`/`resources`; use `screen` / `grep`
+  for diagnosis and mail only as fallback.
 - **Name workers clearly**: `--name` shows in `list` output and as the sender
   name on incoming mail.
 - **Check `list` first**: see what's already running before spawning duplicates.

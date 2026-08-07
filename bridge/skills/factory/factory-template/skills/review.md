@@ -204,13 +204,14 @@ If any box is unchecked, fix it before recording a verdict.
   ```
   Do not put nits in the reject reason — nits stay in `review.md` only.
 - **STUCK** (missing worktree, wrong branch, gate commands absent from
-  `implementation-notes.md`, unbuildable environment): do NOT complete, do NOT reject. Mail
-  your parent the exact blocker and exit; the ticket re-queues.
+  `implementation-notes.md`, unbuildable environment): do NOT complete, do NOT reject. Use
+  fallback mail for the exact blocker and exit; the ticket re-queues.
   ```bash
-  ~/.ftown/ftown-sessions tell --parent --type result \
+  ~/.ftown/ftown-sessions tell --parent --type escalation \
     "ticket $TICKET_ID review: STUCK — <exact blocker>"
   ```
-- After recording the verdict, mail the result summary per the protocol and exit.
+- After recording the verdict in FTS/history, exit per the protocol; do not send a
+  duplicate routine result message.
 
 ## Failure modes table
 

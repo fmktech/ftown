@@ -218,9 +218,9 @@ skipped box.
 - **Groom never rejects.** `BOUNCE_STAGE` for groom is `-`. There is no reject path at this
   stage — if the request is unworkable, that is STUCK, not reject.
 - **STUCK** (unanswerable question, broken environment, contradictory request): do NOT
-  `fts complete`, do NOT write a partial `prd.md`. Mail your parent:
+  `fts complete`, do NOT write a partial `prd.md`. Use fallback escalation mail:
   ```bash
-  ~/.ftown/ftown-sessions tell --parent --type result \
+  ~/.ftown/ftown-sessions tell --parent --type escalation \
     "ticket $TICKET_ID groom: STUCK — <exact question 1>; <exact question 2>"
   ```
   Then exit. Your claim expires and the ticket re-queues.

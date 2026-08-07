@@ -73,7 +73,7 @@ pass/fail from what the running system actually does.
    for the checks above — a green suite does NOT count as verification of any individual AC.
 10. If you acquired any resource in step 4, release it now:
    ```bash
-   fts release --db "$FTS_DB" --ticket "$TICKET_ID" --worker "$WORKER_ID" --resource staging --epoch "$EPOCH"
+   fts release --db "$FTS_DB" --ticket "$TICKET_ID" --resource staging
    ```
    Run this release even if an earlier step found failures — releasing the lease is not
    conditional on the outcome.

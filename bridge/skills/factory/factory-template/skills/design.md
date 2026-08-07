@@ -212,7 +212,8 @@ Run through this before your outcome. If any box fails, you FAIL the gate.
 
 ## Outcome
 
-Exactly one of the following, then mail your parent and exit (protocol step 6–7).
+Exactly one of the following, then exit via protocol step 7. The FTS outcome/artifact is
+the report; do not send a duplicate routine message.
 
 - **PASS** — all gate boxes checked. `NEXT_STAGE` is `implement`.
   ```bash

@@ -20,16 +20,33 @@ Your spawn prompt defines these values. Refer to them exactly as named:
   your session exists; use it verbatim, never substitute `$FTOWN_SESSION_ID`).
   ($FTOWN_SESSION_ID is your session id — used only for the final self-close.)
 
+## Coordination priority — FTS is primary
+
+FTS is the primary coordination plane for this team. Do not use direct messages for
+routine context or status.
+
+- Read ticket history/status with `fts show`, then read earlier-stage artifacts from
+  `TICKET_DIR`. Those artifacts are the durable shared context.
+- Express progress through `fts start`, renewals, lifecycle outcomes, and concise notes.
+  Other workers and orchestrators observe them with `fts show`/`board`/`events`.
+- Before touching a shared external surface, inspect/acquire its FTS resource lease. If
+  acquisition waitlists you, do not touch the resource; the scheduler grants it FIFO.
+- Write a handoff artifact before completing the stage and name it in the outcome note.
+
+Ftown mail is a fallback only when FTS is unavailable/fenced or an urgent escalation
+must wake a human/agent. Do not duplicate normal handoffs in both FTS and mail.
+
 ## The fts commands you are allowed to use
 
 Copy these shapes exactly; do not invent flags:
 
 ```bash
 fts show   --db "$FTS_DB" "$TICKET_ID" --json                 # read ticket + history
+fts resources --db "$FTS_DB" --json                            # leases + FIFO waitlists
 fts start  --db "$FTS_DB" --ticket "$TICKET_ID" --worker "$WORKER_ID" --epoch "$EPOCH"
 fts renew  --db "$FTS_DB" --ticket "$TICKET_ID" --worker "$WORKER_ID" --epoch "$EPOCH"
 fts acquire --db "$FTS_DB" --resource <name> --ticket "$TICKET_ID" --worker "$WORKER_ID" --mode exclusive
-fts release --db "$FTS_DB" --ticket "$TICKET_ID" --worker "$WORKER_ID" --resource <name> --epoch "$EPOCH"
+fts release --db "$FTS_DB" --ticket "$TICKET_ID" --resource <name>
 fts complete --db "$FTS_DB" --ticket "$TICKET_ID" --worker "$WORKER_ID" --epoch "$EPOCH" --note "<one line>"
 fts advance  --db "$FTS_DB" --ticket "$TICKET_ID" --worker "$WORKER_ID" --to-stage "$NEXT_STAGE" --note "<one line>"
 fts reject   --db "$FTS_DB" --ticket "$TICKET_ID" --worker "$WORKER_ID" --epoch "$EPOCH" \
@@ -48,22 +65,25 @@ directly.
 4. **Heartbeat:** run `fts renew` after EVERY substantial step (any test run, file written,
    long command). If renew ever fails (`ClaimExpired`, `ClaimFenced`, `NotClaimOwner`):
    STOP IMMEDIATELY. Do not write anything more, do not "finish up". Another worker owns
-   the ticket now. Mail your parent that you were fenced, then self-close (step 7) and exit.
+   the ticket now. FTS cannot accept a stale worker's status, so send one fallback
+   escalation to your parent, then self-close (step 7) and exit.
 5. Run your skill's GATE checklist. Every box must be checked with evidence, not assumed.
 6. Outcome — exactly one of:
    - PASS: `fts complete` then (if `NEXT_STAGE` != `-`) `fts advance`.
    - FAIL with actionable feedback and `BOUNCE_STAGE` != `-`: `fts reject` with the
      structured reason your skill defines.
-   - STUCK (missing input, broken environment, contradictory requirements): do NOT
-     complete, do NOT reject. Mail your parent the exact blocker and exit; your claim
-     will expire and the ticket re-queues. Then self-close (step 7) — never leave your
-     session idling.
-7. Mail a result summary, then self-close. This applies to EVERY outcome — PASS, REJECT,
-   and STUCK alike — and the self-close command must be the very last command you run;
-   nothing after it executes:
+   - STUCK (missing input, broken environment, contradictory requirements): write the
+     exact blocker to `TICKET_DIR`, renew once so the artifact is safely visible, then use
+     fallback mail to escalate. Do NOT complete or reject; your claim will expire and the
+     ticket re-queues. Then self-close (step 7) — never leave your session idling.
+7. A successful `complete`/`advance`/`reject` plus its artifact/note is the result report;
+   do not send a duplicate routine message. Send fallback mail only for STUCK, fencing,
+   an FTS failure, or an urgent escalation. Then self-close. The self-close command must
+   be the very last command you run; nothing after it executes:
    ```bash
-   ~/.ftown/ftown-sessions tell --parent --type result \
-     "ticket $TICKET_ID $STAGE: <PASS|REJECTED|STUCK> — <one sentence>"
+   # Fallback only when one of the conditions above applies and a parent exists:
+   ~/.ftown/ftown-sessions tell --parent --type escalation \
+     "ticket $TICKET_ID $STAGE: <STUCK|FENCED|FTS-FAILED> — <one sentence>"
    ~/.ftown/ftown-sessions remove "$FTOWN_SESSION_ID"   # self-close; your session ends here
    ```
 

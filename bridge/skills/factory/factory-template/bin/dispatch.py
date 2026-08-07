@@ -137,13 +137,15 @@ def compose_briefing(
         f"EPOCH={epoch}",
         f"WORKER_ID={worker_id}",
         "",
+        "Coordination: FTS ticket state, artifacts, and resource leases are primary; "
+        "use ftown mail only as fallback for urgent escalation or an unavailable/fenced FTS.",
         "Task: Read and follow $REPO_ROOT/factory/skills/_protocol.md, "
         f"then execute your stage per $REPO_ROOT/factory/skills/{stage.name}.md.",
     ]
     if operator_session == "-":
         lines.append(
-            "You have no parent session: skip only the `tell --parent` mail command and "
-            "end your final message with the one-line result instead. The self-close "
+            "You have no parent session: if the fallback protocol would use `tell --parent`, "
+            "put that escalation in your final message instead. The self-close "
             'command (`~/.ftown/ftown-sessions remove "$FTOWN_SESSION_ID"`) is still '
             "MANDATORY and must be the very last command you run."
         )

@@ -70,10 +70,14 @@ export function buildChildBriefing(params: ChildBriefingParams): string {
   return (
     `[ftown] You are child session '${params.childName}' (${params.childId}), ` +
     `spawned by parent '${params.parentName}' (${params.parentId}). ` +
-    `Mail from other agents arrives automatically as [ftown mail] context at turn boundaries. ` +
-    `Report results/questions to your parent with: ftown-harness mail send --parent "<message>" ` +
-    `(add --type result or --type escalation when reporting). Check mail explicitly with: ` +
-    `ftown-harness mail read. Inspect peers with ~/.ftown/ftown-sessions list / screen <id>. ` +
+    `If your task provides FTS_DB and TICKET_ID, read the installed 'fticket' skill and use ` +
+    `fticket as the primary coordination plane: read the ticket and artifacts for context, ` +
+    `record status through its lifecycle and notes, and acquire/release resource leases before ` +
+    `touching shared surfaces. When the task has no FTS identifiers, report with ` +
+    `ftown-harness mail send --parent "<message>" (add --type result or --type escalation). ` +
+    `With FTS, mail is a fallback only when FTS is unavailable/fenced or for an urgent ` +
+    `escalation. Check fallback mail with ftown-harness mail read. ` +
+    `Inspect peers with ~/.ftown/ftown-sessions list / screen <id>. ` +
     `Your parent can read your terminal at any time.`
   );
 }
@@ -90,9 +94,10 @@ export function buildOrchestratorBriefing(params: OrchestratorBriefingParams): s
     `(${params.sessionId}). Use the 'ftown' skill (installed at ` +
     `~/.ftown/skills/ftown, linked from ~/.agents/skills and ~/.claude/skills — ` +
     `read its SKILL.md and references/orchestrator.md if not auto-loaded) to spawn and coordinate worker agent sessions ` +
-    `via ~/.ftown/ftown-sessions. Children you spawn with --parent report back via mail — ` +
-    `their messages arrive automatically as [ftown mail] context at your turn boundaries; ` +
-    `check on demand with ftown-harness mail read.`
+    `via ~/.ftown/ftown-sessions. Prefer the installed 'fticket' skill and an existing FTS ` +
+    `database for tickets, durable context, status, dependencies, and resource leases. ` +
+    `Use ftown mail only as a fallback when FTS is unavailable or for urgent escalation; ` +
+    `fallback messages arrive as [ftown mail] context and can be read with ftown-harness mail read.`
   );
 }
 
