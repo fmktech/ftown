@@ -15,6 +15,7 @@ Scope: native Pi harness support, lifecycle hooks and token usage, bundled model
 | UI production build | ✅ | The E2E-environment production build completed successfully. |
 | E2E typecheck | ✅ | The E2E TypeScript check completed without errors. |
 | Full browser suite | ❌ | 30 passed, 2 skipped, 1 failed. The unchanged direct-transport WebRTC scenario selected Cloud instead of P2P on this Mac; an isolated retry reproduced it. Linux CI is the release decision for this environment-dependent case. |
+| GitHub Linux E2E | ✅ | The `direct-transport-e2e` workflow passed in 4m16s, including the P2P scenario that failed in the local macOS environment. |
 | Secret scan | ✅ | Gitleaks found no leaks in the staged diff. |
 | Diff integrity | ✅ | `git diff --check` completed successfully. |
 | Lint | ⚠️ | `npm run lint` opens Next.js's interactive first-time ESLint setup; the repository has no checked-in non-interactive ESLint configuration and CI does not enforce this command. |
@@ -38,7 +39,7 @@ Weighted score: **88/100 (Strong)**.
 
 ## Verdict
 
-**CONDITIONAL GO for review; strict local release gate remains red.** All Pi-specific tests, builds, package checks, typechecks, and security checks pass. The sole red result is the environment-dependent WebRTC P2P browser scenario, which receives Cloud on this Mac and is unchanged by the Pi feature. Merge/release should require the GitHub Linux E2E job to confirm that scenario.
+**GO.** All Pi-specific tests, builds, package checks, typechecks, security checks, deployment checks, and the GitHub Linux E2E workflow pass. The sole local red result is the environment-dependent WebRTC P2P browser scenario, which receives Cloud on this Mac; the same scenario passes in the merge-gating Linux environment.
 
 ## Findings resolved during presubmit
 
@@ -49,7 +50,6 @@ Weighted score: **88/100 (Strong)**.
 
 ## Follow-ups
 
-1. Confirm the full browser suite in GitHub's Linux CI environment before merge.
-2. Add a hermetic smoke test that loads the packaged extension through Pi's native loader.
-3. Split the extension into transport, lifecycle/usage, and tool-registration modules after the contract stabilizes.
-4. Add durable idempotency for mutating model-tool requests if retries must eventually cover ambiguous server failures.
+1. Add a hermetic smoke test that loads the packaged extension through Pi's native loader.
+2. Split the extension into transport, lifecycle/usage, and tool-registration modules after the contract stabilizes.
+3. Add durable idempotency for mutating model-tool requests if retries must eventually cover ambiguous server failures.
