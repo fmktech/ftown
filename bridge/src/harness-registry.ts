@@ -24,11 +24,12 @@ export interface BuildCommandInput {
   claudeSessionId?: string;
   cursorSessionId?: string;
   codexSessionId?: string;
+  piSessionId?: string;
   /** Initial prompt passed as a CLI argument — avoids racing the TUI with typed input. */
   initialPrompt?: string;
   /**
    * Relaunch is a resurrection resume. Harnesses that resume by working
-   * directory rather than by a captured session id (kimi-code, via `-c`)
+   * directory rather than by a captured session id (Pi/kimi-code, via `-c`)
    * consult this flag; id-based harnesses ignore it and use their id fields.
    */
   resume?: boolean;
@@ -131,6 +132,38 @@ export function buildGrokCommand(options: {
 
   if (options.initialPrompt?.trim()) {
     // The positional prompt is auto-submitted by the grok TUI.
+    parts.push(shellQuote(options.initialPrompt));
+  }
+
+  return parts.join(' ');
+}
+
+export function buildPiCommand(options: {
+  model?: string;
+  initialPrompt?: string;
+  resume?: boolean;
+  piSessionId?: string;
+  /** Compatibility only: build the command shape stored before ftown's Pi extension shipped. */
+  includeFtownExtension?: boolean;
+}): string {
+  // The bridge installs its bundled extension at this stable per-user path.
+  // Keep $HOME unexpanded until the agent's login shell launches Pi.
+  const parts = ['pi'];
+  if (options.includeFtownExtension !== false) {
+    parts.push('--extension', '"$HOME/.ftown/pi/ftown.js"');
+  }
+
+  if (options.piSessionId?.trim()) {
+    parts.push('--session', shellQuote(options.piSessionId.trim()));
+  } else if (options.resume) {
+    parts.push('-c');
+  }
+
+  if (options.model?.trim()) {
+    parts.push('--model', shellQuote(options.model.trim()));
+  }
+
+  if (!options.resume && !options.piSessionId?.trim() && options.initialPrompt?.trim()) {
     parts.push(shellQuote(options.initialPrompt));
   }
 
@@ -247,6 +280,21 @@ export const HARNESSES = {
     // Preserved decision: grok was absent from WorkflowShell / ftown-workflows SHELLS.
     validForWorkflow: false,
   },
+  pi: {
+    // Workdir comes from the runner cwd. Pi resumes the most recent session for
+    // that working directory with -c and accepts an initial positional prompt.
+    buildCommand: (input) =>
+      buildPiCommand({
+        model: input.model,
+        initialPrompt: input.initialPrompt,
+        resume: input.resume,
+        piSessionId: input.piSessionId,
+      }),
+    hooked: true,
+    promptAsCliArg: true,
+    validForLoop: true,
+    validForWorkflow: true,
+  },
   opencode: {
     buildCommand: () => 'opencode',
     // Preserved decision: opencode was never in HOOKED_SHELL_TYPES.
@@ -296,7 +344,7 @@ export const WORKFLOW_SHELLS = SHELL_TYPES.filter(
   (type) => HARNESSES[type].validForWorkflow,
 ) as readonly WorkflowShell[];
 
-/** Shell types whose mail arrives via the Stop-hook pump (claude/codex + claude flavors). */
+/** Shell types whose mail arrives at turn boundaries through native hooks/extensions. */
 export const HOOKED_SHELL_TYPES: ReadonlySet<string> = new Set(
   SHELL_TYPES.filter((type) => HARNESSES[type].hooked),
 );

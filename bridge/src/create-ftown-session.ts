@@ -2,7 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 
-import { buildSessionCommand } from './agent-commands.js';
+import { buildPiCommand, buildSessionCommand } from './agent-commands.js';
 import { ensureCodexWorkdirTrust } from './codex-installer.js';
 import { HARNESSES, harnessAcceptsPromptAsCliArg, type HarnessSpec } from './harness-registry.js';
 import { staggerSpawn } from './spawn-stagger.js';
@@ -36,6 +36,8 @@ export interface CreateFtownSessionInput {
   claudeSessionId?: string;
   cursorSessionId?: string;
   codexSessionId?: string;
+  piSessionId?: string;
+  piSessionFile?: string;
   env?: Record<string, string>;
   parentSessionId?: string;
   initialInput?: string;
@@ -257,7 +259,7 @@ async function staggerHarnessSpawn(shellType: ShellType | undefined): Promise<vo
 /** The stored-session fields relaunch derivation needs — satisfied by both live records and tombstones. */
 export type RelaunchCommandSource = Pick<
   Session,
-  'command' | 'shellType' | 'workingDir' | 'model' | 'claudeSessionId' | 'cursorSessionId' | 'codexSessionId'
+  'command' | 'shellType' | 'workingDir' | 'model' | 'claudeSessionId' | 'cursorSessionId' | 'codexSessionId' | 'piSessionId'
 >;
 
 /**
@@ -291,14 +293,20 @@ export function deriveRelaunchCommand(session: RelaunchCommandSource): {
     claudeSessionId: session.claudeSessionId,
     cursorSessionId: session.cursorSessionId,
     codexSessionId: session.codexSessionId,
-    // Workdir-based resume (kimi-code `-c`): no id to carry, so signal resume
+    piSessionId: session.piSessionId,
+    // Workdir-based resume (Pi/kimi-code `-c`): no id to carry, so signal resume
     // explicitly. Id-based harnesses ignore this and key off their id fields.
     resume: true,
   });
+  const isLegacyPiBuilder = session.shellType === 'pi' && [
+    buildPiCommand({ model: session.model, includeFtownExtension: false }),
+    buildPiCommand({ model: session.model, resume: true, includeFtownExtension: false }),
+  ].includes(session.command);
   const isCustom =
     Boolean(session.command) &&
     session.command !== builderDefault &&
-    session.command !== builderResume;
+    session.command !== builderResume &&
+    !isLegacyPiBuilder;
   return { command: isCustom ? session.command : builderResume, isCustom };
 }
 
@@ -309,9 +317,9 @@ export function canResumeStoredSession(
   const shellType = session.shellType ?? 'claude';
   if (shellType === 'cursor') return Boolean(session.cursorSessionId?.trim());
   if (shellType === 'codex') return Boolean(session.codexSessionId?.trim());
-  // kimi-code resumes by working directory (`-c`), so it needs no captured
-  // session id — a stored kimi-code session is always resumable on restart.
-  if (shellType === 'kimi-code') return true;
+  // Pi and kimi-code resume by working directory (`-c`), so they need no
+  // captured session id and are always resumable on restart.
+  if (shellType === 'pi' || shellType === 'kimi-code') return true;
   return shellType !== 'shell' && shellType !== 'opencode' && Boolean(session.claudeSessionId?.trim());
 }
 
@@ -452,6 +460,8 @@ export async function createFtownSession(
     claudeSessionId: input.claudeSessionId,
     cursorSessionId: input.cursorSessionId,
     codexSessionId: input.codexSessionId,
+    piSessionId: input.piSessionId,
+    piSessionFile: input.piSessionFile,
     env: sessionEnv,
     parentSessionId,
     runtime: deps.runner.getPreferredRuntime(),
@@ -582,6 +592,10 @@ export function parseCreateSessionBody(
       typeof body.cursorSessionId === 'string' ? body.cursorSessionId : undefined,
     codexSessionId:
       typeof body.codexSessionId === 'string' ? body.codexSessionId : undefined,
+    piSessionId:
+      typeof body.piSessionId === 'string' ? body.piSessionId : undefined,
+    piSessionFile:
+      typeof body.piSessionFile === 'string' ? body.piSessionFile : undefined,
     env: env && typeof env === 'object' ? env : undefined,
     parentSessionId,
     initialInput: typeof body.initialInput === 'string' ? body.initialInput : undefined,

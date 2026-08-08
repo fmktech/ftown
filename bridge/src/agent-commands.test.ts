@@ -1,7 +1,48 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildGrokCommand, buildSessionCommand, shellQuote } from './agent-commands.js';
+import { buildGrokCommand, buildPiCommand, buildSessionCommand, shellQuote } from './agent-commands.js';
+
+describe('buildSessionCommand — pi', () => {
+  it('launches Pi as an interactive coding agent', () => {
+    assert.strictEqual(
+      buildSessionCommand({ shellType: 'pi' }),
+      'pi --extension "$HOME/.ftown/pi/ftown.js"',
+    );
+  });
+
+  it('passes the model and initial prompt through Pi CLI arguments', () => {
+    const options = { model: 'anthropic/claude-sonnet-4', initialPrompt: "review today's diff" };
+    assert.strictEqual(
+      buildSessionCommand({ shellType: 'pi', ...options }),
+      "pi --extension \"$HOME/.ftown/pi/ftown.js\" --model 'anthropic/claude-sonnet-4' 'review today'\\''s diff'",
+    );
+    assert.strictEqual(buildSessionCommand({ shellType: 'pi', ...options }), buildPiCommand(options));
+  });
+
+  it('continues the workdir session without replaying its original prompt', () => {
+    assert.strictEqual(
+      buildSessionCommand({
+        shellType: 'pi',
+        model: 'openai/gpt-5',
+        initialPrompt: 'do not replay',
+        resume: true,
+      }),
+      "pi --extension \"$HOME/.ftown/pi/ftown.js\" -c --model 'openai/gpt-5'",
+    );
+  });
+
+  it('resumes the exact native Pi session when its UUID is known', () => {
+    assert.strictEqual(
+      buildSessionCommand({
+        shellType: 'pi',
+        piSessionId: '550e8400-e29b-41d4-a716-446655440000',
+        resume: true,
+      }),
+      "pi --extension \"$HOME/.ftown/pi/ftown.js\" --session '550e8400-e29b-41d4-a716-446655440000'",
+    );
+  });
+});
 
 describe('buildSessionCommand — grok', () => {
   it('launches bare grok with --always-approve when no model/prompt', () => {

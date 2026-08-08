@@ -43,6 +43,8 @@ export interface Session {
   claudeSessionId?: string;
   cursorSessionId?: string;
   codexSessionId?: string;
+  piSessionId?: string;
+  piSessionFile?: string;
   env?: Record<string, string>;
   parentSessionId?: string;
   runtime?: SessionRuntime;
@@ -192,6 +194,8 @@ export interface CreateSessionPayload {
   claudeSessionId?: string;
   cursorSessionId?: string;
   codexSessionId?: string;
+  piSessionId?: string;
+  piSessionFile?: string;
   parentSessionId?: string;
   orchestrator?: boolean;
   suppressBriefing?: boolean;

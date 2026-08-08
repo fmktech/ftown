@@ -24,21 +24,21 @@ type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 const _shellTypeIsRegistryKeys: Equals<ShellType, keyof typeof HARNESSES> = true;
 const _loopHarnessUnion: Equals<
   LoopHarness,
-  'claude' | 'cursor' | 'codex' | 'shell' | 'grok' | 'kimi-code' | 'opencode'
+  'claude' | 'cursor' | 'codex' | 'shell' | 'grok' | 'pi' | 'kimi-code' | 'opencode'
 > = true;
 const _workflowShellUnion: Equals<
   WorkflowShell,
-  'claude' | 'cursor' | 'codex' | 'shell' | 'opencode'
+  'claude' | 'cursor' | 'codex' | 'pi' | 'shell' | 'opencode'
 > = true;
 void _shellTypeIsRegistryKeys;
 void _loopHarnessUnion;
 void _workflowShellUnion;
 
 describe('harness registry', () => {
-  it('contains exactly the historical ShellType set', () => {
+  it('contains the supported ShellType set', () => {
     assert.deepEqual(
       [...SHELL_TYPES].sort(),
-      ['claude', 'codex', 'cursor', 'deepseek', 'fireworks', 'grok', 'kimi', 'kimi-code', 'opencode', 'shell', 'zai'],
+      ['claude', 'codex', 'cursor', 'deepseek', 'fireworks', 'grok', 'kimi', 'kimi-code', 'opencode', 'pi', 'shell', 'zai'],
     );
   });
 
@@ -83,24 +83,24 @@ describe('harness registry', () => {
     }
   });
 
-  it('derives the historical LOOP_HARNESSES set', () => {
+  it('derives the loop harness set', () => {
     assert.deepEqual(
       [...LOOP_HARNESS_TYPES].sort(),
-      ['claude', 'codex', 'cursor', 'grok', 'kimi-code', 'opencode', 'shell'],
+      ['claude', 'codex', 'cursor', 'grok', 'kimi-code', 'opencode', 'pi', 'shell'],
     );
   });
 
-  it('derives the historical WorkflowShell set (grok stays excluded — preserved decision)', () => {
+  it('derives the workflow shell set (grok stays excluded — preserved decision)', () => {
     assert.deepEqual(
       [...WORKFLOW_SHELLS].sort(),
-      ['claude', 'codex', 'cursor', 'opencode', 'shell'],
+      ['claude', 'codex', 'cursor', 'opencode', 'pi', 'shell'],
     );
   });
 
-  it('derives the historical HOOKED_SHELL_TYPES set (grok/cursor/opencode/shell stay unhooked)', () => {
+  it('derives the hooked harness set (Pi uses the bundled ftown extension)', () => {
     assert.deepEqual(
       [...HOOKED_SHELL_TYPES].sort(),
-      ['claude', 'codex', 'deepseek', 'fireworks', 'kimi', 'zai'],
+      ['claude', 'codex', 'deepseek', 'fireworks', 'kimi', 'pi', 'zai'],
     );
   });
 
@@ -139,6 +139,10 @@ describe('harness registry', () => {
         harnessAcceptsPromptAsCliArg('grok', { claudeSessionId: 'a', cursorSessionId: 'b', codexSessionId: 'c' }),
         true,
       );
+    });
+
+    it('pi: accepts an initial CLI prompt', () => {
+      assert.equal(harnessAcceptsPromptAsCliArg('pi', {}), true);
     });
 
     it('shell and opencode: never (prompt is typed into the TUI)', () => {

@@ -167,6 +167,168 @@ describe('collectSessionUsage — codex extractor', () => {
   });
 });
 
+describe('collectSessionUsage — Pi extractor', () => {
+  const workingDir = '/Users/x/projects/pi-demo';
+
+  it('sums assistant-message usage and attributes it by provider/model', async () => {
+    const piSessionsDir = join(root, 'pi-sums');
+    const dir = join(piSessionsDir, '--Users-x-projects-pi-demo--');
+    await mkdir(dir, { recursive: true });
+    const lines = [
+      JSON.stringify({ type: 'session', version: 3, timestamp: '2026-08-08T10:00:01.000Z', cwd: workingDir }),
+      JSON.stringify({ type: 'message', id: 'u1', message: { role: 'user', content: 'hello' } }),
+      JSON.stringify({
+        type: 'message', id: 'a1', message: {
+          role: 'assistant', provider: 'anthropic', model: 'claude-sonnet-4',
+          usage: { input: 100, output: 20, cacheRead: 300, cacheWrite: 40 },
+        },
+      }),
+      'not json',
+      JSON.stringify({
+        type: 'message', id: 'a2', message: {
+          role: 'assistant', provider: 'openai', model: 'gpt-5',
+          usage: { input: 10, output: 5, cacheRead: 2, cacheWrite: 0 },
+        },
+      }),
+    ];
+    await writeFile(join(dir, '2026-08-08T10-00-01-000Z_pi.jsonl'), lines.join('\n') + '\n');
+
+    const usage = await collectSessionUsage(
+      { shellType: 'pi', workingDir, createdAt: '2026-08-08T10:00:00.000Z' },
+      { piSessionsDir },
+    );
+
+    assert.ok(usage);
+    assert.equal(usage.harness, 'pi');
+    assert.equal(usage.inputTokens, 110);
+    assert.equal(usage.outputTokens, 25);
+    assert.equal(usage.cacheReadTokens, 302);
+    assert.equal(usage.cacheWriteTokens, 40);
+    assert.equal(usage.totalTokens, 477);
+    assert.deepEqual(usage.models, ['anthropic/claude-sonnet-4', 'openai/gpt-5']);
+    assert.deepEqual(usage.perModel, [
+      {
+        model: 'anthropic/claude-sonnet-4',
+        inputTokens: 100,
+        outputTokens: 20,
+        cacheReadTokens: 300,
+        cacheWriteTokens: 40,
+      },
+      {
+        model: 'openai/gpt-5',
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheReadTokens: 2,
+        cacheWriteTokens: 0,
+      },
+    ]);
+  });
+
+  it('selects the closest session created after the ftown session in a shared workspace', async () => {
+    const piSessionsDir = join(root, 'pi-disambig');
+    const dir = join(piSessionsDir, '--Users-x-projects-pi-demo--');
+    await mkdir(dir, { recursive: true });
+    const writePi = async (file: string, timestamp: string, input: number) => {
+      await writeFile(join(dir, file), [
+        JSON.stringify({ type: 'session', version: 3, timestamp, cwd: workingDir }),
+        JSON.stringify({
+          type: 'message', id: `a-${input}`, message: {
+            role: 'assistant', provider: 'anthropic', model: 'claude-sonnet-4',
+            usage: { input, output: 1, cacheRead: 0, cacheWrite: 0 },
+          },
+        }),
+      ].join('\n') + '\n');
+    };
+    await writePi('older.jsonl', '2026-08-08T09:59:00.000Z', 1);
+    await writePi('match.jsonl', '2026-08-08T10:00:02.000Z', 42);
+    await writePi('later.jsonl', '2026-08-08T10:05:00.000Z', 99);
+
+    const usage = await collectSessionUsage(
+      { shellType: 'pi', workingDir, createdAt: '2026-08-08T10:00:00.000Z' },
+      { piSessionsDir },
+    );
+    assert.ok(usage);
+    assert.equal(usage.inputTokens, 42);
+  });
+
+  it('uses the native session file from the Pi extension when available', async () => {
+    const piSessionsDir = join(root, 'pi-native');
+    const nativeFile = join(piSessionsDir, 'pi-native-session.jsonl');
+    await mkdir(piSessionsDir, { recursive: true });
+    await writeFile(nativeFile, [
+      JSON.stringify({ type: 'session', version: 3, id: 'pi-native', cwd: '/actual/workdir' }),
+      JSON.stringify({
+        type: 'message', id: 'a1', message: {
+          role: 'assistant', provider: 'openai', model: 'gpt-5',
+          usage: { input: 77, output: 9, cacheRead: 3, cacheWrite: 0 },
+        },
+      }),
+    ].join('\n') + '\n');
+
+    const usage = await collectSessionUsage(
+      {
+        shellType: 'pi',
+        workingDir: '/ambiguous/shared/workdir',
+        piSessionId: 'pi-native',
+        piSessionFile: nativeFile,
+      },
+      { piSessionsDir },
+    );
+
+    assert.ok(usage);
+    assert.equal(usage.inputTokens, 77);
+    assert.equal(usage.outputTokens, 9);
+  });
+
+  it('rejects a native session file outside the Pi sessions directory', async () => {
+    const piSessionsDir = join(root, 'pi-contained');
+    const outsideFile = join(root, 'outside-pi-session.jsonl');
+    await mkdir(piSessionsDir, { recursive: true });
+    await writeFile(outsideFile, JSON.stringify({
+      type: 'message',
+      message: { role: 'assistant', model: 'gpt-5', usage: { input: 999 } },
+    }) + '\n');
+
+    const usage = await collectSessionUsage(
+      { shellType: 'pi', workingDir, piSessionFile: outsideFile },
+      { piSessionsDir },
+    );
+
+    assert.equal(usage, null);
+  });
+
+  it('ignores malformed, negative, and non-finite Pi token values', async () => {
+    const piSessionsDir = join(root, 'pi-malformed');
+    const nativeFile = join(piSessionsDir, 'malformed.jsonl');
+    await mkdir(piSessionsDir, { recursive: true });
+    await writeFile(nativeFile, [
+      JSON.stringify({
+        type: 'message', message: {
+          role: 'assistant', provider: 'openai', model: 'gpt-5',
+          usage: { input: -10, output: '5', cacheRead: null, cacheWrite: 1 / 0 },
+        },
+      }),
+      JSON.stringify({
+        type: 'message', message: {
+          role: 'assistant', provider: 'openai', model: 'gpt-5',
+          usage: { input: 7, output: 2, cacheRead: 1, cacheWrite: 0 },
+        },
+      }),
+    ].join('\n') + '\n');
+
+    const usage = await collectSessionUsage(
+      { shellType: 'pi', workingDir, piSessionFile: nativeFile },
+      { piSessionsDir },
+    );
+
+    assert.ok(usage);
+    assert.equal(usage.inputTokens, 7);
+    assert.equal(usage.outputTokens, 2);
+    assert.equal(usage.cacheReadTokens, 1);
+    assert.equal(usage.cacheWriteTokens, 0);
+  });
+});
+
 function kimiUsageRecord(model: string, usage: Record<string, number>): string {
   return JSON.stringify({ type: 'usage.record', model, usage, usageScope: 'turn', time: 1 });
 }

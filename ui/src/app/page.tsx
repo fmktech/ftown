@@ -102,6 +102,9 @@ const SUPPORTED_AGENTS = [
   { name: "Claude Code", detail: "Anthropic + API providers" },
   { name: "Cursor Agent", detail: "agent CLI" },
   { name: "Codex", detail: "OpenAI Codex CLI" },
+  { name: "Grok", detail: "xAI coding agent CLI" },
+  { name: "Pi", detail: "Hooks, ftown tools, and native resume" },
+  { name: "Kimi Code", detail: "Moonshot coding agent CLI" },
   { name: "opencode", detail: "interactive CLI" },
   { name: "Shell", detail: "zsh on bridge" },
 ] as const;
@@ -120,12 +123,12 @@ const STEPS = [
   {
     n: "3",
     title: "Orchestrate the swarm",
-    desc: "Spawn Claude Code, Cursor, Codex, opencode, or a shell. Run them in parallel, resume chats, and drive them all from anywhere.",
+    desc: "Spawn Claude Code, Cursor, Codex, Grok, Pi, Kimi Code, opencode, or a shell. Run them in parallel, organize agent trees, and drive them all from anywhere.",
   },
 ] as const;
 
 const STATS = [
-  { value: "5", label: "agent CLIs supported" },
+  { value: "7", label: "agent CLIs supported" },
   { value: "∞", label: "parallel sessions" },
   { value: "100%", label: "self-hosted" },
   { value: "MIT", label: "open source" },
@@ -160,7 +163,7 @@ const FEATURES = [
   {
     icon: <AgentIcon />,
     title: "Multi-agent orchestration",
-    desc: "Run Claude Code, Cursor Agent, Codex, opencode, or a raw shell — each as a full interactive TUI streamed to your browser.",
+    desc: "Run seven coding-agent CLIs plus raw shells as full interactive TUIs. Build parent/child teams, move sessions between groups, and coordinate them through durable mail.",
   },
   {
     icon: <TerminalIcon />,
@@ -175,12 +178,12 @@ const FEATURES = [
   {
     icon: <RefreshIcon />,
     title: "Resume where you left off",
-    desc: "Pick up prior Claude or Cursor Agent chats per workspace. Bridge exec lists sessions from the remote machine.",
+    desc: "Pick up native Claude, Cursor, Codex, and Pi sessions; Kimi Code continues by workspace when a bridge restarts.",
   },
   {
     icon: <ZapIcon />,
-    title: "Hook events in the UI",
-    desc: "Bridge installs notify hooks into Claude and Cursor configs so tool use and activity show up live in the dashboard.",
+    title: "Live activity & token usage",
+    desc: "See agent activity, tool events, models, and token usage while sessions are running—not only after they stop.",
   },
   {
     icon: <GlobeIcon />,
@@ -333,7 +336,8 @@ export default async function LandingPage() {
             </h1>
 
             <p className="font-[family-name:var(--font-sans)] text-sm sm:text-base text-[var(--text-secondary)] leading-relaxed max-w-[52ch] mb-6">
-              ftown streams Claude Code, Cursor, Codex, opencode, and shells from any
+              ftown streams Claude Code, Cursor, Codex, Grok, Pi, Kimi Code, opencode,
+              and shells from any
               machine to your desktop or phone — no SSH, no port forwarding. Self-hosted,
               on the subscriptions you already pay for. Terminals stay{" "}
               <span className="text-[var(--accent)] [text-shadow:0_0_16px_var(--accent-glow)]">
@@ -525,8 +529,9 @@ export default async function LandingPage() {
               <p className="font-[family-name:var(--font-sans)] text-[13px] sm:text-sm text-[var(--text-secondary)] leading-relaxed mb-4 max-w-[52ch]">
                 Replace &quot;keep an agent awake and polling&quot; hacks with a first-class
                 schedule. Fire a loop on an interval (<code className="font-[family-name:var(--font-mono)] text-[var(--text-primary)]">every 5m</code>) or
-                cron with a timezone, pick the harness — Claude Code, Cursor, Codex,
-                opencode, or shell — plus workdir and model. Every fire spawns a full
+                cron with a timezone, pick the harness — including Pi, Claude Code,
+                Cursor, Codex, Grok, Kimi Code, opencode, or shell — plus workdir and
+                model. Every fire spawns a full
                 session grouped under the loop: watch it live, scroll back, or take over.
               </p>
               <div className="flex flex-wrap gap-2">

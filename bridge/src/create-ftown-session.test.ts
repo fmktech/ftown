@@ -597,6 +597,46 @@ describe('deriveRelaunchCommand — single home of the relaunch heuristic', () =
     assert.match(derived.command, /--yolo -c$/);
   });
 
+  it('rebuilds a builder-default Pi command into a workdir-based -c resume command', () => {
+    const piStored = {
+      shellType: 'pi' as const,
+      workingDir: '/tmp/work',
+      model: 'anthropic/claude-sonnet-4',
+      claudeSessionId: undefined,
+      cursorSessionId: undefined,
+      codexSessionId: undefined,
+    };
+    const piDefault = buildSessionCommand({ shellType: 'pi', model: piStored.model });
+    assert.deepEqual(deriveRelaunchCommand({ ...piStored, command: piDefault }), {
+      command: "pi --extension \"$HOME/.ftown/pi/ftown.js\" -c --model 'anthropic/claude-sonnet-4'",
+      isCustom: false,
+    });
+  });
+
+  it('relaunches the exact Pi conversation after its extension reports a native id', () => {
+    const stored = {
+      shellType: 'pi' as const,
+      command: buildSessionCommand({ shellType: 'pi' }),
+      piSessionId: '550e8400-e29b-41d4-a716-446655440000',
+    };
+
+    assert.deepEqual(deriveRelaunchCommand(stored), {
+      command: "pi --extension \"$HOME/.ftown/pi/ftown.js\" --session '550e8400-e29b-41d4-a716-446655440000'",
+      isCustom: false,
+    });
+  });
+
+  it('upgrades a pre-extension Pi command to the hooked resume command', () => {
+    assert.deepEqual(deriveRelaunchCommand({
+      shellType: 'pi',
+      model: 'openai/gpt-5',
+      command: "pi --model 'openai/gpt-5'",
+    }), {
+      command: "pi --extension \"$HOME/.ftown/pi/ftown.js\" -c --model 'openai/gpt-5'",
+      isCustom: false,
+    });
+  });
+
   it('KNOWN LIMITATION: a pre-model-fix claude session (stored command lacks --model) is misclassified as custom and relaunched without --model or --resume', () => {
     const derived = deriveRelaunchCommand({
       ...stored,
@@ -625,11 +665,37 @@ describe('canResumeStoredSession — which stored sessions can resume', () => {
     assert.strictEqual(canResumeStoredSession({ shellType: 'kimi-code', claudeSessionId: '  ' }), true);
   });
 
+  it('resumes Pi by working directory — no recorded id required', () => {
+    assert.strictEqual(canResumeStoredSession({ shellType: 'pi' }), true);
+  });
+
   it('never resumes plain shells, opencode, or sessions with no recorded id', () => {
     assert.strictEqual(canResumeStoredSession({ shellType: 'shell', claudeSessionId: 'c' }), false);
     assert.strictEqual(canResumeStoredSession({ shellType: 'opencode', claudeSessionId: 'c' }), false);
     assert.strictEqual(canResumeStoredSession({ shellType: 'claude' }), false);
     assert.strictEqual(canResumeStoredSession({ shellType: 'claude', claudeSessionId: '  ' }), false);
+  });
+});
+
+describe('createFtownSession — Pi launch', () => {
+  it('passes the task and model on the Pi command line without typed-input races', async () => {
+    const harness = fakeDeps();
+    const session = await createFtownSession(harness.deps, {
+      shellType: 'pi',
+      model: 'openai/gpt-5',
+      prompt: "inspect today's changes",
+    });
+
+    assert.strictEqual(session.shellType, 'pi');
+    assert.strictEqual(
+      session.command,
+      "pi --extension \"$HOME/.ftown/pi/ftown.js\" --model 'openai/gpt-5'",
+    );
+    assert.strictEqual(
+      harness.runs[0].command,
+      "pi --extension \"$HOME/.ftown/pi/ftown.js\" --model 'openai/gpt-5' 'inspect today'\\''s changes'",
+    );
+    assert.strictEqual(harness.runs[0].initialInput, undefined);
   });
 });
 

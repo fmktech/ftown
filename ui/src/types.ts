@@ -1,6 +1,6 @@
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error' | 'disconnected';
 
-export type ShellType = 'claude' | 'cursor' | 'codex' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks' | 'grok' | 'kimi-code';
+export type ShellType = 'claude' | 'cursor' | 'codex' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks' | 'grok' | 'pi' | 'kimi-code';
 
 export interface Session {
   id: string;
@@ -16,6 +16,8 @@ export interface Session {
   claudeSessionId?: string;
   cursorSessionId?: string;
   codexSessionId?: string;
+  piSessionId?: string;
+  piSessionFile?: string;
   command?: string;
   parentSessionId?: string;
   loopId?: string; // set on loop-run sessions; groups the run under its Loop in the UI
@@ -48,7 +50,7 @@ export interface SessionUsage {
 // Scheduled Loops
 // ---------------------------------------------------------------------------
 
-export type LoopHarness = 'claude' | 'cursor' | 'codex' | 'opencode' | 'shell' | 'grok' | 'kimi-code';
+export type LoopHarness = 'claude' | 'cursor' | 'codex' | 'opencode' | 'shell' | 'grok' | 'pi' | 'kimi-code';
 
 export type LoopRunStatus = 'ok' | 'error' | 'running' | 'skipped';
 
@@ -204,6 +206,8 @@ export interface CreateSessionPayload {
   claudeSessionId?: string;
   cursorSessionId?: string;
   codexSessionId?: string;
+  piSessionId?: string;
+  piSessionFile?: string;
   env?: Record<string, string>;
   initialInput?: string;
   initialInputDelay?: number;

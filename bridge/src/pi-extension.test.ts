@@ -1,0 +1,522 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { registerFtownPiExtension } from '../pi-extension/ftown.js';
+
+describe('ftown Pi extension', () => {
+  it('forwards native lifecycle metadata and turns pending mail into a follow-up', async () => {
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>();
+    const followUps: string[] = [];
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const pi = {
+      on(event: string, handler: (event: unknown, ctx: unknown) => Promise<unknown>) {
+        handlers.set(event, handler);
+      },
+      sendUserMessage(message: string) {
+        followUps.push(message);
+      },
+      registerTool() {},
+      registerCommand() {},
+    };
+    const fetchImpl = async (url: string, init?: RequestInit) => {
+      requests.push({ url, init });
+      if (url.endsWith('/inbox?wait=0')) {
+        return {
+          ok: true,
+          json: async () => ({
+            messages: [{ from: 'parent-id', fromName: 'Planner', type: 'task', body: 'Review the API' }],
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({ ok: true }) };
+    };
+
+    registerFtownPiExtension(pi, {
+      env: {
+        FTOWN_SESSION_ID: 'ftown-session',
+        FTOWN_HOOK_PORT: '4321',
+        FTOWN_HOOK_TOKEN: 'secret',
+      },
+      fetch: fetchImpl,
+      readBridgePointer: async () => null,
+    });
+
+    const ctx = {
+      sessionManager: {
+        getSessionId: () => 'pi-session-uuid',
+        getSessionFile: () => '/tmp/pi-session.jsonl',
+        getCwd: () => '/tmp/project',
+        getBranch: () => [{
+          type: 'message',
+          message: {
+            role: 'assistant',
+            provider: 'openai',
+            model: 'gpt-5',
+            usage: { input: 77, output: 9, cacheRead: 3, cacheWrite: 1 },
+          },
+        }],
+      },
+    };
+    await handlers.get('agent_settled')?.({}, ctx);
+
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].url, 'http://127.0.0.1:4321/hook');
+    assert.deepEqual(JSON.parse(String(requests[0].init?.body)), {
+      ftown_session_id: 'ftown-session',
+      ftown_session_source: 'env',
+      hook_event_name: 'Stop',
+      session_id: 'pi-session-uuid',
+      session_file: '/tmp/pi-session.jsonl',
+      cwd: '/tmp/project',
+      usage: {
+        inputTokens: 77,
+        outputTokens: 9,
+        cacheReadTokens: 3,
+        cacheWriteTokens: 1,
+        totalTokens: 90,
+        models: ['openai/gpt-5'],
+        perModel: [{
+          model: 'openai/gpt-5',
+          inputTokens: 77,
+          outputTokens: 9,
+          cacheReadTokens: 3,
+          cacheWriteTokens: 1,
+        }],
+        harness: 'pi',
+      },
+    });
+    assert.equal(requests[0].init?.headers instanceof Headers, true);
+    assert.equal((requests[0].init?.headers as Headers).get('authorization'), 'Bearer secret');
+    assert.equal(
+      requests[1].url,
+      'http://127.0.0.1:4321/api/sessions/ftown-session/inbox?wait=0',
+    );
+    assert.deepEqual(followUps, [
+      '[ftown mail]\n[task from Planner (parent-id)] Review the API\nHandle this message and reply with the `ftown_mail` tool where appropriate.',
+    ]);
+  });
+
+  it('maps Pi session, prompt, and tool events onto ftown hook events', async () => {
+    const handlers = new Map<string, (event: any, ctx: any) => Promise<unknown>>();
+    const hookPayloads: Array<Record<string, unknown>> = [];
+    const pi = {
+      on(event: string, handler: (event: any, ctx: any) => Promise<unknown>) {
+        handlers.set(event, handler);
+      },
+      sendUserMessage() {},
+      registerTool() {},
+      registerCommand() {},
+    };
+    const fetchImpl = async (_url: string, init?: RequestInit) => {
+      if (init?.body) hookPayloads.push(JSON.parse(String(init.body)));
+      return { ok: true, json: async () => ({ messages: [] }) };
+    };
+    registerFtownPiExtension(pi, {
+      env: { FTOWN_SESSION_ID: 'ftown-session', FTOWN_HOOK_PORT: '4321' },
+      fetch: fetchImpl,
+      readBridgePointer: async () => null,
+    });
+    const ctx = {
+      sessionManager: {
+        getSessionId: () => 'pi-session-uuid',
+        getSessionFile: () => '/tmp/pi-session.jsonl',
+        getCwd: () => '/tmp/project',
+      },
+    };
+
+    await handlers.get('session_start')?.({ reason: 'startup' }, ctx);
+    await handlers.get('before_agent_start')?.({ prompt: 'Ship it' }, ctx);
+    await handlers.get('tool_execution_start')?.(
+      { toolCallId: 'call-1', toolName: 'bash', args: { command: 'npm test' } },
+      ctx,
+    );
+    await handlers.get('tool_execution_end')?.(
+      { toolCallId: 'call-1', toolName: 'bash', isError: false },
+      ctx,
+    );
+    await handlers.get('session_shutdown')?.({ reason: 'quit' }, ctx);
+
+    assert.deepEqual(
+      hookPayloads.map((payload) => payload.hook_event_name),
+      ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'SessionEnd'],
+    );
+    assert.deepEqual(hookPayloads[2], {
+      ftown_session_id: 'ftown-session',
+      ftown_session_source: 'env',
+      hook_event_name: 'PreToolUse',
+      session_id: 'pi-session-uuid',
+      session_file: '/tmp/pi-session.jsonl',
+      cwd: '/tmp/project',
+      tool_call_id: 'call-1',
+      tool_name: 'bash',
+      tool_input: { command: 'npm test' },
+    });
+    assert.equal(hookPayloads[3].is_error, false);
+  });
+
+  it('registers model-callable ftown tools and sends mail through the local API', async () => {
+    const tools = new Map<string, any>();
+    const commands = new Map<string, any>();
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const pi = {
+      on() {},
+      sendUserMessage() {},
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+      registerCommand(name: string, command: any) { commands.set(name, command); },
+    };
+    const fetchImpl = async (url: string, init?: RequestInit) => {
+      requests.push({ url, init });
+      if (url.endsWith('/api/sessions')) {
+        return {
+          ok: true,
+          json: async () => ({ sessions: [
+            { id: 'ftown-session', name: 'Pi worker', status: 'running' },
+            { id: 'target-id', name: 'Planner', status: 'running' },
+          ] }),
+        };
+      }
+      return { ok: true, json: async () => ({ id: 'mail-1' }) };
+    };
+
+    registerFtownPiExtension(pi, {
+      env: { FTOWN_SESSION_ID: 'ftown-session', FTOWN_HOOK_PORT: '4321' },
+      fetch: fetchImpl,
+      readBridgePointer: async () => null,
+    });
+
+    assert.equal(tools.has('ftown_mail'), true);
+    assert.equal(commands.has('ftown-mail'), true);
+
+    const result = await tools.get('ftown_mail').execute(
+      'call-1',
+      { operation: 'send', target: 'Planner', body: 'Please review', type: 'task' },
+    );
+    const retried = await tools.get('ftown_mail').execute(
+      'call-1',
+      { operation: 'send', target: 'Planner', body: 'Please review', type: 'task' },
+    );
+
+    assert.equal(requests.length, 2);
+    assert.equal(requests[1].url, 'http://127.0.0.1:4321/api/sessions/target-id/inbox');
+    assert.deepEqual(JSON.parse(String(requests[1].init?.body)), {
+      body: 'Please review',
+      type: 'task',
+      from: 'ftown-session',
+      fromName: 'Pi worker',
+    });
+    assert.equal(result.isError, undefined);
+    assert.match(result.content[0].text, /mail-1/);
+    assert.deepEqual(retried, result);
+  });
+
+  it('lists ftown sessions through a model tool and slash command', async () => {
+    const tools = new Map<string, any>();
+    const commands = new Map<string, any>();
+    const notifications: string[] = [];
+    const sessions = [
+      { id: 's1', name: 'Planner', status: 'running', shellType: 'claude' },
+      { id: 's2', name: 'Worker', status: 'completed', shellType: 'pi' },
+    ];
+    const pi = {
+      on() {}, sendUserMessage() {},
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+      registerCommand(name: string, command: any) { commands.set(name, command); },
+    };
+    registerFtownPiExtension(pi, {
+      env: { FTOWN_SESSION_ID: 's2', FTOWN_HOOK_PORT: '4321' },
+      fetch: async () => ({ ok: true, json: async () => ({ sessions }) }),
+      readBridgePointer: async () => null,
+    });
+
+    const result = await tools.get('ftown_sessions').execute('call-list', { operation: 'list' });
+    assert.deepEqual(result.details, { sessions });
+
+    await commands.get('ftown-sessions').handler('', {
+      ui: { notify(message: string) { notifications.push(message); } },
+    });
+    assert.match(notifications[0], /Planner/);
+    assert.match(notifications[0], /Worker/);
+  });
+
+  it('retries a refreshed bridge token when a restarted bridge reuses the same port', async () => {
+    const tools = new Map<string, any>();
+    const authorizations: Array<string | null> = [];
+    const pi = {
+      on() {}, sendUserMessage() {}, registerCommand() {},
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+    };
+    registerFtownPiExtension(pi, {
+      env: {
+        FTOWN_SESSION_ID: 'self', FTOWN_HOOK_PORT: '4321', FTOWN_HOOK_TOKEN: 'stale-token',
+      },
+      fetch: async (_url: string, init?: RequestInit) => {
+        const authorization = (init?.headers as Headers).get('authorization');
+        authorizations.push(authorization);
+        if (authorization === 'Bearer stale-token') {
+          return { ok: false, status: 401, json: async () => ({ error: 'Unauthorized' }) };
+        }
+        return { ok: true, json: async () => ({ sessions: [{ id: 's1', name: 'Worker' }] }) };
+      },
+      readBridgePointer: async () => ({ port: 4321, token: 'fresh-token' }),
+    });
+
+    const result = await tools.get('ftown_sessions').execute('list-call', { operation: 'list' });
+
+    assert.equal(result.isError, undefined);
+    assert.equal(result.details.sessions[0].id, 's1');
+    assert.deepEqual(authorizations, ['Bearer stale-token', 'Bearer fresh-token']);
+  });
+
+  it('inspects a session usage and terminal log without terminal injection', async () => {
+    const tools = new Map<string, any>();
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const pi = {
+      on() {}, sendUserMessage() {}, registerCommand() {},
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+    };
+    const fetchImpl = async (url: string, init?: RequestInit) => {
+      requests.push({ url, init });
+      if (url.endsWith('/api/sessions')) {
+        return { ok: true, json: async () => ({ sessions: [{ id: 's1', name: 'Worker' }] }) };
+      }
+      if (url.endsWith('/usage')) {
+        return { ok: true, json: async () => ({ usage: { totalTokens: 123 } }) };
+      }
+      return { ok: true, json: async () => ({ matches: [{ lineNumber: 7, text: 'tests passed' }] }) };
+    };
+    registerFtownPiExtension(pi, {
+      env: { FTOWN_SESSION_ID: 'self', FTOWN_HOOK_PORT: '4321' },
+      fetch: fetchImpl,
+      readBridgePointer: async () => null,
+    });
+
+    const usage = await tools.get('ftown_sessions').execute(
+      'usage-call', { operation: 'usage', target: 'Worker' },
+    );
+    const grep = await tools.get('ftown_sessions').execute(
+      'grep-call', { operation: 'grep', target: 's1', pattern: 'passed', limit: 10, context: 2 },
+    );
+
+    assert.equal(usage.details.usage.totalTokens, 123);
+    assert.equal(requests[1].url, 'http://127.0.0.1:4321/api/sessions/s1/usage');
+    assert.equal(requests[3].url, 'http://127.0.0.1:4321/api/sessions/s1/grep');
+    assert.deepEqual(JSON.parse(String(requests[3].init?.body)), {
+      pattern: 'passed', offset: 0, limit: 10, context: 2,
+    });
+    assert.match(grep.content[0].text, /tests passed/);
+  });
+
+  it('reports running state and lists archived sessions', async () => {
+    const tools = new Map<string, any>();
+    const requests: string[] = [];
+    const pi = {
+      on() {}, sendUserMessage() {}, registerCommand() {},
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+    };
+    registerFtownPiExtension(pi, {
+      env: { FTOWN_SESSION_ID: 'self', FTOWN_HOOK_PORT: '4321' },
+      fetch: async (url: string) => {
+        requests.push(url);
+        if (url.endsWith('/api/archive')) {
+          return { ok: true, json: async () => ({ archived: [{ id: 'old-1', name: 'Old worker' }] }) };
+        }
+        if (url.endsWith('/api/sessions')) {
+          return { ok: true, json: async () => ({ sessions: [{ id: 's1', name: 'Worker' }] }) };
+        }
+        return { ok: true, json: async () => ({ sessionId: 's1', running: true }) };
+      },
+      readBridgePointer: async () => null,
+    });
+
+    const archived = await tools.get('ftown_sessions').execute(
+      'archive-call', { operation: 'archive' },
+    );
+    const running = await tools.get('ftown_sessions').execute(
+      'running-call', { operation: 'running', target: 'Worker' },
+    );
+
+    assert.equal(archived.details.archived[0].id, 'old-1');
+    assert.equal(running.details.running, true);
+    assert.equal(requests[0], 'http://127.0.0.1:4321/api/archive');
+    assert.equal(requests[2], 'http://127.0.0.1:4321/api/sessions/s1/running');
+  });
+
+  it('creates a structured child session without arbitrary command or env injection', async () => {
+    const tools = new Map<string, any>();
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const pi = {
+      on() {}, sendUserMessage() {}, registerCommand() {},
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+    };
+    registerFtownPiExtension(pi, {
+      env: {
+        FTOWN_SESSION_ID: 'parent-id', FTOWN_HOOK_PORT: '4321', FTOWN_HOOK_TOKEN: 'secret',
+      },
+      fetch: async (url: string, init?: RequestInit) => {
+        requests.push({ url, init });
+        return { ok: true, json: async () => ({ session: { id: 'child-id', name: 'Reviewer' } }) };
+      },
+      readBridgePointer: async () => null,
+    });
+
+    const result = await tools.get('ftown_session_create').execute('create-call', {
+      shell: 'pi', prompt: 'Review the API', workdir: '/tmp/project',
+      model: 'openai/gpt-5', name: 'Reviewer', parent: true,
+    });
+
+    assert.equal(requests[0].url, 'http://127.0.0.1:4321/api/sessions');
+    assert.deepEqual(JSON.parse(String(requests[0].init?.body)), {
+      shellType: 'pi', prompt: 'Review the API', workingDir: '/tmp/project',
+      model: 'openai/gpt-5', name: 'Reviewer', parentSessionId: true,
+    });
+    const requestHeaders = requests[0].init?.headers as Headers;
+    assert.equal(requestHeaders.get('authorization'), 'Bearer secret');
+    assert.equal(requestHeaders.get('x-ftown-session-id'), 'parent-id');
+    assert.equal(result.details.session.id, 'child-id');
+  });
+
+  it('renames and stops sessions through the structured management tool', async () => {
+    const tools = new Map<string, any>();
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const executions: Array<{ command: string; args: string[] }> = [];
+    const pi = {
+      on() {}, sendUserMessage() {}, registerCommand() {},
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+      async exec(command: string, args: string[]) {
+        executions.push({ command, args });
+        return { stdout: '{"stopped":true}', stderr: '', code: 0, killed: false };
+      },
+    };
+    registerFtownPiExtension(pi, {
+      env: { FTOWN_SESSION_ID: 'self', FTOWN_HOOK_PORT: '4321' },
+      fetch: async (url: string, init?: RequestInit) => {
+        requests.push({ url, init });
+        if (url.endsWith('/api/sessions')) {
+          return { ok: true, json: async () => ({ sessions: [{ id: 's1', name: 'Worker' }] }) };
+        }
+        return { ok: true, json: async () => ({ session: { id: 's1', name: 'Reviewer' } }) };
+      },
+      readBridgePointer: async () => null,
+    });
+
+    const renamed = await tools.get('ftown_session_manage').execute(
+      'rename-call', { operation: 'rename', target: 'Worker', name: 'Reviewer' },
+    );
+    const stopped = await tools.get('ftown_session_manage').execute(
+      'stop-call', { operation: 'stop', target: 's1' },
+    );
+
+    assert.deepEqual(JSON.parse(String(requests[1].init?.body)), { name: 'Reviewer' });
+    assert.equal(renamed.details.session.name, 'Reviewer');
+    assert.equal(executions[0].command.endsWith('/.ftown/ftown-sessions'), true);
+    assert.deepEqual(executions[0].args, ['stop', 's1']);
+    assert.equal(stopped.details.stopped, true);
+  });
+
+  it('revives an archived session through the management tool', async () => {
+    const tools = new Map<string, any>();
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const pi = {
+      on() {}, sendUserMessage() {}, registerCommand() {},
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+    };
+    registerFtownPiExtension(pi, {
+      env: { FTOWN_SESSION_ID: 'self', FTOWN_HOOK_PORT: '4321' },
+      fetch: async (url: string, init?: RequestInit) => {
+        requests.push({ url, init });
+        if (url.endsWith('/api/archive')) {
+          return { ok: true, json: async () => ({ archived: [{ id: 'old-1', name: 'Old worker' }] }) };
+        }
+        return { ok: true, json: async () => ({ session: { id: 'new-1' }, resumed: true }) };
+      },
+      readBridgePointer: async () => null,
+    });
+
+    const revived = await tools.get('ftown_session_manage').execute(
+      'revive-call', { operation: 'revive', target: 'Old worker' },
+    );
+
+    assert.equal(requests[1].url, 'http://127.0.0.1:4321/api/sessions/old-1/revive');
+    assert.equal(requests[1].init?.method, 'POST');
+    assert.equal(revived.details.resumed, true);
+  });
+
+  it('lists loops and requests a manual loop run', async () => {
+    const tools = new Map<string, any>();
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const pi = {
+      on() {}, sendUserMessage() {}, registerCommand() {},
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+    };
+    registerFtownPiExtension(pi, {
+      env: { FTOWN_SESSION_ID: 'self', FTOWN_HOOK_PORT: '4321' },
+      fetch: async (url: string, init?: RequestInit) => {
+        requests.push({ url, init });
+        if (url.endsWith('/api/loops')) {
+          return { ok: true, json: async () => ({ loops: [{ id: 'l1', name: 'Nightly review' }] }) };
+        }
+        return { ok: true, json: async () => ({ requested: true, loopId: 'l1' }) };
+      },
+      readBridgePointer: async () => null,
+    });
+
+    const listed = await tools.get('ftown_loops').execute('list-loops', { operation: 'list' });
+    const run = await tools.get('ftown_loops').execute(
+      'run-loop', { operation: 'run_now', target: 'Nightly review' },
+    );
+
+    assert.equal(listed.details.loops[0].id, 'l1');
+    assert.equal(requests[2].url, 'http://127.0.0.1:4321/api/loops/l1/run-now');
+    assert.equal(requests[2].init?.method, 'POST');
+    assert.equal(run.details.requested, true);
+  });
+
+  it('creates, updates, and deletes loops with structured fields', async () => {
+    const tools = new Map<string, any>();
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const pi = {
+      on() {}, sendUserMessage() {}, registerCommand() {},
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+    };
+    registerFtownPiExtension(pi, {
+      env: { FTOWN_SESSION_ID: 'self', FTOWN_HOOK_PORT: '4321' },
+      fetch: async (url: string, init?: RequestInit) => {
+        requests.push({ url, init });
+        if (url.endsWith('/api/loops') && init?.method === 'GET') {
+          return { ok: true, json: async () => ({ loops: [{ id: 'l1', name: 'Review loop' }] }) };
+        }
+        if (url.endsWith('/api/loops') && init?.method === 'POST') {
+          return { ok: true, json: async () => ({ loop: { id: 'l1', name: 'Review loop' } }) };
+        }
+        if (init?.method === 'DELETE') {
+          return { ok: true, json: async () => ({ removed: true, loopId: 'l1' }) };
+        }
+        return { ok: true, json: async () => ({ loop: { id: 'l1', enabled: false } }) };
+      },
+      readBridgePointer: async () => null,
+    });
+
+    const create = await tools.get('ftown_loops').execute('create-loop', {
+      operation: 'create', name: 'Review loop', task: 'Review open work',
+      schedule: { kind: 'interval', everyMs: 300_000 }, shell: 'pi', retention: 10,
+    });
+    const update = await tools.get('ftown_loops').execute(
+      'update-loop', { operation: 'update', target: 'Review loop', enabled: false },
+    );
+    const remove = await tools.get('ftown_loops').execute(
+      'delete-loop', { operation: 'delete', target: 'l1' },
+    );
+
+    assert.equal(create.details.loop.id, 'l1');
+    assert.deepEqual(JSON.parse(String(requests[0].init?.body)), {
+      name: 'Review loop', task: 'Review open work',
+      schedule: { kind: 'interval', everyMs: 300_000 }, harness: 'pi',
+      enabled: true, overlapPolicy: 'skip', retention: { autoClearAfterRuns: 10 },
+    });
+    assert.equal(requests[2].url, 'http://127.0.0.1:4321/api/loops/l1');
+    assert.deepEqual(JSON.parse(String(requests[2].init?.body)), { enabled: false });
+    assert.equal(update.details.loop.enabled, false);
+    assert.equal(requests[4].init?.method, 'DELETE');
+    assert.equal(remove.details.removed, true);
+  });
+});

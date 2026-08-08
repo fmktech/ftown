@@ -232,7 +232,7 @@ class StderrLogger implements Logger {
 // gain a runtime import of harness-registry.js), but asserted against the
 // registry-derived WorkflowShell type so any drift is a compile error.
 type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
-const SHELLS = ['claude', 'cursor', 'codex', 'opencode', 'shell'] as const satisfies readonly WorkflowShell[];
+const SHELLS = ['claude', 'cursor', 'codex', 'pi', 'opencode', 'shell'] as const satisfies readonly WorkflowShell[];
 const _shellsCoverEveryWorkflowShell: Equals<WorkflowShell, (typeof SHELLS)[number]> = true;
 void _shellsCoverEveryWorkflowShell;
 

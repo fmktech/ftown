@@ -1,8 +1,8 @@
 import { createReadStream } from 'node:fs';
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 
 import type { ModelUsage, Session, SessionUsage } from './types.js';
 
@@ -13,10 +13,10 @@ import type { ModelUsage, Session, SessionUsage } from './types.js';
  * not by shellType: provider flavors (zai/kimi/deepseek/fireworks) run the
  * claude CLI under the hood and get a claudeSessionId persisted by the hook
  * pipeline, so any session with a claudeSessionId uses the claude extractor
- * regardless of shellType. The kimi-code harness has no native session-id field
- * on Session, so its extractor keys off workingDir + createdAt instead (see
- * collectKimiCodeUsage). Sessions with none of these (cursor, grok, plain shell)
- * have no structured usage source and yield null.
+ * regardless of shellType. Pi records a native id/file when its extension is
+ * active and falls back to workingDir + createdAt discovery; kimi-code uses the
+ * same workdir-based discovery model. Sessions with none of these (cursor,
+ * grok, plain shell) have no structured usage source and yield null.
  *
  * TODO(opencode): add an opencode extractor once Session carries an
  * opencodeSessionId (no such field exists yet).
@@ -28,10 +28,10 @@ import type { ModelUsage, Session, SessionUsage } from './types.js';
 
 export type UsageSessionRef = Pick<
   Session,
-  'shellType' | 'claudeSessionId' | 'codexSessionId' | 'workingDir'
+  'shellType' | 'claudeSessionId' | 'codexSessionId' | 'piSessionId' | 'piSessionFile' | 'workingDir'
 > &
-  // createdAt is only consumed by the kimi-code extractor to disambiguate
-  // sessions sharing a workingDir; optional so non-kimi callers/tests need not set it.
+  // createdAt is consumed by workdir-based extractors to disambiguate sessions
+  // sharing a workingDir; optional so id-based callers/tests need not set it.
   Partial<Pick<Session, 'createdAt'>>;
 
 export interface UsageCollectorOptions {
@@ -39,6 +39,8 @@ export interface UsageCollectorOptions {
   claudeProjectsDir?: string;
   /** Override for tests. Default: ~/.codex/sessions */
   codexSessionsDir?: string;
+  /** Override for tests. Default: ~/.pi/agent/sessions */
+  piSessionsDir?: string;
   /**
    * Override for tests. Default: ~/.kimi-code. The kimi-code home dir holding
    * session_index.jsonl and sessions/<...>/session_<uuid>/.
@@ -71,10 +73,162 @@ export async function collectSessionUsage(
     if (session.codexSessionId) {
       return await collectCodexUsage(session.codexSessionId, options);
     }
+    if (session.shellType === 'pi' && session.workingDir) {
+      return await collectPiUsage(
+        session.workingDir,
+        session.createdAt,
+        options,
+        session.piSessionFile,
+      );
+    }
     if (session.shellType === 'kimi-code' && session.workingDir) {
       return await collectKimiCodeUsage(session.workingDir, session.createdAt, options);
     }
     return null;
+  } catch {
+    return null;
+  }
+}
+
+function piWorkspaceDirName(workingDir: string): string {
+  const resolved = resolve(workingDir);
+  return `--${resolved.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`;
+}
+
+interface PiSessionHeader {
+  type?: string;
+  timestamp?: string;
+  cwd?: string;
+}
+
+interface PiUsageLine {
+  type?: string;
+  message?: {
+    role?: string;
+    provider?: string;
+    model?: string;
+    usage?: {
+      input?: number;
+      output?: number;
+      cacheRead?: number;
+      cacheWrite?: number;
+    };
+  };
+}
+
+async function resolvePiSessionFile(
+  baseDir: string,
+  workingDir: string,
+  sessionCreatedAt: string | undefined,
+  deadline: number,
+): Promise<string | null> {
+  const dir = join(baseDir, piWorkspaceDirName(workingDir));
+  let files: string[];
+  try {
+    files = (await readdir(dir)).filter((file) => file.endsWith('.jsonl'));
+  } catch {
+    return null;
+  }
+
+  const candidates: Array<{ path: string; createdAtMs: number }> = [];
+  for (const file of files) {
+    const path = join(dir, file);
+    for await (const raw of jsonlLines(path, deadline)) {
+      const header = raw as PiSessionHeader;
+      if (header?.type === 'session' && header.cwd === resolve(workingDir)) {
+        const createdAtMs = header.timestamp ? Date.parse(header.timestamp) : NaN;
+        candidates.push({ path, createdAtMs: Number.isNaN(createdAtMs) ? 0 : createdAtMs });
+      }
+      break;
+    }
+  }
+  if (candidates.length === 0) return null;
+
+  const sessionMs = sessionCreatedAt ? Date.parse(sessionCreatedAt) : NaN;
+  if (!Number.isNaN(sessionMs)) {
+    const atOrAfter = candidates.filter((candidate) => candidate.createdAtMs >= sessionMs);
+    if (atOrAfter.length > 0) {
+      return atOrAfter.reduce((closest, candidate) =>
+        candidate.createdAtMs < closest.createdAtMs ? candidate : closest).path;
+    }
+  }
+
+  return candidates.reduce((newest, candidate) =>
+    candidate.createdAtMs >= newest.createdAtMs ? candidate : newest).path;
+}
+
+async function collectPiUsage(
+  workingDir: string,
+  sessionCreatedAt: string | undefined,
+  options: UsageCollectorOptions,
+  nativeSessionFile?: string,
+): Promise<SessionUsage | null> {
+  const baseDir = options.piSessionsDir ?? join(homedir(), '.pi', 'agent', 'sessions');
+  const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const candidatePath = nativeSessionFile
+    ?? await resolvePiSessionFile(baseDir, workingDir, sessionCreatedAt, deadline);
+  if (!candidatePath) return null;
+  const filePath = await containedPiSessionFile(baseDir, candidatePath);
+  if (!filePath) return null;
+
+  let counted = 0;
+  const byModel = new Map<string, ModelUsage>();
+  for await (const raw of jsonlLines(filePath, deadline)) {
+    const entry = raw as PiUsageLine;
+    const message = entry?.type === 'message' ? entry.message : undefined;
+    const usage = message?.role === 'assistant' ? message.usage : undefined;
+    if (!message || !usage || typeof message.model !== 'string' || !message.model) continue;
+    const model = typeof message.provider === 'string' && message.provider
+      ? `${message.provider}/${message.model}`
+      : message.model;
+
+    let acc = byModel.get(model);
+    if (!acc) {
+      acc = { model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+      byModel.set(model, acc);
+    }
+    acc.inputTokens += safeTokenCount(usage.input);
+    acc.outputTokens += safeTokenCount(usage.output);
+    acc.cacheReadTokens += safeTokenCount(usage.cacheRead);
+    acc.cacheWriteTokens += safeTokenCount(usage.cacheWrite);
+    counted += 1;
+  }
+  if (counted === 0) return null;
+
+  const perModel = [...byModel.values()];
+  const sum = (pick: (model: ModelUsage) => number): number =>
+    perModel.reduce((total, model) => total + pick(model), 0);
+  const inputTokens = sum((model) => model.inputTokens);
+  const outputTokens = sum((model) => model.outputTokens);
+  const cacheReadTokens = sum((model) => model.cacheReadTokens);
+  const cacheWriteTokens = sum((model) => model.cacheWriteTokens);
+
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+    models: perModel.map((model) => model.model),
+    perModel,
+    harness: 'pi',
+    collectedAt: new Date().toISOString(),
+  };
+}
+
+function safeTokenCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+async function containedPiSessionFile(baseDir: string, filePath: string): Promise<string | null> {
+  try {
+    const [base, file, info] = await Promise.all([
+      realpath(baseDir),
+      realpath(filePath),
+      stat(filePath),
+    ]);
+    if (!info.isFile() || !file.startsWith(`${base}${sep}`)) return null;
+    return file;
   } catch {
     return null;
   }

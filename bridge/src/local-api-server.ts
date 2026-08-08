@@ -19,6 +19,7 @@ import {
   resolveSessionIdFromHookPayload,
 } from './session-registry.js';
 import {
+  canResumeStoredSession,
   createFtownSession,
   deriveRelaunchCommand,
   parseCreateSessionBody,
@@ -93,6 +94,13 @@ export function workingDirMissingResponse(
       canCreate: true,
     },
   };
+}
+
+export function archivedSessionWasResumed(
+  session: Pick<Session, 'shellType' | 'claudeSessionId' | 'cursorSessionId' | 'codexSessionId'>,
+  isCustomCommand: boolean,
+): boolean {
+  return !isCustomCommand && canResumeStoredSession(session);
 }
 
 function parseBody(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -597,7 +605,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         (s) =>
           ((tombstone.claudeSessionId && s.claudeSessionId === tombstone.claudeSessionId) ||
             (tombstone.cursorSessionId && s.cursorSessionId === tombstone.cursorSessionId) ||
-            (tombstone.codexSessionId && s.codexSessionId === tombstone.codexSessionId)) &&
+            (tombstone.codexSessionId && s.codexSessionId === tombstone.codexSessionId) ||
+            (tombstone.piSessionId && s.piSessionId === tombstone.piSessionId)) &&
           isLive(s),
       );
       if (conflict) {
@@ -629,14 +638,13 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           claudeSessionId: tombstone.claudeSessionId,
           cursorSessionId: tombstone.cursorSessionId,
           codexSessionId: tombstone.codexSessionId,
+          piSessionId: tombstone.piSessionId,
+          piSessionFile: tombstone.piSessionFile,
           parentSessionId,
         });
-        // resumed=false means a fresh conversation (no agent session id was
-        // recorded before removal); callers should not assume context survived.
-        // Codex resumes via a `resume <id>` subcommand instead of a --resume flag.
-        const resumed =
-          session.command.includes(' --resume ') ||
-          /(^|\s)codex(\s+\S+)*\s+resume\s/.test(session.command);
+        // A builder-managed resumable harness preserves conversation context;
+        // custom commands are rerun verbatim and cannot make that guarantee.
+        const resumed = archivedSessionWasResumed(tombstone, isCustomCommand);
         jsonResponse(res, 201, { session: toWireSession(session), resumed });
       } catch (err) {
           if (err instanceof ProviderAuthMissingError) {

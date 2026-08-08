@@ -39,7 +39,7 @@ fts events --db "$FTS_DB" --after <cursor>
 
 ## Spawning workers
 
-`--shell` accepts `claude`, `cursor`, `codex`, `shell`, `opencode`, and Claude
+`--shell` accepts `claude`, `cursor`, `codex`, `grok`, `pi`, `kimi-code`, `shell`, `opencode`, and Claude
 Code provider flavors such as `zai`, `kimi`, `deepseek`, `fireworks`; `--parent`
 sets the worker's parent to `$FTOWN_SESSION_ID`.
 
@@ -80,7 +80,7 @@ your turn and let fallback mail wake you instead of running a polling loop.
 
 ## Messaging fallback (mail)
 
-Each session has an inbox. Claude and codex sessions receive mail automatically
+Each session has an inbox. Claude, codex, and Pi sessions receive mail automatically
 at turn boundaries via hooks — no keystroke injection. Cursor and shell sessions
 have no hooks: when idle they get a one-line nudge telling them to run
 `ftown-harness mail read`, so expect slightly slower pickup there.
