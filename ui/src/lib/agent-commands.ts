@@ -64,6 +64,14 @@ export function buildGrokCommand(options: {
   return parts.join(" ");
 }
 
+export function buildPiCommand(options: { model?: string }): string {
+  const parts = ["pi", "--extension", '"$HOME/.ftown/pi/ftown.js"'];
+  if (options.model?.trim()) {
+    parts.push("--model", shellQuote(options.model.trim()));
+  }
+  return parts.join(" ");
+}
+
 export function buildKimiCodeCommand(options: { model?: string }): string {
   // Absolute path: the kimi-code installer adds ~/.kimi-code/bin to PATH only via
   // .zshrc (interactive); ftown launches with `zsh -l -c` (non-interactive login),

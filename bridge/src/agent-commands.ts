@@ -10,6 +10,7 @@ export {
   buildCursorAgentCommand,
   buildCodexCommand,
   buildGrokCommand,
+  buildPiCommand,
   buildKimiCodeCommand,
 } from './harness-registry.js';
 
@@ -20,10 +21,11 @@ export interface BuildSessionCommandInput {
   claudeSessionId?: string;
   cursorSessionId?: string;
   codexSessionId?: string;
+  piSessionId?: string;
   command?: string;
   /** Initial prompt passed as a CLI argument — avoids racing the TUI with typed input. */
   initialPrompt?: string;
-  /** Resurrection resume — workdir-based harnesses (kimi-code) append their continue flag. */
+  /** Resurrection resume — workdir-based harnesses (Pi/kimi-code) append their continue flag. */
   resume?: boolean;
 }
 

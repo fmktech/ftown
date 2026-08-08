@@ -26,6 +26,7 @@ import { codexBinaryAvailable, ensureCodexHooks } from './codex-installer.js';
 import { installHarness, harnessOnPath, pathHint, writeHarnessAgentGuide, agentGuidePath } from './harness-installer.js';
 import type { HarnessInstallResult } from './harness-installer.js';
 import { installNotifyScript } from './install-notify-script.js';
+import { installPiExtension } from './pi-extension-installer.js';
 import { installFtownSkill, removeFtownSkill } from './install-ftown-skill.js';
 import { installFtownSessionsCli } from './install-ftown-cli.js';
 import { installFtownWorkflowsCli } from './install-ftown-workflows-cli.js';
@@ -40,6 +41,7 @@ import { SessionResurrection } from './session-resurrection.js';
 import { TerminalPump } from './terminal-pump.js';
 import { collectSessionUsage } from './usage-collector.js';
 import { AgentSessionIdPersister } from './session-ids.js';
+import { HookUsagePersister } from './hook-usage.js';
 import { fetchBridgeToken, refreshBridgeToken, type BridgeAuthResponse } from './bridge-auth.js';
 import { listLoops } from './loop-store.js';
 import { LoopScheduler, LOOP_TICK_INTERVAL_MS } from './loop-scheduler.js';
@@ -286,8 +288,11 @@ program
 
     const bundledNotifyPath = resolve(__dirname, '..', 'hooks', 'notify.sh');
     const notifyScriptPath = installNotifyScript(bundledNotifyPath);
+    const bundledPiExtensionPath = resolve(__dirname, '..', 'pi-extension', 'ftown.js');
+    const piExtensionPath = installPiExtension(bundledPiExtensionPath);
     installClaudeHooks(notifyScriptPath);
     installCursorHooks(notifyScriptPath);
+    console.log(`[Bridge] Pi extension: ${piExtensionPath}`);
 
     const wireTerminalInput = (sessionId: string): void => {
       centrifugo.subscribeToTerminalInput(
@@ -351,6 +356,10 @@ program
 
     // Persists Claude/Cursor/Codex-native session ids from hook events.
     const agentIdPersister = new AgentSessionIdPersister({
+      store,
+      publishSessionUpdate: (session) => centrifugo.publishSessionUpdate(userId, session),
+    });
+    const hookUsagePersister = new HookUsagePersister({
       store,
       publishSessionUpdate: (session) => centrifugo.publishSessionUpdate(userId, session),
     });
@@ -505,16 +514,17 @@ program
     }
 
     localApiServer.on('event', (hookEvent: HookEvent) => {
-      centrifugo.publishHookEvent(userId, hookEvent.sessionId, {
-        type: 'hook_event',
-        eventName: hookEvent.eventName,
-        data: hookEvent.data,
+      pump.withSessionWrite(hookEvent.sessionId, async () => {
+        await agentIdPersister.persist(hookEvent);
+        const usage = await hookUsagePersister.persist(hookEvent);
+        await centrifugo.publishHookEvent(userId, hookEvent.sessionId, {
+          type: 'hook_event',
+          eventName: hookEvent.eventName,
+          data: hookEvent.data,
+          ...(usage ? { usage } : {}),
+        });
       }).catch((err) => {
-        console.error('[Bridge] Failed to handle hook event:', err);
-      });
-
-      pump.withSessionWrite(hookEvent.sessionId, () => agentIdPersister.persist(hookEvent)).catch((err) => {
-        console.error(`[Bridge] Failed to persist agent session id for ${hookEvent.sessionId}:`, err);
+        console.error(`[Bridge] Failed to handle hook event for ${hookEvent.sessionId}:`, err);
       });
     });
 

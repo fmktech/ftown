@@ -71,7 +71,7 @@ run-now request never re-creates a deleted loop.
 | --- | --- |
 | `--every <duration>` | Interval schedule such as `30s`, `5m`, `2h`, `1d`. Minimum is `1s`. |
 | `--cron <expr>` / `--tz <zone>` | Cron schedule with optional IANA timezone. |
-| `--shell <type>` | `claude`, `cursor`, `codex`, `opencode`, or `shell`. |
+| `--shell <type>` | `claude`, `cursor`, `codex`, `grok`, `pi`, `kimi-code`, `opencode`, or `shell`. |
 | `--workdir <path>` | Working directory for each run. |
 | `--model <name>` | Harness model override when supported. |
 | `--disabled` / `--enabled` | Create/update enabled state. |

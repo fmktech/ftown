@@ -1,6 +1,6 @@
 # ftown
 
-A remote CLI agent orchestrator that lets you manage and stream **Claude Code** and **Cursor Agent** sessions through a web dashboard. Terminal streaming climbs a transport ladder — local loopback, then WebRTC P2P, then Centrifugo — so output stays on your machine or network whenever possible, and automatically upgrades back to a direct connection once it can. Recurring agent work runs as scheduled **loops**: cron or interval triggers that spawn full sessions with guardrails, instead of a hand-rolled polling script.
+A remote CLI agent orchestrator that lets you manage and stream **Claude Code, Cursor Agent, Codex, Grok, Pi, Kimi Code, opencode,** and shell sessions through a web dashboard. Terminal streaming climbs a transport ladder — local loopback, then WebRTC P2P, then Centrifugo — so output stays on your machine or network whenever possible, and automatically upgrades back to a direct connection once it can. Recurring agent work runs as scheduled **loops**: cron or interval triggers that spawn full sessions with guardrails, instead of a hand-rolled polling script.
 
 ## Demo
 
@@ -51,8 +51,12 @@ https://github.com/user-attachments/assets/e9c1ce70-70b0-4ba0-81d8-080d4eeef445
 
 ### Everything else
 
-- **Claude Code** and **Cursor Agent** (`agent`) interactive sessions with resume support
-- Hook forwarding to the dashboard (Claude `~/.claude/settings.json`, Cursor `~/.cursor/hooks.json`)
+- Seven coding-agent CLIs plus raw shells as full interactive sessions
+- Parent/child agent trees, durable cross-session mail, and session reparenting
+- Native resume support for Claude, Cursor, Codex, and Pi; workdir-based continuation for Kimi Code
+- Live per-session token/model usage for harnesses with structured native session logs
+- Hook forwarding to the dashboard (Claude/Codex settings, Cursor hooks, and ftown's bundled Pi extension)
+- Native Pi tools for session discovery/control, durable ftown mail, token usage, terminal inspection, archives, and loop management
 - Multiple concurrent sessions with session management
 - Multi-bridge support (connect multiple machines)
 - Mobile-optimized responsive UI
@@ -75,7 +79,7 @@ ftown-sessions loop create \
 ```
 
 - **Schedules** — interval (`--every 30s|5m|2h|1d`) or cron with timezone (`--cron "0 9 * * 1-5" --tz America/New_York`); create via the dashboard's loop modal or the CLI
-- **Harness choice** — claude, cursor, codex, opencode, or plain shell, each with its own configurable workdir and model
+- **Harness choice** — claude, cursor, codex, grok, pi, kimi-code, opencode, or plain shell, each with its own configurable workdir and model
 - **Guardrails** — `--preflight <cmd>` (a non-zero exit skips the run; its stdout is injected into the prompt via `{{preflight}}`), `--postflight <cmd>` (receives run status, session id, and output), `--max-runtime` to force-stop a run
 - **Overlap & retention** — overlapping runs are skipped by default (`--allow-overlap` to permit them); retention keeps only the newest N runs
 - **Lifecycle** — pause/resume, fire a one-shot run manually, edit a loop live, and see run history with status dots (running/done/error/skipped/paused) plus next-due time in the dashboard
@@ -85,7 +89,7 @@ ftown-sessions loop create \
 - Node.js 22+
 - PostgreSQL database (e.g., [Neon](https://neon.tech))
 - [Centrifugo](https://centrifugal.dev) v5 server
-- On bridge machines: [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and/or [Cursor CLI](https://cursor.com/docs/cli/overview) (`curl https://cursor.com/install -fsS | bash`, then `agent login`)
+- On bridge machines: install and authenticate whichever agent CLIs you plan to run. For Pi: `npm install -g @mariozechner/pi-coding-agent`, then run `pi` and `/login` (or provide a supported provider API key).
 
 ## Quick Start
 

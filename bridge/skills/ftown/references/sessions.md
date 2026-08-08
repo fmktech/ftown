@@ -47,8 +47,8 @@ top-level `~/.ftown/ftown` dispatcher.
 ~/.ftown/ftown-sessions archive
 
 # Recreate a removed session from its tombstone (resumes the agent
-# conversation when a claude/cursor/codex session id was recorded; the revived
-# session gets a NEW id)
+# conversation when a claude/cursor/codex/Pi session id was recorded; Kimi Code
+# continues by working directory; the revived session gets a NEW id)
 ~/.ftown/ftown-sessions revive <session-id>
 ```
 
@@ -62,7 +62,7 @@ schedule syntax, manual runs, pause/resume, and run history, read
 
 `tell` posts to the target session's **inbox**. Mail is delivered into the
 recipient's context automatically at turn boundaries (as `[ftown mail]`
-context), so there is no keystroke injection by default. Claude and codex
+context), so there is no keystroke injection by default. Claude, codex, and Pi
 sessions get this hook-based delivery; cursor and shell sessions rely on an
 idle one-line nudge to run `ftown-harness mail read` instead.
 
@@ -93,15 +93,15 @@ Fan-out targets are messaged sequentially, one JSON result line per target.
 
 | Flag | Description |
 |------|-------------|
-| `--shell` | `cursor`, `claude`, `codex`, `shell`, `opencode`, or Claude Code provider flavors `zai`, `kimi`, `deepseek`, `fireworks` (default `claude`) |
-| `--prompt` | Initial task — passed as a CLI launch argument to `claude`/Claude provider flavors/`cursor`/`codex` (typed after boot for other shells) |
+| `--shell` | `claude`, `cursor`, `codex`, `grok`, `pi`, `kimi-code`, `opencode`, `shell`, or Claude Code provider flavors `zai`, `kimi`, `deepseek`, `fireworks` (default `claude`) |
+| `--prompt` | Initial task — passed as a CLI launch argument to `claude`/Claude provider flavors/`cursor`/`codex`/`grok`/`pi` (typed after boot for other shells) |
 | `--workdir` | Working directory |
 | `--name` | Dashboard label |
 | `--command` | Full command override (skips `--shell` builder) |
 | `--parent` | Set parent to `$FTOWN_SESSION_ID` |
 | `--parent-id` | Explicit parent session UUID |
 | `--orchestrator` | Brief the new agent (non-`shell`) to spawn and coordinate sibling sessions |
-| `--model` | Cursor / codex model name |
+| `--model` | Harness model name or provider/model pattern (when supported) |
 
 Provider-flavored shells (`zai`, `kimi`, `deepseek`, `fireworks`) run Claude
 Code with provider-specific default endpoint/model environment. They require a

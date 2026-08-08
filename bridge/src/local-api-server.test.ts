@@ -5,7 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { ProviderAuthMissingError, WorkingDirMissingError } from './create-ftown-session.js';
-import { LocalApiServer, providerAuthMissingResponse, workingDirMissingResponse } from './local-api-server.js';
+import {
+  LocalApiServer,
+  archivedSessionWasResumed,
+  providerAuthMissingResponse,
+  workingDirMissingResponse,
+} from './local-api-server.js';
 import { deleteLoop, getLoop, listLoops, mutateLoopRuntime } from './loop-store.js';
 import { upsertLoopRunRecord } from './loop-run-store.js';
 import { SessionStore } from './session-store.js';
@@ -83,6 +88,15 @@ describe('workingDirMissingResponse', () => {
     assert.strictEqual(response.body.code, 'working_dir_missing');
     assert.strictEqual(response.body.workingDir, '/tmp/missing-project');
     assert.strictEqual(response.body.canCreate, true);
+  });
+});
+
+describe('archivedSessionWasResumed', () => {
+  it('reports Pi workdir/native continuation as resumed, but not a custom command', () => {
+    const piSession = { shellType: 'pi' as const };
+
+    assert.equal(archivedSessionWasResumed(piSession, false), true);
+    assert.equal(archivedSessionWasResumed(piSession, true), false);
   });
 });
 

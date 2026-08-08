@@ -15,7 +15,7 @@ import {
   UpdateSessionParentPayload,
 } from "@/types";
 import type { BridgeRpc } from "@/hooks/useBridgeRpc";
-import { buildCodexCommand, buildCursorAgentCommand, buildGrokCommand, buildKimiCodeCommand } from "@/lib/agent-commands";
+import { buildCodexCommand, buildCursorAgentCommand, buildGrokCommand, buildKimiCodeCommand, buildPiCommand } from "@/lib/agent-commands";
 import { buildUsagePollBatches } from "@/lib/live-usage-polling";
 
 // Re-exported for existing consumers (NewSessionModal, session pickers); the
@@ -310,6 +310,10 @@ export function useSessions(
         });
       } else if (shellType === "grok") {
         cmd = buildGrokCommand({
+          model: options?.model,
+        });
+      } else if (shellType === "pi") {
+        cmd = buildPiCommand({
           model: options?.model,
         });
       } else if (shellType === "kimi-code") {
