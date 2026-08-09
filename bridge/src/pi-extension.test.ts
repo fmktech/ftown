@@ -4,6 +4,80 @@ import assert from 'node:assert/strict';
 import { registerFtownPiExtension } from '../pi-extension/ftown.js';
 
 describe('ftown Pi extension', () => {
+  it('registers provider-compatible object schemas for every ftown tool', () => {
+    const tools: any[] = [];
+    const pi = {
+      on() {}, sendUserMessage() {}, registerCommand() {},
+      registerTool(tool: any) { tools.push(tool); },
+    };
+
+    registerFtownPiExtension(pi, {
+      env: {},
+      fetch: async () => ({ ok: true, json: async () => ({}) }),
+      readBridgePointer: async () => null,
+    });
+
+    assert.deepEqual(tools.map((tool) => tool.name), [
+      'ftown_mail',
+      'ftown_sessions',
+      'ftown_session_create',
+      'ftown_session_manage',
+      'ftown_loops',
+    ]);
+    for (const tool of tools) {
+      assert.equal(tool.parameters.type, 'object', `${tool.name} must have an object schema`);
+      for (const keyword of ['oneOf', 'anyOf', 'allOf', 'enum', 'const', 'not']) {
+        assert.equal(
+          Object.hasOwn(tool.parameters, keyword),
+          false,
+          `${tool.name} must not use top-level ${keyword}`,
+        );
+      }
+    }
+  });
+
+  it('rejects incomplete operation-specific arguments before making bridge requests', async () => {
+    const tools = new Map<string, any>();
+    let requestCount = 0;
+    const pi = {
+      on() {}, sendUserMessage() {}, registerCommand() {},
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+    };
+
+    registerFtownPiExtension(pi, {
+      env: { FTOWN_SESSION_ID: 'self' },
+      fetch: async () => {
+        requestCount += 1;
+        return { ok: true, json: async () => ({}) };
+      },
+      readBridgePointer: async () => null,
+    });
+
+    const cases = [
+      ['ftown_mail', { operation: 'send', target: 'worker' }, /body is required/],
+      ['ftown_sessions', { operation: 'grep', target: 'worker' }, /pattern is required/],
+      ['ftown_session_manage', { operation: 'rename', target: 'worker' }, /name is required/],
+      ['ftown_session_manage', { operation: 'reparent', target: 'worker' }, /parent is required/],
+      ['ftown_loops', { operation: 'create', name: 'Review', task: 'Review work' }, /schedule is required/],
+      ['ftown_loops', { operation: 'update', target: 'Review' }, /field to update is required/],
+      ['ftown_loops', {
+        operation: 'create', name: 'Review', task: 'Review work',
+        schedule: { kind: 'interval' },
+      }, /schedule.everyMs is required/],
+      ['ftown_loops', {
+        operation: 'create', name: 'Review', task: 'Review work',
+        schedule: { kind: 'cron' },
+      }, /schedule.expression is required/],
+    ] as const;
+
+    for (const [toolName, params, expected] of cases) {
+      const result = await tools.get(toolName).execute(`invalid-${toolName}`, params);
+      assert.equal(result.isError, true, `${toolName} should reject incomplete arguments`);
+      assert.match(result.details.error, expected);
+    }
+    assert.equal(requestCount, 0);
+  });
+
   it('forwards native lifecycle metadata and turns pending mail into a follow-up', async () => {
     const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>();
     const followUps: string[] = [];

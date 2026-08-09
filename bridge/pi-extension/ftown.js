@@ -211,7 +211,36 @@ export function registerFtownPiExtension(pi, options = {}) {
     throw new Error(`Session not found: ${normalized}`);
   }
 
+  function hasOwn(value, key) {
+    return value !== null && typeof value === 'object'
+      && Object.prototype.hasOwnProperty.call(value, key);
+  }
+
+  function requireString(params, field, label = field) {
+    const value = params?.[field];
+    if (typeof value !== 'string' || !value.trim()) throw new Error(`${label} is required`);
+  }
+
+  function requireProperty(params, field, label = field) {
+    if (!hasOwn(params, field)) throw new Error(`${label} is required`);
+  }
+
+  function requireOperation(params, allowed) {
+    if (!allowed.includes(params?.operation)) {
+      throw new Error(`operation must be one of: ${allowed.join(', ')}`);
+    }
+  }
+
+  function validateMailParams(params) {
+    requireOperation(params, ['send', 'read']);
+    if (params.operation === 'send') {
+      requireString(params, 'target');
+      requireString(params, 'body');
+    }
+  }
+
   async function runMail(params) {
+    validateMailParams(params);
     if (params.operation === 'read') {
       if (!ftownSessionId) throw new Error('FTOWN_SESSION_ID is unavailable');
       const query = new URLSearchParams({ wait: '0' });
@@ -261,31 +290,19 @@ export function registerFtownPiExtension(pi, options = {}) {
     label: 'ftown mail',
     description: 'Send durable mail to another ftown session, or read this session inbox.',
     parameters: {
-      anyOf: [
-        {
-          type: 'object',
-          properties: {
-            operation: { const: 'send' },
-            target: { type: 'string', description: 'Session id/name, or "parent".' },
-            body: { type: 'string', minLength: 1 },
-            type: { enum: ['message', 'task', 'result', 'escalation'] },
-            threadId: { type: 'string' },
-          },
-          required: ['operation', 'target', 'body'],
-          additionalProperties: false,
-        },
-        {
-          type: 'object',
-          properties: {
-            operation: { const: 'read' },
-            peek: { type: 'boolean', description: 'Do not mark messages delivered.' },
-            all: { type: 'boolean', description: 'Include already-delivered messages.' },
-            limit: { type: 'integer', minimum: 1, maximum: 100 },
-          },
-          required: ['operation'],
-          additionalProperties: false,
-        },
-      ],
+      type: 'object',
+      properties: {
+        operation: { type: 'string', enum: ['send', 'read'] },
+        target: { type: 'string', description: 'Session id/name, or "parent".' },
+        body: { type: 'string', minLength: 1 },
+        type: { type: 'string', enum: ['message', 'task', 'result', 'escalation'] },
+        threadId: { type: 'string' },
+        peek: { type: 'boolean', description: 'Do not mark messages delivered.' },
+        all: { type: 'boolean', description: 'Include already-delivered messages.' },
+        limit: { type: 'integer', minimum: 1, maximum: 100 },
+      },
+      required: ['operation'],
+      additionalProperties: false,
     },
     async execute(toolCallId, params) {
       try {
@@ -322,6 +339,9 @@ export function registerFtownPiExtension(pi, options = {}) {
   });
 
   async function runSessions(params) {
+    requireOperation(params, ['list', 'archive', 'get', 'usage', 'running', 'screen', 'grep']);
+    if (!['list', 'archive'].includes(params.operation)) requireString(params, 'target');
+    if (params.operation === 'grep') requireString(params, 'pattern');
     if (params.operation === 'archive') {
       return requestJson('/api/archive', { method: 'GET' });
     }
@@ -369,30 +389,19 @@ export function registerFtownPiExtension(pi, options = {}) {
     label: 'ftown sessions',
     description: 'List or inspect ftown sessions, running state, archive, token usage, terminal screen, and terminal log matches.',
     parameters: {
-      anyOf: [
-        {
-          type: 'object', properties: { operation: { enum: ['list', 'archive'] } },
-          required: ['operation'], additionalProperties: false,
+      type: 'object',
+      properties: {
+        operation: {
+          type: 'string',
+          enum: ['list', 'archive', 'get', 'usage', 'running', 'screen', 'grep'],
         },
-        ...['get', 'usage', 'running'].map((operation) => ({
-          type: 'object', properties: { operation: { const: operation }, target: targetProperty },
-          required: ['operation', 'target'], additionalProperties: false,
-        })),
-        {
-          type: 'object',
-          properties: { operation: { const: 'screen' }, target: targetProperty, ...pageProperties },
-          required: ['operation', 'target'], additionalProperties: false,
-        },
-        {
-          type: 'object',
-          properties: {
-            operation: { const: 'grep' }, target: targetProperty,
-            pattern: { type: 'string', minLength: 1 }, ...pageProperties,
-            context: { type: 'integer', minimum: 0, maximum: 10 },
-          },
-          required: ['operation', 'target', 'pattern'], additionalProperties: false,
-        },
-      ],
+        target: targetProperty,
+        pattern: { type: 'string', minLength: 1 },
+        ...pageProperties,
+        context: { type: 'integer', minimum: 0, maximum: 10 },
+      },
+      required: ['operation'],
+      additionalProperties: false,
     },
     async execute(_toolCallId, params) {
       try {
@@ -422,6 +431,7 @@ export function registerFtownPiExtension(pi, options = {}) {
       type: 'object',
       properties: {
         shell: {
+          type: 'string',
           enum: ['claude', 'cursor', 'codex', 'grok', 'pi', 'kimi-code', 'opencode', 'shell', 'zai', 'kimi', 'deepseek', 'fireworks'],
         },
         prompt: { type: 'string', minLength: 1 },
@@ -467,6 +477,10 @@ export function registerFtownPiExtension(pi, options = {}) {
   });
 
   async function runSessionManage(params) {
+    requireOperation(params, ['stop', 'remove', 'revive', 'rename', 'reparent']);
+    requireString(params, 'target');
+    if (params.operation === 'rename') requireString(params, 'name');
+    if (params.operation === 'reparent') requireProperty(params, 'parent');
     if (params.operation === 'revive') {
       const payload = await requestJson('/api/archive', { method: 'GET' });
       const archived = Array.isArray(payload?.archived) ? payload.archived : [];
@@ -517,28 +531,17 @@ export function registerFtownPiExtension(pi, options = {}) {
     label: 'manage ftown session',
     description: 'Stop, rename, reparent, remove, or revive an ftown session.',
     parameters: {
-      anyOf: [
-        ...['stop', 'remove', 'revive'].map((operation) => ({
-          type: 'object', properties: { operation: { const: operation }, target: targetProperty },
-          required: ['operation', 'target'], additionalProperties: false,
-        })),
-        {
-          type: 'object',
-          properties: {
-            operation: { const: 'rename' }, target: targetProperty,
-            name: { type: 'string', minLength: 1 },
-          },
-          required: ['operation', 'target', 'name'], additionalProperties: false,
+      type: 'object',
+      properties: {
+        operation: {
+          type: 'string', enum: ['stop', 'remove', 'revive', 'rename', 'reparent'],
         },
-        {
-          type: 'object',
-          properties: {
-            operation: { const: 'reparent' }, target: targetProperty,
-            parent: { type: ['string', 'null'], description: 'Parent id/name; null clears it.' },
-          },
-          required: ['operation', 'target', 'parent'], additionalProperties: false,
-        },
-      ],
+        target: targetProperty,
+        name: { type: 'string', minLength: 1 },
+        parent: { type: ['string', 'null'], description: 'Parent id/name; null clears it.' },
+      },
+      required: ['operation', 'target'],
+      additionalProperties: false,
     },
     async execute(toolCallId, params) {
       try {
@@ -567,41 +570,54 @@ export function registerFtownPiExtension(pi, options = {}) {
   }
 
   const loopScheduleProperty = {
-    anyOf: [
-      {
-        type: 'object',
-        properties: {
-          kind: { const: 'interval' },
-          everyMs: { type: 'integer', minimum: 1000 },
-        },
-        required: ['kind', 'everyMs'],
-        additionalProperties: false,
-      },
-      {
-        type: 'object',
-        properties: {
-          kind: { const: 'cron' },
-          expression: { type: 'string', minLength: 1 },
-          tz: { type: 'string', minLength: 1 },
-        },
-        required: ['kind', 'expression'],
-        additionalProperties: false,
-      },
-    ],
+    type: 'object',
+    properties: {
+      kind: { type: 'string', enum: ['interval', 'cron'] },
+      everyMs: { type: 'integer', minimum: 1000 },
+      expression: { type: 'string', minLength: 1 },
+      tz: { type: 'string', minLength: 1 },
+    },
+    required: ['kind'],
+    additionalProperties: false,
   };
   const loopDraftProperties = {
     name: { type: 'string', minLength: 1 },
     task: { type: 'string', minLength: 1 },
     schedule: loopScheduleProperty,
-    shell: { enum: ['claude', 'cursor', 'codex', 'grok', 'pi', 'kimi-code', 'opencode', 'shell'] },
+    shell: { type: 'string', enum: ['claude', 'cursor', 'codex', 'grok', 'pi', 'kimi-code', 'opencode', 'shell'] },
     workdir: { type: 'string' },
     model: { type: 'string' },
     enabled: { type: 'boolean' },
-    overlapPolicy: { enum: ['skip', 'allow'] },
+    overlapPolicy: { type: 'string', enum: ['skip', 'allow'] },
     retention: { type: ['integer', 'null'], minimum: 0 },
     maxRuntimeMs: { type: 'integer', minimum: 1000 },
     group: { type: 'string' },
   };
+  const loopDraftFields = Object.keys(loopDraftProperties);
+
+  function validateLoopSchedule(schedule) {
+    requireProperty({ schedule }, 'schedule');
+    if (schedule === null || typeof schedule !== 'object') throw new Error('schedule is required');
+    requireOperation({ operation: schedule.kind }, ['interval', 'cron']);
+    if (schedule.kind === 'interval') requireProperty(schedule, 'everyMs', 'schedule.everyMs');
+    if (schedule.kind === 'cron') requireString(schedule, 'expression', 'schedule.expression');
+  }
+
+  function validateLoopParams(params) {
+    requireOperation(params, ['list', 'get', 'runs', 'run_now', 'delete', 'create', 'update']);
+    if (['get', 'runs', 'run_now', 'delete', 'update'].includes(params.operation)) {
+      requireString(params, 'target');
+    }
+    if (params.operation === 'create') {
+      requireString(params, 'name');
+      requireString(params, 'task');
+      requireProperty(params, 'schedule');
+    }
+    if (params.operation === 'update' && !loopDraftFields.some((field) => hasOwn(params, field))) {
+      throw new Error('At least one field to update is required');
+    }
+    if (hasOwn(params, 'schedule')) validateLoopSchedule(params.schedule);
+  }
 
   function loopBody(params, create = false) {
     const body = {};
@@ -626,35 +642,21 @@ export function registerFtownPiExtension(pi, options = {}) {
     label: 'ftown loops',
     description: 'List, inspect, create, update, delete, or run scheduled ftown loops.',
     parameters: {
-      anyOf: [
-        {
-          type: 'object', properties: { operation: { const: 'list' } },
-          required: ['operation'], additionalProperties: false,
+      type: 'object',
+      properties: {
+        operation: {
+          type: 'string',
+          enum: ['list', 'get', 'runs', 'run_now', 'delete', 'create', 'update'],
         },
-        ...['get', 'runs', 'run_now', 'delete'].map((operation) => ({
-          type: 'object',
-          properties: { operation: { const: operation }, target: { type: 'string' } },
-          required: ['operation', 'target'], additionalProperties: false,
-        })),
-        {
-          type: 'object',
-          properties: { operation: { const: 'create' }, ...loopDraftProperties },
-          required: ['operation', 'name', 'task', 'schedule'],
-          additionalProperties: false,
-        },
-        {
-          type: 'object',
-          properties: {
-            operation: { const: 'update' }, target: { type: 'string' }, ...loopDraftProperties,
-          },
-          required: ['operation', 'target'],
-          minProperties: 3,
-          additionalProperties: false,
-        },
-      ],
+        target: { type: 'string' },
+        ...loopDraftProperties,
+      },
+      required: ['operation'],
+      additionalProperties: false,
     },
     async execute(toolCallId, params) {
       try {
+        validateLoopParams(params);
         if (params.operation === 'create') {
           return await executeOnce('ftown_loops', toolCallId, async () =>
             toolResult(await requestJson('/api/loops', {
