@@ -8,9 +8,10 @@ Scope: native Pi harness support, lifecycle hooks and token usage, bundled model
 
 | Check | Result | Evidence |
 | --- | --- | --- |
-| Bridge unit tests | ✅ | `npm test`: 568 passed, 0 failed. |
+| Bridge unit tests | ✅ | `npm test`: 571 passed, 0 failed. |
 | Bridge typecheck/build | ✅ | `npm run build`: TypeScript compilation completed successfully. |
-| Bridge package | ✅ | `npm pack --dry-run`: version 0.19.8 includes `pi-extension/ftown.js` and `pi-extension/API.md`. |
+| Bridge package | ✅ | `npm pack --dry-run`: version 0.19.9 includes `pi-extension/ftown.js` and `pi-extension/API.md`. |
+| Native Pi/OpenAI schema smoke | ✅ | Pi 0.83.0 with OpenAI `gpt-4.1-mini` accepted all five ftown tools and returned `OK`; the same command deterministically reproduces the 0.19.8 schema rejection. |
 | UI unit tests | ✅ | `npm test -- --run`: 133 passed, 0 failed across 12 files. |
 | UI production build | ✅ | The E2E-environment production build completed successfully. |
 | E2E typecheck | ✅ | The E2E TypeScript check completed without errors. |
