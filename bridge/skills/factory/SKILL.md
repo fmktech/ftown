@@ -34,15 +34,21 @@ already initialized (point them at `status`/`up`/`down` instead) — do not over
    `uv` is on PATH.
 2. **Install fticket.** `uv tool install fticket` (or `uv tool upgrade fticket` if already
    installed). Verify with `fts --help`.
-3. **Copy the template.**
+3. **Resolve routing and copy the template.** If the deployment prompt names the
+   initiating harness/model, use those values. Otherwise, when `FTOWN_SESSION_ID` is
+   set, run `~/.ftown/ftown-sessions get "$FTOWN_SESSION_ID"` and read this session's
+   `shellType` and optional `model`. If neither source identifies the harness, ask the
+   user instead of assuming one.
    ```bash
    cp -r ~/.ftown/skills/factory/factory-template "$REPO/factory"
    ```
-   `factory/bin` moves in as-is (no edits). Ask the user for: project name (default: the
-   repo directory's basename), an operator ftown session id (optional — default `-`, no
-   operator mail), any stage routing tweaks (harness/model/max_workers per stage), and
-   the shared resources workers must lease (default `staging`, exclusive-only).
-   Edit `factory/factory.yaml` with their answers.
+   `factory/bin` moves in as-is (no edits). Set every stage plus `triage` and `digest` to
+   the initiating harness/model. When the initiator has no explicit model, remove each
+   template `model` value so the harness default is used. Only retain or add a different
+   route when the user explicitly requested that override. Also apply the project name
+   (default: the repo directory's basename), operator ftown session id (optional —
+   default `-`, no operator mail), and shared resources (default `staging`,
+   exclusive-only). Edit `factory/factory.yaml` with these values.
 4. **Gitignore + state dirs.** Append `.ffactory/` to `$REPO/.gitignore` (create the file
    if absent). `mkdir -p "$REPO/.ffactory/tickets"`.
 5. **Init the ticket db**, reading stage order and limits back out of the edited

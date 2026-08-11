@@ -234,8 +234,16 @@ export interface NewFactoryInput {
 export const FACTORY_SKILL_PATH = "~/.ftown/skills/factory/SKILL.md";
 
 export function factoryInitPrompt(input: NewFactoryInput): string {
+  const initiatorRoute = input.model?.trim()
+    ? `The initiating agent is "${input.harness}" with model "${input.model.trim()}".`
+    : `The initiating agent is "${input.harness}" using its default model.`;
+
   return (
     `Deploy a software factory for project "${input.project}" in ${input.repoPath}.\n\n` +
+    `${initiatorRoute} Use that same agent routing for every stage, triage, and digest. ` +
+    `If no model is named, remove the template's per-role model values so the harness ` +
+    `default is used. Explicit user routing choices override this default; otherwise do ` +
+    `not preserve the template's mixed harness/model routing.\n\n` +
     `Read ${FACTORY_SKILL_PATH} (installed by the ftown bridge; the project template ` +
     `lives next to it at ~/.ftown/skills/factory/factory-template) and follow its ` +
     `"init" procedure exactly for this repo with project name "${input.project}", then ` +
