@@ -137,7 +137,9 @@ automatic one-paragraph briefing prepended to their first input: it states their
 name/id and parent name/id. When the task provides `FTS_DB` and `TICKET_ID`, the
 briefing makes fticket the primary coordination plane for context, status, and
 resource leases; mail is reserved for fallback/urgent escalation. Without FTS,
-it explains how to report via `ftown-harness mail send --parent`. The creator's
+it explains how to report via `ftown-harness mail send --parent --type result`.
+After recording or reporting the outcome, the child is instructed to remove itself as
+its final command unless the user explicitly asked it to stay open. The creator's
 `--prompt` follows after a `Task:` line.
 
 An agent session created with `--orchestrator` additionally gets `FTOWN_ORCHESTRATOR=1`

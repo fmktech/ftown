@@ -75,10 +75,13 @@ export function buildChildBriefing(params: ChildBriefingParams): string {
     `If your task provides FTS_DB and TICKET_ID, read the installed 'fticket' skill and use ` +
     `fticket as the primary coordination plane: read the ticket and artifacts for context, ` +
     `record status through its lifecycle and notes, and acquire/release resource leases before ` +
-    `touching shared surfaces. When the task has no FTS identifiers, report with ` +
-    `ftown-harness mail send --parent "<message>" (add --type result or --type escalation). ` +
+    `touching shared surfaces. When the task has no FTS identifiers, report completion with ` +
+    `ftown-harness mail send --parent --type result "<result>" (use --type escalation when blocked). ` +
     `With FTS, mail is a fallback only when FTS is unavailable/fenced or for an urgent ` +
-    `escalation. Check fallback mail with ftown-harness mail read. ` +
+    `escalation; the ticket transition and notes are the normal result report. After the outcome ` +
+    `is recorded or reported, unless the user explicitly asked you to keep the session open, ` +
+    `run ~/.ftown/ftown-sessions remove "$FTOWN_SESSION_ID" as your very last command; ` +
+    `nothing after it will execute. Check fallback mail with ftown-harness mail read. ` +
     `Inspect peers with ~/.ftown/ftown-sessions list / screen <id>. ` +
     `Your parent can read your terminal at any time.`
   );

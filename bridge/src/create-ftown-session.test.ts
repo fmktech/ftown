@@ -832,6 +832,22 @@ describe('buildChildBriefing', () => {
     assert.match(briefing, /fticket.*primary coordination/i);
     assert.match(briefing, /mail.*fallback/i);
   });
+
+  it('reports its result before self-removing unless the user asks it to stay open', () => {
+    const briefing = buildChildBriefing({
+      childName: 'worker',
+      childId: 'c1',
+      parentName: 'orch',
+      parentId: 'p1',
+    });
+    const report = 'ftown-harness mail send --parent --type result';
+    const remove = '~/.ftown/ftown-sessions remove "$FTOWN_SESSION_ID"';
+
+    assert.ok(briefing.indexOf(report) >= 0, 'child must report a typed result');
+    assert.ok(briefing.indexOf(remove) > briefing.indexOf(report), 'cleanup must follow reporting');
+    assert.match(briefing, /unless.*user.*keep.*open/i);
+    assert.match(briefing, /very last (command|action)/i);
+  });
 });
 
 describe('buildOrchestratorBriefing', () => {
