@@ -4,6 +4,14 @@ import assert from 'node:assert/strict';
 import { registerFtownPiExtension } from '../pi-extension/ftown.js';
 
 describe('ftown Pi extension', () => {
+  async function waitFor(predicate: () => boolean, message: string): Promise<void> {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (predicate()) return;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.fail(message);
+  }
+
   it('registers provider-compatible object schemas for every ftown tool', () => {
     const tools: any[] = [];
     const pi = {
@@ -168,6 +176,126 @@ describe('ftown Pi extension', () => {
     assert.deepEqual(followUps, [
       '[ftown mail]\n[task from Planner (parent-id)] Review the API\nHandle this message and reply with the `ftown_mail` tool where appropriate.',
     ]);
+  });
+
+  it('long-polls for mail and wakes an idle Pi session with a native follow-up', async () => {
+    const handlers = new Map<string, (event: any, ctx: any) => Promise<unknown>>();
+    const followUps: Array<{ message: string; options: unknown }> = [];
+    const inboxRequests: Array<{ url: string; signal?: AbortSignal }> = [];
+    let inboxRequestCount = 0;
+    const pi = {
+      on(event: string, handler: (event: any, ctx: any) => Promise<unknown>) {
+        handlers.set(event, handler);
+      },
+      sendUserMessage(message: string, options: unknown) {
+        followUps.push({ message, options });
+      },
+      registerTool() {},
+      registerCommand() {},
+    };
+    const fetchImpl = async (url: string, init?: RequestInit): Promise<any> => {
+      if (url.includes('/inbox?')) {
+        inboxRequests.push({ url, signal: init?.signal ?? undefined });
+        inboxRequestCount += 1;
+        if (inboxRequestCount === 1) {
+          return {
+            ok: true,
+            json: async () => ({
+              messages: [{ from: 'planner-id', fromName: 'Planner', type: 'task', body: 'Wake up' }],
+            }),
+          };
+        }
+        return await new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        });
+      }
+      return { ok: true, json: async () => ({ ok: true }) };
+    };
+    registerFtownPiExtension(pi, {
+      env: { FTOWN_SESSION_ID: 'ftown-session', FTOWN_HOOK_PORT: '4321' },
+      fetch: fetchImpl,
+      readBridgePointer: async () => null,
+    });
+    const ctx = {
+      sessionManager: {
+        getSessionId: () => 'pi-session-uuid',
+        getSessionFile: () => '/tmp/pi-session.jsonl',
+        getCwd: () => '/tmp/project',
+      },
+    };
+
+    await handlers.get('session_start')?.({ reason: 'startup' }, ctx);
+    await waitFor(() => followUps.length === 1, 'mail did not wake the idle Pi session');
+
+    assert.equal(
+      inboxRequests[0]?.url,
+      'http://127.0.0.1:4321/api/sessions/ftown-session/inbox?wait=30',
+    );
+    assert.deepEqual(followUps, [{
+      message: '[ftown mail]\n[task from Planner (planner-id)] Wake up\nHandle this message and reply with the `ftown_mail` tool where appropriate.',
+      options: { deliverAs: 'followUp' },
+    }]);
+
+    await handlers.get('session_start')?.({ reason: 'resume' }, ctx);
+    await handlers.get('agent_settled')?.({}, ctx);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(
+      inboxRequests.length,
+      2,
+      'repeated starts and agent settlement must reuse the active listener',
+    );
+
+    await handlers.get('session_shutdown')?.({ reason: 'quit' }, ctx);
+    assert.equal(inboxRequests[1]?.signal?.aborted, true, 'shutdown must abort the active listener');
+    await handlers.get('session_start')?.({ reason: 'resume-after-shutdown' }, ctx);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(inboxRequests.length, 2, 'shutdown must permanently close the listener');
+    assert.equal(followUps.length, 1, 'mail must be injected exactly once');
+  });
+
+  it('backs off repeated listener failures and stops retrying on shutdown', async () => {
+    const handlers = new Map<string, (event: any, ctx: any) => Promise<unknown>>();
+    const delays: number[] = [];
+    const pi = {
+      on(event: string, handler: (event: any, ctx: any) => Promise<unknown>) {
+        handlers.set(event, handler);
+      },
+      sendUserMessage() {},
+      registerTool() {},
+      registerCommand() {},
+    };
+    registerFtownPiExtension(pi, {
+      env: { FTOWN_SESSION_ID: 'ftown-session', FTOWN_HOOK_PORT: '4321' },
+      fetch: async (url: string) => {
+        if (url.endsWith('/hook')) return { ok: true, json: async () => ({ ok: true }) };
+        throw new Error('bridge unavailable');
+      },
+      readBridgePointer: async () => null,
+      mailWakeIdleDelayMs: 100,
+      mailWakeMaxRetryDelayMs: 400,
+      delay: async (ms: number, signal: AbortSignal) => {
+        delays.push(ms);
+        if (delays.length < 4) return;
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+      },
+    });
+    const ctx = {
+      sessionManager: {
+        getSessionId: () => 'pi-session-uuid',
+        getSessionFile: () => '/tmp/pi-session.jsonl',
+        getCwd: () => '/tmp/project',
+      },
+    };
+
+    await handlers.get('session_start')?.({ reason: 'startup' }, ctx);
+    await waitFor(() => delays.length === 4, 'listener did not retry bridge failures');
+    assert.deepEqual(delays, [100, 200, 400, 400]);
+
+    await handlers.get('session_shutdown')?.({ reason: 'quit' }, ctx);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(delays.length, 4);
   });
 
   it('maps Pi session, prompt, and tool events onto ftown hook events', async () => {

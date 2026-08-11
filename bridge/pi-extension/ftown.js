@@ -100,13 +100,40 @@ function collectBranchUsage(ctx) {
   };
 }
 
+function delayWithAbort(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    timer.unref?.();
+    signal.addEventListener('abort', finish, { once: true });
+  });
+}
+
 /** Register ftown lifecycle forwarding and mail delivery on Pi's extension API. */
 export function registerFtownPiExtension(pi, options = {}) {
   const env = options.env ?? process.env;
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const readBridgePointer = options.readBridgePointer ?? defaultReadBridgePointer;
   const ftownSessionId = env.FTOWN_SESSION_ID?.trim();
+  const mailWakeWaitSeconds = options.mailWakeWaitSeconds ?? 30;
+  const mailWakeIdleDelayMs = options.mailWakeIdleDelayMs ?? 1_000;
+  const mailWakeMaxRetryDelayMs = Math.max(
+    mailWakeIdleDelayMs,
+    options.mailWakeMaxRetryDelayMs ?? 30_000,
+  );
+  const delay = options.delay ?? delayWithAbort;
   const mutationResults = new Map();
+  let mailWakeController;
+  let mailWakeTask;
+  let mailWakeClosed = false;
 
   async function executeOnce(toolName, toolCallId, operation) {
     if (!toolCallId) return operation();
@@ -140,6 +167,7 @@ export function registerFtownPiExtension(pi, options = {}) {
         lastResponse = response;
       } catch {
         // A tmux-resurrected session may hold a stale port. Try bridge.json next.
+        if (init.signal?.aborted) break;
       }
     }
     return lastResponse;
@@ -175,19 +203,13 @@ export function registerFtownPiExtension(pi, options = {}) {
     });
   }
 
-  async function drainMail() {
+  async function drainMail(wait = 0, signal) {
     if (!ftownSessionId) return [];
-    const response = await request(
-      `/api/sessions/${encodeURIComponent(ftownSessionId)}/inbox?wait=0`,
-      { method: 'GET' },
+    const payload = await requestJson(
+      `/api/sessions/${encodeURIComponent(ftownSessionId)}/inbox?wait=${wait}`,
+      { method: 'GET', signal },
     );
-    if (!response) return [];
-    try {
-      const payload = await response.json();
-      return Array.isArray(payload?.messages) ? payload.messages : [];
-    } catch {
-      return [];
-    }
+    return Array.isArray(payload?.messages) ? payload.messages : [];
   }
 
   async function listSessions() {
@@ -691,19 +713,57 @@ export function registerFtownPiExtension(pi, options = {}) {
     },
   });
 
-  async function deliverMail() {
-    const messages = await drainMail();
-    if (messages.length === 0) return;
+  async function deliverMail(wait = 0, signal) {
+    const messages = await drainMail(wait, signal);
+    if (signal?.aborted || messages.length === 0) return 0;
     const formatted = messages.map(formatMail).join('\n');
     pi.sendUserMessage(
       `[ftown mail]\n${formatted}\n` +
       'Handle this message and reply with the `ftown_mail` tool where appropriate.',
+      { deliverAs: 'followUp' },
     );
+    return messages.length;
+  }
+
+  async function runMailWake(signal) {
+    let retryDelayMs = mailWakeIdleDelayMs;
+    while (!signal.aborted) {
+      try {
+        const delivered = await deliverMail(mailWakeWaitSeconds, signal);
+        retryDelayMs = mailWakeIdleDelayMs;
+        if (delivered === 0 && !signal.aborted) {
+          await delay(mailWakeIdleDelayMs, signal);
+        }
+      } catch {
+        if (!signal.aborted) {
+          await delay(retryDelayMs, signal);
+          retryDelayMs = Math.min(retryDelayMs * 2, mailWakeMaxRetryDelayMs);
+        }
+      }
+    }
+  }
+
+  function startMailWake() {
+    if (!ftownSessionId || mailWakeClosed || mailWakeTask) return;
+    const controller = new AbortController();
+    mailWakeController = controller;
+    const task = runMailWake(controller.signal);
+    mailWakeTask = task;
+    const cleanup = () => {
+      if (mailWakeTask === task) mailWakeTask = undefined;
+      if (mailWakeController === controller) mailWakeController = undefined;
+    };
+    void task.then(cleanup, cleanup);
+  }
+
+  function stopMailWake() {
+    mailWakeClosed = true;
+    mailWakeController?.abort();
   }
 
   pi.on('session_start', async (event, ctx) => {
     await postHook('SessionStart', ctx, { reason: event.reason });
-    await deliverMail();
+    startMailWake();
   });
 
   pi.on('before_agent_start', async (event, ctx) => {
@@ -729,10 +789,11 @@ export function registerFtownPiExtension(pi, options = {}) {
   pi.on('agent_settled', async (_event, ctx) => {
     const usage = collectBranchUsage(ctx);
     await postHook('Stop', ctx, usage ? { usage } : {});
-    await deliverMail();
+    if (!mailWakeTask) await deliverMail();
   });
 
   pi.on('session_shutdown', async (event, ctx) => {
+    stopMailWake();
     await postHook('SessionEnd', ctx, { reason: event.reason });
   });
 }

@@ -218,7 +218,9 @@ export class MailDeliveryService {
         );
         waiter.deliver(marked);
       }
-    } else {
+    } else if (session.shellType !== 'pi') {
+      // Pi's extension owns wake/retry natively; leave mail undelivered between
+      // polls instead of falling back to terminal keystroke injection.
       const nudgeDelay = HOOKED_SHELL_TYPES.has(session.shellType ?? 'claude')
         ? MAIL_NUDGE_DELAY_HOOKED_MS
         : MAIL_NUDGE_DELAY_MS;
@@ -318,10 +320,10 @@ export class MailDeliveryService {
     return { kind: 'longpoll', messages, abandon };
   }
 
-  /** A session earns the Stop-hook listen window only if mail can plausibly
-   *  arrive: it has a parent, has children, was marked an orchestrator, or has
-   *  exchanged mail before. */
+  /** A session earns the listen window when it has a native persistent listener
+   *  (Pi), a parent, children, an orchestrator marker, or prior mail history. */
   async participatesInMail(session: Session): Promise<boolean> {
+    if (session.shellType === 'pi') return true;
     if (session.parentSessionId) return true;
     if (session.env?.FTOWN_ORCHESTRATOR === '1') return true;
     if (!this.store || !this.mailStore) return false;

@@ -298,6 +298,19 @@ describe('MailDeliveryService long poll', () => {
 // ---------------------------------------------------------------------------
 
 describe('MailDeliveryService nudges', () => {
+  it('never injects a PTY nudge for Pi when its native listener is between polls', async () => {
+    const { clock, store, mailStore, runner, service } = setup();
+    const session = makeSession('pi-1', { shellType: 'pi' });
+    store.add(session);
+    runner.running.add(session.id);
+
+    await service.acceptMail(session, { body: 'wake natively', from: 'planner' });
+    await clock.advance(120_000);
+
+    assert.equal(runner.writes.length, 0);
+    assert.equal((await mailStore.listUndelivered(session.id)).length, 1);
+  });
+
   it('coalesces two rapid mails into one nudge crediting the latest sender', async () => {
     const { clock, store, runner, service } = setup();
     const session = makeSession('s1', { shellType: 'opencode' });
@@ -484,6 +497,16 @@ describe('MailDeliveryService participatesInMail gating', () => {
     store.add(session);
 
     const result = await service.readMail(session, { wait: 10, peek: false, all: false, limit: 50 });
+    assert.equal(result.kind, 'longpoll');
+  });
+
+  it('a standalone Pi session holds the long poll open for its native mail listener', async () => {
+    const { store, service } = setup();
+    const session = makeSession('pi-loner', { shellType: 'pi' });
+    store.add(session);
+
+    assert.equal(await service.participatesInMail(session), true);
+    const result = await service.readMail(session, { wait: 30, peek: false, all: false, limit: 50 });
     assert.equal(result.kind, 'longpoll');
   });
 });

@@ -43,6 +43,16 @@ All tools talk only to the local bridge selected by `FTOWN_HOOK_PORT` or `~/.fto
 
 The extension also registers `/ftown-mail read [--peek]`, `/ftown-mail send <session> <message>`, and `/ftown-sessions` for interactive use.
 
+## Mail wake-up
+
+After `session_start`, the extension maintains one authenticated, cancellable
+30-second long-poll against the current session's inbox. Incoming messages are
+injected through Pi's native `sendUserMessage(..., { deliverAs: "followUp" })`
+API. This starts a turn immediately while Pi is idle and safely queues a
+follow-up while Pi is streaming. The listener retries bridge errors with capped
+exponential backoff and is aborted during `session_shutdown`; it never types
+into the terminal.
+
 ## Authorization and safety
 
 The local bridge bearer token authorizes access to the current ftown user's bridge resources. Session name resolution is performed against that same authenticated bridge. The model can inspect a terminal screen or search its captured log, but it cannot inject raw terminal keystrokes, resize terminals, clear terminal history, or call hook/conversation-resolution internals through these tools.
