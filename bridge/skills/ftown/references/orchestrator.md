@@ -119,7 +119,9 @@ prefer an FTS update/event, then fallback mail, which arrives at the next turn b
 ~/.ftown/ftown-sessions revive <session-id>
 ```
 
-Clean up workers you no longer need to keep the session list tidy.
+Child briefings normally make workers report first and then remove themselves. Explicitly
+ask a worker to stay open when you need follow-up interaction; otherwise, clean up any
+worker that exits without honoring the self-removal instruction.
 
 ## Recurring work
 
