@@ -272,7 +272,11 @@ def capacity_spawn(
     db_path: Path,
     dry_run: bool,
 ) -> tuple[list[int], int, int, int]:
-    """Claim + spawn up to capacity, stages in yaml order.
+    """Claim + spawn up to capacity, later stages first (pipeline drain).
+
+    Reversing yaml stage order prefers tickets already moving through the pipeline over
+    admitting new work at the first stage. With max_sessions=1, one ticket therefore
+    runs end-to-end before the dispatcher starts the next one.
 
     Returns (spawned_ids, rejected_input, expiry_capped, active_total). Guards run just
     after the claim (fts.claim picks the ticket, so preflight can't run earlier); a guard
@@ -297,7 +301,7 @@ def capacity_spawn(
         except FTSError as exc:
             print(f"dead_letter failed for ticket {ticket_id}: {exc}", file=sys.stderr)
 
-    for stage in cfg.stages:
+    for stage in reversed(cfg.stages):
         free = min(stage.max_workers - active_of(stage.name), budget)
         if free <= 0:
             continue

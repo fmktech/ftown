@@ -5,7 +5,7 @@ project: my-project            # used to namespace ftown loops and worker names
 operator_session: "-"          # ftown session id for digests/worker mail; "-" = none
 
 limits:
-  max_sessions: 6              # global concurrent worker cap for this factory
+  max_sessions: 6              # global cap; set 1 for strict one-ticket end-to-end flow
   bounce_limit: 3              # rejections before auto dead-letter (fts config)
   claim_ttl_ms: 1800000        # default claim TTL (30m); stages may override
   max_ticket_age_h: 48         # dispatcher dead-letters tickets older than this
@@ -17,6 +17,7 @@ resources:
   - name: staging
     policy: exclusive_only     # both | exclusive_only | shared_only
 
+# Dispatcher claims later stages first, draining work before admitting new tickets.
 # Harness per stage: claude | codex | cursor | zai | kimi | deepseek | fireworks
 # next: where advance() sends the ticket on success (- = terminal)
 # bounce: where reject() sends it (- = rejection not allowed)
