@@ -175,6 +175,8 @@ Mail reaches the recipient automatically: a synchronous \`hook-pump\` hook
 \`~/.codex/hooks.json\` for codex) checks the inbox at turn boundaries and
 injects pending mail as \`[ftown mail]\` context —
 on Stop it holds the agent's turn open so messages get handled immediately.
+Pi's bundled extension keeps one cancellable inbox long-poll open and wakes an
+idle Pi session with a native follow-up turn as soon as mail arrives.
 Cursor and shell sessions have no hooks; when idle they get a one-line nudge
 to run \`ftown-harness mail read\` instead.
 Prefer mail over \`send\` (keystroke injection) for agent-to-agent communication.

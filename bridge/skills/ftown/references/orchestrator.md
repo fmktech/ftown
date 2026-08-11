@@ -80,10 +80,12 @@ your turn and let fallback mail wake you instead of running a polling loop.
 
 ## Messaging fallback (mail)
 
-Each session has an inbox. Claude, codex, and Pi sessions receive mail automatically
-at turn boundaries via hooks — no keystroke injection. Cursor and shell sessions
-have no hooks: when idle they get a one-line nudge telling them to run
-`ftown-harness mail read`, so expect slightly slower pickup there.
+Each session has an inbox. Claude and codex receive mail automatically at turn
+boundaries via hooks. Pi's bundled extension maintains a long-poll and wakes idle
+Pi sessions with a native follow-up turn. None of these paths inject terminal
+keystrokes. Cursor and shell sessions have no hooks: when idle they get a one-line
+nudge telling them to run `ftown-harness mail read`, so expect slightly slower
+pickup there.
 
 ```bash
 # Send work / instructions to a child

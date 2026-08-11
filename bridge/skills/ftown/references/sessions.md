@@ -61,10 +61,11 @@ schedule syntax, manual runs, pause/resume, and run history, read
 ## Messaging (mail)
 
 `tell` posts to the target session's **inbox**. Mail is delivered into the
-recipient's context automatically at turn boundaries (as `[ftown mail]`
-context), so there is no keystroke injection by default. Claude, codex, and Pi
-sessions get this hook-based delivery; cursor and shell sessions rely on an
-idle one-line nudge to run `ftown-harness mail read` instead.
+recipient's context automatically (as `[ftown mail]` context), so there is no
+keystroke injection by default. Claude and codex use turn-boundary hooks. Pi's
+bundled extension keeps a cancellable long-poll open and starts a native
+follow-up turn when mail arrives, including while Pi is idle. Cursor and shell
+sessions rely on an idle one-line nudge to run `ftown-harness mail read` instead.
 
 ```bash
 # Tell a specific session
