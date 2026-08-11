@@ -5,10 +5,11 @@ import { relativeTime } from "@/lib/relative-time";
 import type {
   FactoryBoardProps,
   FactoryTicket,
+  TicketArtifactFile,
   TicketDetail,
-  TicketHistoryEntry,
   TicketStatus,
 } from "./types";
+import { TicketDetailsModal } from "./TicketDetailsModal";
 
 const STATUS_BADGE: Record<TicketStatus, string> = {
   queued: "bg-zinc-500/15 text-zinc-300 border-zinc-500/30",
@@ -20,23 +21,6 @@ const STATUS_BADGE: Record<TicketStatus, string> = {
   dead_letter: "bg-red-500/15 text-red-300 border-red-500/30",
 };
 
-function formatUntil(ms: number): string {
-  if (Number.isNaN(ms)) return "unknown";
-  if (ms - Date.now() <= 0) return `expired ${relativeTime(ms)}`;
-  return `expires ${relativeTime(ms)}`;
-}
-
-function historyLine(entry: TicketHistoryEntry): string {
-  const parts: string[] = [];
-  if (entry.from_stage !== null || entry.to_stage !== null) {
-    parts.push(`${entry.from_stage ?? "?"} → ${entry.to_stage ?? "?"}`);
-  }
-  if (entry.from_status !== null || entry.to_status !== null) {
-    parts.push(`${entry.from_status ?? "?"} → ${entry.to_status ?? "?"}`);
-  }
-  return parts.join(" · ");
-}
-
 interface DetailState {
   ticketId: number;
   loading: boolean;
@@ -44,121 +28,53 @@ interface DetailState {
   detail: TicketDetail | null;
 }
 
-function TicketDetailPanel({
-  state,
-  onClose,
-}: {
-  state: DetailState;
-  onClose: () => void;
-}) {
-  return (
-    <div className="mt-1 rounded border border-zinc-700/60 bg-zinc-900/60 p-2 text-xs text-zinc-300">
-      <div className="flex items-center justify-between">
-        <span className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">
-          Ticket #{state.ticketId}
-        </span>
-        <button
-          type="button"
-          onClick={onClose}
-          className="rounded px-1 text-zinc-500 hover:text-zinc-200"
-          aria-label="Close ticket detail"
-        >
-          ✕
-        </button>
-      </div>
-      {state.loading && (
-        <div className="py-2 text-zinc-500">
-          <span className="inline-block animate-pulse">Loading ticket…</span>
-        </div>
-      )}
-      {!state.loading && state.error !== null && (
-        <div className="py-2 text-red-400">{state.error}</div>
-      )}
-      {!state.loading && state.error === null && state.detail !== null && (
-        <div className="space-y-2 pt-1">
-          {state.detail.claim !== null && (
-            <div className="rounded border border-amber-500/20 bg-amber-500/5 p-1.5">
-              <div className="font-mono text-[10px] uppercase tracking-wider text-amber-400/80">
-                Claim
-              </div>
-              <div className="truncate" title={state.detail.claim.worker_id}>
-                worker: {state.detail.claim.worker_id}
-              </div>
-              <div>
-                epoch {state.detail.claim.epoch} · renews{" "}
-                {state.detail.claim.renew_count}
-              </div>
-              <div>{formatUntil(state.detail.claim.expires_at_ms)}</div>
-            </div>
-          )}
-          <div>
-            <div className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">
-              History
-            </div>
-            {state.detail.history.length === 0 ? (
-              <div className="text-zinc-500">No history entries.</div>
-            ) : (
-              <ol className="mt-1 max-h-48 space-y-1.5 overflow-y-auto border-l border-zinc-700/60 pl-2">
-                {state.detail.history.map((entry) => {
-                  const line = historyLine(entry);
-                  const who = entry.actor ?? entry.worker_id;
-                  return (
-                    <li key={entry.id}>
-                      <div className="flex items-baseline gap-1.5">
-                        <span className="shrink-0 text-zinc-500">
-                          {relativeTime(entry.at_ms)}
-                        </span>
-                        <span className="font-medium text-zinc-200">
-                          {entry.kind}
-                        </span>
-                      </div>
-                      {line !== "" && (
-                        <div className="text-zinc-400">{line}</div>
-                      )}
-                      {who !== null && (
-                        <div className="truncate text-zinc-500" title={who}>
-                          {who}
-                        </div>
-                      )}
-                      {entry.note !== null && entry.note !== "" && (
-                        <div className="text-zinc-400 italic">{entry.note}</div>
-                      )}
-                    </li>
-                  );
-                })}
-              </ol>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
+interface ArtifactState {
+  folderPath: string | null;
+  files: TicketArtifactFile[];
+  filesLoading: boolean;
+  filesError: string | null;
+  selectedRelPath: string | null;
+  content: string | null;
+  contentLoading: boolean;
+  contentError: string | null;
+}
+
+function emptyArtifacts(): ArtifactState {
+  return {
+    folderPath: null,
+    files: [],
+    filesLoading: false,
+    filesError: null,
+    selectedRelPath: null,
+    content: null,
+    contentLoading: false,
+    contentError: null,
+  };
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function TicketCard({
   ticket,
-  expanded,
-  detailState,
-  onToggle,
-  onClose,
+  selected,
+  onOpen,
 }: {
   ticket: FactoryTicket;
-  expanded: boolean;
-  detailState: DetailState | null;
-  onToggle: (id: number) => void;
-  onClose: () => void;
+  selected: boolean;
+  onOpen: (id: number) => void;
 }) {
   return (
-    <div>
-      <button
-        type="button"
-        onClick={() => onToggle(ticket.id)}
-        className={`w-full rounded border p-2 text-left transition-colors ${
-          expanded
-            ? "border-zinc-500/60 bg-zinc-800/80"
-            : "border-zinc-700/50 bg-zinc-900/40 hover:border-zinc-600/60 hover:bg-zinc-800/50"
-        }`}
-      >
+    <button
+      type="button"
+      onClick={() => onOpen(ticket.id)}
+      className={`w-full rounded border p-2 text-left transition-colors ${
+        selected
+          ? "border-zinc-500/60 bg-zinc-800/80"
+          : "border-zinc-700/50 bg-zinc-900/40 hover:border-zinc-600/60 hover:bg-zinc-800/50"
+      }`}
+    >
         <div className="flex items-baseline gap-1.5">
           <span className="shrink-0 font-mono text-xs text-zinc-500">
             #{ticket.id}
@@ -204,11 +120,7 @@ function TicketCard({
               {ticket.dead_letter_reason}
             </div>
           )}
-      </button>
-      {expanded && detailState !== null && (
-        <TicketDetailPanel state={detailState} onClose={onClose} />
-      )}
-    </div>
+    </button>
   );
 }
 
@@ -218,45 +130,115 @@ export function FactoryBoard({
   loading,
   onRefresh,
   showTicket,
+  listTicketArtifacts,
+  readTicketArtifact,
 }: FactoryBoardProps) {
   const [detailState, setDetailState] = useState<DetailState | null>(null);
-  const requestSeq = useRef(0);
-  const expandedIdRef = useRef<number | null>(null);
+  const [artifacts, setArtifacts] = useState<ArtifactState>(emptyArtifacts);
+  const detailSeq = useRef(0);
+  const fileListSeq = useRef(0);
+  const fileReadSeq = useRef(0);
+
+  const openFile = useCallback(
+    (folderPath: string, relPath: string) => {
+      const seq = ++fileReadSeq.current;
+      setArtifacts((current) => ({
+        ...current,
+        folderPath,
+        selectedRelPath: relPath,
+        content: null,
+        contentLoading: true,
+        contentError: null,
+      }));
+      readTicketArtifact(folderPath, relPath)
+        .then((content) => {
+          if (fileReadSeq.current !== seq) return;
+          setArtifacts((current) => ({
+            ...current,
+            content,
+            contentLoading: false,
+            contentError: null,
+          }));
+        })
+        .catch((err: unknown) => {
+          if (fileReadSeq.current !== seq) return;
+          setArtifacts((current) => ({
+            ...current,
+            content: null,
+            contentLoading: false,
+            contentError: errorMessage(err),
+          }));
+        });
+    },
+    [readTicketArtifact],
+  );
+
+  const loadFiles = useCallback(
+    (folderPath: string) => {
+      const seq = ++fileListSeq.current;
+      ++fileReadSeq.current;
+      setArtifacts({
+        ...emptyArtifacts(),
+        folderPath,
+        filesLoading: true,
+      });
+      listTicketArtifacts(folderPath)
+        .then((files) => {
+          if (fileListSeq.current !== seq) return;
+          const first =
+            files.find((file) => file.name === "request.md") ?? files[0] ?? null;
+          setArtifacts({
+            ...emptyArtifacts(),
+            folderPath,
+            files,
+            selectedRelPath: first?.relPath ?? null,
+          });
+          if (first !== null) openFile(folderPath, first.relPath);
+        })
+        .catch((err: unknown) => {
+          if (fileListSeq.current !== seq) return;
+          setArtifacts({
+            ...emptyArtifacts(),
+            folderPath,
+            filesError: errorMessage(err),
+          });
+        });
+    },
+    [listTicketArtifacts, openFile],
+  );
 
   const closeDetail = useCallback(() => {
-    expandedIdRef.current = null;
-    requestSeq.current += 1;
+    detailSeq.current += 1;
+    fileListSeq.current += 1;
+    fileReadSeq.current += 1;
     setDetailState(null);
+    setArtifacts(emptyArtifacts());
   }, []);
 
-  const toggleTicket = useCallback(
+  const openTicket = useCallback(
     (id: number) => {
-      if (expandedIdRef.current === id) {
-        expandedIdRef.current = null;
-        requestSeq.current += 1;
-        setDetailState(null);
-        return;
-      }
-      expandedIdRef.current = id;
-      const seq = ++requestSeq.current;
+      const seq = ++detailSeq.current;
+      ++fileListSeq.current;
+      ++fileReadSeq.current;
+      setArtifacts(emptyArtifacts());
       setDetailState({ ticketId: id, loading: true, error: null, detail: null });
       showTicket(id)
         .then((detail) => {
-          if (requestSeq.current !== seq) return;
+          if (detailSeq.current !== seq) return;
           setDetailState({ ticketId: id, loading: false, error: null, detail });
+          loadFiles(detail.ticket.folder_path);
         })
         .catch((err: unknown) => {
-          if (requestSeq.current !== seq) return;
-          const message = err instanceof Error ? err.message : String(err);
+          if (detailSeq.current !== seq) return;
           setDetailState({
             ticketId: id,
             loading: false,
-            error: message,
+            error: errorMessage(err),
             detail: null,
           });
         });
     },
-    [showTicket],
+    [loadFiles, showTicket],
   );
 
   const columns = useMemo<Array<{ stage: string; tickets: FactoryTicket[] }>>(() => {
@@ -347,12 +329,8 @@ export function FactoryBoard({
                     <TicketCard
                       key={ticket.id}
                       ticket={ticket}
-                      expanded={detailState?.ticketId === ticket.id}
-                      detailState={
-                        detailState?.ticketId === ticket.id ? detailState : null
-                      }
-                      onToggle={toggleTicket}
-                      onClose={closeDetail}
+                      selected={detailState?.ticketId === ticket.id}
+                      onOpen={openTicket}
                     />
                   ))
                 )}
@@ -360,6 +338,38 @@ export function FactoryBoard({
             </div>
           ))}
         </div>
+      )}
+      {detailState !== null && (
+        <TicketDetailsModal
+          ticketId={detailState.ticketId}
+          detail={detailState.detail}
+          detailLoading={detailState.loading}
+          detailError={detailState.error}
+          files={artifacts.files}
+          filesLoading={artifacts.filesLoading}
+          filesError={artifacts.filesError}
+          selectedRelPath={artifacts.selectedRelPath}
+          content={artifacts.content}
+          contentLoading={artifacts.contentLoading}
+          contentError={artifacts.contentError}
+          onSelectFile={(relPath) => {
+            if (artifacts.folderPath !== null) {
+              openFile(artifacts.folderPath, relPath);
+            }
+          }}
+          onRetryFiles={() => {
+            if (artifacts.folderPath !== null) loadFiles(artifacts.folderPath);
+          }}
+          onRetryContent={() => {
+            if (
+              artifacts.folderPath !== null &&
+              artifacts.selectedRelPath !== null
+            ) {
+              openFile(artifacts.folderPath, artifacts.selectedRelPath);
+            }
+          }}
+          onClose={closeDetail}
+        />
       )}
     </div>
   );

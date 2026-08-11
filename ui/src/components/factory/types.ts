@@ -92,6 +92,13 @@ export interface TicketDetail {
   history: TicketHistoryEntry[];
 }
 
+export interface TicketArtifactFile {
+  /** Path displayed inside the ticket artifact folder. */
+  name: string;
+  /** Repo-root-relative path used by the bridge reader. */
+  relPath: string;
+}
+
 // ---------------------------------------------------------------------------
 // Skills
 // ---------------------------------------------------------------------------
@@ -149,6 +156,70 @@ export const SQLITE_TRANSIENT_RE = /database is locked|database table is locked|
 
 export function showTicketCmd(id: number): string {
   return `${FTS_BIN} show --db ${FACTORY_DB} ${Math.floor(id)} --json`;
+}
+
+function hasSafePathSegments(path: string): boolean {
+  return (
+    !/[\0\r\n]/.test(path) &&
+    path
+      .split("/")
+      .every(
+        (segment) => segment !== "" && segment !== "." && segment !== "..",
+      )
+  );
+}
+
+/** Ticket file access is confined to fticket's runtime artifact tree. */
+export function isTicketFolderPath(folderPath: string): boolean {
+  return (
+    folderPath.startsWith(".ffactory/tickets/") &&
+    hasSafePathSegments(folderPath)
+  );
+}
+
+export function listTicketArtifactsCmd(folderPath: string): string {
+  if (!isTicketFolderPath(folderPath)) {
+    throw new Error("invalid ticket artifact folder");
+  }
+  const folder = shellQuote(folderPath);
+  return `test -d ${folder} || { echo 'ticket artifact folder not found' >&2; exit 2; }; find ${folder} -type f -print | LC_ALL=C sort`;
+}
+
+export function isTicketArtifactPath(
+  folderPath: string,
+  relPath: string,
+): boolean {
+  if (!isTicketFolderPath(folderPath)) return false;
+  const prefix = `${folderPath}/`;
+  if (!relPath.startsWith(prefix)) return false;
+  return hasSafePathSegments(relPath.slice(prefix.length));
+}
+
+export function readTicketArtifactCmd(
+  folderPath: string,
+  relPath: string,
+): string {
+  if (!isTicketArtifactPath(folderPath, relPath)) {
+    throw new Error("invalid ticket artifact path");
+  }
+  return `cat ${shellQuote(relPath)}`;
+}
+
+export function parseTicketArtifactFiles(
+  folderPath: string,
+  stdout: string,
+): TicketArtifactFile[] {
+  const prefix = `${folderPath}/`;
+  return stdout
+    .split("\n")
+    .filter(
+      (relPath) =>
+        relPath.length > 0 && isTicketArtifactPath(folderPath, relPath),
+    )
+    .map((relPath) => ({
+      relPath,
+      name: relPath.slice(prefix.length),
+    }));
 }
 
 export const LIST_SKILLS_CMD = `ls factory/skills/*.md 2>/dev/null`;
@@ -304,6 +375,8 @@ export interface UseFactoryResult {
   loading: boolean; // true only until the first poll settles
   refresh: () => void; // force an immediate re-poll
   showTicket: (id: number) => Promise<TicketDetail>;
+  listTicketArtifacts: (folderPath: string) => Promise<TicketArtifactFile[]>;
+  readTicketArtifact: (folderPath: string, relPath: string) => Promise<string>;
   listSkills: () => Promise<SkillFile[]>;
   readSkill: (relPath: string) => Promise<string>;
   writeSkill: (relPath: string, content: string) => Promise<void>;
@@ -361,6 +434,8 @@ export interface FactoryBoardProps {
   loading: boolean;
   onRefresh: () => void;
   showTicket: (id: number) => Promise<TicketDetail>;
+  listTicketArtifacts: (folderPath: string) => Promise<TicketArtifactFile[]>;
+  readTicketArtifact: (folderPath: string, relPath: string) => Promise<string>;
 }
 
 export interface SkillEditorProps {
