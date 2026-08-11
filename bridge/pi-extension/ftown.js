@@ -361,14 +361,35 @@ export function registerFtownPiExtension(pi, options = {}) {
   });
 
   async function runSessions(params) {
-    requireOperation(params, ['list', 'archive', 'get', 'usage', 'running', 'screen', 'grep']);
-    if (!['list', 'archive'].includes(params.operation)) requireString(params, 'target');
+    requireOperation(params, ['list', 'children', 'archive', 'get', 'usage', 'running', 'screen', 'grep']);
+    if (!['list', 'children', 'archive'].includes(params.operation)) requireString(params, 'target');
     if (params.operation === 'grep') requireString(params, 'pattern');
     if (params.operation === 'archive') {
       return requestJson('/api/archive', { method: 'GET' });
     }
     const sessions = await listSessions();
-    if (params.operation === 'list') return { sessions };
+    const filterByPattern = (candidates) => {
+      if (!params.pattern) return candidates;
+      let pattern;
+      try {
+        pattern = new RegExp(params.pattern, 'i');
+      } catch (error) {
+        throw new Error(`Invalid session pattern: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return candidates.filter((session) =>
+        Object.values(session).some((value) => typeof value === 'string' && pattern.test(value)));
+    };
+    if (params.operation === 'children') {
+      const parentSessionId = params.target
+        ? resolveSession(sessions, params.target).id
+        : ftownSessionId;
+      if (!parentSessionId) throw new Error('children requires target outside an ftown session');
+      const children = sessions.filter((session) => session.parentSessionId === parentSessionId);
+      return { sessions: filterByPattern(children) };
+    }
+    if (params.operation === 'list') {
+      return { sessions: filterByPattern(sessions) };
+    }
     const session = resolveSession(sessions, params.target);
     if (params.operation === 'get') {
       return requestJson(`/api/sessions/${encodeURIComponent(session.id)}`, { method: 'GET' });
@@ -400,7 +421,10 @@ export function registerFtownPiExtension(pi, options = {}) {
     });
   }
 
-  const targetProperty = { type: 'string', description: 'Session id or unique exact name.' };
+  const targetProperty = {
+    type: 'string',
+    description: 'Session id or unique exact name; optional parent for children (defaults to current session).',
+  };
   const pageProperties = {
     offset: { type: 'integer', minimum: 0 },
     limit: { type: 'integer', minimum: 1, maximum: 1000 },
@@ -409,16 +433,19 @@ export function registerFtownPiExtension(pi, options = {}) {
   pi.registerTool({
     name: 'ftown_sessions',
     label: 'ftown sessions',
-    description: 'List or inspect ftown sessions, running state, archive, token usage, terminal screen, and terminal log matches.',
+    description: 'List, filter, or inspect ftown sessions, including children, running state, archive, token usage, terminal screen, and terminal log matches.',
     parameters: {
       type: 'object',
       properties: {
         operation: {
           type: 'string',
-          enum: ['list', 'archive', 'get', 'usage', 'running', 'screen', 'grep'],
+          enum: ['list', 'children', 'archive', 'get', 'usage', 'running', 'screen', 'grep'],
         },
         target: targetProperty,
-        pattern: { type: 'string', minLength: 1 },
+        pattern: {
+          type: 'string', minLength: 1,
+          description: 'Case-insensitive regex for list/children filtering; required for terminal grep.',
+        },
         ...pageProperties,
         context: { type: 'integer', minimum: 0, maximum: 10 },
       },

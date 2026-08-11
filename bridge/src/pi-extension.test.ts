@@ -440,6 +440,81 @@ describe('ftown Pi extension', () => {
     assert.match(notifications[0], /Worker/);
   });
 
+  it('filters the native session list with a case-insensitive pattern', async () => {
+    const tools = new Map<string, any>();
+    const sessions = [
+      { id: 's1', name: 'Release Planner', status: 'running', shellType: 'claude' },
+      { id: 's2', name: 'API worker', status: 'completed', shellType: 'pi' },
+      { id: 's3', name: 'UI worker', status: 'running', shellType: 'codex' },
+    ];
+    const pi = {
+      on() {}, sendUserMessage() {}, registerCommand() {},
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+    };
+    registerFtownPiExtension(pi, {
+      env: { FTOWN_SESSION_ID: 's2', FTOWN_HOOK_PORT: '4321' },
+      fetch: async () => ({ ok: true, json: async () => ({ sessions }) }),
+      readBridgePointer: async () => null,
+    });
+
+    const result = await tools.get('ftown_sessions').execute(
+      'call-filtered-list', { operation: 'list', pattern: 'planner|CODEX' },
+    );
+
+    assert.deepEqual(result.details, { sessions: [sessions[0], sessions[2]] });
+  });
+
+  it('lists children of the current Pi session natively', async () => {
+    const tools = new Map<string, any>();
+    const sessions = [
+      { id: 'self', name: 'Orchestrator', status: 'running', shellType: 'pi' },
+      { id: 'child-1', name: 'Reviewer', parentSessionId: 'self', status: 'running' },
+      { id: 'child-2', name: 'Tester', parentSessionId: 'self', status: 'completed' },
+      { id: 'other', name: 'Unrelated', parentSessionId: 'another-session', status: 'running' },
+    ];
+    const pi = {
+      on() {}, sendUserMessage() {}, registerCommand() {},
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+    };
+    registerFtownPiExtension(pi, {
+      env: { FTOWN_SESSION_ID: 'self', FTOWN_HOOK_PORT: '4321' },
+      fetch: async () => ({ ok: true, json: async () => ({ sessions }) }),
+      readBridgePointer: async () => null,
+    });
+
+    const result = await tools.get('ftown_sessions').execute(
+      'call-children', { operation: 'children' },
+    );
+
+    assert.deepEqual(result.details, { sessions: [sessions[1], sessions[2]] });
+  });
+
+  it('filters children of an explicitly targeted parent session', async () => {
+    const tools = new Map<string, any>();
+    const sessions = [
+      { id: 'manager', name: 'Release manager', status: 'running' },
+      { id: 'review', name: 'Security Reviewer', parentSessionId: 'manager', status: 'running' },
+      { id: 'test', name: 'Test worker', parentSessionId: 'manager', status: 'running' },
+      { id: 'self', name: 'Pi', status: 'running', shellType: 'pi' },
+    ];
+    const pi = {
+      on() {}, sendUserMessage() {}, registerCommand() {},
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+    };
+    registerFtownPiExtension(pi, {
+      env: { FTOWN_SESSION_ID: 'self', FTOWN_HOOK_PORT: '4321' },
+      fetch: async () => ({ ok: true, json: async () => ({ sessions }) }),
+      readBridgePointer: async () => null,
+    });
+
+    const result = await tools.get('ftown_sessions').execute(
+      'call-filtered-children',
+      { operation: 'children', target: 'Release manager', pattern: 'security|codex' },
+    );
+
+    assert.deepEqual(result.details, { sessions: [sessions[1]] });
+  });
+
   it('retries a refreshed bridge token when a restarted bridge reuses the same port', async () => {
     const tools = new Map<string, any>();
     const authorizations: Array<string | null> = [];
