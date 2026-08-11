@@ -101,8 +101,8 @@ export function NewFactoryModal(props: NewFactoryModalProps) {
 
         <div className="space-y-4 px-5 py-4">
           <p className="text-xs text-[var(--text-faint)]">
-            Spawns a claude agent session on the bridge that deploys the factory (/factory init) —
-            watch it in Sessions.
+            Spawns the selected agent on the bridge to deploy the factory (/factory init). Its
+            agent and model become the factory default unless you request different routing.
           </p>
 
           <div>
