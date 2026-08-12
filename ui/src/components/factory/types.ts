@@ -400,6 +400,8 @@ export interface FactoryListProps {
   sessions: Session[];
   /** Selecting a nested worker session opens its terminal. */
   onOpenSession: (sessionId: string) => void;
+  /** Stops and tombstone-archives a nested worker session. */
+  onRemoveSession: (sessionId: string) => void;
   /** Currently open session id — highlights the nested worker row. */
   selectedSessionId: string | null;
   /** factoryKey()s hidden by the user; hidden factories fold into a "hidden"

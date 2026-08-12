@@ -53,30 +53,21 @@ function WorkerRow({
   session,
   selected,
   onOpenSession,
+  onRemoveSession,
 }: {
   session: Session;
   selected: boolean;
   onOpenSession: (sessionId: string) => void;
+  onRemoveSession: (sessionId: string) => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={(e) => {
-        e.stopPropagation();
-        onOpenSession(session.id);
-      }}
-      aria-current={selected ? "true" : undefined}
+    <div
       style={{
         display: "flex",
         alignItems: "center",
-        gap: 6,
         width: "100%",
-        textAlign: "left",
-        padding: "5px 12px 5px 30px",
-        border: "none",
         borderLeft: `3px solid ${selected ? "var(--accent)" : "transparent"}`,
         background: selected ? "var(--bg-elevated)" : "transparent",
-        cursor: "pointer",
         fontFamily: "var(--font-mono)",
       }}
       onMouseEnter={(e) => {
@@ -86,33 +77,76 @@ function WorkerRow({
         if (!selected) e.currentTarget.style.background = "transparent";
       }}
     >
-      <StatusDot kind={session.status} />
-      <span
-        title={session.name}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpenSession(session.id);
+        }}
+        aria-current={selected ? "true" : undefined}
         style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
           flex: 1,
           minWidth: 0,
-          fontSize: 11,
-          color: selected ? "var(--text-primary)" : "var(--text-secondary)",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
+          padding: "5px 4px 5px 27px",
+          border: "none",
+          background: "transparent",
+          cursor: "pointer",
+          textAlign: "left",
+          fontFamily: "inherit",
         }}
       >
-        {session.name}
-      </span>
-      {session.usage && (
+        <StatusDot kind={session.status} />
         <span
-          title={formatUsageDetail(session.usage)}
-          style={{ fontSize: 10, color: "var(--text-faint)", flexShrink: 0 }}
+          title={session.name}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            fontSize: 11,
+            color: selected ? "var(--text-primary)" : "var(--text-secondary)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
         >
-          {formatTokens(session.usage.totalTokens)} tok
+          {session.name}
         </span>
-      )}
-      <span style={{ fontSize: 10, color: "var(--text-faint)", flexShrink: 0 }}>
-        {relativeTime(session.createdAt)}
-      </span>
-    </button>
+        {session.usage && (
+          <span
+            title={formatUsageDetail(session.usage)}
+            style={{ fontSize: 10, color: "var(--text-faint)", flexShrink: 0 }}
+          >
+            {formatTokens(session.usage.totalTokens)} tok
+          </span>
+        )}
+        <span style={{ fontSize: 10, color: "var(--text-faint)", flexShrink: 0 }}>
+          {relativeTime(session.createdAt)}
+        </span>
+      </button>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onRemoveSession(session.id);
+        }}
+        aria-label={`Stop and archive ${session.name}`}
+        title="Stop and archive worker"
+        className="btn-ghost"
+        style={{
+          width: 20,
+          height: 20,
+          padding: 0,
+          marginRight: 8,
+          flexShrink: 0,
+          fontSize: 11,
+          lineHeight: 1,
+        }}
+      >
+        ✕
+      </button>
+    </div>
   );
 }
 
@@ -122,12 +156,14 @@ function WorkerSection({
   onToggle,
   selectedSessionId,
   onOpenSession,
+  onRemoveSession,
 }: {
   workers: Session[];
   expanded: boolean;
   onToggle: () => void;
   selectedSessionId: string | null;
   onOpenSession: (sessionId: string) => void;
+  onRemoveSession: (sessionId: string) => void;
 }) {
   if (workers.length === 0) return null;
   return (
@@ -164,6 +200,7 @@ function WorkerSection({
               session={session}
               selected={session.id === selectedSessionId}
               onOpenSession={onOpenSession}
+              onRemoveSession={onRemoveSession}
             />
           ))}
         </div>
@@ -223,6 +260,7 @@ export function FactoryList({
   onCreateFactory,
   sessions,
   onOpenSession,
+  onRemoveSession,
   selectedSessionId,
   hiddenFactoryKeys,
   onHideFactory,
@@ -426,6 +464,7 @@ export function FactoryList({
             }
             selectedSessionId={selectedSessionId}
             onOpenSession={onOpenSession}
+            onRemoveSession={onRemoveSession}
           />
         </div>
         );
