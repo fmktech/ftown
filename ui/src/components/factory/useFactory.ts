@@ -16,9 +16,13 @@ import {
   STAGES_CMD,
   TICKETS_CMD,
   TicketDetail,
+  TicketArtifactFile,
   UseFactoryResult,
   createTicketCmd,
   factoryKey,
+  listTicketArtifactsCmd,
+  parseTicketArtifactFiles,
+  readTicketArtifactCmd,
   readSkillCmd,
   showTicketCmd,
   slugify,
@@ -254,6 +258,40 @@ export function useFactory(
     [bridgeExec, bridgeId, repoRoot],
   );
 
+  const listTicketArtifacts = useCallback(
+    async (folderPath: string): Promise<TicketArtifactFile[]> => {
+      if (repoRoot === null || bridgeId === null) {
+        throw new Error("no factory selected");
+      }
+      const res = await bridgeExec(
+        listTicketArtifactsCmd(folderPath),
+        repoRoot,
+        bridgeId,
+      );
+      const failure = execFailure(res, "failed to list ticket artifacts");
+      if (failure !== null) throw new Error(failure);
+      return parseTicketArtifactFiles(folderPath, res.stdout);
+    },
+    [bridgeExec, bridgeId, repoRoot],
+  );
+
+  const readTicketArtifact = useCallback(
+    async (folderPath: string, relPath: string): Promise<string> => {
+      if (repoRoot === null || bridgeId === null) {
+        throw new Error("no factory selected");
+      }
+      const res = await bridgeExec(
+        readTicketArtifactCmd(folderPath, relPath),
+        repoRoot,
+        bridgeId,
+      );
+      const failure = execFailure(res, "failed to read ticket artifact");
+      if (failure !== null) throw new Error(failure);
+      return res.stdout;
+    },
+    [bridgeExec, bridgeId, repoRoot],
+  );
+
   const listSkills = useCallback(async (): Promise<SkillFile[]> => {
     if (repoRoot === null || bridgeId === null) {
       throw new Error("no factory selected");
@@ -337,6 +375,8 @@ export function useFactory(
     loading,
     refresh,
     showTicket,
+    listTicketArtifacts,
+    readTicketArtifact,
     listSkills,
     readSkill,
     writeSkill,
