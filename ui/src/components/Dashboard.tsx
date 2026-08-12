@@ -1138,6 +1138,7 @@ PY`;
                 onCreateFactory={() => setShowNewFactory(true)}
                 sessions={normalSessions}
                 onOpenSession={handleOpenFactorySession}
+                onRemoveSession={handleRemoveSession}
                 selectedSessionId={selectedSessionId}
                 hiddenFactoryKeys={hiddenFactoryKeys}
                 onHideFactory={handleHideFactory}
