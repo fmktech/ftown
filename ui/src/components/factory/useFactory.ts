@@ -19,6 +19,7 @@ import {
   TicketArtifactFile,
   UseFactoryResult,
   createTicketCmd,
+  deadLetterTicketCmd,
   factoryKey,
   listTicketArtifactsCmd,
   parseTicketArtifactFiles,
@@ -292,6 +293,23 @@ export function useFactory(
     [bridgeExec, bridgeId, repoRoot],
   );
 
+  const stopTicket = useCallback(
+    async (id: number): Promise<void> => {
+      if (repoRoot === null || bridgeId === null) {
+        throw new Error("no factory selected");
+      }
+      const res = await bridgeExec(
+        deadLetterTicketCmd(id),
+        repoRoot,
+        bridgeId,
+      );
+      const failure = execFailure(res, "failed to stop ticket");
+      if (failure !== null) throw new Error(failure);
+      refresh();
+    },
+    [bridgeExec, bridgeId, refresh, repoRoot],
+  );
+
   const listSkills = useCallback(async (): Promise<SkillFile[]> => {
     if (repoRoot === null || bridgeId === null) {
       throw new Error("no factory selected");
@@ -377,6 +395,7 @@ export function useFactory(
     showTicket,
     listTicketArtifacts,
     readTicketArtifact,
+    stopTicket,
     listSkills,
     readSkill,
     writeSkill,

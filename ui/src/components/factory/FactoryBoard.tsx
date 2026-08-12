@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { relativeTime } from "@/lib/relative-time";
 import type {
   FactoryBoardProps,
@@ -37,6 +37,16 @@ interface ArtifactState {
   content: string | null;
   contentLoading: boolean;
   contentError: string | null;
+}
+
+const TERMINAL_STATUSES = new Set<TicketStatus>([
+  "done",
+  "rejected",
+  "dead_letter",
+]);
+
+function hiddenTicketsStorageKey(factoryIdentity: string): string {
+  return `ftown:hidden-factory-tickets:${factoryIdentity}`;
 }
 
 function emptyArtifacts(): ArtifactState {
@@ -125,6 +135,7 @@ function TicketCard({
 }
 
 export function FactoryBoard({
+  factoryIdentity,
   snapshot,
   error,
   loading,
@@ -132,12 +143,39 @@ export function FactoryBoard({
   showTicket,
   listTicketArtifacts,
   readTicketArtifact,
+  stopTicket,
 }: FactoryBoardProps) {
   const [detailState, setDetailState] = useState<DetailState | null>(null);
   const [artifacts, setArtifacts] = useState<ArtifactState>(emptyArtifacts);
+  const [hiddenTicketIds, setHiddenTicketIds] = useState<Set<number>>(
+    () => new Set(),
+  );
+  const [showHiddenTickets, setShowHiddenTickets] = useState(false);
   const detailSeq = useRef(0);
   const fileListSeq = useRef(0);
   const fileReadSeq = useRef(0);
+
+  useEffect(() => {
+    setShowHiddenTickets(false);
+    try {
+      const stored = window.localStorage.getItem(
+        hiddenTicketsStorageKey(factoryIdentity),
+      );
+      const parsed: unknown = stored === null ? [] : JSON.parse(stored);
+      setHiddenTicketIds(
+        new Set(
+          Array.isArray(parsed)
+            ? parsed.filter(
+                (value): value is number =>
+                  typeof value === "number" && Number.isInteger(value),
+              )
+            : [],
+        ),
+      );
+    } catch {
+      setHiddenTicketIds(new Set());
+    }
+  }, [factoryIdentity]);
 
   const openFile = useCallback(
     (folderPath: string, relPath: string) => {
@@ -241,13 +279,50 @@ export function FactoryBoard({
     [loadFiles, showTicket],
   );
 
+  const hideTicket = useCallback(
+    (id: number) => {
+      setHiddenTicketIds((current) => {
+        const next = new Set(current);
+        next.add(id);
+        try {
+          window.localStorage.setItem(
+            hiddenTicketsStorageKey(factoryIdentity),
+            JSON.stringify([...next]),
+          );
+        } catch {
+          // Storage can be unavailable in hardened/private browser contexts;
+          // keep the current-page dismissal useful anyway.
+        }
+        return next;
+      });
+      closeDetail();
+    },
+    [closeDetail, factoryIdentity],
+  );
+
+  const hiddenTicketCount = useMemo(
+    () =>
+      (snapshot?.tickets ?? []).filter((ticket) =>
+        hiddenTicketIds.has(ticket.id),
+      ).length,
+    [hiddenTicketIds, snapshot],
+  );
+
+  const visibleTickets = useMemo(
+    () =>
+      (snapshot?.tickets ?? []).filter(
+        (ticket) => showHiddenTickets || !hiddenTicketIds.has(ticket.id),
+      ),
+    [hiddenTicketIds, showHiddenTickets, snapshot],
+  );
+
   const columns = useMemo<Array<{ stage: string; tickets: FactoryTicket[] }>>(() => {
     const knownStages = snapshot?.stages ?? [];
     const knownSet = new Set(knownStages);
     const byStage = new Map<string, FactoryTicket[]>();
     for (const stage of knownStages) byStage.set(stage, []);
     const unknownTickets: FactoryTicket[] = [];
-    for (const ticket of snapshot?.tickets ?? []) {
+    for (const ticket of visibleTickets) {
       if (knownSet.has(ticket.stage)) {
         byStage.get(ticket.stage)?.push(ticket);
       } else {
@@ -260,7 +335,7 @@ export function FactoryBoard({
       result.push({ stage: "unknown", tickets: unknownTickets });
     }
     return result;
-  }, [snapshot]);
+  }, [snapshot?.stages, visibleTickets]);
 
   if (loading) {
     return (
@@ -292,6 +367,17 @@ export function FactoryBoard({
         >
           ↻
         </button>
+        {hiddenTicketCount > 0 && (
+          <button
+            type="button"
+            onClick={() => setShowHiddenTickets((visible) => !visible)}
+            className="rounded border border-zinc-700/60 px-1.5 py-0.5 text-xs text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
+          >
+            {showHiddenTickets
+              ? "Hide removed"
+              : `Removed ${hiddenTicketCount}`}
+          </button>
+        )}
       </div>
       {snapshot === null ? (
         <div className="flex flex-1 items-center justify-center py-16 text-sm text-zinc-500">
@@ -368,6 +454,18 @@ export function FactoryBoard({
               openFile(artifacts.folderPath, artifacts.selectedRelPath);
             }
           }}
+          onStopTicket={
+            detailState.detail !== null &&
+            !TERMINAL_STATUSES.has(detailState.detail.ticket.status)
+              ? () => stopTicket(detailState.ticketId)
+              : undefined
+          }
+          onHideTicket={
+            detailState.detail !== null &&
+            TERMINAL_STATUSES.has(detailState.detail.ticket.status)
+              ? () => hideTicket(detailState.ticketId)
+              : undefined
+          }
           onClose={closeDetail}
         />
       )}

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  deadLetterTicketCmd,
   factoryInitPrompt,
   listTicketArtifactsCmd,
   parseTicketArtifactFiles,
@@ -73,5 +74,13 @@ describe("ticket artifact commands", () => {
         relPath: `${folder}/evidence/screenshot.txt`,
       },
     ]);
+  });
+});
+
+describe("ticket lifecycle commands", () => {
+  it("stops a ticket through the supported FTS operator action", () => {
+    expect(deadLetterTicketCmd(42)).toBe(
+      '"$HOME/.local/bin/fts" dead-letter --db .ffactory/factory.db --ticket 42 --actor \'ftown-ui\' --reason \'stopped by user from ftown dashboard\'',
+    );
   });
 });

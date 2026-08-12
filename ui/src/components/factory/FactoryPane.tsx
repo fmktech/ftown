@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { FactoryPaneProps } from "./types";
+import { factoryKey } from "./types";
 import { useFactory } from "./useFactory";
 import { FactoryBoard } from "./FactoryBoard";
 import { SkillEditor } from "./SkillEditor";
@@ -27,6 +28,7 @@ export function FactoryPane({ factory, bridgeExec, sessions, onOpenSession }: Fa
     showTicket,
     listTicketArtifacts,
     readTicketArtifact,
+    stopTicket,
     listSkills,
     readSkill,
     writeSkill,
@@ -138,6 +140,7 @@ export function FactoryPane({ factory, bridgeExec, sessions, onOpenSession }: Fa
 
       <div className={tab === "board" ? "flex-1 min-h-0 overflow-hidden" : "hidden"}>
         <FactoryBoard
+          factoryIdentity={factoryKey(factory)}
           snapshot={snapshot}
           error={error}
           loading={loading}
@@ -145,6 +148,7 @@ export function FactoryPane({ factory, bridgeExec, sessions, onOpenSession }: Fa
           showTicket={showTicket}
           listTicketArtifacts={listTicketArtifacts}
           readTicketArtifact={readTicketArtifact}
+          stopTicket={stopTicket}
         />
       </div>
       <div className={tab === "skills" ? "flex-1 min-h-0 overflow-hidden" : "hidden"}>

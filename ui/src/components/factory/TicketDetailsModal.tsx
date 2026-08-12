@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { relativeTime } from "@/lib/relative-time";
 import type {
   TicketArtifactFile,
   TicketDetail,
   TicketHistoryEntry,
 } from "./types";
+import { ArtifactFileTree } from "./ArtifactFileTree";
 
 export interface TicketDetailsModalProps {
   ticketId: number;
@@ -23,6 +24,8 @@ export interface TicketDetailsModalProps {
   onSelectFile: (relPath: string) => void;
   onRetryFiles: () => void;
   onRetryContent: () => void;
+  onStopTicket?: () => Promise<void>;
+  onHideTicket?: () => void;
   onClose: () => void;
 }
 
@@ -61,8 +64,16 @@ export function TicketDetailsModal({
   onSelectFile,
   onRetryFiles,
   onRetryContent,
+  onStopTicket,
+  onHideTicket,
   onClose,
 }: TicketDetailsModalProps) {
+  const [pendingAction, setPendingAction] = useState<"stop" | "hide" | null>(
+    null,
+  );
+  const [actionRunning, setActionRunning] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
@@ -108,6 +119,30 @@ export function TicketDetailsModal({
               </div>
             )}
           </div>
+          {onStopTicket !== undefined && (
+            <button
+              type="button"
+              onClick={() => {
+                setActionError(null);
+                setPendingAction("stop");
+              }}
+              className="shrink-0 rounded border border-red-500/40 px-2 py-1 text-xs text-red-300 hover:bg-red-500/10"
+            >
+              Stop ticket
+            </button>
+          )}
+          {onHideTicket !== undefined && (
+            <button
+              type="button"
+              onClick={() => {
+                setActionError(null);
+                setPendingAction("hide");
+              }}
+              className={smallButton}
+            >
+              Remove from board
+            </button>
+          )}
           <button
             type="button"
             onClick={onClose}
@@ -117,6 +152,58 @@ export function TicketDetailsModal({
             ✕
           </button>
         </header>
+
+        {pendingAction !== null && (
+          <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-amber-500/20 bg-amber-500/5 px-4 py-2 text-xs text-zinc-300">
+            <span className="min-w-0 flex-1">
+              {pendingAction === "stop"
+                ? `Stop ticket #${ticketId}? It will move to dead letter and leave the active pipeline; its history and artifacts are preserved.`
+                : `Remove ticket #${ticketId} from this board? This only hides it in this browser; its FTS history and artifacts remain.`}
+            </span>
+            {actionError !== null && (
+              <span className="w-full text-red-400">{actionError}</span>
+            )}
+            <button
+              type="button"
+              className={smallButton}
+              disabled={actionRunning}
+              onClick={() => {
+                setActionError(null);
+                setPendingAction(null);
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={actionRunning}
+              className="rounded border border-red-500/40 px-2 py-1 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-50"
+              onClick={() => {
+                if (pendingAction === "hide") {
+                  onHideTicket?.();
+                  return;
+                }
+                if (onStopTicket === undefined) return;
+                setActionRunning(true);
+                setActionError(null);
+                void onStopTicket()
+                  .then(onClose)
+                  .catch((err: unknown) => {
+                    setActionError(
+                      err instanceof Error ? err.message : String(err),
+                    );
+                    setActionRunning(false);
+                  });
+              }}
+            >
+              {actionRunning
+                ? "Stopping…"
+                : pendingAction === "stop"
+                  ? "Confirm stop"
+                  : "Remove"}
+            </button>
+          </div>
+        )}
 
         {detailLoading && (
           <div className="flex flex-1 items-center justify-center text-sm text-zinc-500">
@@ -167,25 +254,13 @@ export function TicketDetailsModal({
                 )}
                 {!filesLoading &&
                   filesError === null &&
-                  files.map((file) => {
-                    const selected = file.relPath === selectedRelPath;
-                    return (
-                      <button
-                        key={file.relPath}
-                        type="button"
-                        title={file.name}
-                        aria-current={selected ? "page" : undefined}
-                        onClick={() => onSelectFile(file.relPath)}
-                        className={`block w-full truncate px-3 py-1.5 text-left font-mono text-xs ${
-                          selected
-                            ? "bg-zinc-800 text-zinc-100"
-                            : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200"
-                        }`}
-                      >
-                        {file.name}
-                      </button>
-                    );
-                  })}
+                  files.length > 0 && (
+                    <ArtifactFileTree
+                      files={files}
+                      selectedRelPath={selectedRelPath}
+                      onSelectFile={onSelectFile}
+                    />
+                  )}
               </nav>
 
               <details className="max-h-52 shrink-0 overflow-y-auto border-t border-zinc-800 px-3 py-2 text-xs text-zinc-400">

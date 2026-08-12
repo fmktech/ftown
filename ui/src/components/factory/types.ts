@@ -158,6 +158,15 @@ export function showTicketCmd(id: number): string {
   return `${FTS_BIN} show --db ${FACTORY_DB} ${Math.floor(id)} --json`;
 }
 
+/** Stop active work using FTS's audited operator escape hatch. */
+export function deadLetterTicketCmd(id: number): string {
+  return (
+    `${FTS_BIN} dead-letter --db ${FACTORY_DB}` +
+    ` --ticket ${Math.floor(id)} --actor ${shellQuote("ftown-ui")}` +
+    ` --reason ${shellQuote("stopped by user from ftown dashboard")}`
+  );
+}
+
 function hasSafePathSegments(path: string): boolean {
   return (
     !/[\0\r\n]/.test(path) &&
@@ -377,6 +386,8 @@ export interface UseFactoryResult {
   showTicket: (id: number) => Promise<TicketDetail>;
   listTicketArtifacts: (folderPath: string) => Promise<TicketArtifactFile[]>;
   readTicketArtifact: (folderPath: string, relPath: string) => Promise<string>;
+  /** Moves the ticket to dead_letter through FTS, preserving its audit trail. */
+  stopTicket: (id: number) => Promise<void>;
   listSkills: () => Promise<SkillFile[]>;
   readSkill: (relPath: string) => Promise<string>;
   writeSkill: (relPath: string, content: string) => Promise<void>;
@@ -431,6 +442,8 @@ export interface FactoryPaneProps {
 }
 
 export interface FactoryBoardProps {
+  /** Stable per-factory identity used to scope local board preferences. */
+  factoryIdentity: string;
   snapshot: FactorySnapshot | null;
   error: string | null;
   loading: boolean;
@@ -438,6 +451,7 @@ export interface FactoryBoardProps {
   showTicket: (id: number) => Promise<TicketDetail>;
   listTicketArtifacts: (folderPath: string) => Promise<TicketArtifactFile[]>;
   readTicketArtifact: (folderPath: string, relPath: string) => Promise<string>;
+  stopTicket: (id: number) => Promise<void>;
 }
 
 export interface SkillEditorProps {
