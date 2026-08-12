@@ -37,8 +37,36 @@ describe("TicketDetailsModal", () => {
             relPath: ".ffactory/tickets/42-carry-transfer-value/request.md",
           },
           {
-            name: "qa.md",
-            relPath: ".ffactory/tickets/42-carry-transfer-value/qa.md",
+            name: "evidence/qa.json",
+            relPath:
+              ".ffactory/tickets/42-carry-transfer-value/evidence/qa.json",
+          },
+          {
+            name: "evidence/screenshot.png",
+            relPath:
+              ".ffactory/tickets/42-carry-transfer-value/evidence/screenshot.png",
+          },
+          {
+            name: "report.pdf",
+            relPath: ".ffactory/tickets/42-carry-transfer-value/report.pdf",
+          },
+          {
+            name: "preview/index.html",
+            relPath:
+              ".ffactory/tickets/42-carry-transfer-value/preview/index.html",
+          },
+          {
+            name: "src/fix.ts",
+            relPath: ".ffactory/tickets/42-carry-transfer-value/src/fix.ts",
+          },
+          {
+            name: "logs/worker.log",
+            relPath:
+              ".ffactory/tickets/42-carry-transfer-value/logs/worker.log",
+          },
+          {
+            name: "bundle.zip",
+            relPath: ".ffactory/tickets/42-carry-transfer-value/bundle.zip",
           },
         ],
         filesLoading: false,
@@ -51,6 +79,7 @@ describe("TicketDetailsModal", () => {
         onSelectFile: vi.fn(),
         onRetryFiles: vi.fn(),
         onRetryContent: vi.fn(),
+        onStopTicket: vi.fn(),
         onClose: vi.fn(),
       }),
     );
@@ -58,10 +87,69 @@ describe("TicketDetailsModal", () => {
     expect(html).toContain('role="dialog"');
     expect(html).toContain("Carry transfer value");
     expect(html).toContain("request.md");
-    expect(html).toContain("qa.md");
+    expect(html).toContain('role="tree"');
+    expect(html).toContain('aria-label="Collapse folder evidence"');
+    expect(html).toContain("qa.json");
+    expect(html).toContain("screenshot.png");
+    expect(html).not.toContain(">evidence/qa.json<");
+    expect(html).toContain('aria-label="Markdown file"');
+    expect(html).toContain('aria-label="JSON file"');
+    expect(html).toContain('aria-label="Image file"');
+    expect(html).toContain('aria-label="PDF file"');
+    expect(html).toContain('aria-label="HTML file"');
+    expect(html).toContain('aria-label="Code file"');
+    expect(html).toContain('aria-label="Log file"');
+    expect(html).toContain('aria-label="Archive file"');
+    expect(html).toContain("Stop ticket");
+    expect(html).not.toContain("Remove from board");
     expect(html).toContain("# Requested behavior");
     expect(html.indexOf("request.md")).toBeLessThan(
       html.indexOf("# Requested behavior"),
     );
+  });
+
+  it("offers terminal tickets a non-destructive board removal", () => {
+    const html = renderToStaticMarkup(
+      createElement(TicketDetailsModal, {
+        ticketId: 43,
+        detail: {
+          ticket: {
+            id: 43,
+            kind: "task",
+            title: "Finished ticket",
+            stage: "verify",
+            status: "dead_letter",
+            priority: 0,
+            bounce_count: 1,
+            orphaned: 0,
+            blocked_on: null,
+            dead_letter_reason: "stopped",
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_010_000,
+            folder_path: ".ffactory/tickets/43-finished",
+            epic_id: null,
+          },
+          claim: null,
+          history: [],
+        },
+        detailLoading: false,
+        detailError: null,
+        files: [],
+        filesLoading: false,
+        filesError: null,
+        selectedRelPath: null,
+        content: null,
+        contentLoading: false,
+        contentError: null,
+        onSelectFile: vi.fn(),
+        onRetryFiles: vi.fn(),
+        onRetryContent: vi.fn(),
+        onHideTicket: vi.fn(),
+        onClose: vi.fn(),
+      }),
+    );
+
+    expect(html).toContain("Remove from board");
+    expect(html).not.toContain("Stop ticket");
   });
 });
