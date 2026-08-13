@@ -4,6 +4,7 @@
 
 import type { Session, ShellType } from "@/types";
 import type { BridgeExecResponse } from "@/hooks/useSessions";
+import { imageMimeType } from "./artifact-formats";
 
 // ---------------------------------------------------------------------------
 // Discovery
@@ -211,7 +212,11 @@ export function readTicketArtifactCmd(
   if (!isTicketArtifactPath(folderPath, relPath)) {
     throw new Error("invalid ticket artifact path");
   }
-  return `cat ${shellQuote(relPath)}`;
+  const quotedPath = shellQuote(relPath);
+  if (imageMimeType(relPath) !== undefined) {
+    return `base64 < ${quotedPath} | tr -d '\\n'`;
+  }
+  return `cat ${quotedPath}`;
 }
 
 export function parseTicketArtifactFiles(

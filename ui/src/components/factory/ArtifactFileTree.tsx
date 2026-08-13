@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import type { TicketArtifactFile } from "./types";
+import { artifactExtension, imageMimeType } from "./artifact-formats";
 
 type ArtifactTreeNode =
   | {
@@ -56,9 +57,6 @@ const CODE_EXTENSIONS = new Set([
   "rb", "rs", "sass", "scss", "sh", "sql", "svelte", "swift", "ts", "tsx",
   "vue", "zsh",
 ]);
-const IMAGE_EXTENSIONS = new Set([
-  "avif", "bmp", "gif", "ico", "jpeg", "jpg", "png", "svg", "tif", "tiff", "webp",
-]);
 const ARCHIVE_EXTENSIONS = new Set([
   "7z", "bz2", "gz", "rar", "tar", "tgz", "xz", "zip",
 ]);
@@ -69,20 +67,14 @@ const AUDIO_EXTENSIONS = new Set(["aac", "flac", "m4a", "mp3", "ogg", "wav"]);
 const VIDEO_EXTENSIONS = new Set(["avi", "mkv", "mov", "mp4", "webm"]);
 const CONFIG_EXTENSIONS = new Set(["conf", "env", "ini", "lock", "properties"]);
 
-function extension(name: string): string {
-  const base = name.slice(name.lastIndexOf("/") + 1).toLowerCase();
-  const dot = base.lastIndexOf(".");
-  return dot > 0 ? base.slice(dot + 1) : "";
-}
-
 function fileType(name: string): FileTypeInfo {
   const base = name.slice(name.lastIndexOf("/") + 1);
-  const ext = extension(name);
+  const ext = artifactExtension(name);
   if (TYPES[ext]) return TYPES[ext];
   if (CODE_EXTENSIONS.has(ext)) {
     return { label: "Code", badge: ext.toUpperCase().slice(0, 4), color: "#c084fc" };
   }
-  if (IMAGE_EXTENSIONS.has(ext)) {
+  if (imageMimeType(name) !== undefined) {
     return { label: "Image", badge: "IMG", color: "#22d3ee" };
   }
   if (ARCHIVE_EXTENSIONS.has(ext)) {
@@ -154,6 +146,19 @@ function buildTree(files: TicketArtifactFile[]): ArtifactTreeNode[] {
     folder.files.push(file);
   }
   return finishFolder(root);
+}
+
+function folderPaths(nodes: ArtifactTreeNode[]): Set<string> {
+  const paths = new Set<string>();
+  const visit = (items: ArtifactTreeNode[]) => {
+    for (const item of items) {
+      if (item.kind !== "folder") continue;
+      paths.add(item.path);
+      visit(item.children);
+    }
+  };
+  visit(nodes);
+  return paths;
 }
 
 function FolderIcon({ open }: { open: boolean }) {
@@ -292,7 +297,9 @@ export function ArtifactFileTree({
   onSelectFile: (relPath: string) => void;
 }) {
   const tree = useMemo(() => buildTree(files), [files]);
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const [collapsed, setCollapsed] = useState<Set<string>>(() =>
+    folderPaths(tree),
+  );
 
   const toggleFolder = (path: string) => {
     setCollapsed((current) => {
