@@ -8,6 +8,7 @@ import type {
   TicketHistoryEntry,
 } from "./types";
 import { ArtifactFileTree } from "./ArtifactFileTree";
+import { ArtifactContentPreview } from "./ArtifactContentPreview";
 
 export interface TicketDetailsModalProps {
   ticketId: number;
@@ -339,9 +340,10 @@ export function TicketDetailsModal({
                   </button>
                 </div>
               ) : (
-                <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words p-4 font-mono text-xs leading-5 text-zinc-200 sm:text-sm">
-                  {content === "" ? "(empty file)" : content}
-                </pre>
+                <ArtifactContentPreview
+                  relPath={selectedRelPath}
+                  content={content ?? ""}
+                />
               )}
             </main>
           </div>

@@ -60,6 +60,15 @@ describe("ticket artifact commands", () => {
     ).toThrow("invalid ticket artifact path");
   });
 
+  it("transports image artifacts as base64 instead of corrupting binary stdout", () => {
+    const folder = ".ffactory/tickets/42-carry-transfer-value";
+    expect(
+      readTicketArtifactCmd(folder, `${folder}/evidence/screenshot.png`),
+    ).toBe(
+      "base64 < '.ffactory/tickets/42-carry-transfer-value/evidence/screenshot.png' | tr -d '\\n'",
+    );
+  });
+
   it("turns bridge output into display paths and drops files outside the ticket", () => {
     const folder = ".ffactory/tickets/42-carry-transfer-value";
     expect(

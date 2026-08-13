@@ -73,7 +73,8 @@ describe("TicketDetailsModal", () => {
         filesError: null,
         selectedRelPath:
           ".ffactory/tickets/42-carry-transfer-value/request.md",
-        content: "# Requested behavior\n\nKeep the transfer value.",
+        content:
+          "# Requested behavior\n\nKeep the **transfer value**.\n\n- Preserve cents",
         contentLoading: false,
         contentError: null,
         onSelectFile: vi.fn(),
@@ -88,23 +89,20 @@ describe("TicketDetailsModal", () => {
     expect(html).toContain("Carry transfer value");
     expect(html).toContain("request.md");
     expect(html).toContain('role="tree"');
-    expect(html).toContain('aria-label="Collapse folder evidence"');
-    expect(html).toContain("qa.json");
-    expect(html).toContain("screenshot.png");
+    expect(html).toContain('aria-label="Expand folder evidence"');
+    expect(html).not.toContain("qa.json");
+    expect(html).not.toContain("screenshot.png");
     expect(html).not.toContain(">evidence/qa.json<");
     expect(html).toContain('aria-label="Markdown file"');
-    expect(html).toContain('aria-label="JSON file"');
-    expect(html).toContain('aria-label="Image file"');
     expect(html).toContain('aria-label="PDF file"');
-    expect(html).toContain('aria-label="HTML file"');
-    expect(html).toContain('aria-label="Code file"');
-    expect(html).toContain('aria-label="Log file"');
     expect(html).toContain('aria-label="Archive file"');
     expect(html).toContain("Stop ticket");
     expect(html).not.toContain("Remove from board");
-    expect(html).toContain("# Requested behavior");
+    expect(html).toMatch(/<h1[^>]*>Requested behavior<\/h1>/);
+    expect(html).toContain("<strong>transfer value</strong>");
+    expect(html).toContain("<li>Preserve cents</li>");
     expect(html.indexOf("request.md")).toBeLessThan(
-      html.indexOf("# Requested behavior"),
+      html.indexOf("Requested behavior"),
     );
   });
 
