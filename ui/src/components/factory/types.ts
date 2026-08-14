@@ -168,6 +168,15 @@ export function deadLetterTicketCmd(id: number): string {
   );
 }
 
+/** Reset a terminal ticket to queued at a selected stage, preserving history. */
+export function reviveTicketCmd(id: number, stage: string): string {
+  return (
+    `${FTS_BIN} revive --db ${FACTORY_DB}` +
+    ` --ticket ${Math.floor(id)} --actor ${shellQuote("ftown-ui")}` +
+    ` --to-stage ${shellQuote(stage)}`
+  );
+}
+
 function hasSafePathSegments(path: string): boolean {
   return (
     !/[\0\r\n]/.test(path) &&
