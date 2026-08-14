@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -82,6 +88,7 @@ describe("TicketDetailsModal", () => {
           "# Requested behavior\n\nKeep the **transfer value**.\n\n- Preserve cents",
         contentLoading: false,
         contentError: null,
+        stages: ["acceptance"],
         onSelectFile: vi.fn(),
         onRetryFiles: vi.fn(),
         onRetryContent: vi.fn(),
@@ -144,6 +151,7 @@ describe("TicketDetailsModal", () => {
         content: null,
         contentLoading: false,
         contentError: null,
+        stages: ["verify"],
         onSelectFile: vi.fn(),
         onRetryFiles: vi.fn(),
         onRetryContent: vi.fn(),
@@ -154,6 +162,58 @@ describe("TicketDetailsModal", () => {
 
     expect(html).toContain("Remove from board");
     expect(html).not.toContain("Stop ticket");
+  });
+
+  it("requeues a dead-letter ticket at the selected pipeline stage", async () => {
+    const onRequeueTicket = vi.fn().mockResolvedValue(undefined);
+    render(
+      createElement(TicketDetailsModal, {
+        ticketId: 45,
+        detail: {
+          ticket: {
+            id: 45,
+            kind: "task",
+            title: "Recover failed verification",
+            stage: "verify",
+            status: "dead_letter",
+            priority: 0,
+            bounce_count: 2,
+            orphaned: 0,
+            blocked_on: null,
+            dead_letter_reason: "bounce_limit",
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_010_000,
+            folder_path: ".ffactory/tickets/45-recover-failed-verification",
+            epic_id: null,
+          },
+          claim: null,
+          history: [],
+        },
+        detailLoading: false,
+        detailError: null,
+        files: [],
+        filesLoading: false,
+        filesError: null,
+        selectedRelPath: null,
+        content: null,
+        contentLoading: false,
+        contentError: null,
+        stages: ["rca", "fix", "verify"],
+        onSelectFile: vi.fn(),
+        onRetryFiles: vi.fn(),
+        onRetryContent: vi.fn(),
+        onRequeueTicket,
+        onClose: vi.fn(),
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Requeue ticket" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Queue stage" }), {
+      target: { value: "fix" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Confirm requeue" }));
+
+    await waitFor(() => expect(onRequeueTicket).toHaveBeenCalledWith("fix"));
   });
 
   it("expands the reader to full screen and restores it with Escape", () => {
@@ -190,6 +250,7 @@ describe("TicketDetailsModal", () => {
         content: null,
         contentLoading: false,
         contentError: null,
+        stages: ["rca"],
         onSelectFile: vi.fn(),
         onRetryFiles: vi.fn(),
         onRetryContent: vi.fn(),

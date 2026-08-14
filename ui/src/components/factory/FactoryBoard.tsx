@@ -144,6 +144,7 @@ export function FactoryBoard({
   listTicketArtifacts,
   readTicketArtifact,
   stopTicket,
+  requeueTicket,
 }: FactoryBoardProps) {
   const [detailState, setDetailState] = useState<DetailState | null>(null);
   const [artifacts, setArtifacts] = useState<ArtifactState>(emptyArtifacts);
@@ -438,6 +439,7 @@ export function FactoryBoard({
           content={artifacts.content}
           contentLoading={artifacts.contentLoading}
           contentError={artifacts.contentError}
+          stages={snapshot?.stages ?? []}
           onSelectFile={(relPath) => {
             if (artifacts.folderPath !== null) {
               openFile(artifacts.folderPath, relPath);
@@ -458,6 +460,12 @@ export function FactoryBoard({
             detailState.detail !== null &&
             !TERMINAL_STATUSES.has(detailState.detail.ticket.status)
               ? () => stopTicket(detailState.ticketId)
+              : undefined
+          }
+          onRequeueTicket={
+            detailState.detail !== null &&
+            TERMINAL_STATUSES.has(detailState.detail.ticket.status)
+              ? (stage) => requeueTicket(detailState.ticketId, stage)
               : undefined
           }
           onHideTicket={

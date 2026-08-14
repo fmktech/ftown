@@ -6,6 +6,7 @@ import {
   listTicketArtifactsCmd,
   parseTicketArtifactFiles,
   readTicketArtifactCmd,
+  reviveTicketCmd,
 } from "./types";
 
 describe("factoryInitPrompt", () => {
@@ -90,6 +91,12 @@ describe("ticket lifecycle commands", () => {
   it("stops a ticket through the supported FTS operator action", () => {
     expect(deadLetterTicketCmd(42)).toBe(
       '"$HOME/.local/bin/fts" dead-letter --db .ffactory/factory.db --ticket 42 --actor \'ftown-ui\' --reason \'stopped by user from ftown dashboard\'',
+    );
+  });
+
+  it("requeues a ticket at a selected pipeline stage through FTS revive", () => {
+    expect(reviveTicketCmd(42, "verify")).toBe(
+      '"$HOME/.local/bin/fts" revive --db .ffactory/factory.db --ticket 42 --actor \'ftown-ui\' --to-stage \'verify\'',
     );
   });
 });

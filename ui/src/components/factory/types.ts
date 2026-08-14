@@ -168,6 +168,15 @@ export function deadLetterTicketCmd(id: number): string {
   );
 }
 
+/** Reset a terminal ticket to queued at a selected stage, preserving history. */
+export function reviveTicketCmd(id: number, stage: string): string {
+  return (
+    `${FTS_BIN} revive --db ${FACTORY_DB}` +
+    ` --ticket ${Math.floor(id)} --actor ${shellQuote("ftown-ui")}` +
+    ` --to-stage ${shellQuote(stage)}`
+  );
+}
+
 function hasSafePathSegments(path: string): boolean {
   return (
     !/[\0\r\n]/.test(path) &&
@@ -393,6 +402,8 @@ export interface UseFactoryResult {
   readTicketArtifact: (folderPath: string, relPath: string) => Promise<string>;
   /** Moves the ticket to dead_letter through FTS, preserving its audit trail. */
   stopTicket: (id: number) => Promise<void>;
+  /** Resets a terminal ticket to queued at the selected pipeline stage. */
+  requeueTicket: (id: number, stage: string) => Promise<void>;
   listSkills: () => Promise<SkillFile[]>;
   readSkill: (relPath: string) => Promise<string>;
   writeSkill: (relPath: string, content: string) => Promise<void>;
@@ -457,6 +468,7 @@ export interface FactoryBoardProps {
   listTicketArtifacts: (folderPath: string) => Promise<TicketArtifactFile[]>;
   readTicketArtifact: (folderPath: string, relPath: string) => Promise<string>;
   stopTicket: (id: number) => Promise<void>;
+  requeueTicket: (id: number, stage: string) => Promise<void>;
 }
 
 export interface SkillEditorProps {

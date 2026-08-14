@@ -25,6 +25,7 @@ import {
   parseTicketArtifactFiles,
   readTicketArtifactCmd,
   readSkillCmd,
+  reviveTicketCmd,
   showTicketCmd,
   slugify,
   writeSkillCmd,
@@ -310,6 +311,24 @@ export function useFactory(
     [bridgeExec, bridgeId, refresh, repoRoot],
   );
 
+  const requeueTicket = useCallback(
+    async (id: number, stage: string): Promise<void> => {
+      if (repoRoot === null || bridgeId === null) {
+        throw new Error("no factory selected");
+      }
+      if (stage.trim() === "") throw new Error("queue stage required");
+      const res = await bridgeExec(
+        reviveTicketCmd(id, stage),
+        repoRoot,
+        bridgeId,
+      );
+      const failure = execFailure(res, "failed to requeue ticket");
+      if (failure !== null) throw new Error(failure);
+      refresh();
+    },
+    [bridgeExec, bridgeId, refresh, repoRoot],
+  );
+
   const listSkills = useCallback(async (): Promise<SkillFile[]> => {
     if (repoRoot === null || bridgeId === null) {
       throw new Error("no factory selected");
@@ -396,6 +415,7 @@ export function useFactory(
     listTicketArtifacts,
     readTicketArtifact,
     stopTicket,
+    requeueTicket,
     listSkills,
     readSkill,
     writeSkill,
