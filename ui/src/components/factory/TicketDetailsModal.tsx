@@ -74,14 +74,20 @@ export function TicketDetailsModal({
   );
   const [actionRunning, setActionRunning] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [fullScreen, setFullScreen] = useState(false);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key !== "Escape") return;
+      if (fullScreen) {
+        setFullScreen(false);
+        return;
+      }
+      onClose();
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
+  }, [fullScreen, onClose]);
 
   const selectedName =
     files.find((file) => file.relPath === selectedRelPath)?.name ??
@@ -89,14 +95,18 @@ export function TicketDetailsModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-2 sm:p-4"
+      className={`fixed inset-0 z-50 flex items-center justify-center bg-black/75 ${fullScreen ? "p-0" : "p-2 sm:p-4"}`}
       onClick={onClose}
     >
       <section
         role="dialog"
         aria-modal="true"
         aria-labelledby="ticket-detail-title"
-        className="flex h-[min(88vh,860px)] w-full max-w-6xl flex-col overflow-hidden rounded-lg border border-zinc-700/70 bg-zinc-950 shadow-2xl"
+        className={`flex w-full flex-col overflow-hidden bg-zinc-950 shadow-2xl ${
+          fullScreen
+            ? "h-full max-w-none rounded-none border-0"
+            : "h-[min(88vh,860px)] max-w-6xl rounded-lg border border-zinc-700/70"
+        }`}
         onClick={(event) => event.stopPropagation()}
       >
         <header className="flex shrink-0 items-start gap-3 border-b border-zinc-800 px-4 py-3">
@@ -144,6 +154,15 @@ export function TicketDetailsModal({
               Remove from board
             </button>
           )}
+          <button
+            type="button"
+            onClick={() => setFullScreen((current) => !current)}
+            className="rounded px-2 py-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-100"
+            aria-label={fullScreen ? "Exit full screen" : "Expand full screen"}
+            title={fullScreen ? "Exit full screen" : "Expand full screen"}
+          >
+            {fullScreen ? "↙" : "⛶"}
+          </button>
           <button
             type="button"
             onClick={onClose}

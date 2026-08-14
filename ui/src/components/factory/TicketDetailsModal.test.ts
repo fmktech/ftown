@@ -1,8 +1,13 @@
+// @vitest-environment jsdom
+
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TicketDetailsModal } from "./TicketDetailsModal";
+
+afterEach(cleanup);
 
 describe("TicketDetailsModal", () => {
   it("shows ticket files beside the selected file contents", () => {
@@ -149,5 +154,65 @@ describe("TicketDetailsModal", () => {
 
     expect(html).toContain("Remove from board");
     expect(html).not.toContain("Stop ticket");
+  });
+
+  it("expands the reader to full screen and restores it with Escape", () => {
+    const onClose = vi.fn();
+    render(
+      createElement(TicketDetailsModal, {
+        ticketId: 44,
+        detail: {
+          ticket: {
+            id: 44,
+            kind: "task",
+            title: "Heavy RCA document",
+            stage: "rca",
+            status: "queued",
+            priority: 0,
+            bounce_count: 0,
+            orphaned: 0,
+            blocked_on: null,
+            dead_letter_reason: null,
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_010_000,
+            folder_path: ".ffactory/tickets/44-heavy-rca-document",
+            epic_id: null,
+          },
+          claim: null,
+          history: [],
+        },
+        detailLoading: false,
+        detailError: null,
+        files: [],
+        filesLoading: false,
+        filesError: null,
+        selectedRelPath: null,
+        content: null,
+        contentLoading: false,
+        contentError: null,
+        onSelectFile: vi.fn(),
+        onRetryFiles: vi.fn(),
+        onRetryContent: vi.fn(),
+        onClose,
+      }),
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Expand full screen" }),
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Exit full screen" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("dialog").className).toContain("max-w-none");
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(
+      screen.getByRole("button", { name: "Expand full screen" }),
+    ).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledOnce();
   });
 });
