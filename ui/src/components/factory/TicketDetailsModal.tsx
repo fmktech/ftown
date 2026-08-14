@@ -22,10 +22,12 @@ export interface TicketDetailsModalProps {
   content: string | null;
   contentLoading: boolean;
   contentError: string | null;
+  stages: string[];
   onSelectFile: (relPath: string) => void;
   onRetryFiles: () => void;
   onRetryContent: () => void;
   onStopTicket?: () => Promise<void>;
+  onRequeueTicket?: (stage: string) => Promise<void>;
   onHideTicket?: () => void;
   onClose: () => void;
 }
@@ -62,18 +64,21 @@ export function TicketDetailsModal({
   content,
   contentLoading,
   contentError,
+  stages,
   onSelectFile,
   onRetryFiles,
   onRetryContent,
   onStopTicket,
+  onRequeueTicket,
   onHideTicket,
   onClose,
 }: TicketDetailsModalProps) {
-  const [pendingAction, setPendingAction] = useState<"stop" | "hide" | null>(
-    null,
-  );
+  const [pendingAction, setPendingAction] = useState<
+    "stop" | "requeue" | "hide" | null
+  >(null);
   const [actionRunning, setActionRunning] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [requeueStage, setRequeueStage] = useState("");
   const [fullScreen, setFullScreen] = useState(false);
 
   useEffect(() => {
@@ -142,6 +147,23 @@ export function TicketDetailsModal({
               Stop ticket
             </button>
           )}
+          {onRequeueTicket !== undefined && (
+            <button
+              type="button"
+              onClick={() => {
+                setActionError(null);
+                setRequeueStage(
+                  detail !== null && stages.includes(detail.ticket.stage)
+                    ? detail.ticket.stage
+                    : (stages[0] ?? ""),
+                );
+                setPendingAction("requeue");
+              }}
+              className="shrink-0 rounded border border-emerald-500/40 px-2 py-1 text-xs text-emerald-300 hover:bg-emerald-500/10"
+            >
+              Requeue ticket
+            </button>
+          )}
           {onHideTicket !== undefined && (
             <button
               type="button"
@@ -178,8 +200,28 @@ export function TicketDetailsModal({
             <span className="min-w-0 flex-1">
               {pendingAction === "stop"
                 ? `Stop ticket #${ticketId}? It will move to dead letter and leave the active pipeline; its history and artifacts are preserved.`
-                : `Remove ticket #${ticketId} from this board? This only hides it in this browser; its FTS history and artifacts remain.`}
+                : pendingAction === "requeue"
+                  ? `Requeue ticket #${ticketId}? It will return to queued at the selected stage; its history and artifacts are preserved.`
+                  : `Remove ticket #${ticketId} from this board? This only hides it in this browser; its FTS history and artifacts remain.`}
             </span>
+            {pendingAction === "requeue" && (
+              <label className="flex items-center gap-2">
+                <span className="text-zinc-500">Queue stage</span>
+                <select
+                  aria-label="Queue stage"
+                  value={requeueStage}
+                  onChange={(event) => setRequeueStage(event.target.value)}
+                  disabled={actionRunning}
+                  className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-xs text-zinc-200"
+                >
+                  {stages.map((stage) => (
+                    <option key={stage} value={stage}>
+                      {stage}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             {actionError !== null && (
               <span className="w-full text-red-400">{actionError}</span>
             )}
@@ -196,17 +238,35 @@ export function TicketDetailsModal({
             </button>
             <button
               type="button"
-              disabled={actionRunning}
-              className="rounded border border-red-500/40 px-2 py-1 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-50"
+              aria-label={
+                pendingAction === "requeue" ? "Confirm requeue" : undefined
+              }
+              disabled={
+                actionRunning ||
+                (pendingAction === "requeue" && requeueStage === "")
+              }
+              className={`rounded border px-2 py-1 text-xs disabled:opacity-50 ${
+                pendingAction === "requeue"
+                  ? "border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10"
+                  : "border-red-500/40 text-red-300 hover:bg-red-500/10"
+              }`}
               onClick={() => {
                 if (pendingAction === "hide") {
                   onHideTicket?.();
                   return;
                 }
-                if (onStopTicket === undefined) return;
+                const action =
+                  pendingAction === "requeue"
+                    ? onRequeueTicket === undefined
+                      ? null
+                      : () => onRequeueTicket(requeueStage)
+                    : onStopTicket === undefined
+                      ? null
+                      : onStopTicket;
+                if (action === null) return;
                 setActionRunning(true);
                 setActionError(null);
-                void onStopTicket()
+                void action()
                   .then(onClose)
                   .catch((err: unknown) => {
                     setActionError(
@@ -217,10 +277,14 @@ export function TicketDetailsModal({
               }}
             >
               {actionRunning
-                ? "Stopping…"
+                ? pendingAction === "requeue"
+                  ? "Requeueing…"
+                  : "Stopping…"
                 : pendingAction === "stop"
                   ? "Confirm stop"
-                  : "Remove"}
+                  : pendingAction === "requeue"
+                    ? "Confirm requeue"
+                    : "Remove"}
             </button>
           </div>
         )}

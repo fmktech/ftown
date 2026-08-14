@@ -29,6 +29,7 @@ export function FactoryPane({ factory, bridgeExec, sessions, onOpenSession }: Fa
     listTicketArtifacts,
     readTicketArtifact,
     stopTicket,
+    requeueTicket,
     listSkills,
     readSkill,
     writeSkill,
@@ -149,6 +150,7 @@ export function FactoryPane({ factory, bridgeExec, sessions, onOpenSession }: Fa
           listTicketArtifacts={listTicketArtifacts}
           readTicketArtifact={readTicketArtifact}
           stopTicket={stopTicket}
+          requeueTicket={requeueTicket}
         />
       </div>
       <div className={tab === "skills" ? "flex-1 min-h-0 overflow-hidden" : "hidden"}>

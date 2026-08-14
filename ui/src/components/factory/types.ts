@@ -402,6 +402,8 @@ export interface UseFactoryResult {
   readTicketArtifact: (folderPath: string, relPath: string) => Promise<string>;
   /** Moves the ticket to dead_letter through FTS, preserving its audit trail. */
   stopTicket: (id: number) => Promise<void>;
+  /** Resets a terminal ticket to queued at the selected pipeline stage. */
+  requeueTicket: (id: number, stage: string) => Promise<void>;
   listSkills: () => Promise<SkillFile[]>;
   readSkill: (relPath: string) => Promise<string>;
   writeSkill: (relPath: string, content: string) => Promise<void>;
@@ -466,6 +468,7 @@ export interface FactoryBoardProps {
   listTicketArtifacts: (folderPath: string) => Promise<TicketArtifactFile[]>;
   readTicketArtifact: (folderPath: string, relPath: string) => Promise<string>;
   stopTicket: (id: number) => Promise<void>;
+  requeueTicket: (id: number, stage: string) => Promise<void>;
 }
 
 export interface SkillEditorProps {
