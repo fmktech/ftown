@@ -26,6 +26,7 @@ describe('ftown Pi extension', () => {
     });
 
     assert.deepEqual(tools.map((tool) => tool.name), [
+      'ftown_ask_user',
       'ftown_mail',
       'ftown_sessions',
       'ftown_session_create',
@@ -42,6 +43,42 @@ describe('ftown Pi extension', () => {
         );
       }
     }
+  });
+
+  it('offers a native blocking user-input tool', async () => {
+    const tools = new Map<string, any>();
+    const prompts: Array<{ question: string; options: string[] }> = [];
+    const pi = {
+      on() {}, sendUserMessage() {}, registerCommand() {},
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+    };
+
+    registerFtownPiExtension(pi, {
+      env: {},
+      fetch: async () => ({ ok: true, json: async () => ({}) }),
+      readBridgePointer: async () => null,
+    });
+
+    const result = await tools.get('ftown_ask_user').execute(
+      'ask-1',
+      { question: 'Which environment?', options: ['staging', 'production'] },
+      undefined,
+      undefined,
+      {
+        ui: {
+          async select(question: string, options: string[]) {
+            prompts.push({ question, options });
+            return 'staging';
+          },
+        },
+      },
+    );
+
+    assert.deepEqual(prompts, [{
+      question: 'Which environment?',
+      options: ['staging', 'production'],
+    }]);
+    assert.deepEqual(result.details, { answer: 'staging' });
   });
 
   it('rejects incomplete operation-specific arguments before making bridge requests', async () => {
