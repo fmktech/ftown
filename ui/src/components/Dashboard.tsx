@@ -24,10 +24,12 @@ import { deriveFactories } from "./factory/useFactory";
 import type { FactoryInfo, NewFactoryInput } from "./factory/types";
 import { factoryInitPrompt, factoryKey, factoryWorkerOf } from "./factory/types";
 import { ConnectionDiagnostics } from "./ConnectionDiagnostics";
+import { SessionAttentionAlert } from "./SessionAttentionAlert";
 import { mergeBridgeOrder } from "@/lib/bridge-order";
 import { StatusDot } from "@/lib/StatusDot";
 import { usePersistentState, useHiddenSet, type PersistCodec } from "@/lib/use-persistent-state";
 import { loopGroupKey } from "@/lib/loop-group-key";
+import { latestVisibleSessionAttention } from "@/lib/session-attention";
 
 interface DashboardProps {
   client: Centrifuge | null;
@@ -154,20 +156,12 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     });
   }, [bridges, rawSessions, setBridgeOrder]);
   const { sessionActivity, markSessionIdle, clearSessionAttention } = useAllSessionEvents(client, rawSessions, userId);
-  const latestAttention = useMemo(() => {
-    let latest: { sessionId: string; sessionName: string; title: string; message: string; receivedAt: number } | null = null;
-    for (const [sessionId, activity] of sessionActivity) {
-      if (!activity.attention) continue;
-      const session = rawSessions.find((candidate) => candidate.id === sessionId);
-      const candidate = {
-        sessionId,
-        sessionName: session?.name || session?.prompt?.slice(0, 48) || "Session",
-        ...activity.attention,
-      };
-      if (!latest || candidate.receivedAt > latest.receivedAt) latest = candidate;
-    }
-    return latest;
-  }, [sessionActivity, rawSessions]);
+  const latestAttention = useMemo(() => latestVisibleSessionAttention({
+    sessions: rawSessions,
+    sessionActivity,
+    hiddenSessionIds,
+    hiddenBridgeIds,
+  }), [sessionActivity, rawSessions, hiddenSessionIds, hiddenBridgeIds]);
   const lastNativeAttentionRef = useRef(0);
 
   useEffect(() => {
@@ -477,6 +471,7 @@ PY`;
   }, []);
 
   const handleSelectSession = useCallback((id: string | null) => {
+    if (id) clearSessionAttention(id);
     setSelectedSessionId(id);
     if (id) {
       setSelectedLoopId(null);
@@ -485,7 +480,7 @@ PY`;
       setSidebarTab("sessions");
       setMobileTab("terminal");
     }
-  }, []);
+  }, [clearSessionAttention]);
 
   const handleSelectLoop = useCallback((loopId: string) => {
     setSelectedLoopId(loopId);
@@ -506,12 +501,13 @@ PY`;
   // Like handleSelectSession, but stays on the Factory sidebar tab — opening a
   // worker from the factory view shows its terminal without leaving the view.
   const handleOpenFactorySession = useCallback((id: string) => {
+    clearSessionAttention(id);
     setSelectedFactoryKey(null);
     setSelectedSessionId(id);
     setSelectedLoopId(null);
     setSelectedLoopRunId(null);
     setMobileTab("terminal");
-  }, []);
+  }, [clearSessionAttention]);
 
   const handleSidebarTabSwitch = useCallback((tab: SidebarTab) => {
     setSidebarTab(tab);
@@ -1277,65 +1273,12 @@ PY`;
       />
 
       {latestAttention && (
-        <div
-          role="alert"
-          aria-live="assertive"
-          style={{
-            position: "fixed",
-            right: 16,
-            bottom: isDesktop
-              ? "max(16px, env(safe-area-inset-bottom))"
-              : "calc(max(16px, env(safe-area-inset-bottom)) + 94px)",
-            zIndex: 100,
-            width: "min(360px, calc(100vw - 32px))",
-            padding: 14,
-            borderRadius: "var(--radius-md)",
-            border: "1px solid var(--status-pending)",
-            background: "var(--bg-overlay)",
-            boxShadow: "var(--shadow-lg)",
-          }}
-        >
-          <div className="flex items-start gap-3">
-            <span aria-hidden style={{ color: "var(--status-pending)", fontWeight: 800 }}>!</span>
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontSize: 12, color: "var(--text-primary)", fontWeight: 700 }}>
-                {latestAttention.title}
-              </div>
-              <div style={{ marginTop: 3, fontSize: 11, color: "var(--text-muted)" }}>
-                {latestAttention.sessionName}: {latestAttention.message}
-              </div>
-              <button
-                type="button"
-                className="btn-warn"
-                style={{ marginTop: 10 }}
-                onClick={() => {
-                  handleSelectSession(latestAttention.sessionId);
-                }}
-              >
-                Open session
-              </button>
-            </div>
-            <button
-              type="button"
-              aria-label="Dismiss notification"
-              title="Dismiss"
-              onClick={() => clearSessionAttention(latestAttention.sessionId)}
-              style={{
-                minWidth: 44,
-                minHeight: 44,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                color: "var(--text-faint)",
-                fontSize: 18,
-                lineHeight: 1,
-                cursor: "pointer",
-              }}
-            >
-              ×
-            </button>
-          </div>
-        </div>
+        <SessionAttentionAlert
+          attention={latestAttention}
+          isDesktop={isDesktop}
+          onOpen={handleSelectSession}
+          onDismiss={clearSessionAttention}
+        />
       )}
 
     </div>

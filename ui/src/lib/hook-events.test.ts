@@ -50,6 +50,49 @@ describe("extractManualInputNotice", () => {
       receivedAt: 789,
     });
   });
+
+  it.each([
+    {
+      harness: "Codex",
+      eventName: "PreToolUse",
+      data: {
+        tool_name: "request_user_input",
+        tool_input: { questions: [{ question: "Which branch should I use?" }] },
+      },
+      question: "Which branch should I use?",
+    },
+    {
+      harness: "Cursor",
+      eventName: "preToolUse",
+      data: {
+        toolName: "AskQuestion",
+        toolInput: { prompt: "Approve this migration?" },
+      },
+      question: "Approve this migration?",
+    },
+    {
+      harness: "Pi",
+      eventName: "PreToolUse",
+      data: {
+        tool_name: "ftown_ask_user",
+        tool_input: { question: "Which environment should I deploy?" },
+      },
+      question: "Which environment should I deploy?",
+    },
+  ])("recognizes $harness ask tools and their native input shapes", ({ eventName, data, question }) => {
+    expect(extractManualInputNotice(eventName, data, 900)).toMatchObject({
+      type: "ask_user",
+      message: question,
+      receivedAt: 900,
+    });
+  });
+
+  it("does not treat ordinary tools as manual input", () => {
+    expect(extractManualInputNotice("PreToolUse", {
+      tool_name: "Bash",
+      tool_input: { command: "npm test" },
+    })).toBeNull();
+  });
 });
 
 describe("clearsManualInputNotice", () => {

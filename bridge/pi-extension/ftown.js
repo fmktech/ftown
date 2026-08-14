@@ -308,6 +308,41 @@ export function registerFtownPiExtension(pi, options = {}) {
   }
 
   pi.registerTool({
+    name: 'ftown_ask_user',
+    label: 'ask user',
+    description: 'Pause and ask the user for manual input. Prefer options when the valid choices are known.',
+    parameters: {
+      type: 'object',
+      properties: {
+        question: { type: 'string', minLength: 1 },
+        options: {
+          type: 'array',
+          items: { type: 'string', minLength: 1 },
+          minItems: 2,
+          maxItems: 12,
+          description: 'Optional choices. Omit for a free-form answer.',
+        },
+      },
+      required: ['question'],
+      additionalProperties: false,
+    },
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      try {
+        requireString(params, 'question');
+        if (!ctx?.ui) throw new Error('Pi interactive UI is unavailable');
+        const answer = Array.isArray(params.options) && params.options.length > 0
+          ? await ctx.ui.select(params.question, params.options)
+          : await ctx.ui.input(params.question);
+        return toolResult(answer === undefined
+          ? { answer: null, cancelled: true }
+          : { answer });
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  });
+
+  pi.registerTool({
     name: 'ftown_mail',
     label: 'ftown mail',
     description: 'Send durable mail to another ftown session, or read this session inbox.',

@@ -13,6 +13,35 @@ const MANUAL_INPUT_NOTIFICATION_TYPES = new Set<ManualInputNotice["type"]>([
   "agent_needs_input",
 ]);
 
+const MANUAL_INPUT_TOOL_NAMES = new Set([
+  "askuserquestion",
+  "askquestion",
+  "askuser",
+  "requestuserinput",
+  "ftownaskuser",
+]);
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function extractQuestion(data: Record<string, unknown>): string | undefined {
+  const rawInput = data.tool_input ?? data.toolInput ?? data.input;
+  if (typeof rawInput !== "object" || rawInput === null) return undefined;
+  const input = rawInput as Record<string, unknown>;
+  const direct = nonEmptyString(input.question)
+    ?? nonEmptyString(input.prompt)
+    ?? nonEmptyString(input.message);
+  if (direct) return direct;
+
+  const first = Array.isArray(input.questions) ? input.questions[0] : undefined;
+  if (typeof first !== "object" || first === null) return undefined;
+  const question = first as Record<string, unknown>;
+  return nonEmptyString(question.question)
+    ?? nonEmptyString(question.prompt)
+    ?? nonEmptyString(question.message);
+}
+
 /** Turn a Claude Notification hook into a user-attention signal when the
  * session cannot continue without a human response. */
 export function extractManualInputNotice(
@@ -21,21 +50,17 @@ export function extractManualInputNotice(
   receivedAt: number = Date.now(),
 ): ManualInputNotice | null {
   const toolName = extractToolLabel(eventName, data);
-  if ((eventName === "PreToolUse" || eventName === "preToolUse") && toolName === "AskUserQuestion") {
-    const toolInput = data.tool_input ?? data.toolInput;
-    const questions = typeof toolInput === "object" && toolInput !== null
-      ? (toolInput as Record<string, unknown>).questions
-      : undefined;
-    const first = Array.isArray(questions) ? questions[0] : undefined;
-    const question = typeof first === "object" && first !== null
-      ? (first as Record<string, unknown>).question
-      : undefined;
+  const normalizedToolName = toolName?.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  if (
+    (eventName === "PreToolUse" || eventName === "preToolUse")
+    && normalizedToolName
+    && MANUAL_INPUT_TOOL_NAMES.has(normalizedToolName)
+  ) {
+    const question = extractQuestion(data);
     return {
       type: "ask_user",
       title: "Session is asking a question",
-      message: typeof question === "string" && question.trim()
-        ? question
-        : "Open the session to respond.",
+      message: question ?? "Open the session to respond.",
       receivedAt,
     };
   }

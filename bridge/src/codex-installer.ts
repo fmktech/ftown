@@ -9,11 +9,14 @@ import { isFtownMailPumpCommand } from './hook-installer.js';
 
 const execAsync = promisify(exec);
 
-/**
- * Codex hooks fire on these events in the TUI; the payload schema and output
- * protocol are Claude-compatible. Stop/UserPromptSubmit must omit "matcher".
- */
-const CODEX_HOOK_EVENTS = ['Stop', 'UserPromptSubmit', 'SessionStart'] as const;
+/** Codex turn boundaries used for durable mail delivery. */
+const CODEX_MAIL_HOOK_EVENTS = ['Stop', 'UserPromptSubmit', 'SessionStart'] as const;
+/** Structured lifecycle events forwarded to ftown's session event channel. */
+const CODEX_NOTIFY_HOOK_EVENTS = [
+  ...CODEX_MAIL_HOOK_EVENTS,
+  'PreToolUse',
+  'PostToolUse',
+] as const;
 const CODEX_NOTIFY_TIMEOUT_SECONDS = 10;
 
 interface HookCommandEntry {
@@ -87,7 +90,7 @@ function upsertCodexHookEntry(
 /**
  * Merge ftown hook entries into ~/.codex/hooks.json (Claude-settings-shaped
  * schema). Installs `<harness> hook-pump` (mail delivery at turn boundaries)
- * and the notify.sh forwarder on Stop / UserPromptSubmit / SessionStart.
+ * at turn boundaries and the notify.sh forwarder on lifecycle/tool events.
  * Idempotent; preserves unknown content; atomic tmp+rename.
  */
 export function ensureCodexHooks(
@@ -133,7 +136,7 @@ export function ensureCodexHooks(
   const counters = { added: 0, repaired: 0, kept: 0 };
   const pumpCommand = `${harnessBinPath} hook-pump`;
 
-  for (const event of CODEX_HOOK_EVENTS) {
+  for (const event of CODEX_MAIL_HOOK_EVENTS) {
     upsertCodexHookEntry(hooks, event, {
       matches: isFtownMailPumpCommand,
       desired: { type: 'command', command: pumpCommand, timeout: 30 },
@@ -146,7 +149,9 @@ export function ensureCodexHooks(
       },
       counters,
     });
+  }
 
+  for (const event of CODEX_NOTIFY_HOOK_EVENTS) {
     upsertCodexHookEntry(hooks, event, {
       matches: isFtownNotifyCommand,
       desired: { type: 'command', command: notifyScriptPath, timeout: CODEX_NOTIFY_TIMEOUT_SECONDS },

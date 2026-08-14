@@ -32,12 +32,17 @@ describe('ensureCodexHooks', () => {
       ensureCodexHooks(harness, notify);
 
       const data = readHooks(home);
-      for (const event of ['Stop', 'UserPromptSubmit', 'SessionStart']) {
+      for (const event of ['Stop', 'UserPromptSubmit', 'SessionStart', 'PreToolUse', 'PostToolUse']) {
         const notifyHook = eventCommands(data, event).find((hook) => hook.command === notify);
         assert.ok(notifyHook, `missing notify hook for ${event}`);
         assert.equal(notifyHook.async, undefined);
         assert.equal(notifyHook.timeout, 10);
       }
+      assert.equal(
+        eventCommands(data, 'PreToolUse').some((hook) => hook.command === `${harness} hook-pump`),
+        false,
+        'tool events should not run the mail pump',
+      );
     } finally {
       restoreHome(realHome);
       rmSync(home, { recursive: true, force: true });
