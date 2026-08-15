@@ -429,7 +429,7 @@ Inbox options:
   --json                        Raw JSON output
 
 Create options:
-  --shell <type>                claude | cursor | codex | grok | pi | kimi-code | opencode | shell | zai | kimi | deepseek | fireworks (default: claude)
+  --shell <type>                Harness override; omitted inherits the current session (otherwise claude)
   --prompt <text>               Initial message
   --workdir <path>              Working directory
   --create-workdir              Create --workdir if it does not exist
@@ -515,8 +515,7 @@ async function main(): Promise<void> {
         if (createWorkdir) body.createMissingWorkingDir = true;
 
         const caller = process.env.FTOWN_SESSION_ID?.trim();
-        const headers =
-          useParent && caller ? { 'X-Ftown-Session-Id': caller } : undefined;
+        const headers = caller ? { 'X-Ftown-Session-Id': caller } : undefined;
 
         const { data } = await api('POST', '/api/sessions', body, headers);
         console.log(jsonOut ? JSON.stringify(data, null, 2) : formatCreated(data));

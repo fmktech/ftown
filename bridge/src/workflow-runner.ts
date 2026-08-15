@@ -63,7 +63,7 @@ import type { WorkflowShell } from './harness-registry.js';
 /** What the engine asks BridgeClient to create. */
 export interface SpawnSpec {
   prompt: string; // full child prompt (task + result-file protocol)
-  shellType: WorkflowShell;
+  shellType?: WorkflowShell; // omitted => local API inherits the orchestrator harness
   workingDir?: string;
   name?: string;
   model?: string;
@@ -140,7 +140,7 @@ export interface RunOptions {
   selfSessionId: string; // orchestrator session id => children's parentSessionId
   args?: unknown;
   workdir?: string; // default workdir for spawned children
-  defaultShell?: WorkflowShell; // default 'claude'
+  defaultShell?: WorkflowShell; // omitted => inherit the orchestrator harness
   defaultTimeoutMs?: number; // default 1_800_000 (30 min)
   maxConcurrent?: number; // default 4  (real sessions are heavy — keep low)
   maxAgents?: number | null; // default null
@@ -159,7 +159,6 @@ export type WorkflowModule = {
   run?: (ctx: WorkflowContext) => Promise<unknown> | unknown;
 };
 
-const DEFAULT_SHELL: WorkflowShell = 'claude';
 const DEFAULT_TIMEOUT_MS = 1_800_000;
 const DEFAULT_MAX_CONCURRENT = 4;
 const DEFAULT_POLL_INTERVAL_MS = 2000;
@@ -295,7 +294,7 @@ export async function runWorkflow(
   }
 
   const { bridge, store, clock, logger } = deps;
-  const defaultShell = opts.defaultShell ?? DEFAULT_SHELL;
+  const defaultShell = opts.defaultShell;
   // Resolve numerics defensively: `??` does NOT catch NaN, and a NaN cap would
   // deadlock the semaphore / make every timeout comparison false. Coerce non-finite
   // values to the documented defaults.

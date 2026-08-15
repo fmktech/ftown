@@ -39,13 +39,14 @@ fts events --db "$FTS_DB" --after <cursor>
 
 ## Spawning workers
 
-`--shell` accepts `claude`, `cursor`, `codex`, `grok`, `pi`, `kimi-code`, `shell`, `opencode`, and Claude
-Code provider flavors such as `zai`, `kimi`, `deepseek`, `fireworks`; `--parent`
-sets the worker's parent to `$FTOWN_SESSION_ID`.
+Omit `--shell` to inherit the orchestrator's current harness. Use `--shell` only
+when the user or task explicitly requests a different harness (`claude`, `cursor`,
+`codex`, `grok`, `pi`, `kimi-code`, `shell`, `opencode`, or a Claude Code provider
+flavor such as `zai`, `kimi`, `deepseek`, `fireworks`). `--parent` sets the worker's
+parent to `$FTOWN_SESSION_ID`.
 
 ```bash
 ~/.ftown/ftown-sessions create \
-  --shell claude \
   --parent \
   --workdir /path/to/repo \
   --name review-auth \

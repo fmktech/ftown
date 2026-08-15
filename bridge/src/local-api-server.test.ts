@@ -15,6 +15,7 @@ import { deleteLoop, getLoop, listLoops, mutateLoopRuntime } from './loop-store.
 import { upsertLoopRunRecord } from './loop-run-store.js';
 import { SessionStore } from './session-store.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
+import type { CreateFtownSessionDeps } from './create-ftown-session.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { Loop, LoopRunRecord, Session } from './types.js';
 
@@ -24,17 +25,96 @@ async function api(
   method: string,
   path: string,
   body?: unknown,
+  extraHeaders?: Record<string, string>,
 ): Promise<{ status: number; data: Record<string, unknown> }> {
   const res = await fetch(`http://127.0.0.1:${port}${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
       ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      ...extraHeaders,
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   return { status: res.status, data: (await res.json()) as Record<string, unknown> };
 }
+
+describe('LocalApiServer session harness inheritance', () => {
+  it('inherits the caller harness when omitted and preserves an explicit override', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ftw-session-harness-api-'));
+    const server = new LocalApiServer();
+    const token = 'test-token';
+    const store = new SessionStore(join(home, 'data'));
+    const runs: Array<{ command: string }> = [];
+    const runner = {
+      getPreferredRuntime: () => 'direct',
+      run: (_sessionId: string, command: string) => {
+        runs.push({ command });
+      },
+      stop: () => false,
+    } as unknown as ProcessRunner;
+    const centrifugo = {
+      publishSessionUpdate: async () => {},
+    } as unknown as CentrifugoClient;
+    const caller: Session = {
+      id: 'pi-parent',
+      name: 'Pi parent',
+      command: 'pi',
+      shellType: 'pi',
+      status: 'running',
+      bridgeId: 'bridge-1',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+    await store.saveSession(caller);
+
+    const sessionFactory: CreateFtownSessionDeps = {
+      store,
+      runner,
+      centrifugo,
+      userId: 'user-1',
+      bridgeId: 'bridge-1',
+      hookPort: 4321,
+      hookToken: 'hook-token',
+      notifyScriptPath: '/tmp/notify.sh',
+      wireTerminalInput: () => {},
+    };
+    server.setAuthToken(token);
+    server.setDependencies(store, runner, centrifugo, 'user-1');
+    server.setSessionFactory(sessionFactory);
+
+    const port = await server.start();
+    try {
+      const inherited = await api(
+        port,
+        token,
+        'POST',
+        '/api/sessions',
+        { prompt: 'Use my harness', parentSessionId: true },
+        { 'X-Ftown-Session-Id': caller.id },
+      );
+      assert.strictEqual(inherited.status, 201);
+      assert.strictEqual((inherited.data.session as Session).shellType, 'pi');
+      assert.strictEqual((inherited.data.session as Session).parentSessionId, caller.id);
+
+      const explicit = await api(
+        port,
+        token,
+        'POST',
+        '/api/sessions',
+        { shellType: 'claude', prompt: 'Use Claude', parentSessionId: true },
+        { 'X-Ftown-Session-Id': caller.id },
+      );
+      assert.strictEqual(explicit.status, 201);
+      assert.strictEqual((explicit.data.session as Session).shellType, 'claude');
+      assert.match(runs[0].command, /pi/);
+      assert.match(runs[1].command, /claude/);
+    } finally {
+      server.stop();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
 
 // A blocked provider create/revive must surface as a 422 carrying the provider,
 // the env-var KEY-bearing message, and the `ftown env set` fix — and NEVER the

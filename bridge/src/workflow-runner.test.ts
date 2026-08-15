@@ -259,12 +259,21 @@ describe('agent()', () => {
     // The spawn spec wires the child to the orchestrator and embeds the result path.
     const spec = bridge.created[0];
     assert.strictEqual(spec.parentSessionId, 'self-1');
-    assert.strictEqual(spec.shellType, 'claude'); // default shell
+    assert.strictEqual(spec.shellType, undefined); // local API inherits the orchestrator harness
     assert.ok(spec.prompt.includes(store.resultPath('run1', 'rev')));
 
     // Lifecycle events.
     like(starts(logger)[0], { label: 'rev', sessionId: 's1' });
     like(dones(logger)[0], { label: 'rev', ok: true, cached: false });
+  });
+
+  it('preserves an explicit run-level harness override', async () => {
+    const { bridge, store, deps } = setup();
+    store.result = { ok: true, result: 'done' };
+
+    await run(deps, (ctx) => ctx.agent('review'), { defaultShell: 'claude' });
+
+    assert.strictEqual(bridge.created[0].shellType, 'claude');
   });
 
   it('with a schema returns the parsed result object (not coerced to a string)', async () => {

@@ -373,6 +373,14 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         delete body.parentSessionId;
       }
 
+      // Harness selection and parent assignment are intentionally independent.
+      // Any in-session client may omit shellType to inherit its own harness,
+      // while an explicit shellType (or custom command) always wins.
+      if (!body.shellType && !body.command && callerSessionId) {
+        const caller = await this.store.loadSession(callerSessionId);
+        if (caller?.shellType) body.shellType = caller.shellType;
+      }
+
       const input = parseCreateSessionBody(
         body,
         useCallerAsParent ? callerSessionId : undefined,
