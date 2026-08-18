@@ -51,6 +51,8 @@ function loadBridge(): BridgePointer {
 
 class HttpBridgeClient implements BridgeClient {
   private readonly selfSessionId: string;
+  private inheritedShellType: string | undefined;
+  private inheritedShellResolved = false;
 
   constructor(selfSessionId: string) {
     this.selfSessionId = selfSessionId;
@@ -97,6 +99,15 @@ class HttpBridgeClient implements BridgeClient {
     await new Promise<void>((resolve) => setTimeout(resolve, ms));
   }
 
+  private async getInheritedShellType(): Promise<string | undefined> {
+    if (this.inheritedShellResolved) return this.inheritedShellType;
+    const { data } = await this.api('GET', `/api/sessions/${this.selfSessionId}`);
+    const shellType = (data as { session?: { shellType?: unknown } }).session?.shellType;
+    this.inheritedShellType = typeof shellType === 'string' ? shellType : undefined;
+    this.inheritedShellResolved = true;
+    return this.inheritedShellType;
+  }
+
   private cursorTrustKey(lines: string[], workdir?: string): string | null {
     const text = lines.join('\n');
     if (!text.includes('Workspace Trust Required')) return null;
@@ -123,18 +134,22 @@ class HttpBridgeClient implements BridgeClient {
   }
 
   async createSession(opts: SpawnSpec): Promise<{ id: string }> {
+    const effectiveShellType = opts.shellType ?? await this.getInheritedShellType();
     // Pre-trust the worker's working dir so a claude worker does not block on the
     // "Do you trust this folder?" dialog (which --dangerously-skip-permissions ignores).
-    if (opts.shellType === 'claude' && opts.workingDir) {
+    if (
+      ['claude', 'zai', 'kimi', 'deepseek', 'fireworks'].includes(effectiveShellType ?? '')
+      && opts.workingDir
+    ) {
       ensureClaudeWorkdirTrust(opts.workingDir);
     }
     const body: Record<string, unknown> = {
       prompt: opts.prompt,
-      shellType: opts.shellType,
       parentSessionId: opts.parentSessionId,
       // Workflow children report via the result FILE, never via the mail briefing.
       suppressBriefing: true,
     };
+    if (opts.shellType) body.shellType = opts.shellType;
     if (opts.workingDir) body.workingDir = opts.workingDir;
     if (opts.name) body.name = opts.name;
     if (opts.model) body.model = opts.model;
@@ -146,7 +161,7 @@ class HttpBridgeClient implements BridgeClient {
     if (!session?.id) {
       throw new Error('createSession: bridge did not return a session id');
     }
-    if (opts.shellType === 'cursor' && opts.workingDir) {
+    if (effectiveShellType === 'cursor' && opts.workingDir) {
       await this.acceptCursorWorkspaceTrust(session.id, opts.workingDir);
     }
     return { id: session.id };
@@ -294,7 +309,7 @@ Runs a deterministic multi-session workflow. Must run INSIDE an ftown session
 Options:
   --args <json>        JSON passed to the script as ctx.args
   --workdir <path>     Default working dir for spawned child sessions
-  --shell <type>       Default child shell: ${SHELLS.join(' | ')} (default: claude)
+  --shell <type>       Child harness override: ${SHELLS.join(' | ')} (default: current harness)
   --concurrency <n>    Max concurrently-running child sessions (default: 4)
   --timeout <ms>       Default per-agent timeout in ms (default: 1800000)
   --max-agents <n>     Cap total agent() spawns this run (default: unbounded)
@@ -367,8 +382,9 @@ async function main(): Promise<void> {
     runId,
     selfSessionId,
     args: parsedArgs,
-    defaultShell: parseShell(flag(rest, '--shell')) ?? 'claude',
   };
+  const defaultShell = parseShell(flag(rest, '--shell'));
+  if (defaultShell) opts.defaultShell = defaultShell;
   // Default child workdir to the orchestrator's cwd so workers never launch in an
   // undefined/untrusted directory; the trust pre-acceptance above keys off this.
   const workdir = flag(rest, '--workdir');

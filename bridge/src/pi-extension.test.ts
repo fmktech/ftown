@@ -655,7 +655,7 @@ describe('ftown Pi extension', () => {
     assert.equal(requests[2], 'http://127.0.0.1:4321/api/sessions/s1/running');
   });
 
-  it('creates a structured child session without arbitrary command or env injection', async () => {
+  it('omits the harness to inherit Pi and preserves an explicit harness override', async () => {
     const tools = new Map<string, any>();
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const pi = {
@@ -673,20 +673,32 @@ describe('ftown Pi extension', () => {
       readBridgePointer: async () => null,
     });
 
-    const result = await tools.get('ftown_session_create').execute('create-call', {
-      shell: 'pi', prompt: 'Review the API', workdir: '/tmp/project',
+    const createTool = tools.get('ftown_session_create');
+    assert.deepEqual(createTool.parameters.required, ['prompt']);
+
+    const result = await createTool.execute('create-call', {
+      prompt: 'Review the API', workdir: '/tmp/project',
       model: 'openai/gpt-5', name: 'Reviewer', parent: true,
     });
 
     assert.equal(requests[0].url, 'http://127.0.0.1:4321/api/sessions');
     assert.deepEqual(JSON.parse(String(requests[0].init?.body)), {
-      shellType: 'pi', prompt: 'Review the API', workingDir: '/tmp/project',
+      prompt: 'Review the API', workingDir: '/tmp/project',
       model: 'openai/gpt-5', name: 'Reviewer', parentSessionId: true,
     });
     const requestHeaders = requests[0].init?.headers as Headers;
     assert.equal(requestHeaders.get('authorization'), 'Bearer secret');
     assert.equal(requestHeaders.get('x-ftown-session-id'), 'parent-id');
     assert.equal(result.details.session.id, 'child-id');
+
+    await createTool.execute('override-call', {
+      shell: 'claude', prompt: 'Use Claude explicitly',
+    });
+    assert.deepEqual(JSON.parse(String(requests[1].init?.body)), {
+      shellType: 'claude', prompt: 'Use Claude explicitly',
+    });
+    const overrideHeaders = requests[1].init?.headers as Headers;
+    assert.equal(overrideHeaders.get('x-ftown-session-id'), 'parent-id');
   });
 
   it('renames and stops sessions through the structured management tool', async () => {

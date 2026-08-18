@@ -33,7 +33,7 @@ sessions and loops.
 ```bash
 # Sessions
 ~/.ftown/ftown-sessions list
-~/.ftown/ftown-sessions create --shell codex --prompt "Run tests" --workdir "$PWD" --parent
+~/.ftown/ftown-sessions create --prompt "Run tests" --workdir "$PWD" --parent
 ~/.ftown/ftown-sessions screen <session-id> --limit 200
 ~/.ftown/ftown-sessions tell <session-id> --type task "continue with the API client"
 

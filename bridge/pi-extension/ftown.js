@@ -510,13 +510,14 @@ export function registerFtownPiExtension(pi, options = {}) {
   pi.registerTool({
     name: 'ftown_session_create',
     label: 'create ftown session',
-    description: 'Create a structured ftown agent session. Does not allow arbitrary commands or environment variables.',
+    description: 'Create a structured ftown agent session. Omit shell to inherit the current Pi harness; set it only for an explicit override. Does not allow arbitrary commands or environment variables.',
     parameters: {
       type: 'object',
       properties: {
         shell: {
           type: 'string',
           enum: ['claude', 'cursor', 'codex', 'grok', 'pi', 'kimi-code', 'opencode', 'shell', 'zai', 'kimi', 'deepseek', 'fireworks'],
+          description: 'Optional harness override. Omit to inherit the current Pi harness.',
         },
         prompt: { type: 'string', minLength: 1 },
         workdir: { type: 'string' },
@@ -527,14 +528,14 @@ export function registerFtownPiExtension(pi, options = {}) {
         createWorkdir: { type: 'boolean' },
         orchestrator: { type: 'boolean' },
       },
-      required: ['shell', 'prompt'],
+      required: ['prompt'],
       additionalProperties: false,
     },
     async execute(toolCallId, params) {
       try {
         return await executeOnce('ftown_session_create', toolCallId, async () => {
           const body = {
-            shellType: params.shell,
+            ...(params.shell ? { shellType: params.shell } : {}),
             prompt: params.prompt,
             ...(params.workdir ? { workingDir: params.workdir } : {}),
             ...(params.name ? { name: params.name } : {}),
@@ -545,7 +546,7 @@ export function registerFtownPiExtension(pi, options = {}) {
             ...(params.createWorkdir ? { createMissingWorkingDir: true } : {}),
             ...(params.orchestrator ? { orchestrator: true } : {}),
           };
-          const extraHeaders = params.parent && ftownSessionId
+          const extraHeaders = ftownSessionId
             ? { 'x-ftown-session-id': ftownSessionId }
             : undefined;
           return toolResult(await requestJson('/api/sessions', {

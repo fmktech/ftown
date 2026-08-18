@@ -19,7 +19,6 @@ top-level `~/.ftown/ftown` dispatcher.
 
 # Spawn a child agent (uses FTOWN_SESSION_ID for --parent)
 ~/.ftown/ftown-sessions create \
-  --shell cursor \
   --prompt "Review the auth module and summarize" \
   --workdir /path/to/repo \
   --name auth-review \
@@ -94,7 +93,7 @@ Fan-out targets are messaged sequentially, one JSON result line per target.
 
 | Flag | Description |
 |------|-------------|
-| `--shell` | `claude`, `cursor`, `codex`, `grok`, `pi`, `kimi-code`, `opencode`, `shell`, or Claude Code provider flavors `zai`, `kimi`, `deepseek`, `fireworks` (default `claude`) |
+| `--shell` | Explicit harness override: `claude`, `cursor`, `codex`, `grok`, `pi`, `kimi-code`, `opencode`, `shell`, or Claude Code provider flavors `zai`, `kimi`, `deepseek`, `fireworks`. When omitted inside a session, inherits that session's harness; outside a session, defaults to `claude`. |
 | `--prompt` | Initial task — passed as a CLI launch argument to `claude`/Claude provider flavors/`cursor`/`codex`/`grok`/`pi` (typed after boot for other shells) |
 | `--workdir` | Working directory |
 | `--name` | Dashboard label |
@@ -116,7 +115,7 @@ Returns JSON with the new `session.id` — use that id for `screen` / `grep` / `
 CLI=~/.ftown/ftown-sessions
 
 $CLI list
-$CLI create --shell cursor --prompt "Run tests and report" --workdir "$PWD" --parent
+$CLI create --prompt "Run tests and report" --workdir "$PWD" --parent
 # -> note session.id from JSON
 
 $CLI screen <child-id> --limit 100

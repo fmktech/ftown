@@ -181,7 +181,7 @@ Full options:
 ~/.ftown/ftown-workflows run <script.mjs> \
   [--args <json>]          # parsed and available as ctx.args in the script
   [--workdir <path>]       # default working dir for spawned child sessions
-  [--shell claude|cursor|codex|pi|opencode|shell]
+  [--shell claude|cursor|codex|pi|opencode|shell] # explicit override; default is current harness
   [--concurrency <n>]      # max simultaneous live sessions (default 4)
   [--timeout <ms>]         # per-agent timeout (default 1 800 000 = 30 min)
   [--max-agents <n>]       # hard budget cap on total spawns
@@ -242,7 +242,7 @@ Key options:
 | `label` | `step-<n>` | step key used for the result file and resume |
 | `phase` | — | progress grouping shown in logs |
 | `schema` | — | JSON Schema embedded in the worker prompt; requests JSON result |
-| `shell` | run-level default | `claude` / `cursor` / `codex` / `pi` / `opencode` / `shell` |
+| `shell` | run-level default (current harness when unset) | `claude` / `cursor` / `codex` / `pi` / `opencode` / `shell` |
 | `model` | — | model override passed to the session |
 | `workdir` | run-level default | working directory for the child session |
 | `timeoutMs` | 1 800 000 | wall-clock cap for this step |
