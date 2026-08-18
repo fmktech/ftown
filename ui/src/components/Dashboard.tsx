@@ -30,6 +30,7 @@ import { StatusDot } from "@/lib/StatusDot";
 import { usePersistentState, useHiddenSet, type PersistCodec } from "@/lib/use-persistent-state";
 import { loopGroupKey } from "@/lib/loop-group-key";
 import { latestVisibleSessionAttention } from "@/lib/session-attention";
+import { deriveSessionReachabilityStatus } from "@/lib/session-reachability";
 
 interface DashboardProps {
   client: Centrifuge | null;
@@ -79,10 +80,31 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const { hidden: hiddenLoopGroupKeys, hide: hideLoopGroup, unhide: handleUnhideLoopGroup } = useHiddenSet("ftown:hiddenLoopGroups");
   const { hidden: hiddenCronBridgeIds, hide: hideCronBridge, unhide: handleUnhideCronBridge } = useHiddenSet("ftown:hiddenCronBridges");
   const [showUserMenu, setShowUserMenu] = useState(false);
+  const [directlyReachableBridgeIds, setDirectlyReachableBridgeIds] = useState<Set<string>>(
+    () => new Set()
+  );
   const terminalRef = useRef<TerminalHandle>(null);
   const mobileControlRef = useRef<MobileControlBarHandle>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const userMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!transport) {
+      setDirectlyReachableBridgeIds(new Set());
+      return;
+    }
+
+    const unsubscribe = transport.onBridgeReachabilityChange((bridgeId, reachable) => {
+      setDirectlyReachableBridgeIds((current) => {
+        const next = new Set(current);
+        if (reachable) next.add(bridgeId);
+        else next.delete(bridgeId);
+        return next;
+      });
+    });
+    setDirectlyReachableBridgeIds(new Set(transport.getDirectlyReachableBridgeIds()));
+    return unsubscribe;
+  }, [transport]);
 
   const scheduleTerminalRenderAdjustment = useCallback(() => {
     const refit = () => terminalRef.current?.refit({ forceResize: true });
@@ -250,11 +272,15 @@ PY`;
   const activeBridgeIds = useMemo(() => new Set(bridges.map((b) => b.bridgeId)), [bridges]);
 
   const sessions = useMemo(() => {
-    const mapped = rawSessions.map((s) =>
-      s.status === "running" && activeBridgeIds.size > 0 && !activeBridgeIds.has(s.bridgeId)
-        ? { ...s, status: "disconnected" as const }
-        : s
-    );
+    const mapped = rawSessions.map((s) => {
+      const status = deriveSessionReachabilityStatus(
+        s.status,
+        s.bridgeId,
+        activeBridgeIds,
+        directlyReachableBridgeIds,
+      );
+      return status === s.status ? s : { ...s, status };
+    });
     if (sessionOrder.length === 0 && bridgeOrder.length === 0) return mapped;
     const orderMap = new Map(sessionOrder.map((id, i) => [id, i]));
     return [...mapped].sort((a, b) => {
@@ -267,7 +293,7 @@ PY`;
       const bi = orderMap.get(b.id) ?? Infinity;
       return ai - bi;
     });
-  }, [rawSessions, activeBridgeIds, sessionOrder, bridgeOrder]);
+  }, [rawSessions, activeBridgeIds, directlyReachableBridgeIds, sessionOrder, bridgeOrder]);
 
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
   const selectedLoop = selectedLoopId ? loops.find((loop) => loop.id === selectedLoopId) ?? null : null;

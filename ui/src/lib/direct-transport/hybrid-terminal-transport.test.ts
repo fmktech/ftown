@@ -316,6 +316,27 @@ describe('HybridTerminalTransport', () => {
     expect(publishCommand).toHaveBeenCalledWith(expect.objectContaining({ type: 'terminal_watch' }));
   });
 
+  it('reports bridge reachability while a Local/P2P peer is attached', async () => {
+    const { transport } = makeTransport((opts) => new FakePeer(opts.bridgeId));
+    const changes: Array<[string, boolean]> = [];
+    transport.onBridgeReachabilityChange((bridgeId, reachable) => changes.push([bridgeId, reachable]));
+
+    transport.subscribeTerminal('session-1', 'bridge-1', handlers());
+    await flush();
+
+    expect(transport.getDirectlyReachableBridgeIds()).toEqual(['bridge-1']);
+    expect(changes).toEqual([['bridge-1', true]]);
+
+    FakePeer.instances[0].simulateClose();
+    await flush();
+
+    expect(transport.getDirectlyReachableBridgeIds()).toEqual([]);
+    expect(changes).toEqual([
+      ['bridge-1', true],
+      ['bridge-1', false],
+    ]);
+  });
+
   it("re-emitted 'subscribed' (reconnect) re-sends exactly one terminal_watch without stacking heartbeats", async () => {
     const { transport, centrifuge, publishCommand } = makeTransport((opts) => {
       const p = new FakePeer(opts.bridgeId);
