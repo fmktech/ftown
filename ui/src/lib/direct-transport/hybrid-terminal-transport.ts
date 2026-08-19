@@ -230,6 +230,9 @@ export class HybridTerminalTransport implements TerminalTransportApi {
   private readonly peers = new Map<string, PeerEntry>();
   private readonly sessions = new Map<string, SessionEntry>();
   private readonly modeChangeCbs = new Set<(sessionId: string, mode: TerminalTransportMode) => void>();
+  private readonly bridgeReachabilityCbs = new Set<
+    (bridgeId: string, reachable: boolean) => void
+  >();
   private disposed = false;
 
   /** Registered-once global upgrade triggers (T2); null under SSR / no DOM. */
@@ -344,6 +347,22 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     };
   }
 
+  getDirectlyReachableBridgeIds(): string[] {
+    return [...this.peers.entries()]
+      .filter(([, pe]) => pe.status === 'attached' && pe.peer !== null)
+      .map(([bridgeId]) => bridgeId)
+      .sort();
+  }
+
+  onBridgeReachabilityChange(
+    cb: (bridgeId: string, reachable: boolean) => void,
+  ): () => void {
+    this.bridgeReachabilityCbs.add(cb);
+    return () => {
+      this.bridgeReachabilityCbs.delete(cb);
+    };
+  }
+
   /**
    * Feed inbound signaling (webrtc_answer/webrtc_ice/webrtc_close) received on
    * commands:rpc into the matching bridge peer. Not part of TerminalTransportApi;
@@ -378,6 +397,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     }
     this.peers.clear();
     this.modeChangeCbs.clear();
+    this.bridgeReachabilityCbs.clear();
 
     // Tear down the bridges:presence subscription only if WE created it (#4).
     if (this.ownedPresenceSub) {
@@ -585,6 +605,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     pe.status = 'attached';
     pe.kind = kind;
     pe.reason = null;
+    this.emitBridgeReachability(bridgeId, true);
 
     // An attached rung that later closes drops the session straight to Centrifugo
     // with reason 'peer_lost' — no retry of the other rung (matches R1 philosophy).
@@ -610,12 +631,14 @@ export class HybridTerminalTransport implements TerminalTransportApi {
   private finalizeFailed(bridgeId: string, reason: FallbackReason): void {
     const pe = this.peers.get(bridgeId);
     if (!pe || this.disposed) return;
+    const wasDirectlyReachable = pe.status === 'attached' && pe.peer !== null;
     pe.status = 'failed';
     pe.peer = null;
     pe.kind = null;
     pe.reason = reason;
     // Any pending switchover is void — the peer is gone.
     pe.switchState = null;
+    if (wasDirectlyReachable) this.emitBridgeReachability(bridgeId, false);
     for (const sessionId of pe.sessions) {
       const entry = this.sessions.get(sessionId);
       if (entry && !entry.disposed) {
@@ -789,6 +812,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     pe.status = 'attached';
     pe.kind = kind;
     pe.reason = null;
+    this.emitBridgeReachability(bridgeId, true);
     peer.onClose(() => this.onPeerDown(bridgeId));
     this.stopUpgradeLoop(pe);
 
@@ -1300,5 +1324,9 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     if (entry.mode === mode) return;
     entry.mode = mode;
     for (const cb of this.modeChangeCbs) cb(entry.sessionId, mode);
+  }
+
+  private emitBridgeReachability(bridgeId: string, reachable: boolean): void {
+    for (const cb of this.bridgeReachabilityCbs) cb(bridgeId, reachable);
   }
 }

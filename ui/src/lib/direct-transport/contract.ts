@@ -108,6 +108,10 @@ export interface TerminalTransportApi {
   sendResize(sessionId: string, cols: number, rows: number): void;
   getMode(sessionId: string): TerminalTransportMode;
   onModeChange(cb: (sessionId: string, mode: TerminalTransportMode) => void): () => void;
+  /** Bridge ids with a currently attached Local or P2P transport. */
+  getDirectlyReachableBridgeIds(): string[];
+  /** Fires when a bridge gains or loses its direct Local/P2P path. */
+  onBridgeReachabilityChange(cb: (bridgeId: string, reachable: boolean) => void): () => void;
   /** Why the session is on the centrifugo path; `null` for direct/connecting. */
   getFallbackReason(sessionId: string): FallbackReason;
   dispose(): void;
