@@ -296,7 +296,10 @@ export function useSessions(
       if (shellType === "shell") {
         cmd = "/bin/zsh -l";
       } else if (shellType === "opencode") {
-        cmd = "opencode";
+        // Empty command: the bridge rebuilds from the harness registry, which
+        // passes the prompt as a --prompt CLI arg instead of typing it into
+        // the TUI after a delay.
+        cmd = "";
       } else if (shellType === "cursor") {
         cmd = buildCursorAgentCommand({
           workingDir: options?.workingDir,
@@ -340,7 +343,7 @@ export function useSessions(
         env: options?.env,
         ...(options?.orchestrator && shellType !== "shell" ? { orchestrator: true } : {}),
         ...(options?.createMissingWorkingDir ? { createMissingWorkingDir: true } : {}),
-        ...(prompt ? { initialInput: prompt + "\r", initialInputDelay: 2000 } : {}),
+        ...(prompt && shellType !== "opencode" ? { initialInput: prompt + "\r", initialInputDelay: 2000 } : {}),
       };
 
       const command: Command = {

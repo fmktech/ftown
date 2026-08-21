@@ -27,6 +27,7 @@ import { installHarness, harnessOnPath, pathHint, writeHarnessAgentGuide, agentG
 import type { HarnessInstallResult } from './harness-installer.js';
 import { installNotifyScript } from './install-notify-script.js';
 import { installPiExtension } from './pi-extension-installer.js';
+import { installOpencodePlugin, opencodeBinaryAvailable } from './opencode-plugin-installer.js';
 import { installFtownSkill, removeFtownSkill } from './install-ftown-skill.js';
 import { installFtownSessionsCli } from './install-ftown-cli.js';
 import { installFtownWorkflowsCli } from './install-ftown-workflows-cli.js';
@@ -307,6 +308,13 @@ program
     installClaudeHooks(notifyScriptPath);
     installCursorHooks(notifyScriptPath);
     console.log(`[Bridge] Pi extension: ${piExtensionPath}`);
+    // The opencode plugin rides opencode's global plugin dir; skip silently
+    // when the opencode binary is not installed on this machine.
+    if (await opencodeBinaryAvailable()) {
+      const bundledOpencodePluginPath = resolve(__dirname, '..', 'opencode-plugin', 'ftown.js');
+      const opencodePluginPath = installOpencodePlugin(bundledOpencodePluginPath);
+      console.log(`[Bridge] opencode plugin: ${opencodePluginPath}`);
+    }
 
     const wireTerminalInput = (sessionId: string): void => {
       centrifugo.subscribeToTerminalInput(

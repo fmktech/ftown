@@ -1,0 +1,13 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`buildOpencodeCommand > mirrors the bridge builder byte-for-byte 1`] = `"opencode --auto"`;
+
+exports[`buildOpencodeCommand > mirrors the bridge builder byte-for-byte 2`] = `"opencode --auto -m 'anthropic/claude-sonnet-4-5'"`;
+
+exports[`buildOpencodeCommand > mirrors the bridge builder byte-for-byte 3`] = `"opencode --auto --prompt 'do the thing'"`;
+
+exports[`buildOpencodeCommand > mirrors the bridge builder byte-for-byte 4`] = `"opencode --auto -m 'openai/gpt-5.2' --prompt 'hello world'"`;
+
+exports[`buildOpencodeCommand > mirrors the bridge builder byte-for-byte 5`] = `"opencode --auto --session 'ses_abc'"`;
+
+exports[`buildOpencodeCommand > mirrors the bridge builder byte-for-byte 6`] = `"opencode --auto --prompt 'it'\\''s here'"`;

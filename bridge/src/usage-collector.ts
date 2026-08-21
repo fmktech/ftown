@@ -18,8 +18,9 @@ import type { ModelUsage, Session, SessionUsage } from './types.js';
  * same workdir-based discovery model. Sessions with none of these (cursor,
  * grok, plain shell) have no structured usage source and yield null.
  *
- * TODO(opencode): add an opencode extractor once Session carries an
- * opencodeSessionId (no such field exists yet).
+ * TODO(opencode): opencodeSessionId is now captured from the plugin's hook
+ * events, but there is no on-disk usage extractor yet — opencode sessions
+ * still yield null until one is written.
  *
  * Robustness contract: missing files, unparseable lines, and I/O errors never
  * throw — they degrade to null (or to a partial sum if the read-time cap fires

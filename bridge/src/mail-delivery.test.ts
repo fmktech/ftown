@@ -313,7 +313,7 @@ describe('MailDeliveryService nudges', () => {
 
   it('coalesces two rapid mails into one nudge crediting the latest sender', async () => {
     const { clock, store, runner, service } = setup();
-    const session = makeSession('s1', { shellType: 'opencode' });
+    const session = makeSession('s1', { shellType: 'grok' });
     store.add(session);
     runner.running.add('s1');
 
@@ -336,7 +336,7 @@ describe('MailDeliveryService nudges', () => {
 
   it('rate-limits nudges to one per 30s, retrying when the window reopens', async () => {
     const { clock, store, runner, service } = setup();
-    const session = makeSession('s1', { shellType: 'opencode' });
+    const session = makeSession('s1', { shellType: 'grok' });
     store.add(session);
     runner.running.add('s1');
 
@@ -357,7 +357,7 @@ describe('MailDeliveryService nudges', () => {
 
   it('does not nudge when the mail was already consumed by delivery', async () => {
     const { clock, store, runner, service } = setup();
-    const session = participatingSession('s1', { shellType: 'opencode' });
+    const session = participatingSession('s1', { shellType: 'grok' });
     store.add(session);
     runner.running.add('s1');
 
@@ -372,7 +372,7 @@ describe('MailDeliveryService nudges', () => {
     // A clock near zero would make old code's `lastNudgeAt ?? 0` compute a
     // tiny `sinceLast`, incorrectly rate-limiting the very first nudge.
     const { clock, store, runner, service } = setup(500);
-    const session = makeSession('s1', { shellType: 'opencode' });
+    const session = makeSession('s1', { shellType: 'grok' });
     store.add(session);
     runner.running.add('s1');
 
@@ -384,7 +384,7 @@ describe('MailDeliveryService nudges', () => {
 
   it('keeps the pending nudge marker when the session is not running, for a later retry', async () => {
     const { clock, store, runner, service } = setup();
-    const session = makeSession('s1', { shellType: 'opencode' });
+    const session = makeSession('s1', { shellType: 'grok' });
     store.add(session);
     // Session is not running yet — the nudge timer will fire while it's down.
 
@@ -415,7 +415,7 @@ describe('MailDeliveryService nudges', () => {
 describe('MailDeliveryService busy re-check', () => {
   it('defers nudging a busy session, then fires once it goes idle', async () => {
     const { clock, store, runner, service } = setup();
-    const session = makeSession('s1', { shellType: 'opencode' });
+    const session = makeSession('s1', { shellType: 'grok' });
     store.add(session);
     runner.running.add('s1');
 
@@ -434,7 +434,7 @@ describe('MailDeliveryService busy re-check', () => {
 
   it('ignores a busy marker old enough to be a crash', async () => {
     const { clock, store, runner, service } = setup();
-    const session = makeSession('s1', { shellType: 'opencode' });
+    const session = makeSession('s1', { shellType: 'grok' });
     store.add(session);
     runner.running.add('s1');
 
@@ -518,7 +518,7 @@ describe('MailDeliveryService participatesInMail gating', () => {
 describe('MailDeliveryService injectPtyLine', () => {
   it('submits the CR only after the 600ms paste-settle window', async () => {
     const { clock, store, runner, service } = setup();
-    const session = makeSession('s1', { shellType: 'opencode' });
+    const session = makeSession('s1', { shellType: 'grok' });
     store.add(session);
     runner.running.add('s1');
 

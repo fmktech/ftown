@@ -13,13 +13,15 @@ interface CachedAgentIds {
   codex?: string;
   pi?: string;
   piFile?: string;
+  opencode?: string;
   isCodex?: boolean;
   isPi?: boolean;
+  isOpencode?: boolean;
 }
 
 /**
- * Persists agent-native session identity (Claude/Codex/Pi session_id, Pi
- * session_file, or Cursor conversation_id) from hook events onto the stored
+ * Persists agent-native session identity (Claude/Codex/Pi/opencode session_id,
+ * Pi session_file, or Cursor conversation_id) from hook events onto the stored
  * session record, with an in-memory cache of the last persisted values to skip
  * disk reads on the hot hook path.
  */
@@ -49,7 +51,11 @@ export class AgentSessionIdPersister {
     if (cached
       && (!agentId || (cached.isPi
         ? cached.pi === agentId
-        : cached.isCodex ? cached.codex === agentId : cached.claude === agentId))
+        : cached.isCodex
+          ? cached.codex === agentId
+          : cached.isOpencode
+            ? cached.opencode === agentId
+            : cached.claude === agentId))
       && (!cursorId || cached.cursor === cursorId)
       && (!sessionFile || cached.piFile === sessionFile)) {
       return;
@@ -59,6 +65,7 @@ export class AgentSessionIdPersister {
     if (!session) return;
     const isCodex = session.shellType === 'codex';
     const isPi = session.shellType === 'pi';
+    const isOpencode = session.shellType === 'opencode';
 
     let changed = false;
     if (agentId) {
@@ -68,7 +75,10 @@ export class AgentSessionIdPersister {
       } else if (isCodex && session.codexSessionId !== agentId) {
         session.codexSessionId = agentId;
         changed = true;
-      } else if (!isCodex && session.claudeSessionId !== agentId) {
+      } else if (isOpencode && session.opencodeSessionId !== agentId) {
+        session.opencodeSessionId = agentId;
+        changed = true;
+      } else if (!isCodex && !isOpencode && session.claudeSessionId !== agentId) {
         session.claudeSessionId = agentId;
         changed = true;
       }
@@ -88,8 +98,10 @@ export class AgentSessionIdPersister {
         codex: session.codexSessionId,
         pi: session.piSessionId,
         piFile: session.piSessionFile,
+        opencode: session.opencodeSessionId,
         isCodex,
         isPi,
+        isOpencode,
       });
       return;
     }
@@ -103,8 +115,10 @@ export class AgentSessionIdPersister {
       codex: session.codexSessionId,
       pi: session.piSessionId,
       piFile: session.piSessionFile,
+      opencode: session.opencodeSessionId,
       isCodex,
       isPi,
+      isOpencode,
     });
     await this.deps.publishSessionUpdate(session);
   }

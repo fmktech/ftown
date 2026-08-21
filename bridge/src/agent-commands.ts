@@ -6,6 +6,7 @@ import type { ShellType } from './types.js';
 // The per-harness builders live in the registry; re-exported here so existing
 // importers (and tests) keep their import paths.
 export {
+  buildOpencodeCommand,
   shellQuote,
   buildCursorAgentCommand,
   buildCodexCommand,
@@ -22,6 +23,7 @@ export interface BuildSessionCommandInput {
   cursorSessionId?: string;
   codexSessionId?: string;
   piSessionId?: string;
+  opencodeSessionId?: string;
   command?: string;
   /** Initial prompt passed as a CLI argument — avoids racing the TUI with typed input. */
   initialPrompt?: string;

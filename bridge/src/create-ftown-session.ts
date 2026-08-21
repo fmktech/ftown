@@ -38,6 +38,7 @@ export interface CreateFtownSessionInput {
   codexSessionId?: string;
   piSessionId?: string;
   piSessionFile?: string;
+  opencodeSessionId?: string;
   env?: Record<string, string>;
   parentSessionId?: string;
   initialInput?: string;
@@ -262,7 +263,15 @@ async function staggerHarnessSpawn(shellType: ShellType | undefined): Promise<vo
 /** The stored-session fields relaunch derivation needs — satisfied by both live records and tombstones. */
 export type RelaunchCommandSource = Pick<
   Session,
-  'command' | 'shellType' | 'workingDir' | 'model' | 'claudeSessionId' | 'cursorSessionId' | 'codexSessionId' | 'piSessionId'
+  | 'command'
+  | 'shellType'
+  | 'workingDir'
+  | 'model'
+  | 'claudeSessionId'
+  | 'cursorSessionId'
+  | 'codexSessionId'
+  | 'piSessionId'
+  | 'opencodeSessionId'
 >;
 
 /**
@@ -297,6 +306,7 @@ export function deriveRelaunchCommand(session: RelaunchCommandSource): {
     cursorSessionId: session.cursorSessionId,
     codexSessionId: session.codexSessionId,
     piSessionId: session.piSessionId,
+    opencodeSessionId: session.opencodeSessionId,
     // Workdir-based resume (Pi/kimi-code `-c`): no id to carry, so signal resume
     // explicitly. Id-based harnesses ignore this and key off their id fields.
     resume: true,
@@ -315,15 +325,21 @@ export function deriveRelaunchCommand(session: RelaunchCommandSource): {
 
 /** Whether a stored session recorded the agent-session id its harness needs to resume. */
 export function canResumeStoredSession(
-  session: Pick<Session, 'shellType' | 'claudeSessionId' | 'cursorSessionId' | 'codexSessionId'>,
+  session: Pick<
+    Session,
+    'shellType' | 'claudeSessionId' | 'cursorSessionId' | 'codexSessionId' | 'opencodeSessionId'
+  >,
 ): boolean {
   const shellType = session.shellType ?? 'claude';
   if (shellType === 'cursor') return Boolean(session.cursorSessionId?.trim());
   if (shellType === 'codex') return Boolean(session.codexSessionId?.trim());
+  // opencode resumes by captured session id (`--session`), recorded from the
+  // plugin's hook events.
+  if (shellType === 'opencode') return Boolean(session.opencodeSessionId?.trim());
   // Pi and kimi-code resume by working directory (`-c`), so they need no
   // captured session id and are always resumable on restart.
   if (shellType === 'pi' || shellType === 'kimi-code') return true;
-  return shellType !== 'shell' && shellType !== 'opencode' && Boolean(session.claudeSessionId?.trim());
+  return shellType !== 'shell' && Boolean(session.claudeSessionId?.trim());
 }
 
 /**
@@ -465,6 +481,7 @@ export async function createFtownSession(
     codexSessionId: input.codexSessionId,
     piSessionId: input.piSessionId,
     piSessionFile: input.piSessionFile,
+    opencodeSessionId: input.opencodeSessionId,
     env: sessionEnv,
     parentSessionId,
     runtime: deps.runner.getPreferredRuntime(),
@@ -599,6 +616,8 @@ export function parseCreateSessionBody(
       typeof body.piSessionId === 'string' ? body.piSessionId : undefined,
     piSessionFile:
       typeof body.piSessionFile === 'string' ? body.piSessionFile : undefined,
+    opencodeSessionId:
+      typeof body.opencodeSessionId === 'string' ? body.opencodeSessionId : undefined,
     env: env && typeof env === 'object' ? env : undefined,
     parentSessionId,
     initialInput: typeof body.initialInput === 'string' ? body.initialInput : undefined,

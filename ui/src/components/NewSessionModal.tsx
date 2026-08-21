@@ -324,6 +324,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const [grokModel, setGrokModel] = useState<string>(GROK_MODEL_OPTIONS[0]);
   const [piModel, setPiModel] = useState("");
   const [kimiCodeModel, setKimiCodeModel] = useState<string>(KIMI_CODE_MODEL_OPTIONS[0].value);
+  const [opencodeModel, setOpencodeModel] = useState("");
   const [autoCompactWindow, setAutoCompactWindow] = useState("");
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [missingWorkingDir, setMissingWorkingDir] = useState<string | null>(null);
@@ -408,6 +409,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setGrokModel(restoredShellType === "grok" && typeof parsed.model === "string" ? parsed.model : GROK_MODEL_OPTIONS[0]);
     setPiModel(restoredShellType === "pi" && typeof parsed.model === "string" ? parsed.model : "");
     setKimiCodeModel(restoredShellType === "kimi-code" && typeof parsed.model === "string" ? parsed.model : KIMI_CODE_MODEL_OPTIONS[0].value);
+    setOpencodeModel(restoredShellType === "opencode" && typeof parsed.model === "string" ? parsed.model : "");
     setAutoCompactWindow(getStoredAutoCompactWindow());
     setSubmitError(null);
     setMissingWorkingDir(null);
@@ -467,7 +469,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     try {
       await onSubmit("", {
         name: name.trim() || undefined,
-        model: shellType === "grok" ? grokModel : shellType === "pi" ? piModel.trim() || undefined : shellType === "kimi-code" ? kimiCodeModel : undefined,
+        model: shellType === "grok" ? grokModel : shellType === "pi" ? piModel.trim() || undefined : shellType === "kimi-code" ? kimiCodeModel : shellType === "opencode" ? opencodeModel.trim() || undefined : undefined,
         workingDir: workingDir.trim() || undefined,
         bridgeId: effectiveBridgeId || undefined,
         shellType,
@@ -505,6 +507,9 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       if (shellType === "kimi-code") {
         lastDefaults.model = kimiCodeModel;
       }
+      if (shellType === "opencode") {
+        lastDefaults.model = opencodeModel.trim() || undefined;
+      }
       localStorage.setItem(LAST_SESSION_DEFAULTS_KEY, JSON.stringify(lastDefaults));
     } catch {
       // localStorage unavailable (private browsing, quota) — ignore
@@ -517,6 +522,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setGrokModel(GROK_MODEL_OPTIONS[0]);
     setPiModel("");
     setKimiCodeModel(KIMI_CODE_MODEL_OPTIONS[0].value);
+    setOpencodeModel("");
     setBridgeId("");
     setShowSuggestions(false);
     setSelectedClaudeSessionId(null);
@@ -524,7 +530,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setSelectedCursorSessionId(null);
     setSelectedCursorSummary(null);
     onClose();
-  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, fireworksModels, zaiModels, grokModel, piModel, kimiCodeModel, autoCompactWindow, onSubmit, onClose]);
+  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, fireworksModels, zaiModels, grokModel, piModel, kimiCodeModel, opencodeModel, autoCompactWindow, onSubmit, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -709,6 +715,22 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                   value={piModel}
                   onChange={(e) => setPiModel(e.target.value)}
                   placeholder="Optional, e.g. anthropic/claude-sonnet-4"
+                  className={INPUT_CLASS + " text-sm"}
+                />
+              </div>
+            )}
+
+            {shellType === "opencode" && (
+              <div className="mt-3">
+                <label htmlFor="ns-opencode-model" className="block text-sm text-[var(--text-muted)] mb-1">
+                  Model
+                </label>
+                <input
+                  id="ns-opencode-model"
+                  type="text"
+                  value={opencodeModel}
+                  onChange={(e) => setOpencodeModel(e.target.value)}
+                  placeholder="Optional, provider/model e.g. anthropic/claude-sonnet-4-5"
                   className={INPUT_CLASS + " text-sm"}
                 />
               </div>

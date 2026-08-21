@@ -25,6 +25,7 @@ export interface BuildCommandInput {
   cursorSessionId?: string;
   codexSessionId?: string;
   piSessionId?: string;
+  opencodeSessionId?: string;
   /** Initial prompt passed as a CLI argument — avoids racing the TUI with typed input. */
   initialPrompt?: string;
   /**
@@ -43,7 +44,11 @@ export interface HarnessSpec {
   /** The initial prompt may be passed as a CLI argument instead of typed into the TUI. */
   promptAsCliArg: boolean;
   /** Resume field that suppresses the prompt-as-CLI-arg path when present. */
-  resumeField?: 'claudeSessionId' | 'cursorSessionId' | 'codexSessionId';
+  resumeField?:
+    | 'claudeSessionId'
+    | 'cursorSessionId'
+    | 'codexSessionId'
+    | 'opencodeSessionId';
   /**
    * Rebadged base CLI: the harness launches this CLI with provider env overrides
    * (see PROVIDER_AUTH_ENV / PROVIDER_RUNTIME_ENV in provider-env-store.ts,
@@ -133,6 +138,36 @@ export function buildGrokCommand(options: {
   if (options.initialPrompt?.trim()) {
     // The positional prompt is auto-submitted by the grok TUI.
     parts.push(shellQuote(options.initialPrompt));
+  }
+
+  return parts.join(' ');
+}
+
+export function buildOpencodeCommand(options: {
+  model?: string;
+  opencodeSessionId?: string;
+  initialPrompt?: string;
+}): string {
+  // --auto approves permissions that are not explicitly denied — the opencode
+  // analog of claude's --allow-dangerously-skip-permissions / grok's
+  // --always-approve, required for unattended ftown runs.
+  const parts = ['opencode', '--auto'];
+
+  if (options.opencodeSessionId?.trim()) {
+    // Resume must not replay the original prompt — opencode restores the thread.
+    parts.push('--session', shellQuote(options.opencodeSessionId.trim()));
+    return parts.join(' ');
+  }
+
+  if (options.model?.trim()) {
+    parts.push('-m', shellQuote(options.model.trim()));
+  }
+
+  if (options.initialPrompt?.trim()) {
+    // The TUI submits the --prompt message as the first turn on launch.
+    // Requires an opencode build with prompt auto-submit (restored upstream
+    // 2025-11); older builds merely prefill the composer.
+    parts.push('--prompt', shellQuote(options.initialPrompt));
   }
 
   return parts.join(' ');
@@ -296,11 +331,20 @@ export const HARNESSES = {
     validForWorkflow: true,
   },
   opencode: {
-    buildCommand: () => 'opencode',
-    // Preserved decision: opencode was never in HOOKED_SHELL_TYPES.
-    hooked: false,
-    // Preserved decision: opencode prompts are typed into the TUI, not passed as args.
-    promptAsCliArg: false,
+    // Workdir comes from the runner cwd — opencode takes a project dir
+    // positionally, so it must stay empty and inherit process cwd.
+    buildCommand: (input) =>
+      buildOpencodeCommand({
+        model: input.model,
+        opencodeSessionId: input.opencodeSessionId,
+        initialPrompt: input.initialPrompt,
+      }),
+    // Mail arrives through the installed global plugin (~/.config/opencode/
+    // plugins/ftown.js), which forwards session events to the bridge /hook
+    // endpoint and delivers inbox mail as a new prompt at turn boundaries.
+    hooked: true,
+    promptAsCliArg: true,
+    resumeField: 'opencodeSessionId',
     validForLoop: true,
     validForWorkflow: true,
   },
@@ -363,7 +407,10 @@ export function isLoopHarness(value: unknown): value is LoopHarness {
  */
 export function harnessAcceptsPromptAsCliArg(
   shellType: ShellType,
-  input: Pick<BuildCommandInput, 'claudeSessionId' | 'cursorSessionId' | 'codexSessionId'>,
+  input: Pick<
+    BuildCommandInput,
+    'claudeSessionId' | 'cursorSessionId' | 'codexSessionId' | 'opencodeSessionId'
+  >,
 ): boolean {
   const spec: HarnessSpec = HARNESSES[shellType];
   if (!spec.promptAsCliArg) return false;
