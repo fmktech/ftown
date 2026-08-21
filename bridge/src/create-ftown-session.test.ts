@@ -669,9 +669,14 @@ describe('canResumeStoredSession — which stored sessions can resume', () => {
     assert.strictEqual(canResumeStoredSession({ shellType: 'pi' }), true);
   });
 
-  it('never resumes plain shells, opencode, or sessions with no recorded id', () => {
-    assert.strictEqual(canResumeStoredSession({ shellType: 'shell', claudeSessionId: 'c' }), false);
+  it('resumes opencode by its captured plugin-reported session id', () => {
+    assert.strictEqual(canResumeStoredSession({ shellType: 'opencode', opencodeSessionId: 'ses_1' }), true);
     assert.strictEqual(canResumeStoredSession({ shellType: 'opencode', claudeSessionId: 'c' }), false);
+    assert.strictEqual(canResumeStoredSession({ shellType: 'opencode' }), false);
+  });
+
+  it('never resumes plain shells or sessions with no recorded id', () => {
+    assert.strictEqual(canResumeStoredSession({ shellType: 'shell', claudeSessionId: 'c' }), false);
     assert.strictEqual(canResumeStoredSession({ shellType: 'claude' }), false);
     assert.strictEqual(canResumeStoredSession({ shellType: 'claude', claudeSessionId: '  ' }), false);
   });
@@ -695,6 +700,24 @@ describe('createFtownSession — Pi launch', () => {
       harness.runs[0].command,
       "pi --extension \"$HOME/.ftown/pi/ftown.js\" --model 'openai/gpt-5' 'inspect today'\\''s changes'",
     );
+    assert.strictEqual(harness.runs[0].initialInput, undefined);
+  });
+
+  it('createFtownSession — opencode launch passes the prompt as a --prompt CLI arg', async () => {
+    const harness = fakeDeps();
+    const session = await createFtownSession(harness.deps, {
+      shellType: 'opencode',
+      model: 'anthropic/claude-sonnet-4-5',
+      prompt: "inspect today's changes",
+    });
+
+    assert.strictEqual(session.shellType, 'opencode');
+    assert.strictEqual(session.command, "opencode --auto -m 'anthropic/claude-sonnet-4-5'");
+    assert.strictEqual(
+      harness.runs[0].command,
+      "opencode --auto -m 'anthropic/claude-sonnet-4-5' --prompt 'inspect today'\\''s changes'",
+    );
+    // No typed-input race: the prompt rode the command line.
     assert.strictEqual(harness.runs[0].initialInput, undefined);
   });
 });

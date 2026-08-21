@@ -97,7 +97,10 @@ export function workingDirMissingResponse(
 }
 
 export function archivedSessionWasResumed(
-  session: Pick<Session, 'shellType' | 'claudeSessionId' | 'cursorSessionId' | 'codexSessionId'>,
+  session: Pick<
+    Session,
+    'shellType' | 'claudeSessionId' | 'cursorSessionId' | 'codexSessionId' | 'opencodeSessionId'
+  >,
   isCustomCommand: boolean,
 ): boolean {
   return !isCustomCommand && canResumeStoredSession(session);
@@ -625,7 +628,9 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           ((tombstone.claudeSessionId && s.claudeSessionId === tombstone.claudeSessionId) ||
             (tombstone.cursorSessionId && s.cursorSessionId === tombstone.cursorSessionId) ||
             (tombstone.codexSessionId && s.codexSessionId === tombstone.codexSessionId) ||
-            (tombstone.piSessionId && s.piSessionId === tombstone.piSessionId)) &&
+            (tombstone.piSessionId && s.piSessionId === tombstone.piSessionId) ||
+            (tombstone.opencodeSessionId &&
+              s.opencodeSessionId === tombstone.opencodeSessionId)) &&
           isLive(s),
       );
       if (conflict) {
@@ -659,6 +664,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           codexSessionId: tombstone.codexSessionId,
           piSessionId: tombstone.piSessionId,
           piSessionFile: tombstone.piSessionFile,
+          opencodeSessionId: tombstone.opencodeSessionId,
           parentSessionId,
         });
         // A builder-managed resumable harness preserves conversation context;

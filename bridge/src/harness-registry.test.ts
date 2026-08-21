@@ -8,6 +8,7 @@ import {
   SHELL_TYPES,
   WORKFLOW_SHELLS,
   buildKimiCodeCommand,
+  buildOpencodeCommand,
   harnessAcceptsPromptAsCliArg,
   isLoopHarness,
   isShellType,
@@ -97,10 +98,10 @@ describe('harness registry', () => {
     );
   });
 
-  it('derives the hooked harness set (Pi uses the bundled ftown extension)', () => {
+  it('derives the hooked harness set (Pi uses the bundled ftown extension, opencode the bundled ftown plugin)', () => {
     assert.deepEqual(
       [...HOOKED_SHELL_TYPES].sort(),
-      ['claude', 'codex', 'deepseek', 'fireworks', 'kimi', 'pi', 'zai'],
+      ['claude', 'codex', 'deepseek', 'fireworks', 'kimi', 'opencode', 'pi', 'zai'],
     );
   });
 
@@ -145,9 +146,15 @@ describe('harness registry', () => {
       assert.equal(harnessAcceptsPromptAsCliArg('pi', {}), true);
     });
 
-    it('shell and opencode: never (prompt is typed into the TUI)', () => {
+    it('opencode: yes, unless resuming an opencode session', () => {
+      assert.equal(harnessAcceptsPromptAsCliArg('opencode', {}), true);
+      assert.equal(harnessAcceptsPromptAsCliArg('opencode', { opencodeSessionId: 'ses_123' }), false);
+      // Other harnesses' resume fields do not suppress it.
+      assert.equal(harnessAcceptsPromptAsCliArg('opencode', { claudeSessionId: 'abc' }), true);
+    });
+
+    it('shell: never (prompt is typed into the TTY)', () => {
       assert.equal(harnessAcceptsPromptAsCliArg('shell', {}), false);
-      assert.equal(harnessAcceptsPromptAsCliArg('opencode', {}), false);
     });
 
     it('kimi-code: never (interactive TUI takes no positional prompt)', () => {
@@ -166,6 +173,56 @@ describe('harness registry', () => {
       assert.equal(harnessAcceptsPromptAsCliArg('claude', { claudeSessionId: '   ' }), true);
       assert.equal(harnessAcceptsPromptAsCliArg('cursor', { cursorSessionId: '' }), true);
     });
+  });
+});
+
+describe('buildOpencodeCommand', () => {
+  it('base launch is --auto only (frozen)', () => {
+    assert.equal(buildOpencodeCommand({}), 'opencode --auto');
+  });
+
+  it('model rides -m in provider/model form', () => {
+    assert.equal(
+      buildOpencodeCommand({ model: 'anthropic/claude-sonnet-4-5' }),
+      "opencode --auto -m 'anthropic/claude-sonnet-4-5'",
+    );
+  });
+
+  it('initial prompt rides --prompt (the TUI submits it on launch)', () => {
+    assert.equal(
+      buildOpencodeCommand({ initialPrompt: 'do the thing' }),
+      "opencode --auto --prompt 'do the thing'",
+    );
+  });
+
+  it('model and prompt compose', () => {
+    assert.equal(
+      buildOpencodeCommand({ model: 'openai/gpt-5.2', initialPrompt: 'hello world' }),
+      "opencode --auto -m 'openai/gpt-5.2' --prompt 'hello world'",
+    );
+  });
+
+  it('resume suppresses model and prompt (thread is restored)', () => {
+    assert.equal(buildOpencodeCommand({ opencodeSessionId: 'ses_abc' }), "opencode --auto --session 'ses_abc'");
+    assert.equal(
+      buildOpencodeCommand({ opencodeSessionId: 'ses_abc', model: 'm', initialPrompt: 'p' }),
+      "opencode --auto --session 'ses_abc'",
+    );
+  });
+
+  it('prompts are single-quote escaped', () => {
+    assert.equal(
+      buildOpencodeCommand({ initialPrompt: "it's here" }),
+      `opencode --auto --prompt 'it'\\''s here'`,
+    );
+  });
+
+  it('registry entry threads session id, model, and prompt through', () => {
+    assert.equal(HARNESSES.opencode.buildCommand({}), 'opencode --auto');
+    assert.equal(
+      HARNESSES.opencode.buildCommand({ opencodeSessionId: 'x' }),
+      "opencode --auto --session 'x'",
+    );
   });
 });
 

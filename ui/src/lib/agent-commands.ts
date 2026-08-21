@@ -64,6 +64,31 @@ export function buildGrokCommand(options: {
   return parts.join(" ");
 }
 
+export function buildOpencodeCommand(options: {
+  model?: string;
+  opencodeSessionId?: string;
+  initialPrompt?: string;
+}): string {
+  // Mirror of bridge/src/harness-registry.ts buildOpencodeCommand — both
+  // builders MUST emit byte-identical output for the same inputs.
+  const parts = ["opencode", "--auto"];
+
+  if (options.opencodeSessionId?.trim()) {
+    parts.push("--session", shellQuote(options.opencodeSessionId.trim()));
+    return parts.join(" ");
+  }
+
+  if (options.model?.trim()) {
+    parts.push("-m", shellQuote(options.model.trim()));
+  }
+
+  if (options.initialPrompt?.trim()) {
+    parts.push("--prompt", shellQuote(options.initialPrompt));
+  }
+
+  return parts.join(" ");
+}
+
 export function buildPiCommand(options: { model?: string }): string {
   const parts = ["pi", "--extension", '"$HOME/.ftown/pi/ftown.js"'];
   if (options.model?.trim()) {

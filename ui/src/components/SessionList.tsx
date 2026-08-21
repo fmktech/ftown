@@ -671,7 +671,7 @@ export function SessionList({
 
   function startEditing(session: Session): void {
     setEditingSessionId(session.id);
-    setEditValue(session.name || session.prompt.slice(0, 36));
+    setEditValue(session.name || session.prompt?.slice(0, 36) || "Session");
   }
 
   function commitRename(): void {
@@ -952,7 +952,7 @@ export function SessionList({
 
   function renderSessionRow(session: Session, treeProps?: SessionRowTreeProps): ReactElement {
     const isSelected = session.id === selectedSessionId;
-    const displayName = session.name || session.prompt.slice(0, 36);
+    const displayName = session.name || session.prompt?.slice(0, 36) || "Session";
     const dropKey = `session:${session.id}`;
     const isDragOver = dragOverKey === dropKey;
     const depth = treeProps?.depth ?? 0;
@@ -1613,7 +1613,7 @@ export function SessionList({
           </button>
           {hiddenExpanded && hiddenSessions.map((session) => {
             const isSelected = session.id === selectedSessionId;
-            const displayName = session.name || session.prompt.slice(0, 36);
+            const displayName = session.name || session.prompt?.slice(0, 36) || "Session";
             return (
               <button
                 key={session.id}
