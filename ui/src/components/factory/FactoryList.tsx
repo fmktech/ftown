@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import type { Session } from "@/types";
 import { relativeTime } from "@/lib/relative-time";
 import { StatusDot } from "@/lib/StatusDot";
-import { formatTokens, formatUsageDetail } from "@/lib/format-usage";
+import { formatUsageDetail } from "@/lib/format-usage";
 import {
   factoryKey,
   factoryWorkerOf,
@@ -21,6 +21,23 @@ function initial(factory: FactoryInfo): string {
   return factory.project.slice(0, 1).toUpperCase() || "?";
 }
 
+function FactoryIcon({ selected = false }: { selected?: boolean }) {
+  return (
+    <span
+      aria-hidden="true"
+      className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md border ${
+        selected
+          ? "border-emerald-800/60 bg-emerald-950/40 text-emerald-400"
+          : "border-zinc-800 bg-zinc-900 text-zinc-500"
+      }`}
+    >
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round">
+        <path d="M2 4.5h4l1.2 1.4H14v7.1H2V4.5Z" />
+      </svg>
+    </span>
+  );
+}
+
 function NewFactoryButton({ onCreateFactory }: { onCreateFactory: () => void }) {
   return (
     <button
@@ -28,24 +45,22 @@ function NewFactoryButton({ onCreateFactory }: { onCreateFactory: () => void }) 
       onClick={onCreateFactory}
       aria-label="New factory…"
       title="New factory…"
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        width: 22,
-        height: 22,
-        borderRadius: 5,
-        border: "1px solid var(--border-subtle)",
-        background: "var(--bg-elevated)",
-        color: "var(--text-secondary)",
-        cursor: "pointer",
-        fontSize: 13,
-        lineHeight: 1,
-        flexShrink: 0,
-      }}
+      className="flex h-7 w-7 items-center justify-center rounded-md border border-zinc-800 bg-zinc-900/70 text-base text-zinc-400 transition-colors hover:border-zinc-700 hover:text-zinc-100"
     >
-      ＋
+      +
     </button>
+  );
+}
+
+function WorkerHarnessMark({ session }: { session: Session }) {
+  const label = (session.shellType ?? "agent").slice(0, 1).toUpperCase();
+  return (
+    <span
+      aria-hidden="true"
+      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-zinc-700 bg-zinc-950 font-mono text-[9px] font-semibold text-zinc-400"
+    >
+      {label}
+    </span>
   );
 }
 
@@ -60,89 +75,48 @@ function WorkerRow({
   onOpenSession: (sessionId: string) => void;
   onRemoveSession: (sessionId: string) => void;
 }) {
+  const details = session.usage
+    ? `${session.name}\n${formatUsageDetail(session.usage)}`
+    : session.name;
+
   return (
     <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        width: "100%",
-        borderLeft: `3px solid ${selected ? "var(--accent)" : "transparent"}`,
-        background: selected ? "var(--bg-elevated)" : "transparent",
-        fontFamily: "var(--font-mono)",
-      }}
-      onMouseEnter={(e) => {
-        if (!selected) e.currentTarget.style.background = "var(--bg-hover)";
-      }}
-      onMouseLeave={(e) => {
-        if (!selected) e.currentTarget.style.background = "transparent";
-      }}
+      className={`group/worker flex items-center rounded-md transition-colors ${
+        selected ? "bg-zinc-800/90" : "hover:bg-zinc-800/60"
+      }`}
     >
       <button
         type="button"
-        onClick={(e) => {
-          e.stopPropagation();
+        onClick={(event) => {
+          event.stopPropagation();
           onOpenSession(session.id);
         }}
         aria-current={selected ? "true" : undefined}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          flex: 1,
-          minWidth: 0,
-          padding: "5px 4px 5px 27px",
-          border: "none",
-          background: "transparent",
-          cursor: "pointer",
-          textAlign: "left",
-          fontFamily: "inherit",
-        }}
+        className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left"
       >
         <StatusDot kind={session.status} />
+        <WorkerHarnessMark session={session} />
         <span
-          title={session.name}
-          style={{
-            flex: 1,
-            minWidth: 0,
-            fontSize: 11,
-            color: selected ? "var(--text-primary)" : "var(--text-secondary)",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
+          title={details}
+          className={`min-w-0 flex-1 truncate text-[11px] ${
+            selected ? "text-zinc-100" : "text-zinc-400"
+          }`}
         >
           {session.name}
         </span>
-        {session.usage && (
-          <span
-            title={formatUsageDetail(session.usage)}
-            style={{ fontSize: 10, color: "var(--text-faint)", flexShrink: 0 }}
-          >
-            {formatTokens(session.usage.totalTokens)} tok
-          </span>
-        )}
-        <span style={{ fontSize: 10, color: "var(--text-faint)", flexShrink: 0 }}>
+        <span className="shrink-0 text-[10px] text-zinc-600">
           {relativeTime(session.createdAt)}
         </span>
       </button>
       <button
         type="button"
-        onClick={(e) => {
-          e.stopPropagation();
+        onClick={(event) => {
+          event.stopPropagation();
           onRemoveSession(session.id);
         }}
         aria-label={`Stop and archive ${session.name}`}
         title="Stop and archive worker"
-        className="btn-ghost"
-        style={{
-          width: 20,
-          height: 20,
-          padding: 0,
-          marginRight: 8,
-          flexShrink: 0,
-          fontSize: 11,
-          lineHeight: 1,
-        }}
+        className="mr-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-[10px] text-zinc-600 opacity-0 transition-all hover:bg-zinc-700 hover:text-zinc-200 focus:opacity-100 group-hover/worker:opacity-100"
       >
         ✕
       </button>
@@ -150,105 +124,49 @@ function WorkerRow({
   );
 }
 
-function WorkerSection({
-  workers,
-  expanded,
-  onToggle,
-  selectedSessionId,
-  onOpenSession,
-  onRemoveSession,
+function HiddenFactories({
+  factories,
+  onUnhideFactory,
 }: {
-  workers: Session[];
-  expanded: boolean;
-  onToggle: () => void;
-  selectedSessionId: string | null;
-  onOpenSession: (sessionId: string) => void;
-  onRemoveSession: (sessionId: string) => void;
+  factories: FactoryInfo[];
+  onUnhideFactory?: (key: string) => void;
 }) {
-  if (workers.length === 0) return null;
+  const [expanded, setExpanded] = useState(false);
+  if (factories.length === 0) return null;
+
   return (
-    <div>
+    <div className="mx-2 mt-2 border-t border-zinc-900 pt-2">
       <button
         type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          onToggle();
-        }}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 4,
-          width: "100%",
-          textAlign: "left",
-          padding: "4px 12px 4px 18px",
-          border: "none",
-          background: "transparent",
-          cursor: "pointer",
-          fontFamily: "var(--font-mono)",
-          fontSize: 10,
-          color: "var(--text-faint)",
-        }}
+        onClick={() => setExpanded((value) => !value)}
+        className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-[10px] uppercase tracking-wider text-zinc-600 hover:bg-zinc-900/60 hover:text-zinc-400"
       >
-        <span aria-hidden>{expanded ? "▾" : "▸"}</span>
-        <span>workers ({workers.length})</span>
+        <span>Hidden {factories.length}</span>
+        <span aria-hidden>{expanded ? "⌄" : "›"}</span>
       </button>
       {expanded && (
-        <div className="flex flex-col">
-          {workers.map((session) => (
-            <WorkerRow
-              key={session.id}
-              session={session}
-              selected={session.id === selectedSessionId}
-              onOpenSession={onOpenSession}
-              onRemoveSession={onRemoveSession}
-            />
-          ))}
+        <div className="mt-1 flex flex-col gap-0.5">
+          {factories.map((factory) => {
+            const key = factoryKey(factory);
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => onUnhideFactory?.(key)}
+                className="flex items-center gap-2 rounded-md px-2 py-1.5 text-left opacity-60 hover:bg-zinc-900 hover:opacity-100"
+                title="Unhide factory"
+              >
+                <FactoryIcon />
+                <span className="min-w-0 flex-1 truncate text-xs text-zinc-400">
+                  {factory.project}
+                </span>
+                <span className="text-[10px] text-zinc-600">Unhide</span>
+              </button>
+            );
+          })}
         </div>
       )}
     </div>
-  );
-}
-
-function HideFactoryButton({ onHide, rowHovered }: { onHide: () => void; rowHovered: boolean }) {
-  return (
-    <button
-      type="button"
-      onClick={(e) => {
-        e.stopPropagation();
-        onHide();
-      }}
-      aria-label="Hide factory"
-      title="Hide factory"
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        width: 18,
-        height: 18,
-        borderRadius: 4,
-        border: "none",
-        background: "transparent",
-        color: "var(--text-faint)",
-        cursor: "pointer",
-        fontSize: 11,
-        lineHeight: 1,
-        flexShrink: 0,
-        opacity: rowHovered ? 1 : 0.4,
-        transition: "opacity 0.15s ease, color 0.15s ease, background 0.15s ease",
-      }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.color = "var(--text-primary)";
-        e.currentTarget.style.background = "var(--bg-hover)";
-        e.currentTarget.style.opacity = "1";
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.color = "var(--text-faint)";
-        e.currentTarget.style.background = "transparent";
-        e.currentTarget.style.opacity = rowHovered ? "1" : "0.4";
-      }}
-    >
-      ✕
-    </button>
   );
 }
 
@@ -267,56 +185,38 @@ export function FactoryList({
   onUnhideFactory,
 }: FactoryListProps) {
   const [collapsedWorkers, setCollapsedWorkers] = useState<Record<string, boolean>>({});
-  const [hoveredKey, setHoveredKey] = useState<string | null>(null);
-  const [hiddenExpanded, setHiddenExpanded] = useState(false);
-
   const hiddenSet = hiddenFactoryKeys ?? new Set<string>();
   const visibleFactories = useMemo(
-    () => factories.filter((f) => !hiddenSet.has(factoryKey(f))),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [factories, hiddenFactoryKeys],
+    () => factories.filter((factory) => !hiddenSet.has(factoryKey(factory))),
+    [factories, hiddenSet],
   );
   const hiddenFactories = useMemo(
-    () => factories.filter((f) => hiddenSet.has(factoryKey(f))),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [factories, hiddenFactoryKeys],
+    () => factories.filter((factory) => hiddenSet.has(factoryKey(factory))),
+    [factories, hiddenSet],
   );
-
   const workersByFactoryKey = useMemo(() => {
     const map = new Map<string, Session[]>();
     for (const factory of factories) {
-      const key = factoryKey(factory);
-      const matches = sessions.filter((session) => factoryWorkerOf(session, [factory]) !== null);
-      matches.sort(
-        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-      );
-      map.set(key, matches);
+      const workers = sessions
+        .filter((session) => factoryWorkerOf(session, [factory]) !== null)
+        .sort(
+          (a, b) =>
+            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+        );
+      map.set(factoryKey(factory), workers);
     }
     return map;
-  }, [sessions, factories]);
+  }, [factories, sessions]);
 
   if (factories.length === 0) {
     if (collapsed) return null;
     return (
-      <div
-        className="flex flex-col items-center justify-center text-center"
-        style={{ color: "var(--text-faint)", fontSize: 11, gap: 8, padding: "32px 16px" }}
-      >
-        <span aria-hidden style={{ fontSize: 20, color: "var(--text-faint)" }}>
-          🏭
-        </span>
-        <span style={{ color: "var(--text-muted)", fontSize: 12 }}>No factories detected</span>
-        <span style={{ color: "var(--text-faint)" }}>
-          Deploy one with the /factory skill — loops grouped &quot;Factory: &lt;project&gt;&quot;
-          appear here.
-        </span>
+      <div className="flex flex-col items-center gap-2 px-4 py-8 text-center text-[11px] text-zinc-600">
+        <FactoryIcon />
+        <span className="text-xs text-zinc-400">No factories detected</span>
+        <span>Deploy one with the /factory skill.</span>
         {onCreateFactory && (
-          <button
-            type="button"
-            onClick={onCreateFactory}
-            className="btn-ghost"
-            style={{ marginTop: 4 }}
-          >
+          <button type="button" onClick={onCreateFactory} className="btn-ghost mt-1">
             New factory…
           </button>
         )}
@@ -326,47 +226,25 @@ export function FactoryList({
 
   if (collapsed) {
     return (
-      <div className="flex flex-col">
+      <div className="flex flex-col items-center gap-1 py-2">
         {visibleFactories.map((factory) => {
-          const selected = factoryKey(factory) === selectedKey;
+          const key = factoryKey(factory);
+          const selected = key === selectedKey;
           return (
             <button
-              key={factoryKey(factory)}
+              key={key}
+              type="button"
               onClick={() => onSelect(factory)}
               aria-label={`${factory.project} — ${factory.repoRoot}`}
               aria-current={selected ? "true" : undefined}
               title={`${factory.project}\n${factory.repoRoot}`}
-              style={{
-                width: "100%",
-                display: "flex",
-                justifyContent: "center",
-                alignItems: "center",
-                borderBottom: "1px solid var(--border-subtle)",
-                borderLeft: `3px solid ${selected ? "var(--accent)" : "var(--border-muted)"}`,
-                background: selected ? "var(--bg-elevated)" : "transparent",
-                cursor: "pointer",
-                padding: "10px 6px",
-                fontFamily: "var(--font-mono)",
-              }}
+              className={`flex h-9 w-9 items-center justify-center rounded-lg border text-xs font-semibold transition-colors ${
+                selected
+                  ? "border-emerald-700/60 bg-emerald-950/40 text-emerald-300"
+                  : "border-transparent text-zinc-500 hover:border-zinc-800 hover:bg-zinc-900"
+              }`}
             >
-              <span
-                aria-hidden
-                style={{
-                  width: 22,
-                  height: 22,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  borderRadius: 5,
-                  fontSize: 11,
-                  fontWeight: 600,
-                  background: "var(--bg-elevated)",
-                  border: "1px solid var(--border-subtle)",
-                  color: selected ? "var(--text-primary)" : "var(--text-secondary)",
-                }}
-              >
-                {initial(factory)}
-              </span>
+              {initial(factory)}
             </button>
           );
         })}
@@ -375,192 +253,108 @@ export function FactoryList({
   }
 
   return (
-    <div className="flex flex-col">
-      {onCreateFactory && (
-        <div
-          className="flex items-center justify-end"
-          style={{ padding: "6px 8px", borderBottom: "1px solid var(--border-subtle)" }}
-        >
-          <NewFactoryButton onCreateFactory={onCreateFactory} />
+    <div className="flex flex-col pb-3">
+      <div className="flex items-center justify-between px-3 pb-2 pt-3">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold text-zinc-400">Projects</span>
+          <span className="rounded-full bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-600">
+            {visibleFactories.length}
+          </span>
         </div>
-      )}
-      {visibleFactories.map((factory) => {
-        const selected = factoryKey(factory) === selectedKey;
-        const fKey = factoryKey(factory);
-        const workers = workersByFactoryKey.get(fKey) ?? [];
-        const workersExpanded = collapsedWorkers[fKey] !== true;
-        const hovered = hoveredKey === fKey;
-        return (
-        <div key={fKey} style={{ borderBottom: "1px solid var(--border-subtle)" }}>
-          <div
-            role="button"
-            tabIndex={0}
-            aria-current={selected ? "true" : undefined}
-            onClick={() => onSelect(factory)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") onSelect(factory);
-            }}
-            onMouseEnter={(e) => {
-              setHoveredKey(fKey);
-              if (!selected) e.currentTarget.style.background = "var(--bg-hover)";
-            }}
-            onMouseLeave={(e) => {
-              setHoveredKey((k) => (k === fKey ? null : k));
-              if (!selected) e.currentTarget.style.background = "transparent";
-            }}
-            style={{
-              width: "100%",
-              textAlign: "left",
-              padding: "9px 12px",
-              borderLeft: `3px solid ${selected ? "var(--accent)" : "var(--border-muted)"}`,
-              background: selected ? "var(--bg-elevated)" : "transparent",
-              cursor: "pointer",
-              fontFamily: "var(--font-mono)",
-            }}
-          >
-            <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
-              <span aria-hidden style={{ fontSize: 12, flexShrink: 0 }}>
-                🏭
-              </span>
-              <span
-                title={factory.project}
-                style={{
-                  flex: 1,
-                  minWidth: 0,
-                  fontSize: 12,
-                  fontWeight: 600,
-                  color: selected ? "var(--text-primary)" : "var(--text-secondary)",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {factory.project}
-              </span>
-              <span
-                title={factory.repoRoot}
-                style={{
-                  fontSize: 10,
-                  color: "var(--text-faint)",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                  maxWidth: 120,
-                  flexShrink: 0,
-                }}
-              >
-                {repoBasename(factory.repoRoot)}
-              </span>
-              {onHideFactory && (
-                <HideFactoryButton onHide={() => onHideFactory(fKey)} rowHovered={hovered} />
-              )}
-            </div>
-          </div>
-          <WorkerSection
-            workers={workers}
-            expanded={workersExpanded}
-            onToggle={() =>
-              setCollapsedWorkers((prev) => ({ ...prev, [fKey]: workersExpanded }))
-            }
-            selectedSessionId={selectedSessionId}
-            onOpenSession={onOpenSession}
-            onRemoveSession={onRemoveSession}
-          />
-        </div>
-        );
-      })}
+        {onCreateFactory && <NewFactoryButton onCreateFactory={onCreateFactory} />}
+      </div>
 
-      {hiddenFactories.length > 0 && (
-        <div className="flex flex-col">
-          <button
-            type="button"
-            onClick={() => setHiddenExpanded((v) => !v)}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              padding: "8px 12px",
-              borderBottom: "1px solid var(--border-subtle)",
-              borderTop: "1px solid var(--border-subtle)",
-              background: "var(--bg-base)",
-              cursor: "pointer",
-              fontFamily: "var(--font-mono)",
-              fontSize: 11,
-              color: "var(--text-muted)",
-              letterSpacing: "0.06em",
-              textTransform: "uppercase",
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-base)"; }}
-          >
-            <span>hidden ({hiddenFactories.length})</span>
-            <span style={{ fontSize: 10, opacity: 0.6 }}>{hiddenExpanded ? "▾" : "▸"}</span>
-          </button>
-          {hiddenExpanded &&
-            hiddenFactories.map((factory) => {
-              const fKey = factoryKey(factory);
-              return (
-                <div
-                  key={fKey}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => onUnhideFactory?.(fKey)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") onUnhideFactory?.(fKey);
-                  }}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                    width: "100%",
-                    textAlign: "left",
-                    padding: "9px 12px",
-                    borderBottom: "1px solid var(--border-subtle)",
-                    background: "transparent",
-                    cursor: "pointer",
-                    fontFamily: "var(--font-mono)",
-                    opacity: 0.55,
-                  }}
-                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+      <div className="flex flex-col gap-1 px-2">
+        {visibleFactories.map((factory) => {
+          const key = factoryKey(factory);
+          const selected = key === selectedKey;
+          const workers = workersByFactoryKey.get(key) ?? [];
+          const workersExpanded = collapsedWorkers[key] !== true;
+          return (
+            <div
+              key={key}
+              className={`group/factory rounded-xl border transition-colors ${
+                selected
+                  ? "border-zinc-700/80 bg-zinc-900/90 shadow-sm"
+                  : "border-transparent hover:bg-zinc-900/55"
+              }`}
+            >
+              <div className="flex items-center pr-1">
+                <button
+                  type="button"
+                  onClick={() => onSelect(factory)}
+                  aria-current={selected ? "true" : undefined}
+                  className="flex min-w-0 flex-1 items-center gap-2.5 px-2.5 py-2 text-left"
                 >
-                  <span aria-hidden style={{ fontSize: 12, flexShrink: 0 }}>
-                    🏭
+                  <FactoryIcon selected={selected} />
+                  <span className="min-w-0 flex-1">
+                    <span className={`block truncate text-xs font-medium ${selected ? "text-zinc-100" : "text-zinc-300"}`}>
+                      {factory.project}
+                    </span>
+                    <span className="mt-0.5 block truncate text-[10px] text-zinc-600" title={factory.repoRoot}>
+                      {repoBasename(factory.repoRoot)}
+                    </span>
                   </span>
-                  <span
-                    title={factory.project}
-                    style={{
-                      flex: 1,
-                      minWidth: 0,
-                      fontSize: 12,
-                      fontWeight: 600,
-                      color: "var(--text-secondary)",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
+                  {workers.length > 0 && (
+                    <span className="rounded-full bg-zinc-950/70 px-1.5 py-0.5 text-[10px] text-zinc-500">
+                      {workers.length}
+                    </span>
+                  )}
+                </button>
+                {onHideFactory && (
+                  <button
+                    type="button"
+                    onClick={() => onHideFactory(key)}
+                    aria-label={`Hide ${factory.project}`}
+                    title="Hide factory"
+                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[10px] text-zinc-600 opacity-0 hover:bg-zinc-800 hover:text-zinc-300 focus:opacity-100 group-hover/factory:opacity-100"
                   >
-                    {factory.project}
-                  </span>
-                  {onUnhideFactory && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onUnhideFactory(fKey);
-                      }}
-                      title="Unhide factory"
-                      className="btn-ghost"
-                      style={{ fontSize: 10, flexShrink: 0 }}
-                    >
-                      Unhide
-                    </button>
+                    ✕
+                  </button>
+                )}
+              </div>
+
+              {selected && workers.length > 0 && (
+                <div className="px-2 pb-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setCollapsedWorkers((current) => ({
+                        ...current,
+                        [key]: workersExpanded,
+                      }))
+                    }
+                    className="flex w-full items-center justify-between px-2 pb-1 pt-0.5 text-[10px] text-zinc-600 hover:text-zinc-400"
+                  >
+                    <span>
+                      {workers.length} {workers.length === 1 ? "agent" : "agents"}
+                    </span>
+                    <span aria-hidden>{workersExpanded ? "⌄" : "›"}</span>
+                  </button>
+                  {workersExpanded && (
+                    <div className="flex flex-col gap-0.5">
+                      {workers.map((session) => (
+                        <WorkerRow
+                          key={session.id}
+                          session={session}
+                          selected={session.id === selectedSessionId}
+                          onOpenSession={onOpenSession}
+                          onRemoveSession={onRemoveSession}
+                        />
+                      ))}
+                    </div>
                   )}
                 </div>
-              );
-            })}
-        </div>
-      )}
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <HiddenFactories
+        factories={hiddenFactories}
+        onUnhideFactory={onUnhideFactory}
+      />
     </div>
   );
 }
