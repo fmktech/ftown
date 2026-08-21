@@ -2,14 +2,14 @@
 
 Date: 2026-08-21  
 Base: `origin/main` (`6d01638`)  
-Feature commit: `357f6b4`  
+Feature commits: `357f6b4`, `5adef08`  
 Scope: replace textual agent badges in Sessions, Crons, and Factory workers; add compact live-state indicators.
 
 ## Gate
 
 | Check | Result | Evidence |
 | --- | --- | --- |
-| UI unit tests | ✅ | `npm test`: 186 passed across 26 files. Focused final state suite: 10 passed. |
+| UI unit tests | ✅ | `npm test`: 205 passed across 26 files. Focused provider/sidebar suite: 20 passed. |
 | UI production build/typecheck | ✅ | `npm run build`: compiled and generated all routes successfully. |
 | Bridge unit tests | ✅ | `npm test`: 583 passed, 0 failed. |
 | Bridge build/typecheck | ✅ | `npm run build`: TypeScript completed without errors. |
@@ -45,7 +45,7 @@ Weighted score: **93/100 (Strong)**.
 1. Added semantic `role`/`aria-label` state dots and reduced-motion coverage for spinners.
 2. Kept the frozen Factory prop contract unchanged by using a local view-props extension.
 3. Moved provider colors to shared CSS tokens and made harness maps exhaustive over `ShellType`.
-4. Added distinct Fireworks and Z.ai glyphs and expanded the state test matrix.
+4. Replaced approximations with maintained Lobe Icons brand silhouettes, kept them local-first, and expanded the state test matrix.
 5. Updated lifecycle E2E assertions from removed text badges to accessible icon state.
 
 ## Follow-up
