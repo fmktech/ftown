@@ -1,55 +1,53 @@
-# Presubmit report: Pi wake by ftown mail
+# Presubmit report: sidebar harness and live-state icons
 
-Date: 2026-08-11  
-Base: `origin/main` (`0cea112`)  
-Feature commit: `0640afc`  
-Scope: wake idle Pi sessions from durable ftown mail inside the bundled harness extension.
+Date: 2026-08-21  
+Base: `origin/main` (`6d01638`)  
+Feature commit: `357f6b4`  
+Scope: replace textual agent badges in Sessions, Crons, and Factory workers; add compact live-state indicators.
 
 ## Gate
 
 | Check | Result | Evidence |
 | --- | --- | --- |
-| Bridge unit tests | ✅ | `npm test`: 575 passed, 0 failed. |
-| Bridge typecheck/build | ✅ | `npm run build`: TypeScript compilation completed successfully. |
-| Bridge package | ✅ | `npm pack --dry-run --json`: 0.19.10 includes the Pi extension, API contract, and ftown skill docs. |
-| UI unit tests | ✅ | `npm test`: 133 passed, 0 failed across 12 files. |
-| UI production build | ✅ | The E2E-environment production build completed successfully. |
+| UI unit tests | ✅ | `npm test`: 186 passed across 26 files. Focused final state suite: 10 passed. |
+| UI production build/typecheck | ✅ | `npm run build`: compiled and generated all routes successfully. |
+| Bridge unit tests | ✅ | `npm test`: 583 passed, 0 failed. |
+| Bridge build/typecheck | ✅ | `npm run build`: TypeScript completed without errors. |
 | E2E typecheck | ✅ | `npx tsc --noEmit` completed without errors. |
-| Full browser suite | ✅ | 31 passed and 2 pre-existing tests were skipped. |
-| Live Pi mail smoke | ✅ | An idle Pi received mail without terminal input, started a native turn, and replied `WAKE_BY_MAIL_OK`. |
-| Diff integrity | ✅ | `git diff --check` completed successfully. |
+| Full browser suite | ✅ | 31 passed; 2 intentional pre-existing skips. |
+| Diff integrity | ✅ | `git diff --check origin/main...HEAD` completed successfully. |
 | Lint | ⚠️ | `npm run lint` opens the repository's pre-existing interactive Next.js ESLint setup; CI does not enforce it. |
+| Format | ⚠️ | No repository format-check script is defined; diff integrity is clean. |
 
 ## Scorecard
 
 | Aspect | Score | Band | Why |
 | --- | ---: | --- | --- |
-| Functional completeness | 94 | Strong | Idle wake, native follow-up, singleton polling, permanent shutdown, no PTY fallback, durable gap handling, and live Pi behavior are complete. |
-| Frontend fluency | N/A | N/A | This bridge-local harness change has no frontend surface. |
-| Monorepo awareness | 93 | Strong | The change stays in the bridge-owned extension, mail service, package, tests, and installed documentation surfaces. |
-| Convention consistency | 91 | Strong | It extends the existing authenticated request, inbox, lifecycle, test-double, and package-release patterns. |
-| Code quality | 92 | Strong | Cancellation is end-to-end, listener state has one owner, failures use capped backoff, cleanup handles both task outcomes, and no dependency was added. |
-| Server communication and data flow | 92 | Strong | The bridge remains the durable owner; waiter identity and disconnect guards prevent dead clients from consuming mail. |
-| Testing | 95 | Strong | Behavioral regressions cover native wake, exact delivery mode, duplicate lifecycle events, shutdown, no PTY fallback, Pi eligibility, and deterministic backoff. |
-| Commit hygiene | 96 | Strong | One conventional, reviewer-meaningful feature commit contains the coherent implementation, tests, docs, and patch release bump with an explanatory body. |
-| Scope and regression discipline | 94 | Strong | No UI/API/database/dependency churn; bridge, UI, and full browser regression gates pass. |
-| AI-leveraged understanding | 96 | Strong | Existing abstractions were reused, live behavior was verified, and review findings became focused safety and retry regressions. |
+| Functional completeness | 92 | Strong | All requested sidebar surfaces and the four-state visual grammar are implemented. |
+| Frontend fluency | 90 | Strong | Compact SVG marks, accessible labels/tooltips, reduced-motion handling, and shared primitives. |
+| Monorepo awareness | 95 | Strong | UI behavior stays in the UI workspace, reuses existing activity state, and adds no dependency or backend churn. |
+| Convention consistency | 94 | Strong | Existing StatusDot/CSS token patterns are extended and the frozen Factory contract remains untouched. |
+| Code quality | 94 | Strong | Exhaustive typed harness maps and terminal-state mapping prevent silent drift. |
+| Server communication and data flow | 96 | Strong | Factory workers reuse the existing event-driven sessionActivity map; no polling or server calls were added. |
+| Testing | 88 | Strong | Provider coverage spans all harnesses; state tests cover priority, active modes, idle/running, and terminal states; E2E validates lifecycle icons. |
+| Commit hygiene | 97 | Strong | One conventional, coherent feature commit directly atop main, with an explanatory body. |
+| Scope and regression discipline | 97 | Strong | No dependency/API/config creep and all regression gates are green. |
+| AI-leveraged understanding | 90 | Strong | Cross-cutting concepts were factored once and reused rather than duplicated per sidebar. |
 
-Weighted score: **94/100 (Strong)**.
+Weighted score: **93/100 (Strong)**.
 
 ## Verdict
 
-**GO.** All enforced gates are green. Pi mail wake-up is native-only, cancellable,
-rate-limited on failure, and verified against an actually idle Pi session.
+**GO.** All enforced gates are green. The only advisory is the repository's pre-existing interactive lint setup.
 
 ## Findings resolved during presubmit
 
-1. Removed the old Pi terminal-nudge fallback; mail remains durable between native polls.
-2. Locked repeated start, `agent_settled`, shutdown, and post-shutdown behavior to one listener and one injection.
-3. Replaced fixed failure retries with capped exponential backoff and safe fulfilled/rejected task cleanup.
+1. Added semantic `role`/`aria-label` state dots and reduced-motion coverage for spinners.
+2. Kept the frozen Factory prop contract unchanged by using a local view-props extension.
+3. Moved provider colors to shared CSS tokens and made harness maps exhaustive over `ShellType`.
+4. Added distinct Fireworks and Z.ai glyphs and expanded the state test matrix.
+5. Updated lifecycle E2E assertions from removed text badges to accessible icon state.
 
-## Follow-ups
+## Follow-up
 
-1. Model mail-delivery mode as an explicit harness capability if another native persistent listener is added.
-2. Consider a delivery acknowledgment/lease protocol only if crash-safe exactly-once enqueue becomes a requirement.
-3. Convert the live Pi smoke into an opt-in automated script when Pi is available in CI.
+Add lightweight FactoryList and LoopList render assertions if those components gain more live-state behavior; current shared-component, build, and full E2E coverage is sufficient for this change.
