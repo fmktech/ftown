@@ -98,6 +98,25 @@ describe("compact active sidebars", () => {
     });
   });
 
+  it("keeps the provider icon beside selected and compact session names", async () => {
+    render(createElement(SessionList, {
+      sessions: [
+        session("session-a", "bridge-a", "Selected session"),
+        session("session-b", "bridge-a", "Compact session"),
+      ],
+      bridges: [bridges[0]],
+      bridgeOrder: ["bridge-a"],
+      selectedSessionId: "session-a",
+      onSelectSession: vi.fn(),
+    }));
+
+    await waitFor(() => expect(screen.getAllByRole("img", { name: "Pi agent" })).toHaveLength(2));
+    for (const name of ["Selected session", "Compact session"]) {
+      const nameElement = screen.getByText(name);
+      expect(nameElement.previousElementSibling?.getAttribute("data-harness-icon")).toBe("pi");
+    }
+  });
+
   it("expands only the bridge containing the selected cron", async () => {
     const loops = [
       loop("loop-a", "bridge-a", "Alpha cron"),
@@ -152,5 +171,27 @@ describe("compact active sidebars", () => {
       expect(screen.getByRole("button", { name: "Collapse alpha" })).toBeTruthy();
       expect(screen.getByText("Alpha cron")).toBeTruthy();
     });
+  });
+
+  it("keeps the provider icon beside selected and compact cron names", async () => {
+    render(createElement(LoopList, {
+      loops: [
+        loop("loop-a", "bridge-a", "Selected cron"),
+        loop("loop-b", "bridge-a", "Compact cron"),
+      ],
+      bridges: [bridges[0]],
+      selectedLoopId: "loop-a",
+      onSelectLoop: vi.fn(),
+      onRunNow: vi.fn(),
+      onToggleEnabled: vi.fn(),
+      onEdit: vi.fn(),
+      onDelete: vi.fn(),
+    }));
+
+    await waitFor(() => expect(screen.getAllByRole("img", { name: "Pi agent" })).toHaveLength(2));
+    for (const name of ["Selected cron", "Compact cron"]) {
+      const nameElement = screen.getByText(name);
+      expect(nameElement.previousElementSibling?.getAttribute("data-harness-icon")).toBe("pi");
+    }
   });
 });

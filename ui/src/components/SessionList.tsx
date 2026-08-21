@@ -1025,6 +1025,7 @@ export function SessionList({
           ) : depth > 0 ? (
             <span style={{ width: 10, flexShrink: 0 }} />
           ) : null}
+          <HarnessIcon harness={session.shellType} size={17} />
           {editingSessionId === session.id ? (
             <input
               ref={inputRef}
@@ -1217,7 +1218,6 @@ export function SessionList({
 
         {isSelected && <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <HarnessIcon harness={session.shellType} size={17} />
             {session.model && session.shellType !== "shell" && (
               <span style={{ fontSize: 10, color: "var(--text-faint)" }}>
                 {session.model}
@@ -1488,6 +1488,7 @@ export function SessionList({
                 }}
               >
                 <div className="flex items-center justify-between gap-2">
+                  <HarnessIcon harness={session.shellType} size={16} />
                   <span
                     style={{
                       fontSize: 11,

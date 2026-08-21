@@ -47,17 +47,17 @@
   --shell-shell: #BA55D3;
   --shell-generic: #00BFFF;
   --harness-claude: #D97757;
-  --harness-cursor: #A8B4FF;
-  --harness-codex: #10A37F;
+  --harness-cursor: #F5F5F5;
+  --harness-codex: #FFFFFF;
   --harness-shell: #F0AA22;
-  --harness-zai: #6495ED;
-  --harness-kimi: #FF69B4;
-  --harness-opencode: #BA55D3;
-  --harness-deepseek: #00BFFF;
-  --harness-fireworks: #FF7849;
-  --harness-grok: #FF4560;
-  --harness-pi: #A855F7;
-  --harness-kimi-code: #14B8A6;
+  --harness-zai: #FFFFFF;
+  --harness-kimi: #FFFFFF;
+  --harness-opencode: #FFFFFF;
+  --harness-deepseek: #4D6BFE;
+  --harness-fireworks: #8B5CF6;
+  --harness-grok: #FFFFFF;
+  --harness-pi: #FFFFFF;
+  --harness-kimi-code: #FFFFFF;
 
   /* Radius scale */
   --radius-sm: 4px;

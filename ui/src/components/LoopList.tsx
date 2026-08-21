@@ -351,6 +351,11 @@ export function LoopList({
             >
             <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
               <LoopStatusDot loop={loop} />
+              <HarnessIcon
+                harness={loop.harness}
+                size={17}
+                title={`${harnessLabel(loop.harness)} agent on ${bridgeLabel(loop.bridgeId, bridges)}`}
+              />
               <span
                 title={loop.name}
                 style={{
@@ -408,11 +413,12 @@ export function LoopList({
               <span style={{ fontSize: 10, color: loop.runNowRequested ? "var(--accent)" : "var(--text-faint)", whiteSpace: "nowrap" }}>
                 {nextDueLabel(loop)}
               </span>
-              <HarnessIcon
-                harness={loop.harness}
-                size={17}
-                title={`${harnessLabel(loop.harness)} agent on ${bridgeLabel(loop.bridgeId, bridges)}`}
-              />
+              <span
+                title={bridgeLabel(loop.bridgeId, bridges)}
+                className="truncate text-[9px] text-[var(--text-faint)]"
+              >
+                {bridgeLabel(loop.bridgeId, bridges)}
+              </span>
             </div>}
 
             {selected && <div
