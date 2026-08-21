@@ -268,7 +268,10 @@ class Semaphore {
 
 /** Make a label filesystem-safe for use as a result-file stem. */
 function sanitizeStepKey(label: string): string {
-  const cleaned = label.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+  const cleaned = label
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/\.{2,}/g, '-')
+    .replace(/^-+|-+$/g, '');
   return cleaned.length > 0 ? cleaned : 'step';
 }
 

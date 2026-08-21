@@ -1,4 +1,7 @@
 import { exec } from 'node:child_process';
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { toWireSession } from './session-wire.js';
@@ -27,6 +30,19 @@ import type {
 } from './types.js';
 
 const execAsync = promisify(exec);
+
+function auditBridgeExec(payload: BridgeExecPayload): void {
+  try {
+    const dir = join(homedir(), '.ftown', 'logs');
+    mkdirSync(dir, { recursive: true });
+    const entry =
+      `${new Date().toISOString()} cmd=${JSON.stringify(String(payload.command).slice(0, 500))} ` +
+      `cwd=${payload.workingDir ?? ''}\n`;
+    appendFileSync(join(dir, 'exec-audit.log'), entry, { mode: 0o600 });
+  } catch {
+    // Auditing is best-effort and must never block execution.
+  }
+}
 
 interface ExecError {
   stdout: string;
@@ -194,6 +210,17 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command) =
 
         case 'bridge_exec': {
           const payload = command.payload as BridgeExecPayload;
+
+          if (process.env.FTOWN_DISABLE_BRIDGE_EXEC === '1') {
+            response = {
+              requestId: command.requestId,
+              success: false,
+              error: 'bridge_exec disabled (FTOWN_DISABLE_BRIDGE_EXEC=1)',
+            };
+            break;
+          }
+
+          auditBridgeExec(payload);
 
           try {
             const { stdout, stderr } = await execAsync(payload.command, {

@@ -89,6 +89,20 @@ program
   .option('--data-dir <path>', 'Directory for session data (default: ~/.ftown/data)')
   .option('--bridge-id <id>', 'Bridge instance ID (default: persisted per data dir)')
   .action(async (opts: { token?: string; apiUrl: string; dataDir?: string; bridgeId?: string }) => {
+    const apiUrl = new URL(opts.apiUrl);
+    const isLocalHost =
+      apiUrl.hostname === 'localhost' ||
+      apiUrl.hostname === '127.0.0.1' ||
+      apiUrl.hostname === '::1' ||
+      apiUrl.hostname.endsWith('.localhost');
+    if (apiUrl.protocol !== 'https:' && !isLocalHost && process.env.FTOWN_ALLOW_INSECURE_API !== '1') {
+      program.error(
+        `--api-url must use https:// for non-local hosts (${opts.apiUrl}). ` +
+          'Bridge tokens would otherwise cross the network unencrypted. ' +
+          'Set FTOWN_ALLOW_INSECURE_API=1 to override for trusted LAN setups.',
+      );
+    }
+
     const dataDir = opts.dataDir ? resolve(opts.dataDir) : resolveDefaultDataDir();
     // Bridge identity sticks to the data dir so a plain restart auto-resumes:
     // same id → same dashboard entry, sessions reattach without any flags.

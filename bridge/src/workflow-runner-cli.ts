@@ -364,6 +364,11 @@ async function main(): Promise<void> {
 
   const jsonOut = hasFlag(rest, '--json');
   const runId = flag(rest, '--run-id') ?? randomUUID().slice(0, 8);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(runId) || runId.includes('..')) {
+    throw new Error(
+      '--run-id may only contain letters, digits, dot, underscore, dash (max 64 chars, no "..")',
+    );
+  }
   const concurrencyRaw = flag(rest, '--concurrency');
   const timeoutRaw = flag(rest, '--timeout');
   const maxAgentsRaw = flag(rest, '--max-agents');
