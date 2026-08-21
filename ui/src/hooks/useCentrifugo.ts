@@ -70,11 +70,6 @@ async function fetchCentrifugoToken(): Promise<string> {
   }
 
   const data = (await response.json()) as { token: string };
-  try {
-    localStorage.setItem("ftown_token", data.token);
-  } catch {
-    // Best-effort cache only; refresh keeps working without it.
-  }
   return data.token;
 }
 

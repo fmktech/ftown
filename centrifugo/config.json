@@ -1,9 +1,7 @@
 {
   "token_hmac_secret_key": "your-centrifugo-token-secret-change-me",
   "api_key": "your-centrifugo-api-key-change-me",
-  "admin": true,
-  "admin_password": "admin",
-  "admin_secret": "admin-secret",
+  "admin": false,
   "allowed_origins": [
     "http://localhost:3000",
     "http://localhost:3001",
