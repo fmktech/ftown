@@ -31,6 +31,7 @@ import { usePersistentState, useHiddenSet, type PersistCodec } from "@/lib/use-p
 import { loopGroupKey } from "@/lib/loop-group-key";
 import { latestVisibleSessionAttention } from "@/lib/session-attention";
 import { deriveSessionReachabilityStatus } from "@/lib/session-reachability";
+import { getSessionRelaunchLabel } from "@/lib/session-relaunch";
 
 interface DashboardProps {
   client: Centrifuge | null;
@@ -296,6 +297,9 @@ PY`;
   }, [rawSessions, activeBridgeIds, directlyReachableBridgeIds, sessionOrder, bridgeOrder]);
 
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
+  const sessionRelaunchLabel = selectedSession
+    ? getSessionRelaunchLabel(selectedSession.status)
+    : null;
   const selectedLoop = selectedLoopId ? loops.find((loop) => loop.id === selectedLoopId) ?? null : null;
   const factories = useMemo(() => deriveFactories(loops), [loops]);
   const selectedFactory = useMemo(
@@ -418,7 +422,7 @@ PY`;
     if (selectedSessionId) stopSession(selectedSessionId);
   }, [selectedSessionId, stopSession]);
 
-  const handleRetrySession = useCallback(() => {
+  const handleRelaunchSession = useCallback(() => {
     if (selectedSessionId) retrySession(selectedSessionId);
   }, [selectedSessionId, retrySession]);
 
@@ -737,9 +741,13 @@ PY`;
               Stop
             </button>
           )}
-          {selectedSession?.status === "error" && (
-            <button className="btn-warn" onClick={handleRetrySession}>
-              Retry
+          {sessionRelaunchLabel && (
+            <button
+              className="btn-warn"
+              onClick={handleRelaunchSession}
+              title="Relaunch this session using the same command"
+            >
+              {sessionRelaunchLabel}
             </button>
           )}
         </div>
