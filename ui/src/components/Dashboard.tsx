@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useMemo, useEffect, useRef } from "react";
+import { useState, useCallback, useMemo, useEffect, useRef, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import { Centrifuge } from "centrifuge";
 import { ConnectionStatus } from "@/hooks/useCentrifugo";
 import { TerminalTransportApi } from "@/lib/direct-transport/contract";
@@ -32,6 +32,14 @@ import { loopGroupKey } from "@/lib/loop-group-key";
 import { latestVisibleSessionAttention } from "@/lib/session-attention";
 import { deriveSessionReachabilityStatus } from "@/lib/session-reachability";
 import { getSessionRelaunchLabel } from "@/lib/session-relaunch";
+import {
+  DEFAULT_SIDEBAR_WIDTH,
+  MAX_SIDEBAR_WIDTH,
+  MIN_SIDEBAR_WIDTH,
+  SIDEBAR_KEYBOARD_STEP,
+  clampSidebarWidth,
+  sidebarWidthFromDrag,
+} from "@/lib/sidebar-width";
 
 interface DashboardProps {
   client: Centrifuge | null;
@@ -72,6 +80,8 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [sidebarTab, setSidebarTab] = usePersistentState<SidebarTab>("ftown:sidebarTab", "sessions", SIDEBAR_TAB_CODEC);
   const [selectedFactoryKey, setSelectedFactoryKey] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = usePersistentState<boolean>("ftown:sidebarCollapsed", false);
+  const [storedSidebarWidth, setStoredSidebarWidth] = usePersistentState<number>("ftown:sidebarWidth", DEFAULT_SIDEBAR_WIDTH);
+  const sidebarWidth = clampSidebarWidth(storedSidebarWidth);
   const [sessionOrder, setSessionOrder] = usePersistentState<string[]>("ftown:sessionOrder", []);
   const [bridgeOrder, setBridgeOrder] = usePersistentState<string[]>("ftown:bridgeOrder", []);
   const { hidden: hiddenSessionIds, hide: handleHideSession, unhide: handleUnhideSession } = useHiddenSet("ftown:hiddenSessions");
@@ -88,6 +98,14 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const mobileControlRef = useRef<MobileControlBarHandle>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const userMenuRef = useRef<HTMLDivElement>(null);
+  const sidebarResizeRef = useRef<{
+    pointerId: number;
+    startClientX: number;
+    startWidth: number;
+    previousCursor: string;
+    previousUserSelect: string;
+  } | null>(null);
+  const sidebarRefitFrameRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!transport) {
@@ -635,6 +653,74 @@ PY`;
     setTimeout(() => terminalRef.current?.refit(), 250);
   }, [setSidebarCollapsed]);
 
+  const scheduleSidebarRefit = useCallback(() => {
+    if (sidebarRefitFrameRef.current !== null) return;
+    sidebarRefitFrameRef.current = window.requestAnimationFrame(() => {
+      sidebarRefitFrameRef.current = null;
+      terminalRef.current?.refit();
+    });
+  }, []);
+
+  const updateSidebarWidth = useCallback((width: number) => {
+    setStoredSidebarWidth(clampSidebarWidth(width));
+    scheduleSidebarRefit();
+  }, [scheduleSidebarRefit, setStoredSidebarWidth]);
+
+  const finishSidebarResize = useCallback((element?: HTMLDivElement, pointerId?: number) => {
+    const active = sidebarResizeRef.current;
+    if (!active) return;
+    if (element && pointerId !== undefined && element.hasPointerCapture(pointerId)) {
+      element.releasePointerCapture(pointerId);
+    }
+    document.body.style.cursor = active.previousCursor;
+    document.body.style.userSelect = active.previousUserSelect;
+    sidebarResizeRef.current = null;
+    scheduleSidebarRefit();
+  }, [scheduleSidebarRefit]);
+
+  const handleSidebarResizeStart = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (sidebarCollapsed || event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    sidebarResizeRef.current = {
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startWidth: sidebarWidth,
+      previousCursor: document.body.style.cursor,
+      previousUserSelect: document.body.style.userSelect,
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }, [sidebarCollapsed, sidebarWidth]);
+
+  const handleSidebarResizeMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const active = sidebarResizeRef.current;
+    if (!active || active.pointerId !== event.pointerId) return;
+    updateSidebarWidth(sidebarWidthFromDrag(active.startWidth, active.startClientX, event.clientX));
+  }, [updateSidebarWidth]);
+
+  const handleSidebarResizeKeyDown = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
+    let nextWidth: number | null = null;
+    if (event.key === "ArrowLeft") nextWidth = sidebarWidth - SIDEBAR_KEYBOARD_STEP;
+    if (event.key === "ArrowRight") nextWidth = sidebarWidth + SIDEBAR_KEYBOARD_STEP;
+    if (event.key === "Home") nextWidth = MIN_SIDEBAR_WIDTH;
+    if (event.key === "End") nextWidth = MAX_SIDEBAR_WIDTH;
+    if (nextWidth === null) return;
+    event.preventDefault();
+    updateSidebarWidth(nextWidth);
+  }, [sidebarWidth, updateSidebarWidth]);
+
+  useEffect(() => () => {
+    if (sidebarRefitFrameRef.current !== null) {
+      window.cancelAnimationFrame(sidebarRefitFrameRef.current);
+    }
+    const active = sidebarResizeRef.current;
+    if (active) {
+      document.body.style.cursor = active.previousCursor;
+      document.body.style.userSelect = active.previousUserSelect;
+    }
+  }, []);
+
   return (
     <div
       ref={rootRef}
@@ -997,13 +1083,15 @@ PY`;
         {/* Sidebar */}
         <aside
           id="dashboard-sidebar"
-          className={`shrink-0 flex-col w-full ${sidebarCollapsed ? "md:w-[60px]" : "md:w-[260px]"} ${mobileTab === "sessions" ? "flex" : "hidden"} md:flex`}
+          className={`dashboard-sidebar shrink-0 flex-col ${mobileTab === "sessions" ? "flex" : "hidden"} md:flex`}
           style={{
+            "--dashboard-sidebar-width": `${sidebarCollapsed ? 60 : sidebarWidth}px`,
             borderRight: "1px solid var(--border-subtle)",
             background: "var(--bg-surface)",
             overflow: "hidden",
-            transition: "width 0.2s ease",
-          }}
+            position: "relative",
+            transition: sidebarResizeRef.current ? "none" : "width 0.2s ease",
+          } as CSSProperties}
         >
           <div
             className="shrink-0 hidden md:flex items-center"
@@ -1222,6 +1310,26 @@ PY`;
               />
             )}
           </div>
+          {!sidebarCollapsed && (
+            <div
+              role="separator"
+              aria-label="Resize sidebar"
+              aria-orientation="vertical"
+              aria-valuemin={MIN_SIDEBAR_WIDTH}
+              aria-valuemax={MAX_SIDEBAR_WIDTH}
+              aria-valuenow={sidebarWidth}
+              tabIndex={0}
+              onPointerDown={handleSidebarResizeStart}
+              onPointerMove={handleSidebarResizeMove}
+              onPointerUp={(event) => finishSidebarResize(event.currentTarget, event.pointerId)}
+              onPointerCancel={(event) => finishSidebarResize(event.currentTarget, event.pointerId)}
+              onLostPointerCapture={() => finishSidebarResize()}
+              onKeyDown={handleSidebarResizeKeyDown}
+              onDoubleClick={() => updateSidebarWidth(DEFAULT_SIDEBAR_WIDTH)}
+              className="sidebar-resize-handle hidden md:block"
+              title="Drag to resize · double-click to reset"
+            />
+          )}
         </aside>
 
         {/* Terminal area */}

@@ -56,7 +56,7 @@ function formatTimestamp(timestamp: string): string {
   if (diffMins < 60) return `${diffMins}m`;
   const diffHours = Math.floor(diffMins / 60);
   if (diffHours < 24) return `${diffHours}h`;
-  return date.toLocaleDateString();
+  return `${Math.floor(diffHours / 24)}d`;
 }
 
 function bridgeLabel(bridgeId: string, bridges: BridgeInfo[]): string {
@@ -491,6 +491,11 @@ export function SessionList({
     EMPTY_ID_SET,
     stringSetCodec,
   );
+  const [collapsedFolders, setCollapsedFolders] = usePersistentState<Set<string>>(
+    "ftown:collapsedSessionFolders",
+    EMPTY_ID_SET,
+    stringSetCodec,
+  );
   const dragRef = useRef<DragState | null>(null);
   // Inline opacity React rendered on the dragged row, restored on drag end —
   // hardcoding "1" would permanently clear the 0.55 dim on finished rows.
@@ -623,6 +628,27 @@ export function SessionList({
       return next.size === collapsedIds.size ? collapsedIds : next;
     });
   }, [selectedSessionId, sessions, setCollapsedSessions]);
+
+  useEffect(() => {
+    if (selectedSessionId === null) return;
+    const byId = new Map(sessions.map((session) => [session.id, session]));
+    let root = byId.get(selectedSessionId);
+    const seen = new Set<string>();
+    while (root?.parentSessionId && !seen.has(root.parentSessionId)) {
+      seen.add(root.parentSessionId);
+      const parent = byId.get(root.parentSessionId);
+      if (!parent || parent.bridgeId !== root.bridgeId) break;
+      root = parent;
+    }
+    if (!root) return;
+    const folderKey = `${root.bridgeId}:${normalizeWorkingDir(root.workingDir) ?? "\u0000no-folder"}`;
+    setCollapsedFolders((current) => {
+      if (!current.has(folderKey)) return current;
+      const next = new Set(current);
+      next.delete(folderKey);
+      return next;
+    });
+  }, [selectedSessionId, sessions, setCollapsedFolders]);
 
   const hiddenBridgeIdsList = useMemo(
     () => orderedBridgeIds.filter((id) => hiddenBridgeSet.has(id)),
@@ -1031,8 +1057,8 @@ export function SessionList({
           width: "100%",
           textAlign: "left",
           padding: isSelected
-            ? `9px 12px 9px ${24 + depth * 14}px`
-            : `6px 12px 6px ${24 + depth * 14}px`,
+            ? `9px 12px 9px ${18 + depth * 10}px`
+            : `6px 12px 6px ${18 + depth * 10}px`,
           borderBottom: "1px solid var(--border-subtle)",
           borderTop: isDragOver && dragOverZone === "above" ? "2px solid var(--accent)" : "none",
           ...(isDragOver && dragOverZone === "below" ? { borderBottom: "2px solid var(--accent)" } : {}),
@@ -1456,6 +1482,8 @@ export function SessionList({
           ? renderTree(sessionTree)
           : folderGroups.flatMap((group) => {
               if (group.roots.length === 1) return renderTree(group.roots);
+              const folderKey = `${bridgeId}:${group.key}`;
+              const isFolderCollapsed = collapsedFolders.has(folderKey);
               return [
                 <div
                   key={`folder:${bridgeId}:${group.key}`}
@@ -1464,17 +1492,38 @@ export function SessionList({
                   title={group.path ?? "Sessions without a working folder"}
                   style={{ borderBottom: "1px solid var(--border-subtle)" }}
                 >
-                  <div
+                  <button
+                    type="button"
+                    aria-expanded={!isFolderCollapsed}
+                    aria-label={`${isFolderCollapsed ? "Expand" : "Collapse"} folder ${group.label}`}
+                    onClick={() => {
+                      setCollapsedFolders((current) => {
+                        const next = new Set(current);
+                        if (next.has(folderKey)) next.delete(folderKey);
+                        else next.add(folderKey);
+                        return next;
+                      });
+                    }}
                     style={{
                       display: "flex",
                       alignItems: "center",
                       gap: 7,
+                      width: "100%",
                       minWidth: 0,
-                      padding: "6px 12px 5px 25px",
+                      padding: "6px 12px 5px 17px",
                       color: "var(--text-muted)",
+                      background: "transparent",
+                      border: "none",
+                      cursor: "pointer",
+                      textAlign: "left",
                       fontFamily: "var(--font-mono)",
                     }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
                   >
+                    <span aria-hidden style={{ width: 8, flexShrink: 0, fontSize: 9, color: "var(--text-faint)" }}>
+                      {isFolderCollapsed ? "▸" : "▾"}
+                    </span>
                     <FolderIcon />
                     <span
                       style={{
@@ -1495,8 +1544,8 @@ export function SessionList({
                     >
                       {group.roots.length}
                     </span>
-                  </div>
-                  {renderTree(group.roots, 1)}
+                  </button>
+                  {!isFolderCollapsed && renderTree(group.roots, 1)}
                 </div>,
               ];
             }))}
