@@ -21,7 +21,9 @@ describe("HarnessIcon", () => {
   it("renders the compact Pi mark with its provider label", () => {
     render(createElement(HarnessIcon, { harness: "pi" }));
 
-    expect(screen.getByRole("img", { name: "Pi agent" }).textContent).toBe("π");
+    const icon = screen.getByRole("img", { name: "Pi agent" });
+    expect(icon.getAttribute("data-harness-icon")).toBe("pi");
+    expect(icon.querySelector('svg[viewBox="0 0 24 24"]')).toBeTruthy();
   });
 
   it.each([
@@ -40,6 +42,6 @@ describe("HarnessIcon", () => {
   ] satisfies Array<[ShellType, string]>)("labels the %s harness", (harness, label) => {
     expect(harnessLabel(harness)).toBe(label);
     render(createElement(HarnessIcon, { harness }));
-    expect(screen.getByRole("img", { name: `${label} agent` })).toBeTruthy();
+    expect(screen.getByRole("img", { name: `${label} agent` }).getAttribute("data-harness-icon")).toBe(harness);
   });
 });
