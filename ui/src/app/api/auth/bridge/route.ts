@@ -5,6 +5,7 @@ import jwt from "jsonwebtoken";
 import { parseLocalAdvert } from "./local-advert";
 import { getRequiredSecret } from "@/lib/secrets";
 import { setBridgeRefreshJti } from "@/lib/bridge-refresh";
+import { isValidBridgeLabel } from "@/lib/bridge-label";
 
 interface BridgeTokenRequestBody {
   token: string;
@@ -37,7 +38,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  if (!body.token || !body.bridgeId || !body.hostname) {
+  if (!body.token || !isValidBridgeLabel(body.bridgeId) || !isValidBridgeLabel(body.hostname)) {
     return NextResponse.json(
       { error: "token, bridgeId, and hostname are required" },
       { status: 400 }

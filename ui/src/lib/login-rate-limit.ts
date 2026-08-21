@@ -39,9 +39,9 @@ export async function checkRateLimit(scope: string, key: string): Promise<RateLi
   const sql = getDb();
 
   const rows = (await sql.query(
-    "SELECT failed_count, locked_until FROM rate_limit_attempts WHERE scope = $1 AND key = $2",
+    "SELECT locked_until FROM rate_limit_attempts WHERE scope = $1 AND key = $2",
     [scope, key]
-  )) as RateLimitRow[];
+  )) as Pick<RateLimitRow, "locked_until">[];
 
   if (rows.length === 0) {
     return { allowed: true };
@@ -54,12 +54,6 @@ export async function checkRateLimit(scope: string, key: string): Promise<RateLi
     if (now < lockedUntil) {
       return { allowed: false, retryAfterMs: lockedUntil.getTime() - now.getTime() };
     }
-    // Lockout expired — reset and allow.
-    await sql.query(
-      "UPDATE rate_limit_attempts SET failed_count = 0, locked_until = NULL, updated_at = NOW() WHERE scope = $1 AND key = $2",
-      [scope, key]
-    );
-    return { allowed: true };
   }
 
   return { allowed: true };
@@ -72,32 +66,25 @@ export async function recordAttempt(
 ): Promise<void> {
   const sql = getDb();
 
-  const rows = (await sql.query(
-    "SELECT failed_count FROM rate_limit_attempts WHERE scope = $1 AND key = $2",
-    [scope, key]
-  )) as { failed_count: number }[];
-
-  if (rows.length === 0) {
-    await sql.query(
-      "INSERT INTO rate_limit_attempts (scope, key, failed_count, updated_at) VALUES ($1, $2, 1, NOW())",
-      [scope, key]
-    );
-    return;
-  }
-
-  const newCount = rows[0].failed_count + 1;
-  if (newCount >= config.maxAttempts) {
-    const lockedUntil = new Date(Date.now() + config.lockoutMs).toISOString();
-    await sql.query(
-      "UPDATE rate_limit_attempts SET failed_count = $1, locked_until = $2, updated_at = NOW() WHERE scope = $3 AND key = $4",
-      [newCount, lockedUntil, scope, key]
-    );
-  } else {
-    await sql.query(
-      "UPDATE rate_limit_attempts SET failed_count = $1, updated_at = NOW() WHERE scope = $2 AND key = $3",
-      [newCount, scope, key]
-    );
-  }
+  // Single-statement atomic upsert: counter increment, lockout decision, and
+  // expired-lock reset happen together so concurrent requests cannot race past
+  // the threshold (a SELECT-then-UPDATE pair allowed exactly that).
+  await sql.query(
+    `INSERT INTO rate_limit_attempts (scope, key, failed_count, updated_at)
+     VALUES ($1, $2, 1, NOW())
+     ON CONFLICT (scope, key) DO UPDATE SET
+       failed_count = rate_limit_attempts.failed_count + 1,
+       locked_until = CASE
+         WHEN rate_limit_attempts.locked_until IS NOT NULL
+              AND rate_limit_attempts.locked_until > NOW()
+           THEN rate_limit_attempts.locked_until
+         WHEN rate_limit_attempts.failed_count + 1 >= $3::integer
+           THEN NOW() + ($4::double precision / 1000.0) * interval '1 second'
+         ELSE NULL
+       END,
+       updated_at = NOW()`,
+    [scope, key, config.maxAttempts, config.lockoutMs]
+  );
 }
 
 export async function resetAttempts(scope: string, key: string): Promise<void> {
@@ -109,8 +96,19 @@ export async function resetAttempts(scope: string, key: string): Promise<void> {
 }
 
 // --- Login-scoped convenience wrappers (used by the credentials provider) ---
+//
+// Two independent limiters: per-email (slows a targeted attack on one account)
+// and per-IP (slows credential spraying across many accounts from one source).
+// The IP limiter is deliberately looser so shared egress (office NAT, VPN) is
+// not locked out by one user's typos.
 
 const LOGIN_SCOPE = "login";
+const LOGIN_IP_SCOPE = "login-ip";
+
+export const LOGIN_IP_RATE_LIMIT: RateLimitConfig = {
+  maxAttempts: 30,
+  lockoutMs: 15 * 60 * 1000, // 15 minutes
+};
 
 export function checkLoginRateLimit(email: string): Promise<RateLimitResult> {
   return checkRateLimit(LOGIN_SCOPE, email);
@@ -122,4 +120,16 @@ export function recordFailedLogin(email: string): Promise<void> {
 
 export function resetLoginAttempts(email: string): Promise<void> {
   return resetAttempts(LOGIN_SCOPE, email);
+}
+
+export function checkLoginIpRateLimit(ip: string): Promise<RateLimitResult> {
+  return checkRateLimit(LOGIN_IP_SCOPE, ip);
+}
+
+export function recordFailedLoginIp(ip: string): Promise<void> {
+  return recordAttempt(LOGIN_IP_SCOPE, ip, LOGIN_IP_RATE_LIMIT);
+}
+
+export function resetLoginIpAttempts(ip: string): Promise<void> {
+  return resetAttempts(LOGIN_IP_SCOPE, ip);
 }

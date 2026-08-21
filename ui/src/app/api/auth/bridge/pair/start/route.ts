@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { genDeviceCode, genUserCode, PAIR_REQUEST_TTL_MS, PAIR_POLL_INTERVAL_MS } from "@/lib/pairing";
 import { createPairingRequest, deleteExpiredRequests } from "@/lib/pairing-store";
 import { checkRateLimit, recordAttempt, type RateLimitConfig } from "@/lib/login-rate-limit";
+import { clientIp } from "@/lib/client-ip";
 
 export const runtime = "nodejs";
 
@@ -27,18 +28,6 @@ function isUniqueViolation(err: unknown): boolean {
     "code" in err &&
     (err as { code?: unknown }).code === "23505"
   );
-}
-
-function clientIp(request: NextRequest): string {
-  const forwardedFor = request.headers.get("x-forwarded-for");
-  if (forwardedFor) {
-    return forwardedFor.split(",")[0].trim();
-  }
-  const realIp = request.headers.get("x-real-ip");
-  if (realIp) {
-    return realIp.trim();
-  }
-  return "unknown";
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {

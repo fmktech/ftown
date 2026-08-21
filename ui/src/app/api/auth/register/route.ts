@@ -6,6 +6,7 @@ import {
   recordAttempt,
   REGISTER_RATE_LIMIT,
 } from "@/lib/login-rate-limit";
+import { clientIp } from "@/lib/client-ip";
 import { isRegistrationEnabled } from "@/lib/registration";
 
 interface RegisterBody {
@@ -30,15 +31,6 @@ function acceptedResponse(): NextResponse {
   );
 }
 
-function clientIp(request: Request): string {
-  const forwarded = request.headers.get("x-forwarded-for");
-  if (forwarded) {
-    const first = forwarded.split(",")[0]?.trim();
-    if (first) return first;
-  }
-  return request.headers.get("x-real-ip")?.trim() || "unknown";
-}
-
 export async function POST(request: Request): Promise<NextResponse> {
   if (!isRegistrationEnabled()) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -60,9 +52,17 @@ export async function POST(request: Request): Promise<NextResponse> {
     );
   }
 
-  if (!password || typeof password !== "string" || password.length < 8) {
+  // Cap length: bcrypt cost is CPU-heavy, so unbounded passwords allow cheap
+  // request-bodies to burn server CPU (long strings before the 72-byte bcrypt
+  // cutoff still cost hashing time).
+  if (
+    !password ||
+    typeof password !== "string" ||
+    password.length < 8 ||
+    password.length > 1024
+  ) {
     return NextResponse.json(
-      { error: "Password must be at least 8 characters" },
+      { error: "Password must be between 8 and 1024 characters" },
       { status: 400 }
     );
   }
