@@ -5,7 +5,7 @@ export type ShellType = 'claude' | 'cursor' | 'codex' | 'shell' | 'zai' | 'kimi'
 export interface Session {
   id: string;
   name: string;
-  prompt: string;
+  prompt?: string;
   status: SessionStatus;
   bridgeId: string;
   createdAt: string;
@@ -20,6 +20,7 @@ export interface Session {
   piSessionFile?: string;
   command?: string;
   parentSessionId?: string;
+  runtime?: 'tmux' | 'direct';
   loopId?: string; // set on loop-run sessions; groups the run under its Loop in the UI
   usage?: SessionUsage;
 }
