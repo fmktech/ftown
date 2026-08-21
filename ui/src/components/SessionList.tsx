@@ -10,6 +10,7 @@ import { getSessionDropZone, resolveSessionDrop, type SessionDropZone } from "@/
 import { StatusDot, type StatusDotKind } from "@/lib/StatusDot";
 import { usePersistentState, stringSetCodec } from "@/lib/use-persistent-state";
 import { formatUsage, formatUsageDetail } from "@/lib/format-usage";
+import { collapseToActiveSection } from "@/lib/active-sidebar-section";
 
 interface SessionListProps {
   sessions: Session[];
@@ -469,10 +470,16 @@ export function SessionList({
   // this is persisted so reloads honor that choice instead of re-folding it.
   const seenParentsRef = useRef<Set<string>>(new Set());
   const collapseDefaultsReadyRef = useRef(false);
-  const hiddenSet = hiddenSessionIds ?? new Set<string>();
-  const hiddenBridgeSet = hiddenBridgeIds ?? new Set<string>();
-  const visibleSessions = sessions.filter((s) => !hiddenSet.has(s.id) && !hiddenBridgeSet.has(s.bridgeId));
-  const hiddenSessions = sessions.filter((s) => hiddenSet.has(s.id) && !hiddenBridgeSet.has(s.bridgeId));
+  const hiddenSet = hiddenSessionIds ?? EMPTY_ID_SET;
+  const hiddenBridgeSet = hiddenBridgeIds ?? EMPTY_ID_SET;
+  const visibleSessions = useMemo(
+    () => sessions.filter((session) => !hiddenSet.has(session.id) && !hiddenBridgeSet.has(session.bridgeId)),
+    [hiddenBridgeSet, hiddenSet, sessions],
+  );
+  const hiddenSessions = useMemo(
+    () => sessions.filter((session) => hiddenSet.has(session.id) && !hiddenBridgeSet.has(session.bridgeId)),
+    [hiddenBridgeSet, hiddenSet, sessions],
+  );
 
   // seenParents stays a manually-persisted ref (not usePersistentState): the
   // default-collapse effect below must see the restored set synchronously in
@@ -540,6 +547,49 @@ export function SessionList({
     () => orderedBridgeIds.filter((id) => !hiddenBridgeSet.has(id)),
     [orderedBridgeIds, hiddenBridgeSet],
   );
+
+  const selectedBridgeId = useMemo(
+    () => sessions.find((session) => session.id === selectedSessionId)?.bridgeId ?? null,
+    [selectedSessionId, sessions],
+  );
+
+  useEffect(() => {
+    setCollapsedBridges((current) => {
+      const activeBridgeId = selectedBridgeId
+        ?? visibleBridgeIds.find((bridgeId) => !current.has(bridgeId))
+        ?? visibleBridgeIds[0]
+        ?? null;
+      const next = collapseToActiveSection(
+        current,
+        visibleBridgeIds,
+        activeBridgeId,
+      );
+      if (
+        next.size === current.size &&
+        [...next].every((sectionId) => current.has(sectionId))
+      ) {
+        return current;
+      }
+      return next;
+    });
+  }, [selectedBridgeId, setCollapsedBridges, visibleBridgeIds]);
+
+  useEffect(() => {
+    if (selectedSessionId === null) return;
+    const byId = new Map(sessions.map((session) => [session.id, session]));
+    const ancestors = new Set<string>();
+    let current = byId.get(selectedSessionId);
+    while (current?.parentSessionId && !ancestors.has(current.parentSessionId)) {
+      ancestors.add(current.parentSessionId);
+      current = byId.get(current.parentSessionId);
+    }
+    if (ancestors.size === 0) return;
+    setCollapsedSessions((collapsedIds) => {
+      const next = new Set(collapsedIds);
+      for (const ancestorId of ancestors) next.delete(ancestorId);
+      return next.size === collapsedIds.size ? collapsedIds : next;
+    });
+  }, [selectedSessionId, sessions, setCollapsedSessions]);
 
   const hiddenBridgeIdsList = useMemo(
     () => orderedBridgeIds.filter((id) => hiddenBridgeSet.has(id)),
@@ -808,8 +858,12 @@ export function SessionList({
   function toggleBridgeCollapsed(bridgeId: string): void {
     setCollapsedBridges((prev) => {
       const next = new Set(prev);
-      if (next.has(bridgeId)) next.delete(bridgeId);
-      else next.add(bridgeId);
+      if (next.has(bridgeId)) {
+        for (const visibleBridgeId of visibleBridgeIds) next.add(visibleBridgeId);
+        next.delete(bridgeId);
+      } else {
+        next.add(bridgeId);
+      }
       return next;
     });
   }
@@ -943,7 +997,9 @@ export function SessionList({
         style={{
           width: "100%",
           textAlign: "left",
-          padding: `10px 16px 10px ${28 + depth * 16}px`,
+          padding: isSelected
+            ? `9px 12px 9px ${24 + depth * 14}px`
+            : `6px 12px 6px ${24 + depth * 14}px`,
           borderBottom: "1px solid var(--border-subtle)",
           borderTop: isDragOver && dragOverZone === "above" ? "2px solid var(--accent)" : "none",
           ...(isDragOver && dragOverZone === "below" ? { borderBottom: "2px solid var(--accent)" } : {}),
@@ -963,7 +1019,7 @@ export function SessionList({
           if (!isSelected) e.currentTarget.style.background = "transparent";
         }}
       >
-        <div className="flex items-center justify-between gap-2 mb-1">
+        <div className={`flex items-center justify-between gap-2 ${isSelected ? "mb-1" : ""}`}>
           <div className="flex items-center gap-1.5" style={{ flex: 1, minWidth: 0 }}>
           {treeProps?.hasChildren ? (
             <span
@@ -1071,6 +1127,14 @@ export function SessionList({
               activity={sessionActivity?.get(session.id)?.activity}
               needsInput={Boolean(sessionActivity?.get(session.id)?.attention)}
             />
+            {!isSelected && (
+              <span
+                title={new Date(session.createdAt).toLocaleString()}
+                style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}
+              >
+                {formatTimestamp(session.createdAt)}
+              </span>
+            )}
             <span
               role="button"
               tabIndex={0}
@@ -1149,7 +1213,7 @@ export function SessionList({
           );
         })()}
 
-        {session.name && (
+        {isSelected && session.name && (
           <p
             style={{
               fontSize: 10,
@@ -1164,7 +1228,7 @@ export function SessionList({
           </p>
         )}
 
-        {session.usage && (
+        {isSelected && session.usage && (
           <p
             title={formatUsageDetail(session.usage)}
             style={{
@@ -1180,7 +1244,7 @@ export function SessionList({
           </p>
         )}
 
-        <div className="flex items-center justify-between">
+        {isSelected && <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span
               style={{
@@ -1210,7 +1274,7 @@ export function SessionList({
           >
             {formatTimestamp(session.createdAt)}
           </span>
-        </div>
+        </div>}
       </button>
     );
   }
@@ -1220,6 +1284,7 @@ export function SessionList({
     if (bridgeSessions.length === 0 && collapsed) return null;
 
     const isBridgeCollapsed = collapsedBridges.has(bridgeId);
+    const isActiveBridge = !isBridgeCollapsed;
     const isOnline = onlineBridgeIds.has(bridgeId);
     const label = bridgeLabel(bridgeId, bridges);
     const finishedSessions = bridgeSessions.filter(
@@ -1237,7 +1302,12 @@ export function SessionList({
     }
 
     return (
-      <div key={bridgeId} className="flex flex-col">
+      <div
+        key={bridgeId}
+        className={`mx-2 my-1 flex flex-col overflow-hidden rounded-xl border ${
+          isActiveBridge ? "border-zinc-700/80 bg-zinc-900/80" : "border-transparent"
+        }`}
+      >
         <div
           onDragOver={(e) => handleBridgeDragOver(e, bridgeId)}
           onDragLeave={() => { setDragOverKey(null); setDragOverZone(null); }}
@@ -1247,18 +1317,24 @@ export function SessionList({
             display: "flex",
             alignItems: "center",
             gap: 6,
-            padding: "8px 12px",
-            borderBottom: "1px solid var(--border-subtle)",
+            padding: "7px 9px",
+            borderBottom: !isBridgeCollapsed ? "1px solid var(--border-subtle)" : "none",
             borderTop: isDragOver && dragOverZone === "above" ? "2px solid var(--accent)" : "none",
             ...(isDragOver && dragOverZone === "below" ? { borderBottom: "2px solid var(--accent)" } : {}),
             boxShadow: isDragOver && dragOverZone === "inside" ? "inset 0 0 0 2px var(--accent)" : "none",
-            background: isDragOver && dragOverZone === "inside" ? "var(--bg-hover)" : "var(--bg-base)",
+            background: isDragOver && dragOverZone === "inside"
+              ? "var(--bg-hover)"
+              : isActiveBridge
+                ? "var(--bg-elevated)"
+                : "transparent",
             fontFamily: "var(--font-mono)",
             userSelect: "none",
           }}
           onContextMenu={(e) => handleBridgeContextMenu(e, bridgeId)}
           onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-base)"; }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = isActiveBridge ? "var(--bg-elevated)" : "transparent";
+          }}
         >
           <span
             draggable
@@ -1282,6 +1358,8 @@ export function SessionList({
           </span>
           <button
             type="button"
+            aria-expanded={!isBridgeCollapsed}
+            aria-label={`${isBridgeCollapsed ? "Expand" : "Collapse"} ${label}`}
             onClick={(e) => {
               e.stopPropagation();
               toggleBridgeCollapsed(bridgeId);

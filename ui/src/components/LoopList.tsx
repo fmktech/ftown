@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Loop } from "@/types";
 import { BridgeInfo } from "@/hooks/useBridges";
 import { describeSchedule } from "@/lib/loop-schedule";
@@ -9,8 +9,10 @@ import { relativeTime } from "@/lib/relative-time";
 import { StatusDot } from "@/lib/StatusDot";
 import { usePersistentState, stringSetCodec } from "@/lib/use-persistent-state";
 import { ContextMenu, ContextMenuButton } from "./ContextMenu";
+import { collapseToActiveSection } from "@/lib/active-sidebar-section";
 
 const FOLD_STORAGE_KEY = "ftown:loopList:collapsedSections";
+const EMPTY_STRING_SET = new Set<string>();
 
 interface LoopMenuState {
   loopId: string;
@@ -65,6 +67,12 @@ function loopAccent(loop: Loop): string {
   return "var(--border-muted)";
 }
 
+function sortByNextRun(a: Loop, b: Loop): number {
+  const aNext = a.nextRunAt ? Date.parse(a.nextRunAt) : Number.POSITIVE_INFINITY;
+  const bNext = b.nextRunAt ? Date.parse(b.nextRunAt) : Number.POSITIVE_INFINITY;
+  return aNext - bNext;
+}
+
 function LoopStatusDot({ loop }: { loop: Loop }) {
   if (loop.enabled && (loop.lastStatus === "running" || loop.runNowRequested)) {
     return <StatusDot kind="running" />;
@@ -105,9 +113,9 @@ export function LoopList({
   );
   const [contextMenu, setContextMenu] = useState<LoopMenuState | null>(null);
   const [hiddenExpanded, setHiddenExpanded] = useState(false);
-  const hiddenSet = hiddenLoopIds ?? new Set<string>();
-  const hiddenGroupKeys = hiddenLoopGroupKeys ?? new Set<string>();
-  const hiddenBridgeIds = hiddenCronBridgeIds ?? new Set<string>();
+  const hiddenSet = hiddenLoopIds ?? EMPTY_STRING_SET;
+  const hiddenGroupKeys = hiddenLoopGroupKeys ?? EMPTY_STRING_SET;
+  const hiddenBridgeIds = hiddenCronBridgeIds ?? EMPTY_STRING_SET;
 
   // A loop swallowed by a hidden group or hidden bridge is excluded from the
   // main hierarchy AND from the individually-hidden rows (it is represented by
@@ -139,25 +147,79 @@ export function LoopList({
   // acts on a stale captured Loop (e.g. stale enabled/pause state).
   const activeMenuLoop = contextMenu ? loops.find((l) => l.id === contextMenu.loopId) ?? null : null;
 
-  function toggleSection(sectionId: string): void {
+  function toggleSection(sectionId: string, siblingSectionIds: readonly string[]): void {
     setCollapsedSections((prev) => {
       const next = new Set(prev);
-      if (next.has(sectionId)) next.delete(sectionId);
-      else next.add(sectionId);
+      if (next.has(sectionId)) {
+        for (const siblingSectionId of siblingSectionIds) next.add(siblingSectionId);
+        next.delete(sectionId);
+      } else {
+        next.add(sectionId);
+      }
       return next;
     });
   }
 
-  const sortByNextRun = (a: Loop, b: Loop): number => {
-    const aNext = a.nextRunAt ? Date.parse(a.nextRunAt) : Number.POSITIVE_INFINITY;
-    const bNext = b.nextRunAt ? Date.parse(b.nextRunAt) : Number.POSITIVE_INFINITY;
-    return aNext - bNext;
-  };
+  const visibleLoops = useMemo(
+    () => loops
+      .filter((loop) => {
+        if (hiddenSet.has(loop.id) || hiddenBridgeIds.has(loop.bridgeId)) return false;
+        const group = loop.group?.trim();
+        return !group || !hiddenGroupKeys.has(loopGroupKey(loop.bridgeId, group));
+      })
+      .slice()
+      .sort(sortByNextRun),
+    [hiddenBridgeIds, hiddenGroupKeys, hiddenSet, loops],
+  );
 
-  const visibleLoops = loops
-    .filter((l) => !hiddenSet.has(l.id) && !inHiddenGroupOrBridge(l))
-    .slice()
-    .sort(sortByNextRun);
+  const hierarchySections = useMemo(() => {
+    const bridgeIds = [...new Set(visibleLoops.map((loop) => loop.bridgeId))];
+    const groupIds = [...new Set(visibleLoops.flatMap((loop) => {
+      const group = loop.group?.trim();
+      return group ? [`${loop.bridgeId} ${group}`] : [];
+    }))];
+    const activeLoop = visibleLoops.find((loop) => loop.id === selectedLoopId) ?? null;
+    const activeGroup = activeLoop?.group?.trim();
+    return {
+      bridgeIds,
+      groupIds,
+      selectedBridgeId: activeLoop?.bridgeId ?? null,
+      selectedGroupId: activeLoop && activeGroup ? `${activeLoop.bridgeId} ${activeGroup}` : null,
+    };
+  }, [selectedLoopId, visibleLoops]);
+
+  useEffect(() => {
+    setCollapsedSections((current) => {
+      const activeBridgeId = hierarchySections.selectedBridgeId
+        ?? hierarchySections.bridgeIds.find((bridgeId) => !current.has(bridgeId))
+        ?? hierarchySections.bridgeIds[0]
+        ?? null;
+      const groupsInActiveBridge = activeBridgeId
+        ? hierarchySections.groupIds.filter((groupId) => groupId.startsWith(`${activeBridgeId} `))
+        : [];
+      const activeGroupId = hierarchySections.selectedGroupId
+        ?? groupsInActiveBridge.find((groupId) => !current.has(groupId))
+        ?? groupsInActiveBridge[0]
+        ?? null;
+      let next = collapseToActiveSection(
+        current,
+        hierarchySections.bridgeIds,
+        activeBridgeId,
+      );
+      next = collapseToActiveSection(
+        next,
+        hierarchySections.groupIds,
+        activeGroupId,
+      );
+      if (
+        next.size === current.size &&
+        [...next].every((sectionId) => current.has(sectionId))
+      ) {
+        return current;
+      }
+      return next;
+    });
+  }, [hierarchySections, setCollapsedSections]);
 
   // Individually hidden loops only — loops swallowed by a hidden group/bridge
   // are represented by that group/bridge entry in the Hidden fold, not listed
@@ -269,7 +331,9 @@ export function LoopList({
             style={{
               width: "100%",
               textAlign: "left",
-              padding: indent ? "9px 12px 9px 24px" : "9px 12px",
+              padding: selected
+                ? indent ? "8px 10px 8px 20px" : "8px 10px"
+                : indent ? "6px 10px 6px 20px" : "6px 10px",
               borderBottom: "1px solid var(--border-subtle)",
               borderLeft: `3px solid ${selected ? "var(--accent)" : loopAccent(loop)}`,
               background: selected ? "var(--bg-elevated)" : loop.runNowRequested ? "rgba(0, 255, 136, 0.03)" : "transparent",
@@ -301,7 +365,9 @@ export function LoopList({
               >
                 {loop.name}
               </span>
-              <span style={{ fontSize: 10, color: "var(--text-faint)", whiteSpace: "nowrap" }}>{statusLabel(loop)}</span>
+              <span style={{ fontSize: 10, color: "var(--text-faint)", whiteSpace: "nowrap" }}>
+                {selected ? statusLabel(loop) : nextDueLabel(loop)}
+              </span>
               <span
                 role="button"
                 tabIndex={0}
@@ -337,7 +403,7 @@ export function LoopList({
               </span>
             </div>
 
-            <div className="flex items-center justify-between gap-2" style={{ marginTop: 5, minWidth: 0 }}>
+            {selected && <div className="flex items-center justify-between gap-2" style={{ marginTop: 5, minWidth: 0 }}>
               <span style={{ fontSize: 10, color: loop.runNowRequested ? "var(--accent)" : "var(--text-faint)", whiteSpace: "nowrap" }}>
                 {nextDueLabel(loop)}
               </span>
@@ -353,9 +419,9 @@ export function LoopList({
               >
                 {loop.harness}
               </span>
-            </div>
+            </div>}
 
-            <div
+            {selected && <div
               title={describeSchedule(loop.schedule)}
               style={{
                 marginTop: 3,
@@ -367,7 +433,7 @@ export function LoopList({
               }}
             >
               {describeSchedule(loop.schedule)}
-            </div>
+            </div>}
           </div>
         );
   };
@@ -399,6 +465,8 @@ export function LoopList({
       >
         <button
           type="button"
+          aria-expanded={!isCollapsed}
+          aria-label={`${isCollapsed ? "Expand" : "Collapse"} ${label}`}
           onClick={(e) => {
             e.stopPropagation();
             onToggle();
@@ -539,6 +607,7 @@ export function LoopList({
       {[...groups.entries()].map(([bridgeId, bridgeLoops]) => {
         const bridgeSectionId = bridgeId;
         const isBridgeCollapsed = collapsedSections.has(bridgeSectionId);
+        const isActiveBridge = !isBridgeCollapsed;
 
         // Nest loops with a non-empty group under a collapsible group header;
         // ungrouped loops render directly under the bridge section. Groups are
@@ -560,13 +629,18 @@ export function LoopList({
         const sortedGroups = [...byGroup.entries()].sort(([a], [b]) => a.localeCompare(b));
 
         return (
-          <div key={bridgeId} className="flex flex-col">
+          <div
+            key={bridgeId}
+            className={`mx-2 my-1 flex flex-col overflow-hidden rounded-xl border ${
+              isActiveBridge ? "border-zinc-700/80 bg-zinc-900/80" : "border-transparent"
+            }`}
+          >
             {renderSectionHeader({
               sectionId: bridgeSectionId,
               label: bridgeLabel(bridgeId, bridges),
               count: bridgeLoops.length,
               isCollapsed: isBridgeCollapsed,
-              onToggle: () => toggleSection(bridgeSectionId),
+              onToggle: () => toggleSection(bridgeSectionId, hierarchySections.bridgeIds),
               onHide: onHideCronBridge ? () => onHideCronBridge(bridgeId) : undefined,
               hideTitle: "Hide bridge's crons",
             })}
@@ -582,7 +656,7 @@ export function LoopList({
                         label: group,
                         count: groupLoops.length,
                         isCollapsed: isGroupCollapsed,
-                        onToggle: () => toggleSection(groupSectionId),
+                        onToggle: () => toggleSection(groupSectionId, hierarchySections.groupIds),
                         indent: true,
                         onHide: onHideLoopGroup ? () => onHideLoopGroup(loopGroupKey(bridgeId, group)) : undefined,
                         hideTitle: "Hide group",
