@@ -436,6 +436,31 @@ body {
   background: var(--bg-elevated);
 }
 
+.dashboard-sidebar {
+  width: 100%;
+}
+@media (min-width: 768px) {
+  .dashboard-sidebar {
+    width: var(--dashboard-sidebar-width, 260px);
+  }
+}
+.sidebar-resize-handle {
+  position: absolute;
+  z-index: 20;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+  transition: background 0.15s ease;
+}
+.sidebar-resize-handle:hover,
+.sidebar-resize-handle:focus-visible {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
 /* Mobile control buttons */
 .mobile-ctrl-btn:active {
   background: var(--accent-dim) !important;

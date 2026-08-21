@@ -46,7 +46,10 @@ function loop(id: string, bridgeId: string, name: string): Loop {
 }
 
 beforeEach(() => localStorage.clear());
-afterEach(cleanup);
+afterEach(() => {
+  vi.useRealTimers();
+  cleanup();
+});
 
 describe("compact active sidebars", () => {
   it("expands only the bridge containing the selected session", async () => {
@@ -142,6 +145,16 @@ describe("compact active sidebars", () => {
     expect(within(acmeGroup).getByLabelText("2 root agents")).toBeTruthy();
     expect(screen.queryByRole("group", { name: "Sessions in other" })).toBeNull();
     expect(screen.getByText("Agent C")).toBeTruthy();
+
+    fireEvent.click(within(acmeGroup).getByRole("button", { name: "Collapse folder acme" }));
+    expect(within(acmeGroup).queryByText("Agent A")).toBeNull();
+    expect(within(acmeGroup).queryByText("Agent B")).toBeNull();
+    expect(screen.getByText("Agent C")).toBeTruthy();
+    expect(localStorage.getItem("ftown:collapsedSessionFolders")).toContain("bridge-a:/projects/acme");
+
+    fireEvent.click(within(acmeGroup).getByRole("button", { name: "Expand folder acme" }));
+    expect(within(acmeGroup).getByText("Agent A")).toBeTruthy();
+    expect(within(acmeGroup).getByText("Agent B")).toBeTruthy();
   });
 
   it("shows verbose activity only for the expanded row and keeps age beside its indicator", async () => {
@@ -166,6 +179,23 @@ describe("compact active sidebars", () => {
     for (const indicator of screen.getAllByRole("status", { name: "Using a tool" })) {
       expect(indicator.nextElementSibling?.textContent).not.toBe("");
     }
+  });
+
+  it("uses compact relative days instead of full dates", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-21T12:00:00Z"));
+    render(createElement(SessionList, {
+      sessions: [session("session-a", "bridge-a", "Older session", {
+        createdAt: "2026-08-11T12:00:00Z",
+      })],
+      bridges: [bridges[0]],
+      bridgeOrder: ["bridge-a"],
+      selectedSessionId: "session-a",
+      onSelectSession: vi.fn(),
+    }));
+
+    expect(screen.getByText("10d")).toBeTruthy();
+    expect(screen.queryByText("8/11/2026")).toBeNull();
   });
 
   it("expands only the bridge containing the selected cron", async () => {
