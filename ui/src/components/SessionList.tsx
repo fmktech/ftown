@@ -91,6 +91,68 @@ interface SessionRowTreeProps {
   onToggleCollapse: () => void;
 }
 
+interface SessionFolderGroup {
+  key: string;
+  path: string | null;
+  label: string;
+  roots: SessionTreeNode[];
+}
+
+function normalizeWorkingDir(workingDir?: string): string | null {
+  const trimmed = workingDir?.trim();
+  if (!trimmed) return null;
+  return trimmed.replace(/[\\/]+$/, "") || trimmed;
+}
+
+function workingDirLabel(workingDir: string | null): string {
+  if (workingDir === null) return "No folder";
+  const segments = workingDir.split(/[\\/]/).filter(Boolean);
+  return segments.at(-1) ?? workingDir;
+}
+
+/**
+ * Add workspace folders only when they compact repeated roots across a bridge.
+ * Singleton workspaces remain direct bridge children, avoiding a folder row
+ * that would merely repeat metadata for one agent. Descendants stay attached
+ * to their root and are never regrouped using a child's working directory.
+ */
+function groupSessionRootsByFolder(roots: SessionTreeNode[]): SessionFolderGroup[] | null {
+  const byPath = new Map<string, SessionFolderGroup>();
+  for (const root of roots) {
+    const path = normalizeWorkingDir(root.session.workingDir);
+    const key = path ?? "\u0000no-folder";
+    const existing = byPath.get(key);
+    if (existing) {
+      existing.roots.push(root);
+    } else {
+      byPath.set(key, { key, path, label: workingDirLabel(path), roots: [root] });
+    }
+  }
+
+  const groups = [...byPath.values()];
+  if (groups.length < 2 || groups.every((group) => group.roots.length === 1)) return null;
+  return groups;
+}
+
+function FolderIcon(): ReactElement {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      width="15"
+      height="15"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ flexShrink: 0 }}
+    >
+      <path d="M3 6.75A1.75 1.75 0 0 1 4.75 5h4.1l2 2h8.4A1.75 1.75 0 0 1 21 8.75v8.5A1.75 1.75 0 0 1 19.25 19H4.75A1.75 1.75 0 0 1 3 17.25z" />
+    </svg>
+  );
+}
+
 /**
  * Build a parent→child forest from a pre-sorted list of sessions.
  *
@@ -1099,14 +1161,12 @@ export function SessionList({
               activity={sessionActivity?.get(session.id)?.activity}
               needsInput={Boolean(sessionActivity?.get(session.id)?.attention)}
             />
-            {!isSelected && (
-              <span
-                title={new Date(session.createdAt).toLocaleString()}
-                style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}
-              >
-                {formatTimestamp(session.createdAt)}
-              </span>
-            )}
+            <span
+              title={new Date(session.createdAt).toLocaleString()}
+              style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}
+            >
+              {formatTimestamp(session.createdAt)}
+            </span>
             <span
               role="button"
               tabIndex={0}
@@ -1160,7 +1220,7 @@ export function SessionList({
           </div>
         )}
 
-        {session.status === "running" && (() => {
+        {isSelected && session.status === "running" && (() => {
           const act = sessionActivity?.get(session.id);
           if (!act || act.activity === "idle") return null;
           const isThinking = act.activity === "thinking";
@@ -1216,21 +1276,13 @@ export function SessionList({
           </p>
         )}
 
-        {isSelected && <div className="flex items-center justify-between">
+        {isSelected && session.model && session.shellType !== "shell" && (
           <div className="flex items-center gap-2">
-            {session.model && session.shellType !== "shell" && (
-              <span style={{ fontSize: 10, color: "var(--text-faint)" }}>
-                {session.model}
-              </span>
-            )}
+            <span style={{ fontSize: 10, color: "var(--text-faint)" }}>
+              {session.model}
+            </span>
           </div>
-          <span
-            title={new Date(session.createdAt).toLocaleString()}
-            style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}
-          >
-            {formatTimestamp(session.createdAt)}
-          </span>
-        </div>}
+        )}
       </button>
     );
   }
@@ -1248,6 +1300,19 @@ export function SessionList({
     );
     const dropKey = `bridge:${bridgeId}`;
     const isDragOver = dragOverKey === dropKey;
+    const sessionTree = buildSessionTree(bridgeSessions);
+    const folderGroups = groupSessionRootsByFolder(sessionTree);
+
+    const renderTree = (roots: SessionTreeNode[], depthOffset = 0): ReactElement[] =>
+      flattenSessionTree(roots, collapsedSessions).map((row) =>
+        renderSessionRow(row.session, {
+          depth: row.depth + depthOffset,
+          hasChildren: row.hasChildren,
+          isCollapsed: collapsedSessions.has(row.session.id),
+          descendantCount: row.descendantCount,
+          onToggleCollapse: () => toggleSessionCollapsed(row.session.id),
+        }),
+      );
 
     if (collapsed) {
       return (
@@ -1387,16 +1452,54 @@ export function SessionList({
             {bridgeSessions.length}
           </span>
         </div>
-        {!isBridgeCollapsed &&
-          flattenSessionTree(buildSessionTree(bridgeSessions), collapsedSessions).map((row) =>
-            renderSessionRow(row.session, {
-              depth: row.depth,
-              hasChildren: row.hasChildren,
-              isCollapsed: collapsedSessions.has(row.session.id),
-              descendantCount: row.descendantCount,
-              onToggleCollapse: () => toggleSessionCollapsed(row.session.id),
-            }),
-          )}
+        {!isBridgeCollapsed && (folderGroups === null
+          ? renderTree(sessionTree)
+          : folderGroups.flatMap((group) => {
+              if (group.roots.length === 1) return renderTree(group.roots);
+              return [
+                <div
+                  key={`folder:${bridgeId}:${group.key}`}
+                  role="group"
+                  aria-label={`Sessions in ${group.label}`}
+                  title={group.path ?? "Sessions without a working folder"}
+                  style={{ borderBottom: "1px solid var(--border-subtle)" }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 7,
+                      minWidth: 0,
+                      padding: "6px 12px 5px 25px",
+                      color: "var(--text-muted)",
+                      fontFamily: "var(--font-mono)",
+                    }}
+                  >
+                    <FolderIcon />
+                    <span
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        fontSize: 11,
+                        fontWeight: 600,
+                      }}
+                    >
+                      {group.label}
+                    </span>
+                    <span
+                      aria-label={`${group.roots.length} root agents`}
+                      style={{ fontSize: 9, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}
+                    >
+                      {group.roots.length}
+                    </span>
+                  </div>
+                  {renderTree(group.roots, 1)}
+                </div>,
+              ];
+            }))}
       </div>
     );
   }
