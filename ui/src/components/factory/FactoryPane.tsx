@@ -1,15 +1,24 @@
 "use client";
 
 import { useState } from "react";
+import type { Loop } from "@/types";
 import type { FactoryPaneProps } from "./types";
 import { factoryKey } from "./types";
+import type { DeleteFactoryLoop, UpdateFactoryLoop } from "./factory-lifecycle";
 import { useFactory } from "./useFactory";
 import { FactoryBoard } from "./FactoryBoard";
+import { FactoryLifecycleControls } from "./FactoryLifecycleControls";
 import { SkillEditor } from "./SkillEditor";
 import { FactoryRuns } from "./FactoryRuns";
 import { NewTicketForm } from "./NewTicketForm";
 
 type FactoryTab = "board" | "skills" | "runs";
+
+interface FactoryPaneLifecycleProps extends FactoryPaneProps {
+  loops: Loop[];
+  updateLoop: UpdateFactoryLoop;
+  deleteLoop: DeleteFactoryLoop;
+}
 
 const TABS: { id: FactoryTab; label: string }[] = [
   { id: "board", label: "Board" },
@@ -17,7 +26,15 @@ const TABS: { id: FactoryTab; label: string }[] = [
   { id: "runs", label: "Runs" },
 ];
 
-export function FactoryPane({ factory, bridgeExec, sessions, onOpenSession }: FactoryPaneProps) {
+export function FactoryPane({
+  factory,
+  bridgeExec,
+  sessions,
+  onOpenSession,
+  loops,
+  updateLoop,
+  deleteLoop,
+}: FactoryPaneLifecycleProps) {
   const [tab, setTab] = useState<FactoryTab>("board");
   const [showNewTicket, setShowNewTicket] = useState(false);
   const {
@@ -110,6 +127,13 @@ export function FactoryPane({ factory, bridgeExec, sessions, onOpenSession }: Fa
             );
           })}
         </div>
+        <FactoryLifecycleControls
+          factory={factory}
+          loops={loops}
+          sessions={sessions}
+          updateLoop={updateLoop}
+          deleteLoop={deleteLoop}
+        />
         <button
           type="button"
           onClick={() => setShowNewTicket(true)}

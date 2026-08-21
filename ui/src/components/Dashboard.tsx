@@ -1341,6 +1341,9 @@ PY`;
               bridgeExec={bridgeExec}
               sessions={normalSessions}
               onOpenSession={handleOpenFactorySession}
+              loops={loops}
+              updateLoop={updateLoop}
+              deleteLoop={deleteLoop}
             />
           ) : selectedLoop ? (
             <LoopDetailPane
