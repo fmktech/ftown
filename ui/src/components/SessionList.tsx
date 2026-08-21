@@ -555,10 +555,14 @@ export function SessionList({
 
   useEffect(() => {
     setCollapsedBridges((current) => {
+      const activeBridgeId = selectedBridgeId
+        ?? visibleBridgeIds.find((bridgeId) => !current.has(bridgeId))
+        ?? visibleBridgeIds[0]
+        ?? null;
       const next = collapseToActiveSection(
         current,
         visibleBridgeIds,
-        selectedBridgeId,
+        activeBridgeId,
       );
       if (
         next.size === current.size &&
@@ -1280,7 +1284,7 @@ export function SessionList({
     if (bridgeSessions.length === 0 && collapsed) return null;
 
     const isBridgeCollapsed = collapsedBridges.has(bridgeId);
-    const isActiveBridge = selectedBridgeId === bridgeId;
+    const isActiveBridge = !isBridgeCollapsed;
     const isOnline = onlineBridgeIds.has(bridgeId);
     const label = bridgeLabel(bridgeId, bridges);
     const finishedSessions = bridgeSessions.filter(

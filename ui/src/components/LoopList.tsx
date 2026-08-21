@@ -183,22 +183,33 @@ export function LoopList({
     return {
       bridgeIds,
       groupIds,
-      activeBridgeId: activeLoop?.bridgeId ?? null,
-      activeGroupId: activeLoop && activeGroup ? `${activeLoop.bridgeId} ${activeGroup}` : null,
+      selectedBridgeId: activeLoop?.bridgeId ?? null,
+      selectedGroupId: activeLoop && activeGroup ? `${activeLoop.bridgeId} ${activeGroup}` : null,
     };
   }, [selectedLoopId, visibleLoops]);
 
   useEffect(() => {
     setCollapsedSections((current) => {
+      const activeBridgeId = hierarchySections.selectedBridgeId
+        ?? hierarchySections.bridgeIds.find((bridgeId) => !current.has(bridgeId))
+        ?? hierarchySections.bridgeIds[0]
+        ?? null;
+      const groupsInActiveBridge = activeBridgeId
+        ? hierarchySections.groupIds.filter((groupId) => groupId.startsWith(`${activeBridgeId} `))
+        : [];
+      const activeGroupId = hierarchySections.selectedGroupId
+        ?? groupsInActiveBridge.find((groupId) => !current.has(groupId))
+        ?? groupsInActiveBridge[0]
+        ?? null;
       let next = collapseToActiveSection(
         current,
         hierarchySections.bridgeIds,
-        hierarchySections.activeBridgeId,
+        activeBridgeId,
       );
       next = collapseToActiveSection(
         next,
         hierarchySections.groupIds,
-        hierarchySections.activeGroupId,
+        activeGroupId,
       );
       if (
         next.size === current.size &&
@@ -596,7 +607,7 @@ export function LoopList({
       {[...groups.entries()].map(([bridgeId, bridgeLoops]) => {
         const bridgeSectionId = bridgeId;
         const isBridgeCollapsed = collapsedSections.has(bridgeSectionId);
-        const isActiveBridge = hierarchySections.activeBridgeId === bridgeId;
+        const isActiveBridge = !isBridgeCollapsed;
 
         // Nest loops with a non-empty group under a collapsible group header;
         // ungrouped loops render directly under the bridge section. Groups are

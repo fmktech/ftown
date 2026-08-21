@@ -83,6 +83,21 @@ describe("compact active sidebars", () => {
     });
   });
 
+  it("keeps the first session bridge discoverable before a session is selected", async () => {
+    render(createElement(SessionList, {
+      sessions: [session("session-a", "bridge-a", "Alpha session")],
+      bridges: [bridges[0]],
+      bridgeOrder: ["bridge-a"],
+      selectedSessionId: null,
+      onSelectSession: vi.fn(),
+    }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Collapse alpha" })).toBeTruthy();
+      expect(screen.getByText("Alpha session")).toBeTruthy();
+    });
+  });
+
   it("expands only the bridge containing the selected cron", async () => {
     const loops = [
       loop("loop-a", "bridge-a", "Alpha cron"),
@@ -118,6 +133,24 @@ describe("compact active sidebars", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Collapse alpha" })).toBeTruthy();
       expect(screen.getByRole("button", { name: "Expand beta" })).toBeTruthy();
+    });
+  });
+
+  it("keeps the first cron bridge discoverable before a cron is selected", async () => {
+    render(createElement(LoopList, {
+      loops: [loop("loop-a", "bridge-a", "Alpha cron")],
+      bridges: [bridges[0]],
+      selectedLoopId: null,
+      onSelectLoop: vi.fn(),
+      onRunNow: vi.fn(),
+      onToggleEnabled: vi.fn(),
+      onEdit: vi.fn(),
+      onDelete: vi.fn(),
+    }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Collapse alpha" })).toBeTruthy();
+      expect(screen.getByText("Alpha cron")).toBeTruthy();
     });
   });
 });
