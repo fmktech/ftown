@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BridgeInfo } from "@/hooks/useBridges";
@@ -13,7 +13,7 @@ const bridges: BridgeInfo[] = [
   { clientId: "client-b", bridgeId: "bridge-b", hostname: "beta", connectedAt: "2026-08-21T12:00:00Z" },
 ];
 
-function session(id: string, bridgeId: string, name: string): Session {
+function session(id: string, bridgeId: string, name: string, overrides: Partial<Session> = {}): Session {
   return {
     id,
     bridgeId,
@@ -23,6 +23,7 @@ function session(id: string, bridgeId: string, name: string): Session {
     shellType: "pi",
     createdAt: "2026-08-21T12:00:00Z",
     updatedAt: "2026-08-21T12:00:00Z",
+    ...overrides,
   };
 }
 
@@ -114,6 +115,56 @@ describe("compact active sidebars", () => {
     for (const name of ["Selected session", "Compact session"]) {
       const nameElement = screen.getByText(name);
       expect(nameElement.previousElementSibling?.getAttribute("data-harness-icon")).toBe("pi");
+    }
+  });
+
+  it("groups repeated root-agent folders without regrouping their subagents", async () => {
+    render(createElement(SessionList, {
+      sessions: [
+        session("agent-a", "bridge-a", "Agent A", { workingDir: "/projects/acme" }),
+        session("agent-a-child", "bridge-a", "Agent A child", {
+          workingDir: "/projects/other",
+          parentSessionId: "agent-a",
+        }),
+        session("agent-b", "bridge-a", "Agent B", { workingDir: "/projects/acme/" }),
+        session("agent-c", "bridge-a", "Agent C", { workingDir: "/projects/other" }),
+      ],
+      bridges: [bridges[0]],
+      bridgeOrder: ["bridge-a"],
+      selectedSessionId: "agent-a-child",
+      onSelectSession: vi.fn(),
+    }));
+
+    const acmeGroup = await screen.findByRole("group", { name: "Sessions in acme" });
+    expect(within(acmeGroup).getByText("Agent A")).toBeTruthy();
+    expect(within(acmeGroup).getByText("Agent A child")).toBeTruthy();
+    expect(within(acmeGroup).getByText("Agent B")).toBeTruthy();
+    expect(within(acmeGroup).getByLabelText("2 root agents")).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "Sessions in other" })).toBeNull();
+    expect(screen.getByText("Agent C")).toBeTruthy();
+  });
+
+  it("shows verbose activity only for the expanded row and keeps age beside its indicator", async () => {
+    const sessionActivity = new Map([
+      ["session-a", { activity: "tool_use" as const, toolName: "Bash" }],
+      ["session-b", { activity: "tool_use" as const, toolName: "Bash" }],
+    ]);
+    render(createElement(SessionList, {
+      sessions: [
+        session("session-a", "bridge-a", "Selected session"),
+        session("session-b", "bridge-a", "Compact session"),
+      ],
+      bridges: [bridges[0]],
+      bridgeOrder: ["bridge-a"],
+      selectedSessionId: "session-a",
+      onSelectSession: vi.fn(),
+      sessionActivity,
+    }));
+
+    await waitFor(() => expect(screen.getAllByRole("status", { name: "Using a tool" })).toHaveLength(2));
+    expect(screen.getAllByText("using Bash")).toHaveLength(1);
+    for (const indicator of screen.getAllByRole("status", { name: "Using a tool" })) {
+      expect(indicator.nextElementSibling?.textContent).not.toBe("");
     }
   });
 
