@@ -46,6 +46,18 @@
   --shell-opencode: #FF69B4;
   --shell-shell: #BA55D3;
   --shell-generic: #00BFFF;
+  --harness-claude: #D97757;
+  --harness-cursor: #A8B4FF;
+  --harness-codex: #10A37F;
+  --harness-shell: #F0AA22;
+  --harness-zai: #6495ED;
+  --harness-kimi: #FF69B4;
+  --harness-opencode: #BA55D3;
+  --harness-deepseek: #00BFFF;
+  --harness-fireworks: #FF7849;
+  --harness-grok: #FF4560;
+  --harness-pi: #A855F7;
+  --harness-kimi-code: #14B8A6;
 
   /* Radius scale */
   --radius-sm: 4px;
@@ -80,6 +92,7 @@
 @media (prefers-reduced-motion: reduce) {
   .animate-running,
   .animate-pending,
+  .animate-spin,
   .fade-in {
     animation: none !important;
   }

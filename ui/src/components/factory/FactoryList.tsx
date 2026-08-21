@@ -3,14 +3,21 @@
 import { useMemo, useState } from "react";
 import type { Session } from "@/types";
 import { relativeTime } from "@/lib/relative-time";
-import { StatusDot } from "@/lib/StatusDot";
 import { formatUsageDetail } from "@/lib/format-usage";
+import { HarnessIcon } from "@/components/HarnessIcon";
+import { SessionStateIndicator } from "@/components/SessionStateIndicator";
+import type { SessionActivity } from "@/hooks/useAllSessionEvents";
 import {
   factoryKey,
   factoryWorkerOf,
   type FactoryInfo,
   type FactoryListProps,
 } from "./types";
+
+type FactoryListViewProps = FactoryListProps & {
+  /** Live hook-derived state for worker spinners and input-needed markers. */
+  sessionActivity?: Map<string, SessionActivity>;
+};
 
 function repoBasename(repoRoot: string): string {
   const parts = repoRoot.split("/").filter(Boolean);
@@ -52,28 +59,18 @@ function NewFactoryButton({ onCreateFactory }: { onCreateFactory: () => void }) 
   );
 }
 
-function WorkerHarnessMark({ session }: { session: Session }) {
-  const label = (session.shellType ?? "agent").slice(0, 1).toUpperCase();
-  return (
-    <span
-      aria-hidden="true"
-      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-zinc-700 bg-zinc-950 font-mono text-[9px] font-semibold text-zinc-400"
-    >
-      {label}
-    </span>
-  );
-}
-
 function WorkerRow({
   session,
   selected,
   onOpenSession,
   onRemoveSession,
+  activity,
 }: {
   session: Session;
   selected: boolean;
   onOpenSession: (sessionId: string) => void;
   onRemoveSession: (sessionId: string) => void;
+  activity?: SessionActivity;
 }) {
   const details = session.usage
     ? `${session.name}\n${formatUsageDetail(session.usage)}`
@@ -94,8 +91,12 @@ function WorkerRow({
         aria-current={selected ? "true" : undefined}
         className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left"
       >
-        <StatusDot kind={session.status} />
-        <WorkerHarnessMark session={session} />
+        <SessionStateIndicator
+          status={session.status}
+          activity={activity?.activity}
+          needsInput={Boolean(activity?.attention)}
+        />
+        <HarnessIcon harness={session.shellType} size={18} />
         <span
           title={details}
           className={`min-w-0 flex-1 truncate text-[11px] ${
@@ -180,10 +181,11 @@ export function FactoryList({
   onOpenSession,
   onRemoveSession,
   selectedSessionId,
+  sessionActivity,
   hiddenFactoryKeys,
   onHideFactory,
   onUnhideFactory,
-}: FactoryListProps) {
+}: FactoryListViewProps) {
   const [collapsedWorkers, setCollapsedWorkers] = useState<Record<string, boolean>>({});
   const hiddenSet = hiddenFactoryKeys ?? new Set<string>();
   const visibleFactories = useMemo(
@@ -340,6 +342,7 @@ export function FactoryList({
                           selected={session.id === selectedSessionId}
                           onOpenSession={onOpenSession}
                           onRemoveSession={onRemoveSession}
+                          activity={sessionActivity?.get(session.id)}
                         />
                       ))}
                     </div>

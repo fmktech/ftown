@@ -171,8 +171,8 @@ test.describe("session lifecycle", () => {
     await expect
       .poll(() => statusOf(sid), { timeout: 30_000, message: `stop must move ${sid} to completed` })
       .toBe("completed");
-    // …and the UI badge reflects it (completed renders as "done").
-    await expect(row.getByText("done", { exact: true })).toBeVisible({ timeout: 15_000 });
+    // …and the icon-only UI state reflects it.
+    await expect(row.getByTitle("Completed")).toBeVisible({ timeout: 15_000 });
 
     // --- REMOVE via the row context menu (Remove is always present) ---
     await row.click({ button: "right" });
@@ -235,7 +235,7 @@ test.describe("session lifecycle", () => {
     await waitForBridgeOnline(page);
     await openSession(page, name);
     const row = page.getByRole("button", { name: new RegExp(name) });
-    await expect(row.getByText(/running|idle/).first()).toBeVisible({ timeout: 30_000 });
+    await expect(row.getByTitle(/Running|Idle/).first()).toBeVisible({ timeout: 30_000 });
 
     // A NEW marker proves the resurrected PTY is a LIVE process, not a stale record.
     await runMarkerInTerminal(page, `POST${Date.now()}`);
