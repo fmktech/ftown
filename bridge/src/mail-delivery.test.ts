@@ -544,4 +544,25 @@ describe('MailDeliveryService injectPtyLine', () => {
     assert.equal(await done, true);
     assert.equal(runner.writes[0].data, ": '[ftown msg from alice] dont run this'");
   });
+
+  it('strips quotes and newlines from the sender label (shell-quote breakout)', async () => {
+    const { clock, store, runner, service } = setup();
+    const shellSession = makeSession('s1', { shellType: 'shell' });
+    store.add(shellSession);
+    runner.running.add('s1');
+
+    const evilSender = "'; touch /tmp/pwned; '";
+    const done = service.injectPtyLine(shellSession, evilSender, 'hello');
+    await clock.advance(600);
+    assert.equal(await done, true);
+    assert.equal(runner.writes[0].data, ": '[ftown msg from ; touch /tmp/pwned; ] hello'");
+
+    const agentSession = makeSession('s2', { shellType: 'claude' });
+    store.add(agentSession);
+    runner.running.add('s2');
+
+    const doneAgent = service.injectPtyLine(agentSession, "a'\nb", 'hello');
+    await flushAsync();
+    assert.equal((runner.writes.at(-1) as { data: string }).data, '[ftown msg from ab] hello');
+  });
 });

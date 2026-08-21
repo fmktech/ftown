@@ -5,6 +5,7 @@ import jwt from "jsonwebtoken";
 import { parseLocalAdvert } from "../local-advert";
 import { getRequiredSecret } from "@/lib/secrets";
 import { rotateBridgeRefreshJti } from "@/lib/bridge-refresh";
+import { isValidBridgeLabel } from "@/lib/bridge-label";
 
 interface BridgeRefreshRequestBody {
   refreshToken: string;
@@ -44,7 +45,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   }
 
-  if (!body.refreshToken || !body.bridgeId || !body.hostname) {
+  if (!body.refreshToken || !isValidBridgeLabel(body.bridgeId) || !isValidBridgeLabel(body.hostname)) {
     return NextResponse.json(
       { error: "refreshToken, bridgeId, and hostname are required" },
       { status: 400 }

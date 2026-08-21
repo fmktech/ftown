@@ -1,19 +1,20 @@
 /**
- * Central config for the e2e suite. Values mirror the dev placeholders in
- * centrifugo/config.json (CI-local only — nothing sensitive). Overridable via env
- * so the same constants drive Playwright, the shell scripts, and the shim.
+ * Central config for the e2e suite. CI-local only — nothing sensitive — but
+ * realistic: getRequiredSecret rejects the shipped placeholder values, so e2e
+ * must exercise a real-shaped secret. Overridable via env so the same constants
+ * drive Playwright, the shell scripts, and the shim.
  */
 
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** MUST equal centrifugo/config.json `token_hmac_secret_key`. */
+/** MUST equal e2e/centrifugo.config.json `token_hmac_secret_key`. */
 export const CENTRIFUGO_TOKEN_SECRET =
-  process.env.CENTRIFUGO_TOKEN_SECRET ?? "your-centrifugo-token-secret-change-me";
+  process.env.CENTRIFUGO_TOKEN_SECRET ?? "e2e-centrifugo-token-secret-0123456789abcdef";
 
-/** MUST equal centrifugo/config.json `api_key`. */
+/** MUST equal e2e/centrifugo.config.json `api_key`. */
 export const CENTRIFUGO_API_KEY =
-  process.env.CENTRIFUGO_API_KEY ?? "your-centrifugo-api-key-change-me";
+  process.env.CENTRIFUGO_API_KEY ?? "e2e-centrifugo-api-key-0123456789abcdef";
 
 export const CENTRIFUGO_API_URL =
   process.env.CENTRIFUGO_API_URL ?? "http://localhost:8000/api";

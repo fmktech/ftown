@@ -22,6 +22,9 @@ regexes = [
   # GitHub secrets at deploy time (see .github/workflows/deploy-centrifugo.yml).
   # Scoped to the exact __CENTRIFUGO_*__ token shape so the rule is not weakened.
   '''^__CENTRIFUGO_[A-Z_]+__$''',
+  # Fake, CI-local fixtures used by the e2e suite (see e2e/env.sh) — real-shaped
+  # so getRequiredSecret accepts them, but never valid outside a test run.
+  '''e2e-centrifugo-(token-secret|api-key)-[0-9a-f]{16}''',
 ]
 
 [[rules]]
@@ -38,6 +41,8 @@ regexes = [
   # Documentation placeholders.
   '''^your-''',
   '''://user:password@''',
+  # Fake, CI-local fixtures used by the e2e suite (see e2e/env.sh).
+  '''e2e-centrifugo-(token-secret|api-key)-[0-9a-f]{16}''',
 ]
 
 [allowlist]
@@ -45,4 +50,10 @@ description = "Global allowlist"
 paths = [
   '''node_modules''',
   '''\.gitleaks\.toml$''',
+]
+regexes = [
+  # Fake, CI-local fixtures used by the e2e suite (see e2e/env.sh) — real-shaped
+  # so getRequiredSecret accepts them, but never valid outside a test run. Also
+  # matches the default generic-api-key rule.
+  '''e2e-centrifugo-(token-secret|api-key)-[0-9a-f]{16}''',
 ]

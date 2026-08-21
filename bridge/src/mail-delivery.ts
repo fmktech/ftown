@@ -157,9 +157,10 @@ export class MailDeliveryService {
   async injectPtyLine(session: Session, sender: string, text: string): Promise<boolean> {
     if (!this.runner) return false;
     const isAgent = session.shellType && session.shellType !== 'shell';
+    const safeSender = sender.replace(/['\r\n]/g, '');
     const line = isAgent
-      ? `[ftown msg from ${sender}] ${text}`
-      : `: '[ftown msg from ${sender}] ${text.replace(/'/g, '')}'`;
+      ? `[ftown msg from ${safeSender}] ${text}`
+      : `: '[ftown msg from ${safeSender}] ${text.replace(/'/g, '')}'`;
     if (!this.runner.write(session.id, line)) return false;
     // Composer TUIs detect pastes by input arrival rate; the submit CR must come well
     // after that window or it is treated as a pasted newline.

@@ -3,7 +3,7 @@ services:
     image: centrifugo/centrifugo:v5
     container_name: ftown-centrifugo
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./centrifugo/config.json:/centrifugo/config.json:ro
     command: centrifugo -c config.json

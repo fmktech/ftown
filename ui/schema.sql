@@ -10,8 +10,10 @@ CREATE TABLE users (
 CREATE INDEX idx_users_email ON users(email);
 
 -- Scope-keyed rate limiter shared by login (scope 'login', key = email) and
--- registration (scope 'register', key = client IP).
-CREATE TABLE rate_limit_attempts (
+-- registration (scope 'register', key = client IP). UNLOGGED: counters are
+-- throwaway, so skip WAL for cheap upserts on the hot path (truncated on crash
+-- recovery, not replicated — acceptable for this data).
+CREATE UNLOGGED TABLE rate_limit_attempts (
   scope        TEXT        NOT NULL,
   key          TEXT        NOT NULL,
   failed_count INTEGER     NOT NULL DEFAULT 0,

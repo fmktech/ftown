@@ -1,6 +1,6 @@
 {
-  "token_hmac_secret_key": "your-centrifugo-token-secret-change-me",
-  "api_key": "your-centrifugo-api-key-change-me",
+  "token_hmac_secret_key": "e2e-centrifugo-token-secret-0123456789abcdef",
+  "api_key": "e2e-centrifugo-api-key-0123456789abcdef",
   "admin": true,
   "admin_password": "admin",
   "admin_secret": "admin-secret",

@@ -2,7 +2,15 @@ import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import { compare } from "bcryptjs";
 import { getDb } from "@/lib/db";
-import { checkLoginRateLimit, recordFailedLogin, resetLoginAttempts } from "@/lib/login-rate-limit";
+import {
+  checkLoginIpRateLimit,
+  checkLoginRateLimit,
+  recordFailedLogin,
+  recordFailedLoginIp,
+  resetLoginAttempts,
+  resetLoginIpAttempts,
+} from "@/lib/login-rate-limit";
+import { clientIp } from "@/lib/client-ip";
 import { getRequiredSecret } from "@/lib/secrets";
 
 interface DbUser {
@@ -10,6 +18,11 @@ interface DbUser {
   email: string;
   password_hash: string;
 }
+
+// Precomputed cost-12 hash of an unknown value. Compared against whenever the
+// email does not exist so the response time matches the found-user path and
+// login cannot be used to enumerate registered accounts by timing.
+const DUMMY_BCRYPT_HASH = "$2b$12$bEukDr9TKCHPZqKVWUmg8eqZhrVeYoL3B7xeNx3PHdzD2XK6kAqSm";
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   // F2: fail-fast if AUTH_SECRET is missing or weak — never run sessions on a
@@ -21,12 +34,19 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         email: { label: "Email", type: "email" },
         password: { label: "Password", type: "password" },
       },
-      async authorize(credentials) {
+      async authorize(credentials, request) {
         const email = credentials?.email;
         const password = credentials?.password;
 
         if (typeof email !== "string" || typeof password !== "string") {
           return null;
+        }
+
+        const ip = clientIp(request);
+
+        const ipRateLimit = await checkLoginIpRateLimit(ip);
+        if (!ipRateLimit.allowed) {
+          throw new Error("Too many failed attempts. Try again later.");
         }
 
         const rateLimit = await checkLoginRateLimit(email);
@@ -41,7 +61,9 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         )) as DbUser[];
 
         if (rows.length === 0) {
+          await compare(password, DUMMY_BCRYPT_HASH);
           await recordFailedLogin(email);
+          await recordFailedLoginIp(ip);
           return null;
         }
 
@@ -50,10 +72,12 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
 
         if (!isValid) {
           await recordFailedLogin(email);
+          await recordFailedLoginIp(ip);
           return null;
         }
 
         await resetLoginAttempts(email);
+        await resetLoginIpAttempts(ip);
         return { id: user.id, email: user.email };
       },
     }),

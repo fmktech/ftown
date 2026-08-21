@@ -103,10 +103,21 @@ export function archivedSessionWasResumed(
   return !isCustomCommand && canResumeStoredSession(session);
 }
 
+const MAX_BODY_BYTES = 2 * 1024 * 1024;
+
 function parseBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    let size = 0;
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        reject(new BadRequestError('Request body too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on('end', () => {
       const body = Buffer.concat(chunks).toString('utf-8');
       if (!body) {
@@ -775,6 +786,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
 
       let regex: RegExp;
       try {
+        if (pattern.length > 256) {
+          jsonResponse(res, 400, { error: 'Pattern too long' });
+          return;
+        }
         regex = new RegExp(pattern, 'i');
       } catch {
         jsonResponse(res, 400, { error: 'Invalid regex pattern' });
