@@ -28,7 +28,7 @@ describe("FactoryList", () => {
             bridgeId: "bridge-1",
           },
         ],
-        selectedKey: null,
+        selectedKey: "bridge-1:aurea-retail",
         onSelect: vi.fn(),
         collapsed: false,
         sessions: [worker],
@@ -41,5 +41,8 @@ describe("FactoryList", () => {
     expect(html).toContain(
       'aria-label="Stop and archive aurea-retail-t6-rca"',
     );
+    expect(html).toContain(">Projects<");
+    expect(html).toContain("1 agent");
+    expect(html).toContain("aurea-retail");
   });
 });
