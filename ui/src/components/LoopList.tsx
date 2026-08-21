@@ -10,6 +10,7 @@ import { StatusDot } from "@/lib/StatusDot";
 import { usePersistentState, stringSetCodec } from "@/lib/use-persistent-state";
 import { ContextMenu, ContextMenuButton } from "./ContextMenu";
 import { collapseToActiveSection } from "@/lib/active-sidebar-section";
+import { HarnessIcon, harnessLabel } from "./HarnessIcon";
 
 const FOLD_STORAGE_KEY = "ftown:loopList:collapsedSections";
 const EMPTY_STRING_SET = new Set<string>();
@@ -407,18 +408,11 @@ export function LoopList({
               <span style={{ fontSize: 10, color: loop.runNowRequested ? "var(--accent)" : "var(--text-faint)", whiteSpace: "nowrap" }}>
                 {nextDueLabel(loop)}
               </span>
-              <span
-                title={bridgeLabel(loop.bridgeId, bridges)}
-                style={{
-                  fontSize: 9,
-                  color: "var(--text-faint)",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {loop.harness}
-              </span>
+              <HarnessIcon
+                harness={loop.harness}
+                size={17}
+                title={`${harnessLabel(loop.harness)} agent on ${bridgeLabel(loop.bridgeId, bridges)}`}
+              />
             </div>}
 
             {selected && <div

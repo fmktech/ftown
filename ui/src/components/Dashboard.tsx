@@ -1170,6 +1170,7 @@ PY`;
                 onOpenSession={handleOpenFactorySession}
                 onRemoveSession={handleRemoveSession}
                 selectedSessionId={selectedSessionId}
+                sessionActivity={sessionActivity}
                 hiddenFactoryKeys={hiddenFactoryKeys}
                 onHideFactory={handleHideFactory}
                 onUnhideFactory={handleUnhideFactory}

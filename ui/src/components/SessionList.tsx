@@ -2,15 +2,17 @@
 
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, type ReactElement } from "react";
 import { createPortal } from "react-dom";
-import { Session, SessionStatus } from "@/types";
+import { Session } from "@/types";
 import { SessionActivity } from "@/hooks/useAllSessionEvents";
 import { BridgeInfo } from "@/hooks/useBridges";
 import { reorderByDrop } from "@/lib/bridge-order";
 import { getSessionDropZone, resolveSessionDrop, type SessionDropZone } from "@/lib/session-drop";
-import { StatusDot, type StatusDotKind } from "@/lib/StatusDot";
+import { StatusDot } from "@/lib/StatusDot";
 import { usePersistentState, stringSetCodec } from "@/lib/use-persistent-state";
 import { formatUsage, formatUsageDetail } from "@/lib/format-usage";
 import { collapseToActiveSection } from "@/lib/active-sidebar-section";
+import { HarnessIcon } from "./HarnessIcon";
+import { SessionStateIndicator } from "./SessionStateIndicator";
 
 interface SessionListProps {
   sessions: Session[];
@@ -43,37 +45,6 @@ type ContextMenuState =
 type DragState =
   | { kind: "bridge"; id: string }
   | { kind: "session"; id: string; bridgeId: string };
-
-function StatusBadge({ status, activity, needsInput = false }: { status: SessionStatus; activity?: "thinking" | "tool_use" | "idle"; needsInput?: boolean }) {
-  const isIdle = status === "running" && activity === "idle";
-  // An idle-but-running session renders the pending dot, without its pulse.
-  const kind: StatusDotKind = needsInput ? "pending" : isIdle ? "pending" : status;
-  const labels: Record<SessionStatus, string> = {
-    running:      needsInput ? "input needed" : isIdle ? "idle" : "running",
-    completed:    "done",
-    error:        "error",
-    pending:      "pending",
-    disconnected: "disconnected",
-  };
-  const label = labels[status] ?? "done";
-
-  const labelColors: Record<SessionStatus, string> = {
-    running:      needsInput || isIdle ? "var(--status-pending)" : "var(--accent)",
-    completed:    "var(--text-faint)",
-    error:        "var(--status-error)",
-    pending:      "var(--status-pending)",
-    disconnected: "var(--text-faint)",
-  };
-
-  return (
-    <div className="flex items-center gap-1.5 shrink-0">
-      <StatusDot kind={kind} pulse={isIdle ? false : undefined} />
-      <span style={{ fontSize: 10, color: labelColors[status] ?? "var(--text-faint)", letterSpacing: "0.06em" }}>
-        {label}
-      </span>
-    </div>
-  );
-}
 
 function formatTimestamp(timestamp: string): string {
   const date = new Date(timestamp);
@@ -1122,7 +1093,7 @@ export function SessionList({
           )}
           </div>
           <div className="flex items-center gap-1.5" style={{ flexShrink: 0 }}>
-            <StatusBadge
+            <SessionStateIndicator
               status={session.status}
               activity={sessionActivity?.get(session.id)?.activity}
               needsInput={Boolean(sessionActivity?.get(session.id)?.attention)}
@@ -1246,22 +1217,7 @@ export function SessionList({
 
         {isSelected && <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <span
-              style={{
-                fontSize: 9,
-                fontWeight: 600,
-                letterSpacing: "0.06em",
-                padding: "1px 4px",
-                borderRadius: 3,
-                background: session.shellType === "shell" ? "rgba(255, 170, 0, 0.12)" : session.shellType === "cursor" ? "rgba(168, 180, 255, 0.12)" : session.shellType === "codex" ? "rgba(16, 163, 127, 0.12)" : session.shellType === "zai" ? "rgba(100, 149, 237, 0.12)" : session.shellType === "kimi" ? "rgba(255, 105, 180, 0.12)" : session.shellType === "opencode" ? "rgba(186, 85, 211, 0.12)" : session.shellType === "deepseek" ? "rgba(0, 191, 255, 0.12)" : session.shellType === "grok" ? "rgba(255, 69, 96, 0.12)" : session.shellType === "pi" ? "rgba(168, 85, 247, 0.12)" : session.shellType === "kimi-code" ? "rgba(20, 184, 166, 0.12)" : "rgba(0, 255, 136, 0.08)",
-              color: session.shellType === "shell" ? "var(--status-pending)" : session.shellType === "cursor" ? "var(--shell-claude)" : session.shellType === "codex" ? "var(--shell-codex)" : session.shellType === "zai" ? "var(--shell-cursor)" : session.shellType === "kimi" ? "var(--shell-opencode)" : session.shellType === "opencode" ? "var(--shell-shell)" : session.shellType === "deepseek" ? "var(--shell-generic)" : session.shellType === "grok" ? "rgb(255, 69, 96)" : session.shellType === "pi" ? "rgb(168, 85, 247)" : session.shellType === "kimi-code" ? "rgb(20, 184, 166)" : "var(--accent)",
-                border: `1px solid ${session.shellType === "shell" ? "rgba(255, 170, 0, 0.2)" : session.shellType === "cursor" ? "rgba(168, 180, 255, 0.25)" : session.shellType === "codex" ? "rgba(16, 163, 127, 0.25)" : session.shellType === "zai" ? "rgba(100, 149, 237, 0.2)" : session.shellType === "kimi" ? "rgba(255, 105, 180, 0.2)" : session.shellType === "opencode" ? "rgba(186, 85, 211, 0.2)" : session.shellType === "deepseek" ? "rgba(0, 191, 255, 0.2)" : session.shellType === "grok" ? "rgba(255, 69, 96, 0.25)" : session.shellType === "pi" ? "rgba(168, 85, 247, 0.25)" : session.shellType === "kimi-code" ? "rgba(20, 184, 166, 0.25)" : "rgba(0, 255, 136, 0.15)"}`,
-                textTransform: "uppercase",
-                fontFamily: "var(--font-mono)",
-              }}
-            >
-            {session.shellType === "shell" ? "zsh" : session.shellType === "cursor" ? "cursor" : session.shellType === "codex" ? "codex" : session.shellType === "zai" ? "z.ai" : session.shellType === "kimi" ? "kimi" : session.shellType === "opencode" ? "opencode" : session.shellType === "deepseek" ? "deepseek" : session.shellType === "grok" ? "grok" : session.shellType === "pi" ? "pi" : session.shellType === "kimi-code" ? "Kimi" : "claude"}
-            </span>
+            <HarnessIcon harness={session.shellType} size={17} />
             {session.model && session.shellType !== "shell" && (
               <span style={{ fontSize: 10, color: "var(--text-faint)" }}>
                 {session.model}
@@ -1545,7 +1501,7 @@ export function SessionList({
                   >
                     {displayName}
                   </span>
-                  <StatusBadge
+                  <SessionStateIndicator
                     status={session.status}
                     activity={sessionActivity?.get(session.id)?.activity}
                     needsInput={Boolean(sessionActivity?.get(session.id)?.attention)}

@@ -39,6 +39,8 @@ export function StatusDot({
     <span
       className={statusDotClass(kind, pulse)}
       title={title}
+      role={title ? "img" : undefined}
+      aria-label={title}
       aria-hidden={title ? undefined : true}
     />
   );
