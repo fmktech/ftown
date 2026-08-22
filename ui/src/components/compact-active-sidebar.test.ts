@@ -51,8 +51,8 @@ afterEach(() => {
   cleanup();
 });
 
-describe("compact active sidebars", () => {
-  it("expands only the bridge containing the selected session", async () => {
+describe("sidebar bridge groups", () => {
+  it("selecting a session expands its bridge and never collapses others", async () => {
     const sessions = [
       session("session-a", "bridge-a", "Alpha session"),
       session("session-b", "bridge-b", "Beta session"),
@@ -64,41 +64,71 @@ describe("compact active sidebars", () => {
       onSelectSession: vi.fn(),
     };
     const { rerender } = render(
-      createElement(SessionList, { ...props, selectedSessionId: "session-b" }),
+      createElement(SessionList, { ...props, selectedSessionId: null }),
     );
 
+    // Default: everything expanded. Collapse both manually — user's choice.
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Collapse alpha" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Collapse beta" })).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Collapse alpha" }));
+    fireEvent.click(screen.getByRole("button", { name: "Collapse beta" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Expand alpha" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Expand beta" })).toBeTruthy();
+    });
+
+    // Selecting a session on beta opens beta; alpha stays as the user left it.
+    rerender(createElement(SessionList, { ...props, selectedSessionId: "session-b" }));
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Expand alpha" })).toBeTruthy();
       expect(screen.getByRole("button", { name: "Collapse beta" })).toBeTruthy();
     });
-    expect(screen.queryByText("Alpha session")).toBeNull();
     expect(screen.getByText("Beta session")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Expand alpha" }));
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Collapse alpha" })).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Expand beta" })).toBeTruthy();
-    });
-
+    // Moving the selection back to alpha opens alpha WITHOUT re-collapsing
+    // beta — no one-expanded-at-a-time behavior.
     rerender(createElement(SessionList, { ...props, selectedSessionId: "session-a" }));
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Collapse alpha" })).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Expand beta" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Collapse beta" })).toBeTruthy();
     });
   });
 
-  it("keeps the first session bridge discoverable before a session is selected", async () => {
-    render(createElement(SessionList, {
-      sessions: [session("session-a", "bridge-a", "Alpha session")],
-      bridges: [bridges[0]],
-      bridgeOrder: ["bridge-a"],
+  it("manual expansion survives session-list updates (no auto-recollapse)", async () => {
+    const sessions = [
+      session("session-a", "bridge-a", "Alpha session"),
+      session("session-b", "bridge-b", "Beta session"),
+    ];
+    const props = {
+      sessions,
+      bridges,
+      bridgeOrder: ["bridge-a", "bridge-b"],
       selectedSessionId: null,
       onSelectSession: vi.fn(),
-    }));
+    };
+    // Simulate the mobile churn that used to trigger auto-collapse: fresh
+    // props identity on every poll cycle.
+    const { rerender } = render(createElement(SessionList, { ...props }));
 
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Collapse alpha" })).toBeTruthy();
-      expect(screen.getByText("Alpha session")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Collapse beta" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse alpha" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Expand alpha" })).toBeTruthy());
+
+    for (let i = 0; i < 3; i += 1) {
+      rerender(createElement(SessionList, {
+        ...props,
+        sessions: sessions.map((s) => ({ ...s, updatedAt: new Date().toISOString() })),
+      }));
+    }
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Expand alpha" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Collapse beta" })).toBeTruthy();
     });
   });
 
@@ -198,7 +228,7 @@ describe("compact active sidebars", () => {
     expect(screen.queryByText("8/11/2026")).toBeNull();
   });
 
-  it("expands only the bridge containing the selected cron", async () => {
+  it("selecting a cron expands its bridge and never collapses others", async () => {
     const loops = [
       loop("loop-a", "bridge-a", "Alpha cron"),
       loop("loop-b", "bridge-b", "Beta cron"),
@@ -213,44 +243,34 @@ describe("compact active sidebars", () => {
       onDelete: vi.fn(),
     };
     const { rerender } = render(
-      createElement(LoopList, { ...props, selectedLoopId: "loop-b" }),
+      createElement(LoopList, { ...props, selectedLoopId: null }),
     );
 
+    // Default: everything expanded. Collapse both manually — user's choice.
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Collapse alpha" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Collapse beta" })).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Collapse alpha" }));
+    fireEvent.click(screen.getByRole("button", { name: "Collapse beta" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Expand alpha" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Expand beta" })).toBeTruthy();
+    });
+
+    // Selecting a cron on beta opens beta; alpha stays as the user left it.
+    rerender(createElement(LoopList, { ...props, selectedLoopId: "loop-b" }));
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Expand alpha" })).toBeTruthy();
       expect(screen.getByRole("button", { name: "Collapse beta" })).toBeTruthy();
     });
-    expect(screen.queryByText("Alpha cron")).toBeNull();
     expect(screen.getByText("Beta cron")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Expand alpha" }));
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Collapse alpha" })).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Expand beta" })).toBeTruthy();
-    });
-
+    // Moving the selection back to alpha opens alpha WITHOUT re-collapsing beta.
     rerender(createElement(LoopList, { ...props, selectedLoopId: "loop-a" }));
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Collapse alpha" })).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Expand beta" })).toBeTruthy();
-    });
-  });
-
-  it("keeps the first cron bridge discoverable before a cron is selected", async () => {
-    render(createElement(LoopList, {
-      loops: [loop("loop-a", "bridge-a", "Alpha cron")],
-      bridges: [bridges[0]],
-      selectedLoopId: null,
-      onSelectLoop: vi.fn(),
-      onRunNow: vi.fn(),
-      onToggleEnabled: vi.fn(),
-      onEdit: vi.fn(),
-      onDelete: vi.fn(),
-    }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Collapse alpha" })).toBeTruthy();
-      expect(screen.getByText("Alpha cron")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Collapse beta" })).toBeTruthy();
     });
   });
 
