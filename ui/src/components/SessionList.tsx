@@ -10,7 +10,6 @@ import { getSessionDropZone, resolveSessionDrop, type SessionDropZone } from "@/
 import { StatusDot } from "@/lib/StatusDot";
 import { usePersistentState, stringSetCodec } from "@/lib/use-persistent-state";
 import { formatUsage, formatUsageDetail } from "@/lib/format-usage";
-import { collapseToActiveSection } from "@/lib/active-sidebar-section";
 import { HarnessIcon } from "./HarnessIcon";
 import { SessionStateIndicator } from "./SessionStateIndicator";
 
@@ -591,26 +590,18 @@ export function SessionList({
     [selectedSessionId, sessions],
   );
 
+  // Selecting a session opens its bridge group. Collapse state is otherwise
+  // fully user-controlled: bridges the user expands stay expanded, and
+  // collapsing is never automatic.
   useEffect(() => {
+    if (!selectedBridgeId) return;
     setCollapsedBridges((current) => {
-      const activeBridgeId = selectedBridgeId
-        ?? visibleBridgeIds.find((bridgeId) => !current.has(bridgeId))
-        ?? visibleBridgeIds[0]
-        ?? null;
-      const next = collapseToActiveSection(
-        current,
-        visibleBridgeIds,
-        activeBridgeId,
-      );
-      if (
-        next.size === current.size &&
-        [...next].every((sectionId) => current.has(sectionId))
-      ) {
-        return current;
-      }
+      if (!current.has(selectedBridgeId)) return current;
+      const next = new Set(current);
+      next.delete(selectedBridgeId);
       return next;
     });
-  }, [selectedBridgeId, setCollapsedBridges, visibleBridgeIds]);
+  }, [selectedBridgeId, setCollapsedBridges]);
 
   useEffect(() => {
     if (selectedSessionId === null) return;
@@ -1318,7 +1309,6 @@ export function SessionList({
     if (bridgeSessions.length === 0 && collapsed) return null;
 
     const isBridgeCollapsed = collapsedBridges.has(bridgeId);
-    const isActiveBridge = !isBridgeCollapsed;
     const isOnline = onlineBridgeIds.has(bridgeId);
     const label = bridgeLabel(bridgeId, bridges);
     const finishedSessions = bridgeSessions.filter(
@@ -1351,9 +1341,7 @@ export function SessionList({
     return (
       <div
         key={bridgeId}
-        className={`mx-2 my-1 flex flex-col overflow-hidden rounded-xl border ${
-          isActiveBridge ? "border-zinc-700/80 bg-zinc-900/80" : "border-transparent"
-        }`}
+        className="flex flex-col"
       >
         <div
           onDragOver={(e) => handleBridgeDragOver(e, bridgeId)}
@@ -1371,17 +1359,13 @@ export function SessionList({
             boxShadow: isDragOver && dragOverZone === "inside" ? "inset 0 0 0 2px var(--accent)" : "none",
             background: isDragOver && dragOverZone === "inside"
               ? "var(--bg-hover)"
-              : isActiveBridge
-                ? "var(--bg-elevated)"
-                : "transparent",
+              : "transparent",
             fontFamily: "var(--font-mono)",
             userSelect: "none",
           }}
           onContextMenu={(e) => handleBridgeContextMenu(e, bridgeId)}
           onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = isActiveBridge ? "var(--bg-elevated)" : "transparent";
-          }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
         >
           <span
             draggable
