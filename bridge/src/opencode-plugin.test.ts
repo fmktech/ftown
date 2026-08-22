@@ -26,13 +26,12 @@ describe('ftown opencode plugin', () => {
     const requests: RecordedRequest[] = [];
     const fetchImpl = async (url: string, init?: RequestInit) => {
       requests.push({ url, init });
-      if (url.endsWith('/inbox?wait=0')) {
-        return {
-          ok: true,
-          json: async () => ({
-            messages: [{ from: 'parent-id', fromName: 'Planner', type: 'task', body: 'Review the API' }],
-          }),
-        };
+      if (url.includes('/inbox')) {
+        // Peek sees the mail; the post-injection mark returns an empty box.
+        const messages = url.includes('peek=1')
+          ? [{ from: 'parent-id', fromName: 'Planner', type: 'task', body: 'Review the API' }]
+          : [];
+        return { ok: true, json: async () => ({ messages }) };
       }
       return { ok: true, json: async () => ({ ok: true }) };
     };
@@ -64,14 +63,17 @@ describe('ftown opencode plugin', () => {
 
     // Turn end posts Stop, then drains mail into a new prompt on the same session.
     await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } });
-    assert.equal(requests.length, 4);
+    assert.equal(requests.length, 5);
     assert.deepEqual(JSON.parse(String(requests[2].init?.body)), {
       ftown_session_id: 'ftown-session',
       ftown_session_source: 'env',
       hook_event_name: 'Stop',
       session_id: 'ses_1',
     });
-    assert.ok(requests[3].url.endsWith('/inbox?wait=0'));
+    // Peek before injecting, mark delivered only after the prompt was accepted.
+    assert.ok(requests[3].url.includes('peek=1'));
+    assert.ok(requests[4].url.endsWith('/inbox?wait=0'));
+    assert.ok(requests[4].url !== requests[3].url);
     assert.equal(promptCalls.length, 1);
     assert.deepEqual(promptCalls[0].path, { id: 'ses_1' });
     const parts = (promptCalls[0].body as { parts: Array<{ type: string; text: string }> }).parts;
@@ -155,13 +157,11 @@ describe('ftown opencode plugin', () => {
       env: { FTOWN_SESSION_ID: 'ftown-session', FTOWN_HOOK_PORT: '4321' },
       fetch: (async (url: string, init?: RequestInit) => {
         requests.push({ url, init });
-        if (url.endsWith('/inbox?wait=0')) {
-          return {
-            ok: true,
-            json: async () => ({
-              messages: [{ from: 'parent-id', type: 'task', body: 'check this' }],
-            }),
-          };
+        if (url.includes('/inbox')) {
+          const messages = url.includes('peek=1')
+            ? [{ from: 'parent-id', type: 'task', body: 'check this' }]
+            : [];
+          return { ok: true, json: async () => ({ messages }) };
         }
         return { ok: true, json: async () => ({ ok: true }) };
       }) as any,
@@ -187,21 +187,23 @@ describe('ftown opencode plugin', () => {
   it('delivers mail once when status(idle) and idle both fire for the same boundary', async () => {
     const promptCalls: Array<{ path: { id: string }; body: unknown }> = [];
     let inboxReads = 0;
-    let drainSettled = false;
+    let delivered = false;
     const hooks = registerFtownOpencodePlugin(makeClient(promptCalls) as any, {
       env: { FTOWN_SESSION_ID: 'ftown-session', FTOWN_HOOK_PORT: '4321' },
       fetch: (async (url: string) => {
-        if (String(url).endsWith('/inbox?wait=0')) {
+        if (String(url).includes('/inbox')) {
           inboxReads += 1;
-          // Model the bridge's mark-on-drain: mail is visible to every read
-          // that starts BEFORE an earlier drain completes, and gone after.
-          // Unserialized concurrent drains would both see it and double-inject.
-          const undelivered = drainSettled ? [] : [{ from: 'x', body: 'hi' }];
+          if (!url.includes('peek=1')) {
+            // The post-injection mark: mail leaves the queue.
+            delivered = true;
+            return { ok: true, json: async () => ({ messages: [] }) };
+          }
+          // Peeks that start before the mark see the mail; later ones don't.
+          // Unserialized concurrent boundaries would both peek it and inject
+          // it twice.
+          const undelivered = delivered ? [] : [{ from: 'x', body: 'hi' }];
           return new Promise((resolve) => {
-            setTimeout(() => {
-              drainSettled = true;
-              resolve({ ok: true, json: async () => ({ messages: undelivered }) });
-            }, 5);
+            setTimeout(() => resolve({ ok: true, json: async () => ({ messages: undelivered }) }), 5);
           });
         }
         return { ok: true, json: async () => ({ ok: true }) };
@@ -214,8 +216,39 @@ describe('ftown opencode plugin', () => {
       hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_2' } } }),
     ]);
 
-    assert.ok(inboxReads >= 2);
+    assert.ok(inboxReads >= 3);
     assert.equal(promptCalls.length, 1);
+  });
+
+  it('a failed prompt injection leaves mail queued (no mark, retried next boundary)', async () => {
+    const promptCalls: Array<{ path: { id: string }; body: unknown }> = [];
+    let markRequests = 0;
+    const failingClient = {
+      session: {
+        prompt: async () => {
+          throw new Error('opencode server rejected the prompt');
+        },
+      },
+    };
+    const hooks = registerFtownOpencodePlugin(failingClient as any, {
+      env: { FTOWN_SESSION_ID: 'ftown-session', FTOWN_HOOK_PORT: '4321' },
+      fetch: (async (url: string) => {
+        if (String(url).includes('/inbox')) {
+          if (!url.includes('peek=1')) markRequests += 1;
+          return { ok: true, json: async () => ({ messages: [{ from: 'x', body: 'hi' }] }) };
+        }
+        return { ok: true, json: async () => ({ ok: true }) };
+      }) as any,
+      readBridgePointer: async () => null,
+    });
+
+    await hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_3' } } } });
+    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_3' } } });
+    // Second boundary retries — still no mark on failure.
+    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_3' } } });
+
+    assert.equal(promptCalls.length, 0);
+    assert.equal(markRequests, 0);
   });
 
   it('skips mail delivery when the inbox is empty', async () => {
