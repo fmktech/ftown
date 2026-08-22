@@ -115,6 +115,109 @@ describe('ftown opencode plugin', () => {
     await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } });
   });
 
+  it('message.updated never captures a message id as the session id (regression)', async () => {
+    const promptCalls: Array<{ path: { id: string }; body: unknown }> = [];
+    const client = makeClient(promptCalls);
+    const hookBodies: Record<string, unknown>[] = [];
+    const hooks = registerFtownOpencodePlugin(client as any, {
+      env: { FTOWN_SESSION_ID: 'ftown-session', FTOWN_HOOK_PORT: '4321' },
+      // No session.created event: capture must come from message.updated's
+      // info.sessionID, never from info.id (a msg_… message id).
+      fetch: (async (url: string, init?: RequestInit) => {
+        if (String(url).endsWith('/hook')) {
+          hookBodies.push(JSON.parse(String(init?.body)));
+          return { ok: true, json: async () => ({ ok: true }) };
+        }
+        return { ok: true, json: async () => ({ messages: [] }) };
+      }) as any,
+      readBridgePointer: async () => null,
+    });
+
+    await hooks.event({
+      event: {
+        type: 'message.updated',
+        properties: { info: { id: 'msg_wrong', sessionID: 'ses_right', role: 'user' } },
+      },
+    });
+    await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_right' } } });
+
+    assert.equal(hookBodies.length, 2);
+    assert.equal(hookBodies[0].session_id, 'ses_right');
+    assert.equal(hookBodies[0].hook_event_name, 'UserPromptSubmit');
+    assert.equal(hookBodies[1].session_id, 'ses_right');
+  });
+
+  it('treats session.status busy as activity and idle as a turn boundary', async () => {
+    const promptCalls: Array<{ path: { id: string }; body: unknown }> = [];
+    const client = makeClient(promptCalls);
+    const requests: RecordedRequest[] = [];
+    const hooks = registerFtownOpencodePlugin(client as any, {
+      env: { FTOWN_SESSION_ID: 'ftown-session', FTOWN_HOOK_PORT: '4321' },
+      fetch: (async (url: string, init?: RequestInit) => {
+        requests.push({ url, init });
+        if (url.endsWith('/inbox?wait=0')) {
+          return {
+            ok: true,
+            json: async () => ({
+              messages: [{ from: 'parent-id', type: 'task', body: 'check this' }],
+            }),
+          };
+        }
+        return { ok: true, json: async () => ({ ok: true }) };
+      }) as any,
+      readBridgePointer: async () => null,
+    });
+
+    // v1.18.x fires session.status instead of session.idle.
+    await hooks.event({
+      event: { type: 'session.status', properties: { sessionID: 'ses_7', status: { type: 'busy' } } },
+    });
+    await hooks.event({
+      event: { type: 'session.status', properties: { sessionID: 'ses_7', status: { type: 'idle' } } },
+    });
+
+    const hookEvents = requests
+      .filter((request) => request.url.endsWith('/hook'))
+      .map((request) => JSON.parse(String(request.init?.body)).hook_event_name);
+    assert.deepEqual(hookEvents, ['PreToolUse', 'Stop']);
+    assert.equal(promptCalls.length, 1);
+    assert.deepEqual(promptCalls[0].path, { id: 'ses_7' });
+  });
+
+  it('delivers mail once when status(idle) and idle both fire for the same boundary', async () => {
+    const promptCalls: Array<{ path: { id: string }; body: unknown }> = [];
+    let inboxReads = 0;
+    let drainSettled = false;
+    const hooks = registerFtownOpencodePlugin(makeClient(promptCalls) as any, {
+      env: { FTOWN_SESSION_ID: 'ftown-session', FTOWN_HOOK_PORT: '4321' },
+      fetch: (async (url: string) => {
+        if (String(url).endsWith('/inbox?wait=0')) {
+          inboxReads += 1;
+          // Model the bridge's mark-on-drain: mail is visible to every read
+          // that starts BEFORE an earlier drain completes, and gone after.
+          // Unserialized concurrent drains would both see it and double-inject.
+          const undelivered = drainSettled ? [] : [{ from: 'x', body: 'hi' }];
+          return new Promise((resolve) => {
+            setTimeout(() => {
+              drainSettled = true;
+              resolve({ ok: true, json: async () => ({ messages: undelivered }) });
+            }, 5);
+          });
+        }
+        return { ok: true, json: async () => ({ ok: true }) };
+      }) as any,
+      readBridgePointer: async () => null,
+    });
+
+    await Promise.all([
+      hooks.event({ event: { type: 'session.status', properties: { sessionID: 'ses_2', status: { type: 'idle' } } } }),
+      hooks.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_2' } } }),
+    ]);
+
+    assert.ok(inboxReads >= 2);
+    assert.equal(promptCalls.length, 1);
+  });
+
   it('skips mail delivery when the inbox is empty', async () => {
     const promptCalls: Array<{ path: { id: string }; body: unknown }> = [];
     const client = makeClient(promptCalls);
