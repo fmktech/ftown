@@ -65,6 +65,11 @@ export function registerFtownOpencodePlugin(client, options = {}) {
   // The opencode session id this plugin instance tracks — updated from every
   // event that carries one, so it stays correct across TUI session switches.
   let currentSessionId;
+  // Serializes turn-end handling: opencode may emit BOTH session.status(idle)
+  // and session.idle for the same boundary. Unordered, two concurrent drains
+  // could read the same undelivered mail before either marks it delivered and
+  // inject it twice.
+  let turnEndChain = Promise.resolve();
 
   async function request(path, init = {}) {
     const pointer = await readBridgePointer();
@@ -117,8 +122,9 @@ export function registerFtownOpencodePlugin(client, options = {}) {
     const messages = await drainMail();
     if (messages.length === 0 || !currentSessionId) return;
     const formatted = messages.map(formatMail).join('\n');
-    // Submitting a prompt starts a new turn; when it finishes, session.idle
-    // fires again and any mail that arrived meanwhile is delivered then.
+    // Submitting a prompt starts a new turn; when it finishes, the next
+    // idle boundary fires and any mail that arrived meanwhile is delivered
+    // then.
     await client.session.prompt({
       path: { id: currentSessionId },
       body: {
@@ -134,15 +140,35 @@ export function registerFtownOpencodePlugin(client, options = {}) {
     });
   }
 
-  function trackSessionId(properties) {
-    const id = properties?.info?.id ?? properties?.sessionID ?? properties?.info?.sessionID;
+  /**
+   * Extract the opencode SESSION id from event properties. `info.id` is only
+   * trustworthy on session.created — on message.updated it is a MESSAGE id
+   * (msg_…), which must never be stored as the resume id.
+   */
+  function trackSessionId(properties, preferInfoId = false) {
+    const id = properties?.sessionID
+      ?? properties?.info?.sessionID
+      ?? (preferInfoId ? properties?.info?.id : undefined);
     if (typeof id === 'string' && id.trim()) currentSessionId = id.trim();
+  }
+
+  /** Turn boundary: mark idle, then drain and inject pending mail. */
+  function endTurn(properties) {
+    trackSessionId(properties);
+    const run = turnEndChain.then(async () => {
+      await postHook('Stop');
+      await deliverMail();
+    }).catch(() => {
+      // A failed hook POST or mail delivery must never crash the agent TUI.
+    });
+    turnEndChain = run;
+    return run;
   }
 
   async function handleEvent(event) {
     switch (event.type) {
       case 'session.created':
-        trackSessionId(event.properties);
+        trackSessionId(event.properties, true);
         await postHook('SessionStart');
         break;
       case 'message.updated': {
@@ -152,10 +178,17 @@ export function registerFtownOpencodePlugin(client, options = {}) {
         break;
       }
       case 'session.idle':
-        trackSessionId(event.properties);
-        await postHook('Stop');
-        await deliverMail();
+        await endTurn(event.properties);
         break;
+      case 'session.status': {
+        trackSessionId(event.properties);
+        // v1.18.x fires session.status(busy/idle) reliably; session.idle may
+        // not reach plugins at all. Busy keeps the mail pump from nudging
+        // mid-turn; idle is a full turn boundary.
+        if (event.properties?.status?.type === 'busy') await postHook('PreToolUse');
+        else if (event.properties?.status?.type === 'idle') await endTurn(event.properties);
+        break;
+      }
       case 'session.error':
         trackSessionId(event.properties);
         await postHook('SessionEnd', { reason: 'error' });
