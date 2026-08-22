@@ -103,10 +103,10 @@ export function registerFtownOpencodePlugin(client, options = {}) {
     });
   }
 
-  async function drainMail() {
+  async function listInbox(peek) {
     if (!ftownSessionId) return [];
     const response = await request(
-      `/api/sessions/${encodeURIComponent(ftownSessionId)}/inbox?wait=0`,
+      `/api/sessions/${encodeURIComponent(ftownSessionId)}/inbox?wait=0${peek ? '&peek=1' : ''}`,
       { method: 'GET' },
     );
     if (!response) return [];
@@ -118,13 +118,18 @@ export function registerFtownOpencodePlugin(client, options = {}) {
     }
   }
 
+  /**
+   * Peek first, and only mark delivered AFTER the prompt was accepted. If
+   * submission fails, mail stays queued for the next boundary instead of
+   * being silently lost between a marking drain and a failed injection.
+   */
   async function deliverMail() {
-    const messages = await drainMail();
-    if (messages.length === 0 || !currentSessionId) return;
+    if (!currentSessionId) return;
+    const messages = await listInbox(true);
+    if (messages.length === 0) return;
     const formatted = messages.map(formatMail).join('\n');
-    // Submitting a prompt starts a new turn; when it finishes, the next
-    // idle boundary fires and any mail that arrived meanwhile is delivered
-    // then.
+    // Submitting a prompt starts a new turn; when it finishes, the next idle
+    // boundary fires and any mail that arrived meanwhile is delivered then.
     await client.session.prompt({
       path: { id: currentSessionId },
       body: {
@@ -138,6 +143,8 @@ export function registerFtownOpencodePlugin(client, options = {}) {
         ],
       },
     });
+    // Accepted — only now let the bridge mark the peeked messages delivered.
+    await listInbox(false);
   }
 
   /**
