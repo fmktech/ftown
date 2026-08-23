@@ -9,7 +9,6 @@ import { relativeTime } from "@/lib/relative-time";
 import { StatusDot } from "@/lib/StatusDot";
 import { usePersistentState, stringSetCodec } from "@/lib/use-persistent-state";
 import { ContextMenu, ContextMenuButton } from "./ContextMenu";
-import { collapseToActiveSection } from "@/lib/active-sidebar-section";
 import { HarnessIcon, harnessLabel } from "./HarnessIcon";
 
 const FOLD_STORAGE_KEY = "ftown:loopList:collapsedSections";
@@ -148,15 +147,11 @@ export function LoopList({
   // acts on a stale captured Loop (e.g. stale enabled/pause state).
   const activeMenuLoop = contextMenu ? loops.find((l) => l.id === contextMenu.loopId) ?? null : null;
 
-  function toggleSection(sectionId: string, siblingSectionIds: readonly string[]): void {
+  function toggleSection(sectionId: string): void {
     setCollapsedSections((prev) => {
       const next = new Set(prev);
-      if (next.has(sectionId)) {
-        for (const siblingSectionId of siblingSectionIds) next.add(siblingSectionId);
-        next.delete(sectionId);
-      } else {
-        next.add(sectionId);
-      }
+      if (next.has(sectionId)) next.delete(sectionId);
+      else next.add(sectionId);
       return next;
     });
   }
@@ -179,48 +174,26 @@ export function LoopList({
       const group = loop.group?.trim();
       return group ? [`${loop.bridgeId} ${group}`] : [];
     }))];
-    const activeLoop = visibleLoops.find((loop) => loop.id === selectedLoopId) ?? null;
-    const activeGroup = activeLoop?.group?.trim();
-    return {
-      bridgeIds,
-      groupIds,
-      selectedBridgeId: activeLoop?.bridgeId ?? null,
-      selectedGroupId: activeLoop && activeGroup ? `${activeLoop.bridgeId} ${activeGroup}` : null,
-    };
-  }, [selectedLoopId, visibleLoops]);
+    return { bridgeIds, groupIds };
+  }, [visibleLoops]);
+
+  // Collapse state is fully user-controlled: selecting a loop no longer
+  // collapses sibling sections, and nothing is collapsed automatically.
+  // The only automatic action is opening the selected loop's bridge group.
+  const selectedBridgeId = useMemo(
+    () => visibleLoops.find((loop) => loop.id === selectedLoopId)?.bridgeId ?? null,
+    [selectedLoopId, visibleLoops],
+  );
 
   useEffect(() => {
+    if (!selectedBridgeId) return;
     setCollapsedSections((current) => {
-      const activeBridgeId = hierarchySections.selectedBridgeId
-        ?? hierarchySections.bridgeIds.find((bridgeId) => !current.has(bridgeId))
-        ?? hierarchySections.bridgeIds[0]
-        ?? null;
-      const groupsInActiveBridge = activeBridgeId
-        ? hierarchySections.groupIds.filter((groupId) => groupId.startsWith(`${activeBridgeId} `))
-        : [];
-      const activeGroupId = hierarchySections.selectedGroupId
-        ?? groupsInActiveBridge.find((groupId) => !current.has(groupId))
-        ?? groupsInActiveBridge[0]
-        ?? null;
-      let next = collapseToActiveSection(
-        current,
-        hierarchySections.bridgeIds,
-        activeBridgeId,
-      );
-      next = collapseToActiveSection(
-        next,
-        hierarchySections.groupIds,
-        activeGroupId,
-      );
-      if (
-        next.size === current.size &&
-        [...next].every((sectionId) => current.has(sectionId))
-      ) {
-        return current;
-      }
+      if (!current.has(selectedBridgeId)) return current;
+      const next = new Set(current);
+      next.delete(selectedBridgeId);
       return next;
     });
-  }, [hierarchySections, setCollapsedSections]);
+  }, [selectedBridgeId, setCollapsedSections]);
 
   // Individually hidden loops only — loops swallowed by a hidden group/bridge
   // are represented by that group/bridge entry in the Hidden fold, not listed
@@ -607,7 +580,6 @@ export function LoopList({
       {[...groups.entries()].map(([bridgeId, bridgeLoops]) => {
         const bridgeSectionId = bridgeId;
         const isBridgeCollapsed = collapsedSections.has(bridgeSectionId);
-        const isActiveBridge = !isBridgeCollapsed;
 
         // Nest loops with a non-empty group under a collapsible group header;
         // ungrouped loops render directly under the bridge section. Groups are
@@ -631,16 +603,14 @@ export function LoopList({
         return (
           <div
             key={bridgeId}
-            className={`mx-2 my-1 flex flex-col overflow-hidden rounded-xl border ${
-              isActiveBridge ? "border-zinc-700/80 bg-zinc-900/80" : "border-transparent"
-            }`}
+            className="flex flex-col"
           >
             {renderSectionHeader({
               sectionId: bridgeSectionId,
               label: bridgeLabel(bridgeId, bridges),
               count: bridgeLoops.length,
               isCollapsed: isBridgeCollapsed,
-              onToggle: () => toggleSection(bridgeSectionId, hierarchySections.bridgeIds),
+              onToggle: () => toggleSection(bridgeSectionId),
               onHide: onHideCronBridge ? () => onHideCronBridge(bridgeId) : undefined,
               hideTitle: "Hide bridge's crons",
             })}
@@ -656,7 +626,7 @@ export function LoopList({
                         label: group,
                         count: groupLoops.length,
                         isCollapsed: isGroupCollapsed,
-                        onToggle: () => toggleSection(groupSectionId, hierarchySections.groupIds),
+                        onToggle: () => toggleSection(groupSectionId),
                         indent: true,
                         onHide: onHideLoopGroup ? () => onHideLoopGroup(loopGroupKey(bridgeId, group)) : undefined,
                         hideTitle: "Hide group",
