@@ -273,6 +273,12 @@ function DemoVideo({
 }
 
 export default async function LandingPage() {
+  // Solo builds (PANEL_SOLO, contract bridge/src/solo/contract.ts): the
+  // landing/marketing page and NextAuth do not exist behind ftown-bridge
+  // --solo — the first-run surface is the /local key flow.
+  if (process.env.NEXT_PUBLIC_SOLO === "1") {
+    redirect("/local");
+  }
   const session = await auth();
   if (session?.user?.email) {
     redirect("/dashboard");

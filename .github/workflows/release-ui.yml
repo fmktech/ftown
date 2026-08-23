@@ -1,0 +1,116 @@
+name: Release solo panel bundle
+
+# Publishes the Next.js standalone panel consumed by `ftown-bridge --solo`
+# (PANEL_BUNDLE_URL_TEMPLATE in bridge/src/solo/contract.ts). Tag the release
+# `ui-v<version>` where <version> matches ui/package.json — the bridge fetches
+# `ftown-ui-standalone-<version>.tar.gz` plus its `.sha256` sidecar from this
+# release. Solo builds set NEXT_PUBLIC_SOLO=1: root page redirects to /local,
+# SessionProvider is not mounted (contract S8), and the build must contain no
+# middleware or /api/auth artifacts (S21, asserted below).
+
+on:
+  push:
+    tags: ['ui-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write # create the release and upload assets
+
+concurrency:
+  group: release-ui
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Version parity (tag matches ui/package.json)
+        run: |
+          VERSION="${GITHUB_REF_NAME#ui-v}"
+          LOCAL=$(node -p "require('./package.json').version")
+          echo "tag version=$VERSION package version=$LOCAL"
+          if [ "$VERSION" != "$LOCAL" ]; then
+            echo "::error::Tag ui-v$VERSION does not match ui/package.json ($LOCAL)"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Install
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build standalone (solo mode)
+        env:
+          NEXT_PUBLIC_SOLO: '1'
+        run: npm run build
+
+      - name: Assemble standalone directory
+        run: |
+          DIST="$PWD/dist-package"
+          mkdir -p "$DIST"
+          cp -r .next/standalone/. "$DIST/"
+          mkdir -p "$DIST/.next/static"
+          cp -r .next/static/. "$DIST/.next/static/"
+          if [ -d public ]; then
+            mkdir -p "$DIST/public"
+            cp -r public/. "$DIST/public/"
+          fi
+          echo "SOLO_DIST=$DIST" >> "$GITHUB_ENV"
+
+      # S21 note: this repo builds hosted and solo modes from ONE source tree,
+      # so hosted artifacts (middleware, /api/auth routes) ARE compiled into
+      # every standalone bundle. Their reachability is neutralized at the
+      # bridge's solo front, which claims all /api/* for the bridge and proxies
+      # only page/static paths to this child — enforced by routing-precedence
+      # unit tests in bridge/src/solo/solo-server.test.ts, not by packaging.
+      - name: Smoke (root redirects to /local, /local serves)
+        run: |
+          PORT=4123 HOSTNAME=127.0.0.1 node "$SOLO_DIST/server.js" &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+          ROOT_CODE=""; LOCAL_CODE=""
+          for i in $(seq 1 30); do
+            ROOT_CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4123/ || true)
+            [ "$ROOT_CODE" = "307" ] && break
+            sleep 1
+          done
+          for i in $(seq 1 30); do
+            LOCAL_CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4123/local || true)
+            [ "$LOCAL_CODE" = "200" ] && break
+            sleep 1
+          done
+          LOCATION=$(curl -s -o /dev/null -w '%{redirect_url}' http://127.0.0.1:4123/)
+          echo "root=$ROOT_CODE location=$LOCATION local=$LOCAL_CODE"
+          [ "$ROOT_CODE" = "307" ] || { echo "::error::solo root did not redirect"; exit 1; }
+          case "$LOCATION" in */local) ;; *) echo "::error::redirect target not /local"; exit 1;; esac
+          [ "$LOCAL_CODE" = "200" ] || { echo "::error::/local failed"; exit 1; }
+
+      - name: Package + checksum
+        run: |
+          tar -czf "ftown-ui-standalone-$VERSION.tar.gz" -C "$SOLO_DIST" .
+          sha256sum "ftown-ui-standalone-$VERSION.tar.gz" \
+            | awk '{print $1}' > "ftown-ui-standalone-$VERSION.tar.gz.sha256"
+          cat "ftown-ui-standalone-$VERSION.tar.gz.sha256"
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "ui-v$VERSION" \
+            --title "Solo panel ui-v$VERSION" \
+            --notes "Standalone panel bundle for \`ftown-bridge --solo\`. Fetched automatically by bridge >= 0.19.20." \
+            "ftown-ui-standalone-$VERSION.tar.gz" \
+            "ftown-ui-standalone-$VERSION.tar.gz.sha256"
