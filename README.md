@@ -37,6 +37,18 @@ https://github.com/user-attachments/assets/e9c1ce70-70b0-4ba0-81d8-080d4eeef445
 
 ## Features
 
+### Solo mode — one command, one port, zero accounts
+
+```bash
+npx ftown-bridge --solo
+```
+
+Prints a link like `http://192.168.1.10:8040/#k=<key>` — open it on any device on your Wi-Fi and drive your agents. No Centrifugo to install (a hub is downloaded, checksum-pinned and managed for you), no UI hosting (the panel bundle is fetched on first run), no account service.
+
+- **Single port**: panel + bridge API + websocket hub behind one listener; tunnels (Tailscale serve, cloudflared, ngrok) just point at it when you want internet access
+- **Key auth**: 256-bit key in the URL fragment; `--rotate-key` regenerates offline; `--port` overrides the default (`8040`)
+- ⚠️ LAN traffic is plain HTTP by design — anyone on the same network can capture your key from the wire. Use a tailnet or tunnel with TLS when that matters.
+
 ### Direct transport ladder
 
 - Every session tries three rungs in order, falling through automatically: **Local** (loopback WebSocket, same machine, plain TCP so it survives VPNs/endpoint filters like Cloudflare WARP that block UDP/WebRTC) → **P2P** (WebRTC DataChannel over LAN/localhost, STUN only, no TURN) → **Cloud** (Centrifugo relay, the reliable fallback used only when both direct rungs fail)
