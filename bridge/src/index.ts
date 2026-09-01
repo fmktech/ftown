@@ -3,7 +3,7 @@
 import { Command as Commander } from 'commander';
 import { v4 as uuidv4 } from 'uuid';
 import { resolve, dirname, join } from 'node:path';
-import { homedir, hostname as osHostname } from 'node:os';
+import { homedir, hostname as osHostname, networkInterfaces } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -49,6 +49,40 @@ import { LoopScheduler, LOOP_TICK_INTERVAL_MS } from './loop-scheduler.js';
 import { LoopController } from './loop-controller.js';
 import { SessionController } from './session-controller.js';
 import { runPairing } from './pairing-client.js';
+import { createServer } from 'node:http';
+import { generateAccessKey, mintHubJwt, sha256Hex } from './solo/solo-auth.js';
+import { DEFAULT_SOLO_PORT, SOLO_USER_ID, type SoloConfig } from './solo/contract.js';
+import { ensureHubBinary, startHub, stopHub, writeHubConfig } from './solo/hub-manager.js';
+import {
+  ensurePanelBundle,
+  findPanelServerDir,
+  startPanel,
+  stopPanel,
+} from './solo/panel-manager.js';
+import { createSoloServer } from './solo/solo-server.js';
+
+/** Bridge package version — doubles as the default panel bundle version. */
+const BRIDGE_VERSION = JSON.parse(
+  readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
+).version as string;
+
+/** LAN IPv4 addresses for the solo banner (loopback excluded). */
+function networkInterfacesForBanner(): string[] {
+  const out: string[] = [];
+  try {
+    const nets = networkInterfaces();
+    for (const list of Object.values(nets)) {
+      for (const net of list ?? []) {
+        if (net.family === 'IPv4' && !net.internal) out.push(net.address);
+      }
+    }
+  } catch { /* best-effort banner */ }
+  return out;
+}
+
+function isLoopbackOnly(ips: string[]): boolean {
+  return ips.length === 0;
+}
 
 import type { HookEvent } from './local-api-server.js';
 
@@ -85,11 +119,14 @@ const program = new Commander();
 program
   .name('ftown-bridge')
   .description('ftown orchestrator bridge for Centrifugo')
+  .option('--solo', 'Single-port LAN deployment: no account service, managed hub + panel children, key-based auth')
+  .option('--port <port>', 'Public port for --solo front (default: see DEFAULT_SOLO_PORT)')
+  .option('--rotate-key', 'With --solo: regenerate the access key, print the new banner, exit (offline)')
   .option('--token <jwt>', 'Bridge bootstrap token from the ftown dashboard (short-lived; used once to onboard, then a rotating refresh token is stored). Optional: with no token and no stored refresh token, the bridge runs interactive device pairing instead.')
   .option('--api-url <url>', 'ftown UI API URL', DEFAULT_API_URL)
   .option('--data-dir <path>', 'Directory for session data (default: ~/.ftown/data)')
   .option('--bridge-id <id>', 'Bridge instance ID (default: persisted per data dir)')
-  .action(async (opts: { token?: string; apiUrl: string; dataDir?: string; bridgeId?: string }) => {
+  .action(async (opts: { solo?: boolean; port?: string; rotateKey?: boolean; token?: string; apiUrl: string; dataDir?: string; bridgeId?: string }) => {
     const apiUrl = new URL(opts.apiUrl);
     const isLocalHost =
       apiUrl.hostname === 'localhost' ||
@@ -122,6 +159,25 @@ program
       console.error('[Bridge] Failed to persist bridge id:', err instanceof Error ? err.message : String(err));
     }
 
+    // L4: --rotate-key short-circuits BEFORE any listener binds (exit 0,
+    // nothing started). Without --solo it is an argument error.
+    if (opts.rotateKey && !opts.solo) {
+      program.error('--rotate-key requires --solo');
+    }
+    if (opts.solo && opts.rotateKey) {
+      const raw = generateAccessKey().raw;
+      mkdirSync(join(dataDir, 'solo'), { recursive: true, mode: 0o700 });
+      writeFileSync(join(dataDir, 'solo', 'access-key-hash'), `${sha256Hex(raw)}\n`, { mode: 0o600 });
+      const port = opts.port ? Number(opts.port) : DEFAULT_SOLO_PORT;
+      console.log('========================================');
+      console.log('  ftown SOLO — access key rotated');
+      for (const ip of networkInterfacesForBanner()) {
+        console.log(`  Open:   http://${ip}:${port}/#k=${raw}`);
+      }
+      console.log('========================================');
+      process.exit(0);
+    }
+
     // The local API server binds before the token fetch: its ephemeral port and
     // the per-process loopback nonce ride the auth request so the UI can embed
     // them in the Centrifugo connection JWT `info` claim (presence advert, L2).
@@ -132,6 +188,158 @@ program
     const hookPort = await localApiServer.start();
     console.log(`[Bridge] Local API server started on port ${hookPort}`);
     const localNonce = randomBytes(16).toString('hex');
+
+    // ----- SOLO MODE (contract: bridge/src/solo/contract.ts, lifecycle L1-L4) -----
+    let solo: {
+      config: SoloConfig;
+      front: { port: number; close(): Promise<void> };
+      hub: { stop(): void };
+      panel: { stop(): void };
+      hubReady: Promise<void>;
+      panelReady: Promise<void>;
+    } | undefined;
+
+    if (opts.solo) {
+      const hubSecretPath = join(dataDir, 'solo', 'hub-secret');
+      let hubSecret: string;
+      try {
+        hubSecret = readFileSync(hubSecretPath, 'utf8').trim();
+      } catch {
+        hubSecret = randomBytes(32).toString('hex');
+        mkdirSync(dirname(hubSecretPath), { recursive: true, mode: 0o700 });
+        writeFileSync(hubSecretPath, `${hubSecret}\n`, { mode: 0o600 });
+      }
+
+      // Key lifecycle (S1/S11): raw key exists only in memory at generation and
+      // in the one-time banner. Persisted state is the hash alone. Rotation is
+      // handled by the L4 short-circuit above; here a missing hash means FIRST
+      // boot — generate fresh so the banner can print the full link.
+      const keyHashPath = join(dataDir, 'solo', 'access-key-hash');
+      let accessKeyRaw: string | undefined;
+      let accessKeyHash: string;
+      try {
+        accessKeyHash = readFileSync(keyHashPath, 'utf8').trim();
+      } catch {
+        accessKeyRaw = generateAccessKey().raw;
+        accessKeyHash = sha256Hex(accessKeyRaw);
+      }
+      mkdirSync(join(dataDir, 'solo'), { recursive: true, mode: 0o700 });
+      writeFileSync(keyHashPath, `${accessKeyHash}\n`, { mode: 0o600 });
+
+      // Ephemeral private ports for children: probe free ports on loopback so
+      // collisions are practically impossible (contract "Ports" block).
+      const probeFreePort = (): Promise<number> =>
+        new Promise((resolveP, rejectP) => {
+          const srv = createServer();
+          srv.listen(0, '127.0.0.1', () => {
+            const addr = srv.address();
+            if (!addr || typeof addr === 'string') {
+              srv.close(() => rejectP(new Error('Failed to allocate child port')));
+              return;
+            }
+            srv.close(() => resolveP(addr.port));
+          });
+          srv.on('error', rejectP);
+        });
+      const hubPort = await probeFreePort();
+      const panelPort = await probeFreePort();
+
+      const soloConfig: SoloConfig = {
+        port: opts.port ? Number(opts.port) : DEFAULT_SOLO_PORT,
+        hubPort,
+        panelPort,
+        dataDir,
+        accessKeyHash,
+        hubSecret,
+      };
+
+      const hubHealthy = { up: false };
+      const panelHealthy = { up: false };
+
+      const front = await createSoloServer({
+        config: soloConfig,
+        localApiPort: hookPort,
+        hub: { isHealthy: () => hubHealthy.up },
+        panel: { isHealthy: () => panelHealthy.up },
+      });
+
+      // Children ensured asynchronously AFTER the front listens (L1). The hub
+      // must be healthy before the Centrifugo client connects — gated below.
+      const soloDir = join(dataDir, 'solo');
+      const hubReady = (async () => {
+        const binPath = await ensureHubBinary({ dataDir });
+        const configPath = join(soloDir, 'centrifugo.json');
+        await writeHubConfig(configPath, { port: hubPort, secret: hubSecret });
+        await startHub({ configPath, binPath, dataDir });
+        hubHealthy.up = true;
+        console.log('[Solo] Hub is up (private port)');
+      })();
+      hubReady.catch((err) => {
+        console.error('[Solo] Hub failed to start:', err instanceof Error ? err.message : String(err));
+      });
+
+      // Panel version defaults to the bridge version (release-tag parity);
+      // override with FTOWN_SOLO_PANEL_VERSION for development.
+      const panelVersion =
+        process.env.FTOWN_SOLO_PANEL_VERSION ?? `v${BRIDGE_VERSION}`;
+      const panelReady = (async () => {
+        if (process.env.FTOWN_SOLO_PANEL_DIR) {
+          // Dev escape hatch: serve an already-built standalone directory.
+          console.log(`[Solo] Using local panel dir: ${process.env.FTOWN_SOLO_PANEL_DIR}`);
+        } else {
+          const bundleDir = await ensurePanelBundle({ dataDir, version: panelVersion });
+          const serverDir = await findPanelServerDir(bundleDir);
+          await startPanel({ bundleDir: serverDir, port: panelPort, dataDir });
+        }
+        panelHealthy.up = true;
+        console.log('[Solo] Panel is up (private port)');
+      })();
+      panelReady.catch((err) => {
+        console.error('[Solo] Panel failed to start:', err instanceof Error ? err.message : String(err));
+      });
+
+      // One-time banner (S1 exception): full link ONLY when a fresh key was
+      // generated; otherwise print keyless URL + rotation hint.
+      const bannerIps = networkInterfacesForBanner();
+      console.log('========================================');
+      console.log('  ftown SOLO mode');
+      console.log(`  Bridge ID: ${bridgeId}`);
+      for (const ip of bannerIps) {
+        const base = `http://${ip}:${front.port}`;
+        if (accessKeyRaw) {
+          console.log(`  Open:   ${base}/#k=${accessKeyRaw}`);
+        } else {
+          console.log(`  URL:    ${base}  (key already paired — --rotate-key reprints)`);
+        }
+      }
+      if (!accessKeyRaw) {
+        console.log('  Key not shown: already issued once. --rotate-key regenerates it.');
+      }
+      if (bannerIps.length === 0) {
+        console.log('  WARNING: no LAN interface detected; loopback only.');
+      } else {
+        console.log('  WARNING: bound to a non-loopback interface over plain HTTP (S9).');
+      }
+      console.log('========================================');
+
+      solo = {
+        config: soloConfig,
+        front,
+        hub: {
+          stop: () => {
+            void stopHub(dataDir).catch(() => {});
+          },
+        },
+        panel: {
+          stop: () => {
+            void stopPanel(dataDir).catch(() => {});
+          },
+        },
+        hubReady,
+        panelReady,
+      };
+    }
+    // ----- END SOLO MODE -----
 
     // The bootstrap token (--token) is single-use and short-lived (F1). Once a
     // bridge has onboarded it persists its rotating refresh token (F3) and
@@ -179,7 +387,17 @@ program
     };
 
     let auth: BridgeAuthResponse;
-    if (persistedRefreshToken) {
+    if (solo) {
+      // Solo mode: identity is synthesized locally (contract S2/S10). No
+      // refresh token exists; getToken() mints a fresh hub JWT on demand.
+      const token = mintHubJwt({ secret: solo.config.hubSecret });
+      auth = {
+        userId: SOLO_USER_ID,
+        token,
+        refreshToken: '',
+        centrifugoUrl: `ws://127.0.0.1:${solo.config.hubPort}/connection/websocket`,
+      };
+    } else if (persistedRefreshToken) {
       console.log('[Bridge] Resuming from stored refresh token...');
       try {
         auth = await refreshBridgeToken(opts.apiUrl, persistedRefreshToken, bridgeId, local);
@@ -194,7 +412,7 @@ program
       auth = await onboard();
     }
     let currentRefreshToken = auth.refreshToken;
-    persistRefreshToken(currentRefreshToken);
+    if (!solo) persistRefreshToken(currentRefreshToken);
 
     const userId = auth.userId;
     const centrifugoUrl = auth.centrifugoUrl;
@@ -208,6 +426,10 @@ program
     console.log('========================================');
 
     async function getToken(): Promise<string> {
+      if (solo) {
+        // Solo: mint locally — no remote refresh, no refresh-token rotation.
+        return mintHubJwt({ secret: solo.config.hubSecret });
+      }
       console.log('[Bridge] Refreshing Centrifugo token...');
       // Same process ⇒ same port/nonce; the refresh route re-embeds them.
       const refreshed = await refreshBridgeToken(opts.apiUrl, currentRefreshToken, bridgeId, local);
@@ -557,6 +779,18 @@ program
       publishCommandResponse: (response) => centrifugo.publishCommandResponse(userId, response),
     });
 
+    // Solo: the hub child must be healthy before connecting (L1 gates the
+    // transport, not the front). A failed hub is fatal for solo — exit cleanly
+    // instead of crashing on an unhandled rejection.
+    if (solo) {
+      try {
+        await solo.hubReady;
+        console.log('[Solo] Hub healthy — connecting Centrifugo client');
+      } catch (err) {
+        console.error('[Solo] Cannot continue without the hub:', err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    }
     centrifugo.connect();
     centrifugo.joinBridgesChannel(userId, bridgeId);
     centrifugo.subscribeToSessions(userId);
@@ -599,6 +833,13 @@ program
 
     const shutdown = (): void => {
       console.log('\n[Bridge] Shutting down...');
+      // Solo L2 ordering: stop accepting first, then children (panel before
+      // hub), then the rest of the bridge teardown.
+      if (solo) {
+        void solo.front.close().catch(() => {});
+        solo.panel.stop();
+        solo.hub.stop();
+      }
       scheduler.stop();
       localApiServer.stop();
       runner.stopAll();

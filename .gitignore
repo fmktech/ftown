@@ -42,3 +42,6 @@ node-compile-cache/
 *.key
 CLAUDE.md
 .cursor/hooks.json
+
+# solo panel packaging output
+ui/dist-package/

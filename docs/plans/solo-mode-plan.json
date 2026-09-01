@@ -1,0 +1,47 @@
+{
+  "contract": [
+    "bridge/src/solo/contract.ts"
+  ],
+  "modules": {
+    "solo-auth": [
+      "bridge/src/solo/solo-auth.ts",
+      "bridge/src/solo/solo-auth.test.ts"
+    ],
+    "hub-manager": [
+      "bridge/src/solo/hub-manager.ts",
+      "bridge/src/solo/hub-manager.test.ts"
+    ],
+    "panel-manager": [
+      "bridge/src/solo/panel-manager.ts",
+      "bridge/src/solo/panel-manager.test.ts"
+    ],
+    "ws-proxy": [
+      "bridge/src/solo/ws-proxy.ts",
+      "bridge/src/solo/ws-proxy.test.ts"
+    ],
+    "solo-server": [
+      "bridge/src/solo/solo-server.ts",
+      "bridge/src/solo/solo-server.test.ts"
+    ],
+    "ui-solo": [
+      "ui/src/lib/auth-mode.tsx",
+      "ui/src/lib/solo-client.ts",
+      "ui/src/lib/solo-client.test.ts",
+      "ui/src/app/local/page.tsx",
+      "ui/src/components/local/KeyEntry.tsx",
+      "ui/src/components/local/StartingState.tsx",
+      "ui/src/hooks/useCentrifugo.ts",
+      "ui/src/components/DashboardClient.tsx",
+      "ui/src/app/providers.tsx"
+    ],
+    "architect": [
+      "bridge/src/index.ts",
+      "bridge/package.json",
+      "bridge/package-lock.json",
+      "README.md"
+    ]
+  },
+  "integrator": "architect",
+  "typecheck_cmd": "npx tsc --noEmit",
+  "root": "/Users/fkesheh/projects/ftown"
+}
