@@ -272,6 +272,17 @@ export async function ensureHubBinary(opts: EnsureHubBinaryOptions): Promise<str
  * disables the server HTTP API, `allow_anonymous_connect_without_token=false`
  * means no anonymous client connections. address/port are operational keys so
  * the child binds loopback on the ephemeral port the integrator assigned.
+ *
+ * `allowed_origins: []` is deliberate, not an oversight: centrifugo v5
+ * rejects (403s) any handshake that carries an Origin header when this list
+ * is empty. That's fine here because same-origin is enforced ourselves, one
+ * hop earlier, in the front proxy (ws-proxy.ts `handleHubUpgrade` /
+ * `isSameOrigin`), which also strips the Origin header before forwarding —
+ * so centrifugo never sees one to judge. The hub additionally only ever
+ * binds loopback (127.0.0.1, see `address` below), so it is never reachable
+ * directly from a browser regardless. Do not "fix" this by populating
+ * allowed_origins; that would just duplicate — and could drift from — the
+ * check ws-proxy.ts already owns.
  */
 function hubConfigObject(port: number, secret: string): Record<string, unknown> {
   return {
