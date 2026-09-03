@@ -66,7 +66,7 @@ jobs:
             echo "::error::version input $VERSION does not match bridge/package.json ($LOCAL)"
             exit 1
           fi
-          echo "version=$VERSION" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Install
         run: npm ci
@@ -128,6 +128,7 @@ jobs:
 
       - name: Package + checksum
         run: |
+          : "${VERSION:?VERSION is not set — Version parity step did not export it}"
           tar -czf "ftown-ui-standalone-$VERSION.tar.gz" -C "$SOLO_DIST" .
           sha256sum "ftown-ui-standalone-$VERSION.tar.gz" \
             | awk '{print $1}' > "ftown-ui-standalone-$VERSION.tar.gz.sha256"
@@ -138,6 +139,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          : "${VERSION:?VERSION is not set — Version parity step did not export it}"
           if gh release view "ui-v$VERSION" >/dev/null 2>&1; then
             echo "::notice::release ui-v$VERSION already exists, uploading assets to it (--clobber) instead of creating it"
             echo "exists=true" >> "$GITHUB_OUTPUT"
@@ -150,6 +152,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          : "${VERSION:?VERSION is not set — Version parity step did not export it}"
           gh release create "ui-v$VERSION" \
             --title "Solo panel ui-v$VERSION" \
             --notes "Standalone panel bundle for \`ftown-bridge --solo\`. Fetched automatically by bridge >= 0.19.20." \
@@ -161,6 +164,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          : "${VERSION:?VERSION is not set — Version parity step did not export it}"
           gh release upload "ui-v$VERSION" \
             "ftown-ui-standalone-$VERSION.tar.gz" \
             "ftown-ui-standalone-$VERSION.tar.gz.sha256" \
@@ -170,6 +174,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          : "${VERSION:?VERSION is not set — Version parity step did not export it}"
           ASSETS=$(gh release view "ui-v$VERSION" --json assets -q '.assets[].name')
           echo "$ASSETS"
           for name in "ftown-ui-standalone-$VERSION.tar.gz" "ftown-ui-standalone-$VERSION.tar.gz.sha256"; do
