@@ -6,17 +6,69 @@ on:
     paths: ['bridge/**']
   workflow_dispatch:
 
+# Top-level permissions are the ceiling for every job below. `contents:
+# write` is needed by the `publish` job (push the bridge-vX.Y.Z release tag)
+# and by the `release-panel` job's `release-ui.yml` call (create the panel
+# release). `id-token: write` (npm trusted publishing / OIDC) is scoped down
+# to the `publish` job only, since it is the only job that runs `npm
+# publish`.
 permissions:
-  contents: write # push the bridge-vX.Y.Z release tag
-  id-token: write # npm trusted publishing (OIDC)
+  contents: write
+  id-token: write
 
 concurrency:
   group: publish-bridge
   cancel-in-progress: false
 
 jobs:
-  publish:
+  version:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bridge
+    outputs:
+      publish: ${{ steps.version.outputs.publish }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Check whether the version is unpublished
+        id: version
+        run: |
+          LOCAL=$(node -p "require('./package.json').version")
+          PUBLISHED=$(npm view ftown-bridge version 2>/dev/null || echo "none")
+          echo "local=$LOCAL published=$PUBLISHED"
+          if [ "$LOCAL" = "$PUBLISHED" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "version=$LOCAL" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Cut the panel release BEFORE the npm package is published, so a
+  # published bridge never points at a missing panel release.
+  release-panel:
+    needs: version
+    if: needs.version.outputs.publish == 'true'
+    uses: ./.github/workflows/release-ui.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+    permissions:
+      contents: write
+    secrets: inherit
+
+  publish:
+    needs: [version, release-panel]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write # npm trusted publishing (OIDC)
     defaults:
       run:
         working-directory: bridge
@@ -38,25 +90,10 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Check whether the version is unpublished
-        id: version
-        run: |
-          LOCAL=$(node -p "require('./package.json').version")
-          PUBLISHED=$(npm view ftown-bridge version 2>/dev/null || echo "none")
-          echo "local=$LOCAL published=$PUBLISHED"
-          if [ "$LOCAL" = "$PUBLISHED" ]; then
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-            echo "version=$LOCAL" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Publish
-        if: steps.version.outputs.publish == 'true'
         run: npm publish
 
       - name: Tag release
-        if: steps.version.outputs.publish == 'true'
         run: |
-          git tag "bridge-v${{ steps.version.outputs.version }}"
-          git push origin "bridge-v${{ steps.version.outputs.version }}"
+          git tag "bridge-v${{ needs.version.outputs.version }}"
+          git push origin "bridge-v${{ needs.version.outputs.version }}"

@@ -56,6 +56,7 @@ import { ensureHubBinary, startHub, stopHub, writeHubConfig } from './solo/hub-m
 import {
   ensurePanelBundle,
   findPanelServerDir,
+  normalizePanelVersion,
   startPanel,
   stopPanel,
 } from './solo/panel-manager.js';
@@ -278,14 +279,20 @@ program
         console.error('[Solo] Hub failed to start:', err instanceof Error ? err.message : String(err));
       });
 
-      // Panel version defaults to the bridge version (release-tag parity);
-      // override with FTOWN_SOLO_PANEL_VERSION for development.
-      const panelVersion =
-        process.env.FTOWN_SOLO_PANEL_VERSION ?? `v${BRIDGE_VERSION}`;
+      // Panel version defaults to the bare bridge version (release-tag
+      // parity — panelBundleUrl's template already supplies the `v` prefix
+      // for the tag segment); override with FTOWN_SOLO_PANEL_VERSION for
+      // development. Either source may be typed with a leading `v`, so both
+      // are normalized to the bare semver panelBundleUrl expects.
+      const panelVersion = normalizePanelVersion(
+        process.env.FTOWN_SOLO_PANEL_VERSION ?? BRIDGE_VERSION,
+      );
       const panelReady = (async () => {
         if (process.env.FTOWN_SOLO_PANEL_DIR) {
           // Dev escape hatch: serve an already-built standalone directory.
-          console.log(`[Solo] Using local panel dir: ${process.env.FTOWN_SOLO_PANEL_DIR}`);
+          const serverDir = await findPanelServerDir(resolve(process.env.FTOWN_SOLO_PANEL_DIR));
+          console.log(`[Solo] Using local panel dir: ${serverDir}`);
+          await startPanel({ bundleDir: serverDir, port: panelPort, dataDir });
         } else {
           const bundleDir = await ensurePanelBundle({ dataDir, version: panelVersion });
           const serverDir = await findPanelServerDir(bundleDir);
