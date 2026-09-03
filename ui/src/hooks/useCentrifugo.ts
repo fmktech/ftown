@@ -81,11 +81,29 @@ interface UseCentrifugoResult {
   transport: TerminalTransportApi | null;
 }
 
+/**
+ * Optional per-mode overrides (solo mode). Absent = hosted behavior exactly
+ * as before: tokens come from the session-gated /api/auth/token route and a
+ * permanent auth failure redirects to /login.
+ */
+interface UseCentrifugoOptions {
+  /** Replaces the default session-gated token mint (solo: POST /api/solo/token). */
+  tokenRefresher?: () => Promise<string>;
+  /** Replaces the default "/login" redirect on a permanent auth rejection. */
+  onUnauthorized?: () => void;
+}
+
 export function useCentrifugo(
   token: string | null,
   centrifugoUrl: string | null,
-  userId: string | null
+  userId: string | null,
+  options?: UseCentrifugoOptions
 ): UseCentrifugoResult {
+  // Destructured so the connect effect below depends on stable callback
+  // identities, not a fresh options object literal every render.
+  const tokenRefresher = options?.tokenRefresher;
+  const onUnauthorized = options?.onUnauthorized;
+
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
   const [error, setError] = useState<string | null>(null);
   const [transport, setTransport] = useState<TerminalTransportApi | null>(null);
@@ -124,7 +142,7 @@ export function useCentrifugo(
 
     const client = new Centrifuge(centrifugoUrl, {
       token: initialToken,
-      getToken: fetchCentrifugoToken,
+      getToken: tokenRefresher ?? fetchCentrifugoToken,
     });
 
     client.on("connecting", () => {
@@ -138,14 +156,18 @@ export function useCentrifugo(
     });
 
     client.on("disconnected", (ctx) => {
-      // getToken threw UnauthorizedError (401 from /api/auth/token): the
-      // NextAuth session itself is gone, not just the Centrifugo token.
-      // centrifuge-js stops retrying in this case (reason "unauthorized"),
-      // so surface a clear re-login path instead of a silently dead
-      // dashboard.
+      // getToken threw UnauthorizedError (401 from the token route): the
+      // underlying credential itself is gone — NextAuth session (hosted) or
+      // solo access key — not just the Centrifugo token. centrifuge-js stops
+      // retrying in this case (reason "unauthorized"), so surface a clear
+      // re-auth path instead of a silently dead dashboard.
       if (ctx.reason === "unauthorized") {
         setStatus("error");
         setError("Session expired — please sign in again.");
+        if (onUnauthorized) {
+          onUnauthorized();
+          return;
+        }
         if (typeof window !== "undefined") {
           window.location.href = "/login";
         }
@@ -209,7 +231,7 @@ export function useCentrifugo(
       commandsSub.off("publication", handleInboundSignal);
       cleanup();
     };
-  }, [token, centrifugoUrl, userId, cleanup]);
+  }, [token, centrifugoUrl, userId, cleanup, tokenRefresher, onUnauthorized]);
 
   return {
     client: clientRef.current,

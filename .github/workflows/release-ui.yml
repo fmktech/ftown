@@ -74,9 +74,15 @@ jobs:
       - name: Test
         run: npm test
 
+      # ui/src/lib/auth.ts calls getRequiredSecret("AUTH_SECRET") at module
+      # load, so `next build` needs a value (>=32 chars, must not match
+      # /change-me/i) while collecting page data. Build-time only — never
+      # read at runtime, and the solo bridge never passes AUTH_SECRET to the
+      # panel. Mirrors how e2e.yml sources e2e/env.sh for the same reason.
       - name: Build standalone (solo mode)
         env:
           NEXT_PUBLIC_SOLO: '1'
+          AUTH_SECRET: 'build-time-placeholder-solo-panel-not-a-real-secret-0000' # gitleaks:allow
         run: npm run build
 
       - name: Assemble standalone directory
