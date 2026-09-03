@@ -93,6 +93,18 @@ export function panelBundleUrl(version: string): string {
   return PANEL_BUNDLE_URL_TEMPLATE.replaceAll('<version>', version);
 }
 
+/**
+ * Normalize a user- or config-supplied panel version into the bare semver
+ * expected by {@link panelBundleUrl} (the template already supplies the
+ * `v` prefix for the release-tag segment). Trims surrounding whitespace and
+ * strips a single leading `v`/`V`, so `v0.19.20`, `V0.19.20`, and `0.19.20`
+ * all resolve to the same bundle URL.
+ */
+export function normalizePanelVersion(raw: string): string {
+  const trimmed = raw.trim();
+  return /^[vV]/.test(trimmed) ? trimmed.slice(1) : trimmed;
+}
+
 // ---------- Bundle install ----------
 
 export interface EnsurePanelBundleOptions {

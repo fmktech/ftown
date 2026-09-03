@@ -1,17 +1,31 @@
 name: Release solo panel bundle
 
 # Publishes the Next.js standalone panel consumed by `ftown-bridge --solo`
-# (PANEL_BUNDLE_URL_TEMPLATE in bridge/src/solo/contract.ts). Tag the release
-# `ui-v<version>` where <version> matches ui/package.json — the bridge fetches
-# `ftown-ui-standalone-<version>.tar.gz` plus its `.sha256` sidecar from this
-# release. Solo builds set NEXT_PUBLIC_SOLO=1: root page redirects to /local,
-# SessionProvider is not mounted (contract S8), and the build must contain no
-# middleware or /api/auth artifacts (S21, asserted below).
+# (PANEL_BUNDLE_URL_TEMPLATE in bridge/src/solo/contract.ts). Called as a
+# reusable workflow from publish-bridge.yml with the bridge version to
+# release — this cuts the release BEFORE the npm package is published, so a
+# published bridge never points at a missing panel release. Tag the release
+# `ui-v<version>` where <version> is the bridge version (bridge/package.json)
+# — the bridge fetches `ftown-ui-standalone-<version>.tar.gz` plus its
+# `.sha256` sidecar from this release. Solo builds set NEXT_PUBLIC_SOLO=1:
+# root page redirects to /local, SessionProvider is not mounted (contract
+# S8), and the build must contain no middleware or /api/auth artifacts (S21,
+# asserted below). `workflow_dispatch` allows a manual re-cut of an existing
+# version.
 
 on:
-  push:
-    tags: ['ui-v*']
+  workflow_call:
+    inputs:
+      version:
+        description: 'Bridge version to release the panel bundle for (bridge/package.json)'
+        required: true
+        type: string
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Bridge version to release the panel bundle for (bridge/package.json)'
+        required: true
+        type: string
 
 permissions:
   contents: write # create the release and upload assets
@@ -35,13 +49,21 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
-      - name: Version parity (tag matches ui/package.json)
+      - name: Version parity (input matches bridge/package.json)
         run: |
-          VERSION="${GITHUB_REF_NAME#ui-v}"
-          LOCAL=$(node -p "require('./package.json').version")
-          echo "tag version=$VERSION package version=$LOCAL"
+          VERSION="${{ inputs.version }}"
+          if [ -z "$VERSION" ]; then
+            echo "::error::version input is empty"
+            exit 1
+          fi
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::version input '$VERSION' is not a valid semver"
+            exit 1
+          fi
+          LOCAL=$(node -p "require('../bridge/package.json').version")
+          echo "input version=$VERSION bridge package version=$LOCAL"
           if [ "$VERSION" != "$LOCAL" ]; then
-            echo "::error::Tag ui-v$VERSION does not match ui/package.json ($LOCAL)"
+            echo "::error::version input $VERSION does not match bridge/package.json ($LOCAL)"
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_ENV"
@@ -105,7 +127,20 @@ jobs:
             | awk '{print $1}' > "ftown-ui-standalone-$VERSION.tar.gz.sha256"
           cat "ftown-ui-standalone-$VERSION.tar.gz.sha256"
 
-      - name: Release
+      - name: Check for existing release
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "ui-v$VERSION" >/dev/null 2>&1; then
+            echo "::notice::release ui-v$VERSION already exists, uploading assets to it (--clobber) instead of creating it"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Release (create)
+        if: steps.existing.outputs.exists != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -114,3 +149,26 @@ jobs:
             --notes "Standalone panel bundle for \`ftown-bridge --solo\`. Fetched automatically by bridge >= 0.19.20." \
             "ftown-ui-standalone-$VERSION.tar.gz" \
             "ftown-ui-standalone-$VERSION.tar.gz.sha256"
+
+      - name: Release (upload assets to existing)
+        if: steps.existing.outputs.exists == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "ui-v$VERSION" \
+            "ftown-ui-standalone-$VERSION.tar.gz" \
+            "ftown-ui-standalone-$VERSION.tar.gz.sha256" \
+            --clobber
+
+      - name: Verify assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ASSETS=$(gh release view "ui-v$VERSION" --json assets -q '.assets[].name')
+          echo "$ASSETS"
+          for name in "ftown-ui-standalone-$VERSION.tar.gz" "ftown-ui-standalone-$VERSION.tar.gz.sha256"; do
+            if ! grep -qxF "$name" <<< "$ASSETS"; then
+              echo "::error::expected asset '$name' missing from release ui-v$VERSION"
+              exit 1
+            fi
+          done

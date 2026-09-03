@@ -20,6 +20,7 @@ import {
   PanelStartError,
   ensurePanelBundle,
   findPanelServerDir,
+  normalizePanelVersion,
   panelBundleUrl,
   startPanel,
   stopPanel,
@@ -233,6 +234,47 @@ describe('panelBundleUrl', () => {
   it('is parameterized — different versions yield distinct URLs', () => {
     assert.notEqual(panelBundleUrl('0.0.1'), panelBundleUrl('9.9.9'));
     assert.match(panelBundleUrl('0.0.1'), /ui-v0\.0\.1\/ftown-ui-standalone-0\.0\.1\.tar\.gz$/);
+  });
+
+  it('resolves the exact release asset URL for a bare version (no double-v)', () => {
+    assert.equal(
+      panelBundleUrl('0.19.20'),
+      'https://github.com/fmktech/ftown/releases/download/ui-v0.19.20/ftown-ui-standalone-0.19.20.tar.gz',
+    );
+  });
+});
+
+// =====================================================================
+// normalizePanelVersion
+// =====================================================================
+
+describe('normalizePanelVersion', () => {
+  it('strips a single leading lowercase v', () => {
+    assert.equal(normalizePanelVersion('v0.19.20'), '0.19.20');
+  });
+
+  it('strips a single leading uppercase V', () => {
+    assert.equal(normalizePanelVersion('V0.19.20'), '0.19.20');
+  });
+
+  it('leaves a bare version unchanged', () => {
+    assert.equal(normalizePanelVersion('0.19.20'), '0.19.20');
+  });
+
+  it('trims surrounding whitespace', () => {
+    assert.equal(normalizePanelVersion('  0.19.20  '), '0.19.20');
+    assert.equal(normalizePanelVersion('  v0.19.20  '), '0.19.20');
+  });
+
+  it('only strips one leading v, not v-prefixed content beyond that', () => {
+    assert.equal(normalizePanelVersion('v1.0.0-v2'), '1.0.0-v2');
+  });
+
+  it('composes with panelBundleUrl to avoid the double-v bug', () => {
+    assert.equal(
+      panelBundleUrl(normalizePanelVersion('v0.19.20')),
+      'https://github.com/fmktech/ftown/releases/download/ui-v0.19.20/ftown-ui-standalone-0.19.20.tar.gz',
+    );
   });
 });
 
