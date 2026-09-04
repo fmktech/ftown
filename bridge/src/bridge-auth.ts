@@ -1,4 +1,5 @@
 import { hostname as osHostname } from 'node:os';
+import { UnauthorizedError } from 'centrifuge';
 
 /** Loopback advert embedded in the Centrifugo connection JWT `info` claim (L2). */
 export interface BridgeLocalAdvert {
@@ -69,7 +70,14 @@ export async function refreshBridgeToken(
 
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`Token refresh failed (${res.status}): ${body}`);
+    const message = `Token refresh failed (${res.status}): ${body}`;
+    // A rejected bridge credential cannot become valid through retrying.
+    // centrifuge-js only stops its token retry loop for UnauthorizedError;
+    // ordinary errors are treated as transient and retried indefinitely.
+    if (res.status === 401) {
+      throw new UnauthorizedError(message);
+    }
+    throw new Error(message);
   }
 
   return res.json() as Promise<BridgeAuthResponse>;
