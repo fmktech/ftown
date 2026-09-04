@@ -1,0 +1,21 @@
+services:
+  ftown-solo:
+    build: .
+    image: ftown-solo:0.19.23
+    container_name: ftown-solo
+    init: true
+    restart: unless-stopped
+    ports:
+      - "8040:8040"
+    volumes:
+      - ftown-solo-data:/data
+      - ftown-solo-home:/home/ftown/.ftown
+      - ${FTOWN_WORKSPACE:-./workspace}:/workspace
+    environment:
+      # Optional: enables `claude` CLI sessions without a mounted ~/.claude.
+      # See README "Agent auth".
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+
+volumes:
+  ftown-solo-data:
+  ftown-solo-home:
