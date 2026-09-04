@@ -25,7 +25,7 @@
  */
 
 /** Contract revision — bump on any material change (re-gauntlet required). */
-export const SOLO_CONTRACT_REVISION = 4;
+export const SOLO_CONTRACT_REVISION = 5;
 
 // ---------- Ports ----------
 
@@ -90,6 +90,112 @@ export const CENTRIFUGO_SHA256: Readonly<Record<string, string>> = {
   'linux-amd64': '75d2fac2dcea005bb3cb1b4636b3825d98c97709c94d10755c892dbe1c9956c2',
   'linux-arm64': 'ba6df455ee0064399dd13652575fbbefa3d00bbe647d0555cb3669c1060821e5',
 };
+
+/**
+ * Frozen top-level channel-option DEFAULTS — copied byte-for-byte from the
+ * production hub config's top-level keys (centrifugo/config.json, the same
+ * keys namespaces without their own override inherit). Several HUB_NAMESPACES
+ * entries below (terminal-input, commands, events lacking force_recovery/
+ * allow_history_for_subscriber, bridges lacking history_size/ttl/
+ * force_recovery) rely on these top-level defaults for presence/join_leave/
+ * history/recovery behavior — omitting them means those namespaces silently
+ * fall back to Centrifugo's OWN stricter defaults instead of production's.
+ * Deliberately excludes non-channel-option top-level keys (token secrets,
+ * api/admin/address/port/allowed_origins, log/proxy settings) and the two
+ * top-level publish/subscribe defaults (`allow_publish_for_subscriber:
+ * false`, `allow_subscribe_for_client: false`) that every HUB_NAMESPACES
+ * entry already overrides to true, so their top-level value never applies.
+ */
+export const HUB_CHANNEL_DEFAULTS: Readonly<Record<string, unknown>> = {
+  allow_history_for_subscriber: true,
+  presence: true,
+  join_leave: true,
+  force_push_join_leave: true,
+  allow_presence_for_subscriber: true,
+  history_size: 500,
+  history_ttl: '24h',
+  force_recovery: true,
+};
+
+/**
+ * Frozen Centrifugo `namespaces` block for the managed hub — copied
+ * byte-for-byte (names + options) from the production hub config at
+ * centrifugo/config.json, which targets the SAME pinned CENTRIFUGO_VERSION
+ * (v5.4.9), so no key-format translation was needed. Every namespace prefix
+ * used by a real channel (bridges:presence#solo, commands:rpc#solo,
+ * loops:updates#solo, sessions:*, terminal:*, terminal-input:*, events:*)
+ * MUST have a matching entry here or Centrifugo rejects the subscribe with
+ * code 102 "unknown channel" — this list existing at all is the fix for that
+ * bug; hub-manager.test.ts drift-guards it against centrifugo/config.json so
+ * the two can never silently diverge again.
+ */
+export const HUB_NAMESPACES: ReadonlyArray<Readonly<Record<string, unknown>>> = [
+  {
+    name: 'terminal',
+    allow_publish_for_subscriber: true,
+    allow_subscribe_for_client: true,
+    allow_user_limited_channels: true,
+    allow_history_for_subscriber: true,
+    history_size: 10000,
+    history_ttl: '24h',
+    force_recovery: true,
+    allow_publish_for_client: true,
+  },
+  {
+    name: 'sessions',
+    allow_publish_for_subscriber: true,
+    allow_subscribe_for_client: true,
+    allow_user_limited_channels: true,
+    history_size: 0,
+    history_ttl: '0s',
+    force_recovery: false,
+    allow_publish_for_client: true,
+  },
+  {
+    name: 'loops',
+    allow_publish_for_subscriber: true,
+    allow_subscribe_for_client: true,
+    allow_user_limited_channels: true,
+    history_size: 0,
+    history_ttl: '0s',
+    force_recovery: false,
+    allow_publish_for_client: true,
+  },
+  {
+    name: 'terminal-input',
+    allow_publish_for_subscriber: true,
+    allow_subscribe_for_client: true,
+    allow_user_limited_channels: true,
+    allow_publish_for_client: true,
+  },
+  {
+    name: 'events',
+    allow_publish_for_subscriber: true,
+    allow_subscribe_for_client: true,
+    allow_user_limited_channels: true,
+    history_size: 100,
+    history_ttl: '1h',
+    allow_publish_for_client: true,
+  },
+  {
+    name: 'commands',
+    allow_publish_for_subscriber: true,
+    allow_subscribe_for_client: true,
+    allow_user_limited_channels: true,
+    allow_publish_for_client: true,
+  },
+  {
+    name: 'bridges',
+    allow_publish_for_subscriber: true,
+    allow_subscribe_for_client: true,
+    allow_user_limited_channels: true,
+    presence: true,
+    join_leave: true,
+    force_push_join_leave: true,
+    allow_presence_for_subscriber: true,
+    allow_publish_for_client: true,
+  },
+];
 
 /**
  * Panel (UI standalone) bundle source. Published as a GitHub release asset of
@@ -190,6 +296,25 @@ export interface SoloHealth {
 // websocket_compression   = false         // proxy must not negotiate deflate
 // client.allowed          = false         // no anonymous connections
 // health                  = true
+// ...HUB_CHANNEL_DEFAULTS = spread          // top-level presence/join_leave/
+//                                         // history/force_recovery defaults
+//                                         // several namespaces below rely on
+//                                         // inheriting (production parity)
+// namespaces              = HUB_NAMESPACES  // REQUIRED: every namespaced
+//                                         // channel (bridges:presence#solo,
+//                                         // commands:rpc#solo, loops:updates
+//                                         // #solo, sessions:*, terminal:*,
+//                                         // terminal-input:*, events:*) gets
+//                                         // Centrifugo code 102 ("unknown
+//                                         // channel") without this.
+// allow_user_limited_channels = true      // needed for the `#solo` channel
+//                                         // boundary suffix every client uses
+// client_channel_limit           = 256    // matches production; solo opens
+// client_queue_max_size          = 67108864  // enough concurrent namespaced
+// client_stale_close_delay       = "30s"     // channels/queue depth that the
+// websocket_message_size_limit   = 33554432  // panel's terminal streams need
+// ping_interval = "10s", pong_timeout = "5s" // matches P5 below, explicit
+//                                         // rather than relying on defaults
 // Admin API, server API: disabled. Hub listens on 127.0.0.1:hubPort with its
 // DEFAULT paths (/connection/websocket) — the proxy strips the /hub prefix,
 // so no centrifugo path options are needed.

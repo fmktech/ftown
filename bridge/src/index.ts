@@ -397,7 +397,13 @@ program
     if (solo) {
       // Solo mode: identity is synthesized locally (contract S2/S10). No
       // refresh token exists; getToken() mints a fresh hub JWT on demand.
-      const token = mintHubJwt({ secret: solo.config.hubSecret });
+      // The bridge's own connection token carries `info` (matching the cloud
+      // minter's shape) so the panel's presence-based bridge list sees it —
+      // browser tokens from /api/solo/bootstrap|token deliberately omit it.
+      const token = mintHubJwt({
+        secret: solo.config.hubSecret,
+        info: { bridgeId, hostname: osHostname() },
+      });
       auth = {
         userId: SOLO_USER_ID,
         token,
@@ -435,7 +441,12 @@ program
     async function getToken(): Promise<string> {
       if (solo) {
         // Solo: mint locally — no remote refresh, no refresh-token rotation.
-        return mintHubJwt({ secret: solo.config.hubSecret });
+        // Carries the same `info` claim as the initial mint above so the
+        // panel keeps seeing this bridge across every refresh.
+        return mintHubJwt({
+          secret: solo.config.hubSecret,
+          info: { bridgeId, hostname: osHostname() },
+        });
       }
       console.log('[Bridge] Refreshing Centrifugo token...');
       // Same process ⇒ same port/nonce; the refresh route re-embeds them.
