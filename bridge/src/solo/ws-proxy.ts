@@ -47,6 +47,67 @@ const HOP_BY_HOP = new Set<string>(HOP_BY_HOP_HEADERS);
 const BAD_GATEWAY_BODY = '{"error":"upstream unavailable"}';
 
 /**
+ * Split a Host-header value into hostname + explicit port (or null when the
+ * header carries no port). Handles bracketed IPv6 literals (`[::1]:8080`).
+ */
+function splitHostHeader(host: string): { hostname: string; port: string | null } {
+  if (host.startsWith('[')) {
+    const end = host.indexOf(']');
+    if (end === -1) return { hostname: host, port: null };
+    const hostname = host.slice(0, end + 1);
+    const rest = host.slice(end + 1);
+    return { hostname, port: rest.startsWith(':') ? rest.slice(1) : null };
+  }
+  const idx = host.lastIndexOf(':');
+  if (idx === -1) return { hostname: host, port: null };
+  return { hostname: host.slice(0, idx), port: host.slice(idx + 1) };
+}
+
+/**
+ * Same-origin enforcement (front-proxy owns this — Centrifugo must never see
+ * an Origin header, see hub-manager.ts). Returns false on any parse failure
+ * or mismatch. `hostHeader` with no explicit port is treated as matching
+ * whichever of 80/443 the Origin's scheme implies (default-port equivalence).
+ */
+export function isSameOrigin(originHeader: string, hostHeader: string | undefined): boolean {
+  let originUrl: URL;
+  try {
+    originUrl = new URL(originHeader);
+  } catch {
+    return false;
+  }
+  if (!hostHeader) return false;
+
+  const defaultPort = originUrl.protocol === 'https:' ? '443' : '80';
+  const originHost = originUrl.hostname.toLowerCase();
+  const originPort = originUrl.port !== '' ? originUrl.port : defaultPort;
+
+  const { hostname: reqHostname, port: reqPort } = splitHostHeader(hostHeader.trim().toLowerCase());
+  const effectiveReqPort = reqPort !== null ? reqPort : defaultPort;
+
+  return reqHostname === originHost && effectiveReqPort === originPort;
+}
+
+/** Write a bare 403 directly to the raw socket and tear it down (no upstream opened). */
+function writeOriginForbidden(socket: Duplex): void {
+  try {
+    socket.end(
+      'HTTP/1.1 403 Forbidden\r\n' +
+        'content-length: 0\r\n' +
+        'connection: close\r\n' +
+        '\r\n',
+    );
+    // Safety net: some peers never read/ack the response and would otherwise
+    // hold the socket open forever. socket.end() lets the write flush first;
+    // this just guarantees eventual cleanup if that never happens.
+    setTimeout(() => socket.destroy(), 1000).unref();
+  } catch {
+    // Socket already gone — nothing to relay the error to.
+    socket.destroy();
+  }
+}
+
+/**
  * S20 seam: parse req.url ONCE and decide whether it targets the proxied hub
  * upgrade path. Percent-decoded / differently-cased / extra-segment variants
  * are NOT the allowlist path (goldens pinned in tests).
@@ -68,6 +129,12 @@ export function parseHubTarget(url: string): { isHubUpgradePath: boolean } {
  * - drops every inbound x-forwarded-* header (never relayed — S13),
  * - rewrites Host to 127.0.0.1:<targetPort> (P2),
  * - sets X-Forwarded-Proto from the caller-supplied scheme (P4).
+ *
+ * NOTE: Origin/Cookie are deliberately NOT touched here — this sanitizer is
+ * shared with proxyHttpRequest (local API / panel), where forwardToLocalApi
+ * in solo-server.ts relies on Origin surviving (rewritten to loopback, S18
+ * mechanism). handleHubUpgrade strips Origin/Cookie itself, scoped to just
+ * the hub proxy hop (see below).
  */
 function sanitizeRequestHeaders(
   headers: IncomingHttpHeaders,
@@ -177,7 +244,22 @@ export function handleHubUpgrade(
     return;
   }
 
+  // Same-origin enforcement (front owns this — Centrifugo's allowed_origins
+  // is deliberately empty; see hub-manager.ts). No Origin header at all means
+  // a non-browser client (server-to-server) — allowed through unchecked.
+  const originHeader = req.headers.origin;
+  if (typeof originHeader === 'string' && !isSameOrigin(originHeader, req.headers.host)) {
+    console.error(`[ftown-solo] rejected WS upgrade: origin "${originHeader}" does not match host "${req.headers.host ?? ''}"`);
+    writeOriginForbidden(socket);
+    return;
+  }
+
   const headers = sanitizeRequestHeaders(req.headers, targetPort, forwardedProto);
+  // Hub-scoped only (see sanitizeRequestHeaders note): Centrifugo must never
+  // see Origin (the front now owns that check — hub-manager.ts allowed_origins
+  // is deliberately empty) or Cookie (hub authenticates via JWT only).
+  delete headers['origin'];
+  delete headers['cookie'];
   headers['connection'] = 'Upgrade';
   headers['upgrade'] = 'websocket';
   const clientKey = req.headers['sec-websocket-key'];

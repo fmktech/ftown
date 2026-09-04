@@ -1,6 +1,6 @@
 /**
  * Solo-mode client helpers — the browser side of the frozen wire shapes in
- * bridge/src/solo/contract.ts (SOLO_CONTRACT_REVISION 4).
+ * bridge/src/solo/contract.ts (SOLO_CONTRACT_REVISION 5).
  *
  * Solo auth carries NO cookies (contract S8): every authenticated call sends
  * `Authorization: Bearer <access-key>` against /api/solo/*. The raw key lives

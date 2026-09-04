@@ -8,6 +8,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import {
   HOP_BY_HOP_HEADERS,
   handleHubUpgrade,
+  isSameOrigin,
   parseHubTarget,
   proxyHttpRequest,
 } from './ws-proxy.js';
@@ -93,6 +94,47 @@ function sendRawUpgrade(port: number, path: string): Promise<RawResult> {
   });
 }
 
+/** Like sendRawUpgrade, but lets a test override the Host header and add
+ * arbitrary extra headers (e.g. Origin) on a raw upgrade request. */
+function sendRawUpgradeWithHeaders(
+  port: number,
+  path: string,
+  extraHeaders: Record<string, string>,
+  hostOverride?: string,
+): Promise<RawResult> {
+  return new Promise<RawResult>((resolve) => {
+    const sock = net.connect(port, '127.0.0.1');
+    let data = '';
+    let settled = false;
+    const finish = (result: RawResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sock.destroy();
+      resolve(result);
+    };
+    const timer = setTimeout(() => finish({ data, closed: false, error: 'timeout' }), 5000);
+    sock.on('connect', () => {
+      const lines = [
+        `GET ${path} HTTP/1.1`,
+        `Host: ${hostOverride ?? `127.0.0.1:${port}`}`,
+        'Upgrade: websocket',
+        'Connection: Upgrade',
+        `Sec-WebSocket-Key: ${Buffer.from('the sample nonce').toString('base64')}`,
+        'Sec-WebSocket-Version: 13',
+      ];
+      for (const [name, value] of Object.entries(extraHeaders)) lines.push(`${name}: ${value}`);
+      sock.write(lines.join('\r\n') + '\r\n\r\n');
+    });
+    sock.on('data', (chunk: Buffer) => {
+      data += chunk.toString('utf8');
+      if (data.includes('\r\n\r\n')) finish({ data, closed: false });
+    });
+    sock.on('close', () => finish({ data, closed: true }));
+    sock.on('error', (error: Error) => finish({ data, closed: false, error: String(error) }));
+  });
+}
+
 function httpGetJson(port: number, path: string, headers: Record<string, string>): Promise<{
   statusCode: number | undefined;
   headers: http.IncomingHttpHeaders;
@@ -151,6 +193,9 @@ let frontLivePort = 0;
 let frontDeadPort = 0;
 let deadPort = 0;
 let upstreamWs: WebSocket | null = null;
+/** Counts every 'upgrade' the stub "centrifugo" actually received — used to
+ * prove a rejected-at-the-front request never reaches the upstream at all. */
+let stubUpgradeCount = 0;
 
 const serversToClose: http.Server[] = [];
 
@@ -176,6 +221,7 @@ before(async () => {
     res.end(JSON.stringify(req.headers));
   });
   stub.on('upgrade', (req, socket, head) => {
+    stubUpgradeCount += 1;
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
   });
   stubPort = await listen(stub);
@@ -346,6 +392,103 @@ describe('handleHubUpgrade', () => {
       (result.closed && result.data === '') ||
       result.error !== undefined;
     assert.ok(clean, `unexpected outcome: data=${JSON.stringify(result.data)} error=${result.error ?? 'none'}`);
+  });
+
+  // ---------- same-origin enforcement ----------
+
+  it('proxies when Origin matches Host, and strips Origin from what the upstream sees', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${frontLivePort}/hub/connection/websocket`, {
+      headers: { origin: `http://127.0.0.1:${frontLivePort}` },
+    });
+    const nextMessage = messageQueue(ws);
+    try {
+      await withTimeout(onceEvent(ws, 'open'), 5000, 'ws open timed out');
+      const seen = JSON.parse(
+        await withTimeout(nextMessage(), 5000, 'no header echo from stub'),
+      ) as Record<string, unknown>;
+      assert.ok(!('origin' in seen), 'origin header must not reach the hub');
+    } finally {
+      ws.close();
+    }
+  });
+
+  it('rejects with 403 and never touches the upstream when Origin host differs from Host header', async () => {
+    const before = stubUpgradeCount;
+    const result = await sendRawUpgradeWithHeaders(frontLivePort, '/hub/connection/websocket', {
+      Origin: 'http://evil.example.com',
+    });
+    assert.match(result.data, /^HTTP\/1\.1 403 /);
+    assert.equal(stubUpgradeCount, before, 'upstream must never see a mismatched-origin request');
+  });
+
+  it('rejects with 403 and never touches the upstream when Origin port differs from Host header', async () => {
+    const before = stubUpgradeCount;
+    const mismatchedPort = frontLivePort === 65535 ? frontLivePort - 1 : frontLivePort + 1;
+    const result = await sendRawUpgradeWithHeaders(frontLivePort, '/hub/connection/websocket', {
+      Origin: `http://127.0.0.1:${mismatchedPort}`,
+    });
+    assert.match(result.data, /^HTTP\/1\.1 403 /);
+    assert.equal(stubUpgradeCount, before, 'upstream must never see a mismatched-port request');
+  });
+
+  it('proxies through when no Origin header is present at all', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${frontLivePort}/hub/connection/websocket`);
+    const nextMessage = messageQueue(ws);
+    try {
+      await withTimeout(onceEvent(ws, 'open'), 5000, 'ws open timed out');
+      const seen = JSON.parse(
+        await withTimeout(nextMessage(), 5000, 'no header echo from stub'),
+      ) as Record<string, unknown>;
+      assert.ok(!('origin' in seen));
+    } finally {
+      ws.close();
+    }
+  });
+
+  it('allows Origin with no explicit port against a Host header with no explicit port (default-port equivalence)', async () => {
+    const result = await sendRawUpgradeWithHeaders(
+      frontLivePort,
+      '/hub/connection/websocket',
+      { Origin: 'http://example.com' },
+      'example.com',
+    );
+    assert.match(result.data, /^HTTP\/1\.1 101 Switching Protocols\r\n/);
+  });
+});
+
+// ---------- isSameOrigin (unit) ----------
+
+describe('isSameOrigin', () => {
+  it('matches identical host and port', () => {
+    assert.equal(isSameOrigin('http://example.com:8080', 'example.com:8080'), true);
+  });
+
+  it('rejects a different hostname', () => {
+    assert.equal(isSameOrigin('http://evil.example.com', 'example.com'), false);
+  });
+
+  it('rejects a different port', () => {
+    assert.equal(isSameOrigin('http://example.com:8080', 'example.com:9090'), false);
+  });
+
+  it('treats bare Origin/Host (no explicit port) as the http default (80) on both sides', () => {
+    assert.equal(isSameOrigin('http://example.com', 'example.com'), true);
+  });
+
+  it('treats bare Origin/Host (no explicit port) as the https default (443) on both sides', () => {
+    assert.equal(isSameOrigin('https://example.com', 'example.com'), true);
+  });
+
+  it('is case-insensitive on hostname', () => {
+    assert.equal(isSameOrigin('http://Example.COM', 'example.com'), true);
+  });
+
+  it('returns false when Origin fails to parse', () => {
+    assert.equal(isSameOrigin('not-a-url', 'example.com'), false);
+  });
+
+  it('returns false when there is no Host header', () => {
+    assert.equal(isSameOrigin('http://example.com', undefined), false);
   });
 });
 

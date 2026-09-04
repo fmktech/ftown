@@ -16,10 +16,30 @@ export interface GeneratedAccessKey {
   hash: string;
 }
 
+/**
+ * Presence `info` claim shape — matches the cloud minter's `info` object
+ * byte-for-byte in key names (ui/src/app/api/auth/bridge/route.ts) so the
+ * panel's useBridges hook (which reads ctx.info.connInfo.bridgeId/hostname/
+ * connectedAt from presence/join events) recognizes solo's own bridge entry
+ * exactly like a hosted one.
+ */
+export interface HubJwtInfo {
+  bridgeId: string;
+  hostname: string;
+  connectedAt?: string;
+}
+
 export interface MintHubJwtOptions {
   secret: string;
   ttlSeconds?: number;
   nowMs?: number;
+  /**
+   * Optional presence `info` claim. Omit entirely for tokens that must NOT
+   * surface as a bridge in the panel (browser tokens minted by
+   * /api/solo/bootstrap and /api/solo/token) — only the bridge's own
+   * connection token should carry this.
+   */
+  info?: HubJwtInfo;
 }
 
 export interface VerifyHubJwtOptions {
@@ -50,6 +70,7 @@ interface JwtPayload {
   aud: typeof HUB_JWT_AUDIENCE;
   iat: number;
   exp: number;
+  info?: HubJwtInfo;
 }
 
 export function generateAccessKey(): GeneratedAccessKey {
@@ -96,6 +117,7 @@ export function mintHubJwt(options: MintHubJwtOptions): string {
     aud: HUB_JWT_AUDIENCE,
     iat,
     exp: iat + (options.ttlSeconds ?? HUB_JWT_TTL_SECONDS),
+    ...(options.info !== undefined ? { info: options.info } : {}),
   };
   const signingInput = `${base64UrlEncode(JSON.stringify(header))}.${base64UrlEncode(JSON.stringify(payload))}`;
   return `${signingInput}.${hmacSha256(options.secret, signingInput).toString('base64url')}`;

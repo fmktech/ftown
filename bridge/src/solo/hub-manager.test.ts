@@ -21,7 +21,7 @@ import { PassThrough } from 'node:stream';
 import type { AddressInfo } from 'node:net';
 import { after, describe, it } from 'node:test';
 
-import { HUB_JWT_AUDIENCE } from './contract.js';
+import { HUB_CHANNEL_DEFAULTS, HUB_JWT_AUDIENCE, HUB_NAMESPACES } from './contract.js';
 import {
   ArchiveSafetyError,
   assetUrl,
@@ -213,19 +213,98 @@ describe('writeHubConfig', () => {
       admin: false,
       api_disable: true,
       health: true,
+      ...HUB_CHANNEL_DEFAULTS,
+      namespaces: HUB_NAMESPACES,
+      allow_user_limited_channels: true,
+      client_channel_limit: 256,
+      client_queue_max_size: 67108864,
+      client_stale_close_delay: '30s',
+      websocket_message_size_limit: 33554432,
+      ping_interval: '10s',
+      pong_timeout: '5s',
     });
     assert.deepEqual(Object.keys(parsed).sort(), [
       'address',
       'admin',
       'allow_anonymous_connect_without_token',
+      'allow_history_for_subscriber',
+      'allow_presence_for_subscriber',
+      'allow_user_limited_channels',
       'allowed_origins',
       'api_disable',
+      'client_channel_limit',
+      'client_queue_max_size',
+      'client_stale_close_delay',
+      'force_push_join_leave',
+      'force_recovery',
       'health',
+      'history_size',
+      'history_ttl',
+      'join_leave',
+      'namespaces',
+      'ping_interval',
+      'pong_timeout',
       'port',
+      'presence',
       'token_audience',
       'token_hmac_secret_key',
       'websocket_compression',
+      'websocket_message_size_limit',
     ]);
+  });
+
+  it('never enables admin/api or opens bind address/origins (S7 boundary)', async () => {
+    const dir = tmpDir('cfg-boundary');
+    const configPath = path.join(dir, 'hub.json');
+    await writeHubConfig(configPath, { port: 8042, secret: 'another-secret-value' });
+    const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+    assert.equal(parsed.address, '127.0.0.1');
+    assert.equal(parsed.api_disable, true);
+    assert.equal(parsed.admin, false);
+    assert.deepEqual(parsed.allowed_origins, []);
+  });
+
+  it('drift guard: namespaces + channel defaults match production centrifugo/config.json exactly (fixes code 102 unknown channel)', async () => {
+    const prodConfigPath = path.join(
+      path.dirname(new URL(import.meta.url).pathname),
+      '..',
+      '..',
+      '..',
+      'centrifugo',
+      'config.json',
+    );
+    const prodConfig = JSON.parse(readFileSync(prodConfigPath, 'utf8')) as Record<string, unknown>;
+    assert.ok(Array.isArray(prodConfig.namespaces), 'production config must define namespaces');
+    assert.deepEqual(
+      HUB_NAMESPACES,
+      prodConfig.namespaces,
+      'solo hub namespaces have drifted from production centrifugo/config.json — ' +
+        'every namespaced channel (bridges:presence#solo, commands:rpc#solo, ' +
+        'loops:updates#solo, sessions:*, terminal:*, terminal-input:*, events:*) ' +
+        'will 102 "unknown channel" if these are not identical',
+    );
+
+    for (const key of Object.keys(HUB_CHANNEL_DEFAULTS)) {
+      assert.deepEqual(
+        HUB_CHANNEL_DEFAULTS[key],
+        prodConfig[key],
+        `HUB_CHANNEL_DEFAULTS.${key} has drifted from production centrifugo/config.json ` +
+          `top-level "${key}" — namespaces without their own override inherit this default`,
+      );
+    }
+
+    const dir = tmpDir('cfg-drift');
+    const configPath = path.join(dir, 'hub.json');
+    await writeHubConfig(configPath, { port: 8043, secret: 'drift-guard-secret-value' });
+    const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+    assert.deepEqual(parsed.namespaces, prodConfig.namespaces);
+    for (const key of Object.keys(HUB_CHANNEL_DEFAULTS)) {
+      assert.deepEqual(parsed[key], prodConfig[key]);
+    }
+    assert.equal(parsed.address, '127.0.0.1');
+    assert.equal(parsed.api_disable, true);
+    assert.equal(parsed.admin, false);
+    assert.deepEqual(parsed.allowed_origins, []);
   });
 
   it('keeps 0600 when overwriting an existing file (S7)', async () => {

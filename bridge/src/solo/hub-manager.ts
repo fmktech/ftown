@@ -25,7 +25,9 @@ import { promisify } from 'node:util';
 import {
   CENTRIFUGO_SHA256,
   CENTRIFUGO_VERSION,
+  HUB_CHANNEL_DEFAULTS,
   HUB_JWT_AUDIENCE,
+  HUB_NAMESPACES,
 } from './contract.js';
 
 const execFile = promisify(execFileCb);
@@ -272,6 +274,41 @@ export async function ensureHubBinary(opts: EnsureHubBinaryOptions): Promise<str
  * disables the server HTTP API, `allow_anonymous_connect_without_token=false`
  * means no anonymous client connections. address/port are operational keys so
  * the child binds loopback on the ephemeral port the integrator assigned.
+ *
+ * `...HUB_CHANNEL_DEFAULTS` spreads the production top-level channel-option
+ * defaults (presence, join_leave, force_push_join_leave,
+ * allow_presence_for_subscriber, history_size, history_ttl, force_recovery,
+ * allow_history_for_subscriber) that several HUB_NAMESPACES entries below
+ * have no per-namespace override for and therefore inherit — without this,
+ * those namespaces would silently fall back to Centrifugo's own stricter
+ * built-in defaults instead of production's.
+ *
+ * `namespaces: HUB_NAMESPACES` is the production namespace table (contract-
+ * frozen, drift-guarded in hub-manager.test.ts against centrifugo/config.json)
+ * — WITHOUT it every namespaced channel (bridges:presence#solo, commands:rpc
+ * #solo, loops:updates#solo, sessions:*, terminal:*, terminal-input:*,
+ * events:*) is rejected by Centrifugo with code 102 "unknown channel", which
+ * is why the panel could never see the bridge or create sessions in solo
+ * mode. `allow_user_limited_channels: true` is required alongside it because
+ * every one of those channels carries the `#solo` user-limited-channel
+ * suffix. `client_channel_limit` / `client_queue_max_size` /
+ * `client_stale_close_delay` / `websocket_message_size_limit` /
+ * `ping_interval` / `pong_timeout` are carried over from production so a
+ * single-user LAN client isn't held to defaults tuned for a multi-tenant
+ * deployment. `websocket_compression` stays false (see below) even though
+ * production enables it — that divergence is deliberate, not part of this
+ * fix.
+ *
+ * `allowed_origins: []` is deliberate, not an oversight: centrifugo v5
+ * rejects (403s) any handshake that carries an Origin header when this list
+ * is empty. That's fine here because same-origin is enforced ourselves, one
+ * hop earlier, in the front proxy (ws-proxy.ts `handleHubUpgrade` /
+ * `isSameOrigin`), which also strips the Origin header before forwarding —
+ * so centrifugo never sees one to judge. The hub additionally only ever
+ * binds loopback (127.0.0.1, see `address` below), so it is never reachable
+ * directly from a browser regardless. Do not "fix" this by populating
+ * allowed_origins; that would just duplicate — and could drift from — the
+ * check ws-proxy.ts already owns.
  */
 function hubConfigObject(port: number, secret: string): Record<string, unknown> {
   return {
@@ -285,6 +322,15 @@ function hubConfigObject(port: number, secret: string): Record<string, unknown> 
     admin: false,
     api_disable: true,
     health: true,
+    ...HUB_CHANNEL_DEFAULTS,
+    namespaces: HUB_NAMESPACES,
+    allow_user_limited_channels: true,
+    client_channel_limit: 256,
+    client_queue_max_size: 67108864,
+    client_stale_close_delay: '30s',
+    websocket_message_size_limit: 33554432,
+    ping_interval: '10s',
+    pong_timeout: '5s',
   };
 }
 

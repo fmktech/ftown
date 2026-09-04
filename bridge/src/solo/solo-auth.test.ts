@@ -137,6 +137,39 @@ describe('mintHubJwt / verifyHubJwt roundtrip', () => {
     const payload = decodeSegment(payloadSeg ?? '');
     assert.equal((payload['exp'] as number) - (payload['iat'] as number), 60);
   });
+
+  it('with info: payload carries an `info` claim exactly equal to the given object', () => {
+    const info = { bridgeId: 'bridge-1', hostname: 'my-host' };
+    const [, payloadSeg] = mintHubJwt({ secret: SECRET, nowMs: NOW_MS, info }).split('.');
+    const payload = decodeSegment(payloadSeg ?? '');
+    assert.deepEqual(payload['info'], info);
+    assert.deepEqual(payload, {
+      sub: SOLO_USER_ID,
+      aud: HUB_JWT_AUDIENCE,
+      iat: Math.floor(NOW_MS / 1000),
+      exp: Math.floor(NOW_MS / 1000) + HUB_JWT_TTL_SECONDS,
+      info,
+    });
+  });
+
+  it('with info including optional connectedAt: preserved verbatim', () => {
+    const info = { bridgeId: 'bridge-1', hostname: 'my-host', connectedAt: '2026-09-03T00:00:00.000Z' };
+    const [, payloadSeg] = mintHubJwt({ secret: SECRET, nowMs: NOW_MS, info }).split('.');
+    const payload = decodeSegment(payloadSeg ?? '');
+    assert.deepEqual(payload['info'], info);
+  });
+
+  it('without info: payload has no `info` key at all', () => {
+    const [, payloadSeg] = mintHubJwt({ secret: SECRET, nowMs: NOW_MS }).split('.');
+    const payload = decodeSegment(payloadSeg ?? '');
+    assert.equal('info' in payload, false);
+  });
+
+  it('a token minted with info still verifies OK', () => {
+    const info = { bridgeId: 'bridge-1', hostname: 'my-host' };
+    const token = mintHubJwt({ secret: SECRET, nowMs: NOW_MS, info });
+    assert.deepEqual(verifyHubJwt(token, { secret: SECRET, nowMs: NOW_MS }), { valid: true });
+  });
 });
 
 describe('verifyHubJwt failure reasons', () => {
