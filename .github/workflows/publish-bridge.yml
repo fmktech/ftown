@@ -37,13 +37,27 @@ jobs:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
+      # Two PRs merged close together can both bump to the same version: the
+      # first PR's run publishes it, then the second PR's run sees
+      # local == published and would otherwise skip publishing silently,
+      # losing that PR's changes. On a push (post-merge) that match is
+      # therefore treated as an error so the mistake is caught and the
+      # branch gets re-bumped and re-merged; workflow_dispatch (manual,
+      # possibly re-run intentionally against an already-published version)
+      # still skips quietly.
       - name: Check whether the version is unpublished
         id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           LOCAL=$(node -p "require('./package.json').version")
           PUBLISHED=$(npm view ftown-bridge version 2>/dev/null || echo "none")
           echo "local=$LOCAL published=$PUBLISHED"
           if [ "$LOCAL" = "$PUBLISHED" ]; then
+            if [ "$EVENT_NAME" = "push" ]; then
+              echo "::error::bridge/package.json is $LOCAL but that version is already on npm (published from an earlier commit). Bump the version and merge again so this commit ships."
+              exit 1
+            fi
             echo "publish=false" >> "$GITHUB_OUTPUT"
           else
             echo "publish=true" >> "$GITHUB_OUTPUT"
