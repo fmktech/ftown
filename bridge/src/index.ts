@@ -44,6 +44,7 @@ import { collectSessionUsage } from './usage-collector.js';
 import { AgentSessionIdPersister } from './session-ids.js';
 import { HookUsagePersister } from './hook-usage.js';
 import { fetchBridgeToken, refreshBridgeToken, type BridgeAuthResponse } from './bridge-auth.js';
+import { RotatingTokenRefresher } from './rotating-token-refresher.js';
 import { listLoops } from './loop-store.js';
 import { LoopScheduler, LOOP_TICK_INTERVAL_MS } from './loop-scheduler.js';
 import { LoopController } from './loop-controller.js';
@@ -418,8 +419,29 @@ program
     } else {
       auth = await onboard();
     }
-    let currentRefreshToken = auth.refreshToken;
+    const currentRefreshToken = auth.refreshToken;
     if (!solo) persistRefreshToken(currentRefreshToken);
+
+    const tokenRefresher = solo
+      ? null
+      : new RotatingTokenRefresher({
+          initialRefreshToken: currentRefreshToken,
+          refresh: (refreshToken) =>
+            refreshBridgeToken(opts.apiUrl, refreshToken, bridgeId, local),
+          loadPersistedRefreshToken: () => {
+            try {
+              return readFileSync(refreshTokenPath, 'utf8').trim() || undefined;
+            } catch {
+              return undefined;
+            }
+          },
+          persistRefreshToken,
+          onPersistedTokenRecovery: () => {
+            console.warn(
+              '[Bridge] In-memory refresh token was stale; retrying with the newer persisted token.',
+            );
+          },
+        });
 
     const userId = auth.userId;
     const centrifugoUrl = auth.centrifugoUrl;
@@ -438,14 +460,9 @@ program
         return mintHubJwt({ secret: solo.config.hubSecret });
       }
       console.log('[Bridge] Refreshing Centrifugo token...');
-      // Same process ⇒ same port/nonce; the refresh route re-embeds them.
-      const refreshed = await refreshBridgeToken(opts.apiUrl, currentRefreshToken, bridgeId, local);
-      // F3: the refresh token rotated — adopt and persist the new one so the
-      // next refresh (and any restart) uses it. The old one is now rejected.
-      currentRefreshToken = refreshed.refreshToken;
-      persistRefreshToken(currentRefreshToken);
+      const token = await tokenRefresher!.getToken();
       console.log('[Bridge] Token refreshed successfully');
-      return refreshed.token;
+      return token;
     }
 
     const store = new SessionStore(dataDir);
