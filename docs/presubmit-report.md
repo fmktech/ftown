@@ -1,53 +1,49 @@
-# Presubmit report: sidebar harness and live-state icons
+# Presubmit report: bridge rotating refresh recovery
 
-Date: 2026-08-21  
-Base: `origin/main` (`6d01638`)  
-Feature commit: `357f6b4`  
-Scope: replace textual agent badges in Sessions, Crons, and Factory workers; add compact live-state indicators.
+Date: 2026-09-03
+Base: `origin/main` (`c7f6c26`)
+Feature commit: `9d6fc6b`
+Scope: stop permanent Centrifugo refresh rejection loops and recover stale in-memory state from a newer persisted rotating token.
 
 ## Gate
 
 | Check | Result | Evidence |
 | --- | --- | --- |
-| UI unit tests | ✅ | `npm test`: 186 passed across 26 files. Focused final state suite: 10 passed. |
-| UI production build/typecheck | ✅ | `npm run build`: compiled and generated all routes successfully. |
-| Bridge unit tests | ✅ | `npm test`: 583 passed, 0 failed. |
+| Bridge unit tests | ✅ | `npm test`: 742 passed, 0 failed. |
 | Bridge build/typecheck | ✅ | `npm run build`: TypeScript completed without errors. |
+| UI unit tests | ✅ | `npm test`: 226 passed across 28 files. |
+| UI production build/typecheck | ✅ | `npm run build`: compiled and generated all routes successfully. |
 | E2E typecheck | ✅ | `npx tsc --noEmit` completed without errors. |
 | Full browser suite | ✅ | 31 passed; 2 intentional pre-existing skips. |
 | Diff integrity | ✅ | `git diff --check origin/main...HEAD` completed successfully. |
-| Lint | ⚠️ | `npm run lint` opens the repository's pre-existing interactive Next.js ESLint setup; CI does not enforce it. |
+| Lint | ⚠️ | The repository's standalone Next.js lint command uses the pre-existing interactive ESLint setup; the production build's integrated lint/type checks passed. |
 | Format | ⚠️ | No repository format-check script is defined; diff integrity is clean. |
+
+The full browser suite ran against UI port 3010 because port 3000 was already occupied by an unrelated local process. The temporary test-origin configuration was reverted after the run and is not part of this change.
 
 ## Scorecard
 
 | Aspect | Score | Band | Why |
 | --- | ---: | --- | --- |
-| Functional completeness | 92 | Strong | All requested sidebar surfaces and the four-state visual grammar are implemented. |
-| Frontend fluency | 90 | Strong | Compact SVG marks, accessible labels/tooltips, reduced-motion handling, and shared primitives. |
-| Monorepo awareness | 95 | Strong | UI behavior stays in the UI workspace, reuses existing activity state, and adds no dependency or backend churn. |
-| Convention consistency | 94 | Strong | Existing StatusDot/CSS token patterns are extended and the frozen Factory contract remains untouched. |
-| Code quality | 94 | Strong | Exhaustive typed harness maps and terminal-state mapping prevent silent drift. |
-| Server communication and data flow | 96 | Strong | Factory workers reuse the existing event-driven sessionActivity map; no polling or server calls were added. |
-| Testing | 88 | Strong | Provider coverage spans all harnesses; state tests cover priority, active modes, idle/running, and terminal states; E2E validates lifecycle icons. |
-| Commit hygiene | 97 | Strong | One conventional, coherent feature commit directly atop main, with an explanatory body. |
-| Scope and regression discipline | 97 | Strong | No dependency/API/config creep and all regression gates are green. |
-| AI-leveraged understanding | 90 | Strong | Cross-cutting concepts were factored once and reused rather than duplicated per sidebar. |
+| Functional completeness | 94 | Strong | The repeated 401 loop is stopped, transient failures remain retryable, and restart-like disk recovery happens live. |
+| Frontend fluency | N/A | N/A | This bridge-only fix has no user-interface surface. |
+| Monorepo awareness | 97 | Strong | The change stays in the bridge workspace, synchronizes the package and lockfile patch version, and avoids API/UI/config churn. |
+| Convention consistency | 93 | Strong | The focused service class and Node test-runner coverage follow existing bridge patterns. |
+| Code quality | 90 | Strong | Token ownership and single-flight rotation are isolated behind a small typed abstraction. |
+| Server communication and data flow | 88 | Strong | Terminal 401 and retryable 5xx semantics match the client contract; persisted-state recovery is bounded to one retry. |
+| Testing | 90 | Strong | Regression tests cover status classification, stale-memory recovery, permanent rejection, and concurrent rotation; all repository gates pass. |
+| Commit hygiene | 97 | Strong | One conventional, coherent fix commit directly atop `origin/main`, including tests, release version, and investigation evidence. |
+| Scope and regression discipline | 97 | Strong | No dependencies or unrelated behavior changed, and the complete regression matrix is green. |
+| AI-leveraged understanding | 88 | Strong | The investigation explicitly formed, falsified, and proved hypotheses before translating the causal model into focused tests and code. |
 
-Weighted score: **93/100 (Strong)**.
+Overall score: **92/100 (Strong)**.
 
 ## Verdict
 
-**GO.** All enforced gates are green. The only advisory is the repository's pre-existing interactive lint setup.
+**GO.** Every enforced gate is green. Lint and formatting are advisory because this repository has no non-interactive standalone enforcement for them.
 
-## Findings resolved during presubmit
+## Non-blocking follow-up opportunities
 
-1. Added semantic `role`/`aria-label` state dots and reduced-motion coverage for spinners.
-2. Kept the frozen Factory prop contract unchanged by using a local view-props extension.
-3. Moved provider colors to shared CSS tokens and made harness maps exhaustive over `ShellType`.
-4. Added distinct Fireworks and Z.ai glyphs and expanded the state test matrix.
-5. Updated lifecycle E2E assertions from removed text badges to accessible icon state.
-
-## Follow-up
-
-Add lightweight FactoryList and LoopList render assertions if those components gain more live-state behavior; current shared-component, build, and full E2E coverage is sufficient for this change.
+1. Make refresh-token persistence atomic and coordinate it across processes sharing one data directory.
+2. Add a Centrifuge-client integration test that proves `UnauthorizedError` halts the SDK reconnect loop end to end.
+3. Factor the persisted-token reader shared by startup and live refresh if that path grows further.
