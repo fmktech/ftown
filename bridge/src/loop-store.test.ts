@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  configureLoopStoreHome,
   createLoop,
   deleteLoop,
   getLoop,
@@ -28,6 +29,8 @@ describe('loop-store', () => {
   });
 
   afterEach(() => {
+    // Clear any injected home so a later test falls back to the $HOME override.
+    configureLoopStoreHome(undefined);
     if (realHome === undefined) delete process.env.HOME;
     else process.env.HOME = realHome;
     rmSync(home, { recursive: true, force: true });
