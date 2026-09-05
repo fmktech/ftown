@@ -64,6 +64,12 @@ export const PROVIDER_RUNTIME_ENV: Record<string, Record<string, string>> = {
 
 // homedir() is read at call time (it resolves $HOME), so the path follows a
 // test's $HOME override — the same reason claude-trust.ts recomputes per call.
+//
+// INTENTIONALLY GLOBAL: env.json holds shared per-provider machine tokens and
+// is NOT routed through resolveFtownHome()/--data-dir. Unlike bridge.json /
+// loops.json / loop-runs.json / session-registry.json (which are per-instance),
+// provider tokens are a single machine-wide store shared by every bridge and by
+// the sibling-copied ftown-env CLI, so it always lives at $HOME/.ftown/env.json.
 function envJsonPath(): string {
   return join(homedir(), '.ftown', 'env.json');
 }

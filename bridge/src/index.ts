@@ -3,9 +3,9 @@
 import { Command as Commander } from 'commander';
 import { v4 as uuidv4 } from 'uuid';
 import { resolve, dirname, join } from 'node:path';
-import { homedir, hostname as osHostname, networkInterfaces } from 'node:os';
+import { hostname as osHostname, networkInterfaces } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { cleanup as ndcCleanup } from 'node-datachannel';
 
@@ -34,7 +34,7 @@ import { installFtownWorkflowsCli } from './install-ftown-workflows-cli.js';
 import { installFtownEnvCli } from './install-ftown-env-cli.js';
 import { installFtownCommandCli } from './install-ftown-command-cli.js';
 import { ensureFtownOnPath } from './ensure-ftown-path.js';
-import { unregisterSession } from './session-registry.js';
+import { unregisterSession, configureSessionRegistryHome } from './session-registry.js';
 import { createFtownSession, type CreateFtownSessionDeps } from './create-ftown-session.js';
 import { createCommandHandler } from './command-rpc.js';
 import { removeFtownSession } from './remove-ftown-session.js';
@@ -45,7 +45,9 @@ import { AgentSessionIdPersister } from './session-ids.js';
 import { HookUsagePersister } from './hook-usage.js';
 import { fetchBridgeToken, refreshBridgeToken, type BridgeAuthResponse } from './bridge-auth.js';
 import { RotatingTokenRefresher } from './rotating-token-refresher.js';
-import { listLoops } from './loop-store.js';
+import { listLoops, configureLoopStoreHome } from './loop-store.js';
+import { configureLoopRunStoreHome } from './loop-run-store.js';
+import { resolveDefaultDataDir, resolveFtownHome } from './ftown-home.js';
 import { LoopScheduler, LOOP_TICK_INTERVAL_MS } from './loop-scheduler.js';
 import { LoopController } from './loop-controller.js';
 import { SessionController } from './session-controller.js';
@@ -92,30 +94,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const DEFAULT_API_URL = 'https://ftown.ia.br';
 
-/**
- * Default data dir is ~/.ftown/data (machine-stable, like the rest of ~/.ftown).
- * Older bridges defaulted to ./data relative to the launch cwd — if that legacy
- * dir holds sessions and the new default does not exist yet, migrate it once so
- * an upgraded bridge still resurrects its sessions.
- */
-function resolveDefaultDataDir(): string {
-  const defaultDir = join(homedir(), '.ftown', 'data');
-  const legacyDir = resolve('./data');
-  if (!existsSync(defaultDir) && existsSync(join(legacyDir, 'sessions'))) {
-    try {
-      mkdirSync(dirname(defaultDir), { recursive: true });
-      renameSync(legacyDir, defaultDir);
-      console.log(`[Bridge] Migrated legacy data dir ${legacyDir} -> ${defaultDir}`);
-    } catch (err) {
-      console.error(
-        `[Bridge] Failed to migrate legacy data dir (${err instanceof Error ? err.message : String(err)}); using ${legacyDir}`,
-      );
-      return legacyDir;
-    }
-  }
-  return defaultDir;
-}
-
 const program = new Commander();
 
 program
@@ -143,7 +121,21 @@ program
       );
     }
 
-    const dataDir = opts.dataDir ? resolve(opts.dataDir) : resolveDefaultDataDir();
+    // Resolve the default ONCE (it may perform a one-time legacy ./data
+    // migration) and reuse it for both the data dir and the home resolution, so
+    // the migration side effect never runs twice.
+    const defaultDataDir = resolveDefaultDataDir();
+    const dataDir = opts.dataDir ? resolve(opts.dataDir) : defaultDataDir;
+    // Instance-scoped ".ftown home" for pointer + loop-state files. The DEFAULT
+    // data dir resolves to $HOME/.ftown (unchanged — the harness CLIs hardcode
+    // that path). A non-default --data-dir (Solo test, Docker, a second bridge)
+    // gets its own home so it never touches the primary bridge's bridge.json,
+    // loops.json, loop-runs.json or session-registry.json. Configure the store
+    // singletons ONCE here, before any of them is read/written.
+    const ftownHome = resolveFtownHome(dataDir, defaultDataDir);
+    configureLoopStoreHome(ftownHome);
+    configureLoopRunStoreHome(ftownHome);
+    configureSessionRegistryHome(ftownHome);
     // Bridge identity sticks to the data dir so a plain restart auto-resumes:
     // same id → same dashboard entry, sessions reattach without any flags.
     const bridgeIdPath = join(dataDir, 'bridge-id');
@@ -735,7 +727,10 @@ program
       console.log('[Bridge] PATH already includes ~/.ftown (no profiles changed)');
     }
 
-    const bridgeStateDir = join(homedir(), '.ftown');
+    // Pointer lives under the instance home (see configure* above): default →
+    // $HOME/.ftown (harness CLIs read it there), custom --data-dir → that dir.
+    // Write and cleanup unlink MUST use this same resolved path.
+    const bridgeStateDir = ftownHome;
     const bridgePointerPath = join(bridgeStateDir, 'bridge.json');
     try {
       mkdirSync(bridgeStateDir, { recursive: true, mode: 0o700 });
