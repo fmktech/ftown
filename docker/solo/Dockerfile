@@ -72,7 +72,7 @@ RUN groupmod --new-name ftown node \
 ENV HOME=/home/ftown
 
 # --- Global npm packages ---
-# ftown-bridge: pinned to 0.19.23 (published release with the Solo fixes).
+# ftown-bridge: pinned to 0.19.24 (published release with the Solo fixes).
 # @anthropic-ai/claude-code: the `claude` CLI that harness-registry.ts:229 spawns
 # for Claude Code sessions. Auth is NOT baked into the image — see README
 # "Agent auth" for the two supported options (ANTHROPIC_API_KEY env var, or a
@@ -81,7 +81,7 @@ ENV HOME=/home/ftown
 # host machine's installed pi version, since the bridge deploys its Pi
 # extension into the container and extension/protocol compatibility depends
 # on the pi version matching — see README "Agent auth".
-RUN npm install -g ftown-bridge@0.19.23 @anthropic-ai/claude-code @earendil-works/pi-coding-agent@0.83.0 \
+RUN npm install -g ftown-bridge@0.19.24 @anthropic-ai/claude-code @earendil-works/pi-coding-agent@0.83.0 \
     && npm cache clean --force
 
 # --- Volumes ---
