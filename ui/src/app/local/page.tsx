@@ -139,6 +139,18 @@ export default function LocalPage() {
     setPhase("needs-key");
   }, []);
 
+  if (phase === "ready" && boot) {
+    return (
+      <DashboardClient
+        userId={boot.userId}
+        token={boot.token}
+        centrifugoUrl={boot.centrifugoUrl}
+        tokenRefresher={refreshHubToken}
+        onUnauthorized={handleUnauthorized}
+      />
+    );
+  }
+
   return (
     <main className="min-h-dvh flex items-center justify-center bg-[var(--bg-base)] px-4 py-8">
       {phase === "connecting" && (
@@ -150,15 +162,6 @@ export default function LocalPage() {
         <KeyEntry onSubmit={handleSubmit} submitting={submitting} error={keyError} />
       )}
       {phase === "starting" && <StartingState detail={startDetail} />}
-      {phase === "ready" && boot && (
-        <DashboardClient
-          userId={boot.userId}
-          token={boot.token}
-          centrifugoUrl={boot.centrifugoUrl}
-          tokenRefresher={refreshHubToken}
-          onUnauthorized={handleUnauthorized}
-        />
-      )}
     </main>
   );
 }
