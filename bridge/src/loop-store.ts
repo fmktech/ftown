@@ -7,20 +7,37 @@ import { computeNextRun } from './loop-schedule.js';
 import type { Loop, LoopDraft } from './types.js';
 
 /**
- * Atomic persistence for scheduled loops at `~/.ftown/loops.json`.
+ * Atomic persistence for scheduled loops at `<ftown-home>/loops.json`.
  *
  * Clones the session-registry.ts write pattern (mkdir 0o700 -> write PATH.tmp
- * 0o600 -> renameSync) so a crash mid-write never corrupts the live file. The
- * path is resolved at call time via homedir() (which reads $HOME) so tests can
- * redirect it, matching provider-env-store.ts.
+ * 0o600 -> renameSync) so a crash mid-write never corrupts the live file.
+ *
+ * The instance home is injected once at bridge startup via
+ * `configureLoopStoreHome()` (index.ts passes `resolveFtownHome(dataDir)`): the
+ * DEFAULT data dir keeps `$HOME/.ftown`, a non-default `--data-dir` gets its own
+ * home so a co-resident bridge's loops.json is never touched. When left
+ * unconfigured (unit tests, the default install path) it falls back to
+ * `join(homedir(), '.ftown')` resolved at call time, so a test's $HOME override
+ * still redirects every read/write — byte-for-byte the old behavior.
  */
 
 interface LoopsFile {
   loops: Loop[];
 }
 
+let configuredFtownHome: string | undefined;
+
+/** Inject the instance ".ftown home" once at startup (see module doc). */
+export function configureLoopStoreHome(home: string | undefined): void {
+  configuredFtownHome = home;
+}
+
+function ftownHome(): string {
+  return configuredFtownHome ?? join(homedir(), '.ftown');
+}
+
 function loopsPath(): string {
-  return join(homedir(), '.ftown', 'loops.json');
+  return join(ftownHome(), 'loops.json');
 }
 
 /** Tolerant loader: returns { loops: [] } on a missing OR corrupt file. Never throws. */
@@ -36,7 +53,7 @@ function loadLoops(): LoopsFile {
 }
 
 function saveLoops(data: LoopsFile): void {
-  mkdirSync(join(homedir(), '.ftown'), { recursive: true, mode: 0o700 });
+  mkdirSync(ftownHome(), { recursive: true, mode: 0o700 });
   const path = loopsPath();
   const tmp = `${path}.tmp`;
   writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });

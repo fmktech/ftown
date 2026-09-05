@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { listLoopRunRecords, upsertLoopRunRecord } from './loop-run-store.js';
+import { configureLoopRunStoreHome, listLoopRunRecords, upsertLoopRunRecord } from './loop-run-store.js';
 import type { LoopRunRecord } from './types.js';
 
 // homedir() reads $HOME at call time, so overriding it points every read/write
@@ -20,6 +20,8 @@ describe('loop-run-store — legacy skipped-record cleanup', () => {
   });
 
   afterEach(() => {
+    // Clear any injected home so a later test falls back to the $HOME override.
+    configureLoopRunStoreHome(undefined);
     if (realHome === undefined) delete process.env.HOME;
     else process.env.HOME = realHome;
     rmSync(home, { recursive: true, force: true });

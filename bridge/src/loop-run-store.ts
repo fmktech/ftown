@@ -10,8 +10,27 @@ interface LoopRunsFile {
   runs: LoopRunRecord[];
 }
 
+/**
+ * Instance ".ftown home" for `loop-runs.json`, injected once at bridge startup
+ * via `configureLoopRunStoreHome()` (index.ts passes `resolveFtownHome(dataDir)`):
+ * the DEFAULT data dir keeps `$HOME/.ftown`, a non-default `--data-dir` gets its
+ * own home so a co-resident bridge's loop-runs.json is never touched. Unconfigured
+ * (unit tests / default install) it falls back to `join(homedir(), '.ftown')`
+ * resolved at call time — a test's $HOME override still redirects every read/write.
+ */
+let configuredFtownHome: string | undefined;
+
+/** Inject the instance ".ftown home" once at startup (see above). */
+export function configureLoopRunStoreHome(home: string | undefined): void {
+  configuredFtownHome = home;
+}
+
+function ftownHome(): string {
+  return configuredFtownHome ?? join(homedir(), '.ftown');
+}
+
 function runStorePath(): string {
-  return join(homedir(), '.ftown', 'loop-runs.json');
+  return join(ftownHome(), 'loop-runs.json');
 }
 
 /** Legacy 'skipped' run records were persisted before skip diagnostics moved onto the
@@ -30,7 +49,7 @@ function loadFile(): LoopRunsFile {
 }
 
 function saveFile(data: LoopRunsFile): void {
-  mkdirSync(join(homedir(), '.ftown'), { recursive: true, mode: 0o700 });
+  mkdirSync(ftownHome(), { recursive: true, mode: 0o700 });
   const path = runStorePath();
   const tmp = `${path}.tmp`;
   writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });

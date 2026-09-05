@@ -8,14 +8,37 @@ interface RegistryData {
   byConversation: Record<string, string>;
 }
 
-const REGISTRY_PATH = join(homedir(), '.ftown', 'session-registry.json');
+/**
+ * Instance ".ftown home" for `session-registry.json`, injected once at bridge
+ * startup via `configureSessionRegistryHome()` (index.ts passes
+ * `resolveFtownHome(dataDir)`): the DEFAULT data dir keeps `$HOME/.ftown`, a
+ * non-default `--data-dir` gets its own home so a co-resident bridge's registry
+ * is never touched. Unconfigured (unit tests / default install) it falls back to
+ * `join(homedir(), '.ftown')` resolved at call time — a test's $HOME override
+ * still redirects every read/write. Previously a module-level const computed at
+ * import time; now call-time so injection (and the $HOME override) take effect.
+ */
+let configuredFtownHome: string | undefined;
+
+/** Inject the instance ".ftown home" once at startup (see above). */
+export function configureSessionRegistryHome(home: string | undefined): void {
+  configuredFtownHome = home;
+}
+
+function ftownHome(): string {
+  return configuredFtownHome ?? join(homedir(), '.ftown');
+}
+
+function registryPath(): string {
+  return join(ftownHome(), 'session-registry.json');
+}
 
 function loadRegistry(): RegistryData {
   try {
-    if (!existsSync(REGISTRY_PATH)) {
+    if (!existsSync(registryPath())) {
       return { byWorkspace: {}, byConversation: {} };
     }
-    const parsed = JSON.parse(readFileSync(REGISTRY_PATH, 'utf8')) as Partial<RegistryData>;
+    const parsed = JSON.parse(readFileSync(registryPath(), 'utf8')) as Partial<RegistryData>;
     return {
       byWorkspace: parsed.byWorkspace ?? {},
       byConversation: parsed.byConversation ?? {},
@@ -26,10 +49,11 @@ function loadRegistry(): RegistryData {
 }
 
 function saveRegistry(data: RegistryData): void {
-  mkdirSync(join(homedir(), '.ftown'), { recursive: true, mode: 0o700 });
-  const tmp = `${REGISTRY_PATH}.tmp`;
+  mkdirSync(ftownHome(), { recursive: true, mode: 0o700 });
+  const path = registryPath();
+  const tmp = `${path}.tmp`;
   writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
-  renameSync(tmp, REGISTRY_PATH);
+  renameSync(tmp, path);
 }
 
 export function registerSessionWorkspace(sessionId: string, workingDir?: string): void {
