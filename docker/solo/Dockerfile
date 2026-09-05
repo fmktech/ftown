@@ -77,7 +77,11 @@ ENV HOME=/home/ftown
 # for Claude Code sessions. Auth is NOT baked into the image — see README
 # "Agent auth" for the two supported options (ANTHROPIC_API_KEY env var, or a
 # mounted ~/.claude directory with existing OAuth credentials).
-RUN npm install -g ftown-bridge@0.19.23 @anthropic-ai/claude-code \
+# @earendil-works/pi-coding-agent: the `pi` CLI. Pinned to 0.83.0 to match the
+# host machine's installed pi version, since the bridge deploys its Pi
+# extension into the container and extension/protocol compatibility depends
+# on the pi version matching — see README "Agent auth".
+RUN npm install -g ftown-bridge@0.19.23 @anthropic-ai/claude-code @earendil-works/pi-coding-agent@0.83.0 \
     && npm cache clean --force
 
 # --- Volumes ---

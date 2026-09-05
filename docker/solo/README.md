@@ -90,6 +90,21 @@ need Anthropic credentials. Two options:
    OAuth credentials from a `claude login` done elsewhere) to
    `/home/ftown/.claude` in the container instead of/alongside the env var.
 
+**Pi** — the `pi` CLI (`@earendil-works/pi-coding-agent`) is also installed
+in the image. ftown's bridge deploys its Pi extension to
+`$HOME/.ftown/pi/ftown.js` inside the container, which is why Pi sessions are
+launched with `pi --extension "$HOME/.ftown/pi/ftown.js"`. Pi reads its own
+auth from `~/.pi/agent/`, so to reuse host credentials, bind-mount the host's
+`~/.pi/agent` to `/home/ftown/.pi/agent`, or set provider API keys via
+environment variables instead (e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`).
+`compose.yml` already wires this up:
+
+```
+- ${HOME}/.pi/agent:/home/ftown/.pi/agent
+# optional: also mount host Claude Code OAuth credentials
+# - ${HOME}/.claude:/home/ftown/.claude
+```
+
 `opencode` sessions (`bridge/src/harness-registry.ts:154`) are **not**
 supported by this image — the `opencode` binary isn't installed. Add it to
 the Dockerfile if you need Opencode-harness sessions.

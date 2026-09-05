@@ -11,10 +11,16 @@ services:
       - ftown-solo-data:/data
       - ftown-solo-home:/home/ftown/.ftown
       - ${FTOWN_WORKSPACE:-./workspace}:/workspace
+      - ${HOME}/.pi/agent:/home/ftown/.pi/agent
+      # Optional: mount host Claude Code OAuth credentials (~/.claude) too.
+      # - ${HOME}/.claude:/home/ftown/.claude
     environment:
       # Optional: enables `claude` CLI sessions without a mounted ~/.claude.
       # See README "Agent auth".
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Optional: enables `pi` CLI sessions without a mounted ~/.pi/agent.
+      # See README "Agent auth".
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
 
 volumes:
   ftown-solo-data:
