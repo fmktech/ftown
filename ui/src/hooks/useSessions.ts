@@ -44,16 +44,21 @@ function isSessionUsage(value: unknown): value is SessionUsage {
     && typeof usage.collectedAt === "string";
 }
 
-function mergeSessionSnapshot(current: Session | undefined, incoming: Session): Session {
+export function mergeSessionSnapshot(current: Session | undefined, incoming: Session): Session {
+  if (!current) return incoming;
+  let merged = incoming;
   if (
-    current?.status === "running"
+    current.status === "running"
     && incoming.status === "running"
     && current.usage
     && (!incoming.usage || incoming.usage.collectedAt <= current.usage.collectedAt)
   ) {
-    return { ...incoming, usage: current.usage };
+    merged = { ...merged, usage: current.usage };
   }
-  return incoming;
+  if (!incoming.bridgeId && current.bridgeId) {
+    merged = { ...merged, bridgeId: current.bridgeId };
+  }
+  return merged;
 }
 
 interface SessionUpdateMessage {

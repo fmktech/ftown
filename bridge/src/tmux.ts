@@ -147,9 +147,34 @@ export async function createTmuxSession(options: CreateTmuxSessionOptions): Prom
   args.push(`/bin/zsh -l -c ${shellQuote(inner)}`);
 
   await execFileAsync('tmux', args, { env: options.env });
+  invalidateTmuxSessionCache(options.sessionId);
 }
 
-export function hasTmuxSession(sessionId: string): boolean {
+/**
+ * Negative + positive cache for the has-session probe. `isKnownSession` runs it
+ * on every terminal_watch, and watchers re-send terminal_watch every ~20s: a
+ * foreign session (alive on another bridge, or gone) misses both in-memory arms
+ * and would otherwise spawn `tmux has-session` — a synchronous, event-loop
+ * blocking subprocess — on every heartbeat. Caching both outcomes for a short
+ * TTL collapses that to at most one probe per session per window. Create/attach
+ * and kill invalidate the entry so liveness transitions are seen immediately;
+ * the TTL is the backstop for transitions that bypass those paths.
+ */
+const HAS_SESSION_CACHE_TTL_MS = 2000;
+
+interface HasSessionCacheEntry {
+  value: boolean;
+  expiresAt: number;
+}
+
+const hasSessionCache = new Map<string, HasSessionCacheEntry>();
+
+// Test seams (production uses the defaults). `probe` performs the real tmux
+// subprocess; `now` is the clock the TTL is measured against.
+let hasSessionProbe: (sessionId: string) => boolean = probeTmuxSession;
+let hasSessionNow: () => number = () => Date.now();
+
+function probeTmuxSession(sessionId: string): boolean {
   try {
     execFileSync(
       'tmux',
@@ -160,6 +185,38 @@ export function hasTmuxSession(sessionId: string): boolean {
   } catch {
     return false;
   }
+}
+
+export function hasTmuxSession(sessionId: string): boolean {
+  const now = hasSessionNow();
+  const cached = hasSessionCache.get(sessionId);
+  if (cached && cached.expiresAt > now) {
+    return cached.value;
+  }
+  const value = hasSessionProbe(sessionId);
+  hasSessionCache.set(sessionId, { value, expiresAt: now + HAS_SESSION_CACHE_TTL_MS });
+  return value;
+}
+
+/** Drop the cached liveness for a session (call on create/attach/kill). */
+export function invalidateTmuxSessionCache(sessionId: string): void {
+  hasSessionCache.delete(sessionId);
+}
+
+/** Test-only: override the probe/clock and clear the cache. */
+export function __setTmuxProbeForTest(
+  hooks: { probe?: (sessionId: string) => boolean; now?: () => number } = {},
+): void {
+  if (hooks.probe) hasSessionProbe = hooks.probe;
+  if (hooks.now) hasSessionNow = hooks.now;
+  hasSessionCache.clear();
+}
+
+/** Test-only: restore production probe/clock and clear the cache. */
+export function __resetTmuxProbeForTest(): void {
+  hasSessionProbe = probeTmuxSession;
+  hasSessionNow = () => Date.now();
+  hasSessionCache.clear();
 }
 
 /** Session ids of all live ftown-* sessions on the dedicated socket. */
@@ -180,6 +237,7 @@ export function listFtownTmuxSessions(): string[] {
 }
 
 export async function killTmuxSession(sessionId: string): Promise<boolean> {
+  invalidateTmuxSessionCache(sessionId);
   try {
     await execFileAsync('tmux', [
       '-L', TMUX_SOCKET_NAME,
