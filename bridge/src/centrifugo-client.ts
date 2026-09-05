@@ -90,6 +90,15 @@ export class CentrifugoClient {
       token,
       getToken,
       websocket: WebSocket,
+      // Server sends an app-level ping every ping_interval (10s in
+      // centrifugo/config.json). centrifuge-js treats the connection as dead if
+      // no server ping arrives within maxServerPingDelay of the previous one.
+      // The library default (10s) leaves ZERO slack: a single inbound-backlog
+      // stall (e.g. a websocket_compression + reconnect re-sync storm delaying
+      // the ping frame past 10s) trips a false "no ping" disconnect and starts
+      // the reconnect flapping. 20s = one full ping_interval of tolerance, so a
+      // ping must be missed entirely (not merely delayed) before we reconnect.
+      maxServerPingDelay: 20_000,
     });
 
     this.client.on('connecting', (ctx) => {
@@ -140,11 +149,18 @@ export class CentrifugoClient {
     this.client.disconnect();
   }
 
-  subscribeToSessions(userId: string): void {
-    const channel = `sessions:updates#${userId}`;
-    const sub = this.client.newSubscription(channel);
-    sub.subscribe();
-    this.subscriptions.set(channel, sub);
+  // The bridge only PUBLISHES session updates (see publishSessionUpdate); it has
+  // no publication handler for `sessions:updates#{userId}` — the UI is the sole
+  // consumer. The `sessions` namespace has `allow_publish_for_client: true`
+  // (centrifugo/config.json), so publishing needs no subscription. The old
+  // subscribe here served only to satisfy a permission the config already
+  // grants, at the cost of Centrifugo echoing every one of our own publications
+  // back over the wire — dead inbound traffic that, during a reconnect re-sync
+  // storm, delayed the app-level ping and tripped false "no ping" reconnects.
+  // Removed. Kept as a no-op so the integrator's call site (index.ts) is
+  // unaffected — this file does not own index.ts.
+  subscribeToSessions(_userId: string): void {
+    // intentionally empty — publish-only channel, no subscription needed.
   }
 
   async publishSessionUpdate(userId: string, session: Session): Promise<void> {
@@ -191,14 +207,16 @@ export class CentrifugoClient {
 
   async publishTerminalData(userId: string, sessionId: string, data: string): Promise<void> {
     const channel = `terminal:${sessionId}#${userId}`;
-    if (!this.subscriptions.has(channel)) {
-      const sub = this.client.newSubscription(channel);
-      this.subscriptions.set(channel, sub);
-      await new Promise<void>((resolve) => {
-        sub.on('subscribed', () => resolve());
-        sub.subscribe();
-      });
-    }
+    // The bridge only PUBLISHES terminal output; the UI is the sole subscriber.
+    // The `terminal` namespace has `allow_publish_for_client: true`
+    // (centrifugo/config.json), so client publishing needs no subscription. The
+    // old subscribe-before-publish here existed only to satisfy a permission the
+    // config already grants — and it was the worst offender for the reconnect
+    // flapping: subscribing to our OWN high-volume output channel made Centrifugo
+    // echo every keystroke of terminal output straight back to the bridge (dead
+    // inbound traffic, no handler), and `terminal` has `force_recovery: true`
+    // with a 10000-entry history, so each reconnect replayed that backlog and
+    // starved the app-level ping. Removed — we publish directly.
     try {
       await this.client.publish(channel, truncateData({ type: 'output', data }));
     } catch (err) {

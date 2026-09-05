@@ -481,16 +481,37 @@ program
       // not re-request its list on reconnect, so without this its session list
       // goes stale/empty after a Centrifugo blip until a page reload.
       onReconnect: async () => {
+        // Re-publishing EVERY session on each reconnect is a publish storm that
+        // (before the flapping fix) fed the command-echo backlog. Terminal
+        // records (completed/error) don't change and were already in the UI's
+        // list before the blip, so only live sessions need a re-push. Publish in
+        // bounded batches with a macrotask yield between them so a large account
+        // can't monopolize the event loop. A single publish's payload is
+        // unchanged.
+        const RESYNC_CHUNK = 10;
         const sessions = await store.listSessions();
-        for (const session of sessions) {
-          await centrifugo.publishSessionUpdate(userId, session);
+        const live = sessions.filter(
+          (session) => session.status === 'running' || session.status === 'pending',
+        );
+        for (let i = 0; i < live.length; i += RESYNC_CHUNK) {
+          await Promise.all(
+            live.slice(i, i + RESYNC_CHUNK).map((session) =>
+              centrifugo.publishSessionUpdate(userId, session),
+            ),
+          );
+          await new Promise((resolve) => setTimeout(resolve, 0));
         }
         const loops = listLoops();
-        for (const loop of loops) {
-          await centrifugo.publishLoopUpdate(userId, loop);
+        for (let i = 0; i < loops.length; i += RESYNC_CHUNK) {
+          await Promise.all(
+            loops.slice(i, i + RESYNC_CHUNK).map((loop) =>
+              centrifugo.publishLoopUpdate(userId, loop),
+            ),
+          );
+          await new Promise((resolve) => setTimeout(resolve, 0));
         }
         console.log(
-          `[Bridge] Re-synced ${sessions.length} session(s) and ${loops.length} loop(s) after Centrifugo reconnect`,
+          `[Bridge] Re-synced ${live.length} session(s) and ${loops.length} loop(s) after Centrifugo reconnect`,
         );
       },
     });
@@ -532,13 +553,56 @@ program
       userId,
       // Watch messages fan out to every bridge on commands:rpc; only register
       // watchers for sessions this bridge actually serves terminal data for.
-      isKnownSession: (sid) => runner.isRunning(sid) || terminalManager.has(sid),
+      // hasTmuxSession is the third arm: a session can be alive in tmux with no
+      // PTY client in THIS process (agent-spawned re-run, adopted after a bridge
+      // restart, resurrection deferred). Those used to fail the guard, so the
+      // watch was dropped and every device rendered a blank pane. The tmux probe
+      // is a subprocess, so it runs last — the two in-memory checks short-circuit
+      // for every session this bridge already serves.
+      isKnownSession: (sid) => runner.isRunning(sid) || terminalManager.has(sid) || runner.hasTmuxSession(sid),
     });
+
+    // Accepting the watch is not enough on its own to make output flow.
+    // publishScreenDump serves entirely from terminalManager, which is fed by
+    // TerminalPump from runner 'data' events — there is no tmux capture-pane
+    // path — so a session alive in tmux with no PTY client here dumps an empty
+    // screen and then streams nothing. Attach one client through the SAME adopt
+    // path session resurrection uses (runner.reattach); tmux redraws the full
+    // screen to a joining client, so live output resumes within milliseconds and
+    // rides the already-attached pump. No new pump, no new tmux plumbing.
+    const watchReattachInFlight = new Set<string>();
+    const ensureWatchedSessionAttached = (sid: string): void => {
+      if (runner.isRunning(sid) || watchReattachInFlight.has(sid)) return;
+      if (!runner.hasTmuxSession(sid)) return;
+      watchReattachInFlight.add(sid);
+      void store.loadSession(sid)
+        .then((session) => {
+          // Only adopt what this store still considers live: a tmux session with
+          // no live record may belong to another bridge on this machine.
+          if (!session || (session.status !== 'running' && session.status !== 'pending')) return;
+          if (runner.isRunning(sid)) return;
+          if (!runner.reattach(sid, {
+            workingDir: session.workingDir,
+            parentSessionId: session.parentSessionId,
+          })) return;
+          // Idempotent: subscribeToTerminalInput no-ops on an existing channel.
+          wireTerminalInput(sid);
+          console.log(`[Bridge] Reattached tmux session ${sid} for a new terminal watcher`);
+        })
+        .catch((err) => {
+          console.error(`[Bridge] Failed to reattach ${sid} for a terminal watcher:`, err);
+        })
+        .finally(() => { watchReattachInFlight.delete(sid); });
+    };
+
     // Every NEW remote watcher (first, each additional distinct client, or a
     // post-expiry re-registration) ⇒ push a full screen resync so the joining
     // Centrifugo-fallback client renders before incremental output (R1). The
     // dump is channel-wide; existing viewers re-render idempotently.
-    watchRegistry.onNewWatcher((sid) => publishScreenDump(sid));
+    watchRegistry.onNewWatcher((sid) => {
+      ensureWatchedSessionAttached(sid);
+      publishScreenDump(sid);
+    });
 
     // Bind the loopback WS upgrade handler onto the already-listening server.
     const loopbackHttpServer = localApiServer.getHttpServer();

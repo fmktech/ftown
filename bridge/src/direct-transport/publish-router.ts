@@ -28,7 +28,16 @@ export interface PublishRouterOptions {
    * to accepting all sessionIds.
    */
   isKnownSession?: (sessionId: string) => boolean;
+  /** Injectable log sink for dropped watches (tests); defaults to console.warn. */
+  warn?: (message: string) => void;
 }
+
+/**
+ * Cap on remembered "already logged" sessionIds. Watch messages fan out to
+ * every bridge on commands:rpc, so a long-lived bridge on a busy account would
+ * otherwise accumulate one entry per foreign session forever.
+ */
+const UNKNOWN_LOG_CAP = 500;
 
 /**
  * Implements R2: terminal output/screen always fan out to direct-attached peers;
@@ -42,6 +51,9 @@ export class PublishRouter {
   private readonly userId: string;
   private readonly loopback?: LoopbackPeerServerLike;
   private readonly isKnownSession: (sessionId: string) => boolean;
+  private readonly warn: (message: string) => void;
+  /** sessionIds already logged as unknown; keeps heartbeats from spamming. */
+  private readonly unknownLogged = new Set<string>();
 
   constructor(options: PublishRouterOptions) {
     this.registry = options.registry;
@@ -50,6 +62,7 @@ export class PublishRouter {
     this.userId = options.userId;
     this.loopback = options.loopback;
     this.isKnownSession = options.isKnownSession ?? (() => true);
+    this.warn = options.warn ?? ((message) => console.warn(message));
   }
 
   /** R2 gating: a session is direct-attached if EITHER local rung has a peer. */
@@ -91,7 +104,10 @@ export class PublishRouter {
         if (typeof msg.sessionId !== 'string' || msg.sessionId === '') return;
         if (typeof msg.clientId !== 'string' || msg.clientId === '') return;
         if (msg.type === 'terminal_watch') {
-          if (!this.isKnownSession(msg.sessionId)) return;
+          if (!this.isKnownSession(msg.sessionId)) {
+            this.logUnknownWatch(msg.sessionId);
+            return;
+          }
           this.registry.watch(msg.sessionId, msg.clientId);
         } else {
           this.registry.unwatch(msg.sessionId, msg.clientId);
@@ -100,5 +116,21 @@ export class PublishRouter {
     } catch (err) {
       console.error('[DirectTransport] Failed to handle direct command:', err);
     }
+  }
+
+  /**
+   * A dropped watch is normal for another bridge's session, but for a session
+   * the user IS looking at it renders a permanently blank pane — and used to be
+   * silent. Log once per sessionId: watchers re-send terminal_watch every
+   * WATCH_HEARTBEAT_MS, so an unconditional line would repeat every 20s forever.
+   */
+  private logUnknownWatch(sessionId: string): void {
+    if (this.unknownLogged.has(sessionId)) return;
+    if (this.unknownLogged.size >= UNKNOWN_LOG_CAP) this.unknownLogged.clear();
+    this.unknownLogged.add(sessionId);
+    this.warn(
+      `[DirectTransport] Dropped terminal_watch for unknown session ${sessionId} ` +
+      '(no running process, no terminal buffer, no tmux session on this bridge)',
+    );
   }
 }

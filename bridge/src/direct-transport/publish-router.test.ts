@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 
 import { PublishRouter } from './publish-router.js';
 import type { CentrifugoPublisher } from './publish-router.js';
-import type { WatchRegistry } from './watch-registry.js';
+import { WatchRegistry } from './watch-registry.js';
 import type { DirectPeerManager } from './peer-manager.js';
 import type { SignalType } from './contract.js';
 
@@ -96,14 +96,16 @@ function makeRouter(isKnownSession?: (sessionId: string) => boolean) {
   const watchRegistry = new FakeWatchRegistry();
   const peerManager = new FakePeerManager();
   const centrifugo = new FakeCentrifugoClient();
+  const warnings: string[] = [];
   const router = new PublishRouter({
     registry: watchRegistry as unknown as WatchRegistry,
     peerManager: peerManager as unknown as DirectPeerManager,
     centrifugo,
     userId: USER_ID,
     isKnownSession,
+    warn: (message) => { warnings.push(message); },
   });
-  return { router, watchRegistry, peerManager, centrifugo };
+  return { router, watchRegistry, peerManager, centrifugo, warnings };
 }
 
 describe('PublishRouter.publishTerminalData', () => {
@@ -351,5 +353,98 @@ describe('PublishRouter loopback fan-out (addendum)', () => {
     await router.publishTerminalScreen('sess-1', 'SCREEN');
     assert.deepStrictEqual(peerManager.sendOutputCalls, [['sess-1', 'hello']]);
     assert.deepStrictEqual(peerManager.sendScreenCalls, [['sess-1', 'SCREEN']]);
+  });
+});
+
+/**
+ * Sessions alive in tmux but with no PTY client in this bridge process (agent
+ * spawned via the local API, a re-run, or a session adopted after a restart).
+ * `isKnownSession` is wired in index.ts as
+ * `runner.isRunning(sid) || terminalManager.has(sid) || runner.hasTmuxSession(sid)`;
+ * these tests pin the router half of that contract — the third arm must be able
+ * to admit a watch on its own, and a genuinely unknown session must still be
+ * dropped, now with exactly one log line naming it.
+ */
+describe('PublishRouter tmux-only sessions and unknown-watch logging', () => {
+  /** Stand-in for the index.ts predicate: nothing in-process, alive in tmux. */
+  const tmuxOnly = (alive: string) => (sessionId: string) => sessionId === alive;
+
+  it('accepts terminal_watch for a session known only through the tmux arm of the predicate', () => {
+    const { router, watchRegistry, warnings } = makeRouter(tmuxOnly('tmux-sess'));
+
+    router.handleCommand({ type: 'terminal_watch', sessionId: 'tmux-sess', clientId: 'client-1' });
+
+    assert.deepStrictEqual(watchRegistry.watchCalls, [['tmux-sess', 'client-1']]);
+    assert.strictEqual(watchRegistry.hasWatchers('tmux-sess'), true);
+    assert.deepStrictEqual(warnings, []);
+  });
+
+  it('a tmux-only watch fires onNewWatcher on the real WatchRegistry (the screen-dump trigger)', () => {
+    const registry = new WatchRegistry({ sweepIntervalMs: 0 });
+    const newWatchers: string[] = [];
+    registry.onNewWatcher((sessionId) => { newWatchers.push(sessionId); });
+    const router = new PublishRouter({
+      registry,
+      peerManager: new FakePeerManager() as unknown as DirectPeerManager,
+      centrifugo: new FakeCentrifugoClient(),
+      userId: USER_ID,
+      isKnownSession: tmuxOnly('tmux-sess'),
+    });
+
+    router.handleCommand({ type: 'terminal_watch', sessionId: 'tmux-sess', clientId: 'client-1' });
+
+    assert.deepStrictEqual(newWatchers, ['tmux-sess']);
+    assert.strictEqual(registry.hasWatchers('tmux-sess'), true);
+    registry.dispose();
+  });
+
+  it('R2 output for a tmux-only session reaches Centrifugo once its watch is accepted', async () => {
+    const { router, centrifugo } = makeRouter(tmuxOnly('tmux-sess'));
+
+    await router.publishTerminalData('tmux-sess', 'pre-watch');
+    assert.deepStrictEqual(centrifugo.calls, []);
+
+    router.handleCommand({ type: 'terminal_watch', sessionId: 'tmux-sess', clientId: 'client-1' });
+    await router.publishTerminalData('tmux-sess', 'post-watch');
+
+    assert.deepStrictEqual(
+      centrifugo.calls.map((c) => [c.kind, c.payload]),
+      [['data', 'post-watch']],
+    );
+  });
+
+  it('still drops terminal_watch for an unknown session, and logs it once with the sessionId', () => {
+    const { router, watchRegistry, warnings } = makeRouter(() => false);
+
+    // Watchers re-send terminal_watch every WATCH_HEARTBEAT_MS; only the first logs.
+    router.handleCommand({ type: 'terminal_watch', sessionId: 'foreign-sess', clientId: 'client-1' });
+    router.handleCommand({ type: 'terminal_watch', sessionId: 'foreign-sess', clientId: 'client-1' });
+    router.handleCommand({ type: 'terminal_watch', sessionId: 'foreign-sess', clientId: 'client-2' });
+
+    assert.deepStrictEqual(watchRegistry.watchCalls, []);
+    assert.strictEqual(warnings.length, 1);
+    assert.match(warnings[0], /terminal_watch/);
+    assert.match(warnings[0], /foreign-sess/);
+  });
+
+  it('logs each distinct unknown session once, so one noisy session cannot mask another', () => {
+    const { router, warnings } = makeRouter(() => false);
+
+    router.handleCommand({ type: 'terminal_watch', sessionId: 'foreign-a', clientId: 'client-1' });
+    router.handleCommand({ type: 'terminal_watch', sessionId: 'foreign-b', clientId: 'client-1' });
+    router.handleCommand({ type: 'terminal_watch', sessionId: 'foreign-a', clientId: 'client-1' });
+
+    assert.strictEqual(warnings.length, 2);
+    assert.ok(warnings.some((w) => w.includes('foreign-a')));
+    assert.ok(warnings.some((w) => w.includes('foreign-b')));
+  });
+
+  it('does not log for accepted watches or for terminal_unwatch of an unknown session', () => {
+    const { router, warnings } = makeRouter((sessionId) => sessionId === 'mine');
+
+    router.handleCommand({ type: 'terminal_watch', sessionId: 'mine', clientId: 'client-1' });
+    router.handleCommand({ type: 'terminal_unwatch', sessionId: 'foreign-sess', clientId: 'client-1' });
+
+    assert.deepStrictEqual(warnings, []);
   });
 });
