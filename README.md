@@ -37,17 +37,23 @@ https://github.com/user-attachments/assets/e9c1ce70-70b0-4ba0-81d8-080d4eeef445
 
 ## Features
 
-### Solo mode — one command, one port, zero accounts
+### Solo mode — runs entirely on your network
 
 ```bash
 npx ftown-bridge --solo
 ```
 
-Prints a link like `http://192.168.1.10:8040/#k=<key>` — open it on any device on your Wi-Fi and drive your agents. No Centrifugo to install (a hub is downloaded, checksum-pinned and managed for you), no UI hosting (the panel bundle is fetched on first run), no account service.
+Your code, terminals and agent output never leave your network. ftown Solo has no account, no cloud service and no telemetry; the only outbound traffic is two one-time downloads from GitHub, plus whatever your AI agents themselves send to their model providers.
 
-- **Single port**: panel + bridge API + websocket hub behind one listener; tunnels (Tailscale serve, cloudflared, ngrok) just point at it when you want internet access
-- **Key auth**: 256-bit key in the URL fragment; `--rotate-key` regenerates offline; `--port` overrides the default (`8040`)
+Prints a link like `http://192.168.1.10:8040/#k=<key>` — open it on any device on your Wi-Fi and drive your agents. No Centrifugo to install (a checksum-pinned hub binary is downloaded and managed for you), no UI hosting (the panel bundle is fetched from a GitHub release on first run), no account service.
+
+- **Single port**: panel + bridge API + websocket hub behind one listener; the hub and panel themselves only bind loopback. Tunnels (Tailscale serve, cloudflared, ngrok) just point at the one port when you want off-LAN access
+- **No telemetry**: panel analytics are compiled out of Solo builds — no script is ever requested
+- **Key auth**: 256-bit key lives in the URL fragment (never sent to a server in a request path/query); only its SHA-256 hash is persisted; `--rotate-key` regenerates it offline; `--port` overrides the default (`8040`)
 - ⚠️ LAN traffic is plain HTTP by design — anyone on the same network can capture your key from the wire. Use a tailnet or tunnel with TLS when that matters.
+- **Docker**: `cd docker/solo && docker compose up -d --build` — see [`docker/solo/README.md`](docker/solo/README.md)
+
+Full guide: [docs/solo.md](docs/solo.md)
 
 ### Direct transport ladder
 
@@ -185,7 +191,7 @@ Development config is at `centrifugo/config.json`. For production, create a `con
 
 ### Local Network
 
-Run all three components on a single machine accessible to your LAN.
+Run all three components on a single machine accessible to your LAN. If you just want a single-port, no-account LAN deployment with everything staying on your network, see [Solo mode](#solo-mode--runs-entirely-on-your-network) instead.
 
 **1. Generate secrets:**
 

@@ -382,6 +382,90 @@ export default async function LandingPage() {
           </div>
         </div>
 
+        {/* Solo mode */}
+        <section
+          id="solo"
+          aria-labelledby="solo-heading"
+          className="mt-12 sm:mt-16 w-full max-w-[960px] rounded-[var(--radius-lg)] bg-[var(--bg-surface)] border border-[var(--border-muted)] p-6 sm:p-8"
+        >
+          <p className="text-[11px] tracking-[0.14em] uppercase text-[var(--accent)] font-semibold mb-4">
+            Solo mode
+          </p>
+          <h2
+            id="solo-heading"
+            className="font-[family-name:var(--font-sans)] text-[clamp(24px,4vw,36px)] font-bold tracking-[-0.02em] text-[var(--text-primary)] mb-3"
+          >
+            Run it entirely on your network
+          </h2>
+          <p className="font-[family-name:var(--font-sans)] text-sm sm:text-base text-[var(--text-secondary)] leading-relaxed max-w-[64ch] mb-6">
+            One command starts the bridge, a realtime hub and the web panel on a single
+            port of your own machine. Your code, terminals and agent output never leave
+            your network. No account, no cloud service, no telemetry.
+          </p>
+
+          <div className="inline-block max-w-full rounded-[var(--radius-md)] bg-[var(--bg-elevated)] border border-[var(--border-muted)] px-4 py-3 mb-2 overflow-x-auto">
+            <code className="font-[family-name:var(--font-mono)] text-[13px] text-[var(--accent)] whitespace-pre">
+              npx ftown-bridge --solo
+            </code>
+          </div>
+          <p className="text-[11px] text-[var(--text-faint)] mb-6">
+            Prints a link like{" "}
+            <code className="font-[family-name:var(--font-mono)] text-[var(--text-muted)]">
+              http://192.168.1.10:8040/#k=&hellip;
+            </code>{" "}
+            &mdash; open it on any device on your Wi-Fi.
+          </p>
+
+          <div className="grid sm:grid-cols-3 gap-3 mb-6">
+            <div className="rounded-[var(--radius-md)] bg-[var(--bg-elevated)] border border-[var(--border-muted)] p-4">
+              <div className="font-[family-name:var(--font-sans)] text-[13px] text-[var(--text-secondary)] leading-relaxed">
+                Nothing phones home — the only outbound traffic is two one-time
+                downloads from GitHub (the hub binary, checksum-pinned, and the panel
+                bundle), plus whatever your AI agents send to their own model
+                providers.
+              </div>
+            </div>
+            <div className="rounded-[var(--radius-md)] bg-[var(--bg-elevated)] border border-[var(--border-muted)] p-4">
+              <div className="font-[family-name:var(--font-sans)] text-[13px] text-[var(--text-secondary)] leading-relaxed">
+                Key in the URL, hash on disk — a 256-bit access key pairs your
+                devices; only its hash is stored, and{" "}
+                <code className="font-[family-name:var(--font-mono)] text-[var(--text-primary)]">
+                  --rotate-key
+                </code>{" "}
+                replaces it.
+              </div>
+            </div>
+            <div className="rounded-[var(--radius-md)] bg-[var(--bg-elevated)] border border-[var(--border-muted)] p-4">
+              <div className="font-[family-name:var(--font-sans)] text-[13px] text-[var(--text-secondary)] leading-relaxed">
+                Also runs in Docker —{" "}
+                <code className="font-[family-name:var(--font-mono)] text-[var(--text-primary)]">
+                  docker compose up
+                </code>{" "}
+                from{" "}
+                <code className="font-[family-name:var(--font-mono)] text-[var(--text-primary)]">
+                  docker/solo
+                </code>
+                , or put it behind Tailscale or cloudflared when you want it off the
+                LAN.
+              </div>
+            </div>
+          </div>
+
+          <p className="text-[11px] text-[var(--text-faint)] mb-4">
+            LAN traffic is plain HTTP by design; use a tailnet or TLS tunnel when that
+            matters.
+          </p>
+
+          <a
+            href="https://github.com/fmktech/ftown/blob/main/docs/solo.md"
+            target="_blank"
+            rel="noopener noreferrer"
+            className={`inline-flex items-center gap-1 text-[13px] text-[var(--accent)] hover:text-[var(--text-primary)] transition-colors no-underline ${linkFocus}`}
+          >
+            Read the Solo guide →
+          </a>
+        </section>
+
         {/* Stats strip */}
         <div className="mt-12 sm:mt-16 w-full max-w-[960px] grid grid-cols-2 sm:grid-cols-4 gap-6 py-6 border-y border-[var(--border-subtle)]">
           {STATS.map((s) => (

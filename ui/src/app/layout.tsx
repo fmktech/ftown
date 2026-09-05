@@ -37,7 +37,8 @@ export default function RootLayout({
       <body className="antialiased min-h-screen">
         <ServiceWorkerRegister />
         <Providers>{children}</Providers>
-        <Analytics />
+        {/* Solo promises no telemetry; the same-origin analytics script would 404 anyway but must not be requested. */}
+        {process.env.NEXT_PUBLIC_SOLO !== "1" && <Analytics />}
       </body>
     </html>
   );
