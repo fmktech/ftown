@@ -10,6 +10,7 @@ import { ShellType, SessionUsage } from "@/types";
 import { useTerminal } from "@/hooks/useTerminal";
 import { FallbackReason, TerminalTransportApi, TerminalTransportMode } from "@/lib/direct-transport/contract";
 import { formatTokens, formatUsage, formatUsageDetail } from "@/lib/format-usage";
+import { HarnessIcon } from "./HarnessIcon";
 import "@xterm/xterm/css/xterm.css";
 
 export interface TerminalHandle {
@@ -425,8 +426,12 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
               background: "var(--bg-surface)",
             }}
           >
-            <div className="flex items-center gap-2">
-              <span style={{ fontSize: 11, color: "var(--text-faint)" }}>›_</span>
+            <div className="flex items-center gap-2 min-w-0 overflow-hidden">
+              {shellType ? (
+                <HarnessIcon harness={shellType} size={14} className="shrink-0" title={shellType} />
+              ) : (
+                <span style={{ fontSize: 11, color: "var(--text-faint)" }}>›_</span>
+              )}
               {sessionName && (
                 <span
                   style={{
