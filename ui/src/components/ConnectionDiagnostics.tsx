@@ -15,6 +15,7 @@ interface ConnectionDiagnosticsProps {
   centrifugoUrl: string;
   token: string;
   onRetry: () => void;
+  onDismiss?: () => void;
 }
 
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
@@ -51,7 +52,7 @@ function StatusIcon({ status }: { status: DiagnosticCheck["status"] }) {
   );
 }
 
-export function ConnectionDiagnostics({ connectionStatus, connectionError, centrifugoUrl, token, onRetry }: ConnectionDiagnosticsProps) {
+export function ConnectionDiagnostics({ connectionStatus, connectionError, centrifugoUrl, token, onRetry, onDismiss }: ConnectionDiagnosticsProps) {
   const [checks, setChecks] = useState<DiagnosticCheck[]>([]);
   const [running, setRunning] = useState(false);
   const [hasRun, setHasRun] = useState(false);
@@ -201,7 +202,7 @@ export function ConnectionDiagnostics({ connectionStatus, connectionError, centr
   }, [token, centrifugoUrl, updateCheck]);
 
   if (connectionStatus === "connected") return null;
-  if (connectionStatus === "connecting" && !hasRun) return null;
+  if (connectionStatus === "connecting" && !hasRun && !onDismiss) return null;
 
   const hasFail = checks.some((c) => c.status === "fail");
   const allPass = checks.length > 0 && checks.every((c) => c.status === "pass");
@@ -233,6 +234,7 @@ export function ConnectionDiagnostics({ connectionStatus, connectionError, centr
         <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)", marginBottom: 4 }}>
           Connection Failed
         </div>
+        {onDismiss && <button className="btn-ghost" onClick={onDismiss}>Back to terminals</button>}
         {connectionError && (
           <div style={{ fontSize: 11, color: "var(--status-error)", marginBottom: 12, lineHeight: 1.5 }}>
             {connectionError}

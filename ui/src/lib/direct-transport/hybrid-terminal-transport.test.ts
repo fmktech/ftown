@@ -2172,3 +2172,80 @@ describe('HybridTerminalTransport — transport upgrade (transport-upgrade-adden
     expect(toPeer.indexOf('bc')).toBeLessThan(toPeer.indexOf('z'));
   });
 });
+
+
+describe('cloud outage recovery with remembered loopback discovery', () => {
+  it.each(['reject', 'hang', 'empty'])('reconnects locally when presence is %s, then refreshes credentials on cloud recovery', async (failure) => {
+    vi.useFakeTimers();
+    let state = 'online';
+    let nonce = 'first-nonce';
+    class PresenceSub extends FakeSubscription {
+      presence(): Promise<{ clients: Record<string, { connInfo: unknown }> }> {
+        if (state === 'reject') return Promise.reject(new Error('cloud unavailable'));
+        if (state === 'hang') return new Promise(() => {});
+        const clients: Record<string, { connInfo: unknown }> = state === 'empty' ? {} : {
+          bridge: { connInfo: { bridgeId: 'bridge-1', localPort: 41999, localNonce: nonce } },
+        };
+        return Promise.resolve({ clients });
+      }
+    }
+    class Client extends FakeCentrifugeClient {
+      override newSubscription(channel: string): FakeSubscription {
+        if (channel.startsWith('bridges:presence')) {
+          const sub = new PresenceSub(channel);
+          this.subs.set(channel, sub);
+          return sub;
+        }
+        return super.newSubscription(channel);
+      }
+    }
+    const localPeers: FakePeer[] = [];
+    const loopbackPeerFactory = vi.fn((opts: { bridgeId: string }) => {
+      const p = new FakePeer(opts.bridgeId);
+      localPeers.push(p);
+      return p;
+    });
+    const transport = new HybridTerminalTransport({
+      centrifuge: new Client(), userId: 'user', clientId: 'tab',
+      publishCommand: vi.fn(), loopbackPeerFactory,
+      peerFactory: (opts: PeerFactoryOpts) => {
+        const p = new FakePeer(opts.bridgeId);
+        p.connectMode = 'reject';
+        return p;
+      },
+      upgradeBackoffMs: [1000], upgradeJitter: 0,
+    } as unknown as ConstructorParameters<typeof HybridTerminalTransport>[0]);
+    try {
+      const output = vi.fn();
+      transport.subscribeTerminal('session', 'bridge-1', { onOutput: output, onScreen: vi.fn() });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(transport.getMode('session')).toBe('local');
+      state = failure;
+      transport.sendInput('session', 'still-local');
+      expect(localPeers[0].sendInputCalls).toContainEqual(['session', 'still-local']);
+      localPeers[0].simulateClose();
+      await vi.advanceTimersByTimeAsync(1000 + LOOPBACK_TIMEOUT_MS);
+      expect(localPeers).toHaveLength(2);
+      expect(loopbackPeerFactory).toHaveBeenLastCalledWith(expect.objectContaining({ nonce: 'first-nonce' }));
+      localPeers[1].attachCalls[0][1].onScreen('reconnected');
+      expect(transport.getMode('session')).toBe('local');
+      localPeers[1].attachCalls[0][1].onOutput('working offline');
+      expect(output).toHaveBeenCalledWith('working offline');
+      transport.sendResize('session', 100, 30);
+      expect(localPeers[1].sendResizeCalls).toContainEqual(['session', 100, 30]);
+      state = 'online';
+      nonce = 'rotated-nonce';
+      // Cloud recovery alone must not replace a working direct peer.
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(localPeers).toHaveLength(2);
+      localPeers[1].simulateClose();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(loopbackPeerFactory).toHaveBeenLastCalledWith(expect.objectContaining({ nonce: 'rotated-nonce' }));
+      localPeers[2].attachCalls[0][1].onScreen('fresh screen');
+      expect(transport.getMode('session')).toBe('local');
+    } finally {
+      transport.dispose();
+      vi.useRealTimers();
+    }
+  });
+});
