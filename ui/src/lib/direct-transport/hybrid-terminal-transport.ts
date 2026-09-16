@@ -228,6 +228,9 @@ export class HybridTerminalTransport implements TerminalTransportApi {
   private readonly upgradeJitter: number;
 
   private readonly peers = new Map<string, PeerEntry>();
+  // Scoped to this authenticated transport's lifetime; never persist nonces.
+  // Cloud presence can disappear while the loopback server is still healthy.
+  private readonly localAdverts = new Map<string, BridgeLocalAdvert>();
   private readonly sessions = new Map<string, SessionEntry>();
   private readonly modeChangeCbs = new Set<(sessionId: string, mode: TerminalTransportMode) => void>();
   private readonly bridgeReachabilityCbs = new Set<
@@ -396,6 +399,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
       pe.peer?.close();
     }
     this.peers.clear();
+    this.localAdverts.clear();
     this.modeChangeCbs.clear();
     this.bridgeReachabilityCbs.clear();
 
@@ -785,6 +789,9 @@ export class HybridTerminalTransport implements TerminalTransportApi {
    */
   private async isBridgeOnlineForUpgrade(bridgeId: string): Promise<boolean> {
     if (this.advertInjected) return true;
+    // Let the authenticated loopback handshake determine local reachability,
+    // even when Fly cannot answer presence queries.
+    if (this.localAdverts.has(bridgeId)) return true;
     const sub = this.ensurePresenceSub();
     if (typeof sub.presence !== 'function') return false;
     const result = await this.readPresenceBounded(sub);
@@ -1191,24 +1198,25 @@ export class HybridTerminalTransport implements TerminalTransportApi {
   }
 
   private async defaultGetLocalAdvert(bridgeId: string): Promise<BridgeLocalAdvert | null> {
+    const cached = this.localAdverts.get(bridgeId) ?? null;
     const sub = this.ensurePresenceSub();
-    if (typeof sub.presence !== 'function') return null;
+    if (typeof sub.presence !== 'function') return cached;
     const result = await this.readPresenceBounded(sub);
-    if (!result) return null;
+    if (!result) return cached;
     for (const info of Object.values(result.clients)) {
       const ci = info.connInfo as
         | { bridgeId?: string; localPort?: number; localNonce?: string }
         | undefined;
       if (
         ci &&
-        ci.bridgeId === bridgeId &&
+        typeof ci.bridgeId === 'string' &&
         typeof ci.localPort === 'number' &&
         typeof ci.localNonce === 'string'
       ) {
-        return { localPort: ci.localPort, localNonce: ci.localNonce };
+        this.localAdverts.set(ci.bridgeId, { localPort: ci.localPort, localNonce: ci.localNonce });
       }
     }
-    return null;
+    return this.localAdverts.get(bridgeId) ?? null;
   }
 
   /**

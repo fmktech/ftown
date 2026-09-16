@@ -23,7 +23,7 @@ import { NewFactoryModal } from "./factory/NewFactoryModal";
 import { deriveFactories } from "./factory/useFactory";
 import type { FactoryInfo, NewFactoryInput } from "./factory/types";
 import { factoryInitPrompt, factoryKey, factoryWorkerOf } from "./factory/types";
-import { ConnectionDiagnostics } from "./ConnectionDiagnostics";
+import { CloudConnectionNotice } from "./CloudConnectionNotice";
 import { SessionAttentionAlert } from "./SessionAttentionAlert";
 import { mergeBridgeOrder } from "@/lib/bridge-order";
 import { StatusDot } from "@/lib/StatusDot";
@@ -860,18 +860,31 @@ PY`;
           <span style={{ width: 1, height: 12, background: "var(--border-muted)" }} />
 
           {/* Connection status */}
-          <div className="flex items-center gap-1.5">
-            <StatusDot kind={connectionStatus} title={connectionStatus} />
+          <div className="flex items-center gap-1.5" role="status" aria-live="polite">
+            {directlyReachableBridgeIds.size > 0 && (
+              <>
+                <StatusDot kind="connected" title="Local/P2P connected" />
+                <span style={{ fontSize: 11, color: "var(--status-running)" }}>
+                  Local/P2P connected
+                </span>
+                <span aria-hidden="true" style={{ color: "var(--text-muted)" }}>·</span>
+              </>
+            )}
+            <StatusDot
+              kind={connectionStatus === "connected" ? "connected" : directlyReachableBridgeIds.size > 0 ? "connecting" : connectionStatus}
+              title={connectionStatus === "connected" ? "Cloud connected" : "Cloud reconnecting"}
+            />
             <span
               style={{
                 fontSize: 11,
-                color: connectionStatus === "error" || connectionStatus === "disconnected"
+                color: connectionStatus !== "connected" && directlyReachableBridgeIds.size > 0
+                  ? "var(--status-pending)"
+                  : connectionStatus === "error" || connectionStatus === "disconnected"
                   ? "var(--status-error)"
                   : "var(--text-muted)",
-                textTransform: "capitalize",
               }}
             >
-              {connectionStatus}
+              {connectionStatus === "connected" ? "Cloud connected" : "Cloud reconnecting"}
             </span>
           </div>
 
@@ -1410,7 +1423,7 @@ PY`;
         />
       )}
 
-      <ConnectionDiagnostics
+      <CloudConnectionNotice
         connectionStatus={connectionStatus}
         connectionError={connectionError}
         centrifugoUrl={centrifugoUrl}
