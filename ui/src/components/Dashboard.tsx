@@ -860,7 +860,9 @@ PY`;
           <span style={{ width: 1, height: 12, background: "var(--border-muted)" }} />
 
           {/* Connection status */}
-          <div className="flex items-center gap-1.5" role="status" aria-live="polite">
+          <CloudConnectionNotice connectionStatus={connectionStatus} connectionError={connectionError}
+            centrifugoUrl={centrifugoUrl} token={token} onRetry={() => window.location.reload()}
+            directBridgeCount={directlyReachableBridgeIds.size}>
             {directlyReachableBridgeIds.size > 0 && (
               <>
                 <StatusDot kind="connected" title="Local/P2P connected" />
@@ -886,7 +888,7 @@ PY`;
             >
               {connectionStatus === "connected" ? "Cloud connected" : "Cloud reconnecting"}
             </span>
-          </div>
+          </CloudConnectionNotice>
 
           <span style={{ width: 1, height: 12, background: "var(--border-muted)" }} />
 
@@ -1423,13 +1425,6 @@ PY`;
         />
       )}
 
-      <CloudConnectionNotice
-        connectionStatus={connectionStatus}
-        connectionError={connectionError}
-        centrifugoUrl={centrifugoUrl}
-        token={token}
-        onRetry={() => window.location.reload()}
-      />
 
       {latestAttention && (
         <SessionAttentionAlert

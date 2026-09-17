@@ -1,10 +1,10 @@
 # Cloud outage recovery
 
 The dashboard keeps existing Local/P2P terminals available while Centrifugo is
-unreachable. A nonblocking notice replaces the automatic full-screen error panel;
-diagnostics are available on demand and can be dismissed without reloading.
+unreachable. The connection status indicator opens a hover/focus/click panel instead of
+printing an outage notice over the terminal. Diagnostics can be dismissed without reloading.
 Centrifuge continues its existing reconnect/resubscribe cycle. Once connected,
-the notice disappears and cloud subscriptions resume without replacing healthy
+the indicator updates and cloud subscriptions resume without replacing healthy
 direct terminal connections.
 
 The terminal transport remembers bridge loopback advertisements learned through
@@ -27,3 +27,23 @@ Coverage: `CloudConnectionNotice.test.ts` checks nonblocking/dismissible diagnos
 and recovery; `hybrid-terminal-transport.test.ts` checks reconnection during rejected,
 hanging, and empty presence responses, continued terminal I/O, and refreshed
 credentials after cloud recovery.
+
+## Incident diagnostics
+
+The status panel remains available after recovery. It shows the sanitized WebSocket
+endpoint, browser online hint, current direct bridge count, and recent UTC events.
+A per-tab, 100-event in-memory history records cloud event/error codes, browser
+online/offline and visibility changes, direct reachability counts, token-refresh
+HTTP status, and observed outage duration. Account changes clear the history.
+
+During cloud unavailability, bounded WebSocket-open and same-origin website probes
+run at most once every 30 seconds. Each records start time, result, and duration.
+Diagnostic sockets close on completion, timeout, or cancellation. Manual network
+checks are available while connected as well. Download report exports JSON without
+JWTs, nonces, user IDs, raw error payloads, or URL credentials/query parameters.
+Reports are downloaded locally; there is no telemetry upload.
+
+A browser WebSocket failure does not reveal whether DNS, TCP, TLS, a proxy, or an
+ISP failed. The browser online flag is a hint, not an internet reachability check.
+Website probes can be answered by a service worker. These limits are included in
+the report. History does not survive reloads or a new tab.
