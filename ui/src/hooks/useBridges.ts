@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Centrifuge, Subscription } from "centrifuge";
+import type { MessageClient, MessageSubscription } from "@/lib/message-client";
 
 export interface BridgeInfo {
   clientId: string;
@@ -81,16 +81,16 @@ export function applyBridgeLeave(allClients: BridgeInfo[], clientId: string): Br
   return allClients.filter((b) => b.clientId !== clientId);
 }
 
-export function useBridges(client: Centrifuge | null, userId: string | null): UseBridgesResult {
+export function useBridges(client: MessageClient | null, userId: string | null): UseBridgesResult {
   const [bridges, setBridges] = useState<BridgeInfo[]>([]);
-  const subRef = useRef<Subscription | null>(null);
+  const subRef = useRef<MessageSubscription | null>(null);
   // Every known client per bridgeId (not deduped) — the source of truth fed
   // to dedupeBridges to produce the exposed `bridges` list. Kept in a ref
   // (not state) since it's an internal accumulator; only the derived,
   // deduped projection needs to trigger a re-render.
   const allClientsRef = useRef<BridgeInfo[]>([]);
 
-  const fetchPresence = useCallback(async (sub: Subscription) => {
+  const fetchPresence = useCallback(async (sub: MessageSubscription) => {
     try {
       const result = await sub.presence();
       console.log("[bridges] presence result:", JSON.stringify(result.clients, null, 2));

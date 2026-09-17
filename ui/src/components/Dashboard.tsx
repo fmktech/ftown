@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useMemo, useEffect, useRef, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
-import { Centrifuge } from "centrifuge";
+import type { MessageClient } from "@/lib/message-client";
 import { ConnectionStatus } from "@/hooks/useCentrifugo";
 import { TerminalTransportApi } from "@/lib/direct-transport/contract";
 import { Session, ShellType, Loop, LoopDraft, LoopRunRecord } from "@/types";
@@ -42,7 +42,7 @@ import {
 } from "@/lib/sidebar-width";
 
 interface DashboardProps {
-  client: Centrifuge | null;
+  client: MessageClient | null;
   connectionStatus: ConnectionStatus;
   connectionError: string | null;
   userId: string;
@@ -52,6 +52,7 @@ interface DashboardProps {
    *  useTerminal once the terminal component is wired to it. */
   transport: TerminalTransportApi | null;
   onDisconnect: () => void;
+  localMode?: boolean;
 }
 
 type SidebarTab = "sessions" | "crons" | "factory";
@@ -62,7 +63,7 @@ const SIDEBAR_TAB_CODEC: PersistCodec<SidebarTab> = {
   deserialize: (raw) => (raw === "crons" || raw === "factory" ? raw : "sessions"),
 };
 
-export function Dashboard({ client, connectionStatus, connectionError, userId, token, centrifugoUrl, transport, onDisconnect }: DashboardProps) {
+export function Dashboard({ client, connectionStatus, connectionError, userId, token, centrifugoUrl, transport, onDisconnect, localMode = false }: DashboardProps) {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedLoopId, setSelectedLoopId] = useState<string | null>(null);
   const [selectedLoopRunId, setSelectedLoopRunId] = useState<string | null>(null);
@@ -814,13 +815,13 @@ PY`;
             </svg>
           </button>
 
-          <button
+          {!localMode && <button
             className="btn-ghost hidden md:inline-flex"
             onClick={() => setShowToken(!showToken)}
             style={showToken ? { color: "var(--accent)", borderColor: "var(--accent-dim)" } : {}}
           >
             Connect a bridge
-          </button>
+          </button>}
 
           {selectedSession?.status === "running" && (
             <button className="btn-danger" onClick={handleStopSession}>
@@ -860,7 +861,10 @@ PY`;
           <span style={{ width: 1, height: 12, background: "var(--border-muted)" }} />
 
           {/* Connection status */}
-          <CloudConnectionNotice connectionStatus={connectionStatus} connectionError={connectionError}
+          {localMode ? <span className="flex items-center gap-1.5" title={connectionError ?? "Connected directly to this computer; no cloud required."}>
+            <StatusDot kind={connectionStatus} />
+            <span style={{ fontSize: 11 }}>{connectionStatus === "connected" ? "Local connected" : "Local reconnecting"}</span>
+          </span> : <CloudConnectionNotice connectionStatus={connectionStatus} connectionError={connectionError}
             centrifugoUrl={centrifugoUrl} token={token} onRetry={() => window.location.reload()}
             directBridgeCount={directlyReachableBridgeIds.size}>
             {directlyReachableBridgeIds.size > 0 && (
@@ -888,7 +892,8 @@ PY`;
             >
               {connectionStatus === "connected" ? "Cloud connected" : "Cloud reconnecting"}
             </span>
-          </CloudConnectionNotice>
+          </CloudConnectionNotice>}
+          <a href={localMode ? "/dashboard" : "/local"} className="btn-ghost">{localMode ? "Cloud" : "This computer"}</a>
 
           <span style={{ width: 1, height: 12, background: "var(--border-muted)" }} />
 
@@ -1000,7 +1005,7 @@ PY`;
                     e.currentTarget.style.background = "none";
                   }}
                 >
-                  Disconnect
+                  {localMode ? "Forget this browser" : "Disconnect"}
                 </button>
               </div>
             )}
@@ -1009,7 +1014,7 @@ PY`;
       </header>
 
       {/* ── CLI Token bar ── */}
-      {showToken && (
+      {showToken && !localMode && (
         <div
           className="shrink-0 px-4 py-3 fade-in"
           style={{

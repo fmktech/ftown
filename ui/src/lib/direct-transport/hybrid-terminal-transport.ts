@@ -62,6 +62,8 @@ export interface CentrifugoClientLike {
 
 export interface HybridTerminalTransportOptions {
   centrifuge: CentrifugoClientLike;
+  /** Local pairing mode: loopback only, never WebRTC or relay. */
+  localOnly?: boolean;
   userId: string;
   clientId: string;
   publishCommand: (msg: DirectCommandMessage) => void;
@@ -215,6 +217,7 @@ interface SessionEntry {
  */
 export class HybridTerminalTransport implements TerminalTransportApi {
   private readonly client: CentrifugoClientLike;
+  private readonly localOnly: boolean;
   private readonly userId: string;
   private readonly clientId: string;
   private readonly publishCommand: (msg: DirectCommandMessage) => void;
@@ -251,6 +254,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
 
   constructor(opts: HybridTerminalTransportOptions) {
     this.client = opts.centrifuge;
+    this.localOnly = opts.localOnly ?? false;
     this.userId = opts.userId;
     this.clientId = opts.clientId;
     this.publishCommand = opts.publishCommand;
@@ -319,7 +323,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     if (!entry || entry.disposed) return;
     if (this.hasActivePath(entry)) {
       this.dispatchInput(entry, data);
-    } else {
+    } else if (!this.localOnly) {
       this.bufferInput(entry, data);
     }
   }
@@ -568,6 +572,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
   }
 
   private async attemptWebRtc(bridgeId: string, ctx: LadderCtx): Promise<WebRtcPeerApi | null> {
+    if (this.localOnly) return null;
     let peer: WebRtcPeerApi;
     try {
       peer = this.peerFactory({
@@ -663,7 +668,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
   private hasCentrifugoSessions(pe: PeerEntry): boolean {
     for (const sessionId of pe.sessions) {
       const entry = this.sessions.get(sessionId);
-      if (entry && !entry.disposed && entry.mode === 'centrifugo') return true;
+      if (entry && !entry.disposed && (entry.mode === 'centrifugo' || (this.localOnly && entry.mode === 'connecting'))) return true;
     }
     return false;
   }
@@ -829,7 +834,9 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     for (const sessionId of [...pe.sessions]) {
       const entry = this.sessions.get(sessionId);
       if (!entry || entry.disposed) continue;
-      if (entry.mode === 'centrifugo') {
+      if (this.localOnly && entry.mode === 'connecting') {
+        this.goDirect(entry, peer, this.modeForKind(kind));
+      } else if (entry.mode === 'centrifugo') {
         switching.push(entry);
       } else if (!entry.direct) {
         // Edge: a session still in the connecting window when the upgrade landed —
@@ -1041,6 +1048,13 @@ export class HybridTerminalTransport implements TerminalTransportApi {
 
   private goCentrifugo(entry: SessionEntry, reason: FallbackReason): void {
     entry.reason = reason;
+    if (this.localOnly) {
+      entry.direct = false;
+      entry.pendingInput = [];
+      entry.pendingInputChars = 0;
+      this.setMode(entry, 'connecting');
+      return;
+    }
     // Abandon any in-flight upgrade switchover (the new peer is gone/superseded).
     entry.pendingSwitchPeer = null;
     if (entry.switchWatchdog) {

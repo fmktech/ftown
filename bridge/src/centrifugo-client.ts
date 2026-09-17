@@ -78,14 +78,17 @@ export class CentrifugoClient {
   private readonly subscriptions: Map<string, Subscription> = new Map();
   private readonly onReconnect?: () => void | Promise<void>;
   private hasConnected = false;
+  private readonly disabled: boolean;
+  private readonly localListeners = new Set<(channel: string, data: unknown) => void>();
 
   constructor(
     url: string,
     token: string,
     getToken: () => Promise<string>,
-    opts?: { onReconnect?: () => void | Promise<void> },
+    opts?: { onReconnect?: () => void | Promise<void>; disabled?: boolean },
   ) {
     this.onReconnect = opts?.onReconnect;
+    this.disabled = opts?.disabled ?? false;
     this.client = new Centrifuge(url, {
       token,
       getToken,
@@ -117,15 +120,44 @@ export class CentrifugoClient {
 
     this.client.on('disconnected', (ctx) => {
       console.log(`[Centrifugo] Disconnected: code=${ctx.code} reason=${ctx.reason}`);
-      if (ctx.code === 3) {
+      if (!this.disabled && ctx.code === 3) {
         console.log(`[Centrifugo] Reconnecting after message size limit disconnect...`);
-        setTimeout(() => this.client.connect(), 1000);
+        setTimeout(() => this.connect(), 1000);
       }
     });
 
     this.client.on('error', (ctx) => {
       console.error(`[Centrifugo] Error:`, ctx.error);
     });
+  }
+
+  /** Observe bridge publications without depending on the cloud transport. */
+  onLocalPublication(listener: (channel: string, data: unknown) => void): () => void {
+    this.localListeners.add(listener);
+    return () => { this.localListeners.delete(listener); };
+  }
+
+  private publish(channel: string, data: Record<string, unknown>): Promise<void> {
+    for (const listener of this.localListeners) {
+      try {
+        listener(channel, data);
+      } catch (err) {
+        console.error('[Centrifugo] Local publication listener failed:', err);
+      }
+    }
+    // Mutations have already committed to the local store. Cloud delivery must
+    // not delay their acknowledgement or make a successful mutation look failed.
+    // Disconnected updates are reconciled by the existing reconnect snapshot.
+    if (!this.disabled && this.client.state === 'connected') {
+      try {
+        void this.client.publish(channel, data).catch((err: unknown) => {
+          console.error(`[Centrifugo] Failed to publish to ${channel}:`, err);
+        });
+      } catch (err) {
+        console.error(`[Centrifugo] Failed to publish to ${channel}:`, err);
+      }
+    }
+    return Promise.resolve();
   }
 
   private async runOnReconnect(): Promise<void> {
@@ -138,6 +170,7 @@ export class CentrifugoClient {
   }
 
   connect(): void {
+    if (this.disabled) return;
     this.client.connect();
   }
 
@@ -166,7 +199,7 @@ export class CentrifugoClient {
   async publishSessionUpdate(userId: string, session: Session): Promise<void> {
     const channel = `sessions:updates#${userId}`;
     try {
-      await this.client.publish(channel, {
+      await this.publish(channel, {
         type: 'session_update',
         session: toWireSession(session),
         timestamp: new Date().toISOString(),
@@ -178,6 +211,7 @@ export class CentrifugoClient {
   }
 
   subscribeToLoops(userId: string): void {
+    if (this.disabled) return;
     const channel = `loops:updates#${userId}`;
     const sub = this.client.newSubscription(channel);
     sub.subscribe();
@@ -188,7 +222,7 @@ export class CentrifugoClient {
     const channel = `loops:updates#${userId}`;
     // Loop carries no secret env-like field, so — unlike sessions — nothing is stripped.
     try {
-      await this.client.publish(channel, { type: 'loop_update', loop, timestamp: new Date().toISOString() });
+      await this.publish(channel, { type: 'loop_update', loop, timestamp: new Date().toISOString() });
     } catch (err) {
       console.error(`[Centrifugo] Failed to publish loop update to ${channel}:`, err);
       throw err;
@@ -198,7 +232,7 @@ export class CentrifugoClient {
   async publishLoopRemoved(userId: string, loopId: string): Promise<void> {
     const channel = `loops:updates#${userId}`;
     try {
-      await this.client.publish(channel, { type: 'loop_removed', loopId, timestamp: new Date().toISOString() });
+      await this.publish(channel, { type: 'loop_removed', loopId, timestamp: new Date().toISOString() });
     } catch (err) {
       console.error(`[Centrifugo] Failed to publish loop removed to ${channel}:`, err);
       throw err;
@@ -218,7 +252,7 @@ export class CentrifugoClient {
     // with a 10000-entry history, so each reconnect replayed that backlog and
     // starved the app-level ping. Removed — we publish directly.
     try {
-      await this.client.publish(channel, truncateData({ type: 'output', data }));
+      await this.publish(channel, truncateData({ type: 'output', data }));
     } catch (err) {
       console.error(`[Centrifugo] Failed to publish terminal data to ${channel}:`, err);
     }
@@ -231,6 +265,7 @@ export class CentrifugoClient {
     onResize: TerminalResizeHandler,
     onInit?: TerminalInitHandler,
   ): void {
+    if (this.disabled) return;
     const channel = `terminal-input:${sessionId}#${userId}`;
     if (this.subscriptions.has(channel)) {
       return;
@@ -265,6 +300,7 @@ export class CentrifugoClient {
   }
 
   subscribeToCommands(userId: string, handler: CommandHandler, onDirectCommand?: DirectCommandHandler): void {
+    if (this.disabled) return;
     const channel = `commands:rpc#${userId}`;
 
     const existingSub = this.subscriptions.get(channel);
@@ -331,6 +367,7 @@ export class CentrifugoClient {
   // `info` claim, not subscription data — Centrifugo ignores subscribe data
   // without a subscribe proxy; presence exposes conn_info only.
   joinBridgesChannel(userId: string, bridgeId: string): void {
+    if (this.disabled) return;
     const channel = `bridges:presence#${userId}`;
 
     const presenceInfo: BridgePresenceInfo = {
@@ -358,7 +395,7 @@ export class CentrifugoClient {
   async publishTerminalScreen(userId: string, sessionId: string, raw: string): Promise<void> {
     const channel = `terminal:${sessionId}#${userId}`;
     try {
-      await this.client.publish(channel, {
+      await this.publish(channel, {
         type: 'screen_dump',
         raw,
         timestamp: new Date().toISOString(),
@@ -370,16 +407,10 @@ export class CentrifugoClient {
 
   async publishHookEvent(userId: string, sessionId: string, event: Record<string, unknown>): Promise<void> {
     const channel = `events:${sessionId}#${userId}`;
-    if (!this.subscriptions.has(channel)) {
-      const sub = this.client.newSubscription(channel);
-      this.subscriptions.set(channel, sub);
-      await new Promise<void>((resolve) => {
-        sub.on('subscribed', () => resolve());
-        sub.subscribe();
-      });
-    }
+    // The events namespace permits client publishing without subscribing.
+    // Waiting for a subscription here deadlocks local hooks during cloud loss.
     try {
-      await this.client.publish(channel, truncateData(event));
+      await this.publish(channel, truncateData(event));
     } catch (err) {
       console.error(`[Centrifugo] Failed to publish hook event to ${channel}:`, err);
     }
@@ -389,7 +420,7 @@ export class CentrifugoClient {
   async publishSignal(userId: string, msg: SignalMessage): Promise<void> {
     const channel = `commands:rpc#${userId}`;
     try {
-      await this.client.publish(channel, msg as unknown as Record<string, unknown>);
+      await this.publish(channel, msg as unknown as Record<string, unknown>);
     } catch (err) {
       console.error(`[Centrifugo] Failed to publish signal to ${channel}:`, err);
     }
@@ -398,7 +429,7 @@ export class CentrifugoClient {
   async publishCommandResponse(userId: string, response: CommandResponse): Promise<void> {
     const channel = `commands:rpc#${userId}`;
     try {
-      await this.client.publish(channel, truncateData({
+      await this.publish(channel, truncateData({
         type: 'command_response',
         response: response as unknown as Record<string, unknown>,
         timestamp: new Date().toISOString(),

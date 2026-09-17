@@ -14,5 +14,16 @@ test('ftown-bridge uses the hosted API when --api-url is omitted', () => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /--api-url <url>/);
-  assert.match(result.stdout, /default: "https:\/\/ftown\.ia\.br"/);
+  assert.match(result.stdout.replace(/\s+/g, ' '), /default: "https:\/\/ftown\.ia\.br"/);
+});
+
+
+test('local browser commands are available before cloud onboarding', () => {
+  for (const args of [['pair', '--help'], ['devices', '--help'], ['revoke', '--help']]) {
+    const result = spawnSync(process.execPath, ['--import', 'tsx', 'src/index.ts', ...args],
+      { cwd: bridgeRoot, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /--data-dir/);
+    assert.doesNotMatch(result.stdout, /Authenticating|device pairing/);
+  }
 });

@@ -69,6 +69,7 @@ describe('toWireSession', () => {
 });
 
 interface PublishCapture {
+  state: 'connected';
   publish(channel: string, data: Record<string, unknown>): Promise<unknown>;
 }
 
@@ -78,6 +79,7 @@ describe('CentrifugoClient.publishSessionUpdate — token never crosses the wire
 
     const captured: { channel?: string; data?: Record<string, unknown> } = {};
     (client as unknown as { client: PublishCapture }).client = {
+      state: 'connected',
       publish: async (channel: string, data: Record<string, unknown>) => {
         captured.channel = channel;
         captured.data = data;

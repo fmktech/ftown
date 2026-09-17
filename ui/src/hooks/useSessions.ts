@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Centrifuge, Subscription } from "centrifuge";
+import type { MessageClient, MessageSubscription } from "@/lib/message-client";
 import { v4 as uuidv4 } from "uuid";
 import {
   Session,
@@ -114,12 +114,12 @@ interface UseSessionsResult {
  * shared `commands:rpc#{userId}` channel — this hook never subscribes to it.
  */
 export function useSessions(
-  client: Centrifuge | null,
+  client: MessageClient | null,
   userId: string | null,
   rpc: BridgeRpc
 ): UseSessionsResult {
   const [sessions, setSessions] = useState<Session[]>([]);
-  const sessionsSubRef = useRef<Subscription | null>(null);
+  const sessionsSubRef = useRef<MessageSubscription | null>(null);
   const sessionsRef = useRef<Session[]>([]);
   const usageRequestsRef = useRef<Set<string>>(new Set());
   const usageGenerationRef = useRef(0);
@@ -200,7 +200,10 @@ export function useSessions(
       const responseData = response.data as { sessions?: Session[] };
       if (Array.isArray(responseData.sessions)) {
         setSessions((prev) => {
-          const merged = new Map(prev.map((s) => [s.id, s]));
+          const incomingIds = new Set(responseData.sessions!.map((session) => session.id));
+          const merged = new Map(prev.filter((session) =>
+            !client?.sessionSnapshotBridgeId || session.bridgeId !== client.sessionSnapshotBridgeId || incomingIds.has(session.id)
+          ).map((session) => [session.id, session]));
           for (const s of responseData.sessions!) {
             if (isRecentlyRemoved(s.id)) continue;
             merged.set(s.id, mergeSessionSnapshot(merged.get(s.id), s));
@@ -226,7 +229,7 @@ export function useSessions(
       unregisterResponse();
       unregisterSubscribed();
     };
-  }, [userId, onResponse, onSubscribed, publishCommand, isRecentlyRemoved]);
+  }, [client, userId, onResponse, onSubscribed, publishCommand, isRecentlyRemoved]);
 
   useEffect(() => {
     usageGenerationRef.current += 1;
