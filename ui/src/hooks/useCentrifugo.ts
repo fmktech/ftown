@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { Centrifuge, UnauthorizedError } from "centrifuge";
 import { v4 as uuidv4 } from "uuid";
 import { HybridTerminalTransport } from "@/lib/direct-transport/hybrid-terminal-transport";
+import { clearConnectionHistory, recordConnectionEvent } from "@/lib/connection-history";
 import {
   DirectCommandMessage,
   TerminalTransportApi,
@@ -62,6 +63,8 @@ async function fetchCentrifugoToken(): Promise<string> {
     headers: { "Content-Type": "application/json" },
   });
 
+  recordConnectionEvent("token refresh HTTP", { status: response.status });
+
   if (response.status === 401) {
     throw new UnauthorizedError("session expired");
   }
@@ -112,6 +115,7 @@ export function useCentrifugo(
   // Stable per-tab id for the lifetime of this hook instance (survives
   // reconnects; a fresh page load gets a fresh id).
   const clientIdRef = useRef<string>("");
+  useEffect(() => { clearConnectionHistory(); }, [userId]);
   if (!clientIdRef.current) clientIdRef.current = uuidv4();
 
   const cleanup = useCallback(() => {
@@ -145,17 +149,20 @@ export function useCentrifugo(
       getToken: tokenRefresher ?? fetchCentrifugoToken,
     });
 
-    client.on("connecting", () => {
+    client.on("connecting", (ctx) => {
+      recordConnectionEvent("cloud connecting", { code: ctx.code });
       setStatus("connecting");
       setError(null);
     });
 
     client.on("connected", () => {
+      recordConnectionEvent("cloud connected");
       setStatus("connected");
       setError(null);
     });
 
     client.on("disconnected", (ctx) => {
+      recordConnectionEvent("cloud disconnected", { code: ctx.code, unauthorized: ctx.reason === "unauthorized" });
       // getToken threw UnauthorizedError (401 from the token route): the
       // underlying credential itself is gone — NextAuth session (hosted) or
       // solo access key — not just the Centrifugo token. centrifuge-js stops
@@ -180,6 +187,7 @@ export function useCentrifugo(
     });
 
     client.on("error", (ctx) => {
+      recordConnectionEvent("cloud error", { code: ctx.error.code, type: ctx.type });
       setStatus("error");
       setError(`Connection error: ${ctx.error.message}`);
     });

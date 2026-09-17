@@ -119,7 +119,10 @@ export function ConnectionDiagnostics({ connectionStatus, connectionError, centr
     updateCheck(3, { status: "running" });
     try {
       const wsResult = await new Promise<{ connected: boolean; code?: number; reason?: string }>((resolve) => {
-        const timeout = setTimeout(() => resolve({ connected: false, reason: "Timeout (5s)" }), 5000);
+        const timeout = setTimeout(() => {
+          resolve({ connected: false, reason: "Timeout (5s) before WebSocket open — DNS/TCP/TLS cannot be distinguished by this browser check" });
+          ws.close();
+        }, 5000);
         const ws = new WebSocket(centrifugoUrl);
         ws.onopen = () => {
           clearTimeout(timeout);
@@ -153,7 +156,10 @@ export function ConnectionDiagnostics({ connectionStatus, connectionError, centr
     updateCheck(4, { status: "running" });
     try {
       const handshakeResult = await new Promise<{ ok: boolean; detail: string }>((resolve) => {
-        const timeout = setTimeout(() => resolve({ ok: false, detail: "Timeout (8s)" }), 8000);
+        const timeout = setTimeout(() => {
+          resolve({ ok: false, detail: "Timeout (8s)" });
+          ws.close();
+        }, 8000);
         const ws = new WebSocket(centrifugoUrl);
         let gotResponse = false;
 
@@ -201,7 +207,7 @@ export function ConnectionDiagnostics({ connectionStatus, connectionError, centr
     setRunning(false);
   }, [token, centrifugoUrl, updateCheck]);
 
-  if (connectionStatus === "connected") return null;
+  if (connectionStatus === "connected" && !onDismiss) return null;
   if (connectionStatus === "connecting" && !hasRun && !onDismiss) return null;
 
   const hasFail = checks.some((c) => c.status === "fail");
@@ -232,7 +238,7 @@ export function ConnectionDiagnostics({ connectionStatus, connectionError, centr
         }}
       >
         <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text-primary)", marginBottom: 4 }}>
-          Connection Failed
+          Connection diagnostics
         </div>
         {onDismiss && <button className="btn-ghost" onClick={onDismiss}>Back to terminals</button>}
         {connectionError && (
@@ -280,7 +286,7 @@ export function ConnectionDiagnostics({ connectionStatus, connectionError, centr
                 : checks.some((c) => c.name === "WebSocket reachable" && c.status === "fail")
                   ? "Cannot reach the WebSocket server. Check your network connection, VPN, or firewall settings."
                   : checks.some((c) => c.name === "Centrifugo handshake" && c.status === "fail")
-                    ? "WebSocket connects but the server rejected authentication. Try reloading the page for a fresh token."
+                    ? "The protocol check failed. A timeout or closed socket does not prove authentication was rejected; inspect the result above."
                     : "Check the details above for more information."}
           </div>
         )}
