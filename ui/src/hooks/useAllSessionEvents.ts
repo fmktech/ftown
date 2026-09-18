@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { Centrifuge, Subscription } from "centrifuge";
+import type { MessageClient, MessageSubscription } from "@/lib/message-client";
 import { Session } from "@/types";
 import { clearsManualInputNotice, hookEventToActivity, extractManualInputNotice, extractToolLabel, type ManualInputNotice } from "@/lib/hook-events";
 import { TokenUsage } from "./useSessionEvents";
@@ -32,12 +32,12 @@ export interface AllSessionEvents {
 }
 
 export function useAllSessionEvents(
-  client: Centrifuge | null,
+  client: MessageClient | null,
   sessions: Session[],
   userId: string
 ): AllSessionEvents {
   const [activityMap, setActivityMap] = useState<Map<string, SessionActivity>>(new Map());
-  const subsRef = useRef<Map<string, { client: Centrifuge; sub: Subscription }>>(new Map());
+  const subsRef = useRef<Map<string, { client: MessageClient; sub: MessageSubscription }>>(new Map());
   const clientRef = useRef(client);
   const userIdRef = useRef(userId);
   clientRef.current = client;

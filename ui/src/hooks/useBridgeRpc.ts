@@ -40,6 +40,7 @@ export interface BridgeRpcSubscriptionLike {
 
 /** Minimal structural view of the Centrifuge client — only what this hook uses. */
 export interface CentrifugoClientLike {
+  readonly commandTimeoutMs?: number;
   newSubscription(channel: string): BridgeRpcSubscriptionLike;
   getSubscription(channel: string): BridgeRpcSubscriptionLike | null;
 }
@@ -64,7 +65,7 @@ export interface RpcCore {
   bridgeExec(command: string, workingDir: string, bridgeId: string): Promise<BridgeExecResponse>;
 }
 
-export function createRpcCore(publish: (command: Command) => void): RpcCore {
+export function createRpcCore(publish: (command: Command) => void, timeoutMs = RPC_TIMEOUT_MS): RpcCore {
   // First-response callbacks: resolve once, then self-delete.
   const pendingCallbacks = new Map<string, (response: CommandResponse) => void>();
   // Broadcast-collect callbacks: unlike pendingCallbacks (which resolves on
@@ -92,7 +93,7 @@ export function createRpcCore(publish: (command: Command) => void): RpcCore {
       const timeout = setTimeout(() => {
         pendingCallbacks.delete(command.requestId);
         reject(new Error(`${command.type} timed out`));
-      }, RPC_TIMEOUT_MS);
+      }, timeoutMs);
 
       pendingCallbacks.set(command.requestId, (resp) => {
         clearTimeout(timeout);
@@ -130,7 +131,7 @@ export function createRpcCore(publish: (command: Command) => void): RpcCore {
       const timeout = setTimeout(() => {
         pendingCallbacks.delete(requestId);
         reject(new Error("bridge_exec timed out"));
-      }, RPC_TIMEOUT_MS);
+      }, timeoutMs);
 
       pendingCallbacks.set(requestId, (resp) => {
         clearTimeout(timeout);
@@ -190,7 +191,7 @@ export function useBridgeRpc(client: CentrifugoClientLike | null, userId: string
   if (coreRef.current === null) {
     coreRef.current = createRpcCore((command) => {
       commandsSubRef.current?.publish(command);
-    });
+    }, client?.commandTimeoutMs);
   }
   const core = coreRef.current;
 

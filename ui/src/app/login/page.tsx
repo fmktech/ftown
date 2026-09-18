@@ -50,6 +50,8 @@ export default function LoginPage() {
           Sign in to your account
         </p>
 
+        <Link href="/local" className="btn-ghost block text-center mb-6">This computer — no account needed</Link>
+
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label htmlFor="email" className="block text-sm text-[var(--text-secondary)] mb-1">

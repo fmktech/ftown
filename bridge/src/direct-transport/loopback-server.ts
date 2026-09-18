@@ -39,8 +39,7 @@ function constantTimeEq(a: string, b: string): boolean {
 /** Same loopback host guard the HTTP handler applies (defense in depth). */
 function isLoopbackHost(hostHeader: string | undefined): boolean {
   if (!hostHeader) return false;
-  const host = hostHeader.split(':')[0];
-  return host === '127.0.0.1' || host === 'localhost' || host === '[::1]';
+  return /^(127\.0\.0\.1|localhost|\[::1\])(?::[0-9]{1,5})?$/.test(hostHeader);
 }
 
 function isLocalhostOrigin(origin: string): boolean {
@@ -52,6 +51,8 @@ export interface LoopbackPeerServerOptions {
   bridgeId: string;
   /** Per-process nonce; upgrade requires `?nonce=` to match this exactly. */
   nonce: string;
+  /** Additional origin-bound browser credentials issued by local approval. */
+  authorize?: (token: string, origin: string) => boolean;
   /** Exact non-localhost origins allowed to upgrade (typically the api-url origin). */
   allowedOrigins: string[];
   /** `input` frames feed here (same sink as terminal-input / DataChannel). */
@@ -216,6 +217,7 @@ class LoopbackPeer {
 export class LoopbackPeerServer {
   readonly bridgeId: string;
   private readonly nonce: string;
+  private readonly authorize?: (token: string, origin: string) => boolean;
   private readonly allowedOrigins: string[];
   private readonly onInputCb: (sessionId: string, data: string) => void;
   private readonly onResizeCb: (sessionId: string, cols: number, rows: number) => void;
@@ -228,6 +230,7 @@ export class LoopbackPeerServer {
   constructor(options: LoopbackPeerServerOptions) {
     this.bridgeId = options.bridgeId;
     this.nonce = options.nonce;
+    this.authorize = options.authorize;
     this.allowedOrigins = options.allowedOrigins;
     this.onInputCb = options.onInput;
     this.onResizeCb = options.onResize;
@@ -255,6 +258,11 @@ export class LoopbackPeerServer {
       if (peer.hasAttached(sessionId)) return true;
     }
     return false;
+  }
+
+  disconnectPeers(): void {
+    for (const peer of this.peers) peer.close();
+    this.peers.clear();
   }
 
   closeAll(): void {
@@ -308,7 +316,8 @@ export class LoopbackPeerServer {
       this.reject(socket, 403, 'Forbidden');
       return;
     }
-    if (!this.nonceMatches(url.searchParams.get('nonce'))) {
+    const token = url.searchParams.get('nonce');
+    if (!this.nonceMatches(token) && !(token && req.headers.origin && this.authorize?.(token, req.headers.origin))) {
       this.reject(socket, 403, 'Forbidden');
       return;
     }

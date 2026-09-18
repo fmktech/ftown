@@ -1,6 +1,7 @@
+import type { BrowserAccess } from './browser-access.js';
 import { createServer } from 'node:http';
 import { EventEmitter } from 'node:events';
-import { timingSafeEqual } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 
 import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 
@@ -146,9 +147,8 @@ function constantTimeEq(a: string, b: string): boolean {
 
 function isLoopbackHost(hostHeader: string | undefined, expectedPort: number): boolean {
   if (!hostHeader) return false;
-  const [host, port] = hostHeader.split(':');
-  if (port && parseInt(port, 10) !== expectedPort) return false;
-  return host === '127.0.0.1' || host === 'localhost' || host === '[::1]';
+  const match = /^(127\.0\.0\.1|localhost|\[::1\])(?::([0-9]{1,5}))?$/.exec(hostHeader);
+  return !!match && (!match[2] || Number(match[2]) === expectedPort);
 }
 
 function extractBearer(req: IncomingMessage): string | null {
@@ -171,6 +171,7 @@ function getQueryInt(url: URL, name: string, defaultValue: number): number {
 
 export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private server: Server | null = null;
+  private browserAccess: BrowserAccess | null = null;
   private store: SessionStore | null = null;
   private runner: ProcessRunner | null = null;
   private centrifugo: CentrifugoClient | null = null;
@@ -183,6 +184,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private port: number = 0;
   private loopController: LoopController | null = null;
   private sessionController: SessionController | null = null;
+
+  setBrowserAccess(access: BrowserAccess): void {
+    this.browserAccess = access;
+  }
 
   setAuthToken(token: string): void {
     this.authToken = token;
@@ -264,17 +269,22 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     return this.sessionController;
   }
 
-  async start(): Promise<number> {
+  async start(preferredPort = 0): Promise<number> {
     return new Promise((resolve, reject) => {
       const server = createServer((req: IncomingMessage, res: ServerResponse) => {
         this.handleRequest(req, res);
       });
 
-      server.on('error', (err: Error) => {
-        console.error('[LocalApiServer] Server error:', err.message);
+      server.on('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EADDRINUSE' && preferredPort !== 0 && !this.server) {
+          preferredPort = 0;
+          server.listen(0, '127.0.0.1');
+          return;
+        }
+        reject(err);
       });
 
-      server.listen(0, '127.0.0.1', () => {
+      server.once('listening', () => {
         const address = server.address();
         if (!address || typeof address === 'string') {
           reject(new Error('Failed to get server address'));
@@ -285,6 +295,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         console.log(`[LocalApiServer] Listening on port ${address.port}`);
         resolve(address.port);
       });
+      server.listen(preferredPort, '127.0.0.1');
     });
   }
 
@@ -298,6 +309,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   }
 
   stop(): void {
+    this.browserAccess?.close();
     this.mail.stop();
     if (this.server) {
       this.server.close();
@@ -311,14 +323,30 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return;
     }
 
+    let url: URL;
+    try { url = new URL(req.url ?? '/', `http://${req.headers.host}`); }
+    catch { jsonResponse(res, 400, { error: 'Invalid request URL' }); return; }
+    const path = url.pathname;
+    if (path.startsWith('/api/browser/')) {
+      if (!this.browserAccess) {
+        jsonResponse(res, 503, { error: 'Local browser access is starting', code: 'NOT_READY', requestId: randomUUID() });
+        return;
+      }
+      const presented = extractBearer(req);
+      const admin = req.headers.origin === undefined && !!this.authToken && !!presented &&
+        constantTimeEq(presented, this.authToken);
+      void this.browserAccess.handle(req, res, admin).catch(() => {
+        if (!res.headersSent) jsonResponse(res, 500, { error: 'Internal server error', code: 'INTERNAL_ERROR', requestId: randomUUID() });
+        else res.end();
+      });
+      return;
+    }
+
     const origin = req.headers.origin;
     if (typeof origin === 'string' && origin && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|$)/.test(origin)) {
       jsonResponse(res, 403, { error: 'Forbidden origin' });
       return;
     }
-
-    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
-    const path = url.pathname;
 
     if (this.authToken) {
       const presented = extractBearer(req);

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Centrifuge, Subscription } from "centrifuge";
+import type { MessageClient, MessageSubscription } from "@/lib/message-client";
 import { v4 as uuidv4 } from "uuid";
 import {
   Loop,
@@ -56,12 +56,12 @@ interface UseLoopsResult {
  * newSubscription(channel) call).
  */
 export function useLoops(
-  client: Centrifuge | null,
+  client: MessageClient | null,
   userId: string | null,
   rpc: Pick<BridgeRpc, "sendCommand" | "sendCommandCollect">
 ): UseLoopsResult {
   const [loops, setLoops] = useState<Loop[]>([]);
-  const loopsSubRef = useRef<Subscription | null>(null);
+  const loopsSubRef = useRef<MessageSubscription | null>(null);
   const { sendCommand, sendCommandCollect } = rpc;
 
   // Secondary/CLI-parity path (§2c): loop state is delivered push-first over

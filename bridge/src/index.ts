@@ -19,6 +19,9 @@ import { ProcessRunner } from './claude-runner.js';
 import { SessionStore } from './session-store.js';
 import { MailStore } from './mail-store.js';
 import { LocalApiServer } from './local-api-server.js';
+import { BrowserAccess } from './browser-access.js';
+import { registerLocalBrowserCommands } from './local-pair-cli.js';
+import type { CommandResponse } from './types.js';
 import { TerminalManager } from './terminal-manager.js';
 import { installClaudeHooks } from './hook-installer.js';
 import { installCursorHooks } from './cursor-hook-installer.js';
@@ -99,6 +102,7 @@ const program = new Commander();
 program
   .name('ftown-bridge')
   .description('ftown orchestrator bridge for Centrifugo')
+  .option('--local', 'Local browser control only: no cloud account or connection')
   .option('--solo', 'Single-port LAN deployment: no account service, managed hub + panel children, key-based auth')
   .option('--port <port>', 'Public port for --solo front (default: see DEFAULT_SOLO_PORT)')
   .option('--rotate-key', 'With --solo: regenerate the access key, print the new banner, exit (offline)')
@@ -106,7 +110,8 @@ program
   .option('--api-url <url>', 'ftown UI API URL', DEFAULT_API_URL)
   .option('--data-dir <path>', 'Directory for session data (default: ~/.ftown/data)')
   .option('--bridge-id <id>', 'Bridge instance ID (default: persisted per data dir)')
-  .action(async (opts: { solo?: boolean; port?: string; rotateKey?: boolean; token?: string; apiUrl: string; dataDir?: string; bridgeId?: string }) => {
+  .action(async (opts: { local?: boolean; solo?: boolean; port?: string; rotateKey?: boolean; token?: string; apiUrl: string; dataDir?: string; bridgeId?: string }) => {
+    if (opts.local && opts.solo) program.error('--local and --solo cannot be combined');
     const apiUrl = new URL(opts.apiUrl);
     const isLocalHost =
       apiUrl.hostname === 'localhost' ||
@@ -179,7 +184,16 @@ program
     const localApiServer = new LocalApiServer();
     const apiToken = randomBytes(32).toString('hex');
     localApiServer.setAuthToken(apiToken);
-    const hookPort = await localApiServer.start();
+    // Reuse the local port so remembered browsers survive restarts. If another
+    // process took it, the server chooses an available port and pair prints it.
+    const localPortPath = join(dataDir, 'local-api-port');
+    let preferredLocalPort = 0;
+    try {
+      const saved = Number(readFileSync(localPortPath, 'utf8').trim());
+      if (Number.isInteger(saved) && saved > 0 && saved <= 65535) preferredLocalPort = saved;
+    } catch { /* first start */ }
+    const hookPort = await localApiServer.start(preferredLocalPort);
+    writeFileSync(localPortPath, `${hookPort}\n`, { mode: 0o600 });
     console.log(`[Bridge] Local API server started on port ${hookPort}`);
     const localNonce = randomBytes(16).toString('hex');
 
@@ -387,7 +401,9 @@ program
     };
 
     let auth: BridgeAuthResponse;
-    if (solo) {
+    if (opts.local) {
+      auth = { userId: 'local', token: '', refreshToken: '', centrifugoUrl: 'ws://127.0.0.1/disabled' };
+    } else if (solo) {
       // Solo mode: identity is synthesized locally (contract S2/S10). No
       // refresh token exists; getToken() mints a fresh hub JWT on demand.
       // The bridge's own connection token carries `info` (matching the cloud
@@ -418,9 +434,9 @@ program
       auth = await onboard();
     }
     const currentRefreshToken = auth.refreshToken;
-    if (!solo) persistRefreshToken(currentRefreshToken);
+    if (!solo && !opts.local) persistRefreshToken(currentRefreshToken);
 
-    const tokenRefresher = solo
+    const tokenRefresher = solo || opts.local
       ? null
       : new RotatingTokenRefresher({
           initialRefreshToken: currentRefreshToken,
@@ -477,6 +493,7 @@ program
 
     const runner = new ProcessRunner();
     const centrifugo = new CentrifugoClient(centrifugoUrl, auth.token, getToken, {
+      disabled: opts.local,
       // On a transport reconnect, re-publish the session snapshot. The UI does
       // not re-request its list on reconnect, so without this its session list
       // goes stale/empty after a Centrifugo blip until a page reload.
@@ -535,11 +552,13 @@ program
     // over TCP on the existing 127.0.0.1 local API server. Bypasses VPN/endpoint
     // filters that kill UDP hairpin. Input/resize/attach feed the SAME sinks as
     // the WebRTC peer manager; upgrades are gated on the per-process nonce (L1/L2).
+    let browserAccess: BrowserAccess | undefined;
     let apiOrigin = '';
     try { apiOrigin = new URL(opts.apiUrl).origin; } catch { /* leave empty; only localhost origins accepted */ }
     const loopbackServer = new LoopbackPeerServer({
       bridgeId,
       nonce: localNonce,
+      authorize: (token, origin) => browserAccess?.authorize(token, origin) ?? false,
       allowedOrigins: apiOrigin ? [apiOrigin] : [],
       onInput: (sid, data) => { runner.write(sid, data); },
       onResize: (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
@@ -802,6 +821,7 @@ program
         bridgePointerPath,
         JSON.stringify({
           port: hookPort,
+          apiUrl: opts.apiUrl,
           token: apiToken,
           bridgeId,
           pid: process.pid,
@@ -817,11 +837,12 @@ program
     }
 
     const cleanupPointer = (): void => {
-      try { unlinkSync(bridgePointerPath); } catch { /* already gone */ }
+      try {
+        const pointer = JSON.parse(readFileSync(bridgePointerPath, 'utf8'));
+        if (pointer.pid === process.pid && pointer.token === apiToken) unlinkSync(bridgePointerPath);
+      } catch { /* already gone or owned by a newer bridge */ }
     };
     process.on('exit', cleanupPointer);
-    process.on('SIGINT', () => { cleanupPointer(); process.exit(0); });
-    process.on('SIGTERM', () => { cleanupPointer(); process.exit(0); });
 
     function publishScreenDump(sid: string): void {
       // Phase 1: viewport-only dump (~rows*cols bytes) for instant render.
@@ -866,6 +887,27 @@ program
       });
     });
 
+    let ready = false;
+    browserAccess = new BrowserAccess({
+      dataDir,
+      cloudNonce: opts.local || solo ? undefined : localNonce,
+      allowedOrigins: apiOrigin ? [apiOrigin] : [],
+      bootstrap: () => ({ version: 1, userId, bridgeId, hostname: osHostname(), localPort: hookPort, localNonce: '' }),
+      execute: async (command) => {
+        if (!ready) return { requestId: command.requestId, success: false, error: 'Bridge is starting; try again shortly' };
+        let result: CommandResponse | undefined;
+        await createCommandHandler({
+          bridgeId, sessionController, loopController,
+          publishCommandResponse: async (response) => { result = response; },
+        })(command);
+        return result ?? { requestId: command.requestId, success: false, error: 'Command was not handled' };
+      },
+      onRevoke: () => loopbackServer.disconnectPeers(),
+    });
+    localApiServer.setBrowserAccess(browserAccess);
+    centrifugo.onLocalPublication((channel, data) => browserAccess?.publish(channel, data));
+    console.log(`[Bridge] Local browser access: run ftown-bridge pair${opts.dataDir ? ` --data-dir ${JSON.stringify(dataDir)}` : ''}`);
+
     const handleCommand = createCommandHandler({
       bridgeId,
       sessionController,
@@ -890,7 +932,6 @@ program
     centrifugo.subscribeToSessions(userId);
     centrifugo.subscribeToLoops(userId);
 
-    let ready = false;
     centrifugo.subscribeToCommands(userId, (command) => {
       if (!ready) return;
       handleCommand(command).catch((err) => {
@@ -950,4 +991,8 @@ program
     process.on('SIGTERM', shutdown);
   });
 
-program.parse();
+registerLocalBrowserCommands(program);
+program.parseAsync().catch((err: unknown) => {
+  console.error(err instanceof Error ? err.message : String(err));
+  process.exit(1);
+});
