@@ -890,6 +890,7 @@ program
     let ready = false;
     browserAccess = new BrowserAccess({
       dataDir,
+      cloudNonce: opts.local || solo ? undefined : localNonce,
       allowedOrigins: apiOrigin ? [apiOrigin] : [],
       bootstrap: () => ({ version: 1, userId, bridgeId, hostname: osHostname(), localPort: hookPort, localNonce: '' }),
       execute: async (command) => {

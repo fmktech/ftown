@@ -56,10 +56,10 @@ export function rememberDevice(device: LocalDevice, remember: boolean): void {
   storage.setItem(key(device.port), JSON.stringify(device));
   storage.setItem(SELECTED, String(device.port));
 }
-export function readDevice(): LocalDevice | null {
+export function readDevice(selectedPort?: number): LocalDevice | null {
   for (const storage of [sessionStorage, localStorage]) {
     try {
-      const port = storage.getItem(SELECTED);
+      const port = selectedPort === undefined ? storage.getItem(SELECTED) : String(selectedPort);
       if (!port) continue;
       localOrigin(port);
       const data = JSON.parse(storage.getItem(key(Number(port))) ?? 'null') as LocalDevice | null;

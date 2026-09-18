@@ -10,10 +10,10 @@ import type { Command, CommandResponse } from './types.js';
 const origin = 'https://ftown.ia.br';
 const other = 'https://preview.example.com';
 const bootstrap = () => ({ version: 1 as const, userId: 'local', bridgeId: 'bridge-1', hostname: 'laptop', localPort: 1234, localNonce: 'admin-secret' });
-async function fixture(execute: (c: Command) => Promise<CommandResponse> = async c => ({ requestId: c.requestId, success: true })) {
+async function fixture(execute: (c: Command) => Promise<CommandResponse> = async c => ({ requestId: c.requestId, success: true }), cloudNonce?: string) {
   const dataDir = mkdtempSync(join(tmpdir(), 'browser-access-'));
   let revoked = 0;
-  const opts = { dataDir, allowedOrigins: [origin, other], bootstrap, execute, onRevoke: () => { revoked++; } };
+  const opts = { cloudNonce, dataDir, allowedOrigins: [origin, other], bootstrap, execute, onRevoke: () => { revoked++; } };
   let access = new BrowserAccess(opts);
   const server = createServer((req, res) => { void access.handle(req, res, req.headers.authorization === 'Bearer admin' && !req.headers.origin); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -158,4 +158,39 @@ test('command capacity rejects before execution and completed cache entries expi
     assert.equal((await f.call('commands', 'POST', { type: 'list_sessions', payload: {}, requestId: 'overflow' }, p.token)).status, 200);
     assert.equal(calls, 1001);
   } finally { Date.now = now; await f.close(); }
+});
+
+
+test('authenticated cloud capability grants idempotent remembered local access without pairing', async () => {
+  const nonce = 'a'.repeat(32);
+  const f = await fixture(undefined, nonce);
+  try {
+    const credential = 'b'.repeat(43);
+    const body = { bridgeId: 'bridge-1', credential };
+    assert.equal((await f.call('cloud-devices', 'POST', body)).status, 401);
+    assert.equal((await f.call('cloud-devices', 'POST', body, 'wrong')).status, 401);
+    assert.equal((await f.call('cloud-devices', 'POST', body, nonce, 'https://evil.test')).status, 403);
+    assert.equal((await f.call('cloud-devices', 'POST', { ...body, bridgeId: 'other' }, nonce)).status, 403);
+    assert.equal((await f.call('cloud-devices', 'POST', { ...body, credential: 'weak' }, nonce)).status, 400);
+    assert.equal((await f.call('cloud-devices', 'POST', body, nonce)).status, 200);
+    assert.equal((await f.call('cloud-devices', 'POST', body, nonce)).status, 200);
+    assert.equal((await f.admin('devices')).body.devices.length, 1);
+    assert.equal((await f.call('cloud-devices', 'POST', body, nonce, other)).status, 409);
+    assert.equal((await f.call('bootstrap', 'POST', {}, credential)).status, 200);
+    const disk = readFileSync(join(f.dataDir, 'browser-devices.json'), 'utf8');
+    assert.ok(!disk.includes(credential)); assert.ok(!disk.includes(nonce));
+    f.restart();
+    assert.equal((await f.call('bootstrap', 'POST', {}, credential)).status, 200);
+    const devices = await f.admin('devices');
+    await f.admin(`devices/${devices.body.devices[0].id}`, 'DELETE');
+    assert.equal((await f.call('bootstrap', 'POST', {}, credential)).status, 401);
+  } finally { await f.close(); }
+});
+
+test('standalone local mode has no cloud authorization bypass', async () => {
+  const f = await fixture();
+  try {
+    assert.equal((await f.call('cloud-devices', 'POST', { bridgeId: 'bridge-1', credential: 'b'.repeat(43) }, 'a'.repeat(32))).status, 401);
+    assert.equal((await f.call('pairings', 'POST', { remember: true })).status, 409);
+  } finally { await f.close(); }
 });

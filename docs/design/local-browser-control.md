@@ -107,3 +107,33 @@ assembled smoke creates/removes a shell session while cloud is unavailable. No d
 - Independent non-author backend and UI review completed. Fixed early local RPC
   timeout and bootstrap refresh after a bridge changes identity mode on restart.
 - No live bridge restart, deployment or PWA caching is part of this validation.
+
+
+## Cloud-authorized local access (additive follow-up)
+
+The API style/envelopes and device model above remain unchanged. Cloud access
+already grants the owner the bridge's per-process local nonce via signed
+connection info in authenticated owner-only presence. That capability can also
+create an origin-bound remembered browser device; unauthenticated local access
+still requires explicit terminal approval.
+
+Typed operation: POST /api/browser/cloud-devices,
+request {bridgeId:string, credential:string} -> {credential:string}.
+Authorization: exact allowed Origin AND bearer equal to this bridge's cloud
+local nonce AND request bridgeId equal to its actual identity. Disabled in
+--local and --solo. Credential is browser-generated random32-byte base64url,
+persisted as a hash only. Identical credential + origin + bridge is idempotent;
+conflicting binding409. Same error envelope: invalid400, invalid proof401,
+origin/bridge403, conflicting binding409, device cap429, storage failure503.
+No collection/pagination. Maximum100 devices bounds creation. Additive route;
+existing pair/bootstrap/commands APIs unchanged.
+
+Journey: authenticated cloud presence -> bounded loopback exchange -> verified
+bootstrap -> remembered local device -> /local restores without approval or
+cloud login. Snapshot/join hooks prepare it proactively; clicking This computer
+awaits pending preparation. Failed remote-loopback attempts never affect cloud
+use. Cloud nonce is never logged, persisted in browser storage, or put in a URL.
+
+Follow-up verification: 798 bridge tests and 271 UI tests pass; both production
+builds pass. Added proof/origin/identity/idempotency tests and browser handoff,
+revocation, retry and remembered-access tests.

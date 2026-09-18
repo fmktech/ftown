@@ -4,7 +4,22 @@ Choose **This computer** on the hosted login page or cloud dashboard to manage a
 bridge on the same computer without cloud login. Session and loop operations use
 the same bridge controllers as cloud mode; terminals connect over loopback.
 
-## Start and approve
+## Coming from Cloud
+
+When the authenticated cloud dashboard sees this computer's bridge, it uses the
+bridge's cloud-issued local capability to establish remembered local access
+automatically. Choose **This computer** to switch without `ftown-bridge pair` or
+a second terminal. The dashboard prepares this access while cloud is available,
+so it also works after Fly disconnects. Browser local-network permission may
+still be required.
+
+Only a matching bridge identity and allowed browser origin can exchange that
+capability. Remote bridges cannot authorize a different bridge on this computer.
+A saved credential that was revoked is not silently replaced by background
+polling. Devices established from Cloud can be listed and revoked with the same
+CLI commands below.
+
+## Start and approve without Cloud
 
 For a bridge that never contacts the cloud:
 

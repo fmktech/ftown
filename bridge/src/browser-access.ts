@@ -1,11 +1,11 @@
-import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Command, CommandResponse } from './types.js';
 
 export type BrowserBootstrap = { version: 1; userId: string; bridgeId: string; hostname: string; localPort: number; localNonce: string };
-type Options = { dataDir: string; allowedOrigins: string[]; bootstrap: () => BrowserBootstrap; execute: (command: Command) => Promise<CommandResponse>; onRevoke?: () => void };
+type Options = { cloudNonce?: string; dataDir: string; allowedOrigins: string[]; bootstrap: () => BrowserBootstrap; execute: (command: Command) => Promise<CommandResponse>; onRevoke?: () => void };
 type Device = { id: string; origin: string; createdAt: string; hash: string; bridgeId: string; remember: boolean };
 type Pairing = { id: string; code: string; origin: string; remember: boolean; expiresAt: string; pollHash: string; status: 'pending' | 'denied' | 'approved'; credential?: string };
 type Cached = { body: string; result: Promise<CommandResponse>; completedAt?: number };
@@ -151,6 +151,28 @@ export class BrowserAccess {
           this.opts.onRevoke?.(); this.send(res, 200, { ok: true }); return;
         }
         fail(404, 'not_found', 'Unknown admin route');
+      }
+      // This capability comes from the bridge's signed connection info on the
+      // owner's authenticated cloud presence channel, not from a browser claim.
+      if (path === '/api/browser/cloud-devices' && req.method === 'POST') {
+        const proof = /^Bearer ([a-f0-9]{32})$/.exec(req.headers.authorization ?? '')?.[1] ?? '';
+        if (!this.opts.cloudNonce || !timingSafeEqual(Buffer.from(hash(proof)), Buffer.from(hash(this.opts.cloudNonce)))) {
+          fail(401, 'unauthorized', 'Cloud bridge authorization required');
+        }
+        const body = await this.body(req);
+        if (body.bridgeId !== this.opts.bootstrap().bridgeId) fail(403, 'wrong_bridge', 'Cloud authorization targets another bridge');
+        if (typeof body.credential !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(body.credential)) fail(400, 'invalid_credential', 'Expected a random browser credential');
+        const credential = body.credential as string;
+        const digest = hash(credential);
+        const existing = [...this.devices.values()].find(d => d.hash === digest);
+        if (existing && (existing.origin !== origin || existing.bridgeId !== body.bridgeId)) fail(409, 'credential_conflict', 'Credential is already bound');
+        if (!existing) {
+          if (this.devices.size >= 100) fail(429, 'device_limit', 'Too many paired browsers');
+          const device: Device = { id: randomUUID(), origin, createdAt: new Date().toISOString(), hash: digest, bridgeId: body.bridgeId as string, remember: true };
+          this.devices.set(device.id, device);
+          try { this.persist(); } catch (error) { this.devices.delete(device.id); throw error; }
+        }
+        this.send(res, 200, { credential }); return;
       }
       if (path === '/api/browser/pairings' && req.method === 'POST') {
         const recent = (this.rates.get(origin) ?? []).filter(t => Date.now() - t < 60_000);

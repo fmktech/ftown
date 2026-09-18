@@ -1,5 +1,6 @@
 "use client";
 
+import { createCloudLocalAccess } from "@/lib/cloud-local-access";
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { MessageClient, MessageSubscription } from "@/lib/message-client";
 
@@ -13,6 +14,7 @@ export interface BridgeInfo {
 interface UseBridgesResult {
   bridges: BridgeInfo[];
   hasBridges: boolean;
+  prepareLocalAccess: () => Promise<void>;
 }
 
 /**
@@ -84,6 +86,8 @@ export function applyBridgeLeave(allClients: BridgeInfo[], clientId: string): Br
 export function useBridges(client: MessageClient | null, userId: string | null): UseBridgesResult {
   const [bridges, setBridges] = useState<BridgeInfo[]>([]);
   const subRef = useRef<MessageSubscription | null>(null);
+  const localAdvertsRef = useRef<unknown[]>([]);
+  const provisionRef = useRef<((info: unknown) => Promise<void>) | null>(null);
   // Every known client per bridgeId (not deduped) — the source of truth fed
   // to dedupeBridges to produce the exposed `bridges` list. Kept in a ref
   // (not state) since it's an internal accumulator; only the derived,
@@ -93,7 +97,8 @@ export function useBridges(client: MessageClient | null, userId: string | null):
   const fetchPresence = useCallback(async (sub: MessageSubscription) => {
     try {
       const result = await sub.presence();
-      console.log("[bridges] presence result:", JSON.stringify(result.clients, null, 2));
+      localAdvertsRef.current = Object.values(result.clients).map(info => info.connInfo);
+      for (const info of localAdvertsRef.current) void provisionRef.current?.(info);
       const bridgeList: BridgeInfo[] = Object.entries(result.clients)
         .filter(([, info]) => info.connInfo && typeof info.connInfo === "object" && "bridgeId" in (info.connInfo as Record<string, unknown>))
         .map(([clientId, info]) => {
@@ -121,6 +126,8 @@ export function useBridges(client: MessageClient | null, userId: string | null):
       return;
     }
 
+    const abort = new AbortController();
+    provisionRef.current = createCloudLocalAccess(abort.signal);
     const channel = `bridges:presence#${userId}`;
 
     const existing = client.getSubscription(channel);
@@ -139,6 +146,8 @@ export function useBridges(client: MessageClient | null, userId: string | null):
     sub.on("join", (ctx) => {
       const data = ctx.info.connInfo as { bridgeId?: string; hostname?: string; connectedAt?: string } | undefined;
       if (!data?.bridgeId) return;
+      localAdvertsRef.current.push(ctx.info.connInfo);
+      void provisionRef.current?.(ctx.info.connInfo);
       const bridge: BridgeInfo = {
         clientId: ctx.info.client,
         bridgeId: data.bridgeId,
@@ -162,6 +171,9 @@ export function useBridges(client: MessageClient | null, userId: string | null):
     }, 10_000);
 
     return () => {
+      abort.abort();
+      provisionRef.current = null;
+      localAdvertsRef.current = [];
       clearInterval(presenceInterval);
       sub.removeAllListeners();
       sub.unsubscribe();
@@ -172,7 +184,20 @@ export function useBridges(client: MessageClient | null, userId: string | null):
     };
   }, [client, userId, fetchPresence]);
 
+  const prepareLocalAccess = useCallback(async () => {
+    // A click can precede the first presence snapshot. Give it a bounded chance
+    // to discover this computer without trapping navigation during an outage.
+    if (!localAdvertsRef.current.length && subRef.current) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([fetchPresence(subRef.current), new Promise<void>(resolve => { timer = setTimeout(resolve, 3000); })]);
+      } finally { if (timer) clearTimeout(timer); }
+    }
+    await Promise.all(localAdvertsRef.current.map(info => provisionRef.current?.(info)));
+  }, [fetchPresence]);
+
   return {
+    prepareLocalAccess,
     bridges,
     hasBridges: bridges.length > 0,
   };

@@ -181,7 +181,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const rpc = useBridgeRpc(client, userId);
   const { bridgeExec } = rpc;
   const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, setSessionParent, removeSession, refreshSessions } = useSessions(client, userId, rpc);
-  const { bridges, hasBridges } = useBridges(client, userId);
+  const { bridges, hasBridges, prepareLocalAccess } = useBridges(client, userId);
   const { loops, createLoop, updateLoop, deleteLoop, runLoopNow, getLoopRuns } = useLoops(client, userId, rpc);
 
   // Keep bridgeOrder stable when bridges connect/disconnect; only append new ids (sorted).
@@ -893,7 +893,10 @@ PY`;
               {connectionStatus === "connected" ? "Cloud connected" : "Cloud reconnecting"}
             </span>
           </CloudConnectionNotice>}
-          <a href={localMode ? "/dashboard" : "/local"} className="btn-ghost">{localMode ? "Cloud" : "This computer"}</a>
+          <a href={localMode ? "/dashboard" : "/local"} onClick={localMode ? undefined : (event) => {
+            event.preventDefault();
+            void prepareLocalAccess().then(() => { window.location.href = "/local"; });
+          }} className="btn-ghost">{localMode ? "Cloud" : "This computer"}</a>
 
           <span style={{ width: 1, height: 12, background: "var(--border-muted)" }} />
 
