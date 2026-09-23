@@ -11,6 +11,7 @@ export {
   buildCursorAgentCommand,
   buildCodexCommand,
   buildGrokCommand,
+  buildMuseCommand,
   buildPiCommand,
   buildKimiCodeCommand,
 } from './harness-registry.js';
@@ -24,10 +25,11 @@ export interface BuildSessionCommandInput {
   codexSessionId?: string;
   piSessionId?: string;
   opencodeSessionId?: string;
+  museSessionId?: string;
   command?: string;
   /** Initial prompt passed as a CLI argument — avoids racing the TUI with typed input. */
   initialPrompt?: string;
-  /** Resurrection resume — workdir-based harnesses (Pi/kimi-code) append their continue flag. */
+  /** Resurrection resume — workdir-based harnesses (Pi/kimi-code) append their continue flag; id-based harnesses (incl. muse) ignore it and key off their id fields. */
   resume?: boolean;
 }
 

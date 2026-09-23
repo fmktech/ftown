@@ -26,6 +26,7 @@ export interface BuildCommandInput {
   codexSessionId?: string;
   piSessionId?: string;
   opencodeSessionId?: string;
+  museSessionId?: string;
   /** Initial prompt passed as a CLI argument — avoids racing the TUI with typed input. */
   initialPrompt?: string;
   /**
@@ -48,7 +49,8 @@ export interface HarnessSpec {
     | 'claudeSessionId'
     | 'cursorSessionId'
     | 'codexSessionId'
-    | 'opencodeSessionId';
+    | 'opencodeSessionId'
+    | 'museSessionId';
   /**
    * Rebadged base CLI: the harness launches this CLI with provider env overrides
    * (see PROVIDER_AUTH_ENV / PROVIDER_RUNTIME_ENV in provider-env-store.ts,
@@ -224,6 +226,39 @@ export function buildKimiCodeCommand(options: { model?: string; resume?: boolean
   return parts.join(' ');
 }
 
+export function buildMuseCommand(options: {
+  workingDir?: string;
+  model?: string;
+  museSessionId?: string;
+  initialPrompt?: string;
+}): string {
+  // --yolo disables approval and sandboxing for this workspace run — the muse
+  // analog of grok's --always-approve, required for unattended ftown runs.
+  const parts = ['muse', '--yolo'];
+
+  if (options.workingDir?.trim()) {
+    parts.push('--workspace', shellQuote(options.workingDir.trim()));
+  }
+
+  if (options.museSessionId?.trim()) {
+    // Resume must not replay the model or prompt — muse restores the captured
+    // native session (codex/opencode precedent).
+    parts.push('resume', shellQuote(options.museSessionId.trim()));
+    return parts.join(' ');
+  }
+
+  if (options.model?.trim()) {
+    parts.push('--model', shellQuote(options.model.trim()));
+  }
+
+  if (options.initialPrompt?.trim()) {
+    // The positional prompt is auto-submitted by the muse TUI.
+    parts.push(shellQuote(options.initialPrompt));
+  }
+
+  return parts.join(' ');
+}
+
 /** claude CLI launch — shared by 'claude' and every claude-rebadged provider flavor. */
 function buildClaudeCommand(input: BuildCommandInput): string {
   const parts = ['claude', '--allow-dangerously-skip-permissions'];
@@ -313,6 +348,26 @@ export const HARNESSES = {
     promptAsCliArg: true,
     validForLoop: true,
     // Preserved decision: grok was absent from WorkflowShell / ftown-workflows SHELLS.
+    validForWorkflow: false,
+  },
+  muse: {
+    // Fresh spawns take a positional prompt (grok-style); resume restores the
+    // captured native session id (opencode-style id resume).
+    buildCommand: (input) =>
+      buildMuseCommand({
+        workingDir: input.workingDir,
+        model: input.model,
+        museSessionId: input.museSessionId,
+        initialPrompt: input.initialPrompt,
+      }),
+    // Mail arrives through the installed ftown Muse plugin, which forwards
+    // session events to the bridge /hook endpoint and delivers inbox mail at
+    // turn boundaries.
+    hooked: true,
+    promptAsCliArg: true,
+    resumeField: 'museSessionId',
+    validForLoop: true,
+    // Preserved decision: like grok, muse is absent from WorkflowShell / ftown-workflows SHELLS.
     validForWorkflow: false,
   },
   pi: {
@@ -409,7 +464,7 @@ export function harnessAcceptsPromptAsCliArg(
   shellType: ShellType,
   input: Pick<
     BuildCommandInput,
-    'claudeSessionId' | 'cursorSessionId' | 'codexSessionId' | 'opencodeSessionId'
+    'claudeSessionId' | 'cursorSessionId' | 'codexSessionId' | 'opencodeSessionId' | 'museSessionId'
   >,
 ): boolean {
   const spec: HarnessSpec = HARNESSES[shellType];

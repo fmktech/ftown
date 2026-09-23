@@ -171,7 +171,7 @@ function parseLoopSchedule(args: string[], required: boolean): LoopSchedule | un
 
 function parseLoopHarness(raw: string | undefined): LoopHarness {
   const harness = (raw ?? 'claude') as LoopHarness;
-  if (!['claude', 'cursor', 'codex', 'grok', 'pi', 'kimi-code', 'opencode', 'shell'].includes(harness)) {
+  if (!['claude', 'cursor', 'codex', 'grok', 'pi', 'kimi-code', 'muse', 'opencode', 'shell'].includes(harness)) {
     throw new Error(`Invalid --shell "${raw}"`);
   }
   return harness;
@@ -454,7 +454,7 @@ Loop create/update options:
   --every <duration>            Interval schedule, e.g. 30s, 5m, 2h
   --cron <expr>                 Cron schedule, e.g. "*/15 * * * *"
   --tz <iana-zone>              Cron timezone
-  --shell <type>                claude | cursor | codex | grok | pi | kimi-code | opencode | shell (default: claude)
+  --shell <type>                claude | cursor | codex | grok | pi | kimi-code | muse | opencode | shell (default: claude)
   --workdir <path>              Working directory
   --model <name>                Agent model
   --disabled                    Create/update as disabled

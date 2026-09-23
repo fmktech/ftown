@@ -140,6 +140,12 @@ describe('parseCreateSessionBody — suppressBriefing plumbing', () => {
     assert.strictEqual(input.shellType, 'claude');
     assert.strictEqual(input.suppressBriefing, true);
   });
+
+  it('passes through the muse native session id for resume creates', () => {
+    const input = parseCreateSessionBody({ shellType: 'muse', museSessionId: 'sess-abc' });
+    assert.strictEqual(input.museSessionId, 'sess-abc');
+    assert.strictEqual(parseCreateSessionBody({ shellType: 'muse' }).museSessionId, undefined);
+  });
 });
 
 describe('parseCreateSessionBody — missing working dir confirmation plumbing', () => {
@@ -360,8 +366,8 @@ describe('resolveProviderAuthEnv — provider token mapping', () => {
     );
   });
 
-  it('returns nothing for the five unmapped shell types and undefined', () => {
-    for (const unmapped of ['claude', 'cursor', 'codex', 'shell', 'opencode'] as const) {
+  it('returns nothing for unmapped shell types and undefined', () => {
+    for (const unmapped of ['claude', 'cursor', 'codex', 'shell', 'opencode', 'muse'] as const) {
       assert.deepEqual(
         resolveProviderAuthEnv(unmapped, { processEnv: { ANTHROPIC_API_KEY: 'x' } }),
         {},
@@ -391,7 +397,7 @@ describe('resolveProviderRuntimeEnv — provider CLI defaults', () => {
   });
 
   it('returns nothing for non-provider shell types and undefined', () => {
-    for (const shellType of ['claude', 'cursor', 'codex', 'shell', 'opencode'] as const) {
+    for (const shellType of ['claude', 'cursor', 'codex', 'shell', 'opencode', 'muse'] as const) {
       assert.deepEqual(resolveProviderRuntimeEnv(shellType), {});
     }
     assert.deepEqual(resolveProviderRuntimeEnv(undefined), {});
@@ -518,8 +524,8 @@ describe('assertProviderAuthAvailable — mapped flavors require a token', () =>
     );
   });
 
-  it('does not throw for the five unmapped shell types or undefined', () => {
-    for (const unmapped of ['claude', 'cursor', 'codex', 'shell', 'opencode'] as const) {
+  it('does not throw for unmapped shell types or undefined', () => {
+    for (const unmapped of ['claude', 'cursor', 'codex', 'shell', 'opencode', 'muse'] as const) {
       assert.doesNotThrow(() => assertProviderAuthAvailable(unmapped, { processEnv: {} }));
     }
     assert.doesNotThrow(() => assertProviderAuthAvailable(undefined, { processEnv: {} }));
@@ -626,6 +632,19 @@ describe('deriveRelaunchCommand — single home of the relaunch heuristic', () =
     });
   });
 
+  it('rebuilds a builder-default muse stored command into the resume-by-id command', () => {
+    const museDefault = buildSessionCommand({ shellType: 'muse', workingDir: '/tmp/work' });
+    assert.deepEqual(deriveRelaunchCommand({
+      shellType: 'muse',
+      command: museDefault,
+      workingDir: '/tmp/work',
+      museSessionId: 'sess-abc',
+    }), {
+      command: "muse --yolo --workspace '/tmp/work' resume 'sess-abc'",
+      isCustom: false,
+    });
+  });
+
   it('upgrades a pre-extension Pi command to the hooked resume command', () => {
     assert.deepEqual(deriveRelaunchCommand({
       shellType: 'pi',
@@ -663,6 +682,12 @@ describe('canResumeStoredSession — which stored sessions can resume', () => {
   it('resumes kimi-code by working directory — no recorded id required', () => {
     assert.strictEqual(canResumeStoredSession({ shellType: 'kimi-code' }), true);
     assert.strictEqual(canResumeStoredSession({ shellType: 'kimi-code', claudeSessionId: '  ' }), true);
+  });
+
+  it('resumes muse by its captured plugin-reported session id', () => {
+    assert.strictEqual(canResumeStoredSession({ shellType: 'muse', museSessionId: 'sess_1' }), true);
+    assert.strictEqual(canResumeStoredSession({ shellType: 'muse', claudeSessionId: 'c' }), false);
+    assert.strictEqual(canResumeStoredSession({ shellType: 'muse' }), false);
   });
 
   it('resumes Pi by working directory — no recorded id required', () => {

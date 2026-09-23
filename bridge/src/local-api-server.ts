@@ -100,7 +100,7 @@ export function workingDirMissingResponse(
 export function archivedSessionWasResumed(
   session: Pick<
     Session,
-    'shellType' | 'claudeSessionId' | 'cursorSessionId' | 'codexSessionId' | 'opencodeSessionId'
+    'shellType' | 'claudeSessionId' | 'cursorSessionId' | 'codexSessionId' | 'opencodeSessionId' | 'museSessionId'
   >,
   isCustomCommand: boolean,
 ): boolean {
@@ -658,7 +658,9 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
             (tombstone.codexSessionId && s.codexSessionId === tombstone.codexSessionId) ||
             (tombstone.piSessionId && s.piSessionId === tombstone.piSessionId) ||
             (tombstone.opencodeSessionId &&
-              s.opencodeSessionId === tombstone.opencodeSessionId)) &&
+              s.opencodeSessionId === tombstone.opencodeSessionId) ||
+            (tombstone.museSessionId &&
+              s.museSessionId === tombstone.museSessionId)) &&
           isLive(s),
       );
       if (conflict) {
@@ -693,6 +695,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           piSessionId: tombstone.piSessionId,
           piSessionFile: tombstone.piSessionFile,
           opencodeSessionId: tombstone.opencodeSessionId,
+          museSessionId: tombstone.museSessionId,
           parentSessionId,
         });
         // A builder-managed resumable harness preserves conversation context;

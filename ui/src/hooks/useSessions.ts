@@ -15,7 +15,7 @@ import {
   UpdateSessionParentPayload,
 } from "@/types";
 import type { BridgeRpc } from "@/hooks/useBridgeRpc";
-import { buildCodexCommand, buildCursorAgentCommand, buildGrokCommand, buildKimiCodeCommand, buildPiCommand } from "@/lib/agent-commands";
+import { buildCodexCommand, buildCursorAgentCommand, buildGrokCommand, buildKimiCodeCommand, buildMuseCommand, buildPiCommand } from "@/lib/agent-commands";
 import { buildUsagePollBatches } from "@/lib/live-usage-polling";
 
 // Re-exported for existing consumers (NewSessionModal, session pickers); the
@@ -76,6 +76,7 @@ export interface CreateSessionOptions {
   claudeSessionId?: string;
   cursorSessionId?: string;
   codexSessionId?: string;
+  museSessionId?: string;
   env?: Record<string, string>;
   orchestrator?: boolean;
   createMissingWorkingDir?: boolean;
@@ -323,6 +324,12 @@ export function useSessions(
         cmd = buildGrokCommand({
           model: options?.model,
         });
+      } else if (shellType === "muse") {
+        cmd = buildMuseCommand({
+          workingDir: options?.workingDir,
+          model: options?.model,
+          museSessionId: options?.museSessionId,
+        });
       } else if (shellType === "pi") {
         cmd = buildPiCommand({
           model: options?.model,
@@ -348,6 +355,7 @@ export function useSessions(
         claudeSessionId: options?.claudeSessionId,
         cursorSessionId: options?.cursorSessionId,
         codexSessionId: options?.codexSessionId,
+        museSessionId: options?.museSessionId,
         env: options?.env,
         ...(options?.orchestrator && shellType !== "shell" ? { orchestrator: true } : {}),
         ...(options?.createMissingWorkingDir ? { createMissingWorkingDir: true } : {}),

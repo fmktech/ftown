@@ -14,9 +14,11 @@ import type { ModelUsage, Session, SessionUsage } from './types.js';
  * claude CLI under the hood and get a claudeSessionId persisted by the hook
  * pipeline, so any session with a claudeSessionId uses the claude extractor
  * regardless of shellType. Pi records a native id/file when its extension is
- * active and falls back to workingDir + createdAt discovery; kimi-code uses the
- * same workdir-based discovery model. Sessions with none of these (cursor,
- * grok, plain shell) have no structured usage source and yield null.
+ * active and falls back to workingDir + createdAt discovery; kimi-code uses
+ * the same workdir-based discovery model. Muse is id-first (native
+ * museSessionId resolved codex-style) with the workdir model as fallback.
+ * Sessions with none of these (cursor, grok, plain shell) have no structured
+ * usage source and yield null.
  *
  * TODO(opencode): opencodeSessionId is now captured from the plugin's hook
  * events, but there is no on-disk usage extractor yet — opencode sessions
@@ -29,7 +31,7 @@ import type { ModelUsage, Session, SessionUsage } from './types.js';
 
 export type UsageSessionRef = Pick<
   Session,
-  'shellType' | 'claudeSessionId' | 'codexSessionId' | 'piSessionId' | 'piSessionFile' | 'workingDir'
+  'shellType' | 'claudeSessionId' | 'codexSessionId' | 'piSessionId' | 'piSessionFile' | 'museSessionId' | 'workingDir'
 > &
   // createdAt is consumed by workdir-based extractors to disambiguate sessions
   // sharing a workingDir; optional so id-based callers/tests need not set it.
@@ -47,6 +49,8 @@ export interface UsageCollectorOptions {
    * session_index.jsonl and sessions/<...>/session_<uuid>/.
    */
   kimiCodeDir?: string;
+  /** Override for tests. Default: ~/.local/share/muse/sessions */
+  museSessionsDir?: string;
   /** Cap on wall-clock read time per collection. Default 15s. */
   timeoutMs?: number;
 }
@@ -84,6 +88,19 @@ export async function collectSessionUsage(
     }
     if (session.shellType === 'kimi-code' && session.workingDir) {
       return await collectKimiCodeUsage(session.workingDir, session.createdAt, options);
+    }
+    if (session.shellType === 'muse') {
+      // Id-first: the native session id resolves the exact session.jsonl
+      // (codex-style date-partition scan); an id miss falls back to the
+      // workdir + createdAt discovery below.
+      if (session.museSessionId) {
+        const byId = await collectMuseUsageById(session.museSessionId, options);
+        if (byId) return byId;
+      }
+      if (session.workingDir) {
+        return await collectMuseUsage(session.workingDir, session.createdAt, options);
+      }
+      return null;
     }
     return null;
   } catch {
@@ -592,6 +609,247 @@ async function collectKimiCodeUsage(
     models: perModel.map((m) => m.model),
     perModel,
     harness: 'kimi-code',
+    collectedAt: new Date().toISOString(),
+  };
+}
+
+interface MuseEnvelope {
+  payload_type?: string;
+  // Microseconds since epoch (session start ≈ first data record's value).
+  recorded_at?: number;
+  payload?: {
+    kind?: string;
+    record?: {
+      workspace_root?: string;
+      cwd?: string;
+    };
+    event?: {
+      kind?: string;
+      model?: string;
+      usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+        cached_tokens?: number;
+        cache_write_tokens?: number;
+        cache_read_tokens?: number;
+        reasoning_tokens?: number;
+      };
+    };
+  };
+}
+
+/**
+ * Resolve the muse session.jsonl that this ftown session spawned.
+ *
+ * Layout is date-partitioned: sessions/YYYY/MM/DD/<session-id>/session.jsonl.
+ * The workspace marker is `runtime.session.metadata`
+ * (record.workspace_root), with `runtime.session.route_facts` (record.cwd)
+ * as fallback — both verified against real logs on this machine. Selection
+ * mirrors kimi-code: among workspace matches, the newest session created
+ * at-or-after the ftown session, else the newest overall.
+ */
+async function resolveMuseSessionFile(
+  baseDir: string,
+  workingDir: string,
+  sessionCreatedAt: string | undefined,
+  deadline: number,
+): Promise<string | null> {
+  const resolvedWorkdir = resolve(workingDir);
+  const listDirs = async (dir: string): Promise<string[]> => {
+    try {
+      const entries = await readdir(dir, { withFileTypes: true });
+      // Newest partitions first — sessions are usually recent.
+      return entries
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+        .sort()
+        .reverse();
+    } catch {
+      return [];
+    }
+  };
+
+  const candidates: Array<{ path: string; createdAtMs: number }> = [];
+
+  const matchFile = async (filePath: string): Promise<void> => {
+    // Markers sit in the first data lines — stop once workspace + start time
+    // are known rather than streaming tens of MB per candidate.
+    let workspace: string | null = null;
+    let createdAtMs = 0;
+    let sawTimestamp = false;
+    for await (const raw of jsonlLines(filePath, deadline)) {
+      const entry = raw as MuseEnvelope;
+      if (typeof entry?.recorded_at === 'number' && !sawTimestamp) {
+        createdAtMs = Math.floor(entry.recorded_at / 1000);
+        sawTimestamp = true;
+      }
+      const record = entry?.payload?.record;
+      if (entry?.payload_type === 'runtime.session.metadata') {
+        const root = record?.workspace_root;
+        if (typeof root === 'string' && root) workspace = root;
+      } else if (entry?.payload_type === 'runtime.session.route_facts') {
+        const cwd = record?.cwd;
+        if (!workspace && typeof cwd === 'string' && cwd) workspace = cwd;
+      }
+      if (workspace && sawTimestamp) break;
+    }
+    if (!workspace) return;
+    let normalized: string;
+    try {
+      normalized = resolve(workspace);
+    } catch {
+      return;
+    }
+    if (normalized === resolvedWorkdir) {
+      candidates.push({ path: filePath, createdAtMs });
+    }
+  };
+
+  for (const year of await listDirs(baseDir)) {
+    for (const month of await listDirs(join(baseDir, year))) {
+      for (const day of await listDirs(join(baseDir, year, month))) {
+        if (Date.now() > deadline) break;
+        const dayDir = join(baseDir, year, month, day);
+        for (const sessionId of await listDirs(dayDir)) {
+          if (Date.now() > deadline) break;
+          await matchFile(join(dayDir, sessionId, 'session.jsonl'));
+        }
+      }
+      if (Date.now() > deadline) break;
+    }
+    if (Date.now() > deadline) break;
+  }
+
+  if (candidates.length === 0) return null;
+
+  const sessionMs = sessionCreatedAt ? Date.parse(sessionCreatedAt) : NaN;
+  const newest = (list: Array<{ path: string; createdAtMs: number }>) =>
+    list.reduce((best, c) => (c.createdAtMs >= best.createdAtMs ? c : best));
+
+  if (!Number.isNaN(sessionMs)) {
+    const atOrAfter = candidates.filter((c) => c.createdAtMs >= sessionMs);
+    if (atOrAfter.length > 0) return newest(atOrAfter).path;
+  }
+  return newest(candidates).path;
+}
+
+/** Resolve sessions/YYYY/MM/DD/<id>/session.jsonl by native id (date-partitioned). */
+async function findMuseSessionFileById(
+  baseDir: string,
+  museSessionId: string,
+): Promise<string | null> {
+  // The id becomes a path segment — reject anything that could escape the day dir.
+  if (museSessionId.includes('/') || museSessionId.includes('\\') || museSessionId.includes('..')) {
+    return null;
+  }
+  const listDirs = async (dir: string): Promise<string[]> => {
+    try {
+      const entries = await readdir(dir, { withFileTypes: true });
+      // Newest partitions first — sessions are usually recent.
+      return entries
+        .filter((e) => e.isDirectory())
+        .map((e) => e.name)
+        .sort()
+        .reverse();
+    } catch {
+      return [];
+    }
+  };
+  for (const year of await listDirs(baseDir)) {
+    for (const month of await listDirs(join(baseDir, year))) {
+      for (const day of await listDirs(join(baseDir, year, month))) {
+        const filePath = join(baseDir, year, month, day, museSessionId, 'session.jsonl');
+        try {
+          if ((await stat(filePath)).isFile()) return filePath;
+        } catch {
+          // No session by that id under this partition — keep scanning.
+        }
+      }
+    }
+  }
+  return null;
+}
+
+async function collectMuseUsageById(
+  museSessionId: string,
+  options: UsageCollectorOptions,
+): Promise<SessionUsage | null> {
+  const baseDir = options.museSessionsDir
+    ?? join(homedir(), '.local', 'share', 'muse', 'sessions');
+  const filePath = await findMuseSessionFileById(baseDir, museSessionId);
+  if (!filePath) return null;
+  const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  return sumMuseSessionFile(filePath, deadline);
+}
+
+async function collectMuseUsage(
+  workingDir: string,
+  sessionCreatedAt: string | undefined,
+  options: UsageCollectorOptions,
+): Promise<SessionUsage | null> {
+  const baseDir = options.museSessionsDir
+    ?? join(homedir(), '.local', 'share', 'muse', 'sessions');
+  const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+
+  const filePath = await resolveMuseSessionFile(baseDir, workingDir, sessionCreatedAt, deadline);
+  if (!filePath) return null;
+  return sumMuseSessionFile(filePath, deadline);
+}
+
+async function sumMuseSessionFile(
+  filePath: string,
+  deadline: number,
+): Promise<SessionUsage | null> {
+  let counted = 0;
+  // Keyed by model id; Map preserves first-appearance order.
+  const byModel = new Map<string, ModelUsage>();
+
+  for await (const raw of jsonlLines(filePath, deadline)) {
+    const entry = raw as MuseEnvelope;
+    if (entry?.payload_type !== 'runtime.session') continue;
+    const event = entry.payload?.kind === 'run' ? entry.payload.event : undefined;
+    if (event?.kind !== 'model_completed') continue;
+    const usage = event.usage;
+    const model = event.model ?? '';
+    if (!usage || !model) continue;
+
+    let acc = byModel.get(model);
+    if (!acc) {
+      acc = { model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+      byModel.set(model, acc);
+    }
+    // Per-call records — SUM across all of them. Verified against real logs:
+    // input_tokens INCLUDES cached tokens (cached(n) ≈ input(n-1)), so split
+    // them codex-style; cached_tokens duplicates cache_read_tokens (ignored);
+    // output_tokens includes reasoning_tokens (no separate field to map to).
+    const input = safeTokenCount(usage.input_tokens);
+    const cacheRead = Math.min(safeTokenCount(usage.cache_read_tokens), input);
+    acc.inputTokens += input - cacheRead;
+    acc.outputTokens += safeTokenCount(usage.output_tokens);
+    acc.cacheReadTokens += cacheRead;
+    acc.cacheWriteTokens += safeTokenCount(usage.cache_write_tokens);
+    counted += 1;
+  }
+
+  if (counted === 0) return null;
+
+  const perModel = [...byModel.values()];
+  const sum = (pick: (m: ModelUsage) => number): number =>
+    perModel.reduce((acc, m) => acc + pick(m), 0);
+  const inputTokens = sum((m) => m.inputTokens);
+  const outputTokens = sum((m) => m.outputTokens);
+  const cacheReadTokens = sum((m) => m.cacheReadTokens);
+  const cacheWriteTokens = sum((m) => m.cacheWriteTokens);
+
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+    models: perModel.map((m) => m.model),
+    perModel,
+    harness: 'muse',
     collectedAt: new Date().toISOString(),
   };
 }

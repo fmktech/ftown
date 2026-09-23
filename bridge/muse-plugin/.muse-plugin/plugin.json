@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "ftown",
+  "name": "ftown",
+  "displayName": "ftown",
+  "version": "0.1.0",
+  "description": "ftown session lifecycle hooks: native session id capture and inbox mail delivery.",
+  "compat": {
+    "source": "native",
+    "manifestDir": ".muse-plugin"
+  },
+  "capabilities": {
+    "skills": [],
+    "commands": [],
+    "hooks": [
+      {
+        "id": "ftown-session-start",
+        "event": "SessionStart",
+        "command": [
+          "sh",
+          "hooks/ftown-session-start.sh"
+        ],
+        "timeoutMs": 5000,
+        "statusMessage": "ftown session start"
+      },
+      {
+        "id": "ftown-stop",
+        "event": "Stop",
+        "command": [
+          "sh",
+          "hooks/ftown-stop.sh"
+        ],
+        "timeoutMs": 5000,
+        "statusMessage": "ftown stop"
+      }
+    ],
+    "mcpServers": [],
+    "reminders": []
+  }
+}

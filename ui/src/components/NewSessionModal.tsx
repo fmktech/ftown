@@ -227,6 +227,7 @@ const VALID_SHELL_TYPES: ShellType[] = [
   "cursor",
   "codex",
   "grok",
+  "muse",
   "pi",
   "kimi-code",
   "opencode",
@@ -240,13 +241,14 @@ interface LastSessionDefaults {
   model?: string;
 }
 
-type TopShell = "claude" | "cursor" | "codex" | "grok" | "pi" | "kimi-code" | "opencode" | "shell";
+type TopShell = "claude" | "cursor" | "codex" | "grok" | "muse" | "pi" | "kimi-code" | "opencode" | "shell";
 type ClaudeFlavor = "standard" | "zai" | "kimi" | "deepseek" | "fireworks";
 
 function shellTypeToTop(s: ShellType | undefined): { top: TopShell; flavor: ClaudeFlavor } {
   if (s === "cursor") return { top: "cursor", flavor: "standard" };
   if (s === "codex") return { top: "codex", flavor: "standard" };
   if (s === "grok") return { top: "grok", flavor: "standard" };
+  if (s === "muse") return { top: "muse", flavor: "standard" };
   if (s === "pi") return { top: "pi", flavor: "standard" };
   if (s === "kimi-code") return { top: "kimi-code", flavor: "standard" };
   if (s === "opencode") return { top: "opencode", flavor: "standard" };
@@ -259,7 +261,7 @@ function shellTypeToTop(s: ShellType | undefined): { top: TopShell; flavor: Clau
 }
 
 function resolveShellType(top: TopShell, flavor: ClaudeFlavor): ShellType {
-  if (top === "cursor" || top === "codex" || top === "grok" || top === "pi" || top === "kimi-code" || top === "opencode" || top === "shell") return top;
+  if (top === "cursor" || top === "codex" || top === "grok" || top === "muse" || top === "pi" || top === "kimi-code" || top === "opencode" || top === "shell") return top;
   if (flavor === "standard") return "claude";
   return flavor;
 }
@@ -322,6 +324,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const [fireworksModels, setFireworksModels] = useState<FireworksModels>(FIREWORKS_DEFAULT_MODELS);
   const [zaiModels, setZaiModels] = useState<ZaiModels>(ZAI_DEFAULT_MODELS);
   const [grokModel, setGrokModel] = useState<string>(GROK_MODEL_OPTIONS[0]);
+  const [museModel, setMuseModel] = useState("");
   const [piModel, setPiModel] = useState("");
   const [kimiCodeModel, setKimiCodeModel] = useState<string>(KIMI_CODE_MODEL_OPTIONS[0].value);
   const [opencodeModel, setOpencodeModel] = useState("");
@@ -407,6 +410,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setFireworksModels(getStoredFireworksModels());
     setZaiModels(getStoredZaiModels());
     setGrokModel(restoredShellType === "grok" && typeof parsed.model === "string" ? parsed.model : GROK_MODEL_OPTIONS[0]);
+    setMuseModel(restoredShellType === "muse" && typeof parsed.model === "string" ? parsed.model : "");
     setPiModel(restoredShellType === "pi" && typeof parsed.model === "string" ? parsed.model : "");
     setKimiCodeModel(restoredShellType === "kimi-code" && typeof parsed.model === "string" ? parsed.model : KIMI_CODE_MODEL_OPTIONS[0].value);
     setOpencodeModel(restoredShellType === "opencode" && typeof parsed.model === "string" ? parsed.model : "");
@@ -469,7 +473,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     try {
       await onSubmit("", {
         name: name.trim() || undefined,
-        model: shellType === "grok" ? grokModel : shellType === "pi" ? piModel.trim() || undefined : shellType === "kimi-code" ? kimiCodeModel : shellType === "opencode" ? opencodeModel.trim() || undefined : undefined,
+        model: shellType === "grok" ? grokModel : shellType === "muse" ? museModel.trim() || undefined : shellType === "pi" ? piModel.trim() || undefined : shellType === "kimi-code" ? kimiCodeModel : shellType === "opencode" ? opencodeModel.trim() || undefined : undefined,
         workingDir: workingDir.trim() || undefined,
         bridgeId: effectiveBridgeId || undefined,
         shellType,
@@ -501,6 +505,9 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       if (shellType === "grok") {
         lastDefaults.model = grokModel;
       }
+      if (shellType === "muse") {
+        lastDefaults.model = museModel.trim() || undefined;
+      }
       if (shellType === "pi") {
         lastDefaults.model = piModel.trim() || undefined;
       }
@@ -520,6 +527,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setTopShell("claude");
     setClaudeFlavor("standard");
     setGrokModel(GROK_MODEL_OPTIONS[0]);
+    setMuseModel("");
     setPiModel("");
     setKimiCodeModel(KIMI_CODE_MODEL_OPTIONS[0].value);
     setOpencodeModel("");
@@ -530,7 +538,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setSelectedCursorSessionId(null);
     setSelectedCursorSummary(null);
     onClose();
-  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, fireworksModels, zaiModels, grokModel, piModel, kimiCodeModel, opencodeModel, autoCompactWindow, onSubmit, onClose]);
+  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, fireworksModels, zaiModels, grokModel, museModel, piModel, kimiCodeModel, opencodeModel, autoCompactWindow, onSubmit, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -591,6 +599,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                 <option value="cursor">Cursor Agent</option>
                 <option value="codex">Codex</option>
                 <option value="grok">Grok</option>
+                <option value="muse">Muse</option>
                 <option value="pi">Pi</option>
                 <option value="kimi-code">Kimi Code</option>
                 <option value="opencode">opencode</option>
@@ -681,6 +690,22 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                     </option>
                   ))}
                 </select>
+              </div>
+            )}
+
+            {shellType === "muse" && (
+              <div className="mt-3">
+                <label htmlFor="ns-muse-model" className="block text-sm text-[var(--text-muted)] mb-1">
+                  Model
+                </label>
+                <input
+                  id="ns-muse-model"
+                  type="text"
+                  value={museModel}
+                  onChange={(e) => setMuseModel(e.target.value)}
+                  placeholder="Optional, CLI default when blank"
+                  className={INPUT_CLASS + " text-sm"}
+                />
               </div>
             )}
 

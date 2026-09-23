@@ -11,6 +11,7 @@ function hasCollectableUsage(session: Session): boolean {
   if (session.status !== "running") return false;
   if (session.codexSessionId) return true;
   if (session.claudeSessionId && session.workingDir) return true;
+  if (session.shellType === "muse") return Boolean(session.museSessionId || session.workingDir);
   return session.shellType === "kimi-code" && Boolean(session.workingDir);
 }
 

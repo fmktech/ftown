@@ -18,6 +18,7 @@
     "hooks",
     "pi-extension",
     "opencode-plugin",
+    "muse-plugin",
     "skills"
   ],
   "scripts": {
