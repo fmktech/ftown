@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import { hash } from "bcryptjs";
 import { getDb } from "@/lib/db";
 import {
@@ -8,6 +8,7 @@ import {
 } from "@/lib/login-rate-limit";
 import { clientIp } from "@/lib/client-ip";
 import { isRegistrationEnabled } from "@/lib/registration";
+import { notifyCustomerSignup } from "@/lib/signup-webhook";
 
 interface RegisterBody {
   email: string;
@@ -93,10 +94,14 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   const passwordHash = await hash(password, 12);
 
-  await sql.query(
-    "INSERT INTO users (email, password_hash) VALUES ($1, $2) ON CONFLICT (email) DO NOTHING",
+  const created = (await sql.query(
+    "INSERT INTO users (email, password_hash) VALUES ($1, $2) ON CONFLICT (email) DO NOTHING RETURNING id",
     [email, passwordHash]
-  );
+  )) as DbUserRow[];
+
+  if (created.length > 0) {
+    after(() => notifyCustomerSignup(email));
+  }
 
   return acceptedResponse();
 }
