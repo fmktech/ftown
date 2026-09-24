@@ -14,16 +14,18 @@ interface CachedAgentIds {
   pi?: string;
   piFile?: string;
   opencode?: string;
+  muse?: string;
   isCodex?: boolean;
   isPi?: boolean;
   isOpencode?: boolean;
+  isMuse?: boolean;
 }
 
 /**
- * Persists agent-native session identity (Claude/Codex/Pi/opencode session_id,
- * Pi session_file, or Cursor conversation_id) from hook events onto the stored
- * session record, with an in-memory cache of the last persisted values to skip
- * disk reads on the hot hook path.
+ * Persists agent-native session identity (Claude/Codex/Pi/opencode/Muse
+ * session_id, Pi session_file, or Cursor conversation_id) from hook events
+ * onto the stored session record, with an in-memory cache of the last
+ * persisted values to skip disk reads on the hot hook path.
  */
 export class AgentSessionIdPersister {
   private readonly cache = new Map<string, CachedAgentIds>();
@@ -55,7 +57,9 @@ export class AgentSessionIdPersister {
           ? cached.codex === agentId
           : cached.isOpencode
             ? cached.opencode === agentId
-            : cached.claude === agentId))
+            : cached.isMuse
+              ? cached.muse === agentId
+              : cached.claude === agentId))
       && (!cursorId || cached.cursor === cursorId)
       && (!sessionFile || cached.piFile === sessionFile)) {
       return;
@@ -66,6 +70,7 @@ export class AgentSessionIdPersister {
     const isCodex = session.shellType === 'codex';
     const isPi = session.shellType === 'pi';
     const isOpencode = session.shellType === 'opencode';
+    const isMuse = session.shellType === 'muse';
 
     let changed = false;
     if (agentId) {
@@ -78,7 +83,10 @@ export class AgentSessionIdPersister {
       } else if (isOpencode && session.opencodeSessionId !== agentId) {
         session.opencodeSessionId = agentId;
         changed = true;
-      } else if (!isCodex && !isOpencode && session.claudeSessionId !== agentId) {
+      } else if (isMuse && session.museSessionId !== agentId) {
+        session.museSessionId = agentId;
+        changed = true;
+      } else if (!isCodex && !isOpencode && !isMuse && session.claudeSessionId !== agentId) {
         session.claudeSessionId = agentId;
         changed = true;
       }
@@ -99,9 +107,11 @@ export class AgentSessionIdPersister {
         pi: session.piSessionId,
         piFile: session.piSessionFile,
         opencode: session.opencodeSessionId,
+        muse: session.museSessionId,
         isCodex,
         isPi,
         isOpencode,
+        isMuse,
       });
       return;
     }
@@ -116,9 +126,11 @@ export class AgentSessionIdPersister {
       pi: session.piSessionId,
       piFile: session.piSessionFile,
       opencode: session.opencodeSessionId,
+      muse: session.museSessionId,
       isCodex,
       isPi,
       isOpencode,
+      isMuse,
     });
     await this.deps.publishSessionUpdate(session);
   }

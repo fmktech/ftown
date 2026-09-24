@@ -8,6 +8,7 @@ import {
   SHELL_TYPES,
   WORKFLOW_SHELLS,
   buildKimiCodeCommand,
+  buildMuseCommand,
   buildOpencodeCommand,
   harnessAcceptsPromptAsCliArg,
   isLoopHarness,
@@ -25,7 +26,7 @@ type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 const _shellTypeIsRegistryKeys: Equals<ShellType, keyof typeof HARNESSES> = true;
 const _loopHarnessUnion: Equals<
   LoopHarness,
-  'claude' | 'cursor' | 'codex' | 'shell' | 'grok' | 'pi' | 'kimi-code' | 'opencode'
+  'claude' | 'cursor' | 'codex' | 'shell' | 'grok' | 'muse' | 'pi' | 'kimi-code' | 'opencode'
 > = true;
 const _workflowShellUnion: Equals<
   WorkflowShell,
@@ -39,7 +40,7 @@ describe('harness registry', () => {
   it('contains the supported ShellType set', () => {
     assert.deepEqual(
       [...SHELL_TYPES].sort(),
-      ['claude', 'codex', 'cursor', 'deepseek', 'fireworks', 'grok', 'kimi', 'kimi-code', 'opencode', 'pi', 'shell', 'zai'],
+      ['claude', 'codex', 'cursor', 'deepseek', 'fireworks', 'grok', 'kimi', 'kimi-code', 'muse', 'opencode', 'pi', 'shell', 'zai'],
     );
   });
 
@@ -87,21 +88,21 @@ describe('harness registry', () => {
   it('derives the loop harness set', () => {
     assert.deepEqual(
       [...LOOP_HARNESS_TYPES].sort(),
-      ['claude', 'codex', 'cursor', 'grok', 'kimi-code', 'opencode', 'pi', 'shell'],
+      ['claude', 'codex', 'cursor', 'grok', 'kimi-code', 'muse', 'opencode', 'pi', 'shell'],
     );
   });
 
-  it('derives the workflow shell set (grok stays excluded — preserved decision)', () => {
+  it('derives the workflow shell set (grok and muse stay excluded — preserved decision)', () => {
     assert.deepEqual(
       [...WORKFLOW_SHELLS].sort(),
       ['claude', 'codex', 'cursor', 'opencode', 'pi', 'shell'],
     );
   });
 
-  it('derives the hooked harness set (Pi uses the bundled ftown extension, opencode the bundled ftown plugin)', () => {
+  it('derives the hooked harness set (Pi uses the bundled ftown extension, opencode/muse the bundled ftown plugins)', () => {
     assert.deepEqual(
       [...HOOKED_SHELL_TYPES].sort(),
-      ['claude', 'codex', 'deepseek', 'fireworks', 'kimi', 'opencode', 'pi', 'zai'],
+      ['claude', 'codex', 'deepseek', 'fireworks', 'kimi', 'muse', 'opencode', 'pi', 'zai'],
     );
   });
 
@@ -140,6 +141,13 @@ describe('harness registry', () => {
         harnessAcceptsPromptAsCliArg('grok', { claudeSessionId: 'a', cursorSessionId: 'b', codexSessionId: 'c' }),
         true,
       );
+    });
+
+    it('muse: yes, unless resuming a muse session', () => {
+      assert.equal(harnessAcceptsPromptAsCliArg('muse', {}), true);
+      assert.equal(harnessAcceptsPromptAsCliArg('muse', { museSessionId: 'sess_abc' }), false);
+      // Other harnesses' resume fields do not suppress it.
+      assert.equal(harnessAcceptsPromptAsCliArg('muse', { claudeSessionId: 'abc' }), true);
     });
 
     it('pi: accepts an initial CLI prompt', () => {
@@ -252,5 +260,76 @@ describe('buildKimiCodeCommand', () => {
       HARNESSES['kimi-code'].buildCommand({ resume: true, model: 'k2' }),
       `${KIMI} --yolo -c -m 'k2'`,
     );
+  });
+});
+
+describe('buildMuseCommand', () => {
+  it('base launch is --yolo only (frozen)', () => {
+    assert.equal(buildMuseCommand({}), 'muse --yolo');
+  });
+
+  it('--workspace rides only when the workdir is known', () => {
+    assert.equal(buildMuseCommand({ workingDir: '/tmp/w' }), "muse --yolo --workspace '/tmp/w'");
+    assert.equal(buildMuseCommand({ workingDir: '  ' }), 'muse --yolo');
+  });
+
+  it('model and prompt compose after --workspace (flag order mirrors cursor)', () => {
+    assert.equal(
+      buildMuseCommand({ workingDir: '/tmp/w', model: 'm1', initialPrompt: 'hello world' }),
+      "muse --yolo --workspace '/tmp/w' --model 'm1' 'hello world'",
+    );
+  });
+
+  it('prompt is positional without a workdir', () => {
+    assert.equal(buildMuseCommand({ initialPrompt: 'do the thing' }), "muse --yolo 'do the thing'");
+  });
+
+  it('prompts are single-quote escaped', () => {
+    assert.equal(
+      buildMuseCommand({ initialPrompt: "it's here" }),
+      `muse --yolo 'it'\\''s here'`,
+    );
+  });
+
+  it('resume early-returns with no model and no prompt (codex/opencode precedent)', () => {
+    assert.equal(
+      buildMuseCommand({ workingDir: '/tmp/w', museSessionId: 'sess-abc' }),
+      "muse --yolo --workspace '/tmp/w' resume 'sess-abc'",
+    );
+    assert.equal(
+      buildMuseCommand({ workingDir: '/tmp/w', museSessionId: 'sess-abc', model: 'm1', initialPrompt: 'p' }),
+      "muse --yolo --workspace '/tmp/w' resume 'sess-abc'",
+    );
+    assert.equal(buildMuseCommand({ museSessionId: 'sess-abc' }), "muse --yolo resume 'sess-abc'");
+  });
+
+  it('resume suppresses the prompt-as-CLI-arg path (prompt never replays on resume)', () => {
+    assert.equal(harnessAcceptsPromptAsCliArg('muse', { museSessionId: 'sess-abc' }), false);
+    assert.equal(
+      buildMuseCommand({ workingDir: '/tmp/w', museSessionId: 'sess-abc', initialPrompt: 'do not replay' }),
+      "muse --yolo --workspace '/tmp/w' resume 'sess-abc'",
+    );
+  });
+
+  it('registry muse entry threads workdir, model, prompt, and session id through', () => {
+    assert.equal(HARNESSES.muse.buildCommand({}), 'muse --yolo');
+    assert.equal(
+      HARNESSES.muse.buildCommand({ workingDir: '/tmp/w', model: 'm1', initialPrompt: 'hi' }),
+      "muse --yolo --workspace '/tmp/w' --model 'm1' 'hi'",
+    );
+    assert.equal(
+      HARNESSES.muse.buildCommand({ workingDir: '/tmp/w', museSessionId: 'sess-abc' }),
+      "muse --yolo --workspace '/tmp/w' resume 'sess-abc'",
+    );
+  });
+
+  it('registry muse spec matches the frozen contract (A1: hooked + museSessionId)', () => {
+    assert.equal(HARNESSES.muse.hooked, true);
+    assert.equal(HARNESSES.muse.promptAsCliArg, true);
+    assert.equal(HARNESSES.muse.resumeField, 'museSessionId');
+    assert.ok(!('providerBase' in HARNESSES.muse));
+    assert.equal(HARNESSES.muse.validForLoop, true);
+    assert.equal(HARNESSES.muse.validForWorkflow, false);
+    assert.ok(!('spawnStaggerMs' in HARNESSES.muse));
   });
 });

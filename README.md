@@ -1,6 +1,6 @@
 # ftown
 
-A remote CLI agent orchestrator that lets you manage and stream **Claude Code, Cursor Agent, Codex, Grok, Pi, Kimi Code, opencode,** and shell sessions through a web dashboard. Terminal streaming climbs a transport ladder — local loopback, then WebRTC P2P, then Centrifugo — so output stays on your machine or network whenever possible, and automatically upgrades back to a direct connection once it can. Recurring agent work runs as scheduled **loops**: cron or interval triggers that spawn full sessions with guardrails, instead of a hand-rolled polling script.
+A remote CLI agent orchestrator that lets you manage and stream **Claude Code, Cursor Agent, Codex, Grok, Muse Code, Pi, Kimi Code, opencode,** and shell sessions through a web dashboard. Terminal streaming climbs a transport ladder — local loopback, then WebRTC P2P, then Centrifugo — so output stays on your machine or network whenever possible, and automatically upgrades back to a direct connection once it can. Recurring agent work runs as scheduled **loops**: cron or interval triggers that spawn full sessions with guardrails, instead of a hand-rolled polling script.
 
 ## Demo
 
@@ -69,7 +69,7 @@ Full guide: [docs/solo.md](docs/solo.md)
 
 ### Everything else
 
-- Seven coding-agent CLIs plus raw shells as full interactive sessions
+- Eight coding-agent CLIs plus raw shells as full interactive sessions
 - Parent/child agent trees, durable cross-session mail, and session reparenting
 - Native resume support for Claude, Cursor, Codex, and Pi; workdir-based continuation for Kimi Code
 - Live per-session token/model usage for harnesses with structured native session logs
@@ -97,7 +97,7 @@ ftown-sessions loop create \
 ```
 
 - **Schedules** — interval (`--every 30s|5m|2h|1d`) or cron with timezone (`--cron "0 9 * * 1-5" --tz America/New_York`); create via the dashboard's loop modal or the CLI
-- **Harness choice** — claude, cursor, codex, grok, pi, kimi-code, opencode, or plain shell, each with its own configurable workdir and model
+- **Harness choice** — claude, cursor, codex, grok, muse, pi, kimi-code, opencode, or plain shell, each with its own configurable workdir and model
 - **Guardrails** — `--preflight <cmd>` (a non-zero exit skips the run; its stdout is injected into the prompt via `{{preflight}}`), `--postflight <cmd>` (receives run status, session id, and output), `--max-runtime` to force-stop a run
 - **Overlap & retention** — overlapping runs are skipped by default (`--allow-overlap` to permit them); retention keeps only the newest N runs
 - **Lifecycle** — pause/resume, fire a one-shot run manually, edit a loop live, and see run history with status dots (running/done/error/skipped/paused) plus next-due time in the dashboard

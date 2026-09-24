@@ -1,7 +1,13 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildGrokCommand, buildPiCommand, buildSessionCommand, shellQuote } from './agent-commands.js';
+import {
+  buildGrokCommand,
+  buildMuseCommand,
+  buildPiCommand,
+  buildSessionCommand,
+  shellQuote,
+} from './agent-commands.js';
 
 describe('buildSessionCommand — pi', () => {
   it('launches Pi as an interactive coding agent', () => {
@@ -75,6 +81,65 @@ describe('buildSessionCommand — grok', () => {
     assert.strictEqual(
       buildSessionCommand({ shellType: 'grok', ...options }),
       buildGrokCommand(options),
+    );
+  });
+});
+
+describe('buildSessionCommand — muse', () => {
+  it('launches bare muse with --yolo when no workdir/model/prompt', () => {
+    assert.strictEqual(buildSessionCommand({ shellType: 'muse' }), 'muse --yolo');
+  });
+
+  it("appends --workspace '<workdir>' when a workdir is provided", () => {
+    assert.strictEqual(
+      buildSessionCommand({ shellType: 'muse', workingDir: '/tmp/w' }),
+      "muse --yolo --workspace '/tmp/w'",
+    );
+  });
+
+  it("appends --model '<model>' when a model is provided", () => {
+    assert.strictEqual(
+      buildSessionCommand({ shellType: 'muse', workingDir: '/tmp/w', model: 'm1' }),
+      "muse --yolo --workspace '/tmp/w' --model 'm1'",
+    );
+  });
+
+  it('appends the shell-quoted initial prompt as the last positional arg', () => {
+    assert.strictEqual(
+      buildSessionCommand({ shellType: 'muse', workingDir: '/tmp/w', model: 'm1', initialPrompt: 'hello world' }),
+      "muse --yolo --workspace '/tmp/w' --model 'm1' 'hello world'",
+    );
+  });
+
+  it('shell-escapes a single quote in the initial prompt', () => {
+    assert.strictEqual(
+      buildSessionCommand({ shellType: 'muse', initialPrompt: "it's fine" }),
+      "muse --yolo 'it'\\''s fine'",
+    );
+  });
+
+  it('resume restores the native session without model or prompt', () => {
+    assert.strictEqual(
+      buildSessionCommand({
+        shellType: 'muse',
+        workingDir: '/tmp/w',
+        model: 'm1',
+        initialPrompt: 'do not replay',
+        museSessionId: 'sess-abc',
+      }),
+      "muse --yolo --workspace '/tmp/w' resume 'sess-abc'",
+    );
+  });
+
+  it('produces the same string as buildMuseCommand for matching inputs', () => {
+    const options = { workingDir: '/tmp/w', model: 'm1', initialPrompt: "it's fine" };
+    assert.strictEqual(
+      buildSessionCommand({ shellType: 'muse', ...options }),
+      buildMuseCommand(options),
+    );
+    assert.strictEqual(
+      buildSessionCommand({ shellType: 'muse', workingDir: '/tmp/w', museSessionId: 'sess-abc' }),
+      buildMuseCommand({ workingDir: '/tmp/w', museSessionId: 'sess-abc' }),
     );
   });
 });

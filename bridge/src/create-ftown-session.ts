@@ -39,6 +39,7 @@ export interface CreateFtownSessionInput {
   piSessionId?: string;
   piSessionFile?: string;
   opencodeSessionId?: string;
+  museSessionId?: string;
   env?: Record<string, string>;
   parentSessionId?: string;
   initialInput?: string;
@@ -272,6 +273,7 @@ export type RelaunchCommandSource = Pick<
   | 'codexSessionId'
   | 'piSessionId'
   | 'opencodeSessionId'
+  | 'museSessionId'
 >;
 
 /**
@@ -307,8 +309,10 @@ export function deriveRelaunchCommand(session: RelaunchCommandSource): {
     codexSessionId: session.codexSessionId,
     piSessionId: session.piSessionId,
     opencodeSessionId: session.opencodeSessionId,
-    // Workdir-based resume (Pi/kimi-code `-c`): no id to carry, so signal resume
-    // explicitly. Id-based harnesses ignore this and key off their id fields.
+    museSessionId: session.museSessionId,
+    // Workdir-based resume (Pi/kimi-code `-c`): no id to carry, so signal
+    // resume explicitly. Id-based harnesses ignore this and key off their id
+    // fields.
     resume: true,
   });
   const isLegacyPiBuilder = session.shellType === 'pi' && [
@@ -327,7 +331,7 @@ export function deriveRelaunchCommand(session: RelaunchCommandSource): {
 export function canResumeStoredSession(
   session: Pick<
     Session,
-    'shellType' | 'claudeSessionId' | 'cursorSessionId' | 'codexSessionId' | 'opencodeSessionId'
+    'shellType' | 'claudeSessionId' | 'cursorSessionId' | 'codexSessionId' | 'opencodeSessionId' | 'museSessionId'
   >,
 ): boolean {
   const shellType = session.shellType ?? 'claude';
@@ -336,8 +340,11 @@ export function canResumeStoredSession(
   // opencode resumes by captured session id (`--session`), recorded from the
   // plugin's hook events.
   if (shellType === 'opencode') return Boolean(session.opencodeSessionId?.trim());
-  // Pi and kimi-code resume by working directory (`-c`), so they need no
-  // captured session id and are always resumable on restart.
+  // muse resumes by captured session id (`resume '<ID>'`), recorded from the
+  // plugin's hook events.
+  if (shellType === 'muse') return Boolean(session.museSessionId?.trim());
+  // Pi/kimi-code resume by working directory (`-c`) — neither needs a captured
+  // session id, so both are always resumable on restart.
   if (shellType === 'pi' || shellType === 'kimi-code') return true;
   return shellType !== 'shell' && Boolean(session.claudeSessionId?.trim());
 }
@@ -482,6 +489,7 @@ export async function createFtownSession(
     piSessionId: input.piSessionId,
     piSessionFile: input.piSessionFile,
     opencodeSessionId: input.opencodeSessionId,
+    museSessionId: input.museSessionId,
     env: sessionEnv,
     parentSessionId,
     runtime: deps.runner.getPreferredRuntime(),
@@ -618,6 +626,8 @@ export function parseCreateSessionBody(
       typeof body.piSessionFile === 'string' ? body.piSessionFile : undefined,
     opencodeSessionId:
       typeof body.opencodeSessionId === 'string' ? body.opencodeSessionId : undefined,
+    museSessionId:
+      typeof body.museSessionId === 'string' ? body.museSessionId : undefined,
     env: env && typeof env === 'object' ? env : undefined,
     parentSessionId,
     initialInput: typeof body.initialInput === 'string' ? body.initialInput : undefined,

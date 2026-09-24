@@ -91,6 +91,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command) =
               cursorSessionId: payload.cursorSessionId,
               codexSessionId: payload.codexSessionId,
               opencodeSessionId: payload.opencodeSessionId,
+              museSessionId: payload.museSessionId,
               env: payload.env,
               parentSessionId: payload.parentSessionId,
               initialInput: payload.initialInput,

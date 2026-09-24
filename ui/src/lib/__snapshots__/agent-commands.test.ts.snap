@@ -1,5 +1,25 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
+exports[`buildMuseCommand > mirrors the bridge builder byte-for-byte 1`] = `"muse --yolo"`;
+
+exports[`buildMuseCommand > mirrors the bridge builder byte-for-byte 2`] = `"muse --yolo --workspace '/tmp/work'"`;
+
+exports[`buildMuseCommand > mirrors the bridge builder byte-for-byte 3`] = `"muse --yolo --model 'muse-large'"`;
+
+exports[`buildMuseCommand > mirrors the bridge builder byte-for-byte 4`] = `"muse --yolo --workspace '/tmp/work' --model 'muse-large'"`;
+
+exports[`buildMuseCommand > mirrors the bridge builder byte-for-byte 5`] = `"muse --yolo --workspace '/tmp/work' 'do the thing'"`;
+
+exports[`buildMuseCommand > mirrors the bridge builder byte-for-byte 6`] = `"muse --yolo --workspace '/tmp/work' --model 'muse-large' 'hello world'"`;
+
+exports[`buildMuseCommand > mirrors the bridge builder byte-for-byte 7`] = `"muse --yolo resume 'ses_abc'"`;
+
+exports[`buildMuseCommand > mirrors the bridge builder byte-for-byte 8`] = `"muse --yolo --workspace '/tmp/work' resume 'ses_abc'"`;
+
+exports[`buildMuseCommand > mirrors the bridge builder byte-for-byte 9`] = `"muse --yolo --workspace '/tmp/work' resume 'ses_abc'"`;
+
+exports[`buildMuseCommand > mirrors the bridge builder byte-for-byte 10`] = `"muse --yolo 'it'\\''s here'"`;
+
 exports[`buildOpencodeCommand > mirrors the bridge builder byte-for-byte 1`] = `"opencode --auto"`;
 
 exports[`buildOpencodeCommand > mirrors the bridge builder byte-for-byte 2`] = `"opencode --auto -m 'anthropic/claude-sonnet-4-5'"`;

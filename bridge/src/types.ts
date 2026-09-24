@@ -46,6 +46,7 @@ export interface Session {
   piSessionId?: string;
   piSessionFile?: string;
   opencodeSessionId?: string;
+  museSessionId?: string;
   env?: Record<string, string>;
   parentSessionId?: string;
   runtime?: SessionRuntime;
@@ -198,6 +199,7 @@ export interface CreateSessionPayload {
   piSessionId?: string;
   piSessionFile?: string;
   opencodeSessionId?: string;
+  museSessionId?: string;
   parentSessionId?: string;
   orchestrator?: boolean;
   suppressBriefing?: boolean;

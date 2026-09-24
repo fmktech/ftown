@@ -501,6 +501,263 @@ describe('collectSessionUsage — kimi-code extractor', () => {
   });
 });
 
+function museMetaLine(workspaceRoot: string, recordedAtUs: number): string {
+  return JSON.stringify({
+    payload_type: 'runtime.session.metadata',
+    recorded_at: recordedAtUs,
+    payload: { kind: 'metadata', record: { workspace_root: workspaceRoot } },
+  });
+}
+
+function museCompletedLine(
+  model: string,
+  usage: Record<string, number>,
+  recordedAtUs: number,
+): string {
+  return JSON.stringify({
+    payload_type: 'runtime.session',
+    recorded_at: recordedAtUs,
+    payload: { kind: 'run', run_id: 'run-1', event: { kind: 'model_completed', model, usage } },
+  });
+}
+
+async function writeMuseSession(
+  museSessionsDir: string,
+  sessionId: string,
+  lines: string[],
+): Promise<void> {
+  const dir = join(museSessionsDir, '2026', '09', '20', sessionId);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'session.jsonl'), lines.join('\n') + '\n');
+}
+
+/** recorded_at is microseconds; fixtures pin it from ISO session times. */
+const museUs = (iso: string): number => Date.parse(iso) * 1000;
+
+describe('collectSessionUsage — muse extractor', () => {
+  const workingDir = '/Users/x/projects/muse-demo';
+  const sessionCreatedAt = '2026-09-20T12:00:00.000Z';
+
+  it('sums model_completed usage, splits cached from input, attributes per model', async () => {
+    const museSessionsDir = join(root, 'muse-sums');
+    await writeMuseSession(museSessionsDir, 'sess-1', [
+      JSON.stringify({ retained_frame: 'session_permission_transaction' }),
+      museMetaLine(workingDir, museUs('2026-09-20T12:00:01.000Z')),
+      JSON.stringify({
+        payload_type: 'runtime.session',
+        recorded_at: museUs('2026-09-20T12:00:02.000Z'),
+        payload: { kind: 'run', run_id: 'run-1', event: { kind: 'started' } },
+      }),
+      museCompletedLine('muse-spark-1.3', {
+        input_tokens: 100, output_tokens: 20, cached_tokens: 0,
+        cache_write_tokens: 5, cache_read_tokens: 0, reasoning_tokens: 8,
+      }, museUs('2026-09-20T12:00:03.000Z')),
+      'not json',
+      // input includes cached — only the fresh 200 count as input
+      museCompletedLine('muse-spark-1.3', {
+        input_tokens: 1000, output_tokens: 50, cached_tokens: 800,
+        cache_write_tokens: 10, cache_read_tokens: 800, reasoning_tokens: 20,
+      }, museUs('2026-09-20T12:00:04.000Z')),
+      // model_completed without a model — skipped
+      JSON.stringify({
+        payload_type: 'runtime.session',
+        recorded_at: museUs('2026-09-20T12:00:05.000Z'),
+        payload: {
+          kind: 'run',
+          run_id: 'run-1',
+          event: { kind: 'model_completed', usage: { input_tokens: 999, output_tokens: 999 } },
+        },
+      }),
+      museCompletedLine('muse-spark-1.3-contributor', {
+        input_tokens: 60, output_tokens: 6, cached_tokens: 0,
+        cache_write_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0,
+      }, museUs('2026-09-20T12:00:06.000Z')),
+    ]);
+
+    const usage = await collectSessionUsage(
+      { shellType: 'muse' as never, workingDir, createdAt: sessionCreatedAt },
+      { museSessionsDir },
+    );
+
+    assert.ok(usage);
+    assert.equal(usage.harness, 'muse');
+    assert.equal(usage.inputTokens, 360);
+    assert.equal(usage.outputTokens, 76);
+    assert.equal(usage.cacheReadTokens, 800);
+    assert.equal(usage.cacheWriteTokens, 15);
+    assert.equal(usage.totalTokens, 1251);
+    assert.deepEqual(usage.models, ['muse-spark-1.3', 'muse-spark-1.3-contributor']);
+    assert.deepEqual(usage.perModel, [
+      {
+        model: 'muse-spark-1.3',
+        inputTokens: 300,
+        outputTokens: 70,
+        cacheReadTokens: 800,
+        cacheWriteTokens: 15,
+      },
+      {
+        model: 'muse-spark-1.3-contributor',
+        inputTokens: 60,
+        outputTokens: 6,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+      },
+    ]);
+    assert.ok(usage.collectedAt);
+  });
+
+  it('disambiguates two sessions in the same workdir by createdAt (>= session wins, newest)', async () => {
+    const museSessionsDir = join(root, 'muse-disambig');
+    await writeMuseSession(museSessionsDir, 'sess-older', [
+      museMetaLine(workingDir, museUs('2026-09-20T11:00:00.000Z')),
+      museCompletedLine('muse-spark-1.3', { input_tokens: 9, output_tokens: 9 }, museUs('2026-09-20T11:00:05.000Z')),
+    ]);
+    await writeMuseSession(museSessionsDir, 'sess-newer', [
+      museMetaLine(workingDir, museUs('2026-09-20T12:00:03.000Z')),
+      museCompletedLine('muse-spark-1.3', { input_tokens: 42, output_tokens: 7 }, museUs('2026-09-20T12:00:05.000Z')),
+    ]);
+
+    const usage = await collectSessionUsage(
+      { shellType: 'muse' as never, workingDir, createdAt: sessionCreatedAt },
+      { museSessionsDir },
+    );
+    assert.ok(usage);
+    assert.equal(usage.inputTokens, 42);
+    assert.equal(usage.outputTokens, 7);
+  });
+
+  it('returns null when no session matches the workspace or the dir is missing', async () => {
+    const museSessionsDir = join(root, 'muse-nomatch');
+    await writeMuseSession(museSessionsDir, 'sess-other', [
+      museMetaLine('/some/other/dir', museUs('2026-09-20T12:00:01.000Z')),
+      museCompletedLine('muse-spark-1.3', { input_tokens: 999, output_tokens: 999 }, museUs('2026-09-20T12:00:05.000Z')),
+    ]);
+
+    assert.equal(
+      await collectSessionUsage(
+        { shellType: 'muse' as never, workingDir, createdAt: sessionCreatedAt },
+        { museSessionsDir },
+      ),
+      null,
+    );
+    assert.equal(
+      await collectSessionUsage(
+        { shellType: 'muse' as never, workingDir, createdAt: sessionCreatedAt },
+        { museSessionsDir: join(root, 'muse-missing') },
+      ),
+      null,
+    );
+  });
+});
+
+describe('collectSessionUsage — muse id-first resolution', () => {
+  const workingDir = '/Users/x/projects/muse-demo';
+  const sessionCreatedAt = '2026-09-20T12:00:00.000Z';
+
+  it('resolves the exact session.jsonl by native id, ignoring the workdir', async () => {
+    const museSessionsDir = join(root, 'muse-id-hit');
+    const nativeId = 'id-hit-uuid-1234';
+    await writeMuseSession(museSessionsDir, nativeId, [
+      museMetaLine('/some/other/workspace', museUs('2026-09-20T12:00:01.000Z')),
+      museCompletedLine('muse-spark-1.3', { input_tokens: 11, output_tokens: 3 }, museUs('2026-09-20T12:00:05.000Z')),
+    ]);
+    // A workdir decoy that must NOT win over the id.
+    await writeMuseSession(museSessionsDir, 'sess-decoy', [
+      museMetaLine(workingDir, museUs('2026-09-20T12:00:02.000Z')),
+      museCompletedLine('muse-spark-1.3', { input_tokens: 999, output_tokens: 999 }, museUs('2026-09-20T12:00:05.000Z')),
+    ]);
+
+    const usage = await collectSessionUsage(
+      { shellType: 'muse', museSessionId: nativeId, workingDir, createdAt: sessionCreatedAt },
+      { museSessionsDir },
+    );
+    assert.ok(usage);
+    assert.equal(usage.harness, 'muse');
+    assert.equal(usage.inputTokens, 11);
+    assert.equal(usage.outputTokens, 3);
+  });
+
+  it('resolves by id without any workdir on the session', async () => {
+    const museSessionsDir = join(root, 'muse-id-only');
+    const nativeId = 'id-only-uuid-5678';
+    await writeMuseSession(museSessionsDir, nativeId, [
+      museMetaLine('/whatever/workspace', museUs('2026-09-20T12:00:01.000Z')),
+      museCompletedLine('muse-spark-1.3', { input_tokens: 5, output_tokens: 2 }, museUs('2026-09-20T12:00:05.000Z')),
+    ]);
+
+    const usage = await collectSessionUsage(
+      { shellType: 'muse', museSessionId: nativeId },
+      { museSessionsDir },
+    );
+    assert.ok(usage);
+    assert.equal(usage.inputTokens, 5);
+  });
+
+  it('falls back to workdir discovery when the native id matches nothing', async () => {
+    const museSessionsDir = join(root, 'muse-id-miss');
+    await writeMuseSession(museSessionsDir, 'sess-workdir', [
+      museMetaLine(workingDir, museUs('2026-09-20T12:00:01.000Z')),
+      museCompletedLine('muse-spark-1.3', { input_tokens: 42, output_tokens: 7 }, museUs('2026-09-20T12:00:05.000Z')),
+    ]);
+
+    const usage = await collectSessionUsage(
+      {
+        shellType: 'muse',
+        museSessionId: 'no-such-uuid',
+        workingDir,
+        createdAt: sessionCreatedAt,
+      },
+      { museSessionsDir },
+    );
+    assert.ok(usage);
+    assert.equal(usage.inputTokens, 42);
+    assert.equal(usage.outputTokens, 7);
+  });
+
+  it('returns null when the id misses and no workdir (or no workdir match) exists', async () => {
+    const museSessionsDir = join(root, 'muse-id-null');
+    await writeMuseSession(museSessionsDir, 'sess-other', [
+      museMetaLine('/some/other/dir', museUs('2026-09-20T12:00:01.000Z')),
+      museCompletedLine('muse-spark-1.3', { input_tokens: 999, output_tokens: 999 }, museUs('2026-09-20T12:00:05.000Z')),
+    ]);
+
+    // Id miss + no workdir at all.
+    assert.equal(
+      await collectSessionUsage(
+        { shellType: 'muse', museSessionId: 'no-such-uuid' },
+        { museSessionsDir },
+      ),
+      null,
+    );
+    // Id miss + workdir with no match.
+    assert.equal(
+      await collectSessionUsage(
+        { shellType: 'muse', museSessionId: 'no-such-uuid', workingDir, createdAt: sessionCreatedAt },
+        { museSessionsDir },
+      ),
+      null,
+    );
+    // Neither id nor workdir.
+    assert.equal(await collectSessionUsage({ shellType: 'muse' }), null);
+  });
+
+  it('rejects a hostile native id instead of escaping the sessions dir', async () => {
+    const museSessionsDir = join(root, 'muse-id-hostile');
+    await writeMuseSession(museSessionsDir, 'sess-1', [
+      museMetaLine(workingDir, museUs('2026-09-20T12:00:01.000Z')),
+      museCompletedLine('muse-spark-1.3', { input_tokens: 1, output_tokens: 1 }, museUs('2026-09-20T12:00:05.000Z')),
+    ]);
+
+    assert.equal(
+      await collectSessionUsage(
+        { shellType: 'muse', museSessionId: '../../etc' },
+        { museSessionsDir },
+      ),
+      null,
+    );
+  });
+});
+
 describe('collectSessionUsage — extractor routing', () => {
   it('prefers the claude extractor whenever claudeSessionId is present (provider flavors)', async () => {
     const claudeProjectsDir = join(root, 'routing');
@@ -518,6 +775,25 @@ describe('collectSessionUsage — extractor routing', () => {
       { claudeProjectsDir },
     );
     assert.equal(usage?.harness, 'claude');
+  });
+
+  it('routes muse shellType to the workdir-based muse extractor', async () => {
+    const museSessionsDir = join(root, 'routing-muse');
+    const workingDir = '/tmp/muse-routing';
+    await writeMuseSession(museSessionsDir, 'sess-muse-1', [
+      museMetaLine(workingDir, museUs('2026-09-20T10:00:01.000Z')),
+      museCompletedLine(
+        'muse-spark-1.3',
+        { input_tokens: 7, output_tokens: 3 },
+        museUs('2026-09-20T10:00:05.000Z'),
+      ),
+    ]);
+
+    const usage = await collectSessionUsage(
+      { shellType: 'muse' as never, workingDir, createdAt: '2026-09-20T10:00:00.000Z' },
+      { museSessionsDir },
+    );
+    assert.equal(usage?.harness, 'muse');
   });
 
   it('returns null for sessions with no structured source (shell/cursor)', async () => {

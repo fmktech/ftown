@@ -31,6 +31,7 @@ import type { HarnessInstallResult } from './harness-installer.js';
 import { installNotifyScript } from './install-notify-script.js';
 import { installPiExtension } from './pi-extension-installer.js';
 import { installOpencodePlugin, opencodeBinaryAvailable } from './opencode-plugin-installer.js';
+import { ensureMusePlugin, museBinaryAvailable } from './muse-plugin-installer.js';
 import { installFtownSkill, removeFtownSkill } from './install-ftown-skill.js';
 import { installFtownSessionsCli } from './install-ftown-cli.js';
 import { installFtownWorkflowsCli } from './install-ftown-workflows-cli.js';
@@ -646,6 +647,16 @@ program
       const bundledOpencodePluginPath = resolve(__dirname, '..', 'opencode-plugin', 'ftown.js');
       const opencodePluginPath = installOpencodePlugin(bundledOpencodePluginPath);
       console.log(`[Bridge] opencode plugin: ${opencodePluginPath}`);
+    }
+    // The Muse plugin rides `muse plugins`; skip silently when the muse
+    // binary is not installed on this machine.
+    if (await museBinaryAvailable()) {
+      const bundledMusePluginDir = resolve(__dirname, '..', 'muse-plugin');
+      const musePluginResult = await ensureMusePlugin(bundledMusePluginDir);
+      console.log(`[Bridge] muse plugin: ${musePluginResult.action}`);
+      if (musePluginResult.warning) {
+        console.warn(`[Bridge] muse plugin: ${musePluginResult.warning}`);
+      }
     }
 
     const wireTerminalInput = (sessionId: string): void => {

@@ -41,7 +41,7 @@ fts events --db "$FTS_DB" --after <cursor>
 
 Omit `--shell` to inherit the orchestrator's current harness. Use `--shell` only
 when the user or task explicitly requests a different harness (`claude`, `cursor`,
-`codex`, `grok`, `pi`, `kimi-code`, `shell`, `opencode`, or a Claude Code provider
+`codex`, `grok`, `muse`, `pi`, `kimi-code`, `shell`, `opencode`, or a Claude Code provider
 flavor such as `zai`, `kimi`, `deepseek`, `fireworks`). `--parent` sets the worker's
 parent to `$FTOWN_SESSION_ID`.
 
@@ -83,7 +83,9 @@ your turn and let fallback mail wake you instead of running a polling loop.
 
 Each session has an inbox. Claude and codex receive mail automatically at turn
 boundaries via hooks. Pi's bundled extension maintains a long-poll and wakes idle
-Pi sessions with a native follow-up turn. None of these paths inject terminal
+Pi sessions with a native follow-up turn. Muse's installed `ftown` plugin
+reports the native session id on SessionStart and pumps pending mail as
+context on Stop. None of these paths inject terminal
 keystrokes. Cursor and shell sessions have no hooks: when idle they get a one-line
 nudge telling them to run `ftown-harness mail read`, so expect slightly slower
 pickup there.

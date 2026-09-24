@@ -26,12 +26,15 @@ describe("buildUsagePollBatches", () => {
       session({ id: "claude-pending-id", shellType: "claude", workingDir: "/repo" }),
       session({ id: "codex", shellType: "codex", codexSessionId: "native-codex", bridgeId: "bridge-b" }),
       session({ id: "kimi", shellType: "kimi-code", workingDir: "/repo", bridgeId: "bridge-a" }),
+      session({ id: "muse", shellType: "muse", workingDir: "/repo", bridgeId: "bridge-a" }),
+      session({ id: "muse-id", shellType: "muse", museSessionId: "native-muse", bridgeId: "bridge-a" }),
+      session({ id: "muse-no-id-no-dir", shellType: "muse" }),
       session({ id: "cursor", shellType: "cursor", cursorSessionId: "native-cursor" }),
       session({ id: "claude-a", claudeSessionId: "native-a", workingDir: "/repo", bridgeId: "bridge-a" }),
     ]);
 
     expect(batches).toEqual([
-      { bridgeId: "bridge-a", sessionIds: ["claude-a", "claude-b", "kimi"] },
+      { bridgeId: "bridge-a", sessionIds: ["claude-a", "claude-b", "kimi", "muse", "muse-id"] },
       { bridgeId: "bridge-b", sessionIds: ["codex"] },
     ]);
   });

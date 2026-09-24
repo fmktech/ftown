@@ -620,7 +620,7 @@ export default async function LandingPage() {
                 Replace &quot;keep an agent awake and polling&quot; hacks with a first-class
                 schedule. Fire a loop on an interval (<code className="font-[family-name:var(--font-mono)] text-[var(--text-primary)]">every 5m</code>) or
                 cron with a timezone, pick the harness — including Pi, Claude Code,
-                Cursor, Codex, Grok, Kimi Code, opencode, or shell — plus workdir and
+                Cursor, Codex, Grok, Muse, Kimi Code, opencode, or shell — plus workdir and
                 model. Every fire spawns a full
                 session grouped under the loop: watch it live, scroll back, or take over.
               </p>

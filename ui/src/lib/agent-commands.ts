@@ -97,6 +97,42 @@ export function buildPiCommand(options: { model?: string }): string {
   return parts.join(" ");
 }
 
+export function buildMuseCommand(options: {
+  workingDir?: string;
+  model?: string;
+  initialPrompt?: string;
+  museSessionId?: string;
+}): string {
+  // Mirror of bridge/src/harness-registry.ts buildMuseCommand — both
+  // builders MUST emit byte-identical output for the same inputs.
+  // Frozen contract (docs/plans/muse-agent-contract.md Amendment A1): fresh
+  // mirrors grok (prompt as positional CLI arg), resume is native-id
+  // (`resume '<ID>'`, opencode precedent). Flag order mirrors cursor.
+  const parts = ["muse", "--yolo"];
+
+  if (options.workingDir?.trim()) {
+    parts.push("--workspace", shellQuote(options.workingDir.trim()));
+  }
+
+  if (options.museSessionId?.trim()) {
+    // Resume must not replay model or prompt — muse restores the
+    // hook-persisted native session (codex/opencode early-return precedent).
+    parts.push("resume", shellQuote(options.museSessionId.trim()));
+    return parts.join(" ");
+  }
+
+  if (options.model?.trim()) {
+    parts.push("--model", shellQuote(options.model.trim()));
+  }
+
+  if (options.initialPrompt?.trim()) {
+    // The positional prompt is auto-submitted by the muse TUI.
+    parts.push(shellQuote(options.initialPrompt));
+  }
+
+  return parts.join(" ");
+}
+
 export function buildKimiCodeCommand(options: { model?: string }): string {
   // Absolute path: the kimi-code installer adds ~/.kimi-code/bin to PATH only via
   // .zshrc (interactive); ftown launches with `zsh -l -c` (non-interactive login),
