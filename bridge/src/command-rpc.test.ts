@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import type { CommandRpcDeps } from './command-rpc.js';
 import { createCommandHandler } from './command-rpc.js';
 import type { LoopController } from './loop-controller.js';
 import type { SessionController } from './session-controller.js';
@@ -92,4 +93,25 @@ test('get_sessions_usage returns one id-keyed response for a session batch', asy
     success: true,
     data: { usages: { 'session-1': usage } },
   }]);
+});
+
+for (const populated of [false, true]) {
+  test(`list_sessions supplies bridge identity (${populated ? 'nonempty' : 'empty'}) and strips env`, async () => {
+    const session = { id: 'scratch', bridgeId: 'owner', status: 'completed', env: { SECRET: 'scratch' } } as unknown as Session;
+    const responses: CommandResponse[] = [];
+    const handler = createCommandHandler({ bridgeId: 'owner', sessionController: { list: async () => populated ? [session] : [] }, loopController: {}, publishCommandResponse: async r => { responses.push(r); } } as unknown as CommandRpcDeps);
+    await handler({ type: 'list_sessions', requestId: 'broadcast', payload: {} });
+    assert.equal(responses[0].success, true);
+    const data = responses[0].data as { bridgeId: string; sessions: Session[] };
+    assert.equal(data.bridgeId, 'owner'); assert.equal(data.sessions.length, Number(populated));
+    if (populated) { assert.equal('env' in data.sessions[0], false); assert.deepEqual(session.env, { SECRET: 'scratch' }); }
+    await handler({ type: 'list_sessions', requestId: 'foreign', payload: { bridgeId: 'other' } });
+    assert.equal(responses.length, 1);
+  });
+}
+test('ordinary partial loop-run responses do not gain full-list identity', async () => {
+  const responses: CommandResponse[] = [];
+  const handler = createCommandHandler({ bridgeId: 'owner', sessionController: {}, loopController: { runs: async () => [] }, publishCommandResponse: async r => { responses.push(r); } } as unknown as CommandRpcDeps);
+  await handler({ type: 'get_loop_runs', requestId: 'partial', payload: { loopId: 'fake' } });
+  assert.equal(responses[0].success, true); assert.equal('bridgeId' in (responses[0].data as object), false);
 });

@@ -21,6 +21,8 @@ export class SessionStore {
   private readonly sessionsDir: string;
   private readonly archivePath: string;
   private readonly writeLocks: Map<string, Promise<void>> = new Map();
+  // Removal is final for this store's lifetime; explicit revival uses a new ID.
+  private readonly retiredSessionIds = new Set<string>();
   private readonly maxTerminalLogBytes: number;
 
   constructor(dataDir: string, options: { maxTerminalLogBytes?: number } = {}) {
@@ -46,22 +48,40 @@ export class SessionStore {
     return join(this.sessionDir(sessionId), 'terminal.log');
   }
 
-  async saveSession(session: Session): Promise<void> {
-    const dir = this.sessionDir(session.id);
-    await mkdir(dir, { recursive: true });
-    const filePath = this.sessionFilePath(session.id);
-    const tempFilePath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-
+  /** Serialize all directory mutations, recovering after a failed operation. */
+  private async withSessionWrite(sessionId: string, task: () => Promise<void>): Promise<void> {
+    const previous = this.writeLocks.get(sessionId) ?? Promise.resolve();
+    const run = previous.then(task);
+    const settled = run.catch(() => undefined);
+    this.writeLocks.set(sessionId, settled);
     try {
-      // Publish only complete snapshots. Writing the live path in place lets a
-      // concurrent API read observe the truncate/write window and JSON.parse an
-      // incomplete document. A same-directory rename is atomic for readers.
-      await writeFile(tempFilePath, JSON.stringify(session, null, 2), 'utf-8');
-      await rename(tempFilePath, filePath);
-    } catch (error) {
-      await rm(tempFilePath, { force: true }).catch(() => undefined);
-      throw error;
+      await run;
+    } finally {
+      if (this.writeLocks.get(sessionId) === settled) {
+        this.writeLocks.delete(sessionId);
+      }
     }
+  }
+
+  async saveSession(session: Session): Promise<void> {
+    await this.withSessionWrite(session.id, async () => {
+      if (this.retiredSessionIds.has(session.id)) return;
+      const dir = this.sessionDir(session.id);
+      await mkdir(dir, { recursive: true });
+      const filePath = this.sessionFilePath(session.id);
+      const tempFilePath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+
+      try {
+        // Publish only complete snapshots. Writing the live path in place lets a
+        // concurrent API read observe the truncate/write window and JSON.parse an
+        // incomplete document. A same-directory rename is atomic for readers.
+        await writeFile(tempFilePath, JSON.stringify(session, null, 2), 'utf-8');
+        await rename(tempFilePath, filePath);
+      } catch (error) {
+        await rm(tempFilePath, { force: true }).catch(() => undefined);
+        throw error;
+      }
+    });
   }
 
   async loadSession(sessionId: string): Promise<Session | null> {
@@ -94,17 +114,13 @@ export class SessionStore {
   }
 
   async appendTerminalData(sessionId: string, data: string): Promise<void> {
-    const dir = this.sessionDir(sessionId);
-    await mkdir(dir, { recursive: true });
-
-    const filePath = this.terminalLogPath(sessionId);
-
-    const prevLock = this.writeLocks.get(sessionId) ?? Promise.resolve();
-    const newLock = prevLock
-      .then(() => appendFile(filePath, data, 'utf-8'))
-      .then(() => this.trimTerminalLogIfNeeded(filePath));
-    this.writeLocks.set(sessionId, newLock);
-    await newLock;
+    await this.withSessionWrite(sessionId, async () => {
+      if (this.retiredSessionIds.has(sessionId)) return;
+      await mkdir(this.sessionDir(sessionId), { recursive: true });
+      const filePath = this.terminalLogPath(sessionId);
+      await appendFile(filePath, data, 'utf-8');
+      await this.trimTerminalLogIfNeeded(filePath);
+    });
   }
 
   /**
@@ -155,10 +171,11 @@ export class SessionStore {
   }
 
   async deleteSession(sessionId: string): Promise<void> {
-    const dir = this.sessionDir(sessionId);
-    if (existsSync(dir)) {
-      await rm(dir, { recursive: true, force: true });
-    }
+    await this.withSessionWrite(sessionId, async () => {
+      await rm(this.sessionDir(sessionId), { recursive: true, force: true });
+      // Latch only after successful deletion so failures remain retryable.
+      this.retiredSessionIds.add(sessionId);
+    });
   }
 
   /** Append a tombstone for a removed session to <dataDir>/archive.jsonl. */
@@ -191,13 +208,13 @@ export class SessionStore {
   }
 
   async clearTerminalLog(sessionId: string): Promise<void> {
-    const filePath = this.terminalLogPath(sessionId);
-    if (existsSync(filePath)) {
-      const prevLock = this.writeLocks.get(sessionId) ?? Promise.resolve();
-      const newLock = prevLock.then(() => truncate(filePath, 0));
-      this.writeLocks.set(sessionId, newLock);
-      await newLock;
-    }
+    await this.withSessionWrite(sessionId, async () => {
+      if (this.retiredSessionIds.has(sessionId)) return;
+      const filePath = this.terminalLogPath(sessionId);
+      if (existsSync(filePath)) {
+        await truncate(filePath, 0);
+      }
+    });
   }
 
   async loadTerminalLog(sessionId: string): Promise<string> {
