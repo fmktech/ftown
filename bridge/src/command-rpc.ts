@@ -119,7 +119,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command) =
 
         case 'list_sessions': {
           const sessions = await sessionController.list();
-          response = { requestId: command.requestId, success: true, data: { sessions: sessions.map(toWireSession) } };
+          response = { requestId: command.requestId, success: true, data: { bridgeId, sessions: sessions.map(toWireSession) } };
           break;
         }
 
