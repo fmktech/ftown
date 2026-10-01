@@ -165,7 +165,13 @@ export class MailDeliveryService {
     // Composer TUIs detect pastes by input arrival rate; the submit CR must come well
     // after that window or it is treated as a pasted newline.
     await this.delay(COMPOSER_PASTE_SETTLE_MS);
-    this.runner.write(session.id, submitSuffixFor(session.shellType));
+    if (!this.runner.write(session.id, submitSuffixFor(session.shellType))) return false;
+    if (isAgent) {
+      // Retry Enter separately after the same settle window so it cannot become
+      // part of the first paste/submit batch.
+      await this.delay(COMPOSER_PASTE_SETTLE_MS);
+      if (!this.runner.write(session.id, submitSuffixFor(session.shellType))) return false;
+    }
     return true;
   }
 

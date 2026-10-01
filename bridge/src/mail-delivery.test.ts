@@ -399,7 +399,7 @@ describe('MailDeliveryService nudges', () => {
     runner.running.add('s1');
     const retried = (service as unknown as { fireMailNudge(id: string): Promise<void> }).fireMailNudge('s1');
     await flushAsync(); // let fireMailNudge reach injectPtyLine's delay before the clock jumps
-    await clock.advance(600); // composer-paste settle for the submit CR
+    await clock.advance(1_200); // paste settle and separate second-submit delay
     await retried;
 
     const nudges = runner.nudgeLines();
@@ -516,21 +516,34 @@ describe('MailDeliveryService participatesInMail gating', () => {
 // ---------------------------------------------------------------------------
 
 describe('MailDeliveryService injectPtyLine', () => {
-  it('submits the CR only after the 600ms paste-settle window', async () => {
+  it('submits two separate CRs after successive 600ms settle windows for agents', async () => {
     const { clock, store, runner, service } = setup();
     const session = makeSession('s1', { shellType: 'grok' });
     store.add(session);
     runner.running.add('s1');
 
     const done = service.injectPtyLine(session, 'alice', 'hi there');
+    let completed = false;
+    void done.then(() => { completed = true; });
     await flushAsync();
     assert.equal(runner.writes.length, 1, 'only the message line before the settle window');
     assert.equal(runner.writes[0].data, '[ftown msg from alice] hi there');
 
-    await clock.advance(600);
-    assert.equal(await done, true);
+    await clock.advance(599);
+    assert.equal(runner.writes.length, 1);
+    await clock.advance(1);
     assert.equal(runner.writes.length, 2);
     assert.equal(runner.writes[1].data, '\r');
+    assert.equal(completed, false);
+
+    await clock.advance(599);
+    assert.equal(runner.writes.length, 2, 'no second CR before its settle window');
+    assert.equal(completed, false);
+    await clock.advance(1);
+    assert.equal(await done, true);
+    assert.deepEqual(runner.writes.map((write) => write.data), [
+      '[ftown msg from alice] hi there', '\r', '\r',
+    ]);
   });
 
   it('wraps plain-shell messages in a quoted no-op', async () => {
@@ -543,6 +556,69 @@ describe('MailDeliveryService injectPtyLine', () => {
     await clock.advance(600);
     assert.equal(await done, true);
     assert.equal(runner.writes[0].data, ": '[ftown msg from alice] dont run this'");
+    await clock.advance(600);
+    assert.deepEqual(runner.writes.map((write) => write.data), [
+      ": '[ftown msg from alice] dont run this'", '\r',
+    ]);
+  });
+
+  it('preserves the quoted no-op and single CR when shellType is undefined', async () => {
+    const { clock, runner, service } = setup();
+    runner.running.add('s1');
+    const done = service.injectPtyLine(makeSession('s1'), 'alice', "don't run this");
+    await clock.advance(600);
+    assert.equal(await done, true);
+    await clock.advance(600);
+    assert.deepEqual(runner.writes.map((write) => write.data), [
+      ": '[ftown msg from alice] dont run this'", '\r',
+    ]);
+  });
+
+  it('returns false without a runner or when the initial line is rejected', async () => {
+    const session = makeSession('s1', { shellType: 'codex' });
+    assert.equal(await new MailDeliveryService().injectPtyLine(session, 'alice', 'hello'), false);
+
+    const { clock, runner, service } = setup();
+    assert.equal(await service.injectPtyLine(session, 'alice', 'hello'), false);
+    runner.running.add('s1');
+    await clock.advance(1_200);
+    assert.deepEqual(runner.writes, [], 'a rejected initial line schedules no submits');
+  });
+
+  it('returns false after a rejected first submit without attempting a late second submit', async () => {
+    const { clock, runner, service } = setup();
+    const attempts: string[] = [];
+    const write = runner.write.bind(runner);
+    runner.write = (sessionId, data) => {
+      attempts.push(data);
+      return write(sessionId, data);
+    };
+    runner.running.add('s1');
+    const done = service.injectPtyLine(makeSession('s1', { shellType: 'claude' }), 'alice', 'hello');
+    runner.running.delete('s1');
+    await clock.advance(600);
+    assert.equal(await done, false);
+    runner.running.add('s1');
+    await clock.advance(1_200);
+    assert.deepEqual(attempts, ['[ftown msg from alice] hello', '\r']);
+  });
+
+  it('returns false when the second submit is rejected', async () => {
+    const { clock, runner, service } = setup();
+    const attempts: string[] = [];
+    const write = runner.write.bind(runner);
+    runner.write = (sessionId, data) => {
+      attempts.push(data);
+      return write(sessionId, data);
+    };
+    runner.running.add('s1');
+    const done = service.injectPtyLine(makeSession('s1', { shellType: 'codex' }), 'alice', 'hello');
+    await clock.advance(600);
+    runner.running.delete('s1');
+    await clock.advance(600);
+    assert.equal(await done, false);
+    assert.deepEqual(attempts, ['[ftown msg from alice] hello', '\r', '\r']);
+    assert.equal(runner.writes.length, 2, 'only the line and first CR succeeded');
   });
 
   it('strips quotes and newlines from the sender label (shell-quote breakout)', async () => {
@@ -564,5 +640,8 @@ describe('MailDeliveryService injectPtyLine', () => {
     const doneAgent = service.injectPtyLine(agentSession, "a'\nb", 'hello');
     await flushAsync();
     assert.equal((runner.writes.at(-1) as { data: string }).data, '[ftown msg from ab] hello');
+    await clock.advance(1_200);
+    assert.equal(await doneAgent, true);
+    assert.deepEqual(runner.writes.slice(-2).map((write) => write.data), ['\r', '\r']);
   });
 });
