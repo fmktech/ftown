@@ -221,7 +221,7 @@ describe('buildOpencodeCommand', () => {
   it('prompts are single-quote escaped', () => {
     assert.equal(
       buildOpencodeCommand({ initialPrompt: "it's here" }),
-      `opencode --auto --prompt 'it'\\''s here'`,
+      process.platform === 'win32' ? "opencode --auto --prompt 'it''s here'" : `opencode --auto --prompt 'it'\\''s here'`,
     );
   });
 
@@ -287,7 +287,7 @@ describe('buildMuseCommand', () => {
   it('prompts are single-quote escaped', () => {
     assert.equal(
       buildMuseCommand({ initialPrompt: "it's here" }),
-      `muse --yolo 'it'\\''s here'`,
+      process.platform === 'win32' ? "muse --yolo 'it''s here'" : `muse --yolo 'it'\\''s here'`,
     );
   });
 
