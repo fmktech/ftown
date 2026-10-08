@@ -13,6 +13,7 @@ import {
   tmuxSessionName,
 } from './tmux.js';
 import { applyTerminalColorEnv } from './xterm-theme.js';
+import { directShellCommand } from './direct-shell.js';
 
 import type { SessionRuntime } from './types.js';
 
@@ -65,6 +66,8 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
   private readonly lastSizes: Map<string, { cols: number; rows: number }> = new Map();
 
   getPreferredRuntime(): SessionRuntime {
+    // Native Windows PTYs cannot attach to a Unix tmux server.
+    if (process.platform === 'win32') return 'direct';
     return isTmuxAvailable() ? 'tmux' : 'direct';
   }
 
@@ -353,7 +356,8 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
   ): void {
     let proc: IPty;
     try {
-      proc = pty.spawn('/bin/zsh', ['-l', '-c', command], {
+      const shell = directShellCommand(command);
+      proc = pty.spawn(shell.file, shell.args, {
         name: 'xterm-256color',
         cols,
         rows,

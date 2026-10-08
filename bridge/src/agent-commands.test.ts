@@ -21,7 +21,9 @@ describe('buildSessionCommand — pi', () => {
     const options = { model: 'anthropic/claude-sonnet-4', initialPrompt: "review today's diff" };
     assert.strictEqual(
       buildSessionCommand({ shellType: 'pi', ...options }),
-      "pi --extension \"$HOME/.ftown/pi/ftown.js\" --model 'anthropic/claude-sonnet-4' 'review today'\\''s diff'",
+      process.platform === 'win32'
+        ? "pi --extension \"$HOME/.ftown/pi/ftown.js\" --model 'anthropic/claude-sonnet-4' 'review today''s diff'"
+        : "pi --extension \"$HOME/.ftown/pi/ftown.js\" --model 'anthropic/claude-sonnet-4' 'review today'\\''s diff'",
     );
     assert.strictEqual(buildSessionCommand({ shellType: 'pi', ...options }), buildPiCommand(options));
   });
@@ -72,7 +74,7 @@ describe('buildSessionCommand — grok', () => {
   it('shell-escapes a single quote in the initial prompt', () => {
     assert.strictEqual(
       buildSessionCommand({ shellType: 'grok', initialPrompt: "it's fine" }),
-      "grok --always-approve 'it'\\''s fine'",
+      process.platform === 'win32' ? "grok --always-approve 'it''s fine'" : "grok --always-approve 'it'\\''s fine'",
     );
   });
 
@@ -114,7 +116,7 @@ describe('buildSessionCommand — muse', () => {
   it('shell-escapes a single quote in the initial prompt', () => {
     assert.strictEqual(
       buildSessionCommand({ shellType: 'muse', initialPrompt: "it's fine" }),
-      "muse --yolo 'it'\\''s fine'",
+      process.platform === 'win32' ? "muse --yolo 'it''s fine'" : "muse --yolo 'it'\\''s fine'",
     );
   });
 
@@ -190,7 +192,9 @@ describe('buildSessionCommand — claude model flag', () => {
   it('shell-quotes a hostile model value', () => {
     assert.equal(
       buildSessionCommand({ shellType: 'claude', model: `x'; rm -rf /` }),
-      `claude --allow-dangerously-skip-permissions --model 'x'\\''; rm -rf /'`,
+      process.platform === 'win32'
+        ? "claude --allow-dangerously-skip-permissions --model 'x''; rm -rf /'"
+        : `claude --allow-dangerously-skip-permissions --model 'x'\\''; rm -rf /'`,
     );
   });
 

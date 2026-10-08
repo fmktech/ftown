@@ -12,8 +12,9 @@
  * fine (they are erased at compile time).
  */
 
-/** Shell-escape a value for use inside zsh -c '...' */
-export function shellQuote(value: string): string {
+/** Escape an argument for the direct runtime's platform shell. */
+export function shellQuote(value: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform === 'win32') return `'${value.replaceAll("'", "''")}'`;
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
