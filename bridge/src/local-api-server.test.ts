@@ -251,9 +251,9 @@ describe('LocalApiServer session parent route', () => {
 
 describe('LocalApiServer loop routes', () => {
   it('creates, lists, runs, pauses, and deletes bridge-owned loops', async () => {
-    const realHome = process.env.HOME;
+    const realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     const home = mkdtempSync(join(tmpdir(), 'ftw-loop-api-'));
-    process.env.HOME = home;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
 
     const server = new LocalApiServer();
     const token = 'test-token';
@@ -367,8 +367,8 @@ describe('LocalApiServer loop routes', () => {
       assert.strictEqual(deleted[0].id, loop.id);
     } finally {
       server.stop();
-      if (realHome === undefined) delete process.env.HOME;
-      else process.env.HOME = realHome;
+      if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
+      else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
       rmSync(home, { recursive: true, force: true });
     }
   });
@@ -377,9 +377,9 @@ describe('LocalApiServer loop routes', () => {
 /** Shared harness for the run-now/group tests below: a real LocalApiServer
  * backed by a throwaway ~/.ftown, with recording centrifugo/scheduler stubs. */
 function setupLoopApiServer() {
-  const realHome = process.env.HOME;
+  const realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
   const home = mkdtempSync(join(tmpdir(), 'ftw-loop-api-'));
-  process.env.HOME = home;
+  process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
 
   const server = new LocalApiServer();
   const token = 'test-token';
@@ -414,8 +414,8 @@ function setupLoopApiServer() {
     kicks: () => kicks,
     async cleanup() {
       server.stop();
-      if (realHome === undefined) delete process.env.HOME;
-      else process.env.HOME = realHome;
+      if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
+      else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
       rmSync(home, { recursive: true, force: true });
     },
   };

@@ -7,8 +7,8 @@ import { join } from 'node:path';
 import { ensureCodexHooks } from './codex-installer.js';
 
 function restoreHome(realHome: string | undefined): void {
-  if (realHome === undefined) delete process.env.HOME;
-  else process.env.HOME = realHome;
+  if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
+  else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
 }
 
 function readHooks(home: string): Record<string, unknown> {
@@ -22,9 +22,9 @@ function eventCommands(data: Record<string, unknown>, event: string): Array<Reco
 
 describe('ensureCodexHooks', () => {
   it('installs Codex notify hooks without async:true', () => {
-    const realHome = process.env.HOME;
+    const realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     const home = mkdtempSync(join(tmpdir(), 'ftw-codex-hooks-'));
-    process.env.HOME = home;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
 
     try {
       const harness = join(home, '.ftown', 'bin', 'ftown-harness');
@@ -50,9 +50,9 @@ describe('ensureCodexHooks', () => {
   });
 
   it('repairs legacy Codex notify hooks that used async:true', () => {
-    const realHome = process.env.HOME;
+    const realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     const home = mkdtempSync(join(tmpdir(), 'ftw-codex-hooks-repair-'));
-    process.env.HOME = home;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
 
     try {
       const hooksPath = join(home, '.codex', 'hooks.json');

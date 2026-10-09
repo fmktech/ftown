@@ -13,15 +13,15 @@ describe('ensureClaudeWorkdirTrust', () => {
   let workdir: string;
 
   beforeEach(() => {
-    realHome = process.env.HOME;
+    realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     home = mkdtempSync(join(tmpdir(), 'ftw-home-'));
     workdir = mkdtempSync(join(tmpdir(), 'ftw-wd-'));
-    process.env.HOME = home;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
   });
 
   afterEach(() => {
-    if (realHome === undefined) delete process.env.HOME;
-    else process.env.HOME = realHome;
+    if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
+    else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
     rmSync(home, { recursive: true, force: true });
     rmSync(workdir, { recursive: true, force: true });
   });

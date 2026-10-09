@@ -21,18 +21,18 @@ describe('ftown skill installer', () => {
   let bundled: string;
 
   beforeEach(() => {
-    realHome = process.env.HOME;
+    realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     home = mkdtempSync(join(tmpdir(), 'ftw-skill-install-'));
     bundled = join(home, 'bundled-skill');
     mkdirSync(join(bundled, 'scripts'), { recursive: true });
     writeFileSync(join(bundled, 'SKILL.md'), '---\nname: test\ndescription: test\n---\n# test\n');
     writeFileSync(join(bundled, 'scripts', 'tool'), '#!/usr/bin/env bash\n');
-    process.env.HOME = home;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
   });
 
   afterEach(() => {
-    if (realHome === undefined) delete process.env.HOME;
-    else process.env.HOME = realHome;
+    if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
+    else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
     rmSync(home, { recursive: true, force: true });
   });
 

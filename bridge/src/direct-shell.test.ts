@@ -10,11 +10,12 @@ it('keeps the Unix login shell launch', () => {
   });
 });
 
-it('uses Windows PowerShell and preserves Unicode and quotes in encoded commands', () => {
+it('uses Windows PowerShell without policy bypass or encoded commands', () => {
   const command = "Write-Output 'olá; $HOME & today''s diff'";
   const shell = directShellCommand(command, 'win32', { SystemRoot: 'D:\\Windows' });
   assert.equal(shell.file, 'D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
-  assert.equal(Buffer.from(shell.args.at(-1)!, 'base64').toString('utf16le'),
+  assert.deepEqual(shell.args.slice(0, -1), ['-NoLogo', '-NoProfile', '-Command']);
+  assert.equal(shell.args.at(-1),
     `$ErrorActionPreference = 'Stop'\n${command}\nexit $LASTEXITCODE`);
   assert.equal(shellQuote("today's diff", 'win32'), "'today''s diff'");
   assert.equal(shellQuote("today's diff", 'linux'), "'today'\\''s diff'");
