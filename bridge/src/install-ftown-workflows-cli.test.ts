@@ -14,7 +14,7 @@ describe('installFtownWorkflowsCli', () => {
   let fakeCli: string;
 
   beforeEach(() => {
-    realHome = process.env.HOME;
+    realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     tmp = mkdtempSync(join(tmpdir(), 'ftw-install-'));
     // A fake compiled dist dir containing the cli and its sibling runtime modules.
     const dist = join(tmp, 'dist');
@@ -26,12 +26,12 @@ describe('installFtownWorkflowsCli', () => {
     );
     writeFileSync(join(dist, 'workflow-runner.js'), 'export const ENGINE = true;\n');
     writeFileSync(join(dist, 'claude-trust.js'), 'export const TRUST = true;\n');
-    process.env.HOME = tmp;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = tmp;
   });
 
   afterEach(() => {
-    if (realHome === undefined) delete process.env.HOME;
-    else process.env.HOME = realHome;
+    if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
+    else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
     rmSync(tmp, { recursive: true, force: true });
   });
 

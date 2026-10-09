@@ -26,8 +26,8 @@ import type { CreateFtownSessionDeps } from './create-ftown-session.js';
 import type { Session } from './types.js';
 
 function restoreHome(realHome: string | undefined): void {
-  if (realHome === undefined) delete process.env.HOME;
-  else process.env.HOME = realHome;
+  if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
+  else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
 }
 
 function fakeSession(name: string): Session {
@@ -217,11 +217,11 @@ describe('nextAvailableGeneratedName', () => {
 
 describe('createFtownSession — working directory and generated name preflight', () => {
   it('blocks a missing working directory before saving or running the Codex CLI', async () => {
-    const realHome = process.env.HOME;
+    const realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     const home = mkdtempSync(join(tmpdir(), 'ftw-home-'));
     const root = mkdtempSync(join(tmpdir(), 'ftw-create-preflight-'));
     const missing = join(root, 'missing-project');
-    process.env.HOME = home;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
     const harness = fakeDeps();
 
     try {
@@ -244,12 +244,12 @@ describe('createFtownSession — working directory and generated name preflight'
   });
 
   it('uses the workspace basename as the generated session name and suffixes collisions', async () => {
-    const realHome = process.env.HOME;
+    const realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     const home = mkdtempSync(join(tmpdir(), 'ftw-home-'));
     const root = mkdtempSync(join(tmpdir(), 'ftw-name-wd-'));
     const workdir = join(root, 'medieval-new5');
     mkdirSync(workdir);
-    process.env.HOME = home;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
     const harness = fakeDeps([
       fakeSession('medieval-new5'),
       fakeSession('medieval-new5_1'),
@@ -275,9 +275,9 @@ describe('createFtownSession — working directory and generated name preflight'
 
 describe('createFtownSession — loopId passthrough (§4g loop-run tagging)', () => {
   it('round-trips input.loopId onto the persisted Session, and leaves it undefined when absent', async () => {
-    const realHome = process.env.HOME;
+    const realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     const home = mkdtempSync(join(tmpdir(), 'ftw-home-'));
-    process.env.HOME = home;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
     try {
       const tagged = fakeDeps();
       const withLoop = await createFtownSession(tagged.deps, { shellType: 'shell', loopId: 'loop-42' });
@@ -406,11 +406,11 @@ describe('resolveProviderRuntimeEnv — provider CLI defaults', () => {
 
 describe('createFtownSession — provider runtime env', () => {
   it('adds z.ai runtime defaults for CLI-spawned sessions and maps only the auth target', async () => {
-    const realHome = process.env.HOME;
+    const realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     const home = mkdtempSync(join(tmpdir(), 'ftw-home-'));
     mkdirSync(join(home, '.ftown'), { recursive: true });
     writeFileSync(join(home, '.ftown', 'env.json'), JSON.stringify({ ZAI_API_TOKEN: 'tok-zai' }));
-    process.env.HOME = home;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
     const harness = fakeDeps();
 
     try {
@@ -435,11 +435,11 @@ describe('createFtownSession — provider runtime env', () => {
   });
 
   it('lets caller env override provider defaults while provider auth still wins', async () => {
-    const realHome = process.env.HOME;
+    const realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     const home = mkdtempSync(join(tmpdir(), 'ftw-home-'));
     mkdirSync(join(home, '.ftown'), { recursive: true });
     writeFileSync(join(home, '.ftown', 'env.json'), JSON.stringify({ ZAI_API_TOKEN: 'tok-zai' }));
-    process.env.HOME = home;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
     const harness = fakeDeps();
 
     try {
@@ -752,9 +752,9 @@ describe('createFtownSession — Pi launch', () => {
 // invocation. This is the lock on "how is a session launched has one answer".
 describe('relaunchFtownSession — entry-point parity with createFtownSession', () => {
   it('fresh create with a resume id, retry, and resume relaunch produce the same runner.run invocation', async () => {
-    const realHome = process.env.HOME;
+    const realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     const home = mkdtempSync(join(tmpdir(), 'ftw-home-'));
-    process.env.HOME = home;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
     const harness = fakeDeps();
 
     try {
@@ -788,9 +788,9 @@ describe('relaunchFtownSession — entry-point parity with createFtownSession', 
   });
 
   it('retry reruns the stored command verbatim and leaves runtime/errorReason untouched', async () => {
-    const realHome = process.env.HOME;
+    const realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     const home = mkdtempSync(join(tmpdir(), 'ftw-home-'));
-    process.env.HOME = home;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
     const harness = fakeDeps();
     const session: Session = {
       ...fakeSession('retry-me'),
@@ -829,9 +829,9 @@ describe('relaunchFtownSession — entry-point parity with createFtownSession', 
   });
 
   it('resume relaunch derives the command via the heuristic, refreshes runtime, and clears errorReason', async () => {
-    const realHome = process.env.HOME;
+    const realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     const home = mkdtempSync(join(tmpdir(), 'ftw-home-'));
-    process.env.HOME = home;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
     const harness = fakeDeps();
     const session: Session = {
       ...fakeSession('resume-me'),

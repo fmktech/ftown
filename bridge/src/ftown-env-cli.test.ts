@@ -171,14 +171,14 @@ describe('ftown-env CLI commands (HOME-overridden)', () => {
   let home: string;
 
   beforeEach(() => {
-    realHome = process.env.HOME;
+    realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     home = mkdtempSync(join(tmpdir(), 'ftw-env-cli-'));
-    process.env.HOME = home;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
   });
 
   afterEach(() => {
-    if (realHome === undefined) delete process.env.HOME;
-    else process.env.HOME = realHome;
+    if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
+    else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -221,19 +221,19 @@ describe('installFtownEnvCli (HOME-overridden)', () => {
   let fakeCli: string;
 
   beforeEach(() => {
-    realHome = process.env.HOME;
+    realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     tmp = mkdtempSync(join(tmpdir(), 'ftw-env-install-'));
     const dist = join(tmp, 'dist');
     mkdirSync(dist, { recursive: true });
     fakeCli = join(dist, 'ftown-env-cli.js');
     writeFileSync(fakeCli, "#!/usr/bin/env node\nimport './provider-env-store.js';\n");
     writeFileSync(join(dist, 'provider-env-store.js'), 'export const STORE = true;\n');
-    process.env.HOME = tmp;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = tmp;
   });
 
   afterEach(() => {
-    if (realHome === undefined) delete process.env.HOME;
-    else process.env.HOME = realHome;
+    if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
+    else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
     rmSync(tmp, { recursive: true, force: true });
   });
 

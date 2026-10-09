@@ -14,16 +14,16 @@ describe('loop-run-store — legacy skipped-record cleanup', () => {
   let home: string;
 
   beforeEach(() => {
-    realHome = process.env.HOME;
+    realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     home = mkdtempSync(join(tmpdir(), 'ftw-loop-runs-'));
-    process.env.HOME = home;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
   });
 
   afterEach(() => {
     // Clear any injected home so a later test falls back to the $HOME override.
     configureLoopRunStoreHome(undefined);
-    if (realHome === undefined) delete process.env.HOME;
-    else process.env.HOME = realHome;
+    if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
+    else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
     rmSync(home, { recursive: true, force: true });
   });
 

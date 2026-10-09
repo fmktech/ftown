@@ -16,23 +16,23 @@ import {
 } from './loop-store.js';
 import type { Loop, LoopDraft } from './types.js';
 
-// homedir() reads $HOME at call time, so overriding it points every read/write
+// homedir() reads USERPROFILE on Windows and HOME on Unix, so overriding it points every read/write
 // at a throwaway ~/.ftown/loops.json — the provider-env-store.test.ts pattern.
 describe('loop-store', () => {
   let realHome: string | undefined;
   let home: string;
 
   beforeEach(() => {
-    realHome = process.env.HOME;
+    realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     home = mkdtempSync(join(tmpdir(), 'ftw-loops-'));
-    process.env.HOME = home;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
   });
 
   afterEach(() => {
     // Clear any injected home so a later test falls back to the $HOME override.
     configureLoopStoreHome(undefined);
-    if (realHome === undefined) delete process.env.HOME;
-    else process.env.HOME = realHome;
+    if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
+    else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -106,7 +106,7 @@ describe('loop-store', () => {
   });
 
   describe('persistence', () => {
-    it('writes loops.json at mode 0o600 inside a 0o700 dir', () => {
+    it('writes loops.json at mode 0o600 inside a 0o700 dir', { skip: process.platform === 'win32' }, () => {
       createLoop(draft());
       assert.strictEqual(statSync(loopsPath()).mode & 0o777, 0o600);
       assert.strictEqual(statSync(loopsDir()).mode & 0o777, 0o700);

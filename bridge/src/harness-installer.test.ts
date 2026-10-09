@@ -14,7 +14,7 @@ describe('installHarness', () => {
   let dist: string;
 
   beforeEach(() => {
-    realHome = process.env.HOME;
+    realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     realPath = process.env.PATH;
     tmp = mkdtempSync(join(tmpdir(), 'ftw-harness-'));
     dist = join(tmp, 'npx-cache', 'node_modules', 'ftown-bridge', 'dist');
@@ -27,13 +27,13 @@ describe('installHarness', () => {
     mkdirSync(commander, { recursive: true });
     writeFileSync(join(commander, 'package.json'), '{"name":"commander","type":"module","main":"index.js"}\n');
     writeFileSync(join(commander, 'index.js'), 'export const COMMANDER = true;\n');
-    process.env.HOME = tmp;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = tmp;
     process.env.PATH = '/usr/bin:/bin';
   });
 
   afterEach(() => {
-    if (realHome === undefined) delete process.env.HOME;
-    else process.env.HOME = realHome;
+    if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
+    else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
     if (realPath === undefined) delete process.env.PATH;
     else process.env.PATH = realPath;
     rmSync(tmp, { recursive: true, force: true });

@@ -14,19 +14,19 @@ describe('installFtownSessionsCli', () => {
   let fakeCli: string;
 
   beforeEach(() => {
-    realHome = process.env.HOME;
+    realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     tmp = mkdtempSync(join(tmpdir(), 'ftw-install-sessions-'));
     const dist = join(tmp, 'dist');
     mkdirSync(dist, { recursive: true });
     fakeCli = join(dist, 'ftown-sessions-cli.js');
     writeFileSync(fakeCli, "#!/usr/bin/env node\nimport './wire-types.js';\n");
     writeFileSync(join(dist, 'wire-types.js'), 'export const WIRE_TYPES = true;\n');
-    process.env.HOME = tmp;
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = tmp;
   });
 
   afterEach(() => {
-    if (realHome === undefined) delete process.env.HOME;
-    else process.env.HOME = realHome;
+    if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
+    else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
     rmSync(tmp, { recursive: true, force: true });
   });
 
