@@ -32,7 +32,7 @@ jobs:
         working-directory: bridge
         run: |
           npm run build
-          node --import tsx --test src/mcp/mcp.test.ts src/mcp/http.test.ts
+          node --import tsx --test src/mcp/mcp.test.ts src/mcp/http.test.ts src/mcp/legacy-relay.test.ts
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
       - name: Prepare runtime configuration
         run: node deploy/mcp/prepare-runtime.mjs

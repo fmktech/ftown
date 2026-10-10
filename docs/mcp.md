@@ -16,11 +16,11 @@ flowchart LR
 
 The gateway is a **separate Fly app**, alongside the existing `ftown-centrifugo` app. Its public URL ends in `/mcp`. Fly terminates TLS; the container listens on its internal HTTP port. The existing Vercel UI hosts `/mcp/consent` and reuses the current NextAuth login. OAuth state lives in the same Postgres database as ftown's users and device ownership records.
 
-Computers connect outward to Centrifugo as they already do. The recommended `relay` transport does not need inbound ports or SSH credentials on workers. Each worker must run this bridge build to support the `mcp_request` command and stop/retry routes. The local bridge credential is used only on the worker and is never sent through the relay.
+Computers connect outward to Centrifugo as they already do. The recommended `relay` transport does not need inbound ports or SSH credentials on workers. New workers support the native `mcp_request` command. Existing 0.19.33 workers are also supported: only after an explicit unknown-command rejection, the gateway uses the existing owner-scoped RPC and a fixed Node loopback helper through `bridge_exec`; stop/retry use their existing RPC commands. The local bridge credential stays on the worker. Compatibility requires Node on PATH and `bridge_exec` enabled; otherwise upgrade the worker for native MCP support. Timeouts and ambiguous failures never trigger a fallback or mutation retry.
 
 ## Deployment checklist
 
-The production gateway is `https://ftown-mcp.fly.dev/mcp`, in Fly organization `ftown`. The consent page is deployed to `https://ftown.ia.br/mcp/consent` in the existing Vercel project. The initial rollout applied migration `0004_mcp_oauth.sql` and registered four paired computers belonging to the owner of the configured anchor bridge. Computer bridges still need the new build before they can answer MCP requests.
+The production gateway is `https://ftown-mcp.fly.dev/mcp`, in Fly organization `ftown`. The consent page is deployed to `https://ftown.ia.br/mcp/consent` in the existing Vercel project. The initial rollout applied migration `0004_mcp_oauth.sql` and registered four paired computers belonging to the owner of the configured anchor bridge. The compatibility rollout (`0c67792`, gateway 0.19.35) verified three available computers and 27 running sessions. Foad-Legion remains unreachable. A live disposable MCP session passed creation, terminal input, history/search, mail enqueue/readback, stop/retry and removal. See the [investigation](investigations/2026-10-10-mcp-legacy-bridges.md).
 
 The following steps describe setup and recovery:
 

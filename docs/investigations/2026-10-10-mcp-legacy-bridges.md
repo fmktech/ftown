@@ -5,7 +5,7 @@ slug: mcp-legacy-bridges
 date: 2026-10-10T08:25:00-03:00
 git_commit: 16bc69ac857d8bf88596d0f0af9dc5775c183a05
 branch: feat/agent-control-mcp
-status: root-cause-proven
+status: resolved
 hypotheses_formed: 3
 hypotheses_rejected: 2
 hypotheses_proven: 1
@@ -47,3 +47,8 @@ Kept the network, identity and target identical; changed only the command to lis
 
 ## Fix plan
 Use the existing owner-scoped RPC only after an exact unknown-mcp-command rejection. Stop/retry use their existing RPC commands; other operations use a fixed, validated loopback request helper through bridge_exec. Encode all request data, enforce machine identity, deadline, response bounds and no redirects, never expose credentials, and never retry a timeout or ambiguous mutation. Keep the modern transport preferred. Preserve direct-runtime agents. Test the legacy path with a real isolated broker and verify live fleet discovery before claiming resolution.
+
+## Resolution
+Gateway commit `0c67792`, package 0.19.35, deployed to Fly. No worker restart required. The compatibility regression in relay.integration.test.ts failed before the change with `Bridge could not execute the relay request`, then passed with the change. Seven focused MCP tests (including a real isolated Centrifugo broker) and four helper security tests passed; TypeScript build and harness status passed.
+
+The public HTTPS MCP was verified with a temporary, subsequently revoked control grant. machines_list returned three available computers with session counts 7, 22 and 21. sessions_list returned 27 running sessions (7, 9 and 11), without errors on those computers. A disposable shell session passed create/get, terminal input, history reading, literal search, message enqueue/readback, stop, retry and removal. No existing agent was modified by these tests. Foad-Legion remains unreachable, timing out on both legacy and modern RPC; this separate machine connectivity limitation is reported rather than hidden.
