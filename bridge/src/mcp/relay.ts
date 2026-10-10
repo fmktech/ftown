@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { Centrifuge, type Subscription } from "centrifuge";
 import WebSocket from "ws";
 import jwt from "jsonwebtoken";
-import { FleetError, type BridgeRequest } from "./fleet.js";
+import { FleetError, requestSchema, type BridgeRequest } from "./fleet.js";
+import { legacyRelayCommand } from "./legacy-relay.js";
 
 /** One renewable owner-scoped relay connection per account, shared by all its MCP requests. */
 export class FleetRelay {
@@ -54,9 +55,51 @@ export class FleetRelay {
     request: BridgeRequest,
     signal?: AbortSignal,
   ) {
+    request = requestSchema.parse(request);
+    const deadline = Date.now() + request.timeoutMs;
+    const mutation = request.method !== "GET";
+    const response = await this.rpc(userId, machineId, "mcp_request", {
+      request, expiresAt: deadline,
+    }, deadline, mutation, signal);
+    if (response.success) return this.unwrap(response.data);
+    // Only this rejection proves the operation was not executed. Never fall
+    // back after a timeout, connection failure or ambiguous execution error.
+    if (response.error !== "Unknown command type: mcp_request")
+      throw new FleetError("bridge_error", "Bridge could not execute the relay request", mutation);
+    const lifecycle = request.method === "POST"
+      ? /^\/api\/sessions\/([a-zA-Z0-9_-]+)\/(stop|retry)$/.exec(request.path) : null;
+    const type = lifecycle ? `${lifecycle[2]}_session` : "bridge_exec";
+    const payload = lifecycle ? { sessionId: lifecycle[1] } : {
+      command: legacyRelayCommand(machineId, request, deadline),
+      timeout: Math.max(1, deadline - Date.now()),
+    };
+    const legacy = await this.rpc(userId, machineId, type, payload, deadline, mutation, signal);
+    if (!legacy.success) {
+      if (legacy.error === "bridge_exec disabled (FTOWN_DISABLE_BRIDGE_EXEC=1)")
+        throw new FleetError("bridge_upgrade_required", "Upgrade this bridge to enable native MCP support; legacy execution is disabled");
+      throw new FleetError("bridge_error", "Bridge rejected the compatibility request", mutation);
+    }
+    if (lifecycle) return legacy.data;
+    if (legacy.data?.exitCode !== 0)
+      throw new FleetError("bridge_error", "Legacy bridge helper failed; check Node availability or upgrade this bridge", mutation);
+    let result;
+    try { result = JSON.parse(legacy.data.stdout); }
+    catch { throw new FleetError("bridge_error", "Legacy bridge returned an invalid result", mutation); }
+    return this.unwrap(result);
+  }
+  private unwrap(result: any) {
+    if (result?.error)
+      throw new FleetError(result.error.code, result.error.message, result.error.outcomeUnknown, result.error.status);
+    return result?.data;
+  }
+  private async rpc(
+    userId: string, machineId: string, type: string, payload: Record<string, unknown>,
+    deadline: number, mutation: boolean, signal?: AbortSignal,
+  ): Promise<any> {
+    if (Date.now() >= deadline) throw new FleetError("timeout", "Request expired before publication");
+    if (signal?.aborted) throw new FleetError("cancelled", "Relay request cancelled");
     const { sub, pending } = this.connection(userId);
     const id = randomUUID();
-    const deadline = Date.now() + request.timeoutMs;
     return new Promise((resolve, reject) => {
       let sent = false;
       let settled = false;
@@ -74,7 +117,7 @@ export class FleetRelay {
           new FleetError(
             "cancelled",
             "Relay request cancelled",
-            sent && request.method !== "GET",
+            sent && mutation,
           ),
         );
       const timer = setTimeout(
@@ -83,49 +126,27 @@ export class FleetRelay {
             new FleetError(
               "timeout",
               "Bridge did not respond before the deadline",
-              sent && request.method !== "GET",
+              sent && mutation,
             ),
           ),
-        request.timeoutMs,
+        Math.max(1, deadline - Date.now()),
       );
       signal?.addEventListener("abort", cancel, { once: true });
       if (signal?.aborted) {
         cancel();
         return;
       }
-      pending.set(id, (response) => {
-        if (!response.success) {
-          finish(
-            new FleetError(
-              "bridge_error",
-              "Bridge could not execute the relay request",
-              sent && request.method !== "GET",
-            ),
-          );
-          return;
-        }
-        const result = response.data;
-        if (result?.error)
-          finish(
-            new FleetError(
-              result.error.code,
-              result.error.message,
-              result.error.outcomeUnknown,
-              result.error.status,
-            ),
-          );
-        else finish(undefined, result?.data);
-      });
+      pending.set(id, (response) => finish(undefined, response));
       void sub
-        .ready(request.timeoutMs)
+        .ready(Math.max(1, deadline - Date.now()))
         .then(async () => {
           if (settled) return;
           // No retries: publication failure may still mean the request was delivered.
           sent = true;
           await sub.publish({
-            type: "mcp_request",
+            type,
             requestId: id,
-            payload: { bridgeId: machineId, request, expiresAt: deadline },
+            payload: { ...payload, bridgeId: machineId },
           });
         })
         .catch(() =>
@@ -133,7 +154,7 @@ export class FleetRelay {
             new FleetError(
               "connection_error",
               "Relay connection unavailable",
-              sent && request.method !== "GET",
+              sent && mutation,
             ),
           ),
         );

@@ -74,8 +74,26 @@ test(
     });
     const channel = `commands:rpc#${owner}`;
     const sub = worker.newSubscription(channel);
+    const received: { type: string; machine: string }[] = [];
     sub.on("publication", async (ctx) => {
-      if (ctx.info?.user !== owner || ctx.data.type !== "mcp_request") return;
+      if (ctx.info?.user !== owner || ctx.data.type === "command_response") return;
+      const machine = ctx.data.payload.bridgeId;
+      received.push({ type: ctx.data.type, machine });
+      if (machine === "legacy") {
+        const response = ctx.data.type === "mcp_request"
+          ? { requestId: ctx.data.requestId, success: false, error: "Unknown command type: mcp_request" }
+          : { requestId: ctx.data.requestId, success: true, data: ctx.data.type === "stop_session"
+            ? { stopped: true }
+            : { stdout: JSON.stringify({ data: { sessions: [{ id: "existing-agent" }] } }), exitCode: 0 } };
+        await sub.publish({ type: "command_response", response });
+        return;
+      }
+      if (machine === "rejected") {
+        await sub.publish({ type: "command_response", response: { requestId: ctx.data.requestId, success: false, error: "Request failed after execution" } });
+        return;
+      }
+      if (machine === "silent") return;
+      if (ctx.data.type !== "mcp_request") return;
       const response = {
         requestId: ctx.data.requestId,
         success: true,
@@ -105,5 +123,19 @@ test(
       timeoutMs: 3000,
     });
     assert.deepEqual(result, { bridge: "bridge-1" });
+    assert.deepEqual(await relay.request(owner, "legacy", {
+      method: "GET", path: "/api/sessions", timeoutMs: 3000,
+    }), { sessions: [{ id: "existing-agent" }] });
+    assert.deepEqual(await relay.request(owner, "legacy", {
+      method: "POST", path: "/api/sessions/existing-agent/stop", body: {}, timeoutMs: 3000,
+    }), { stopped: true });
+    assert.deepEqual(received.filter(r => r.machine === "legacy").map(r => r.type),
+      ["mcp_request", "bridge_exec", "mcp_request", "stop_session"]);
+    for (const machine of ["rejected", "silent"]) {
+      await assert.rejects(relay.request(owner, machine, {
+        method: "POST", path: "/api/sessions", body: {}, timeoutMs: 1000,
+      }));
+      assert.deepEqual(received.filter(r => r.machine === machine).map(r => r.type), ["mcp_request"]);
+    }
   },
 );
