@@ -2,6 +2,7 @@ import { auth } from "@/lib/auth";
 import { getDevicesForSub } from "@/lib/bridge-refresh";
 import { mcpConsentRequest } from "@/lib/mcp-consent";
 import { redirect } from "next/navigation";
+import BridgeSelection from "./BridgeSelection";
 
 export const dynamic = "force-dynamic";
 interface Details {
@@ -87,20 +88,7 @@ export default async function ConsentPage({
       <p className="text-sm">Client callback: {details.redirectUri}</p>
       {error === "select" && <p role="alert">Select at least one computer to allow access.</p>}
       <form action={decide} className="space-y-4">
-        <fieldset>
-          <legend className="font-semibold mb-2">
-            Allow access to these computers
-          </legend>
-          {devices.map((d) => (
-            <label key={d.bridgeId} className="block py-2">
-              <input type="checkbox" name="machine" value={d.bridgeId} />{" "}
-              {d.hostname ?? d.bridgeId}
-            </label>
-          ))}
-          {!devices.length && (
-            <p>No authorized computers are available for this account.</p>
-          )}
-        </fieldset>
+        <BridgeSelection devices={devices.map(({ bridgeId, hostname }) => ({ bridgeId, hostname }))} />
         <button
           name="decision"
           value="approve"
