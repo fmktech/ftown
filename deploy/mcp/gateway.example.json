@@ -1,0 +1,15 @@
+{
+  "publicUrl": "https://ftown-mcp.fly.dev",
+  "loginUrl": "https://ftown.ia.br",
+  "allowedOrigins": [],
+  "fleet": {
+    "concurrency": 8,
+    "timeoutMs": 15000,
+    "machines": [
+      { "id": "REPLACE_WITH_BRIDGE_ID", "label": "My workstation", "transport": "relay", "userId": "owner@example.com" }
+    ]
+  },
+  "access": [
+    { "subject": "REPLACE_WITH_FTOWN_USER_DATABASE_ID", "machines": ["REPLACE_WITH_BRIDGE_ID"] }
+  ]
+}

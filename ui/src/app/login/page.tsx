@@ -30,7 +30,8 @@ export default function LoginPage() {
         return;
       }
 
-      router.push("/dashboard");
+      const returnTo = new URLSearchParams(window.location.search).get("returnTo");
+      router.push(returnTo?.startsWith("/mcp/consent?request=") ? returnTo : "/dashboard");
     } catch (err) {
       console.error(err);
       setError("An unexpected error occurred");

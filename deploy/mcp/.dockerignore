@@ -1,0 +1,11 @@
+**
+!bridge
+!bridge/package.json
+!bridge/package-lock.json
+!bridge/tsconfig.json
+!bridge/src
+!bridge/src/**
+!deploy
+!deploy/mcp
+!deploy/mcp/Dockerfile
+bridge/src/**/*.test.ts

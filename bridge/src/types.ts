@@ -180,7 +180,7 @@ export interface Command {
   requestId: string;
 }
 
-export type CommandType = 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'clear_terminal' | 'update_session_parent' | 'get_session_usage' | 'get_sessions_usage' | 'create_loop' | 'list_loops' | 'update_loop' | 'delete_loop' | 'run_loop_now' | 'get_loop_runs';
+export type CommandType = 'mcp_request' | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'clear_terminal' | 'update_session_parent' | 'get_session_usage' | 'get_sessions_usage' | 'create_loop' | 'list_loops' | 'update_loop' | 'delete_loop' | 'run_loop_now' | 'get_loop_runs';
 
 export interface CreateSessionPayload {
   command: string;

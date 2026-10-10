@@ -184,6 +184,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private port: number = 0;
   private loopController: LoopController | null = null;
   private sessionController: SessionController | null = null;
+  private lifecycleController: SessionController | null = null;
 
   setBrowserAccess(access: BrowserAccess): void {
     this.browserAccess = access;
@@ -228,6 +229,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private invalidateControllers(): void {
     this.loopController = null;
     this.sessionController = null;
+    this.lifecycleController = null;
   }
 
   /**
@@ -253,6 +255,11 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   }
 
   /** Transport-agnostic session operations (shared with the RPC switch). */
+  setSessionController(controller: SessionController): void {
+    this.sessionController = controller;
+    this.lifecycleController = controller;
+  }
+
   private getSessionController(): SessionController | null {
     if (this.sessionController) return this.sessionController;
     const { store, runner, centrifugo, userId } = this;
@@ -589,6 +596,23 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     const sessionResizeMatch = path.match(/^\/api\/sessions\/([^/]+)\/resize$/);
     const sessionRunningMatch = path.match(/^\/api\/sessions\/([^/]+)\/running$/);
     const sessionUsageMatch = path.match(/^\/api\/sessions\/([^/]+)\/usage$/);
+
+    // Lifecycle routes use the same controller as dashboard RPC.
+    const lifecycleMatch = path.match(/^\/api\/sessions\/([^/]+)\/(stop|retry)$/);
+    if (lifecycleMatch && req.method === 'POST') {
+      const controller = lifecycleMatch[2] === 'stop' ? this.lifecycleController : this.getSessionController();
+      if (!controller) { jsonResponse(res, 503, { error: 'Server not ready' }); return; }
+      const id = lifecycleMatch[1];
+      if (!await controller.get(id)) { jsonResponse(res, 404, { error: 'Session not found' }); return; }
+      if (lifecycleMatch[2] === 'stop') {
+        jsonResponse(res, 200, await controller.stop(id));
+      } else {
+        const result = await controller.retry(id);
+        if (result.ok) jsonResponse(res, 200, { session: toWireSession(result.session) });
+        else jsonResponse(res, result.code === 'not_found' ? 404 : result.code === 'conflict' ? 409 : 400, { error: result.message });
+      }
+      return;
+    }
 
     // GET /api/sessions/:id
     if (sessionMatch && req.method === 'GET') {

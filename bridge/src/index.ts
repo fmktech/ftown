@@ -40,6 +40,7 @@ import { installFtownCommandCli } from './install-ftown-command-cli.js';
 import { ensureFtownOnPath } from './ensure-ftown-path.js';
 import { unregisterSession, configureSessionRegistryHome } from './session-registry.js';
 import { createFtownSession, type CreateFtownSessionDeps } from './create-ftown-session.js';
+import { createRelayHandler } from './mcp/relay-handler.js';
 import { createCommandHandler } from './command-rpc.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { SessionResurrection } from './session-resurrection.js';
@@ -755,6 +756,8 @@ program
       destroyTerminal: (sid) => terminalManager.destroy(sid),
     });
 
+    localApiServer.setSessionController(sessionController);
+
     // Compiled sibling of this module (running from dist), else the sibling
     // dist/ directory (running from src via `tsx watch` in dev). If neither
     // exists — dev mode without a build — skip installation instead of
@@ -921,6 +924,7 @@ program
 
     const handleCommand = createCommandHandler({
       bridgeId,
+      relayRequest: createRelayHandler(hookPort, apiToken),
       sessionController,
       loopController,
       publishCommandResponse: (response) => centrifugo.publishCommandResponse(userId, response),

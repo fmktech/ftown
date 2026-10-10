@@ -1,6 +1,6 @@
 {
   "name": "ftown-bridge",
-  "version": "0.19.33",
+  "version": "0.19.34",
   "description": "CLI bridge for ftown — generic PTY-over-Centrifugo relay",
   "type": "module",
   "main": "dist/index.js",
@@ -10,7 +10,8 @@
     "ftown-harness": "dist/harness-cli.js",
     "ftown-env": "dist/ftown-env-cli.js",
     "ftown-sessions": "bin/ftown-sessions",
-    "ftown-workflows": "dist/workflow-runner-cli.js"
+    "ftown-workflows": "dist/workflow-runner-cli.js",
+    "ftown-mcp": "dist/mcp-cli.js"
   },
   "files": [
     "dist",
@@ -27,7 +28,8 @@
     "prepublishOnly": "npm run build",
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
-    "harness": "tsx src/harness-cli.ts"
+    "harness": "tsx src/harness-cli.ts",
+    "mcp": "tsx src/mcp-cli.ts"
   },
   "engines": {
     "node": ">=22"
@@ -47,18 +49,27 @@
     "directory": "bridge"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/headless": "^6.0.0",
     "centrifuge": "^5.2.2",
     "commander": "^13.1.0",
     "cron-parser": "^4.9.0",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.1",
+    "jsonwebtoken": "^9.0.3",
     "node-datachannel": "^0.32.3",
     "node-pty": "^1.2.0-beta.12",
+    "pg": "^8.23.1",
     "uuid": "^11.1.0",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.13.0",
+    "@types/pg": "^8.23.1",
     "@types/uuid": "^10.0.0",
     "@types/ws": "^8.5.14",
     "tsx": "^4.19.0",

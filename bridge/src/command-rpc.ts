@@ -52,6 +52,7 @@ interface ExecError {
 
 export interface CommandRpcDeps {
   bridgeId: string;
+  relayRequest?: (id: string, payload: Record<string, unknown>) => Promise<unknown>;
   sessionController: SessionController;
   loopController: LoopController;
   publishCommandResponse: (response: CommandResponse) => Promise<void>;
@@ -77,6 +78,12 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command) =
 
     try {
       switch (command.type) {
+        case 'mcp_request': {
+          if (payloadBridgeId !== bridgeId || !deps.relayRequest) throw new Error('MCP relay unavailable or missing target');
+          const data = await deps.relayRequest(command.requestId, command.payload as Record<string, unknown>);
+          response = { requestId: command.requestId, success: true, data: data as Record<string, unknown> };
+          break;
+        }
         case 'create_session': {
           const payload = command.payload as CreateSessionPayload;
           const session = await sessionController.create(

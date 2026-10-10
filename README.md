@@ -455,3 +455,7 @@ cd bridge && npm run dev -- --token <jwt> --api-url http://localhost:3000
 ## License
 
 [MIT](LICENSE)
+
+## Agent control over MCP
+
+Connect to the HTTPS `ftown-mcp` gateway with OAuth through your ftown account to create, inspect, message, search and control sessions across computers through the existing relay. See the [MCP setup and fleet orchestration guide](docs/mcp.md). Cron and factory administration are excluded.
