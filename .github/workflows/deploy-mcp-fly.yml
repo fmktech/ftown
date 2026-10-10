@@ -1,0 +1,60 @@
+name: Deploy HTTPS MCP gateway to Fly
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, feat/agent-control-mcp]
+    paths:
+      - deploy/mcp/**
+      - .github/workflows/deploy-mcp-fly.yml
+permissions:
+  contents: read
+concurrency:
+  group: deploy-mcp-fly
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install gateway dependencies
+        working-directory: bridge
+        run: npm ci --ignore-scripts
+      - name: Build and test gateway
+        working-directory: bridge
+        run: |
+          npm run build
+          node --import tsx --test src/mcp/mcp.test.ts src/mcp/http.test.ts
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+      - name: Prepare runtime configuration
+        run: node deploy/mcp/prepare-runtime.mjs
+        env:
+          DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+          FTOWN_MCP_APPROVAL_SECRET: ${{ secrets.FTOWN_MCP_APPROVAL_SECRET }}
+          CENTRIFUGO_TOKEN_SECRET: ${{ secrets.CENTRIFUGO_TOKEN_HMAC_SECRET_KEY }}
+          FTOWN_MCP_OWNER_BRIDGE_ID: ${{ vars.FTOWN_MCP_OWNER_BRIDGE_ID }}
+          MCP_SECRETS_FILE: ${{ runner.temp }}/mcp-secrets.env
+      - name: Stage secrets and deploy gateway
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_MCP_API_TOKEN }}
+          MCP_SECRETS_FILE: ${{ runner.temp }}/mcp-secrets.env
+        run: |
+          set -euo pipefail
+          trap 'rm -f "$MCP_SECRETS_FILE"' EXIT
+          flyctl secrets import --app ftown-mcp --stage < "$MCP_SECRETS_FILE"
+          flyctl deploy --remote-only --ha=false --config deploy/mcp/fly.toml
+          flyctl checks list --app ftown-mcp
+      - name: Verify public HTTPS and authentication
+        run: |
+          set -euo pipefail
+          base=https://ftown-mcp.fly.dev
+          curl --fail --retry 5 --retry-all-errors "$base/healthz"
+          curl --fail "$base/.well-known/oauth-authorization-server" | jq -e '.issuer == "https://ftown-mcp.fly.dev"'
+          test "$(curl -sS -o /dev/null -w '%{http_code}' "$base/mcp")" = 401
+      - name: Remove runtime bundle
+        if: always()
+        run: rm -f "${{ runner.temp }}/mcp-secrets.env"
