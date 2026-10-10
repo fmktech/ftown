@@ -50,6 +50,8 @@ The `Deploy HTTPS MCP gateway to Fly` workflow uses the app-scoped `FLY_MCP_API_
 
 Initial deployment evidence: [database migration](https://github.com/fmktech/ftown/actions/runs/38008247315), [gateway build, tests and deployment](https://github.com/fmktech/ftown/actions/runs/38008464435). The gateway image was built from `5ebbdf2`; the production consent UI was built from `3c442a2`.
 
+The live deployment smoke test passed persisted client registration, the login redirect, signed server-to-server consent, S256 PKCE, MCP initialization, read-only tool filtering, refresh rotation, and revocation. Its temporary grant was revoked after testing. This exercised the deployed gateway and production database; it did not exercise an interactive browser login and consent submission. Fleet discovery reached three existing bridges, which rejected the new command; a fourth timed out. A local bridge restart was deferred because its seven direct-runtime agents would be stopped. Upgrade worker bridges before treating fleet control as operational.
+
 For local development behind a TLS reverse proxy:
 
 ```sh
