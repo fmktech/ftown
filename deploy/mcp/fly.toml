@@ -5,8 +5,7 @@ kill_signal = "SIGTERM"
 kill_timeout = "35s"
 
 [build]
-  dockerfile = "deploy/mcp/Dockerfile"
-  ignorefile = "deploy/mcp/.dockerignore"
+  dockerfile = "Dockerfile"
 
 [env]
   NODE_ENV = "production"

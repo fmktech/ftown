@@ -46,7 +46,7 @@ jobs:
           set -euo pipefail
           trap 'rm -f "$MCP_SECRETS_FILE"' EXIT
           flyctl secrets import --app ftown-mcp --stage < "$MCP_SECRETS_FILE"
-          flyctl deploy --remote-only --ha=false --config deploy/mcp/fly.toml
+          flyctl deploy --remote-only --ha=false --config deploy/mcp/fly.toml --ignorefile deploy/mcp/.dockerignore
           flyctl checks list --app ftown-mcp
       - name: Verify public HTTPS and authentication
         run: |
