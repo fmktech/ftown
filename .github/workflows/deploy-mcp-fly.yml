@@ -2,10 +2,14 @@ name: Deploy HTTPS MCP gateway to Fly
 on:
   workflow_dispatch:
   push:
-    branches: [main, feat/agent-control-mcp]
+    branches: [main]
     paths:
       - deploy/mcp/**
       - .github/workflows/deploy-mcp-fly.yml
+      - bridge/src/mcp/**
+      - bridge/src/mcp-cli.ts
+      - bridge/package.json
+      - bridge/package-lock.json
 permissions:
   contents: read
 concurrency:

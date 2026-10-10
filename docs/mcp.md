@@ -20,7 +20,9 @@ Computers connect outward to Centrifugo as they already do. The recommended `rel
 
 ## Deployment checklist
 
-These are setup instructions, not a record of deployment. The checked-in app name is a proposed target and must be verified as available in the correct Fly organization.
+The production gateway is `https://ftown-mcp.fly.dev/mcp`, in Fly organization `ftown`. The consent page is deployed to `https://ftown.ia.br/mcp/consent` in the existing Vercel project. The initial rollout applied migration `0004_mcp_oauth.sql` and registered four paired computers belonging to the owner of the configured anchor bridge. Computer bridges still need the new build before they can answer MCP requests.
+
+The following steps describe setup and recovery:
 
 1. Apply `ui/migrations/0004_mcp_oauth.sql` using the existing migration workflow. It adds one table and an expiry index. The fresh-install `ui/schema.sql` includes the same definitions.
 2. Deploy the UI changes to its existing Vercel project with these server-only environment variables:
@@ -37,12 +39,16 @@ These are setup instructions, not a record of deployment. The checked-in app nam
 5. Build/deploy from the repository root using the new app's config, after confirming the deployment target:
 
 ```sh
-fly deploy --config deploy/mcp/fly.toml
+fly deploy --config deploy/mcp/fly.toml --ignorefile deploy/mcp/.dockerignore
 ```
 
 6. Upgrade/restart the computer bridges with this build. Verify `/healthz`, OAuth discovery, and an end-to-end grant against a test account before enabling production users.
 
-`deploy/mcp/Dockerfile` builds only the gateway's runtime requirements; PTY/WebRTC native install scripts are skipped because the hosted process does not launch agents locally. The runtime is non-root. The Fly config requires HTTPS, keeps one instance warm, and has a liveness check. These files have not been deployed by this change.
+`deploy/mcp/Dockerfile` builds only the gateway's runtime requirements; PTY/WebRTC native install scripts are skipped because the hosted process does not launch agents locally. The runtime is non-root. The Fly config requires HTTPS, keeps one instance warm, and has a liveness check.
+
+The `Deploy HTTPS MCP gateway to Fly` workflow uses the app-scoped `FLY_MCP_API_TOKEN`, separate from the broker's deploy token. It takes the database and broker credentials from existing GitHub secrets and shares `FTOWN_MCP_APPROVAL_SECRET` with the production Vercel project. `FTOWN_MCP_OWNER_BRIDGE_ID` identifies an existing, non-revoked bridge; deployment derives only that owner's active computers from the database. Re-run the workflow after pairing another computer to refresh the gateway registry. Rotate the app deploy token before its 30-day expiry. Never print or upload the generated runtime secret bundle.
+
+Initial deployment evidence: [database migration](https://github.com/fmktech/ftown/actions/runs/38008247315), [gateway build, tests and deployment](https://github.com/fmktech/ftown/actions/runs/38008464435). The gateway image was built from `5ebbdf2`; the production consent UI was built from `3c442a2`.
 
 For local development behind a TLS reverse proxy:
 
