@@ -122,8 +122,8 @@ Alternative fleet transports remain available: `local` reads the gateway host's 
 
 | Tool | Purpose |
 | --- | --- |
-| `machines_list` | Authorized hosts, connectivity and session counts |
-| `sessions_list` | Filtered, paginated inventory with per-host errors |
+| `machines_list` | Online computers and current session counts by default; `includeOffline: true` includes unavailable registrations |
+| `sessions_list` | Current (running/pending) sessions by default; `status: "all"` includes older sessions, `includeOffline: true` includes connection diagnostics |
 | `sessions_create` | Launch a harness with prompt, model, directory and optional parent |
 | `sessions_get`, `sessions_update` | Inspect, rename and reparent |
 | `sessions_stop`, `sessions_retry` | Stop a process or rerun its stored command |

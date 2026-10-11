@@ -385,11 +385,11 @@ export function createMcpServer(
   }
   for (const [name, op] of Object.entries(operations)) register(name, op);
   register("machines_list", {
-    schema: z.object({}),
+    schema: z.object({ includeOffline: z.boolean().default(false) }),
     description:
-      "Discover configured fleet machines and test connectivity. Returns per-machine availability and session counts without credentials.",
+      "Discover online computers by default. Set includeOffline=true to include unavailable or older registered bridges and their connection errors. sessionCount counts current (running or pending) sessions. omittedOfflineCount reports how many unavailable computers were omitted.",
     readOnly: true,
-    run: (_, s) =>
+    run: (a, s) =>
       mapLimit(fleet.config.machines, fleet.config.concurrency, async (m) => {
         try {
           const data = await req(m.id, "GET", "/api/sessions", undefined, s);
@@ -398,23 +398,27 @@ export function createMcpServer(
             label: m.label,
             transport: m.transport,
             available: true,
-            sessionCount: data.sessions.length,
+            sessionCount: data.sessions.filter((session: any) => ["running", "pending"].includes(session.status)).length,
           };
         } catch (e) {
           return { machine: m.id, available: false, error: errorResult(e) };
         }
-      }).then((machines) => ({ machines })),
+      }).then((machines) => ({
+        machines: a.includeOffline ? machines : machines.filter((m) => m.available),
+        omittedOfflineCount: a.includeOffline ? 0 : machines.filter((m) => !m.available).length,
+      })),
   });
   register("sessions_list", {
     schema: z.object({
       machines: z.array(machine).min(1).max(1000).optional(),
-      status: z.enum(["pending", "running", "completed", "error"]).optional(),
+      status: z.enum(["current", "all", "pending", "running", "completed", "error"]).default("current"),
+      includeOffline: z.boolean().default(false),
       name: z.string().optional(),
       parentSessionId: sessionId.optional(),
       ...page,
     }),
     description:
-      "List sessions across all or selected machines, with filters and a global page. Partial machine failures are explicit. Ordered by machine ID then session ID; pages may shift during concurrent changes.",
+      "List current chats (running or pending sessions) on online computers by default. Set status=all for older sessions, or select a specific status. Set includeOffline=true for unavailable computer diagnostics. Explicitly selected machines always report errors. omittedOfflineCount identifies incomplete fleet coverage. Ordered by machine ID then session ID; pages may shift during concurrent changes.",
     readOnly: true,
     run: async (a, s) => {
       const results = await mapLimit(
@@ -455,7 +459,7 @@ export function createMcpServer(
         )
         .filter(
           (v: any) =>
-            (!a.status || v.status === a.status) &&
+            (a.status === "all" || (a.status === "current" ? ["running", "pending"].includes(v.status) : v.status === a.status)) &&
             (!a.name || v.name.toLowerCase().includes(a.name.toLowerCase())) &&
             (!a.parentSessionId || v.parentSessionId === a.parentSessionId),
         )
@@ -468,7 +472,8 @@ export function createMcpServer(
         total: sessions.length,
         nextOffset:
           a.offset + a.limit < sessions.length ? a.offset + a.limit : null,
-        errors: results
+        omittedOfflineCount: a.includeOffline || a.machines ? 0 : results.filter((r) => r.error).length,
+        errors: (a.includeOffline || a.machines ? results : [])
           .filter((r) => r.error)
           .map(({ machine, error }) => ({ machine, error })),
       };

@@ -159,10 +159,23 @@ test("real bridge through MCP: discovery, literal history search, partial batche
   );
   const discovery = await call("machines_list");
   assert.equal(discovery.data.machines[0].available, true);
-  assert.equal(discovery.data.machines[1].available, false);
+  assert.equal(discovery.data.machines.length, 1);
+  assert.equal(discovery.data.omittedOfflineCount, 1);
+  assert.equal((await call("machines_list", { includeOffline: true })).data.machines[1].available, false);
   const listed = await call("sessions_list");
   assert.equal(listed.data.sessions[0].machine, "one");
-  assert.equal(listed.data.errors.length, 1);
+  assert.equal(listed.data.errors.length, 0);
+  assert.equal(listed.data.omittedOfflineCount, 1);
+  assert.equal((await call("sessions_list", { includeOffline: true })).data.errors.length, 1);
+  assert.equal((await call("sessions_list", { machines: ["offline"] })).data.errors.length, 1);
+  await store.saveSession({ ...sample, id: "old", status: "completed" });
+  await store.saveSession({ ...sample, id: "queued", status: "pending" });
+  await store.saveSession({ ...sample, id: "failed", status: "error" });
+  assert.deepEqual((await call("sessions_list")).data.sessions.map((s: any) => s.id), ["queued", "s1"]);
+  assert.equal((await call("machines_list")).data.machines[0].sessionCount, 2);
+  assert.equal((await call("sessions_list", { status: "all" })).data.total, 4);
+  assert.deepEqual((await call("sessions_list", { status: "completed" })).data.sessions.map((s: any) => s.id), ["old"]);
+  assert.deepEqual((await call("sessions_list", { status: "running" })).data.sessions.map((s: any) => s.id), ["s1"]);
   assert.equal(listed.data.sessions[0].command, undefined);
   const target = { machine: "one", sessionId: "s1" };
   assert.equal(
