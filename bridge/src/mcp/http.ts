@@ -223,11 +223,21 @@ export function createGateway(
     };
     const server = createMcpServer(fleet, {
       readOnly: !req.auth!.scopes.includes("mcp:control"),
+      caller: { subject: String(req.auth!.extra!.subject), clientId: req.auth!.clientId, scopes: [...req.auth!.scopes] },
+      revalidate: async (machines) => {
+        let current;
+        try { current = await provider.verifyAccessToken(req.auth!.token); }
+        catch { throw new FleetError("forbidden", "Access expired or was revoked during this request"); }
+        const authorized = current.extra?.machines as string[];
+        if (machines.some((machine) => !authorized.includes(machine))) throw new FleetError("forbidden", "Machine access was revoked during this request");
+      },
     });
     // Stateless transport: every request is authenticated and reconstructs its own scoped tool surface.
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
-      enableJsonResponse: true,
+      // Only a bounded attention_wait call opens a request-scoped SSE stream.
+      // No GET stream/session map or unsolicited server notifications are advertised.
+      enableJsonResponse: !(req.body?.method === "tools/call" && req.body?.params?.name === "attention_wait"),
     });
     res.on("close", () => {
       void server.close();
