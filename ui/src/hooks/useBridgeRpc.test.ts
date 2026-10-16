@@ -69,7 +69,7 @@ describe("createRpcCore", () => {
 
   describe("sendCommandCollect", () => {
     it("collects every response within the window and resolves when it closes", async () => {
-      const promise = core.sendCommandCollect(cmd("r1", "list_loops"));
+      const promise = core.sendCommandCollect(cmd("r1", "list_sessions"));
       expect(published).toHaveLength(1);
 
       core.handleResponse(resp("r1", { data: { bridge: "a" } }));
@@ -84,13 +84,13 @@ describe("createRpcCore", () => {
     });
 
     it("resolves with an empty array when nothing responds", async () => {
-      const promise = core.sendCommandCollect(cmd("r1", "list_loops"), 500);
+      const promise = core.sendCommandCollect(cmd("r1", "list_sessions"), 500);
       vi.advanceTimersByTime(500);
       await expect(promise).resolves.toEqual([]);
     });
 
     it("stops collecting after the window closes", async () => {
-      const promise = core.sendCommandCollect(cmd("r1", "list_loops"));
+      const promise = core.sendCommandCollect(cmd("r1", "list_sessions"));
       core.handleResponse(resp("r1"));
       vi.advanceTimersByTime(1500);
       core.handleResponse(resp("r1"));

@@ -280,7 +280,7 @@ describe('writeHubConfig', () => {
       prodConfig.namespaces,
       'solo hub namespaces have drifted from production centrifugo/config.json — ' +
         'every namespaced channel (bridges:presence#solo, commands:rpc#solo, ' +
-        'loops:updates#solo, sessions:*, terminal:*, terminal-input:*, events:*) ' +
+        'sessions:*, terminal:*, terminal-input:*, events:*) ' +
         'will 102 "unknown channel" if these are not identical',
     );
 

@@ -8,12 +8,12 @@ import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 import type { SessionStore } from './session-store.js';
 import type { MailStore } from './mail-store.js';
 import { AttentionStore, AttentionError } from './attention-store.js';
-import type { Loop, LoopDraft, Session } from './types.js';
+import type { Session } from './types.js';
 import { MailDeliveryService, sanitizeMessageText } from './mail-delivery.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { TerminalManager } from './terminal-manager.js';
-import { LoopController } from './loop-controller.js';
+import { AUTOMATION_REMOVED_CODE, AUTOMATION_REMOVED_MESSAGE, isRetiredAutomationSession } from './retired-automation.js';
 import { SessionController } from './session-controller.js';
 import {
   registerSessionConversation,
@@ -53,14 +53,6 @@ interface HookServerEvents {
 
 interface ApiError {
   error: string;
-}
-
-interface LoopApiDeps {
-  bridgeId: string;
-  scheduler: {
-    kick(): void;
-    onLoopDeleted(loop: Loop): void;
-  };
 }
 
 function jsonResponse(res: ServerResponse, status: number, data: unknown): void {
@@ -180,11 +172,9 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private sessionDeps: CreateFtownSessionDeps | null = null;
   private mail: MailDeliveryService = new MailDeliveryService();
   private attention: AttentionStore | null = null;
-  private loopApi: LoopApiDeps | null = null;
   private userId: string = '';
   private authToken: string = '';
   private port: number = 0;
-  private loopController: LoopController | null = null;
   private sessionController: SessionController | null = null;
   private lifecycleController: SessionController | null = null;
 
@@ -226,38 +216,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     this.invalidateControllers();
   }
 
-  setLoopApi(deps: LoopApiDeps): void {
-    this.loopApi = deps;
-    this.invalidateControllers();
-  }
-
   /** Controllers are lazy snapshots of the injected deps; rebuild on re-wiring. */
   private invalidateControllers(): void {
-    this.loopController = null;
     this.sessionController = null;
     this.lifecycleController = null;
-  }
-
-  /**
-   * Transport-agnostic loop operations (shared with the Centrifugo RPC switch
-   * in index.ts). Null until setDependencies + setLoopApi have both run —
-   * index.ts wires them in one synchronous block, so no request can observe a
-   * half-wired server.
-   */
-  private getLoopController(): LoopController | null {
-    if (this.loopController) return this.loopController;
-    const { store, runner, centrifugo, userId, loopApi } = this;
-    if (!store || !runner || !centrifugo || !userId || !loopApi) return null;
-    this.loopController = new LoopController({
-      bridgeId: loopApi.bridgeId,
-      scheduler: loopApi.scheduler,
-      isSessionRunning: (sid) => runner.isRunning(sid),
-      publishLoopUpdate: (loop) => centrifugo.publishLoopUpdate(userId, loop),
-      publishLoopRemoved: (loopId) => centrifugo.publishLoopRemoved(userId, loopId),
-      listWireSessions: async () => (await store.listSessions()).map(toWireSession),
-      loadTerminalLog: (sid) => store.loadTerminalLog(sid),
-    });
-    return this.loopController;
   }
 
   /** Transport-agnostic session operations (shared with the RPC switch). */
@@ -401,6 +363,11 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     path: string,
     url: URL,
   ): Promise<void> {
+    if (path === '/api/loops' || path.startsWith('/api/loops/')) {
+      jsonResponse(res, 410, { code: AUTOMATION_REMOVED_CODE, error: AUTOMATION_REMOVED_MESSAGE });
+      return;
+    }
+
     if (!this.store) {
       jsonResponse(res, 503, { error: 'Server not ready' });
       return;
@@ -509,93 +476,6 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return;
     }
 
-    const loopMatch = path.match(/^\/api\/loops\/([^/]+)$/);
-    const loopRunNowMatch = path.match(/^\/api\/loops\/([^/]+)\/run-now$/);
-    const loopRunsMatch = path.match(/^\/api\/loops\/([^/]+)\/runs$/);
-    const isLoopRoute =
-      path === '/api/loops' || Boolean(loopMatch) || Boolean(loopRunNowMatch) || Boolean(loopRunsMatch);
-
-    if (isLoopRoute) {
-      const loops = this.getLoopController();
-      if (!loops) {
-        jsonResponse(res, 503, { error: 'Loop API not ready' });
-        return;
-      }
-
-      // GET /api/loops — local CLI/skill parity with list_loops RPC.
-      if (path === '/api/loops' && req.method === 'GET') {
-        jsonResponse(res, 200, { loops: loops.list() });
-        return;
-      }
-
-      // POST /api/loops — create a loop owned by this bridge.
-      if (path === '/api/loops' && req.method === 'POST') {
-        const body = await parseBody(req);
-        const result = await loops.create(body as Partial<LoopDraft>);
-        if (!result.ok) {
-          jsonResponse(res, 400, { error: result.message });
-          return;
-        }
-        jsonResponse(res, 201, { loop: result.loop });
-        return;
-      }
-
-      // GET /api/loops/:id
-      if (loopMatch && req.method === 'GET') {
-        const result = loops.get(loopMatch[1]);
-        if (!result.ok) {
-          jsonResponse(res, 404, { error: result.message });
-          return;
-        }
-        jsonResponse(res, 200, { loop: result.loop });
-        return;
-      }
-
-      // PATCH /api/loops/:id
-      if (loopMatch && req.method === 'PATCH') {
-        const body = await parseBody(req);
-        const result = await loops.update(loopMatch[1], body as Partial<LoopDraft>);
-        if (!result.ok) {
-          jsonResponse(res, result.code === 'not_found' ? 404 : 400, { error: result.message });
-          return;
-        }
-        jsonResponse(res, 200, { loop: result.loop });
-        return;
-      }
-
-      // DELETE /api/loops/:id
-      if (loopMatch && req.method === 'DELETE') {
-        const loopId = loopMatch[1];
-        const { removed } = await loops.delete(loopId);
-        jsonResponse(res, 200, { removed, loopId });
-        return;
-      }
-
-      // POST /api/loops/:id/run-now
-      if (loopRunNowMatch && req.method === 'POST') {
-        const outcome = await loops.runNow(loopRunNowMatch[1]);
-        if (!outcome.fired) {
-          if (outcome.reason === 'not_found') {
-            jsonResponse(res, 404, { error: 'Loop not found', fired: false, reason: 'not_found' });
-            return;
-          }
-          jsonResponse(res, 200, { fired: false, reason: 'overlap' });
-          return;
-        }
-        jsonResponse(res, 200, { fired: true, loop: outcome.loop });
-        return;
-      }
-
-      // GET /api/loops/:id/runs
-      if (loopRunsMatch && req.method === 'GET') {
-        jsonResponse(res, 200, { runs: await loops.runs(loopRunsMatch[1]) });
-        return;
-      }
-
-      jsonResponse(res, 404, { error: 'Not found' });
-      return;
-    }
-
     const attentionMatch = path.match(/^\/api\/sessions\/([a-zA-Z0-9_-]+)\/attention(?:\/(ack|resolve))?$/);
     if (attentionMatch) {
       const id = attentionMatch[1];
@@ -663,7 +543,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       } else {
         const result = await controller.retry(id);
         if (result.ok) jsonResponse(res, 200, { session: toWireSession(result.session) });
-        else jsonResponse(res, result.code === 'not_found' ? 404 : result.code === 'conflict' ? 409 : 400, { error: result.message });
+        else jsonResponse(res, result.code === AUTOMATION_REMOVED_CODE ? 410 : result.code === 'not_found' ? 404 : result.code === 'conflict' ? 409 : 400, { error: result.message, ...(result.code === AUTOMATION_REMOVED_CODE ? { code: AUTOMATION_REMOVED_CODE } : {}) });
       }
       return;
     }
@@ -716,6 +596,11 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       const tombstone = archived.filter((record) => record.id === sessionId).pop();
       if (!tombstone) {
         jsonResponse(res, 404, { error: 'Archived session not found' });
+        return;
+      }
+
+      if (isRetiredAutomationSession(tombstone)) {
+        jsonResponse(res, 410, { code: AUTOMATION_REMOVED_CODE, error: AUTOMATION_REMOVED_MESSAGE });
         return;
       }
 

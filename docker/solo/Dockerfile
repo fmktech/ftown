@@ -37,7 +37,6 @@
 #       bridge/src/claude-runner.ts:356        pty.spawn('/bin/zsh', ['-l','-c', command])
 #       bridge/src/harness-registry.ts:154     spawns 'opencode --auto'
 #       bridge/src/harness-registry.ts:229     spawns 'claude --allow-dangerously-skip-permissions'
-#       bridge/src/loop-scheduler.ts:122       spawn('/bin/sh', ['-c', command])
 #     => tmux, zsh, and the `claude` CLI must be on PATH. `opencode` is NOT
 #        installed by this image (not required by the task); Opencode-harness
 #        sessions will fail to spawn until it is added — see README gotchas.
@@ -72,7 +71,7 @@ RUN groupmod --new-name ftown node \
 ENV HOME=/home/ftown
 
 # --- Global npm packages ---
-# ftown-bridge: pinned to 0.19.24 (published release with the Solo fixes).
+# ftown-bridge: pinned to 0.19.38 (factory/recurring automation retirement).
 # @anthropic-ai/claude-code: the `claude` CLI that harness-registry.ts:229 spawns
 # for Claude Code sessions. Auth is NOT baked into the image — see README
 # "Agent auth" for the two supported options (ANTHROPIC_API_KEY env var, or a
@@ -81,12 +80,13 @@ ENV HOME=/home/ftown
 # host machine's installed pi version, since the bridge deploys its Pi
 # extension into the container and extension/protocol compatibility depends
 # on the pi version matching — see README "Agent auth".
-RUN npm install -g ftown-bridge@0.19.24 @anthropic-ai/claude-code @earendil-works/pi-coding-agent@0.83.0 \
+# Requires the npm retirement release to be published before building this image.
+RUN npm install -g ftown-bridge@0.19.38 @anthropic-ai/claude-code @earendil-works/pi-coding-agent@0.83.0 \
     && npm cache clean --force
 
 # --- Volumes ---
 # /data              bridge --data-dir: session/event persistence.
-# /home/ftown/.ftown loops.json, bridge.json, and the solo/ subdir (access-key-hash,
+# /home/ftown/.ftown bridge.json, and the solo/ subdir (access-key-hash,
 #                    hub-secret, downloaded hub binary + panel bundle cache).
 # /workspace         where agent sessions do their work (bind-mount host projects here).
 RUN mkdir -p /data /home/ftown/.ftown /workspace \

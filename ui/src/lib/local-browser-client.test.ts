@@ -27,7 +27,7 @@ describe('local browser control', () => {
     await expect(bootstrapLocal(device)).rejects.toThrow('different bridge');
   });
 
-  it('routes create/remove/loop controller RPC responses without cloud and never retries uncertain commands', async () => {
+  it('routes create/remove/rename controller RPC responses without cloud and never retries uncertain commands', async () => {
     const fetcher = vi.fn().mockImplementation((_url, options) => {
       const command = JSON.parse(options.body);
       return Promise.resolve(json({ requestId: command.requestId, success: true, data: { ok: true } }));
@@ -40,7 +40,7 @@ describe('local browser control', () => {
       expect(info?.user).toBe(boot.userId);
       core.handleResponse((data as { response: Parameters<typeof core.handleResponse>[0] }).response);
     });
-    for (const type of ['create_session', 'remove_session', 'create_loop'] as const) {
+    for (const type of ['create_session', 'remove_session', 'rename_session'] as const) {
       await expect(core.sendCommand({ type, requestId: type, payload: {} })).resolves.toMatchObject({ success: true });
     }
     fetcher.mockRejectedValueOnce(new Error('connection lost'));

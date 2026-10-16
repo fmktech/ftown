@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtempSync, mkdirSync, lstatSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, lstatSync, readFileSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -114,11 +114,12 @@ async function runScript(
   env: Record<string, string | undefined>,
 ): Promise<ScriptResult> {
   try {
-    const { stdout, stderr } = await execFileAsync('/bin/sh', [script], {
+    const execution = execFileAsync('/bin/sh', [script], {
       env: { ...env, PATH: env.PATH ?? '/usr/bin:/bin' },
-      input: stdin,
       timeout: 10000,
     });
+    execution.child.stdin?.end(stdin);
+    const { stdout, stderr } = await execution;
     return { exitCode: 0, stdout, stderr };
   } catch (err) {
     const e = err as { code?: unknown; stdout?: unknown; stderr?: unknown };
@@ -140,6 +141,19 @@ function scriptEnv(stub: StubBridge, extra: Record<string, string | undefined> =
     ...extra,
   };
 }
+
+describe('muse process fixture', () => {
+  it('streams supplied stdin and closes the pipe before awaiting the child', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ftown-muse-stdin-'));
+    const script = join(home, 'echo.sh');
+    writeFileSync(script, '#!/bin/sh\ncat\n');
+    try {
+      assert.deepEqual(await runScript(script, 'fixture payload', { HOME: home }), {
+        exitCode: 0, stdout: 'fixture payload', stderr: '',
+      });
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+});
 
 describe('muse plugin bundle', () => {
   it('declares SessionStart + Stop hooks only, with argv commands and 5s timeouts', () => {

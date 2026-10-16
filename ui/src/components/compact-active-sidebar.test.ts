@@ -4,8 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { createElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BridgeInfo } from "@/hooks/useBridges";
-import type { Loop, Session } from "@/types";
-import { LoopList } from "./LoopList";
+import type { Session } from "@/types";
 import { SessionList } from "./SessionList";
 
 const bridges: BridgeInfo[] = [
@@ -24,24 +23,6 @@ function session(id: string, bridgeId: string, name: string, overrides: Partial<
     createdAt: "2026-08-21T12:00:00Z",
     updatedAt: "2026-08-21T12:00:00Z",
     ...overrides,
-  };
-}
-
-function loop(id: string, bridgeId: string, name: string): Loop {
-  return {
-    id,
-    bridgeId,
-    name,
-    schedule: { kind: "interval", everyMs: 60_000 },
-    harness: "pi",
-    task: `${name} task`,
-    enabled: true,
-    overlapPolicy: "skip",
-    retention: { autoClearAfterRuns: 10 },
-    runCount: 0,
-    skipCount: 0,
-    createdAt: "2026-08-21T12:00:00Z",
-    updatedAt: "2026-08-21T12:00:00Z",
   };
 }
 
@@ -228,71 +209,4 @@ describe("sidebar bridge groups", () => {
     expect(screen.queryByText("8/11/2026")).toBeNull();
   });
 
-  it("selecting a cron expands its bridge and never collapses others", async () => {
-    const loops = [
-      loop("loop-a", "bridge-a", "Alpha cron"),
-      loop("loop-b", "bridge-b", "Beta cron"),
-    ];
-    const props = {
-      loops,
-      bridges,
-      onSelectLoop: vi.fn(),
-      onRunNow: vi.fn(),
-      onToggleEnabled: vi.fn(),
-      onEdit: vi.fn(),
-      onDelete: vi.fn(),
-    };
-    const { rerender } = render(
-      createElement(LoopList, { ...props, selectedLoopId: null }),
-    );
-
-    // Default: everything expanded. Collapse both manually — user's choice.
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Collapse alpha" })).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Collapse beta" })).toBeTruthy();
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Collapse alpha" }));
-    fireEvent.click(screen.getByRole("button", { name: "Collapse beta" }));
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Expand alpha" })).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Expand beta" })).toBeTruthy();
-    });
-
-    // Selecting a cron on beta opens beta; alpha stays as the user left it.
-    rerender(createElement(LoopList, { ...props, selectedLoopId: "loop-b" }));
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Expand alpha" })).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Collapse beta" })).toBeTruthy();
-    });
-    expect(screen.getByText("Beta cron")).toBeTruthy();
-
-    // Moving the selection back to alpha opens alpha WITHOUT re-collapsing beta.
-    rerender(createElement(LoopList, { ...props, selectedLoopId: "loop-a" }));
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Collapse alpha" })).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Collapse beta" })).toBeTruthy();
-    });
-  });
-
-  it("keeps the provider icon beside selected and compact cron names", async () => {
-    render(createElement(LoopList, {
-      loops: [
-        loop("loop-a", "bridge-a", "Selected cron"),
-        loop("loop-b", "bridge-a", "Compact cron"),
-      ],
-      bridges: [bridges[0]],
-      selectedLoopId: "loop-a",
-      onSelectLoop: vi.fn(),
-      onRunNow: vi.fn(),
-      onToggleEnabled: vi.fn(),
-      onEdit: vi.fn(),
-      onDelete: vi.fn(),
-    }));
-
-    await waitFor(() => expect(screen.getAllByRole("img", { name: "Pi agent" })).toHaveLength(2));
-    for (const name of ["Selected cron", "Compact cron"]) {
-      const nameElement = screen.getByText(name);
-      expect(nameElement.previousElementSibling?.getAttribute("data-harness-icon")).toBe("pi");
-    }
-  });
 });

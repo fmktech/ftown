@@ -51,8 +51,7 @@ function sanitizeTerminalTail(raw: string): string {
 /**
  * Terminal output pump: buffers runner PTY output per session (coalescing into
  * ≤16ms / ≤32KB flushes to the store + transports), and owns the runner
- * lifecycle handlers ('complete'/'error') that persist final loop-run/session
- * statuses — the loop scheduler reads the statuses this module produces.
+ * lifecycle handlers ('complete'/'error') that persist final session statuses.
  */
 export class TerminalPump {
   private readonly outputBuffers = new Map<string, string>();

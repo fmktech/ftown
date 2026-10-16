@@ -5,17 +5,14 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { resetFtownHomeForTests, resolveDefaultDataDir, resolveFtownHome } from './ftown-home.js';
-import { configureLoopStoreHome, createLoop, listLoops } from './loop-store.js';
-import { configureLoopRunStoreHome, listLoopRunRecords, upsertLoopRunRecord } from './loop-run-store.js';
 import {
   configureSessionRegistryHome,
   registerSessionWorkspace,
   resolveSessionIdFromHookPayload,
 } from './session-registry.js';
-import type { LoopDraft, LoopRunRecord } from './types.js';
 
 // homedir() reads $HOME at call time; overriding it isolates every read/write
-// under a throwaway home — the loop-store.test.ts / provider-env-store.test.ts
+// under a throwaway home — the provider-env-store.test.ts
 // pattern.
 describe('ftown-home', () => {
   let realHome: string | undefined;
@@ -31,8 +28,6 @@ describe('ftown-home', () => {
     // Reset all injected/memoized home state so no later test inherits a stale
     // custom home or a default cached under a prior test's $HOME.
     resetFtownHomeForTests();
-    configureLoopStoreHome(undefined);
-    configureLoopRunStoreHome(undefined);
     configureSessionRegistryHome(undefined);
     if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
@@ -64,9 +59,9 @@ describe('ftown-home', () => {
   // Guards the backward-compat contract: with the DEFAULT data dir, every routed
   // instance file must land at EXACTLY the old join(homedir(),'.ftown',<file>).
   describe('backward-compat: default paths are byte-for-byte unchanged', () => {
-    it('bridge.json / loops.json / loop-runs.json / session-registry.json', () => {
+    it('bridge.json / session-registry.json', () => {
       const ftHome = resolveFtownHome(resolveDefaultDataDir());
-      for (const file of ['bridge.json', 'loops.json', 'loop-runs.json', 'session-registry.json']) {
+      for (const file of ['bridge.json', 'session-registry.json']) {
         assert.strictEqual(join(ftHome, file), join(homedir(), '.ftown', file));
       }
     });
@@ -75,57 +70,6 @@ describe('ftown-home', () => {
   // A non-default injected home must own its instance files and never touch
   // $HOME/.ftown.
   describe('injected custom home routes writes away from $HOME/.ftown', () => {
-    function draft(): LoopDraft {
-      return {
-        name: 'nightly',
-        bridgeId: 'bridge-1',
-        schedule: { kind: 'interval', everyMs: 60_000 },
-        harness: 'claude',
-        task: 'do the thing',
-        enabled: true,
-        overlapPolicy: 'skip',
-        retention: { autoClearAfterRuns: 10 },
-      };
-    }
-
-    it('loop-store writes loops.json under the injected home, not $HOME/.ftown', () => {
-      const custom = mkdtempSync(join(tmpdir(), 'ftw-custom-home-'));
-      try {
-        configureLoopStoreHome(custom);
-        createLoop(draft());
-        assert.ok(existsSync(join(custom, 'loops.json')), 'loops.json under custom home');
-        assert.ok(!existsSync(join(home, '.ftown', 'loops.json')), '$HOME/.ftown/loops.json untouched');
-        assert.strictEqual(listLoops().length, 1);
-      } finally {
-        rmSync(custom, { recursive: true, force: true });
-      }
-    });
-
-    it('loop-run-store writes loop-runs.json under the injected home, not $HOME/.ftown', () => {
-      const custom = mkdtempSync(join(tmpdir(), 'ftw-custom-runs-'));
-      try {
-        configureLoopRunStoreHome(custom);
-        const rec: LoopRunRecord = {
-          id: 'run-1',
-          loopId: 'loop-1',
-          bridgeId: 'bridge-1',
-          name: 'nightly · run-1',
-          status: 'ok',
-          startedAt: new Date(0).toISOString(),
-          updatedAt: new Date(0).toISOString(),
-        };
-        upsertLoopRunRecord(rec);
-        assert.ok(existsSync(join(custom, 'loop-runs.json')), 'loop-runs.json under custom home');
-        assert.ok(
-          !existsSync(join(home, '.ftown', 'loop-runs.json')),
-          '$HOME/.ftown/loop-runs.json untouched',
-        );
-        assert.strictEqual(listLoopRunRecords('loop-1').length, 1);
-      } finally {
-        rmSync(custom, { recursive: true, force: true });
-      }
-    });
-
     it('session-registry writes under the injected home, not $HOME/.ftown', () => {
       const custom = mkdtempSync(join(tmpdir(), 'ftw-custom-reg-'));
       try {

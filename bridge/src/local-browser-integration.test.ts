@@ -13,7 +13,6 @@ import { LoopbackPeerServer } from './direct-transport/loopback-server.js';
 import { DIRECT_PROTOCOL_VERSION } from './direct-transport/contract.js';
 import { SessionStore } from './session-store.js';
 import { SessionController } from './session-controller.js';
-import { LoopController } from './loop-controller.js';
 import { CentrifugoClient } from './centrifugo-client.js';
 import { createCommandHandler } from './command-rpc.js';
 import { removeFtownSession } from './remove-ftown-session.js';
@@ -47,13 +46,12 @@ async function harness() {
     publishSessionUpdate: session => centrifugo.publishSessionUpdate('local-user', session),
     removeSession: (id, options) => removeFtownSession({ store, runner, centrifugo, userId: 'local-user' }, id, options),
   });
-  const loopController = new LoopController({ bridgeId: BRIDGE, scheduler: { kick() {}, onLoopDeleted() {} }, isSessionRunning: id => runner.isRunning(id), publishLoopUpdate: loop => centrifugo.publishLoopUpdate('local-user', loop), publishLoopRemoved: id => centrifugo.publishLoopRemoved('local-user', id), listWireSessions: () => store.listSessions(), loadTerminalLog: id => store.loadTerminalLog(id) });
   let loopback: LoopbackPeerServer;
   const access = new BrowserAccess({ dataDir, allowedOrigins: [ORIGIN],
     bootstrap: () => ({ version: 1, userId: 'local-user', bridgeId: BRIDGE, hostname: 'integration', localPort: port, localNonce: 'legacy-nonce' }),
     execute: async command => {
       let response: CommandResponse | undefined;
-      await createCommandHandler({ bridgeId: BRIDGE, sessionController, loopController, publishCommandResponse: async value => { response = value; } })(command);
+      await createCommandHandler({ bridgeId: BRIDGE, sessionController, publishCommandResponse: async value => { response = value; } })(command);
       if (!response) throw new Error('RPC did not respond');
       return response;
     },

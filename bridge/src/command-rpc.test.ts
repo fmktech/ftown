@@ -3,7 +3,6 @@ import test from 'node:test';
 
 import type { CommandRpcDeps } from './command-rpc.js';
 import { createCommandHandler } from './command-rpc.js';
-import type { LoopController } from './loop-controller.js';
 import type { SessionController } from './session-controller.js';
 import type { Command, CommandResponse, Session } from './types.js';
 
@@ -24,7 +23,6 @@ test('update_session_parent rejects a missing or invalid parentSessionId', async
   const handler = createCommandHandler({
     bridgeId: 'bridge-1',
     sessionController,
-    loopController: {} as LoopController,
     publishCommandResponse: async (response) => {
       responses.push(response);
     },
@@ -77,7 +75,6 @@ test('get_sessions_usage returns one id-keyed response for a session batch', asy
   const handler = createCommandHandler({
     bridgeId: 'bridge-1',
     sessionController,
-    loopController: {} as LoopController,
     publishCommandResponse: async (response) => { responses.push(response); },
   });
 
@@ -99,7 +96,7 @@ for (const populated of [false, true]) {
   test(`list_sessions supplies bridge identity (${populated ? 'nonempty' : 'empty'}) and strips env`, async () => {
     const session = { id: 'scratch', bridgeId: 'owner', status: 'completed', env: { SECRET: 'scratch' } } as unknown as Session;
     const responses: CommandResponse[] = [];
-    const handler = createCommandHandler({ bridgeId: 'owner', sessionController: { list: async () => populated ? [session] : [] }, loopController: {}, publishCommandResponse: async r => { responses.push(r); } } as unknown as CommandRpcDeps);
+    const handler = createCommandHandler({ bridgeId: 'owner', sessionController: { list: async () => populated ? [session] : [] }, publishCommandResponse: async r => { responses.push(r); } } as unknown as CommandRpcDeps);
     await handler({ type: 'list_sessions', requestId: 'broadcast', payload: {} });
     assert.equal(responses[0].success, true);
     const data = responses[0].data as { bridgeId: string; sessions: Session[] };
@@ -109,9 +106,28 @@ for (const populated of [false, true]) {
     assert.equal(responses.length, 1);
   });
 }
-test('ordinary partial loop-run responses do not gain full-list identity', async () => {
+test('retired RPC commands reject without dependencies, preserving routing and correlation', async () => {
   const responses: CommandResponse[] = [];
-  const handler = createCommandHandler({ bridgeId: 'owner', sessionController: {}, loopController: { runs: async () => [] }, publishCommandResponse: async r => { responses.push(r); } } as unknown as CommandRpcDeps);
-  await handler({ type: 'get_loop_runs', requestId: 'partial', payload: { loopId: 'fake' } });
-  assert.equal(responses[0].success, true); assert.equal('bridgeId' in (responses[0].data as object), false);
+  const handler = createCommandHandler({ bridgeId: 'owner', sessionController: new Proxy({}, {
+    get() { throw new Error('Retired commands must not touch sessions'); },
+  }) as SessionController, publishCommandResponse: async (response) => { responses.push(response); } });
+  const retired = ['create_loop', 'list_loops', 'update_loop', 'delete_loop', 'run_loop_now', 'get_loop_runs'];
+  for (const type of retired) {
+    await handler({ type, requestId: type, payload: { bridgeId: 'owner' } } as unknown as Command);
+    assert.deepEqual(responses.at(-1), { requestId: type, success: false,
+      error: 'Recurring loops and factory automation have been removed', data: { code: 'automation_removed' } });
+    const count = responses.length;
+    await handler({ type, requestId: 'foreign', payload: { bridgeId: 'other' } } as unknown as Command);
+    assert.equal(responses.length, count);
+  }
+});
+
+test('legacy automation retry preserves retirement code in RPC response', async () => {
+  const responses: CommandResponse[] = [];
+  const handler = createCommandHandler({ bridgeId: 'owner', sessionController: {
+    retry: async () => ({ ok: false, code: 'automation_removed', message: 'Recurring loops and factory automation have been removed' }),
+  } as unknown as SessionController, publishCommandResponse: async (response) => { responses.push(response); } });
+  await handler({ type: 'retry_session', requestId: 'retry', payload: { sessionId: 'legacy' } });
+  assert.deepEqual(responses, [{ requestId: 'retry', success: false,
+    error: 'Recurring loops and factory automation have been removed', data: { code: 'automation_removed' } }]);
 });

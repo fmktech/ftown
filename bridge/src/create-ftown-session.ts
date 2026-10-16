@@ -1,3 +1,4 @@
+import { assertSessionCanLaunch } from './retired-automation.js';
 import { v4 as uuidv4 } from 'uuid';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
@@ -47,7 +48,6 @@ export interface CreateFtownSessionInput {
   orchestrator?: boolean;
   suppressBriefing?: boolean;
   createMissingWorkingDir?: boolean;
-  loopId?: string;
 }
 
 export async function resolveParentSessionId(
@@ -373,6 +373,7 @@ export async function relaunchFtownSession(
   session: Session,
   mode: RelaunchMode,
 ): Promise<string> {
+  assertSessionCanLaunch(session);
   const command = mode === 'retry' ? session.command : deriveRelaunchCommand(session).command;
   if (!command) {
     throw new Error('Session has no command to relaunch');
@@ -493,7 +494,6 @@ export async function createFtownSession(
     env: sessionEnv,
     parentSessionId,
     runtime: deps.runner.getPreferredRuntime(),
-    loopId: input.loopId,
   };
 
   await deps.store.saveSession(session);

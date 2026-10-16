@@ -33,7 +33,7 @@ import { installNotifyScript } from './install-notify-script.js';
 import { installPiExtension } from './pi-extension-installer.js';
 import { installOpencodePlugin, opencodeBinaryAvailable } from './opencode-plugin-installer.js';
 import { ensureMusePlugin, museBinaryAvailable } from './muse-plugin-installer.js';
-import { installFtownSkill, removeFtownSkill } from './install-ftown-skill.js';
+import { installFtownSkill, removeFtownSkill, retireBundledAutomationAssets } from './install-ftown-skill.js';
 import { installFtownSessionsCli } from './install-ftown-cli.js';
 import { installFtownWorkflowsCli } from './install-ftown-workflows-cli.js';
 import { installFtownEnvCli } from './install-ftown-env-cli.js';
@@ -44,18 +44,14 @@ import { createFtownSession, type CreateFtownSessionDeps } from './create-ftown-
 import { createRelayHandler } from './mcp/relay-handler.js';
 import { createCommandHandler } from './command-rpc.js';
 import { removeFtownSession } from './remove-ftown-session.js';
-import { SessionResurrection } from './session-resurrection.js';
+import { SessionResurrection, shouldResurrectStoredSession } from './session-resurrection.js';
 import { TerminalPump } from './terminal-pump.js';
 import { collectSessionUsage } from './usage-collector.js';
 import { AgentSessionIdPersister } from './session-ids.js';
 import { HookUsagePersister } from './hook-usage.js';
 import { fetchBridgeToken, refreshBridgeToken, type BridgeAuthResponse } from './bridge-auth.js';
 import { RotatingTokenRefresher } from './rotating-token-refresher.js';
-import { listLoops, configureLoopStoreHome } from './loop-store.js';
-import { configureLoopRunStoreHome } from './loop-run-store.js';
 import { resolveDefaultDataDir, resolveFtownHome } from './ftown-home.js';
-import { LoopScheduler, LOOP_TICK_INTERVAL_MS } from './loop-scheduler.js';
-import { LoopController } from './loop-controller.js';
 import { SessionController } from './session-controller.js';
 import { runPairing } from './pairing-client.js';
 import { createServer } from 'node:http';
@@ -134,15 +130,13 @@ program
     // the migration side effect never runs twice.
     const defaultDataDir = resolveDefaultDataDir();
     const dataDir = opts.dataDir ? resolve(opts.dataDir) : defaultDataDir;
-    // Instance-scoped ".ftown home" for pointer + loop-state files. The DEFAULT
+    // Instance-scoped ".ftown home" for pointer and registry files. The DEFAULT
     // data dir resolves to $HOME/.ftown (unchanged — the harness CLIs hardcode
     // that path). A non-default --data-dir (Solo test, Docker, a second bridge)
     // gets its own home so it never touches the primary bridge's bridge.json,
-    // loops.json, loop-runs.json or session-registry.json. Configure the store
+    // or session-registry.json. Configure the store
     // singletons ONCE here, before any of them is read/written.
     const ftownHome = resolveFtownHome(dataDir, defaultDataDir);
-    configureLoopStoreHome(ftownHome);
-    configureLoopRunStoreHome(ftownHome);
     configureSessionRegistryHome(ftownHome);
     // Bridge identity sticks to the data dir so a plain restart auto-resumes:
     // same id → same dashboard entry, sessions reattach without any flags.
@@ -521,17 +515,8 @@ program
           );
           await new Promise((resolve) => setTimeout(resolve, 0));
         }
-        const loops = listLoops();
-        for (let i = 0; i < loops.length; i += RESYNC_CHUNK) {
-          await Promise.all(
-            loops.slice(i, i + RESYNC_CHUNK).map((loop) =>
-              centrifugo.publishLoopUpdate(userId, loop),
-            ),
-          );
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
         console.log(
-          `[Bridge] Re-synced ${live.length} session(s) and ${loops.length} loop(s) after Centrifugo reconnect`,
+          `[Bridge] Re-synced ${live.length} session(s) after Centrifugo reconnect`,
         );
       },
     });
@@ -601,7 +586,7 @@ program
         .then((session) => {
           // Only adopt what this store still considers live: a tmux session with
           // no live record may belong to another bridge on this machine.
-          if (!session || (session.status !== 'running' && session.status !== 'pending')) return;
+          if (!session || !shouldResurrectStoredSession(session)) return;
           if (runner.isRunning(sid)) return;
           if (!runner.reattach(sid, {
             workingDir: session.workingDir,
@@ -685,22 +670,8 @@ program
     };
     localApiServer.setSessionFactory(sessionFactoryDeps);
 
-    // Scheduled-loops engine. It fires loop runs IN-PROCESS via createFtownSession
-    // (avoiding the external-caller parent-identity restriction) and reaps old runs
-    // via removeFtownSession — both injected as closures over the real deps.
-    const scheduler = new LoopScheduler({
-      store,
-      runner,
-      centrifugo,
-      userId,
-      spawnSession: (input) => createFtownSession(sessionFactoryDeps, input),
-      removeSession: (id, options) => removeFtownSession({ store, runner, centrifugo, userId }, id, options),
-    });
-    localApiServer.setLoopApi({ bridgeId, scheduler });
-
     // Terminal output pump: buffers runner PTY output and owns the runner
-    // 'complete'/'error' lifecycle handlers (loop-run status transitions the
-    // loop scheduler depends on).
+    // 'complete'/'error' lifecycle handlers.
     const pump = new TerminalPump({
       store,
       terminalManager,
@@ -732,18 +703,7 @@ program
       publishSessionUpdate: (session) => centrifugo.publishSessionUpdate(userId, session),
     });
 
-    // Transport-agnostic controllers: each loop/session operation is defined
-    // once here; the RPC switch below and the local HTTP router are thin
-    // adapters that only marshal wire formats around these calls.
-    const loopController = new LoopController({
-      bridgeId,
-      scheduler,
-      isSessionRunning: (sid) => runner.isRunning(sid),
-      publishLoopUpdate: (loop) => centrifugo.publishLoopUpdate(userId, loop),
-      publishLoopRemoved: (loopId) => centrifugo.publishLoopRemoved(userId, loopId),
-      listWireSessions: async () => (await store.listSessions()).map(toWireSession),
-      loadTerminalLog: (sid) => store.loadTerminalLog(sid),
-    });
+    // Session operations shared by local HTTP and dashboard RPC.
     const sessionController = new SessionController({
       store,
       runner,
@@ -786,8 +746,8 @@ program
       console.warn('[Bridge] harness CLI not built (run `npm run build`) — skipping harness install in dev mode');
     }
 
+    retireBundledAutomationAssets();
     installFtownSkill('ftown', resolve(__dirname, '..', 'skills', 'ftown'));
-    installFtownSkill('factory', resolve(__dirname, '..', 'skills', 'factory'));
     installFtownSkill('fticket', resolve(__dirname, '..', 'skills', 'fticket'));
     for (const legacySkill of ['ftown-sessions', 'ftown-loops', 'ftown-orchestrator', 'ftown-workflows']) {
       removeFtownSkill(legacySkill);
@@ -913,7 +873,7 @@ program
         if (!ready) return { requestId: command.requestId, success: false, error: 'Bridge is starting; try again shortly' };
         let result: CommandResponse | undefined;
         await createCommandHandler({
-          bridgeId, sessionController, loopController,
+          bridgeId, sessionController,
           publishCommandResponse: async (response) => { result = response; },
         })(command);
         return result ?? { requestId: command.requestId, success: false, error: 'Command was not handled' };
@@ -928,7 +888,6 @@ program
       bridgeId,
       relayRequest: createRelayHandler(hookPort, apiToken),
       sessionController,
-      loopController,
       publishCommandResponse: (response) => centrifugo.publishCommandResponse(userId, response),
     });
 
@@ -947,7 +906,6 @@ program
     centrifugo.connect();
     centrifugo.joinBridgesChannel(userId, bridgeId);
     centrifugo.subscribeToSessions(userId);
-    centrifugo.subscribeToLoops(userId);
 
     centrifugo.subscribeToCommands(userId, (command) => {
       if (!ready) return;
@@ -966,20 +924,6 @@ program
         } catch (err) {
           console.error('[Bridge] Session resurrection failed:', err);
         }
-        // Loops start AFTER resurrection: skip missed fires, push the current loop
-        // snapshot to the UI, then begin the 30s tick.
-        try {
-          await scheduler.reconcileOnStart();
-          for (const loop of listLoops()) {
-            await centrifugo.publishLoopUpdate(userId, loop).catch((err) => {
-              console.error(`[Bridge] Failed to publish loop ${loop.id} on ready:`, err);
-            });
-          }
-          scheduler.start();
-          console.log(`[Bridge] Loop scheduler started (tick every ${LOOP_TICK_INTERVAL_MS}ms)`);
-        } catch (err) {
-          console.error('[Bridge] Loop scheduler failed to start:', err);
-        }
       })();
     }, 2000);
 
@@ -992,7 +936,6 @@ program
         solo.panel.stop();
         solo.hub.stop();
       }
-      scheduler.stop();
       localApiServer.stop();
       runner.stopAll();
       loopbackServer.closeAll();

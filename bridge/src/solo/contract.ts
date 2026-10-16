@@ -123,7 +123,7 @@ export const HUB_CHANNEL_DEFAULTS: Readonly<Record<string, unknown>> = {
  * centrifugo/config.json, which targets the SAME pinned CENTRIFUGO_VERSION
  * (v5.4.9), so no key-format translation was needed. Every namespace prefix
  * used by a real channel (bridges:presence#solo, commands:rpc#solo,
- * loops:updates#solo, sessions:*, terminal:*, terminal-input:*, events:*)
+ * sessions:*, terminal:*, terminal-input:*, events:*)
  * MUST have a matching entry here or Centrifugo rejects the subscribe with
  * code 102 "unknown channel" — this list existing at all is the fix for that
  * bug; hub-manager.test.ts drift-guards it against centrifugo/config.json so
@@ -143,16 +143,6 @@ export const HUB_NAMESPACES: ReadonlyArray<Readonly<Record<string, unknown>>> = 
   },
   {
     name: 'sessions',
-    allow_publish_for_subscriber: true,
-    allow_subscribe_for_client: true,
-    allow_user_limited_channels: true,
-    history_size: 0,
-    history_ttl: '0s',
-    force_recovery: false,
-    allow_publish_for_client: true,
-  },
-  {
-    name: 'loops',
     allow_publish_for_subscriber: true,
     allow_subscribe_for_client: true,
     allow_user_limited_channels: true,
@@ -302,7 +292,7 @@ export interface SoloHealth {
 //                                         // inheriting (production parity)
 // namespaces              = HUB_NAMESPACES  // REQUIRED: every namespaced
 //                                         // channel (bridges:presence#solo,
-//                                         // commands:rpc#solo, loops:updates
+//                                         // commands:rpc#solo
 //                                         // #solo, sessions:*, terminal:*,
 //                                         // terminal-input:*, events:*) gets
 //                                         // Centrifugo code 102 ("unknown

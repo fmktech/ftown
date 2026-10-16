@@ -1,6 +1,6 @@
 # ftown
 
-A remote CLI agent orchestrator that lets you manage and stream **Claude Code, Cursor Agent, Codex, Grok, Muse Code, Pi, Kimi Code, opencode,** and shell sessions through a web dashboard. Terminal streaming climbs a transport ladder — local loopback, then WebRTC P2P, then Centrifugo — so output stays on your machine or network whenever possible, and automatically upgrades back to a direct connection once it can. Recurring agent work runs as scheduled **loops**: cron or interval triggers that spawn full sessions with guardrails, instead of a hand-rolled polling script.
+A remote CLI agent orchestrator that lets you manage and stream **Claude Code, Cursor Agent, Codex, Grok, Muse Code, Pi, Kimi Code, opencode,** and shell sessions through a web dashboard. Terminal streaming climbs a transport ladder — local loopback, then WebRTC P2P, then Centrifugo — so output stays on your machine or network whenever possible, and automatically upgrades back to a direct connection once it can. The FTown MCP gateway lets connected assistants inspect and control sessions across your authorized computers and follow durable requests for human input.
 
 ## Demo
 
@@ -63,10 +63,6 @@ Full guide: [docs/solo.md](docs/solo.md)
 - Local-first, private transport: terminal output never touches the cloud while you're on the same machine or network; Centrifugo relays only while a remote viewer is actively watching
 - Loopback WS is gated by a per-process random nonce plus Origin check; presence adverts are scoped to the owning user's JWT
 
-### Loops
-
-- First-class scheduled recurring agent runs — interval or cron+timezone — each firing a normal session with guardrails (preflight/postflight, max runtime, overlap/retention policy); see [Loops](#loops) below
-
 ### Everything else
 
 - Eight coding-agent CLIs plus raw shells as full interactive sessions
@@ -74,33 +70,13 @@ Full guide: [docs/solo.md](docs/solo.md)
 - Native resume support for Claude, Cursor, Codex, and Pi; workdir-based continuation for Kimi Code
 - Live per-session token/model usage for harnesses with structured native session logs
 - Hook forwarding to the dashboard (Claude/Codex settings, Cursor hooks, and ftown's bundled Pi extension)
-- Native Pi tools for session discovery/control, durable ftown mail, token usage, terminal inspection, archives, and loop management
+- Native Pi tools for session discovery/control, durable ftown mail, token usage, terminal inspection, and archives
 - Multiple concurrent sessions with session management
 - Multi-bridge support (connect multiple machines)
 - Mobile-optimized responsive UI
 - Authentication via NextAuth with rate-limited login
 - Auto-refreshing bridge tokens (30-day refresh tokens)
 - Connection diagnostics overlay for troubleshooting
-
-## Loops
-
-Loops replace fragile "keep an agent awake and polling" patterns with a durable scheduled primitive — cron for agents, with the full session UX (watch live, scroll back, take over) on every run.
-
-Each loop is a schedule + harness + task prompt owned by the bridge; every fire spawns a normal ftown session, grouped under the loop in the dashboard.
-
-```bash
-ftown-sessions loop create \
-  --cron "0 9 * * 1-5" --tz America/New_York \
-  --harness claude --workdir ~/projects/ftown \
-  --preflight "git fetch && git log origin/main..HEAD --oneline" \
-  "Review overnight commits on main: {{preflight}}. Flag anything that needs attention."
-```
-
-- **Schedules** — interval (`--every 30s|5m|2h|1d`) or cron with timezone (`--cron "0 9 * * 1-5" --tz America/New_York`); create via the dashboard's loop modal or the CLI
-- **Harness choice** — claude, cursor, codex, grok, muse, pi, kimi-code, opencode, or plain shell, each with its own configurable workdir and model
-- **Guardrails** — `--preflight <cmd>` (a non-zero exit skips the run; its stdout is injected into the prompt via `{{preflight}}`), `--postflight <cmd>` (receives run status, session id, and output), `--max-runtime` to force-stop a run
-- **Overlap & retention** — overlapping runs are skipped by default (`--allow-overlap` to permit them); retention keeps only the newest N runs
-- **Lifecycle** — pause/resume, fire a one-shot run manually, edit a loop live, and see run history with status dots (running/done/error/skipped/paused) plus next-due time in the dashboard
 
 ## Prerequisites
 
@@ -171,6 +147,36 @@ On start, the bridge **auto-deploys** a local harness CLI:
 ~/.ftown/bin/ftown-harness here -n 20
 ~/.ftown/bin/ftown-harness ls
 ```
+
+## Agent control over MCP
+
+Connect an assistant to the remote Streamable HTTP MCP server at
+`https://ftown-mcp.fly.dev/mcp` (or your own deployed gateway URL). Use the
+client's OAuth connection flow, sign in to FTown and select the computers and
+read/control access to authorize. The client needs Streamable HTTP, public OAuth
+with S256 PKCE and resource indicators; there is no local stdio command or bridge
+token to paste into it. Computers must be paired and registered in the gateway.
+Self-hosted setup and configuration are in the [MCP guide](docs/mcp.md).
+
+- **Fleet and sessions:** discover authorized computers, inspect current sessions,
+  create tasks, rename/reparent, stop/retry, archive/revive, read token usage and
+  search retained terminal history. Keep both the machine and session ID.
+- **Mail and terminals:** send durable threaded messages or broadcasts, observe
+  inboxes without consuming agent mail, and send exact terminal input or resize
+  requests when authorized.
+- **Durable attention:** `attention_inbox` reads supported human-input requests;
+  `attention_wait` waits across selected sessions with reconnect cursors.
+  `attention_ack` acknowledges delivery and `attention_resolve` updates the record;
+  neither answers or approves the source prompt.
+
+Upgrade each bridge for durable attention capture. Supported hooks write requests
+to its local ledger before acknowledging them, so captured requests survive
+restarts and gateway outages. Capture depends on the harness's supported hooks;
+terminal text and idle state do not establish a request. A bounded
+`attention_wait` can emit standard progress notifications when the client supplies
+`_meta.progressToken`. Clients must call inbox/wait again or reconnect with their
+cursors; this does not promise unsolicited wake-up of an inactive assistant.
+See [identity and attention details](docs/mcp.md#identity-and-durable-attention).
 
 ## Configuration
 
@@ -439,6 +445,13 @@ On any machine where you want to run Claude or Cursor Agent sessions:
 npx ftown-bridge --token <jwt> --api-url https://your-domain.vercel.app
 ```
 
+## Upgrade notes
+
+Factory and recurring interval/cron automation was retired in bridge 0.19.38.
+Saved definitions, run histories and project files are preserved but inactive.
+Read the [retirement and rollback notes](docs/automation-sunset.md) before upgrading
+or downgrading bridges.
+
 ## Development
 
 ```bash
@@ -455,7 +468,3 @@ cd bridge && npm run dev -- --token <jwt> --api-url http://localhost:3000
 ## License
 
 [MIT](LICENSE)
-
-## Agent control over MCP
-
-Connect to the HTTPS `ftown-mcp` gateway with OAuth through your ftown account to create, inspect, message, search and control sessions across computers through the existing relay. See the [MCP setup and fleet orchestration guide](docs/mcp.md). Cron and factory administration are excluded.

@@ -89,11 +89,12 @@ function ZapIcon() {
   );
 }
 
-function ClockIcon() {
+function McpIcon() {
   return (
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
-      <circle cx="12" cy="12" r="10" />
-      <polyline points="12 6 12 12 16 14" />
+      <rect x="8" y="8" width="8" height="8" rx="2" />
+      <path d="M12 3v5M3 12h5M16 12h5M12 16v5" />
+      <circle cx="12" cy="3" r="1" /><circle cx="3" cy="12" r="1" /><circle cx="21" cy="12" r="1" /><circle cx="12" cy="21" r="1" />
     </svg>
   );
 }
@@ -152,13 +153,6 @@ const TRANSPORT_LADDER = [
   },
 ] as const;
 
-const LOOP_GUARDRAILS = [
-  { label: "Preflight", desc: "A non-zero exit skips the run; stdout gets injected into the prompt." },
-  { label: "Max runtime", desc: "Force-stops runs past a time limit." },
-  { label: "Overlap guard", desc: "Skips a fire by default if the previous run is still going." },
-  { label: "Retention", desc: "Keeps only the newest N runs per loop." },
-] as const;
-
 const FEATURES = [
   {
     icon: <AgentIcon />,
@@ -201,9 +195,9 @@ const FEATURES = [
     desc: "On localhost or LAN, terminal I/O pairs peer-to-peer and never touches the cloud. Centrifugo only relays it while a remote viewer is actively watching.",
   },
   {
-    icon: <ClockIcon />,
-    title: "Scheduled loops",
-    desc: "Cron for agents — fire a harness on an interval or cron schedule with preflight/postflight guardrails. Every run is a full session you can watch live or scroll back through.",
+    icon: <McpIcon />,
+    title: "MCP fleet control",
+    desc: "Connect your MCP client over HTTPS with OAuth to inspect computers, launch and control sessions, exchange mail, and check attention requests.",
   },
 ] as const;
 
@@ -349,8 +343,8 @@ export default async function LandingPage() {
               <span className="text-[var(--accent)] [text-shadow:0_0_16px_var(--accent-glow)]">
                 local or P2P
               </span>{" "}
-              whenever possible, and scheduled loops keep agents firing on a cron even
-              when nobody&apos;s watching.
+              whenever possible. Connect an MCP client to inspect your fleet and coordinate
+              sessions from your existing agent workflow.
             </p>
 
             <div className="flex flex-wrap gap-2 mb-7 max-w-[520px]">
@@ -606,49 +600,52 @@ export default async function LandingPage() {
           </div>
         </div>
 
-        {/* Loops */}
-        <div className="mt-14 sm:mt-20 w-full max-w-[960px] rounded-[var(--radius-lg)] bg-[var(--bg-surface)] border border-[var(--border-muted)] p-6 sm:p-8">
+        {/* MCP */}
+        <section aria-labelledby="mcp-heading" className="mt-14 sm:mt-20 w-full max-w-[960px] rounded-[var(--radius-lg)] bg-[var(--bg-surface)] border border-[var(--border-muted)] p-6 sm:p-8">
           <div className="flex flex-col lg:flex-row gap-8 lg:gap-10">
             <div className="flex-1 min-w-0">
-              <div className="text-[11px] font-semibold tracking-[0.08em] uppercase text-[var(--accent)] mb-2">
-                Scheduled loops
+              <div className="text-[11px] font-semibold tracking-[0.08em] uppercase text-[var(--accent)] mb-3">
+                FTown MCP
               </div>
-              <div className="text-[11px] font-semibold tracking-[0.08em] uppercase text-[var(--text-muted)] mb-4 text-center">
-                Cron for agents
-              </div>
-              <p className="font-[family-name:var(--font-sans)] text-[13px] sm:text-sm text-[var(--text-secondary)] leading-relaxed mb-4 max-w-[52ch]">
-                Replace &quot;keep an agent awake and polling&quot; hacks with a first-class
-                schedule. Fire a loop on an interval (<code className="font-[family-name:var(--font-mono)] text-[var(--text-primary)]">every 5m</code>) or
-                cron with a timezone, pick the harness — including Pi, Claude Code,
-                Cursor, Codex, Grok, Muse, Kimi Code, opencode, or shell — plus workdir and
-                model. Every fire spawns a full
-                session grouped under the loop: watch it live, scroll back, or take over.
+              <h2 id="mcp-heading" className="font-[family-name:var(--font-sans)] text-2xl sm:text-3xl font-semibold tracking-tight text-[var(--text-primary)] mb-4">
+                Your fleet, in your MCP client.
+              </h2>
+              <p className="font-[family-name:var(--font-sans)] text-[13px] sm:text-sm text-[var(--text-secondary)] leading-relaxed mb-5 max-w-[52ch]">
+                Give your agent a view across your computers. Inspect sessions and retained
+                terminal history, launch work, send durable mail, and control terminals
+                through the same FTown fleet.
               </p>
-              <div className="flex flex-wrap gap-2">
-                {LOOP_GUARDRAILS.map((g) => (
-                  <span
-                    key={g.label}
-                    className="text-[11px] font-[family-name:var(--font-mono)] px-2.5 py-1 rounded-[var(--radius-sm)] border border-[var(--border-muted)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]"
-                    title={g.desc}
-                  >
-                    {g.label}
-                  </span>
-                ))}
+              <div className="border-l-2 border-[var(--accent-dim)] pl-4">
+                <h3 className="text-[13px] font-semibold text-[var(--text-primary)] mb-1">Keep questions in view</h3>
+                <p className="font-[family-name:var(--font-sans)] text-[13px] text-[var(--text-secondary)] leading-relaxed">
+                  Supported agent input requests stay in a durable attention inbox.
+                  Your client can check the backlog or wait for new requests, then
+                  pick up where it left off after reconnecting.
+                </p>
               </div>
             </div>
-            <div className="lg:w-[280px] shrink-0 rounded-[var(--radius-md)] border border-[var(--border-muted)] bg-[var(--bg-elevated)] p-4">
-              <div className="text-[11px] font-semibold tracking-[0.08em] uppercase text-[var(--text-muted)] mb-3">
-                Per-loop controls
+            <div className="lg:w-[310px] shrink-0 rounded-[var(--radius-md)] border border-[var(--border-muted)] bg-[var(--bg-elevated)] p-5">
+              <div className="flex items-center gap-2 text-[var(--accent)] mb-4">
+                <McpIcon />
+                <h3 className="text-[11px] font-semibold tracking-[0.08em] uppercase">Connect over HTTPS</h3>
               </div>
-              <ul className="text-[13px] text-[var(--text-secondary)] leading-relaxed space-y-1.5 list-none">
-                <li>Pause / resume, manual fire</li>
-                <li>Live edits</li>
-                <li>Run history with status dots</li>
-                <li>Postflight hook on completion</li>
-              </ul>
+              <p className="font-[family-name:var(--font-sans)] text-[13px] text-[var(--text-secondary)] leading-relaxed mb-3">
+                Add a remote MCP server, sign in with FTown, and choose which
+                computers it can access.
+              </p>
+              <code className="block break-all rounded-[var(--radius-sm)] border border-[var(--border-subtle)] bg-[var(--bg-void)] px-3 py-3 text-[12px] text-[var(--text-primary)] select-all">
+                https://ftown-mcp.fly.dev/mcp
+              </code>
+              <a href="https://github.com/fmktech/ftown/blob/main/docs/mcp.md" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 text-[12px] text-[var(--accent)] hover:underline mt-4">
+                MCP setup &amp; capabilities <span aria-hidden="true">↗</span>
+              </a>
+              <p className="font-[family-name:var(--font-sans)] text-[11px] text-[var(--text-muted)] leading-relaxed mt-4">
+                Attention updates use inbox checks or bounded waits. Your client
+                stays in control of when it listens.
+              </p>
             </div>
           </div>
-        </div>
+        </section>
 
         {/* Desktop demo */}
         <div className="mt-14 sm:mt-20 w-full max-w-[960px]">

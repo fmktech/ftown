@@ -1,3 +1,4 @@
+import { AUTOMATION_REMOVED_CODE, AUTOMATION_REMOVED_MESSAGE, isRetiredAutomationSession } from './retired-automation.js';
 import {
   createFtownSession,
   relaunchFtownSession,
@@ -22,7 +23,7 @@ import type { Session, SessionUsage } from './types.js';
  * - State/lookup failures return typed `{ ok: false, code, message }` results.
  */
 
-export type SessionErrorCode = 'not_found' | 'invalid' | 'conflict';
+export type SessionErrorCode = 'not_found' | 'invalid' | 'conflict' | typeof AUTOMATION_REMOVED_CODE;
 
 export interface SessionControllerError {
   ok: false;
@@ -166,11 +167,12 @@ export class SessionController {
 
   /** Re-run a finished/dead session's stored command verbatim. */
   async retry(sessionId: string): Promise<SessionControllerResult<{ session: Session }>> {
-    const factory = this.require(this.deps.sessionFactory, 'sessionFactory');
-
     const existingSession = await this.deps.store.loadSession(sessionId);
     if (!existingSession) {
       return { ok: false, code: 'not_found', message: 'Session not found' };
+    }
+    if (isRetiredAutomationSession(existingSession)) {
+      return { ok: false, code: AUTOMATION_REMOVED_CODE, message: AUTOMATION_REMOVED_MESSAGE };
     }
     if (existingSession.status === 'running') {
       return { ok: false, code: 'conflict', message: 'Session is already running' };
@@ -179,6 +181,7 @@ export class SessionController {
       return { ok: false, code: 'invalid', message: 'Session has no command (created before v0.2.0)' };
     }
 
+    const factory = this.require(this.deps.sessionFactory, 'sessionFactory');
     await relaunchFtownSession(factory, existingSession, 'retry');
     return { ok: true, session: existingSession };
   }

@@ -28,7 +28,7 @@ export function resolveDefaultDataDir(): string {
 
 /**
  * Resolve the ".ftown home" — the directory that holds THIS bridge instance's
- * pointer and loop-state files: bridge.json, loops.json, loop-runs.json,
+ * pointer and registry files: bridge.json,
  * session-registry.json.
  *
  * Why this indirection exists:
@@ -39,7 +39,7 @@ export function resolveDefaultDataDir(): string {
  *   $HOME/.ftown or those CLIs break.
  * - A NON-default `--data-dir` (a Solo test, Docker, or a second co-resident
  *   bridge) owns its OWN instance files under that dir. It must never write or
- *   delete the primary bridge's pointer/loop state under $HOME/.ftown — a
+ *   delete the primary bridge's pointer/registry state under $HOME/.ftown — a
  *   co-resident primary bridge relies on those files.
  *
  * Semantics: if `dataDir` resolves to the default data dir, return

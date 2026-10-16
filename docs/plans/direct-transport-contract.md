@@ -1,5 +1,9 @@
 # Direct Transport Contract (FROZEN)
 
+Historical implementation contract. The former `loops:updates` channel is
+superseded by [automation retirement](../automation-sunset.md) in bridge 0.19.38;
+the current control plane below omits that retired namespace.
+
 WebRTC DataChannel direct data plane between `bridge/` and `ui/`, with Centrifugo as
 control plane, signaling channel, and fallback data plane. This contract is immutable
 for the duration of the implementation. Wire types live in:
@@ -13,7 +17,7 @@ duplicated by project convention, see `bridge/src/types.ts` / `ui/src/types.ts`)
 ## Architecture
 
 ```
-Control plane (always Centrifugo):  sessions:updates, loops:updates, events:*,
+Control plane (always Centrifugo):  sessions:updates, events:*,
                                     bridges:presence, commands:rpc (incl. signaling,
                                     watch heartbeats)
 Data plane (preferred):             WebRTC DataChannel — terminal output/screen/input/resize

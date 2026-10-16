@@ -19,7 +19,7 @@ are cleared on disposal. They are not written to browser storage. This supports
 outages in an already-loaded dashboard, not cold offline startup or page reloads.
 A bridge restarted with a different port/nonce needs cloud discovery again.
 
-Session creation, loops, and other management RPCs still require Centrifugo.
+Session creation and other cloud management RPCs still require Centrifugo.
 Local terminal input, output, and resize use the direct connection. A remote bridge
 without a reachable direct path remains unavailable until a path recovers.
 

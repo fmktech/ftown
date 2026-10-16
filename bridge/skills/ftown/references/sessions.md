@@ -51,12 +51,6 @@ top-level `~/.ftown/ftown` dispatcher.
 ~/.ftown/ftown-sessions revive <session-id>
 ```
 
-## Scheduled loops
-
-Loop runs are normal sessions tagged with `loopId`. For loop creation,
-schedule syntax, manual runs, pause/resume, and run history, read
-`references/loops.md`.
-
 ## Messaging (mail)
 
 `tell` posts to the target session's **inbox**. Mail is delivered into the
@@ -171,11 +165,6 @@ The CLI wraps the loopback API. Raw access if needed:
 | DELETE | `/api/sessions/:id` | Remove (tombstone-archived) |
 | GET | `/api/archive` | List removed-session tombstones |
 | POST | `/api/sessions/:id/revive` | Recreate a removed session (new id) |
-| GET | `/api/loops` | List scheduled loops |
-| POST | `/api/loops` | Create a scheduled loop on this bridge |
-| GET/PATCH/DELETE | `/api/loops/:id` | Inspect, update, or delete a loop |
-| POST | `/api/loops/:id/run-now` | Request an immediate loop run; returns 404 `reason: not_found` if the loop no longer exists |
-| GET | `/api/loops/:id/runs` | List run sessions for a loop |
 
 To move a session under a different parent, PATCH it with the new parent's id:
 

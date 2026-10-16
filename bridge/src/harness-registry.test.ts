@@ -4,36 +4,29 @@ import assert from 'node:assert/strict';
 import {
   HARNESSES,
   HOOKED_SHELL_TYPES,
-  LOOP_HARNESS_TYPES,
   SHELL_TYPES,
   WORKFLOW_SHELLS,
   buildKimiCodeCommand,
   buildMuseCommand,
   buildOpencodeCommand,
   harnessAcceptsPromptAsCliArg,
-  isLoopHarness,
   isShellType,
 } from './harness-registry.js';
 import { buildSessionCommand } from './agent-commands.js';
 import { PROVIDER_AUTH_ENV, PROVIDER_FLAVORS, PROVIDER_RUNTIME_ENV } from './provider-env-store.js';
 
-import type { LoopHarness, ShellType, WorkflowShell } from './harness-registry.js';
+import type { ShellType, WorkflowShell } from './harness-registry.js';
 
 // ---- Type-level drift guards: derived unions must match the registry keys ----
 
 type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 
 const _shellTypeIsRegistryKeys: Equals<ShellType, keyof typeof HARNESSES> = true;
-const _loopHarnessUnion: Equals<
-  LoopHarness,
-  'claude' | 'cursor' | 'codex' | 'shell' | 'grok' | 'muse' | 'pi' | 'kimi-code' | 'opencode'
-> = true;
 const _workflowShellUnion: Equals<
   WorkflowShell,
   'claude' | 'cursor' | 'codex' | 'pi' | 'shell' | 'opencode'
 > = true;
 void _shellTypeIsRegistryKeys;
-void _loopHarnessUnion;
 void _workflowShellUnion;
 
 describe('harness registry', () => {
@@ -85,13 +78,6 @@ describe('harness registry', () => {
     }
   });
 
-  it('derives the loop harness set', () => {
-    assert.deepEqual(
-      [...LOOP_HARNESS_TYPES].sort(),
-      ['claude', 'codex', 'cursor', 'grok', 'kimi-code', 'muse', 'opencode', 'pi', 'shell'],
-    );
-  });
-
   it('derives the workflow shell set (grok and muse stay excluded — preserved decision)', () => {
     assert.deepEqual(
       [...WORKFLOW_SHELLS].sort(),
@@ -104,14 +90,6 @@ describe('harness registry', () => {
       [...HOOKED_SHELL_TYPES].sort(),
       ['claude', 'codex', 'deepseek', 'fireworks', 'kimi', 'muse', 'opencode', 'pi', 'zai'],
     );
-  });
-
-  it('isLoopHarness accepts exactly the loop harnesses', () => {
-    for (const type of SHELL_TYPES) {
-      assert.equal(isLoopHarness(type), HARNESSES[type].validForLoop, type);
-    }
-    assert.equal(isLoopHarness('nonsense'), false);
-    assert.equal(isLoopHarness(undefined), false);
   });
 
   describe('prompt-as-CLI-arg predicate (behavior preserved from create-ftown-session)', () => {
@@ -328,7 +306,6 @@ describe('buildMuseCommand', () => {
     assert.equal(HARNESSES.muse.promptAsCliArg, true);
     assert.equal(HARNESSES.muse.resumeField, 'museSessionId');
     assert.ok(!('providerBase' in HARNESSES.muse));
-    assert.equal(HARNESSES.muse.validForLoop, true);
     assert.equal(HARNESSES.muse.validForWorkflow, false);
     assert.ok(!('spawnStaggerMs' in HARNESSES.muse));
   });

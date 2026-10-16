@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 
 /**
  * Shared right-click / kebab context-menu primitives, extracted from the
- * pattern originated in SessionList.tsx so other lists (e.g. LoopList) can
+ * pattern originated in SessionList.tsx so other lists can
  * reuse the same positioning, dismissal, and styling behavior.
  */
 

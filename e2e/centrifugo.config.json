@@ -45,16 +45,6 @@
       "allow_publish_for_client": true
     },
     {
-      "name": "loops",
-      "allow_publish_for_subscriber": true,
-      "allow_subscribe_for_client": true,
-      "allow_user_limited_channels": true,
-      "history_size": 0,
-      "history_ttl": "0s",
-      "force_recovery": false,
-      "allow_publish_for_client": true
-    },
-    {
       "name": "terminal-input",
       "allow_publish_for_subscriber": true,
       "allow_subscribe_for_client": true,

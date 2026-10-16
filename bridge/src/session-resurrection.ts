@@ -1,3 +1,4 @@
+import { AUTOMATION_REMOVED_MESSAGE, isRetiredAutomationSession } from './retired-automation.js';
 import type { Session } from './types.js';
 import type { SessionStore } from './session-store.js';
 import type { ProcessRunner } from './claude-runner.js';
@@ -13,22 +14,28 @@ import { isTmuxAvailable, killTmuxSession, listFtownTmuxSessions } from './tmux.
 
 export function shouldResurrectStoredSession(session: Session): boolean {
   if (session.status !== 'running' && session.status !== 'pending') return false;
-  return !session.loopId;
+  return !isRetiredAutomationSession(session);
 }
 
 export interface SessionResurrectionDeps {
-  store: SessionStore;
+  store: Pick<SessionStore, 'listSessions' | 'listArchived' | 'loadSession' | 'saveSession'>;
   runner: ProcessRunner;
   bridgeId: string;
   sessionFactoryDeps: CreateFtownSessionDeps;
   publishSessionUpdate: (session: Session) => Promise<void>;
   wireTerminalInput: (sessionId: string) => void;
+  /** Exact dedicated-socket operations; injectable without touching a live tmux server. */
+  tmux?: {
+    available(): boolean;
+    list(): string[];
+    kill(sessionId: string): Promise<boolean>;
+  };
 }
 
 /**
  * Resurrection engine: on bridge start, sessions left in a live state by a
  * previous bridge are reattached (tmux), respawned (resume), or marked as
- * error. Loop-run sessions are deferred to the loop scheduler.
+ * error. Historical loop-owned sessions are retired before ordinary resurrection.
  */
 export class SessionResurrection {
   private started = false;
@@ -49,7 +56,7 @@ export class SessionResurrection {
     // Commands run concurrently with the resurrection loop; act on fresh
     // state so a session stopped or removed mid-loop is not respawned.
     const session = await store.loadSession(sessionId);
-    if (!session || (session.status !== 'running' && session.status !== 'pending')) return;
+    if (!session || !shouldResurrectStoredSession(session)) return;
     if (runner.isRunning(session.id)) return;
 
     if (runner.reattach(session.id, {
@@ -94,14 +101,49 @@ export class SessionResurrection {
     const { store } = this.deps;
     const sessions = await store.listSessions();
 
+    const tmux = this.deps.tmux ?? {
+      available: isTmuxAvailable, list: listFtownTmuxSessions, kill: killTmuxSession,
+    };
+    const liveTmuxIds = new Set(tmux.available() ? tmux.list() : []);
+    const retiredIds = new Set(sessions.filter(isRetiredAutomationSession).map((session) => session.id));
+    // Only explicit historical provenance proves ownership. Do not inspect loop
+    // definitions, prompts, names, or project data. Retry cleanup on later starts
+    // even if an earlier start already marked this record error.
+    for (const snapshot of sessions) {
+      if (!retiredIds.has(snapshot.id)) continue;
+      try {
+        const current = await store.loadSession(snapshot.id);
+        if (!current || !isRetiredAutomationSession(current)) continue;
+        let cleanupFailed = false;
+        if (liveTmuxIds.has(current.id)) {
+          try { cleanupFailed = !await tmux.kill(current.id); }
+          catch { cleanupFailed = true; }
+        }
+        const reason = cleanupFailed
+          ? `${AUTOMATION_REMOVED_MESSAGE}; failed to stop retired tmux session ${current.id}; cleanup will retry on bridge restart`
+          : AUTOMATION_REMOVED_MESSAGE;
+        if (cleanupFailed) console.error(`[Bridge] ${reason}`);
+        if (current.status === 'running' || current.status === 'pending' || cleanupFailed
+          || current.errorReason?.startsWith(`${AUTOMATION_REMOVED_MESSAGE}; failed to stop`)) {
+          await this.markSessionDead(current, reason);
+        }
+      } catch (error) {
+        console.error(`[Bridge] Failed to retire automation session ${snapshot.id}:`, error);
+      }
+    }
+
     // Reap tmux sessions for OUR dead store records (removed records, failed
     // kills) before resurrection re-creates any. Archived tombstones count as
     // dead too: remove_session deletes the store record, so a failed tmux
     // kill would otherwise leave a permanently invisible live agent. Tmux
     // sessions with ids we have no record of are left alone — they may
     // belong to another bridge running on this machine.
-    if (isTmuxAvailable()) {
+    if (liveTmuxIds.size > 0) {
       const archived = await store.listArchived();
+      const currentIds = new Set(sessions.map((session) => session.id));
+      const retiredArchiveIds = new Set(archived
+        .filter((record) => isRetiredAutomationSession(record) && !currentIds.has(record.id))
+        .map((record) => record.id));
       const deadIds = new Set([
         ...sessions
           .filter((s) => s.status !== 'running' && s.status !== 'pending')
@@ -115,21 +157,18 @@ export class SessionResurrection {
           deadIds.delete(s.id);
         }
       }
-      for (const tmuxId of listFtownTmuxSessions()) {
-        if (deadIds.has(tmuxId)) {
+      for (const tmuxId of liveTmuxIds) {
+        if (deadIds.has(tmuxId) && !retiredIds.has(tmuxId)) {
           console.log(`[Bridge] Killing tmux session for dead session ${tmuxId}`);
-          await killTmuxSession(tmuxId);
+          const stopped = await tmux.kill(tmuxId);
+          if (!stopped && retiredArchiveIds.has(tmuxId)) {
+            console.error(`[Bridge] ${AUTOMATION_REMOVED_MESSAGE}; failed to stop archived retired tmux session ${tmuxId}; cleanup will retry on bridge restart`);
+          }
         }
       }
     }
 
-    let deferredLoopRuns = 0;
     for (const session of sessions) {
-      if (session.loopId) {
-        if (session.status !== 'running' && session.status !== 'pending') continue;
-        deferredLoopRuns += 1;
-        continue;
-      }
       if (!shouldResurrectStoredSession(session)) continue;
       try {
         await this.resurrectSession(session.id);
@@ -143,8 +182,6 @@ export class SessionResurrection {
         }
       }
     }
-    if (deferredLoopRuns > 0) {
-      console.log(`[Bridge] Deferred ${deferredLoopRuns} loop-run session(s) to the loop scheduler`);
-    }
+
   }
 }

@@ -25,25 +25,4 @@ describe('bundled orchestration coordination contract', () => {
     assert.match(skill, /Resources \(leases with FIFO waitlists\)/);
   });
 
-  it('gives factory workers valid lease commands and an FTS-first protocol', () => {
-    const protocol = bundled('skills/factory/factory-template/skills/_protocol.md');
-    const releaseLine = protocol
-      .split('\n')
-      .find((line) => line.startsWith('fts release --db'));
-
-    assert.match(protocol, /FTS.*primary coordination plane/i);
-    assert.equal(
-      releaseLine,
-      'fts release --db "$FTS_DB" --ticket "$TICKET_ID" --resource <name>',
-    );
-  });
-
-  it('declares and registers factory resources during initialization', () => {
-    const template = bundled('skills/factory/factory-template/factory.yaml');
-    const factorySkill = bundled('skills/factory/SKILL.md');
-
-    assert.match(template, /^resources:/m);
-    assert.match(template, /name: staging/);
-    assert.match(factorySkill, /fts register-resource/);
-  });
 });

@@ -4,31 +4,20 @@ import { useState, useCallback, useMemo, useEffect, useRef, type CSSProperties, 
 import type { MessageClient } from "@/lib/message-client";
 import { ConnectionStatus } from "@/hooks/useCentrifugo";
 import { TerminalTransportApi } from "@/lib/direct-transport/contract";
-import { Session, ShellType, Loop, LoopDraft, LoopRunRecord } from "@/types";
+import { Session, ShellType } from "@/types";
 import { CreateSessionOptions, useSessions } from "@/hooks/useSessions";
 import { useBridgeRpc } from "@/hooks/useBridgeRpc";
 import { useBridges } from "@/hooks/useBridges";
-import { useLoops } from "@/hooks/useLoops";
 import { useAllSessionEvents } from "@/hooks/useAllSessionEvents";
 import { SessionList } from "./SessionList";
-import { LoopList } from "./LoopList";
-import { LoopDetailPane } from "./LoopDetailPane";
 import { Terminal, TerminalHandle } from "./Terminal";
 import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
 import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
-import { LoopFormModal } from "./LoopFormModal";
-import { FactoryList } from "./factory/FactoryList";
-import { FactoryPane } from "./factory/FactoryPane";
-import { NewFactoryModal } from "./factory/NewFactoryModal";
-import { deriveFactories } from "./factory/useFactory";
-import type { FactoryInfo, NewFactoryInput } from "./factory/types";
-import { factoryInitPrompt, factoryKey, factoryWorkerOf } from "./factory/types";
 import { CloudConnectionNotice } from "./CloudConnectionNotice";
 import { SessionAttentionAlert } from "./SessionAttentionAlert";
 import { mergeBridgeOrder } from "@/lib/bridge-order";
 import { StatusDot } from "@/lib/StatusDot";
-import { usePersistentState, useHiddenSet, type PersistCodec } from "@/lib/use-persistent-state";
-import { loopGroupKey } from "@/lib/loop-group-key";
+import { usePersistentState, useHiddenSet } from "@/lib/use-persistent-state";
 import { latestVisibleSessionAttention } from "@/lib/session-attention";
 import { deriveSessionReachabilityStatus } from "@/lib/session-reachability";
 import { getSessionRelaunchLabel } from "@/lib/session-relaunch";
@@ -55,31 +44,13 @@ interface DashboardProps {
   localMode?: boolean;
 }
 
-type SidebarTab = "sessions" | "crons" | "factory";
-
-// Stored as the raw tab name (historical format) rather than JSON.
-const SIDEBAR_TAB_CODEC: PersistCodec<SidebarTab> = {
-  serialize: (v) => v,
-  deserialize: (raw) => (raw === "crons" || raw === "factory" ? raw : "sessions"),
-};
-
 export function Dashboard({ client, connectionStatus, connectionError, userId, token, centrifugoUrl, transport, onDisconnect, localMode = false }: DashboardProps) {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
-  const [selectedLoopId, setSelectedLoopId] = useState<string | null>(null);
-  const [selectedLoopRunId, setSelectedLoopRunId] = useState<string | null>(null);
-  const [selectedLoopRuns, setSelectedLoopRuns] = useState<LoopRunRecord[]>([]);
-  const [loopRunsLoading, setLoopRunsLoading] = useState(false);
-  const [loopRunsError, setLoopRunsError] = useState<string | null>(null);
   const [showNewSession, setShowNewSession] = useState(false);
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
-  const [showLoopForm, setShowLoopForm] = useState(false);
-  const [showNewFactory, setShowNewFactory] = useState(false);
-  const [editingLoop, setEditingLoop] = useState<Loop | null>(null);
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
   const [mobileTab, setMobileTab] = useState<"sessions" | "terminal">("sessions");
-  const [sidebarTab, setSidebarTab] = usePersistentState<SidebarTab>("ftown:sidebarTab", "sessions", SIDEBAR_TAB_CODEC);
-  const [selectedFactoryKey, setSelectedFactoryKey] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = usePersistentState<boolean>("ftown:sidebarCollapsed", false);
   const [storedSidebarWidth, setStoredSidebarWidth] = usePersistentState<number>("ftown:sidebarWidth", DEFAULT_SIDEBAR_WIDTH);
   const sidebarWidth = clampSidebarWidth(storedSidebarWidth);
@@ -87,10 +58,6 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [bridgeOrder, setBridgeOrder] = usePersistentState<string[]>("ftown:bridgeOrder", []);
   const { hidden: hiddenSessionIds, hide: handleHideSession, unhide: handleUnhideSession } = useHiddenSet("ftown:hiddenSessions");
   const { hidden: hiddenBridgeIds, hide: hideBridge, unhide: handleUnhideBridge } = useHiddenSet("ftown:hiddenBridges");
-  const { hidden: hiddenLoopIds, hide: hideLoop, unhide: handleUnhideLoop } = useHiddenSet("ftown:hiddenLoops");
-  const { hidden: hiddenFactoryKeys, hide: hideFactory, unhide: handleUnhideFactory } = useHiddenSet("ftown:hiddenFactories");
-  const { hidden: hiddenLoopGroupKeys, hide: hideLoopGroup, unhide: handleUnhideLoopGroup } = useHiddenSet("ftown:hiddenLoopGroups");
-  const { hidden: hiddenCronBridgeIds, hide: hideCronBridge, unhide: handleUnhideCronBridge } = useHiddenSet("ftown:hiddenCronBridges");
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [directlyReachableBridgeIds, setDirectlyReachableBridgeIds] = useState<Set<string>>(
     () => new Set()
@@ -177,12 +144,11 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   }, [showUserMenu]);
 
   // The bridge-RPC transport over `commands:rpc#{userId}` is created ONCE here;
-  // sessions, loops, and factory consume it as peers.
+  // session management consumes this shared transport.
   const rpc = useBridgeRpc(client, userId);
   const { bridgeExec } = rpc;
   const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, setSessionParent, removeSession, refreshSessions } = useSessions(client, userId, rpc);
   const { bridges, hasBridges, prepareLocalAccess } = useBridges(client, userId);
-  const { loops, createLoop, updateLoop, deleteLoop, runLoopNow, getLoopRuns } = useLoops(client, userId, rpc);
 
   // Keep bridgeOrder stable when bridges connect/disconnect; only append new ids (sorted).
   useEffect(() => {
@@ -316,84 +282,9 @@ PY`;
   }, [rawSessions, activeBridgeIds, directlyReachableBridgeIds, sessionOrder, bridgeOrder]);
 
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
-  const sessionRelaunchLabel = selectedSession
+  const sessionRelaunchLabel = selectedSession && !selectedSession.loopId
     ? getSessionRelaunchLabel(selectedSession.status)
     : null;
-  const selectedLoop = selectedLoopId ? loops.find((loop) => loop.id === selectedLoopId) ?? null : null;
-  const factories = useMemo(() => deriveFactories(loops), [loops]);
-  const selectedFactory = useMemo(
-    () => (selectedFactoryKey ? factories.find((f) => factoryKey(f) === selectedFactoryKey) ?? null : null),
-    [factories, selectedFactoryKey]
-  );
-
-  // Mirrors the run-selection fallback in LoopDetailPane so the two stay in sync.
-  const selectedLoopRun = useMemo(
-    () => selectedLoopRuns.find((run) => run.id === selectedLoopRunId) ?? selectedLoopRuns[0] ?? null,
-    [selectedLoopRuns, selectedLoopRunId]
-  );
-  // The Session backing a still-running run, if the bridge still reports it live.
-  const liveLoopRunSession = useMemo(() => {
-    if (!selectedLoopRun || selectedLoopRun.status !== "running" || !selectedLoopRun.sessionId) return null;
-    return sessions.find((s) => s.id === selectedLoopRun.sessionId) ?? null;
-  }, [selectedLoopRun, sessions]);
-
-  // Loop-run sessions are represented through LoopRunRecord in the loop detail
-  // pane, so they no longer appear as top-level sidebar sessions.
-  const normalSessions = useMemo(() => sessions.filter((s) => !s.loopId), [sessions]);
-  // Factory worker sessions are nested under their factory in the Factory tab
-  // instead of appearing as top-level sidebar sessions.
-  const nonFactorySessions = useMemo(
-    () => normalSessions.filter((s) => factoryWorkerOf(s, factories) === null),
-    [normalSessions, factories]
-  );
-  const loopCount = loops.filter((loop) => {
-    if (hiddenLoopIds.has(loop.id)) return false;
-    const groupKey = loop.group ? loopGroupKey(loop.bridgeId, loop.group) : null;
-    if (groupKey && hiddenLoopGroupKeys.has(groupKey)) return false;
-    if (hiddenCronBridgeIds.has(loop.bridgeId)) return false;
-    return true;
-  }).length;
-  const factoryCount = factories.filter((f) => !hiddenFactoryKeys.has(factoryKey(f))).length;
-
-  useEffect(() => {
-    if (!selectedLoop) {
-      setSelectedLoopRuns([]);
-      setSelectedLoopRunId(null);
-      setLoopRunsLoading(false);
-      setLoopRunsError(null);
-      return;
-    }
-
-    let cancelled = false;
-    const routeBridgeId = activeBridgeIds.has(selectedLoop.bridgeId) ? selectedLoop.bridgeId : undefined;
-    setLoopRunsLoading(true);
-    setLoopRunsError(null);
-    getLoopRuns(routeBridgeId, selectedLoop.id)
-      .then((runs) => {
-        if (cancelled) return;
-        setSelectedLoopRuns(runs);
-        setLoopRunsError(null);
-        setSelectedLoopRunId((current) => {
-          if (current && runs.some((run) => run.id === current)) return current;
-          return runs[0]?.id ?? null;
-        });
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          console.error("get_loop_runs failed", err);
-          setLoopRunsError(err instanceof Error ? err.message : String(err));
-          setSelectedLoopRuns([]);
-          setSelectedLoopRunId(null);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setLoopRunsLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedLoop?.id, selectedLoop?.bridgeId, selectedLoop?.runCount, selectedLoop?.skipCount, selectedLoop?.lastStatus, selectedLoop?.lastSessionId, selectedLoop?.updatedAt, activeBridgeIds, getLoopRuns]);
 
   useEffect(() => {
     if (!selectedSessionId) return undefined;
@@ -456,12 +347,6 @@ PY`;
     markInterruptIdle(selectedSessionId, selectedSession?.shellType);
   }, [selectedSessionId, selectedSession?.shellType, markInterruptIdle]);
 
-  // Same optimistic-idle heuristic as handleTerminalInterrupt, targeted at the
-  // live session backing the currently viewed loop run instead of the sidebar selection.
-  const handleLoopRunInterrupt = useCallback(() => {
-    markInterruptIdle(liveLoopRunSession?.id ?? null, liveLoopRunSession?.shellType);
-  }, [liveLoopRunSession, markInterruptIdle]);
-
   const handleRemoveSession = useCallback((sessionId: string, onlyIfFinished?: boolean) => {
     // Only let removeSession drop the row optimistically when the owning bridge
     // is online; otherwise the remove_session command is dropped (no command
@@ -473,38 +358,6 @@ PY`;
       setSelectedSessionId(null);
     }
   }, [removeSession, selectedSessionId, rawSessions, activeBridgeIds]);
-
-  // Hiding a loop/factory/bridge also clears its selection; plain hides come
-  // straight from useHiddenSet (handleHideSession/handleUnhide* above).
-  const handleHideLoop = useCallback((loopId: string) => {
-    hideLoop(loopId);
-    setSelectedLoopId((prev) => (prev === loopId ? null : prev));
-  }, [hideLoop]);
-
-  const handleHideLoopGroup = useCallback((groupKey: string) => {
-    hideLoopGroup(groupKey);
-    setSelectedLoopId((prev) => {
-      if (!prev) return prev;
-      const selected = loops.find((loop) => loop.id === prev);
-      if (selected?.group && loopGroupKey(selected.bridgeId, selected.group) === groupKey) return null;
-      return prev;
-    });
-  }, [hideLoopGroup, loops]);
-
-  const handleHideCronBridge = useCallback((bridgeId: string) => {
-    hideCronBridge(bridgeId);
-    setSelectedLoopId((prev) => {
-      if (!prev) return prev;
-      const selected = loops.find((loop) => loop.id === prev);
-      if (selected && selected.bridgeId === bridgeId) return null;
-      return prev;
-    });
-  }, [hideCronBridge, loops]);
-
-  const handleHideFactory = useCallback((key: string) => {
-    hideFactory(key);
-    setSelectedFactoryKey((prev) => (prev === key ? null : prev));
-  }, [hideFactory]);
 
   const handleHideBridge = useCallback((bridgeId: string) => {
     hideBridge(bridgeId);
@@ -523,44 +376,9 @@ PY`;
     if (id) clearSessionAttention(id);
     setSelectedSessionId(id);
     if (id) {
-      setSelectedLoopId(null);
-      setSelectedLoopRunId(null);
-      setSelectedFactoryKey(null);
-      setSidebarTab("sessions");
       setMobileTab("terminal");
     }
   }, [clearSessionAttention]);
-
-  const handleSelectLoop = useCallback((loopId: string) => {
-    setSelectedLoopId(loopId);
-    setSelectedSessionId(null);
-    setSelectedFactoryKey(null);
-    setSidebarTab("crons");
-    setMobileTab("terminal");
-  }, []);
-
-  const handleSelectFactory = useCallback((factory: FactoryInfo) => {
-    setSelectedFactoryKey(factoryKey(factory));
-    setSelectedSessionId(null);
-    setSelectedLoopId(null);
-    setSelectedLoopRunId(null);
-    setMobileTab("terminal");
-  }, []);
-
-  // Like handleSelectSession, but stays on the Factory sidebar tab — opening a
-  // worker from the factory view shows its terminal without leaving the view.
-  const handleOpenFactorySession = useCallback((id: string) => {
-    clearSessionAttention(id);
-    setSelectedFactoryKey(null);
-    setSelectedSessionId(id);
-    setSelectedLoopId(null);
-    setSelectedLoopRunId(null);
-    setMobileTab("terminal");
-  }, [clearSessionAttention]);
-
-  const handleSidebarTabSwitch = useCallback((tab: SidebarTab) => {
-    setSidebarTab(tab);
-  }, [setSidebarTab]);
 
   const handleMobileTabSwitch = useCallback((tab: "sessions" | "terminal") => {
     setMobileTab(tab);
@@ -577,77 +395,6 @@ PY`;
     });
     setShowNewSession(true);
   }, []);
-
-  const handleOpenNewLoop = useCallback(() => {
-    setEditingLoop(null);
-    setShowLoopForm(true);
-  }, []);
-
-  const handleEditLoop = useCallback((loop: Loop) => {
-    setEditingLoop(loop);
-    setShowLoopForm(true);
-  }, []);
-
-  const handleCloseLoopForm = useCallback(() => {
-    setShowLoopForm(false);
-    setEditingLoop(null);
-  }, []);
-
-  const handleSubmitLoop = useCallback(
-    async (draft: LoopDraft): Promise<void> => {
-      if (editingLoop) {
-        // Route by the loop's OWNING bridge, never the (locked) form value — a
-        // loop cannot be moved, and only its owner bridge holds the record.
-        await updateLoop(editingLoop.bridgeId, editingLoop.id, draft);
-      } else {
-        await createLoop(draft);
-      }
-    },
-    [editingLoop, updateLoop, createLoop]
-  );
-
-  const handleCreateFactory = useCallback(
-    async (input: NewFactoryInput): Promise<void> => {
-      await createSession(factoryInitPrompt(input), {
-        bridgeId: input.bridgeId,
-        workingDir: input.repoPath,
-        shellType: input.harness,
-        model: input.model,
-        name: `factory-init-${input.project}`,
-      });
-      setShowNewFactory(false);
-      handleSidebarTabSwitch("sessions");
-    },
-    [createSession, handleSidebarTabSwitch]
-  );
-
-  const handleRunLoopNow = useCallback(
-    (loop: Loop) => {
-      runLoopNow(loop.bridgeId, loop.id).catch((err) => console.error("run_loop_now failed", err));
-    },
-    [runLoopNow]
-  );
-
-  const handleToggleLoopEnabled = useCallback(
-    (loop: Loop) => {
-      updateLoop(loop.bridgeId, loop.id, { enabled: !loop.enabled }).catch((err) =>
-        console.error("update_loop failed", err)
-      );
-    },
-    [updateLoop]
-  );
-
-  const handleDeleteLoop = useCallback(
-    (loop: Loop) => {
-      deleteLoop(loop.bridgeId, loop.id).catch((err) => console.error("delete_loop failed", err));
-      if (selectedLoopId === loop.id) {
-        setSelectedLoopId(null);
-        setSelectedLoopRunId(null);
-        setSelectedLoopRuns([]);
-      }
-    },
-    [deleteLoop, selectedLoopId]
-  );
 
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed((prev) => !prev);
@@ -786,20 +533,6 @@ PY`;
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               <line x1="8" y1="3" x2="8" y2="13" />
               <line x1="3" y1="8" x2="13" y2="8" />
-            </svg>
-          </button>
-
-          <button
-            className="btn-ghost"
-            onClick={handleOpenNewLoop}
-            disabled={!hasBridges}
-            title={hasBridges ? "Create a new loop" : "No bridges online — start a bridge first"}
-            style={{ padding: "4px 8px", lineHeight: 1, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
-          >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M2 8a6 6 0 0 1 10.5-4M14 8a6 6 0 0 1-10.5 4" />
-              <path d="M12.5 4H14V2.5" />
-              <path d="M3.5 12H2v1.5" />
             </svg>
           </button>
 
@@ -1197,141 +930,29 @@ PY`;
           </div>
 
           <div className="flex-1 overflow-y-auto">
-            {isDesktop && sidebarCollapsed ? (
-              <div
-                role="tablist"
-                aria-label="Sidebar sections"
-                className="sidebar-tabs-collapsed"
-              >
-                <button
-                  role="tab"
-                  aria-selected={sidebarTab === "sessions"}
-                  aria-label={`Sessions (${nonFactorySessions.length})`}
-                  title={`Sessions (${nonFactorySessions.length})`}
-                  onClick={() => handleSidebarTabSwitch("sessions")}
-                  className={`sidebar-tab-icon ${sidebarTab === "sessions" ? "sidebar-tab-active" : ""}`}
-                >
-                  ▤
-                </button>
-                <button
-                  role="tab"
-                  aria-selected={sidebarTab === "crons"}
-                  aria-label={`Crons (${loopCount})`}
-                  title={`Crons (${loopCount})`}
-                  onClick={() => handleSidebarTabSwitch("crons")}
-                  className={`sidebar-tab-icon ${sidebarTab === "crons" ? "sidebar-tab-active" : ""}`}
-                >
-                  ◷
-                </button>
-                {(factories.length > 0 || sidebarTab === "factory") && (
-                  <button
-                    role="tab"
-                    aria-selected={sidebarTab === "factory"}
-                    aria-label={`Factory (${factoryCount})`}
-                    title={`Factory (${factoryCount})`}
-                    onClick={() => handleSidebarTabSwitch("factory")}
-                    className={`sidebar-tab-icon ${sidebarTab === "factory" ? "sidebar-tab-active" : ""}`}
-                  >
-                    ▦
-                  </button>
-                )}
-              </div>
-            ) : (
-              <div
-                role="tablist"
-                aria-label="Sidebar sections"
-                className="sidebar-tabs sidebar-tabs-sticky"
-              >
-                <button
-                  role="tab"
-                  aria-selected={sidebarTab === "sessions"}
-                  onClick={() => handleSidebarTabSwitch("sessions")}
-                  className={`sidebar-tab ${sidebarTab === "sessions" ? "sidebar-tab-active" : ""}`}
-                >
-                  Sessions <span className="sidebar-tab-count">{nonFactorySessions.length}</span>
-                </button>
-                <button
-                  role="tab"
-                  aria-selected={sidebarTab === "crons"}
-                  onClick={() => handleSidebarTabSwitch("crons")}
-                  className={`sidebar-tab ${sidebarTab === "crons" ? "sidebar-tab-active" : ""}`}
-                >
-                  Crons <span className="sidebar-tab-count">{loopCount}</span>
-                </button>
-                {(factories.length > 0 || sidebarTab === "factory") && (
-                  <button
-                    role="tab"
-                    aria-selected={sidebarTab === "factory"}
-                    onClick={() => handleSidebarTabSwitch("factory")}
-                    className={`sidebar-tab ${sidebarTab === "factory" ? "sidebar-tab-active" : ""}`}
-                  >
-                    Factory <span className="sidebar-tab-count">{factoryCount}</span>
-                  </button>
-                )}
-              </div>
-            )}
-            {sidebarTab === "factory" ? (
-              <FactoryList
-                factories={factories}
-                selectedKey={selectedFactoryKey}
-                onSelect={handleSelectFactory}
-                collapsed={isDesktop && sidebarCollapsed}
-                onCreateFactory={() => setShowNewFactory(true)}
-                sessions={normalSessions}
-                onOpenSession={handleOpenFactorySession}
-                onRemoveSession={handleRemoveSession}
-                selectedSessionId={selectedSessionId}
-                sessionActivity={sessionActivity}
-                hiddenFactoryKeys={hiddenFactoryKeys}
-                onHideFactory={handleHideFactory}
-                onUnhideFactory={handleUnhideFactory}
-              />
-            ) : sidebarTab === "crons" ? (
-              <LoopList
-                loops={loops}
-                bridges={bridges}
-                selectedLoopId={selectedLoopId}
-                onSelectLoop={handleSelectLoop}
-                onRunNow={handleRunLoopNow}
-                onToggleEnabled={handleToggleLoopEnabled}
-                onEdit={handleEditLoop}
-                onDelete={handleDeleteLoop}
-                collapsed={isDesktop && sidebarCollapsed}
-                hiddenLoopIds={hiddenLoopIds}
-                onHideLoop={handleHideLoop}
-                onUnhideLoop={handleUnhideLoop}
-                hiddenLoopGroupKeys={hiddenLoopGroupKeys}
-                onHideLoopGroup={handleHideLoopGroup}
-                onUnhideLoopGroup={handleUnhideLoopGroup}
-                hiddenCronBridgeIds={hiddenCronBridgeIds}
-                onHideCronBridge={handleHideCronBridge}
-                onUnhideCronBridge={handleUnhideCronBridge}
-              />
-            ) : (
-              <SessionList
-                sessions={nonFactorySessions}
-                bridges={bridges}
-                bridgeOrder={bridgeOrder}
-                selectedSessionId={selectedSessionId}
-                onSelectSession={handleSelectSession}
-                onRenameSession={renameSession}
-                onStopSession={stopSession}
-                onRemoveSession={handleRemoveSession}
-                onCloneSession={handleCloneSession}
-                onSetSessionParent={setSessionParent}
-                onReorderSessions={handleReorderSessions}
-                onReorderBridges={handleReorderBridges}
-                sessionActivity={sessionActivity}
-                collapsed={isDesktop && sidebarCollapsed}
-                hiddenSessionIds={hiddenSessionIds}
-                hiddenBridgeIds={hiddenBridgeIds}
-                onHideSession={handleHideSession}
-                onUnhideSession={handleUnhideSession}
-                onHideBridge={handleHideBridge}
-                onUnhideBridge={handleUnhideBridge}
-                onCreateSession={handleCreateSessionOnBridge}
-              />
-            )}
+            <SessionList
+              sessions={sessions}
+              bridges={bridges}
+              bridgeOrder={bridgeOrder}
+              selectedSessionId={selectedSessionId}
+              onSelectSession={handleSelectSession}
+              onRenameSession={renameSession}
+              onStopSession={stopSession}
+              onRemoveSession={handleRemoveSession}
+              onCloneSession={handleCloneSession}
+              onSetSessionParent={setSessionParent}
+              onReorderSessions={handleReorderSessions}
+              onReorderBridges={handleReorderBridges}
+              sessionActivity={sessionActivity}
+              collapsed={isDesktop && sidebarCollapsed}
+              hiddenSessionIds={hiddenSessionIds}
+              hiddenBridgeIds={hiddenBridgeIds}
+              onHideSession={handleHideSession}
+              onUnhideSession={handleUnhideSession}
+              onHideBridge={handleHideBridge}
+              onUnhideBridge={handleUnhideBridge}
+              onCreateSession={handleCreateSessionOnBridge}
+            />
           </div>
           {!sidebarCollapsed && (
             <div
@@ -1357,51 +978,20 @@ PY`;
 
         {/* Terminal area */}
         <main className={`flex-1 flex-col min-h-0 min-w-0 ${mobileTab === "terminal" ? "flex" : "hidden"} md:flex`}>
-          {selectedFactory ? (
-            <FactoryPane
-              key={selectedFactoryKey}
-              factory={selectedFactory}
-              bridgeExec={bridgeExec}
-              sessions={normalSessions}
-              onOpenSession={handleOpenFactorySession}
-              loops={loops}
-              updateLoop={updateLoop}
-              deleteLoop={deleteLoop}
-            />
-          ) : selectedLoop ? (
-            <LoopDetailPane
-              loop={selectedLoop}
-              runs={selectedLoopRuns}
-              selectedRunId={selectedLoopRunId}
-              loadingRuns={loopRunsLoading}
-              runsError={loopRunsError}
-              onSelectRun={setSelectedLoopRunId}
-              onRunNow={handleRunLoopNow}
-              onToggleEnabled={handleToggleLoopEnabled}
-              onEdit={handleEditLoop}
-              onDelete={handleDeleteLoop}
-              liveSession={liveLoopRunSession}
-              transport={transport}
-              usage={liveLoopRunSession ? sessionActivity.get(liveLoopRunSession.id)?.usage : undefined}
-              terminalRef={terminalRef}
-              onInterrupt={handleLoopRunInterrupt}
-            />
-          ) : (
-            <Terminal
-              ref={terminalRef}
-              transport={transport}
-              sessionId={selectedSessionId}
-              bridgeId={selectedSession?.bridgeId ?? null}
-              isRunning={selectedSession?.status === "running"}
-              sessionName={selectedSession?.name ?? selectedSession?.prompt?.slice(0, 48) ?? null}
-              usage={selectedSessionId ? sessionActivity.get(selectedSessionId)?.usage : undefined}
-              persistedUsage={selectedSession?.usage}
-              onMobileTap={() => mobileControlRef.current?.focusInput()}
-              shellType={selectedSession?.shellType}
-              onInterrupt={handleTerminalInterrupt}
-            />
-          )}
-          {selectedSessionId && !selectedLoop && !selectedFactory && (
+          <Terminal
+            ref={terminalRef}
+            transport={transport}
+            sessionId={selectedSessionId}
+            bridgeId={selectedSession?.bridgeId ?? null}
+            isRunning={selectedSession?.status === "running"}
+            sessionName={selectedSession?.name ?? selectedSession?.prompt?.slice(0, 48) ?? null}
+            usage={selectedSessionId ? sessionActivity.get(selectedSessionId)?.usage : undefined}
+            persistedUsage={selectedSession?.usage}
+            onMobileTap={() => mobileControlRef.current?.focusInput()}
+            shellType={selectedSession?.shellType}
+            onInterrupt={handleTerminalInterrupt}
+          />
+          {selectedSessionId && (
             <MobileControlBar ref={mobileControlRef} onSendInput={(data) => terminalRef.current?.sendInput(data)} />
           )}
         </main>
@@ -1416,23 +1006,6 @@ PY`;
         defaults={sessionDefaults}
         bridgeExec={bridgeExec}
       />
-
-      <LoopFormModal
-        isOpen={showLoopForm}
-        onClose={handleCloseLoopForm}
-        onSubmit={handleSubmitLoop}
-        bridges={bridges}
-        editingLoop={editingLoop}
-      />
-
-      {showNewFactory && (
-        <NewFactoryModal
-          bridges={bridges.map((b) => ({ bridgeId: b.bridgeId, label: b.hostname }))}
-          onSubmit={handleCreateFactory}
-          onClose={() => setShowNewFactory(false)}
-        />
-      )}
-
 
       {latestAttention && (
         <SessionAttentionAlert

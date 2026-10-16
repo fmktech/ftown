@@ -55,6 +55,8 @@ export interface Session {
   shellType?: string;
   model?: string;
   parentSessionId?: string;
+  /** Historical automation provenance; new sessions cannot set it. */
+  loopId?: string;
   usage?: SessionUsage;
 }
 
@@ -75,43 +77,8 @@ export interface MailMessage {
   deliveredVia?: string;
 }
 
-export type LoopHarness = 'claude' | 'cursor' | 'codex' | 'grok' | 'muse' | 'pi' | 'kimi-code' | 'opencode' | 'shell';
-
-export type LoopSchedule =
-  | { kind: 'interval'; everyMs: number }
-  | { kind: 'cron'; expression: string; tz?: string };
-
-/** Body for POST /api/loops and PATCH /api/loops/:id (as a Partial). */
-export interface LoopDraft {
-  name: string;
-  schedule: LoopSchedule;
-  harness: LoopHarness;
-  workdir?: string;
-  task: string;
-  model?: string;
-  enabled: boolean;
-  overlapPolicy: 'skip' | 'allow';
-  retention: { autoClearAfterRuns: number | null };
-  preflight?: { command: string; timeoutMs?: number };
-  postflight?: { command: string; timeoutMs?: number; runOnSkip?: boolean };
-  maxRuntimeMs?: number;
-  group?: string;
-}
-
-/** Loop shape as returned by GET /api/loops and /api/loops/:id. */
-export interface LoopInfo extends LoopDraft {
-  id: string;
-  bridgeId: string;
-  createdAt: string;
-  updatedAt: string;
-  lastRunAt?: string;
-  nextRunAt?: string;
-  lastStatus?: 'ok' | 'error' | 'running' | 'skipped';
-  lastSessionId?: string;
-  runCount: number;
-  skipCount: number;
-  runNowRequested?: boolean;
-}
+export const AUTOMATION_REMOVED_CODE = 'automation_removed' as const;
+export const AUTOMATION_REMOVED_MESSAGE = 'Recurring loops and factory automation have been removed';
 
 /**
  * Keystrokes appended after `send`/`keys` text to submit it, keyed by shell type.

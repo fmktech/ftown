@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { CentrifugoClient } from './centrifugo-client.js';
-import type { Session, Loop } from './types.js';
+import type { Session } from './types.js';
 
 function fixture(disabled = false) {
   const client = new CentrifugoClient('ws://127.0.0.1:1/connection/websocket', '', async () => '', { disabled });
@@ -21,7 +21,6 @@ test('disabled local mode never connects or subscribes, and publishes local even
   transport.publish = () => { throw new Error('unexpected cloud publish'); };
   client.connect();
   client.subscribeToSessions('local');
-  client.subscribeToLoops('local');
   client.subscribeToCommands('local', () => {});
   client.subscribeToTerminalInput('local', 's', () => {}, () => {});
   client.joinBridgesChannel('local', 'b');
@@ -29,22 +28,20 @@ test('disabled local mode never connects or subscribes, and publishes local even
   const unsubscribe = client.onLocalPublication((channel, data) => events.push({ channel, data }));
   const session = { id: 's', env: { TOKEN: 'secret' } } as unknown as Session;
   await client.publishSessionUpdate('local', session);
-  await client.publishLoopUpdate('local', { id: 'l' } as Loop);
-  await client.publishLoopRemoved('local', 'l');
   await client.publishTerminalData('local', 's', 'hello');
   await client.publishTerminalScreen('local', 's', 'screen');
   await client.publishHookEvent('local', 's', { type: 'hook', data: 'event' });
   await client.publishCommandResponse('local', { requestId: 'r', success: true });
   assert.deepEqual(events.map((event) => event.channel), [
-    'sessions:updates#local', 'loops:updates#local', 'loops:updates#local',
+    'sessions:updates#local',
     'terminal:s#local', 'terminal:s#local', 'events:s#local', 'commands:rpc#local',
   ]);
   assert.equal((events[0].data as { session: Session }).session.env, undefined);
   assert.equal(session.env?.TOKEN, 'secret');
-  assert.equal((events[6].data as { response: { requestId: string } }).response.requestId, 'r');
+  assert.equal((events[4].data as { response: { requestId: string } }).response.requestId, 'r');
   unsubscribe();
-  await client.publishLoopRemoved('local', 'another');
-  assert.equal(events.length, 7);
+  await client.publishHookEvent('local', 'another', { type: 'hook' });
+  assert.equal(events.length, 5);
 });
 
 test('disconnected cloud does not queue or delay local hook and command acknowledgements', async () => {
@@ -71,7 +68,7 @@ test('cloud publish which never acknowledges cannot stall an already committed l
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
-      client.publishLoopRemoved('user', 'l'),
+      client.publishHookEvent('user', 's', { type: 'hook' }),
       new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('publication stalled')), 100); }),
     ]);
   } finally {
@@ -87,6 +84,6 @@ test('rejected cloud delivery does not reject a committed local mutation', async
   transport.publish = async () => { throw new Error('cloud disconnected during publish'); };
   const local: unknown[] = [];
   client.onLocalPublication((_channel, data) => local.push(data));
-  await assert.doesNotReject(client.publishLoopRemoved('user', 'l'));
+  await assert.doesNotReject(client.publishHookEvent('user', 's', { type: 'hook' }));
   assert.equal(local.length, 1);
 });

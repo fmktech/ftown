@@ -273,16 +273,16 @@ describe('createFtownSession — working directory and generated name preflight'
   });
 });
 
-describe('createFtownSession — loopId passthrough (§4g loop-run tagging)', () => {
-  it('round-trips input.loopId onto the persisted Session, and leaves it undefined when absent', async () => {
+describe('createFtownSession — historical automation metadata is not a creation feature', () => {
+  it('does not tag fresh sessions as automation even if untyped input contains legacy loopId', async () => {
     const realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     const home = mkdtempSync(join(tmpdir(), 'ftw-home-'));
     process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
     try {
       const tagged = fakeDeps();
-      const withLoop = await createFtownSession(tagged.deps, { shellType: 'shell', loopId: 'loop-42' });
-      assert.strictEqual(withLoop.loopId, 'loop-42');
-      assert.strictEqual(tagged.saved[0].loopId, 'loop-42');
+      const withLoop = await createFtownSession(tagged.deps, { shellType: 'shell', loopId: 'loop-42' } as never);
+      assert.strictEqual(withLoop.loopId, undefined);
+      assert.strictEqual(tagged.saved[0].loopId, undefined);
 
       const plain = fakeDeps();
       const withoutLoop = await createFtownSession(plain.deps, { shellType: 'shell' });
@@ -417,10 +417,8 @@ describe('createFtownSession — provider runtime env', () => {
       const session = await createFtownSession(harness.deps, {
         shellType: 'zai',
         prompt: 'do provider work',
-        loopId: 'loop-zai',
       });
 
-      assert.strictEqual(session.loopId, 'loop-zai');
       assert.strictEqual(session.env?.ANTHROPIC_BASE_URL, 'https://api.z.ai/api/anthropic');
       assert.strictEqual(session.env?.ANTHROPIC_DEFAULT_OPUS_MODEL, 'glm-5.2[1m]');
       assert.strictEqual(session.env?.ANTHROPIC_AUTH_TOKEN, 'tok-zai');
