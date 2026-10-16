@@ -453,7 +453,7 @@ export default function EnvVarsEditor({ value: controlledValue, onChange: contro
         <div className="border-t border-[#2a2a2a] px-4 py-3 space-y-2">
           {!isControlled && (
             <p className="text-[11px] text-[var(--text-faint)]">
-              Stored locally in this browser only — shared across all loops, never synced to the bridge or server.
+              Stored locally in this browser only — shared across sessions, never synced to the bridge or server.
             </p>
           )}
           {/* Existing vars */}

@@ -11,9 +11,7 @@ This complements the by-hand orchestrator playbook in
 repeatable; use orchestrator guidance when you need to improvise or keep a
 human in the loop.
 
-This is separate from **scheduled loops** managed by `~/.ftown/ftown-sessions
-loop ...`. Scheduled loops create recurring ftown sessions over time. A workflow
-loop is control flow inside one deterministic workflow run.
+A workflow runs deterministic control flow inside one explicitly started run.
 
 ## Operating Contract
 

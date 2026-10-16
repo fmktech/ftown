@@ -175,7 +175,7 @@ export class LocalBrowserClient implements MessageClient {
         this.cursor = result.cursor;
         for (const event of result.events) this.deliver(event.channel, event.data);
         if (result.reset || recovered) {
-          // Existing hooks refresh authoritative sessions/loops on subscribe.
+          // Existing hooks refresh authoritative sessions on subscribe.
           for (const sub of this.subscriptions.values()) if (sub.state === 'subscribed') sub.emit('subscribed', undefined);
         }
       } catch (error) {

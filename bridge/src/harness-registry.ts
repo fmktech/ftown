@@ -1,8 +1,8 @@
 /**
  * Single source of truth for the supported harnesses ("shell types").
  *
- * Every place that used to re-list harness names (ShellType/LoopHarness unions,
- * LOOP_HARNESSES, HOOKED_SHELL_TYPES, WorkflowShell/SHELLS, the buildSessionCommand
+ * Every place that used to re-list harness names (ShellType unions,
+ * HOOKED_SHELL_TYPES, WorkflowShell/SHELLS, the buildSessionCommand
  * branch, the prompt-as-CLI-arg predicate) now derives from HARNESSES below.
  *
  * NOTE: this module is part of the bridge dist and is NOT sibling-copied into
@@ -58,8 +58,6 @@ export interface HarnessSpec {
    * which stays registry-free so it can be sibling-copied).
    */
   providerBase?: 'claude';
-  /** Accepted as a Loop harness (loop-validation / LoopHarness). */
-  validForLoop: boolean;
   /** Accepted as a workflow child shell (WorkflowShell / ftown-workflows --shell). */
   validForWorkflow: boolean;
   /**
@@ -279,7 +277,6 @@ const CLAUDE_SPEC = {
   hooked: true,
   promptAsCliArg: true,
   resumeField: 'claudeSessionId',
-  validForLoop: true,
   validForWorkflow: true,
 } as const;
 
@@ -290,8 +287,7 @@ const PROVIDER_FLAVOR_SPEC = {
   promptAsCliArg: true,
   resumeField: 'claudeSessionId',
   providerBase: 'claude',
-  // Preserved decision: provider flavors were never in LOOP_HARNESSES or WorkflowShell.
-  validForLoop: false,
+  // Preserved decision: provider flavors were never in WorkflowShell.
   validForWorkflow: false,
 } as const;
 
@@ -308,7 +304,6 @@ export const HARNESSES = {
     hooked: false,
     promptAsCliArg: true,
     resumeField: 'cursorSessionId',
-    validForLoop: true,
     validForWorkflow: true,
     // Concurrent cursor-agent startups race on a macOS Keychain WRITE during
     // token refresh (last-writer-wins; corrupts auth from 2 concurrent spawns).
@@ -327,14 +322,12 @@ export const HARNESSES = {
     hooked: true,
     promptAsCliArg: true,
     resumeField: 'codexSessionId',
-    validForLoop: true,
     validForWorkflow: true,
   },
   shell: {
     buildCommand: () => '/bin/zsh -l',
     hooked: false,
     promptAsCliArg: false,
-    validForLoop: true,
     validForWorkflow: true,
   },
   grok: {
@@ -347,7 +340,6 @@ export const HARNESSES = {
     // Preserved decision: grok was never in HOOKED_SHELL_TYPES (no Stop-hook pump).
     hooked: false,
     promptAsCliArg: true,
-    validForLoop: true,
     // Preserved decision: grok was absent from WorkflowShell / ftown-workflows SHELLS.
     validForWorkflow: false,
   },
@@ -367,7 +359,6 @@ export const HARNESSES = {
     hooked: true,
     promptAsCliArg: true,
     resumeField: 'museSessionId',
-    validForLoop: true,
     // Preserved decision: like grok, muse is absent from WorkflowShell / ftown-workflows SHELLS.
     validForWorkflow: false,
   },
@@ -383,7 +374,6 @@ export const HARNESSES = {
       }),
     hooked: true,
     promptAsCliArg: true,
-    validForLoop: true,
     validForWorkflow: true,
   },
   opencode: {
@@ -401,7 +391,6 @@ export const HARNESSES = {
     hooked: true,
     promptAsCliArg: true,
     resumeField: 'opencodeSessionId',
-    validForLoop: true,
     validForWorkflow: true,
   },
   'kimi-code': {
@@ -409,7 +398,6 @@ export const HARNESSES = {
     buildCommand: (input) => buildKimiCodeCommand({ model: input.model, resume: input.resume }),
     hooked: false,
     promptAsCliArg: false,
-    validForLoop: true,
     validForWorkflow: false,
   },
   zai: PROVIDER_FLAVOR_SPEC,
@@ -422,12 +410,9 @@ export const HARNESSES = {
 
 export type ShellType = keyof typeof HARNESSES;
 
-type KeysWhere<F extends 'validForLoop' | 'validForWorkflow' | 'hooked'> = {
+type KeysWhere<F extends 'validForWorkflow' | 'hooked'> = {
   [K in ShellType]: (typeof HARNESSES)[K][F] extends true ? K : never;
 }[ShellType];
-
-/** Harnesses accepted for Loops — derived, so drift is a compile error. */
-export type LoopHarness = KeysWhere<'validForLoop'>;
 
 /** Harnesses accepted as workflow child shells — derived, so drift is a compile error. */
 export type WorkflowShell = KeysWhere<'validForWorkflow'>;
@@ -435,10 +420,6 @@ export type WorkflowShell = KeysWhere<'validForWorkflow'>;
 // ---- Derived runtime lists / predicates ----
 
 export const SHELL_TYPES = Object.keys(HARNESSES) as readonly ShellType[];
-
-export const LOOP_HARNESS_TYPES = SHELL_TYPES.filter(
-  (type) => HARNESSES[type].validForLoop,
-) as readonly LoopHarness[];
 
 export const WORKFLOW_SHELLS = SHELL_TYPES.filter(
   (type) => HARNESSES[type].validForWorkflow,
@@ -451,10 +432,6 @@ export const HOOKED_SHELL_TYPES: ReadonlySet<string> = new Set(
 
 export function isShellType(value: unknown): value is ShellType {
   return typeof value === 'string' && Object.prototype.hasOwnProperty.call(HARNESSES, value);
-}
-
-export function isLoopHarness(value: unknown): value is LoopHarness {
-  return isShellType(value) && HARNESSES[value].validForLoop;
 }
 
 /**

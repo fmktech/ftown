@@ -90,8 +90,10 @@ Both builders MUST emit byte-identical output for the same inputs.
 - `ui/src/components/SessionList.tsx` — extend the shellType badge ternary/switch
   to render a `grok` badge (pick a distinct color consistent with the existing
   per-agent styling).
-- `ui/src/components/LoopFormModal.tsx` — add `grok` to the loop-harness picker
-  so scheduled loops can run grok.
+- **Superseded historical requirement:** add `grok` to the loop-harness picker
+  in the former `ui/src/components/LoopFormModal.tsx`. The modal and recurring-loop
+  feature were retired in bridge 0.19.38; this bullet records the original intent
+  and no longer directs implementation. See [retirement notes](../automation-sunset.md).
 
 ## Definition of done (gates)
 - Bridge: `npx tsc -p bridge/tsconfig.json --noEmit` (or the bridge build script)

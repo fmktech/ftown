@@ -61,7 +61,7 @@ browser's saved credential; use `revoke` to invalidate it on the bridge too.
 ## Outages and restarts
 
 While the local bridge runs, the local dashboard supports creating, removing,
-renaming, stopping, and retrying sessions, managing loops, and using terminals
+renaming, stopping, and retrying sessions, and using terminals
 without Fly. The cloud dashboard's **This computer** link switches to this local
 route. It does not automatically replay a cloud command whose delivery is
 uncertain, or switch the dashboard back to cloud mode.

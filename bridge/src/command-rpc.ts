@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 
 import { toWireSession } from './session-wire.js';
 import { WorkingDirMissingError } from './create-ftown-session.js';
-import type { LoopController } from './loop-controller.js';
+import { AUTOMATION_REMOVED_CODE, AUTOMATION_REMOVED_MESSAGE, AutomationRemovedError, RETIRED_AUTOMATION_COMMANDS } from './retired-automation.js';
 import type { SessionController } from './session-controller.js';
 
 import type {
@@ -15,16 +15,11 @@ import type {
   Command,
   CommandResponse,
   CreateSessionPayload,
-  CreateLoopPayload,
-  DeleteLoopPayload,
   GetHistoryPayload,
-  GetLoopRunsPayload,
   GetSessionUsagePayload,
   GetSessionsUsagePayload,
   RemoveSessionPayload,
   RenameSessionPayload,
-  RunLoopNowPayload,
-  UpdateLoopPayload,
   UpdateSessionParentPayload,
   StopSessionPayload,
 } from './types.js';
@@ -54,17 +49,16 @@ export interface CommandRpcDeps {
   bridgeId: string;
   relayRequest?: (id: string, payload: Record<string, unknown>) => Promise<unknown>;
   sessionController: SessionController;
-  loopController: LoopController;
   publishCommandResponse: (response: CommandResponse) => Promise<void>;
 }
 
 /**
  * Centrifugo commands:rpc adapter: a thin wire-marshaling switch around the
- * transport-agnostic session/loop controllers. Commands addressed to another
+ * transport-agnostic session controller. Commands addressed to another
  * bridge (payload.bridgeId mismatch) are ignored without a response.
  */
 export function createCommandHandler(deps: CommandRpcDeps): (command: Command) => Promise<void> {
-  const { bridgeId, sessionController, loopController } = deps;
+  const { bridgeId, sessionController } = deps;
 
   return async function handleCommand(command: Command): Promise<void> {
     console.log(`[Bridge] Received command: ${command.type} (requestId: ${command.requestId})`);
@@ -77,6 +71,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command) =
     let response: CommandResponse;
 
     try {
+      if (RETIRED_AUTOMATION_COMMANDS.has(command.type)) throw new AutomationRemovedError();
       switch (command.type) {
         case 'mcp_request': {
           if (payloadBridgeId !== bridgeId || !deps.relayRequest) throw new Error('MCP relay unavailable or missing target');
@@ -153,7 +148,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command) =
           const result = await sessionController.retry(payload.sessionId);
           response = result.ok
             ? { requestId: command.requestId, success: true, data: { session: toWireSession(result.session) } }
-            : { requestId: command.requestId, success: false, error: result.message };
+            : { requestId: command.requestId, success: false, error: result.message, ...(result.code === AUTOMATION_REMOVED_CODE ? { data: { code: AUTOMATION_REMOVED_CODE } } : {}) };
           break;
         }
 
@@ -288,71 +283,6 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command) =
           break;
         }
 
-        case 'create_loop': {
-          const payload = command.payload as CreateLoopPayload;
-          // bridgeId is forced to THIS bridge inside the controller (the routing
-          // guard already proved payload.bridgeId === bridgeId), so a loop is
-          // always owned by its runner.
-          const result = await loopController.create(payload);
-          response = result.ok
-            ? { requestId: command.requestId, success: true, data: { loop: result.loop } }
-            : { requestId: command.requestId, success: false, error: result.message };
-          break;
-        }
-
-        case 'list_loops': {
-          response = { requestId: command.requestId, success: true, data: { loops: loopController.list() } };
-          break;
-        }
-
-        case 'update_loop': {
-          const payload = command.payload as UpdateLoopPayload;
-          if (!payload.loopId) {
-            response = { requestId: command.requestId, success: false, error: 'Missing loopId' };
-            break;
-          }
-          const result = await loopController.update(payload.loopId, payload.patch);
-          response = result.ok
-            ? { requestId: command.requestId, success: true, data: { loop: result.loop } }
-            : { requestId: command.requestId, success: false, error: result.message };
-          break;
-        }
-
-        case 'delete_loop': {
-          const payload = command.payload as DeleteLoopPayload;
-          if (!payload.loopId) {
-            response = { requestId: command.requestId, success: false, error: 'Missing loopId' };
-            break;
-          }
-          const { removed } = await loopController.delete(payload.loopId);
-          response = { requestId: command.requestId, success: true, data: { removed } };
-          break;
-        }
-
-        case 'run_loop_now': {
-          const payload = command.payload as RunLoopNowPayload;
-          if (!payload.loopId) {
-            response = { requestId: command.requestId, success: false, error: 'Missing loopId' };
-            break;
-          }
-          const outcome = await loopController.runNow(payload.loopId);
-          response = outcome.fired
-            ? { requestId: command.requestId, success: true, data: { fired: true } }
-            : { requestId: command.requestId, success: true, data: { fired: false, reason: outcome.reason } };
-          break;
-        }
-
-        case 'get_loop_runs': {
-          const payload = command.payload as GetLoopRunsPayload;
-          if (!payload.loopId) {
-            response = { requestId: command.requestId, success: false, error: 'Missing loopId' };
-            break;
-          }
-          const runs = await loopController.runs(payload.loopId);
-          response = { requestId: command.requestId, success: true, data: { runs } };
-          break;
-        }
-
         default: {
           response = {
             requestId: command.requestId,
@@ -363,7 +293,9 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command) =
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
-      response = err instanceof WorkingDirMissingError
+      response = err instanceof AutomationRemovedError
+        ? { requestId: command.requestId, success: false, error: AUTOMATION_REMOVED_MESSAGE, data: { code: AUTOMATION_REMOVED_CODE } }
+        : err instanceof WorkingDirMissingError
         ? {
             requestId: command.requestId,
             success: false,

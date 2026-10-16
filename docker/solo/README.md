@@ -28,6 +28,12 @@ trailing argument on `docker run`.
 
 ## Build & run
 
+This image pins `ftown-bridge@0.19.38`, which removes factory and recurring
+interval/cron automation. Publish that retirement release to npm before building
+the image; the source change alone does not publish it, and builds cannot resolve
+the new pin until it is available. Do not substitute an older bridge version.
+See the [retirement and rollback notes](../../docs/automation-sunset.md).
+
 ```bash
 cd docker/solo
 docker compose up -d --build
@@ -71,7 +77,7 @@ from the same machine) and the key from the banner.
 ## Persistence
 
 - `/data` — session/event data (`--data-dir`), backed by the `ftown-solo-data` volume.
-- `/home/ftown/.ftown` — `loops.json`, `bridge.json`, the access-key hash, hub
+- `/home/ftown/.ftown` — `bridge.json`, the access-key hash, hub
   secret, and the downloaded Centrifugo hub binary + panel bundle cache,
   backed by the `ftown-solo-home` volume. Losing this volume loses the access
   key (a new one is generated) and forces a re-download of the hub/panel on

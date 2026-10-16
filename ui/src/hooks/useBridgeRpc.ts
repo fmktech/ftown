@@ -53,7 +53,7 @@ export interface CentrifugoClientLike {
  *   (success or failure alike) and rejects with "<type> timed out" after 30s.
  * - `sendCommandCollect` is the broadcast variant: it accumulates EVERY
  *   response for the requestId until `windowMs` closes (default 1500ms), so a
- *   fan-out command with no bridgeId (e.g. list_loops) merges replies from all
+ *   fan-out command with no bridgeId (e.g. list_sessions) merges replies from all
  *   connected bridges instead of only the first responder.
  * - `bridgeExec` is the shell-exec convenience wrapper with its own
  *   requestId, resolving the response data on success.
@@ -177,7 +177,7 @@ export interface BridgeRpc {
 /**
  * Owns the shared `commands:rpc#{userId}` channel: requestId correlation,
  * the 30s timeout pattern, and broadcast-collect — the bridge-RPC transport
- * that sessions, loops, and factory consume as peers. Exactly one instance
+ * used by session management. Exactly one instance
  * should exist per Dashboard; other hooks receive the returned object instead
  * of opening a second subscription to the same channel (centrifuge-js throws
  * on a duplicate newSubscription(channel) call).

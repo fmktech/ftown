@@ -10,7 +10,7 @@ production EC2 host.
 
 The problem this solves: the live server config drifted from the repo. Newer
 namespaces existed in the repo but were **missing on the server**
-(`loops`, `events`, `commands`, `bridges`), silently breaking features. From now
+(`events`, `commands`, `bridges`), silently breaking features. From now
 on the repo is the single source of truth and CI re-applies it on every merge to
 `main` that touches the config, so drift can never silently accumulate again.
 **The first run fixes the current drift.**
@@ -143,7 +143,9 @@ names). To do the first deploy — which fixes the current namespace drift:
 Watch the run: `render OK` → `checkconfig` passes → the remote script logs the
 detected layout, the backup path, the restart, and `deploy OK`. After it
 completes, the server has the full namespace set (`terminal`, `sessions`,
-`loops`, `terminal-input`, `events`, `commands`, `bridges`).
+`terminal-input`, `events`, `commands`, `bridges`).
+The former `loops` namespace was removed with bridge 0.19.38; see the
+[retirement notes](automation-sunset.md) before reverting configuration or bridges.
 
 ---
 

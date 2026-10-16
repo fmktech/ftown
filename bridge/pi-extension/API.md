@@ -8,7 +8,6 @@ The bundled Pi extension exposes ftown's authenticated local bridge API as a sma
 | --- | --- | --- | --- |
 | Session | Opaque UUID, or a unique exact name for lookup | Optional parent session; owns inbox, usage, screen, and log | Create, inspect, rename, reparent, stop, remove, revive |
 | Mail message | Assigned by the session inbox | Sent from one session to another; optional thread | Send, peek/read, delivered |
-| Loop | Opaque ID, or a unique exact name for lookup | Owns loop runs | Create, inspect, update, run, delete |
 
 All tools talk only to the local bridge selected by `FTOWN_HOOK_PORT` or `~/.ftown/bridge.json`. The extension supplies that bridge's bearer token and never sends credentials to the model.
 
@@ -31,15 +30,8 @@ All tools talk only to the local bridge selected by `FTOWN_HOOK_PORT` or `~/.fto
 | `ftown_session_manage` | `reparent` | `target`, `parent` | Updated session | Yes |
 | `ftown_session_manage` | `remove` | `target` | Removal acknowledgement | Yes |
 | `ftown_session_manage` | `revive` | `target` | Recreated session and resume state | Yes |
-| `ftown_loops` | `list` | None | `{ loops }` | No |
-| `ftown_loops` | `get` | `target` | `{ loop }` | No |
-| `ftown_loops` | `create` | `name`, `task`, `schedule` | `{ loop }` | Yes |
-| `ftown_loops` | `update` | `target` and changed fields | `{ loop }` | Yes |
-| `ftown_loops` | `delete` | `target` | Removal acknowledgement | Yes |
-| `ftown_loops` | `runs` | `target` | Loop run history | No |
-| `ftown_loops` | `run_now` | `target` | Requested loop run | Yes |
 
-`target` accepts an opaque ID or a unique exact name. Mail additionally accepts `parent`. Reparenting with `parent: null` clears the parent. Session and loop creation intentionally accept structured fields only; arbitrary session commands, environment variables, and loop preflight/postflight shell commands are not part of the model-facing contract.
+`target` accepts an opaque ID or a unique exact name. Mail additionally accepts `parent`. Reparenting with `parent: null` clears the parent. Session creation intentionally accepts structured fields only; arbitrary session commands and environment variables are not part of the model-facing contract.
 
 The extension also registers `/ftown-mail read [--peek]`, `/ftown-mail send <session> <message>`, and `/ftown-sessions` for interactive use.
 
@@ -57,11 +49,11 @@ into the terminal.
 
 The local bridge bearer token authorizes access to the current ftown user's bridge resources. Session name resolution is performed against that same authenticated bridge. The model can inspect a terminal screen or search its captured log, but it cannot inject raw terminal keystrokes, resize terminals, clear terminal history, or call hook/conversation-resolution internals through these tools.
 
-Mutation executions are deduplicated in the running extension by `(tool name, Pi tool-call ID)`, including concurrent retries. Failed attempts are not cached. This prevents a retried model tool call from duplicating mail, sessions, management actions, or loop runs; it is not a durable idempotency key across Pi process restarts.
+Mutation executions are deduplicated in the running extension by `(tool name, Pi tool-call ID)`, including concurrent retries. Failed attempts are not cached. This prevents a retried model tool call from duplicating mail, sessions, or management actions; it is not a durable idempotency key across Pi process restarts.
 
 ## Pagination and errors
 
-Inbox reads accept `limit` from 1 to 100. Screen and log operations accept zero-based `offset`; screen `limit` is 1 to 1,000, log `limit` is 1 to 1,000, and grep context is 0 to 10 lines. Session and loop collection endpoints currently return the bridge's complete local collection and inherit its unpaginated behavior.
+Inbox reads accept `limit` from 1 to 100. Screen and log operations accept zero-based `offset`; screen `limit` is 1 to 1,000, log `limit` is 1 to 1,000, and grep context is 0 to 10 lines. Session collection endpoints currently return the bridge's complete local collection and inherit its unpaginated behavior.
 
 Transport failures, missing/ambiguous names, unavailable parent context, validation failures, and bridge `{ "error": string }` responses become Pi tool errors. No response body, token, stack trace, or upstream URL is exposed to the model.
 
@@ -71,4 +63,4 @@ The tool schemas ship with `ftown-bridge` and follow its semantic version. Addin
 
 ## Consumer walkthrough
 
-An agent can call `ftown_sessions.list`, use the returned session ID with `ftown_sessions.get` or `usage`, and then send context with `ftown_mail.send`. To delegate, it can create a child with `ftown_session_create`, retain the returned ID, inspect its output, and later rename, reparent, stop, remove, or revive it. For scheduled work, it can create or update a structured loop, request `run_now`, then inspect `runs` without leaving Pi.
+An agent can call `ftown_sessions.list`, use the returned session ID with `ftown_sessions.get` or `usage`, and then send context with `ftown_mail.send`. To delegate, it can create a child with `ftown_session_create`, retain the returned ID, inspect its output, and later rename, reparent, stop, remove, or revive it.

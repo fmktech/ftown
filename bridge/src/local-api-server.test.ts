@@ -1,3 +1,4 @@
+import { request as httpRequest } from 'node:http';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
@@ -12,13 +13,11 @@ import {
   providerAuthMissingResponse,
   workingDirMissingResponse,
 } from './local-api-server.js';
-import { deleteLoop, getLoop, listLoops, mutateLoopRuntime } from './loop-store.js';
-import { upsertLoopRunRecord } from './loop-run-store.js';
 import { SessionStore } from './session-store.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { CreateFtownSessionDeps } from './create-ftown-session.js';
 import type { ProcessRunner } from './claude-runner.js';
-import type { Loop, LoopRunRecord, Session } from './types.js';
+import type { Session } from './types.js';
 
 async function api(
   port: number,
@@ -250,299 +249,6 @@ describe('LocalApiServer session parent route', () => {
   });
 });
 
-describe('LocalApiServer loop routes', () => {
-  it('creates, lists, runs, pauses, and deletes bridge-owned loops', async () => {
-    const realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
-    const home = mkdtempSync(join(tmpdir(), 'ftw-loop-api-'));
-    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
-
-    const server = new LocalApiServer();
-    const token = 'test-token';
-    const published: Loop[] = [];
-    const removed: string[] = [];
-    const deleted: Loop[] = [];
-    let kicks = 0;
-
-    const store = new SessionStore(join(home, 'data'));
-    const runner = { isRunning: () => false } as unknown as ProcessRunner;
-    const centrifugo = {
-      publishLoopUpdate: async (_userId: string, loop: Loop) => {
-        published.push(loop);
-      },
-      publishLoopRemoved: async (_userId: string, loopId: string) => {
-        removed.push(loopId);
-      },
-    } as unknown as CentrifugoClient;
-
-    server.setAuthToken(token);
-    server.setDependencies(store, runner, centrifugo, 'user-1');
-    server.setLoopApi({
-      bridgeId: 'bridge-1',
-      scheduler: {
-        kick: () => {
-          kicks += 1;
-        },
-        onLoopDeleted: (loop) => {
-          deleted.push(loop);
-        },
-      },
-    });
-
-    const port = await server.start();
-    try {
-      const create = await api(port, token, 'POST', '/api/loops', {
-        name: 'nightly',
-        schedule: { kind: 'interval', everyMs: 60_000 },
-        harness: 'codex',
-        task: 'run checks',
-        enabled: true,
-        overlapPolicy: 'skip',
-        retention: { autoClearAfterRuns: 3 },
-      });
-      assert.strictEqual(create.status, 201);
-      const loop = create.data.loop as Loop;
-      assert.strictEqual(loop.bridgeId, 'bridge-1');
-      assert.strictEqual(loop.harness, 'codex');
-      assert.strictEqual(published.length, 1);
-
-      const list = await api(port, token, 'GET', '/api/loops');
-      assert.strictEqual(list.status, 200);
-      assert.strictEqual((list.data.loops as Loop[]).length, 1);
-
-      const runNow = await api(port, token, 'POST', `/api/loops/${loop.id}/run-now`);
-      assert.strictEqual(runNow.status, 200);
-      assert.strictEqual(runNow.data.fired, true);
-      assert.strictEqual(kicks, 1);
-
-      const runSession: Session = {
-        id: 'run-1',
-        name: 'nightly run',
-        command: 'codex',
-        status: 'completed',
-        bridgeId: 'bridge-1',
-        createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:05.000Z',
-        loopId: loop.id,
-        shellType: 'codex',
-        prompt: 'run checks',
-      };
-      await store.saveSession(runSession);
-      await store.appendTerminalData(runSession.id, 'persisted output');
-      const runs = await api(port, token, 'GET', `/api/loops/${loop.id}/runs`);
-      assert.strictEqual(runs.status, 200);
-      const records = runs.data.runs as LoopRunRecord[];
-      assert.strictEqual(records.length, 1);
-      assert.strictEqual(records[0].sessionId, 'run-1');
-      assert.strictEqual(records[0].status, 'ok');
-      assert.strictEqual(records[0].logTail, 'persisted output');
-      await store.deleteSession(runSession.id);
-      upsertLoopRunRecord({
-        id: 'run-1',
-        loopId: loop.id,
-        bridgeId: 'bridge-1',
-        sessionId: 'run-1',
-        name: 'nightly run',
-        status: 'ok',
-        startedAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:05.000Z',
-        finishedAt: '2026-01-01T00:00:05.000Z',
-        durationMs: 5000,
-        logTail: 'durable record output',
-        logBytes: 21,
-        logTruncated: false,
-      });
-      const durableRuns = await api(port, token, 'GET', `/api/loops/${loop.id}/runs`);
-      assert.strictEqual(durableRuns.status, 200);
-      const durableRecords = durableRuns.data.runs as LoopRunRecord[];
-      assert.strictEqual(durableRecords.length, 1);
-      assert.strictEqual(durableRecords[0].logTail, 'durable record output');
-
-      const pause = await api(port, token, 'PATCH', `/api/loops/${loop.id}`, { enabled: false });
-      assert.strictEqual(pause.status, 200);
-      assert.strictEqual((pause.data.loop as Loop).enabled, false);
-
-      const del = await api(port, token, 'DELETE', `/api/loops/${loop.id}`);
-      assert.strictEqual(del.status, 200);
-      assert.strictEqual(del.data.removed, true);
-      assert.deepStrictEqual(removed, [loop.id]);
-      assert.strictEqual(deleted[0].id, loop.id);
-    } finally {
-      server.stop();
-      if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
-      else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-});
-
-/** Shared harness for the run-now/group tests below: a real LocalApiServer
- * backed by a throwaway ~/.ftown, with recording centrifugo/scheduler stubs. */
-function setupLoopApiServer() {
-  const realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
-  const home = mkdtempSync(join(tmpdir(), 'ftw-loop-api-'));
-  process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
-
-  const server = new LocalApiServer();
-  const token = 'test-token';
-  const published: Loop[] = [];
-  let kicks = 0;
-
-  const store = new SessionStore(join(home, 'data'));
-  const runner = { isRunning: () => false } as unknown as ProcessRunner;
-  const centrifugo = {
-    publishLoopUpdate: async (_userId: string, loop: Loop) => {
-      published.push(loop);
-    },
-    publishLoopRemoved: async () => {},
-  } as unknown as CentrifugoClient;
-
-  server.setAuthToken(token);
-  server.setDependencies(store, runner, centrifugo, 'user-1');
-  server.setLoopApi({
-    bridgeId: 'bridge-1',
-    scheduler: {
-      kick: () => {
-        kicks += 1;
-      },
-      onLoopDeleted: () => {},
-    },
-  });
-
-  return {
-    server,
-    token,
-    published,
-    kicks: () => kicks,
-    async cleanup() {
-      server.stop();
-      if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
-      else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
-      rmSync(home, { recursive: true, force: true });
-    },
-  };
-}
-
-describe('LocalApiServer run-now — deleted loop is never resurrected', () => {
-  it('run-now on an id that no longer exists returns not_found and writes/publishes nothing', async () => {
-    const h = setupLoopApiServer();
-    try {
-      const port = await h.server.start();
-      const create = await api(port, h.token, 'POST', '/api/loops', {
-        name: 'nightly',
-        schedule: { kind: 'interval', everyMs: 60_000 },
-        harness: 'codex',
-        task: 'run checks',
-        enabled: true,
-        overlapPolicy: 'skip',
-        retention: { autoClearAfterRuns: 3 },
-      });
-      const loop = create.data.loop as Loop;
-      h.published.length = 0;
-
-      deleteLoop(loop.id); // simulates a delete_loop that lands first
-
-      const runNow = await api(port, h.token, 'POST', `/api/loops/${loop.id}/run-now`);
-      assert.strictEqual(runNow.status, 404);
-      assert.strictEqual(runNow.data.fired, false);
-      assert.strictEqual(runNow.data.reason, 'not_found');
-      assert.strictEqual(getLoop(loop.id), undefined, 'loop stays deleted, not resurrected');
-      assert.deepStrictEqual(listLoops(), []);
-      assert.strictEqual(h.published.length, 0, 'no loop_update publish for a deleted loop');
-      assert.strictEqual(h.kicks(), 0);
-    } finally {
-      await h.cleanup();
-    }
-  });
-
-  it('mutateLoopRuntime (the primitive the run-now handlers use) leaves loops.json untouched when the loop is deleted before the write lands', async () => {
-    const h = setupLoopApiServer();
-    try {
-      const port = await h.server.start();
-      const create = await api(port, h.token, 'POST', '/api/loops', {
-        name: 'nightly',
-        schedule: { kind: 'interval', everyMs: 60_000 },
-        harness: 'codex',
-        task: 'run checks',
-        enabled: true,
-        overlapPolicy: 'skip',
-        retention: { autoClearAfterRuns: 3 },
-      });
-      const loop = create.data.loop as Loop;
-
-      // Mirrors exactly what the fixed run-now handlers do: getLoop() to
-      // decide overlap, then write the manual-fire flag via
-      // mutateLoopRuntime — but here the loop is deleted in between.
-      assert.ok(getLoop(loop.id), 'precondition: loop exists before the race');
-      deleteLoop(loop.id); // a concurrent delete_loop wins the race
-      const result = mutateLoopRuntime(loop.id, (l) => {
-        l.runNowRequested = true;
-        l.updatedAt = new Date().toISOString();
-      });
-
-      assert.strictEqual(result, null, 'the write is skipped, not resurrected');
-      assert.deepStrictEqual(listLoops(), []);
-    } finally {
-      await h.cleanup();
-    }
-  });
-});
-
-describe('LocalApiServer loop group field', () => {
-  it('trims group on create and clears it on an empty-string PATCH', async () => {
-    const h = setupLoopApiServer();
-    try {
-      const port = await h.server.start();
-      const create = await api(port, h.token, 'POST', '/api/loops', {
-        name: 'nightly',
-        schedule: { kind: 'interval', everyMs: 60_000 },
-        harness: 'codex',
-        task: 'run checks',
-        enabled: true,
-        overlapPolicy: 'skip',
-        retention: { autoClearAfterRuns: 3 },
-        group: '  infra  ',
-      });
-      assert.strictEqual(create.status, 201);
-      const loop = create.data.loop as Loop;
-      assert.strictEqual(loop.group, 'infra');
-
-      const list = await api(port, h.token, 'GET', '/api/loops');
-      assert.strictEqual((list.data.loops as Loop[])[0].group, 'infra');
-
-      const renamed = await api(port, h.token, 'PATCH', `/api/loops/${loop.id}`, { group: '  ops  ' });
-      assert.strictEqual((renamed.data.loop as Loop).group, 'ops');
-
-      const cleared = await api(port, h.token, 'PATCH', `/api/loops/${loop.id}`, { group: '' });
-      assert.strictEqual(cleared.status, 200);
-      assert.strictEqual((cleared.data.loop as Loop).group, undefined);
-      assert.strictEqual(getLoop(loop.id)!.group, undefined);
-    } finally {
-      await h.cleanup();
-    }
-  });
-
-  it('a blank/whitespace-only group on create is stored as absent', async () => {
-    const h = setupLoopApiServer();
-    try {
-      const port = await h.server.start();
-      const create = await api(port, h.token, 'POST', '/api/loops', {
-        name: 'nightly',
-        schedule: { kind: 'interval', everyMs: 60_000 },
-        harness: 'codex',
-        task: 'run checks',
-        enabled: true,
-        overlapPolicy: 'skip',
-        retention: { autoClearAfterRuns: 3 },
-        group: '   ',
-      });
-      assert.strictEqual((create.data.loop as Loop).group, undefined);
-    } finally {
-      await h.cleanup();
-    }
-  });
-});
-
-
 describe('LocalApiServer durable attention ingress', () => {
   it('persists before hook success/publication and rejects workspace/unknown attribution', async () => {
     const home = mkdtempSync(join(tmpdir(), 'ftw-attention-api-'));
@@ -605,5 +311,65 @@ describe('LocalApiServer durable attention ingress', () => {
       assert.equal(response.status, 500); assert.equal(published, false);
       assert.equal(response.data.code, 'attention_storage_error');
     } finally { server.getHttpServer()?.closeAllConnections(); server.stop(); rmSync(home, { recursive: true, force: true }); }
+  });
+});
+
+// Run by the main assistant with the other listener-backed tests.
+describe('retired automation HTTP compatibility', () => {
+  it('authenticates first and rejects every legacy subtree method before readiness, body parsing or storage', async () => {
+    const server = new LocalApiServer();
+    server.setAuthToken('retirement-token');
+    const port = await server.start();
+    try {
+      assert.equal((await api(port, 'wrong', 'GET', '/api/loops')).status, 401);
+      const hostileHostStatus = await new Promise<number | undefined>((resolve, reject) => {
+        const request = httpRequest({ hostname: '127.0.0.1', port, path: '/api/loops',
+          headers: { Host: `foreign.example:${port}`, Authorization: 'Bearer retirement-token' } },
+        (response) => { response.resume(); resolve(response.statusCode); });
+        request.on('error', reject); request.end();
+      });
+      assert.equal(hostileHostStatus, 421);
+      for (const path of ['/api/loops', '/api/loops/', '/api/loops/id', '/api/loops/id/run-now', '/api/loops/id/runs', '/api/loops/unknown/nested']) {
+        for (const method of ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS']) {
+          const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+            method, headers: { Authorization: 'Bearer retirement-token', 'Content-Type': 'application/json' },
+            ...(method === 'POST' || method === 'PATCH' ? { body: '{malformed' } : {}),
+          });
+          assert.equal(response.status, 410, `${method} ${path}`);
+          assert.deepEqual(await response.json(), { code: 'automation_removed',
+            error: 'Recurring loops and factory automation have been removed' });
+        }
+      }
+      assert.equal((await api(port, 'retirement-token', 'GET', '/api/loops-other')).status, 503);
+    } finally { server.stop(); }
+  });
+
+  it('preserves history and archive provenance while rejecting retry and revive', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ftw-retired-api-'));
+    const server = new LocalApiServer();
+    const store = new SessionStore(join(home, 'data'));
+    const record = { id: 'old-run', name: 'run', command: 'dispatch', status: 'error', bridgeId: 'bridge',
+      loopId: 'old-loop', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' } as Session;
+    await store.saveSession(record); await store.appendTerminalData(record.id, 'preserved output');
+    await store.archiveSession(record);
+    const archiveBefore = readFileSync(join(home, 'data', 'archive.jsonl'), 'utf8');
+    const runner = { run: () => { throw new Error('must not launch'); }, stop: () => false } as unknown as ProcessRunner;
+    const centrifugo = { publishSessionUpdate: async () => {} } as unknown as CentrifugoClient;
+    server.setAuthToken('token'); server.setDependencies(store, runner, centrifugo, 'user');
+    server.setSessionFactory({ store, runner, centrifugo, userId: 'user', bridgeId: 'bridge',
+      hookPort: 0, hookToken: 'token', notifyScriptPath: '', wireTerminalInput: () => {} });
+    const port = await server.start();
+    try {
+      for (const action of ['retry', 'revive']) {
+        const response = await api(port, 'token', 'POST', `/api/sessions/old-run/${action}`);
+        assert.equal(response.status, 410);
+        assert.equal(response.data.code, 'automation_removed');
+      }
+      const history = await api(port, 'token', 'GET', '/api/sessions/old-run');
+      assert.equal((history.data.session as Session).loopId, 'old-loop');
+      assert.equal(await store.loadTerminalLog(record.id), 'preserved output');
+      assert.equal(readFileSync(join(home, 'data', 'archive.jsonl'), 'utf8'), archiveBefore);
+      assert.deepEqual(await store.loadSession(record.id), record);
+    } finally { server.stop(); rmSync(home, { recursive: true, force: true }); }
   });
 });

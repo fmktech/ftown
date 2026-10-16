@@ -1,8 +1,8 @@
 // Derived from the harness registry (single source of truth for supported
 // harnesses); re-exported here so existing `from './types.js'` imports keep working.
 // Type-only, so this adds no runtime dependency on harness-registry.js.
-export type { LoopHarness, ShellType } from './harness-registry.js';
-import type { LoopHarness, ShellType } from './harness-registry.js';
+export type { ShellType } from './harness-registry.js';
+import type { ShellType } from './harness-registry.js';
 
 export type SessionRuntime = 'tmux' | 'direct';
 
@@ -51,7 +51,7 @@ export interface Session {
   parentSessionId?: string;
   runtime?: SessionRuntime;
   errorReason?: string;
-  loopId?: string; // set on loop-run sessions; groups the run under its Loop in the UI
+  loopId?: string; // Historical provenance only; retired automation can never be relaunched
   usage?: SessionUsage;
 }
 
@@ -60,93 +60,6 @@ export type SessionStatus = 'pending' | 'running' | 'completed' | 'error';
 /** Tombstone written to <dataDir>/archive.jsonl when a session is removed. */
 export interface ArchivedSession extends Session {
   removedAt: string;
-}
-
-export type LoopRunStatus = 'ok' | 'error' | 'running' | 'skipped';
-
-export type LoopSchedule =
-  | { kind: 'interval'; everyMs: number }
-  | { kind: 'cron'; expression: string; tz?: string };
-
-export interface LoopFlight {
-  command: string;
-  timeoutMs?: number;
-}
-
-export interface LoopPostflight {
-  command: string;
-  timeoutMs?: number;
-  /** Run postflight even when the fire was preflight-skipped. Default false. */
-  runOnSkip?: boolean;
-}
-
-export interface LoopRetention {
-  /** Keep newest N run-sessions; prune older ones. null = keep all. Default 10. */
-  autoClearAfterRuns: number | null;
-}
-
-/** Client-authored fields (create/edit form). */
-export interface LoopDraft {
-  name: string;
-  bridgeId: string;                 // REQUIRED: which bridge owns/runs this loop
-  schedule: LoopSchedule;
-  harness: LoopHarness;
-  workdir?: string;
-  task: string;                     // prompt run each fire; may contain "{{preflight}}"
-  model?: string;
-  enabled: boolean;
-  overlapPolicy: 'skip' | 'allow';  // default 'skip'
-  retention: LoopRetention;
-  preflight?: LoopFlight;
-  postflight?: LoopPostflight;
-  /** Optional deterministic backstop: force-stop + mark 'error' if a flight runs longer. */
-  maxRuntimeMs?: number;
-  /** Optional free-text label the UI uses to fold loops into groups. Trimmed on
-   * write; blank/whitespace-only is normalized to absent (undefined). */
-  group?: string;
-}
-
-/** Full server-authoritative record (LoopDraft + runtime state). */
-export interface Loop extends LoopDraft {
-  id: string;
-  createdAt: string;                // ISO
-  updatedAt: string;                // ISO
-  lastRunAt?: string;               // ISO — fire time of the most recent flight
-  nextRunAt?: string;               // ISO — authoritative, computed on the bridge
-  lastStatus?: LoopRunStatus;
-  lastSessionId?: string;           // id of the most recent run-Session
-  runCount: number;                 // real AI/flight runs spawned
-  skipCount: number;                // preflight-abort skips
-  lastSkipAt?: string;              // ISO — fire time of the most recent preflight skip
-  lastSkipReason?: string;          // preflight exit code + trimmed stderr/stdout, capped at 512 chars
-  /** Transient manual-fire flag; set by run_loop_now, cleared on the next tick. */
-  runNowRequested?: boolean;
-}
-
-/** Legacy shape: older bridges exposed loop runs as sessions tagged with loopId. */
-export type LoopRun = Session & { loopId: string };
-
-export interface LoopRunRecord {
-  /** Stable UI id. For spawned runs this is the session id; skipped runs mint their own id. */
-  id: string;
-  loopId: string;
-  bridgeId: string;
-  sessionId?: string;
-  name: string;
-  status: LoopRunStatus;
-  startedAt: string;
-  updatedAt: string;
-  finishedAt?: string;
-  durationMs?: number;
-  harness?: LoopHarness;
-  workdir?: string;
-  task?: string;
-  model?: string;
-  sessionStatus?: SessionStatus;
-  errorReason?: string;
-  logTail?: string;
-  logBytes?: number;
-  logTruncated?: boolean;
 }
 
 /** Inter-agent mail stored in <dataDir>/sessions/<id>/inbox.jsonl. */
@@ -180,7 +93,7 @@ export interface Command {
   requestId: string;
 }
 
-export type CommandType = 'mcp_request' | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'clear_terminal' | 'update_session_parent' | 'get_session_usage' | 'get_sessions_usage' | 'create_loop' | 'list_loops' | 'update_loop' | 'delete_loop' | 'run_loop_now' | 'get_loop_runs';
+export type CommandType = 'mcp_request' | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'clear_terminal' | 'update_session_parent' | 'get_session_usage' | 'get_sessions_usage';
 
 export interface CreateSessionPayload {
   command: string;
@@ -252,14 +165,7 @@ export interface GetSessionsUsagePayload {
   bridgeId?: string;
 }
 
-export interface CreateLoopPayload extends LoopDraft { bridgeId: string }
-export interface ListLoopsPayload { bridgeId?: string }
-export interface UpdateLoopPayload { bridgeId: string; loopId: string; patch: Partial<LoopDraft> }
-export interface DeleteLoopPayload { bridgeId: string; loopId: string }
-export interface RunLoopNowPayload { bridgeId: string; loopId: string }
-export interface GetLoopRunsPayload { bridgeId?: string; loopId: string }
-
-export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | ClearTerminalPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | CreateLoopPayload | ListLoopsPayload | UpdateLoopPayload | DeleteLoopPayload | RunLoopNowPayload | GetLoopRunsPayload | Record<string, unknown>;
+export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | ClearTerminalPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>;
 
 export interface CommandResponse {
   requestId: string;

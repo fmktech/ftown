@@ -286,7 +286,7 @@ export async function ensureHubBinary(opts: EnsureHubBinaryOptions): Promise<str
  * `namespaces: HUB_NAMESPACES` is the production namespace table (contract-
  * frozen, drift-guarded in hub-manager.test.ts against centrifugo/config.json)
  * — WITHOUT it every namespaced channel (bridges:presence#solo, commands:rpc
- * #solo, loops:updates#solo, sessions:*, terminal:*, terminal-input:*,
+ * #solo, sessions:*, terminal:*, terminal-input:*,
  * events:*) is rejected by Centrifugo with code 102 "unknown channel", which
  * is why the panel could never see the bridge or create sessions in solo
  * mode. `allow_user_limited_channels: true` is required alongside it because

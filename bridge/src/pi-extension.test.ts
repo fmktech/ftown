@@ -31,7 +31,6 @@ describe('ftown Pi extension', () => {
       'ftown_sessions',
       'ftown_session_create',
       'ftown_session_manage',
-      'ftown_loops',
     ]);
     for (const tool of tools) {
       assert.equal(tool.parameters.type, 'object', `${tool.name} must have an object schema`);
@@ -103,16 +102,6 @@ describe('ftown Pi extension', () => {
       ['ftown_sessions', { operation: 'grep', target: 'worker' }, /pattern is required/],
       ['ftown_session_manage', { operation: 'rename', target: 'worker' }, /name is required/],
       ['ftown_session_manage', { operation: 'reparent', target: 'worker' }, /parent is required/],
-      ['ftown_loops', { operation: 'create', name: 'Review', task: 'Review work' }, /schedule is required/],
-      ['ftown_loops', { operation: 'update', target: 'Review' }, /field to update is required/],
-      ['ftown_loops', {
-        operation: 'create', name: 'Review', task: 'Review work',
-        schedule: { kind: 'interval' },
-      }, /schedule.everyMs is required/],
-      ['ftown_loops', {
-        operation: 'create', name: 'Review', task: 'Review work',
-        schedule: { kind: 'cron' },
-      }, /schedule.expression is required/],
     ] as const;
 
     for (const [toolName, params, expected] of cases) {
@@ -767,82 +756,4 @@ describe('ftown Pi extension', () => {
     assert.equal(revived.details.resumed, true);
   });
 
-  it('lists loops and requests a manual loop run', async () => {
-    const tools = new Map<string, any>();
-    const requests: Array<{ url: string; init?: RequestInit }> = [];
-    const pi = {
-      on() {}, sendUserMessage() {}, registerCommand() {},
-      registerTool(tool: any) { tools.set(tool.name, tool); },
-    };
-    registerFtownPiExtension(pi, {
-      env: { FTOWN_SESSION_ID: 'self', FTOWN_HOOK_PORT: '4321' },
-      fetch: async (url: string, init?: RequestInit) => {
-        requests.push({ url, init });
-        if (url.endsWith('/api/loops')) {
-          return { ok: true, json: async () => ({ loops: [{ id: 'l1', name: 'Nightly review' }] }) };
-        }
-        return { ok: true, json: async () => ({ requested: true, loopId: 'l1' }) };
-      },
-      readBridgePointer: async () => null,
-    });
-
-    const listed = await tools.get('ftown_loops').execute('list-loops', { operation: 'list' });
-    const run = await tools.get('ftown_loops').execute(
-      'run-loop', { operation: 'run_now', target: 'Nightly review' },
-    );
-
-    assert.equal(listed.details.loops[0].id, 'l1');
-    assert.equal(requests[2].url, 'http://127.0.0.1:4321/api/loops/l1/run-now');
-    assert.equal(requests[2].init?.method, 'POST');
-    assert.equal(run.details.requested, true);
-  });
-
-  it('creates, updates, and deletes loops with structured fields', async () => {
-    const tools = new Map<string, any>();
-    const requests: Array<{ url: string; init?: RequestInit }> = [];
-    const pi = {
-      on() {}, sendUserMessage() {}, registerCommand() {},
-      registerTool(tool: any) { tools.set(tool.name, tool); },
-    };
-    registerFtownPiExtension(pi, {
-      env: { FTOWN_SESSION_ID: 'self', FTOWN_HOOK_PORT: '4321' },
-      fetch: async (url: string, init?: RequestInit) => {
-        requests.push({ url, init });
-        if (url.endsWith('/api/loops') && init?.method === 'GET') {
-          return { ok: true, json: async () => ({ loops: [{ id: 'l1', name: 'Review loop' }] }) };
-        }
-        if (url.endsWith('/api/loops') && init?.method === 'POST') {
-          return { ok: true, json: async () => ({ loop: { id: 'l1', name: 'Review loop' } }) };
-        }
-        if (init?.method === 'DELETE') {
-          return { ok: true, json: async () => ({ removed: true, loopId: 'l1' }) };
-        }
-        return { ok: true, json: async () => ({ loop: { id: 'l1', enabled: false } }) };
-      },
-      readBridgePointer: async () => null,
-    });
-
-    const create = await tools.get('ftown_loops').execute('create-loop', {
-      operation: 'create', name: 'Review loop', task: 'Review open work',
-      schedule: { kind: 'interval', everyMs: 300_000 }, shell: 'pi', retention: 10,
-    });
-    const update = await tools.get('ftown_loops').execute(
-      'update-loop', { operation: 'update', target: 'Review loop', enabled: false },
-    );
-    const remove = await tools.get('ftown_loops').execute(
-      'delete-loop', { operation: 'delete', target: 'l1' },
-    );
-
-    assert.equal(create.details.loop.id, 'l1');
-    assert.deepEqual(JSON.parse(String(requests[0].init?.body)), {
-      name: 'Review loop', task: 'Review open work',
-      schedule: { kind: 'interval', everyMs: 300_000 }, harness: 'pi',
-      enabled: true, overlapPolicy: 'skip', retention: { autoClearAfterRuns: 10 },
-    });
-    assert.equal(requests[2].url, 'http://127.0.0.1:4321/api/loops/l1');
-    assert.deepEqual(JSON.parse(String(requests[2].init?.body)), { enabled: false });
-    assert.equal(update.details.loop.enabled, false);
-    assert.equal(requests[4].init?.method, 'DELETE');
-    assert.equal(remove.details.removed, true);
-  });
 });

@@ -31,7 +31,7 @@ interface SessionStateIndicatorProps {
   needsInput?: boolean;
 }
 
-/** Icon-only live state used by compact session and factory rows. */
+/** Icon-only live state used by compact session rows. */
 export function SessionStateIndicator({
   status,
   activity,

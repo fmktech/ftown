@@ -126,25 +126,6 @@ Child briefings normally make workers report first and then remove themselves. E
 ask a worker to stay open when you need follow-up interaction; otherwise, clean up any
 worker that exits without honoring the self-removal instruction.
 
-## Recurring work
-
-For unattended recurring work, create a scheduled loop instead of keeping an
-orchestrator alive to poll or sleep. See `references/loops.md` for the full loop
-workflow:
-
-```bash
-~/.ftown/ftown-sessions loop create \
-  --name repo-watch \
-  --every 30m \
-  --shell codex \
-  --workdir /path/to/repo \
-  --task "Inspect recent changes, run the focused checks, and report issues"
-```
-
-Loop runs show as normal ftown sessions grouped under their loop in the
-dashboard. Use `~/.ftown/ftown-sessions loop runs <loop-id>` to inspect run
-sessions from the CLI.
-
 ## Practical guidance
 
 - **Parallelize** independent tasks: spawn multiple workers before waiting for any.
