@@ -18,6 +18,7 @@ import { toWireSession } from './session-wire.js';
 import { ProcessRunner } from './claude-runner.js';
 import { SessionStore } from './session-store.js';
 import { MailStore } from './mail-store.js';
+import { AttentionStore } from './attention-store.js';
 import { LocalApiServer } from './local-api-server.js';
 import { BrowserAccess } from './browser-access.js';
 import { registerLocalBrowserCommands } from './local-pair-cli.js';
@@ -632,6 +633,7 @@ program
       console.log(`[Bridge] Loopback WS rung ready at ws://127.0.0.1:${hookPort}/ws`);
     }
     localApiServer.setDependencies(store, runner, centrifugo, userId, terminalManager);
+    localApiServer.setAttentionStore(new AttentionStore((sessionId) => store.sessionDir(sessionId)));
     const mailStore = new MailStore((sessionId) => store.sessionDir(sessionId));
     localApiServer.setMailStore(mailStore);
 

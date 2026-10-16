@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { AttentionStore, AttentionError } from './attention-store.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -538,5 +539,71 @@ describe('LocalApiServer loop group field', () => {
     } finally {
       await h.cleanup();
     }
+  });
+});
+
+
+describe('LocalApiServer durable attention ingress', () => {
+  it('persists before hook success/publication and rejects workspace/unknown attribution', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ftw-attention-api-'));
+    const store = new SessionStore(join(home, 'data'));
+    const server = new LocalApiServer();
+    const token = 'attention-hook-token';
+    const sample: Session = { id: 'attention-session', name: 'Attention worker', command: 'test', status: 'running', bridgeId: 'machine-a', createdAt: '2026-10-16T00:00:00Z', updatedAt: '2026-10-16T00:00:00Z' };
+    await store.saveSession(sample);
+    const attention = new AttentionStore((id) => store.sessionDir(id));
+    server.setAuthToken(token);
+    server.setDependencies(store, {} as ProcessRunner, {} as CentrifugoClient, 'user-a');
+    server.setAttentionStore(attention);
+    let published = 0;
+    server.on('event', () => {
+      published++;
+      assert.match(readFileSync(join(store.sessionDir(sample.id), 'attention.json'), 'utf8'), /Question one/);
+    });
+    const port = await server.start();
+    try {
+      const payload = { ftown_session_id: sample.id, ftown_session_source: 'env', hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'Question one', env: { KEY: 'never-forward' } };
+      assert.equal((await api(port, 'wrong', 'POST', '/hook', payload)).status, 401);
+      assert.equal((await api(port, token, 'POST', '/hook', payload)).status, 200);
+      assert.equal(published, 1);
+      const read = await api(port, token, 'GET', `/api/sessions/${sample.id}/attention`);
+      assert.equal(read.status, 200);
+      assert.ok(!JSON.stringify(read.data).includes('never-forward'));
+      const events = read.data.events as { id: string; acknowledgedAt?: string }[];
+      assert.equal(events.length, 1);
+      assert.equal((await api(port, token, 'POST', '/hook', { ...payload, message: 'workspace question', ftown_session_source: 'workspace' })).status, 200);
+      assert.equal((await attention.list(sample.id)).events.length, 1);
+      assert.equal((await api(port, token, 'POST', '/hook', { ...payload, ftown_session_id: 'missing' })).status, 200);
+      assert.equal(existsSync(store.sessionDir('missing')), false);
+      assert.equal((await api(port, token, 'GET', '/api/sessions/missing/attention')).status, 404);
+      assert.equal((await api(port, token, 'POST', `/api/sessions/${sample.id}/attention/ack`, { eventIds: [events[0].id, 'unknown'] })).status, 400);
+      assert.equal((await attention.list(sample.id)).events[0].acknowledgedAt, undefined);
+      const ack = await api(port, token, 'POST', `/api/sessions/${sample.id}/attention/ack`, { eventIds: [events[0].id] });
+      assert.equal(ack.status, 200);
+      const resolved = await api(port, token, 'POST', `/api/sessions/${sample.id}/attention/resolve`, { eventIds: [events[0].id] });
+      assert.equal(resolved.status, 200);
+      assert.equal((await attention.list(sample.id)).events.length, 0);
+      await store.deleteSession(sample.id);
+      assert.equal(existsSync(join(store.sessionDir(sample.id), 'attention.json')), false);
+      assert.equal((await api(port, token, 'GET', `/api/sessions/${sample.id}/attention`)).status, 404);
+    } finally { server.getHttpServer()?.closeAllConnections(); server.stop(); rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it('storage failures fail the hook before success or publication', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ftw-attention-failure-'));
+    const store = new SessionStore(join(home, 'data'));
+    const server = new LocalApiServer();
+    await store.saveSession({ id: 's', name: 'S', command: 'test', status: 'running', bridgeId: 'machine-a', createdAt: '', updatedAt: '' });
+    class BrokenStore extends AttentionStore { override async record(): Promise<void> { throw new AttentionError('attention_storage_error', 'Attention history could not be persisted', 500); } }
+    server.setDependencies(store, {} as ProcessRunner, {} as CentrifugoClient, 'user-a');
+    server.setAttentionStore(new BrokenStore((id) => store.sessionDir(id)));
+    server.setAuthToken('token');
+    let published = false; server.on('event', () => { published = true; });
+    const port = await server.start();
+    try {
+      const response = await api(port, 'token', 'POST', '/hook', { ftown_session_id: 's', hook_event_name: 'Notification', notification_type: 'permission_prompt' });
+      assert.equal(response.status, 500); assert.equal(published, false);
+      assert.equal(response.data.code, 'attention_storage_error');
+    } finally { server.getHttpServer()?.closeAllConnections(); server.stop(); rmSync(home, { recursive: true, force: true }); }
   });
 });

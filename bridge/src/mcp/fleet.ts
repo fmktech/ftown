@@ -86,7 +86,7 @@ export const requestSchema = z
     path: z
       .string()
       .regex(
-        /^\/api\/(?:archive|sessions(?:\/[a-zA-Z0-9_-]+(?:\/(?:screen|grep|keys|message|inbox|resize|usage|running|revive|stop|retry))?)?)(?:\?[^#]*)?$/,
+        /^\/api\/(?:archive|sessions(?:\/[a-zA-Z0-9_-]+(?:\/(?:screen|grep|keys|message|inbox|resize|usage|running|revive|stop|retry|attention(?:\/(?:ack|resolve))?))?)?)(?:\?[^#]*)?$/,
       ),
     body: z.unknown().optional(),
     timeoutMs: z.number().int().min(1000).max(60000),
@@ -166,7 +166,7 @@ export async function httpRequest(
           ? data.error.replaceAll(token, "[redacted]").slice(0, 1000)
           : "Bridge request rejected";
       throw new FleetError(
-        "bridge_error",
+        typeof data?.code === "string" && ["unknown_session", "invalid_cursor", "unknown_attention", "attention_storage_error", "cancelled", "attention_not_ready"].includes(data.code) ? data.code : "bridge_error",
         `${detail} (HTTP ${res.status})`,
         request.method !== "GET" && res.status >= 500,
         res.status,
@@ -261,7 +261,18 @@ export class Fleet {
       throw new FleetError("unknown_machine", `Unknown machine: ${machineId}`);
     const request = requestSchema.parse({ method, path, body, timeoutMs });
     if (this.active >= this.config.concurrency)
-      await new Promise<void>((resolve) => this.waiters.push(resolve));
+      await new Promise<void>((resolve, reject) => {
+        const acquire = () => { signal?.removeEventListener("abort", cancel); resolve(); };
+        const cancel = () => {
+          const index = this.waiters.indexOf(acquire);
+          if (index !== -1) this.waiters.splice(index, 1);
+          signal?.removeEventListener("abort", cancel);
+          reject(new FleetError("cancelled", "Request cancelled before dispatch"));
+        };
+        this.waiters.push(acquire);
+        signal?.addEventListener("abort", cancel, { once: true });
+        if (signal?.aborted) cancel();
+      });
     else this.active++;
     try {
       if (signal?.aborted)

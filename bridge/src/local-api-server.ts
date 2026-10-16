@@ -7,6 +7,7 @@ import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 
 import type { SessionStore } from './session-store.js';
 import type { MailStore } from './mail-store.js';
+import { AttentionStore, AttentionError } from './attention-store.js';
 import type { Loop, LoopDraft, Session } from './types.js';
 import { MailDeliveryService, sanitizeMessageText } from './mail-delivery.js';
 import type { ProcessRunner } from './claude-runner.js';
@@ -178,6 +179,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private terminalManager: TerminalManager | null = null;
   private sessionDeps: CreateFtownSessionDeps | null = null;
   private mail: MailDeliveryService = new MailDeliveryService();
+  private attention: AttentionStore | null = null;
   private loopApi: LoopApiDeps | null = null;
   private userId: string = '';
   private authToken: string = '';
@@ -192,6 +194,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
 
   setAuthToken(token: string): void {
     this.authToken = token;
+  }
+
+  setAttentionStore(store: AttentionStore): void {
+    this.attention = store;
   }
 
   setMailStore(mailStore: MailStore): void {
@@ -365,12 +371,16 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     }
 
     if (path === '/hook' && req.method === 'POST') {
-      this.handleHook(req, res);
+      void this.handleHook(req, res);
       return;
     }
 
     if (path.startsWith('/api/')) {
       this.handleApiRoute(req, res, path, url).catch((err) => {
+        if (err instanceof AttentionError) {
+          if (!res.destroyed) jsonResponse(res, err.status, { error: err.message, code: err.code });
+          return;
+        }
         if (err instanceof BadRequestError) {
           jsonResponse(res, 400, { error: err.message });
           return;
@@ -586,6 +596,50 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return;
     }
 
+    const attentionMatch = path.match(/^\/api\/sessions\/([a-zA-Z0-9_-]+)\/attention(?:\/(ack|resolve))?$/);
+    if (attentionMatch) {
+      const id = attentionMatch[1];
+      if (!await this.store.loadSession(id)) { jsonResponse(res, 404, { error: 'Session not found', code: 'unknown_session' }); return; }
+      if (!this.attention) { jsonResponse(res, 503, { error: 'Attention store not ready', code: 'attention_not_ready' }); return; }
+      if (!attentionMatch[2] && req.method === 'GET') {
+        const integer = (name: string, fallback: number, maximum: number) => {
+          const raw = url.searchParams.get(name);
+          if (raw === null) return fallback;
+          if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw)) || Number(raw) > maximum) throw new BadRequestError(`Invalid ${name}`);
+          return Number(raw);
+        };
+        const limit = integer('limit', 50, 100);
+        if (limit < 1) throw new BadRequestError('Invalid limit');
+        const waitSeconds = integer('waitSeconds', 0, 25);
+        const includeResolved = url.searchParams.get('includeResolved');
+        const actionableOnly = url.searchParams.get('actionableOnly');
+        if ((includeResolved !== null && !['true', 'false'].includes(includeResolved)) || (actionableOnly !== null && !['true', 'false'].includes(actionableOnly))) throw new BadRequestError('Invalid attention filter');
+        const options = { cursor: url.searchParams.get('cursor') ?? undefined, limit, includeResolved: includeResolved === 'true', actionableOnly: actionableOnly === 'true' };
+        const controller = new AbortController();
+        const cancel = () => controller.abort();
+        res.on('close', cancel);
+        try {
+          const page = waitSeconds ? await this.attention.wait(id, options, waitSeconds, controller.signal) : await this.attention.list(id, options);
+          if (!res.destroyed) {
+            // Removal during a wait is an unknown session, never an empty recovered inbox.
+            if (!await this.store.loadSession(id)) { jsonResponse(res, 404, { error: 'Session not found', code: 'unknown_session' }); return; }
+            jsonResponse(res, 200, page);
+          }
+        } finally { res.off('close', cancel); }
+        return;
+      }
+      if (attentionMatch[2] && req.method === 'POST') {
+        const body = await parseBody(req);
+        const ids = body.eventIds;
+        if (!Array.isArray(ids) || !ids.length || ids.length > 100 || ids.some((id) => typeof id !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(id))) throw new BadRequestError('Invalid attention IDs');
+        if (Object.keys(body).some((key) => !['eventIds', ...(attentionMatch[2] === 'resolve' ? ['reason'] : [])].includes(key))) throw new BadRequestError('Unknown attention argument');
+        if (body.reason !== undefined && (typeof body.reason !== 'string' || body.reason.length > 500)) throw new BadRequestError('Invalid resolution reason');
+        jsonResponse(res, 200, { events: await this.attention.mutate(id, ids as string[], attentionMatch[2] as 'ack' | 'resolve', body.reason as string | undefined) });
+        return;
+      }
+      jsonResponse(res, 405, { error: 'Method not allowed' }); return;
+    }
+
     const sessionMatch = path.match(/^\/api\/sessions\/([^/]+)$/);
     const sessionReviveMatch = path.match(/^\/api\/sessions\/([^/]+)\/revive$/);
     const sessionScreenMatch = path.match(/^\/api\/sessions\/([^/]+)\/screen$/);
@@ -622,7 +676,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         jsonResponse(res, 404, { error: 'Session not found' });
         return;
       }
-      jsonResponse(res, 200, { session: toWireSession(session) });
+      jsonResponse(res, 200, { session: toWireSession(session), ...(this.attention ? { capabilities: { attention: { version: 1 } } } : {}) });
       return;
     }
 
@@ -1100,74 +1154,37 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     jsonResponse(res, 200, { messages });
   }
 
-  private handleHook(req: IncomingMessage, res: ServerResponse): void {
-    const chunks: Buffer[] = [];
-
-    req.on('data', (chunk: Buffer) => {
-      chunks.push(chunk);
-    });
-
-    req.on('end', () => {
-      try {
-        const body = Buffer.concat(chunks).toString('utf-8');
-        const payload = JSON.parse(body) as Record<string, unknown>;
-
-        const hookEventName = payload.hook_event_name as string | undefined;
-        let ftownSessionId = payload.ftown_session_id as string | undefined;
-        // notify.sh reports how it attributed the session id.
-        let source = typeof payload.ftown_session_source === 'string'
-          ? payload.ftown_session_source
-          : undefined;
-        if (!ftownSessionId) {
-          const resolved = resolveSessionIdFromHookPayload(payload);
-          ftownSessionId = resolved?.sessionId;
-          source = resolved?.source;
-        }
-
-        if (!ftownSessionId || !hookEventName) {
-          res.writeHead(200);
-          res.end('{"ok":true}');
-          return;
-        }
-
-        if (hookEventName === 'UserPromptSubmit' || hookEventName === 'PreToolUse' || hookEventName === 'PostToolUse') {
-          this.mail.markAgentBusy(ftownSessionId);
-        } else if (hookEventName === 'Stop' || hookEventName === 'SessionEnd') {
-          this.mail.markAgentIdle(ftownSessionId);
-        }
-
-        const conversationId = payload.conversation_id;
-        // Workspace attribution may belong to a foreign agent running in the
-        // same directory; never let it claim the conversation mapping.
-        if (typeof conversationId === 'string' && conversationId && source !== 'workspace') {
-          registerSessionConversation(ftownSessionId, conversationId);
-        }
-
-        console.log(`[LocalApiServer] Received ${hookEventName} for ftown session ${ftownSessionId}`);
-
-        const { ftown_session_id: _, ftown_session_source: __, ...rest } = payload;
-
-        const hookEvent: HookEvent = {
-          sessionId: ftownSessionId,
-          eventName: hookEventName,
-          data: rest as Record<string, unknown>,
-          source,
-        };
-
-        this.emit('event', hookEvent);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end('{"ok":true}');
-      } catch (err) {
-        console.error('[LocalApiServer] Failed to parse hook payload:', err instanceof Error ? err.message : String(err));
-        res.writeHead(400);
-        res.end();
+  private async handleHook(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    try {
+      const payload = await parseBody(req);
+      const hookEventName = typeof payload.hook_event_name === 'string' ? payload.hook_event_name : undefined;
+      let ftownSessionId = typeof payload.ftown_session_id === 'string' ? payload.ftown_session_id : undefined;
+      let source = typeof payload.ftown_session_source === 'string' ? payload.ftown_session_source : undefined;
+      if (!ftownSessionId) {
+        const resolved = resolveSessionIdFromHookPayload(payload);
+        ftownSessionId = resolved?.sessionId;
+        source = resolved?.source;
       }
-    });
-
-    req.on('error', (err: Error) => {
-      console.error('[LocalApiServer] Request error:', err.message);
-      res.writeHead(500);
-      res.end();
-    });
+      if (!ftownSessionId || !hookEventName) { jsonResponse(res, 200, { ok: true }); return; }
+      const { ftown_session_id: _, ftown_session_source: __, ...rest } = payload;
+      // Workspace fallback can identify a foreign agent in the same directory.
+      // Only known explicit/native-attributed sessions may produce authoritative records.
+      if (this.attention && source !== 'workspace' && /^[a-zA-Z0-9_-]+$/.test(ftownSessionId) && await this.store?.loadSession(ftownSessionId)) {
+        await this.attention.record(ftownSessionId, hookEventName, rest);
+      }
+      if (hookEventName === 'UserPromptSubmit' || hookEventName === 'PreToolUse' || hookEventName === 'PostToolUse') this.mail.markAgentBusy(ftownSessionId);
+      else if (hookEventName === 'Stop' || hookEventName === 'SessionEnd') this.mail.markAgentIdle(ftownSessionId);
+      const conversationId = payload.conversation_id;
+      if (typeof conversationId === 'string' && conversationId && source !== 'workspace') registerSessionConversation(ftownSessionId, conversationId);
+      const hookEvent: HookEvent = { sessionId: ftownSessionId, eventName: hookEventName, data: rest, source };
+      // Persistence is complete before listeners can publish and before HTTP success.
+      this.emit('event', hookEvent);
+      jsonResponse(res, 200, { ok: true });
+    } catch (error) {
+      if (res.destroyed) return;
+      if (error instanceof AttentionError) jsonResponse(res, error.status, { error: error.message, code: error.code });
+      else if (error instanceof BadRequestError) jsonResponse(res, 400, { error: error.message });
+      else jsonResponse(res, 500, { error: 'Hook handling failed' });
+    }
   }
 }
