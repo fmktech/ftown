@@ -1,0 +1,13 @@
+{
+  "version": "0.19.40",
+  "fileCount": 243,
+  "retiredAssets": [],
+  "bin": {
+    "ftown-bridge": "dist/index.js",
+    "ftown": "dist/ftown-cli.js",
+    "ftown-harness": "dist/harness-cli.js",
+    "ftown-env": "dist/ftown-env-cli.js",
+    "ftown-sessions": "bin/ftown-sessions",
+    "ftown-mcp": "dist/mcp-cli.js"
+  }
+}

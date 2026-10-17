@@ -2,12 +2,12 @@
  * Single source of truth for the supported harnesses ("shell types").
  *
  * Every place that used to re-list harness names (ShellType unions,
- * HOOKED_SHELL_TYPES, WorkflowShell/SHELLS, the buildSessionCommand
+ * HOOKED_SHELL_TYPES, the buildSessionCommand
  * branch, the prompt-as-CLI-arg predicate) now derives from HARNESSES below.
  *
  * NOTE: this module is part of the bridge dist and is NOT sibling-copied into
  * ~/.ftown. Standalone sibling-copied modules (provider-env-store.ts,
- * workflow-runner.ts, workflow-runner-cli.ts, harness-cli.ts,
+ * harness-cli.ts,
  * ftown-sessions-cli.ts) must not import it at runtime — type-only imports are
  * fine (they are erased at compile time).
  */
@@ -58,8 +58,6 @@ export interface HarnessSpec {
    * which stays registry-free so it can be sibling-copied).
    */
   providerBase?: 'claude';
-  /** Accepted as a workflow child shell (WorkflowShell / ftown-workflows --shell). */
-  validForWorkflow: boolean;
   /**
    * Minimum gap (ms) enforced between concurrent spawns of this harness
    * (see spawn-stagger.ts). Unset means spawns are not staggered.
@@ -277,7 +275,7 @@ const CLAUDE_SPEC = {
   hooked: true,
   promptAsCliArg: true,
   resumeField: 'claudeSessionId',
-  validForWorkflow: true,
+
 } as const;
 
 /** claude-rebadged provider flavor (zai/kimi/deepseek/fireworks): same CLI, provider env. */
@@ -287,8 +285,7 @@ const PROVIDER_FLAVOR_SPEC = {
   promptAsCliArg: true,
   resumeField: 'claudeSessionId',
   providerBase: 'claude',
-  // Preserved decision: provider flavors were never in WorkflowShell.
-  validForWorkflow: false,
+
 } as const;
 
 export const HARNESSES = {
@@ -304,7 +301,7 @@ export const HARNESSES = {
     hooked: false,
     promptAsCliArg: true,
     resumeField: 'cursorSessionId',
-    validForWorkflow: true,
+
     // Concurrent cursor-agent startups race on a macOS Keychain WRITE during
     // token refresh (last-writer-wins; corrupts auth from 2 concurrent spawns).
     // A 250ms spawn stagger fully eliminated it in testing (0/27 at N=9);
@@ -322,13 +319,13 @@ export const HARNESSES = {
     hooked: true,
     promptAsCliArg: true,
     resumeField: 'codexSessionId',
-    validForWorkflow: true,
+
   },
   shell: {
     buildCommand: () => '/bin/zsh -l',
     hooked: false,
     promptAsCliArg: false,
-    validForWorkflow: true,
+
   },
   grok: {
     // Workdir comes from the runner cwd — grok inherits process cwd, no --cwd.
@@ -340,8 +337,7 @@ export const HARNESSES = {
     // Preserved decision: grok was never in HOOKED_SHELL_TYPES (no Stop-hook pump).
     hooked: false,
     promptAsCliArg: true,
-    // Preserved decision: grok was absent from WorkflowShell / ftown-workflows SHELLS.
-    validForWorkflow: false,
+
   },
   muse: {
     // Fresh spawns take a positional prompt (grok-style); resume restores the
@@ -359,8 +355,7 @@ export const HARNESSES = {
     hooked: true,
     promptAsCliArg: true,
     resumeField: 'museSessionId',
-    // Preserved decision: like grok, muse is absent from WorkflowShell / ftown-workflows SHELLS.
-    validForWorkflow: false,
+
   },
   pi: {
     // Workdir comes from the runner cwd. Pi resumes the most recent session for
@@ -374,7 +369,7 @@ export const HARNESSES = {
       }),
     hooked: true,
     promptAsCliArg: true,
-    validForWorkflow: true,
+
   },
   opencode: {
     // Workdir comes from the runner cwd — opencode takes a project dir
@@ -391,14 +386,14 @@ export const HARNESSES = {
     hooked: true,
     promptAsCliArg: true,
     resumeField: 'opencodeSessionId',
-    validForWorkflow: true,
+
   },
   'kimi-code': {
     // Own binary (absolute path); interactive TUI, no positional prompt.
     buildCommand: (input) => buildKimiCodeCommand({ model: input.model, resume: input.resume }),
     hooked: false,
     promptAsCliArg: false,
-    validForWorkflow: false,
+
   },
   zai: PROVIDER_FLAVOR_SPEC,
   kimi: PROVIDER_FLAVOR_SPEC,
@@ -410,20 +405,9 @@ export const HARNESSES = {
 
 export type ShellType = keyof typeof HARNESSES;
 
-type KeysWhere<F extends 'validForWorkflow' | 'hooked'> = {
-  [K in ShellType]: (typeof HARNESSES)[K][F] extends true ? K : never;
-}[ShellType];
-
-/** Harnesses accepted as workflow child shells — derived, so drift is a compile error. */
-export type WorkflowShell = KeysWhere<'validForWorkflow'>;
-
 // ---- Derived runtime lists / predicates ----
 
 export const SHELL_TYPES = Object.keys(HARNESSES) as readonly ShellType[];
-
-export const WORKFLOW_SHELLS = SHELL_TYPES.filter(
-  (type) => HARNESSES[type].validForWorkflow,
-) as readonly WorkflowShell[];
 
 /** Shell types whose mail arrives at turn boundaries through native hooks/extensions. */
 export const HOOKED_SHELL_TYPES: ReadonlySet<string> = new Set(

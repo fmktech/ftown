@@ -8,8 +8,9 @@ skills no longer offer them. Stale `/api/loops` requests return HTTP 410 with
 Upgrading a bridge does not delete or rewrite saved `loops.json`, `loop-runs.json`,
 project `factory/` definitions or `.ffactory/` ticket databases/history, artifacts,
 worktrees and worker maps. New code never loads or schedules those definitions.
-Independent FTS installations and ordinary manually started sessions/workflows
-remain available. Historical loop-owned sessions appear in normal session history;
+Independent FTS installations and ordinary manually started sessions remain
+available. The later agent surface simplification below also retires the
+deterministic workflow runner. Historical loop-owned sessions appear in normal session history;
 their `loopId` metadata remains readable and archived.
 
 Before ordinary startup resurrection, the upgraded bridge stops only exact known
@@ -34,3 +35,19 @@ enabled or manually queued definitions. Before a rollback, review every affected
 bridge and explicitly disable or otherwise isolate old scheduling through a planned
 operational procedure. Preserve backups and project history. There is no schema
 migration or automatic data purge in this release.
+
+
+## Agent surface simplification
+
+ftown no longer bundles or installs fticket, and the ftown workflow runner,
+workflow CLI, reference and example have been retired. Use `ftown sessions`,
+`ftown harness`, and `ftown env`; the existing nonworkflow launchers remain
+compatible. The ftown skill is the authoritative agent guide. Child briefings
+carry identity and result/escalation reporting; session cleanup is explicit.
+
+Upgrade cleanup recognizes exact shipped skill trees, reference/example hashes,
+workflow runtime hashes and generated workflow launcher content. Customized or
+unrecognized assets, foreign links, symlink parents, independently installed
+skills, shared runtime files and all `~/.ftown/workflows/` run data survive.
+Unrecognized legacy files may remain on disk, but the new `ftown` dispatcher has
+no workflow route.

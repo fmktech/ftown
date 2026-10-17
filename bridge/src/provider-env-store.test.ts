@@ -15,7 +15,7 @@ import {
 } from './provider-env-store.js';
 
 // Overrides $HOME so every read/write targets a throwaway ~/.ftown/env.json,
-// mirroring claude-trust.test.ts. homedir() reads $HOME at call time.
+// homedir() reads $HOME at call time.
 describe('provider-env-store', () => {
   let realHome: string | undefined;
   let home: string;

@@ -253,3 +253,30 @@ describe('installFtownEnvCli (HOME-overridden)', () => {
     assert.ok(readFileSync(launcher, 'utf8').includes('ftown-env-cli.js'));
   });
 });
+
+
+describe('CLI entry recognition', () => {
+  it('recognizes physical, parent-symlink and npm-bin paths without running on import', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, realpathSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { pathToFileURL } = await import('node:url');
+    const { isCliEntry } = await import('./ftown-env-cli.js');
+    const temporary = mkdtempSync(join(tmpdir(), 'ftown-entry-'));
+    try {
+      const dist = join(temporary, 'node_modules', 'ftown-bridge', 'dist');
+      const bin = join(temporary, 'node_modules', '.bin');
+      mkdirSync(dist, { recursive: true }); mkdirSync(bin);
+      const target = join(dist, 'ftown-env-cli.js'); writeFileSync(target, 'export {};');
+      const npmBin = join(bin, 'ftown'); symlinkSync('../ftown-bridge/dist/ftown-env-cli.js', npmBin);
+      const parentLink = join(temporary, 'linked-dist'); symlinkSync(dist, parentLink);
+      const moduleUrl = pathToFileURL(realpathSync(target)).href;
+      assert.equal(isCliEntry(moduleUrl, target), true);
+      assert.equal(isCliEntry(moduleUrl, npmBin), true);
+      assert.equal(isCliEntry(moduleUrl, join(parentLink, 'ftown-env-cli.js')), true);
+      assert.equal(isCliEntry('file:///different-module.js', npmBin), false);
+      assert.equal(isCliEntry(moduleUrl, undefined), false);
+      assert.equal(isCliEntry(moduleUrl, join(temporary, 'missing')), false);
+    } finally { rmSync(temporary, { recursive: true, force: true }); }
+  });
+});

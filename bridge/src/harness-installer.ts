@@ -120,84 +120,17 @@ export function writeHarnessAgentGuide(opts: {
   port: number;
   bridgeId?: string;
 }): void {
-  const h = opts.wrapperPath;
-  const body = `# ftown bridge harness (auto-generated)
+  const body = `# ftown agent guide (auto-generated)
 
-Bridge is running. Use the harness CLI — **do not** use curl, lsof, or raw HTTP for the local bridge API.
+Read the installed ftown skill at ~/.ftown/skills/ftown/SKILL.md for session,
+mail, terminal, and cleanup guidance. Its references/sessions.md contains the
+command reference; references/orchestrator.md adds coordination examples.
 
-## Command
+Discover commands with \`ftown --help\`, \`ftown sessions --help\`,
+\`ftown harness --help\`, and \`ftown env --help\`.
+If ftown is not on PATH, use \`~/.ftown/ftown\`.
 
-\`\`\`bash
-${h} <subcommand>
-\`\`\`
-
-Wrapper path is stable; bridge port/token live in \`~/.ftown/bridge.json\` (current port: ${opts.port}).
-
-## Default workflow (run in order)
-
-\`\`\`bash
-${h} status          # bridge up?
-${h} here -n 25      # workspace session + tail (works when process dead if log exists)
-${h} ls --tail 3     # all sessions; log=N lines; preview dead sessions too
-${h} grep <name> "error|FAIL" -C 2
-\`\`\`
-
-## Subcommands
-
-| Subcommand | Example |
-|------------|---------|
-| \`status\` | \`${h} status\` |
-| \`ls\` | \`${h} ls --tail 3\` |
-| \`here\` | \`${h} here -n 30\` — walks up from cwd to find workspace |
-| \`tail\` | \`${h} tail ftown -n 40\` |
-| \`grep\` | \`${h} grep legbi "pattern" -C 2\` |
-| \`mail send\` | \`${h} mail send <session> --type task "do X"\` — inter-agent mail |
-| \`mail read\` | \`${h} mail read\` (\`--peek\`, \`--limit N\`, \`--all\`) |
-| \`send\` | \`${h} send ftown "text" -s --dry-run\` first; **only if user asked** |
-| \`--json\` | \`${h} --json ls\` — machine-readable output |
-
-## Session names
-
-Resolve by exact name → unique substring → id prefix. Ambiguous names print choices.
-
-## Mail (per-session inbox)
-
-\`\`\`bash
-${h} mail send <session> "message"            # plain message
-${h} mail send <child> --type task "do X"     # task for a worker
-${h} mail send --parent --type result "done"  # report to parent (uses FTOWN_PARENT_SESSION_ID)
-${h} mail read                                # pending mail; --peek keeps it undelivered
-\`\`\`
-
-Types: \`message | task | result | escalation\`; \`--thread <id>\` groups replies.
-Mail reaches the recipient automatically: a synchronous \`hook-pump\` hook
-(Stop / UserPromptSubmit / SessionStart in \`~/.claude/settings.json\` for claude,
-\`~/.codex/hooks.json\` for codex) checks the inbox at turn boundaries and
-injects pending mail as \`[ftown mail]\` context —
-on Stop it holds the agent's turn open so messages get handled immediately.
-Pi's bundled extension keeps one cancellable inbox long-poll open and wakes an
-idle Pi session with a native follow-up turn as soon as mail arrives.
-opencode sessions get the same turn-boundary delivery through the installed
-plugin at \`~/.config/opencode/plugins/ftown.js\`.
-Cursor and shell sessions have no hooks; when idle they get a one-line nudge
-to run \`ftown-harness mail read\` instead.
-Prefer mail over \`send\` (keystroke injection) for agent-to-agent communication.
-
-## Submit keys (\`-s\`)
-
-- All shell types: Enter (\`\\r\`)
-
-## Registry
-
-\`~/.ftown/session-registry.json\` maps workspace roots → session id. \`here\` uses it.
-
-## When bridge is down
-
-\`${h}\` exits with a clear error. Start bridge from ftown UI → Connect a bridge → copy the bootstrap token → \`npx ftown-bridge --token ... --api-url ...\`
-
-## context-mode
-
-Allowed Bash: \`${h}\` subcommands (short output). Do not use curl/wget/fetch to \`127.0.0.1\` for bridge API.
+Bridge connection details live in \`~/.ftown/bridge.json\`.
 `;
   const { ftownDir, agentGuide } = paths();
   mkdirSync(ftownDir, { recursive: true, mode: 0o700 });

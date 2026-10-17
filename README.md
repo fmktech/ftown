@@ -138,14 +138,14 @@ onboard a new bridge.
 
 On start, the bridge **auto-deploys** a local harness CLI:
 
-- `~/.ftown/bin/ftown-harness` — list/tail/grep sessions, resolve workspace via `here`
-- `~/.ftown/harness-agent.md` — agent cheat sheet (regenerated each start)
+- `ftown` — grouped `sessions`, `harness`, and `env` commands (existing launchers remain compatible)
+- `~/.ftown/harness-agent.md` — short pointer to the authoritative installed ftown skill
 - `~/.ftown/bridge.json` — port + token while bridge is running
 
 ```bash
-~/.ftown/bin/ftown-harness status
-~/.ftown/bin/ftown-harness here -n 20
-~/.ftown/bin/ftown-harness ls
+ftown harness status
+ftown harness here -n 20
+ftown harness ls
 ```
 
 ## Agent control over MCP

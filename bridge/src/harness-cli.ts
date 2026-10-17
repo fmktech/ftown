@@ -605,7 +605,7 @@ async function cmdHookPump(): Promise<void> {
           decision: 'block',
           reason:
             `[ftown mail] You received message(s) while finishing your turn:\n${formatted}\n` +
-            'Handle them now; reply with `ftown-harness mail send ...` where appropriate.',
+            'Handle them now; reply with `ftown harness mail send ...` where appropriate.',
         }),
       );
       return;
@@ -629,7 +629,7 @@ async function cmdHookPump(): Promise<void> {
 
 const program = new Command();
 program
-  .name('ftown-harness')
+  .name('ftown harness')
   .description('CLI for ftown bridge local API (~/.ftown/bridge.json)')
   .option('--json', 'Machine-readable JSON output');
 
@@ -771,6 +771,6 @@ program
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   const msg = err instanceof Error ? err.message : String(err);
-  console.error(`ftown-harness: ${msg}`);
+  console.error(`ftown harness: ${msg}`);
   process.exit(1);
 });

@@ -18,3 +18,15 @@ export const RETIRED_FACTORY_ASSETS: Readonly<Record<string, string>> = {
   "factory-template/skills/triage.md": "5fce18ea3417b3a37ec3e0ce4eaf4c004829133b3e879340c1e3f8b445d32d82"
 };
 export const RETIRED_LOOP_REFERENCE_SHA256 = "0b1d4b879321aaf9125d9203ab289a9e17057a3345c3afa6d97f7298bc8ed441";
+
+export const RETIRED_FTICKET_ASSETS: Readonly<Record<string, string>> = {
+  "SKILL.md": "d84e731b25ee7ee27b482cdfa49bb156719c4f7d17a291005c11dedfa0a42ebe"
+};
+export const RETIRED_WORKFLOW_SKILL_ASSETS: Readonly<Record<string, string>> = {
+  "references/workflows.md": "dfc292df0c8cf6503b0a570c86d36e9f018c997bf0141aadba0a42537600dff7",
+  "scripts/example.flow.mjs": "eb9ece0af09bafc0838a5e8174a15d98eddaa4d2ae69015175f890af08d0fc3c"
+};
+export const RETIRED_WORKFLOW_RUNTIME_ASSETS: Readonly<Record<string, string>> = {
+  "ftown-workflows-cli.js": "c6a7d1b3565ce5ab2bafc95dbb6cc55e75ab295f1eed2628cc219b6724891623",
+  "workflow-runner.js": "65d5e0e123362d5b1d98fccb7977001c391a14a0c0ab0352104c9e5de847eb0d"
+};

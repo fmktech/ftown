@@ -12,11 +12,12 @@ import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
 
 const FTOWN_DIR = join(homedir(), '.ftown');
 
 /** Subcommand -> sibling launcher path (relative to a given ftownDir). */
-const SUBCOMMANDS = ['env', 'sessions', 'workflows', 'harness'] as const;
+const SUBCOMMANDS = ['env', 'sessions', 'harness'] as const;
 type Subcommand = (typeof SUBCOMMANDS)[number];
 
 function isSubcommand(sub: string): sub is Subcommand {
@@ -39,8 +40,6 @@ export function resolveSubcommandTarget(sub: string | undefined, ftownDir: strin
       return join(ftownDir, 'ftown-env');
     case 'sessions':
       return join(ftownDir, 'ftown-sessions');
-    case 'workflows':
-      return join(ftownDir, 'ftown-workflows');
     case 'harness':
       return join(ftownDir, 'bin', 'ftown-harness');
   }
@@ -48,12 +47,11 @@ export function resolveSubcommandTarget(sub: string | undefined, ftownDir: strin
 
 /** Multi-line usage text listing every routed subcommand. */
 export function usage(): string {
-  return `Usage: ftown <env|sessions|workflows|harness> [args...]
+  return `Usage: ftown <env|sessions|harness> [args...]
 
 Subcommands:
   env        Manage per-provider machine tokens (~/.ftown/env.json)
   sessions   List, create, read and drive ftown agent sessions
-  workflows  Run deterministic, resumable multi-session workflows
   harness    Inspect and drive the local ftown-bridge harness`;
 }
 
@@ -94,7 +92,16 @@ function main(): void {
 
 // Only run as a script (installed CLI / `node dist/ftown-cli.js`), never on
 // import — tests import the exported helpers without triggering the dispatcher.
-const entry = process.argv[1];
-if (entry && import.meta.url === pathToFileURL(entry).href) {
+export function isCliEntry(moduleUrl: string, entry: string | undefined): boolean {
+  if (!entry) return false;
+  try {
+    // Node resolves ESM files through symlinks, including npm bins and macOS /var.
+    return moduleUrl === pathToFileURL(realpathSync(entry)).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isCliEntry(import.meta.url, process.argv[1])) {
   main();
 }
