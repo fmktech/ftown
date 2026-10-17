@@ -1,4 +1,4 @@
 interface:
   display_name: "ftown"
-  short_description: "Control ftown sessions, orchestration, and workflows."
-  default_prompt: "Use ftown to manage sessions or workflows."
+  short_description: "Control ftown sessions, mail, and orchestration."
+  default_prompt: "Use ftown to manage sessions and mail."

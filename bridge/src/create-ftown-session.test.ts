@@ -867,16 +867,20 @@ describe('relaunchFtownSession — entry-point parity with createFtownSession', 
 });
 
 describe('buildChildBriefing', () => {
-  it('prefers fticket coordination when ticket variables are present and keeps mail as fallback', () => {
+  it('identifies the child and parent and directs result and escalation reporting through mail', () => {
     const briefing = buildChildBriefing({
       childName: 'worker',
       childId: 'c1',
       parentName: 'orch',
       parentId: 'p1',
     });
-    assert.match(briefing, /FTS_DB.*TICKET_ID/);
-    assert.match(briefing, /fticket.*primary coordination/i);
-    assert.match(briefing, /mail.*fallback/i);
+    assert.match(briefing, /child session 'worker' \(c1\)/);
+    assert.match(briefing, /parent 'orch' \(p1\)/);
+    assert.match(briefing, /ftown-harness mail send --parent --type result/);
+    assert.match(briefing, /--type escalation when blocked/);
+    assert.match(briefing, /ftown-harness mail read/);
+    assert.match(briefing, /ftown-sessions list \/ screen <id>/);
+    assert.doesNotMatch(briefing, /fticket|FTS|TICKET_ID|fallback|resource leases/i);
   });
 
   it('reports its result before self-removing unless the user asks it to stay open', () => {
@@ -897,14 +901,18 @@ describe('buildChildBriefing', () => {
 });
 
 describe('buildOrchestratorBriefing', () => {
-  it('directs multi-agent teams to fticket before direct messaging', () => {
+  it('points to the ftown skill and session mail without prescribing a ticket system', () => {
     const briefing = buildOrchestratorBriefing({
       sessionName: 'orch',
       sessionId: 'p1',
     });
 
-    assert.match(briefing, /fticket/);
-    assert.match(briefing, /tickets.*context.*status.*resource leases/i);
-    assert.match(briefing, /mail.*fallback/i);
+    assert.match(briefing, /ORCHESTRATOR.*session 'orch' \(p1\)/);
+    assert.match(briefing, /'ftown' skill/);
+    assert.match(briefing, /SKILL\.md and references\/orchestrator\.md/);
+    assert.match(briefing, /ftown-sessions/);
+    assert.match(briefing, /\[ftown mail\]/);
+    assert.match(briefing, /ftown-harness mail read/);
+    assert.doesNotMatch(briefing, /fticket|FTS|fallback|resource leases/i);
   });
 });
