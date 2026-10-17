@@ -33,7 +33,7 @@ export function resolveDefaultDataDir(): string {
  *
  * Why this indirection exists:
  * - The DEFAULT install keeps $HOME/.ftown. The harness CLIs
- *   (harness-cli.ts / ftown-sessions-cli.ts / workflow-runner-cli.ts, and their
+ *   (harness-cli.ts / ftown-sessions-cli.ts, and their
  *   deployed sibling copies) hardcode `join(homedir(), '.ftown', 'bridge.json')`
  *   to find the primary bridge, so the default MUST stay byte-for-byte at
  *   $HOME/.ftown or those CLIs break.

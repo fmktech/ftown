@@ -8,6 +8,7 @@
  * Every token value is masked before it touches stdout — raw secrets never print.
  */
 import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
 
 import {
   PROVIDER_AUTH_ENV,
@@ -151,7 +152,7 @@ export async function run(argv: string[]): Promise<void> {
       const source = resolveProviderSource(provider);
       const token = await resolveSetToken(positional[1], readStdin, () =>
         console.error(
-          'ftown-env: warning: the token was passed as an argument, which exposes it to ' +
+          'ftown env: warning: the token was passed as an argument, which exposes it to ' +
             '`ps` and shell history. Prefer stdin: `printf %s "$TOKEN" | ftown env set <provider> -`.',
         ),
       );
@@ -206,14 +207,23 @@ async function main(): Promise<void> {
     await run(argv);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`ftown-env: ${msg}`);
+    console.error(`ftown env: ${msg}`);
     process.exit(1);
   }
 }
 
 // Only run as a script (installed CLI / `node dist/ftown-env-cli.js`), never on
 // import — tests import the exported helpers without triggering the dispatcher.
-const entry = process.argv[1];
-if (entry && import.meta.url === pathToFileURL(entry).href) {
+export function isCliEntry(moduleUrl: string, entry: string | undefined): boolean {
+  if (!entry) return false;
+  try {
+    // Node resolves ESM files through symlinks, including npm bins and macOS /var.
+    return moduleUrl === pathToFileURL(realpathSync(entry)).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isCliEntry(import.meta.url, process.argv[1])) {
   void main();
 }

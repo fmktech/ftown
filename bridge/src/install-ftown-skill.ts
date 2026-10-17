@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { RETIRED_FACTORY_ASSETS, RETIRED_LOOP_REFERENCE_SHA256 } from './retired-skill-assets.js';
+import { RETIRED_FACTORY_ASSETS, RETIRED_LOOP_REFERENCE_SHA256, RETIRED_FTICKET_ASSETS, RETIRED_WORKFLOW_SKILL_ASSETS, RETIRED_WORKFLOW_RUNTIME_ASSETS } from './retired-skill-assets.js';
 import {
   chmodSync,
   cpSync,
@@ -145,8 +145,11 @@ export function removeFtownSkill(skillName: string): void {
     const expected = JSON.parse(readFileSync(manifest, 'utf8')) as Record<string, string>;
     if (ownedSkillParentIsReal() && matchesTree(dest, expected)) rmSync(dest, { recursive: true, force: true });
   } catch { /* Unrecognized/customized directories are user-owned. */ }
-  removeSkillLinkFrom(join(homedir(), '.agents', 'skills'), skillName);
-  removeSkillLinkFrom(join(homedir(), '.claude', 'skills'), skillName);
+  // Preserve the discovery links when an unrecognized/customized tree survives.
+  if (!pathExists(dest) && ownedSkillParentIsReal()) {
+    removeSkillLinkFrom(join(homedir(), '.agents', 'skills'), skillName);
+    removeSkillLinkFrom(join(homedir(), '.claude', 'skills'), skillName);
+  }
 }
 
 function sha256(path: string): string {
@@ -208,4 +211,69 @@ export function retireBundledAutomationAssets(
     if (lstatSync(reference).isFile() && !lstatSync(reference).isSymbolicLink()
       && sha256(reference) === known.loopReference) unlinkSync(reference);
   } catch { /* Preserve customized/unrecognized paths. */ }
+}
+
+function pathExists(path: string): boolean {
+  try { lstatSync(path); return true; } catch { return false; }
+}
+
+/** Upgrade retirement never follows symlinks or removes user workflow run data. */
+export function retireBundledAgentAssets(
+  known: {
+    fticket: Readonly<Record<string, string>>;
+    skillFiles: Readonly<Record<string, string>>;
+    runtimeFiles: Readonly<Record<string, string>>;
+  } = {
+    fticket: RETIRED_FTICKET_ASSETS,
+    skillFiles: RETIRED_WORKFLOW_SKILL_ASSETS,
+    runtimeFiles: RETIRED_WORKFLOW_RUNTIME_ASSETS,
+  },
+): void {
+  const home = homedir();
+  const canonical = ftownSkillPath('fticket');
+  if (ownedSkillParentIsReal()) {
+    try {
+      if (matchesTree(canonical, known.fticket)) rmSync(canonical, { recursive: true });
+    } catch { /* Missing or customized assets survive. */ }
+  }
+  for (const agentDir of ['.agents', '.claude']) {
+    const skillsDir = join(home, agentDir, 'skills');
+    if (!realDirectory(join(home, agentDir)) || !realDirectory(skillsDir)) continue;
+    const legacy = join(skillsDir, 'fticket');
+    try {
+      if (matchesTree(legacy, known.fticket)) rmSync(legacy, { recursive: true });
+    } catch { /* Foreign links and customized trees survive. */ }
+    if (ownedSkillParentIsReal() && !pathExists(canonical)) removeSkillLinkFrom(skillsDir, 'fticket');
+  }
+
+  const skill = ftownSkillPath('ftown');
+  if (ownedSkillParentIsReal() && realDirectory(skill)) {
+    for (const [relative, hash] of Object.entries(known.skillFiles)) {
+      // Inventory keys are fixed shipped references/examples, never user input.
+      const path = join(skill, relative);
+      if (realDirectory(join(skill, relative.split('/')[0]))) removeKnownFile(path, hash);
+    }
+  }
+
+  const ftown = join(home, '.ftown');
+  if (!realDirectory(ftown)) return;
+  for (const [relative, hash] of Object.entries(known.runtimeFiles)) {
+    removeKnownFile(join(ftown, relative), hash);
+  }
+  const launcher = join(ftown, 'ftown-workflows');
+  const expected = `#!/usr/bin/env bash
+set -euo pipefail
+exec node "${join(ftown, 'ftown-workflows-cli.js')}" "$@"
+`;
+  try {
+    const stat = lstatSync(launcher);
+    if (stat.isFile() && !stat.isSymbolicLink() && readFileSync(launcher, 'utf8') === expected) unlinkSync(launcher);
+  } catch { /* Missing or user-owned launcher. */ }
+}
+
+function removeKnownFile(path: string, expectedHash: string): void {
+  try {
+    const stat = lstatSync(path);
+    if (stat.isFile() && !stat.isSymbolicLink() && sha256(path) === expectedHash) unlinkSync(path);
+  } catch { /* Missing, custom and symlink assets survive. */ }
 }

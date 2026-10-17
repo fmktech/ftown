@@ -1,33 +1,68 @@
 ---
 name: ftown
 description: >-
-  Control ftown from inside agent sessions: create/list/read/drive sibling
-  sessions, send ftown mail, and coordinate worker agent sessions. Use when a task
-  mentions ftown, ftown sessions, bridge sessions, child/sibling agents, mail/inbox,
-  orchestration, or fan-out.
+  Control ftown sessions: create/list/read/drive sibling sessions, send ftown
+  mail, and coordinate worker agents. Use for ftown sessions, child/sibling
+  agents, bridge mail/inbox, or explicitly requested orchestration.
 ---
 
 # ftown
 
-Use the local bridge CLIs installed under `~/.ftown`. They read
-`~/.ftown/bridge.json`; anyone who can read that file can control the bridge's
-sessions.
+Use `ftown sessions`, `ftown harness`, and `ftown env`. Run `ftown --help`
+for command discovery; if it is missing from PATH, use `~/.ftown/ftown`.
+The bridge installs this skill at `~/.ftown/skills/ftown`, linked from the agent
+skill directories. Start or restart ftown-bridge to update it and the CLIs.
 
-## Pick The Reference
-
-- Session control, mail, terminal output, archive/revive, or local API:
-  read `references/sessions.md`.
-- Ad-hoc multi-agent coordination from an orchestrator session:
-  read `references/orchestrator.md`.
-
-## Quick Commands
+## Commands and references
 
 ```bash
-# Sessions
-~/.ftown/ftown-sessions list
-~/.ftown/ftown-sessions create --prompt "Run tests" --workdir "$PWD" --parent
-~/.ftown/ftown-sessions screen <session-id> --limit 200
-~/.ftown/ftown-sessions tell <session-id> --type task "continue with the API client"
+ftown sessions list
+ftown sessions create --prompt "Review the auth module" --workdir "$PWD" --parent
+ftown sessions screen <session-id> --limit 200
+ftown harness mail send <session-id> --type task "review the API client"
+ftown harness mail read
+ftown env --help
 ```
 
-Use orchestrator guidance for ad-hoc multi-agent coordination.
+Read `references/sessions.md` for the session, mail and terminal command
+reference. Read `references/orchestrator.md` for practical worker coordination
+examples. Each command group also has `--help`.
+
+## Identity and reporting
+
+Your id is `$FTOWN_SESSION_ID`; children also receive `$FTOWN_PARENT_SESSION_ID`.
+A child's initial briefing identifies it and its parent and explains reporting:
+
+```bash
+ftown harness mail send --parent --type result "Done; checks passed"
+ftown harness mail send --parent --type escalation "Blocked: need the API contract"
+```
+
+Mail arrives as `[ftown mail]` context through harness hooks/extensions where
+available. Cursor and shell sessions receive an idle nudge to read their inbox.
+Prefer mail for agent communication; use terminal key injection only when the
+task needs it. Inspect peers with `ftown sessions list` and
+`ftown sessions screen <id> --limit 100`.
+
+## Cleanup
+
+Session cleanup is an explicit user or orchestrator action. Reporting a result
+does not remove a child automatically. Keep sessions available for follow-up
+until cleanup is requested or the coordinating task calls for it.
+
+```bash
+ftown sessions remove <finished-session-id>
+ftown sessions archive
+ftown sessions revive <archived-session-id>
+```
+
+Removal archives the session; revival creates a new session id and resumes its
+agent conversation when supported. Preserve useful results before cleanup.
+
+## Connection and compatibility
+
+The commands read `~/.ftown/bridge.json`. Anyone who can read that file can
+control the bridge's sessions. Existing `ftown-sessions`, `ftown-harness`, and
+`ftown-env` launchers remain compatible; use the grouped commands above in new
+instructions. ftown does not install a ticket system or provide a workflow
+runner. Independently installed coordination tools remain yours to manage.

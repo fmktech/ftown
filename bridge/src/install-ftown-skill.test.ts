@@ -1,11 +1,11 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, symlinkSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, symlinkSync, unlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { installFtownSkill, removeFtownSkill, retireBundledAutomationAssets } from './install-ftown-skill.js';
+import { installFtownSkill, removeFtownSkill, retireBundledAutomationAssets, retireBundledAgentAssets } from './install-ftown-skill.js';
 
 function pathExistsForLstat(path: string): boolean {
   try {
@@ -125,4 +125,83 @@ describe('ftown skill installer', () => {
     assert.equal(readFileSync(join(custom, 'custom.md'), 'utf8'), 'keep');
     assert.equal(readFileSync(join(outside, 'factory', 'SKILL.md'), 'utf8'), 'shipped factory');
   });
+  it('retires exact fticket copies and known workflow files while keeping run data and shared runtime', () => {
+    const hash = (s: string) => createHash('sha256').update(s).digest('hex');
+    installFtownSkill('fticket', bundled);
+    const ftown = join(home, '.ftown');
+    const skill = join(ftown, 'skills', 'ftown');
+    mkdirSync(join(skill, 'references'), { recursive: true });
+    mkdirSync(join(ftown, 'workflows', 'run-1'), { recursive: true });
+    writeFileSync(join(skill, 'references', 'workflows.md'), 'old guide');
+    writeFileSync(join(ftown, 'workflow-runner.js'), 'old engine');
+    writeFileSync(join(ftown, 'ftown-workflows-cli.js'), 'old cli');
+    writeFileSync(join(ftown, 'claude-trust.js'), 'shared');
+    writeFileSync(join(ftown, 'workflows', 'run-1', 'result.json'), 'user data');
+    writeFileSync(join(ftown, 'ftown-workflows'), `#!/usr/bin/env bash
+set -euo pipefail
+exec node "${join(ftown, 'ftown-workflows-cli.js')}" "$@"
+`);
+    const known = {
+      fticket: { 'SKILL.md': hash(readFileSync(join(bundled, 'SKILL.md'), 'utf8')), scripts: 'directory', 'scripts/tool': hash(readFileSync(join(bundled, 'scripts', 'tool'), 'utf8')) },
+      skillFiles: { 'references/workflows.md': hash('old guide') },
+      runtimeFiles: { 'workflow-runner.js': hash('old engine'), 'ftown-workflows-cli.js': hash('old cli') },
+    };
+    retireBundledAgentAssets(known);
+    for (const path of [join(ftown, 'skills', 'fticket'), join(home, '.agents', 'skills', 'fticket'), join(home, '.claude', 'skills', 'fticket'), join(skill, 'references', 'workflows.md'), join(ftown, 'workflow-runner.js'), join(ftown, 'ftown-workflows-cli.js'), join(ftown, 'ftown-workflows')]) assert.equal(pathExistsForLstat(path), false, path);
+    assert.equal(readFileSync(join(ftown, 'claude-trust.js'), 'utf8'), 'shared');
+    assert.equal(readFileSync(join(ftown, 'workflows', 'run-1', 'result.json'), 'utf8'), 'user data');
+    retireBundledAgentAssets(known);
+  });
+
+  it('preserves customized canonical fticket and its exact discovery links', () => {
+    installFtownSkill('fticket', bundled);
+    const canonical = join(home, '.ftown', 'skills', 'fticket');
+    writeFileSync(join(canonical, 'private.md'), 'keep');
+    retireBundledAgentAssets();
+    removeFtownSkill('fticket');
+    assert.equal(readFileSync(join(canonical, 'private.md'), 'utf8'), 'keep');
+    for (const dir of ['.agents', '.claude']) assert.equal(pathExistsForLstat(join(home, dir, 'skills', 'fticket')), true);
+  });
+
+  it('preserves custom workflow files, symlinks and independent absolute skill links', () => {
+    const ftown = join(home, '.ftown');
+    const canonical = join(ftown, 'skills', 'fticket');
+    mkdirSync(canonical, { recursive: true });
+    writeFileSync(join(canonical, 'SKILL.md'), 'custom');
+    for (const dir of ['.agents', '.claude']) {
+      mkdirSync(join(home, dir, 'skills'), { recursive: true });
+      symlinkSync(canonical, join(home, dir, 'skills', 'fticket'));
+    }
+    const outside = join(home, 'my-engine.js'); writeFileSync(outside, 'keep');
+    symlinkSync(outside, join(ftown, 'workflow-runner.js'));
+    writeFileSync(join(ftown, 'ftown-workflows'), 'my launcher');
+    writeFileSync(join(ftown, 'ftown-workflows-cli.js'), 'my cli');
+    retireBundledAgentAssets({ fticket: {}, skillFiles: {}, runtimeFiles: { 'workflow-runner.js': createHash('sha256').update('keep').digest('hex') } });
+    assert.equal(readFileSync(outside, 'utf8'), 'keep');
+    assert.equal(lstatSync(join(ftown, 'workflow-runner.js')).isSymbolicLink(), true);
+    assert.equal(readFileSync(join(ftown, 'ftown-workflows'), 'utf8'), 'my launcher');
+    assert.equal(readFileSync(join(ftown, 'ftown-workflows-cli.js'), 'utf8'), 'my cli');
+    for (const dir of ['.agents', '.claude']) assert.equal(lstatSync(join(home, dir, 'skills', 'fticket')).isSymbolicLink(), true);
+  });
+
+  it('preserves fticket and workflow files behind symlink roots or parent directories', () => {
+    const hash = createHash('sha256').update('known').digest('hex');
+    const outside = join(home, 'outside'); mkdirSync(join(outside, 'skills', 'fticket'), { recursive: true });
+    writeFileSync(join(outside, 'skills', 'fticket', 'SKILL.md'), 'known');
+    writeFileSync(join(outside, 'workflow-runner.js'), 'known');
+    symlinkSync(outside, join(home, '.ftown'));
+    retireBundledAgentAssets({ fticket: { 'SKILL.md': hash }, skillFiles: {}, runtimeFiles: { 'workflow-runner.js': hash } });
+    assert.equal(readFileSync(join(outside, 'skills', 'fticket', 'SKILL.md'), 'utf8'), 'known');
+    assert.equal(readFileSync(join(outside, 'workflow-runner.js'), 'utf8'), 'known');
+    unlinkSync(join(home, '.ftown'));
+    mkdirSync(join(home, '.ftown', 'skills'), { recursive: true });
+    symlinkSync(join(outside, 'skills', 'fticket'), join(home, '.ftown', 'skills', 'fticket'));
+    const refs = join(outside, 'references'); mkdirSync(refs); writeFileSync(join(refs, 'workflows.md'), 'known');
+    mkdirSync(join(home, '.ftown', 'skills', 'ftown'));
+    symlinkSync(refs, join(home, '.ftown', 'skills', 'ftown', 'references'));
+    retireBundledAgentAssets({ fticket: { 'SKILL.md': hash }, skillFiles: { 'references/workflows.md': hash }, runtimeFiles: {} });
+    assert.equal(readFileSync(join(outside, 'skills', 'fticket', 'SKILL.md'), 'utf8'), 'known');
+    assert.equal(readFileSync(join(refs, 'workflows.md'), 'utf8'), 'known');
+  });
+
 });

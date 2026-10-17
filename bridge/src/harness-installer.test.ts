@@ -79,6 +79,10 @@ describe('installHarness', () => {
 
     writeHarnessAgentGuide({ wrapperPath: result.wrapperPath, port: 12345, bridgeId: 'bridge-1' });
     assert.equal(agentGuidePath(), join(tmp, '.ftown', 'harness-agent.md'));
-    assert.ok(readFileSync(agentGuidePath(), 'utf8').includes(result.wrapperPath));
+    const guide = readFileSync(agentGuidePath(), 'utf8');
+    assert.match(guide, /skills\/ftown\/SKILL\.md/);
+    assert.match(guide, /ftown --help/);
+    assert.ok(guide.length < 900);
+    assert.doesNotMatch(guide, /Default workflow|Subcommands|Mail \(per-session/);
   });
 });

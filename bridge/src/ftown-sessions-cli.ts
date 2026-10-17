@@ -197,7 +197,7 @@ function formatUsageTable(rows: UsageRow[]): string {
 }
 
 function usage(): void {
-  console.error(`Usage: ftown-sessions <command> [options]
+  console.error(`Usage: ftown sessions <command> [options]
 
 Commands:
   list                          List sessions
@@ -257,7 +257,7 @@ Reads ~/.ftown/bridge.json (ftown-bridge must be running).`);
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (['loop', 'loops', 'loop-list'].includes(argv[0])) {
-    console.error(`ftown-sessions: ${AUTOMATION_REMOVED_MESSAGE}`);
+    console.error(`ftown sessions: ${AUTOMATION_REMOVED_MESSAGE}`);
     process.exit(1);
   }
   if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
@@ -513,7 +513,7 @@ async function main(): Promise<void> {
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`ftown-sessions: ${msg}`);
+    console.error(`ftown sessions: ${msg}`);
     process.exit(1);
   }
 }

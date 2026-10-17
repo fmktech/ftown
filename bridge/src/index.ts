@@ -33,9 +33,8 @@ import { installNotifyScript } from './install-notify-script.js';
 import { installPiExtension } from './pi-extension-installer.js';
 import { installOpencodePlugin, opencodeBinaryAvailable } from './opencode-plugin-installer.js';
 import { ensureMusePlugin, museBinaryAvailable } from './muse-plugin-installer.js';
-import { installFtownSkill, removeFtownSkill, retireBundledAutomationAssets } from './install-ftown-skill.js';
+import { installFtownSkill, removeFtownSkill, retireBundledAutomationAssets, retireBundledAgentAssets } from './install-ftown-skill.js';
 import { installFtownSessionsCli } from './install-ftown-cli.js';
-import { installFtownWorkflowsCli } from './install-ftown-workflows-cli.js';
 import { installFtownEnvCli } from './install-ftown-env-cli.js';
 import { installFtownCommandCli } from './install-ftown-command-cli.js';
 import { ensureFtownOnPath } from './ensure-ftown-path.js';
@@ -747,8 +746,8 @@ program
     }
 
     retireBundledAutomationAssets();
+    retireBundledAgentAssets();
     installFtownSkill('ftown', resolve(__dirname, '..', 'skills', 'ftown'));
-    installFtownSkill('fticket', resolve(__dirname, '..', 'skills', 'fticket'));
     for (const legacySkill of ['ftown-sessions', 'ftown-loops', 'ftown-orchestrator', 'ftown-workflows']) {
       removeFtownSkill(legacySkill);
     }
@@ -758,12 +757,6 @@ program
       : resolve(__dirname, '..', 'dist', 'ftown-sessions-cli.js');
     const cliPath = installFtownSessionsCli(cliBundlePath);
     console.log(`[Bridge] Installed CLI at ${cliPath}`);
-
-    const workflowsCliBundlePath = existsSync(resolve(__dirname, 'workflow-runner-cli.js'))
-      ? resolve(__dirname, 'workflow-runner-cli.js')
-      : resolve(__dirname, '..', 'dist', 'workflow-runner-cli.js');
-    const workflowsCliPath = installFtownWorkflowsCli(workflowsCliBundlePath);
-    console.log(`[Bridge] Installed workflows CLI at ${workflowsCliPath}`);
 
     const envCliBundlePath = existsSync(resolve(__dirname, 'ftown-env-cli.js'))
       ? resolve(__dirname, 'ftown-env-cli.js')

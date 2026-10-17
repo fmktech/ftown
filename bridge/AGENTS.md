@@ -6,7 +6,7 @@
 
 - `~/.ftown/bin/ftown-harness` — stable CLI entry (wrapper → package `harness-cli.js`)
 - `~/.ftown/bridge.json` — port, token, `harness` path
-- `~/.ftown/harness-agent.md` — cheat sheet for agents (regenerated each start)
+- `~/.ftown/harness-agent.md` — short pointer to the authoritative ftown skill (regenerated each start)
 
 Implement harness features in `src/harness-cli.ts` and `src/harness-installer.ts`. Bridge wires install in `src/index.ts` next to hook installation.
 
@@ -26,12 +26,12 @@ npm version patch --no-git-tag-version
 
 ```bash
 npm run harness -- status
-npm run build   # publishes bin ftown-harness in package
+npm run build   # builds canonical ftown command and compatible launchers
 ```
 
 ### Tests before PR
 
 ```bash
 npm run build
-npm run harness -- status   # requires running bridge
+ftown harness status       # requires a task-owned running bridge
 ```

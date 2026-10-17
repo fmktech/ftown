@@ -75,12 +75,7 @@ export function buildChildBriefing(params: ChildBriefingParams): string {
     `[ftown] You are child session '${params.childName}' (${params.childId}), ` +
     `spawned by parent '${params.parentName}' (${params.parentId}). ` +
     `Report completion with ` +
-    `ftown-harness mail send --parent --type result "<result>" (use --type escalation when blocked). ` +
-    `After the outcome is reported, unless the user explicitly asked you to keep the session open, ` +
-    `run ~/.ftown/ftown-sessions remove "$FTOWN_SESSION_ID" as your very last command; ` +
-    `nothing after it will execute. Check mail with ftown-harness mail read. ` +
-    `Inspect peers with ~/.ftown/ftown-sessions list / screen <id>. ` +
-    `Your parent can read your terminal at any time.`
+    `ftown harness mail send --parent --type result "<result>" (use --type escalation when blocked).`
   );
 }
 
@@ -96,8 +91,8 @@ export function buildOrchestratorBriefing(params: OrchestratorBriefingParams): s
     `(${params.sessionId}). Use the 'ftown' skill (installed at ` +
     `~/.ftown/skills/ftown, linked from ~/.agents/skills and ~/.claude/skills — ` +
     `read its SKILL.md and references/orchestrator.md if not auto-loaded) to spawn and coordinate worker agent sessions ` +
-    `via ~/.ftown/ftown-sessions. Messages arrive as [ftown mail] context and can be read ` +
-    `with ftown-harness mail read.`
+    `via ftown sessions. Messages arrive as [ftown mail] context and can be read ` +
+    `with ftown harness mail read.`
   );
 }
 

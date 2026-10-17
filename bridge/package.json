@@ -1,6 +1,6 @@
 {
   "name": "ftown-bridge",
-  "version": "0.19.39",
+  "version": "0.19.40",
   "description": "CLI bridge for ftown — generic PTY-over-Centrifugo relay",
   "type": "module",
   "main": "dist/index.js",
@@ -10,7 +10,6 @@
     "ftown-harness": "dist/harness-cli.js",
     "ftown-env": "dist/ftown-env-cli.js",
     "ftown-sessions": "bin/ftown-sessions",
-    "ftown-workflows": "dist/workflow-runner-cli.js",
     "ftown-mcp": "dist/mcp-cli.js"
   },
   "files": [
@@ -23,7 +22,7 @@
     "skills"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "prepublishOnly": "npm run build",
     "start": "tsx src/index.ts",

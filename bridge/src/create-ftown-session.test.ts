@@ -116,10 +116,7 @@ function fakeDeps(existingSessions: Session[] = []): {
   };
 }
 
-// FIX C: ftown-workflows children must be spawnable WITHOUT the standard child briefing,
-// because that briefing tells the child to report via mail — which conflicts with the
-// file-based result protocol the workflow runner polls for. The flag is carried on the
-// create-session body and parsed here.
+// Callers can suppress automatic briefing without changing task delivery.
 describe('parseCreateSessionBody — suppressBriefing plumbing', () => {
   it('parses suppressBriefing: true', () => {
     assert.strictEqual(parseCreateSessionBody({ suppressBriefing: true }).suppressBriefing, true);
@@ -876,28 +873,12 @@ describe('buildChildBriefing', () => {
     });
     assert.match(briefing, /child session 'worker' \(c1\)/);
     assert.match(briefing, /parent 'orch' \(p1\)/);
-    assert.match(briefing, /ftown-harness mail send --parent --type result/);
+    assert.match(briefing, /ftown harness mail send --parent --type result/);
     assert.match(briefing, /--type escalation when blocked/);
-    assert.match(briefing, /ftown-harness mail read/);
-    assert.match(briefing, /ftown-sessions list \/ screen <id>/);
+    assert.doesNotMatch(briefing, /mail read|list|screen|remove|very last|keep.*open/i);
     assert.doesNotMatch(briefing, /fticket|FTS|TICKET_ID|fallback|resource leases/i);
   });
 
-  it('reports its result before self-removing unless the user asks it to stay open', () => {
-    const briefing = buildChildBriefing({
-      childName: 'worker',
-      childId: 'c1',
-      parentName: 'orch',
-      parentId: 'p1',
-    });
-    const report = 'ftown-harness mail send --parent --type result';
-    const remove = '~/.ftown/ftown-sessions remove "$FTOWN_SESSION_ID"';
-
-    assert.ok(briefing.indexOf(report) >= 0, 'child must report a typed result');
-    assert.ok(briefing.indexOf(remove) > briefing.indexOf(report), 'cleanup must follow reporting');
-    assert.match(briefing, /unless.*user.*keep.*open/i);
-    assert.match(briefing, /very last (command|action)/i);
-  });
 });
 
 describe('buildOrchestratorBriefing', () => {
@@ -910,9 +891,28 @@ describe('buildOrchestratorBriefing', () => {
     assert.match(briefing, /ORCHESTRATOR.*session 'orch' \(p1\)/);
     assert.match(briefing, /'ftown' skill/);
     assert.match(briefing, /SKILL\.md and references\/orchestrator\.md/);
-    assert.match(briefing, /ftown-sessions/);
+    assert.match(briefing, /ftown sessions/);
     assert.match(briefing, /\[ftown mail\]/);
-    assert.match(briefing, /ftown-harness mail read/);
+    assert.match(briefing, /ftown harness mail read/);
     assert.doesNotMatch(briefing, /fticket|FTS|fallback|resource leases/i);
+  });
+});
+
+
+describe('child task delivery', () => {
+  it('keeps the requested task after the short briefing and supports suppression', async () => {
+    for (const suppressBriefing of [false, true]) {
+      const harness = fakeDeps([fakeSession('parent')]);
+      await createFtownSession(harness.deps, { name: 'worker', shellType: 'claude', parentSessionId: 'parent', prompt: 'bounded task', suppressBriefing });
+      const command = harness.runs[0].command;
+      assert.match(command, /bounded task/);
+      assert.doesNotMatch(command, /self-remov|very last command|keep the session open/);
+      if (suppressBriefing) assert.doesNotMatch(command, /\[ftown\]|Task:/);
+      else {
+        assert.match(command, /\[ftown\]/);
+        assert.match(command, /ftown harness mail send --parent --type result/);
+        assert.match(command, /Task: bounded task/);
+      }
+    }
   });
 });

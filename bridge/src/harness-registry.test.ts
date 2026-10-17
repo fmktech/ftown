@@ -5,7 +5,6 @@ import {
   HARNESSES,
   HOOKED_SHELL_TYPES,
   SHELL_TYPES,
-  WORKFLOW_SHELLS,
   buildKimiCodeCommand,
   buildMuseCommand,
   buildOpencodeCommand,
@@ -15,19 +14,14 @@ import {
 import { buildSessionCommand } from './agent-commands.js';
 import { PROVIDER_AUTH_ENV, PROVIDER_FLAVORS, PROVIDER_RUNTIME_ENV } from './provider-env-store.js';
 
-import type { ShellType, WorkflowShell } from './harness-registry.js';
+import type { ShellType } from './harness-registry.js';
 
 // ---- Type-level drift guards: derived unions must match the registry keys ----
 
 type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 
 const _shellTypeIsRegistryKeys: Equals<ShellType, keyof typeof HARNESSES> = true;
-const _workflowShellUnion: Equals<
-  WorkflowShell,
-  'claude' | 'cursor' | 'codex' | 'pi' | 'shell' | 'opencode'
-> = true;
 void _shellTypeIsRegistryKeys;
-void _workflowShellUnion;
 
 describe('harness registry', () => {
   it('contains the supported ShellType set', () => {
@@ -76,13 +70,6 @@ describe('harness registry', () => {
       assert.ok(isShellType(flavor), `flavor "${flavor}" missing from HARNESSES`);
       assert.equal(HARNESSES[flavor].providerBase, 'claude');
     }
-  });
-
-  it('derives the workflow shell set (grok and muse stay excluded — preserved decision)', () => {
-    assert.deepEqual(
-      [...WORKFLOW_SHELLS].sort(),
-      ['claude', 'codex', 'cursor', 'opencode', 'pi', 'shell'],
-    );
   });
 
   it('derives the hooked harness set (Pi uses the bundled ftown extension, opencode/muse the bundled ftown plugins)', () => {
@@ -306,7 +293,6 @@ describe('buildMuseCommand', () => {
     assert.equal(HARNESSES.muse.promptAsCliArg, true);
     assert.equal(HARNESSES.muse.resumeField, 'museSessionId');
     assert.ok(!('providerBase' in HARNESSES.muse));
-    assert.equal(HARNESSES.muse.validForWorkflow, false);
     assert.ok(!('spawnStaggerMs' in HARNESSES.muse));
   });
 });

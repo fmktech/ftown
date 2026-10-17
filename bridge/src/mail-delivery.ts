@@ -400,7 +400,7 @@ export class MailDeliveryService {
     this.pendingNudgeFrom.delete(sessionId);
     this.lastNudgeAt.set(sessionId, this.now());
     const text = sanitizeMessageText(
-      `You have new ftown mail from ${fromLabel} — run \`~/.ftown/bin/ftown-harness mail read\` to read it.`,
+      `You have new ftown mail from ${fromLabel} — run \`ftown harness mail read\` to read it.`,
     );
     await this.injectPtyLine(session, 'ftown-mail', text);
   }

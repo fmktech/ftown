@@ -1,9 +1,9 @@
 # ftown cross-session CLI
 
-**Prefer the CLI** — installed to `~/.ftown/ftown-sessions` whenever `ftown-bridge` is running. It reads `~/.ftown/bridge.json` automatically.
+Use `ftown sessions`, installed whenever `ftown-bridge` is running. It reads `~/.ftown/bridge.json` automatically.
 
 ```bash
-~/.ftown/ftown-sessions --help
+ftown sessions --help
 ```
 
 Unified skill wrapper: `scripts/ftown` in this skill directory delegates to the
@@ -15,40 +15,40 @@ top-level `~/.ftown/ftown` dispatcher.
 
 ```bash
 # List sessions (JSON)
-~/.ftown/ftown-sessions list
+ftown sessions list
 
 # Spawn a child agent (uses FTOWN_SESSION_ID for --parent)
-~/.ftown/ftown-sessions create \
+ftown sessions create \
   --prompt "Review the auth module and summarize" \
   --workdir /path/to/repo \
   --name auth-review \
   --parent
 
 # Metadata
-~/.ftown/ftown-sessions get <session-id>
+ftown sessions get <session-id>
 
 # Terminal output (JSON by default; add --plain for raw lines)
-~/.ftown/ftown-sessions screen <session-id> --limit 200
+ftown sessions screen <session-id> --limit 200
 
 # Search output (--offset/--limit paginate screen and grep)
-~/.ftown/ftown-sessions grep <session-id> --pattern 'error|failed' --offset 0 --limit 100
+ftown sessions grep <session-id> --pattern 'error|failed' --offset 0 --limit 100
 
 # Type into another running session
-~/.ftown/ftown-sessions keys <session-id> 'y'
+ftown sessions keys <session-id> 'y'
 
 # Liveness
-~/.ftown/ftown-sessions running <session-id>
+ftown sessions running <session-id>
 
 # Stop and remove a session (kept as a tombstone in the archive)
-~/.ftown/ftown-sessions remove <session-id>
+ftown sessions remove <session-id>
 
 # List archived (removed) sessions: id, name, removedAt, shellType
-~/.ftown/ftown-sessions archive
+ftown sessions archive
 
 # Recreate a removed session from its tombstone (resumes the agent
 # conversation when a claude/cursor/codex/Pi session id was recorded; Kimi Code
 # continues by working directory; the revived session gets a NEW id)
-~/.ftown/ftown-sessions revive <session-id>
+ftown sessions revive <session-id>
 ```
 
 ## Messaging (mail)
@@ -61,27 +61,27 @@ follow-up turn when mail arrives, including while Pi is idle. opencode's
 installed plugin delivers pending mail as a new prompt when a turn goes idle.
 Muse's installed `ftown` plugin reports the native session id on SessionStart
 and pumps pending mail as context on Stop.
-Cursor and shell sessions rely on an idle one-line nudge to run `ftown-harness
+Cursor and shell sessions rely on an idle one-line nudge to run `ftown harness
 mail read` instead.
 
 ```bash
 # Tell a specific session
-~/.ftown/ftown-sessions tell <session-id> "tests are green, ship it"
+ftown sessions tell <session-id> "tests are green, ship it"
 
 # Mail type / threading
-~/.ftown/ftown-sessions tell <session-id> --type task "implement the API client"
-~/.ftown/ftown-sessions tell <session-id> --type result --thread <id> "done, 0 failures"
+ftown sessions tell <session-id> --type task "implement the API client"
+ftown sessions tell <session-id> --type result --thread <id> "done, 0 failures"
 
 # Tell my parent / children / siblings (resolved via FTOWN_SESSION_ID)
-~/.ftown/ftown-sessions tell --parent "child finished phase 1"
-~/.ftown/ftown-sessions tell --children "pause and report status"
-~/.ftown/ftown-sessions tell --siblings "I grabbed the lock, stand by"
+ftown sessions tell --parent "child finished phase 1"
+ftown sessions tell --children "pause and report status"
+ftown sessions tell --siblings "I grabbed the lock, stand by"
 
 # Last resort: inject as terminal keystrokes instead of mail
-~/.ftown/ftown-sessions tell <session-id> --keys "wake up"
+ftown sessions tell <session-id> --keys "wake up"
 
 # Read my own inbox (requires FTOWN_SESSION_ID; alias: mail)
-~/.ftown/ftown-sessions inbox            # --peek / --limit N / --all / --json
+ftown sessions inbox            # --peek / --limit N / --all / --json
 ```
 
 Sender is resolved from `FTOWN_SESSION_ID` (omitted when unset).
@@ -110,14 +110,12 @@ Returns JSON with the new `session.id` — use that id for `screen` / `grep` / `
 ## Typical workflow
 
 ```bash
-CLI=~/.ftown/ftown-sessions
-
-$CLI list
-$CLI create --prompt "Run tests and report" --workdir "$PWD" --parent
+ftown sessions list
+ftown sessions create --prompt "Run tests and report" --workdir "$PWD" --parent
 # -> note session.id from JSON
 
-$CLI screen <child-id> --limit 100
-$CLI grep <child-id> --pattern 'FAIL|Error'
+ftown sessions screen <child-id> --limit 100
+ftown sessions grep <child-id> --pattern 'FAIL|Error'
 ```
 
 ## Environment
@@ -132,15 +130,14 @@ Spawned ftown sessions receive:
 Agent children (any `--shell` except `shell`) spawned with a parent also get an
 automatic one-paragraph briefing prepended to their first input: it states their
 name/id and parent name/id. It explains how to report via
-`ftown-harness mail send --parent --type result` (or `--type escalation` when blocked).
-After reporting the outcome, the child is instructed to remove itself as
-its final command unless the user explicitly asked it to stay open. The creator's
-`--prompt` follows after a `Task:` line.
+`ftown harness mail send --parent --type result` (or `--type escalation` when blocked).
+The creator's `--prompt` follows after a `Task:` line. Session cleanup is an
+explicit user or orchestrator action; see the ftown skill.
 
 An agent session created with `--orchestrator` additionally gets `FTOWN_ORCHESTRATOR=1`
 in its environment and a compact pointer briefing directing it to the unified
-**ftown** skill, whose `references/orchestrator.md` contains the full
-orchestrator playbook for spawning workers, monitoring them, and cleaning up.
+**ftown** skill, whose `references/orchestrator.md` adds practical
+coordination examples for spawning workers, monitoring them, and cleaning up.
 When both apply, the child paragraph comes first, then the orchestrator pointer,
 separated by a blank line.
 
@@ -175,7 +172,7 @@ back to the bridge root. Parent and child must belong to the same bridge.
 
 ## If the CLI is missing
 
-Start or restart **ftown-bridge** on this machine. It installs
-`~/.ftown/ftown-sessions`, `~/.ftown/notify.sh`, and updates the unified skill
+Start or restart **ftown-bridge** on this machine. It installs the `ftown` command, compatible launchers, `~/.ftown/notify.sh`,
+and updates the unified skill
 under `~/.ftown/skills/ftown/` (linked into ~/.agents/skills and
 ~/.claude/skills).
