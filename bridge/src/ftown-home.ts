@@ -1,29 +1,19 @@
-import { existsSync, mkdirSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, lstatSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
-/**
- * Default data dir is ~/.ftown/data (machine-stable, like the rest of ~/.ftown).
- * Older bridges defaulted to ./data relative to the launch cwd — if that legacy
- * dir holds sessions and the new default does not exist yet, migrate it once so
- * an upgraded bridge still resurrects its sessions.
- */
-export function resolveDefaultDataDir(): string {
-  const defaultDir = join(homedir(), '.ftown', 'data');
-  const legacyDir = resolve('./data');
-  if (!existsSync(defaultDir) && existsSync(join(legacyDir, 'sessions'))) {
-    try {
-      mkdirSync(dirname(defaultDir), { recursive: true });
-      renameSync(legacyDir, defaultDir);
-      console.log(`[Bridge] Migrated legacy data dir ${legacyDir} -> ${defaultDir}`);
-    } catch (err) {
-      console.error(
-        `[Bridge] Failed to migrate legacy data dir (${err instanceof Error ? err.message : String(err)}); using ${legacyDir}`,
-      );
-      return legacyDir;
-    }
-  }
-  return defaultDir;
+/** Resolve the default without migrating data or touching global state. */
+export function resolveDefaultDataDir(): string { return join(homedir(), '.ftown', 'data'); }
+
+/** Explicit setup-only migration of the historical cwd-relative data directory. */
+export function migrateLegacyDataDir(): void {
+  const destination = resolveDefaultDataDir();
+  const legacy = resolve('./data');
+  if (existsSync(destination) || !existsSync(join(legacy, 'sessions'))) return;
+  if (lstatSync(legacy).isSymbolicLink() || lstatSync(join(legacy, 'sessions')).isSymbolicLink()) return;
+  mkdirSync(dirname(destination), { recursive: true });
+  renameSync(legacy, destination);
+  console.log(`[Setup] Migrated legacy data dir ${legacy} -> ${destination}`);
 }
 
 /**
@@ -45,28 +35,13 @@ export function resolveDefaultDataDir(): string {
  * Semantics: if `dataDir` resolves to the default data dir, return
  * `$HOME/.ftown`; otherwise the custom data dir is its own instance home.
  *
- * `defaultDataDir` lets a caller pass the default it ALREADY resolved (index.ts
- * computes it once for both `dataDir` and this call) so
- * `resolveDefaultDataDir()`'s one-time legacy `./data` migration side effect is
- * never re-triggered. When omitted (standalone callers, tests) the default is
- * computed once and memoized, so a repeated call cannot re-run the migration —
- * where a first-fail-then-succeed sequence could otherwise misroute the home to
- * `./data`. This function performs no fs writes of its own beyond that shared,
- * idempotent migration.
+ * `defaultDataDir` can pass the already-resolved default. Resolution is read-only.
  */
-let memoizedDefaultDataDir: string | undefined;
-
 export function resolveFtownHome(dataDir: string, defaultDataDir?: string): string {
-  const def = defaultDataDir ?? (memoizedDefaultDataDir ??= resolveDefaultDataDir());
+  const def = defaultDataDir ?? resolveDefaultDataDir();
   if (resolve(dataDir) === resolve(def)) return join(homedir(), '.ftown');
   return resolve(dataDir);
 }
 
-/**
- * Test-only: clear the memoized default data dir so a $HOME override in a later
- * test is honored instead of a value cached from an earlier one. Never call this
- * in production — index.ts always passes an explicit `defaultDataDir`.
- */
-export function resetFtownHomeForTests(): void {
-  memoizedDefaultDataDir = undefined;
-}
+/** Compatibility helper for tests; default resolution no longer caches HOME. */
+export function resetFtownHomeForTests(): void {}

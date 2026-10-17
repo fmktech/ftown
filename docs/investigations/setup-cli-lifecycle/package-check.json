@@ -1,0 +1,23 @@
+{
+  "version": "0.19.41",
+  "fileCount": 261,
+  "retiredAssets": [],
+  "requiredModules": [
+    "dist/ftown-cli.js",
+    "dist/setup.js",
+    "dist/setup-state.js",
+    "dist/setup-migrations.js",
+    "dist/sessions-commands.js",
+    "dist/harness-commands.js",
+    "dist/env-commands.js",
+    "dist/cli-client.js"
+  ],
+  "bin": {
+    "ftown-bridge": "dist/index.js",
+    "ftown": "dist/ftown-cli.js",
+    "ftown-harness": "dist/harness-cli.js",
+    "ftown-env": "dist/ftown-env-cli.js",
+    "ftown-sessions": "bin/ftown-sessions",
+    "ftown-mcp": "dist/mcp-cli.js"
+  }
+}

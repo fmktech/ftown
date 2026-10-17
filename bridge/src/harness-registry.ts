@@ -5,11 +5,6 @@
  * HOOKED_SHELL_TYPES, the buildSessionCommand
  * branch, the prompt-as-CLI-arg predicate) now derives from HARNESSES below.
  *
- * NOTE: this module is part of the bridge dist and is NOT sibling-copied into
- * ~/.ftown. Standalone sibling-copied modules (provider-env-store.ts,
- * harness-cli.ts,
- * ftown-sessions-cli.ts) must not import it at runtime — type-only imports are
- * fine (they are erased at compile time).
  */
 
 /** Escape an argument for the direct runtime's platform shell. */

@@ -1,59 +1,53 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, it } from 'node:test';
-import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { CLI_RUNTIME_MODULES, installFtownCommandCli } from './install-ftown-command-cli.js';
 
-import { installFtownCommandCli } from './install-ftown-command-cli.js';
+function fixture(root: string): string {
+  const source = join(root, 'cache', 'package');
+  mkdirSync(join(source, 'dist'), { recursive: true });
+  writeFileSync(join(source, 'package.json'), '{"version":"1.2.3","type":"module"}');
+  for (const name of CLI_RUNTIME_MODULES) writeFileSync(join(source, 'dist', `${name}.js`), `export const NAME = '${name}';`);
+  for (const asset of ['hooks', 'pi-extension', 'opencode-plugin', 'muse-plugin', 'skills']) {
+    mkdirSync(join(source, asset)); writeFileSync(join(source, asset, 'asset'), asset);
+  }
+  const dependency = join(source, 'node_modules', 'commander'); mkdirSync(dependency, { recursive: true });
+  writeFileSync(join(dependency, 'package.json'), '{"name":"commander","main":"index.js"}');
+  writeFileSync(join(dependency, 'index.js'), 'module.exports = {};');
+  return source;
+}
 
-// These tests override $HOME so installFtownCommandCli (which resolves everything
-// from homedir() at call time) writes into a throwaway dir instead of the real ~/.ftown.
-describe('installFtownCommandCli', () => {
-  let realHome: string | undefined;
-  let tmp: string;
-  let fakeCli: string;
+test('one copied runtime owns every group, assets and dependency; aliases are delegates', () => {
+  const temporary = mkdtempSync(join(tmpdir(), 'ftown-runtime-'));
+  try {
+    const source = fixture(temporary); const home = join(temporary, "user's home"); mkdirSync(home);
+    const command = installFtownCommandCli(source, home);
+    const runtime = join(home, '.ftown', 'cli');
+    rmSync(join(temporary, 'cache'), { recursive: true });
+    assert.equal(existsSync(source), false);
+    for (const name of CLI_RUNTIME_MODULES) assert.ok(readFileSync(join(runtime, 'dist', `${name}.js`), 'utf8').includes(name));
+    assert.equal(JSON.parse(readFileSync(join(runtime, 'package.json'), 'utf8')).version, '1.2.3');
+    for (const [relative, group] of [['ftown', ''], ['ftown-sessions', 'sessions'], ['ftown-env', 'env'], ['bin/ftown-harness', 'harness']]) {
+      const path = join(home, '.ftown', relative); const body = readFileSync(path, 'utf8');
+      assert.match(body, /cli\/dist\/ftown-cli\.js/);
+      if (group) assert.ok(body.includes(` ${group} "$@"`));
+      assert.equal(statSync(path).mode & 0o777, 0o755);
+    }
+    assert.equal(command, join(home, '.ftown', 'ftown'));
+    assert.equal(installFtownCommandCli(runtime, home), command, 'repair can use the durable runtime as its own source');
+    assert.equal(readFileSync(join(runtime, 'hooks', 'asset'), 'utf8'), 'hooks');
+  } finally { rmSync(temporary, { recursive: true, force: true }); }
+});
 
-  beforeEach(() => {
-    realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
-    tmp = mkdtempSync(join(tmpdir(), 'ftw-install-cmd-'));
-    // A fake compiled dist dir containing the top-level dispatcher CLI. It imports
-    // ONLY node builtins, so no sibling module copy is needed alongside it.
-    const dist = join(tmp, 'dist');
-    mkdirSync(dist, { recursive: true });
-    fakeCli = join(dist, 'ftown-cli.js');
-    writeFileSync(fakeCli, "#!/usr/bin/env node\nconsole.log('dispatch');\n");
-    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = tmp;
-  });
-
-  afterEach(() => {
-    if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
-    else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
-    rmSync(tmp, { recursive: true, force: true });
-  });
-
-  it('copies the compiled ftown-cli.js into $HOME/.ftown at mode 0644', () => {
-    installFtownCommandCli(fakeCli);
-    const cliJs = join(tmp, '.ftown', 'ftown-cli.js');
-    assert.strictEqual(existsSync(cliJs), true);
-    assert.ok(readFileSync(cliJs, 'utf8').includes('dispatch'));
-    assert.strictEqual(statSync(cliJs).mode & 0o777, 0o644);
-  });
-
-  it('writes an executable ftown launcher (0755) under $HOME/.ftown and returns its path', () => {
-    const launcher = installFtownCommandCli(fakeCli);
-    assert.strictEqual(launcher, join(tmp, '.ftown', 'ftown'));
-    assert.strictEqual(existsSync(launcher), true);
-    assert.strictEqual(statSync(launcher).mode & 0o777, 0o755);
-    const body = readFileSync(launcher, 'utf8');
-    assert.ok(body.startsWith('#!/usr/bin/env bash'));
-    // The launcher execs `node <dir>/ftown-cli.js "$@"`.
-    assert.ok(body.includes(`node "${join(tmp, '.ftown', 'ftown-cli.js')}" "$@"`));
-  });
-
-  it('writes the shared ~/.ftown/package.json ESM marker', () => {
-    installFtownCommandCli(fakeCli);
-    assert.deepStrictEqual(JSON.parse(readFileSync(join(tmp, '.ftown', 'package.json'), 'utf8')), {
-      type: 'module',
-    });
-  });
+test('does not overwrite a foreign runtime symlink', () => {
+  const temporary = mkdtempSync(join(tmpdir(), 'ftown-runtime-link-'));
+  try {
+    const source = fixture(temporary); const home = join(temporary, 'home'); const external = join(temporary, 'outside');
+    mkdirSync(join(home, '.ftown'), { recursive: true }); mkdirSync(external);
+    writeFileSync(join(external, 'keep'), 'private'); symlinkSync(external, join(home, '.ftown', 'cli'));
+    assert.throws(() => installFtownCommandCli(source, home), /symlink/);
+    assert.equal(readFileSync(join(external, 'keep'), 'utf8'), 'private');
+  } finally { rmSync(temporary, { recursive: true, force: true }); }
 });

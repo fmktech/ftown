@@ -8,7 +8,6 @@ import { buildSessionCommand } from './agent-commands.js';
 import {
   assertProviderAuthAvailable,
   buildChildBriefing,
-  buildOrchestratorBriefing,
   canResumeStoredSession,
   createFtownSession,
   deriveRelaunchCommand,
@@ -881,22 +880,6 @@ describe('buildChildBriefing', () => {
 
 });
 
-describe('buildOrchestratorBriefing', () => {
-  it('points to the ftown skill and session mail without prescribing a ticket system', () => {
-    const briefing = buildOrchestratorBriefing({
-      sessionName: 'orch',
-      sessionId: 'p1',
-    });
-
-    assert.match(briefing, /ORCHESTRATOR.*session 'orch' \(p1\)/);
-    assert.match(briefing, /'ftown' skill/);
-    assert.match(briefing, /SKILL\.md and references\/orchestrator\.md/);
-    assert.match(briefing, /ftown sessions/);
-    assert.match(briefing, /\[ftown mail\]/);
-    assert.match(briefing, /ftown harness mail read/);
-    assert.doesNotMatch(briefing, /fticket|FTS|fallback|resource leases/i);
-  });
-});
 
 
 describe('child task delivery', () => {
@@ -914,5 +897,23 @@ describe('child task delivery', () => {
         assert.match(command, /Task: bounded task/);
       }
     }
+  });
+});
+
+
+describe('legacy orchestrator compatibility', () => {
+  it('ignores role requests while preserving task, parent and explicitly supplied env', async () => {
+    for (const legacy of [false, true]) {
+      const harness = fakeDeps([fakeSession('parent')]);
+      await createFtownSession(harness.deps, { name: 'ordinary', shellType: 'claude', parentSessionId: 'parent', prompt: 'ordinary task', orchestrator: legacy });
+      assert.equal(harness.saved[0].env, undefined);
+      assert.equal(harness.saved[0].parentSessionId, 'parent');
+      assert.match(harness.runs[0].command, /ordinary task/);
+      assert.doesNotMatch(harness.runs[0].command, /ORCHESTRATOR|references\/orchestrator/);
+    }
+    const harness = fakeDeps();
+    await createFtownSession(harness.deps, { shellType: 'claude', prompt: 'keep my env', env: { FTOWN_ORCHESTRATOR: 'custom', USER_SETTING: 'keep' }, orchestrator: true });
+    assert.deepEqual(harness.saved[0].env, { FTOWN_ORCHESTRATOR: 'custom', USER_SETTING: 'keep' });
+    assert.equal(parseCreateSessionBody({ orchestrator: true, prompt: 'task' }).orchestrator, undefined);
   });
 });

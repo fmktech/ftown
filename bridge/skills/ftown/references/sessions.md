@@ -1,6 +1,6 @@
 # ftown cross-session CLI
 
-Use `ftown sessions`, installed whenever `ftown-bridge` is running. It reads `~/.ftown/bridge.json` automatically.
+Use `ftown sessions`, installed by explicit `ftown setup` before the bridge starts. It reads `~/.ftown/bridge.json` automatically.
 
 ```bash
 ftown sessions --help
@@ -98,7 +98,6 @@ Fan-out targets are messaged sequentially, one JSON result line per target.
 | `--command` | Full command override (skips `--shell` builder) |
 | `--parent` | Set parent to `$FTOWN_SESSION_ID` |
 | `--parent-id` | Explicit parent session UUID |
-| `--orchestrator` | Brief the new agent (non-`shell`) to spawn and coordinate sibling sessions |
 | `--model` | Harness model name or provider/model pattern (when supported) |
 
 Provider-flavored shells (`zai`, `kimi`, `deepseek`, `fireworks`) run Claude
@@ -124,7 +123,6 @@ Spawned ftown sessions receive:
 
 - `FTOWN_SESSION_ID` — this session (use with `--parent`)
 - `FTOWN_PARENT_SESSION_ID` — the parent session id, set on children spawned with `--parent` / `--parent-id`
-- `FTOWN_ORCHESTRATOR` — set to `1` on sessions created with `--orchestrator`
 - `FTOWN_HOOK_PORT` / `FTOWN_HOOK_TOKEN` — hook forwarding (not for cross-session control)
 
 Agent children (any `--shell` except `shell`) spawned with a parent also get an
@@ -134,12 +132,10 @@ name/id and parent name/id. It explains how to report via
 The creator's `--prompt` follows after a `Task:` line. Session cleanup is an
 explicit user or orchestrator action; see the ftown skill.
 
-An agent session created with `--orchestrator` additionally gets `FTOWN_ORCHESTRATOR=1`
-in its environment and a compact pointer briefing directing it to the unified
-**ftown** skill, whose `references/orchestrator.md` adds practical
-coordination examples for spawning workers, monitoring them, and cleaning up.
-When both apply, the child paragraph comes first, then the orchestrator pointer,
-separated by a blank line.
+A task and optional parent link are sufficient for coordination. Legacy
+`--orchestrator` and request booleans are accepted as ignored compatibility inputs;
+there is no role briefing or injected role environment. Explicit user-supplied
+environment variables remain untouched.
 
 ## HTTP API (optional)
 
@@ -172,7 +168,9 @@ back to the bridge root. Parent and child must belong to the same bridge.
 
 ## If the CLI is missing
 
-Start or restart **ftown-bridge** on this machine. It installs the `ftown` command, compatible launchers, `~/.ftown/notify.sh`,
-and updates the unified skill
+Run `npm exec --yes --package ftown-bridge@<version> -- ftown setup`, using the
+version in the bridge readiness hint. This works before the installed alias
+exists and installs the `ftown` command, compatible
+launchers, `~/.ftown/notify.sh`, and updates the unified skill
 under `~/.ftown/skills/ftown/` (linked into ~/.agents/skills and
 ~/.claude/skills).

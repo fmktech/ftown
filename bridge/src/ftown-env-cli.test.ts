@@ -19,7 +19,6 @@ import {
   resolveSetToken,
   run,
 } from './ftown-env-cli.js';
-import { installFtownEnvCli } from './install-ftown-env-cli.js';
 import { loadProviderEnv } from './provider-env-store.js';
 
 /** Capture console.log lines produced while running `fn`, restoring it after. */
@@ -214,46 +213,6 @@ describe('ftown-env CLI commands (HOME-overridden)', () => {
     await assert.rejects(run(['bogus']), /Unknown command/);
   });
 });
-
-describe('installFtownEnvCli (HOME-overridden)', () => {
-  let realHome: string | undefined;
-  let tmp: string;
-  let fakeCli: string;
-
-  beforeEach(() => {
-    realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
-    tmp = mkdtempSync(join(tmpdir(), 'ftw-env-install-'));
-    const dist = join(tmp, 'dist');
-    mkdirSync(dist, { recursive: true });
-    fakeCli = join(dist, 'ftown-env-cli.js');
-    writeFileSync(fakeCli, "#!/usr/bin/env node\nimport './provider-env-store.js';\n");
-    writeFileSync(join(dist, 'provider-env-store.js'), 'export const STORE = true;\n');
-    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = tmp;
-  });
-
-  afterEach(() => {
-    if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
-    else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
-    rmSync(tmp, { recursive: true, force: true });
-  });
-
-  it('copies BOTH the cli and the provider-env-store sibling so the runtime import resolves', () => {
-    installFtownEnvCli(fakeCli);
-    const ftown = join(tmp, '.ftown');
-    assert.strictEqual(existsSync(join(ftown, 'ftown-env-cli.js')), true);
-    assert.strictEqual(existsSync(join(ftown, 'provider-env-store.js')), true);
-    assert.ok(readFileSync(join(ftown, 'provider-env-store.js'), 'utf8').includes('STORE'));
-  });
-
-  it('writes an executable launcher under $HOME/.ftown and returns its path', () => {
-    const launcher = installFtownEnvCli(fakeCli);
-    assert.strictEqual(launcher, join(tmp, '.ftown', 'ftown-env'));
-    assert.strictEqual(existsSync(launcher), true);
-    assert.ok(statSync(launcher).mode & 0o100);
-    assert.ok(readFileSync(launcher, 'utf8').includes('ftown-env-cli.js'));
-  });
-});
-
 
 describe('CLI entry recognition', () => {
   it('recognizes physical, parent-symlink and npm-bin paths without running on import', async () => {

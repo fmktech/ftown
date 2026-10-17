@@ -81,7 +81,7 @@ function linkSkillInto(skillsDir: string, skillName: string): void {
 
 function realDirectory(path: string): boolean {
   try { const stat = lstatSync(path); return stat.isDirectory() && !stat.isSymbolicLink(); }
-  catch { return false; }
+  catch (error) { preserveUnknown(error); return false; }
 }
 
 function ownedSkillParentIsReal(): boolean {
@@ -94,8 +94,8 @@ function removeSkillLinkFrom(skillsDir: string, skillName: string): void {
   let stat;
   try {
     stat = lstatSync(linkPath);
-  } catch {
-    return;
+  } catch (error) {
+    preserveUnknown(error); return;
   }
 
   if (stat.isSymbolicLink()) {
@@ -144,7 +144,7 @@ export function removeFtownSkill(skillName: string): void {
   try {
     const expected = JSON.parse(readFileSync(manifest, 'utf8')) as Record<string, string>;
     if (ownedSkillParentIsReal() && matchesTree(dest, expected)) rmSync(dest, { recursive: true, force: true });
-  } catch { /* Unrecognized/customized directories are user-owned. */ }
+  } catch (error) { preserveUnknown(error); /* Unrecognized/customized directories are user-owned. */ }
   // Preserve the discovery links when an unrecognized/customized tree survives.
   if (!pathExists(dest) && ownedSkillParentIsReal()) {
     removeSkillLinkFrom(join(homedir(), '.agents', 'skills'), skillName);
@@ -190,7 +190,7 @@ export function retireBundledAutomationAssets(
   const dest = ftownSkillPath('factory');
   try {
     if (ownedSkillParentIsReal() && matchesTree(dest, known.factory)) rmSync(dest, { recursive: true });
-  } catch { /* Missing, customized or unrecognized contents must survive. */ }
+  } catch (error) { preserveUnknown(error); /* Missing, customized or unrecognized contents must survive. */ }
   for (const dir of ['.agents', '.claude']) {
     const skills = join(homedir(), dir, 'skills');
     // Older bridge versions copied real directories into these locations.
@@ -199,8 +199,8 @@ export function retireBundledAutomationAssets(
       const path = join(skills, 'factory');
       if (realDirectory(join(homedir(), dir)) && realDirectory(skills)
         && matchesTree(path, known.factory)) rmSync(path, { recursive: true });
-    } catch { /* Preserve custom trees, foreign links and symlink parents. */ }
-    removeSkillLinkFrom(skills, 'factory');
+    } catch (error) { preserveUnknown(error); /* Preserve custom trees, foreign links and symlink parents. */ }
+    if (ownedSkillParentIsReal() && !pathExists(dest)) removeSkillLinkFrom(skills, 'factory');
   }
 
   const references = join(ftownSkillPath('ftown'), 'references');
@@ -210,11 +210,11 @@ export function retireBundledAutomationAssets(
     if (!ownedSkillParentIsReal() || lstatSync(ftownSkillPath('ftown')).isSymbolicLink() || lstatSync(references).isSymbolicLink()) return;
     if (lstatSync(reference).isFile() && !lstatSync(reference).isSymbolicLink()
       && sha256(reference) === known.loopReference) unlinkSync(reference);
-  } catch { /* Preserve customized/unrecognized paths. */ }
+  } catch (error) { preserveUnknown(error); /* Preserve customized/unrecognized paths. */ }
 }
 
 function pathExists(path: string): boolean {
-  try { lstatSync(path); return true; } catch { return false; }
+  try { lstatSync(path); return true; } catch (error) { preserveUnknown(error); return false; }
 }
 
 /** Upgrade retirement never follows symlinks or removes user workflow run data. */
@@ -234,7 +234,7 @@ export function retireBundledAgentAssets(
   if (ownedSkillParentIsReal()) {
     try {
       if (matchesTree(canonical, known.fticket)) rmSync(canonical, { recursive: true });
-    } catch { /* Missing or customized assets survive. */ }
+    } catch (error) { preserveUnknown(error); /* Missing or customized assets survive. */ }
   }
   for (const agentDir of ['.agents', '.claude']) {
     const skillsDir = join(home, agentDir, 'skills');
@@ -242,7 +242,7 @@ export function retireBundledAgentAssets(
     const legacy = join(skillsDir, 'fticket');
     try {
       if (matchesTree(legacy, known.fticket)) rmSync(legacy, { recursive: true });
-    } catch { /* Foreign links and customized trees survive. */ }
+    } catch (error) { preserveUnknown(error); /* Foreign links and customized trees survive. */ }
     if (ownedSkillParentIsReal() && !pathExists(canonical)) removeSkillLinkFrom(skillsDir, 'fticket');
   }
 
@@ -268,12 +268,18 @@ exec node "${join(ftown, 'ftown-workflows-cli.js')}" "$@"
   try {
     const stat = lstatSync(launcher);
     if (stat.isFile() && !stat.isSymbolicLink() && readFileSync(launcher, 'utf8') === expected) unlinkSync(launcher);
-  } catch { /* Missing or user-owned launcher. */ }
+  } catch (error) { preserveUnknown(error); /* Missing or user-owned launcher. */ }
 }
 
 function removeKnownFile(path: string, expectedHash: string): void {
   try {
     const stat = lstatSync(path);
     if (stat.isFile() && !stat.isSymbolicLink() && sha256(path) === expectedHash) unlinkSync(path);
-  } catch { /* Missing, custom and symlink assets survive. */ }
+  } catch (error) { preserveUnknown(error); /* Missing, custom and symlink assets survive. */ }
+}
+
+/** Unknown/custom contents are a safe skip; filesystem failure must be retryable. */
+function preserveUnknown(error: unknown): void {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code && code !== 'ENOENT' && code !== 'ENOTDIR') throw error;
 }

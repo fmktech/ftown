@@ -118,8 +118,15 @@ async function runScript(
       env: { ...env, PATH: env.PATH ?? '/usr/bin:/bin' },
       timeout: 10000,
     });
+    // A valid inert hook can exit without reading stdin. Its closed pipe is
+    // independent of child success/failure, which execFile still reports below.
+    let stdinError: Error | undefined;
+    execution.child.stdin?.on('error', (error: NodeJS.ErrnoException) => {
+      if (error.code !== 'EPIPE') stdinError = error;
+    });
     execution.child.stdin?.end(stdin);
     const { stdout, stderr } = await execution;
+    if (stdinError) throw stdinError;
     return { exitCode: 0, stdout, stderr };
   } catch (err) {
     const e = err as { code?: unknown; stdout?: unknown; stderr?: unknown };
@@ -153,6 +160,20 @@ describe('muse process fixture', () => {
       });
     } finally { rmSync(home, { recursive: true, force: true }); }
   });
+});
+
+describe('muse process fixture early exit', () => {
+  for (const exitCode of [0, 7]) {
+    it(`preserves child exit ${exitCode} when it closes stdin before consuming queued input`, async () => {
+      const home = mkdtempSync(join(tmpdir(), 'ftown-muse-early-exit-'));
+      const script = join(home, 'exit.sh'); writeFileSync(script, `#!/bin/sh\nexit ${exitCode}\n`);
+      try {
+        assert.deepEqual(await runScript(script, 'x'.repeat(256 * 1024), { HOME: home }), {
+          exitCode, stdout: '', stderr: '',
+        });
+      } finally { rmSync(home, { recursive: true, force: true }); }
+    });
+  }
 });
 
 describe('muse plugin bundle', () => {

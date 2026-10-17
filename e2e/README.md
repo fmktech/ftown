@@ -61,3 +61,6 @@ the client silently falls back — making Test A fail locally. This is an
 environment artifact, not a product/test bug: node-datachannel P2P over loopback
 and the full signaling exchange both work. CI (single interface, no VPN) and any
 non-VPN host connect normally.
+
+The service startup script runs explicit `ftown setup` in its disposable bridge
+HOME before starting the bridge. Setup and readiness never target the real HOME.

@@ -3,7 +3,7 @@
 import { Command as Commander } from 'commander';
 import { v4 as uuidv4 } from 'uuid';
 import { resolve, dirname, join } from 'node:path';
-import { hostname as osHostname, networkInterfaces } from 'node:os';
+import { hostname as osHostname, networkInterfaces, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -24,20 +24,8 @@ import { BrowserAccess } from './browser-access.js';
 import { registerLocalBrowserCommands } from './local-pair-cli.js';
 import type { CommandResponse } from './types.js';
 import { TerminalManager } from './terminal-manager.js';
-import { installClaudeHooks } from './hook-installer.js';
-import { installCursorHooks } from './cursor-hook-installer.js';
-import { codexBinaryAvailable, ensureCodexHooks } from './codex-installer.js';
-import { installHarness, harnessOnPath, pathHint, writeHarnessAgentGuide, agentGuidePath } from './harness-installer.js';
-import type { HarnessInstallResult } from './harness-installer.js';
-import { installNotifyScript } from './install-notify-script.js';
-import { installPiExtension } from './pi-extension-installer.js';
-import { installOpencodePlugin, opencodeBinaryAvailable } from './opencode-plugin-installer.js';
-import { ensureMusePlugin, museBinaryAvailable } from './muse-plugin-installer.js';
-import { installFtownSkill, removeFtownSkill, retireBundledAutomationAssets, retireBundledAgentAssets } from './install-ftown-skill.js';
-import { installFtownSessionsCli } from './install-ftown-cli.js';
-import { installFtownEnvCli } from './install-ftown-env-cli.js';
-import { installFtownCommandCli } from './install-ftown-command-cli.js';
-import { ensureFtownOnPath } from './ensure-ftown-path.js';
+import { assertSetupReady } from './setup-state.js';
+import { canonicalNotifyPath } from './install-notify-script.js';
 import { unregisterSession, configureSessionRegistryHome } from './session-registry.js';
 import { createFtownSession, type CreateFtownSessionDeps } from './create-ftown-session.js';
 import { createRelayHandler } from './mcp/relay-handler.js';
@@ -124,9 +112,10 @@ program
       );
     }
 
-    // Resolve the default ONCE (it may perform a one-time legacy ./data
-    // migration) and reuse it for both the data dir and the home resolution, so
-    // the migration side effect never runs twice.
+    // Explicit setup must finish before any migration, identity, network or auth side effect.
+    assertSetupReady(BRIDGE_VERSION);
+
+    // Read-only default resolution; explicit setup owns legacy data migration.
     const defaultDataDir = resolveDefaultDataDir();
     const dataDir = opts.dataDir ? resolve(opts.dataDir) : defaultDataDir;
     // Instance-scoped ".ftown home" for pointer and registry files. The DEFAULT
@@ -621,30 +610,7 @@ program
     const mailStore = new MailStore((sessionId) => store.sessionDir(sessionId));
     localApiServer.setMailStore(mailStore);
 
-    const bundledNotifyPath = resolve(__dirname, '..', 'hooks', 'notify.sh');
-    const notifyScriptPath = installNotifyScript(bundledNotifyPath);
-    const bundledPiExtensionPath = resolve(__dirname, '..', 'pi-extension', 'ftown.js');
-    const piExtensionPath = installPiExtension(bundledPiExtensionPath);
-    installClaudeHooks(notifyScriptPath);
-    installCursorHooks(notifyScriptPath);
-    console.log(`[Bridge] Pi extension: ${piExtensionPath}`);
-    // The opencode plugin rides opencode's global plugin dir; skip silently
-    // when the opencode binary is not installed on this machine.
-    if (await opencodeBinaryAvailable()) {
-      const bundledOpencodePluginPath = resolve(__dirname, '..', 'opencode-plugin', 'ftown.js');
-      const opencodePluginPath = installOpencodePlugin(bundledOpencodePluginPath);
-      console.log(`[Bridge] opencode plugin: ${opencodePluginPath}`);
-    }
-    // The Muse plugin rides `muse plugins`; skip silently when the muse
-    // binary is not installed on this machine.
-    if (await museBinaryAvailable()) {
-      const bundledMusePluginDir = resolve(__dirname, '..', 'muse-plugin');
-      const musePluginResult = await ensureMusePlugin(bundledMusePluginDir);
-      console.log(`[Bridge] muse plugin: ${musePluginResult.action}`);
-      if (musePluginResult.warning) {
-        console.warn(`[Bridge] muse plugin: ${musePluginResult.warning}`);
-      }
-    }
+    const notifyScriptPath = canonicalNotifyPath();
 
     const wireTerminalInput = (sessionId: string): void => {
       centrifugo.subscribeToTerminalInput(
@@ -719,66 +685,6 @@ program
 
     localApiServer.setSessionController(sessionController);
 
-    // Compiled sibling of this module (running from dist), else the sibling
-    // dist/ directory (running from src via `tsx watch` in dev). If neither
-    // exists — dev mode without a build — skip installation instead of
-    // crashing; the harness CLI is a packaged artifact, not source.
-    const harnessCliPath = existsSync(resolve(__dirname, 'harness-cli.js'))
-      ? resolve(__dirname, 'harness-cli.js')
-      : resolve(__dirname, '..', 'dist', 'harness-cli.js');
-    let harness: HarnessInstallResult | undefined;
-    if (existsSync(harnessCliPath)) {
-      harness = installHarness(harnessCliPath);
-      // Codex reads Claude-style hooks from ~/.codex/hooks.json; skip silently
-      // when the codex binary is not installed on this machine.
-      if (await codexBinaryAvailable()) {
-        ensureCodexHooks(harness.wrapperPath, notifyScriptPath);
-      }
-      writeHarnessAgentGuide({ wrapperPath: harness.wrapperPath, port: hookPort, bridgeId });
-      console.log(`[Bridge] Harness CLI: ${harness.wrapperPath}`);
-      console.log(`[Bridge] Agent guide:  ${agentGuidePath()}`);
-      if (!harnessOnPath()) {
-        const hint = pathHint();
-        if (hint) console.log(`[Bridge] ${hint}`);
-      }
-    } else {
-      console.warn('[Bridge] harness CLI not built (run `npm run build`) — skipping harness install in dev mode');
-    }
-
-    retireBundledAutomationAssets();
-    retireBundledAgentAssets();
-    installFtownSkill('ftown', resolve(__dirname, '..', 'skills', 'ftown'));
-    for (const legacySkill of ['ftown-sessions', 'ftown-loops', 'ftown-orchestrator', 'ftown-workflows']) {
-      removeFtownSkill(legacySkill);
-    }
-
-    const cliBundlePath = existsSync(resolve(__dirname, 'ftown-sessions-cli.js'))
-      ? resolve(__dirname, 'ftown-sessions-cli.js')
-      : resolve(__dirname, '..', 'dist', 'ftown-sessions-cli.js');
-    const cliPath = installFtownSessionsCli(cliBundlePath);
-    console.log(`[Bridge] Installed CLI at ${cliPath}`);
-
-    const envCliBundlePath = existsSync(resolve(__dirname, 'ftown-env-cli.js'))
-      ? resolve(__dirname, 'ftown-env-cli.js')
-      : resolve(__dirname, '..', 'dist', 'ftown-env-cli.js');
-    const envCliPath = installFtownEnvCli(envCliBundlePath);
-    console.log(`[Bridge] Installed env CLI at ${envCliPath}`);
-
-    const ftownCliBundlePath = existsSync(resolve(__dirname, 'ftown-cli.js'))
-      ? resolve(__dirname, 'ftown-cli.js')
-      : resolve(__dirname, '..', 'dist', 'ftown-cli.js');
-    const ftownCommandPath = installFtownCommandCli(ftownCliBundlePath);
-    console.log(`[Bridge] Installed ftown command at ${ftownCommandPath}`);
-
-    const pathSetup = ensureFtownOnPath();
-    if (pathSetup.skipped) {
-      console.log('[Bridge] PATH setup skipped (FTOWN_SKIP_PATH_SETUP)');
-    } else if (pathSetup.updated.length > 0) {
-      console.log(`[Bridge] Added ~/.ftown to PATH in: ${pathSetup.updated.join(', ')}`);
-    } else {
-      console.log('[Bridge] PATH already includes ~/.ftown (no profiles changed)');
-    }
-
     // Pointer lives under the instance home (see configure* above): default →
     // $HOME/.ftown (harness CLIs read it there), custom --data-dir → that dir.
     // Write and cleanup unlink MUST use this same resolved path.
@@ -795,8 +701,8 @@ program
           bridgeId,
           pid: process.pid,
           startedAt: new Date().toISOString(),
-          harness: harness?.wrapperPath,
-          harnessCli: harness?.cliPath,
+          harness: join(homedir(), '.ftown', 'bin', 'ftown-harness'),
+          harnessCli: join(homedir(), '.ftown', 'cli', 'dist', 'ftown-cli.js'),
         }, null, 2),
         { mode: 0o600 },
       );

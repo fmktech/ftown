@@ -114,6 +114,7 @@ export interface CreateSessionPayload {
   opencodeSessionId?: string;
   museSessionId?: string;
   parentSessionId?: string;
+  /** @deprecated Ignored compatibility input. Ordinary sessions use task + parent. */
   orchestrator?: boolean;
   suppressBriefing?: boolean;
   createMissingWorkingDir?: boolean;

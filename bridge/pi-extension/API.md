@@ -64,3 +64,7 @@ The tool schemas ship with `ftown-bridge` and follow its semantic version. Addin
 ## Consumer walkthrough
 
 An agent can call `ftown_sessions.list`, use the returned session ID with `ftown_sessions.get` or `usage`, and then send context with `ftown_mail.send`. To delegate, it can create a child with `ftown_session_create`, retain the returned ID, inspect its output, and later rename, reparent, stop, remove, or revive it.
+
+The ftown extension is installed by explicit `ftown setup`; use
+`ftown setup --repair` after installing a new optional harness. Structured creates
+use ordinary task and parent inputs. Legacy orchestrator booleans are ignored.

@@ -51,3 +51,14 @@ unrecognized assets, foreign links, symlink parents, independently installed
 skills, shared runtime files and all `~/.ftown/workflows/` run data survive.
 Unrecognized legacy files may remain on disk, but the new `ftown` dispatcher has
 no workflow route.
+
+## Explicit setup lifecycle
+
+Bridge 0.19.41 moves integration installation and the retirement checks above to
+`ftown setup`. Ordinary startup requires matching completed setup before data
+migration, auth or listeners. Stable cleanup migration IDs run once, separately
+from package-version readiness; `ftown setup --repair` deliberately rechecks
+current installation and cleanup. Failed setup remains retryable. Missing optional
+harness binaries and user-disabled plugins are intentional skips. No special
+orchestrator briefing or injected environment remains; task and parent links
+provide ordinary coordination.

@@ -40,6 +40,7 @@ https://github.com/user-attachments/assets/e9c1ce70-70b0-4ba0-81d8-080d4eeef445
 ### Solo mode — runs entirely on your network
 
 ```bash
+npm exec --yes --package ftown-bridge -- ftown setup
 npx ftown-bridge --solo
 ```
 
@@ -127,6 +128,7 @@ session-gated `POST /api/auth/bridge/bootstrap`, audience `ftown:bridge-bootstra
 and copies it to your clipboard):
 
 ```bash
+npm exec --yes --package ftown-bridge -- ftown setup
 npx ftown-bridge --token <bootstrap-jwt> --api-url http://localhost:3000
 ```
 
@@ -136,7 +138,24 @@ for a 30-day rotating refresh token stored under the bridge data dir
 bootstrap token does not need to stay valid — generate a fresh one each time you
 onboard a new bridge.
 
-On start, the bridge **auto-deploys** a local harness CLI:
+Run setup from the package entrypoint before first start. For an upgrade, use
+the exact new package version shown by the startup readiness hint:
+
+```bash
+npm exec --yes --package ftown-bridge@<new-version> -- ftown setup
+```
+
+This installs that version's CLI/runtime assets, hooks/plugins, ftown skill and
+PATH entries. The installed `ftown` alias uses its copied runtime; it does not
+fetch or discover a newer package.
+Ordinary bridge starts only check readiness and write runtime connection state.
+Use installed `ftown setup --repair` to recheck the current copied version,
+restore its missing assets, or detect newly installed integrations. If its runtime
+is incomplete, use the matching package entrypoint above with `--repair`.
+Setup keeps completed cleanup migration IDs across package upgrades; repair can
+safely repeat them while preserving customized assets and saved data.
+
+Setup provides:
 
 - `ftown` — grouped `sessions`, `harness`, and `env` commands (existing launchers remain compatible)
 - `~/.ftown/harness-agent.md` — short pointer to the authoritative installed ftown skill
@@ -263,6 +282,7 @@ npm start  # Runs on port 3000
 **5. Connect a bridge** from any machine on the LAN:
 
 ```bash
+npm exec --yes --package ftown-bridge -- ftown setup
 npx ftown-bridge --token <jwt> --api-url http://192.168.1.100:3000
 ```
 
@@ -442,6 +462,7 @@ additive so that window is safe.
 On any machine where you want to run Claude or Cursor Agent sessions:
 
 ```bash
+npm exec --yes --package ftown-bridge -- ftown setup
 npx ftown-bridge --token <jwt> --api-url https://your-domain.vercel.app
 ```
 
