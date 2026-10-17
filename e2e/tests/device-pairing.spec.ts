@@ -1,9 +1,10 @@
 import { test, expect } from "@playwright/test";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { registerUser, login } from "../helpers/app";
 import { waitForChannels } from "../helpers/centrifugo";
 import { CENTRIFUGO_API_KEY, CENTRIFUGO_API_URL, UI_BASE_URL } from "../helpers/config";
@@ -21,7 +22,8 @@ import { CENTRIFUGO_API_KEY, CENTRIFUGO_API_URL, UI_BASE_URL } from "../helpers/
  *
  * Flow proven end-to-end:
  *  1. Register + log in a fresh browser user.
- *  2. Spawn a token-less, scratch-HOME bridge; it prints a `userCode` (P8: the
+ *  2. Explicitly set up the scratch HOME, then spawn a token-less bridge;
+ *     it prints a `userCode` (P8: the
  *     deviceCode secret is never logged, only this low-value code + URL are).
  *  3. Parse the userCode (format XXXX-XXXX) from bridge stdout.
  *  4. Navigate to /pair?code=<userCode> (prefills + looks up automatically),
@@ -34,6 +36,7 @@ import { CENTRIFUGO_API_KEY, CENTRIFUGO_API_URL, UI_BASE_URL } from "../helpers/
 
 const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const USER_CODE_RE = /\b([A-Z0-9]{4}-[A-Z0-9]{4})\b/;
+const execFileAsync = promisify(execFile);
 
 interface SpawnedBridge {
   proc: ChildProcess;
@@ -48,15 +51,30 @@ function bridgeEmail(): string {
   return `e2e-pairing-${Date.now()}-${Math.floor(Math.random() * 1e6)}@ftown.test`;
 }
 
-/** Spawn a bridge with NO --token and a fresh scratch HOME, so it must pair. */
-function spawnPairingBridge(): SpawnedBridge {
+/** Set up a fresh HOME, then spawn with NO --token, so the bridge must pair. */
+async function spawnPairingBridge(): Promise<SpawnedBridge> {
   const scratchHome = mkdtempSync(join(tmpdir(), "ftown-e2e-pair-home-"));
+  const env = { ...process.env, HOME: scratchHome, USERPROFILE: scratchHome };
+  try {
+    await execFileAsync(
+      process.execPath,
+      [join(REPO_ROOT, "bridge", "dist", "ftown-cli.js"), "setup"],
+      { cwd: scratchHome, env, encoding: "utf8", timeout: 30_000 },
+    );
+  } catch (error) {
+    rmSync(scratchHome, { recursive: true, force: true });
+    const failure = error as Error & { stdout?: string; stderr?: string };
+    throw new Error(
+      `pairing bridge setup failed before tokenless startup: ${failure.message}\n${failure.stdout ?? ""}${failure.stderr ?? ""}`,
+      { cause: error },
+    );
+  }
   const proc = spawn(
     process.execPath,
     [join(REPO_ROOT, "bridge", "dist", "index.js"), "--api-url", UI_BASE_URL],
     {
       cwd: join(REPO_ROOT, "bridge"),
-      env: { ...process.env, HOME: scratchHome },
+      env,
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -125,7 +143,7 @@ test.describe("device pairing", () => {
       await registerUser(email);
       await login(page, email);
 
-      bridge = spawnPairingBridge();
+      bridge = await spawnPairingBridge();
       const userCode = await waitForUserCode(bridge);
       expect(userCode).toMatch(USER_CODE_RE);
 
