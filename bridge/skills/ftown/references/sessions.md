@@ -131,11 +131,9 @@ Spawned ftown sessions receive:
 
 Agent children (any `--shell` except `shell`) spawned with a parent also get an
 automatic one-paragraph briefing prepended to their first input: it states their
-name/id and parent name/id. When the task provides `FTS_DB` and `TICKET_ID`, the
-briefing makes fticket the primary coordination plane for context, status, and
-resource leases; mail is reserved for fallback/urgent escalation. Without FTS,
-it explains how to report via `ftown-harness mail send --parent --type result`.
-After recording or reporting the outcome, the child is instructed to remove itself as
+name/id and parent name/id. It explains how to report via
+`ftown-harness mail send --parent --type result` (or `--type escalation` when blocked).
+After reporting the outcome, the child is instructed to remove itself as
 its final command unless the user explicitly asked it to stay open. The creator's
 `--prompt` follows after a `Task:` line.
 
