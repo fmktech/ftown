@@ -28,7 +28,7 @@ const create = {
   model: z.string().optional(),
   command: z.string().min(1).optional(),
   parentSessionId: sessionId.optional(),
-  orchestrator: z.boolean().optional(),
+  orchestrator: z.boolean().optional().describe('Deprecated compatibility input; ignored.'),
   createMissingWorkingDir: z.boolean().default(false),
 };
 const send = {

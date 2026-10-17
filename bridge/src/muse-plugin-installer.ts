@@ -265,6 +265,11 @@ export async function ensureMusePlugin(
       };
     }
 
+    // Explicit user rejection wins even when source/content drift would reinstall.
+    if (inspection?.capabilities.some((cap) => cap.status === 'trusted_disabled')) {
+      return { action: 'skipped', approved: false, warning: 'muse ftown integration intentionally disabled by the user; preserved' };
+    }
+
     // First run (or a record that vanished): install, then approve.
     if (!inspection) {
       const installed = await run(

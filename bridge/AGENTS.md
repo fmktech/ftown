@@ -2,13 +2,22 @@
 
 ## Harness (local session control)
 
-`ftown-bridge` auto-deploys on every start:
+The package entrypoint's `ftown setup` explicitly installs or upgrades integrations
+before bridge startup. For upgrades use `npm exec --yes --package
+ftown-bridge@<new-version> -- ftown setup`; the installed copied alias does not
+discover newer packages. Installed `ftown setup --repair` repairs its current version.
+
+Setup provides:
 
 - `~/.ftown/bin/ftown-harness` — stable CLI entry (wrapper → package `harness-cli.js`)
 - `~/.ftown/bridge.json` — port, token, `harness` path
-- `~/.ftown/harness-agent.md` — short pointer to the authoritative ftown skill (regenerated each start)
+- `~/.ftown/harness-agent.md` — short pointer to the authoritative ftown skill (generated during setup)
 
-Implement harness features in `src/harness-cli.ts` and `src/harness-installer.ts`. Bridge wires install in `src/index.ts` next to hook installation.
+Implement command behavior in `src/harness-commands.ts`, `src/sessions-commands.ts`,
+and `src/env-commands.ts`. Entry files are thin aliases to `src/ftown-cli.ts`.
+`src/setup.ts` owns installation; `src/setup-state.ts` gates ordinary startup
+before auth/listeners or data migration. Cleanup migration IDs live in
+`src/setup-migrations.ts`; use `ftown setup --repair` to repeat safe checks.
 
 ## Versioning
 
@@ -25,6 +34,7 @@ npm version patch --no-git-tag-version
 ### Dev
 
 ```bash
+npm exec --package ftown-bridge -- ftown setup
 npm run harness -- status
 npm run build   # builds canonical ftown command and compatible launchers
 ```

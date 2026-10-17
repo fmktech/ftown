@@ -1,83 +1,48 @@
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import assert from 'node:assert/strict';
+import { runFtown, usage } from './ftown-cli.js';
 
-import { resolveSubcommandTarget, usage } from './ftown-cli.js';
+async function capture(run: () => Promise<unknown>): Promise<string> {
+  let text = ''; const originalOut = process.stdout.write; const originalError = process.stderr.write;
+  const write = ((chunk: string | Uint8Array) => { text += chunk.toString(); return true; }) as typeof process.stdout.write;
+  process.stdout.write = write; process.stderr.write = write;
+  try { await run(); return text; } finally { process.stdout.write = originalOut; process.stderr.write = originalError; }
+}
 
-const FTOWN_DIR = '/home/tester/.ftown';
-
-describe('resolveSubcommandTarget', () => {
-  it('routes env to the sibling ftown-env launcher', () => {
-    assert.strictEqual(
-      resolveSubcommandTarget('env', FTOWN_DIR),
-      join(FTOWN_DIR, 'ftown-env'),
-    );
-  });
-
-  it('routes sessions to the sibling ftown-sessions launcher', () => {
-    assert.strictEqual(
-      resolveSubcommandTarget('sessions', FTOWN_DIR),
-      join(FTOWN_DIR, 'ftown-sessions'),
-    );
-  });
-
-  it('routes harness to the bin/ftown-harness launcher', () => {
-    assert.strictEqual(
-      resolveSubcommandTarget('harness', FTOWN_DIR),
-      join(FTOWN_DIR, 'bin', 'ftown-harness'),
-    );
-  });
-
-  it('throws on an undefined subcommand, listing the valid ones', () => {
-    assert.throws(
-      () => resolveSubcommandTarget(undefined, FTOWN_DIR),
-      (err: unknown) => {
-        assert.ok(err instanceof Error);
-        for (const sub of ['env', 'sessions', 'harness']) {
-          assert.ok(err.message.includes(sub), `message should mention "${sub}"`);
-        }
-        return true;
-      },
-    );
-  });
-
-  it('throws on an unknown subcommand, listing the valid ones', () => {
-    assert.throws(
-      () => resolveSubcommandTarget('bogus', FTOWN_DIR),
-      (err: unknown) => {
-        assert.ok(err instanceof Error);
-        assert.ok(err.message.includes('bogus'));
-        for (const sub of ['env', 'sessions', 'harness']) {
-          assert.ok(err.message.includes(sub), `message should mention "${sub}"`);
-        }
-        return true;
-      },
-    );
-  });
-});
-
-describe('retired workflow route', () => {
-  it('rejects workflows even if an old launcher remains installed', () => {
-    assert.throws(() => resolveSubcommandTarget('workflows', FTOWN_DIR), /Unknown subcommand/);
+describe('in-process canonical commands', () => {
+  it('discovers setup and groups, rejecting the retired workflow route', async () => {
+    assert.match(usage(), /setup\|sessions\|harness\|env/);
     assert.doesNotMatch(usage(), /workflows/);
+    let code: number | undefined;
+    await capture(async () => { code = await runFtown(['workflows']); });
+    assert.equal(code, 1);
+  });
+  it('runs repeated harness parsers and env help without import/exit side effects', async () => {
+    const text = await capture(async () => {
+      assert.equal(await runFtown(['harness', '--help']), 0);
+      assert.equal(await runFtown(['harness', '--help']), 0);
+      assert.equal(await runFtown(['env', '--help']), 0);
+    });
+    assert.equal((text.match(/Usage: ftown harness/g) ?? []).length, 2);
+    assert.match(text, /Usage: ftown env/);
+  });
+  it('shares the callers fetch, HOME and process for session commands', async () => {
+    const previous = process.env.HOME; const home = mkdtempSync(join(tmpdir(), 'ftown-cli-'));
+    const original = globalThis.fetch;
+    process.env.HOME = home;
+    try {
+      const { mkdirSync, writeFileSync } = await import('node:fs');
+      mkdirSync(join(home, '.ftown')); writeFileSync(join(home, '.ftown/bridge.json'), '{"port":1234,"token":"test"}');
+      const requests: string[] = [];
+      globalThis.fetch = (async (url) => { requests.push(String(url)); return new Response('{"sessions":[]}', { status: 200 }); }) as typeof fetch;
+      await capture(async () => { assert.equal(await runFtown(['sessions', 'list']), 0); });
+      assert.deepEqual(requests, ['http://127.0.0.1:1234/api/sessions']);
+    } finally { globalThis.fetch = original; if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous; rmSync(home, { recursive: true, force: true }); }
   });
 });
-
-describe('usage', () => {
-  it('mentions all three subcommands', () => {
-    const text = usage();
-    for (const sub of ['env', 'sessions', 'harness']) {
-      assert.ok(text.includes(sub), `usage should mention "${sub}"`);
-    }
-  });
-
-  it('starts with the canonical Usage line', () => {
-    assert.ok(
-      usage().startsWith('Usage: ftown <env|sessions|harness> [args...]'),
-    );
-  });
-});
-
 
 describe('CLI entry recognition', () => {
   it('recognizes physical, parent-symlink and npm-bin paths without running on import', async () => {

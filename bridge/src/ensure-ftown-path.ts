@@ -4,7 +4,7 @@
  * The bridge installs the `ftown` launcher at ~/.ftown/ftown. For it to be
  * runnable as a bare `ftown`, ~/.ftown must be on PATH. This module manages a
  * clearly-fenced block in the user's shell profiles, never touching content
- * outside its BEGIN..END markers, and is safe to call on every bridge start.
+ * outside its BEGIN..END markers, and runs only during explicit ftown setup.
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';

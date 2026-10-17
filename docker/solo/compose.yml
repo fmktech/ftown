@@ -1,7 +1,7 @@
 services:
   ftown-solo:
     build: .
-    image: ftown-solo:0.19.23
+    image: ftown-solo:0.19.41
     container_name: ftown-solo
     init: true
     restart: unless-stopped

@@ -11,7 +11,23 @@ description: >-
 Use `ftown sessions`, `ftown harness`, and `ftown env`. Run `ftown --help`
 for command discovery; if it is missing from PATH, use `~/.ftown/ftown`.
 The bridge installs this skill at `~/.ftown/skills/ftown`, linked from the agent
-skill directories. Start or restart ftown-bridge to update it and the CLIs.
+skill directories. Startup checks setup readiness and never rewrites global
+integrations. Before the installed command exists, run setup from the package:
+
+```bash
+npm exec --yes --package ftown-bridge -- ftown setup
+```
+
+For upgrades, use the exact new version named by the startup readiness hint:
+
+```bash
+npm exec --yes --package ftown-bridge@<new-version> -- ftown setup
+```
+
+The installed alias uses its copied version and does not discover newer packages.
+Use `ftown setup --repair` to repair that current copied version or detect new
+optional harnesses. If the copied runtime is incomplete, use the matching package
+entrypoint with `--repair`.
 
 ## Commands and references
 
@@ -22,6 +38,7 @@ ftown sessions screen <session-id> --limit 200
 ftown harness mail send <session-id> --type task "review the API client"
 ftown harness mail read
 ftown env --help
+ftown setup --help
 ```
 
 Read `references/sessions.md` for the session, mail and terminal command

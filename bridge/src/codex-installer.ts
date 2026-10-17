@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { CANONICAL_NOTIFY_PATH, isFtownNotifyCommand } from './install-notify-script.js';
+import { canonicalNotifyPath, isFtownNotifyCommand } from './install-notify-script.js';
 import { isFtownMailPumpCommand } from './hook-installer.js';
 
 const execAsync = promisify(exec);
@@ -95,8 +95,8 @@ function upsertCodexHookEntry(
  */
 export function ensureCodexHooks(
   harnessBinPath: string,
-  notifyScriptPath: string = CANONICAL_NOTIFY_PATH,
-): void {
+  notifyScriptPath: string = canonicalNotifyPath(),
+): boolean {
   const hooksPath = join(homedir(), '.codex', 'hooks.json');
 
   let raw: string;
@@ -111,7 +111,7 @@ export function ensureCodexHooks(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[CodexHookInstaller] failed: ${msg}`);
-    return;
+    return false;
   }
 
   let parsed: CodexHooksFile;
@@ -120,12 +120,12 @@ export function ensureCodexHooks(
     parsed = trimmed.length === 0 ? {} : JSON.parse(trimmed) as CodexHooksFile;
     if (!isObject(parsed)) {
       console.error('[CodexHookInstaller] failed: hooks.json root is not an object');
-      return;
+      return false;
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[CodexHookInstaller] failed: ${msg}`);
-    return;
+    return false;
   }
 
   if (!isObject(parsed.hooks)) {
@@ -180,12 +180,13 @@ export function ensureCodexHooks(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[CodexHookInstaller] failed: ${msg}`);
-    return;
+    return false;
   }
 
   console.log(
     `[CodexHookInstaller] hooks.json: added ${counters.added}, repaired ${counters.repaired}, kept ${counters.kept}`,
   );
+  return true;
 }
 
 /** Escape a path for use inside a TOML basic (double-quoted) key. */

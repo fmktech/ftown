@@ -33,7 +33,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function mergeHooksFile(settingsPath: string, notifyScriptPath: string, label: string): void {
+function mergeHooksFile(settingsPath: string, notifyScriptPath: string, label: string): boolean {
 
   let raw: string;
   try {
@@ -47,7 +47,7 @@ function mergeHooksFile(settingsPath: string, notifyScriptPath: string, label: s
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[CursorHookInstaller] failed: ${msg}`);
-    return;
+    return false;
   }
 
   let parsed: CursorHooksFile;
@@ -56,12 +56,12 @@ function mergeHooksFile(settingsPath: string, notifyScriptPath: string, label: s
     parsed = trimmed.length === 0 ? {} : JSON.parse(trimmed) as CursorHooksFile;
     if (!isObject(parsed)) {
       console.error('[CursorHookInstaller] failed: hooks.json root is not an object');
-      return;
+      return false;
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[CursorHookInstaller] failed: ${msg}`);
-    return;
+    return false;
   }
 
   if (typeof parsed.version !== 'number') {
@@ -107,13 +107,14 @@ function mergeHooksFile(settingsPath: string, notifyScriptPath: string, label: s
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[CursorHookInstaller] failed: ${msg}`);
-    return;
+    return false;
   }
 
   console.log(`[CursorHookInstaller] ${label}: added ${added}, repaired ${repaired}, kept ${kept}`);
+  return true;
 }
 
 /** User-level ~/.cursor/hooks.json (global Cursor CLI). */
-export function installCursorHooks(notifyScriptPath: string): void {
-  mergeHooksFile(join(homedir(), '.cursor', 'hooks.json'), notifyScriptPath, 'hooks.json');
+export function installCursorHooks(notifyScriptPath: string): boolean {
+  return mergeHooksFile(join(homedir(), '.cursor', 'hooks.json'), notifyScriptPath, 'hooks.json');
 }

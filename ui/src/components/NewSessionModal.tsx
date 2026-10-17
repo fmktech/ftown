@@ -787,17 +787,6 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
             )}
           </div>
 
-          {shellType !== "shell" && (
-            <div className="rounded-[var(--radius-sm)] border border-[var(--border-muted)] px-3 py-2">
-                <span className="block text-sm text-[var(--text-muted)]">Need an orchestrator?</span>
-                <span className="block text-xs text-[var(--text-faint)]">
-                  Start a normal session and ask it to use the{" "}
-                <span className="text-[var(--accent)]">ftown</span> skill&apos;s orchestrator
-                reference to spawn and coordinate worker sessions.
-                </span>
-              </div>
-            )}
-
           <div>
             <label htmlFor="ns-bridge" className="block text-sm text-[var(--text-muted)] mb-1">Bridge</label>
             {bridges.length === 0 ? (

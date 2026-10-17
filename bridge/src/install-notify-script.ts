@@ -2,7 +2,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
-export const CANONICAL_NOTIFY_PATH = join(homedir(), '.ftown', 'notify.sh');
+export function canonicalNotifyPath(): string { return join(homedir(), '.ftown', 'notify.sh'); }
 
 /** True for legacy package paths and the canonical ~/.ftown copy. */
 export function isFtownNotifyCommand(command: string): boolean {
@@ -16,12 +16,13 @@ export function isFtownNotifyCommand(command: string): boolean {
 
 /** Copy bundled notify.sh to ~/.ftown/notify.sh (mode 0755). Returns canonical path. */
 export function installNotifyScript(bundledPath: string): string {
-  mkdirSync(dirname(CANONICAL_NOTIFY_PATH), { recursive: true, mode: 0o700 });
-  copyFileSync(bundledPath, CANONICAL_NOTIFY_PATH);
-  chmodSync(CANONICAL_NOTIFY_PATH, 0o755);
-  return CANONICAL_NOTIFY_PATH;
+  const destination = canonicalNotifyPath();
+  mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
+  copyFileSync(bundledPath, destination);
+  chmodSync(destination, 0o755);
+  return destination;
 }
 
 export function canonicalNotifyReady(): boolean {
-  return existsSync(CANONICAL_NOTIFY_PATH);
+  return existsSync(canonicalNotifyPath());
 }

@@ -1,10 +1,10 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { resetFtownHomeForTests, resolveDefaultDataDir, resolveFtownHome } from './ftown-home.js';
+import { migrateLegacyDataDir, resetFtownHomeForTests, resolveDefaultDataDir, resolveFtownHome } from './ftown-home.js';
 import {
   configureSessionRegistryHome,
   registerSessionWorkspace,
@@ -32,6 +32,21 @@ describe('ftown-home', () => {
     if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
     rmSync(home, { recursive: true, force: true });
+  });
+
+  it('resolves without migrating legacy data; only explicit setup moves it', () => {
+    const originalCwd = process.cwd(); const workspace = join(home, 'workspace');
+    mkdirSync(join(workspace, 'data', 'sessions'), { recursive: true });
+    writeFileSync(join(workspace, 'data', 'sessions', 'history'), 'keep'); process.chdir(workspace);
+    try {
+      const destination = resolveDefaultDataDir();
+      assert.equal(existsSync(destination), false);
+      assert.equal(existsSync(join(workspace, 'data/sessions/history')), true);
+      migrateLegacyDataDir();
+      assert.equal(readFileSync(join(destination, 'sessions/history'), 'utf8'), 'keep');
+      assert.equal(existsSync(join(workspace, 'data')), false);
+      migrateLegacyDataDir();
+    } finally { process.chdir(originalCwd); }
   });
 
   describe('resolveFtownHome', () => {

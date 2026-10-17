@@ -262,7 +262,7 @@ export class MailDeliveryService {
     }
 
     // The listen window is earned, not universal: a session with no mail
-    // relationships (no parent, no children, not an orchestrator) gets an
+    // relationships (no parent, no children) gets an
     // instant stop instead of holding its Stop hook open for `wait` seconds.
     // Late mail for everyone is still covered by the idle nudge.
     let effectiveWait = wait;
@@ -328,11 +328,10 @@ export class MailDeliveryService {
   }
 
   /** A session earns the listen window when it has a native persistent listener
-   *  (Pi), a parent, children, an orchestrator marker, or prior mail history. */
+   *  (Pi), a parent, children, or prior mail history. */
   async participatesInMail(session: Session): Promise<boolean> {
     if (session.shellType === 'pi') return true;
     if (session.parentSessionId) return true;
-    if (session.env?.FTOWN_ORCHESTRATOR === '1') return true;
     if (!this.store || !this.mailStore) return false;
     const sessions = await this.store.listSessions();
     if (sessions.some((s) => s.parentSessionId === session.id)) return true;

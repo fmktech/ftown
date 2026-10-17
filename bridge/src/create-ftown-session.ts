@@ -45,6 +45,7 @@ export interface CreateFtownSessionInput {
   parentSessionId?: string;
   initialInput?: string;
   initialInputDelay?: number;
+  /** @deprecated Accepted for compatibility; ignored. */
   orchestrator?: boolean;
   suppressBriefing?: boolean;
   createMissingWorkingDir?: boolean;
@@ -76,23 +77,6 @@ export function buildChildBriefing(params: ChildBriefingParams): string {
     `spawned by parent '${params.parentName}' (${params.parentId}). ` +
     `Report completion with ` +
     `ftown harness mail send --parent --type result "<result>" (use --type escalation when blocked).`
-  );
-}
-
-interface OrchestratorBriefingParams {
-  sessionName: string;
-  sessionId: string;
-}
-
-/** Compact pointer injected into an orchestrator agent's first input. */
-export function buildOrchestratorBriefing(params: OrchestratorBriefingParams): string {
-  return (
-    `[ftown] You are an ORCHESTRATOR running inside ftown session '${params.sessionName}' ` +
-    `(${params.sessionId}). Use the 'ftown' skill (installed at ` +
-    `~/.ftown/skills/ftown, linked from ~/.agents/skills and ~/.claude/skills — ` +
-    `read its SKILL.md and references/orchestrator.md if not auto-loaded) to spawn and coordinate worker agent sessions ` +
-    `via ftown sessions. Messages arrive as [ftown mail] context and can be read ` +
-    `with ftown harness mail read.`
   );
 }
 
@@ -425,19 +409,16 @@ export async function createFtownSession(
   assertProviderAuthAvailable(input.shellType, sources);
   const providerRuntime = resolveProviderRuntimeEnv(input.shellType);
   const providerAuth = resolveProviderAuthEnv(input.shellType, sources);
-  const isOrchestratorAgent = input.orchestrator && isAgent;
   const shouldSetSessionEnv =
     Boolean(input.env)
     || Object.keys(providerRuntime).length > 0
-    || Object.keys(providerAuth).length > 0
-    || isOrchestratorAgent;
+    || Object.keys(providerAuth).length > 0;
   const sessionEnv: Record<string, string> | undefined =
     shouldSetSessionEnv
       ? {
           ...providerRuntime,
           ...(input.env ?? {}),
           ...providerAuth,
-          ...(isOrchestratorAgent ? { FTOWN_ORCHESTRATOR: '1' } : {}),
         }
       : undefined;
 
@@ -507,12 +488,7 @@ export async function createFtownSession(
           parentId: parentSessionId,
         })
       : undefined;
-  const orchestratorBriefing =
-    !input.suppressBriefing && input.orchestrator && isAgent
-      ? buildOrchestratorBriefing({ sessionName: session.name, sessionId })
-      : undefined;
-  // Orchestrator paragraph follows the child paragraph, separated by a blank line.
-  const briefing = [childBriefing, orchestratorBriefing].filter(Boolean).join('\n\n') || undefined;
+  const briefing = childBriefing;
 
   // Composer TUIs need the submit CR sent separately after the paste settles —
   // a CR inside the pasted chunk becomes a newline, and ESC+CR reads as
@@ -621,7 +597,6 @@ export function parseCreateSessionBody(
     initialInput: typeof body.initialInput === 'string' ? body.initialInput : undefined,
     initialInputDelay:
       typeof body.initialInputDelay === 'number' ? body.initialInputDelay : undefined,
-    orchestrator: body.orchestrator === true,
     suppressBriefing: body.suppressBriefing === true,
     createMissingWorkingDir: body.createMissingWorkingDir === true,
   };

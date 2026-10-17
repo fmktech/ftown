@@ -464,14 +464,14 @@ describe('MailDeliveryService participatesInMail gating', () => {
     if (result.kind === 'immediate') assert.deepEqual(result.messages, []);
   });
 
-  it('a parent, a child, the orchestrator marker, or mail history earns the window', async () => {
+  it('a parent, a child, or mail history earns the window; obsolete role env is inert', async () => {
     const { store, mailStore, service } = setup();
 
     const withParent = makeSession('a', { parentSessionId: 'p' });
     assert.equal(await service.participatesInMail(withParent), true);
 
     const orchestrator = makeSession('b', { env: { FTOWN_ORCHESTRATOR: '1' } });
-    assert.equal(await service.participatesInMail(orchestrator), true);
+    assert.equal(await service.participatesInMail(orchestrator), false);
 
     const parent = makeSession('c');
     store.add(parent);

@@ -765,7 +765,7 @@ PY`;
             <button
               className="btn-ghost"
               onClick={async () => {
-                const text = `npx -y ftown-bridge@latest --api-url ${window.location.origin}`;
+                const text = `npm exec --yes --package ftown-bridge@latest -- ftown setup && npx -y ftown-bridge@latest --api-url ${window.location.origin}`;
                 try {
                   await navigator.clipboard.writeText(text);
                 } catch {
@@ -797,7 +797,7 @@ PY`;
               letterSpacing: "0.02em",
             }}
           >
-            npx -y ftown-bridge@latest --api-url {typeof window !== "undefined" ? window.location.origin : ""}
+            npm exec --yes --package ftown-bridge@latest -- ftown setup &amp;&amp; npx -y ftown-bridge@latest --api-url {typeof window !== "undefined" ? window.location.origin : ""}
           </code>
           <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 6 }}>
             Run this on the machine, then approve it here:{" "}

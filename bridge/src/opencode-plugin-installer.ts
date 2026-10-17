@@ -23,8 +23,7 @@ export async function opencodeBinaryAvailable(): Promise<boolean> {
  * manual `opencode` runs are unaffected.
  *
  * Unlike the Pi extension (loaded per-launch via --extension), a global-dir
- * install cannot be scoped per session — so the installer rewrites on every
- * bridge start to keep the deployed copy in sync with the bundled one.
+ * install cannot be scoped per session — so explicit setup updates it to keep the deployed copy in sync with the bundled one.
  */
 export function installOpencodePlugin(bundledPath: string, home: string = homedir()): string {
   const destination = join(home, '.config', 'opencode', 'plugins', 'ftown.js');

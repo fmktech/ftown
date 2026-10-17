@@ -526,7 +526,7 @@ export function registerFtownPiExtension(pi, options = {}) {
         parent: { type: 'boolean', description: 'Make the current Pi session the parent.' },
         parentId: { type: 'string', description: 'Explicit ftown parent session id.' },
         createWorkdir: { type: 'boolean' },
-        orchestrator: { type: 'boolean' },
+        orchestrator: { type: 'boolean', description: 'Deprecated compatibility input; ignored.' },
       },
       required: ['prompt'],
       additionalProperties: false,
@@ -544,7 +544,6 @@ export function registerFtownPiExtension(pi, options = {}) {
               ? { parentSessionId: params.parentId }
               : params.parent ? { parentSessionId: true } : {}),
             ...(params.createWorkdir ? { createMissingWorkingDir: true } : {}),
-            ...(params.orchestrator ? { orchestrator: true } : {}),
           };
           const extraHeaders = ftownSessionId
             ? { 'x-ftown-session-id': ftownSessionId }

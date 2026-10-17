@@ -114,7 +114,7 @@ const STEPS = [
   {
     n: "1",
     title: "Run the bridge",
-    desc: "Start ftown-bridge on any machine — laptop, server, or VM. It installs the CLI and registers itself with your dashboard.",
+    desc: "Run ftown setup once on your machine, then start ftown-bridge to register it with your dashboard.",
   },
   {
     n: "2",
@@ -399,7 +399,7 @@ export default async function LandingPage() {
 
           <div className="inline-block max-w-full rounded-[var(--radius-md)] bg-[var(--bg-elevated)] border border-[var(--border-muted)] px-4 py-3 mb-2 overflow-x-auto">
             <code className="font-[family-name:var(--font-mono)] text-[13px] text-[var(--accent)] whitespace-pre">
-              npx ftown-bridge --solo
+              npm exec --yes --package ftown-bridge -- ftown setup &amp;&amp; npx ftown-bridge --solo
             </code>
           </div>
           <p className="text-[11px] text-[var(--text-faint)] mb-6">

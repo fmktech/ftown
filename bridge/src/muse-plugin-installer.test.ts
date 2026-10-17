@@ -267,6 +267,20 @@ describe('ensureMusePlugin', () => {
     assert.ok(!calls.some((call) => call.args.includes('install') || call.args.includes('update')));
   });
 
+  it('does not reinstall or update a disabled integration after source/hash drift', async () => {
+    const home = makeHome(); const bundle = makeBundle();
+    mkdirSync(join(home, '.ftown'), { recursive: true });
+    writeFileSync(statePath(home), '{"bundleHash":"old"}');
+    const { run, calls } = makeFakeRun({
+      [PROBE_KEY]: OK_PROBE,
+      'muse plugins inspect ftown --json': { stdout: inspectJson('/old/source', [['ftown-stop', 'trusted_disabled']]), stderr: '', exitCode: 0 },
+    });
+    const result = await ensureMusePlugin(bundle, home, run);
+    assert.equal(result.action, 'skipped'); assert.match(result.warning ?? '', /intentionally disabled/);
+    assert.equal(calls.some((call) => call.args.some((arg) => ['install', 'update', 'remove', 'approve'].includes(arg))), false);
+    assert.equal(readFileSync(statePath(home), 'utf8'), '{"bundleHash":"old"}');
+  });
+
   it('leaves user-rejected capabilities disabled', async () => {
     const home = makeHome();
     const bundle = makeBundle();
@@ -283,13 +297,13 @@ describe('ensureMusePlugin', () => {
 
     const result = await ensureMusePlugin(bundle, home, run);
 
-    assert.equal(result.action, 'none');
+    assert.equal(result.action, 'skipped');
     assert.equal(result.approved, false);
-    assert.match(result.warning ?? '', /rejected/);
+    assert.match(result.warning ?? '', /intentionally disabled/);
     assert.ok(!calls.some((call) => call.args.includes('approve')));
   });
 
-  it('approves granularly when some capabilities are rejected', async () => {
+  it('preserves the whole integration when any capability was explicitly disabled', async () => {
     const home = makeHome();
     const bundle = makeBundle();
     mkdirSync(join(home, '.ftown'), { recursive: true });
@@ -308,13 +322,10 @@ describe('ensureMusePlugin', () => {
 
     const result = await ensureMusePlugin(bundle, home, run);
 
-    assert.equal(result.action, 'approved');
-    assert.equal(result.approved, true);
-    assert.match(result.warning ?? '', /rejected/);
-    assert.deepEqual(
-      calls.filter((call) => call.args.includes('approve')).map((call) => call.args.join(' ')),
-      ['plugins approve ftown:hook:ftown-stop --json'],
-    );
+    assert.equal(result.action, 'skipped');
+    assert.equal(result.approved, false);
+    assert.match(result.warning ?? '', /intentionally disabled/);
+    assert.equal(calls.some((call) => call.args.includes('approve')), false);
   });
 
   it('warns instead of throwing when approve fails', async () => {

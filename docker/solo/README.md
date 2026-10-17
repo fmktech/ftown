@@ -28,11 +28,29 @@ trailing argument on `docker run`.
 
 ## Build & run
 
-This image pins `ftown-bridge@0.19.38`, which removes factory and recurring
-interval/cron automation. Publish that retirement release to npm before building
+This image pins `ftown-bridge@0.19.41`, which uses explicit setup
+and in-process CLI commands. Publish that release to npm before building
 the image; the source change alone does not publish it, and builds cannot resolve
 the new pin until it is available. Do not substitute an older bridge version.
 See the [retirement and rollback notes](../../docs/automation-sunset.md).
+
+The image runs explicit setup during its build, before HOME volume initialization.
+Fresh named HOME volumes inherit the ready runtime. Normal container startup does
+not install or repair integrations. When upgrading an existing HOME volume, run
+setup once with the new image's package entrypoint (the volume's PATH alias may
+still point to an older CLI):
+
+```bash
+docker compose build
+docker compose run --rm --entrypoint node ftown-solo /usr/local/lib/node_modules/ftown-bridge/dist/ftown-cli.js setup
+docker compose up -d
+```
+
+For explicit repair, append `--repair` to the setup command. A missing/outdated
+setup fails before bridge listeners/auth with matching-version setup guidance.
+The 0.19.41 package must be published before this image can be built; this source
+change does not publish it.
+
 
 ```bash
 cd docker/solo

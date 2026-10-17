@@ -32,6 +32,7 @@ describe('bundled agent surface contract', () => {
     const pkg = JSON.parse(bundled('package.json'));
     assert.equal(pkg.bin['ftown-workflows'], undefined);
     const startup = bundled('src/index.ts');
-    assert.doesNotMatch(startup, /installFtownSkill\('fticket'|installFtownWorkflowsCli/);
+    assert.doesNotMatch(startup, /installFtownSkill|installFtownWorkflowsCli|retireBundled/);
+    assert.ok(startup.indexOf('assertSetupReady(BRIDGE_VERSION)') < startup.indexOf('const defaultDataDir = resolveDefaultDataDir()'));
   });
 });

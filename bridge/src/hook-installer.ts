@@ -72,7 +72,7 @@ function upsertHookEntry(
   spec.counters.added++;
 }
 
-export function installClaudeHooks(notifyScriptPath: string): void {
+export function installClaudeHooks(notifyScriptPath: string): boolean {
   const settingsPath = join(homedir(), '.claude', 'settings.json');
 
   let raw: string;
@@ -87,7 +87,7 @@ export function installClaudeHooks(notifyScriptPath: string): void {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[HookInstaller] failed: ${msg}`);
-    return;
+    return false;
   }
 
   let parsed: SettingsShape;
@@ -96,12 +96,12 @@ export function installClaudeHooks(notifyScriptPath: string): void {
     parsed = trimmed.length === 0 ? {} : JSON.parse(trimmed) as SettingsShape;
     if (!isObject(parsed)) {
       console.error('[HookInstaller] failed: settings.json root is not an object');
-      return;
+      return false;
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[HookInstaller] failed: ${msg}`);
-    return;
+    return false;
   }
 
   if (!isObject(parsed.hooks)) {
@@ -148,10 +148,11 @@ export function installClaudeHooks(notifyScriptPath: string): void {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[HookInstaller] failed: ${msg}`);
-    return;
+    return false;
   }
 
   console.log(
     `[HookInstaller] settings.json: added ${counters.added}, repaired ${counters.repaired}, kept ${counters.kept}`,
   );
+  return true;
 }

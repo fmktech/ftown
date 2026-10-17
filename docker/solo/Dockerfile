@@ -71,7 +71,7 @@ RUN groupmod --new-name ftown node \
 ENV HOME=/home/ftown
 
 # --- Global npm packages ---
-# ftown-bridge: pinned to 0.19.38 (factory/recurring automation retirement).
+# ftown-bridge: pinned to 0.19.41 (explicit setup lifecycle).
 # @anthropic-ai/claude-code: the `claude` CLI that harness-registry.ts:229 spawns
 # for Claude Code sessions. Auth is NOT baked into the image — see README
 # "Agent auth" for the two supported options (ANTHROPIC_API_KEY env var, or a
@@ -80,8 +80,8 @@ ENV HOME=/home/ftown
 # host machine's installed pi version, since the bridge deploys its Pi
 # extension into the container and extension/protocol compatibility depends
 # on the pi version matching — see README "Agent auth".
-# Requires the npm retirement release to be published before building this image.
-RUN npm install -g ftown-bridge@0.19.38 @anthropic-ai/claude-code @earendil-works/pi-coding-agent@0.83.0 \
+# Requires the npm setup release to be published before building this image.
+RUN npm install -g ftown-bridge@0.19.41 @anthropic-ai/claude-code @earendil-works/pi-coding-agent@0.83.0 \
     && npm cache clean --force
 
 # --- Volumes ---
@@ -92,12 +92,14 @@ RUN npm install -g ftown-bridge@0.19.38 @anthropic-ai/claude-code @earendil-work
 RUN mkdir -p /data /home/ftown/.ftown /workspace \
     && chown -R ftown:ftown /data /home/ftown/.ftown /workspace
 
+# Seed fresh HOME volumes once at build time; normal container startup never installs.
+USER ftown
+WORKDIR /workspace
+RUN node /usr/local/lib/node_modules/ftown-bridge/dist/ftown-cli.js setup
+
 VOLUME ["/data", "/home/ftown/.ftown", "/workspace"]
 
 EXPOSE 8040
-
-USER ftown
-WORKDIR /workspace
 
 # GOTCHA (verified empirically, see README "Port mapping — read this"):
 # bridge/src/solo/solo-server.ts:272-291 isAllowedHost() rejects any request

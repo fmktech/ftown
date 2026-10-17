@@ -78,7 +78,6 @@ export interface CreateSessionOptions {
   codexSessionId?: string;
   museSessionId?: string;
   env?: Record<string, string>;
-  orchestrator?: boolean;
   createMissingWorkingDir?: boolean;
 }
 
@@ -443,7 +442,6 @@ export function useSessions(
         codexSessionId: options?.codexSessionId,
         museSessionId: options?.museSessionId,
         env: options?.env,
-        ...(options?.orchestrator && shellType !== "shell" ? { orchestrator: true } : {}),
         ...(options?.createMissingWorkingDir ? { createMissingWorkingDir: true } : {}),
         ...(prompt && shellType !== "opencode" ? { initialInput: prompt + "\r", initialInputDelay: 2000 } : {}),
       };

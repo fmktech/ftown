@@ -1,11 +1,4 @@
-// No imports beyond Node builtins — this file must stay dependency-free so compiled
-// sibling copies work standalone when this file is copied alongside harness-cli.js
-// and ftown-sessions-cli.js into ~/.ftown (see harness-installer.ts / install-ftown-cli.ts).
-//
-// This module holds the wire shapes shared by the standalone CLIs (harness-cli.ts,
-// ftown-sessions-cli.ts) that talk to LocalApiServer over ~/.ftown/bridge.json. These
-// are the shapes as seen over the wire by those CLIs — not necessarily identical to the
-// richer internal types in ./types.ts.
+// Shared wire shapes for the in-process CLI runtime and local bridge API.
 
 /** Contents of ~/.ftown/bridge.json, pointing a CLI at the running LocalApiServer. */
 export interface BridgePointer {

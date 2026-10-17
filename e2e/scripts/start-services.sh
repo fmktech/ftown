@@ -48,7 +48,8 @@ done
 # --- register the run user ---
 node -e "fetch('http://localhost:3000/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:process.env.E2E_USER_EMAIL,password:'e2e-password-123'})}).then(async r=>{if(!r.ok){console.error('register failed',r.status,await r.text());process.exit(1)}console.log('[start] register',r.status)})"
 
-# --- bridge (scratch HOME, dist build) ---
+# --- explicit setup and bridge (scratch HOME, dist build) ---
+( cd "$REPO/bridge" && HOME="$BRIDGE_HOME" node dist/ftown-cli.js setup )
 BRIDGE_TOKEN="$(node -e "const jwt=require('$E2E_DIR/node_modules/jsonwebtoken');console.log(jwt.sign({sub:process.env.E2E_USER_EMAIL},process.env.CENTRIFUGO_TOKEN_SECRET,{audience:'ftown:bridge-bootstrap',expiresIn:'10m'}))")"
 ( cd "$REPO/bridge" && HOME="$BRIDGE_HOME" exec node dist/index.js --token "$BRIDGE_TOKEN" --api-url http://localhost:3000 ) > "$E2E_DIR/bridge.log" 2>&1 &
 echo $! > "$E2E_DIR/.bridge.pid"

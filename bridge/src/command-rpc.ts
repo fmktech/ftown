@@ -98,7 +98,6 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command) =
               parentSessionId: payload.parentSessionId,
               initialInput: payload.initialInput,
               initialInputDelay: payload.initialInputDelay,
-              orchestrator: payload.orchestrator,
               suppressBriefing: payload.suppressBriefing,
               createMissingWorkingDir: payload.createMissingWorkingDir,
             },

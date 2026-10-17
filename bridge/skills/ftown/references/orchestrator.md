@@ -2,7 +2,8 @@
 
 Read `../SKILL.md` for identity, reporting and cleanup behavior, and
 `sessions.md` for the command reference. These examples add only coordination
-steps.
+steps. Use an ordinary session with the requested task and parent link; no
+special orchestrator mode is needed.
 
 List existing sessions before creating another worker. Give each worker a
 bounded task, clear writable files and acceptance checks; save the returned
