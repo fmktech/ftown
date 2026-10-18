@@ -1,7 +1,7 @@
 # Agent push notifications
 
 Hosted FTown can notify your browser when an agent asks a distinct question or
-first becomes idle. Enable push notifications at the bottom of the session
+stays idle for ten uninterrupted minutes. Enable push notifications at the bottom of the session
 sidebar. This is an explicit opt-in; loading the dashboard never requests
 permission. Disable it there to unsubscribe. Signing out detaches the browser
 subscription; switching accounts discards a subscription owned by the prior
@@ -12,11 +12,14 @@ and network availability. HTTPS (or localhost) is required. iPhone/iPad support
 requires installing the web app to the Home Screen and enabling notifications
 from that app. Local/solo mode does not contact the hosted push service.
 
-One idle notification is keyed to the authenticated owner, bridge and FTown
-session for that session's lifetime. It requires an observed thinking/tool-use
-to idle transition; initial or restored idle snapshots never generate it.
-Questions use persisted attention UUIDs, so repeats of that attention do not
-resend. New subscribers receive future events only. Clicking a notification
+Each observed thinking/tool-use to idle transition starts a ten-minute timer.
+Repeated idle observations do not reset it. One notification is allowed for that
+idle period; the session must resume thinking/tool-use before a later idle
+period can start a fresh timer. Initial or legacy idle snapshots do not start
+one. The persisted cycle UUID and deadline survive bridge restart: a pending
+cycle resumes for a live session, including an overdue cycle, while an already
+notified cycle does not replay. Questions remain immediate and use persisted
+attention UUIDs, so repeats of that attention do not resend. New subscribers receive future events only. Clicking a notification
 opens/focuses FTown and selects its session when available.
 
 ## Deployment
@@ -48,6 +51,9 @@ provider fanout and timeouts are bounded. Payloads contain only sanitized short
 agent names/question excerpts; raw hook payloads and credentials are excluded.
 Notification excerpts can appear on your lock screen when you opt in.
 
+Resumed activity, session end/deletion and shutdown cancel local idle timers.
+Activity also drops queued idle retries and aborts a matching in-flight local
+request best-effort; provider delivery already accepted cannot be recalled.
 Cloud event and delivery deduplication survives bridge restart/reconnect.
 Transient provider delivery retries are bounded to five minutes, successful
 endpoints are not resent, and expired endpoints are removed. The bridge queue
@@ -60,7 +66,8 @@ not a guaranteed exactly-once message channel; in-app attention stays available.
 ## Verification
 
 Unit checks cover authentication/owner guards, endpoint restriction, immutable
-identity, finite bridge retry, recipient/delivery boundaries, permission UX and
+identity, fake-clock idle boundary/rearm/recovery/cancellation, finite bridge
+retry, recipient/delivery boundaries, permission UX and
 service-worker duplicate display/click behavior. The main assistant alone runs
 `e2e/tests/push-notifications.spec.ts` after the normal fixture build/start.
 `e2e/scripts/start-services.sh` generates ephemeral VAPID keys in its process
@@ -74,5 +81,6 @@ routes, closes app pages and dispatches worker push/click events. Synthetic clic
 lack OS user activation, so the worker browser clients.openWindow boundary is
 captured, its fixed same-origin session URL asserted, and a real test-context
 page navigates that URL. Production window-opening behavior is unchanged. It checks
-real database owner/revoked/browser-token rejection and duplicate idle/question
-records with zero recipients. No external push vendor is contacted by it.
+real database owner/revoked/browser-token rejection, same-cycle idle dedup,
+distinct subsequent idle cycles and duplicate questions with zero recipients.
+No test waits ten real minutes. No external push vendor is contacted by it.

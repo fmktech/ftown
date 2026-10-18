@@ -19,6 +19,7 @@ const ledgerSchema = z.object({
   prunedThrough: z.number().int().nonnegative(),
   activity: z.object({ state: z.enum(['thinking', 'tool_use', 'idle', 'unknown']), lastActivityAt: z.string().optional() }).strict(),
   events: z.array(itemSchema),
+  idleCycle: z.object({ id: z.string().uuid(), startedAt: z.string().datetime(), dueAt: z.string().datetime(), notifiedAt: z.string().datetime().optional() }).strict().optional(),
 }).strict();
 type Ledger = z.infer<typeof ledgerSchema>;
 type StoredItem = Ledger['events'][number];
@@ -31,12 +32,92 @@ export class AttentionError extends Error {
 }
 const publicItem = ({ fingerprint: _fingerprint, sourceId: _sourceId, reason: _reason, ...item }: StoredItem): AttentionItem => item;
 
+export const IDLE_NOTIFICATION_DELAY_MS = 600_000;
+export interface AttentionNotificationOptions {
+  now?: () => number;
+  schedule?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  cancel?: (timer: ReturnType<typeof setTimeout>) => void;
+  isSessionActive?: (sessionId: string) => Promise<boolean>;
+  onIdleCanceled?: (sessionId: string) => void;
+}
+interface IdleTimer { cycleId: string; timer: ReturnType<typeof setTimeout> }
+
 /** Single-process, serialized snapshots. Missing/corrupt files never masquerade as recovered history. */
 export class AttentionStore {
   private locks = new Map<string, Promise<unknown>>();
   private listeners = new Map<string, Set<() => void>>();
+  private idleTimers = new Map<string, IdleTimer>();
+  private notificationsStopped = false;
+  private notificationOptions: Required<Omit<AttentionNotificationOptions, 'onIdleCanceled'>> & Pick<AttentionNotificationOptions, 'onIdleCanceled'>;
   constructor(private resolveDir: (sessionId: string) => string, private resolvedRetention = 500,
-    private onNotification?: (sessionId: string, notice: PushNotice) => void) {}
+    private onNotification?: (sessionId: string, notice: PushNotice) => void,
+    options: AttentionNotificationOptions = {}) {
+    this.notificationOptions = { now: Date.now, schedule: setTimeout, cancel: clearTimeout,
+      isSessionActive: async () => true, ...options };
+  }
+
+  private clearIdleTimer(id: string): void {
+    const entry = this.idleTimers.get(id);
+    if (entry) this.notificationOptions.cancel(entry.timer);
+    this.idleTimers.delete(id);
+  }
+  private idleCanceled(id: string): void {
+    this.clearIdleTimer(id);
+    try { this.notificationOptions.onIdleCanceled?.(id); } catch { /* Optional observer is isolated. */ }
+  }
+  private scheduleIdle(id: string, cycle: NonNullable<Ledger['idleCycle']>): void {
+    if (this.notificationsStopped || cycle.notifiedAt || !this.onNotification) return;
+    this.clearIdleTimer(id);
+    const remaining = Math.max(0, Date.parse(cycle.dueAt) - this.notificationOptions.now());
+    const timer = this.notificationOptions.schedule(() => { void this.emitIdle(id, cycle.id).catch(() => {
+      if (this.idleTimers.get(id)?.cycleId === cycle.id) this.clearIdleTimer(id);
+    }); }, Math.min(remaining, 2_147_483_647));
+    timer.unref?.();
+    this.idleTimers.set(id, { cycleId: cycle.id, timer });
+  }
+  private async emitIdle(id: string, cycleId: string): Promise<void> {
+    await this.withLock(id, async () => {
+      const current = () => !this.notificationsStopped && this.idleTimers.get(id)?.cycleId === cycleId;
+      if (!current()) return;
+      const ledger = await this.load(id);
+      const cycle = ledger.idleCycle;
+      if (!cycle || cycle.id !== cycleId || cycle.notifiedAt || ledger.activity.state !== 'idle') { this.clearIdleTimer(id); return; }
+      const active = await this.notificationOptions.isSessionActive(id);
+      if (!current()) return;
+      if (!active) { delete ledger.idleCycle; await this.save(id, ledger); this.idleCanceled(id); return; }
+      if (this.notificationOptions.now() < Date.parse(cycle.dueAt)) { this.scheduleIdle(id, cycle); return; }
+      const timestamp = new Date(this.notificationOptions.now()).toISOString();
+      cycle.notifiedAt = timestamp;
+      await this.save(id, ledger);
+      if (!current()) return;
+      this.clearIdleTimer(id);
+      try { this.onNotification?.(id, { kind: 'idle', eventKey: `idle:${cycle.id}`, title: 'Agent has been idle for 10 minutes',
+        message: 'The agent is ready for your next instruction.', occurredAt: timestamp }); } catch { /* Durable qualification is not rolled back by delivery failure. */ }
+    });
+  }
+  async restoreIdleNotifications(ids: Iterable<string>): Promise<void> {
+    for (const id of ids) {
+      try {
+        await this.withLock(id, async () => {
+          if (this.notificationsStopped) return;
+          const ledger = await this.load(id);
+          if (ledger.activity.state === 'idle' && ledger.idleCycle && !ledger.idleCycle.notifiedAt) this.scheduleIdle(id, ledger.idleCycle);
+        });
+      } catch { console.warn(`[Bridge] Could not restore idle notification for session ${id}`); }
+    }
+  }
+  async cancelIdleNotification(id: string): Promise<void> {
+    this.idleCanceled(id);
+    await this.withLock(id, async () => {
+      this.idleCanceled(id);
+      const ledger = await this.load(id);
+      if (ledger.idleCycle) { delete ledger.idleCycle; await this.save(id, ledger); }
+    });
+  }
+  stopNotifications(): void {
+    this.notificationsStopped = true;
+    for (const id of Array.from(this.idleTimers.keys())) this.idleCanceled(id);
+  }
 
   private withLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
     if (!/^[a-zA-Z0-9_-]+$/.test(id)) return Promise.reject(new AttentionError('invalid_session', 'Invalid session ID'));
@@ -94,12 +175,15 @@ export class AttentionStore {
   async record(id: string, eventName: string, data: Record<string, unknown>): Promise<void> {
     const observation = classifyAttentionHook(eventName, data);
     if (!observation.activity && !observation.attention && !observation.resolve) return;
+    const cancelIdle = observation.activity === 'thinking' || observation.activity === 'tool_use' || observation.resolve === 'session_end';
+    if (cancelIdle) this.idleCanceled(id);
     await this.withLock(id, async () => {
       const ledger = await this.load(id);
-      const timestamp = new Date().toISOString();
+      const timestamp = new Date(this.notificationOptions.now()).toISOString();
       const notifications: PushNotice[] = [];
-      if (observation.activity === 'idle' && ['thinking', 'tool_use'].includes(ledger.activity.state)) {
-        notifications.push({ kind: 'idle', eventKey: 'idle', title: 'Agent is idle', message: 'The agent is ready for your next instruction.', occurredAt: timestamp });
+      if (cancelIdle) { this.idleCanceled(id); delete ledger.idleCycle; }
+      else if (observation.activity === 'idle' && ['thinking', 'tool_use'].includes(ledger.activity.state)) {
+        ledger.idleCycle = { id: randomUUID(), startedAt: timestamp, dueAt: new Date(this.notificationOptions.now() + IDLE_NOTIFICATION_DELAY_MS).toISOString() };
       }
       if (observation.activity) ledger.activity = { state: observation.activity, lastActivityAt: timestamp };
       if (observation.resolve) for (const event of ledger.events) {
@@ -123,8 +207,10 @@ export class AttentionStore {
       }
       this.prune(ledger);
       await this.save(id, ledger);
+      if (ledger.activity.state === 'idle' && ledger.idleCycle && !ledger.idleCycle.notifiedAt
+        && !this.idleTimers.has(id)) this.scheduleIdle(id, ledger.idleCycle);
       for (const notice of notifications) {
-        try { this.onNotification?.(id, notice); } catch { /* Optional delivery cannot fail a committed hook. */ }
+        try { if (!this.notificationsStopped) this.onNotification?.(id, notice); } catch { /* Optional delivery cannot fail a committed hook. */ }
       }
       if (created) for (const listener of this.listeners.get(id) ?? []) listener();
     });

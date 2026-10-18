@@ -5,7 +5,7 @@ const mocks=vi.hoisted(()=>({query:vi.fn(),send:vi.fn()}));
 vi.mock("@/lib/db",()=>({getDb:()=>({query:mocks.query})}));
 vi.mock("@/lib/push",async(original)=>({...await original<typeof import("@/lib/push")>(),sendBrowserPush:mocks.send}));
 import { POST } from "./route";
-const event={sessionId:"s",sessionName:"Agent",kind:"idle",eventKey:"idle",title:"Idle",message:"Ready",occurredAt:new Date().toISOString()};
+const event={sessionId:"s",sessionName:"Agent",kind:"idle",eventKey:"idle:00000000-0000-4000-8000-000000000001",title:"Idle",message:"Ready",occurredAt:new Date().toISOString()};
 function request(bridge=true){const token=jwt.sign({sub:"owner",...(bridge?{info:{bridgeId:"bridge"}}:{})},"unit-signing-secret-for-local-fixtures-only",{audience:"ftown:centrifugo",expiresIn:60});return new Request("https://app.test/api/push/events",{method:"POST",headers:{authorization:`Bearer ${token}`},body:JSON.stringify(event)});}
 function configure(pending:number,claim=true){
  const keys=webpush.generateVAPIDKeys();vi.stubEnv("VAPID_PUBLIC_KEY",keys.publicKey);vi.stubEnv("VAPID_PRIVATE_KEY",keys.privateKey);vi.stubEnv("VAPID_SUBJECT","mailto:test@example.test");vi.stubEnv("CENTRIFUGO_TOKEN_SECRET","unit-signing-secret-for-local-fixtures-only");
