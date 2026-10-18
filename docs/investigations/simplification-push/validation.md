@@ -72,3 +72,19 @@ notes were preserved and excluded from landing.
 - PR creation and automatic CI remain. Do not merge or configure production push
   from this task. Production activation requires migration 0005 and stable VAPID
   configuration as documented in docs/push-notifications.md.
+
+## Landing completion
+- [PR119](https://github.com/fmktech/ftown/pull/119) targets main from
+  feat/simplify-cli-release-and-notifications. Implementation commit
+  f933e54969b9506d074ba4c6e8998e0829517b6c contains the accepted combined change.
+- Fresh origin/main remained957d90 before landing; no conflict or version
+  collision appeared. Mechanically verified67 disjoint allowlisted paths and
+  excluded all4 pre-existing dirty notes. Staged whitespace check passed after
+  trimming one trailing blank line in the contract under explicit ownership.
+- Root transferred final coordination files to the integration owner. This
+  final coordination commit records the PR and retirement state; it changes no
+  application source or validation evidence.
+- canonical_start and npx_review are accepted/native-completed with no leases.
+  Integration owner stops writing and releases its Git lease on final handoff;
+  no pending worker assignment or task server remains. Root monitors automatic
+  PR CI. No merge, production migration/configuration or package publication ran.

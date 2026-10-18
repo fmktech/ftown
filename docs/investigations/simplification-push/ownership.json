@@ -2,7 +2,7 @@
   "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
   "branch": "feat/simplify-cli-release-and-notifications",
   "base": "957d90bbd265b90d60f54848a26a13a74722ccca",
-  "phase": "landing",
+  "phase": "PR opened; source work accepted; automatic CI monitored by root",
   "integrationOwner": "/root/npx_implementation",
   "e2eOwner": "/root",
   "workers": [
@@ -10,13 +10,11 @@
       "agent": "/root/npx_implementation",
       "model": "gpt-6.1-sol",
       "effort": "high",
-      "status": "source accepted; authorized Git landing in progress",
+      "status": "accepted and retired on final native handoff; Git landing complete",
       "dependencies": [
         "frozen contract"
       ],
-      "leases": [
-        "git index/history"
-      ],
+      "leases": [],
       "files": [
         "bridge/scripts/publish-packages.mjs",
         "bridge/scripts/publish-packages.test.mjs",
@@ -119,5 +117,7 @@
     "docs/investigations/npx-ftown/coordination.md",
     "docs/investigations/setup-cli-lifecycle/coordination.md",
     "docs/investigations/simplify-agent-surface/coordination.md"
-  ]
+  ],
+  "pullRequest": "https://github.com/fmktech/ftown/pull/119",
+  "implementationCommit": "f933e54969b9506d074ba4c6e8998e0829517b6c"
 }

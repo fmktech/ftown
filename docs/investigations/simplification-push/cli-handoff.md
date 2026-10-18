@@ -71,3 +71,9 @@ Root authorized integration commit/push/PR, with no merge or production change.
 Fresh origin/main still957d90, ancestor of this branch; no conflict or version
 collision appeared. Only the frozen task allowlist is staged; four unrelated
 dirty notes remain excluded. Final PR/lease retirement state follows landing.
+
+Landing complete: [PR119](https://github.com/fmktech/ftown/pull/119), implementation
+commit f933e54969b9506d074ba4c6e8998e0829517b6c. Final coordination records the PR
+and accepted worker retirement without source changes. On final native handoff
+this integration worker stops writing and releases all file/Git/lock/build leases;
+root alone monitors automatic CI. No merge or production action was performed.
