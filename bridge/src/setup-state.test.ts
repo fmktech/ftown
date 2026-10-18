@@ -8,7 +8,7 @@ import { assertSetupReady, acquireSetupLock, assertSetupVersion, readSetupState,
 test('readiness is versioned and missing assets require explicit repair', () => {
   const home = mkdtempSync(join(tmpdir(), 'ftown-ready-'));
   try {
-    assert.throws(() => assertSetupReady('1.2.3', home), /ftown-bridge@1\.2\.3 -- ftown setup/);
+    assert.throws(() => assertSetupReady('1.2.3', home), /npx ftown@1\.2\.3 setup/);
     writeSetupState({ schema: 1, packageVersion: '1.2.3', completedMigrations: ['stable-v1'] }, home);
     assert.throws(() => assertSetupReady('1.2.3', home), /--repair/);
     for (const path of REQUIRED_SETUP_ASSETS) {
@@ -18,10 +18,10 @@ test('readiness is versioned and missing assets require explicit repair', () => 
     rmSync(join(home, '.ftown/cli/dist/harness-commands.js'));
     assert.throws(() => assertSetupReady('1.2.3', home), /--repair/);
     writeFileSync(join(home, '.ftown/cli/dist/harness-commands.js'), 'restored');
-    assert.throws(() => assertSetupReady('1.2.4', home), /ftown-bridge@1\.2\.4/);
+    assert.throws(() => assertSetupReady('1.2.4', home), /npx ftown@1\.2\.4 setup/);
     assert.deepEqual(readSetupState(home).completedMigrations, ['stable-v1']);
     assert.equal(JSON.parse(readFileSync(setupStatePath(home), 'utf8')).packageVersion, '1.2.3');
-    assert.equal(setupHint('1.2.4'), 'npm exec --yes --package ftown-bridge@1.2.4 -- ftown setup');
+    assert.equal(setupHint('1.2.4'), 'npx ftown@1.2.4 setup');
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -44,7 +44,7 @@ test('setup lock preserves active/unknown owners and recovers only a provably de
 });
 
 test('older cached packages cannot overwrite a newer installed setup', () => {
-  assert.throws(() => assertSetupVersion('0.19.40', '0.19.41'), /newer.*ftown-bridge@0\.19\.41.*--repair/);
+  assert.throws(() => assertSetupVersion('0.19.40', '0.19.41'), /newer.*npx ftown@0\.19\.41 setup --repair/);
   assert.doesNotThrow(() => assertSetupVersion('0.19.41', '0.19.40'));
 });
 

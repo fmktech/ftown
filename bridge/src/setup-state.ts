@@ -30,7 +30,7 @@ export function writeSetupState(state: SetupState, home = homedir()): void {
 }
 
 export function setupHint(version: string): string {
-  return `npm exec --yes --package ftown-bridge@${version} -- ftown setup`;
+  return `npx ftown@${version} setup`;
 }
 
 export function assertSetupReady(version: string, home = homedir()): void {

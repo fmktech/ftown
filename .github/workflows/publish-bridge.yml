@@ -3,7 +3,7 @@ name: Publish bridge to npm
 on:
   push:
     branches: [main]
-    paths: ['bridge/**']
+    paths: ['bridge/**', '.github/workflows/publish-bridge.yml']
   workflow_dispatch:
 
 # Top-level permissions are the ceiling for every job below. `contents:
@@ -27,7 +27,6 @@ jobs:
       run:
         working-directory: bridge
     outputs:
-      publish: ${{ steps.version.outputs.publish }}
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
@@ -37,38 +36,16 @@ jobs:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
-      # Two PRs merged close together can both bump to the same version: the
-      # first PR's run publishes it, then the second PR's run sees
-      # local == published and would otherwise skip publishing silently,
-      # losing that PR's changes. On a push (post-merge) that match is
-      # therefore treated as an error so the mistake is caught and the
-      # branch gets re-bumped and re-merged; workflow_dispatch (manual,
-      # possibly re-run intentionally against an already-published version)
-      # still skips quietly.
-      - name: Check whether the version is unpublished
+      # Fail before the panel release on registry errors, version collisions,
+      # or a conflicting release tag. Same-commit partial publishes can retry.
+      - name: Preflight both exact npm versions and the release tag
         id: version
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          LOCAL=$(node -p "require('./package.json').version")
-          PUBLISHED=$(npm view ftown-bridge version 2>/dev/null || echo "none")
-          echo "local=$LOCAL published=$PUBLISHED"
-          if [ "$LOCAL" = "$PUBLISHED" ]; then
-            if [ "$EVENT_NAME" = "push" ]; then
-              echo "::error::bridge/package.json is $LOCAL but that version is already on npm (published from an earlier commit). Bump the version and merge again so this commit ships."
-              exit 1
-            fi
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-            echo "version=$LOCAL" >> "$GITHUB_OUTPUT"
-          fi
+        run: node scripts/publish-packages.mjs preflight
 
   # Cut the panel release BEFORE the npm package is published, so a
   # published bridge never points at a missing panel release.
   release-panel:
     needs: version
-    if: needs.version.outputs.publish == 'true'
     uses: ./.github/workflows/release-ui.yml
     with:
       version: ${{ needs.version.outputs.version }}
@@ -78,7 +55,6 @@ jobs:
 
   publish:
     needs: [version, release-panel]
-    if: needs.version.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -104,10 +80,11 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Publish
-        run: npm publish
+      - name: Verify release planning and artifact parity
+        run: node --test scripts/publish-packages.test.mjs
+
+      - name: Publish ftown then ftown-bridge (retry missing packages only)
+        run: node scripts/publish-packages.mjs publish
 
       - name: Tag release
-        run: |
-          git tag "bridge-v${{ needs.version.outputs.version }}"
-          git push origin "bridge-v${{ needs.version.outputs.version }}"
+        run: node scripts/publish-packages.mjs tag

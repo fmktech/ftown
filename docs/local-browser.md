@@ -24,7 +24,7 @@ CLI commands below.
 For a bridge that never contacts the cloud:
 
 ```sh
-npm exec --yes --package ftown-bridge -- ftown setup
+npx ftown setup
 ftown-bridge --local
 ```
 

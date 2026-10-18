@@ -168,7 +168,7 @@ back to the bridge root. Parent and child must belong to the same bridge.
 
 ## If the CLI is missing
 
-Run `npm exec --yes --package ftown-bridge@<version> -- ftown setup`, using the
+Run `npx ftown@<version> setup`, using the
 version in the bridge readiness hint. This works before the installed alias
 exists and installs the `ftown` command, compatible
 launchers, `~/.ftown/notify.sh`, and updates the unified skill
