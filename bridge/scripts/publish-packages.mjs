@@ -3,12 +3,13 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFile
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 
 export const PACKAGE_NAMES = ['ftown', 'ftown-bridge'];
 const bridgeDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-function command(program, args, cwd = bridgeDirectory) {
-  const result = spawnSync(program, args, { cwd, encoding: 'utf8' });
+function command(program, args, cwd = bridgeDirectory, timeoutMs) {
+  const result = spawnSync(program, args, { cwd, encoding: 'utf8', timeout: timeoutMs });
   if (result.error) throw result.error;
   return result;
 }
@@ -62,6 +63,38 @@ export function releasePlan(version, commit, lookup = lookupVersion) {
   });
 }
 
+/** After publishing, tolerate only temporarily absent versions, never registry errors/collisions. */
+export async function waitForPublishedPackages(version, commit, {
+  lookup = (name, version, remaining) => lookupVersion(name, version,
+    (program, args) => command(program, args, bridgeDirectory, Math.ceil(remaining))),
+  sleep = delay, now = () => performance.now(),
+  timeoutMs = 300_000, intervalMs = 10_000, log = console.log,
+} = {}) {
+  const deadline = now() + timeoutMs;
+  const confirmed = new Map();
+  const timeoutError = () => new Error(`Timed out waiting for npm visibility: ${PACKAGE_NAMES.filter((name) => !confirmed.has(name)).map((name) => `${name}@${version}`).join(', ')}. Retry this same source commit after registry metadata is visible.`);
+  const remainingBudget = () => {
+    const remaining = deadline - now();
+    if (remaining <= 0) throw timeoutError();
+    return remaining;
+  };
+  for (;;) {
+    const pending = releasePlan(version, commit, (name) => {
+      if (confirmed.has(name)) return confirmed.get(name);
+      let metadata;
+      try { metadata = lookup(name, version, remainingBudget()); }
+      catch (error) { if (error.code === 'ETIMEDOUT') throw timeoutError(); throw error; }
+      remainingBudget();
+      if (metadata !== undefined) confirmed.set(name, metadata);
+      return metadata;
+    }).filter(({ publish }) => publish).map(({ name }) => `${name}@${version}`);
+    if (pending.length === 0) return;
+    const remaining = remainingBudget();
+    log(`Waiting for npm visibility: ${pending.join(', ')} (${Math.ceil(remaining / 1000)}s remaining)`);
+    await sleep(Math.min(intervalMs, remaining));
+  }
+}
+
 export function checkReleaseTag(version, commit, run = command) {
   const tag = `bridge-v${version}`;
   const result = run('git', ['ls-remote', '--tags', 'origin', `refs/tags/${tag}`, `refs/tags/${tag}^{}`]);
@@ -103,7 +136,7 @@ export function publishPackages(plan, artifacts, publish = (path) => checked('np
   }
 }
 
-function main() {
+async function main() {
   const [action, outputDirectory] = process.argv.slice(2);
   const { version } = JSON.parse(readFileSync(join(bridgeDirectory, 'package.json'), 'utf8'));
   const commit = checked('git', ['rev-parse', 'HEAD']);
@@ -113,21 +146,24 @@ function main() {
     return;
   }
   if (!['preflight', 'publish', 'tag'].includes(action)) throw new Error('Expected preflight, pack, publish or tag');
+  if (action === 'tag') {
+    checkReleaseTag(version, commit);
+    await waitForPublishedPackages(version, commit);
+    if (!checkReleaseTag(version, commit)) checked('git', ['push', 'origin', `${commit}:refs/tags/bridge-v${version}`]);
+    return;
+  }
   const plan = releasePlan(version, commit);
   const tagged = checkReleaseTag(version, commit);
   if (action === 'preflight') {
     console.log(JSON.stringify({ version, commit, plan, tagged }));
     if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`);
-  } else if (action === 'publish') {
+  } else {
     const temporary = mkdtempSync(join(tmpdir(), 'ftown-artifacts-'));
     try { publishPackages(plan, packPackages(version, commit, temporary)); }
     finally { rmSync(temporary, { recursive: true, force: true }); }
-  } else {
-    if (plan.some(({ publish }) => publish)) throw new Error('Both npm packages must exist from this commit before tagging');
-    if (!tagged) checked('git', ['push', 'origin', `${commit}:refs/tags/bridge-v${version}`]);
   }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { main(); } catch (error) { console.error(error.message); process.exitCode = 1; }
+  main().catch((error) => { console.error(error.message); process.exitCode = 1; });
 }
