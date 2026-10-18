@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { AttentionStore, AttentionError } from './attention-store.js';
+import { MailStore } from './mail-store.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -371,5 +372,44 @@ describe('retired automation HTTP compatibility', () => {
       assert.equal(readFileSync(join(home, 'data', 'archive.jsonl'), 'utf8'), archiveBefore);
       assert.deepEqual(await store.loadSession(record.id), record);
     } finally { server.stop(); rmSync(home, { recursive: true, force: true }); }
+  });
+});
+
+
+// Root executes listener-backed tests; implementation workers only author them.
+describe('LocalApiServer native wake heartbeats', () => {
+  it('authenticates peeks, validates native identity/harness/runtime and never drains inboxes', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ftown-native-heartbeat-'));
+    const store = new SessionStore(join(home, 'data')); const server = new LocalApiServer();
+    const running = new Set(['claude', 'opencode', 'alias']);
+    const runner = { isRunning: (id: string) => running.has(id) } as unknown as ProcessRunner;
+    const base = { command: 'test', status: 'running' as const, bridgeId: 'machine', createdAt: '', updatedAt: '' };
+    for (const session of [
+      { ...base, id: 'claude', name: 'Claude', shellType: 'claude' as const, claudeSessionId: 'native-claude' },
+      { ...base, id: 'opencode', name: 'OpenCode', shellType: 'opencode' as const, opencodeSessionId: 'ses_native' },
+      { ...base, id: 'alias', name: 'Alias', shellType: 'fireworks' as const, claudeSessionId: 'native-alias' },
+    ]) await store.saveSession(session);
+    const mail = new MailStore(id => store.sessionDir(id));
+    server.setAuthToken('token'); server.setDependencies(store, runner, {} as CentrifugoClient, 'user'); server.setMailStore(mail);
+    const port = await server.start();
+    const query = (adapter: string, id: string) => `?peek=1&wait=0&adapter=${adapter}&nativeSessionId=${id}`;
+    try {
+      await api(port, 'token', 'POST', '/api/sessions/claude/inbox', { body: 'still unread' });
+      assert.equal((await api(port, 'wrong', 'GET', '/api/sessions/claude/inbox' + query('claude-mod', 'native-claude'))).status, 401);
+      assert.equal((await api(port, 'token', 'GET', '/api/sessions/claude/inbox?adapter=claude-mod')).status, 400);
+      assert.equal((await api(port, 'token', 'GET', '/api/sessions/claude/inbox?peek=0&wait=0&adapter=claude-mod&nativeSessionId=native-claude')).status, 400);
+      assert.equal((await api(port, 'token', 'GET', '/api/sessions/claude/inbox' + query('opencode', 'native-claude'))).status, 409);
+      assert.equal((await api(port, 'token', 'GET', '/api/sessions/claude/inbox' + query('claude-mod', 'wrong'))).status, 409);
+      assert.equal((await api(port, 'token', 'GET', '/api/sessions/opencode/inbox' + query('opencode', 'ses_native'))).status, 200);
+      assert.equal((await api(port, 'token', 'GET', '/api/sessions/alias/inbox' + query('claude-mod', 'native-alias'))).status, 200);
+      const peek = await api(port, 'token', 'GET', '/api/sessions/claude/inbox' + query('claude-mod', 'native-claude'));
+      assert.equal(peek.status, 200); assert.equal((peek.data.messages as unknown[]).length, 1);
+      assert.equal((await mail.listUndelivered('claude')).length, 1);
+      running.delete('claude');
+      assert.equal((await api(port, 'token', 'GET', '/api/sessions/claude/inbox' + query('claude-mod', 'native-claude'))).status, 409);
+      assert.equal((await mail.listUndelivered('claude')).length, 1);
+      const ordinary = await api(port, 'token', 'GET', '/api/sessions/claude/inbox?peek=1');
+      assert.equal(ordinary.status, 200); assert.equal((ordinary.data.messages as unknown[]).length, 1);
+    } finally { server.getHttpServer()?.closeAllConnections(); server.stop(); rmSync(home, { recursive: true, force: true }); }
   });
 });

@@ -1,0 +1,31 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "branch": "feat/native-mail-delivery",
+  "base": "804370e88312278d3446e653594b274da5300c93",
+  "workers": [
+    {
+      "agent": "/root/npx_implementation", "model": "gpt-6.1-sol", "reasoning": "high",
+      "role": "mail core and integration owner", "dependencies": ["frozen contract v1"],
+      "files": ["bridge/src/mail-delivery.ts", "bridge/src/mail-delivery.test.ts", "bridge/src/local-api-server.ts", "bridge/src/local-api-server.test.ts", "bridge/opencode-plugin/ftown.js", "bridge/src/opencode-plugin.test.ts", "bridge/scripts/native-mail-bridge-smoke.mjs", "bridge/package.json", "bridge/package-lock.json"],
+      "leases": ["Git index/history/remote operations", "package version/lock", "build output after writers finish"]
+    },
+    {
+      "agent": "/root/canonical_start", "model": "gpt-6.1-sol", "reasoning": "high",
+      "role": "Claude Mod and installation", "dependencies": ["frozen contract v1"],
+      "files": ["bridge/claude-mod/", "bridge/src/claude-mod-installer.ts", "bridge/src/claude-mod-installer.test.ts", "bridge/src/claude-mod.test.ts", "bridge/scripts/claude-mod-smoke.mjs", "bridge/src/setup.ts", "bridge/src/setup.test.ts", "bridge/src/installation-manifest.ts", "bridge/src/installation-manifest.test.ts", "bridge/src/harness-registry.ts", "bridge/src/harness-registry.test.ts", "bridge/src/agent-commands.ts", "bridge/src/agent-commands.test.ts"],
+      "leases": []
+    },
+    {
+      "agent": "/root/npx_review", "model": "gpt-6.1-sol", "reasoning": "high",
+      "role": "native CLI adapters and independent core review", "dependencies": ["frozen contract v1"],
+      "files": ["bridge/src/native-mail.ts", "bridge/src/native-mail.test.ts", "bridge/scripts/native-mail-smoke.mjs"],
+      "leases": []
+    },
+    {
+      "agent": "/root", "role": "architecture and E2E", "dependencies": [],
+      "files": ["docs/investigations/native-mail-delivery/"],
+      "leases": ["all E2E servers/ports/processes/databases/configuration", "native CLI runtime probes", "CI reruns"]
+    }
+  ],
+  "excluded_user_changes": ["docs/investigations/2026-10-17-pairing-setup.md", "docs/investigations/npx-ftown/coordination.md", "docs/investigations/setup-cli-lifecycle/coordination.md", "docs/investigations/simplify-agent-surface/coordination.md"]
+}

@@ -1,5 +1,6 @@
 import { createMailMessage } from './mail-store.js';
 import { HOOKED_SHELL_TYPES } from './harness-registry.js';
+import { createNativeMailWaker, type NativeMailWaker } from './native-mail.js';
 
 import type { MailMessage, Session, ShellType } from './types.js';
 
@@ -16,6 +17,24 @@ export const MAIL_NUDGE_MIN_INTERVAL_MS = 30_000;
 // turn never reaches Stop, and ignore busy markers old enough to be a crash.
 export const MAIL_NUDGE_BUSY_RECHECK_MS = 60_000;
 export const AGENT_BUSY_STALE_MS = 30 * 60_000;
+export const NATIVE_WAKE_LEASE_MS = 30_000;
+export const MAIL_WAKE_TEXT = 'You have new ftown mail — run `ftown harness mail read` to read it.';
+export interface NativeWakeRegistration { adapter: 'claude-mod' | 'opencode'; nativeSessionId: string }
+export class NativeWakeRegistrationError extends Error {
+  constructor(readonly status: 400 | 409, message: string) { super(message); }
+}
+export function parseNativeWakeRegistration(query: URLSearchParams): NativeWakeRegistration | undefined {
+  const adapter = query.get('adapter');
+  const nativeSessionId = query.get('nativeSessionId');
+  if (adapter === null && nativeSessionId === null) return undefined;
+  if ((adapter !== 'claude-mod' && adapter !== 'opencode') || !nativeSessionId
+    || nativeSessionId.length > 200 || !/^[a-zA-Z0-9_-]+$/.test(nativeSessionId)
+    || query.getAll('adapter').length !== 1 || query.getAll('nativeSessionId').length !== 1
+    || query.get('peek') !== '1' || query.get('wait') !== '0') {
+    throw new NativeWakeRegistrationError(400, 'Native wake registration requires peek=1, wait=0, adapter and nativeSessionId');
+  }
+  return { adapter, nativeSessionId };
+}
 
 export const MAIL_TYPES: ReadonlyArray<MailMessage['type']> = ['message', 'task', 'result', 'escalation'];
 
@@ -41,6 +60,7 @@ export function sanitizeMessageText(text: string): string {
 interface MailWaiter {
   deliver: (messages: MailMessage[]) => void;
 }
+const nativeIdentity = (session: Session) => `${session.shellType}:${session.shellType === 'codex' ? session.codexSessionId ?? '' : session.museSessionId ?? ''}`;
 
 /** The slice of SessionStore the mail engine needs. */
 export interface MailDeliverySessionStore {
@@ -77,6 +97,7 @@ export interface MailDeliveryOptions {
   now?: () => number;
   setTimeout?: (fn: () => void, ms: number) => MailTimerHandle;
   clearTimeout?: (handle: MailTimerHandle) => void;
+  nativeWake?: NativeMailWaker;
 }
 
 export type AcceptMailResult = { ok: true; id: string } | { ok: false; error: string };
@@ -107,6 +128,13 @@ export class MailDeliveryService {
   private pendingNudgeFrom: Map<string, string> = new Map();
   private lastNudgeAt: Map<string, number> = new Map();
   private agentBusySince: Map<string, number> = new Map();
+  private nativeLeases = new Map<string, NativeWakeRegistration & { until: number }>();
+  private nativeBatches = new Map<string, { identity: string; ids: Set<string> }>();
+  private wakeLocks = new Map<string, Promise<void>>();
+  private wakeControllers = new Map<string, AbortController>();
+  private legacyReadyAt = new Map<string, number>();
+  private stopped = false;
+  private readonly nativeWake: NativeMailWaker;
 
   constructor(options: MailDeliveryOptions = {}) {
     this.store = options.store ?? null;
@@ -115,6 +143,7 @@ export class MailDeliveryService {
     this.now = options.now ?? (() => Date.now());
     this.setTimeoutFn = options.setTimeout ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimeoutFn = options.clearTimeout ?? ((handle) => clearTimeout(handle as NodeJS.Timeout));
+    this.nativeWake = options.nativeWake ?? createNativeMailWaker();
   }
 
   setStore(store: MailDeliverySessionStore): void {
@@ -136,10 +165,42 @@ export class MailDeliveryService {
 
   /** Clear all timers and resolve every pending long poll with []. */
   stop(): void {
+    this.stopped = true;
     for (const timer of this.nudgeTimers.values()) this.clearTimeoutFn(timer);
     this.nudgeTimers.clear();
     for (const waiter of [...this.mailWaiters.values()]) waiter.deliver([]);
     this.mailWaiters.clear();
+    this.nativeLeases.clear();
+    this.nativeBatches.clear();
+    this.legacyReadyAt.clear();
+    for (const controller of this.wakeControllers.values()) controller.abort();
+    this.wakeControllers.clear();
+  }
+
+  private pluginIdentity(session: Session, adapter: NativeWakeRegistration['adapter']): string | undefined {
+    if (adapter === 'opencode') return session.shellType === 'opencode' ? session.opencodeSessionId : undefined;
+    return ['claude', 'zai', 'kimi', 'deepseek', 'fireworks'].includes(session.shellType ?? 'claude')
+      ? session.claudeSessionId : undefined;
+  }
+
+  registerNativeWake(session: Session, registration: NativeWakeRegistration): void {
+    if (this.stopped || session.status !== 'running' || !this.runner?.isRunning(session.id)
+      || this.pluginIdentity(session, registration.adapter) !== registration.nativeSessionId) {
+      this.nativeLeases.delete(session.id);
+      throw new NativeWakeRegistrationError(409, 'Native wake session identity or running process does not match');
+    }
+    this.nativeLeases.set(session.id, { ...registration, until: this.now() + NATIVE_WAKE_LEASE_MS });
+  }
+
+  private pluginLeaseRemaining(session: Session): number {
+    const lease = this.nativeLeases.get(session.id);
+    if (!lease) return 0;
+    if (session.status !== 'running' || !this.runner?.isRunning(session.id)
+      || this.pluginIdentity(session, lease.adapter) !== lease.nativeSessionId || lease.until <= this.now()) {
+      this.nativeLeases.delete(session.id);
+      return 0;
+    }
+    return lease.until - this.now();
   }
 
   /** Hook activity (UserPromptSubmit/PreToolUse/PostToolUse): the agent is mid-turn. */
@@ -155,7 +216,7 @@ export class MailDeliveryService {
   // Plain shells would execute the message as a command; deliver it as a quoted no-op
   // (`: '...'`) — interactive zsh has no '#' comments by default.
   async injectPtyLine(session: Session, sender: string, text: string): Promise<boolean> {
-    if (!this.runner) return false;
+    if (this.stopped || !this.runner) return false;
     const isAgent = session.shellType && session.shellType !== 'shell';
     const safeSender = sender.replace(/['\r\n]/g, '');
     const line = isAgent
@@ -165,11 +226,13 @@ export class MailDeliveryService {
     // Composer TUIs detect pastes by input arrival rate; the submit CR must come well
     // after that window or it is treated as a pasted newline.
     await this.delay(COMPOSER_PASTE_SETTLE_MS);
+    if (this.stopped) return false;
     if (!this.runner.write(session.id, submitSuffixFor(session.shellType))) return false;
     if (isAgent) {
       // Retry Enter separately after the same settle window so it cannot become
       // part of the first paste/submit batch.
       await this.delay(COMPOSER_PASTE_SETTLE_MS);
+      if (this.stopped) return false;
       if (!this.runner.write(session.id, submitSuffixFor(session.shellType))) return false;
     }
     return true;
@@ -228,9 +291,11 @@ export class MailDeliveryService {
     } else if (session.shellType !== 'pi') {
       // Pi's extension owns wake/retry natively; leave mail undelivered between
       // polls instead of falling back to terminal keystroke injection.
-      const nudgeDelay = HOOKED_SHELL_TYPES.has(session.shellType ?? 'claude')
+      const legacyDelay = HOOKED_SHELL_TYPES.has(session.shellType ?? 'claude')
         ? MAIL_NUDGE_DELAY_HOOKED_MS
         : MAIL_NUDGE_DELAY_MS;
+      if (!this.pendingNudgeFrom.has(session.id)) this.legacyReadyAt.set(session.id, this.now() + legacyDelay);
+      const nudgeDelay = session.shellType === 'codex' || session.shellType === 'muse' ? MAIL_NUDGE_DELAY_MS : legacyDelay;
       this.scheduleMailNudge(session.id, fromName ?? from, nudgeDelay);
     }
 
@@ -343,6 +408,7 @@ export class MailDeliveryService {
   // undelivered and the session is running, inject a one-line pointer to the
   // harness mail command. At most one nudge per session per 30s; senders coalesce.
   private scheduleMailNudge(sessionId: string, fromLabel: string, delayMs = MAIL_NUDGE_DELAY_MS): void {
+    if (this.stopped) return;
     this.pendingNudgeFrom.set(sessionId, fromLabel);
     if (this.nudgeTimers.has(sessionId)) return;
     const timer = this.setTimeoutFn(() => {
@@ -355,15 +421,66 @@ export class MailDeliveryService {
     this.nudgeTimers.set(sessionId, timer);
   }
 
-  private async fireMailNudge(sessionId: string): Promise<void> {
-    if (!this.store || !this.mailStore || !this.runner) return;
+  private fireMailNudge(sessionId: string): Promise<void> {
+    const previous = this.wakeLocks.get(sessionId) ?? Promise.resolve();
+    const next = previous.then(() => this.wakeSession(sessionId));
+    const settled = next.catch(() => undefined);
+    this.wakeLocks.set(sessionId, settled);
+    void settled.then(() => { if (this.wakeLocks.get(sessionId) === settled) this.wakeLocks.delete(sessionId); });
+    return next;
+  }
+
+  private async wakeSession(sessionId: string): Promise<void> {
+    if (this.stopped || !this.store || !this.mailStore || !this.runner) return;
 
     const fromLabel = this.pendingNudgeFrom.get(sessionId) ?? 'ftown';
     const undelivered = await this.mailStore.listUndelivered(sessionId);
+    if (this.stopped) return;
     if (undelivered.length === 0) {
       this.pendingNudgeFrom.delete(sessionId);
+      this.nativeBatches.delete(sessionId);
+      this.legacyReadyAt.delete(sessionId);
       return;
     }
+    let session = await this.store.loadSession(sessionId);
+    if (this.stopped || !session || session.status !== 'running' || !this.runner.isRunning(sessionId)) {
+      this.nativeLeases.delete(sessionId);
+      return;
+    }
+    const leaseRemaining = this.pluginLeaseRemaining(session);
+    if (leaseRemaining > 0) { this.scheduleMailNudge(sessionId, fromLabel, leaseRemaining); return; }
+
+    if (session.shellType === 'codex' || session.shellType === 'muse') {
+      let identity = nativeIdentity(session);
+      const prior = this.nativeBatches.get(sessionId);
+      if (prior?.identity === identity && undelivered.every((message) => prior.ids.has(message.id))) return;
+      // A hook may have drained mail during the session lookup. Never wake for a stale snapshot.
+      session = await this.store.loadSession(sessionId);
+      const pending = await this.mailStore.listUndelivered(sessionId);
+      if (this.stopped || !pending.length || !session || session.status !== 'running' || !this.runner.isRunning(sessionId)) return;
+      identity = nativeIdentity(session);
+      const controller = new AbortController();
+      this.wakeControllers.set(sessionId, controller);
+      const isCurrent = async () => {
+        if (this.stopped || controller.signal.aborted) return false;
+        const live = await this.store!.loadSession(sessionId);
+        const pending = await this.mailStore!.listUndelivered(sessionId);
+        return !this.stopped && !controller.signal.aborted && !!live && live.status === 'running'
+          && nativeIdentity(live) === identity
+          && this.runner!.isRunning(sessionId) && pending.some(message => undelivered.some(original => original.id === message.id));
+      };
+      let result;
+      try { result = await this.nativeWake(session, MAIL_WAKE_TEXT, controller.signal, isCurrent).catch(() => ({ status: 'unknown' as const })); }
+      finally { if (this.wakeControllers.get(sessionId) === controller) this.wakeControllers.delete(sessionId); }
+      if (this.stopped) return;
+      if (result.status === 'accepted' || result.status === 'unknown') {
+        this.nativeBatches.set(sessionId, { identity, ids: new Set(pending.map((message) => message.id)) });
+        return;
+      }
+    }
+
+    const legacyWait = (this.legacyReadyAt.get(sessionId) ?? 0) - this.now();
+    if (legacyWait > 0) { this.scheduleMailNudge(sessionId, fromLabel, legacyWait); return; }
 
     const busySince = this.agentBusySince.get(sessionId);
     if (busySince !== undefined && this.now() - busySince < AGENT_BUSY_STALE_MS) {
@@ -392,9 +509,17 @@ export class MailDeliveryService {
     // re-check this session (new mail via acceptMail, or an external
     // restart/idle hook re-invoking this nudge check) still knows who to
     // credit.
-    if (!this.runner.isRunning(sessionId)) return;
-    const session = await this.store.loadSession(sessionId);
-    if (!session) return;
+    // Recheck after native probing/rejection and before each legacy side effect.
+    const pending = await this.mailStore.listUndelivered(sessionId);
+    session = await this.store.loadSession(sessionId);
+    if (this.stopped || !pending.length || !session || session.status !== 'running' || !this.runner.isRunning(sessionId)) return;
+    const refreshedLease = this.pluginLeaseRemaining(session);
+    if (refreshedLease > 0) { this.scheduleMailNudge(sessionId, fromLabel, refreshedLease); return; }
+    const freshBusySince = this.agentBusySince.get(sessionId);
+    if (freshBusySince !== undefined && this.now() - freshBusySince < AGENT_BUSY_STALE_MS) {
+      this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_BUSY_RECHECK_MS);
+      return;
+    }
 
     this.pendingNudgeFrom.delete(sessionId);
     this.lastNudgeAt.set(sessionId, this.now());

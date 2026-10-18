@@ -1,5 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { CLAUDE_MOD_FILES } from './claude-mod-installer.js';
 
 import {
   HARNESSES,
@@ -24,6 +28,35 @@ const _shellTypeIsRegistryKeys: Equals<ShellType, keyof typeof HARNESSES> = true
 void _shellTypeIsRegistryKeys;
 
 describe('harness registry', () => {
+  it('loads the installed Mod only for compatible Claude executables, including provider aliases', () => {
+    if (process.platform === 'win32') return;
+    const home = process.env.HOME; const path = process.env.PATH;
+    const temporary = mkdtempSync(join(tmpdir(), 'ftown-mod-launch-'));
+    try {
+      process.env.HOME = temporary;
+      for (const relative of CLAUDE_MOD_FILES) {
+        const file = join(temporary, '.ftown/claude-plugin', relative);
+        mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, 'asset');
+      }
+      const bin = join(temporary, 'bin'); mkdirSync(bin);
+      writeFileSync(join(bin, 'claude'), '#!/bin/sh\necho "2.1.302 (Claude Code)"\n'); chmodSync(join(bin, 'claude'), 0o755);
+      process.env.PATH = bin;
+      for (const type of ['claude', 'zai', 'kimi', 'deepseek', 'fireworks'] as const) {
+        const command = HARNESSES[type].buildCommand({ claudeSessionId: 'native-id', model: 'm' });
+        assert.ok(command.includes(`--plugin-dir '${join(temporary, '.ftown/claude-plugin')}'`), type);
+        assert.match(command, /--resume 'native-id'/);
+      }
+      // Changing PATH invalidates the bounded probe cache.
+      const oldBin = join(temporary, 'old-bin'); mkdirSync(oldBin);
+      writeFileSync(join(oldBin, 'claude'), '#!/bin/sh\necho "2.1.286 (Claude Code)"\n'); chmodSync(join(oldBin, 'claude'), 0o755);
+      process.env.PATH = oldBin;
+      assert.doesNotMatch(HARNESSES.claude.buildCommand({}), /--plugin-dir/);
+    } finally {
+      if (home === undefined) delete process.env.HOME; else process.env.HOME = home;
+      if (path === undefined) delete process.env.PATH; else process.env.PATH = path;
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  });
   it('contains the supported ShellType set', () => {
     assert.deepEqual(
       [...SHELL_TYPES].sort(),

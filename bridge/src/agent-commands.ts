@@ -1,4 +1,5 @@
-import { HARNESSES } from './harness-registry.js';
+import { HARNESSES, shellQuote } from './harness-registry.js';
+import { claudeModLaunchPath } from './claude-mod-installer.js';
 
 import type { HarnessSpec } from './harness-registry.js';
 import type { ShellType } from './types.js';
@@ -35,7 +36,22 @@ export interface BuildSessionCommandInput {
 
 export function buildSessionCommand(input: BuildSessionCommandInput): string {
   if (input.command?.trim()) {
-    return input.command.trim();
+    const command = input.command.trim();
+    const type = input.shellType ?? 'claude';
+    const spec: HarnessSpec | undefined = (HARNESSES as Record<string, HarnessSpec>)[type];
+    const base = 'claude --allow-dangerously-skip-permissions';
+    const nativeId = input.claudeSessionId?.trim();
+    // Existing/cached dashboards send these exact generated commands. Decorate
+    // only that narrow surface; genuine custom commands remain verbatim, and
+    // the dashboard's model/prompt/resume behavior stays unchanged.
+    const generatedResume = nativeId && /^[a-zA-Z0-9_-]+$/.test(nativeId) && (
+      command === `${base} --resume ${nativeId}` || command === `${base} --resume ${shellQuote(nativeId)}`
+    );
+    if ((type === 'claude' || spec?.providerBase === 'claude') && (command === base || generatedResume)) {
+      const mod = claudeModLaunchPath();
+      if (mod) return `${base} --plugin-dir ${shellQuote(mod)}${command.slice(base.length)}`;
+    }
+    return command;
   }
 
   const shellType = input.shellType ?? 'claude';

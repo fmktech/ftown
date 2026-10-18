@@ -9,7 +9,7 @@ import type { SessionStore } from './session-store.js';
 import type { MailStore } from './mail-store.js';
 import { AttentionStore, AttentionError } from './attention-store.js';
 import type { Session } from './types.js';
-import { MailDeliveryService, sanitizeMessageText } from './mail-delivery.js';
+import { MailDeliveryService, sanitizeMessageText, parseNativeWakeRegistration, NativeWakeRegistrationError } from './mail-delivery.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { TerminalManager } from './terminal-manager.js';
@@ -1016,6 +1016,15 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     const session = await this.store.loadSession(sessionId);
     if (!session) {
       jsonResponse(res, 404, { error: 'Session not found' });
+      return;
+    }
+
+    try {
+      const registration = parseNativeWakeRegistration(url.searchParams);
+      if (registration) this.mail.registerNativeWake(session, registration);
+    } catch (error) {
+      if (!(error instanceof NativeWakeRegistrationError)) throw error;
+      jsonResponse(res, error.status, { error: error.message });
       return;
     }
 
