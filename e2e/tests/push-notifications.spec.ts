@@ -90,7 +90,8 @@ test("explicit push opt-in/opt-out and closed-page service-worker display/click"
  await opened.request.delete("/api/push",{headers:{origin:new URL(UI_BASE_URL).origin},data:{endpoint:subscription.endpoint}});
 });
 
-test("real push API binds bridge owner and durably deduplicates idle/questions without recipients",async({page})=>{
+test("real push API binds bridge owner and durably deduplicates idle cycles/questions without recipients",async({page})=>{
+ const idle=`idle:${randomUUID()}`;const nextIdle=`idle:${randomUUID()}`;
  const user=await registerAndLogin(page);const bridgeId=`push-${randomUUID()}`;const sessionId=randomUUID();
  const db=new pg.Client({host:process.env.PGHOST??"localhost",port:Number(process.env.PGPORT??5432),user:process.env.PGUSER??"ftown",password:process.env.PGPASSWORD??"ftown",database:process.env.PGDATABASE??"ftown"});
  await db.connect();
@@ -98,21 +99,23 @@ test("real push API binds bridge owner and durably deduplicates idle/questions w
  const post=(eventKey:string,kind:string,overrideToken=token)=>page.request.post("/api/push/events",{headers:{authorization:`Bearer ${overrideToken}`},data:{sessionId,sessionName:"Agent",eventKey,kind,title:"Ready",message:"Fixture",occurredAt:new Date().toISOString()}});
  try {
   await db.query("INSERT INTO bridge_refresh(bridge_id,sub,current_jti) VALUES($1,$2,'test-jti')",[bridgeId,user.email]);
-  const browserToken=await getCentrifugoToken(page);expect((await post("idle","idle",browserToken)).status()).toBe(401);
-  for(let n=0;n<2;n++)expect((await post("idle","idle")).status()).toBe(202);
+  const browserToken=await getCentrifugoToken(page);expect((await post(idle,"idle",browserToken)).status()).toBe(401);
+  for(let n=0;n<2;n++)expect((await post(idle,"idle")).status()).toBe(202);
   // First ingest freezes recipients: later subscribers cannot get this idle replay.
   const key=createECDH("prime256v1");key.generateKeys();
   const subscription={endpoint:`https://fcm.googleapis.com/no-backlog-${randomUUID()}`,keys:{p256dh:key.getPublicKey().toString("base64url"),auth:Buffer.alloc(16,1).toString("base64url")}};
   expect((await page.request.post("/api/push",{headers:{origin:new URL(UI_BASE_URL).origin},data:subscription})).status()).toBe(201);
-  expect((await post("idle","idle")).status()).toBe(202);
+  expect((await post(idle,"idle")).status()).toBe(202);
   expect((await db.query("SELECT COUNT(*)::int AS count FROM push_deliveries d JOIN push_events e ON e.id=d.event_id WHERE e.sub=$1 AND e.bridge_id=$2",[user.email,bridgeId])).rows[0].count).toBe(0);
   expect((await page.request.delete("/api/push",{headers:{origin:new URL(UI_BASE_URL).origin},data:{endpoint:subscription.endpoint}})).status()).toBe(204);
+  // A subsequent idle period has its own UUID; retries of either stay deduplicated.
+  for(let n=0;n<2;n++)expect((await post(nextIdle,"idle")).status()).toBe(202);
   const question=`question:${randomUUID()}`;
   await Promise.all([post(question,"question"),post(question,"question")]).then(responses=>responses.forEach(response=>expect(response.status()).toBe(202)));
   const {rows}=await db.query("SELECT kind,COUNT(*)::int AS count FROM push_events WHERE sub=$1 AND bridge_id=$2 GROUP BY kind ORDER BY kind",[user.email,bridgeId]);
-  expect(rows).toEqual([{kind:"idle",count:1},{kind:"question",count:1}]);
+  expect(rows).toEqual([{kind:"idle",count:2},{kind:"question",count:1}]);
   expect((await db.query("SELECT COUNT(*)::int AS count FROM push_deliveries d JOIN push_events e ON e.id=d.event_id WHERE e.sub=$1 AND e.bridge_id=$2",[user.email,bridgeId])).rows[0].count).toBe(0);
-  await db.query("UPDATE bridge_refresh SET sub='different-owner' WHERE bridge_id=$1",[bridgeId]);expect((await post("idle","idle")).status()).toBe(403);
-  await db.query("UPDATE bridge_refresh SET sub=$1,current_jti='revoked' WHERE bridge_id=$2",[user.email,bridgeId]);expect((await post("idle","idle")).status()).toBe(403);
+  await db.query("UPDATE bridge_refresh SET sub='different-owner' WHERE bridge_id=$1",[bridgeId]);expect((await post(idle,"idle")).status()).toBe(403);
+  await db.query("UPDATE bridge_refresh SET sub=$1,current_jti='revoked' WHERE bridge_id=$2",[user.email,bridgeId]);expect((await post(idle,"idle")).status()).toBe(403);
  }finally{await db.query("DELETE FROM push_events WHERE sub=$1 AND bridge_id=$2",[user.email,bridgeId]);await db.query("DELETE FROM bridge_refresh WHERE bridge_id=$1",[bridgeId]);await db.end();}
 });

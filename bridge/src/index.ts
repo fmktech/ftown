@@ -620,11 +620,32 @@ program
       getToken: () => currentBridgeToken,
       getSession: (sessionId) => store.loadSession(sessionId),
     });
-    localApiServer.setAttentionStore(new AttentionStore(
+    const attentionStore = new AttentionStore(
       (sessionId) => store.sessionDir(sessionId),
       500,
-      (sessionId, notice) => pushNotifier?.notify(sessionId, notice),
-    ));
+      pushNotifier ? (sessionId, notice) => pushNotifier.notify(sessionId, notice) : undefined,
+      {
+        isSessionActive: async (sessionId) => {
+          const session = await store.loadSession(sessionId);
+          return !!session && session.status === 'running' && session.shellType !== 'shell';
+        },
+        onIdleCanceled: (sessionId) => pushNotifier?.cancelIdle(sessionId),
+      },
+    );
+    localApiServer.setAttentionStore(attentionStore);
+    const stopPushSessionObserver = centrifugo.onLocalPublication((channel, data) => {
+      if (channel !== `sessions:updates#${userId}` || !data || typeof data !== 'object') return;
+      const update = data as { type?: string; session?: { id?: string; status?: string } };
+      if (update.type === 'session_update' && update.session?.id && update.session.status !== 'running') {
+        void attentionStore.cancelIdleNotification(update.session.id).catch(() => { /* Removed sessions have no ledger left to update. */ });
+      }
+    });
+    if (pushNotifier) {
+      const knownSessions = await store.listSessions();
+      await attentionStore.restoreIdleNotifications(knownSessions
+        .filter((session) => session.status === 'running' && session.shellType !== 'shell')
+        .map((session) => session.id));
+    }
     const mailStore = new MailStore((sessionId) => store.sessionDir(sessionId));
     localApiServer.setMailStore(mailStore);
 
@@ -846,6 +867,8 @@ program
 
     const shutdown = (): void => {
       console.log('\n[Bridge] Shutting down...');
+      attentionStore.stopNotifications();
+      stopPushSessionObserver();
       pushNotifier?.stop();
       // Solo L2 ordering: stop accepting first, then children (panel before
       // hub), then the rest of the bridge teardown.

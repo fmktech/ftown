@@ -1,0 +1,83 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "model": "gpt-6.1-sol",
+  "effort": "high",
+  "contract": "Idle push once after 600000ms continuously idle following observed activity; no repeat until thinking/tool_use resumes, then later idle begins a new cycle. Questions immediate. Stable per-cycle event keys persist for retry/restart dedup. Initial idle snapshots do not flood. VAPID production configuration and WebCraw ENV backup authorized, no rotation if keys exist; no merge or database mutation implied.",
+  "owners": {
+    "/root/npx_implementation": [
+      "Git branch/index/history/push and PR",
+      "bridge/package.json",
+      "bridge/package-lock.json",
+      "docs/investigations/idle-push-followup/integration.md",
+      "docs/investigations/idle-push-followup/ownership.json"
+    ],
+    "/root/npx_review": [
+      "bridge/src/attention-store.ts",
+      "bridge/src/attention-store.test.ts",
+      "bridge/src/push-notifier.ts",
+      "bridge/src/push-notifier.test.ts",
+      "bridge/src/index.ts",
+      "ui/src/lib/push.ts",
+      "ui/src/lib/push.test.ts",
+      "ui/src/lib/push-store.test.ts",
+      "ui/src/app/api/push/events/route.test.ts",
+      "e2e/tests/push-notifications.spec.ts",
+      "docs/push-notifications.md",
+      "docs/investigations/idle-push-followup/implementation.md"
+    ],
+    "/root/canonical_start": [
+      "Separate VAPID setup completed; no repository writes"
+    ],
+    "/root": [
+      "/tmp/ftown-push-followup/coordination.json",
+      "docs/investigations/idle-push-followup/contract.md",
+      "E2E and server resources"
+    ]
+  },
+  "dependencies": {
+    "implementation": [
+      "branch prep",
+      "independent contract review"
+    ],
+    "secrets": [
+      "existing VAPID metadata check"
+    ],
+    "integration": [
+      "implementation and review handoffs",
+      "root focused runtime validation"
+    ]
+  },
+  "state": "all implementation, independent review and root runtime gates accepted; source workers native completed; integration Git/report leases released at PR handoff",
+  "branch": "fix/idle-push-after-ten-minutes",
+  "base": "cb6406890217f2b7bbeb3399300c4c307839e491",
+  "validation": {
+    "bridgeBuild": "pass, version 0.19.46",
+    "bridgeSuite": "808 passed, 4 skipped",
+    "uiBuild": "pass",
+    "uiSuite": "309 passed",
+    "rootRuntime": "task-owned installed bridge setup/start and ftown harness status passed",
+    "rootFocusedE2E": "push-notifications.spec.ts 2/2 passed; real authenticated API/SQL, same-cycle dedup and distinct next cycle, existing SW opt-in/out/click test; OS/provider boundaries simulated",
+    "timerEvidence": "fake clock confirms 599999/600000ms boundary and lifecycle/recovery cases; no real 10-minute or external provider delivery test",
+    "cleanup": "removed task compose project ftown-idle-push, network/volume, scratch HOME/certs/PIDs; all test ports free; Docker Desktop restored stopped; unrelated containers/data preserved"
+  },
+  "workers": [
+    {
+      "agent": "/root/npx_review",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "status": "accepted and native completed; no leases"
+    },
+    {
+      "agent": "/root/canonical_start",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "status": "operations accepted and native completed; no leases"
+    },
+    {
+      "agent": "/root/npx_implementation",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "status": "integration accepted; stops writing and releases Git/report leases at PR handoff"
+    }
+  ]
+}

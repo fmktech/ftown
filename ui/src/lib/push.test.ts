@@ -26,6 +26,20 @@ describe("push boundary",()=>{
     for(const change of [{eventKey:"other"},{sessionId:"../x"},{occurredAt:"bad"},{occurredAt:new Date(Date.now()+120000).toISOString()},{message:"x".repeat(2001)}]) expect(()=>parsePushEvent({...event,...change})).toThrow();
     expect(cleanPushText("Bearer fixture-token API_KEY=fixture-value",100)).toBe("Bearer [redacted] API_KEY=[redacted]");
   });
+  it("supports rolling legacy idle keys and distinct durable cycle UUIDs",()=>{
+    const event={sessionId:"s",sessionName:"Agent",kind:"idle",eventKey:"idle",title:"Ready",message:"Ready",occurredAt:new Date().toISOString()};
+    const first={...event,eventKey:"idle:00000000-0000-4000-8000-000000000001"};
+    const next={...event,eventKey:"idle:00000000-0000-4000-8000-000000000002"};
+    expect(parsePushEvent(event).eventKey).toBe("idle");
+    expect(parsePushEvent(first).eventKey).toBe(first.eventKey);
+    const retry={...first,message:"retry"};
+    expect(eventIdentity("owner","bridge",first)).toBe(eventIdentity("owner","bridge",retry));
+    expect(eventIdentity("owner","bridge",next)).not.toBe(eventIdentity("owner","bridge",first));
+    for(const eventKey of ["idle:","idle:abc","idle:00000000-0000-4000-8000-000000000001extra","idle:00000000000040008000000000000001"])
+      expect(()=>parsePushEvent({...event,eventKey})).toThrow();
+    expect(()=>parsePushEvent({...first,kind:"question"})).toThrow();
+    expect(()=>parsePushEvent({...event,eventKey:"question:00000000-0000-4000-8000-000000000001"})).toThrow();
+  });
   it("requires same-origin mutations and bounded streamed JSON",async()=>{
     expect(()=>requireSameOrigin(new Request("https://app.test/api/push",{headers:{origin:"https://evil.test"}}))).toThrow();
     await expect(boundedJson(new Request("https://app.test/api/push",{method:"POST",body:"x".repeat(16385)}))).rejects.toMatchObject({status:413});

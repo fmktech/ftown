@@ -59,7 +59,7 @@ export function parsePushEvent(value: unknown, now = Date.now()): PushEvent {
   if (!record(value) || typeof value.sessionId !== "string" || !/^[a-zA-Z0-9_-]{1,200}$/.test(value.sessionId)
     || typeof value.sessionName !== "string" || value.sessionName.length > 200
     || !["question", "idle"].includes(String(value.kind)) || typeof value.eventKey !== "string"
-    || (value.kind === "idle" ? value.eventKey !== "idle" : !/^question:[a-f0-9-]{36}$/.test(value.eventKey))
+    || (value.kind === "idle" ? value.eventKey !== "idle" && !/^idle:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value.eventKey) : !/^question:[a-f0-9-]{36}$/.test(value.eventKey))
     || typeof value.title !== "string" || value.title.length > 200 || typeof value.message !== "string" || value.message.length > 2000
     || typeof value.occurredAt !== "string" || !Number.isFinite(Date.parse(value.occurredAt))
     || Date.parse(value.occurredAt) > now + 60_000 || Date.parse(value.occurredAt) < now - 600_000) throw new PushError("invalid_event", 400);
