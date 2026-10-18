@@ -2,12 +2,12 @@
 export const CLI_RUNTIME_MODULES = [
   'ftown-cli', 'start-commands', 'index', 'cli-entry', 'cli-client', 'sessions-commands', 'harness-commands', 'env-commands',
   'ftown-home', 'wire-types', 'harness-format', 'provider-env-store', 'setup', 'setup-state', 'setup-migrations',
-  'installation-manifest', 'production-dependencies', 'attention-store', 'push-notifier',
+  'installation-manifest', 'production-dependencies', 'attention-store', 'push-notifier', 'native-mail',
   'install-ftown-command-cli', 'install-notify-script', 'hook-installer', 'cursor-hook-installer',
-  'codex-installer', 'pi-extension-installer', 'opencode-plugin-installer', 'muse-plugin-installer',
+  'codex-installer', 'pi-extension-installer', 'claude-mod-installer', 'opencode-plugin-installer', 'muse-plugin-installer',
   'install-ftown-skill', 'retired-skill-assets', 'harness-installer', 'ensure-ftown-path',
 ] as const;
-export const RUNTIME_DIRECTORIES = ['dist', 'bin', 'hooks', 'pi-extension', 'opencode-plugin', 'muse-plugin', 'skills'] as const;
+export const RUNTIME_DIRECTORIES = ['dist', 'bin', 'hooks', 'pi-extension', 'claude-mod', 'opencode-plugin', 'muse-plugin', 'skills'] as const;
 export const CLI_LAUNCHERS = [
   { path: 'ftown', group: '' }, { path: 'ftown-sessions', group: 'sessions' },
   { path: 'ftown-env', group: 'env' }, { path: 'bin/ftown-harness', group: 'harness' },
@@ -18,6 +18,8 @@ export const REQUIRED_SETUP_ASSETS: readonly string[] = [
   ...CLI_LAUNCHERS.map(({ path }) => path), 'notify.sh', 'pi/ftown.js', 'harness-agent.md', 'skills/ftown/SKILL.md',
   ...REQUIRED_RUNTIME_FILES.map((path) => `cli/${path}`), `cli/${RUNTIME_INVENTORY_FILE}`,
   'cli/hooks/notify.sh', 'cli/pi-extension/ftown.js', 'cli/opencode-plugin/ftown.js',
+  'claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/hooks/hooks.json', 'claude-plugin/hooks/register.js',
+  'cli/claude-mod/.claude-plugin/plugin.json', 'cli/claude-mod/hooks/hooks.json', 'cli/claude-mod/hooks/register.js',
   'cli/muse-plugin/.muse-plugin/plugin.json', 'cli/skills/ftown/SKILL.md',
 ];
 

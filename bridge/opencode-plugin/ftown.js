@@ -39,187 +39,200 @@ function headers(token, json = false) {
   return result;
 }
 
-function formatMail(message) {
-  const sender = message.fromName
-    ? `${message.fromName} (${message.from ?? 'external'})`
-    : (message.from ?? 'external');
-  return `[${message.type ?? 'message'} from ${sender}] ${message.body ?? ''}`;
-}
+export const MAIL_WAKE_TEXT = 'You have new ftown mail — run `ftown harness mail read` to read it.';
 
-/**
- * Register ftown lifecycle forwarding and mail delivery on opencode's plugin
- * event stream. The plugin is inert unless FTOWN_SESSION_ID is present in the
- * opencode process env (i.e. the session was spawned by ftown), so manual
- * `opencode` runs are unaffected.
- *
- * Mirrors bridge/pi-extension/ftown.js: forwards Claude-style hook events to
- * the bridge /hook endpoint (session-id capture + busy/idle live status) and
- * delivers inbox mail as a new prompt at turn boundaries.
- */
+/** The inbox is authoritative. Native prompts only ask the agent to read it. */
 export function registerFtownOpencodePlugin(client, options = {}) {
   const env = options.env ?? process.env;
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const readBridgePointer = options.readBridgePointer ?? defaultReadBridgePointer;
+  const schedule = options.schedule ?? setTimeout;
+  const cancel = options.cancel ?? clearTimeout;
+  const now = options.now ?? Date.now;
   const ftownSessionId = env.FTOWN_SESSION_ID?.trim();
-
-  // The opencode session id this plugin instance tracks — updated from every
-  // event that carries one, so it stays correct across TUI session switches.
+  const lifetime = new AbortController();
+  const childSessions = new Set();
   let currentSessionId;
-  // Serializes turn-end handling: opencode may emit BOTH session.status(idle)
-  // and session.idle for the same boundary. Unordered, two concurrent drains
-  // could read the same undelivered mail before either marks it delivered and
-  // inject it twice.
-  let turnEndChain = Promise.resolve();
+  let generation = 0;
+  let busy = false;
+  let closed = false;
+  let wakeEnabled = true;
+  let timer;
+  let polling = false;
+  let inflight = false;
+  let seen = new Set();
+  let retryAt = 0;
+  let retryDelay = 5_000;
+
+  function disableNativeWake() {
+    wakeEnabled = false; generation++;
+    if (timer) cancel(timer);
+    timer = undefined;
+    seen.clear();
+  }
+
+  function dispose() {
+    if (closed) return;
+    closed = true; generation++;
+    lifetime.abort();
+    if (timer) cancel(timer);
+    timer = undefined;
+    seen.clear();
+  }
 
   async function request(path, init = {}) {
     const pointer = await readBridgePointer();
+    if (closed) return null;
     let lastResponse = null;
     for (const endpoint of endpoints(env, pointer)) {
+      if (closed) return null;
       try {
         const response = await fetchImpl(`http://127.0.0.1:${endpoint.port}${path}`, {
           ...init,
+          signal: AbortSignal.any([lifetime.signal, AbortSignal.timeout(3_000)]),
           headers: headers(endpoint.token, init.body !== undefined),
         });
         if (response.ok) return response;
         lastResponse = response;
-      } catch {
-        // A resurrected PTY may hold a stale port. Try bridge.json next.
-      }
+      } catch { /* Bridge restart: try the current bridge pointer. */ }
     }
     return lastResponse;
   }
 
   async function postHook(eventName, data = {}) {
-    if (!ftownSessionId || !currentSessionId) return;
-    await request('/hook', {
-      method: 'POST',
-      body: JSON.stringify({
-        ftown_session_id: ftownSessionId,
-        ftown_session_source: 'env',
-        hook_event_name: eventName,
-        session_id: currentSessionId,
-        ...data,
-      }),
-    });
+    if (!ftownSessionId || !currentSessionId || closed) return;
+    await request('/hook', { method: 'POST', body: JSON.stringify({
+      ftown_session_id: ftownSessionId, ftown_session_source: 'env',
+      hook_event_name: eventName, session_id: currentSessionId, ...data,
+    }) });
   }
 
-  async function listInbox(peek) {
-    if (!ftownSessionId) return [];
-    const response = await request(
-      `/api/sessions/${encodeURIComponent(ftownSessionId)}/inbox?wait=0${peek ? '&peek=1' : ''}`,
-      { method: 'GET' },
-    );
-    if (!response) return [];
+  function schedulePoll() {
+    if (closed || !wakeEnabled || !ftownSessionId || !currentSessionId || timer) return;
+    timer = schedule(() => { timer = undefined; void poll(); }, 5_000);
+    timer?.unref?.();
+  }
+
+  async function submitWake(id, epoch, ids) {
+    inflight = true;
+    for (const messageId of ids) seen.add(messageId);
     try {
+      const result = await client.session.prompt({ path: { id }, body: {
+        parts: [{ type: 'text', text: `[ftown mail] ${MAIL_WAKE_TEXT}` }],
+      } });
+      if (closed || epoch !== generation) return;
+      // Only an explicit rejection may retry this unread batch. A thrown or
+      // ambiguous response may already have started a turn; keep it suppressed.
+      if (result?.error && [400, 401, 403, 404, 409, 422].includes(result.response?.status)) {
+        for (const messageId of ids) seen.delete(messageId);
+        retryAt = now() + retryDelay;
+        retryDelay = Math.min(60_000, retryDelay * 2);
+      } else { retryDelay = 5_000; retryAt = 0; }
+    } catch { /* Unknown admission: never immediately duplicate the wake. */ }
+    finally { inflight = false; }
+  }
+
+  async function poll() {
+    if (closed || !wakeEnabled || !ftownSessionId || !currentSessionId || polling) return;
+    polling = true;
+    const id = currentSessionId;
+    const epoch = generation;
+    try {
+      const query = new URLSearchParams({ wait: '0', peek: '1', adapter: 'opencode', nativeSessionId: id });
+      const response = await request(`/api/sessions/${encodeURIComponent(ftownSessionId)}/inbox?${query}`);
+      if (closed || epoch !== generation || !response?.ok) return;
       const payload = await response.json();
-      return Array.isArray(payload?.messages) ? payload.messages : [];
-    } catch {
-      return [];
+      if (closed || epoch !== generation || !Array.isArray(payload?.messages)) return;
+      const unread = new Set(payload.messages.filter(message => typeof message.id === 'string').map(message => message.id));
+      seen = new Set([...seen].filter(messageId => unread.has(messageId)));
+      const fresh = [...unread].filter(messageId => !seen.has(messageId));
+      if (!busy && !inflight && fresh.length && now() >= retryAt) void submitWake(id, epoch, fresh);
+    } catch { /* A failed heartbeat leaves mail untouched; bridge fallback expires. */ }
+    finally { polling = false; schedulePoll(); }
+  }
+
+  async function identify(properties, created = false) {
+    const info = properties?.info;
+    const id = properties?.sessionID ?? info?.sessionID ?? (created ? info?.id : undefined);
+    if (typeof id !== 'string' || !id.trim() || closed) return false;
+    if (created && info?.parentID) { childSessions.add(id); return false; }
+    if (childSessions.has(id)) return false;
+    // A shared event stream cannot prove which competing root is active in
+    // the TUI. Stop native wake rather than guessing; legacy hooks/PTY remain.
+    if (created && currentSessionId && id !== currentSessionId) { disableNativeWake(); return false; }
+    if (currentSessionId) {
+      if (id === currentSessionId) return true;
+      // A plugin loaded after session creation can encounter another existing
+      // root too. Verify it instead of keeping the original wake target active.
+      if (typeof client.session.get === 'function') {
+        const epoch = generation;
+        const result = await client.session.get({ path: { id } });
+        if (closed || epoch !== generation) return false;
+        if (!result?.error && result?.data?.id === id) {
+          if (result.data.parentID) childSessions.add(id);
+          else disableNativeWake();
+        }
+      }
+      return false;
     }
-  }
-
-  /**
-   * Peek first, and only mark delivered AFTER the prompt was accepted. If
-   * submission fails, mail stays queued for the next boundary instead of
-   * being silently lost between a marking drain and a failed injection.
-   */
-  async function deliverMail() {
-    if (!currentSessionId) return;
-    const messages = await listInbox(true);
-    if (messages.length === 0) return;
-    const formatted = messages.map(formatMail).join('\n');
-    // Submitting a prompt starts a new turn; when it finishes, the next idle
-    // boundary fires and any mail that arrived meanwhile is delivered then.
-    await client.session.prompt({
-      path: { id: currentSessionId },
-      body: {
-        parts: [
-          {
-            type: 'text',
-            text:
-              `[ftown mail]\n${formatted}\n` +
-              'Handle this message and reply with a message to the sender where appropriate.',
-          },
-        ],
-      },
-    });
-    // Accepted — only now let the bridge mark the peeked messages delivered.
-    await listInbox(false);
-  }
-
-  /**
-   * Extract the opencode SESSION id from event properties. `info.id` is only
-   * trustworthy on session.created — on message.updated it is a MESSAGE id
-   * (msg_…), which must never be stored as the resume id.
-   */
-  function trackSessionId(properties, preferInfoId = false) {
-    const id = properties?.sessionID
-      ?? properties?.info?.sessionID
-      ?? (preferInfoId ? properties?.info?.id : undefined);
-    if (typeof id === 'string' && id.trim()) currentSessionId = id.trim();
-  }
-
-  /** Turn boundary: mark idle, then drain and inject pending mail. */
-  function endTurn(properties) {
-    trackSessionId(properties);
-    const run = turnEndChain.then(async () => {
-      await postHook('Stop');
-      await deliverMail();
-    }).catch(() => {
-      // A failed hook POST or mail delivery must never crash the agent TUI.
-    });
-    turnEndChain = run;
-    return run;
+    // Late-loaded plugins may miss session.created. Verify the native session
+    // before binding; arbitrary child/message events cannot retarget the bridge.
+    if (!created) {
+      if (typeof client.session.get !== 'function') return false;
+      const result = await client.session.get({ path: { id } });
+      if (closed || result?.error || result?.data?.id !== id || result.data.parentID) {
+        if (result?.data?.parentID) childSessions.add(id);
+        return false;
+      }
+      if (currentSessionId) return id === currentSessionId;
+    }
+    currentSessionId = id;
+    generation++;
+    seen.clear();
+    return true;
   }
 
   async function handleEvent(event) {
+    if (!ftownSessionId || closed) return;
+    if (event.type === 'server.instance.disposed') { dispose(); return; }
+    if (!await identify(event.properties, event.type === 'session.created')) return;
     switch (event.type) {
       case 'session.created':
-        trackSessionId(event.properties, true);
         await postHook('SessionStart');
+        await poll();
         break;
-      case 'message.updated': {
-        trackSessionId(event.properties);
-        const role = event.properties?.info?.role;
-        if (role === 'user') await postHook('UserPromptSubmit', { prompt: event.properties?.info?.summary });
+      case 'message.updated':
+        if (event.properties?.info?.role === 'user') { busy = true; await postHook('UserPromptSubmit'); }
         break;
-      }
+      case 'session.status':
+        if (event.properties?.status?.type === 'busy') { busy = true; await postHook('PreToolUse'); break; }
+        if (event.properties?.status?.type !== 'idle') break;
+        // falls through
       case 'session.idle':
-        await endTurn(event.properties);
+        busy = false;
+        await postHook('Stop');
+        await poll();
         break;
-      case 'session.status': {
-        trackSessionId(event.properties);
-        // v1.18.x fires session.status(busy/idle) reliably; session.idle may
-        // not reach plugins at all. Busy keeps the mail pump from nudging
-        // mid-turn; idle is a full turn boundary.
-        if (event.properties?.status?.type === 'busy') await postHook('PreToolUse');
-        else if (event.properties?.status?.type === 'idle') await endTurn(event.properties);
-        break;
-      }
       case 'session.error':
-        trackSessionId(event.properties);
-        await postHook('SessionEnd', { reason: 'error' });
+        busy = false;
+        await postHook('SessionEnd', { reason: event.type });
+        await poll();
         break;
-      default:
+      case 'session.deleted':
+        await postHook('SessionEnd', { reason: event.type });
+        dispose();
         break;
     }
+    schedulePoll();
   }
 
-  return {
-    event: async ({ event }) => {
-      try {
-        await handleEvent(event);
-      } catch {
-        // A failed hook POST or mail delivery must never crash the agent TUI.
-      }
-    },
-  };
+  return { event: async ({ event }) => {
+    try { await handleEvent(event); } catch { /* Never break the agent TUI. */ }
+  }, dispose };
 }
 
-/** opencode plugin entry — auto-loaded from ~/.config/opencode/plugins/. */
 export const FtownOpencodePlugin = async ({ client }) => {
   if (!process.env.FTOWN_SESSION_ID?.trim()) return {};
   return registerFtownOpencodePlugin(client);
 };
-
 export default FtownOpencodePlugin;

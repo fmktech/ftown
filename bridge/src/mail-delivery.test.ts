@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 
 import {
   AGENT_BUSY_STALE_MS,
+  MAIL_WAKE_TEXT,
+  parseNativeWakeRegistration,
+  NativeWakeRegistrationError,
   MailDeliveryService,
   type MailDeliveryMailStore,
   type MailDeliveryRunner,
@@ -10,6 +13,7 @@ import {
   type MailTimerHandle,
 } from './mail-delivery.js';
 import type { MailMessage, Session } from './types.js';
+import type { NativeMailWaker } from './native-mail.js';
 
 // ---------------------------------------------------------------------------
 // Fakes: a controllable clock plus in-memory store/mail/runner doubles, so the
@@ -156,7 +160,7 @@ function makeSession(id: string, overrides: Partial<Session> = {}): Session {
   };
 }
 
-function setup(startTime?: number) {
+function setup(startTime?: number, nativeWake?: NativeMailWaker) {
   const clock = new FakeClock(startTime);
   const store = new FakeSessionStore();
   const mailStore = new FakeMailStore();
@@ -168,6 +172,7 @@ function setup(startTime?: number) {
     now: clock.now,
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
+    nativeWake: nativeWake ?? (async () => ({ status: 'unsupported' })),
   });
   return { clock, store, mailStore, runner, service };
 }
@@ -645,3 +650,130 @@ describe('MailDeliveryService injectPtyLine', () => {
     assert.deepEqual(runner.writes.slice(-2).map((write) => write.data), ['\r', '\r']);
   });
 });
+
+
+const nativeSession = (id = 'native') => makeSession(id, { shellType: 'codex', codexSessionId: '00000000-0000-4000-8000-000000000001' });
+function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
+
+describe('MailDeliveryService native wakes', () => {
+  it('queues native wake while busy, sends no payload and leaves inbox unread; each batch wakes once', async () => {
+    const calls: string[] = [];
+    const f = setup(undefined, async (_session, text) => { calls.push(text); return { status: 'accepted' }; });
+    const session = nativeSession(); f.store.add(session); f.runner.running.add(session.id); f.service.markAgentBusy(session.id);
+    await f.service.acceptMail(session, { body: 'secret task body', from: 'parent' });
+    await f.clock.advance(5_000);
+    assert.deepEqual(calls, [MAIL_WAKE_TEXT]); assert.equal(f.runner.writes.length, 0);
+    assert.equal((await f.mailStore.listUndelivered(session.id)).length, 1);
+    await f.clock.advance(120_000); assert.equal(calls.length, 1);
+    await f.service.acceptMail(session, { body: 'second task' }); await f.clock.advance(5_000);
+    assert.equal(calls.length, 2); assert.equal(f.runner.writes.length, 0);
+    const drained = await f.service.readMail(session, { peek: false, wait: 0, all: false, limit: 50 });
+    assert.equal(drained.kind, 'immediate'); if (drained.kind === 'immediate') assert.equal(drained.messages.length, 2);
+    assert.deepEqual((await f.service.readMail(session, { peek: false, wait: 0, all: false, limit: 50 })), { kind: 'immediate', messages: [] });
+    f.service.stop();
+  });
+
+  it('unknown admission suppresses repeats; unsupported/rejected keep hooked PTY delay and busy safety', async () => {
+    for (const status of ['unknown', 'unsupported', 'rejected'] as const) {
+      let calls = 0;
+      const f = setup(undefined, async () => { calls++; return { status }; });
+      const session = nativeSession(); f.store.add(session); f.runner.running.add(session.id);
+      await f.service.acceptMail(session, { body: 'task' }); await f.clock.advance(5_000);
+      assert.equal(calls, 1); assert.equal(f.runner.writes.length, 0);
+      await f.clock.advance(54_999); assert.equal(f.runner.writes.length, 0);
+      await f.clock.advance(1_201);
+      assert.equal(f.runner.nudgeLines().length, status === 'unknown' ? 0 : 1);
+      assert.equal((await f.mailStore.listUndelivered(session.id)).length, 1);
+      f.service.stop();
+    }
+    const f = setup(undefined, async () => ({ status: 'unsupported' })); const session = nativeSession();
+    f.store.add(session); f.runner.running.add(session.id); f.service.markAgentBusy(session.id);
+    await f.service.acceptMail(session, { body: 'task' }); await f.clock.advance(120_000);
+    assert.equal(f.runner.writes.length, 0); f.service.stop();
+  });
+
+  it('healthy native plugin lease suppresses already scheduled PTY and expiry restores fallback', async () => {
+    const f = setup(); const session = makeSession('claude', { shellType: 'claude', claudeSessionId: 'native-id' });
+    f.store.add(session); f.runner.running.add(session.id);
+    await f.service.acceptMail(session, { body: 'task' });
+    await f.clock.advance(59_000);
+    f.service.registerNativeWake(session, { adapter: 'claude-mod', nativeSessionId: 'native-id' });
+    await f.clock.advance(30_000); await f.clock.advance(1_200);
+    assert.equal(f.runner.nudgeLines().length, 1, 'lease expiry, not original timer, permits PTY');
+    f.service.stop();
+  });
+
+  it('lease refreshes while native prompt is pending; stale native IDs and stopped processes cannot suppress fallback', async () => {
+    const f = setup(); const session = makeSession('claude', { shellType: 'fireworks', claudeSessionId: 'native-id' });
+    f.store.add(session); f.runner.running.add(session.id);
+    await f.service.acceptMail(session, { body: 'task' });
+    for (let i = 0; i < 15; i++) { f.service.registerNativeWake(session, { adapter: 'claude-mod', nativeSessionId: 'native-id' }); await f.clock.advance(5_000); }
+    assert.equal(f.runner.writes.length, 0);
+    f.store.add({ ...session, claudeSessionId: 'changed' });
+    await f.clock.advance(31_200); assert.equal(f.runner.nudgeLines().length, 1);
+    assert.throws(() => f.service.registerNativeWake(session, { adapter: 'claude-mod', nativeSessionId: 'wrong' }), (error: unknown) => error instanceof NativeWakeRegistrationError && error.status === 409);
+    f.runner.running.delete(session.id);
+    assert.throws(() => f.service.registerNativeWake(session, { adapter: 'claude-mod', nativeSessionId: 'native-id' }), /running process/);
+    f.service.stop();
+  });
+
+  it('serializes native wakes and revalidates after async probe, mail drain, process stop and shutdown', async () => {
+    const pending = deferred<{ status: 'accepted' }>(); let calls = 0; let signal: AbortSignal | undefined;
+    const f = setup(undefined, async (_session, _text, abort, current) => {
+      calls++; signal = abort; assert.equal(await current?.(), true); return pending.promise;
+    });
+    const session = nativeSession(); f.store.add(session); f.runner.running.add(session.id);
+    await f.service.acceptMail(session, { body: 'one' }); await f.clock.advance(5_000);
+    await f.service.acceptMail(session, { body: 'two' }); await f.clock.advance(5_000);
+    assert.equal(calls, 1);
+    f.service.stop(); assert.equal(signal?.aborted, true); pending.resolve({ status: 'accepted' }); await flushAsync();
+    assert.equal(calls, 1); assert.equal(f.runner.writes.length, 0);
+
+    const gate = deferred<void>(); let entered!: () => void;
+    const checking = new Promise<void>(done => { entered = done; }); let allowed: boolean | undefined;
+    const g = setup(undefined, async (_session, _text, _signal, current) => { entered(); await gate.promise; allowed = await current?.(); return { status: 'unsupported' }; });
+    g.store.add(session); g.runner.running.add(session.id);
+    await g.service.acceptMail(session, { body: 'one' }); await g.clock.advance(5_000); await checking;
+    await g.service.readMail(session, { peek: false, wait: 0, all: false, limit: 50 });
+    gate.resolve(); await flushAsync(); assert.equal(allowed, false);
+    await g.clock.advance(120_000); assert.equal(g.runner.writes.length, 0); g.service.stop();
+  });
+
+  it('shutdown fences PTY submits already awaiting paste settle', async () => {
+    const f = setup(); const session = makeSession('s', { shellType: 'grok' }); f.runner.running.add(session.id);
+    const done = f.service.injectPtyLine(session, 'sender', 'pointer'); await flushAsync();
+    f.service.stop(); await f.clock.advance(1_200); assert.equal(await done, false);
+    assert.equal(f.runner.writes.length, 1, 'no delayed carriage return after stop');
+  });
+});
+
+describe('native heartbeat parsing', () => {
+  it('keeps ordinary peeks unchanged and rejects partial, malformed or destructive registrations', () => {
+    assert.equal(parseNativeWakeRegistration(new URLSearchParams('peek=1')), undefined);
+    const valid = 'peek=1&wait=0&adapter=claude-mod&nativeSessionId=native-id';
+    assert.deepEqual(parseNativeWakeRegistration(new URLSearchParams(valid)), { adapter: 'claude-mod', nativeSessionId: 'native-id' });
+    for (const query of ['adapter=claude-mod', 'nativeSessionId=native-id', valid.replace('peek=1', 'peek=0'), valid.replace('wait=0', 'wait=1'), valid.replace('claude-mod', 'unknown'), valid + '&adapter=opencode', valid.replace('native-id', 'unsafe/id')]) {
+      assert.throws(() => parseNativeWakeRegistration(new URLSearchParams(query)), (error: unknown) => error instanceof NativeWakeRegistrationError && error.status === 400, query);
+    }
+  });
+});
+
+
+describe('late mail wake revalidation', () => {
+    it('selects Muse identity by harness even when an unrelated Codex ID is present', async () => {
+      const gate = deferred<void>(); let current: (() => Promise<boolean>) | undefined; let allowed: boolean | undefined;
+      const f = setup(undefined, async (_session, _text, _signal, check) => { current = check; await gate.promise; allowed = await check?.(); return { status: 'unknown' }; });
+      const session = makeSession('muse', { shellType: 'muse', museSessionId: '00000000-0000-4000-8000-000000000001', codexSessionId: 'stale-unrelated' });
+      f.store.add(session); f.runner.running.add(session.id);
+      await f.service.acceptMail(session, { body: 'task' }); await f.clock.advance(5_000); assert.ok(current);
+      f.store.add({ ...session, museSessionId: '00000000-0000-4000-8000-000000000002' });
+      gate.resolve(); await flushAsync(); assert.equal(allowed, false); assert.equal(f.runner.writes.length, 0); f.service.stop();
+    });
+    it('rechecks resumed activity during the final awaited mail scan before PTY input', async () => {
+      const f = setup(); const session = makeSession('grok', { shellType: 'grok' }); f.store.add(session); f.runner.running.add(session.id);
+      const read = f.mailStore.listUndelivered.bind(f.mailStore); let reads = 0;
+      f.mailStore.listUndelivered = async id => { const messages = await read(id); if (++reads === 2) f.service.markAgentBusy(id); return messages; };
+      await f.service.acceptMail(session, { body: 'task' }); await f.clock.advance(6_200);
+      assert.equal(f.runner.writes.length, 0); f.service.stop();
+    });
+  });

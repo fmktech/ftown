@@ -7,6 +7,8 @@
  *
  */
 
+import { claudeModLaunchPath } from './claude-mod-installer.js';
+
 /** Escape an argument for the direct runtime's platform shell. */
 export function shellQuote(value: string, platform: NodeJS.Platform = process.platform): string {
   if (platform === 'win32') return `'${value.replaceAll("'", "''")}'`;
@@ -254,6 +256,8 @@ export function buildMuseCommand(options: {
 /** claude CLI launch — shared by 'claude' and every claude-rebadged provider flavor. */
 function buildClaudeCommand(input: BuildCommandInput): string {
   const parts = ['claude', '--allow-dangerously-skip-permissions'];
+  const mod = claudeModLaunchPath();
+  if (mod) parts.push('--plugin-dir', shellQuote(mod));
   if (input.model?.trim()) {
     parts.push('--model', shellQuote(input.model.trim()));
   }

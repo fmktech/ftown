@@ -1,5 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { CLAUDE_MOD_FILES } from './claude-mod-installer.js';
 
 import {
   buildGrokCommand,
@@ -8,6 +12,39 @@ import {
   buildSessionCommand,
   shellQuote,
 } from './agent-commands.js';
+
+describe('dashboard-generated Claude launch compatibility', () => {
+  it('adds the compatible Mod to exact defaults/resumes, preserving real custom commands', () => {
+    if (process.platform === 'win32') return;
+    const oldHome = process.env.HOME; const oldPath = process.env.PATH;
+    const home = mkdtempSync(join(tmpdir(), 'ftown-ui-mod-'));
+    try {
+      process.env.HOME = home;
+      for (const relative of CLAUDE_MOD_FILES) {
+        const path = join(home, '.ftown/claude-plugin', relative);
+        mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, 'asset');
+      }
+      const bin = join(home, 'bin'); mkdirSync(bin);
+      writeFileSync(join(bin, 'claude'), '#!/bin/sh\necho "2.1.302 (Claude Code)"\n'); chmodSync(join(bin, 'claude'), 0o755);
+      process.env.PATH = bin;
+      const base = 'claude --allow-dangerously-skip-permissions';
+      const mod = ` --plugin-dir '${join(home, '.ftown/claude-plugin')}'`;
+      for (const shellType of ['claude', 'zai', 'kimi', 'deepseek', 'fireworks'] as const) {
+        assert.equal(buildSessionCommand({ shellType, command: base, model: 'preserve-ui-model-behavior', initialPrompt: 'do not append' }), base + mod);
+        assert.equal(buildSessionCommand({ shellType, command: base + ' --resume native-id', claudeSessionId: 'native-id', initialPrompt: 'do not replay' }), base + mod + ' --resume native-id');
+        assert.equal(buildSessionCommand({ shellType, command: base + " --resume 'native-id'", claudeSessionId: 'native-id' }), base + mod + " --resume 'native-id'");
+      }
+      for (const command of [base + ' --resume wrong-id', base + ' --model sonnet', 'custom-claude --resume native-id']) {
+        assert.equal(buildSessionCommand({ shellType: 'claude', command, claudeSessionId: 'native-id' }), command);
+      }
+      assert.equal(buildSessionCommand({ shellType: 'shell', command: base }), base);
+    } finally {
+      if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+      if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('buildSessionCommand — pi', () => {
   it('launches Pi as an interactive coding agent', () => {

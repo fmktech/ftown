@@ -1,0 +1,6 @@
+{
+  "name": "ftown-mail",
+  "version": "1.0.0",
+  "author": { "name": "FTown" },
+  "description": "Wake FTown-managed Claude sessions when their durable inbox has unread mail."
+}

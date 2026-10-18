@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { installFtownCommandCli } from './install-ftown-command-cli.js';
 import { installNotifyScript } from './install-notify-script.js';
 import { installPiExtension } from './pi-extension-installer.js';
+import { installClaudeMod } from './claude-mod-installer.js';
 import { installClaudeHooks } from './hook-installer.js';
 import { installCursorHooks } from './cursor-hook-installer.js';
 import { codexBinaryAvailable, ensureCodexHooks } from './codex-installer.js';
@@ -33,6 +34,7 @@ export function packageVersion(root = packageRoot()): string {
 async function installIntegrations(root: string): Promise<IntegrationResult[]> {
   const notify = installNotifyScript(join(root, 'hooks', 'notify.sh'));
   installPiExtension(join(root, 'pi-extension', 'ftown.js'));
+  installClaudeMod(join(root, 'claude-mod'));
   if (!installClaudeHooks(notify)) throw new Error('Claude hook setup failed; fix settings.json and rerun ftown setup --repair');
   if (!installCursorHooks(notify)) throw new Error('Cursor hook setup failed; fix hooks.json and rerun ftown setup --repair');
   const results: IntegrationResult[] = [{ name: 'claude/cursor/pi', status: 'installed' }];
