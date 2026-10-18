@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync, unlinkSync, rmdirSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { CLI_RUNTIME_MODULES } from './install-ftown-command-cli.js';
+import { REQUIRED_SETUP_ASSETS, RUNTIME_INVENTORY_FILE, parseRuntimeInventory } from './installation-manifest.js';
+export { REQUIRED_SETUP_ASSETS } from './installation-manifest.js';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -35,7 +36,28 @@ export function setupHint(version: string): string {
 
 export function assertSetupReady(version: string, home = homedir()): void {
   const state = readSetupState(home);
-  const missing = REQUIRED_SETUP_ASSETS.some((asset) => {
+  let inventoryFiles: string[] = [];
+  let validInventory = false;
+  try {
+    const root = lstatSync(join(home, '.ftown'));
+    if (!root.isDirectory() || root.isSymbolicLink()) throw new Error('Setup directory must be real');
+    const inventory = parseRuntimeInventory(JSON.parse(readFileSync(join(home, '.ftown', 'cli', RUNTIME_INVENTORY_FILE), 'utf8')));
+    validInventory = inventory.packageVersion === version;
+    inventoryFiles = inventory.files.map((file) => `cli/${file}`);
+  } catch { /* Missing/invalid inventory requires explicit setup or repair. */ }
+  const directories = new Set<string>();
+  const missing = !validInventory || [...REQUIRED_SETUP_ASSETS, ...inventoryFiles].some((asset) => {
+    const parts = asset.split('/'); let parent = join(home, '.ftown');
+    try {
+      for (const part of parts.slice(0, -1)) {
+        parent = join(parent, part);
+        if (!directories.has(parent)) {
+          const stat = lstatSync(parent);
+          if (!stat.isDirectory() || stat.isSymbolicLink()) return true;
+          directories.add(parent);
+        }
+      }
+    } catch { return true; }
     try { return !lstatSync(join(home, '.ftown', asset)).isFile(); } catch { return true; }
   });
   if (state.packageVersion !== version || missing) {
@@ -43,16 +65,6 @@ export function assertSetupReady(version: string, home = homedir()): void {
     throw new Error(`FTown setup is missing, incomplete or outdated. Run: ${setupHint(version)}${repair}`);
   }
 }
-
-/** Existence/type inventory; startup never repairs or hashes global integrations. */
-export const REQUIRED_SETUP_ASSETS: readonly string[] = [
-  'ftown', 'ftown-sessions', 'ftown-env', 'bin/ftown-harness', 'notify.sh',
-  'pi/ftown.js', 'harness-agent.md', 'skills/ftown/SKILL.md',
-  'cli/package.json', 'cli/node_modules/commander/package.json', 'cli/node_modules/commander/index.js',
-  'cli/hooks/notify.sh', 'cli/pi-extension/ftown.js', 'cli/opencode-plugin/ftown.js',
-  'cli/muse-plugin/.muse-plugin/plugin.json', 'cli/skills/ftown/SKILL.md',
-  ...CLI_RUNTIME_MODULES.map((name) => `cli/dist/${name}.js`),
-];
 
 /** Reject stale npm-cache setup rather than overwrite a newer installed runtime. */
 export function assertSetupVersion(version: string, installed: string | undefined): void {

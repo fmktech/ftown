@@ -15,6 +15,7 @@ import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
 import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
 import { CloudConnectionNotice } from "./CloudConnectionNotice";
 import { SessionAttentionAlert } from "./SessionAttentionAlert";
+import { PushNotificationsControl, detachPushSubscription } from "./PushNotificationsControl";
 import { mergeBridgeOrder } from "@/lib/bridge-order";
 import { StatusDot } from "@/lib/StatusDot";
 import { usePersistentState, useHiddenSet } from "@/lib/use-persistent-state";
@@ -170,27 +171,6 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     hiddenSessionIds,
     hiddenBridgeIds,
   }), [sessionActivity, rawSessions, hiddenSessionIds, hiddenBridgeIds]);
-  const lastNativeAttentionRef = useRef(0);
-
-  useEffect(() => {
-    if (!latestAttention || latestAttention.receivedAt <= lastNativeAttentionRef.current) return;
-    lastNativeAttentionRef.current = latestAttention.receivedAt;
-    if (
-      document.visibilityState === "hidden"
-      && "Notification" in window
-      && window.Notification.permission === "granted"
-    ) {
-      try {
-        new window.Notification(latestAttention.title, {
-          body: `${latestAttention.sessionName}: ${latestAttention.message}`,
-          tag: `ftown-input-${latestAttention.sessionId}`,
-        });
-      } catch {
-        // The in-app alert remains visible when the browser rejects a native notification.
-      }
-    }
-  }, [latestAttention]);
-
   const installedHookBridges = useRef(new Set<string>());
 
   useEffect(() => {
@@ -379,6 +359,21 @@ PY`;
       setMobileTab("terminal");
     }
   }, [clearSessionAttention]);
+
+  useEffect(() => {
+    const sessionId = new URLSearchParams(window.location.search).get("session");
+    if (sessionId && rawSessions.some((session) => session.id === sessionId)) {
+      handleSelectSession(sessionId);
+      const url = new URL(window.location.href); url.searchParams.delete("session");
+      window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+    }
+    const onNotification = (event: MessageEvent) => {
+      if (event.data?.type === "ftown-open-session" && typeof event.data.sessionId === "string"
+        && rawSessions.some((session) => session.id === event.data.sessionId)) handleSelectSession(event.data.sessionId);
+    };
+    navigator.serviceWorker?.addEventListener("message", onNotification);
+    return () => navigator.serviceWorker?.removeEventListener("message", onNotification);
+  }, [rawSessions, handleSelectSession]);
 
   const handleMobileTabSwitch = useCallback((tab: "sessions" | "terminal") => {
     setMobileTab(tab);
@@ -717,7 +712,7 @@ PY`;
                 <button
                   onClick={() => {
                     setShowUserMenu(false);
-                    onDisconnect();
+                    void detachPushSubscription().catch(() => {}).finally(onDisconnect);
                   }}
                   style={{
                     display: "block",
@@ -954,6 +949,7 @@ PY`;
               onCreateSession={handleCreateSessionOnBridge}
             />
           </div>
+          <PushNotificationsControl localMode={localMode} accountId={userId} />
           {!sidebarCollapsed && (
             <div
               role="separator"

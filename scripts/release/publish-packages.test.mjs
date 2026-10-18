@@ -182,7 +182,7 @@ test('release tags allow same-commit retries including annotated tags and reject
 test('both real npm artifacts have identical files, modes and manifest fields except package name', () => {
   const temporary = mkdtempSync(join(tmpdir(), 'ftown-artifact-test-'));
   try {
-    const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    const manifest = JSON.parse(readFileSync(new URL('../../bridge/package.json', import.meta.url), 'utf8'));
     const artifacts = packPackages(manifest.version, commit, temporary);
     const snapshots = artifacts.map(({ name, path }) => {
       const directory = join(temporary, name); mkdirSync(directory);

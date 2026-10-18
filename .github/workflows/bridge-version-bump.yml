@@ -5,6 +5,7 @@ on:
     paths:
       - 'bridge/**'
       - '.github/workflows/bridge-version-bump.yml'
+      - 'scripts/release/package-changes.mjs'
 
 jobs:
   check:
@@ -14,22 +15,20 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Check for package-affecting changes
+        id: changes
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/release/package-changes.mjs "$BASE" "$HEAD"
+
       - name: Require bridge version bump
+        if: steps.changes.outputs.package_changed == 'true'
         run: |
           set -euo pipefail
 
           BASE="${{ github.event.pull_request.base.sha }}"
           HEAD="${{ github.event.pull_request.head.sha }}"
-          CHANGED="$(git diff --name-only "$BASE" "$HEAD" -- 'bridge/**' || true)"
-
-          if [ -z "$CHANGED" ]; then
-            echo "No bridge changes in this PR."
-            exit 0
-          fi
-
-          echo "Bridge files changed:"
-          echo "$CHANGED"
-
           BASE_VERSION="$(
             git show "$BASE:bridge/package.json" \
               | node -pe "JSON.parse(require('fs').readFileSync(0, 'utf8')).version"
@@ -40,7 +39,7 @@ jobs:
           echo "head bridge version: $HEAD_VERSION"
 
           if [ "$BASE_VERSION" = "$HEAD_VERSION" ]; then
-            echo "::error::This PR changes bridge/** but does not bump bridge/package.json version."
+            echo "::error::This PR changes bridge package/build inputs but does not bump bridge/package.json version."
             echo "Run from bridge/: npm version patch --no-git-tag-version"
             exit 1
           fi

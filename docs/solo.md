@@ -5,7 +5,7 @@ with no account service and no cloud dependency:
 
 ```bash
 npx ftown setup
-npx ftown-bridge --solo
+npx ftown start --solo
 ```
 
 Your code, terminals, and agent output never leave your network. There is no
@@ -56,8 +56,14 @@ requested.
 
 ```bash
 npx ftown setup
-npx ftown-bridge --solo
+npx ftown start --solo
 ```
+
+After setup, `ftown start --solo` runs the installed copied version without
+requiring the original npm package cache. `npx ftown start --solo` and the
+compatible `npx ftown-bridge --solo` accept the same bridge options. Use
+`ftown start --help` to discover them. Starts check setup readiness; setup and
+upgrades remain explicit commands.
 
 This prints a banner with a URL like:
 

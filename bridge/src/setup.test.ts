@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { performSetup, type SetupDependencies } from './setup.js';
 import { readSetupState, REQUIRED_SETUP_ASSETS } from './setup-state.js';
+import { REQUIRED_RUNTIME_FILES } from './installation-manifest.js';
 
 async function fixture(run: (home: string, root: string) => Promise<void>): Promise<void> {
   const previous = process.env.HOME; const temporary = mkdtempSync(join(tmpdir(), 'ftown-setup-'));
@@ -21,7 +22,8 @@ function dependencies(home: string, calls: string[], fail = false): SetupDepende
     skillAndPath: () => {
       calls.push('skill/path');
       for (const path of REQUIRED_SETUP_ASSETS) {
-        const full = join(home, '.ftown', path); mkdirSync(dirname(full), { recursive: true }); writeFileSync(full, path === 'cli/package.json' ? '{"version":"1.2.3"}' : 'asset');
+        const full = join(home, '.ftown', path); mkdirSync(dirname(full), { recursive: true });
+        writeFileSync(full, path === 'cli/installation.json' ? JSON.stringify({ schema: 1, packageVersion: '1.2.3', files: REQUIRED_RUNTIME_FILES }) : path === 'cli/package.json' ? '{"version":"1.2.3"}' : 'asset');
       }
     },
   };

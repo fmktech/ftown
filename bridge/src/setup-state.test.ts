@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { assertSetupReady, acquireSetupLock, assertSetupVersion, readSetupState, setupHint, setupStatePath, writeSetupState, REQUIRED_SETUP_ASSETS } from './setup-state.js';
+import { REQUIRED_RUNTIME_FILES } from './installation-manifest.js';
 
 test('readiness is versioned and missing assets require explicit repair', () => {
   const home = mkdtempSync(join(tmpdir(), 'ftown-ready-'));
@@ -12,12 +13,19 @@ test('readiness is versioned and missing assets require explicit repair', () => 
     writeSetupState({ schema: 1, packageVersion: '1.2.3', completedMigrations: ['stable-v1'] }, home);
     assert.throws(() => assertSetupReady('1.2.3', home), /--repair/);
     for (const path of REQUIRED_SETUP_ASSETS) {
-      const full = join(home, '.ftown', path); mkdirSync(dirname(full), { recursive: true }); writeFileSync(full, 'asset');
+      const full = join(home, '.ftown', path); mkdirSync(dirname(full), { recursive: true });
+      writeFileSync(full, path === 'cli/installation.json' ? JSON.stringify({ schema: 1, packageVersion: '1.2.3', files: REQUIRED_RUNTIME_FILES }) : 'asset');
     }
     assert.doesNotThrow(() => assertSetupReady('1.2.3', home));
     rmSync(join(home, '.ftown/cli/dist/harness-commands.js'));
     assert.throws(() => assertSetupReady('1.2.3', home), /--repair/);
     writeFileSync(join(home, '.ftown/cli/dist/harness-commands.js'), 'restored');
+    const native = join(home, '.ftown/cli/node_modules/native/addon.node'); mkdirSync(dirname(native), { recursive: true }); writeFileSync(native, 'native');
+    writeFileSync(join(home, '.ftown/cli/installation.json'), JSON.stringify({ schema: 1, packageVersion: '1.2.3', files: [...REQUIRED_RUNTIME_FILES, 'node_modules/native/addon.node'] }));
+    assert.doesNotThrow(() => assertSetupReady('1.2.3', home));
+    rmSync(native);
+    assert.throws(() => assertSetupReady('1.2.3', home), /--repair/);
+    writeFileSync(native, 'restored');
     assert.throws(() => assertSetupReady('1.2.4', home), /npx ftown@1\.2\.4 setup/);
     assert.deepEqual(readSetupState(home).completedMigrations, ['stable-v1']);
     assert.equal(JSON.parse(readFileSync(setupStatePath(home), 'utf8')).packageVersion, '1.2.3');

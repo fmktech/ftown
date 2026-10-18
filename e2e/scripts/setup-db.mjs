@@ -19,6 +19,8 @@ const client = new Client({
   database: process.env.PGDATABASE ?? "ftown",
 });
 
+const PUSH_DDL = await (await import("node:fs/promises")).readFile(new URL("../../ui/migrations/0005_web_push.sql", import.meta.url), "utf8");
+
 const DDL = `
 CREATE TABLE IF NOT EXISTS users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -65,6 +67,7 @@ CREATE INDEX IF NOT EXISTS idx_pairing_user_code ON pairing_requests(user_code);
 
 await client.connect();
 await client.query(DDL);
+await client.query(PUSH_DDL);
 await client.end();
 console.log(
   "[setup-db] schema ready (users, rate_limit_attempts, bridge_refresh, pairing_requests)",

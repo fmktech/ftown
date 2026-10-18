@@ -104,7 +104,7 @@ export async function runSetup(argv: string[]): Promise<number> {
     const result = await performSetup({ repair: argv.includes('--repair') });
     console.log(`ftown setup ${result.version}: ${result.action}`);
     for (const integration of result.integrations) console.log(`  ${integration.name}: ${integration.status}${integration.detail ? ` (${integration.detail})` : ''}`);
-    console.log('Open a new shell for PATH changes; start ftown-bridge when ready.');
+    console.log('Open a new shell for PATH changes; run ftown start when ready.');
     return 0;
   } catch (error) {
     console.error(`ftown setup: ${error instanceof Error ? error.message : String(error)}`);

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export const PACKAGE_NAMES = ['ftown', 'ftown-bridge'];
-const bridgeDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const bridgeDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '../../bridge');
 
 function command(program, args, cwd = bridgeDirectory, timeoutMs) {
   const result = spawnSync(program, args, { cwd, encoding: 'utf8', timeout: timeoutMs });

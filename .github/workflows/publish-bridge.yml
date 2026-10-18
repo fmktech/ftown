@@ -3,7 +3,7 @@ name: Publish bridge to npm
 on:
   push:
     branches: [main]
-    paths: ['bridge/**', '.github/workflows/publish-bridge.yml']
+    paths: ['bridge/**']
   workflow_dispatch:
 
 # Top-level permissions are the ceiling for every job below. `contents:
@@ -28,24 +28,42 @@ jobs:
         working-directory: bridge
     outputs:
       version: ${{ steps.version.outputs.version }}
+      package_changed: ${{ steps.changes.outputs.package_changed }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Check for package-affecting changes
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE: ${{ github.event.before }}
+          HEAD: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            node ../scripts/release/package-changes.mjs --force
+          else
+            node ../scripts/release/package-changes.mjs "$BASE" "$HEAD"
+          fi
+
       # Fail before the panel release on registry errors, version collisions,
       # or a conflicting release tag. Same-commit partial publishes can retry.
       - name: Preflight both exact npm versions and the release tag
         id: version
-        run: node scripts/publish-packages.mjs preflight
+        if: steps.changes.outputs.package_changed == 'true'
+        run: node ../scripts/release/publish-packages.mjs preflight
 
   # Cut the panel release BEFORE the npm package is published, so a
   # published bridge never points at a missing panel release.
   release-panel:
     needs: version
+    if: needs.version.outputs.package_changed == 'true'
     uses: ./.github/workflows/release-ui.yml
     with:
       version: ${{ needs.version.outputs.version }}
@@ -55,6 +73,7 @@ jobs:
 
   publish:
     needs: [version, release-panel]
+    if: needs.version.outputs.package_changed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -81,10 +100,10 @@ jobs:
         run: npm run build
 
       - name: Verify release planning and artifact parity
-        run: node --test scripts/publish-packages.test.mjs
+        run: node --test ../scripts/release/publish-packages.test.mjs ../scripts/release/package-changes.test.mjs
 
       - name: Publish ftown then ftown-bridge (retry missing packages only)
-        run: node scripts/publish-packages.mjs publish
+        run: node ../scripts/release/publish-packages.mjs publish
 
       - name: Tag release
-        run: node scripts/publish-packages.mjs tag
+        run: node ../scripts/release/publish-packages.mjs tag

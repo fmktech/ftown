@@ -110,3 +110,25 @@ test('only explicit continuation resolves; storage failure cannot report durable
   assert.equal((await store.list('s1')).events.length, 0);
   await assert.rejects(new AttentionStore(resolve).record('missing', 'Notification', notice()), (e: unknown) => e instanceof AttentionError && e.code === 'attention_storage_error');
 });
+
+
+test('notifications follow committed distinct questions and observed busy-to-idle only', async (t) => {
+  const f = await fixture(t);
+  const emitted: { session: string; notice: import('./push-notifier.js').PushNotice }[] = [];
+  const store = new AttentionStore(f.resolve, 500, (session, notice) => { emitted.push({ session, notice }); });
+  await store.record('s1', 'Stop', {});
+  assert.equal(emitted.length, 0, 'initial idle never notifies');
+  await store.record('s1', 'UserPromptSubmit', {});
+  await store.record('s1', 'Stop', {});
+  await store.record('s1', 'Stop', {});
+  assert.deepEqual(emitted.map(({notice}) => notice.eventKey), ['idle']);
+  await store.record('s1', 'Notification', notice('choose', {notification_id:'q'}));
+  await store.record('s1', 'Notification', notice('choose', {notification_id:'q'}));
+  const attention = (await store.list('s1')).events[0];
+  assert.equal(emitted.length, 2);
+  assert.equal(emitted[1].notice.eventKey, `question:${attention.id}`);
+  assert.equal(emitted[1].notice.occurredAt, attention.createdAt);
+  const throwing = new AttentionStore(f.resolve, 500, () => { throw new Error('observer'); });
+  await throwing.record('s1', 'Notification', notice('another'));
+  assert.equal((await throwing.list('s1')).events.length, 2, 'observer failure cannot undo committed attention');
+});

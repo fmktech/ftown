@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { Command as Commander } from 'commander';
+import { Command as Commander, CommanderError } from 'commander';
 import { v4 as uuidv4 } from 'uuid';
 import { resolve, dirname, join } from 'node:path';
 import { hostname as osHostname, networkInterfaces, homedir } from 'node:os';
@@ -19,6 +19,7 @@ import { ProcessRunner } from './claude-runner.js';
 import { SessionStore } from './session-store.js';
 import { MailStore } from './mail-store.js';
 import { AttentionStore } from './attention-store.js';
+import { BridgePushNotifier } from './push-notifier.js';
 import { LocalApiServer } from './local-api-server.js';
 import { BrowserAccess } from './browser-access.js';
 import { registerLocalBrowserCommands } from './local-pair-cli.js';
@@ -53,6 +54,7 @@ import {
   stopPanel,
 } from './solo/panel-manager.js';
 import { createSoloServer } from './solo/solo-server.js';
+import { executeCli, isCliEntry } from './cli-entry.js';
 
 /** Bridge package version — doubles as the default panel bundle version. */
 const BRIDGE_VERSION = JSON.parse(
@@ -83,10 +85,12 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const DEFAULT_API_URL = 'https://ftown.ia.br';
 
+export async function runBridge(argv: string[], commandName = 'ftown-bridge'): Promise<number> {
 const program = new Commander();
+program.exitOverride();
 
 program
-  .name('ftown-bridge')
+  .name(commandName)
   .description('ftown orchestrator bridge for Centrifugo')
   .option('--local', 'Local browser control only: no cloud account or connection')
   .option('--solo', 'Single-port LAN deployment: no account service, managed hub + panel children, key-based auth')
@@ -419,14 +423,18 @@ program
       auth = await onboard();
     }
     const currentRefreshToken = auth.refreshToken;
+    let currentBridgeToken = auth.token;
     if (!solo && !opts.local) persistRefreshToken(currentRefreshToken);
 
     const tokenRefresher = solo || opts.local
       ? null
       : new RotatingTokenRefresher({
           initialRefreshToken: currentRefreshToken,
-          refresh: (refreshToken) =>
-            refreshBridgeToken(opts.apiUrl, refreshToken, bridgeId, local),
+          refresh: async (refreshToken) => {
+            const refreshed = await refreshBridgeToken(opts.apiUrl, refreshToken, bridgeId, local);
+            currentBridgeToken = refreshed.token;
+            return refreshed;
+          },
           loadPersistedRefreshToken: () => {
             try {
               return readFileSync(refreshTokenPath, 'utf8').trim() || undefined;
@@ -606,7 +614,17 @@ program
       console.log(`[Bridge] Loopback WS rung ready at ws://127.0.0.1:${hookPort}/ws`);
     }
     localApiServer.setDependencies(store, runner, centrifugo, userId, terminalManager);
-    localApiServer.setAttentionStore(new AttentionStore((sessionId) => store.sessionDir(sessionId)));
+    const pushNotifier = opts.local || solo ? undefined : new BridgePushNotifier({
+      apiUrl: opts.apiUrl,
+      bridgeId,
+      getToken: () => currentBridgeToken,
+      getSession: (sessionId) => store.loadSession(sessionId),
+    });
+    localApiServer.setAttentionStore(new AttentionStore(
+      (sessionId) => store.sessionDir(sessionId),
+      500,
+      (sessionId, notice) => pushNotifier?.notify(sessionId, notice),
+    ));
     const mailStore = new MailStore((sessionId) => store.sessionDir(sessionId));
     localApiServer.setMailStore(mailStore);
 
@@ -781,7 +799,7 @@ program
     });
     localApiServer.setBrowserAccess(browserAccess);
     centrifugo.onLocalPublication((channel, data) => browserAccess?.publish(channel, data));
-    console.log(`[Bridge] Local browser access: run ftown-bridge pair${opts.dataDir ? ` --data-dir ${JSON.stringify(dataDir)}` : ''}`);
+    console.log(`[Bridge] Local browser access: run ${commandName} pair${opts.dataDir ? ` --data-dir ${JSON.stringify(dataDir)}` : ''}`);
 
     const handleCommand = createCommandHandler({
       bridgeId,
@@ -828,6 +846,7 @@ program
 
     const shutdown = (): void => {
       console.log('\n[Bridge] Shutting down...');
+      pushNotifier?.stop();
       // Solo L2 ordering: stop accepting first, then children (panel before
       // hub), then the rest of the bridge teardown.
       if (solo) {
@@ -851,7 +870,15 @@ program
   });
 
 registerLocalBrowserCommands(program);
-program.parseAsync().catch((err: unknown) => {
-  console.error(err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
+try {
+  await program.parseAsync(argv, { from: 'user' });
+  return 0;
+} catch (error) {
+  if (error instanceof CommanderError) return error.exitCode;
+  throw error;
+}
+}
+
+if (isCliEntry(import.meta.url, process.argv[1])) {
+  void executeCli(() => runBridge(process.argv.slice(2)));
+}

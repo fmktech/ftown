@@ -5,8 +5,12 @@ contain the same CLI, dependencies, bins and bundled assets. Their manifests
 differ only in `name`; both retain the canonical `ftown` command. The source
 package stays named `ftown-bridge` for existing integrations and bridge starts.
 
-Every change under `bridge/` needs a new version in both `bridge/package.json`
-and `bridge/package-lock.json`. The publish workflow on main checks both exact
+Every change to bridge runtime, shipped assets or build inputs needs a new version in both `bridge/package.json`
+and `bridge/package-lock.json`. Tests, agent docs and external release tooling
+do not require a package version or publication; the shared
+`scripts/release/package-changes.mjs` classifier gates both bump checks and
+automatic publication. Explicit workflow dispatch remains available for release
+recovery. The publish workflow on main checks both exact
 npm versions and the `bridge-vVERSION` tag before cutting the panel release.
 Only npm's structured E404 is treated as absence. Registry authentication,
 network and unexpected response errors stop the release.
@@ -49,13 +53,13 @@ these repository changes.
 
 ## Release helper and local verification
 
-From `bridge/`, the internal helper provides these commands:
+From repository root, the internal helper provides these commands:
 
 ```bash
-npm run build
-node --test scripts/publish-packages.test.mjs
-node scripts/publish-packages.mjs preflight
-node scripts/publish-packages.mjs pack /absolute/path/to/artifacts
+npm --prefix bridge run build
+node --test scripts/release/*.test.mjs
+node scripts/release/publish-packages.mjs preflight
+node scripts/release/publish-packages.mjs pack /absolute/path/to/artifacts
 ```
 
 `preflight` reads registry metadata and the remote tag without publishing. It

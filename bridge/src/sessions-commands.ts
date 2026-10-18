@@ -3,6 +3,7 @@
  * Local API client for ftown cross-session control.
  * Installed to ~/.ftown/ftown-sessions by ftown-bridge.
  */
+import { Command, CommanderError } from 'commander';
 import { api as request, loadPointer, listSessions, fetchInbox, sendMail } from './cli-client.js';
 import {
   MAIL_TYPES,
@@ -46,30 +47,6 @@ async function resolveFanout(
   return sessions
     .filter((s) => s.parentSessionId === parent && s.id !== self)
     .map((s) => s.id);
-}
-
-function flag(args: string[], name: string): string | undefined {
-  const i = args.indexOf(name);
-  if (i === -1 || i + 1 >= args.length) return undefined;
-  return args[i + 1];
-}
-
-function hasFlag(args: string[], name: string): boolean {
-  return args.includes(name);
-}
-
-/** Positional args, skipping flags and the values of value-taking flags. */
-function positionals(args: string[], valueFlags: string[]): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a.startsWith('--')) {
-      if (valueFlags.includes(a)) i++;
-      continue;
-    }
-    out.push(a);
-  }
-  return out;
 }
 
 interface UsageRow {
@@ -146,78 +123,78 @@ function formatUsageTable(rows: UsageRow[]): string {
   return [render(header), ...body.map(render)].join('\n');
 }
 
-function usage(): void {
-  console.error(`Usage: ftown sessions <command> [options]
+interface SessionsOptions {
+  plain?: boolean; json?: boolean; shell?: string; prompt?: string; workdir?: string;
+  name?: string; command?: string; model?: string; parentId?: string; parent?: boolean;
+  createWorkdir?: boolean; offset?: string; limit?: string; pattern?: string;
+  children?: boolean; siblings?: boolean; keys?: boolean; type?: string; thread?: string;
+  peek?: boolean; all?: boolean;
+}
+type SessionCommand = 'list' | 'create' | 'get' | 'screen' | 'grep' | 'keys' | 'tell'
+  | 'inbox' | 'mail' | 'running' | 'usage' | 'remove' | 'archive' | 'revive';
 
-Commands:
-  list                          List sessions
-  create [options]              Spawn a new agent session
-  get <session-id>              Session metadata
-  screen <session-id>           Print terminal lines
-  grep <session-id>             Search terminal output
-  keys <session-id> <text>      Send keys to a running session
-  tell <target> <message...>    Send mail to another session's inbox
-  inbox | mail                  Read own inbox (requires FTOWN_SESSION_ID)
-  running <session-id>          Check if session PTY is running
-  usage <session-id...>         Model/token usage per session (--json for raw)
-  remove <session-id>           Stop and remove a session (archived as a tombstone)
-  archive                       List archived (removed) sessions
-  revive <session-id>           Recreate a removed session from its tombstone
+function sessionProgram(): Command {
+  const program = new Command().name('ftown sessions').description('List, create, read and drive ftown agent sessions');
+  program.exitOverride();
+  program.configureOutput({ writeOut: (text) => console.log(text.trimEnd()), writeErr: (text) => console.error(text.trimEnd()) });
+  const command = (name: string, description: string): Command => program.command(name).description(description)
+    .option('--json', 'Machine-readable JSON output (the default for most commands)')
+    .option('--plain', 'Human-readable output where supported');
+  const run = (name: SessionCommand, args: string[], cmd: Command): Promise<void> => executeSessionCommand(name, args, cmd.opts<SessionsOptions>());
 
-Tell targets (one of):
-  <session-id>                  Explicit target session id
-  --parent                      Message FTOWN_SESSION_ID's parent session
-  --children                    Message all sessions parented to FTOWN_SESSION_ID
-  --siblings                    Message sessions sharing my parent (excluding me)
-
-Tell options:
-  --type <t>                    message | task | result | escalation (default: message)
-  --thread <id>                 Thread id for grouping replies
-  --keys                        Inject as terminal keystrokes instead of mail (last resort)
-
-Inbox options:
-  --peek                        Do not mark messages as delivered
-  --limit <n>                   Max messages
-  --all                         Include already-delivered messages
-  --json                        Raw JSON output
-
-Create options:
-  --shell <type>                Harness override; omitted inherits the current session (otherwise claude)
-  --prompt <text>               Initial message
-  --workdir <path>              Working directory
-  --create-workdir              Create --workdir if it does not exist
-  --name <label>                Dashboard name
-  --command <cmd>               Full command override
-  --parent                      Link parent to FTOWN_SESSION_ID or X-Ftown-Session-Id
-  --parent-id <uuid>            Explicit parent session id
-  --model <name>                Model (cursor, codex)
-  --json                        Output raw JSON (default for most commands)
-
-Screen/grep options:
-  --offset <n>                  Pagination offset (default: 0)
-  --limit <n>                   Max lines/matches (default: 200)
-
-Grep options:
-  --pattern <regex>             Required for grep
-
-Reads ~/.ftown/bridge.json (ftown-bridge must be running).`);
+  command('list', 'List sessions').action((_opts, cmd: Command) => run('list', [], cmd));
+  command('create', 'Spawn a new agent session')
+    .option('--shell <type>', 'Harness override; otherwise inherit the current session')
+    .option('--prompt <text>', 'Initial message').option('--workdir <path>', 'Working directory')
+    .option('--create-workdir', 'Create the working directory if missing')
+    .option('--name <label>', 'Dashboard name').option('--command <cmd>', 'Full command override')
+    .option('--parent', 'Link to the current session').option('--parent-id <uuid>', 'Explicit parent session')
+    .option('--model <name>', 'Model override')
+    .option('--orchestrator', 'Compatibility flag (no additional prompt or environment changes)')
+    .action((_opts, cmd: Command) => run('create', [], cmd));
+  for (const name of ['get', 'running', 'remove', 'revive'] as const) {
+    command(`${name} <session-id>`, { get: 'Session metadata', running: 'Check if session PTY is running', remove: 'Stop and remove a session', revive: 'Recreate an archived session' }[name])
+      .action((id: string, _opts, cmd: Command) => run(name, [id], cmd));
+  }
+  command('screen <session-id>', 'Print terminal lines')
+    .option('--offset <n>', 'Pagination offset', '0').option('--limit <n>', 'Max lines', '200')
+    .action((id: string, _opts, cmd: Command) => run('screen', [id], cmd));
+  command('grep <session-id>', 'Search terminal output')
+    .requiredOption('--pattern <regex>', 'Search expression').option('--offset <n>', 'Match offset', '0')
+    .option('--limit <n>', 'Max matches', '100')
+    .action((id: string, _opts, cmd: Command) => run('grep', [id], cmd));
+  command('keys <session-id> <text...>', 'Send keys to a running session')
+    .action((id: string, text: string[], _opts, cmd: Command) => run('keys', [id, ...text], cmd));
+  command('tell [target] [message...]', 'Send mail to another session inbox')
+    .option('--parent', 'Message the current session parent').option('--children', 'Message its children')
+    .option('--siblings', 'Message its siblings').option('--keys', 'Inject terminal keystrokes instead of mail')
+    .option('--type <t>', `Mail type: ${MAIL_TYPES.join(' | ')}`).option('--thread <id>', 'Reply thread')
+    .action((target: string | undefined, text: string[], _opts, cmd: Command) => run('tell', [...(target === undefined ? [] : [target]), ...text], cmd));
+  command('inbox', 'Read own inbox (requires FTOWN_SESSION_ID)').alias('mail')
+    .option('--peek', 'Do not mark delivered').option('--limit <n>', 'Max messages').option('--all', 'Include delivered messages')
+    .action((_opts, cmd: Command) => run('inbox', [], cmd));
+  command('usage <session-id...>', 'Model/token usage per session')
+    .action((ids: string[], _opts, cmd: Command) => run('usage', ids, cmd));
+  command('archive', 'List archived sessions').action((_opts, cmd: Command) => run('archive', [], cmd));
+  return program;
 }
 
 export async function runSessions(argv: string[]): Promise<number> {
   if (['loop', 'loops', 'loop-list'].includes(argv[0])) {
-    console.error(`ftown sessions: ${AUTOMATION_REMOVED_MESSAGE}`);
-    return 1;
+    console.error(`ftown sessions: ${AUTOMATION_REMOVED_MESSAGE}`); return 1;
   }
-  if (argv.length === 0 || argv[0] === '--help' || argv[0] === '-h') {
-    usage();
-    return argv.length === 0 ? 1 : 0;
-  }
-
-  const cmd = argv[0];
-  const rest = argv.slice(1);
-  const jsonOut = !hasFlag(rest, '--plain');
-
+  const program = sessionProgram();
   try {
+    if (argv.length === 0) { program.outputHelp({ error: true }); return 1; }
+    await program.parseAsync(argv, { from: 'user' }); return 0;
+  } catch (error) {
+    if (error instanceof CommanderError) return error.exitCode;
+    console.error(`ftown sessions: ${error instanceof Error ? error.message : String(error)}`); return 1;
+  }
+}
+
+async function executeSessionCommand(cmd: SessionCommand, rest: string[], options: SessionsOptions): Promise<void> {
+  const jsonOut = !options.plain;
     switch (cmd) {
       case 'list': {
         const { data } = await api('GET', '/api/sessions');
@@ -226,15 +203,15 @@ export async function runSessions(argv: string[]): Promise<number> {
       }
 
       case 'create': {
-        const shellType = flag(rest, '--shell');
-        const prompt = flag(rest, '--prompt');
-        const workingDir = flag(rest, '--workdir');
-        const name = flag(rest, '--name');
-        const command = flag(rest, '--command');
-        const model = flag(rest, '--model');
-        const parentId = flag(rest, '--parent-id');
-        const useParent = hasFlag(rest, '--parent');
-        const createWorkdir = hasFlag(rest, '--create-workdir');
+        const shellType = options.shell;
+        const prompt = options.prompt;
+        const workingDir = options.workdir;
+        const name = options.name;
+        const command = options.command;
+        const model = options.model;
+        const parentId = options.parentId;
+        const useParent = !!options.parent;
+        const createWorkdir = !!options.createWorkdir;
 
         const body: Record<string, unknown> = {};
         if (shellType) body.shellType = shellType;
@@ -256,7 +233,7 @@ export async function runSessions(argv: string[]): Promise<number> {
       }
 
       case 'get': {
-        const id = rest.find((a) => !a.startsWith('--'));
+        const id = rest[0];
         if (!id) throw new Error('Missing session-id');
         const { data } = await api('GET', `/api/sessions/${id}`);
         console.log(JSON.stringify(data, null, 2));
@@ -264,10 +241,10 @@ export async function runSessions(argv: string[]): Promise<number> {
       }
 
       case 'screen': {
-        const id = rest.find((a) => !a.startsWith('--'));
+        const id = rest[0];
         if (!id) throw new Error('Missing session-id');
-        const offset = flag(rest, '--offset') ?? '0';
-        const limit = flag(rest, '--limit') ?? '200';
+        const offset = options.offset ?? '0';
+        const limit = options.limit ?? '200';
         const { data } = await api(
           'GET',
           `/api/sessions/${id}/screen?offset=${offset}&limit=${limit}`,
@@ -282,12 +259,12 @@ export async function runSessions(argv: string[]): Promise<number> {
       }
 
       case 'grep': {
-        const id = rest.find((a) => !a.startsWith('--'));
-        const pattern = flag(rest, '--pattern');
+        const id = rest[0];
+        const pattern = options.pattern;
         if (!id) throw new Error('Missing session-id');
         if (!pattern) throw new Error('Missing --pattern');
-        const offset = parseInt(flag(rest, '--offset') ?? '0', 10);
-        const limit = parseInt(flag(rest, '--limit') ?? '100', 10);
+        const offset = parseInt(options.offset ?? '0', 10);
+        const limit = parseInt(options.limit ?? '100', 10);
         const { data } = await api('POST', `/api/sessions/${id}/grep`, {
           pattern,
           offset,
@@ -298,7 +275,7 @@ export async function runSessions(argv: string[]): Promise<number> {
       }
 
       case 'keys': {
-        const positional = rest.filter((a) => !a.startsWith('--'));
+        const positional = rest;
         const id = positional[0];
         const keys = positional.slice(1).join(' ');
         if (!id || !keys) throw new Error('Usage: keys <session-id> <text>');
@@ -308,12 +285,12 @@ export async function runSessions(argv: string[]): Promise<number> {
       }
 
       case 'tell': {
-        const useParent = hasFlag(rest, '--parent');
-        const useChildren = hasFlag(rest, '--children');
-        const useSiblings = hasFlag(rest, '--siblings');
-        const useKeys = hasFlag(rest, '--keys');
-        const mailType = flag(rest, '--type');
-        const threadId = flag(rest, '--thread');
+        const useParent = !!options.parent;
+        const useChildren = !!options.children;
+        const useSiblings = !!options.siblings;
+        const useKeys = !!options.keys;
+        const mailType = options.type;
+        const threadId = options.thread;
         const fanCount = [useParent, useChildren, useSiblings].filter(Boolean).length;
         if (fanCount > 1) {
           throw new Error('Use only one of --parent, --children, --siblings');
@@ -322,7 +299,7 @@ export async function runSessions(argv: string[]): Promise<number> {
           throw new Error(`Invalid --type "${mailType}" — use one of: ${MAIL_TYPES.join(', ')}`);
         }
 
-        const positional = positionals(rest, ['--type', '--thread']);
+        const positional = rest;
         const self = process.env.FTOWN_SESSION_ID?.trim();
 
         let targets: string[];
@@ -330,6 +307,7 @@ export async function runSessions(argv: string[]): Promise<number> {
 
         if (fanCount === 1) {
           message = positional.join(' ');
+          if (!message) throw new Error('Missing message');
           targets = await resolveFanout(
             useParent ? 'parent' : useChildren ? 'children' : 'siblings',
             self,
@@ -379,9 +357,9 @@ export async function runSessions(argv: string[]): Promise<number> {
       case 'mail': {
         const self = process.env.FTOWN_SESSION_ID?.trim();
         if (!self) throw new Error('inbox requires FTOWN_SESSION_ID to be set');
-        const limit = flag(rest, '--limit');
-        const messages = await fetchInbox(loadPointer(), self, { peek: hasFlag(rest, '--peek'), all: hasFlag(rest, '--all'), ...(limit ? { limit: Number(limit) } : {}) });
-        if (hasFlag(rest, '--json')) {
+        const limit = options.limit;
+        const messages = await fetchInbox(loadPointer(), self, { peek: !!options.peek, all: !!options.all, ...(limit ? { limit: Number(limit) } : {}) });
+        if (!!options.json) {
           console.log(JSON.stringify({ messages }, null, 2));
         } else if (messages.length === 0) {
           console.log('(no mail)');
@@ -392,7 +370,7 @@ export async function runSessions(argv: string[]): Promise<number> {
       }
 
       case 'running': {
-        const id = rest.find((a) => !a.startsWith('--'));
+        const id = rest[0];
         if (!id) throw new Error('Missing session-id');
         const { data } = await api('GET', `/api/sessions/${id}/running`);
         console.log(JSON.stringify(data, null, 2));
@@ -400,10 +378,10 @@ export async function runSessions(argv: string[]): Promise<number> {
       }
 
       case 'usage': {
-        const ids = rest.filter((a) => !a.startsWith('--'));
+        const ids = rest;
         if (ids.length === 0) throw new Error('Missing session-id');
         const rows = await Promise.all(ids.map(fetchUsageRow));
-        if (hasFlag(rest, '--json')) {
+        if (!!options.json) {
           console.log(JSON.stringify({ sessions: rows }, null, 2));
         } else {
           console.log(formatUsageTable(rows));
@@ -412,7 +390,7 @@ export async function runSessions(argv: string[]): Promise<number> {
       }
 
       case 'remove': {
-        const id = rest.find((a) => !a.startsWith('--'));
+        const id = rest[0];
         if (!id) throw new Error('Missing session-id');
         const { data } = await api('DELETE', `/api/sessions/${id}`);
         console.log(jsonOut ? JSON.stringify(data, null, 2) : `removed ${id}`);
@@ -440,23 +418,15 @@ export async function runSessions(argv: string[]): Promise<number> {
       }
 
       case 'revive': {
-        const id = rest.find((a) => !a.startsWith('--'));
+        const id = rest[0];
         if (!id) throw new Error('Missing session-id');
         const { data } = await api('POST', `/api/sessions/${id}/revive`);
         console.log(jsonOut ? JSON.stringify(data, null, 2) : formatCreated(data));
         break;
       }
 
-      default:
-        usage();
-        return 1;
+
     }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`ftown sessions: ${msg}`);
-    return 1;
-  }
-  return 0;
 }
 
 function formatSessionList(data: unknown): string {

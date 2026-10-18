@@ -31,6 +31,12 @@ export E2E_USER_EMAIL
 echo "$E2E_USER_EMAIL" > "$E2E_DIR/.run-email"
 echo "[start] run user: $E2E_USER_EMAIL"
 
+# Ephemeral test-only VAPID keys stay in this process environment, never logs/files.
+# The browser spec uses a fake PushManager and synthetic worker delivery, never vendors.
+read -r VAPID_PUBLIC_KEY VAPID_PRIVATE_KEY < <(cd "$REPO/ui" && node -e 'const k=require("web-push").generateVAPIDKeys();process.stdout.write(k.publicKey+" "+k.privateKey+"\n")')
+export VAPID_PUBLIC_KEY VAPID_PRIVATE_KEY
+export VAPID_SUBJECT="mailto:e2e@ftown.test"
+
 # --- UI (next start, prod) ---
 ( cd "$REPO/ui" && exec node_modules/.bin/next start -p 3000 ) > "$E2E_DIR/ui.log" 2>&1 &
 echo $! > "$E2E_DIR/.ui.pid"
@@ -49,9 +55,9 @@ done
 node -e "fetch('http://localhost:3000/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:process.env.E2E_USER_EMAIL,password:'e2e-password-123'})}).then(async r=>{if(!r.ok){console.error('register failed',r.status,await r.text());process.exit(1)}console.log('[start] register',r.status)})"
 
 # --- explicit setup and bridge (scratch HOME, dist build) ---
-( cd "$REPO/bridge" && HOME="$BRIDGE_HOME" node dist/ftown-cli.js setup )
+( cd "$BRIDGE_HOME" && HOME="$BRIDGE_HOME" USERPROFILE="$BRIDGE_HOME" node "$REPO/bridge/dist/ftown-cli.js" setup )
 BRIDGE_TOKEN="$(node -e "const jwt=require('$E2E_DIR/node_modules/jsonwebtoken');console.log(jwt.sign({sub:process.env.E2E_USER_EMAIL},process.env.CENTRIFUGO_TOKEN_SECRET,{audience:'ftown:bridge-bootstrap',expiresIn:'10m'}))")"
-( cd "$REPO/bridge" && HOME="$BRIDGE_HOME" exec node dist/index.js --token "$BRIDGE_TOKEN" --api-url http://localhost:3000 ) > "$E2E_DIR/bridge.log" 2>&1 &
+( cd "$BRIDGE_HOME" && HOME="$BRIDGE_HOME" USERPROFILE="$BRIDGE_HOME" exec node "$REPO/bridge/dist/index.js" --token "$BRIDGE_TOKEN" --api-url http://localhost:3000 ) > "$E2E_DIR/bridge.log" 2>&1 &
 echo $! > "$E2E_DIR/.bridge.pid"
 echo "[start] bridge pid $(cat "$E2E_DIR/.bridge.pid") (HOME=$BRIDGE_HOME)"
 
