@@ -4,11 +4,102 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { checkReleaseTag, lookupVersion, packPackages, parsePackResult, publishPackages, releasePlan } from './publish-packages.mjs';
+import { checkReleaseTag, lookupVersion, packPackages, parsePackResult, publishPackages, releasePlan, waitForPublishedPackages } from './publish-packages.mjs';
 
 const commit = 'a'.repeat(40);
 const version = '1.2.3';
 const metadata = { name: 'ftown', version, gitHead: commit };
+
+function visibilityClock() {
+  let elapsed = 0;
+  const sleeps = [];
+  const messages = [];
+  return { sleeps, messages, now: () => elapsed, advance: (ms) => { elapsed += ms; },
+    sleep: async (ms) => { sleeps.push(ms); elapsed += ms; }, log: (message) => messages.push(message) };
+}
+
+test('visible same-commit versions need no wait', async () => {
+  const clock = visibilityClock();
+  await waitForPublishedPackages(version, commit, { ...clock, lookup: () => metadata });
+  assert.deepEqual(clock.sleeps, []);
+  assert.deepEqual(clock.messages, []);
+});
+
+test('tag verification waits for delayed visibility and polls only missing versions', async () => {
+  const clock = visibilityClock();
+  const calls = [];
+  const reads = new Map();
+  await waitForPublishedPackages(version, commit, { ...clock, timeoutMs: 100, intervalMs: 20,
+    lookup: (name) => {
+      calls.push(name);
+      const count = (reads.get(name) ?? 0) + 1;
+      reads.set(name, count);
+      const visible = count >= (name === 'ftown' ? 2 : 3);
+      return lookupVersion(name, version, () => ({ status: visible ? 0 : 1, stderr: '',
+        stdout: JSON.stringify(visible ? { ...metadata, name } : { error: { code: 'E404' } }) }));
+    } });
+  assert.deepEqual(calls, ['ftown', 'ftown-bridge', 'ftown', 'ftown-bridge', 'ftown-bridge']);
+  assert.deepEqual(clock.sleeps, [20, 20]);
+  assert.equal(clock.messages.length, 2);
+  assert.match(clock.messages[0], /Waiting for npm visibility: ftown@1\.2\.3, ftown-bridge@1\.2\.3/);
+  assert.match(clock.messages[1], /Waiting for npm visibility: ftown-bridge@1\.2\.3/);
+});
+
+test('missing versions have a finite deadline and the final sleep respects the remaining budget', async () => {
+  const clock = visibilityClock();
+  await assert.rejects(waitForPublishedPackages(version, commit, { ...clock,
+    timeoutMs: 50, intervalMs: 20, lookup: () => undefined }), /Timed out.*ftown@1\.2\.3.*ftown-bridge@1\.2\.3.*same source commit/);
+  assert.deepEqual(clock.sleeps, [20, 20, 10]);
+  assert.equal(clock.now(), 50);
+});
+
+test('lookup duration consumes the deadline and no fresh request starts after it', async () => {
+  const clock = visibilityClock();
+  const calls = [];
+  await assert.rejects(waitForPublishedPackages(version, commit, { ...clock, timeoutMs: 50,
+    lookup: (name, requestedVersion, remaining) => {
+      calls.push({ name, requestedVersion, remaining });
+      clock.advance(50);
+      return metadata;
+    } }), /Timed out waiting for npm visibility/);
+  assert.deepEqual(calls, [{ name: 'ftown', requestedVersion: version, remaining: 50 }]);
+  assert.deepEqual(clock.sleeps, []);
+});
+
+test('each lookup receives only its remaining budget and subprocess timeout stops waiting', async () => {
+  const clock = visibilityClock();
+  const budgets = [];
+  await waitForPublishedPackages(version, commit, { ...clock, timeoutMs: 50,
+    lookup: (name, requestedVersion, remaining) => {
+      budgets.push(remaining);
+      clock.advance(10);
+      return metadata;
+    } });
+  assert.deepEqual(budgets, [50, 40]);
+  const expired = visibilityClock();
+  await assert.rejects(waitForPublishedPackages(version, commit, { ...expired,
+    lookup: () => { throw Object.assign(new Error('spawn timeout'), { code: 'ETIMEDOUT' }); } }), /Timed out waiting for npm visibility/);
+  assert.deepEqual(expired.sleeps, []);
+});
+
+test('visibility wait fails immediately for commit collisions or non-E404 registry failures', async () => {
+  for (const gitHead of [undefined, 'other-commit']) {
+    const clock = visibilityClock();
+    await assert.rejects(waitForPublishedPackages(version, commit, { ...clock,
+      lookup: () => ({ ...metadata, gitHead }) }), /different or missing gitHead/);
+    assert.deepEqual(clock.sleeps, []);
+  }
+  for (const response of [
+    { status: 1, stdout: '{"error":{"code":"E401"}}', stderr: 'auth' },
+    { status: 1, stdout: '{"error":{"code":"ENETUNREACH"}}', stderr: 'network' },
+    { status: 0, stdout: 'invalid metadata', stderr: '' },
+  ]) {
+    const clock = visibilityClock();
+    await assert.rejects(waitForPublishedPackages(version, commit, { ...clock,
+      lookup: (name) => lookupVersion(name, version, () => response) }), /Cannot inspect|Invalid registry metadata/);
+    assert.deepEqual(clock.sleeps, []);
+  }
+});
 
 test('npm pack supports npm11 arrays and npm12 package maps with one exact safe artifact', () => {
   const artifact = { name: 'ftown', version, filename: `ftown-${version}.tgz` };
