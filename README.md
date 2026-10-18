@@ -40,7 +40,7 @@ https://github.com/user-attachments/assets/e9c1ce70-70b0-4ba0-81d8-080d4eeef445
 ### Solo mode — runs entirely on your network
 
 ```bash
-npm exec --yes --package ftown-bridge -- ftown setup
+npx ftown setup
 npx ftown-bridge --solo
 ```
 
@@ -128,7 +128,7 @@ session-gated `POST /api/auth/bridge/bootstrap`, audience `ftown:bridge-bootstra
 and copies it to your clipboard):
 
 ```bash
-npm exec --yes --package ftown-bridge -- ftown setup
+npx ftown setup
 npx ftown-bridge --token <bootstrap-jwt> --api-url http://localhost:3000
 ```
 
@@ -142,7 +142,7 @@ Run setup from the package entrypoint before first start. For an upgrade, use
 the exact new package version shown by the startup readiness hint:
 
 ```bash
-npm exec --yes --package ftown-bridge@<new-version> -- ftown setup
+npx ftown@<new-version> setup
 ```
 
 This installs that version's CLI/runtime assets, hooks/plugins, ftown skill and
@@ -282,7 +282,7 @@ npm start  # Runs on port 3000
 **5. Connect a bridge** from any machine on the LAN:
 
 ```bash
-npm exec --yes --package ftown-bridge -- ftown setup
+npx ftown setup
 npx ftown-bridge --token <jwt> --api-url http://192.168.1.100:3000
 ```
 
@@ -462,7 +462,7 @@ additive so that window is safe.
 On any machine where you want to run Claude or Cursor Agent sessions:
 
 ```bash
-npm exec --yes --package ftown-bridge -- ftown setup
+npx ftown setup
 npx ftown-bridge --token <jwt> --api-url https://your-domain.vercel.app
 ```
 

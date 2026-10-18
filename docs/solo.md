@@ -4,7 +4,7 @@ Solo is a single-command, single-port way to run ftown on your own network,
 with no account service and no cloud dependency:
 
 ```bash
-npm exec --yes --package ftown-bridge -- ftown setup
+npx ftown setup
 npx ftown-bridge --solo
 ```
 
@@ -55,7 +55,7 @@ requested.
 ## Quick start
 
 ```bash
-npm exec --yes --package ftown-bridge -- ftown setup
+npx ftown setup
 npx ftown-bridge --solo
 ```
 

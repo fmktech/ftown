@@ -15,13 +15,13 @@ skill directories. Startup checks setup readiness and never rewrites global
 integrations. Before the installed command exists, run setup from the package:
 
 ```bash
-npm exec --yes --package ftown-bridge -- ftown setup
+npx ftown setup
 ```
 
 For upgrades, use the exact new version named by the startup readiness hint:
 
 ```bash
-npm exec --yes --package ftown-bridge@<new-version> -- ftown setup
+npx ftown@<new-version> setup
 ```
 
 The installed alias uses its copied version and does not discover newer packages.

@@ -3,9 +3,9 @@
 ## Harness (local session control)
 
 The package entrypoint's `ftown setup` explicitly installs or upgrades integrations
-before bridge startup. For upgrades use `npm exec --yes --package
-ftown-bridge@<new-version> -- ftown setup`; the installed copied alias does not
-discover newer packages. Installed `ftown setup --repair` repairs its current version.
+before bridge startup. For upgrades use `npx ftown@<new-version> setup`; the
+installed copied alias does not discover newer packages. Installed
+`ftown setup --repair` repairs its current version.
 
 Setup provides:
 
@@ -31,10 +31,13 @@ Use:
 npm version patch --no-git-tag-version
 ```
 
+See [npm releases](../docs/npm-release.md) for dual publication and the separate
+first-publication/trusted-publisher prerequisites for each package.
+
 ### Dev
 
 ```bash
-npm exec --package ftown-bridge -- ftown setup
+npx ftown setup
 npm run harness -- status
 npm run build   # builds canonical ftown command and compatible launchers
 ```
