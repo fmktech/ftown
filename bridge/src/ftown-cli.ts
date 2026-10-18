@@ -8,7 +8,10 @@ import { executeCli, isCliEntry } from './cli-entry.js';
 export { isCliEntry } from './cli-entry.js';
 
 export function usage(): string {
-  return `Usage: ftown <setup|start|sessions|harness|env> [args...]
+  return `Usage: ftown [bridge options]
+       ftown <setup|start|sessions|harness|env> [args...]
+
+With no subcommand, start the bridge. Run setup explicitly before the first start.
 
 Subcommands:
   setup      Install or upgrade local CLI, hooks, plugins and skill (--repair to recheck)
@@ -18,15 +21,16 @@ Subcommands:
   env        Manage per-provider machine tokens (~/.ftown/env.json)`;
 }
 
-export async function runFtown(argv: string[]): Promise<number> {
+export async function runFtown(argv: string[], start: (argv: string[]) => Promise<number> = runStart): Promise<number> {
   const [group, ...args] = argv;
-  if (!group || ['--help', '-h', 'help'].includes(group)) { console.log(usage()); return 0; }
+  if (['--help', '-h', 'help'].includes(group)) { console.log(usage()); return 0; }
+  if (!group || group.startsWith('-')) return start(argv);
   switch (group) {
     case 'sessions': return runSessions(args);
     case 'harness': return runHarness(args);
     case 'env': return runEnv(args);
     case 'setup': return runSetup(args);
-    case 'start': return runStart(args);
+    case 'start': return start(args);
     default: console.error(`ftown: Unknown subcommand "${group}"`); console.error(usage()); return 1;
   }
 }

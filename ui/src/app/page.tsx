@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { auth } from "@/lib/auth";
 import { redirect } from "next/navigation";
+import { buildBridgeCommand } from "@/lib/bridge-command";
 
 function GitHubIcon() {
   return (
@@ -399,7 +400,7 @@ export default async function LandingPage() {
 
           <div className="inline-block max-w-full rounded-[var(--radius-md)] bg-[var(--bg-elevated)] border border-[var(--border-muted)] px-4 py-3 mb-2 overflow-x-auto">
             <code className="font-[family-name:var(--font-mono)] text-[13px] text-[var(--accent)] whitespace-pre">
-              npm exec --yes --package ftown-bridge -- ftown setup &amp;&amp; npx ftown-bridge --solo
+              {buildBridgeCommand({ solo: true })}
             </code>
           </div>
           <p className="text-[11px] text-[var(--text-faint)] mb-6">

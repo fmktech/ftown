@@ -17,6 +17,7 @@ import { CloudConnectionNotice } from "./CloudConnectionNotice";
 import { SessionAttentionAlert } from "./SessionAttentionAlert";
 import { PushNotificationsControl, detachPushSubscription } from "./PushNotificationsControl";
 import { mergeBridgeOrder } from "@/lib/bridge-order";
+import { buildBridgeCommand } from "@/lib/bridge-command";
 import { StatusDot } from "@/lib/StatusDot";
 import { usePersistentState, useHiddenSet } from "@/lib/use-persistent-state";
 import { latestVisibleSessionAttention } from "@/lib/session-attention";
@@ -46,6 +47,7 @@ interface DashboardProps {
 }
 
 export function Dashboard({ client, connectionStatus, connectionError, userId, token, centrifugoUrl, transport, onDisconnect, localMode = false }: DashboardProps) {
+  const connectCommand = buildBridgeCommand({ apiUrl: typeof window !== "undefined" ? window.location.origin : "" });
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [showNewSession, setShowNewSession] = useState(false);
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
@@ -760,7 +762,7 @@ PY`;
             <button
               className="btn-ghost"
               onClick={async () => {
-                const text = `npm exec --yes --package ftown-bridge@latest -- ftown setup && npx -y ftown-bridge@latest --api-url ${window.location.origin}`;
+                const text = connectCommand;
                 try {
                   await navigator.clipboard.writeText(text);
                 } catch {
@@ -792,7 +794,7 @@ PY`;
               letterSpacing: "0.02em",
             }}
           >
-            npm exec --yes --package ftown-bridge@latest -- ftown setup &amp;&amp; npx -y ftown-bridge@latest --api-url {typeof window !== "undefined" ? window.location.origin : ""}
+            {connectCommand}
           </code>
           <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 6 }}>
             Run this on the machine, then approve it here:{" "}
