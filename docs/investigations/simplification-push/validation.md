@@ -88,3 +88,23 @@ notes were preserved and excluded from landing.
   Integration owner stops writing and releases its Git lease on final handoff;
   no pending worker assignment or task server remains. Root monitors automatic
   PR CI. No merge, production migration/configuration or package publication ran.
+
+## CI clean-install repair
+- CI39089624759 failed UI npm ci on Node24.21.0/npm11.19.0 because the optional
+  @emnapi/runtime1.11.3 hoisted record was missing. The notification worker
+  restored exactly that generated ten-line lock entry; no existing entry,
+  manifest, dependency version or application source changed.
+- Original lock failed and the minimal repaired lock passed actual scratch
+  clean installations with exact CI Node24.21.0/npm11.19.0 targeting Linux/x64/
+  glibc. npm12.2.0/Linux and npm11.6.2/Darwin also passed with the lock unchanged.
+  Scripts were disabled; this establishes graph/install portability, not Linux
+  native execution. See ci-lockfile-repair.md for reproduction and cleanup.
+- Independent canonical_start review closed with no findings: exactly one new
+  record and zero altered existing entries. Both repair author and reviewer
+  stopped writing and released leases. Root accepted this bounded metadata fix;
+  prior builds/tests/runtime evidence remains valid without repetition.
+- Ownership revalidated68 disjoint paths. Integration stages only the repaired
+  lock, investigation and final coordination/evidence; all4 prior dirty notes
+  stay excluded. Integration worker releases its Git/coordination lease and
+  retires on final handoff. Root monitors new automatic PR119 CI; no manual
+  rerun, merge, version bump, production action or additional runtime check ran.

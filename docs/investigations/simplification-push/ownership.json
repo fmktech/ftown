@@ -2,7 +2,7 @@
   "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
   "branch": "feat/simplify-cli-release-and-notifications",
   "base": "957d90bbd265b90d60f54848a26a13a74722ccca",
-  "phase": "PR opened; source work accepted; automatic CI monitored by root",
+  "phase": "CI lockfile repair accepted and landed; automatic CI monitored by root",
   "integrationOwner": "/root/npx_implementation",
   "e2eOwner": "/root",
   "workers": [
@@ -10,7 +10,7 @@
       "agent": "/root/npx_implementation",
       "model": "gpt-6.1-sol",
       "effort": "high",
-      "status": "accepted and retired on final native handoff; Git landing complete",
+      "status": "CI repair Git landing complete; retired on final native handoff",
       "dependencies": [
         "frozen contract"
       ],
@@ -42,16 +42,16 @@
         "bridge/package-lock.json",
         "docs/investigations/2026-10-18-sessions-help.md",
         "docs/investigations/simplification-push/cli-handoff.md",
-        "docs/investigations/simplification-push/ownership.json",
         "docs/investigations/simplification-push/validation.md",
-        "docs/investigations/simplification-push/contract.md"
+        "docs/investigations/simplification-push/contract.md",
+        "docs/investigations/simplification-push/ownership.json"
       ]
     },
     {
       "agent": "/root/canonical_start",
       "model": "gpt-6.1-sol",
       "effort": "high",
-      "status": "accepted and retired (native completed)",
+      "status": "CI lockfile independent review accepted; native completed and no leases",
       "dependencies": [
         "installer full runtime contract",
         "push notifier frozen API"
@@ -76,7 +76,7 @@
       "agent": "/root/npx_review",
       "model": "gpt-6.1-sol",
       "effort": "high",
-      "status": "accepted and retired (native completed)",
+      "status": "CI lockfile repair accepted; native completed and lease released",
       "dependencies": [
         "push contract"
       ],
@@ -107,7 +107,8 @@
         "e2e/scripts/start-services.sh",
         "e2e/tests/push-notifications.spec.ts",
         "docs/push-notifications.md",
-        "docs/investigations/simplification-push/notifications-handoff.md"
+        "docs/investigations/simplification-push/notifications-handoff.md",
+        "docs/investigations/simplification-push/ci-lockfile-repair.md"
       ]
     }
   ],
