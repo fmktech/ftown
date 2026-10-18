@@ -4,11 +4,35 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { checkReleaseTag, lookupVersion, packPackages, publishPackages, releasePlan } from './publish-packages.mjs';
+import { checkReleaseTag, lookupVersion, packPackages, parsePackResult, publishPackages, releasePlan } from './publish-packages.mjs';
 
 const commit = 'a'.repeat(40);
 const version = '1.2.3';
-const metadata = { version, gitHead: commit };
+const metadata = { name: 'ftown', version, gitHead: commit };
+
+test('npm pack supports npm11 arrays and npm12 package maps with one exact safe artifact', () => {
+  const artifact = { name: 'ftown', version, filename: `ftown-${version}.tgz` };
+  for (const value of [[artifact], { ftown: artifact }]) {
+    assert.deepEqual(parsePackResult(JSON.stringify(value), 'ftown', version), artifact);
+  }
+  const invalid = [null, false, 'text', [], {}, [artifact, artifact], artifact,
+    { other: artifact }, { ftown: artifact, extra: artifact }, { ftown: [artifact] },
+    [{ ...artifact, name: 'other' }], [{ ...artifact, version: '9.9.9' }],
+    [{ ...artifact, filename: '../escape.tgz' }], [{ ...artifact, filename: '/tmp/escape.tgz' }],
+    [{ ...artifact, filename: undefined }], [{ ...artifact, filename: '' }]];
+  for (const value of invalid) {
+    assert.throws(() => parsePackResult(JSON.stringify(value), 'ftown', version), /Invalid npm pack result/);
+  }
+  assert.throws(() => parsePackResult('not JSON', 'ftown', version), /Invalid npm pack result/);
+});
+
+test('exact registry versions accept npm12 singleton arrays and reject ambiguous or mismatched records', () => {
+  const run = (value) => () => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
+  assert.deepEqual(lookupVersion('ftown', version, run([metadata])), metadata);
+  for (const value of [[], [metadata, metadata], [null], { ...metadata, name: 'other' }, { ...metadata, version: '1.2.4' }]) {
+    assert.throws(() => lookupVersion('ftown', version, run(value)), /Invalid registry metadata/);
+  }
+});
 
 test('exact versions absent or from the same commit form retryable release plans', () => {
   assert.deepEqual(releasePlan(version, commit, () => undefined), [

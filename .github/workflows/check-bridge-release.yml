@@ -1,0 +1,35 @@
+name: Check bridge release artifacts
+
+on:
+  pull_request:
+    paths:
+      - 'bridge/**'
+      - '.github/workflows/publish-bridge.yml'
+      - '.github/workflows/check-bridge-release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  artifacts:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        npm: ['11', 'latest']
+    defaults:
+      run:
+        working-directory: bridge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Match supported and publishing npm versions
+        run: npm install -g npm@${{ matrix.npm }}
+      - name: Install
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Test release planning and real artifact parity
+        run: node --test scripts/publish-packages.test.mjs

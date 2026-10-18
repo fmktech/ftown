@@ -28,10 +28,27 @@ export function lookupVersion(name, version, run = command) {
     if (value?.error?.code === 'E404') return undefined;
     throw new Error(`Cannot inspect ${name}@${version}: ${result.stderr || result.stdout}`);
   }
-  if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== version) {
+  // npm11 returns one record; npm12 returns a singleton array for an exact view.
+  if (Array.isArray(value) && value.length === 1) value = value[0];
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.name !== name || value.version !== version) {
     throw new Error(`Invalid registry metadata for ${name}@${version}`);
   }
   return value;
+}
+
+/** npm11 pack arrays and npm12 name-keyed maps must identify exactly one artifact. */
+export function parsePackResult(output, name, version) {
+  let result;
+  try { result = JSON.parse(output); } catch { throw new Error(`Invalid npm pack result for ${name}@${version}`); }
+  let artifact;
+  if (Array.isArray(result) && result.length === 1) artifact = result[0];
+  else if (result && typeof result === 'object' && !Array.isArray(result)
+    && Object.keys(result).length === 1 && Object.hasOwn(result, name)) artifact = result[name];
+  if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)
+    || artifact.name !== name || artifact.version !== version || artifact.filename !== `${name}-${version}.tgz`) {
+    throw new Error(`Invalid npm pack result for ${name}@${version}`);
+  }
+  return artifact;
 }
 
 /** Pure planning seam: an exact existing version is reusable only from this commit. */
@@ -61,7 +78,7 @@ export function packPackages(version, commit, outputDirectory) {
   mkdirSync(output, { recursive: true });
   const temporary = mkdtempSync(join(tmpdir(), 'ftown-publish-'));
   try {
-    const [source] = JSON.parse(checked('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', temporary]));
+    const source = parsePackResult(checked('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', temporary]), 'ftown-bridge', version);
     checked('tar', ['-xzf', join(temporary, source.filename), '-C', temporary]);
     const stage = join(temporary, 'package');
     const manifestPath = join(stage, 'package.json');
@@ -70,7 +87,7 @@ export function packPackages(version, commit, outputDirectory) {
     manifest.gitHead = commit;
     return PACKAGE_NAMES.map((name) => {
       writeFileSync(manifestPath, `${JSON.stringify({ ...manifest, name }, null, 2)}\n`);
-      const [artifact] = JSON.parse(checked('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', output], stage));
+      const artifact = parsePackResult(checked('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', output], stage), name, version);
       return { name, path: join(output, artifact.filename) };
     });
   } finally { rmSync(temporary, { recursive: true, force: true }); }
