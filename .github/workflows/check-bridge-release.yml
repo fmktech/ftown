@@ -4,8 +4,10 @@ on:
   pull_request:
     paths:
       - 'bridge/**'
+      - 'scripts/release/**'
       - '.github/workflows/publish-bridge.yml'
       - '.github/workflows/check-bridge-release.yml'
+      - '.github/workflows/bridge-version-bump.yml'
 
 permissions:
   contents: read
@@ -32,4 +34,4 @@ jobs:
       - name: Build
         run: npm run build
       - name: Test release planning and real artifact parity
-        run: node --test scripts/publish-packages.test.mjs
+        run: node --test ../scripts/release/*.test.mjs

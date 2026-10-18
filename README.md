@@ -41,7 +41,7 @@ https://github.com/user-attachments/assets/e9c1ce70-70b0-4ba0-81d8-080d4eeef445
 
 ```bash
 npx ftown setup
-npx ftown-bridge --solo
+npx ftown start --solo
 ```
 
 Your code, terminals and agent output never leave your network. ftown Solo has no account, no cloud service and no telemetry; the only outbound traffic is two one-time downloads from GitHub, plus whatever your AI agents themselves send to their model providers.
@@ -72,6 +72,7 @@ Full guide: [docs/solo.md](docs/solo.md)
 - Live per-session token/model usage for harnesses with structured native session logs
 - Hook forwarding to the dashboard (Claude/Codex settings, Cursor hooks, and ftown's bundled Pi extension)
 - Native Pi tools for session discovery/control, durable ftown mail, token usage, terminal inspection, and archives
+- Optional [Web Push notifications](docs/push-notifications.md) for agent questions and the first observed idle transition per agent on hosted deployments
 - Multiple concurrent sessions with session management
 - Multi-bridge support (connect multiple machines)
 - Mobile-optimized responsive UI
@@ -129,7 +130,7 @@ and copies it to your clipboard):
 
 ```bash
 npx ftown setup
-npx ftown-bridge --token <bootstrap-jwt> --api-url http://localhost:3000
+npx ftown start --token <bootstrap-jwt> --api-url http://localhost:3000
 ```
 
 The bootstrap token is used **once** to onboard the bridge; it is then exchanged
@@ -146,8 +147,10 @@ npx ftown@<new-version> setup
 ```
 
 This installs that version's CLI/runtime assets, hooks/plugins, ftown skill and
-PATH entries. The installed `ftown` alias uses its copied runtime; it does not
-fetch or discover a newer package.
+PATH entries. Start that copied version with `ftown start`, or use
+`ftown start --solo` for Solo. `npx ftown start` accepts the same options. The
+installed alias runs independently of the original npm cache and does not fetch
+or discover a newer package. `npx ftown-bridge` remains a compatible launcher.
 Ordinary bridge starts only check readiness and write runtime connection state.
 Use installed `ftown setup --repair` to recheck the current copied version,
 restore its missing assets, or detect newly installed integrations. If its runtime
@@ -157,7 +160,7 @@ safely repeat them while preserving customized assets and saved data.
 
 Setup provides:
 
-- `ftown` — grouped `sessions`, `harness`, and `env` commands (existing launchers remain compatible)
+- `ftown` — `setup`, `start`, `sessions`, `harness`, and `env` commands (existing launchers remain compatible)
 - `~/.ftown/harness-agent.md` — short pointer to the authoritative installed ftown skill
 - `~/.ftown/bridge.json` — port + token while bridge is running
 
@@ -283,7 +286,7 @@ npm start  # Runs on port 3000
 
 ```bash
 npx ftown setup
-npx ftown-bridge --token <jwt> --api-url http://192.168.1.100:3000
+npx ftown start --token <jwt> --api-url http://192.168.1.100:3000
 ```
 
 Get the token via **Generate bridge token** in the dashboard at
@@ -463,7 +466,7 @@ On any machine where you want to run Claude or Cursor Agent sessions:
 
 ```bash
 npx ftown setup
-npx ftown-bridge --token <jwt> --api-url https://your-domain.vercel.app
+npx ftown start --token <jwt> --api-url https://your-domain.vercel.app
 ```
 
 ## Upgrade notes

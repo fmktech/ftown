@@ -1,0 +1,123 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "branch": "feat/simplify-cli-release-and-notifications",
+  "base": "957d90bbd265b90d60f54848a26a13a74722ccca",
+  "phase": "landing",
+  "integrationOwner": "/root/npx_implementation",
+  "e2eOwner": "/root",
+  "workers": [
+    {
+      "agent": "/root/npx_implementation",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "status": "source accepted; authorized Git landing in progress",
+      "dependencies": [
+        "frozen contract"
+      ],
+      "leases": [
+        "git index/history"
+      ],
+      "files": [
+        "bridge/scripts/publish-packages.mjs",
+        "bridge/scripts/publish-packages.test.mjs",
+        "scripts/release/publish-packages.mjs",
+        "scripts/release/publish-packages.test.mjs",
+        "scripts/release/package-changes.mjs",
+        "scripts/release/package-changes.test.mjs",
+        ".github/workflows/publish-bridge.yml",
+        ".github/workflows/check-bridge-release.yml",
+        ".github/workflows/bridge-version-bump.yml",
+        "docs/npm-release.md",
+        "bridge/AGENTS.md",
+        "bridge/src/installation-manifest.ts",
+        "bridge/src/installation-manifest.test.ts",
+        "bridge/src/production-dependencies.ts",
+        "bridge/src/production-dependencies.test.ts",
+        "bridge/src/install-ftown-command-cli.ts",
+        "bridge/src/install-ftown-command-cli.test.ts",
+        "bridge/src/setup-state.ts",
+        "bridge/src/setup-state.test.ts",
+        "bridge/src/setup.test.ts",
+        "bridge/src/sessions-commands.ts",
+        "bridge/src/sessions-commands.test.ts",
+        "bridge/package.json",
+        "bridge/package-lock.json",
+        "docs/investigations/2026-10-18-sessions-help.md",
+        "docs/investigations/simplification-push/cli-handoff.md",
+        "docs/investigations/simplification-push/ownership.json",
+        "docs/investigations/simplification-push/validation.md",
+        "docs/investigations/simplification-push/contract.md"
+      ]
+    },
+    {
+      "agent": "/root/canonical_start",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "status": "accepted and retired (native completed)",
+      "dependencies": [
+        "installer full runtime contract",
+        "push notifier frozen API"
+      ],
+      "leases": [],
+      "files": [
+        "bridge/src/ftown-cli.ts",
+        "bridge/src/ftown-cli.test.ts",
+        "bridge/src/index.ts",
+        "bridge/src/start-commands.ts",
+        "bridge/src/start-commands.test.ts",
+        "bridge/src/setup.ts",
+        "README.md",
+        "docs/solo.md",
+        "bridge/skills/ftown/SKILL.md",
+        "docs/investigations/simplification-push/start-handoff.md",
+        "docs/investigations/simplification-push/cli-smoke.mjs",
+        "docs/investigations/simplification-push/independent-review.md"
+      ]
+    },
+    {
+      "agent": "/root/npx_review",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "status": "accepted and retired (native completed)",
+      "dependencies": [
+        "push contract"
+      ],
+      "leases": [],
+      "files": [
+        "bridge/src/attention-store.ts",
+        "bridge/src/attention-store.test.ts",
+        "bridge/src/push-notifier.ts",
+        "bridge/src/push-notifier.test.ts",
+        "ui/src/lib/push.ts",
+        "ui/src/lib/push.test.ts",
+        "ui/src/lib/push-store.ts",
+        "ui/src/lib/push-store.test.ts",
+        "ui/src/app/api/push/route.ts",
+        "ui/src/app/api/push/route.test.ts",
+        "ui/src/app/api/push/events/route.ts",
+        "ui/src/app/api/push/events/route.test.ts",
+        "ui/src/components/PushNotificationsControl.tsx",
+        "ui/src/components/PushNotificationsControl.test.tsx",
+        "ui/src/components/Dashboard.tsx",
+        "ui/public/sw.js",
+        "ui/src/lib/push-service-worker.test.ts",
+        "ui/schema.sql",
+        "ui/migrations/0005_web_push.sql",
+        "ui/package.json",
+        "ui/package-lock.json",
+        "e2e/scripts/setup-db.mjs",
+        "e2e/scripts/start-services.sh",
+        "e2e/tests/push-notifications.spec.ts",
+        "docs/push-notifications.md",
+        "docs/investigations/simplification-push/notifications-handoff.md"
+      ]
+    }
+  ],
+  "rootOwns": [],
+  "preserveDirty": [
+    "docs/investigations/2026-10-17-pairing-setup.md",
+    "docs/investigations/npx-ftown/coordination.md",
+    "docs/investigations/setup-cli-lifecycle/coordination.md",
+    "docs/investigations/simplify-agent-surface/coordination.md"
+  ]
+}

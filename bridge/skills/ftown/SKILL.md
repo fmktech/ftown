@@ -8,7 +8,7 @@ description: >-
 
 # ftown
 
-Use `ftown sessions`, `ftown harness`, and `ftown env`. Run `ftown --help`
+Use `ftown start`, `ftown sessions`, `ftown harness`, and `ftown env`. Run `ftown --help`
 for command discovery; if it is missing from PATH, use `~/.ftown/ftown`.
 The bridge installs this skill at `~/.ftown/skills/ftown`, linked from the agent
 skill directories. Startup checks setup readiness and never rewrites global
@@ -24,7 +24,11 @@ For upgrades, use the exact new version named by the startup readiness hint:
 npx ftown@<new-version> setup
 ```
 
-The installed alias uses its copied version and does not discover newer packages.
+Start the bridge with `ftown start`; use `ftown start --solo` for a single-port
+LAN deployment. `npx ftown start` accepts the same options, and `ftown-bridge`
+remains compatible. `ftown start --help` only displays help. The installed alias
+uses its copied version independently of the npm cache and does not discover
+newer packages.
 Use `ftown setup --repair` to repair that current copied version or detect new
 optional harnesses. If the copied runtime is incomplete, use the matching package
 entrypoint with `--repair`.
@@ -39,6 +43,7 @@ ftown harness mail send <session-id> --type task "review the API client"
 ftown harness mail read
 ftown env --help
 ftown setup --help
+ftown start --help
 ```
 
 Read `references/sessions.md` for the session, mail and terminal command

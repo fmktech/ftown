@@ -2,6 +2,7 @@ import { open, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import type { PushNotice } from './push-notifier.js';
 import { classifyAttentionHook, sanitizeAttentionText, type Activity, type AttentionItem, type Resolution } from './attention-events.js';
 
 const itemSchema = z.object({
@@ -34,7 +35,8 @@ const publicItem = ({ fingerprint: _fingerprint, sourceId: _sourceId, reason: _r
 export class AttentionStore {
   private locks = new Map<string, Promise<unknown>>();
   private listeners = new Map<string, Set<() => void>>();
-  constructor(private resolveDir: (sessionId: string) => string, private resolvedRetention = 500) {}
+  constructor(private resolveDir: (sessionId: string) => string, private resolvedRetention = 500,
+    private onNotification?: (sessionId: string, notice: PushNotice) => void) {}
 
   private withLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
     if (!/^[a-zA-Z0-9_-]+$/.test(id)) return Promise.reject(new AttentionError('invalid_session', 'Invalid session ID'));
@@ -95,6 +97,10 @@ export class AttentionStore {
     await this.withLock(id, async () => {
       const ledger = await this.load(id);
       const timestamp = new Date().toISOString();
+      const notifications: PushNotice[] = [];
+      if (observation.activity === 'idle' && ['thinking', 'tool_use'].includes(ledger.activity.state)) {
+        notifications.push({ kind: 'idle', eventKey: 'idle', title: 'Agent is idle', message: 'The agent is ready for your next instruction.', occurredAt: timestamp });
+      }
       if (observation.activity) ledger.activity = { state: observation.activity, lastActivityAt: timestamp };
       if (observation.resolve) for (const event of ledger.events) {
         if (event.resolvedAt || (observation.resolve === 'elicitation_complete' && event.type !== 'elicitation_dialog')) continue;
@@ -109,12 +115,17 @@ export class AttentionStore {
         const existing = ledger.events.find((event) => !event.resolvedAt && (sourceId ? event.sourceId === sourceId : event.fingerprint === fingerprint));
         if (existing) { existing.lastSeenAt = timestamp; existing.occurrences++; }
         else {
-          ledger.events.push({ ...attention, id: randomUUID(), sequence: ++ledger.sequence, createdAt: timestamp, lastSeenAt: timestamp, occurrences: 1, fingerprint, ...(sourceId ? { sourceId } : {}) });
+          const attentionId = randomUUID();
+          notifications.push({ kind: 'question', eventKey: `question:${attentionId}`, title: attention.title, message: attention.message, occurredAt: timestamp });
+          ledger.events.push({ ...attention, id: attentionId, sequence: ++ledger.sequence, createdAt: timestamp, lastSeenAt: timestamp, occurrences: 1, fingerprint, ...(sourceId ? { sourceId } : {}) });
           created = true;
         }
       }
       this.prune(ledger);
       await this.save(id, ledger);
+      for (const notice of notifications) {
+        try { this.onNotification?.(id, notice); } catch { /* Optional delivery cannot fail a committed hook. */ }
+      }
       if (created) for (const listener of this.listeners.get(id) ?? []) listener();
     });
   }

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -14,11 +14,23 @@ async function capture(run: () => Promise<unknown>): Promise<string> {
 
 describe('in-process canonical commands', () => {
   it('discovers setup and groups, rejecting the retired workflow route', async () => {
-    assert.match(usage(), /setup\|sessions\|harness\|env/);
+    assert.match(usage(), /setup\|start\|sessions\|harness\|env/);
     assert.doesNotMatch(usage(), /workflows/);
     let code: number | undefined;
     await capture(async () => { code = await runFtown(['workflows']); });
     assert.equal(code, 1);
+  });
+  it('routes canonical start through the read-only readiness gate before bridge loading', async () => {
+    const previous = process.env.HOME;
+    const home = mkdtempSync(join(tmpdir(), 'ftown-start-unready-'));
+    process.env.HOME = home;
+    try {
+      await assert.rejects(runFtown(['start', '--solo']), /npx ftown@[\d.]+ setup/);
+      assert.equal(existsSync(join(home, '.ftown')), false);
+    } finally {
+      if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
   it('runs repeated harness parsers and env help without import/exit side effects', async () => {
     const text = await capture(async () => {

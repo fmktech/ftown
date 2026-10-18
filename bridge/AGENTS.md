@@ -21,9 +21,11 @@ before auth/listeners or data migration. Cleanup migration IDs live in
 
 ## Versioning
 
-Any PR that changes `bridge/**` must bump `bridge/package.json` and keep
+Any PR that changes bridge runtime, shipped assets or build inputs must bump `bridge/package.json` and keep
 `bridge/package-lock.json` in sync. CI enforces this because `main` publishes
-the bridge package to npm.
+the bridge package to npm. Tests and agent documentation alone do not require
+a version bump; release-only tooling lives at `../scripts/release`. The shared
+package-change classifier defines the gate.
 
 Use:
 
