@@ -1,0 +1,12 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "branch": "fix/npx-ftown-default-start",
+  "base": "8157ab6402c66de2a553968cbab00c70162074fd",
+  "workers": [
+    {"agent":"/root/npx_implementation","model":"gpt-6.1-sol","reasoning":"high","role":"CLI/UI implementation and integration","dependencies":["frozen contract"],"files":["bridge/src/ftown-cli.ts","bridge/src/ftown-cli.test.ts","bridge/src/start-commands.test.ts","bridge/scripts/default-start-smoke.mjs","bridge/package.json","bridge/package-lock.json","ui/src/components/Dashboard.tsx","ui/src/components/Dashboard.test.tsx","ui/src/app/page.tsx","ui/src/lib/bridge-command.ts","ui/src/lib/bridge-command.test.ts"],"leases":["shared checkout Git/index/history/remotes","package version/lock","bridge dist after writers freeze"]},
+    {"agent":"/root/npx_review","model":"gpt-6.1-sol","reasoning":"high","role":"release classifier repair","dependencies":["frozen contract"],"files":["scripts/release/package-changes.mjs","scripts/release/package-changes.test.mjs"],"leases":["isolated temporary Git unit fixtures only"]},
+    {"agent":"/root/canonical_start","model":"gpt-6.1-sol","reasoning":"high","role":"independent review","dependencies":["contract then implementation"],"files":[],"leases":[]},
+    {"agent":"/root","role":"architecture and E2E","dependencies":[],"files":["docs/investigations/npx-default-start/"],"leases":["all E2E/runtime processes/ports/environment/cleanup","CI monitoring and reruns"]}
+  ],
+  "excluded_user_changes":["docs/investigations/2026-10-17-pairing-setup.md","docs/investigations/npx-ftown/coordination.md","docs/investigations/setup-cli-lifecycle/coordination.md","docs/investigations/simplify-agent-surface/coordination.md"]
+}

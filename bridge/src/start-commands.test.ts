@@ -30,6 +30,17 @@ test('missing or outdated setup never loads native bridge dependencies', async (
   assert.equal(loaded, false);
 });
 
+test('default startup checks readiness before loading the bridge, preserving its return code', async () => {
+  const order: string[] = [];
+  assert.equal(await runStart([], {
+    assertReady: () => { order.push('ready'); },
+    loadBridge: async () => { order.push('load'); return { runBridge: async argv => {
+      assert.deepEqual(argv, []); order.push('run'); return 4;
+    } }; },
+  }), 4);
+  assert.deepEqual(order, ['ready', 'load', 'run']);
+});
+
 test('standalone help is discoverable without setup, while option values cannot bypass readiness', async () => {
   let checks = 0;
   const argvSeen: string[][] = [];

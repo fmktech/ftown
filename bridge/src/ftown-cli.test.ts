@@ -25,8 +25,38 @@ describe('in-process canonical commands', () => {
     const home = mkdtempSync(join(tmpdir(), 'ftown-start-unready-'));
     process.env.HOME = home;
     try {
-      await assert.rejects(runFtown(['start', '--solo']), /npx ftown@[\d.]+ setup/);
+      for (const argv of [[], ['--local'], ['start', '--solo']]) {
+        await assert.rejects(runFtown(argv), /npx ftown@[\d.]+ setup/);
+      }
       assert.equal(existsSync(join(home, '.ftown')), false);
+    } finally {
+      if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+  it('forwards default/root flags and explicit start to the same start route unchanged', async () => {
+    const calls: string[][] = [];
+    const start = async (argv: string[]) => { calls.push(argv); return 7; };
+    assert.equal(await runFtown([], start), 7);
+    const rootOptions = ['--local', '--api-url', 'http://127.0.0.1', '--port', '8040'];
+    assert.equal(await runFtown(rootOptions, start), 7);
+    assert.equal(await runFtown(['--solo'], start), 7);
+    assert.equal(await runFtown(['start', ...rootOptions], start), 7);
+    assert.deepEqual(calls, [[], rootOptions, ['--solo'], rootOptions]);
+  });
+  it('keeps explicit help read-only and unknown positional commands out of startup', async () => {
+    let started = false;
+    const start = async () => { started = true; throw new Error('must not start'); };
+    const previous = process.env.HOME; const home = mkdtempSync(join(tmpdir(), 'ftown-root-help-'));
+    process.env.HOME = home;
+    try {
+      const text = await capture(async () => {
+        for (const help of ['--help', '-h', 'help']) assert.equal(await runFtown([help], start), 0);
+        assert.equal(await runFtown(['not-a-command'], start), 1);
+      });
+      assert.match(text, /With no subcommand, start the bridge/);
+      assert.match(text, /Unknown subcommand "not-a-command"/);
+      assert.equal(started, false); assert.equal(existsSync(join(home, '.ftown')), false);
     } finally {
       if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous;
       rmSync(home, { recursive: true, force: true });

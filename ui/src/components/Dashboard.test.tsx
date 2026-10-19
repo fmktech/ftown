@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "@/types";
 import { Dashboard } from "./Dashboard";
+import { buildBridgeCommand } from "@/lib/bridge-command";
 
 const state = vi.hoisted(() => ({
   sessions: [] as Session[],
@@ -52,7 +53,7 @@ beforeEach(() => {
   window.requestAnimationFrame = vi.fn(() => 1);
   window.cancelAnimationFrame = vi.fn();
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); Reflect.deleteProperty(navigator, "clipboard"); Reflect.deleteProperty(document, "execCommand"); });
 
 describe("dashboard after recurring automation retirement", () => {
   it.each([null, "crons", "factory"])("shows all session history with sidebar setting %s", async (storedTab) => {
@@ -83,5 +84,31 @@ describe("dashboard after recurring automation retirement", () => {
     expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
     fireEvent.click(screen.getByRole("button", { name: "Stop" }));
     expect(state.stopSession).toHaveBeenCalledWith("ordinary");
+  });
+});
+
+describe("bridge connection command", () => {
+  it("copies exactly the canonical command displayed for the current origin", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    dashboard();
+    fireEvent.click(screen.getByRole("button", { name: "Connect a bridge" }));
+    const command = buildBridgeCommand({ apiUrl: window.location.origin });
+    expect(screen.getByText(command).tagName).toBe("CODE");
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(command));
+  });
+  it("preserves clipboard fallback with the same displayed command", async () => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: vi.fn().mockRejectedValue(new Error("blocked")) } });
+    const copy = vi.fn(() => true);
+    Object.defineProperty(document, "execCommand", { configurable: true, value: copy });
+    let copied = "";
+    copy.mockImplementation(() => { copied = document.querySelector("textarea")?.value ?? ""; return true; });
+    dashboard();
+    fireEvent.click(screen.getByRole("button", { name: "Connect a bridge" }));
+    const command = screen.getByText(buildBridgeCommand({ apiUrl: window.location.origin })).textContent;
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    await waitFor(() => expect(copy).toHaveBeenCalledWith("copy"));
+    expect(copied).toBe(command); expect(document.querySelector("textarea")).toBeNull();
   });
 });

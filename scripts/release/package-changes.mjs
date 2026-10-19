@@ -16,7 +16,7 @@ export function isPackageChange(path) {
 }
 
 export function changedPackageFiles(base, head, run = execFileSync) {
-  return run('git', ['diff', '--name-only', '--no-renames', '-z', base, head, '--', 'bridge/'], { encoding: 'utf8' })
+  return run('git', ['diff', '--name-only', '--no-renames', '--no-relative', '-z', base, head, '--', ':(top)bridge/'], { encoding: 'utf8' })
     .split('\0').filter((path) => path && isPackageChange(path));
 }
 
