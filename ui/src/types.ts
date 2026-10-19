@@ -106,7 +106,7 @@ export interface Command {
 }
 
 export interface CreateSessionPayload {
-  command: string;
+  command?: string;
   prompt: string;
   name?: string;
   model?: string;

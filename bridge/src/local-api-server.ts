@@ -177,6 +177,11 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private port: number = 0;
   private sessionController: SessionController | null = null;
   private lifecycleController: SessionController | null = null;
+  private mailStore: MailStore | null = null;
+  private recoveryEpoch = 0;
+  private recoveryStartedAt = -1;
+  private recoveryStopped = false;
+  private runnerReadyListener: ((sessionId: string) => void) | null = null;
 
   setBrowserAccess(access: BrowserAccess): void {
     this.browserAccess = access;
@@ -191,7 +196,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   }
 
   setMailStore(mailStore: MailStore): void {
+    if (this.mailStore !== mailStore) this.recoveryEpoch++;
+    this.mailStore = mailStore;
     this.mail.setMailStore(mailStore);
+    this.startMailRecovery();
   }
 
   setDependencies(
@@ -201,6 +209,9 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     userId: string,
     terminalManager?: TerminalManager,
   ): void {
+    const changed = this.store !== store || this.runner !== runner;
+    if (this.runnerReadyListener) this.runner?.off?.('ready', this.runnerReadyListener);
+    if (changed) this.recoveryEpoch++;
     this.store = store;
     this.runner = runner;
     this.centrifugo = centrifugo;
@@ -208,7 +219,44 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     this.terminalManager = terminalManager ?? null;
     this.mail.setStore(store);
     this.mail.setRunner(runner);
+    this.bindMailRecovery();
+    this.startMailRecovery();
     this.invalidateControllers();
+  }
+
+  private bindMailRecovery(): void {
+    if (this.recoveryStopped || !this.runner) return;
+    const runner = this.runner;
+    // Read the current epoch at dispatch: setting the mail store also changes it.
+    this.runnerReadyListener = (id) => {
+      const epoch = this.recoveryEpoch;
+      if (this.recoveryStopped || this.runner !== runner || !this.mailStore) return;
+      void this.recoverMail(id, epoch);
+    };
+    runner.on?.('ready', this.runnerReadyListener);
+  }
+
+  private async recoverMail(id: string, epoch: number): Promise<void> {
+    if (this.recoveryStopped || this.recoveryEpoch !== epoch) return;
+    try { await this.mail.recoverPendingMail(id); }
+    catch (error) {
+      console.error('[LocalApiServer] Mail recovery failed:', error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private startMailRecovery(): void {
+    const { store, runner, recoveryEpoch: epoch } = this;
+    if (this.recoveryStopped || !store || !runner || !this.mailStore || this.recoveryStartedAt === epoch) return;
+    this.recoveryStartedAt = epoch;
+    void (async () => {
+      const sessions = await store.listSessions();
+      for (const session of sessions) {
+        if (this.recoveryStopped || this.recoveryEpoch !== epoch) return;
+        if (session.status === 'running' && runner.isRunning(session.id)) await this.recoverMail(session.id, epoch);
+      }
+    })().catch((error) => {
+      console.error('[LocalApiServer] Initial mail recovery failed:', error instanceof Error ? error.message : String(error));
+    });
   }
 
   setSessionFactory(deps: CreateFtownSessionDeps): void {
@@ -284,6 +332,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   }
 
   stop(): void {
+    this.recoveryStopped = true;
+    this.recoveryEpoch++;
+    if (this.runnerReadyListener) this.runner?.off?.('ready', this.runnerReadyListener);
+    this.runnerReadyListener = null;
     this.browserAccess?.close();
     this.mail.stop();
     if (this.server) {

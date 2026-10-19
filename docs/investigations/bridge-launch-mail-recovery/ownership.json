@@ -1,0 +1,12 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "branch": "fix/bridge-launch-mail-recovery",
+  "base": "92d0110302afcf61f8ac48b999d5603ad9c521ca",
+  "workers": [
+    {"agent":"/root/npx_implementation","model":"gpt-6.1-sol","reasoning":"high","role":"launch implementation and integration owner","dependencies":["reviewed frozen contract"],"files":["ui/src/hooks/useSessions.ts","ui/src/hooks/useSessions.test.ts","ui/src/types.ts","ui/src/lib/agent-commands.ts","ui/src/lib/agent-commands.test.ts","ui/src/lib/__snapshots__/agent-commands.test.ts.snap","bridge/src/create-ftown-session.test.ts","bridge/scripts/structured-launch-smoke.mjs","bridge/package.json","bridge/package-lock.json"],"leases":["shared Git/index/history/remotes","package version/lock","bridge dist after all source writers stop"]},
+    {"agent":"/root/npx_review","model":"gpt-6.1-sol","reasoning":"high","role":"mail lifecycle recovery","dependencies":["reviewed frozen contract"],"files":["bridge/src/mail-delivery.ts","bridge/src/mail-delivery.test.ts","bridge/src/local-api-server.ts","bridge/src/local-api-server.test.ts","bridge/src/claude-runner.ts","bridge/src/claude-runner.test.ts","bridge/scripts/mail-recovery-smoke.mjs"],"leases":[]},
+    {"agent":"/root/canonical_start","model":"gpt-6.1-sol","reasoning":"high","role":"independent design and final reviewer","dependencies":["draft contract then implementation"],"files":[],"leases":[]},
+    {"agent":"/root","role":"architect and sole E2E executor","dependencies":[],"files":["docs/investigations/bridge-launch-mail-recovery/"],"leases":["all E2E processes/ports/environments/fixtures/cleanup","CI E2E monitoring/reruns"]}
+  ],
+  "excluded_user_changes":["docs/investigations/2026-10-17-pairing-setup.md","docs/investigations/npx-ftown/coordination.md","docs/investigations/setup-cli-lifecycle/coordination.md","docs/investigations/simplify-agent-surface/coordination.md"]
+}

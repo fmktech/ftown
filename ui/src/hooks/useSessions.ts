@@ -15,7 +15,6 @@ import {
   UpdateSessionParentPayload,
 } from "@/types";
 import type { BridgeRpc } from "@/hooks/useBridgeRpc";
-import { buildCodexCommand, buildCursorAgentCommand, buildGrokCommand, buildKimiCodeCommand, buildMuseCommand, buildPiCommand } from "@/lib/agent-commands";
 import { buildUsagePollBatches } from "@/lib/live-usage-polling";
 
 // Re-exported for existing consumers (NewSessionModal, session pickers); the
@@ -77,6 +76,9 @@ export interface CreateSessionOptions {
   cursorSessionId?: string;
   codexSessionId?: string;
   museSessionId?: string;
+  piSessionId?: string;
+  piSessionFile?: string;
+  opencodeSessionId?: string;
   env?: Record<string, string>;
   createMissingWorkingDir?: boolean;
 }
@@ -386,51 +388,7 @@ export function useSessions(
       }
 
       const shellType = options?.shellType ?? "claude";
-      let cmd: string;
-      if (shellType === "shell") {
-        cmd = "/bin/zsh -l";
-      } else if (shellType === "opencode") {
-        // Empty command: the bridge rebuilds from the harness registry, which
-        // passes the prompt as a --prompt CLI arg instead of typing it into
-        // the TUI after a delay.
-        cmd = "";
-      } else if (shellType === "cursor") {
-        cmd = buildCursorAgentCommand({
-          workingDir: options?.workingDir,
-          model: options?.model,
-          cursorSessionId: options?.cursorSessionId,
-        });
-      } else if (shellType === "codex") {
-        cmd = buildCodexCommand({
-          model: options?.model,
-          codexSessionId: options?.codexSessionId,
-        });
-      } else if (shellType === "grok") {
-        cmd = buildGrokCommand({
-          model: options?.model,
-        });
-      } else if (shellType === "muse") {
-        cmd = buildMuseCommand({
-          workingDir: options?.workingDir,
-          model: options?.model,
-          museSessionId: options?.museSessionId,
-        });
-      } else if (shellType === "pi") {
-        cmd = buildPiCommand({
-          model: options?.model,
-        });
-      } else if (shellType === "kimi-code") {
-        cmd = buildKimiCodeCommand({
-          model: options?.model,
-        });
-      } else if (options?.claudeSessionId) {
-        cmd = `claude --allow-dangerously-skip-permissions --resume ${options.claudeSessionId}`;
-      } else {
-        cmd = "claude --allow-dangerously-skip-permissions";
-      }
-
       const payload: CreateSessionPayload = {
-        command: cmd,
         prompt,
         name: options?.name,
         model: options?.model,
@@ -441,9 +399,11 @@ export function useSessions(
         cursorSessionId: options?.cursorSessionId,
         codexSessionId: options?.codexSessionId,
         museSessionId: options?.museSessionId,
+        piSessionId: options?.piSessionId,
+        piSessionFile: options?.piSessionFile,
+        opencodeSessionId: options?.opencodeSessionId,
         env: options?.env,
         ...(options?.createMissingWorkingDir ? { createMissingWorkingDir: true } : {}),
-        ...(prompt && shellType !== "opencode" ? { initialInput: prompt + "\r", initialInputDelay: 2000 } : {}),
       };
 
       const command: Command = {

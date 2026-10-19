@@ -1,6 +1,8 @@
 import { request as httpRequest } from 'node:http';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { MailDeliveryService } from './mail-delivery.js';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { AttentionStore, AttentionError } from './attention-store.js';
 import { MailStore } from './mail-store.js';
@@ -19,6 +21,75 @@ import type { CentrifugoClient } from './centrifugo-client.js';
 import type { CreateFtownSessionDeps } from './create-ftown-session.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { Session } from './types.js';
+
+describe('LocalApiServer mail recovery wiring (no HTTP listener)', () => {
+  const flush = async () => { for (let i = 0; i < 8; i++) await new Promise<void>(resolve => setImmediate(resolve)); };
+  const session = (id: string): Session => ({ id, name: id, command: 'fake', shellType: 'grok',
+    status: 'running', bridgeId: 'bridge', createdAt: '', updatedAt: '' });
+  function fixture() {
+    const server = new LocalApiServer();
+    const calls: string[] = [];
+    const mail = new MailDeliveryService();
+    mail.recoverPendingMail = async id => { calls.push(id); };
+    (server as unknown as { mail: MailDeliveryService }).mail = mail;
+    const runner = Object.assign(new EventEmitter(), { isRunning: () => true }) as unknown as ProcessRunner;
+    const store = { listSessions: async () => [session('attached')] } as unknown as SessionStore;
+    const mailStore = {} as MailStore;
+    const centrifugo = {} as CentrifugoClient;
+    return { server, calls, runner, store, mailStore, centrifugo, mail };
+  }
+
+  for (const order of ['dependencies-first', 'mail-first'] as const) {
+    it(`runs one initial pass only after all dependencies (${order})`, async () => {
+      const { server, calls, runner, store, mailStore, centrifugo } = fixture();
+      if (order === 'dependencies-first') server.setDependencies(store, runner, centrifugo, 'user');
+      else server.setMailStore(mailStore);
+      await flush(); assert.deepEqual(calls, []);
+      if (order === 'dependencies-first') server.setMailStore(mailStore);
+      else server.setDependencies(store, runner, centrifugo, 'user');
+      await flush(); assert.deepEqual(calls, ['attached']);
+      server.setDependencies(store, runner, centrifugo, 'user');
+      server.setMailStore(mailStore);
+      await flush(); assert.deepEqual(calls, ['attached']);
+      assert.equal(runner.listenerCount('ready'), 1);
+      runner.emit('ready', 'retried'); await flush();
+      assert.deepEqual(calls, ['attached', 'retried']);
+      server.stop();
+      assert.equal(runner.listenerCount('ready'), 0);
+      runner.emit('ready', 'stopped'); await flush();
+      assert.deepEqual(calls, ['attached', 'retried']);
+    });
+  }
+
+  it('unbinds the old runner and fences an awaited initial listing on replacement/stop', async () => {
+    const { server, calls, runner, store, mailStore, centrifugo } = fixture();
+    let finish!: (sessions: Session[]) => void;
+    store.listSessions = () => new Promise(resolve => { finish = resolve; });
+    server.setDependencies(store, runner, centrifugo, 'user'); server.setMailStore(mailStore);
+    const nextRunner = Object.assign(new EventEmitter(), { isRunning: () => true }) as unknown as ProcessRunner;
+    const nextStore = { listSessions: async () => [session('new')] } as unknown as SessionStore;
+    server.setDependencies(nextStore, nextRunner, centrifugo, 'user');
+    assert.equal(runner.listenerCount('ready'), 0);
+    assert.equal(nextRunner.listenerCount('ready'), 1);
+    finish([session('stale')]); runner.emit('ready', 'old');
+    await flush(); assert.deepEqual(calls, ['new']);
+    let stoppedFinish!: (sessions: Session[]) => void;
+    nextStore.listSessions = () => new Promise(resolve => { stoppedFinish = resolve; });
+    server.setMailStore({} as MailStore);
+    server.stop(); stoppedFinish([session('after-stop')]);
+    await flush(); assert.deepEqual(calls, ['new']);
+    assert.equal(nextRunner.listenerCount('ready'), 0);
+  });
+
+  it('isolates one corrupt inbox and skips nonrunning receivers in the initial pass', async () => {
+    const { server, calls, runner, store, mailStore, centrifugo, mail } = fixture();
+    store.listSessions = async () => [session('broken'), { ...session('stopped'), status: 'completed' }, session('healthy')];
+    mail.recoverPendingMail = async id => { if (id === 'broken') throw new Error('expected corrupt inbox'); calls.push(id); };
+    server.setDependencies(store, runner, centrifugo, 'user'); server.setMailStore(mailStore);
+    await flush(); assert.deepEqual(calls, ['healthy']);
+    server.stop();
+  });
+});
 
 async function api(
   port: number,
