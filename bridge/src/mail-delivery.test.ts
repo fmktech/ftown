@@ -182,6 +182,125 @@ function participatingSession(id: string, overrides: Partial<Session> = {}): Ses
   return makeSession(id, { parentSessionId: 'parent-1', ...overrides });
 }
 
+describe('MailDeliveryService receiver recovery', () => {
+  for (const status of ['accepted', 'unknown'] as const) {
+    it(`preserves ${status} native batch suppression across repeated ready events`, async () => {
+      let attempts = 0;
+      const { clock, store, runner, service, mailStore } = setup(undefined, async () => {
+        attempts++; return { status };
+      });
+      const session = makeSession('s1', { shellType: 'codex', codexSessionId: 'native-id' });
+      store.add(session);
+      await service.acceptMail(session, { body: 'durable payload', from: 'alice' });
+      await clock.advance(10_000); // old timer expires while the process is down
+      runner.running.add(session.id);
+      await service.recoverPendingMail(session.id);
+      await clock.advance(6_000);
+      await Promise.all(Array.from({ length: 10 }, () => service.recoverPendingMail(session.id)));
+      await clock.advance(120_000);
+      assert.equal(attempts, 1);
+      assert.equal(runner.writes.length, 0);
+      assert.equal((await mailStore.listUndelivered(session.id)).length, 1);
+      service.stop();
+    });
+  }
+
+  it('recovers persisted unread mail in a new service, deriving the sender without delivering the payload', async () => {
+    const { clock, store, runner, service, mailStore } = setup();
+    const session = makeSession('s1', { shellType: 'grok' });
+    store.add(session);
+    await service.acceptMail(session, { body: 'private payload', from: 'alice', fromName: 'Alice' });
+    service.stop();
+    runner.running.add(session.id);
+    const restarted = new MailDeliveryService({ store, runner, mailStore, now: clock.now,
+      setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
+    await restarted.recoverPendingMail(session.id);
+    await clock.advance(6_200);
+    assert.equal(runner.nudgeLines().length, 1);
+    assert.match(runner.nudgeLines()[0], /Alice/);
+    assert.doesNotMatch(runner.nudgeLines()[0], /private payload/);
+    assert.equal((await mailStore.listUndelivered(session.id)).length, 1);
+    restarted.stop();
+  });
+
+  it('ignores Pi, stopped, deleted and drained receivers without recurring work', async () => {
+    const { clock, store, runner, service, mailStore } = setup();
+    for (const [id, overrides] of [
+      ['pi', { shellType: 'pi' }], ['stopped', { status: 'completed' }],
+      ['deleted', {}], ['drained', {}],
+    ] as Array<[string, Partial<Session>]>) {
+      const session = makeSession(id, { shellType: 'grok', ...overrides });
+      store.add(session); runner.running.add(id);
+      await service.acceptMail(session, { body: 'work', from: 'alice' });
+    }
+    store.sessions.delete('deleted');
+    mailStore.messages = mailStore.messages.filter(message => message.to !== 'drained');
+    await Promise.all(['pi', 'stopped', 'deleted', 'drained'].map(id => service.recoverPendingMail(id)));
+    await clock.advance(600_000);
+    assert.equal(runner.writes.length, 0);
+    service.stop();
+  });
+
+  it('retains plugin lease, busy and rate-limit gates when readiness repeats', async () => {
+    const { clock, store, runner, service } = setup();
+    const session = makeSession('s1', { shellType: 'opencode', opencodeSessionId: 'native-id' });
+    store.add(session); runner.running.add(session.id);
+    await service.acceptMail(session, { body: 'work', from: 'alice' });
+    service.registerNativeWake(session, { adapter: 'opencode', nativeSessionId: 'native-id' });
+    service.markAgentBusy(session.id);
+    await service.recoverPendingMail(session.id);
+    await clock.advance(31_000);
+    assert.equal(runner.writes.length, 0);
+    service.markAgentIdle(session.id);
+    await clock.advance(60_200);
+    assert.equal(runner.nudgeLines().length, 1);
+    await service.recoverPendingMail(session.id);
+    await clock.advance(6_200);
+    assert.equal(runner.nudgeLines().length, 1, 'a ready event cannot bypass the rate limit');
+    service.stop();
+  });
+
+  for (const action of ['replace', 'stop'] as const) {
+    it(`fences an awaited recovery read on ${action}`, async () => {
+      const { clock, store, runner, service } = setup();
+      const session = makeSession('s1', { shellType: 'grok' });
+      store.add(session); runner.running.add(session.id);
+      await service.acceptMail(session, { body: 'work', from: 'alice' });
+      let release!: (session: Session | null) => void;
+      store.loadSession = () => new Promise(resolve => { release = resolve; });
+      const recovery = service.recoverPendingMail(session.id);
+      if (action === 'replace') service.setRunner(new FakeRunner());
+      else service.stop();
+      release(session);
+      await recovery;
+      await clock.advance(600_000);
+      assert.equal(runner.writes.length, 0);
+      service.stop();
+    });
+  }
+
+  it('fences an in-flight wake and aborts native probing when the runner is replaced', async () => {
+    let finish!: () => void;
+    let signal: AbortSignal | undefined;
+    const { clock, store, runner, service } = setup(undefined, async (_session, _text, abort) => {
+      signal = abort;
+      await new Promise<void>(resolve => { finish = resolve; });
+      return { status: 'unsupported' };
+    });
+    const session = makeSession('s1', { shellType: 'codex', codexSessionId: 'native-id' });
+    store.add(session); runner.running.add(session.id);
+    await service.acceptMail(session, { body: 'work', from: 'alice' });
+    await clock.advance(5_000);
+    assert.ok(signal);
+    service.setRunner(new FakeRunner());
+    assert.equal(signal.aborted, true);
+    finish(); await flushAsync();
+    await clock.advance(120_000);
+    assert.equal(runner.writes.length, 0);
+    service.stop();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // (a) Long-poll waiters
 // ---------------------------------------------------------------------------
@@ -397,15 +516,10 @@ describe('MailDeliveryService nudges', () => {
     await clock.advance(5_600);
     assert.equal(runner.nudgeLines().length, 0, 'no nudge while the session is down');
 
-    // Session comes back up; an external retry trigger (e.g. a restart hook,
-    // outside this module) re-checks the nudge for this session. Don't await
-    // it yet — injectPtyLine's paste-settle delay is itself clock-driven, so
-    // the clock must advance before this promise can resolve.
+    // Actual runner readiness now has a public recovery path.
     runner.running.add('s1');
-    const retried = (service as unknown as { fireMailNudge(id: string): Promise<void> }).fireMailNudge('s1');
-    await flushAsync(); // let fireMailNudge reach injectPtyLine's delay before the clock jumps
-    await clock.advance(1_200); // paste settle and separate second-submit delay
-    await retried;
+    await Promise.all([service.recoverPendingMail('s1'), service.recoverPendingMail('s1')]);
+    await clock.advance(6_200);
 
     const nudges = runner.nudgeLines();
     assert.equal(nudges.length, 1, 'the retry must still nudge for mail that arrived while down');

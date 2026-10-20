@@ -47,6 +47,7 @@ interface RecordedRun {
   workingDir?: string;
   env?: Record<string, string>;
   initialInput?: string;
+  initialInputDelay?: number;
   submitSuffix?: string;
   hookPort?: number;
   hookToken?: string;
@@ -83,6 +84,7 @@ function fakeDeps(existingSessions: Session[] = []): {
             workingDir?: string;
             env?: Record<string, string>;
             initialInput?: string;
+            initialInputDelay?: number;
             submitSuffix?: string;
             hookPort?: number;
             hookToken?: string;
@@ -95,6 +97,7 @@ function fakeDeps(existingSessions: Session[] = []): {
             workingDir: opts.workingDir,
             env: opts.env,
             initialInput: opts.initialInput,
+            initialInputDelay: opts.initialInputDelay,
             submitSuffix: opts.submitSuffix,
             hookPort: opts.hookPort,
             hookToken: opts.hookToken,
@@ -811,6 +814,7 @@ describe('relaunchFtownSession — entry-point parity with createFtownSession', 
         workingDir: undefined,
         env: { FOO: 'bar' },
         initialInput: undefined,
+        initialInputDelay: undefined,
         submitSuffix: undefined,
         hookPort: 1,
         hookToken: 'token',
@@ -915,5 +919,80 @@ describe('legacy orchestrator compatibility', () => {
     await createFtownSession(harness.deps, { shellType: 'claude', prompt: 'keep my env', env: { FTOWN_ORCHESTRATOR: 'custom', USER_SETTING: 'keep' }, orchestrator: true });
     assert.deepEqual(harness.saved[0].env, { FTOWN_ORCHESTRATOR: 'custom', USER_SETTING: 'keep' });
     assert.equal(parseCreateSessionBody({ orchestrator: true, prompt: 'task' }).orchestrator, undefined);
+  });
+});
+
+// These are actual create calls with the browser's commandless payload shape.
+// Expectations assert the external launch contract, not another command builder.
+describe('commandless standard launch boundary', () => {
+  it('uses registry model/workspace flags and delivers the quoted task exactly once', async () => {
+    const realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
+    const home = mkdtempSync(join(tmpdir(), 'ftown-structured-unit-'));
+    process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
+    try {
+      const prompt = "inspect today's changes";
+      const quotedPrompt = "'inspect today'\\''s changes'";
+      const cases = [
+        { shellType: 'claude', base: "claude --allow-dangerously-skip-permissions --model 'provider/model'" },
+        { shellType: 'cursor', base: `agent --force --workspace '${home}' --model 'provider/model'` },
+        { shellType: 'codex', base: "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -m 'provider/model'" },
+        { shellType: 'grok', base: "grok --always-approve -m 'provider/model'" },
+        { shellType: 'muse', base: `muse --yolo --workspace '${home}' --model 'provider/model'` },
+      ] as const;
+      for (const { shellType, base } of cases) {
+        const h = fakeDeps();
+        const session = await createFtownSession(h.deps, { shellType, model: 'provider/model', prompt,
+          workingDir: home, env: { CUSTOM_SETTING: 'kept verbatim' } });
+        assert.equal(session.command, base, `${shellType}: persisted command excludes the task`);
+        assert.equal(session.prompt, prompt);
+        assert.equal(session.model, 'provider/model');
+        assert.equal(h.runs[0].command, `${base} ${quotedPrompt}`);
+        assert.equal(h.runs[0].workingDir, home);
+        assert.equal(h.runs[0].env?.CUSTOM_SETTING, 'kept verbatim');
+        assert.equal(h.runs[0].initialInput, undefined, `${shellType}: no second typed task`);
+        assert.equal(h.runs[0].initialInputDelay, undefined);
+        assert.equal(h.runs[0].submitSuffix, undefined);
+      }
+    } finally { restoreHome(realHome); rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it('retains typed task delivery for shell and kimi-code without putting it into the command', async () => {
+    for (const shellType of ['shell', 'kimi-code'] as const) {
+      const h = fakeDeps();
+      const session = await createFtownSession(h.deps, { shellType, prompt: 'one task' });
+      assert.equal(h.runs[0].command, session.command);
+      assert.equal(h.runs[0].command.includes('one task'), false);
+      assert.equal(h.runs[0].initialInput, 'one task');
+      assert.equal(h.runs[0].initialInputDelay, 2000);
+      assert.equal(h.runs[0].submitSuffix, '\r');
+    }
+  });
+
+  it('delivers a new resume-create task once but never replays it on resurrection', async () => {
+    const h = fakeDeps();
+    const session = await createFtownSession(h.deps, { shellType: 'claude', claudeSessionId: 'native-id',
+      model: 'chosen-model', prompt: 'new follow-up task' });
+    assert.match(h.runs[0].command, /--model 'chosen-model' --resume 'native-id'$/);
+    assert.equal(h.runs[0].command.includes('new follow-up task'), false);
+    assert.equal(h.runs[0].initialInput, 'new follow-up task');
+    assert.equal(h.runs[0].submitSuffix, '\r');
+    session.status = 'error';
+    await relaunchFtownSession(h.deps, session, 'resume');
+    assert.equal(h.runs[1].command, h.runs[0].command);
+    assert.equal(h.runs[1].initialInput, undefined);
+    assert.equal(h.runs[1].initialInputDelay, undefined);
+  });
+
+  it('preserves old-browser/custom commands and raw input byte-for-byte', async () => {
+    const h = fakeDeps();
+    const command = "my-wrapper --custom 'chosen model'";
+    const session = await createFtownSession(h.deps, { shellType: 'claude', command, prompt: 'metadata only',
+      initialInput: 'raw input\r', initialInputDelay: 37, env: { WRAPPER_SETTING: 'preserved' } });
+    assert.equal(session.command, command);
+    assert.equal(h.runs[0].command, command);
+    assert.equal(h.runs[0].initialInput, 'raw input\r');
+    assert.equal(h.runs[0].initialInputDelay, 37);
+    assert.equal(h.runs[0].submitSuffix, '');
+    assert.equal(h.runs[0].env?.WRAPPER_SETTING, 'preserved');
   });
 });

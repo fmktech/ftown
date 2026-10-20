@@ -18,6 +18,7 @@ import { directShellCommand } from './direct-shell.js';
 import type { SessionRuntime } from './types.js';
 
 export interface ProcessRunnerEvents {
+  ready: [sessionId: string];
   data: [string, string];
   complete: [string];
   error: [string, Error];
@@ -65,6 +66,13 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
   /** Last client-requested size, so tmux reattach does not snap back to creation-time size. */
   private readonly lastSizes: Map<string, { cols: number; rows: number }> = new Map();
 
+  constructor(private readonly dependencies: {
+    spawn?: typeof pty.spawn;
+    createTmuxSession?: typeof createTmuxSession;
+  } = {}) {
+    super();
+  }
+
   getPreferredRuntime(): SessionRuntime {
     // Native Windows PTYs cannot attach to a Unix tmux server.
     if (process.platform === 'win32') return 'direct';
@@ -106,7 +114,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
     if (this.activeProcesses.has(sessionId)) {
       return true;
     }
-    if (!isTmuxAvailable() || !hasTmuxSession(sessionId)) {
+    if (!this.hasTmuxSession(sessionId)) {
       return false;
     }
 
@@ -240,7 +248,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
     params: Omit<TmuxAttachParams, 'env'>,
   ): Promise<void> {
     try {
-      await createTmuxSession({
+      await (this.dependencies.createTmuxSession ?? createTmuxSession)({
         sessionId,
         command,
         cwd: params.cwd,
@@ -278,7 +286,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
 
     let proc: IPty;
     try {
-      proc = pty.spawn(
+      proc = (this.dependencies.spawn ?? pty.spawn)(
         'tmux',
         ['-L', TMUX_SOCKET_NAME, 'attach-session', '-t', `=${tmuxSessionName(sessionId)}`],
         {
@@ -342,6 +350,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
       }
     });
 
+    this.emit('ready', sessionId);
     this.scheduleInitialInput(sessionId, proc, params.initialInput, params.initialInputDelay, params.submitSuffix);
   }
 
@@ -357,7 +366,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
     let proc: IPty;
     try {
       const shell = directShellCommand(command);
-      proc = pty.spawn(shell.file, shell.args, {
+      proc = (this.dependencies.spawn ?? pty.spawn)(shell.file, shell.args, {
         name: 'xterm-256color',
         cols,
         rows,
@@ -394,6 +403,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
       }
     });
 
+    this.emit('ready', sessionId);
     this.scheduleInitialInput(sessionId, proc, options.initialInput, options.initialInputDelay, options.submitSuffix);
   }
 

@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Centrifuge } from "centrifuge";
-import type { Command, CommandResponse, Session } from "@/types";
+import type { Command, CommandResponse, Session, ShellType } from "@/types";
 import type { BridgeRpc } from "./useBridgeRpc";
 import { useSessions, mergeSessionSnapshot } from "./useSessions";
 import { SessionList } from "@/components/SessionList";
@@ -52,6 +52,36 @@ function setup(immediate = false) {
   const ids = () => hook.result.current.sessions.map(s => s.id);
   return { ...h, ...hook, refresh, ids };
 }
+describe("structured session creation through the actual hook", () => {
+  const shellTypes: ShellType[] = ["claude", "cursor", "codex", "shell", "zai", "kimi", "opencode", "deepseek", "fireworks", "grok", "pi", "kimi-code", "muse"];
+
+  it.each(shellTypes)("leaves %s command and task delivery construction to the bridge", async (shellType) => {
+    const h = setup();
+    const prompt = "inspect today's changes; $(not a command)\nsecond line";
+    await act(async () => h.result.current.createSession(prompt, {
+      shellType, model: "provider/model 'quoted'", name: "named session", workingDir: "/work/with spaces",
+      bridgeId: "chosen-bridge", env: { CUSTOM_VALUE: "kept verbatim" }, createMissingWorkingDir: true,
+    }));
+    const command = vi.mocked(h.rpc.sendCommand).mock.calls.map(([value]) => value).find(value => value.type === "create_session")!;
+    expect(command.payload).toMatchObject({ prompt, shellType, model: "provider/model 'quoted'", name: "named session",
+      workingDir: "/work/with spaces", bridgeId: "chosen-bridge", env: { CUSTOM_VALUE: "kept verbatim" }, createMissingWorkingDir: true });
+    for (const key of ["command", "initialInput", "initialInputDelay"]) expect(command.payload).not.toHaveProperty(key);
+    expect(command.requestId).toEqual(expect.any(String));
+  });
+
+  it("defaults to Claude and preserves every native resume identifier without inventing input", async () => {
+    const h = setup();
+    const resume = { claudeSessionId: "claude-id", cursorSessionId: "cursor-id", codexSessionId: "codex-id",
+      museSessionId: "muse-id", piSessionId: "pi-id", piSessionFile: "/work/pi session.jsonl", opencodeSessionId: "opencode-id" };
+    await act(async () => h.result.current.createSession("", resume));
+    const command = vi.mocked(h.rpc.sendCommand).mock.calls.map(([value]) => value).find(value => value.type === "create_session")!;
+    expect(command.payload).toMatchObject({ prompt: "", shellType: "claude", ...resume });
+    expect(command.payload).not.toHaveProperty("createMissingWorkingDir");
+    expect(command.payload).not.toHaveProperty("initialInput");
+    expect(command.payload).not.toHaveProperty("command");
+  });
+});
+
 describe("retirement reconciliation through actual hook callbacks", () => {
   it("heals missed self/parent removal on reconnect with empty owner and isolates offline owners", () => {
     const h = setup(true); h.reply(h.request(), [row("self"), row("parent-child")], "a");
