@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Centrifuge } from "centrifuge";
-import type { Command, CommandResponse, Session, ShellType } from "@/types";
+import type { Command, CommandResponse, CreateSessionPayload, Session, ShellType } from "@/types";
 import type { BridgeRpc } from "./useBridgeRpc";
 import { useSessions, mergeSessionSnapshot } from "./useSessions";
 import { SessionList } from "@/components/SessionList";
@@ -29,7 +29,8 @@ function harness(immediate = false) {
   const commands: Command[] = [];
   const rpc: BridgeRpc = {
     publishCommand: vi.fn(c => { commands.push(c); }),
-    sendCommand: vi.fn(async c => ({ requestId: c.requestId, success: true, data: { usages: {} } })),
+    sendCommand: vi.fn(async c => ({ requestId: c.requestId, success: true, data: c.type === "create_session"
+      ? { session: row("created-session", (c.payload as CreateSessionPayload).bridgeId ?? "a", { status: "running" }) } : { usages: {} } })),
     sendCommandCollect: vi.fn(), bridgeExec: vi.fn(), lastResponse: null,
     onResponse: cb => { responses.add(cb); return () => { responses.delete(cb); }; },
     onSubscribed: cb => { subscribed.add(cb); if (immediate) cb(); return () => { subscribed.delete(cb); }; },
@@ -321,4 +322,78 @@ it("reconciles correlated local transport snapshots using its bridge scope", () 
   act(() => hook.result.current.refreshSessions());
   h.reply(h.request(), []);
   expect(hook.result.current.sessions).toEqual([]);
+});
+
+describe("create response identity before session publications", () => {
+  it("returns and reconciles the exact successful session before its publication arrives", async () => {
+    const h = setup();
+    const created = row("created-id", "a", { status: "running", name: "Created session" });
+    vi.mocked(h.rpc.sendCommand).mockImplementation(async command => ({ requestId: command.requestId, success: true, data: { session: created } }));
+    let result: unknown;
+    await act(async () => { result = await h.result.current.createSession("", { shellType: "shell", bridgeId: "a" }); });
+    expect(result).toEqual(created);
+    expect(h.result.current.sessions).toEqual([created]);
+  });
+});
+
+describe("create result reconciliation boundaries", () => {
+  function pendingCreate() {
+    const h = setup(true);
+    let resolve!: (response: CommandResponse) => void;
+    vi.mocked(h.rpc.sendCommand).mockImplementation(() => new Promise<CommandResponse>(done => { resolve = done; }));
+    const pending = h.result.current.createSession("", { shellType: "shell", bridgeId: "a" });
+    return { ...h, pending, resolve: (session: Session) => resolve({ requestId: "create", success: true, data: { session } }) };
+  }
+
+  it("keeps a reply-before-publication row through an older list and merges a duplicate publication once", async () => {
+    const h = setup(true); const oldList = h.request();
+    const created = row("created", "a", { status: "running" });
+    vi.mocked(h.rpc.sendCommand).mockResolvedValue({ requestId: "create", success: true, data: { session: created } });
+    await act(async () => { await h.result.current.createSession("", { shellType: "shell" }); });
+    h.reply(oldList, [], "a");
+    expect(h.ids()).toEqual(["created"]);
+    h.publication(created);
+    expect(h.result.current.sessions).toEqual([created]);
+  });
+
+  it("preserves a newer publication when the older create response resolves", async () => {
+    const h = pendingCreate();
+    const older = row("created", "a", { status: "running", name: "Original" });
+    const newer = { ...older, status: "completed" as const, name: "Renamed", updatedAt: "2026-10-22" };
+    h.publication(newer);
+    let returned: unknown;
+    await act(async () => { h.resolve(older); returned = await h.pending; });
+    expect(returned).toEqual(newer);
+    expect(h.result.current.sessions).toEqual([newer]);
+  });
+
+  it.each(["confirmed", "optimistic"])("does not resurrect a %s removed row from a late create result", async kind => {
+    const h = pendingCreate(); const created = row("created", "a", { status: "running" });
+    h.publication(created);
+    if (kind === "confirmed") h.publication(created, "removed");
+    else act(() => h.result.current.removeSession(created.id));
+    await act(async () => { h.resolve(created); await expect(h.pending).rejects.toThrow("no longer available"); });
+    expect(h.ids()).toEqual([]);
+  });
+
+  it.each(["account switch", "unmount"])("rejects an old-context create response after %s", async boundary => {
+    const h = pendingCreate();
+    if (boundary === "account switch") h.rerender({ userId: "other-user" }); else h.unmount();
+    await act(async () => { h.resolve(row("created")); await expect(h.pending).rejects.toThrow("context changed"); });
+    expect(h.ids()).toEqual([]);
+  });
+
+  it.each([undefined, null, {}, { session: { id: "partial" } }, { session: row("wrong-owner", "b") }])("rejects malformed or wrong-owner success data %# without changing rows", async data => {
+    const h = setup(); h.publication(row("existing"));
+    vi.mocked(h.rpc.sendCommand).mockResolvedValue({ requestId: "create", success: true, data });
+    await act(async () => { await expect(h.result.current.createSession("", { bridgeId: "a" })).rejects.toThrow("invalid created session"); });
+    expect(h.ids()).toEqual(["existing"]);
+  });
+
+  it("preserves bridge error details and rows on unsuccessful creation", async () => {
+    const h = setup(); h.publication(row("existing"));
+    vi.mocked(h.rpc.sendCommand).mockResolvedValue({ requestId: "create", success: false, error: "Missing directory", data: { code: "working_dir_missing", workingDir: "/missing", canCreate: true } });
+    await act(async () => { await expect(h.result.current.createSession("", {})).rejects.toMatchObject({ message: "Missing directory", code: "working_dir_missing", workingDir: "/missing", canCreate: true }); });
+    expect(h.ids()).toEqual(["existing"]);
+  });
 });
