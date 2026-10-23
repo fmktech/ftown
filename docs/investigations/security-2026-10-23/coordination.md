@@ -75,3 +75,23 @@ PostCSS resolution accepted: global `$postcss` plus targeted npm update removed 
 Npm owner also owns `docker/solo/README.md` solely to align the documented0.19.41 package pin with the approved0.19.50 pin and preserve publish-before-build prerequisite. All46leases mechanically non-overlapping. Dev patched targets remain Vite8.1.6/Undici7.29.1; scoped parent overrides may select those reviewed patched versions instead of unrelated latest minor upgrades, with final compatiblegraph/audit validation.
 
 Integration finding: origin/main advanced to c194a6c with compatible Node/CA security remediation overlapping runtime selectors and Docker files. Sole Git owner will first commit the task snapshot, then merge origin/main preserving its CA update commands and existing changes. No bridgeversion collision (.49 upstream, this task.50). Root coordination files now frozen/released for Git integration; four unrelated dirty notes remain excluded and byte-identical. Source review closes against mergedfinaltree before runtime/PR gate.
+
+Final merged source independently approved at229a90760d26d280aa6c2d43fcbd2a74a9190b42 and pushed withoutforce. All four npm audits reportzero. Root verified E2E localPGselectors(localhost:5432/ftown), localNeonshim URL and scratchHOME before dispatch; no production DB/secrets injected. Root dispatched [E2E39943863194](https://github.com/fmktech/ftown/actions/runs/39943863194) and [Centrifugo39943867710](https://github.com/fmktech/ftown/actions/runs/39943867710) with explicitdeploy=false; legacydeploy notinvoked. Gitleaks39943825478 passed. Runtimechecks pending. Root reacquired coordinatorfiles while Gitowner idle.
+
+Centrifugo validation39943867710 passed allpureguards, real6.10.2 checkconfig for4configs(no unknown-key warnings), Flyimagebuild andendpoint/originruntime smoke; deployjob skipped. CIevidence saved at `/var/folders/ft/gvw3pk8x1w7g7cxhzj50ptyh0000gn/T/ftown-security-ci-rlb6pcvw/centrifugo.log`. Combined E2Ejob advanced past UI/bridge units+builds, releaseartifact checks and actualSolo securitysmoke successfully; browser suite now running.
+
+## Accepted verification and completion gate
+
+At source revision `229a90760d26d280aa6c2d43fcbd2a74a9190b42`, root-managed GitHub Actions passed:
+
+- UI: 343 tests in 37 files and production build/type checks.
+- Bridge: 862 passed, 4 existing skips, 0 failures; clean build/type checks.
+- Release planning/artifact parity: 17 passed.
+- Browser suite: 38 passed, 2 existing skips. Covers real Credentials login/session/signout, all three transport paths, owner/foreign subscription and publisher controls, HTTP IDOR, desktop/mobile session creation, lifecycle and restart recovery. Skips are existing mail PTY nudge and stopped/errored-session retry cases.
+- Actual managed Solo 6.10.2: verified archive/cache, mode 0600 config, JWT audience, owner isolation, publish/history/reconnect, disabled API/admin and loopback binding.
+- Centrifugo: 34 pure/fake guards, all four real binary configs without unknown-key warnings, Fly image build, and endpoint/origin smoke. Deployment explicitly skipped.
+- npm audits: bridge/UI/E2E/shim all zero known vulnerabilities. Gitleaks passed.
+
+[Combined validation](https://github.com/fmktech/ftown/actions/runs/39943863194) and [Centrifugo validation](https://github.com/fmktech/ftown/actions/runs/39943867710) are final runtime evidence for unchanged source. Raw logs are retained in the CI evidence directory above. Recorded-process shutdown and Docker teardown passed; no task local service or Boat sandbox was created. Four unrelated dirty notes remain byte-identical.
+
+Independent review accepted the merged source; source owners and reviewer completed and released leases. Root accepts all implementation/runtime gates and authorizes the existing Git integration owner to commit this evidence, push and open the PR against main. Documentation-only evidence updates do not invalidate source test results. No merge, production deployment, global Node change or npm publication is performed. The legacy host still needs a patched binary/image before guarded configuration deployment; the Solo Docker image requires ftown-bridge 0.19.50 publication before build. Managed hosting patch level is platform-controlled; repository runtime selectors are not deployment proof.

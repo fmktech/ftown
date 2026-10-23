@@ -58,10 +58,10 @@
     "/root/npx_review": []
   },
   "resources": {
-    "npm installs/locks": "npx_implementation",
+    "npm installs/locks": "released",
     "Git index/history": "npx_implementation",
-    "E2E/servers/DB/CI execution": "root",
-    "remote validation": "root: GitHub Actions; Boat create rejected daily quota"
+    "E2E/servers/DB/CI execution": "root: complete and cleaned",
+    "remote validation": "GitHub Actions passed; Boat creation rejected without resource creation"
   },
-  "status": "implementation and independent review active; source freeze and remote gates pending"
+  "status": "source and runtime gates passed; workers completed; final evidence commit and PR publication assigned to npx_implementation"
 }
