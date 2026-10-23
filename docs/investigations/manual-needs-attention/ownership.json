@@ -1,0 +1,31 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "branch": "feat/manual-needs-attention",
+  "model": "gpt-6.1-sol",
+  "reasoning_effort": "high",
+  "owners": {
+    "/root": [
+      "docs/investigations/manual-needs-attention/coordination.md",
+      "docs/investigations/manual-needs-attention/ownership.json"
+    ],
+    "/root/attention_implementation": [
+      "ui/src/components/SessionList.tsx",
+      "ui/src/components/session-needs-attention.test.ts",
+      "e2e/tests/session-needs-attention.spec.ts",
+      ".github/workflows/e2e.yml",
+      "bridge/src/attention-store.test.ts"
+    ],
+    "/root/npx_review": [],
+    "/root/npx_implementation": []
+  },
+  "resources": {
+    "Git index/history": "/root/npx_implementation",
+    "E2E/CI/browser/servers/generated artifacts": "/root: acceptance passed; CI cleanup verified; screenshots retained",
+    "dependency installs/lockfiles": "none authorized"
+  },
+  "dependencies": [
+    "independent contract review before implementation",
+    "implementation handoff before final source review and combined E2E"
+  ],
+  "status": "PR128 open; UI/runtime/visual acceptance passed; test cleanup repair independently approved with 13 tests and bridge tsc passed; repair/review workers stopped; Git owner authorized to push repair and evidence"
+}

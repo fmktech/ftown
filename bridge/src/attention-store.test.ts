@@ -166,6 +166,9 @@ test('questions remain immediate and committed/deduplicated while idle is delaye
   const throwing = new AttentionStore(f.resolve, 500, () => { throw new Error('observer'); });
   t.after(async () => { throwing.stopNotifications(); });
   await throwing.record('s1', 'Notification', notice('another'));
+  // This real-clock store can restore the fake-clock idle cycle as overdue.
+  // Stop timers before the final serialized read drains writes ahead of fixture removal.
+  throwing.stopNotifications();
   assert.equal((await throwing.list('s1')).events.length, 2);
 });
 test('busy, session end, deletion and shutdown cancel idle without reviving deleted sessions', async (t) => {
