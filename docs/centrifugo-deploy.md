@@ -1,11 +1,32 @@
 # Centrifugo config deploy
 
+## Required runtime upgrade before config deployment
+
+The committed template uses Centrifugo **6.10.2** configuration. The remote
+helper rejects old, prerelease or unparseable binary versions before backing up,
+installing configuration or restarting anything. It does not install binaries
+or recreate Docker containers. An operator must first prepare a matching patched
+binary/image and v6 config together on the intended host; the current v5 service
+is not remediated merely by merging this PR. Do not start the patched image with
+an old v5 config or feed the v6 template to a v5 binary.
+
+The four existing GitHub secret names/placeholders are unchanged. Rendering now
+checks `client.token.hmac_secret_key`, `http_api.key`, `admin.password` and
+`admin.secret`; ACME settings live under `http_server.tls_autocert`. This retains
+legacy TLS/admin/API policy rather than expanding the hardened Fly surface.
+
+Validate with the pinned binary and reject unknown-key warnings before any
+cutover. Rollback pairs the previous binary/image with its matching previous
+configuration. Restart loses in-memory channel history, as before; no persistent
+schema migration is introduced.
+
+
 > This is the legacy AWS/EC2 runbook. New deployments use the hardened Fly.io
 > package and cutover procedure in
 > [`centrifugo-fly-rollout.md`](./centrifugo-fly-rollout.md). Keep this runbook
 > until the Fly migration has passed its rollback window.
 
-Automated, drift-proof deployment of the Centrifugo (v5) configuration to the
+Automated, drift-proof deployment of the Centrifugo (v6) configuration to the
 production EC2 host.
 
 The problem this solves: the live server config drifted from the repo. Newer
@@ -55,7 +76,7 @@ job runs with `permissions: contents: read`.
    it **never prints** the rendered file (only field/env names). Output is
    written mode `0600` outside the checkout.
 3. **Validate** — `jq empty` on the rendered JSON, then `centrifugo checkconfig`
-   inside `centrifugo/centrifugo:v5`. `checkconfig` is a purely **structural**
+   inside the pinned `centrifugo/centrifugo:v6.10.2` image. `checkconfig` is a purely **structural**
    check, so it runs against the committed **placeholder template** — the
    real-secret render is never mounted into the third-party image.
 4. **Install SSH key** — the `CENTRIFUGO_SSH_KEY` secret is written to a `600`

@@ -1,92 +1,110 @@
 {
-  "token_hmac_secret_key": "e2e-centrifugo-token-secret-0123456789abcdef",
-  "api_key": "e2e-centrifugo-api-key-0123456789abcdef",
-  "admin": true,
-  "admin_password": "admin",
-  "admin_secret": "admin-secret",
-  "allowed_origins": [
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "http://localhost:3002"
-  ],
-  "allow_anonymous_connect_without_token": false,
-  "token_audience": "ftown:centrifugo",
-  "allow_user_limited_channels": true,
-  "allow_publish_for_subscriber": false,
-  "allow_subscribe_for_client": false,
-  "allow_history_for_subscriber": true,
-  "presence": true,
-  "join_leave": true,
-  "force_push_join_leave": true,
-  "allow_presence_for_subscriber": true,
-  "history_size": 500,
-  "history_ttl": "24h",
-  "force_recovery": true,
-  "namespaces": [
-    {
-      "name": "terminal",
-      "allow_publish_for_subscriber": true,
-      "allow_subscribe_for_client": true,
+  "client": {
+    "token": {
+      "hmac_secret_key": "e2e-centrifugo-token-secret-0123456789abcdef",
+      "audience": "ftown:centrifugo"
+    },
+    "allowed_origins": [
+      "http://localhost:3000",
+      "http://localhost:3001",
+      "http://localhost:3002"
+    ],
+    "allow_anonymous_connect_without_token": false,
+    "channel_limit": 256,
+    "queue_max_size": 67108864,
+    "stale_close_delay": "30s",
+    "ping_interval": "10s",
+    "pong_timeout": "5s"
+  },
+  "http_api": {
+    "key": "e2e-centrifugo-api-key-0123456789abcdef"
+  },
+  "admin": {
+    "enabled": true,
+    "password": "admin",
+    "secret": "admin-secret"
+  },
+  "channel": {
+    "without_namespace": {
       "allow_user_limited_channels": true,
+      "allow_publish_for_subscriber": false,
+      "allow_subscribe_for_client": false,
       "allow_history_for_subscriber": true,
-      "history_size": 10000,
-      "history_ttl": "24h",
-      "force_recovery": true,
-      "allow_publish_for_client": true
-    },
-    {
-      "name": "sessions",
-      "allow_publish_for_subscriber": true,
-      "allow_subscribe_for_client": true,
-      "allow_user_limited_channels": true,
-      "history_size": 0,
-      "history_ttl": "0s",
-      "force_recovery": false,
-      "allow_publish_for_client": true
-    },
-    {
-      "name": "terminal-input",
-      "allow_publish_for_subscriber": true,
-      "allow_subscribe_for_client": true,
-      "allow_user_limited_channels": true,
-      "allow_publish_for_client": true
-    },
-    {
-      "name": "events",
-      "allow_publish_for_subscriber": true,
-      "allow_subscribe_for_client": true,
-      "allow_user_limited_channels": true,
-      "history_size": 100,
-      "history_ttl": "1h",
-      "allow_publish_for_client": true
-    },
-    {
-      "name": "commands",
-      "allow_publish_for_subscriber": true,
-      "allow_subscribe_for_client": true,
-      "allow_user_limited_channels": true,
-      "allow_publish_for_client": true
-    },
-    {
-      "name": "bridges",
-      "allow_publish_for_subscriber": true,
-      "allow_subscribe_for_client": true,
-      "allow_user_limited_channels": true,
       "presence": true,
       "join_leave": true,
       "force_push_join_leave": true,
       "allow_presence_for_subscriber": true,
-      "allow_publish_for_client": true
-    }
-  ],
-  "client_channel_limit": 256,
-  "websocket_message_size_limit": 33554432,
-  "websocket_compression": true,
-  "websocket_compression_min_size": 1024,
-  "client_queue_max_size": 67108864,
-  "client_stale_close_delay": "30s",
-  "ping_interval": "10s",
-  "pong_timeout": "5s",
-  "log_level": "info",
-  "health": true
+      "history_size": 500,
+      "history_ttl": "24h",
+      "force_recovery": true
+    },
+    "namespaces": [
+      {
+        "name": "terminal",
+        "allow_publish_for_subscriber": true,
+        "allow_subscribe_for_client": true,
+        "allow_user_limited_channels": true,
+        "allow_history_for_subscriber": true,
+        "history_size": 10000,
+        "history_ttl": "24h",
+        "force_recovery": true,
+        "allow_publish_for_client": true
+      },
+      {
+        "name": "sessions",
+        "allow_publish_for_subscriber": true,
+        "allow_subscribe_for_client": true,
+        "allow_user_limited_channels": true,
+        "history_size": 0,
+        "history_ttl": "0s",
+        "force_recovery": false,
+        "allow_publish_for_client": true
+      },
+      {
+        "name": "terminal-input",
+        "allow_publish_for_subscriber": true,
+        "allow_subscribe_for_client": true,
+        "allow_user_limited_channels": true,
+        "allow_publish_for_client": true
+      },
+      {
+        "name": "events",
+        "allow_publish_for_subscriber": true,
+        "allow_subscribe_for_client": true,
+        "allow_user_limited_channels": true,
+        "history_size": 100,
+        "history_ttl": "1h",
+        "allow_publish_for_client": true
+      },
+      {
+        "name": "commands",
+        "allow_publish_for_subscriber": true,
+        "allow_subscribe_for_client": true,
+        "allow_user_limited_channels": true,
+        "allow_publish_for_client": true
+      },
+      {
+        "name": "bridges",
+        "allow_publish_for_subscriber": true,
+        "allow_subscribe_for_client": true,
+        "allow_user_limited_channels": true,
+        "presence": true,
+        "join_leave": true,
+        "force_push_join_leave": true,
+        "allow_presence_for_subscriber": true,
+        "allow_publish_for_client": true
+      }
+    ]
+  },
+  "websocket": {
+    "message_size_limit": 33554432,
+    "compression": true,
+    "compression_min_size": 1024
+  },
+  "log": {
+    "level": "info"
+  },
+  "health": {
+    "enabled": true
+  }
 }

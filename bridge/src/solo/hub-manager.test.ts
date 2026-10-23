@@ -125,7 +125,7 @@ async function startStubHub(
     children.push(child);
     return asChild(child);
   };
-  const binPath = opts.binPath ?? '/opt/ftown/bin/centrifugo-v5.4.9';
+  const binPath = opts.binPath ?? '/opt/ftown/bin/centrifugo-v6.10.2';
   try {
     const running = await startHub({
       configPath,
@@ -180,15 +180,15 @@ describe('resolvePlatformTriple', () => {
 describe('assetUrl', () => {
   it('builds the pinned GitHub release asset URL shape', () => {
     assert.equal(
-      assetUrl('v5.4.9', 'linux-amd64'),
-      'https://github.com/centrifugal/centrifugo/releases/download/v5.4.9/centrifugo_5.4.9_linux_amd64.tar.gz',
+      assetUrl('v6.10.2', 'linux-amd64'),
+      'https://github.com/centrifugal/centrifugo/releases/download/v6.10.2/centrifugo_6.10.2_linux_amd64.tar.gz',
     );
   });
 
-  it('uses underscores in the filename triple (verified against v5.4.9 checksums.txt)', () => {
+  it('uses underscores in the filename triple (verified against v6.10.2 checksums.txt)', () => {
     assert.equal(
-      assetUrl('v5.4.9', 'darwin-arm64'),
-      'https://github.com/centrifugal/centrifugo/releases/download/v5.4.9/centrifugo_5.4.9_darwin_arm64.tar.gz',
+      assetUrl('v6.10.2', 'darwin-arm64'),
+      'https://github.com/centrifugal/centrifugo/releases/download/v6.10.2/centrifugo_6.10.2_darwin_arm64.tar.gz',
     );
   });
 });
@@ -203,54 +203,21 @@ describe('writeHubConfig', () => {
 
     const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
     assert.deepEqual(parsed, {
-      address: '127.0.0.1',
-      port: 8041,
-      token_hmac_secret_key: 'super-secret-value',
-      token_audience: HUB_JWT_AUDIENCE,
-      allowed_origins: [],
-      websocket_compression: false,
-      allow_anonymous_connect_without_token: false,
-      admin: false,
-      api_disable: true,
-      health: true,
-      ...HUB_CHANNEL_DEFAULTS,
-      namespaces: HUB_NAMESPACES,
-      allow_user_limited_channels: true,
-      client_channel_limit: 256,
-      client_queue_max_size: 67108864,
-      client_stale_close_delay: '30s',
-      websocket_message_size_limit: 33554432,
-      ping_interval: '10s',
-      pong_timeout: '5s',
+      http_server: { address: '127.0.0.1', port: 8041 },
+      client: {
+        token: { hmac_secret_key: 'super-secret-value', audience: HUB_JWT_AUDIENCE },
+        allowed_origins: [], allow_anonymous_connect_without_token: false,
+        channel_limit: 256, queue_max_size: 67108864, stale_close_delay: '30s',
+        ping_interval: '10s', pong_timeout: '5s',
+      },
+      websocket: { compression: false, message_size_limit: 33554432 },
+      admin: { enabled: false }, http_api: { disabled: true }, health: { enabled: true },
+      channel: {
+        without_namespace: { ...HUB_CHANNEL_DEFAULTS, allow_user_limited_channels: true },
+        namespaces: HUB_NAMESPACES,
+      },
     });
-    assert.deepEqual(Object.keys(parsed).sort(), [
-      'address',
-      'admin',
-      'allow_anonymous_connect_without_token',
-      'allow_history_for_subscriber',
-      'allow_presence_for_subscriber',
-      'allow_user_limited_channels',
-      'allowed_origins',
-      'api_disable',
-      'client_channel_limit',
-      'client_queue_max_size',
-      'client_stale_close_delay',
-      'force_push_join_leave',
-      'force_recovery',
-      'health',
-      'history_size',
-      'history_ttl',
-      'join_leave',
-      'namespaces',
-      'ping_interval',
-      'pong_timeout',
-      'port',
-      'presence',
-      'token_audience',
-      'token_hmac_secret_key',
-      'websocket_compression',
-      'websocket_message_size_limit',
-    ]);
+    assert.deepEqual(Object.keys(parsed).sort(), ['admin', 'channel', 'client', 'health', 'http_api', 'http_server', 'websocket']);
   });
 
   it('never enables admin/api or opens bind address/origins (S7 boundary)', async () => {
@@ -258,53 +225,56 @@ describe('writeHubConfig', () => {
     const configPath = path.join(dir, 'hub.json');
     await writeHubConfig(configPath, { port: 8042, secret: 'another-secret-value' });
     const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
-    assert.equal(parsed.address, '127.0.0.1');
-    assert.equal(parsed.api_disable, true);
-    assert.equal(parsed.admin, false);
-    assert.deepEqual(parsed.allowed_origins, []);
+    assert.deepEqual(parsed.http_server, { address: '127.0.0.1', port: 8042 });
+    assert.deepEqual(parsed.http_api, { disabled: true });
+    assert.deepEqual(parsed.admin, { enabled: false });
+    const client = parsed.client as Record<string, unknown>;
+    assert.deepEqual(client.allowed_origins, []);
+    assert.equal(client.allow_anonymous_connect_without_token, false);
   });
 
-  it('drift guard: namespaces + channel defaults match production centrifugo/config.json exactly (fixes code 102 unknown channel)', async () => {
-    const prodConfigPath = path.join(
-      path.dirname(new URL(import.meta.url).pathname),
-      '..',
-      '..',
-      '..',
-      'centrifugo',
-      'config.json',
-    );
-    const prodConfig = JSON.parse(readFileSync(prodConfigPath, 'utf8')) as Record<string, unknown>;
-    assert.ok(Array.isArray(prodConfig.namespaces), 'production config must define namespaces');
-    assert.deepEqual(
-      HUB_NAMESPACES,
-      prodConfig.namespaces,
-      'solo hub namespaces have drifted from production centrifugo/config.json — ' +
-        'every namespaced channel (bridges:presence#solo, commands:rpc#solo, ' +
-        'sessions:*, terminal:*, terminal-input:*, events:*) ' +
-        'will 102 "unknown channel" if these are not identical',
-    );
-
-    for (const key of Object.keys(HUB_CHANNEL_DEFAULTS)) {
-      assert.deepEqual(
-        HUB_CHANNEL_DEFAULTS[key],
-        prodConfig[key],
-        `HUB_CHANNEL_DEFAULTS.${key} has drifted from production centrifugo/config.json ` +
-          `top-level "${key}" — namespaces without their own override inherit this default`,
-      );
+  it('keeps explicit namespace options and non-namespaced defaults in sync with development config', async () => {
+    const prodConfigPath = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..', 'centrifugo', 'config.json');
+    const prodConfig = JSON.parse(readFileSync(prodConfigPath, 'utf8')) as { channel: { namespaces: unknown; without_namespace: Record<string, unknown> } };
+    assert.deepEqual(HUB_NAMESPACES, prodConfig.channel.namespaces);
+    for (const [key, value] of Object.entries(HUB_CHANNEL_DEFAULTS)) {
+      assert.deepEqual(value, prodConfig.channel.without_namespace[key], `without_namespace.${key} drifted`);
     }
-
+    // Named namespaces do not inherit without_namespace. In particular sessions
+    // stays nonrecoverable and terminal retains its explicit retention policy.
+    const sessions = HUB_NAMESPACES.find(namespace => namespace.name === 'sessions');
+    assert.equal(sessions?.force_recovery, false);
+    assert.equal(sessions?.history_size, 0);
     const dir = tmpDir('cfg-drift');
     const configPath = path.join(dir, 'hub.json');
     await writeHubConfig(configPath, { port: 8043, secret: 'drift-guard-secret-value' });
-    const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
-    assert.deepEqual(parsed.namespaces, prodConfig.namespaces);
-    for (const key of Object.keys(HUB_CHANNEL_DEFAULTS)) {
-      assert.deepEqual(parsed[key], prodConfig[key]);
-    }
-    assert.equal(parsed.address, '127.0.0.1');
-    assert.equal(parsed.api_disable, true);
-    assert.equal(parsed.admin, false);
-    assert.deepEqual(parsed.allowed_origins, []);
+    const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as { channel: { namespaces: unknown; without_namespace: Record<string, unknown> } };
+    assert.deepEqual(parsed.channel.namespaces, prodConfig.channel.namespaces);
+    for (const [key, value] of Object.entries(HUB_CHANNEL_DEFAULTS)) assert.deepEqual(parsed.channel.without_namespace[key], value);
+  });
+
+  it('starts from nested v6 port and token fields without an HTTP listener or real child', async () => {
+    const dir = tmpDir('cfg-start');
+    const configPath = path.join(dir, 'hub.json');
+    await writeHubConfig(configPath, { port: 58321, secret: 'nested-v6-hub-secret' });
+    const child = new StubHubChild();
+    child.pid = undefined;
+    let spawned = false;
+    const running = await startHub({
+      dataDir: dir, configPath, binPath: '/fixture/centrifugo-v6.10.2',
+      spawnImpl: (command, args) => {
+        spawned = true;
+        assert.equal(command, '/fixture/centrifugo-v6.10.2');
+        assert.deepEqual(args, ['-c', configPath]);
+        return child;
+      },
+      fetchImpl: async url => {
+        assert.equal(String(url), 'http://127.0.0.1:58321/health');
+        return new Response('{}');
+      },
+    });
+    assert.equal(spawned, true);
+    assert.equal(running.port, 58321);
   });
 
   it('keeps 0600 when overwriting an existing file (S7)', async () => {
@@ -369,7 +339,7 @@ describe('ensureHubBinary', () => {
     );
 
     const soloDir = path.join(dir, 'solo');
-    assert.ok(!existsSync(path.join(soloDir, 'bin', 'centrifugo-v5.4.9')));
+    assert.ok(!existsSync(path.join(soloDir, 'bin', 'centrifugo-v6.10.2')));
     assert.deepEqual(
       readdirSync(soloDir).filter((name) => name.startsWith('.')),
       [],
@@ -434,10 +404,10 @@ describe('startHub', () => {
     try {
       assert.equal(started.captures.length, 1);
       const cap = started.captures[0];
-      assert.equal(cap.command, '/opt/ftown/bin/centrifugo-v5.4.9');
+      assert.equal(cap.command, '/opt/ftown/bin/centrifugo-v6.10.2');
       assert.deepEqual([...cap.args], ['-c', started.configPath]);
       assert.deepEqual([cap.command, ...cap.args], [
-        '/opt/ftown/bin/centrifugo-v5.4.9',
+        '/opt/ftown/bin/centrifugo-v6.10.2',
         '-c',
         started.configPath,
       ]);

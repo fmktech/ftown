@@ -179,3 +179,18 @@ docker restart ftown-solo
   `172.17.0.2`), which isn't reachable from your browser — substitute the
   Docker host's real LAN IP (or `localhost` if browsing from the same
   machine) and keep the key from the banner.
+
+## Managed hub security version
+
+This release downloads Centrifugo **6.10.2** for Solo, verifies the embedded
+platform archive SHA256, and selects a new versioned cache entry. Existing v5
+cache files are not reused as the new binary. The generated configuration uses
+v6 nesting and keeps mode 0600, the same loopback bind, JWT audience, explicit
+namespace permissions, retention and health probe. No key rotation is needed.
+
+An already running bridge or old installed package keeps its old managed hub
+until the user upgrades through `npx ftown@<new-version> setup` and restarts.
+The container image also needs the new npm package published before rebuilding;
+this PR does not claim to build or deploy that image. Reverting requires the
+matching older package/config/binary; restarting either version loses the hub's
+in-memory publication history, not the separate durable FTown mailbox.

@@ -70,10 +70,10 @@ jobs:
           template = os.environ["TEMPLATE"]
           out = os.environ["RENDERED"]
           keys = {
-              "CENTRIFUGO_TOKEN_HMAC_SECRET_KEY": "token_hmac_secret_key",
-              "CENTRIFUGO_API_KEY": "api_key",
-              "CENTRIFUGO_ADMIN_PASSWORD": "admin_password",
-              "CENTRIFUGO_ADMIN_SECRET": "admin_secret",
+              "CENTRIFUGO_TOKEN_HMAC_SECRET_KEY": ("client", "token", "hmac_secret_key"),
+              "CENTRIFUGO_API_KEY": ("http_api", "key"),
+              "CENTRIFUGO_ADMIN_PASSWORD": ("admin", "password"),
+              "CENTRIFUGO_ADMIN_SECRET": ("admin", "secret"),
           }
 
           missing = [e for e in keys if not os.environ.get(e)]
@@ -96,14 +96,17 @@ jobs:
 
           data = json.loads(text)
           for env_name, field in keys.items():
-              if data.get(field) != os.environ[env_name]:
-                  sys.exit("ERROR: field " + field + " did not render to its secret value")
+              value = data
+              for component in field:
+                  value = value.get(component, {})
+              if value != os.environ[env_name]:
+                  sys.exit("ERROR: field " + ".".join(field) + " did not render to its secret value")
 
           fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
           with open(fd, "w", encoding="utf-8") as f:
               f.write(text)
 
-          print("render OK -> fields: " + ", ".join(sorted(keys.values())))
+          print("render OK -> fields: " + ", ".join(".".join(path) for path in sorted(keys.values())))
           PY
 
       # Validate the config. `jq empty` proves the RENDERED file is well-formed
@@ -114,9 +117,17 @@ jobs:
         run: |
           set -euo pipefail
           jq empty "$RENDERED"
-          docker run --rm -v "$PWD/centrifugo":/cfg:ro \
-            centrifugo/centrifugo:v5.4.9@sha256:90be10af3cb1c73c6b6cff8f6bcf02f8c0537d6aa1ed9f2cfe59a9e776a0c3d5 \
-            centrifugo checkconfig -c /cfg/config.prod.json
+          if ! output=$(docker run --rm -v "$PWD/centrifugo":/cfg:ro \
+            centrifugo/centrifugo:v6.10.2@sha256:34b84f823515927266ce3abfb840fd9e0acabb58805e7e896f5de731217a627d \
+            centrifugo checkconfig -c /cfg/config.prod.json 2>&1); then
+            printf '%s\n' "$output"
+            exit 1
+          fi
+          printf '%s\n' "$output"
+          if printf '%s\n' "$output" | grep -Eiq 'unknown|unrecognized|unsupported'; then
+            echo "ERROR: unknown Centrifugo configuration option" >&2
+            exit 1
+          fi
 
       - name: Install SSH key
         env:
@@ -164,7 +175,9 @@ jobs:
           ssh $SSH_OPTS "$TARGET" "chmod 600 '$REMOTE_DIR/config.prod.json'"
           # shellcheck disable=SC2086
           scp $SSH_OPTS scripts/deploy/centrifugo-remote.sh "$TARGET:$REMOTE_DIR/centrifugo-remote.sh"
-          # The remote script self-detects docker vs systemd, backs up, swaps,
+          # The remote script rejects runtimes older than 6.10.2 before backing up/swapping.
+          # Upgrade the host binary/image manually first; this workflow never does so.
+          # For a patched host it self-detects docker vs systemd, backs up, swaps,
           # restarts, health-checks, rolls back on failure, and self-deletes the
           # uploaded secret config on exit. Its non-zero exit fails this step
           # (and the job) loudly.
