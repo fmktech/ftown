@@ -41,7 +41,7 @@
 #        installed by this image (not required by the task); Opencode-harness
 #        sessions will fail to spawn until it is added — see README gotchas.
 
-FROM node:22-bookworm-slim
+FROM node:22.23.4-bookworm-slim
 
 # --- OS packages ---
 # ca-certificates: TLS for npm installs and outbound HTTPS (hub archive, panel bundle, Claude API).
@@ -62,7 +62,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # --- Non-root user ---
 # Sessions spawn shells (tmux/zsh) as this user; uid 1000 matches the common
 # first non-root uid on the Docker host so bind-mounted files land with a
-# recognizable owner. node:22-bookworm-slim already ships a uid/gid 1000
+# recognizable owner. node:22.23.4-bookworm-slim already ships a uid/gid 1000
 # user+group named "node" (for the same reason) — rename it to "ftown"
 # instead of fighting it for the id.
 RUN groupmod --new-name ftown node \
@@ -71,7 +71,7 @@ RUN groupmod --new-name ftown node \
 ENV HOME=/home/ftown
 
 # --- Global npm packages ---
-# ftown-bridge: pinned to 0.19.41 (explicit setup lifecycle).
+# ftown-bridge: pinned to 0.19.50 (explicit setup lifecycle).
 # @anthropic-ai/claude-code: the `claude` CLI that harness-registry.ts:229 spawns
 # for Claude Code sessions. Auth is NOT baked into the image — see README
 # "Agent auth" for the two supported options (ANTHROPIC_API_KEY env var, or a
@@ -81,7 +81,7 @@ ENV HOME=/home/ftown
 # extension into the container and extension/protocol compatibility depends
 # on the pi version matching — see README "Agent auth".
 # Requires the npm setup release to be published before building this image.
-RUN npm install -g ftown-bridge@0.19.41 @anthropic-ai/claude-code @earendil-works/pi-coding-agent@0.83.0 \
+RUN npm install -g ftown-bridge@0.19.50 @anthropic-ai/claude-code @earendil-works/pi-coding-agent@0.83.0 \
     && npm cache clean --force
 
 # --- Volumes ---
