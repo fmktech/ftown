@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
-  "description": "Web dashboard for ftown \u2014 orchestrate remote Claude Code, Cursor Agent, and CLI sessions",
+  "description": "Web dashboard for ftown — orchestrate remote Claude Code, Cursor Agent, and CLI sessions",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/fmktech/ftown.git",
@@ -32,7 +32,7 @@
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "sharp": "^0.35.5",
-    "uuid": "^11.1.0",
+    "uuid": "^11.1.1",
     "web-push": "^3.6.7"
   },
   "devDependencies": {
