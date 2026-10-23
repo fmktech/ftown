@@ -22,6 +22,7 @@ export interface Session {
   museSessionId?: string;
   command?: string;
   parentSessionId?: string;
+  pullRequestUrl?: string;
   runtime?: 'tmux' | 'direct';
   loopId?: string; // Read-only provenance on sessions created by retired recurring automation.
   usage?: SessionUsage;

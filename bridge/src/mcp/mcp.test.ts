@@ -11,6 +11,7 @@ import { createMcpServer } from "./server.js";
 import { LocalApiServer } from "../local-api-server.js";
 import { SessionStore } from "../session-store.js";
 import { MailStore } from "../mail-store.js";
+import { AttentionStore } from "../attention-store.js";
 import { SessionController } from "../session-controller.js";
 import type { ProcessRunner } from "../claude-runner.js";
 import type { CentrifugoClient } from "../centrifugo-client.js";
@@ -91,6 +92,8 @@ test("real bridge through MCP: discovery, literal history search, partial batche
   );
   const mail = new MailStore((id) => join(dir, "mail", id));
   api.setMailStore(mail);
+  const attention = new AttentionStore((id) => store.sessionDir(id));
+  api.setAttentionStore(attention);
   const sessionFactory = {
     store,
     runner,
@@ -142,6 +145,7 @@ test("real bridge through MCP: discovery, literal history search, partial batche
   t.after(async () => {
     await client.close();
     await server.close();
+    attention.stopNotifications();
     api.stop();
     await rm(dir, { recursive: true, force: true });
   });
@@ -178,6 +182,26 @@ test("real bridge through MCP: discovery, literal history search, partial batche
   assert.deepEqual((await call("sessions_list", { status: "running" })).data.sessions.map((s: any) => s.id), ["s1"]);
   assert.equal(listed.data.sessions[0].command, undefined);
   const target = { machine: "one", sessionId: "s1" };
+  const attentionResult = await call("attention_request", { ...target, message: "Please review API_KEY=secret", title: "Review requested" });
+  assert.equal(attentionResult.isError, undefined);
+  assert.equal(attentionResult.data.machine, "one");
+  assert.equal(attentionResult.data.sessionId, "s1");
+  assert.equal(attentionResult.data.event.type, "agent_needs_input");
+  assert.equal(attentionResult.data.event.message, "Please review API_KEY=[redacted]");
+  const repeated = await call("attention_request", { ...target, message: "Please review API_KEY=secret", title: "Review requested" });
+  assert.equal(repeated.data.event.id, attentionResult.data.event.id);
+  assert.equal(repeated.data.event.occurrences, 2);
+  assert.equal((await attention.list("s1")).events[0].id, attentionResult.data.event.id);
+  for (const pullRequestUrl of ["https://github.com/fmktech/ftown/pull/128?view=1", "https://github.com/other/repo/pull/2", null]) {
+    const updated = await call("sessions_update", { ...target, pullRequestUrl });
+    assert.equal(updated.isError, undefined);
+    const expected = pullRequestUrl?.split('?')[0];
+    assert.equal(updated.data.session.pullRequestUrl, expected);
+    assert.equal((await store.loadSession("s1"))?.pullRequestUrl, expected);
+    assert.equal((await call("sessions_get", target)).data.session.pullRequestUrl, expected);
+    assert.equal((await call("sessions_list", { machines: ["one"] })).data.sessions.find((session: Session) => session.id === "s1")?.pullRequestUrl, expected);
+  }
+
   assert.equal(
     (await call("chats_read", { ...target, limit: 2 })).data.lines.length,
     2,
@@ -402,3 +426,43 @@ test(
     assert.ok(!JSON.stringify(args).includes("remote-secret"));
   },
 );
+
+
+test("sessions_update probes PR capability before any mixed mutation and preserves legacy updates", async (t) => {
+  const calls: { method: string; path: string; body: unknown }[] = [];
+  let capability: unknown = {};
+  const config = configSchema.parse({ machines: [{ id: 'one', transport: 'local' }] });
+  const server = createMcpServer({ config, request: async (_machine, method, path, body) => {
+    calls.push({ method, path, body });
+    return method === 'GET' ? capability : { session: { id: 's', ...(body as object) } };
+  } });
+  const client = new Client({ name: 'metadata-test', version: '1' });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await server.connect(a); await client.connect(b);
+  t.after(async () => { await client.close(); await server.close(); });
+  const target = { machine: 'one', sessionId: 's' };
+  for (const pullRequestUrl of ['https://github.com/fmktech/ftown/pull/128', null]) {
+    const result = await client.callTool({ name: 'sessions_update', arguments: { ...target, name: 'Do not rename', pullRequestUrl } });
+    assert.equal(result.isError, true);
+    assert.equal((result.structuredContent as { error: { code: string } }).error.code, 'bridge_upgrade_required');
+  }
+  assert.deepEqual(calls.map((call) => call.method), ['GET', 'GET'], 'old bridge receives neither PR nor name mutation');
+  calls.length = 0;
+  const invalid = [
+    { pullRequestUrl: '' }, { pullRequestUrl: 'javascript:alert(1)' }, { pullRequestUrl: 'https://github.com/o/r/pull/1/files' },
+    { pullRequestUrl: 128 }, { pullRequestUrl: 'https://github.com/o/r/pull/1', extra: true },
+  ];
+  for (const body of invalid) assert.equal((await client.callTool({ name: 'sessions_update', arguments: { ...target, name: 'No write', ...body } })).isError, true);
+  assert.equal(calls.length, 0, 'invalid mixed updates fail before capability reads or writes');
+  const legacy = await client.callTool({ name: 'sessions_update', arguments: { ...target, name: 'Rename', parentSessionId: null } });
+  assert.equal(legacy.isError, undefined);
+  assert.deepEqual(calls, [{ method: 'PATCH', path: '/api/sessions/s', body: { name: 'Rename', parentSessionId: null } }]);
+  calls.length = 0;
+  capability = { capabilities: { sessionMetadata: { pullRequest: true } } };
+  for (const pullRequestUrl of [' https://github.com/fmktech/ftown/pull/128/?x=1#review ', null]) {
+    const result = await client.callTool({ name: 'sessions_update', arguments: { ...target, name: 'Rename', pullRequestUrl } });
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(calls.at(-1), { method: 'PATCH', path: '/api/sessions/s', body: { name: 'Rename', pullRequestUrl: pullRequestUrl === null ? null : 'https://github.com/fmktech/ftown/pull/128' } });
+  }
+  assert.deepEqual(calls.map((call) => call.method), ['GET', 'PATCH', 'GET', 'PATCH']);
+});

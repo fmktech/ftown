@@ -5,6 +5,8 @@ import { EventEmitter } from 'node:events';
 import { MailDeliveryService } from './mail-delivery.js';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { AttentionStore, AttentionError } from './attention-store.js';
+import type { AttentionItem } from './attention-events.js';
+import type { HookEvent } from './local-api-server.js';
 import { MailStore } from './mail-store.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -372,7 +374,7 @@ describe('LocalApiServer durable attention ingress', () => {
     const store = new SessionStore(join(home, 'data'));
     const server = new LocalApiServer();
     await store.saveSession({ id: 's', name: 'S', command: 'test', status: 'running', bridgeId: 'machine-a', createdAt: '', updatedAt: '' });
-    class BrokenStore extends AttentionStore { override async record(): Promise<void> { throw new AttentionError('attention_storage_error', 'Attention history could not be persisted', 500); } }
+    class BrokenStore extends AttentionStore { override async record(): Promise<undefined> { throw new AttentionError('attention_storage_error', 'Attention history could not be persisted', 500); } }
     server.setDependencies(store, {} as ProcessRunner, {} as CentrifugoClient, 'user-a');
     server.setAttentionStore(new BrokenStore((id) => store.sessionDir(id)));
     server.setAuthToken('token');
@@ -383,6 +385,150 @@ describe('LocalApiServer durable attention ingress', () => {
       assert.equal(response.status, 500); assert.equal(published, false);
       assert.equal(response.data.code, 'attention_storage_error');
     } finally { server.getHttpServer()?.closeAllConnections(); server.stop(); rmSync(home, { recursive: true, force: true }); }
+  });
+});
+
+async function sessionToolsFixture(t: { after: (fn: () => void) => void }, withAttention = true) {
+  const home = mkdtempSync(join(tmpdir(), 'ftown-session-tools-'));
+  const store = new SessionStore(join(home, 'data'));
+  const server = new LocalApiServer();
+  const token = 'session-tools-token';
+  const pushes: string[] = [];
+  const published: Session[] = [];
+  const events: HookEvent[] = [];
+  const sample: Session = { id: 'tools-session', name: 'Tools worker', command: 'test', status: 'running',
+    bridgeId: 'machine-a', createdAt: '2026-10-23T12:00:00Z', updatedAt: '2026-10-23T12:00:00Z' };
+  await store.saveSession(sample);
+  const attention = new AttentionStore((id) => store.sessionDir(id), 500, (_id, event) => { pushes.push(event.eventKey); });
+  server.setAuthToken(token);
+  server.setDependencies(store, { stop: () => false } as unknown as ProcessRunner, {
+    publishSessionUpdate: async (_user: string, session: Session) => { published.push({ ...session }); },
+  } as unknown as CentrifugoClient, 'user-a');
+  if (withAttention) server.setAttentionStore(attention);
+  server.on('event', (event) => {
+    // A live notification must refer to an already committed exact record.
+    const ledger = JSON.parse(readFileSync(join(store.sessionDir(event.sessionId), 'attention.json'), 'utf8')) as { events: AttentionItem[] };
+    assert.ok(ledger.events.some((item) => item.id === event.data.notification_id));
+    events.push(event);
+  });
+  const port = await server.start();
+  t.after(() => { attention.stopNotifications(); server.getHttpServer()?.closeAllConnections(); server.stop(); rmSync(home, { recursive: true, force: true }); });
+  return { store, server, token, sample, attention, port, events, pushes, published };
+}
+
+describe('LocalApiServer explicit session attention and PR metadata', () => {
+  it('returns exact committed sanitized attention events, deduplicates pushes and allows recurrence', async (t) => {
+    const f = await sessionToolsFixture(t);
+    const path = `/api/sessions/${f.sample.id}/attention`;
+    const capabilities = await api(f.port, f.token, 'GET', `/api/sessions/${f.sample.id}`);
+    assert.deepEqual(capabilities.data.capabilities, { attention: { version: 1, request: true }, sessionMetadata: { pullRequest: true } });
+    const body = { title: '  Review requested  ', message: '\x1b[31mApprove API_KEY=secret-value before proceeding\x1b[0m' };
+    const first = await api(f.port, f.token, 'POST', path, body);
+    assert.equal(first.status, 200);
+    const event = first.data.event as AttentionItem;
+    assert.equal(event.title, 'Review requested');
+    assert.equal(event.message, 'Approve API_KEY=[redacted] before proceeding');
+    assert.equal(event.type, 'agent_needs_input');
+    assert.deepEqual(f.events[0], { sessionId: f.sample.id, eventName: 'Notification', source: 'api', data: {
+      notification_type: 'agent_needs_input', title: event.title, message: event.message, notification_id: event.id,
+    } });
+    const duplicate = await api(f.port, f.token, 'POST', path, body);
+    assert.equal((duplicate.data.event as AttentionItem).id, event.id);
+    assert.equal((duplicate.data.event as AttentionItem).occurrences, 2);
+    assert.equal(f.pushes.length, 1);
+    assert.equal(f.events.length, 2, 'the live per-session notice may repeat');
+    const requests = await Promise.all([
+      api(f.port, f.token, 'POST', path, { message: 'First concurrent question' }),
+      api(f.port, f.token, 'POST', path, { message: 'Second concurrent question' }),
+    ]);
+    assert.ok(requests.every((response) => response.status === 200));
+    assert.deepEqual(requests.map((response) => (response.data.event as AttentionItem).message), ['First concurrent question', 'Second concurrent question']);
+    assert.equal((requests[0].data.event as AttentionItem).title, 'Session needs your input');
+    assert.notEqual((requests[0].data.event as AttentionItem).id, (requests[1].data.event as AttentionItem).id);
+    const reloaded = new AttentionStore((id) => f.store.sessionDir(id));
+    assert.equal((await reloaded.list(f.sample.id)).events.length, 3);
+    const resolved = await api(f.port, f.token, 'POST', `${path}/resolve`, { eventIds: [event.id] });
+    assert.equal(resolved.status, 200);
+    const recurring = await api(f.port, f.token, 'POST', path, body);
+    assert.notEqual((recurring.data.event as AttentionItem).id, event.id);
+    assert.equal(f.pushes.length, 4);
+  });
+
+  it('rejects invalid input, inactive/unknown targets and unauthorized requests before recording', async (t) => {
+    const f = await sessionToolsFixture(t);
+    const path = `/api/sessions/${f.sample.id}/attention`;
+    for (const body of [null, [], {}, { message: '' }, { message: '  ' }, { message: 4 },
+      { message: 'x'.repeat(2001) }, { message: 'valid', title: '' }, { message: 'valid', title: false },
+      { message: 'valid', title: 'x'.repeat(201) }, { message: '\x1b[31m\x1b[0m' },
+      { message: 'valid', title: '\x1b[31m\x1b[0m' }, { message: 'valid', arbitrary: 'secret' }]) {
+      assert.equal((await api(f.port, f.token, 'POST', path, body)).status, 400, JSON.stringify(body));
+    }
+    assert.equal((await api(f.port, 'wrong', 'POST', path, { message: 'valid' })).status, 401);
+    assert.equal((await api(f.port, f.token, 'POST', path, { message: 'valid' }, { Origin: 'https://evil.test' })).status, 403);
+    const hostileHostStatus = await new Promise<number | undefined>((resolve, reject) => {
+      const request = httpRequest({ hostname: '127.0.0.1', port: f.port, path, method: 'POST',
+        headers: { Host: `foreign.example:${f.port}`, Authorization: `Bearer ${f.token}` } },
+      (response) => { response.resume(); resolve(response.statusCode); });
+      request.on('error', reject); request.end();
+    });
+    assert.equal(hostileHostStatus, 421);
+    const missing = await api(f.port, f.token, 'POST', '/api/sessions/missing/attention', { message: 'valid' });
+    assert.equal(missing.status, 404); assert.equal(missing.data.code, 'unknown_session');
+    for (const status of ['completed', 'error'] as const) {
+      await f.store.saveSession({ ...f.sample, status });
+      const inactive = await api(f.port, f.token, 'POST', path, { message: 'valid' });
+      assert.equal(inactive.status, 409); assert.equal(inactive.data.code, 'session_not_active');
+    }
+    assert.equal(f.events.length, 0); assert.equal(f.pushes.length, 0);
+    assert.equal(existsSync(join(f.store.sessionDir(f.sample.id), 'attention.json')), false);
+    await f.store.saveSession({ ...f.sample, status: 'pending' });
+    assert.equal((await api(f.port, f.token, 'POST', path, { message: 'Pending session request' })).status, 200);
+    assert.equal(f.events.length, 1);
+  });
+
+  it('reports optional attention readiness and storage failure without publishing success', async (t) => {
+    const f = await sessionToolsFixture(t, false);
+    const path = `/api/sessions/${f.sample.id}/attention`;
+    const capabilities = await api(f.port, f.token, 'GET', `/api/sessions/${f.sample.id}`);
+    assert.deepEqual(capabilities.data.capabilities, { sessionMetadata: { pullRequest: true } });
+    const unavailable = await api(f.port, f.token, 'POST', path, { message: 'valid' });
+    assert.equal(unavailable.status, 503); assert.equal(unavailable.data.code, 'attention_not_ready');
+    class BrokenStore extends AttentionStore {
+      override async record(): Promise<undefined> { throw new AttentionError('attention_storage_error', 'Attention history could not be persisted', 500); }
+    }
+    f.server.setAttentionStore(new BrokenStore((id) => f.store.sessionDir(id)));
+    const failure = await api(f.port, f.token, 'POST', path, { message: 'valid' });
+    assert.equal(failure.status, 500); assert.equal(failure.data.code, 'attention_storage_error');
+    assert.equal(f.events.length, 0); assert.equal(f.pushes.length, 0);
+    assert.equal(existsSync(join(f.store.sessionDir(f.sample.id), 'attention.json')), false);
+  });
+
+  it('attaches, replaces, reloads and clears PR metadata through the existing PATCH path', async (t) => {
+    const f = await sessionToolsFixture(t);
+    const path = `/api/sessions/${f.sample.id}`;
+    const attached = await api(f.port, f.token, 'PATCH', path, { pullRequestUrl: ' https://github.com/fmktech/ftown/pull/128/?tab=files#review ' });
+    assert.equal(attached.status, 200);
+    assert.equal((attached.data.session as Session).pullRequestUrl, 'https://github.com/fmktech/ftown/pull/128');
+    assert.equal(f.published.at(-1)?.pullRequestUrl, 'https://github.com/fmktech/ftown/pull/128');
+    assert.equal((await new SessionStore(join(f.store.sessionDir(f.sample.id), '../..')).loadSession(f.sample.id))?.pullRequestUrl, 'https://github.com/fmktech/ftown/pull/128');
+    const before = await f.store.loadSession(f.sample.id);
+    for (const body of [
+      { name: 'must not change', pullRequestUrl: 'https://evil.test/owner/repo/pull/1' },
+      { pullRequestUrl: '' }, { pullRequestUrl: 7 },
+      { name: 'must not change', parentSessionId: 'missing', pullRequestUrl: 'https://github.com/owner/repo/pull/2' },
+    ]) assert.equal((await api(f.port, f.token, 'PATCH', path, body)).status, 400);
+    assert.deepEqual(await f.store.loadSession(f.sample.id), before);
+    assert.equal(f.published.length, 1);
+    assert.equal((await api(f.port, f.token, 'PATCH', path, { name: 'Renamed' })).status, 200);
+    assert.equal((await f.store.loadSession(f.sample.id))?.pullRequestUrl, 'https://github.com/fmktech/ftown/pull/128');
+    await api(f.port, f.token, 'PATCH', path, { pullRequestUrl: 'https://github.com/fmktech/ftown/pull/129' });
+    const listed = await api(f.port, f.token, 'GET', '/api/sessions');
+    assert.equal((listed.data.sessions as Session[]).find((session) => session.id === f.sample.id)?.pullRequestUrl, 'https://github.com/fmktech/ftown/pull/129');
+    assert.equal((await api(f.port, f.token, 'PATCH', path, { pullRequestUrl: null })).status, 200);
+    const cleared = await api(f.port, f.token, 'GET', path);
+    assert.equal(Object.hasOwn(cleared.data.session as Session, 'pullRequestUrl'), false);
+    assert.equal(Object.hasOwn(f.published.at(-1)!, 'pullRequestUrl'), false);
+    assert.equal((await api(f.port, f.token, 'PATCH', '/api/sessions/missing', { pullRequestUrl: null })).status, 404);
   });
 });
 

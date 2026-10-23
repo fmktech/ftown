@@ -256,6 +256,15 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 }
 
 describe("mergeSessionSnapshot", () => {
+  it("canonicalizes PR metadata without changing the incoming snapshot", () => {
+    const incoming = makeSession({ pullRequestUrl: "https://github.com/Org/repo/pull/0123/?tab=files" });
+    expect(mergeSessionSnapshot(undefined, incoming).pullRequestUrl).toBe("https://github.com/Org/repo/pull/123");
+    expect(incoming.pullRequestUrl).toContain("?tab=files");
+  });
+
+  it("clears a previous PR when a complete snapshot omits the field", () => {
+    expect(mergeSessionSnapshot(makeSession({ pullRequestUrl: "https://github.com/a/b/pull/1" }), makeSession())).not.toHaveProperty("pullRequestUrl");
+  });
   it("keeps the existing bridgeId when the incoming row omits it", () => {
     const current = makeSession({ id: "s1", bridgeId: "bridge-1" });
     const incoming = makeSession({
@@ -311,6 +320,35 @@ describe("mergeSessionSnapshot", () => {
 
     const result = mergeSessionSnapshot(undefined, incoming);
     expect(result).toEqual(incoming);
+  });
+});
+
+describe("PR snapshots through actual session ingestion", () => {
+  it.each([null, 123, {}, "javascript:alert(1)", "https://evil.test/a/b/pull/1"])("retains a session with malformed optional PR metadata %#", pullRequestUrl => {
+    const h = setup(true);
+    h.reply(h.request(), [{ ...row("safe-session"), pullRequestUrl }], "a");
+    expect(h.ids()).toEqual(["safe-session"]);
+    expect(h.result.current.sessions[0]).not.toHaveProperty("pullRequestUrl");
+  });
+
+  it("replaces and clears live PR snapshots while preserving other sessions", () => {
+    const h = setup(true);
+    h.reply(h.request(), [row("target"), row("other")], "a");
+    h.publication(row("target", "a", { pullRequestUrl: "https://github.com/a/b/pull/1" }));
+    expect(h.result.current.sessions.find(s => s.id === "target")?.pullRequestUrl).toBe("https://github.com/a/b/pull/1");
+    h.publication(row("target", "a", { pullRequestUrl: "https://github.com/a/b/pull/2" }));
+    expect(h.result.current.sessions.find(s => s.id === "target")?.pullRequestUrl).toBe("https://github.com/a/b/pull/2");
+    h.publication(row("target"));
+    expect(h.result.current.sessions.find(s => s.id === "target")).not.toHaveProperty("pullRequestUrl");
+    expect(h.result.current.sessions.find(s => s.id === "other")).toEqual(row("other"));
+  });
+
+  it("clears a stored PR after a full list reload without that metadata", () => {
+    const h = setup(true);
+    h.reply(h.request(), [row("target", "a", { pullRequestUrl: "https://github.com/a/b/pull/1" })], "a");
+    h.refresh();
+    h.reply(h.request(), [row("target")], "a");
+    expect(h.result.current.sessions[0]).not.toHaveProperty("pullRequestUrl");
   });
 });
 

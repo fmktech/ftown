@@ -11,6 +11,7 @@ import { useTerminal } from "@/hooks/useTerminal";
 import { FallbackReason, TerminalTransportApi, TerminalTransportMode } from "@/lib/direct-transport/contract";
 import { formatTokens, formatUsage, formatUsageDetail } from "@/lib/format-usage";
 import { HarnessIcon } from "./HarnessIcon";
+import { PullRequestLink } from "./PullRequestLink";
 import "@xterm/xterm/css/xterm.css";
 
 export interface TerminalHandle {
@@ -24,6 +25,7 @@ interface TerminalProps {
   bridgeId: string | null;
   isRunning: boolean;
   sessionName?: string | null;
+  pullRequestUrl?: string;
   usage?: TokenUsage;
   /** Persisted usage totals from the session record; shown when no live activity usage is present. */
   persistedUsage?: SessionUsage;
@@ -123,7 +125,7 @@ function TransportModeBadge({
   );
 }
 
-export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ transport, sessionId, bridgeId, isRunning, sessionName, usage, persistedUsage, onMobileTap, shellType, onInterrupt }, ref) {
+export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ transport, sessionId, bridgeId, isRunning, sessionName, pullRequestUrl, usage, persistedUsage, onMobileTap, shellType, onInterrupt }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -419,14 +421,14 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
         <>
           {/* Terminal header */}
           <div
-            className="shrink-0 flex items-center justify-between px-4"
+            className="shrink-0 flex flex-wrap items-center justify-between gap-x-2 px-3"
             style={{
-              height: 36,
+              minHeight: 44,
               borderBottom: "1px solid var(--border-subtle)",
               background: "var(--bg-surface)",
             }}
           >
-            <div className="flex items-center gap-2 min-w-0 overflow-hidden">
+            <div className="flex items-center gap-2 min-w-0 grow basis-[200px] overflow-hidden">
               {shellType ? (
                 <HarnessIcon harness={shellType} size={14} className="shrink-0" title={shellType} />
               ) : (
@@ -446,9 +448,10 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
                   {sessionName}
                 </span>
               )}
+              <PullRequestLink url={pullRequestUrl} />
             </div>
 
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 max-w-full py-1">
               <TransportModeBadge mode={mode} fallbackReason={fallbackReason} />
 
               {usage && (usage.inputTokens > 0 || usage.outputTokens > 0) ? (

@@ -8,6 +8,7 @@ import {
 
 import type { RemoveFtownSessionOptions } from './remove-ftown-session.js';
 import type { Session, SessionUsage } from './types.js';
+import { normalizePullRequestUrl } from './pull-request-url.js';
 
 /**
  * Transport-agnostic session operations, defined ONCE and shared by the two
@@ -39,6 +40,7 @@ export type SessionControllerResult<T> = ({ ok: true } & T) | SessionControllerE
 export interface SessionUpdateInput {
   name?: string;
   parent?: { value: unknown };
+  pullRequestUrl?: string | null;
 }
 
 /** Narrow structural slice of SessionStore so tests can use in-memory fakes. */
@@ -77,6 +79,7 @@ export interface SessionControllerDeps {
 
 export class SessionController {
   private readonly deps: SessionControllerDeps;
+  private readonly metadataWrites = new Map<string, Promise<void>>();
 
   constructor(deps: SessionControllerDeps) {
     this.deps = deps;
@@ -196,6 +199,24 @@ export class SessionController {
     sessionId: string,
     input: SessionUpdateInput,
   ): Promise<SessionControllerResult<{ session: Session }>> {
+    const update = () => this.updateMetadata(sessionId, input);
+    if (this.deps.withSessionWrite) {
+      let result!: SessionControllerResult<{ session: Session }>;
+      await this.deps.withSessionWrite(sessionId, async () => { result = await update(); });
+      return result;
+    }
+    const previous = this.metadataWrites.get(sessionId) ?? Promise.resolve();
+    const next = previous.then(update, update);
+    const settled = next.then(() => undefined, () => undefined);
+    this.metadataWrites.set(sessionId, settled);
+    try { return await next; }
+    finally { if (this.metadataWrites.get(sessionId) === settled) this.metadataWrites.delete(sessionId); }
+  }
+
+  private async updateMetadata(
+    sessionId: string,
+    input: SessionUpdateInput,
+  ): Promise<SessionControllerResult<{ session: Session }>> {
     const session = await this.deps.store.loadSession(sessionId);
     if (!session) {
       return { ok: false, code: 'not_found', message: 'Session not found' };
@@ -205,13 +226,18 @@ export class SessionController {
       if (typeof input.name !== 'string' || !input.name) {
         return { ok: false, code: 'invalid', message: 'Invalid name' };
       }
-      session.name = input.name;
     }
 
+    let pullRequestUrl: string | undefined;
+    if (input.pullRequestUrl !== undefined && input.pullRequestUrl !== null) {
+      try { pullRequestUrl = normalizePullRequestUrl(input.pullRequestUrl); }
+      catch { return { ok: false, code: 'invalid', message: 'Invalid pullRequestUrl' }; }
+    }
+    let parentSessionId: string | undefined;
     if (input.parent) {
       const raw = input.parent.value;
       if (raw === null || raw === undefined || raw === '') {
-        session.parentSessionId = undefined;
+        parentSessionId = undefined;
       } else if (typeof raw !== 'string') {
         return { ok: false, code: 'invalid', message: 'Invalid parentSessionId' };
       } else if (raw === session.id) {
@@ -228,7 +254,7 @@ export class SessionController {
             message: 'Parent session belongs to another bridge',
           };
         }
-        const parentSessionId = proposed.parentSessionId ?? proposed.id;
+        parentSessionId = proposed.parentSessionId ?? proposed.id;
         if (parentSessionId === session.id) {
           return {
             ok: false,
@@ -244,10 +270,15 @@ export class SessionController {
             message: 'Session with children cannot be reparented',
           };
         }
-        session.parentSessionId = parentSessionId;
       }
     }
 
+    // Validate the entire update before touching the loaded object: some store
+    // implementations return shared references rather than detached snapshots.
+    if (input.name !== undefined) session.name = input.name;
+    if (input.parent) session.parentSessionId = parentSessionId;
+    if (input.pullRequestUrl === null) delete session.pullRequestUrl;
+    else if (pullRequestUrl !== undefined) session.pullRequestUrl = pullRequestUrl;
     session.updatedAt = new Date().toISOString();
     await this.deps.store.saveSession(session);
     await this.deps.publishSessionUpdate(session);

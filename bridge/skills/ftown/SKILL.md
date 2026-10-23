@@ -39,6 +39,9 @@ entrypoint with `--repair`.
 ftown sessions list
 ftown sessions create --prompt "Review the auth module" --workdir "$PWD" --parent
 ftown sessions screen <session-id> --limit 200
+ftown sessions attention --message "Please review the migration plan" --title "Review requested"
+ftown sessions pr https://github.com/owner/repo/pull/123
+ftown sessions pr --clear
 ftown harness mail send <session-id> --type task "review the API client"
 ftown harness mail read
 ftown env --help
@@ -65,6 +68,27 @@ available. Cursor and shell sessions receive an idle nudge to read their inbox.
 Prefer mail for agent communication; use terminal key injection only when the
 task needs it. Inspect peers with `ftown sessions list` and
 `ftown sessions screen <id> --limit 100`.
+
+## Human attention and pull requests
+
+Use `ftown sessions attention --message "..."` when you need human input. It
+creates a durable attention record and uses the dashboard's existing notice flow;
+it does not answer a prompt or guarantee a push notification. Push remains opt-in
+and requires a supported hosted session. Repeating an unresolved request updates
+its occurrence count; after an uncertain result, inspect the existing request
+before retrying.
+
+Attach one GitHub pull request with `ftown sessions pr <URL>`; another URL
+replaces it and `--clear` removes it. This records a link without fetching GitHub
+or creating a PR. Both commands target trimmed `$FTOWN_SESSION_ID` unless you
+supply `--session-id <id>`; they never guess identity from the working directory.
+Older bridges report `bridge_upgrade_required` before mutation.
+
+Remote MCP callers use `attention_request` with explicit `machine` and
+`sessionId`, or `sessions_update` with `pullRequestUrl` (string to set, null to
+clear). Mutation tools require control access; remote callers have no automatic
+local self identity. Keep the returned attention event ID for existing inbox,
+acknowledge and resolve operations, which do not answer the agent's question.
 
 ## Cleanup
 

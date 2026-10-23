@@ -984,6 +984,7 @@ PY`;
             bridgeId={selectedSession?.bridgeId ?? null}
             isRunning={selectedSession?.status === "running"}
             sessionName={selectedSession?.name ?? selectedSession?.prompt?.slice(0, 48) ?? null}
+            pullRequestUrl={selectedSession?.pullRequestUrl}
             usage={selectedSessionId ? sessionActivity.get(selectedSessionId)?.usage : undefined}
             persistedUsage={selectedSession?.usage}
             onMobileTap={() => mobileControlRef.current?.focusInput()}

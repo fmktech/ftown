@@ -51,6 +51,51 @@ ftown sessions archive
 ftown sessions revive <session-id>
 ```
 
+## Ask the human or associate a pull request
+
+```bash
+# Request human input for this session (JSON {event} by default)
+ftown sessions attention --message "Please review the migration plan" --title "Review requested"
+
+# Set or replace this session's single GitHub PR link (JSON {session})
+ftown sessions pr https://github.com/owner/repo/pull/123
+
+# Clear the association
+ftown sessions pr --clear
+
+# Explicit target overrides FTOWN_SESSION_ID for either command
+ftown sessions attention --session-id <id> --message "Which approach should I take?"
+ftown sessions pr --session-id <id> https://github.com/owner/repo/pull/123
+```
+
+Both commands use trimmed `FTOWN_SESSION_ID` when `--session-id` is omitted;
+missing/invalid identity, empty/oversized text, malformed URLs and contradictory
+arguments fail before transport. There is no working-directory or latest-session
+fallback. Title is optional (default `Session needs your input`, max 200 characters);
+message is required (max 2000). Controls and common credentials are sanitized.
+`--plain` prints a concise success summary. `--help` is read-only.
+
+Attention persists an `agent_needs_input` event, returns its exact ID and updates
+the existing dashboard attention flow. Logical duplicate unresolved requests
+coalesce while recording occurrences; resolving it permits a new incident.
+Only creation triggers notification, and hosted push remains opt-in with existing
+session/harness eligibility. Do not automatically retry an uncertain mutation.
+Acknowledging/resolving an event never answers or approves a CLI prompt.
+
+PR links accept only HTTPS GitHub `/owner/repo/pull/<positive-number>` URLs.
+Outer whitespace, query/fragment and a trailing slash are normalized; credentials,
+nondefault ports and other paths/hosts are rejected. No GitHub request is made.
+Attaching/replacing/clearing is metadata-only; omitting it on an update preserves
+its value. New sessions/children do not implicitly inherit a parent's PR.
+
+New commands probe the exact bridge capability before writing; update old bridges
+with the exact version setup command in their readiness hint. For remote MCP,
+`attention_request` requires explicit `{machine, sessionId, message, title?}` and
+returns `{machine, sessionId, event}`. `sessions_update` accepts `pullRequestUrl`
+(string or null), alongside existing name/parent fields. A mixed PR+name update
+rejects an old bridge before changing either field. Read-only MCP clients cannot
+see these mutation tools; control authorization and machine ownership still apply.
+
 ## Messaging (mail)
 
 `tell` posts to the target session's **inbox**. Mail is delivered into the
@@ -145,7 +190,8 @@ The CLI wraps the loopback API. Raw access if needed:
 |--------|------|---------|
 | GET | `/api/sessions` | List |
 | POST | `/api/sessions` | Create |
-| PATCH | `/api/sessions/:id` | Rename and/or move (`{ name?, parentSessionId? }`; `null` moves to the root) |
+| PATCH | `/api/sessions/:id` | Rename, move or associate a PR (`{ name?, parentSessionId?, pullRequestUrl? }`; `null` detaches/clears) |
+| POST | `/api/sessions/:id/attention` | Request human input (`{ message, title? }`) → `{ event }` |
 | GET | `/api/sessions/:id/screen` | Terminal lines |
 | POST | `/api/sessions/:id/grep` | Search |
 | POST | `/api/sessions/:id/keys` | Send keys |

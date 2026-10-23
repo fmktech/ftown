@@ -48,6 +48,7 @@ export interface Session {
   shellType?: string;
   model?: string;
   parentSessionId?: string;
+  pullRequestUrl?: string;
   /** Historical automation provenance; new sessions cannot set it. */
   loopId?: string;
   usage?: SessionUsage;

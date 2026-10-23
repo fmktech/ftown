@@ -88,3 +88,101 @@ test('legacy attention endpoint is explicit upgrade-required and never a fabrica
   const identity = await client.callTool({ name: 'whoami' });
   assert.equal(identity.isError, true); assert.equal((identity.structuredContent as { error: { code: string } }).error.code, 'identity_unavailable');
 });
+
+
+test('attention_request is discoverable, mutating and non-idempotent with exact event response', async (t) => {
+  const calls: { machine: string; method: string; path: string; body: unknown }[] = [];
+  const exact = { ...item('returned-event', 17), type: 'agent_needs_input' as const, occurrences: 3 };
+  let revalidations = 0;
+  const client = await connect(t, async (machine, method, path, body) => {
+    calls.push({ machine, method, path, body });
+    return method === 'GET' ? { capabilities: { attention: { version: 1, request: true } } } : { event: exact };
+  }, { revalidate: async (machines) => { assert.deepEqual(machines, ['b']); revalidations++; } });
+  const tool = (await client.listTools()).tools.find((tool) => tool.name === 'attention_request');
+  assert.equal(tool?.annotations?.readOnlyHint, false);
+  assert.equal(tool?.annotations?.idempotentHint, false);
+  const result = await client.callTool({ name: 'attention_request', arguments: { machine: 'b', sessionId: 's', title: ' Review ', message: ' Please check API_KEY=secret ' } });
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(result.structuredContent, { machine: 'b', sessionId: 's', event: exact });
+  assert.deepEqual(calls, [
+    { machine: 'b', method: 'GET', path: '/api/sessions/s', body: undefined },
+    { machine: 'b', method: 'POST', path: '/api/sessions/s/attention', body: { title: 'Review', message: 'Please check API_KEY=[redacted]' } },
+  ]);
+  assert.equal(revalidations, 3, 'authorization is checked before probe, before mutation and before returning');
+});
+
+test('attention_request invalid local arguments never dispatch to any bridge', async (t) => {
+  let dispatches = 0;
+  const client = await connect(t, async () => { dispatches++; return {}; });
+  for (const args of [
+    { machine: 'a', message: 'Question' }, { sessionId: 's', message: 'Question' },
+    { machine: 'a', sessionId: '../s', message: 'Question' },
+    { machine: 'a', sessionId: 's', message: ' ' }, { machine: 'a', sessionId: 's', message: '\x1b[31m' },
+    { machine: 'a', sessionId: 's', message: 'x'.repeat(2001) },
+    { machine: 'a', sessionId: 's', message: 'Question', title: ' ' },
+    { machine: 'a', sessionId: 's', message: 'Question', title: 'x'.repeat(201) },
+    { machine: 'a', sessionId: 's', message: 'Question', unexpected: true },
+  ]) assert.equal((await client.callTool({ name: 'attention_request', arguments: args })).isError, true);
+  assert.equal(dispatches, 0);
+});
+
+test('attention_request requires version 1 and explicit request capability; it never guesses on older bridges', async (t) => {
+  let capabilities: unknown = {};
+  const calls: string[] = [];
+  const client = await connect(t, async (_machine, method) => { calls.push(method); return { capabilities }; });
+  for (const value of [{}, { attention: { version: 1 } }, { attention: { version: 1, request: false } }, { attention: { version: 2, request: true } }]) {
+    capabilities = value;
+    const result = await client.callTool({ name: 'attention_request', arguments: { machine: 'a', sessionId: 's', message: 'Question' } });
+    assert.equal(result.isError, true);
+    assert.equal((result.structuredContent as { error: { code: string } }).error.code, 'bridge_upgrade_required');
+  }
+  assert.deepEqual(calls, ['GET', 'GET', 'GET', 'GET']);
+});
+
+test('read-only surface hides attention_request and denied access prevents any mutation', async (t) => {
+  let calls = 0;
+  const readOnly = await connect(t, async () => { calls++; return {}; }, { readOnly: true });
+  assert.ok(!(await readOnly.listTools()).tools.some((tool) => tool.name === 'attention_request'));
+  assert.equal((await readOnly.callTool({ name: 'attention_request', arguments: { machine: 'a', sessionId: 's', message: 'Question' } })).isError, true);
+  const denied = await connect(t, async () => { calls++; return {}; }, { revalidate: async () => { throw new FleetError('forbidden', 'Revoked'); } });
+  const result = await denied.callTool({ name: 'attention_request', arguments: { machine: 'a', sessionId: 's', message: 'Question' } });
+  assert.equal((result.structuredContent as { error: { code: string } }).error.code, 'forbidden');
+  assert.equal(calls, 0);
+});
+
+test('attention_request revalidates after capability probe and never retries uncertain writes', async (t) => {
+  const methods: string[] = [];
+  let checks = 0;
+  const revoked = await connect(t, async (_m, method) => { methods.push(method); return { capabilities: { attention: { version: 1, request: true } } }; }, { revalidate: async () => { if (++checks === 2) throw new FleetError('forbidden', 'Revoked during probe'); } });
+  assert.equal((await revoked.callTool({ name: 'attention_request', arguments: { machine: 'a', sessionId: 's', message: 'Question' } })).isError, true);
+  assert.deepEqual(methods, ['GET']);
+  methods.length = 0;
+  const uncertain = await connect(t, async (_m, method) => {
+    methods.push(method);
+    if (method === 'GET') return { capabilities: { attention: { version: 1, request: true } } };
+    throw new FleetError('timeout', 'Outcome unknown', true);
+  });
+  const result = await uncertain.callTool({ name: 'attention_request', arguments: { machine: 'a', sessionId: 's', message: 'Question' } });
+  assert.equal((result.structuredContent as { error: { outcomeUnknown: boolean } }).error.outcomeUnknown, true);
+  assert.deepEqual(methods, ['GET', 'POST']);
+});
+
+
+test('attention_request malformed success is outcome-unknown and revoked final access withholds event', async (t) => {
+  let posts = 0;
+  const malformed = await connect(t, async (_m, method) => {
+    if (method === 'GET') return { capabilities: { attention: { version: 1, request: true } } };
+    posts++; return { event: { id: 'incomplete' } };
+  });
+  const result = await malformed.callTool({ name: 'attention_request', arguments: { machine: 'a', sessionId: 's', message: 'Question' } });
+  assert.equal((result.structuredContent as { error: { outcomeUnknown: boolean } }).error.outcomeUnknown, true);
+  assert.equal(posts, 1);
+  let checks = 0;
+  const revoked = await connect(t, async (_m, method) => method === 'GET' ? { capabilities: { attention: { version: 1, request: true } } } : { event: item() }, {
+    revalidate: async () => { if (++checks === 3) throw new FleetError('forbidden', 'Revoked after request'); },
+  });
+  const denied = await revoked.callTool({ name: 'attention_request', arguments: { machine: 'a', sessionId: 's', message: 'Question' } });
+  assert.equal(denied.isError, true);
+  assert.equal((denied.structuredContent as { error: { code: string } }).error.code, 'forbidden');
+  assert.equal((denied.structuredContent as { event?: unknown }).event, undefined);
+});

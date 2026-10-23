@@ -4,6 +4,8 @@
  * Installed to ~/.ftown/ftown-sessions by ftown-bridge.
  */
 import { Command, CommanderError } from 'commander';
+import { normalizePullRequestUrl } from './pull-request-url.js';
+import { sanitizeAttentionText } from './attention-events.js';
 import { api as request, loadPointer, listSessions, fetchInbox, sendMail } from './cli-client.js';
 import {
   MAIL_TYPES,
@@ -128,10 +130,10 @@ interface SessionsOptions {
   name?: string; command?: string; model?: string; parentId?: string; parent?: boolean;
   createWorkdir?: boolean; offset?: string; limit?: string; pattern?: string;
   children?: boolean; siblings?: boolean; keys?: boolean; type?: string; thread?: string;
-  peek?: boolean; all?: boolean;
+  peek?: boolean; all?: boolean; sessionId?: string; message?: string; title?: string; clear?: boolean;
 }
 type SessionCommand = 'list' | 'create' | 'get' | 'screen' | 'grep' | 'keys' | 'tell'
-  | 'inbox' | 'mail' | 'running' | 'usage' | 'remove' | 'archive' | 'revive';
+  | 'inbox' | 'mail' | 'running' | 'usage' | 'remove' | 'archive' | 'revive' | 'attention' | 'pr';
 
 function sessionProgram(): Command {
   const program = new Command().name('ftown sessions').description('List, create, read and drive ftown agent sessions');
@@ -176,6 +178,15 @@ function sessionProgram(): Command {
   command('usage <session-id...>', 'Model/token usage per session')
     .action((ids: string[], _opts, cmd: Command) => run('usage', ids, cmd));
   command('archive', 'List archived sessions').action((_opts, cmd: Command) => run('archive', [], cmd));
+  command('attention', 'Request human input for this session')
+    .requiredOption('--message <text>', 'What the user should review or answer (max 2000 characters)')
+    .option('--title <text>', 'Short title (max 200 characters)')
+    .option('--session-id <id>', 'Target session; defaults to FTOWN_SESSION_ID')
+    .action((_opts, cmd: Command) => run('attention', [], cmd));
+  command('pr [url]', 'Attach or replace this session’s GitHub pull request')
+    .option('--clear', 'Remove the current pull request association')
+    .option('--session-id <id>', 'Target session; defaults to FTOWN_SESSION_ID')
+    .action((url: string | undefined, _opts, cmd: Command) => run('pr', url === undefined ? [] : [url], cmd));
   return program;
 }
 
@@ -193,9 +204,56 @@ export async function runSessions(argv: string[]): Promise<number> {
   }
 }
 
+function selfSessionId(explicit?: string): string {
+  const id = (explicit ?? process.env.FTOWN_SESSION_ID)?.trim();
+  if (!id || !/^[A-Za-z0-9_-]+$/.test(id)) {
+    throw new Error('Supply a valid --session-id or set FTOWN_SESSION_ID');
+  }
+  return id;
+}
+
+function attentionText(value: string, field: string, maxLength: number): string {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > maxLength) throw new Error(`${field} must contain 1–${maxLength} characters`);
+  const text = sanitizeAttentionText(trimmed, maxLength);
+  if (!text) throw new Error(`${field} must contain visible text`);
+  return text;
+}
+
+async function requireSessionCapability(id: string, feature: 'attention' | 'pullRequest'): Promise<void> {
+  const { data } = await api('GET', `/api/sessions/${id}`);
+  const capabilities = (data as { capabilities?: { attention?: { version?: number; request?: boolean }; sessionMetadata?: { pullRequest?: boolean } } } | null)?.capabilities;
+  const supported = feature === 'attention'
+    ? capabilities?.attention?.version === 1 && capabilities.attention.request === true
+    : capabilities?.sessionMetadata?.pullRequest === true;
+  if (!supported) throw new Error(`bridge_upgrade_required: Upgrade this bridge to support ${feature === 'attention' ? 'attention requests' : 'pull request metadata'}`);
+}
+
 async function executeSessionCommand(cmd: SessionCommand, rest: string[], options: SessionsOptions): Promise<void> {
   const jsonOut = !options.plain;
     switch (cmd) {
+      case 'attention': {
+        const id = selfSessionId(options.sessionId);
+        const message = attentionText(options.message ?? '', '--message', 2000);
+        const title = options.title === undefined ? undefined : attentionText(options.title, '--title', 200);
+        await requireSessionCapability(id, 'attention');
+        const { data } = await api('POST', `/api/sessions/${id}/attention`, { message, ...(title === undefined ? {} : { title }) });
+        console.log(jsonOut ? JSON.stringify(data, null, 2) : `attention requested for ${id}`);
+        break;
+      }
+      case 'pr': {
+        const id = selfSessionId(options.sessionId);
+        const url = rest[0];
+        if ((url !== undefined && options.clear) || (url === undefined && !options.clear)) {
+          throw new Error('Supply a GitHub pull request URL or --clear, but not both');
+        }
+        const pullRequestUrl = options.clear ? null : normalizePullRequestUrl(url!);
+        await requireSessionCapability(id, 'pullRequest');
+        const { data } = await api('PATCH', `/api/sessions/${id}`, { pullRequestUrl });
+        console.log(jsonOut ? JSON.stringify(data, null, 2) : `pull request ${pullRequestUrl === null ? 'cleared' : 'updated'} for ${id}`);
+        break;
+      }
+
       case 'list': {
         const { data } = await api('GET', '/api/sessions');
         console.log(jsonOut ? JSON.stringify(data, null, 2) : formatSessionList(data));

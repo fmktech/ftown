@@ -49,6 +49,7 @@ export interface Session {
   museSessionId?: string;
   env?: Record<string, string>;
   parentSessionId?: string;
+  pullRequestUrl?: string;
   runtime?: SessionRuntime;
   errorReason?: string;
   loopId?: string; // Historical provenance only; retired automation can never be relaunched

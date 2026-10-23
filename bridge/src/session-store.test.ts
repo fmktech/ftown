@@ -18,6 +18,20 @@ describe('SessionStore session snapshot persistence', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  it('preserves optional PR metadata on reload and clears it with a replacement snapshot', async () => {
+    const store = new SessionStore(dir);
+    const session: Session = { id: 'pull-request', name: 'PR worker', command: 'zsh', status: 'completed',
+      bridgeId: 'bridge-1', createdAt: '', updatedAt: '', pullRequestUrl: 'https://github.com/fmktech/ftown/pull/128' };
+    await store.saveSession(session);
+    const reloaded = new SessionStore(dir);
+    assert.equal((await reloaded.loadSession(session.id))?.pullRequestUrl, session.pullRequestUrl);
+    assert.equal((await reloaded.listSessions()).find((item) => item.id === session.id)?.pullRequestUrl, session.pullRequestUrl);
+    const { pullRequestUrl: _url, ...cleared } = session;
+    await reloaded.saveSession(cleared);
+    assert.equal(Object.hasOwn((await store.loadSession(session.id))!, 'pullRequestUrl'), false);
+    assert.equal((await reloaded.listSessions()).find((item) => item.id === session.id)?.pullRequestUrl, undefined);
+  });
+
   it('never exposes a partial JSON snapshot to concurrent readers', async () => {
     const store = new SessionStore(dir);
     const session: Session = {

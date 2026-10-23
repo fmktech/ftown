@@ -172,12 +172,12 @@ export class AttentionStore {
     for (const event of ledger.events) if (drop.has(event.id)) ledger.prunedThrough = Math.max(ledger.prunedThrough, event.sequence);
     ledger.events = ledger.events.filter((event) => !drop.has(event.id));
   }
-  async record(id: string, eventName: string, data: Record<string, unknown>): Promise<void> {
+  async record(id: string, eventName: string, data: Record<string, unknown>): Promise<AttentionItem | undefined> {
     const observation = classifyAttentionHook(eventName, data);
     if (!observation.activity && !observation.attention && !observation.resolve) return;
     const cancelIdle = observation.activity === 'thinking' || observation.activity === 'tool_use' || observation.resolve === 'session_end';
     if (cancelIdle) this.idleCanceled(id);
-    await this.withLock(id, async () => {
+    return this.withLock(id, async () => {
       const ledger = await this.load(id);
       const timestamp = new Date(this.notificationOptions.now()).toISOString();
       const notifications: PushNotice[] = [];
@@ -192,16 +192,18 @@ export class AttentionStore {
         event.resolution = observation.resolve;
       }
       let created = false;
+      let recorded: StoredItem | undefined;
       if (observation.attention) {
         const { sourceId: rawSourceId, ...attention } = observation.attention;
         const sourceId = rawSourceId ? createHash('sha256').update(rawSourceId).digest('hex') : undefined;
         const fingerprint = createHash('sha256').update(JSON.stringify(attention)).digest('hex');
         const existing = ledger.events.find((event) => !event.resolvedAt && (sourceId ? event.sourceId === sourceId : event.fingerprint === fingerprint));
-        if (existing) { existing.lastSeenAt = timestamp; existing.occurrences++; }
+        if (existing) { existing.lastSeenAt = timestamp; existing.occurrences++; recorded = existing; }
         else {
           const attentionId = randomUUID();
           notifications.push({ kind: 'question', eventKey: `question:${attentionId}`, title: attention.title, message: attention.message, occurredAt: timestamp });
-          ledger.events.push({ ...attention, id: attentionId, sequence: ++ledger.sequence, createdAt: timestamp, lastSeenAt: timestamp, occurrences: 1, fingerprint, ...(sourceId ? { sourceId } : {}) });
+          recorded = { ...attention, id: attentionId, sequence: ++ledger.sequence, createdAt: timestamp, lastSeenAt: timestamp, occurrences: 1, fingerprint, ...(sourceId ? { sourceId } : {}) };
+          ledger.events.push(recorded);
           created = true;
         }
       }
@@ -213,6 +215,7 @@ export class AttentionStore {
         try { if (!this.notificationsStopped) this.onNotification?.(id, notice); } catch { /* Optional delivery cannot fail a committed hook. */ }
       }
       if (created) for (const listener of this.listeners.get(id) ?? []) listener();
+      return recorded ? publicItem(recorded) : undefined;
     });
   }
   async list(id: string, options: AttentionReadOptions = {}): Promise<AttentionPage> {

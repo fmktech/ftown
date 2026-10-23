@@ -16,6 +16,7 @@ import {
 } from "@/types";
 import type { BridgeRpc } from "@/hooks/useBridgeRpc";
 import { buildUsagePollBatches } from "@/lib/live-usage-polling";
+import { parsePullRequestUrl } from "@/lib/pull-request-url";
 
 // Re-exported for existing consumers (NewSessionModal, session pickers); the
 // type now lives with the transport that produces it.
@@ -61,8 +62,15 @@ function isSessionRow(value: unknown): value is Session {
 }
 
 export function mergeSessionSnapshot(current: Session | undefined, incoming: Session): Session {
-  if (!current) return incoming;
   let merged = incoming;
+  const pullRequest = parsePullRequestUrl(incoming.pullRequestUrl);
+  if (pullRequest) {
+    if (incoming.pullRequestUrl !== pullRequest.url) merged = { ...incoming, pullRequestUrl: pullRequest.url };
+  } else if (Object.hasOwn(incoming, "pullRequestUrl")) {
+    merged = { ...incoming };
+    delete merged.pullRequestUrl;
+  }
+  if (!current) return merged;
   if (
     current.usage
     && (!incoming.usage || incoming.usage.collectedAt <= current.usage.collectedAt)
