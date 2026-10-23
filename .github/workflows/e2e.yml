@@ -67,8 +67,8 @@ jobs:
         working-directory: ui
         run: |
           npm ci
-          set -a; E2E_DIR="$GITHUB_WORKSPACE/e2e" source "$GITHUB_WORKSPACE/e2e/env.sh"; set +a
           npm test
+          set -a; E2E_DIR="$GITHUB_WORKSPACE/e2e" source "$GITHUB_WORKSPACE/e2e/env.sh"; set +a
           npm run build
 
       - name: Build bridge
