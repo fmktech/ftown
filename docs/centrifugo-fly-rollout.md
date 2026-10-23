@@ -9,6 +9,24 @@ The target is one `shared-cpu-1x` Machine with 256 MB in `gru`. Centrifugo uses
 its memory engine, so the app must stay at exactly one Machine. A rolling deploy
 causes a brief client reconnect; it does not provide zero-downtime failover.
 
+## Deployment routing and observed status
+
+The 2026-10-23 investigation verified `wss.ftown.ia.br` routing to the Fly app
+and observed one running Machine in `gru`, still using Centrifugo 5.4.9. The older
+`centrifugo.webcraw.ai` alias resolved to AWS; connection timeouts did not establish
+whether that host was retired. These observations are not a completed cutover or
+an upgrade claim: verify current routing, runtime version and certificates before
+any deployment or DNS change.
+
+Pushes and pull requests automatically run secret-free configuration/image
+validation, including legacy AWS config/workflow/script changes. They deploy
+neither platform. Fly production deployment remains an explicit manual action.
+The legacy **Deploy centrifugo config** workflow is now manual fallback only:
+select `main` and explicitly enable `deploy_legacy_aws`; the default `false`
+skips its deployment job and makes no AWS contact. Its verified host-key pin and
+patched-runtime prerequisites remain mandatory. See the
+[legacy fallback runbook](centrifugo-deploy.md).
+
 ## What is deployed
 
 | Path | Purpose |
@@ -113,8 +131,10 @@ Follow the ownership-validation and DNS records printed by `fly certs add`.
 Complete certificate validation before changing production traffic. Lower DNS
 TTL ahead of the window if the provider permits it.
 
-Cut over `centrifugo.webcraw.ai` first because it is the current production UI
-endpoint, then `wss.ftown.ia.br`. Preserve the hostname in
+Verify which hostname each deployed UI and bridge currently uses. The older
+`centrifugo.webcraw.ai` alias may still route to AWS even when `wss.ftown.ia.br`
+routes to Fly. Complete any remaining alias cutover only after the checks above;
+do not infer it from a successful validation workflow. Preserve the hostname in
 `NEXT_PUBLIC_CENTRIFUGO_URL`; only its DNS target changes, so no UI deployment
 is required.
 
@@ -170,7 +190,8 @@ fly deploy --image <previous-image-reference> -a ftown-centrifugo --ha=false
 
 After 24–48 hours of healthy Fly traffic and an expired DNS rollback window:
 
-1. Disable the legacy `Deploy Centrifugo Config` workflow.
+1. The legacy deployment is already manual-only. Disable that workflow entirely
+   once the AWS rollback path is intentionally retired.
 2. Stop the AWS Centrifugo container, then remove the host only after a final
    verification period.
 3. Delete the obsolete SSH, API, admin-password, and admin-secret values from

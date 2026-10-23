@@ -4,6 +4,9 @@ on:
   pull_request:
     paths:
       - 'centrifugo/config.fly.json'
+      - 'centrifugo/config.prod.json'
+      - '.github/workflows/deploy-centrifugo.yml'
+      - 'scripts/deploy/**'
       - 'centrifugo/Dockerfile.fly'
       - 'centrifugo/entrypoint.sh'
       - 'scripts/check-centrifugo-config*'
@@ -16,6 +19,9 @@ on:
     branches: [main]
     paths:
       - 'centrifugo/config.fly.json'
+      - 'centrifugo/config.prod.json'
+      - '.github/workflows/deploy-centrifugo.yml'
+      - 'scripts/deploy/**'
       - 'centrifugo/Dockerfile.fly'
       - 'centrifugo/entrypoint.sh'
       - 'scripts/check-centrifugo-config*'

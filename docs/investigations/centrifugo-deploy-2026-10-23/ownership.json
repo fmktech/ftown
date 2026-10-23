@@ -1,0 +1,24 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "model": "gpt-6.1-sol",
+  "reasoning_effort": "high",
+  "owners": {
+    "/root": [
+      "docs/investigations/centrifugo-deploy-2026-10-23/coordination.md",
+      "docs/investigations/centrifugo-deploy-2026-10-23/ownership.json"
+    ],
+    "/root/canonical_start": [
+      ".github/workflows/deploy-centrifugo.yml",
+      ".github/workflows/deploy-centrifugo-fly.yml",
+      "docs/centrifugo-deploy.md",
+      "docs/centrifugo-fly-rollout.md"
+    ],
+    "/root/npx_implementation": [],
+    "/root/npx_review": []
+  },
+  "resources": {
+    "Git index/history": "npx_implementation",
+    "E2E/CI/deployment execution": "root"
+  },
+  "status": "implementation frozen; static checks passed; independent review and root dry-run validation pending"
+}
