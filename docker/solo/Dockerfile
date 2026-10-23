@@ -41,7 +41,7 @@
 #        installed by this image (not required by the task); Opencode-harness
 #        sessions will fail to spawn until it is added — see README gotchas.
 
-FROM node:22-bookworm-slim
+FROM node:22.23.4-bookworm-slim
 
 # --- OS packages ---
 # ca-certificates: TLS for npm installs and outbound HTTPS (hub archive, panel bundle, Claude API).
@@ -57,6 +57,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       zsh \
       procps \
       tini \
+    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Non-root user ---
