@@ -18,7 +18,7 @@
   },
   "resources": {
     "Git index/history": "npx_implementation",
-    "E2E/CI/deployment execution": "root"
+    "E2E/CI/deployment execution": "root: validation complete; both production deployments skipped"
   },
-  "status": "implementation frozen; static checks passed; independent review and root dry-run validation pending"
+  "status": "source and focused runtime gates passed; workers stopped; final evidence commit and PR authorized"
 }
