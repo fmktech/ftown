@@ -302,14 +302,6 @@ PY`;
     });
   }, [rawSessions, setBridgeOrder, setSessionOrder]);
 
-  const handleCreateSession = useCallback(
-    async (prompt: string, options: CreateSessionOptions): Promise<void> => {
-      await createSession(prompt, options);
-      scheduleTerminalRenderAdjustment();
-    },
-    [createSession, scheduleTerminalRenderAdjustment]
-  );
-
   const handleStopSession = useCallback(() => {
     if (selectedSessionId) stopSession(selectedSessionId);
   }, [selectedSessionId, stopSession]);
@@ -361,6 +353,15 @@ PY`;
       setMobileTab("terminal");
     }
   }, [clearSessionAttention]);
+
+  const handleCreateSession = useCallback(
+    async (prompt: string, options: CreateSessionOptions): Promise<void> => {
+      const created = await createSession(prompt, options);
+      handleSelectSession(created.id);
+      scheduleTerminalRenderAdjustment();
+    },
+    [createSession, handleSelectSession, scheduleTerminalRenderAdjustment]
+  );
 
   useEffect(() => {
     const sessionId = new URLSearchParams(window.location.search).get("session");

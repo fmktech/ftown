@@ -30,20 +30,23 @@ vi.mock("@/hooks/useAllSessionEvents", () => ({ useAllSessionEvents: () => ({
 }) }));
 vi.mock("./Terminal", () => ({ Terminal: ({ sessionId }: { sessionId: string | null }) => <div data-testid="terminal">{sessionId}</div> }));
 vi.mock("./MobileControlBar", () => ({ MobileControlBar: () => <div>Session controls</div> }));
-vi.mock("./NewSessionModal", () => ({ NewSessionModal: ({ isOpen }: { isOpen: boolean }) => isOpen ? <div>New Session</div> : null }));
+vi.mock("./NewSessionModal", () => ({ NewSessionModal: ({ isOpen, onSubmit, onClose }: {
+  isOpen: boolean; onSubmit: (prompt: string, options: { shellType: "shell" }) => Promise<void>; onClose: () => void;
+}) => isOpen ? <div>New Session<button onClick={() => { void onSubmit("", { shellType: "shell" }).then(onClose).catch(() => {}); }}>Submit new session</button></div> : null }));
 vi.mock("./CloudConnectionNotice", () => ({ CloudConnectionNotice: () => null }));
 
 function session(id: string, name: string, fields: Partial<Session> = {}): Session {
   return { id, name, bridgeId: "bridge-a", status: "running", shellType: "shell", createdAt: "2026-10-16T00:00:00Z", updatedAt: "2026-10-16T00:00:00Z", ...fields };
 }
-function dashboard() {
+function dashboard(localMode = false) {
   return render(<Dashboard client={null} connectionStatus="connected" connectionError={null}
-    userId="user" token="test" centrifugoUrl="ws://localhost" transport={null} onDisconnect={vi.fn()} />);
+    userId="user" token="test" centrifugoUrl="ws://localhost" transport={null} onDisconnect={vi.fn()} localMode={localMode} />);
 }
 
 beforeEach(() => {
   localStorage.clear();
   vi.clearAllMocks();
+  state.createSession.mockResolvedValue(undefined);
   state.sessions = [
     session("ordinary", "Regular shell"),
     session("legacy", "Preserved run", { loopId: "retired-loop", status: "error" }),
@@ -110,5 +113,41 @@ describe("bridge connection command", () => {
     fireEvent.click(screen.getByRole("button", { name: "Copy" }));
     await waitFor(() => expect(copy).toHaveBeenCalledWith("copy"));
     expect(copied).toBe(command); expect(document.querySelector("textarea")).toBeNull();
+  });
+});
+
+describe("new-session navigation", () => {
+  it.each([
+    { desktop: true, local: false }, { desktop: false, local: false },
+    { desktop: true, local: true }, { desktop: false, local: true },
+  ])("opens the exact create result (desktop=$desktop, local=$local) without a sidebar click", async ({ desktop, local }) => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: desktop, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    const created = session("created-id", "New session");
+    // Both rows are already available: delayed publication cannot explain a failure.
+    state.sessions.push(created, session("unrelated-later-id", "Another new session"));
+    state.createSession.mockResolvedValue(created);
+    dashboard(local);
+    fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+    fireEvent.click(screen.getByTitle("Create a new session"));
+    fireEvent.click(screen.getByRole("button", { name: "Submit new session" }));
+    await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("created-id"));
+    expect(screen.getByRole("button", { name: "Terminal" }).classList.contains("mobile-tab-active")).toBe(true);
+    expect(screen.getByRole("button", { name: /Regular shell/ })).toBeTruthy();
+    expect(state.clearSessionAttention).toHaveBeenLastCalledWith("created-id");
+  });
+
+  it("keeps the selected session and mobile workspace when creation fails", async () => {
+    state.createSession.mockRejectedValue(new Error("Create rejected"));
+    dashboard();
+    fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+    fireEvent.click(screen.getByTitle("Create a new session"));
+    fireEvent.click(screen.getByRole("button", { name: "Submit new session" }));
+    await waitFor(() => expect(state.createSession).toHaveBeenCalled());
+    expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
+    expect(screen.getByRole("button", { name: "Workspace" }).classList.contains("mobile-tab-active")).toBe(true);
+    expect(screen.getByText("New Session")).toBeTruthy();
+    expect(state.clearSessionAttention).toHaveBeenCalledTimes(1);
   });
 });

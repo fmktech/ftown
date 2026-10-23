@@ -45,6 +45,21 @@ function isSessionUsage(value: unknown): value is SessionUsage {
     && typeof usage.collectedAt === "string";
 }
 
+function isSessionRow(value: unknown): value is Session {
+  if (!value || typeof value !== "object") return false;
+  const row = value as Record<string, unknown>;
+  const optionalStrings = ["prompt", "model", "workingDir", "shellType", "claudeSessionId", "cursorSessionId", "codexSessionId", "piSessionId", "piSessionFile", "opencodeSessionId", "museSessionId", "command", "parentSessionId", "loopId"];
+  return optionalStrings.every(key => row[key] === undefined || typeof row[key] === "string")
+    && (row.usage === undefined || isSessionUsage(row.usage))
+    && (row.runtime === undefined || row.runtime === "tmux" || row.runtime === "direct")
+    && typeof row.id === "string" && row.id.length > 0
+    && typeof row.bridgeId === "string" && row.bridgeId.length > 0
+    && typeof row.name === "string" && typeof row.createdAt === "string"
+    && typeof row.updatedAt === "string"
+    && typeof row.status === "string"
+    && ["pending", "running", "completed", "error", "disconnected"].includes(row.status);
+}
+
 export function mergeSessionSnapshot(current: Session | undefined, incoming: Session): Session {
   if (!current) return incoming;
   let merged = incoming;
@@ -100,7 +115,7 @@ export class CreateSessionBridgeError extends Error {
 
 interface UseSessionsResult {
   sessions: Session[];
-  createSession: (prompt: string, options?: CreateSessionOptions) => Promise<void>;
+  createSession: (prompt: string, options?: CreateSessionOptions) => Promise<Session>;
   stopSession: (sessionId: string) => void;
   retrySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
@@ -190,20 +205,6 @@ export function useSessions(
       observationsRef.current.delete(id);
     };
     const observe = (id: string) => observationsRef.current.set(id, ++mutationRef.current);
-    const isRow = (value: unknown): value is Session => {
-      if (!value || typeof value !== "object") return false;
-      const row = value as Record<string, unknown>;
-      const optionalStrings = ["prompt", "model", "workingDir", "shellType", "claudeSessionId", "cursorSessionId", "codexSessionId", "piSessionId", "piSessionFile", "opencodeSessionId", "museSessionId", "command", "parentSessionId", "loopId"];
-      return optionalStrings.every(key => row[key] === undefined || typeof row[key] === "string")
-        && (row.usage === undefined || isSessionUsage(row.usage))
-        && (row.runtime === undefined || row.runtime === "tmux" || row.runtime === "direct")
-        && typeof row.id === "string" && row.id.length > 0
-        && typeof row.bridgeId === "string" && row.bridgeId.length > 0
-        && typeof row.name === "string" && typeof row.createdAt === "string"
-        && typeof row.updatedAt === "string"
-        && typeof row.status === "string"
-        && ["pending", "running", "completed", "error", "disconnected"].includes(row.status);
-    };
     const rollback = (requestId: string) => {
       const removal = removals.get(requestId);
       if (!removal) return;
@@ -235,7 +236,7 @@ export function useSessions(
       if (!response.data || typeof response.data !== "object") return;
       const data = response.data as { sessions?: unknown; bridgeId?: unknown };
       if (!Array.isArray(data.sessions)) return;
-      const rows = data.sessions.filter(isRow);
+      const rows = data.sessions.filter(isSessionRow);
       const candidate = requests.get(response.requestId);
       const request = candidate?.contextGeneration === usageGenerationRef.current ? candidate : undefined;
       const bridgeId = typeof data.bridgeId === "string" && data.bridgeId.length > 0 ? data.bridgeId : (request ? client?.sessionSnapshotBridgeId : undefined);
@@ -288,7 +289,7 @@ export function useSessions(
         if ((data.session.status as string) === "removed") {
           confirm(data.session.id);
           updateSessions(prev => prev.filter(s => s.id !== data.session.id));
-        } else if (isRow(data.session) && !blocked(data.session.id)) {
+        } else if (isSessionRow(data.session) && !blocked(data.session.id)) {
           observe(data.session.id);
           updateSessions(prev => {
             const current = prev.find(s => s.id === data.session.id);
@@ -382,7 +383,7 @@ export function useSessions(
   }, [userId, pollLiveUsage]);
 
   const createSession = useCallback(
-    (prompt: string, options?: CreateSessionOptions): Promise<void> => {
+    (prompt: string, options?: CreateSessionOptions): Promise<Session> => {
       if (!userId) {
         return Promise.reject(new Error("Not connected"));
       }
@@ -412,14 +413,37 @@ export function useSessions(
         requestId: uuidv4(),
       };
 
+      const requestGeneration = usageGenerationRef.current;
+      const requestCutoff = mutationRef.current;
       // sendCommand rejects with "create_session timed out" after 30s.
       return sendCommand(command).then((resp) => {
         if (!resp.success) {
           throw new CreateSessionBridgeError(resp.error ?? "create_session failed", resp.data);
         }
+        if (requestGeneration !== usageGenerationRef.current) {
+          throw new Error("Session creation context changed; refresh before retrying.");
+        }
+        const created = (resp.data as { session?: unknown } | undefined)?.session;
+        if (!isSessionRow(created) || (options?.bridgeId && created.bridgeId !== options.bridgeId)) {
+          throw new Error("Bridge returned an invalid created session; refresh before retrying.");
+        }
+        if (confirmedRemovedRef.current.has(created.id)
+          || (optimisticRef.current.get(created.id)?.expiry ?? 0) > Date.now()) {
+          throw new Error("Created session is no longer available.");
+        }
+        let reconciled = created;
+        updateSessions(prev => {
+          const current = prev.find(row => row.id === created.id);
+          // A publication received while create was in flight is newer evidence.
+          reconciled = current && (observationsRef.current.get(created.id) ?? 0) > requestCutoff
+            ? current : mergeSessionSnapshot(current, created);
+          return current ? prev.map(row => row.id === created.id ? reconciled : row) : [reconciled, ...prev];
+        });
+        observationsRef.current.set(created.id, ++mutationRef.current);
+        return reconciled;
       });
     },
-    [userId, sendCommand]
+    [userId, sendCommand, updateSessions]
   );
 
   const stopSession = useCallback(
