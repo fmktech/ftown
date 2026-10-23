@@ -1,22 +1,16 @@
 name: Deploy centrifugo config
 
-# SECURITY: this repo is PUBLIC and this workflow reads production secrets.
-# It therefore runs ONLY on trusted refs — never on pull_request /
-# pull_request_target (a forked PR could exfiltrate the secrets):
-#   - push to main touching the centrifugo config, this workflow, or the deploy
-#     scripts
-#   - manual workflow_dispatch (used for the first run — see
-#     docs/centrifugo-deploy.md)
+# Legacy AWS fallback only. Normal pushes/PRs use the secret-free Fly validator.
+# This public repository's deployment secrets are read only after an explicit
+# manual confirmation on trusted main; never on pull requests or other refs.
 on:
-  push:
-    branches: [main]
-    paths:
-      # Fly-specific files have their own validation/deploy workflow and must not
-      # cause an unrelated restart of the legacy AWS host.
-      - 'centrifugo/config.prod.json'
-      - '.github/workflows/deploy-centrifugo.yml'
-      - 'scripts/deploy/**'
   workflow_dispatch:
+    inputs:
+      deploy_legacy_aws:
+        description: Deploy configuration to the legacy AWS host (requires verified host pin and patched runtime)
+        required: true
+        default: false
+        type: boolean
 
 # One deploy at a time; never cancel an in-flight deploy (a half-applied config
 # swap on the host would be worse than waiting).
@@ -29,6 +23,7 @@ permissions:
 
 jobs:
   deploy:
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy_legacy_aws == true && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     env:
       # Committed template with __CENTRIFUGO_*__ placeholders (no real secrets).
@@ -146,7 +141,7 @@ jobs:
         env:
           CENTRIFUGO_HOST: ${{ vars.CENTRIFUGO_HOST }}
           CENTRIFUGO_SSH_USER: ${{ vars.CENTRIFUGO_SSH_USER }}
-          # REQUIRED host-key pin (ssh-keyscan output). The SSH handshake is
+          # REQUIRED independently verified host public-key pin. The SSH handshake is
           # authenticated against it before any rendered secrets are uploaded.
           CENTRIFUGO_KNOWN_HOSTS: ${{ vars.CENTRIFUGO_KNOWN_HOSTS }}
         run: |

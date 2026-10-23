@@ -1,4 +1,4 @@
-# Centrifugo config deploy
+# Legacy AWS Centrifugo config deployment
 
 ## Required runtime upgrade before config deployment
 
@@ -26,20 +26,20 @@ schema migration is introduced.
 > [`centrifugo-fly-rollout.md`](./centrifugo-fly-rollout.md). Keep this runbook
 > until the Fly migration has passed its rollback window.
 
-Automated, drift-proof deployment of the Centrifugo (v6) configuration to the
-production EC2 host.
+This is a **manual fallback deployment**, not an automatic production sync.
+Merging configuration or deploy-script changes never contacts the AWS host.
+The Fly workflow automatically validates the committed configurations without
+production secrets; actual Fly deployment also requires a separate manual action.
 
-The problem this solves: the live server config drifted from the repo. Newer
-namespaces existed in the repo but were **missing on the server**
-(`events`, `commands`, `bridges`), silently breaking features. From now
-on the repo is the single source of truth and CI re-applies it on every merge to
-`main` that touches the config, so drift can never silently accumulate again.
-**The first run fixes the current drift.**
+The older AWS endpoint remains available as a documented fallback procedure, but
+its current health and role must be verified before use. Network timeouts do not
+prove it has been decommissioned. This workflow does not change DNS or choose the
+broker used by browsers or bridges. See the [Fly rollout runbook](centrifugo-fly-rollout.md)
+for the observed routing and cutover prerequisites.
 
-> There is **no secret leak** here. `centrifugo/config.json` and
-> `.secrets/config.prod.json` only ever contained placeholder values, and the
-> single real secret — `.secrets/centrifugo.pem` — is gitignored and has never
-> been committed. This is a **config sync**, not a security incident.
+The template remains the source of truth for an explicitly requested config sync.
+It retains the namespace set needed by the application; successful validation or
+a merge alone does not prove the remote host is running that configuration.
 
 ---
 
@@ -49,10 +49,10 @@ on the repo is the single source of truth and CI re-applies it on every merge to
 | --- | --- |
 | `centrifugo/config.prod.json` | Committed **template**. The four secret fields are explicit `__CENTRIFUGO_*__` placeholders; CI renders them from GitHub secrets. |
 | `centrifugo/config.json` | Local dev config (docker-compose). Obviously-dev placeholder values, never used in prod. |
-| `.github/workflows/deploy-centrifugo.yml` | The pipeline (render → validate → deploy → health → rollback). |
+| `.github/workflows/deploy-centrifugo.yml` | Explicit manual AWS deployment on `main` (render → validate → deploy → health → rollback). |
 | `scripts/deploy/centrifugo-remote.sh` | Runs **on the host**; self-detects layout, swaps config, restarts, rolls back. |
 | GitHub Actions **secrets** | The four Centrifugo secret values + the SSH private key. |
-| GitHub Actions **variables** | The host name and SSH user (non-secret). |
+| GitHub Actions **variables** | The intended host, SSH user and required trusted host-key pin (non-secret). |
 
 The template is deliberately un-ignored in `.gitignore`
 (`!centrifugo/config.prod.json`) so it is tracked and CI can check it out. Every
@@ -62,12 +62,17 @@ other `config.prod.json` and all of `.secrets/` stay ignored.
 
 ## How the pipeline works
 
-Trigger: `push` to `main` that touches `centrifugo/**`, this workflow, or
-`scripts/deploy/**`, plus manual `workflow_dispatch`. There is **no**
-`pull_request` / `pull_request_target` / `workflow_run` trigger — the repo is
-public and the workflow handles real secrets, so only trusted refs may run it. A
-`concurrency` group serializes deploys (never two config swaps at once), and the
-job runs with `permissions: contents: read`.
+Trigger: manual `workflow_dispatch` only, on branch **`main`**, with the boolean
+**`deploy_legacy_aws` explicitly enabled**. Its default is `false`: a default
+manual run skips the entire deployment job and reads no deployment secrets or
+contacts the host. The job also rejects non-`main` refs. There are no `push`,
+`pull_request`, `pull_request_target` or `workflow_run` deployment triggers.
+
+Pushes and pull requests touching the legacy config, workflow or deploy scripts
+instead trigger the existing **Validate and deploy Centrifugo to Fly** validation
+job. That validation uses placeholder data and no production credentials; it
+neither deploys Fly nor contacts AWS. A concurrency group still serializes
+explicit AWS deploys, with `permissions: contents: read`.
 
 1. **Checkout** the repo.
 2. **Render** — a small Python step reads `centrifugo/config.prod.json` and
@@ -94,18 +99,22 @@ Any error fails the job loudly.
 **SSH host-key verification.** The workflow requires the repo variable
 `CENTRIFUGO_KNOWN_HOSTS` (host public keys are not secret):
 
-- The key is pinned and the handshake runs with `StrictHostKeyChecking=yes`,
-  which **authenticates the host and blocks an on-path MITM** from capturing the
-  rendered secrets. Populate it with:
+- The key is pinned and the handshake uses `StrictHostKeyChecking=yes` to
+  authenticate the host before uploading rendered secrets.
+- Obtain the correct host public key from a trusted, previously verified
+  `known_hosts` entry or an authenticated administrative channel. Verify its
+  fingerprint independently against the intended AWS host. A fresh unauthenticated
+  `ssh-keyscan` result is not sufficient evidence of identity.
+- Store only that verified entry, including the correct host name/address:
 
   ```sh
-  ssh-keyscan -t ed25519,ecdsa,rsa ec2-56-124-107-237.sa-east-1.compute.amazonaws.com
-  gh variable set CENTRIFUGO_KNOWN_HOSTS < <(ssh-keyscan -t ed25519 ec2-56-124-107-237.sa-east-1.compute.amazonaws.com)
+  ssh-keygen -lf path/to/verified-centrifugo-known-hosts
+  gh variable set CENTRIFUGO_KNOWN_HOSTS < path/to/verified-centrifugo-known-hosts
   ```
 
-  (Run `ssh-keyscan` from a trusted network and verify the fingerprint out of
-  band first.) If the variable is absent, the workflow fails before uploading
-  the rendered secret configuration.
+If this variable is absent or empty, the workflow fails before SSH/upload.
+There is no trust-on-first-use fallback. Do not bypass this failure to make a
+workflow green; provision a verified pin before requesting a real deployment.
 
 ### The remote script (`centrifugo-remote.sh`)
 
@@ -151,30 +160,33 @@ known, restrict it to that origin plus the WSS hosts
 
 ---
 
-## First run
+## Explicit fallback deployment
 
-The secrets and variables are **already set** (see the next section for the exact
-names). To do the first deploy — which fixes the current namespace drift:
+1. Confirm the intended AWS host is reachable and is still the correct fallback
+   target. Verify its trusted host-key pin and all required secrets/variables;
+   their presence is not assumed.
+2. Prepare a matching Centrifugo **6.10.2 or newer** binary/image and v6 config.
+   The remote script rejects an old/unknown runtime before modifying live state;
+   this workflow does not perform the binary upgrade.
+3. GitHub → **Actions** → **Deploy centrifugo config** → **Run workflow** →
+   branch **`main`** → explicitly check **`deploy_legacy_aws`**.
+   Leaving it unchecked skips deployment. Merging a PR never starts AWS deployment.
+4. Watch `render OK` → `checkconfig` → verified runtime → detected layout →
+   backup/restart → `deploy OK`. Verify the intended application's realtime
+   behavior after success; configuration validation alone is not a live check.
 
-1. **Merge to `main`** touching `centrifugo/**` (this branch's changes qualify).
-   The path filter auto-triggers the deploy on merge; **or**
-2. **Manually** — GitHub → **Actions** → **Deploy centrifugo config** → **Run
-   workflow** → branch `main` (`workflow_dispatch`).
-
-Watch the run: `render OK` → `checkconfig` passes → the remote script logs the
-detected layout, the backup path, the restart, and `deploy OK`. After it
-completes, the server has the full namespace set (`terminal`, `sessions`,
-`terminal-input`, `events`, `commands`, `bridges`).
-The former `loops` namespace was removed with bridge 0.19.38; see the
-[retirement notes](automation-sunset.md) before reverting configuration or bridges.
+The namespace set is `terminal`, `sessions`, `terminal-input`, `events`,
+`commands`, and `bridges`. The former `loops` namespace was removed with bridge
+0.19.38; see [retirement notes](automation-sunset.md) before reverting config or
+bridges. This action does not cut over DNS, shut down Fly, or prove AWS retirement.
 
 ---
 
 ## GitHub secrets & variables
 
-These are **already configured** by the user; the workflow references these exact
-names. If you ever need to re-set them, every command below reads from a file or
-stdin so **nothing is echoed** to your terminal or shell history. Requires the
+Verify these exact names before requesting deployment; configuration is not
+assumed to be complete. The commands below read values from files or stdin so
+**nothing is echoed** to your terminal or shell history. Requires the
 GitHub CLI (`gh auth login` first) run from inside the repo.
 
 **Secrets** (values are secret):
@@ -193,7 +205,7 @@ GitHub CLI (`gh auth login` first) run from inside the repo.
 | --- | --- |
 | `CENTRIFUGO_HOST` | `ec2-56-124-107-237.sa-east-1.compute.amazonaws.com` |
 | `CENTRIFUGO_SSH_USER` | `ec2-user` |
-| `CENTRIFUGO_KNOWN_HOSTS` | **Optional** but recommended — `ssh-keyscan` output for the host. Pins the SSH host key so the deploy authenticates it (blocks MITM). If unset, the deploy still runs (trust-on-first-use) with a loud warning. |
+| `CENTRIFUGO_KNOWN_HOSTS` | **Required** verified host public-key entry for the intended host. Empty/missing values fail before SSH; no TOFU or fresh-keyscan fallback. |
 
 ```sh
 # SSH private key (straight from the gitignored keyfile):
@@ -209,8 +221,8 @@ gh secret set CENTRIFUGO_ADMIN_SECRET          < path/to/admin_secret
 gh variable set CENTRIFUGO_HOST     --body 'ec2-56-124-107-237.sa-east-1.compute.amazonaws.com'
 gh variable set CENTRIFUGO_SSH_USER --body 'ec2-user'
 
-# Optional (recommended) host-key pin — authenticates the SSH handshake:
-gh variable set CENTRIFUGO_KNOWN_HOSTS < <(ssh-keyscan -t ed25519 ec2-56-124-107-237.sa-east-1.compute.amazonaws.com)
+# Required host-key pin from the independently verified file described above:
+gh variable set CENTRIFUGO_KNOWN_HOSTS < path/to/verified-centrifugo-known-hosts
 
 # Verify (names only, never values):
 gh secret list
@@ -221,8 +233,8 @@ gh variable list
 
 ## Same-key config sync = brief reconnect blip (no bridge re-pair)
 
-For this deploy the GitHub secrets hold the **existing** key values, so the
-`token_hmac_secret_key` is **unchanged**. Applying the config restarts
+For a same-key config sync, preserve the **existing** GitHub secret values, so
+`client.token.hmac_secret_key` remains **unchanged**. Applying the config restarts
 Centrifugo, which drops live websocket connections — but because the signing key
 did not change, everything re-attaches on its own:
 
