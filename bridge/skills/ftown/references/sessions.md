@@ -162,6 +162,30 @@ ftown sessions screen <child-id> --limit 100
 ftown sessions grep <child-id> --pattern 'FAIL|Error'
 ```
 
+### Completion handoff
+
+When the task creates or updates a GitHub PR, associate its actual URL with the
+FTown session before the completion notice. Then request user attention once the
+task is complete, before the final handoff. Replace the sample URL and summary
+below with truthful outcomes and checks (including checks not run):
+
+```bash
+ftown sessions pr https://github.com/owner/repo/pull/123
+ftown sessions attention --title 'Work complete' \
+  --message 'Outcome: <actual result>. Checks: <actual results or not run>. PR: https://github.com/owner/repo/pull/123'
+```
+
+For tasks without a PR, omit the PR command and PR summary. Use the verified
+`FTOWN_SESSION_ID` or explicit `--session-id`; never guess a target. MCP callers
+instead use `sessions_update` with `pullRequestUrl` when applicable, then
+`attention_request` with title `Work complete` and the same truthful summary,
+always supplying explicit `machine` and `sessionId`.
+
+Send one completion request per completed task, not repeated per-turn notices.
+Logical duplicate coalescing does not justify retries after an uncertain outcome;
+inspect the existing request first, as described above. Child agents still send
+their assigned result to the parent; the user attention request is additional.
+
 ## Environment
 
 Spawned ftown sessions receive:

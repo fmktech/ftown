@@ -2,8 +2,9 @@
 name: ftown
 description: >-
   Control ftown sessions: create/list/read/drive sibling sessions, send ftown
-  mail, and coordinate worker agents. Use for ftown sessions, child/sibling
-  agents, bridge mail/inbox, or explicitly requested orchestration.
+  mail, request human attention, link session PRs, and coordinate worker agents.
+  Use for ftown sessions, child/sibling agents, bridge mail/inbox, or explicitly
+  requested orchestration.
 ---
 
 # ftown
@@ -89,6 +90,19 @@ Remote MCP callers use `attention_request` with explicit `machine` and
 clear). Mutation tools require control access; remote callers have no automatic
 local self identity. Keep the returned attention event ID for existing inbox,
 acknowledge and resolve operations, which do not answer the agent's question.
+
+For tasks performed in an FTown session, associate the task's GitHub PR when
+created or updated, before the completion notice: use `ftown sessions pr <URL>`
+or MCP `sessions_update.pullRequestUrl`. Omit this step for tasks without a PR;
+never invent a PR or guess a session identity.
+
+Once the task is complete, request user attention **once per completed task**,
+before the final handoff, using `ftown sessions attention --title 'Work complete'
+--message "<truthful outcome, checks and PR summary>"` or MCP `attention_request`.
+Do not send a completion notice every turn; retain the uncertain-result guidance
+above. Children must still report their result to the parent as assigned; user
+attention does not replace that reporting. See the completion example in
+`references/sessions.md`.
 
 ## Cleanup
 
