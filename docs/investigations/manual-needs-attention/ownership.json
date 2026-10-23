@@ -19,12 +19,12 @@
   },
   "resources": {
     "Git index/history": "/root/npx_implementation",
-    "E2E/CI/browser/servers/generated artifacts": "/root",
+    "E2E/CI/browser/servers/generated artifacts": "/root: acceptance passed; CI cleanup verified; screenshots retained",
     "dependency installs/lockfiles": "none authorized"
   },
   "dependencies": [
     "independent contract review before implementation",
     "implementation handoff before final source review and combined E2E"
   ],
-  "status": "implementation and independent review completed; source leases released; static checks passed; Git commit/push authorized before root CI and visual acceptance"
+  "status": "implementation/review workers completed and retired; runtime/visual acceptance passed on ab4ab965; final evidence commit and PR publication assigned to sole Git owner"
 }
