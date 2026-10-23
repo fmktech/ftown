@@ -1,4 +1,5 @@
 FROM node:22.23.4-alpine AS base
+RUN apk add --no-cache --upgrade ca-certificates && update-ca-certificates
 
 FROM base AS deps
 WORKDIR /app

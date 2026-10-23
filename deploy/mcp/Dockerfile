@@ -1,4 +1,5 @@
 FROM node:24.22.1-bookworm-slim AS build
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && update-ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY bridge/package.json bridge/package-lock.json ./
 # The gateway needs no PTY or WebRTC native binaries.
@@ -8,7 +9,7 @@ COPY bridge/src ./src
 RUN npm run build && npm prune --omit=dev --ignore-scripts
 
 FROM node:24.22.1-bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates openssh-client && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates openssh-client && update-ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build --chown=node:node /app/package.json ./
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
