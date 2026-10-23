@@ -513,6 +513,13 @@ export function SessionList({
     () => sessions.filter((session) => !hiddenSet.has(session.id) && !hiddenBridgeSet.has(session.bridgeId)),
     [hiddenBridgeSet, hiddenSet, sessions],
   );
+  const attentionSessions = useMemo(
+    () => visibleSessions.flatMap((session) => {
+      const attention = sessionActivity?.get(session.id)?.attention;
+      return attention ? [{ session, attention }] : [];
+    }).sort((a, b) => b.attention.receivedAt - a.attention.receivedAt),
+    [sessionActivity, visibleSessions],
+  );
   const hiddenSessions = useMemo(
     () => sessions.filter((session) => hiddenSet.has(session.id) && !hiddenBridgeSet.has(session.bridgeId)),
     [hiddenBridgeSet, hiddenSet, sessions],
@@ -1539,6 +1546,92 @@ export function SessionList({
 
   return (
     <div className="flex flex-col">
+      {!collapsed && attentionSessions.length > 0 && (
+        <section
+          aria-label="Needs attention"
+          style={{ padding: "6px 0", borderBottom: "1px solid var(--border-muted)" }}
+        >
+          <h2 style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            padding: "4px 12px 5px",
+            fontSize: 10,
+            fontWeight: 600,
+            color: "var(--text-muted)",
+          }}>
+            Needs attention
+            <span aria-hidden style={{ color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>
+              {attentionSessions.length}
+            </span>
+          </h2>
+          {attentionSessions.map(({ session, attention }) => {
+            const isSelected = session.id === selectedSessionId;
+            const displayName = session.name || session.prompt?.slice(0, 36) || "Session";
+            const requestLabel = `${displayName}: ${attention.title}. ${attention.message}`;
+            return (
+              <button
+                key={session.id}
+                type="button"
+                aria-label={requestLabel}
+                aria-current={isSelected ? "true" : undefined}
+                title={requestLabel}
+                onClick={() => onSelectSession(session.id)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 7,
+                  width: "100%",
+                  minWidth: 0,
+                  minHeight: 44,
+                  padding: "7px 12px 7px 10px",
+                  border: "none",
+                  borderLeft: `2px solid ${isSelected ? "var(--accent)" : "transparent"}`,
+                  background: isSelected ? "var(--bg-elevated)" : "transparent",
+                  color: isSelected ? "var(--text-primary)" : "var(--text-secondary)",
+                  textAlign: "left",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 11,
+                  cursor: "pointer",
+                }}
+                onMouseEnter={(e) => {
+                  if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)";
+                }}
+                onMouseLeave={(e) => {
+                  if (!isSelected) e.currentTarget.style.background = "transparent";
+                }}
+              >
+                <HarnessIcon harness={session.shellType} size={17} />
+                <span style={{
+                  flex: 1,
+                  minWidth: 0,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  fontWeight: isSelected ? 600 : 400,
+                }}>
+                  {displayName}
+                </span>
+                <span aria-hidden style={{
+                  width: 5,
+                  height: 5,
+                  flexShrink: 0,
+                  borderRadius: "50%",
+                  background: "var(--status-pending)",
+                }} />
+                <span style={{
+                  flexShrink: 0,
+                  fontSize: 10,
+                  color: "var(--text-faint)",
+                  fontVariantNumeric: "tabular-nums",
+                }}>
+                  {formatTimestamp(new Date(attention.receivedAt).toISOString())}
+                </span>
+              </button>
+            );
+          })}
+        </section>
+      )}
       {visibleBridgeIds.map((bridgeId) => renderBridgeFolder(bridgeId))}
 
       {hiddenBridgeIdsList.length > 0 && !collapsed && (

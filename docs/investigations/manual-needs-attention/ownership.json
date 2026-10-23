@@ -1,0 +1,30 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "branch": "feat/manual-needs-attention",
+  "model": "gpt-6.1-sol",
+  "reasoning_effort": "high",
+  "owners": {
+    "/root": [
+      "docs/investigations/manual-needs-attention/coordination.md",
+      "docs/investigations/manual-needs-attention/ownership.json"
+    ],
+    "/root/attention_implementation": [
+      "ui/src/components/SessionList.tsx",
+      "ui/src/components/session-needs-attention.test.ts",
+      "e2e/tests/session-needs-attention.spec.ts",
+      ".github/workflows/e2e.yml"
+    ],
+    "/root/npx_review": [],
+    "/root/npx_implementation": []
+  },
+  "resources": {
+    "Git index/history": "/root/npx_implementation",
+    "E2E/CI/browser/servers/generated artifacts": "/root",
+    "dependency installs/lockfiles": "none authorized"
+  },
+  "dependencies": [
+    "independent contract review before implementation",
+    "implementation handoff before final source review and combined E2E"
+  ],
+  "status": "implementation and independent review completed; source leases released; static checks passed; Git commit/push authorized before root CI and visual acceptance"
+}
