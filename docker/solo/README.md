@@ -28,7 +28,7 @@ trailing argument on `docker run`.
 
 ## Build & run
 
-This image pins `ftown-bridge@0.19.41`, which uses explicit setup
+This image pins `ftown-bridge@0.19.50`, which uses explicit setup
 and in-process CLI commands. Publish that release to npm before building
 the image; the source change alone does not publish it, and builds cannot resolve
 the new pin until it is available. Do not substitute an older bridge version.
@@ -48,7 +48,7 @@ docker compose up -d
 
 For explicit repair, append `--repair` to the setup command. A missing/outdated
 setup fails before bridge listeners/auth with matching-version setup guidance.
-The 0.19.41 package must be published before this image can be built; this source
+The 0.19.50 package must be published before this image can be built; this source
 change does not publish it.
 
 

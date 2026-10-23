@@ -104,8 +104,8 @@ export function resolvePlatformTriple(
 
 export function assetUrl(version: string, triple: PlatformTriple): string {
   const bare = version.startsWith('v') ? version.slice(1) : version;
-  // Release assets use UNDERSCORES between parts (centrifugo_5.4.9_darwin_arm64.tar.gz)
-  // while our platform triple is dashed — verified against the v5.4.9 checksums.txt.
+  // Release assets use UNDERSCORES between parts (centrifugo_6.10.2_darwin_arm64.tar.gz)
+  // while our platform triple is dashed — verified against the v6.10.2 checksums.txt.
   const assetTriple = triple.split('-').join('_');
   return `https://github.com/centrifugal/centrifugo/releases/download/${version}/centrifugo_${bare}_${assetTriple}.tar.gz`;
 }
@@ -268,69 +268,36 @@ export async function ensureHubBinary(opts: EnsureHubBinaryOptions): Promise<str
 // ---------- Config write (frozen keys, S7) ----------
 
 /**
- * Frozen solo hub configuration. Security keys mirror the contract block
- * translated to actual centrifugo v5 flat key names (verified against the
- * v5.4.9 source defaults): `admin` disables the admin web UI, `api_disable`
- * disables the server HTTP API, `allow_anonymous_connect_without_token=false`
- * means no anonymous client connections. address/port are operational keys so
- * the child binds loopback on the ephemeral port the integrator assigned.
+ * Nested Centrifugo v6 configuration. Admin and server HTTP API stay disabled;
+ * the hub binds only loopback on the port assigned by the Solo integrator.
+ * Named namespaces retain their own explicit permission/retention settings;
+ * HUB_CHANNEL_DEFAULTS applies only to channels without a namespace.
  *
- * `...HUB_CHANNEL_DEFAULTS` spreads the production top-level channel-option
- * defaults (presence, join_leave, force_push_join_leave,
- * allow_presence_for_subscriber, history_size, history_ttl, force_recovery,
- * allow_history_for_subscriber) that several HUB_NAMESPACES entries below
- * have no per-namespace override for and therefore inherit — without this,
- * those namespaces would silently fall back to Centrifugo's own stricter
- * built-in defaults instead of production's.
- *
- * `namespaces: HUB_NAMESPACES` is the production namespace table (contract-
- * frozen, drift-guarded in hub-manager.test.ts against centrifugo/config.json)
- * — WITHOUT it every namespaced channel (bridges:presence#solo, commands:rpc
- * #solo, sessions:*, terminal:*, terminal-input:*,
- * events:*) is rejected by Centrifugo with code 102 "unknown channel", which
- * is why the panel could never see the bridge or create sessions in solo
- * mode. `allow_user_limited_channels: true` is required alongside it because
- * every one of those channels carries the `#solo` user-limited-channel
- * suffix. `client_channel_limit` / `client_queue_max_size` /
- * `client_stale_close_delay` / `websocket_message_size_limit` /
- * `ping_interval` / `pong_timeout` are carried over from production so a
- * single-user LAN client isn't held to defaults tuned for a multi-tenant
- * deployment. `websocket_compression` stays false (see below) even though
- * production enables it — that divergence is deliberate, not part of this
- * fix.
- *
- * `allowed_origins: []` is deliberate, not an oversight: centrifugo v5
- * rejects (403s) any handshake that carries an Origin header when this list
- * is empty. That's fine here because same-origin is enforced ourselves, one
- * hop earlier, in the front proxy (ws-proxy.ts `handleHubUpgrade` /
- * `isSameOrigin`), which also strips the Origin header before forwarding —
- * so centrifugo never sees one to judge. The hub additionally only ever
- * binds loopback (127.0.0.1, see `address` below), so it is never reachable
- * directly from a browser regardless. Do not "fix" this by populating
- * allowed_origins; that would just duplicate — and could drift from — the
- * check ws-proxy.ts already owns.
+ * Empty client.allowed_origins is deliberate: ws-proxy.ts enforces same-origin
+ * at the public front and strips Origin before forwarding to this private hub.
+ * WebSocket compression stays disabled for Solo, matching its previous policy.
  */
 function hubConfigObject(port: number, secret: string): Record<string, unknown> {
   return {
-    address: '127.0.0.1',
-    port,
-    token_hmac_secret_key: secret,
-    token_audience: HUB_JWT_AUDIENCE,
-    allowed_origins: [],
-    websocket_compression: false,
-    allow_anonymous_connect_without_token: false,
-    admin: false,
-    api_disable: true,
-    health: true,
-    ...HUB_CHANNEL_DEFAULTS,
-    namespaces: HUB_NAMESPACES,
-    allow_user_limited_channels: true,
-    client_channel_limit: 256,
-    client_queue_max_size: 67108864,
-    client_stale_close_delay: '30s',
-    websocket_message_size_limit: 33554432,
-    ping_interval: '10s',
-    pong_timeout: '5s',
+    http_server: { address: '127.0.0.1', port },
+    client: {
+      token: { hmac_secret_key: secret, audience: HUB_JWT_AUDIENCE },
+      allowed_origins: [],
+      allow_anonymous_connect_without_token: false,
+      channel_limit: 256,
+      queue_max_size: 67108864,
+      stale_close_delay: '30s',
+      ping_interval: '10s',
+      pong_timeout: '5s',
+    },
+    websocket: { compression: false, message_size_limit: 33554432 },
+    admin: { enabled: false },
+    http_api: { disabled: true },
+    health: { enabled: true },
+    channel: {
+      without_namespace: { ...HUB_CHANNEL_DEFAULTS, allow_user_limited_channels: true },
+      namespaces: HUB_NAMESPACES,
+    },
   };
 }
 
@@ -433,11 +400,12 @@ export async function startHub(opts: StartHubOptions): Promise<RunningHub> {
   let secret: string;
   try {
     const parsed = JSON.parse(await readFile(opts.configPath, 'utf8')) as {
-      port?: unknown;
-      token_hmac_secret_key?: unknown;
+      http_server?: { port?: unknown };
+      client?: { token?: { hmac_secret_key?: unknown } };
     };
-    port = Number(parsed.port);
-    secret = typeof parsed.token_hmac_secret_key === 'string' ? parsed.token_hmac_secret_key : '';
+    port = Number(parsed.http_server?.port);
+    const configuredSecret = parsed.client?.token?.hmac_secret_key;
+    secret = typeof configuredSecret === 'string' ? configuredSecret : '';
   } catch (err) {
     throw new HubStartError(`cannot read hub config ${opts.configPath}: ${errorMessage(err)}`);
   }

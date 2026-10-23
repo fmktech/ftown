@@ -31,6 +31,7 @@ LIVE_CONFIG=""
 BACKUP=""
 SUDO=""
 INTERNAL_PORT=""
+VERSION_BIN=""
 PORT=""
 
 log() { printf '[centrifugo-deploy] %s\n' "$*"; }
@@ -41,7 +42,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 read_port() {
   # $1 = field name, e.g. internal_port. The leading quote in the pattern means
   # "port" never matches inside "internal_port".
-  grep -oE "\"$1\"[[:space:]]*:[[:space:]]*[0-9]+" "$NEW_CONFIG" 2>/dev/null \
+  grep -oE "\"$1\"[[:space:]]*:[[:space:]]*\"?[0-9]+" "$NEW_CONFIG" 2>/dev/null \
     | grep -oE '[0-9]+$' | head -n1 || true
 }
 
@@ -110,9 +111,34 @@ detect_systemd() {
   cfg="$(printf '%s\n' "$execstart" | tr ' ' '\n' | extract_config_arg)"
   [ -n "$cfg" ] || cfg="/etc/centrifugo/config.json"
   LIVE_CONFIG="$cfg"
+  # systemctl's structured ExecStart includes path=; plain output is accepted too.
+  VERSION_BIN="$(printf '%s\n' "$execstart" | sed -n 's/.*path=\([^ ;}]*\).*/\1/p')"
+  [ -n "$VERSION_BIN" ] || VERSION_BIN="$(printf '%s\n' "$execstart" | awk '{print $1}')"
 
   LAYOUT="systemd"
   return 0
+}
+
+# Reject an old/unknown runtime before backing up or changing live state.
+# This config deploy intentionally does not recreate Docker containers or install binaries.
+require_patched_runtime() {
+  case "$LAYOUT" in
+    docker) version_output="$(docker exec "$CONTAINER" centrifugo version 2>/dev/null)" || version_output="" ;;
+    systemd)
+      case "$VERSION_BIN" in /*) : ;; *) die "cannot determine Centrifugo executable; manually upgrade binary/image to >=6.10.2 before deploying v6 config" ;; esac
+      version_output="$("$VERSION_BIN" version 2>/dev/null)" || version_output=""
+      ;;
+  esac
+  # Accept a stable three-component release only; prereleases/ambiguous output fail closed.
+  version="$(printf '%s\n' "$version_output" | sed -nE 's/^Centrifugo v?([0-9]+\.[0-9]+\.[0-9]+)( \([^)]*\))?[[:space:]]*$/\1/p')"
+  case "$version_output" in *'
+'*) die "Ambiguous runtime version; manually upgrade the host binary/image to >=6.10.2 before deploying v6 config" ;; esac
+  if [ -z "$version" ] || ! printf '%s\n' "$version" | awk -F. '
+      NF == 3 && ($1 > 6 || ($1 == 6 && ($2 > 10 || ($2 == 10 && $3 >= 2)))) { ok=1 }
+      END { exit !ok }'; then
+    die "Centrifugo >=6.10.2 is required; manually upgrade the host binary/image before deploying v6 config (live config/service unchanged)"
+  fi
+  log "verified patched Centrifugo runtime $version"
 }
 
 set_sudo() {
@@ -260,6 +286,7 @@ else
   exit 1
 fi
 
+require_patched_runtime
 set_sudo
 INTERNAL_PORT="$(read_port internal_port)"
 PORT="$(read_port port)"

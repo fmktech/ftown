@@ -5,6 +5,8 @@ on:
     paths:
       - 'centrifugo/config.fly.json'
       - 'centrifugo/Dockerfile.fly'
+      - 'centrifugo/entrypoint.sh'
+      - 'scripts/check-centrifugo-config*'
       - 'centrifugo/.dockerignore'
       - 'centrifugo/fly.toml'
       - '.github/workflows/deploy-centrifugo-fly.yml'
@@ -15,6 +17,8 @@ on:
     paths:
       - 'centrifugo/config.fly.json'
       - 'centrifugo/Dockerfile.fly'
+      - 'centrifugo/entrypoint.sh'
+      - 'scripts/check-centrifugo-config*'
       - 'centrifugo/.dockerignore'
       - 'centrifugo/fly.toml'
       - '.github/workflows/deploy-centrifugo-fly.yml'
@@ -32,7 +36,7 @@ permissions:
 env:
   FLY_APP: ftown-centrifugo
   CENTRIFUGO_IMAGE: ftown-centrifugo:ci
-  CENTRIFUGO_UPSTREAM: centrifugo/centrifugo:v5.4.9@sha256:90be10af3cb1c73c6b6cff8f6bcf02f8c0537d6aa1ed9f2cfe59a9e776a0c3d5
+  CENTRIFUGO_UPSTREAM: centrifugo/centrifugo:v6.10.2@sha256:34b84f823515927266ce3abfb840fd9e0acabb58805e7e896f5de731217a627d
 
 jobs:
   validate:
@@ -41,36 +45,33 @@ jobs:
       # actions/checkout v4, pinned to prevent tag retargeting.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.1
+
       - name: Assert the hardened Fly surface
         run: |
           set -euo pipefail
-          jq -e '
-            .admin == false and
-            .api_disable == true and
-            .allow_anonymous_connect_without_token == false and
-            .disallow_anonymous_connection_tokens == true and
-            .allowed_origins == ["https://ftown.ia.br"] and
-            .address == "0.0.0.0" and
-            .port == 8000 and
-            .internal_address == "127.0.0.1" and
-            .internal_port == 9000 and
-            .websocket_message_size_limit <= 1048576 and
-            .client_queue_max_size <= 8388608 and
-            (has("token_hmac_secret_key") | not) and
-            (has("api_key") | not) and
-            (has("admin_password") | not) and
-            (has("admin_secret") | not) and
-            (has("tls_autocert") | not)
-          ' centrifugo/config.fly.json >/dev/null
+          node scripts/check-centrifugo-config.mjs
+          node --test scripts/check-centrifugo-config.test.mjs scripts/deploy/centrifugo-remote.test.mjs
 
-      - name: Validate Centrifugo config
+      - name: Validate Centrifugo configs without unknown-key warnings
         run: |
           set -euo pipefail
-          docker run --rm \
-            -e CENTRIFUGO_TOKEN_HMAC_SECRET_KEY=ci-only-secret-at-least-32-characters \
-            -v "$PWD/centrifugo/config.fly.json:/centrifugo/config.fly.json:ro" \
-            "$CENTRIFUGO_UPSTREAM" \
-            centrifugo checkconfig -c /centrifugo/config.fly.json
+          for config in centrifugo/config.json centrifugo/config.fly.json centrifugo/config.prod.json e2e/centrifugo.config.json; do
+            if ! output=$(docker run --rm \
+              -e CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY=ci-only-secret-at-least-32-characters \
+              -v "$PWD:/cfg:ro" "$CENTRIFUGO_UPSTREAM" \
+              centrifugo checkconfig -c "/cfg/$config" 2>&1); then
+              printf '%s\n' "$output"
+              exit 1
+            fi
+            printf '%s\n' "$output"
+            if printf '%s\n' "$output" | grep -Eiq 'unknown|unrecognized|unsupported'; then
+              echo "ERROR: config validation warned about an unknown option: $config" >&2
+              exit 1
+            fi
+          done
 
       - name: Build Fly image
         run: |
@@ -160,7 +161,7 @@ jobs:
           test -n "${FLY_API_TOKEN:-}"
           flyctl status --app "$FLY_APP" >/dev/null
           flyctl secrets list --app "$FLY_APP" --json | jq -e '
-            map(.Name // .name) | index("CENTRIFUGO_TOKEN_HMAC_SECRET_KEY") != null
+            map(.Name // .name) | (index("CENTRIFUGO_TOKEN_HMAC_SECRET_KEY") != null or index("CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY") != null)
           ' >/dev/null
 
       - name: Deploy one memory-engine Machine

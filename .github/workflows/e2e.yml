@@ -9,7 +9,7 @@ on:
 jobs:
   direct-transport-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
 
@@ -67,6 +67,7 @@ jobs:
         working-directory: ui
         run: |
           npm ci
+          npm test
           set -a; E2E_DIR="$GITHUB_WORKSPACE/e2e" source "$GITHUB_WORKSPACE/e2e/env.sh"; set +a
           npm run build
 
@@ -75,6 +76,11 @@ jobs:
         run: |
           npm ci
           npm run build
+          npm test
+          node --test ../scripts/release/*.test.mjs
+
+      - name: Check managed Solo security boundaries
+        run: timeout 120s node bridge/scripts/centrifugo-security-smoke.mjs
 
       - name: Install Playwright chromium (browsers + OS deps)
         if: steps.playwright-cache.outputs.cache-hit != 'true'

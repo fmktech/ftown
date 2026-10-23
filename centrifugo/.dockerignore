@@ -1,3 +1,4 @@
 *
 !Dockerfile.fly
 !config.fly.json
+!entrypoint.sh

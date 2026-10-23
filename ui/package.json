@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
-  "description": "Web dashboard for ftown — orchestrate remote Claude Code, Cursor Agent, and CLI sessions",
+  "description": "Web dashboard for ftown \u2014 orchestrate remote Claude Code, Cursor Agent, and CLI sessions",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/fmktech/ftown.git",
@@ -27,11 +27,12 @@
     "centrifuge": "^5.3.2",
     "diff2html": "^3.4.56",
     "jsonwebtoken": "^9.0.2",
-    "next": "^15.3.0",
-    "next-auth": "^5.0.0-beta.30",
+    "next": "^15.5.28",
+    "next-auth": "^5.0.0-beta.32",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "uuid": "^11.1.0",
+    "sharp": "^0.35.5",
+    "uuid": "^11.1.1",
     "web-push": "^3.6.7"
   },
   "devDependencies": {
@@ -46,9 +47,21 @@
     "@types/web-push": "^3.6.4",
     "jsdom": "^29.1.1",
     "pg": "^8.13.1",
-    "postcss": "^8.5.3",
+    "postcss": "^8.5.23",
     "tailwindcss": "^4.1.3",
     "typescript": "^5.8.2",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.12"
+  },
+  "overrides": {
+    "postcss": "$postcss",
+    "vitest": {
+      "vite": "8.1.6"
+    },
+    "jsdom": {
+      "undici": "7.29.1"
+    }
+  },
+  "engines": {
+    "node": "^22.23.4 || ^24.22.1"
   }
 }

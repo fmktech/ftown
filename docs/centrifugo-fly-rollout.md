@@ -13,8 +13,8 @@ causes a brief client reconnect; it does not provide zero-downtime failover.
 
 | Path | Purpose |
 | --- | --- |
-| `centrifugo/config.fly.json` | Hardened Centrifugo v5 runtime config. Admin and HTTP API are disabled; secrets are absent. |
-| `centrifugo/Dockerfile.fly` | Reproducible image pinned to the Centrifugo v5.4.9 multi-platform digest. |
+| `centrifugo/config.fly.json` | Hardened Centrifugo v6 runtime config. Admin and HTTP API are disabled; secrets are absent. |
+| `centrifugo/Dockerfile.fly` | Reproducible image pinned to the Centrifugo v6.10.2 multi-platform digest. |
 | `centrifugo/fly.toml` | Fly service, checks, region, resource limits, and one-Machine policy. |
 | `.github/workflows/deploy-centrifugo-fly.yml` | PR/push validation plus an explicitly approved manual production deploy. |
 
@@ -61,7 +61,10 @@ Confirm that only the required runtime secret exists:
 fly secrets list -a ftown-centrifugo
 ```
 
-Expected secret name: `CENTRIFUGO_TOKEN_HMAC_SECRET_KEY`.
+Expected secret name: `CENTRIFUGO_TOKEN_HMAC_SECRET_KEY`. The image entrypoint
+aliases this existing name to v6's `CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY` at
+runtime. An explicitly supplied native v6 name takes precedence; an empty native
+value fails startup. No secret rotation or UI/bridge environment rename is needed.
 
 ## First deployment
 
@@ -176,3 +179,21 @@ After 24–48 hours of healthy Fly traffic and an expired DNS rollback window:
 
 Rotating the HMAC signing secret is a separate coordinated operation because it
 invalidates existing connection tokens and may require bridge/client re-pairing.
+
+## Security upgrade to 6.10.2
+
+The Docker image and managed Solo binary now select Centrifugo 6.10.2, including
+protocol decoder hardening, recovery deadlock fixes and the current container CA
+bundle. Configuration uses the official v6 nested layout. Named namespaces retain
+their explicit options; `channel.without_namespace` is not inherited by them.
+
+Before deploying, run `node scripts/check-centrifugo-config.mjs`, validate all
+four committed configurations with the pinned upstream `checkconfig`, and treat
+unknown-key warnings as failures even if its exit code is zero. Run the focused
+realtime authorization/reconnect and Solo checks described in the security report.
+The PR does not deploy the service or rotate its HMAC secret. The existing manual
+Fly deployment gate remains required.
+
+Rollback must restore the previous image **and its matching v5 config**, not just
+one of them. Existing in-memory publication history is lost on every service
+restart; durable FTown sessions/mail are separate and have no new data migration.

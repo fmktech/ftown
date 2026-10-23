@@ -1,0 +1,67 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "model": "gpt-6.1-sol",
+  "reasoning_effort": "high",
+  "owners": {
+    "/root": [
+      "docs/investigations/security-2026-10-23/coordination.md",
+      "docs/investigations/security-2026-10-23/ownership.json"
+    ],
+    "/root/npx_implementation": [
+      "bridge/package.json",
+      "bridge/package-lock.json",
+      "ui/package.json",
+      "ui/package-lock.json",
+      ".nvmrc",
+      ".github/workflows/check-bridge-release.yml",
+      ".github/workflows/bridge-version-bump.yml",
+      ".github/workflows/e2e.yml",
+      ".github/workflows/migrate.yml",
+      ".github/workflows/release-ui.yml",
+      ".github/workflows/publish-bridge.yml",
+      ".github/workflows/deploy-mcp-fly.yml",
+      "deploy/mcp/Dockerfile",
+      "e2e/neon-http-shim/Dockerfile",
+      "e2e/neon-http-shim/package.json",
+      "e2e/neon-http-shim/package-lock.json",
+      "ui/Dockerfile",
+      "docker/solo/Dockerfile",
+      "e2e/tests/auth-session.spec.ts",
+      "docs/investigations/security-2026-10-23/npm-runtime.md",
+      "docker/solo/README.md"
+    ],
+    "/root/canonical_start": [
+      "centrifugo/config.json",
+      "centrifugo/config.fly.json",
+      "centrifugo/config.prod.json",
+      "centrifugo/Dockerfile.fly",
+      "centrifugo/entrypoint.sh",
+      "docker-compose.yml",
+      "e2e/docker-compose.yml",
+      "e2e/centrifugo.config.json",
+      ".github/workflows/deploy-centrifugo-fly.yml",
+      ".github/workflows/deploy-centrifugo.yml",
+      "scripts/deploy/centrifugo-remote.sh",
+      "scripts/deploy/centrifugo-remote.test.mjs",
+      "scripts/check-centrifugo-config.mjs",
+      "scripts/check-centrifugo-config.test.mjs",
+      "bridge/src/solo/contract.ts",
+      "bridge/src/solo/hub-manager.ts",
+      "bridge/src/solo/hub-manager.test.ts",
+      "bridge/scripts/centrifugo-security-smoke.mjs",
+      "docs/centrifugo-fly-rollout.md",
+      "docs/centrifugo-deploy.md",
+      "docs/solo.md",
+      "docs/investigations/security-2026-10-23/centrifugo.md",
+      "centrifugo/.dockerignore"
+    ],
+    "/root/npx_review": []
+  },
+  "resources": {
+    "npm installs/locks": "released",
+    "Git index/history": "npx_implementation",
+    "E2E/servers/DB/CI execution": "root: complete and cleaned",
+    "remote validation": "GitHub Actions passed; Boat creation rejected without resource creation"
+  },
+  "status": "source and runtime gates passed; workers completed; final evidence commit and PR publication assigned to npx_implementation"
+}

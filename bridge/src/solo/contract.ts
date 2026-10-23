@@ -25,7 +25,7 @@
  */
 
 /** Contract revision — bump on any material change (re-gauntlet required). */
-export const SOLO_CONTRACT_REVISION = 5;
+export const SOLO_CONTRACT_REVISION = 6;
 
 // ---------- Ports ----------
 
@@ -69,14 +69,14 @@ export const HUB_JWT_TTL_SECONDS = 12 * 60 * 60;
 export const SOLO_USER_ID = 'solo';
 
 /**
- * Audience claim REQUIRED in every hub JWT and configured as token_audience
+ * Audience claim REQUIRED in every hub JWT and configured as client.token.audience
  * in the hub config. Minting without aud, or configuring a different value,
  * makes every WS handshake fail with an audience mismatch.
  */
 export const HUB_JWT_AUDIENCE = 'ftown:centrifugo';
 
 /** Centrifugo release to download (pinned; checksums embedded below). */
-export const CENTRIFUGO_VERSION = 'v5.4.9';
+export const CENTRIFUGO_VERSION = 'v6.10.2';
 
 /**
  * Embedded sha256 digests for the pinned centrifugo release assets, sourced
@@ -85,27 +85,14 @@ export const CENTRIFUGO_VERSION = 'v5.4.9';
  * darwin-arm64, darwin-amd64, linux-amd64, linux-arm64.
  */
 export const CENTRIFUGO_SHA256: Readonly<Record<string, string>> = {
-  'darwin-arm64': 'b0bef645acffe29ae9eb07fd98e93ac14d9c1cdd26b568b6cf9b8f20c6f653f4',
-  'darwin-amd64': 'ab221e476f8e9abd69f9943c2d3e7fefc232b90c5c23ccff60b89cae82f3fd50',
-  'linux-amd64': '75d2fac2dcea005bb3cb1b4636b3825d98c97709c94d10755c892dbe1c9956c2',
-  'linux-arm64': 'ba6df455ee0064399dd13652575fbbefa3d00bbe647d0555cb3669c1060821e5',
+  'darwin-arm64': 'ca1c7b02763280a97a4605a6a359ef90c831f6520727b48b09eab8281f07c792',
+  'darwin-amd64': 'cdb1ce846103750cc2eb24b2998aeaacb97dc189a7584b00f11a9bcb7d7bc2b5',
+  'linux-amd64': 'fea3767686d2bcc55df02094cc323268d9a02bb255eb60884d9e74ce4162eb45',
+  'linux-arm64': '5bfaf520235db64ea1339247f4d6b14c0738979fedae187c57aa24c1861db5c2',
 };
 
-/**
- * Frozen top-level channel-option DEFAULTS — copied byte-for-byte from the
- * production hub config's top-level keys (centrifugo/config.json, the same
- * keys namespaces without their own override inherit). Several HUB_NAMESPACES
- * entries below (terminal-input, commands, events lacking force_recovery/
- * allow_history_for_subscriber, bridges lacking history_size/ttl/
- * force_recovery) rely on these top-level defaults for presence/join_leave/
- * history/recovery behavior — omitting them means those namespaces silently
- * fall back to Centrifugo's OWN stricter defaults instead of production's.
- * Deliberately excludes non-channel-option top-level keys (token secrets,
- * api/admin/address/port/allowed_origins, log/proxy settings) and the two
- * top-level publish/subscribe defaults (`allow_publish_for_subscriber:
- * false`, `allow_subscribe_for_client: false`) that every HUB_NAMESPACES
- * entry already overrides to true, so their top-level value never applies.
- */
+/** Options for channels without a namespace. Named namespaces use only their
+ * own explicit options; these are not inherited by HUB_NAMESPACES. */
 export const HUB_CHANNEL_DEFAULTS: Readonly<Record<string, unknown>> = {
   allow_history_for_subscriber: true,
   presence: true,
@@ -117,18 +104,8 @@ export const HUB_CHANNEL_DEFAULTS: Readonly<Record<string, unknown>> = {
   force_recovery: true,
 };
 
-/**
- * Frozen Centrifugo `namespaces` block for the managed hub — copied
- * byte-for-byte (names + options) from the production hub config at
- * centrifugo/config.json, which targets the SAME pinned CENTRIFUGO_VERSION
- * (v5.4.9), so no key-format translation was needed. Every namespace prefix
- * used by a real channel (bridges:presence#solo, commands:rpc#solo,
- * sessions:*, terminal:*, terminal-input:*, events:*)
- * MUST have a matching entry here or Centrifugo rejects the subscribe with
- * code 102 "unknown channel" — this list existing at all is the fix for that
- * bug; hub-manager.test.ts drift-guards it against centrifugo/config.json so
- * the two can never silently diverge again.
- */
+/** Explicit namespace options shared with centrifugo/config.json. Keep these
+ * values identical: each named namespace is independent of without_namespace. */
 export const HUB_NAMESPACES: ReadonlyArray<Readonly<Record<string, unknown>>> = [
   {
     name: 'terminal',
