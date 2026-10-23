@@ -36,7 +36,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: '24.22.1'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Check for package-affecting changes
@@ -86,7 +86,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: '24.22.1'
           registry-url: 'https://registry.npmjs.org'
 
       # Trusted publishing needs npm >= 11.5.1

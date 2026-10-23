@@ -1,4 +1,5 @@
-FROM node:24-alpine
+FROM node:24.22.1-alpine
+RUN apk add --no-cache --upgrade ca-certificates && update-ca-certificates
 WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
