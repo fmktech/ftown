@@ -56,12 +56,13 @@ export function useAllSessionEvents(
       if (msg.type !== "hook_event") return;
 
       const attention = extractManualInputNotice(msg.eventName, msg.data);
-      const clearsAttention = clearsManualInputNotice(msg.eventName, msg.data);
       const activity = hookEventToActivity(msg.eventName);
-      if (!activity && !attention && !clearsAttention) return;
 
       setActivityMap((prev) => {
         const current = prev.get(sessionId) ?? { activity: "idle" as const };
+        // Use the latest queued notice, including a Notification from this React batch.
+        const clearsAttention = clearsManualInputNotice(msg.eventName, msg.data, current.attention);
+        if (!activity && !attention && !clearsAttention) return prev;
         const toolName =
           activity === "tool_use"
             ? extractToolLabel(msg.eventName, msg.data)

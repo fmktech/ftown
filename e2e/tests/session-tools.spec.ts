@@ -27,6 +27,32 @@ function originalRow(page: Page, name: string) {
     .filter({ has: page.getByText(name, { exact: true }) });
 }
 
+function sessionRow(page: Page, name: string) {
+  return originalRow(page, name).locator("..");
+}
+
+interface ReceivedHook { channel: string; eventName: string; notificationType?: string; toolName?: string }
+
+function observeHooks(page: Page): ReceivedHook[] {
+  const received: ReceivedHook[] = [];
+  page.on("websocket", socket => socket.on("framereceived", frame => {
+    const payload = typeof frame.payload === "string" ? frame.payload : frame.payload.toString("utf8");
+    for (const line of payload.split("\n")) {
+      if (!line.trim()) continue;
+      let reply: { push?: { channel?: string; pub?: { data?: { type?: string; eventName?: string; data?: Record<string, unknown> } } } };
+      try { reply = JSON.parse(line); } catch { continue; }
+      if (!reply || typeof reply !== "object") continue;
+      const push = reply.push;
+      const event = push?.pub?.data;
+      if (typeof push?.channel !== "string" || event?.type !== "hook_event" || typeof event.eventName !== "string") continue;
+      received.push({ channel: push.channel, eventName: event.eventName,
+        notificationType: typeof event.data?.notification_type === "string" ? event.data.notification_type : undefined,
+        toolName: typeof event.data?.tool_name === "string" ? event.data.tool_name : undefined });
+    }
+  }));
+  return received;
+}
+
 async function tabIntoHeaderLink(page: Page, link: Locator, mobile: boolean) {
   // These are the actual preceding controls in the visible DOM. Tab forward
   // proves the link is keyboard reachable without entering xterm, where
@@ -48,6 +74,7 @@ for (const viewport of [
   test(`agent CLI attention and session PR association on ${viewport.name}`, async ({ page, context }, testInfo) => {
     test.setTimeout(180_000);
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    const receivedHooks = observeHooks(page);
     // Clicking the real link must open its canonical destination while keeping
     // this integration test entirely independent of GitHub/network availability.
     await context.route("https://github.com/**", route => route.fulfill({
@@ -113,8 +140,8 @@ for (const viewport of [
       await page.reload();
       await waitForBridgeOnline(page);
       await showWorkspace();
-      await expect(originalRow(page, targetName).getByText("PR #123", { exact: true })).toBeVisible();
-      await expect(originalRow(page, otherName).getByText(/PR #/)).toHaveCount(0);
+      await expect(sessionRow(page, targetName).getByRole("link", { name: `PR #123 in fmktech/ftown: ${prOne}`, exact: true })).toBeVisible();
+      await expect(sessionRow(page, otherName).getByRole("link")).toHaveCount(0);
       await originalRow(page, targetName).click();
       await expect(headerLink).toBeVisible();
 
@@ -126,8 +153,11 @@ for (const viewport of [
       await expect(replacementLink).toBeVisible();
       await expect(headerLink).toHaveCount(0);
       await showWorkspace();
-      await expect(originalRow(page, targetName).getByText("PR #456", { exact: true })).toBeVisible();
+      const sidebarLink = sessionRow(page, targetName).getByRole("link", { name: `PR #456 in fmktech/ftown: ${prTwo}`, exact: true });
+      await expect(sidebarLink).toBeVisible();
       await expect(originalRow(page, targetName).locator("a")).toHaveCount(0);
+      await expect(originalRow(page, targetName)).toHaveAttribute("draggable", "true");
+      await expect(sidebarLink).toHaveAttribute("draggable", "false");
       await originalRow(page, otherName).click();
       await expect(page.locator("main").getByRole("link", { name: /PR #/ })).toHaveCount(0);
       await showWorkspace();
@@ -152,7 +182,61 @@ for (const viewport of [
       await expect(shortcut).toBeVisible();
       await expect(region.getByRole("button", { name: new RegExp(otherName) })).toHaveCount(0);
       await expect(page.getByRole("alert").filter({ hasText: message })).toBeVisible();
-      await expect(originalRow(page, targetName).getByText("PR #456", { exact: true })).toBeVisible();
+
+      // The requesting agent's completion hook must not dismiss its explicit
+      // request. Wait for actual browser delivery before checking React state.
+      for (const hook of [
+        { eventName: "PostToolUse", data: { tool_name: "exec_command" } },
+        { eventName: "postToolUseFailure", data: { tool_name: "exec_command" } },
+        { eventName: "Notification", data: { notification_type: "elicitation_complete" } },
+        { eventName: "Notification", data: { notification_type: "elicitation_response" } },
+      ]) {
+        const before = receivedHooks.length;
+        const result = await bridgeApiFetch("POST", "/hook", { body: {
+          ftown_session_id: targetId, hook_event_name: hook.eventName, ...hook.data,
+        } });
+        expect(result.status, JSON.stringify(result.body)).toBeGreaterThanOrEqual(200);
+        expect(result.status, JSON.stringify(result.body)).toBeLessThan(300);
+        await expect.poll(() => receivedHooks.slice(before).some(event =>
+          event.channel.startsWith(`events:${targetId}#`) && event.eventName === hook.eventName
+          && event.notificationType === hook.data.notification_type && event.toolName === hook.data.tool_name,
+        )).toBe(true);
+        await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+        await expect(shortcut).toBeVisible();
+        await expect(page.getByRole("alert").filter({ hasText: message })).toBeVisible();
+      }
+
+      // The sidebar PR is a separate native destination. Both keyboard and
+      // pointer navigation must preserve the observer selection and request.
+      await expect(sidebarLink).toBeVisible();
+      await expect(sidebarLink).toHaveAttribute("href", prTwo);
+      await expect(sidebarLink).toHaveAttribute("target", "_blank");
+      await expect(sidebarLink).toHaveAttribute("rel", "noopener noreferrer");
+      const sidebarBox = await sidebarLink.boundingBox();
+      expect(sidebarBox).not.toBeNull();
+      expect(sidebarBox!.height).toBeGreaterThanOrEqual(44);
+      expect(sidebarBox!.width).toBeGreaterThanOrEqual(44);
+      expect(sidebarBox!.x).toBeGreaterThanOrEqual(0);
+      expect(sidebarBox!.x + sidebarBox!.width).toBeLessThanOrEqual(viewport.width);
+      const menuControl = originalRow(page, targetName).getByRole("button", { name: "Session actions", exact: true });
+      await menuControl.focus();
+      await page.keyboard.press("Tab");
+      await expect(sidebarLink).toBeFocused();
+      expect(await sidebarLink.evaluate(element => getComputedStyle(element).boxShadow)).not.toBe("none");
+      const [keyboardDestination] = await Promise.all([context.waitForEvent("page"), page.keyboard.press("Enter")]);
+      await expect(keyboardDestination).toHaveURL(prTwo);
+      await expect(keyboardDestination).toHaveTitle("PR destination intercepted");
+      await keyboardDestination.close();
+      const [pointerDestination] = await Promise.all([context.waitForEvent("page"), sidebarLink.click()]);
+      await expect(pointerDestination).toHaveURL(prTwo);
+      await expect(pointerDestination).toHaveTitle("PR destination intercepted");
+      await pointerDestination.close();
+      await expect(page.locator("main").getByText(otherName, { exact: true })).toHaveCount(1);
+      await expect(page.locator("main").getByRole("link", { name: /PR #/ })).toHaveCount(0);
+      await expect(shortcut).toBeVisible();
+      await expect(page.getByRole("alert").filter({ hasText: message })).toBeVisible();
+      if (mobile) await expect(page.getByRole("button", { name: "Workspace", exact: true })).toHaveClass(/mobile-tab-active/);
+      expect(await sessionRow(page, targetName).evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
       await screenshot("attention-with-associated-pr");
       await shortcut.click();
@@ -170,14 +254,14 @@ for (const viewport of [
       const cleared = await sessionCommand<SessionResult>(targetId, ["pr", "--clear"]);
       expect(cleared.session.id).toBe(targetId);
       expect(cleared.session).not.toHaveProperty("pullRequestUrl");
-      await expect(originalRow(page, targetName).getByText(/PR #/)).toHaveCount(0);
+      await expect(sessionRow(page, targetName).getByRole("link")).toHaveCount(0);
       await originalRow(page, targetName).click();
       await expect(replacementLink).toHaveCount(0);
       await page.reload();
       await waitForBridgeOnline(page);
       await showWorkspace();
       await expect(originalRow(page, targetName)).toBeVisible();
-      await expect(originalRow(page, targetName).getByText(/PR #/)).toHaveCount(0);
+      await expect(sessionRow(page, targetName).getByRole("link")).toHaveCount(0);
       await originalRow(page, targetName).click();
       await expect(page.locator("main").getByRole("link", { name: /PR #/ })).toHaveCount(0);
     } finally {

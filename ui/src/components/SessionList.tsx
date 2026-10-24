@@ -9,7 +9,6 @@ import { reorderByDrop } from "@/lib/bridge-order";
 import { getSessionDropZone, resolveSessionDrop, type SessionDropZone } from "@/lib/session-drop";
 import { StatusDot } from "@/lib/StatusDot";
 import { usePersistentState, stringSetCodec } from "@/lib/use-persistent-state";
-import { formatUsage, formatUsageDetail } from "@/lib/format-usage";
 import { HarnessIcon } from "./HarnessIcon";
 import { SessionStateIndicator } from "./SessionStateIndicator";
 import { PullRequestLink } from "./PullRequestLink";
@@ -1018,8 +1017,13 @@ export function SessionList({
     }
 
     return (
-      <button
+      <div
         key={session.id}
+        data-session-row={session.id}
+        className="flex items-stretch min-w-0"
+        style={{ borderBottom: "1px solid var(--border-subtle)", background: isSelected ? "var(--bg-elevated)" : "transparent" }}
+      >
+      <button
         draggable
         onDragStart={(e) => handleDragStart(e, { kind: "session", id: session.id, bridgeId: session.bridgeId })}
         onDragEnd={handleDragEnd}
@@ -1053,12 +1057,13 @@ export function SessionList({
           }
         }}
         style={{
-          width: "100%",
+          flex: 1,
+          minWidth: 0,
           textAlign: "left",
           padding: isSelected
             ? `9px 12px 9px ${18 + depth * 10}px`
             : `6px 12px 6px ${18 + depth * 10}px`,
-          borderBottom: "1px solid var(--border-subtle)",
+          borderBottom: "none",
           borderTop: isDragOver && dragOverZone === "above" ? "2px solid var(--accent)" : "none",
           ...(isDragOver && dragOverZone === "below" ? { borderBottom: "2px solid var(--accent)" } : {}),
           boxShadow: isDragOver && dragOverZone === "inside" ? "inset 0 0 0 2px var(--accent)" : "none",
@@ -1160,7 +1165,6 @@ export function SessionList({
               {displayName}
             </span>
           )}
-          <PullRequestLink url={session.pullRequestUrl} badge />
           {treeProps?.isCollapsed && treeProps.descendantCount > 0 && (
             <span
               title={`${treeProps.descendantCount} hidden child session${treeProps.descendantCount === 1 ? "" : "s"}`}
@@ -1286,22 +1290,6 @@ export function SessionList({
           </p>
         )}
 
-        {isSelected && session.usage && (
-          <p
-            title={formatUsageDetail(session.usage)}
-            style={{
-              fontSize: 10,
-              color: "var(--text-faint)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              marginBottom: 4,
-            }}
-          >
-            {formatUsage(session.usage)}
-          </p>
-        )}
-
         {isSelected && session.model && session.shellType !== "shell" && (
           <div className="flex items-center gap-2">
             <span style={{ fontSize: 10, color: "var(--text-faint)" }}>
@@ -1310,6 +1298,8 @@ export function SessionList({
           </div>
         )}
       </button>
+      <PullRequestLink url={session.pullRequestUrl} badge />
+      </div>
     );
   }
 

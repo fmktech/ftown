@@ -1,0 +1,39 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "branch": "fix/session-attention-sidebar",
+  "base": "c2d5e7b453399931f75f6fcf5e83407aed6f822f",
+  "model": "gpt-6.1-sol",
+  "reasoning_effort": "high",
+  "owners": {
+    "/root": [
+      "docs/investigations/2026-10-23-live-attention-cleared.md",
+      "docs/investigations/2026-10-23-live-attention-cleared.ownership.json"
+    ],
+    "/root/npx_implementation": [
+      "ui/src/lib/hook-events.ts",
+      "ui/src/lib/hook-events.test.ts",
+      "ui/src/hooks/useAllSessionEvents.ts",
+      "ui/src/hooks/useAllSessionEvents.test.ts"
+    ],
+    "/root/session_ui": [
+      "ui/src/components/SessionList.tsx",
+      "ui/src/components/PullRequestLink.tsx",
+      "ui/src/components/session-pull-request.test.ts",
+      "e2e/tests/session-tools.spec.ts"
+    ],
+    "/root/npx_review": []
+  },
+  "integration_owner": "/root/npx_implementation",
+  "resources": {
+    "Git index/history": "npx_implementation exclusive final landing lease: exact 10 manifest files, preserve 4 unrelated notes, commit/push/open PR only; no merge",
+    "Boat source transfer/dependencies": "released; bx_cew4y98w deleted and absent from inventory after evidence retrieval",
+    "unit/static/build": "released after RED/GREEN, full UI424/424, UI/e2e tsc and bridge build; exact SHA match",
+    "E2E/browser/live services/database": "released by root after focused4/4, screenshots inspected, Docker/PID/ports clean, Boat deleted"
+  },
+  "contracts": [
+    "Keep ManualInputNotice and exported hook surface stable; clearing consumes current attention inside functional React updater, including same-batch sequences. Protect agent_needs_input from completion/failure/unrelated elicitation; retain userprompt/manualclear and legacy notice behavior.",
+    "Sidebar wrapper is noninteractive flex with data-session-row; preserve draggable session-selection button/handlers and add sibling safe PR anchor. Compact badge is a link with >=44px target and accessible full URL/repo. No nested interactive anchors/buttons. Remove sidebar usage only; terminal header unchanged.",
+    "Only UI worker writes E2E spec; include Notification->PostToolUse survival, sidebar PR navigation without selecting session, updated sibling-anchor assertions. Root executes all E2E."
+  ],
+  "status": "All implementation/review/runtime gates passed; source/review workers completed and retired. Integration owner reactivated solely to commit/push/open PR then release Git and stop."
+}
