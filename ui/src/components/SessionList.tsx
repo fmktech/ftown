@@ -9,6 +9,7 @@ import { reorderByDrop } from "@/lib/bridge-order";
 import { getSessionDropZone, resolveSessionDrop, type SessionDropZone } from "@/lib/session-drop";
 import { StatusDot } from "@/lib/StatusDot";
 import { usePersistentState, stringSetCodec } from "@/lib/use-persistent-state";
+import { parsePullRequestUrl } from "@/lib/pull-request-url";
 import { HarnessIcon } from "./HarnessIcon";
 import { SessionStateIndicator } from "./SessionStateIndicator";
 import { PullRequestLink } from "./PullRequestLink";
@@ -312,19 +313,23 @@ function ContextMenuButton({
   onClick,
   color = "var(--text-secondary)",
   disabled = false,
+  largeOnMobile = false,
 }: {
   label: string;
   onClick: () => void;
   color?: string;
   disabled?: boolean;
+  largeOnMobile?: boolean;
 }) {
   return (
     <button
       role="menuitem"
       onClick={onClick}
       disabled={disabled}
+      className={largeOnMobile ? "min-h-11 text-sm md:min-h-0 md:text-[11px]" : undefined}
       style={{
         ...menuButtonStyle,
+        fontSize: largeOnMobile ? undefined : menuButtonStyle.fontSize,
         color: disabled ? "var(--text-faint)" : color,
         cursor: disabled ? "not-allowed" : "pointer",
         opacity: disabled ? 0.5 : 1,
@@ -368,6 +373,7 @@ function SessionContextMenu({
   useEffect(() => { menuRef.current?.focus(); }, []);
 
   const isRunning = menu.session.status === "running" || menu.session.status === "pending";
+  const pullRequest = parsePullRequestUrl(menu.session.pullRequestUrl);
 
   return createPortal(
     <div
@@ -375,23 +381,43 @@ function SessionContextMenu({
       role="menu"
       aria-label="Session actions"
       tabIndex={-1}
-      style={{ ...contextMenuPanelStyle, top: pos.top, left: pos.left, outline: "none" }}
+      className="w-[220px] max-w-[calc(100vw-16px)] md:w-auto md:max-w-none md:min-w-[120px]"
+      style={{ ...contextMenuPanelStyle, minWidth: undefined, top: pos.top, left: pos.left, outline: "none" }}
     >
-      <ContextMenuButton label="Rename" onClick={() => { onRename(menu.session); onClose(); }} />
-      <ContextMenuButton label="Clone" onClick={() => { onClone(menu.session); onClose(); }} />
+      {pullRequest && (
+        <a
+          role="menuitem"
+          href={pullRequest.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`Open pull request: PR #${pullRequest.number} in ${pullRequest.repository}: ${pullRequest.url}`}
+          title={pullRequest.url}
+          className="min-h-11 text-sm md:min-h-0 md:text-[11px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]"
+          style={{ ...menuButtonStyle, fontSize: undefined, color: "var(--accent)" }}
+          onClick={(event) => { event.stopPropagation(); onClose(); }}
+          onMouseEnter={(event) => { event.currentTarget.style.background = "var(--bg-hover)"; }}
+          onMouseLeave={(event) => { event.currentTarget.style.background = "transparent"; }}
+        >
+          Open pull request
+        </a>
+      )}
+      <ContextMenuButton largeOnMobile label="Rename" onClick={() => { onRename(menu.session); onClose(); }} />
+      <ContextMenuButton largeOnMobile label="Clone" onClick={() => { onClone(menu.session); onClose(); }} />
       {isHidden ? (
-        <ContextMenuButton label="Unhide" onClick={() => { onUnhide(menu.session.id); onClose(); }} />
+        <ContextMenuButton largeOnMobile label="Unhide" onClick={() => { onUnhide(menu.session.id); onClose(); }} />
       ) : (
-        <ContextMenuButton label="Hide" onClick={() => { onHide(menu.session.id); onClose(); }} />
+        <ContextMenuButton largeOnMobile label="Hide" onClick={() => { onHide(menu.session.id); onClose(); }} />
       )}
       {isRunning && (
         <ContextMenuButton
+          largeOnMobile
           label="Stop"
           color="var(--status-error)"
           onClick={() => { onStop(menu.session.id); onClose(); }}
         />
       )}
       <ContextMenuButton
+        largeOnMobile
         label="Remove"
         color="var(--status-error)"
         onClick={() => { onRemove(menu.session.id); onClose(); }}
@@ -1165,6 +1191,7 @@ export function SessionList({
               {displayName}
             </span>
           )}
+          <PullRequestLink url={session.pullRequestUrl} badge />
           {treeProps?.isCollapsed && treeProps.descendantCount > 0 && (
             <span
               title={`${treeProps.descendantCount} hidden child session${treeProps.descendantCount === 1 ? "" : "s"}`}
@@ -1201,8 +1228,10 @@ export function SessionList({
               role="button"
               tabIndex={0}
               aria-haspopup="menu"
+              aria-expanded={contextMenu?.kind === "session" && contextMenu.session.id === session.id}
               aria-label="Session actions"
               title="Session actions"
+              className="inline-flex min-h-11 min-w-11 items-center justify-center text-xl md:min-h-0 md:min-w-0 md:text-base"
               onClick={(e) => {
                 e.stopPropagation();
                 const r = e.currentTarget.getBoundingClientRect();
@@ -1219,7 +1248,6 @@ export function SessionList({
               style={{
                 cursor: "pointer",
                 color: "var(--text-faint)",
-                fontSize: 16,
                 lineHeight: 1,
                 padding: "2px 4px",
                 userSelect: "none",
@@ -1298,7 +1326,6 @@ export function SessionList({
           </div>
         )}
       </button>
-      <PullRequestLink url={session.pullRequestUrl} badge />
       </div>
     );
   }
