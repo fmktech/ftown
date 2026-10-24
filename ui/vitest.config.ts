@@ -14,6 +14,9 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      "@security": path.resolve(__dirname, "../bridge/src/security"),
+      "@hpke/core": path.resolve(__dirname, "./node_modules/@hpke/core/esm/mod.js"),
+      "@hpke/common": path.resolve(__dirname, "./node_modules/@hpke/common/esm/mod.js"),
     },
   },
 });

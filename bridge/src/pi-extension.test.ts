@@ -1,7 +1,16 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { registerFtownPiExtension } from '../pi-extension/ftown.js';
+import { registerFtownPiExtension as registerNative } from '../pi-extension/ftown.js';
+
+// Unit business mocks sit behind the injected encrypted-CLI transport seam. Hooks retain their separate credential.
+function registerFtownPiExtension(api: any, options: any = {}) {
+  return registerNative(api, { ...options, proxy: async (path: string, init: RequestInit = {}) => {
+    const port = options.env?.FTOWN_HOOK_PORT || '4321';
+    const headers = new Headers(init.headers);
+    return options.fetch(`http://127.0.0.1:${port}${path}`, { ...init, headers });
+  } });
+}
 
 describe('ftown Pi extension', () => {
   async function waitFor(predicate: () => boolean, message: string): Promise<void> {
@@ -541,7 +550,7 @@ describe('ftown Pi extension', () => {
     assert.deepEqual(result.details, { sessions: [sessions[1]] });
   });
 
-  it('retries a refreshed bridge token when a restarted bridge reuses the same port', async () => {
+  it('business requests use the encrypted proxy without forwarding hook credentials', async () => {
     const tools = new Map<string, any>();
     const authorizations: Array<string | null> = [];
     const pi = {
@@ -567,7 +576,7 @@ describe('ftown Pi extension', () => {
 
     assert.equal(result.isError, undefined);
     assert.equal(result.details.sessions[0].id, 's1');
-    assert.deepEqual(authorizations, ['Bearer stale-token', 'Bearer fresh-token']);
+    assert.deepEqual(authorizations, [null]);
   });
 
   it('inspects a session usage and terminal log without terminal injection', async () => {
@@ -676,7 +685,7 @@ describe('ftown Pi extension', () => {
       model: 'openai/gpt-5', name: 'Reviewer', parentSessionId: true,
     });
     const requestHeaders = requests[0].init?.headers as Headers;
-    assert.equal(requestHeaders.get('authorization'), 'Bearer secret');
+    assert.equal(requestHeaders.get('authorization'), null);
     assert.equal(requestHeaders.get('x-ftown-session-id'), 'parent-id');
     assert.equal(result.details.session.id, 'child-id');
 

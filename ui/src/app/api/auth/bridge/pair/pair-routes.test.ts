@@ -31,6 +31,7 @@ vi.mock("@/lib/bridge-refresh", () => ({
   getBridgeRefreshOwner: vi.fn(),
   getDevicesForSub: vi.fn(),
   revokeDevice: vi.fn(),
+  getOwnerIdForSub: vi.fn(async () => '349f8d2e-38e4-4d59-888d-687dcfa19e39'),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -240,7 +241,7 @@ describe("POST /api/auth/bridge/pair/poll", () => {
     // The loopback advert from the poll body is embedded so the owner's clients
     // discover the loopback rung via presence.
     expect(connectDecoded.info.localPort).toBe(51234);
-    expect(connectDecoded.info.localNonce).toBe("0123456789abcdef0123456789abcdef");
+    expect(connectDecoded.info.localNonce).toBeUndefined();
 
     const refreshDecoded = jwt.verify(body.refreshToken, TEST_SECRET, {
       audience: "ftown:bridge-refresh",

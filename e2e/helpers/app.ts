@@ -1,5 +1,7 @@
 import { expect, type Page } from "@playwright/test";
 import { UI_BASE_URL } from "./config";
+import { pairBrowser } from "./secure-browser";
+import { readBridgePointer } from "./bridge-api";
 
 /** Default password for every e2e-registered user (CI-local; nothing sensitive). */
 export const E2E_PASSWORD = "e2e-password-123";
@@ -50,12 +52,13 @@ export async function registerUser(email: string, password: string = E2E_PASSWOR
 }
 
 /** Fill the /login credentials form and land on /dashboard. */
-export async function login(page: Page, email: string, password: string = E2E_PASSWORD): Promise<void> {
+export async function login(page: Page, email: string, password: string = E2E_PASSWORD, options: { pairBridge?: boolean } = {}): Promise<void> {
   await page.goto("/login");
   await page.locator("#email").fill(email);
   await page.locator("#password").fill(password);
   await page.getByRole("button", { name: "Sign In" }).click();
   await page.waitForURL("**/dashboard", { timeout: 30_000 });
+  if (options.pairBridge !== false && email === process.env.E2E_USER_EMAIL) await pairBrowser(page, { email, password });
 }
 
 /**
@@ -105,6 +108,7 @@ export async function createShellSession(page: Page, name: string): Promise<void
   await page.locator('button[title="Create a new session"]').click();
   await expect(page.getByText("New Session", { exact: true })).toBeVisible();
   await page.locator("#ns-shell-type").selectOption("shell");
+  await page.locator("#ns-bridge").selectOption(readBridgePointer().bridgeId);
   await page.locator('input[placeholder="Optional name for this session"]').fill(name);
   await page.getByRole("button", { name: "Create Session" }).click();
 }

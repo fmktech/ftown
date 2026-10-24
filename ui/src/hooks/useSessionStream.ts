@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { Centrifuge, Subscription } from "centrifuge";
+import type { MessageClient, MessageSubscription } from "@/lib/message-client";
 import { SessionMessage } from "@/types";
 
 interface StreamMessage {
@@ -16,13 +16,13 @@ interface UseSessionStreamResult {
 }
 
 export function useSessionStream(
-  client: Centrifuge | null,
+  client: MessageClient | null,
   sessionId: string | null,
   userId: string | null
 ): UseSessionStreamResult {
   const [messages, setMessages] = useState<SessionMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
-  const subRef = useRef<Subscription | null>(null);
+  const subRef = useRef<MessageSubscription | null>(null);
 
   useEffect(() => {
     if (!client || !sessionId || !userId) {

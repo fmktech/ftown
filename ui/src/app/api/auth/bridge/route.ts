@@ -4,7 +4,7 @@ import jwt from "jsonwebtoken";
 
 import { parseLocalAdvert } from "./local-advert";
 import { getRequiredSecret } from "@/lib/secrets";
-import { setBridgeRefreshJti } from "@/lib/bridge-refresh";
+import { setBridgeRefreshJti, getOwnerIdForSub } from "@/lib/bridge-refresh";
 import { isValidBridgeLabel } from "@/lib/bridge-label";
 
 interface BridgeTokenRequestBody {
@@ -71,12 +71,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (advert && "error" in advert) {
     return NextResponse.json({ error: advert.error }, { status: 400 });
   }
+  let ownerId: string;
+  try { ownerId = await getOwnerIdForSub(decoded.sub); }
+  catch { return NextResponse.json({ error: 'Bridge account is unavailable' }, { status: 401 }); }
 
   const centrifugoToken = jwt.sign(
     {
       sub: decoded.sub,
       info: {
         bridgeId: body.bridgeId,
+        ownerId,
         hostname: body.hostname,
         connectedAt: new Date().toISOString(),
         ...(advert ?? {}),
@@ -97,6 +101,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       bridgeId: body.bridgeId,
       type: "bridge_refresh",
       jti: refreshJti,
+      ownerId,
     },
     secret,
     { audience: "ftown:bridge-refresh", expiresIn: "30d" },
@@ -109,5 +114,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     refreshToken,
     centrifugoUrl,
     userId: decoded.sub,
+    ownerId,
   });
 }

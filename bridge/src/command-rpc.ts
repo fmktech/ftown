@@ -1,4 +1,6 @@
 import { exec } from 'node:child_process';
+import type { McpApproval, SecurityPageQuery, VerifiedApplication } from './security/protocol.js';
+import type { BridgeSecurityService } from './security/bridge/security.js';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -31,9 +33,7 @@ function auditBridgeExec(payload: BridgeExecPayload): void {
   try {
     const dir = join(homedir(), '.ftown', 'logs');
     mkdirSync(dir, { recursive: true });
-    const entry =
-      `${new Date().toISOString()} cmd=${JSON.stringify(String(payload.command).slice(0, 500))} ` +
-      `cwd=${payload.workingDir ?? ''}\n`;
+    const entry = `${JSON.stringify({ at: new Date().toISOString(), operation: 'bridge_exec' })}\n`;
     appendFileSync(join(dir, 'exec-audit.log'), entry, { mode: 0o600 });
   } catch {
     // Auditing is best-effort and must never block execution.
@@ -48,10 +48,11 @@ interface ExecError {
 
 export interface CommandRpcDeps {
   bridgeId: string;
+  security?: BridgeSecurityService;
   relayRequest?: (id: string, payload: Record<string, unknown>) => Promise<unknown>;
   sessionController: SessionController;
   attentionStore?: AttentionStore;
-  publishCommandResponse: (response: CommandResponse) => Promise<void>;
+  publishCommandResponse: (response: CommandResponse, verified?: VerifiedApplication) => Promise<void>;
 }
 
 /**
@@ -59,10 +60,10 @@ export interface CommandRpcDeps {
  * transport-agnostic session controller. Commands addressed to another
  * bridge (payload.bridgeId mismatch) are ignored without a response.
  */
-export function createCommandHandler(deps: CommandRpcDeps): (command: Command) => Promise<void> {
+export function createCommandHandler(deps: CommandRpcDeps): (command: Command, verified?: VerifiedApplication) => Promise<void> {
   const { bridgeId, sessionController } = deps;
 
-  return async function handleCommand(command: Command): Promise<void> {
+  return async function handleCommand(command: Command, verified?: VerifiedApplication): Promise<void> {
     console.log(`[Bridge] Received command: ${command.type} (requestId: ${command.requestId})`);
 
     const payloadBridgeId = (command.payload as Record<string, unknown>).bridgeId as string | undefined;
@@ -74,7 +75,31 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command) =
 
     try {
       if (RETIRED_AUTOMATION_COMMANDS.has(command.type)) throw new AutomationRemovedError();
+      if (deps.security && !verified) throw new Error('approval_required');
+      if (deps.security && verified && command.type !== 'security_activate_mcp') await deps.security.revalidate(verified.principal);
       switch (command.type) {
+        case 'security_devices':
+        case 'security_invite':
+        case 'security_revoke':
+        case 'security_approve_mcp':
+        case 'security_activate_mcp':
+        case 'security_activity': {
+          if (!deps.security || !verified || payloadBridgeId !== bridgeId) throw new Error('approval_required');
+          const payload = command.payload as Record<string, unknown>;
+          let result: unknown;
+          if (command.type === 'security_devices') result = { devices: await deps.security.listDevices(verified.principal) };
+          else if (command.type === 'security_invite') result = await deps.security.createInvitation(verified.principal, { label: typeof payload.label === 'string' ? payload.label : '' });
+          else if (command.type === 'security_revoke') {
+            if (typeof payload.endpointId !== 'string') throw new Error('invalid_envelope');
+            await deps.security.revokeEndpoint(verified.principal, payload.endpointId); result = { endpointId: payload.endpointId, revoked: true };
+          } else if (command.type === 'security_approve_mcp') result = await deps.security.approveMcp(verified.principal, payload.approval as McpApproval);
+          else if (command.type === 'security_activate_mcp') {
+            if (typeof payload.grantId !== 'string') throw new Error('invalid_envelope');
+            result = await deps.security.activateMcp(verified.principal, payload.grantId);
+          } else { await deps.security.policy.revalidate(verified.principal, 'admin'); result = await deps.security.audit.list((payload.page ?? {}) as SecurityPageQuery); }
+          response = { requestId: command.requestId, success: true, data: result as Record<string, unknown> };
+          break;
+        }
         case 'get_session_attention':
         case 'resolve_session_attention': {
           const payload = command.payload as Record<string, unknown>;
@@ -327,7 +352,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command) =
     }
 
     try {
-      await deps.publishCommandResponse(response);
+      await deps.publishCommandResponse(response, verified);
     } catch (err) {
       console.error(`[Bridge] Failed to publish command response:`, err);
     }

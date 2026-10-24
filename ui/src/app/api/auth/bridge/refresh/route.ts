@@ -4,7 +4,7 @@ import jwt from "jsonwebtoken";
 
 import { parseLocalAdvert } from "../local-advert";
 import { getRequiredSecret } from "@/lib/secrets";
-import { rotateBridgeRefreshJti } from "@/lib/bridge-refresh";
+import { rotateBridgeRefreshJti, getOwnerIdForSub } from "@/lib/bridge-refresh";
 import { isValidBridgeLabel } from "@/lib/bridge-label";
 
 interface BridgeRefreshRequestBody {
@@ -91,6 +91,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // F3: rotate. Atomically verify this token's jti is the current one for the
   // bridge and swap in a fresh jti. A stale/reused/superseded token fails here.
   const nextJti = randomUUID();
+  let ownerId: string;
+  try { ownerId = await getOwnerIdForSub(decoded.sub); }
+  catch { return NextResponse.json({ error: 'Bridge account is unavailable' }, { status: 401 }); }
   const rotated = await rotateBridgeRefreshJti(body.bridgeId, decoded.sub, decoded.jti, nextJti);
   if (!rotated) {
     return NextResponse.json(
@@ -104,6 +107,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       sub: decoded.sub,
       info: {
         bridgeId: body.bridgeId,
+        ownerId,
         hostname: body.hostname,
         connectedAt: new Date().toISOString(),
         ...(advert ?? {}),
@@ -119,6 +123,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       bridgeId: body.bridgeId,
       type: "bridge_refresh",
       jti: nextJti,
+      ownerId,
     },
     secret,
     { audience: "ftown:bridge-refresh", expiresIn: "30d" },
@@ -128,6 +133,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     token,
     refreshToken,
     userId: decoded.sub,
+    ownerId,
     centrifugoUrl: process.env.NEXT_PUBLIC_CENTRIFUGO_URL,
   });
 }

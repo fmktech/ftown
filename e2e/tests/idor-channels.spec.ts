@@ -1,4 +1,5 @@
-import { test, expect, type BrowserContext } from "@playwright/test";
+import { expect, type BrowserContext } from "@playwright/test";
+import { test } from "../helpers/fixtures";
 import {
   sharedEmail,
   login,

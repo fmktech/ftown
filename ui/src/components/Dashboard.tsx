@@ -9,6 +9,8 @@ import { CreateSessionOptions, useSessions } from "@/hooks/useSessions";
 import { useBridgeRpc } from "@/hooks/useBridgeRpc";
 import { useBridges } from "@/hooks/useBridges";
 import { useAllSessionEvents } from "@/hooks/useAllSessionEvents";
+import type { SecurityCommand, SecurityCommandResults } from "@security/protocol";
+import { SecurityPanel } from "./SecurityPanel";
 import { SessionList } from "./SessionList";
 import { Terminal, TerminalHandle } from "./Terminal";
 import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
@@ -60,6 +62,9 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const { hidden: hiddenSessionIds, hide: handleHideSession, unhide: handleUnhideSession } = useHiddenSet("ftown:hiddenSessions");
   const { hidden: hiddenBridgeIds, hide: hideBridge, unhide: handleUnhideBridge } = useHiddenSet("ftown:hiddenBridges");
   const [showUserMenu, setShowUserMenu] = useState(false);
+  const [showSecurity, setShowSecurity] = useState(false);
+  const [securityBridgeId, setSecurityBridgeId] = useState<string | undefined>(undefined);
+  const [securityGeneration, setSecurityGeneration] = useState(0);
   const [directlyReachableBridgeIds, setDirectlyReachableBridgeIds] = useState<Set<string>>(
     () => new Set()
   );
@@ -149,7 +154,22 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const rpc = useBridgeRpc(client, userId);
   const { bridgeExec } = rpc;
   const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, setSessionParent, removeSession, refreshSessions } = useSessions(client, userId, rpc);
-  const { bridges, hasBridges, prepareLocalAccess } = useBridges(client, userId);
+  const { bridges, prepareLocalAccess } = useBridges(client, userId);
+  const securityRuntime = client?.securityRuntime;
+  useEffect(() => securityRuntime?.onChange(() => setSecurityGeneration(value => value + 1)), [securityRuntime]);
+  const readyBridges = useMemo(() => bridges.filter(bridge => securityRuntime?.state(bridge.bridgeId).status === "ready"), [bridges, securityRuntime, securityGeneration]);
+  const hasBridges = readyBridges.length > 0;
+  const securityBridges = useMemo(() => {
+    const known = new Map(bridges.map(bridge => [bridge.bridgeId, { bridgeId: bridge.bridgeId, label: bridge.hostname,
+      security: securityRuntime?.state(bridge.bridgeId) ?? { bridgeId: bridge.bridgeId, status: "unpaired" as const, endpoint: null } }]));
+    for (const state of securityRuntime?.snapshot() ?? []) if (!known.has(state.bridgeId)) known.set(state.bridgeId, { bridgeId: state.bridgeId, label: state.bridgeId, security: state });
+    return [...known.values()];
+  }, [bridges, securityRuntime, securityGeneration]);
+  const executeSecurity = useCallback(<C extends SecurityCommand>(command: C): Promise<SecurityCommandResults[C["type"]]> => {
+    if (!client?.executeSecurity) return Promise.reject({ code: "security_setup_required" });
+    return client.executeSecurity(command);
+  }, [client]);
+  const openSecurity = useCallback((bridgeId?: string) => { setSecurityBridgeId(bridgeId); setShowSecurity(true); }, []);
 
   // Keep bridgeOrder stable when bridges connect/disconnect; only append new ids (sorted).
   useEffect(() => {
@@ -168,7 +188,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const installedHookBridges = useRef(new Set<string>());
 
   useEffect(() => {
-    for (const bridge of bridges) {
+    for (const bridge of readyBridges) {
       if (installedHookBridges.current.has(bridge.bridgeId)) continue;
       installedHookBridges.current.add(bridge.bridgeId);
 
@@ -227,7 +247,7 @@ print("ftown hooks point at", notify)
 PY`;
       bridgeExec(script, "~", bridge.bridgeId).catch(() => {});
     }
-  }, [bridges, bridgeExec]);
+  }, [readyBridges, bridgeExec]);
 
   const activeBridgeIds = useMemo(() => new Set(bridges.map((b) => b.bridgeId)), [bridges]);
 
@@ -256,6 +276,9 @@ PY`;
   }, [rawSessions, activeBridgeIds, directlyReachableBridgeIds, sessionOrder, bridgeOrder]);
 
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
+  useEffect(() => {
+    if (selectedSessionId && !sessions.some(session => session.id === selectedSessionId)) setSelectedSessionId(null);
+  }, [sessions, selectedSessionId]);
   const sessionRelaunchLabel = selectedSession && !selectedSession.loopId
     ? getSessionRelaunchLabel(selectedSession.status)
     : null;
@@ -942,8 +965,13 @@ PY`;
               onHideBridge={handleHideBridge}
               onUnhideBridge={handleUnhideBridge}
               onCreateSession={handleCreateSessionOnBridge}
+              onOpenSecurity={openSecurity}
             />
           </div>
+          <button type="button" className="flex min-h-11 shrink-0 items-center justify-center gap-2 border-t border-[var(--border-subtle)] px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
+            title="Security: devices and MCP activity" aria-label="Open security" onClick={() => openSecurity()}>
+            <span aria-hidden="true">◇</span><span className={isDesktop && sidebarCollapsed ? "sr-only" : ""}>Security</span>
+          </button>
           <PushNotificationsControl localMode={localMode} accountId={userId} />
           {!sidebarCollapsed && (
             <div
@@ -990,11 +1018,14 @@ PY`;
 
       </div>
 
+      <SecurityPanel open={showSecurity} onClose={() => setShowSecurity(false)} bridges={securityBridges}
+        currentEndpointId={securityRuntime?.identity.endpoint.id ?? null} execute={executeSecurity}
+        initialBridgeId={securityBridgeId} gatewayAvailable={!localMode && !securityRuntime?.ownerId.startsWith("solo:")} />
       <NewSessionModal
         isOpen={showNewSession}
         onClose={() => { setShowNewSession(false); setSessionDefaults(undefined); }}
         onSubmit={handleCreateSession}
-        bridges={bridges}
+        bridges={readyBridges}
         defaults={sessionDefaults}
         bridgeExec={bridgeExec}
       />

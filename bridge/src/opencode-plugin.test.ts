@@ -1,6 +1,15 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { registerFtownOpencodePlugin } from '../opencode-plugin/ftown.js';
+import { registerFtownOpencodePlugin as registerNative } from '../opencode-plugin/ftown.js';
+
+// Unit business mocks sit behind the injected encrypted-CLI transport seam. Hooks retain their separate credential.
+function registerFtownOpencodePlugin(api: any, options: any = {}) {
+  return registerNative(api, { ...options, proxy: async (path: string, init: RequestInit = {}) => {
+    const port = options.env?.FTOWN_HOOK_PORT || '4321';
+    const headers = new Headers(init.headers);
+    return options.fetch(`http://127.0.0.1:${port}${path}`, { ...init, headers });
+  } });
+}
 
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
@@ -51,7 +60,7 @@ describe('OpenCode native mail wake', () => {
       const query = new URL(request.url).searchParams;
       assert.equal(query.get('peek'), '1'); assert.equal(query.get('wait'), '0');
       assert.equal(query.get('adapter'), 'opencode'); assert.equal(query.get('nativeSessionId'), 'ses_root');
-      assert.equal(new Headers(request.init?.headers).get('authorization'), 'Bearer secret');
+      assert.equal(new Headers(request.init?.headers).get('authorization'), null);
     }
     await f.event('session.idle', { sessionID: 'ses_root' }); await f.advance();
     assert.equal(f.prompts.length, 1, 'same unread IDs never repeat');

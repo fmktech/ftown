@@ -420,9 +420,22 @@ export async function createSoloServer(options: SoloServerOptions): Promise<Solo
       return;
     }
 
-    // ---- (3) remaining /api/* → the EXISTING bridge local API --------------
+    // Only the encrypted endpoint ingress is exported through the Solo front.
+    if (['/api/security/info', '/api/security/envelope', '/api/security/events'].includes(path)) {
+      if (!isAllowedHost(req.headers.host ?? '', { address: bound.address, port: bound.port }, options.allowedHosts)) {
+        sendError(res, 400, 'invalid host header'); return;
+      }
+      const origin = req.headers.origin;
+      if (origin) {
+        try { if (new URL(origin).host !== req.headers.host) { sendError(res, 403, 'forbidden origin'); return; } }
+        catch { sendError(res, 403, 'forbidden origin'); return; }
+      }
+      forwardToLocalApi(req, res); return;
+    }
+
+    // No arbitrary plaintext application route can bypass endpoint authentication.
     if (path === '/api' || path.startsWith('/api/')) {
-      forwardToLocalApi(req, res);
+      sendError(res, 426, 'upgrade_required');
       return;
     }
 

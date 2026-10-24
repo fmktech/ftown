@@ -8,19 +8,45 @@ ftown exposes MCP as a remote **Streamable HTTP endpoint over HTTPS**, with OAut
 flowchart LR
   Agent[MCP client] -->|HTTPS + OAuth access token| Gateway[Fly: MCP gateway]
   Agent -->|Browser authorization| UI[Vercel: ftown login and consent]
-  UI -->|Signed, short-lived approval| Gateway
-  Gateway -->|OAuth grants and ownership checks| DB[Neon / Postgres]
-  Gateway -->|Owner-scoped WebSocket connection| Relay[Fly: existing Centrifugo]
-  Relay <--> Bridge[ftown bridge on each computer]
+  UI -->|Browser admin: encrypted bridge approval| Bridge[ftown bridge on each computer]
+  UI -->|Signed consent + verified bridge receipts| Gateway
+  Gateway -->|Encrypted private key and bound bridge pins| DB[Neon / Postgres]
+  WrappingSecret[Separate service wrapping secret] --> Gateway
+  Gateway -->|HPKE Auth application encryption| Relay[Fly: existing Centrifugo]
+  Relay <-->|Opaque application content| Bridge
 ```
 
 The gateway is a **separate Fly app**, alongside the existing `ftown-centrifugo` app. Its public URL ends in `/mcp`. Fly terminates TLS; the container listens on its internal HTTP port. The existing Vercel UI hosts `/mcp/consent` and reuses the current NextAuth login. OAuth state lives in the same Postgres database as ftown's users and device ownership records.
 
-Computers connect outward to Centrifugo as they already do. The recommended `relay` transport does not need inbound ports or SSH credentials on workers. New workers support the native `mcp_request` command. Existing 0.19.33 workers are also supported: only after an explicit unknown-command rejection, the gateway uses the existing owner-scoped RPC and a fixed Node loopback helper through `bridge_exec`; stop/retry use their existing RPC commands. The local bridge credential stays on the worker. Compatibility requires Node on PATH and `bridge_exec` enabled; otherwise upgrade the worker for native MCP support. Timeouts and ambiguous failures never trigger a fallback or mutation retry.
+Computers connect outward to Centrifugo. The `relay` transport needs no inbound
+ports or SSH credentials. Upgraded gateway and bridge endpoints use HPKE Auth
+application encryption (P-256, HKDF-SHA256, AES-256-GCM) with explicitly approved
+identities and pinned bridge keys. Legacy plaintext HTTP/SSH and `bridge_exec`
+compatibility paths cannot bypass this boundary; upgrade and pair those workers.
+Timeouts and ambiguous failures never trigger a fallback or mutation retry.
+
+The hosted gateway is a trusted plaintext endpoint: standard MCP clients use
+HTTPS/OAuth and the gateway reads tool calls/results. Every grant has a distinct
+bridge-facing key, stored as authenticated ciphertext with its pins in Postgres.
+A separately provisioned service secret wraps that record. The approving browser
+sends encrypted grants to selected bridges; the gateway validates bridge receipts
+before completing consent. Grants are initially pending, activate only after a
+valid access-token request, and never exceed the browser-approved expiry. No
+model PIN or custom MCP client is required. Routing IDs, hostname, sizes/timing,
+public keys and online state remain visible metadata. See the complete
+[encryption diagram](../README.md#architecture) and [operations guide](e2ee-operations.md).
 
 ## Deployment checklist
 
 The production gateway is `https://ftown-mcp.fly.dev/mcp`, in Fly organization `ftown`. The consent page is deployed to `https://ftown.ia.br/mcp/consent` in the existing Vercel project. The initial rollout applied migration `0004_mcp_oauth.sql` and registered four paired computers belonging to the owner of the configured anchor bridge. The compatibility rollout (`0c67792`, gateway 0.19.35) verified three available computers and 27 running sessions. Foad-Legion remains unreachable. A live disposable MCP session passed creation, terminal input, history/search, mail enqueue/readback, stop/retry and removal. See the [investigation](investigations/2026-10-10-mcp-legacy-bridges.md).
+
+The historical production evidence below predates endpoint encryption and is
+not validation of the encrypted rollout. Before deploying this protocol, apply
+`ui/migrations/0006_endpoint_security.sql` after the existing OAuth migration,
+provision `FTOWN_MCP_KEY_ENCRYPTION_SECRET` and its configured key ID outside the
+database, and upgrade/pair each bridge. Preserve that wrapping secret during
+redeployment; a missing or wrong key fails closed and must never regenerate an
+identity. Existing MCP clients require renewed consent from an approved browser.
 
 The following steps describe setup and recovery:
 
@@ -71,7 +97,7 @@ Add a remote MCP server using your deployed URL:
 https://YOUR-MCP-HOST/mcp
 ```
 
-Use the client's OAuth connection flow. It discovers the authorization server, registers a public client, opens ftown's login/consent page, and exchanges its authorization code using PKCE. The user selects which owned computers to authorize.
+Use the client's OAuth connection flow. It discovers the authorization server, registers a public client, opens ftown's login/consent page, and exchanges its authorization code using PKCE. The user selects which owned computers to authorize. The consent browser must already have administrator approval on each selected bridge. Offline or unpaired bridges remain visibly blocked; consent cannot silently skip their approval.
 
 There is no local command to launch in the MCP client, and no bridge token to paste into it. Clients must support Streamable HTTP, public OAuth clients with S256 PKCE, and resource indicators. HTTPS browser clients must also have their origin added to `allowedOrigins` in gateway config. Non-browser clients normally omit `Origin`.
 
@@ -84,10 +110,24 @@ There is no local command to launch in the MCP client, and no bridge token to pa
 - Opaque access tokens expire after 15 minutes. Refresh grants expire after 30 days. Every refresh rotates the refresh token; reuse revokes the entire grant, including issued access tokens. Refresh cannot expand scopes.
 - `/revoke` revokes the entire associated grant. Device revocation and configured access removal also prevent subsequent MCP access. Already-dispatched work is not rolled back by revocation.
 - Raw OAuth access/refresh tokens and authorization codes are not stored: token records use SHA-256 keys. Account ownership is read from `users` and `bridge_refresh` on every request. Expired records are pruned in bounded batches during ordinary database operations.
-- The consent UI sends a 60-second assertion directly to the gateway. It is audience-, issuer-, purpose-, subject- and request-bound; the browser never receives this assertion. Approval requests are one-use. Next.js server actions enforce the browser action boundary.
+- The server sends a 60-second assertion directly to the gateway, bound to audience, issuer, purpose, subject and request. The browser never receives it. Browser-side encrypted bridge approvals produce receipts bound to the exact grant endpoint, selected bridge, permissions and expiry; server completion verifies those receipts before one-use consent succeeds.
 - OAuth grants and refresh rotation are shared in Postgres, including transaction locks to serialize refresh rotation. MCP HTTP handling is stateless; it does not require sticky sessions. Connection pools, limits and relay request deduplication remain per process.
 
 The implementation uses the [official MCP SDK](https://ts.sdk.modelcontextprotocol.io/server) for transport and OAuth endpoint handling, following [MCP's HTTP authorization model](https://modelcontextprotocol.io/specification/latest/basic/authorization).
+
+## MCP security activity
+
+Open **Security → Activity** in the dashboard. Gateway evidence includes
+authenticated attempts, rejected calls, batches and calls that never reach a
+bridge. Select a connected bridge and **Bridge execution** to inspect its
+independent received-operation record. Use action IDs to correlate them. A
+timeout or unknown outcome is not proof of non-execution; investigate before
+repeating a mutation.
+
+History retains 30 days and at most 10,000 events per store. Records contain safe
+identity, action, target ID, timestamps and outcome metadata, never raw arguments,
+results, tokens, commands, paths or prompt/mail/search text. Gateway history is
+available while bridges are offline. Bridge history requires encrypted access.
 
 ## Fleet configuration
 

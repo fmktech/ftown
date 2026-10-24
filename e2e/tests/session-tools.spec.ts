@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { test, expect, type Locator, type Page } from "@playwright/test";
+import { expect, type Locator, type Page } from "@playwright/test";
+import { test } from "../helpers/fixtures";
 import { login, sharedEmail, waitForBridgeOnline } from "../helpers/app";
 import { bridgeApiFetch } from "../helpers/bridge-api";
 import { BRIDGE_HOME, E2E_DIR } from "../helpers/config";
@@ -33,24 +34,48 @@ function sessionRow(page: Page, name: string) {
 
 interface ReceivedHook { channel: string; eventName: string; notificationType?: string; toolName?: string }
 
-function observeHooks(page: Page): ReceivedHook[] {
+async function observeHooks(page: Page): Promise<{ received: ReceivedHook[]; brokerFrames: string[] }> {
   const received: ReceivedHook[] = [];
+  const brokerFrames: string[] = [];
   page.on("websocket", socket => socket.on("framereceived", frame => {
     const payload = typeof frame.payload === "string" ? frame.payload : frame.payload.toString("utf8");
-    for (const line of payload.split("\n")) {
-      if (!line.trim()) continue;
-      let reply: { push?: { channel?: string; pub?: { data?: { type?: string; eventName?: string; data?: Record<string, unknown> } } } };
-      try { reply = JSON.parse(line); } catch { continue; }
-      if (!reply || typeof reply !== "object") continue;
-      const push = reply.push;
-      const event = push?.pub?.data;
-      if (typeof push?.channel !== "string" || event?.type !== "hook_event" || typeof event.eventName !== "string") continue;
-      received.push({ channel: push.channel, eventName: event.eventName,
-        notificationType: typeof event.data?.notification_type === "string" ? event.data.notification_type : undefined,
-        toolName: typeof event.data?.tool_name === "string" ? event.data.tool_name : undefined });
-    }
+    brokerFrames.push(payload);
   }));
-  return received;
+  await page.exposeFunction("__recordDecryptedHook", (event: ReceivedHook) => { received.push(event); });
+  await page.addInitScript(() => {
+    const subtle = crypto.subtle;
+    const decrypt = subtle.decrypt.bind(subtle);
+    const object = (value: unknown): value is Record<string, unknown> =>
+      value !== null && typeof value === "object" && !Array.isArray(value);
+    // Passive test observation: native authentication, arguments, result and
+    // rejection remain unchanged. Only bounded hook metadata leaves the page.
+    Object.defineProperty(subtle, "decrypt", { configurable: true, value: async (...args: Parameters<SubtleCrypto["decrypt"]>) => {
+      const result = await decrypt(...args);
+      try {
+        const algorithm = args[0];
+        if (typeof algorithm === "string" || algorithm.name !== "AES-GCM") return result;
+        const additionalData = (algorithm as AesGcmParams).additionalData;
+        if (!additionalData) return result;
+        const header: unknown = JSON.parse(new TextDecoder().decode(additionalData));
+        if (!Array.isArray(header) || header.length !== 13 || header[0] !== "ftown/e2ee/v1"
+          || header[1] !== "ftown_encrypted" || header[2] !== 1 || header[8] !== "application"
+          || typeof header[7] !== "string" || !/^events:[^#]+#.+$/.test(header[7])) return result;
+        const application: unknown = JSON.parse(new TextDecoder().decode(result));
+        if (!object(application) || application.type !== "application" || !object(application.route)
+          || application.route.kind !== "publication" || !object(application.data)) return result;
+        const event = application.data;
+        if (event.type !== "hook_event" || typeof event.eventName !== "string" || !object(event.data)) return result;
+        const observer = globalThis as unknown as { __recordDecryptedHook: (event: {
+          channel: string; eventName: string; notificationType?: string; toolName?: string;
+        }) => Promise<void> };
+        await observer.__recordDecryptedHook({ channel: header[7], eventName: event.eventName,
+          notificationType: typeof event.data.notification_type === "string" ? event.data.notification_type : undefined,
+          toolName: typeof event.data.tool_name === "string" ? event.data.tool_name : undefined });
+      } catch { /* Observer parsing/binding failures cannot change native crypto behavior. */ }
+      return result;
+    } });
+  });
+  return { received, brokerFrames };
 }
 
 async function tabIntoHeaderLink(page: Page, link: Locator, mobile: boolean) {
@@ -76,7 +101,7 @@ for (const viewport of [
   test(`agent CLI attention and session PR association on ${viewport.name}`, async ({ page, context }, testInfo) => {
     test.setTimeout(180_000);
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
-    const receivedHooks = observeHooks(page);
+    const { received: receivedHooks, brokerFrames } = await observeHooks(page);
     // Clicking the real link must open its canonical destination while keeping
     // this integration test entirely independent of GitHub/network availability.
     await context.route("https://github.com/**", route => route.fulfill({
@@ -208,6 +233,7 @@ for (const viewport of [
         { eventName: "Notification", data: { notification_type: "elicitation_response" } },
       ]) {
         const before = receivedHooks.length;
+        const beforeFrames = brokerFrames.length;
         const result = await bridgeApiFetch("POST", "/hook", { body: {
           ftown_session_id: targetId, hook_event_name: hook.eventName, ...hook.data,
         } });
@@ -217,6 +243,23 @@ for (const viewport of [
           event.channel.startsWith(`events:${targetId}#`) && event.eventName === hook.eventName
           && event.notificationType === hook.data.notification_type && event.toolName === hook.data.tool_name,
         )).toBe(true);
+        const wire = brokerFrames.slice(beforeFrames).join("\n");
+        const encryptedPublication = wire.split("\n").some(line => {
+          try {
+            const reply = JSON.parse(line) as { push?: { pub?: { data?: unknown } } } | null;
+            const packet = reply?.push?.pub?.data;
+            const envelope = (value: unknown): boolean => value !== null && typeof value === "object"
+              && "type" in value && value.type === "ftown_encrypted" && "version" in value && value.version === 1
+              && "enc" in value && typeof value.enc === "string" && "ciphertext" in value && typeof value.ciphertext === "string";
+            return envelope(packet) || (packet !== null && typeof packet === "object" && "type" in packet
+              && packet.type === "ftown_encrypted_batch" && "version" in packet && packet.version === 1
+              && "envelopes" in packet && Array.isArray(packet.envelopes) && packet.envelopes.length > 0 && packet.envelopes.every(envelope));
+          } catch { return false; }
+        });
+        expect(encryptedPublication, "Browser received an encrypted hook publication").toBe(true);
+        expect(wire).not.toContain("hook_event");
+        expect(wire).not.toContain("notification_type");
+        expect(wire).not.toContain("tool_name");
         await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
         await expect(shortcut).toBeVisible();
         await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);

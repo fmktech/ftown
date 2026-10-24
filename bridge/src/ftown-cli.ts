@@ -4,12 +4,13 @@ import { runHarness } from './harness-commands.js';
 import { runEnv } from './env-commands.js';
 import { runSetup } from './setup.js';
 import { runStart } from './start-commands.js';
+import { runSecurity } from './security-cli.js';
 import { executeCli, isCliEntry } from './cli-entry.js';
 export { isCliEntry } from './cli-entry.js';
 
 export function usage(): string {
   return `Usage: ftown [bridge options]
-       ftown <setup|start|sessions|harness|env> [args...]
+       ftown <setup|start|sessions|harness|env|security> [args...]
 
 With no subcommand, start the bridge. Run setup explicitly before the first start.
 
@@ -18,6 +19,7 @@ Subcommands:
   start      Start the bridge (--solo for a single-port LAN deployment)
   sessions   List, create, read and drive ftown agent sessions
   harness    Inspect and drive the local ftown-bridge harness
+  security   Pair browsers and inspect/revoke encrypted endpoints
   env        Manage per-provider machine tokens (~/.ftown/env.json)`;
 }
 
@@ -29,6 +31,7 @@ export async function runFtown(argv: string[], start: (argv: string[]) => Promis
     case 'sessions': return runSessions(args);
     case 'harness': return runHarness(args);
     case 'env': return runEnv(args);
+    case 'security': return runSecurity(args);
     case 'setup': return runSetup(args);
     case 'start': return start(args);
     default: console.error(`ftown: Unknown subcommand "${group}"`); console.error(usage()); return 1;

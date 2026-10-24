@@ -1,378 +1,129 @@
-/**
- * Contract-level tests for WebRtcPeer (docs/plans/direct-transport-contract.md, R6 +
- * "DataChannel protocol" + "Module APIs" sections). Written against contract.ts before
- * webrtc-peer.ts lands — module-not-found failures are expected until then.
- *
- * ASSUMPTIONS (not fully pinned down by the contract doc, reconciled once the real
- * implementation lands without invalidating the behavioral assertions below):
- * - `handleSignal(msg: SignalMessage)` exists on WebRtcPeer (symmetric with the bridge's
- *   `DirectPeerManager.handleSignal`), per the task spec for this test suite.
- * - The client is the RTCPeerConnection offerer: it creates the `ftown` DataChannel
- *   itself and calls `RTCPeerConnection#createDataChannel` synchronously inside
- *   `connect()`.
- * - `connect()` resolves only after the hello/hello_ack handshake completes over the
- *   open DataChannel (not merely on ICE/channel "open").
- * - The client also pings the bridge every `PING_INTERVAL_MS` and treats 2 consecutive
- *   missed pongs as dead (symmetric keepalive; the contract only states the bridge's
- *   side of this rule explicitly).
- * - ICE candidates are relayed as `webrtc_ice` with `payload` = `JSON.stringify(candidate)`.
- */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import {
-  DATA_CHANNEL_LABEL,
-  DIRECT_PROTOCOL_VERSION,
-  PAIR_TIMEOUT_MS,
-  PING_INTERVAL_MS,
-  type SignalMessage,
-} from './contract';
-
-// WebRtcPeer does not exist yet — this import is expected to fail until A3 lands it.
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { generateEndpoint, open, seal } from '@security/crypto';
+import type { SecureApplication, SecureEnvelope } from '@security/protocol';
+import { SecureEndpointRuntime } from '../secure-endpoint-runtime';
 import { WebRtcPeer } from './webrtc-peer';
+import { PAIR_TIMEOUT_MS, PING_INTERVAL_MS, type SignalMessage } from './contract';
 
-class FakeDataChannel {
-  readyState: 'connecting' | 'open' | 'closed' = 'connecting';
-  onopen: (() => void) | null = null;
-  onmessage: ((ev: { data: string }) => void) | null = null;
-  onclose: (() => void) | null = null;
-  sent: unknown[] = [];
-
-  constructor(public label: string) {}
-
-  send(data: string): void {
-    this.sent.push(JSON.parse(data));
+const ownerId = '00000000-0000-4000-8000-000000000001';
+class Channel {
+  readyState = 'connecting'; onopen: (() => void) | null = null; onclose: (() => void) | null = null; onerror: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  sent: unknown[] = []; wire: ((packet: SecureEnvelope) => Promise<void>) | null = null;
+  send(raw: string) { const packet = JSON.parse(raw) as SecureEnvelope; this.sent.push(packet); void this.wire?.(packet); }
+  close() { this.readyState = 'closed'; this.onclose?.(); }
+  open() { this.readyState = 'open'; this.onopen?.(); }
+  receive(value: unknown) { this.onmessage?.({ data: JSON.stringify(value) }); }
+}
+class Connection {
+  static instances: Connection[] = [];
+  channel = new Channel(); iceConnectionState = 'new'; onicecandidate: unknown; oniceconnectionstatechange: unknown;
+  remote: unknown; candidates: unknown[] = [];
+  constructor() { Connection.instances.push(this); }
+  createDataChannel() { return this.channel; }
+  async createOffer() { return { type: 'offer', sdp: 'private-sdp' }; }
+  async setLocalDescription() {}
+  async setRemoteDescription(value: unknown) { this.remote = value; }
+  async addIceCandidate(value: unknown) { this.candidates.push(value); }
+  close() { this.channel.close(); }
+}
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
+async function fixture() {
+  Connection.instances = []; vi.stubGlobal('RTCPeerConnection', Connection);
+  const browser = await generateEndpoint(ownerId, 'browser'); const bridge = await generateEndpoint(ownerId, 'bridge');
+  const runtime = new SecureEndpointRuntime(browser, [{ bridgeId: 'bridge-one', endpoint: bridge.endpoint, permissions: ['read', 'control', 'admin'] }]);
+  const signals: SignalMessage[] = [];
+  const peer = new WebRtcPeer({ bridgeId: 'bridge-one', clientId: 'tab', securityRuntime: runtime, sendSignal: message => signals.push(message) });
+  const connecting = peer.connect(); await vi.waitFor(() => expect(signals.some(signal => signal.type === 'webrtc_offer')).toBe(true));
+  const pairId = signals[0].pairId; const channelName = `direct:webrtc:bridge-one:${pairId}`;
+  const connection = Connection.instances[0]; const received: SecureApplication[] = [];
+  async function respond(data: unknown, purpose: 'welcome' | 'application', messageId = crypto.randomUUID()) {
+    const now = Date.now();
+    const packet = await seal(bridge, browser.endpoint, { type: 'ftown_encrypted', version: 1, senderId: bridge.endpoint.id, recipientId: browser.endpoint.id,
+      ownerId, bridgeId: 'bridge-one', channel: channelName, purpose, messageId, createdAt: now, expiresAt: now + 120000, receiverEpoch: null }, new TextEncoder().encode(JSON.stringify(data)));
+    connection.channel.receive(packet);
   }
-
-  close(): void {
-    if (this.readyState === 'closed') return;
-    this.readyState = 'closed';
-    this.onclose?.();
-  }
-
-  simulateOpen(): void {
-    this.readyState = 'open';
-    this.onopen?.();
-  }
-
-  simulateMessage(msg: unknown): void {
-    this.onmessage?.({ data: JSON.stringify(msg) });
-  }
+  connection.channel.wire = async packet => {
+    const plain = JSON.parse(new TextDecoder().decode(await open(bridge, browser.endpoint, packet,
+      { ownerId, bridgeId: 'bridge-one', channel: channelName, recipientId: bridge.endpoint.id, purpose: packet.purpose })));
+    if (packet.purpose === 'hello') await respond({ type: 'welcome', challenge: plain.challenge, receiverEpoch: 'boot-one' }, 'welcome', packet.messageId);
+    else received.push(plain as SecureApplication);
+  };
+  return { peer, runtime, connecting, connection, signals, pairId, received, respond };
 }
 
-class FakeRTCPeerConnection {
-  static instances: FakeRTCPeerConnection[] = [];
-
-  channel: FakeDataChannel | null = null;
-  onicecandidate: ((ev: { candidate: unknown }) => void) | null = null;
-  localDescription: { type: string; sdp: string } | null = null;
-  remoteDescription: { type: string; sdp: string } | null = null;
-  closed = false;
-  addIceCandidateCalls: unknown[] = [];
-
-  constructor(public config: unknown) {
-    FakeRTCPeerConnection.instances.push(this);
-  }
-
-  createDataChannel(label: string): FakeDataChannel {
-    this.channel = new FakeDataChannel(label);
-    return this.channel;
-  }
-
-  async createOffer(): Promise<{ type: string; sdp: string }> {
-    return { type: 'offer', sdp: 'fake-offer-sdp' };
-  }
-
-  async setLocalDescription(desc: { type: string; sdp: string }): Promise<void> {
-    this.localDescription = desc;
-  }
-
-  async setRemoteDescription(desc: { type: string; sdp: string }): Promise<void> {
-    this.remoteDescription = desc;
-  }
-
-  async addIceCandidate(candidate: unknown): Promise<void> {
-    this.addIceCandidateCalls.push(candidate);
-  }
-
-  close(): void {
-    this.closed = true;
-    this.channel?.close();
-  }
-
-  emitIceCandidate(candidate: unknown): void {
-    this.onicecandidate?.({ candidate });
-  }
-}
-
-/** Real RTCIceCandidate exposes `.toJSON()`; WebRtcPeer calls it before relaying. */
-function fakeIceCandidate(data: { candidate: string; sdpMid: string; sdpMLineIndex: number }) {
-  return { ...data, toJSON: () => data };
-}
-
-async function flush(): Promise<void> {
-  await vi.advanceTimersByTimeAsync(0);
-}
-
-describe('WebRtcPeer', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    FakeRTCPeerConnection.instances = [];
-    (globalThis as unknown as { RTCPeerConnection: unknown }).RTCPeerConnection =
-      FakeRTCPeerConnection;
+describe('encrypted WebRTC peer', () => {
+  it('requires an authenticated endpoint welcome after the data channel opens', async () => {
+    const f = await fixture(); let connected = false; void f.connecting.then(() => { connected = true; });
+    expect(connected).toBe(false); f.connection.channel.open(); await f.connecting; expect(connected).toBe(true);
+    expect(f.connection.channel.sent[0]).toMatchObject({ type: 'ftown_encrypted', purpose: 'hello' }); f.peer.close(); f.runtime.dispose();
   });
-
-  afterEach(() => {
-    vi.useRealTimers();
+  it('preserves encrypted terminal ordering and binds output to the negotiated pair', async () => {
+    const f = await fixture(); f.connection.channel.open(); await f.connecting;
+    const output = vi.fn(); f.peer.attach('session-one', { onOutput: output, onScreen: vi.fn() }); f.peer.sendInput('session-one', 'PRIVATE-INPUT');
+    await vi.waitFor(() => expect(f.received).toHaveLength(2));
+    expect(f.received.map(value => value.route.kind === 'terminal' && value.route.frameType)).toEqual(['attach', 'input']);
+    expect(JSON.stringify(f.connection.channel.sent)).not.toContain('PRIVATE-INPUT');
+    await f.respond({ type: 'application', route: { kind: 'terminal', sessionId: 'session-one', frameType: 'output', pairId: 'wrong-pair' }, data: { kind: 'output', sessionId: 'session-one', data: 'wrong' }, mcp: null }, 'application');
+    await f.respond({ type: 'application', route: { kind: 'terminal', sessionId: 'session-one', frameType: 'output', pairId: f.pairId }, data: { kind: 'output', sessionId: 'session-one', data: 'right' }, mcp: null }, 'application');
+    await vi.waitFor(() => expect(output).toHaveBeenCalledExactlyOnceWith('right')); f.peer.close(); f.runtime.dispose();
   });
-
-  function makePeer() {
-    const sendSignal = vi.fn<(msg: SignalMessage) => void>();
-    const peer = new WebRtcPeer({ bridgeId: 'bridge-1', clientId: 'client-1', sendSignal });
-    return { peer, sendSignal };
-  }
-
-  it('produces an offer via sendSignal and relays ICE candidates', async () => {
-    const { peer, sendSignal } = makePeer();
-
-    void peer.connect();
-    await flush();
-
-    expect(FakeRTCPeerConnection.instances).toHaveLength(1);
-    const pc = FakeRTCPeerConnection.instances[0];
-    expect(pc.channel?.label).toBe(DATA_CHANNEL_LABEL);
-    expect(pc.localDescription).toEqual({ type: 'offer', sdp: 'fake-offer-sdp' });
-
-    expect(sendSignal).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'webrtc_offer',
-        bridgeId: 'bridge-1',
-        clientId: 'client-1',
-        payload: 'fake-offer-sdp',
-        pairId: expect.any(String),
-      }),
-    );
-
-    pc.emitIceCandidate(fakeIceCandidate({ candidate: 'fake-candidate', sdpMid: '0', sdpMLineIndex: 0 }));
-    await flush();
-
-    const iceCall = sendSignal.mock.calls.find((c) => c[0].type === 'webrtc_ice');
-    expect(iceCall).toBeDefined();
-    expect(JSON.parse(iceCall![0].payload)).toEqual({
-      candidate: 'fake-candidate',
-      sdpMid: '0',
-      sdpMLineIndex: 0,
-    });
+  it('rejects a plaintext acknowledgement without enabling terminal controls', async () => {
+    const f = await fixture(); f.connection.channel.wire = null; const rejected = expect(f.connecting).rejects.toThrow();
+    f.connection.channel.open(); f.connection.channel.receive({ kind: 'hello_ack', protocolVersion: 1 });
+    await rejected; expect(f.connection.channel.readyState).toBe('closed'); f.runtime.dispose();
   });
-
-  it('applies answer and ICE candidates via handleSignal', async () => {
-    const { peer, sendSignal } = makePeer();
-    void peer.connect();
-    await flush();
-
-    const pc = FakeRTCPeerConnection.instances[0];
-    const pairId = sendSignal.mock.calls[0][0].pairId;
-
-    peer.handleSignal({
-      type: 'webrtc_answer',
-      pairId,
-      bridgeId: 'bridge-1',
-      clientId: 'client-1',
-      payload: 'fake-answer-sdp',
-    });
-    await flush();
-    expect(pc.remoteDescription).toEqual({ type: 'answer', sdp: 'fake-answer-sdp' });
-
-    const candidate = { candidate: 'remote-cand', sdpMid: '0', sdpMLineIndex: 0 };
-    peer.handleSignal({
-      type: 'webrtc_ice',
-      pairId,
-      bridgeId: 'bridge-1',
-      clientId: 'client-1',
-      payload: JSON.stringify(candidate),
-    });
-    await flush();
-    expect(pc.addIceCandidateCalls).toContainEqual(candidate);
+  it('ignores signaling for another bridge or pair', async () => {
+    const f = await fixture();
+    f.peer.handleSignal({ type: 'webrtc_answer', bridgeId: 'foreign', clientId: 'tab', pairId: f.pairId, payload: 'foreign-sdp' });
+    await Promise.resolve(); expect(f.connection.remote).toBeUndefined();
+    const rejected = expect(f.connecting).rejects.toThrow(); f.peer.close(); await rejected; f.runtime.dispose();
   });
-
-  it('gates connect() resolution on the hello/hello_ack handshake', async () => {
-    const { peer } = makePeer();
-    let resolved = false;
-    const connectPromise = peer.connect().then(() => {
-      resolved = true;
-    });
-    await flush();
-
-    const pc = FakeRTCPeerConnection.instances[0];
-    pc.channel!.simulateOpen();
-    await flush();
-
-    expect(
-      pc.channel!.sent.some(
-        (m) =>
-          (m as { kind: string }).kind === 'hello' &&
-          (m as { clientId: string }).clientId === 'client-1' &&
-          (m as { protocolVersion: number }).protocolVersion === DIRECT_PROTOCOL_VERSION,
-      ),
-    ).toBe(true);
-    expect(resolved).toBe(false);
-
-    pc.channel!.simulateMessage({
-      kind: 'hello_ack',
-      bridgeId: 'bridge-1',
-      protocolVersion: DIRECT_PROTOCOL_VERSION,
-    });
-    await flush();
-    expect(resolved).toBe(true);
-    await connectPromise;
+  it('times out pairing and tears down its data channel', async () => {
+    vi.useFakeTimers(); const f = await fixture(); const rejected = expect(f.connecting).rejects.toThrow('pair timeout');
+    await vi.advanceTimersByTimeAsync(PAIR_TIMEOUT_MS); await rejected;
+    expect(f.connection.channel.readyState).toBe('closed'); expect(f.signals.at(-1)?.type).toBe('webrtc_close'); f.runtime.dispose();
   });
-
-  it('closes the connection on protocol version mismatch', async () => {
-    const { peer } = makePeer();
-    const onCloseSpy = vi.fn();
-    peer.onClose(onCloseSpy);
-
-    const connectPromise = peer.connect();
-    // Swallow the expected rejection so vitest doesn't flag it as unhandled while we
-    // inspect state before awaiting it below.
-    connectPromise.catch(() => {});
-    await flush();
-
-    const pc = FakeRTCPeerConnection.instances[0];
-    pc.channel!.simulateOpen();
-    await flush();
-
-    pc.channel!.simulateMessage({
-      kind: 'hello_ack',
-      bridgeId: 'bridge-1',
-      protocolVersion: DIRECT_PROTOCOL_VERSION + 1,
-    });
-    await flush();
-
-    expect(pc.closed).toBe(true);
-    expect(onCloseSpy).toHaveBeenCalled();
-    await expect(connectPromise).rejects.toBeTruthy();
+  it('sends its offer and local ICE, queues early ICE until a matching answer, and ignores malformed candidates', async () => {
+    const f = await fixture();
+    expect(f.signals[0]).toMatchObject({ type: 'webrtc_offer', bridgeId: 'bridge-one', clientId: 'tab', payload: 'private-sdp' });
+    const local = { candidate: 'local-ice', sdpMid: '0' };
+    (f.connection.onicecandidate as (event: unknown) => void)({ candidate: { toJSON: () => local } });
+    expect(f.signals[1]).toMatchObject({ type: 'webrtc_ice', pairId: f.pairId, payload: JSON.stringify(local) });
+    const signal = (type: 'webrtc_answer' | 'webrtc_ice', payload: string): SignalMessage => ({ type, bridgeId: 'bridge-one', clientId: 'tab', pairId: f.pairId, payload });
+    const early = { candidate: 'early-ice' }; const late = { candidate: 'late-ice' };
+    f.peer.handleSignal(signal('webrtc_ice', JSON.stringify(early))); expect(f.connection.candidates).toEqual([]);
+    f.peer.handleSignal({ ...signal('webrtc_answer', 'foreign'), pairId: 'foreign-pair' }); expect(f.connection.remote).toBeUndefined();
+    f.peer.handleSignal(signal('webrtc_ice', 'not-json'));
+    f.peer.handleSignal(signal('webrtc_answer', 'remote-sdp'));
+    await vi.waitFor(() => expect(f.connection.candidates).toEqual([early]));
+    expect(f.connection.remote).toEqual({ type: 'answer', sdp: 'remote-sdp' });
+    f.peer.handleSignal(signal('webrtc_ice', JSON.stringify(late)));
+    await vi.waitFor(() => expect(f.connection.candidates).toEqual([early, late]));
+    const rejected = expect(f.connecting).rejects.toThrow(); f.peer.close(); await rejected; f.runtime.dispose();
   });
-
-  it('rejects connect() after PAIR_TIMEOUT_MS with no successful handshake', async () => {
-    const { peer } = makePeer();
-    const connectPromise = peer.connect();
-    connectPromise.catch(() => {});
-
-    await vi.advanceTimersByTimeAsync(PAIR_TIMEOUT_MS);
-
-    await expect(connectPromise).rejects.toBeTruthy();
+  it('delivers the screen before output and stops detached sessions without affecting siblings', async () => {
+    const f = await fixture(); f.connection.channel.open(); await f.connecting;
+    const frames: string[] = []; const other = vi.fn();
+    f.peer.attach('one', { onScreen: data => frames.push(`screen:${data}`), onOutput: data => frames.push(`output:${data}`) });
+    f.peer.attach('two', { onScreen: other, onOutput: other });
+    const terminal = async (sessionId: string, kind: 'screen' | 'output', data: string) => f.respond({ type: 'application', route: { kind: 'terminal', sessionId, frameType: kind, pairId: f.pairId }, data: { kind, sessionId, data, seq: 1 }, mcp: null }, 'application');
+    await terminal('one', 'screen', 'snapshot'); await terminal('one', 'output', 'delta'); await terminal('unknown', 'output', 'foreign');
+    await vi.waitFor(() => expect(frames).toEqual(['screen:snapshot', 'output:delta'])); expect(other).not.toHaveBeenCalled();
+    f.peer.detach('one'); await terminal('one', 'output', 'detached'); await terminal('two', 'output', 'sibling');
+    await vi.waitFor(() => expect(other).toHaveBeenCalledExactlyOnceWith('sibling')); expect(frames).toHaveLength(2);
+    await vi.waitFor(() => expect(f.received.some(app => app.route.kind === 'terminal' && app.route.frameType === 'detach')).toBe(true));
+    f.peer.close(); f.runtime.dispose();
   });
-
-  async function connectedPeer() {
-    const { peer, sendSignal } = makePeer();
-    const connectPromise = peer.connect();
-    await flush();
-    const pc = FakeRTCPeerConnection.instances[FakeRTCPeerConnection.instances.length - 1];
-    pc.channel!.simulateOpen();
-    await flush();
-    pc.channel!.simulateMessage({
-      kind: 'hello_ack',
-      bridgeId: 'bridge-1',
-      protocolVersion: DIRECT_PROTOCOL_VERSION,
-    });
-    await flush();
-    await connectPromise;
-    pc.channel!.sent = [];
-    return { peer, pc, sendSignal };
-  }
-
-  it('attaches a session and calls onScreen before onOutput for that session', async () => {
-    const { peer, pc } = await connectedPeer();
-    const order: string[] = [];
-    const onScreen = vi.fn((data: string) => order.push(`screen:${data}`));
-    const onOutput = vi.fn((data: string) => order.push(`output:${data}`));
-
-    peer.attach('session-1', { onScreen, onOutput });
-    await flush();
-
-    expect(
-      pc.channel!.sent.some(
-        (m) => (m as { kind: string }).kind === 'attach' && (m as { sessionId: string }).sessionId === 'session-1',
-      ),
-    ).toBe(true);
-
-    pc.channel!.simulateMessage({ kind: 'screen', sessionId: 'session-1', data: 'full-screen', seq: 0 });
-    pc.channel!.simulateMessage({ kind: 'output', sessionId: 'session-1', data: 'chunk-1', seq: 1 });
-    await flush();
-
-    expect(order).toEqual(['screen:full-screen', 'output:chunk-1']);
-
-    // Messages for a non-attached session are ignored.
-    pc.channel!.simulateMessage({ kind: 'output', sessionId: 'session-2', data: 'ignored', seq: 1 });
-    await flush();
-    expect(onOutput).toHaveBeenCalledTimes(1);
-
-    peer.detach('session-1');
-    await flush();
-    pc.channel!.simulateMessage({ kind: 'output', sessionId: 'session-1', data: 'after-detach', seq: 2 });
-    await flush();
-    expect(onOutput).toHaveBeenCalledTimes(1);
-  });
-
-  it('routes sendInput/sendResize as DataChannel frames', async () => {
-    const { peer, pc } = await connectedPeer();
-    peer.sendInput('session-1', 'ls\n');
-    peer.sendResize('session-1', 80, 24);
-
-    expect(pc.channel!.sent).toContainEqual({ kind: 'input', sessionId: 'session-1', data: 'ls\n' });
-    expect(pc.channel!.sent).toContainEqual({ kind: 'resize', sessionId: 'session-1', cols: 80, rows: 24 });
-  });
-
-  it('sends periodic pings and closes after 2 consecutive missed pongs', async () => {
-    // A sibling connection that keeps answering pongs, to prove teardown is scoped to
-    // the one connection that stops answering (not a global timer side effect).
-    const { pc: healthyPc } = await connectedPeer();
-    const onCloseSpy = vi.fn();
-    const { peer, pc } = await connectedPeer();
-    peer.onClose(onCloseSpy);
-
-    const pingCount = () => pc.channel!.sent.filter((m) => (m as { kind: string }).kind === 'ping').length;
-
-    // Tick 1: 0 misses so far -> sends a ping, 1 miss now outstanding.
+  it('resets missed pongs while closing an unresponsive sibling independently', async () => {
+    vi.useFakeTimers(); const f = await fixture(); const sibling = await fixture();
+    f.connection.channel.open(); sibling.connection.channel.open(); await Promise.all([f.connecting, sibling.connecting]);
+    await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS * 2);
+    await sibling.respond({ type: 'application', route: { kind: 'terminal', sessionId: '', frameType: 'pong', pairId: sibling.pairId }, data: { kind: 'pong' }, mcp: null }, 'application');
+    await sibling.respond({ type: 'application', route: { kind: 'terminal', sessionId: '', frameType: 'ping', pairId: sibling.pairId }, data: { kind: 'ping' }, mcp: null }, 'application');
+    await vi.waitFor(() => expect(sibling.received.some(app => app.route.kind === 'terminal' && app.route.frameType === 'pong')).toBe(true));
     await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS);
-    healthyPc.channel!.simulateMessage({ kind: 'pong' });
-    expect(pingCount()).toBe(1);
-    expect(pc.closed).toBe(false);
-
-    // Tick 2: 1 miss so far -> sends a second ping, 2 misses now outstanding.
-    await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS);
-    healthyPc.channel!.simulateMessage({ kind: 'pong' });
-    expect(pingCount()).toBe(2);
-    expect(pc.closed).toBe(false);
-
-    // Tick 3: 2 consecutive missed pongs -> dead, closes without sending a 3rd ping.
-    await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS);
-    expect(pc.closed).toBe(true);
-    expect(onCloseSpy).toHaveBeenCalled();
-
-    // The healthy sibling, which kept answering pongs, is unaffected.
-    expect(healthyPc.closed).toBe(false);
-  });
-
-  it('resets the missed-pong counter when a pong is received', async () => {
-    const { peer, pc } = await connectedPeer();
-    const onCloseSpy = vi.fn();
-    peer.onClose(onCloseSpy);
-
-    // First ping goes unanswered, but a pong then arrives and resets the counter.
-    await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS);
-    pc.channel!.simulateMessage({ kind: 'pong' });
-
-    // From here it again takes 2 more unanswered ping ticks before a 3rd tick kills it.
-    await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS);
-    expect(pc.closed).toBe(false);
-    expect(onCloseSpy).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS);
-    expect(pc.closed).toBe(false);
-    expect(onCloseSpy).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS);
-    expect(pc.closed).toBe(true);
-    expect(onCloseSpy).toHaveBeenCalled();
+    expect(f.connection.channel.readyState).toBe('closed'); expect(sibling.connection.channel.readyState).toBe('open');
+    sibling.peer.close(); f.runtime.dispose(); sibling.runtime.dispose();
   });
 });

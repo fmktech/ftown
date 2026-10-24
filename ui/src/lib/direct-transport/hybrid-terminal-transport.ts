@@ -1,3 +1,4 @@
+import type { SecureEndpointRuntime } from "../secure-endpoint-runtime";
 import {
   LOOPBACK_TIMEOUT_MS,
   WATCH_HEARTBEAT_MS,
@@ -62,6 +63,7 @@ export interface CentrifugoClientLike {
 
 export interface HybridTerminalTransportOptions {
   centrifuge: CentrifugoClientLike;
+  securityRuntime?: SecureEndpointRuntime;
   /** Local pairing mode: loopback only, never WebRTC or relay. */
   localOnly?: boolean;
   userId: string;
@@ -217,6 +219,7 @@ interface SessionEntry {
  */
 export class HybridTerminalTransport implements TerminalTransportApi {
   private readonly client: CentrifugoClientLike;
+  private readonly securityRuntime?: SecureEndpointRuntime;
   private readonly localOnly: boolean;
   private readonly userId: string;
   private readonly clientId: string;
@@ -240,6 +243,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     (bridgeId: string, reachable: boolean) => void
   >();
   private disposed = false;
+  private securityUnsubscribe: (() => void) | null = null;
 
   /** Registered-once global upgrade triggers (T2); null under SSR / no DOM. */
   private onlineHandler: (() => void) | null = null;
@@ -254,6 +258,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
 
   constructor(opts: HybridTerminalTransportOptions) {
     this.client = opts.centrifuge;
+    this.securityRuntime = opts.securityRuntime;
     this.localOnly = opts.localOnly ?? false;
     this.userId = opts.userId;
     this.clientId = opts.clientId;
@@ -267,6 +272,13 @@ export class HybridTerminalTransport implements TerminalTransportApi {
         ? opts.upgradeBackoffMs
         : [15_000, 30_000, 60_000, 120_000];
     this.upgradeJitter = typeof opts.upgradeJitter === 'number' ? opts.upgradeJitter : 0.2;
+    this.securityUnsubscribe = this.securityRuntime?.onChange(() => {
+      for (const [bridgeId, peer] of this.peers) if (["revoked", "key_changed"].includes(this.securityRuntime!.state(bridgeId).status)) {
+        peer.peer?.close(); peer.upgradePeer?.close();
+        if (peer.upgradeTimer) clearTimeout(peer.upgradeTimer);
+        for (const entry of this.sessions.values()) if (entry.bridgeId === bridgeId) { entry.pendingInput = []; entry.pendingInputChars = 0; entry.outQueue = []; }
+      }
+    }) ?? null;
     this.registerGlobalTriggers();
   }
 
@@ -384,6 +396,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
   }
 
   dispose(): void {
+    this.securityUnsubscribe?.(); this.securityUnsubscribe = null;
     if (this.disposed) return;
     this.disposed = true;
 
@@ -548,7 +561,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
         bridgeId,
         clientId: this.clientId,
         port: advert.localPort,
-        nonce: advert.localNonce,
+        securityRuntime: this.securityRuntime,
       });
     } catch {
       // Synchronous construction throw (e.g. Safari mixed-content) → next rung.
@@ -579,6 +592,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
         bridgeId,
         clientId: this.clientId,
         sendSignal: (m) => this.publishCommand(m),
+        securityRuntime: this.securityRuntime,
       });
     } catch {
       // WebRTC unsupported/blocked (e.g. Safari): next rung.
@@ -1224,10 +1238,9 @@ export class HybridTerminalTransport implements TerminalTransportApi {
       if (
         ci &&
         typeof ci.bridgeId === 'string' &&
-        typeof ci.localPort === 'number' &&
-        typeof ci.localNonce === 'string'
+        typeof ci.localPort === 'number'
       ) {
-        this.localAdverts.set(ci.bridgeId, { localPort: ci.localPort, localNonce: ci.localNonce });
+        this.localAdverts.set(ci.bridgeId, { localPort: ci.localPort });
       }
     }
     return this.localAdverts.get(bridgeId) ?? null;

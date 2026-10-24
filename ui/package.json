@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
-  "description": "Web dashboard for ftown \u2014 orchestrate remote Claude Code, Cursor Agent, and CLI sessions",
+  "description": "Web dashboard for ftown — orchestrate remote Claude Code, Cursor Agent, and CLI sessions",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/fmktech/ftown.git",
@@ -17,6 +17,8 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@hpke/common": "1.10.1",
+    "@hpke/core": "1.9.0",
     "@neondatabase/serverless": "^1.0.2",
     "@vercel/analytics": "^2.0.1",
     "@xterm/addon-fit": "^0.11.0",

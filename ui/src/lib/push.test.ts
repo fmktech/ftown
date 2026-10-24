@@ -22,7 +22,8 @@ describe("push boundary",()=>{
   });
   it("rejects invalid payload/time/key and preserves safe Unicode",()=>{
     const event={sessionId:"s",sessionName:"Agent 🐈",kind:"idle",eventKey:"idle",title:"Ready",message:"hello",occurredAt:new Date().toISOString()};
-    expect(parsePushEvent(event).sessionName).toBe("Agent 🐈");
+    expect(parsePushEvent(event)).toMatchObject({ sessionName: 'FTown', title: 'FTown attention', message: 'Open FTown to view details.' });
+    expect(JSON.stringify(parsePushEvent(event))).not.toContain('Agent 🐈');
     for(const change of [{eventKey:"other"},{sessionId:"../x"},{occurredAt:"bad"},{occurredAt:new Date(Date.now()+120000).toISOString()},{message:"x".repeat(2001)}]) expect(()=>parsePushEvent({...event,...change})).toThrow();
     expect(cleanPushText("Bearer fixture-token API_KEY=fixture-value",100)).toBe("Bearer [redacted] API_KEY=[redacted]");
   });
@@ -44,6 +45,13 @@ describe("push boundary",()=>{
     expect(()=>requireSameOrigin(new Request("https://app.test/api/push",{headers:{origin:"https://evil.test"}}))).toThrow();
     await expect(boundedJson(new Request("https://app.test/api/push",{method:"POST",body:"x".repeat(16385)}))).rejects.toMatchObject({status:413});
     await expect(boundedJson(new Request("https://app.test/api/push",{method:"POST",body:"garbage"}))).rejects.toMatchObject({status:400});
+  });
+  it("accepts the exact configured proxy origin without trusting forwarded origins",()=>{
+    vi.stubEnv("FTOWN_PUBLIC_URL","https://localhost:8444");
+    expect(()=>requireSameOrigin(new Request("https://localhost:3000/api/push",{headers:{origin:"https://localhost:8444"}}))).not.toThrow();
+    expect(()=>requireSameOrigin(new Request("https://localhost:3000/api/push",{headers:{origin:"https://evil.test","x-forwarded-host":"evil.test","x-forwarded-proto":"https"}}))).toThrow();
+    vi.stubEnv("FTOWN_PUBLIC_URL","");
+    expect(()=>requireSameOrigin(new Request("https://localhost:3000/api/push",{headers:{origin:"https://localhost:3000"}}))).toThrow();
   });
   it("rejects browser tokens and inactive/cross-owner bridge identities",async()=>{
     vi.stubEnv("CENTRIFUGO_TOKEN_SECRET","unit-secret-long-enough-for-signing-fixtures");

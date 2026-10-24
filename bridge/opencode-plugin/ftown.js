@@ -1,19 +1,43 @@
 import { readFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 async function defaultReadBridgePointer() {
   try {
-    const raw = await readFile(join(homedir(), '.ftown', 'bridge.json'), 'utf8');
+    const raw = await readFile(process.env.FTOWN_BRIDGE_POINTER || (process.env.FTOWN_DATA_DIR ? join(process.env.FTOWN_DATA_DIR, 'bridge.json') : join(homedir(), '.ftown', 'bridge.json')), 'utf8');
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed.port !== 'number') return null;
-    return {
-      port: parsed.port,
-      token: typeof parsed.token === 'string' ? parsed.token : undefined,
-    };
+    return parsed;
   } catch {
     return null;
   }
+}
+
+
+async function secureProxy(env, pointer, path, init = {}) {
+  const cli = pointer?.harnessCli || join(homedir(), '.ftown', 'cli', 'dist', 'ftown-cli.js');
+  const args = [cli, 'security'];
+  const directory = env.FTOWN_DATA_DIR || pointer?.dataDir;
+  if (directory) args.push('--data-dir', directory);
+  args.push('proxy');
+  const request = { method: init.method || 'GET', path, timeoutMs: 60000 };
+  if (init.body !== undefined) request.body = typeof init.body === 'string' ? JSON.parse(init.body) : init.body;
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, args, { stdio: ['pipe', 'pipe', 'ignore'], signal: init.signal, env });
+    const chunks = []; let bytes = 0;
+    const timeout = setTimeout(() => child.kill(), 65000); timeout.unref?.();
+    child.on('error', () => { clearTimeout(timeout); reject(new Error('Encrypted bridge request failed')); });
+    child.stdout.on('data', data => { bytes += data.length; if (bytes > 1048576) child.kill(); else chunks.push(data); });
+    child.on('close', code => {
+      clearTimeout(timeout);
+      if (code !== 0 || bytes > 1048576) return reject(new Error('Encrypted bridge request failed'));
+      try { const response = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        resolve(new Response(JSON.stringify(response.body), { status: response.status })); }
+      catch { reject(new Error('Encrypted bridge response failed')); }
+    });
+    child.stdin.on('error', () => {}); child.stdin.end(JSON.stringify(request));
+  });
 }
 
 function endpoints(env, pointer) {
@@ -82,6 +106,10 @@ export function registerFtownOpencodePlugin(client, options = {}) {
 
   async function request(path, init = {}) {
     const pointer = await readBridgePointer();
+    if (path.startsWith('/api/')) {
+      try { return await (options.proxy ?? ((p, i) => secureProxy(env, pointer, p, i)))(path, init); }
+      catch { return null; } // Delivery may be unknown: never retry a mutation through another endpoint.
+    }
     if (closed) return null;
     let lastResponse = null;
     for (const endpoint of endpoints(env, pointer)) {

@@ -3,12 +3,17 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createServer } from "node:net";
+import { createServer, type AddressInfo } from "node:net";
+import { randomBytes, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { Centrifuge } from "centrifuge";
 import WebSocket from "ws";
 import jwt from "jsonwebtoken";
 import { FleetRelay } from "./relay.js";
+import { open, seal, parseSecureEnvelope } from '../security/crypto.js';
+import type { ApplicationJson, SecureApplication } from '../security/protocol.js';
+import type { McpRequestContext } from './secure-client.js';
+import { TestIdentityStore, TEST_OWNER_A } from './test-support.js';
 
 // Optional real-broker integration: supply a local Centrifugo v5 binary. Never uses live credentials.
 test(
@@ -19,7 +24,7 @@ test(
     const reserve = createServer();
     reserve.listen(0, "127.0.0.1");
     await new Promise<void>((r) => reserve.once("listening", r));
-    const port = (reserve.address() as any).port;
+    const port = (reserve.address() as AddressInfo).port;
     await new Promise<void>((r) => reserve.close(() => r()));
     const secret = "isolated-test-key-not-a-real-token-secret";
     const file = join(dir, "config.json");
@@ -74,37 +79,44 @@ test(
     });
     const channel = `commands:rpc#${owner}`;
     const sub = worker.newSubscription(channel);
-    const received: { type: string; machine: string }[] = [];
-    sub.on("publication", async (ctx) => {
-      if (ctx.info?.user !== owner || ctx.data.type === "command_response") return;
-      const machine = ctx.data.payload.bridgeId;
-      received.push({ type: ctx.data.type, machine });
-      if (machine === "legacy") {
-        const response = ctx.data.type === "mcp_request"
-          ? { requestId: ctx.data.requestId, success: false, error: "Unknown command type: mcp_request" }
-          : { requestId: ctx.data.requestId, success: true, data: ctx.data.type === "stop_session"
-            ? { stopped: true }
-            : { stdout: JSON.stringify({ data: { sessions: [{ id: "existing-agent" }] } }), exitCode: 0 } };
-        await sub.publish({ type: "command_response", response });
-        return;
-      }
-      if (machine === "rejected") {
-        await sub.publish({ type: "command_response", response: { requestId: ctx.data.requestId, success: false, error: "Request failed after execution" } });
-        return;
-      }
-      if (machine === "silent") return;
-      if (ctx.data.type !== "mcp_request") return;
-      const response = {
-        requestId: ctx.data.requestId,
-        success: true,
-        data: { data: { bridge: ctx.data.payload.bridgeId } },
-      };
-      // Foreign publishing is permitted by this broker's namespace policy; gateway must reject its identity.
-      await intruder.publish(channel, {
-        type: "command_response",
-        response: { ...response, data: { data: { bridge: "forged" } } },
-      });
-      await sub.publish({ type: "command_response", response });
+    const keys = new TestIdentityStore();
+    const pending = await keys.ensurePendingIdentity(randomBytes(32).toString('base64url'), TEST_OWNER_A, ['read', 'control']);
+    const machines = ['bridge-1', 'rejected', 'silent'];
+    const bridgeKeys = new Map(await Promise.all(machines.map(async bridgeId => [bridgeId, await keys.bridge(TEST_OWNER_A, bridgeId)] as const)));
+    const grant = await keys.approve(TEST_OWNER_A, pending.requestId, machines.map(bridgeId => ({ bridgeId, endpoint: bridgeKeys.get(bridgeId)!.endpoint, permissions: ['read', 'control'] })));
+    await keys.markActive(TEST_OWNER_A, pending.requestId);
+    const context: McpRequestContext = { grant, action: { actionId: randomUUID(), parentActionId: null, clientId: 'test-client', grantId: grant.grantId, tool: 'sessions_get', operation: null } };
+    const received: { bridgeId: string; purpose: string; wire: string }[] = [];
+    let handlerError: unknown;
+    sub.on('publication', ctx => {
+      void (async () => {
+        if (ctx.info?.user !== owner) return;
+        let packet;
+        try { packet = parseSecureEnvelope(ctx.data); } catch { return; }
+        const bridge = bridgeKeys.get(packet.bridgeId);
+        if (!bridge || packet.recipientId !== bridge.endpoint.id) return;
+        received.push({ bridgeId: packet.bridgeId, purpose: packet.purpose, wire: JSON.stringify(ctx.data) });
+        const value = JSON.parse(new TextDecoder().decode(await open(bridge, grant.identity.endpoint, packet, { ownerId: TEST_OWNER_A, bridgeId: packet.bridgeId, channel, recipientId: bridge.endpoint.id, purpose: packet.purpose })));
+        let response: unknown;
+        if (packet.purpose === 'hello') response = { type: 'welcome', challenge: value.challenge, receiverEpoch: 'test-boot-epoch' };
+        else {
+          const application = value as SecureApplication;
+          let data: ApplicationJson;
+          if (application.route.kind === 'command') data = { type: 'command_response', response: { requestId: packet.messageId, success: true, data: { grantId: grant.grantId } } };
+          else {
+            if (packet.bridgeId === 'silent') return;
+            data = packet.bridgeId === 'rejected' ? { status: 503, body: { code: 'outcome_unknown', outcomeUnknown: true } } : { status: 200, body: { bridge: packet.bridgeId } };
+          }
+          response = { type: 'application', route: { kind: 'response', requestId: packet.messageId }, data, mcp: null };
+        }
+        const reply = await seal(bridge, grant.identity.endpoint, { ...packet, senderId: bridge.endpoint.id, recipientId: grant.identity.endpoint.id, purpose: packet.purpose === 'hello' ? 'welcome' : 'application', receiverEpoch: null }, new TextEncoder().encode(JSON.stringify(response)));
+        // Even an otherwise authentic response from a foreign broker identity is ignored.
+        const forged = await seal(bridge, grant.identity.endpoint, { ...reply }, new TextEncoder().encode(JSON.stringify({ type: 'welcome', challenge: 'forged', receiverEpoch: 'foreign' })));
+        await intruder.publish(channel, forged);
+        // Old plaintext publications with a visible correlation ID never enter the client.
+        await sub.publish({ type: 'command_response', response: { requestId: packet.messageId, success: true, data: { forged: true } } });
+        await sub.publish(reply);
+      })().catch(error => { handlerError = error; });
     });
     worker.connect();
     intruder.connect();
@@ -117,25 +129,15 @@ test(
     assert.equal(childError, undefined);
     const relay = new FleetRelay(url, secret);
     t.after(() => relay.close());
-    const result = await relay.request(owner, "bridge-1", {
-      method: "GET",
-      path: "/api/sessions",
-      timeoutMs: 3000,
-    });
-    assert.deepEqual(result, { bridge: "bridge-1" });
-    assert.deepEqual(await relay.request(owner, "legacy", {
-      method: "GET", path: "/api/sessions", timeoutMs: 3000,
-    }), { sessions: [{ id: "existing-agent" }] });
-    assert.deepEqual(await relay.request(owner, "legacy", {
-      method: "POST", path: "/api/sessions/existing-agent/stop", body: {}, timeoutMs: 3000,
-    }), { stopped: true });
-    assert.deepEqual(received.filter(r => r.machine === "legacy").map(r => r.type),
-      ["mcp_request", "bridge_exec", "mcp_request", "stop_session"]);
-    for (const machine of ["rejected", "silent"]) {
-      await assert.rejects(relay.request(owner, machine, {
-        method: "POST", path: "/api/sessions", body: {}, timeoutMs: 1000,
-      }));
-      assert.deepEqual(received.filter(r => r.machine === machine).map(r => r.type), ["mcp_request"]);
+    const result = await relay.request(owner, 'bridge-1', { method: 'GET', path: '/api/sessions', timeoutMs: 3000 }, undefined, context);
+    assert.deepEqual(result, { bridge: 'bridge-1' });
+    assert.deepEqual(received.filter(row => row.bridgeId === 'bridge-1').map(row => row.purpose), ['hello', 'application', 'application']);
+    for (const bridgeId of ['rejected', 'silent']) {
+      await assert.rejects(relay.request(owner, bridgeId, { method: 'POST', path: '/api/sessions', body: { name: 'sensitive-marker' }, timeoutMs: 1500 }, undefined, context), { outcomeUnknown: true });
+      assert.equal(received.filter(row => row.bridgeId === bridgeId).length, 3);
     }
+    await assert.rejects(relay.request(owner, 'bridge-1', { method: 'GET', path: '/api/sessions', timeoutMs: 1000 }), { code: 'approval_required' });
+    assert.equal(received.some(row => row.wire.includes('sensitive-marker') || row.wire.includes('/api/sessions')), false);
+    assert.equal(handlerError, undefined);
   },
 );

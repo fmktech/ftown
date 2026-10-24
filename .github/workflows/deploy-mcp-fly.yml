@@ -32,8 +32,18 @@ jobs:
         working-directory: bridge
         run: |
           npm run build
-          node --import tsx --test src/attention-events.test.ts src/attention-store.test.ts src/mcp/mcp.test.ts src/mcp/http.test.ts src/mcp/attention.test.ts src/mcp/legacy-relay.test.ts src/local-api-server.test.ts
+          node --import tsx --test src/security/crypto.test.ts src/mcp/mcp-key-store.test.ts src/mcp/security-events.test.ts src/mcp/secure-client.test.ts src/attention-events.test.ts src/attention-store.test.ts src/mcp/mcp.test.ts src/mcp/http.test.ts src/mcp/attention.test.ts src/mcp/legacy-relay.test.ts src/local-api-server.test.ts
       - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+      - name: Verify separately provisioned encryption wrapping key
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_MCP_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Only list names; this key must never enter the generated runtime bundle.
+          flyctl secrets list --app ftown-mcp --json | jq -e '
+            [ .[] | (.Name // .name) ] |
+            index("FTOWN_MCP_KEY_ENCRYPTION_SECRET") != null and
+            index("FTOWN_MCP_KEY_ENCRYPTION_KEY_ID") != null' >/dev/null
       - name: Prepare runtime configuration
         run: node deploy/mcp/prepare-runtime.mjs
         env:

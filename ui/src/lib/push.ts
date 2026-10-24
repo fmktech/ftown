@@ -5,6 +5,7 @@ import webpush from "web-push";
 import { isValidBridgeLabel } from "@/lib/bridge-label";
 import { getDb } from "@/lib/db";
 import { getRequiredSecret } from "@/lib/secrets";
+import { isTrustedBrowserOrigin } from '@/lib/request-origin';
 
 export class PushError extends Error {
   constructor(public code: string, public status: number) { super(code); }
@@ -14,6 +15,11 @@ export interface BrowserSubscription { endpoint: string; keys: { p256dh: string;
 export interface PushEvent {
   sessionId: string; sessionName: string; kind: "question" | "idle";
   eventKey: string; title: string; message: string; occurredAt: string;
+}
+/** Public push providers/control-plane storage receive routing references only. */
+export function genericPushEvent(event: Pick<PushEvent, 'sessionId' | 'kind' | 'eventKey' | 'occurredAt'>): PushEvent {
+  return { sessionId: event.sessionId, kind: event.kind, eventKey: event.eventKey, occurredAt: event.occurredAt,
+    sessionName: 'FTown', title: 'FTown attention', message: 'Open FTown to view details.' };
 }
 export function pushConfig(): PushConfig | null {
   const publicKey = process.env.VAPID_PUBLIC_KEY;
@@ -63,15 +69,15 @@ export function parsePushEvent(value: unknown, now = Date.now()): PushEvent {
     || typeof value.title !== "string" || value.title.length > 200 || typeof value.message !== "string" || value.message.length > 2000
     || typeof value.occurredAt !== "string" || !Number.isFinite(Date.parse(value.occurredAt))
     || Date.parse(value.occurredAt) > now + 60_000 || Date.parse(value.occurredAt) < now - 600_000) throw new PushError("invalid_event", 400);
-  return { sessionId: value.sessionId, sessionName: cleanPushText(value.sessionName, 100), kind: value.kind as PushEvent["kind"],
-    eventKey: value.eventKey, title: cleanPushText(value.title, 120), message: cleanPushText(value.message, 500), occurredAt: new Date(value.occurredAt).toISOString() };
+  return genericPushEvent({ sessionId: value.sessionId, kind: value.kind as PushEvent["kind"],
+    eventKey: value.eventKey, occurredAt: new Date(value.occurredAt).toISOString() });
 }
 export function eventIdentity(owner: string, bridge: string, event: Pick<PushEvent, "sessionId" | "eventKey">): string {
   return createHash("sha256").update(JSON.stringify([owner, bridge, event.sessionId, event.eventKey])).digest("hex");
 }
 export function endpointHash(endpoint: string): string { return createHash("sha256").update(endpoint).digest("hex"); }
 export function requireSameOrigin(request: Request): void {
-  if (request.headers.get("origin") !== new URL(request.url).origin) throw new PushError("forbidden_origin", 403);
+  if (!isTrustedBrowserOrigin(request)) throw new PushError("forbidden_origin", 403);
 }
 export async function boundedJson(request: Request): Promise<unknown> {
   if (Number(request.headers.get("content-length")) > 16_384) throw new PushError("payload_too_large", 413);

@@ -23,7 +23,8 @@ export const LOOPBACK_TIMEOUT_MS = 1_500;
  */
 export interface BridgeLocalAdvert {
   localPort: number;
-  localNonce: string;
+  /** Legacy fixture compatibility; never authorization or transmitted. */
+  localNonce?: string;
 }
 
 /** Signaling + watch messages, published on the commands:rpc#{userId} channel. */

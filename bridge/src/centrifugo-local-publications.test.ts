@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { secureFixture } from './security/bridge/fixtures.test.js';
 import { test } from 'node:test';
 import { CentrifugoClient } from './centrifugo-client.js';
 import type { Session } from './types.js';
@@ -57,11 +61,15 @@ test('disconnected cloud does not queue or delay local hook and command acknowle
 
 test('cloud publish which never acknowledges cannot stall an already committed local mutation', async () => {
   const { client, transport } = fixture();
+  const directory = await mkdtemp(join(tmpdir(), 'ftown-nonblocking-publish-'));
+  const secure = await secureFixture(directory, async () => new Response('{}'));
+  client.setSecurity(secure.security);
+  let release: () => void = () => {};
   transport.state = 'connected';
   const remote: unknown[] = [];
   transport.publish = (channel, data) => {
     remote.push({ channel, data });
-    return new Promise(() => {});
+    return new Promise<void>(resolve => { release = resolve; });
   };
   const local: unknown[] = [];
   client.onLocalPublication((channel, data) => local.push({ channel, data }));
@@ -74,8 +82,12 @@ test('cloud publish which never acknowledges cannot stall an already committed l
   } finally {
     clearTimeout(timer);
   }
-  assert.deepEqual(remote, local);
+  for (let count = 0; count < 100 && !remote.length; count++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(remote.length, 1);
+  assert.equal((remote[0] as { data: { type: string } }).data.type, 'ftown_encrypted');
+  assert.notDeepEqual(remote, local);
   assert.equal(local.length, 1);
+  release(); await secure.security.close(); await rm(directory, { recursive: true, force: true });
 });
 
 test('rejected cloud delivery does not reject a committed local mutation', async () => {

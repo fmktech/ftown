@@ -71,12 +71,18 @@ This prints a banner with a URL like:
 http://192.168.1.10:8040/#k=<64-char-hex-key>
 ```
 
-Open that URL on any device on the same Wi-Fi/LAN — your phone, another
-laptop, anything. The key lives in the URL fragment (`#k=...`), which browsers
-never send in a request — it's read client-side and exchanged for a session.
-Bookmark or save the link; the browser keeps the key in local storage so you
-don't need to re-enter it. Losing the link means re-running with
-`--rotate-key` to get a fresh one.
+For a browser on the same computer, use trustworthy localhost. For phones or
+other LAN devices, put HTTPS in front of the exposed port before opening the
+panel. Plain `http://<LAN-IP>` cannot provide the secure browser context needed
+for WebCrypto and shows setup guidance instead of enabling controls.
+
+The access key lives in the URL fragment (`#k=...`), which browsers never send
+as an HTTP path or query. It authenticates Solo bootstrap, and is separate from
+the browser's encryption identity. The browser also needs an explicit bridge
+invitation to establish its pinned key and local approval. Each browser retains
+its own non-extractable private key in IndexedDB; clearing browser storage
+requires another invitation. Rotating the Solo access key is not a replacement
+for revoking an individual approved encryption endpoint.
 
 ## Docker
 
@@ -105,9 +111,8 @@ Key points:
 
 ## Remote access (tunnels)
 
-LAN traffic is plain HTTP by design (see Security notes). To reach Solo from
-outside your LAN, put a TLS tunnel in front of the one exposed port instead
-of exposing it directly:
+Encrypted controls on any non-localhost browser require HTTPS. Put a TLS
+tunnel in front of the one exposed port for LAN or remote access:
 
 - Tailscale `tailscale serve`
 - `cloudflared tunnel`
@@ -119,16 +124,35 @@ port mapping.
 
 ## Security notes
 
-- **Plain HTTP on LAN**: anyone on the same network segment can capture your
-  key off the wire. Use a tailnet or TLS tunnel if that's a concern.
+- **Secure browser context**: use HTTPS or trustworthy localhost. Plain LAN HTTP
+  cannot enable encrypted controls and can expose the Solo bootstrap credential.
+- **Endpoint encryption**: browser-to-bridge application content uses the same
+  HPKE Auth framing over the local hub, HTTP/WebSocket and WebRTC paths. Explicit
+  invitations establish trust; public discovery data does not grant access.
+- **Local boundaries**: the bridge decrypts before dispatching agents/tools. Their
+  files and provider connections are separate trust boundaries. Minimal discovery
+  and local hook ingestion remain explicit plaintext exceptions.
 - **Key handling**: the key is a 256-bit value (`ACCESS_KEY_BYTES = 32`,
   `bridge/src/solo/contract.ts:63`), generated with `crypto.randomBytes`.
   Only its SHA-256 hash is ever persisted (`bridge/src/solo/solo-auth.ts:15`);
-  the raw key exists only in the banner and the URL fragment.
+  the browser retains the presented access credential in its local storage. The
+  separate browser encryption private key is non-extractable in IndexedDB.
 - `--rotate-key` regenerates the key offline and reprints the banner. It
   doesn't restart a running server process — restart the bridge (or the
   container) to make the running process pick up the new hash.
 - No account service, no cloud identity, no telemetry.
+
+## Encryption setup
+
+Open **Security → Devices** after pairing to inspect the bridge's local approvals
+and revoke a particular endpoint. Keep access to the bridge's local CLI for
+recovery. A different bridge fingerprint requires verification and a fresh
+invitation; the browser never accepts a replacement just because discovery
+returns it. There is no plaintext compatibility switch for old bridges.
+
+See the [encryption data-flow diagram](../README.md#architecture) and
+[operational setup](e2ee-operations.md). Browser storage is not a hardware-backed
+key store, and same-origin code on an unlocked browser remains trusted.
 
 ## Troubleshooting
 

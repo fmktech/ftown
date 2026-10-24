@@ -1,4 +1,8 @@
 import { request as httpRequest } from 'node:http';
+import { loadOrCreateIdentity } from './security/bridge/identity.js';
+import { BridgeSecurityService } from './security/bridge/security.js';
+import { apiResponse } from './cli-client.js';
+import type { BridgePointer } from './wire-types.js';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
@@ -13,7 +17,7 @@ import { join } from 'node:path';
 
 import { ProviderAuthMissingError, WorkingDirMissingError } from './create-ftown-session.js';
 import {
-  LocalApiServer,
+  LocalApiServer as BaseLocalApiServer,
   archivedSessionWasResumed,
   providerAuthMissingResponse,
   workingDirMissingResponse,
@@ -23,6 +27,33 @@ import type { CentrifugoClient } from './centrifugo-client.js';
 import type { CreateFtownSessionDeps } from './create-ftown-session.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { Session } from './types.js';
+
+// Tests exercise the real encrypted adapter. Raw requests remain raw in explicit boundary tests.
+const secureFixtures = new Map<number, { pointer: BridgePointer; token: string }>();
+class LocalApiServer extends BaseLocalApiServer {
+  private testToken = '';
+  private testPort = 0;
+  private testSecurity?: BridgeSecurityService;
+  private testDirectory?: string;
+  override setAuthToken(token: string): void { this.testToken = token; super.setAuthToken(token); }
+  override async start(preferred = 0): Promise<number> {
+    const ownerId = '7bac2a7f-c58e-4845-856f-8283fb07ad96';
+    const dataDir = mkdtempSync(join(tmpdir(), 'ftown-secure-api-fixture-')); this.testDirectory = dataDir;
+    const identity = await loadOrCreateIdentity(dataDir, ownerId, 'bridge');
+    const client = await loadOrCreateIdentity(dataDir, ownerId, 'local-cli');
+    const security = new BridgeSecurityService(identity, 'bridge-1', dataDir, { relayUserId: 'user-1' }); this.testSecurity = security;
+    await security.policy.provisionLocalEndpoint(client.endpoint);
+    this.setSecurity(security, { protocolVersion: 1, ownerId, bridgeId: 'bridge-1', endpoint: identity.endpoint, relayUserId: 'user-1' }, async () => null);
+    const port = await super.start(preferred); this.testPort = port;
+    secureFixtures.set(port, { token: this.testToken, pointer: { port, token: this.testToken, dataDir, ownerId, endpoint: identity.endpoint, bridgeId: 'bridge-1' } });
+    return port;
+  }
+  override stop(): void {
+    secureFixtures.delete(this.testPort); super.stop();
+    const dir = this.testDirectory;
+    void this.testSecurity?.close().finally(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
+  }
+}
 
 describe('LocalApiServer mail recovery wiring (no HTTP listener)', () => {
   const flush = async () => { for (let i = 0; i < 8; i++) await new Promise<void>(resolve => setImmediate(resolve)); };
@@ -101,6 +132,12 @@ async function api(
   body?: unknown,
   extraHeaders?: Record<string, string>,
 ): Promise<{ status: number; data: Record<string, unknown> }> {
+  const secure = secureFixtures.get(port);
+  if (path.startsWith('/api/') && secure && token === secure.token && !Object.keys(extraHeaders ?? {}).some(key => key.toLowerCase() === 'origin')) {
+    const normalized = Object.fromEntries(Object.entries(extraHeaders ?? {}).map(([key, value]) => [key.toLowerCase(), value]));
+    const response = await apiResponse(secure.pointer, method, path, body, normalized);
+    return { status: response.status, data: response.body as Record<string, unknown> };
+  }
   const res = await fetch(`http://127.0.0.1:${port}${path}`, {
     method,
     headers: {
@@ -477,8 +514,8 @@ describe('LocalApiServer explicit session attention and PR metadata', () => {
       { message: 'valid', title: '\x1b[31m\x1b[0m' }, { message: 'valid', arbitrary: 'secret' }]) {
       assert.equal((await api(f.port, f.token, 'POST', path, body)).status, 400, JSON.stringify(body));
     }
-    assert.equal((await api(f.port, 'wrong', 'POST', path, { message: 'valid' })).status, 401);
-    assert.equal((await api(f.port, f.token, 'POST', path, { message: 'valid' }, { Origin: 'https://evil.test' })).status, 403);
+    assert.equal((await api(f.port, 'wrong', 'POST', path, { message: 'valid' })).status, 426);
+    assert.equal((await api(f.port, f.token, 'POST', path, { message: 'valid' }, { Origin: 'https://evil.test' })).status, 426);
     const hostileHostStatus = await new Promise<number | undefined>((resolve, reject) => {
       const request = httpRequest({ hostname: '127.0.0.1', port: f.port, path, method: 'POST',
         headers: { Host: `foreign.example:${f.port}`, Authorization: `Bearer ${f.token}` } },
@@ -553,7 +590,7 @@ describe('retired automation HTTP compatibility', () => {
     server.setAuthToken('retirement-token');
     const port = await server.start();
     try {
-      assert.equal((await api(port, 'wrong', 'GET', '/api/loops')).status, 401);
+      assert.equal((await api(port, 'wrong', 'GET', '/api/loops')).status, 426);
       const hostileHostStatus = await new Promise<number | undefined>((resolve, reject) => {
         const request = httpRequest({ hostname: '127.0.0.1', port, path: '/api/loops',
           headers: { Host: `foreign.example:${port}`, Authorization: 'Bearer retirement-token' } },
@@ -567,12 +604,18 @@ describe('retired automation HTTP compatibility', () => {
             method, headers: { Authorization: 'Bearer retirement-token', 'Content-Type': 'application/json' },
             ...(method === 'POST' || method === 'PATCH' ? { body: '{malformed' } : {}),
           });
-          assert.equal(response.status, 410, `${method} ${path}`);
-          assert.deepEqual(await response.json(), { code: 'automation_removed',
-            error: 'Recurring loops and factory automation have been removed' });
+          assert.equal(response.status, 426, `${method} ${path}: raw bearer never reaches application dispatch`);
+          assert.deepEqual(await response.json(), { code: 'upgrade_required', error: 'upgrade_required' });
         }
       }
-      assert.equal((await api(port, 'retirement-token', 'GET', '/api/loops-other')).status, 503);
+      for (const path of ['/api/loops', '/api/loops/id', '/api/loops/id/run-now', '/api/loops/id/runs']) {
+        for (const method of ['GET', 'POST', 'PATCH', 'DELETE']) {
+          const response = await api(port, 'retirement-token', method, path, method === 'GET' ? undefined : {});
+          assert.equal(response.status, 410, `${method} ${path}: encrypted retired operations stay inert`);
+          assert.deepEqual(response.data, { code: 'automation_removed', error: 'Recurring loops and factory automation have been removed' });
+        }
+      }
+      assert.equal((await api(port, 'retirement-token', 'GET', '/api/loops-other')).status, 403, 'unknown application routes deny before readiness');
     } finally { server.stop(); }
   });
 
@@ -626,7 +669,7 @@ describe('LocalApiServer native wake heartbeats', () => {
     const query = (adapter: string, id: string) => `?peek=1&wait=0&adapter=${adapter}&nativeSessionId=${id}`;
     try {
       await api(port, 'token', 'POST', '/api/sessions/claude/inbox', { body: 'still unread' });
-      assert.equal((await api(port, 'wrong', 'GET', '/api/sessions/claude/inbox' + query('claude-mod', 'native-claude'))).status, 401);
+      assert.equal((await api(port, 'wrong', 'GET', '/api/sessions/claude/inbox' + query('claude-mod', 'native-claude'))).status, 426);
       assert.equal((await api(port, 'token', 'GET', '/api/sessions/claude/inbox?adapter=claude-mod')).status, 400);
       assert.equal((await api(port, 'token', 'GET', '/api/sessions/claude/inbox?peek=0&wait=0&adapter=claude-mod&nativeSessionId=native-claude')).status, 400);
       assert.equal((await api(port, 'token', 'GET', '/api/sessions/claude/inbox' + query('opencode', 'native-claude'))).status, 409);

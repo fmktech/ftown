@@ -19,7 +19,8 @@
       }
     ],
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@security/*": ["../bridge/src/security/*"]
     },
     "forceConsistentCasingInFileNames": true
   },

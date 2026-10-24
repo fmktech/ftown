@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { runFtown, usage } from './ftown-cli.js';
+import { secureFixture } from './security/bridge/fixtures.test.js';
 
 async function capture(run: () => Promise<unknown>): Promise<string> {
   let text = ''; const originalOut = process.stdout.write; const originalError = process.stderr.write;
@@ -77,9 +78,11 @@ describe('in-process canonical commands', () => {
     process.env.HOME = home;
     try {
       const { mkdirSync, writeFileSync } = await import('node:fs');
-      mkdirSync(join(home, '.ftown')); writeFileSync(join(home, '.ftown/bridge.json'), '{"port":1234,"token":"test"}');
+      mkdirSync(join(home, '.ftown'));
       const requests: string[] = [];
-      globalThis.fetch = (async (url) => { requests.push(String(url)); return new Response('{"sessions":[]}', { status: 200 }); }) as typeof fetch;
+      const secure = await secureFixture(join(home, '.ftown'), (async (url) => { requests.push(String(url)); return new Response('{"sessions":[]}', { status: 200 }); }) as typeof fetch);
+      writeFileSync(join(home, '.ftown/bridge.json'), JSON.stringify(secure.pointer));
+      globalThis.fetch = secure.fetch;
       await capture(async () => { assert.equal(await runFtown(['sessions', 'list']), 0); });
       assert.deepEqual(requests, ['http://127.0.0.1:1234/api/sessions']);
     } finally { globalThis.fetch = original; if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous; rmSync(home, { recursive: true, force: true }); }

@@ -37,6 +37,10 @@ read -r VAPID_PUBLIC_KEY VAPID_PRIVATE_KEY < <(cd "$REPO/ui" && node -e 'const k
 export VAPID_PUBLIC_KEY VAPID_PRIVATE_KEY
 export VAPID_SUBJECT="mailto:e2e@ftown.test"
 
+# TLS endpoints for MCP and its consent UI; all ports/processes belong to this run.
+node "$E2E_DIR/scripts/mcp-tls-proxy.mjs" > "$E2E_DIR/mcp-tls.log" 2>&1 &
+echo $! > "$E2E_DIR/.mcp-tls.pid"
+
 # --- UI (next start, prod) ---
 ( cd "$REPO/ui" && exec node_modules/.bin/next start -p 3000 ) > "$E2E_DIR/ui.log" 2>&1 &
 echo $! > "$E2E_DIR/.ui.pid"
@@ -68,5 +72,29 @@ for i in $(seq 1 40); do
   if [ "${N:-0}" -ge 1 ]; then echo "[start] bridge online (presence=$N)"; break; fi
   sleep 1
   [ "$i" = 40 ] && { echo "[start] bridge presence not detected"; tail -40 "$E2E_DIR/bridge.log"; exit 1; }
+done
+export BRIDGE_HOME
+# A second independent instance exercises exact target/pin routing on one account.
+case "$E2E_SECOND_BRIDGE_HOME" in "$E2E_DIR"/*) ;; *) echo "[start] second bridge home must be inside this task's E2E directory"; exit 1 ;; esac
+rm -rf "$E2E_SECOND_BRIDGE_HOME"; mkdir -p "$E2E_SECOND_BRIDGE_HOME"
+printf 'skip_global_compinit=1\n' > "$E2E_SECOND_BRIDGE_HOME/.zshenv"
+printf 'autoload -Uz compinit\ncompinit -u\n' > "$E2E_SECOND_BRIDGE_HOME/.zshrc"
+( cd "$E2E_SECOND_BRIDGE_HOME" && HOME="$E2E_SECOND_BRIDGE_HOME" USERPROFILE="$E2E_SECOND_BRIDGE_HOME" node "$REPO/bridge/dist/ftown-cli.js" setup )
+( cd "$E2E_SECOND_BRIDGE_HOME" && HOME="$E2E_SECOND_BRIDGE_HOME" USERPROFILE="$E2E_SECOND_BRIDGE_HOME" exec node "$REPO/bridge/dist/index.js" --token "$BRIDGE_TOKEN" --api-url http://localhost:3000 ) > "$E2E_DIR/bridge-2.log" 2>&1 &
+echo $! > "$E2E_DIR/.bridge-2.pid"
+for i in $(seq 1 40); do
+  N=$(node -e "fetch('http://localhost:8000/api',{method:'POST',headers:{'Content-Type':'application/json','X-API-Key':process.env.CENTRIFUGO_API_KEY},body:JSON.stringify({method:'presence',params:{channel:'bridges:presence#'+process.env.E2E_USER_EMAIL}})}).then(r=>r.json()).then(j=>process.stdout.write(String(Object.keys(((j.result||{}).presence)||{}).length))).catch(()=>process.stdout.write('0'))" 2>/dev/null || echo 0)
+  if [ "${N:-0}" -ge 2 ]; then echo "[start] both bridges online"; break; fi
+  sleep 1
+  [ "$i" = 40 ] && { echo "[start] second bridge presence not detected"; exit 1; }
+done
+export FTOWN_MCP_CONFIG_JSON="$(node "$E2E_DIR/scripts/mcp-test-config.mjs")"
+export CENTRIFUGO_URL="wss://localhost:8443/connection/websocket"
+( cd "$REPO/bridge" && HOST=127.0.0.1 PORT=8080 exec node dist/mcp-cli.js ) > "$E2E_DIR/mcp.log" 2>&1 &
+echo $! > "$E2E_DIR/.mcp.pid"
+for i in $(seq 1 40); do
+  if node -e "fetch('https://localhost:8443/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" 2>/dev/null; then echo "[start] MCP TLS gateway ready"; break; fi
+  sleep 1
+  [ "$i" = 40 ] && { echo "[start] MCP failed to start"; exit 1; }
 done
 echo "[start] ready"

@@ -622,7 +622,7 @@ describe('HybridTerminalTransport — loopback ladder (loopback-transport-addend
 
     expect(transport.getMode('session-1')).toBe('local');
     expect(loopbackPeerFactory).toHaveBeenCalledWith(
-      expect.objectContaining({ bridgeId: 'bridge-1', port: ADVERT.localPort, nonce: ADVERT.localNonce }),
+      expect.objectContaining({ bridgeId: 'bridge-1', port: ADVERT.localPort }),
     );
     expect(peerFactory).not.toHaveBeenCalled();
     expect(FakeLoopbackPeer.instances[0].attachCalls).toHaveLength(1);
@@ -1024,7 +1024,7 @@ describe('HybridTerminalTransport — default presence-based getLocalAdvert', ()
     return { transport, peerFactory, loopbackPeerFactory, loopbackPeers };
   }
 
-  it('finds a matching connInfo advert in presence and attempts loopback with its port/nonce', async () => {
+  it('finds a matching connInfo advert in presence and attempts loopback with its discovery port without a bearer nonce', async () => {
     const centrifuge = new PresenceFakeClient();
     centrifuge.seedPresenceSub(() =>
       Promise.resolve({
@@ -1041,7 +1041,7 @@ describe('HybridTerminalTransport — default presence-based getLocalAdvert', ()
     await flush();
 
     expect(loopbackPeerFactory).toHaveBeenCalledWith(
-      expect.objectContaining({ bridgeId: 'bridge-1', port: 41999, nonce: 'nonce-abc' }),
+      expect.objectContaining({ bridgeId: 'bridge-1', port: 41999 }),
     );
     expect(transport.getMode('session-1')).toBe('local');
     expect(peerFactory).not.toHaveBeenCalled();
@@ -1084,7 +1084,7 @@ describe('HybridTerminalTransport — default presence-based getLocalAdvert', ()
     expect(created).not.toBeNull();
     expect(created!.subscribeCalls).toBeGreaterThanOrEqual(1);
     expect(loopbackPeerFactory).toHaveBeenCalledWith(
-      expect.objectContaining({ bridgeId: 'bridge-1', port: 41999, nonce: 'nonce-abc' }),
+      expect.objectContaining({ bridgeId: 'bridge-1', port: 41999 }),
     );
     expect(transport.getMode('session-1')).toBe('local');
     expect(peerFactory).not.toHaveBeenCalled();
@@ -2091,7 +2091,7 @@ describe('HybridTerminalTransport — transport upgrade (transport-upgrade-adden
     await vi.advanceTimersByTimeAsync(2000);
     await flush();
     expect(loopbackPeerFactory).toHaveBeenCalledWith(
-      expect.objectContaining({ bridgeId: 'bridge-1', port: 41999, nonce: 'nonce-online' }),
+      expect.objectContaining({ bridgeId: 'bridge-1', port: 41999 }),
     );
     const peer = UpgradeFakeLoopbackPeer.instances.at(-1)!;
     expect(peer.attachCalls).toHaveLength(1);
@@ -2175,7 +2175,7 @@ describe('HybridTerminalTransport — transport upgrade (transport-upgrade-adden
 
 
 describe('cloud outage recovery with remembered loopback discovery', () => {
-  it.each(['reject', 'hang', 'empty'])('reconnects locally when presence is %s, then refreshes credentials on cloud recovery', async (failure) => {
+  it.each(['reject', 'hang', 'empty'])('reconnects locally when presence is %s, and ignores retired capabilities on cloud recovery', async (failure) => {
     vi.useFakeTimers();
     let state = 'online';
     let nonce = 'first-nonce';
@@ -2226,7 +2226,7 @@ describe('cloud outage recovery with remembered loopback discovery', () => {
       localPeers[0].simulateClose();
       await vi.advanceTimersByTimeAsync(1000 + LOOPBACK_TIMEOUT_MS);
       expect(localPeers).toHaveLength(2);
-      expect(loopbackPeerFactory).toHaveBeenLastCalledWith(expect.objectContaining({ nonce: 'first-nonce' }));
+      expect(loopbackPeerFactory).toHaveBeenLastCalledWith(expect.objectContaining({ port: 41999 }));
       localPeers[1].attachCalls[0][1].onScreen('reconnected');
       expect(transport.getMode('session')).toBe('local');
       localPeers[1].attachCalls[0][1].onOutput('working offline');
@@ -2240,7 +2240,7 @@ describe('cloud outage recovery with remembered loopback discovery', () => {
       expect(localPeers).toHaveLength(2);
       localPeers[1].simulateClose();
       await vi.advanceTimersByTimeAsync(1000);
-      expect(loopbackPeerFactory).toHaveBeenLastCalledWith(expect.objectContaining({ nonce: 'rotated-nonce' }));
+      expect(loopbackPeerFactory).toHaveBeenLastCalledWith(expect.objectContaining({ port: 41999 }));
       localPeers[2].attachCalls[0][1].onScreen('fresh screen');
       expect(transport.getMode('session')).toBe('local');
     } finally {

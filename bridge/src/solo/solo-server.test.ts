@@ -459,27 +459,26 @@ describe('routing precedence', () => {
     assert.equal(stack.panel.requests.length, 1);
   });
 
-  it('other /api/* bypasses the solo auth gate and reaches the existing bridge API', async () => {
+  it('arbitrary plaintext /api/* is rejected without reaching bridge application routes', async () => {
     const stack = await startStack();
     after(() => stopStack(stack));
     const res = await request(stack.solo.port, '/api/devices');
-    assert.equal(res.status, 200);
-    assert.equal(res.body, '{"from":"local-api"}');
-    assert.equal(stack.localApi.requests[0]?.url, '/api/devices');
+    assert.equal(res.status, 426);
+    assert.equal(stack.localApi.requests.length, 0);
   });
 
   it('S18 mechanism: local API sees loopback Host and replaced Origin', async () => {
     const stack = await startStack();
     after(() => stopStack(stack));
-    await request(stack.solo.port, '/api/pairings', {
-      headers: { origin: 'http://attacker.example:9999' },
+    await request(stack.solo.port, '/api/security/info', {
+      headers: { origin: `http://127.0.0.1:${stack.solo.port}` },
     });
     const seen = stack.localApi.requests[0];
     assert.ok(seen);
     assert.equal(seen.headers['host'], `127.0.0.1:${stack.localApi.port}`);
     assert.equal(seen.headers['origin'], `http://127.0.0.1:${stack.localApi.port}`);
 
-    await request(stack.solo.port, '/api/no-origin-header');
+    await request(stack.solo.port, '/api/security/info');
     const second = stack.localApi.requests[1];
     assert.ok(second);
     assert.equal(second.headers['origin'], undefined);
@@ -492,12 +491,12 @@ describe('routing precedence', () => {
       res.writeHead(418, { 'content-type': 'text/plain' });
       res.end(`echo:${String(req.url)}:done`);
     });
-    const res = await request(stack.solo.port, '/api/teapot?deep=true', {
+    const res = await request(stack.solo.port, '/api/security/envelope?deep=true', {
       method: 'POST',
       headers: { 'content-type': 'text/plain' },
     });
     assert.equal(res.status, 418);
-    assert.equal(res.body, 'echo:/api/teapot?deep=true:done');
+    assert.equal(res.body, 'echo:/api/security/envelope?deep=true:done');
   });
 
   it('panel fallback routing rewrites Host; panel responses lacking cache headers get no-store (S14)', async () => {

@@ -164,6 +164,12 @@ export function useSessions(
     setSessions(next);
   }, []);
 
+  useEffect(() => client?.securityRuntime?.onChange(() => {
+    const runtime = client.securityRuntime;
+    if (!runtime) return;
+    updateSessions(previous => previous.filter(session => !["revoked", "key_changed"].includes(runtime.state(session.bridgeId).status)));
+  }), [client, updateSessions]);
+
   useEffect(() => {
     confirmedRemovedRef.current.clear();
     optimisticRef.current.clear();

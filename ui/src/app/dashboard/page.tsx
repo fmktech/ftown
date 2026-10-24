@@ -22,6 +22,7 @@ export default async function DashboardPage() {
 
   return (
     <DashboardClient
+      ownerId={session.user.id!}
       userId={email}
       token={token}
       centrifugoUrl={centrifugoUrl}

@@ -16,6 +16,7 @@ import { SessionController } from "../session-controller.js";
 import type { ProcessRunner } from "../claude-runner.js";
 import type { CentrifugoClient } from "../centrifugo-client.js";
 import type { Session } from "../types.js";
+import { attachTestSecurity, testRequestContext } from "./test-support.js";
 
 test("config rejects duplicate IDs, insecure origins and request escapes", () => {
   assert.throws(() =>
@@ -120,6 +121,7 @@ test("real bridge through MCP: discovery, literal history search, partial batche
       unregisterSession: () => {},
     }),
   );
+  const { security, context } = await attachTestSecurity(api, join(dir, "security"), "one");
   const port = await api.start();
   const bridgeFile = join(dir, "bridge.json");
   await writeFile(bridgeFile, JSON.stringify({ port, token: "test-secret" }));
@@ -136,7 +138,7 @@ test("real bridge through MCP: discovery, literal history search, partial batche
           },
         ],
       }),
-    ),
+    ).scoped(context),
   );
   const client = new Client({ name: "test", version: "1" });
   const [a, b] = InMemoryTransport.createLinkedPair();
@@ -146,12 +148,13 @@ test("real bridge through MCP: discovery, literal history search, partial batche
     await client.close();
     await server.close();
     attention.stopNotifications();
+    await security.close();
     api.stop();
     await rm(dir, { recursive: true, force: true });
   });
   const call = async (name: string, args: any = {}) => {
     const result = await client.callTool({ name, arguments: args });
-    return { ...result, data: result.structuredContent as any };
+    return { ...result, isError: 'isError' in result ? result.isError : undefined, data: result.structuredContent as any };
   };
   const tools = await client.listTools();
   assert.ok(tools.tools.length >= 20);
@@ -299,134 +302,46 @@ test("real bridge through MCP: discovery, literal history search, partial batche
   );
 });
 
-test("global concurrency, cancellation, redirects and ambiguous mutation failures", async (t) => {
-  let active = 0,
-    peak = 0,
-    hits = 0;
-  const api = createServer((req, res) => {
-    hits++;
-    active++;
-    peak = Math.max(peak, active);
-    assert.equal(req.headers.authorization, "Bearer secret");
-    if (req.url === "/api/archive") {
-      active--;
-      res.writeHead(302, { Location: "/api/sessions" });
-      res.end();
-      return;
-    }
-    if (req.method === "POST") {
-      active--;
-      req.socket.destroy();
-      return;
-    }
-    setTimeout(() => {
-      active--;
-      res.end(JSON.stringify({ sessions: [] }));
-    }, 30);
-  });
-  await new Promise<void>((resolve) => api.listen(0, "127.0.0.1", resolve));
-  process.env.FTOWN_TEST_TOKEN = "secret";
-  t.after(() => {
-    api.close();
-    delete process.env.FTOWN_TEST_TOKEN;
-  });
-  const fleet = new Fleet(
-    configSchema.parse({
-      concurrency: 2,
-      machines: [
-        {
-          id: "a",
-          transport: "http",
-          url: `http://127.0.0.1:${(api.address() as any).port}`,
-          tokenEnv: "FTOWN_TEST_TOKEN",
-        },
-      ],
-    }),
-  );
-  await Promise.all(
-    Array.from({ length: 8 }, () => fleet.request("a", "GET", "/api/sessions")),
-  );
+test("shared Fleet bounds concurrent encrypted requests and cancels queued work", async () => {
+  let active = 0, peak = 0, hits = 0;
+  const context = await testRequestContext();
+  const fleet = new Fleet(configSchema.parse({ concurrency: 2, machines: [{ id: 'a', transport: 'relay', userId: 'owner@example.test' }] }), async (_user, _machine, request, signal) => {
+    if (signal?.aborted) throw new FleetError('cancelled', 'cancelled');
+    hits++; active++; peak = Math.max(peak, active);
+    await new Promise(resolve => setTimeout(resolve, 10)); active--;
+    if (request.method === 'POST') throw new FleetError('connection_error', 'dispatched', true);
+    return { sessions: [] };
+  }).scoped(context);
+  await Promise.all(Array.from({ length: 8 }, () => fleet.request('a', 'GET', '/api/sessions')));
   assert.equal(peak, 2);
-  await assert.rejects(
-    fleet.request("a", "GET", "/api/archive"),
-    (e: FleetError) => e.code === "connection_error",
-  );
   const before = hits;
-  await assert.rejects(
-    fleet.request("a", "POST", "/api/sessions", {}),
-    (e: FleetError) => e.outcomeUnknown,
-  );
+  await assert.rejects(fleet.request('a', 'POST', '/api/sessions', {}), (error: FleetError) => error.outcomeUnknown);
   assert.equal(hits, before + 1);
-  await assert.rejects(
-    fleet.request("a", "GET", "/api/sessions", undefined, AbortSignal.abort()),
-    (e: FleetError) => e.code === "cancelled",
-  );
+  await assert.rejects(fleet.request('a', 'GET', '/api/sessions', undefined, AbortSignal.abort()), { code: 'cancelled' });
   assert.equal(hits, before + 1);
 });
 
-test(
-  "SSH framing keeps arguments on stdin and credentials on the remote host",
-  { skip: process.platform === "win32" },
-  async (t) => {
-    const dir = await mkdtemp(join(tmpdir(), "ftown-mcp-ssh-"));
-    const { mkdir, chmod } = await import("node:fs/promises");
-    await mkdir(join(dir, ".ftown"));
-    let body = "";
-    const api = createServer(async (req, res) => {
-      assert.equal(req.headers.authorization, "Bearer remote-secret");
-      for await (const chunk of req) body += chunk;
-      res.end(JSON.stringify({ session: { id: "remote-session" } }));
-    });
-    await new Promise<void>((resolve) => api.listen(0, "127.0.0.1", resolve));
-    await writeFile(
-      join(dir, ".ftown", "bridge.json"),
-      JSON.stringify({
-        port: (api.address() as any).port,
-        token: "remote-secret",
-      }),
-    );
-    const argsFile = join(dir, "ssh-args.json");
-    // A process-level SSH test double executes the remote command through a POSIX shell.
-    const fakeSsh = join(dir, "ssh");
-    await writeFile(
-      fakeSsh,
-      `#!${process.execPath}\nconst fs=require('node:fs'); const cp=require('node:child_process');fs.writeFileSync(${JSON.stringify(argsFile)},JSON.stringify(process.argv.slice(2)));const child=cp.spawn('/bin/sh',['-c',process.argv.at(-1)],{stdio:'inherit',env:{...process.env,HOME:${JSON.stringify(dir)}}});child.on('exit',c=>process.exit(c??1));`,
-    );
-    await chmod(fakeSsh, 0o755);
-    const executable = join(dir, "remote mcp");
-    await writeFile(
-      executable,
-      `#!${process.execPath}\nimport(${JSON.stringify("file://" + resolve("dist/mcp-cli.js"))});`,
-    );
-    await chmod(executable, 0o755);
-    const oldPath = process.env.PATH;
-    process.env.PATH = `${dir}:${oldPath}`;
-    t.after(async () => {
-      process.env.PATH = oldPath;
-      api.close();
-      await rm(dir, { recursive: true, force: true });
-    });
-    const fleet = new Fleet(
-      configSchema.parse({
-        machines: [
-          { id: "remote", transport: "ssh", host: "worker-host", executable },
-        ],
-      }),
-    );
-    const prompt = 'Quotes " and $(never-execute) and `never`\nsecond line';
-    const result = await fleet.request("remote", "POST", "/api/sessions", {
-      prompt,
-    });
-    assert.equal(result.session.id, "remote-session");
-    assert.equal(JSON.parse(body).prompt, prompt);
-    const { readFile } = await import("node:fs/promises");
-    const args = JSON.parse(await readFile(argsFile, "utf8"));
-    assert.ok(args.includes("StrictHostKeyChecking=yes"));
-    assert.ok(!JSON.stringify(args).includes(prompt));
-    assert.ok(!JSON.stringify(args).includes("remote-secret"));
-  },
-);
+test('encrypted HTTP transport refuses redirects before sending any plaintext application data', async t => {
+  let hits = 0;
+  const api = createServer(async (req, res) => {
+    hits++; assert.equal(req.headers.authorization, undefined); assert.equal(req.url, '/api/security/envelope');
+    let body = ''; for await (const chunk of req) body += chunk;
+    const packet = JSON.parse(body);
+    assert.equal(packet.type, 'ftown_encrypted'); assert.equal(packet.purpose, 'hello');
+    assert.ok(!body.includes('sensitive prompt'));
+    res.writeHead(302, { Location: 'https://untrusted.example/' }); res.end();
+  });
+  await new Promise<void>(resolve => api.listen(0, '127.0.0.1', resolve)); t.after(() => api.close());
+  const address = api.address(); assert.ok(address && typeof address !== 'string');
+  const fleet = new Fleet(configSchema.parse({ machines: [{ id: 'a', transport: 'http', url: `http://127.0.0.1:${address.port}`, tokenEnv: 'NO_SECRET_IS_SENT' }] })).scoped(await testRequestContext());
+  await assert.rejects(fleet.request('a', 'POST', '/api/sessions', { prompt: 'sensitive prompt' }), { code: 'connection_error', outcomeUnknown: false });
+  assert.equal(hits, 1);
+});
 
+test('legacy SSH MCP endpoint fails closed without launching a helper or exposing arguments', async () => {
+  const fleet = new Fleet(configSchema.parse({ machines: [{ id: 'a', transport: 'ssh', host: 'worker-host', executable: '/must-not-execute' }] })).scoped(await testRequestContext());
+  await assert.rejects(fleet.request('a', 'POST', '/api/sessions', { prompt: 'sensitive prompt' }), { code: 'upgrade_required', outcomeUnknown: false });
+});
 
 test("sessions_update probes PR capability before any mixed mutation and preserves legacy updates", async (t) => {
   const calls: { method: string; path: string; body: unknown }[] = [];

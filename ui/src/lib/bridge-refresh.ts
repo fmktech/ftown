@@ -30,6 +30,14 @@ interface DeviceDbRow {
 
 const REVOKED_JTI = "revoked";
 
+/** Account identity is immutable; email remains only the existing relay subject. */
+export async function getOwnerIdForSub(sub: string): Promise<string> {
+  const rows = await getDb().query('SELECT id::text AS owner_id FROM users WHERE email=$1', [sub]);
+  const ownerId = rows[0]?.owner_id;
+  if (typeof ownerId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(ownerId)) throw new Error('Bridge account is unavailable');
+  return ownerId;
+}
+
 /**
  * Establish (or reset) the current jti for a bridge. Called when a fresh
  * refresh token is minted from a bootstrap token — a re-bootstrap deliberately

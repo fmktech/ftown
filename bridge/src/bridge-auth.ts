@@ -8,6 +8,7 @@ export interface BridgeLocalAdvert {
 }
 
 export interface BridgeAuthResponse {
+  ownerId: string;
   token: string;
   refreshToken: string;
   centrifugoUrl: string;
@@ -30,7 +31,7 @@ export async function fetchBridgeToken(
       // Embedded in the Centrifugo connection JWT `info` claim so the owning
       // user's clients discover the loopback WS rung via presence (L2).
       localPort: local.localPort,
-      localNonce: local.localNonce,
+      // Local port is discovery only; no cloud-visible local authorization secret.
     }),
   });
 
@@ -64,7 +65,7 @@ export async function refreshBridgeToken(
       bridgeId,
       hostname: osHostname(),
       localPort: local.localPort,
-      localNonce: local.localNonce,
+      // Local port is discovery only; no cloud-visible local authorization secret.
     }),
   });
 

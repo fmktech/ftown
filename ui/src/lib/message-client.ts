@@ -1,4 +1,8 @@
+import type { SecurityCommand, SecurityCommandResults } from "@security/protocol";
+import type { SecureEndpointRuntime } from "./secure-endpoint-runtime";
+
 /** Shared authenticated message transport used by cloud and local dashboards. */
+export interface MessagePublishOptions { deadline?: number; signal?: AbortSignal }
 export interface MessageEvents {
   publication: { data: unknown; info?: { user?: string } };
   subscribed: unknown;
@@ -9,7 +13,7 @@ export interface MessageSubscription {
   state: string;
   subscribe(): void;
   unsubscribe(): void;
-  publish(data: unknown): Promise<unknown>;
+  publish(data: unknown, options?: MessagePublishOptions): Promise<unknown>;
   on(event: "publication", listener: (ctx: MessageEvents["publication"]) => void): unknown;
   on(event: "subscribed", listener: (ctx: MessageEvents["subscribed"]) => void): unknown;
   on(event: "join", listener: (ctx: MessageEvents["join"]) => void): unknown;
@@ -22,6 +26,8 @@ export interface MessageSubscription {
   presence(): Promise<{ clients: Record<string, { connInfo?: unknown }> }>;
 }
 export interface MessageClient {
+  readonly securityRuntime?: SecureEndpointRuntime;
+  readonly executeSecurity?: <C extends SecurityCommand>(command: C) => Promise<SecurityCommandResults[C["type"]]>;
   readonly commandTimeoutMs?: number;
   /** A local controller snapshot is authoritative for this single bridge. */
   readonly sessionSnapshotBridgeId?: string;

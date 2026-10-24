@@ -1,4 +1,5 @@
-import { test, expect } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "../helpers/fixtures";
 import { registerAndLogin } from "../helpers/app";
 
 test("Credentials session authorizes until normal UI signout, then fails closed", async ({ page }) => {

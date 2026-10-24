@@ -1,4 +1,7 @@
 import { Centrifuge } from 'centrifuge';
+import { BridgeSecurityService, applicationJson } from './security/bridge/security.js';
+import { executeSecurePacket } from './security/bridge/execute.js';
+import type { ApplicationJson, SecureEnvelope, VerifiedApplication } from './security/protocol.js';
 import WebSocket from 'ws';
 
 import type { Subscription, PublicationContext } from 'centrifuge';
@@ -20,7 +23,7 @@ type TerminalInitHandler = (sessionId: string) => void;
 type CommandHandler = (command: Command) => void;
 type DirectCommandHandler = (msg: DirectCommandMessage) => void;
 
-const MAX_PUBLISH_BYTES = 460_000;
+const MAX_PUBLISH_BYTES = 300_000;
 
 /**
  * Fail-closed publisher-identity check for inbound client publications on a
@@ -78,6 +81,13 @@ export class CentrifugoClient {
   private readonly subscriptions: Map<string, Subscription> = new Map();
   private readonly onReconnect?: () => void | Promise<void>;
   private hasConnected = false;
+  private security: BridgeSecurityService | null = null;
+  private outbound: Promise<void> = Promise.resolve();
+  private outboundQueued = 0;
+  private inbound: Promise<void> = Promise.resolve();
+  private readonly terminalInbound = new Map<string, Promise<void>>();
+
+  setSecurity(security: BridgeSecurityService): void { this.security = security; }
   private readonly disabled: boolean;
   private readonly localListeners = new Set<(channel: string, data: unknown) => void>();
 
@@ -148,14 +158,21 @@ export class CentrifugoClient {
     // Mutations have already committed to the local store. Cloud delivery must
     // not delay their acknowledgement or make a successful mutation look failed.
     // Disconnected updates are reconciled by the existing reconnect snapshot.
-    if (!this.disabled && this.client.state === 'connected') {
-      try {
-        void this.client.publish(channel, data).catch((err: unknown) => {
-          console.error(`[Centrifugo] Failed to publish to ${channel}:`, err);
-        });
-      } catch (err) {
-        console.error(`[Centrifugo] Failed to publish to ${channel}:`, err);
-      }
+    if (!this.disabled && this.client.state === 'connected' && this.security) {
+      if (this.outboundQueued >= 100) { console.warn('[Centrifugo] Encrypted publication capacity reached'); return Promise.resolve(); }
+      this.outboundQueued++;
+      const security = this.security;
+      const run = this.outbound.then(async () => {
+        const packets = await security.sealPublication(channel, { type: 'application', route: { kind: 'publication' },
+          data: applicationJson(data), mcp: null });
+        for (const packet of packets) {
+          if (packet.type !== 'ftown_encrypted') continue;
+          await security.policy.principal(packet.recipientId);
+          await this.client.publish(channel, packet);
+        }
+      });
+      this.outbound = run.catch(() => { console.error('[Centrifugo] Encrypted publication failed'); }).finally(() => { this.outboundQueued--; });
+      return Promise.resolve();
     }
     return Promise.resolve();
   }
@@ -223,7 +240,7 @@ export class CentrifugoClient {
     // with a 10000-entry history, so each reconnect replayed that backlog and
     // starved the app-level ping. Removed — we publish directly.
     try {
-      await this.publish(channel, truncateData({ type: 'output', data }));
+      for (let offset = 0; offset < data.length; offset += 60000) await this.publish(channel, { type: 'output', data: data.slice(offset, offset + 60000) });
     } catch (err) {
       console.error(`[Centrifugo] Failed to publish terminal data to ${channel}:`, err);
     }
@@ -254,84 +271,53 @@ export class CentrifugoClient {
         );
         return;
       }
-      const msg = ctx.data as { type: string; data?: string; cols?: number; rows?: number };
-      if (msg.type === 'input' && msg.data !== undefined) {
-        onInput(sessionId, msg.data);
-      }
-      if (msg.type === 'resize' && msg.cols !== undefined && msg.rows !== undefined) {
-        onResize(sessionId, msg.cols, msg.rows);
-      }
-      if (msg.type === 'init' && onInit) {
-        onInit(sessionId);
-      }
+      if (!this.security || ctx.data?.type !== 'ftown_encrypted' || ctx.data.recipientId !== this.security.endpoint.id) return;
+      const security = this.security;
+      const terminalRun = (this.terminalInbound.get(channel) ?? Promise.resolve()).then(async () => {
+        const verified = await security.acceptApplication(ctx.data, { transport: 'cloud', channel, bridgeId: security.bridgeId, pairId: null });
+        if (verified.application.route.kind !== 'terminal' || verified.application.route.sessionId !== sessionId) return;
+        await security.revalidate(verified.principal);
+        const msg = verified.application.data as { kind: string; data?: string; cols?: number; rows?: number };
+        if (msg.kind === 'input' && typeof msg.data === 'string') onInput(sessionId, msg.data);
+        if (msg.kind === 'resize' && Number.isInteger(msg.cols) && Number.isInteger(msg.rows)) onResize(sessionId, msg.cols!, msg.rows!);
+        if (msg.kind === 'init') onInit?.(sessionId);
+        await security.complete(verified, 'succeeded');
+      }).catch(() => { console.warn('[Centrifugo] Encrypted terminal input rejected'); });
+      this.terminalInbound.set(channel, terminalRun);
     });
 
     sub.subscribe();
     this.subscriptions.set(channel, sub);
   }
 
-  subscribeToCommands(userId: string, handler: CommandHandler, onDirectCommand?: DirectCommandHandler): void {
+  /** Plaintext command adapter is deliberately retired. */
+  subscribeToCommands(_userId: string, _handler: CommandHandler, _onDirectCommand?: DirectCommandHandler): void {
+    console.warn('[Centrifugo] Plaintext command subscriptions are disabled');
+  }
+
+  subscribeSecureCommands(userId: string, dispatch: (message: VerifiedApplication) => Promise<ApplicationJson>): void {
     if (this.disabled) return;
     const channel = `commands:rpc#${userId}`;
-
-    const existingSub = this.subscriptions.get(channel);
-    if (existingSub) {
-      existingSub.unsubscribe();
-      this.subscriptions.delete(channel);
-    }
-
+    const existing = this.subscriptions.get(channel);
+    existing?.unsubscribe();
     const sub = this.client.newSubscription(channel);
-
     sub.on('publication', (ctx: PublicationContext) => {
-      // Fail-closed RCE close: execute commands ONLY from the channel owner
-      // (info.user == userId). The bridge's own command_response/signal echoes
-      // and the owner UI's commands all carry info.user == userId and pass; a
-      // foreign publisher's create_session/kill/bridge_exec is dropped here.
-      // See isOwnerPublication for the cross-user-publish threat. This filters
-      // strictly on publisher identity, never on message type.
-      if (!isOwnerPublication(ctx, userId)) {
-        console.warn(
-          `[Centrifugo] Dropped foreign command publication on ${channel} from user="${ctx.info?.user ?? ''}"`,
-        );
-        return;
-      }
-      const data = ctx.data as Record<string, unknown>;
-      if (data.type === 'command_response') {
-        return;
-      }
-      if (onDirectCommand && (isSignalMessage(data) || isWatchMessage(data))) {
-        try {
-          onDirectCommand(data as unknown as DirectCommandMessage);
-        } catch (err) {
-          console.error(`[Centrifugo] Direct command handler failed on ${channel}:`, err);
-        }
-        return;
-      }
-      const command = data as unknown as Command;
-      if (!command.type || !command.requestId) {
-        return;
-      }
-      handler(command);
+      if (!isOwnerPublication(ctx, userId) || !this.security) return;
+      const packet = ctx.data as SecureEnvelope;
+      if (!packet || !['ftown_encrypted', 'ftown_enrollment'].includes(packet.type)) return;
+      const envelope = packet.type === 'ftown_encrypted' ? packet : (ctx.data as { envelope?: SecureEnvelope }).envelope;
+      if (envelope?.recipientId !== this.security.endpoint.id) return;
+      const security = this.security;
+      void (async () => {
+        const response = await executeSecurePacket(security, ctx.data, { transport: 'cloud', channel, bridgeId: security.bridgeId, pairId: null }, dispatch, accept => {
+          const accepted = this.inbound.then(accept);
+          this.inbound = accepted.then(() => undefined, () => undefined);
+          return accepted;
+        });
+        await this.client.publish(channel, response);
+      })().catch(() => { console.warn('[Centrifugo] Encrypted command rejected'); });
     });
-
-    sub.on('subscribing', (ctx) => {
-      console.log(`[Centrifugo] Subscribing to ${channel}: ${ctx.reason}`);
-    });
-
-    sub.on('subscribed', (ctx) => {
-      console.log(`[Centrifugo] Subscribed to ${channel}, recoverable=${ctx.recoverable}`);
-    });
-
-    sub.on('error', (ctx) => {
-      console.error(`[Centrifugo] Subscription error on ${channel}:`, ctx.error);
-    });
-
-    sub.on('unsubscribed', (ctx) => {
-      console.log(`[Centrifugo] Unsubscribed from ${channel}: ${ctx.reason}`);
-    });
-
-    sub.subscribe();
-    this.subscriptions.set(channel, sub);
+    sub.subscribe(); this.subscriptions.set(channel, sub);
   }
 
   // The loopback rung advert (localPort/localNonce) rides the connection JWT's
@@ -366,11 +352,8 @@ export class CentrifugoClient {
   async publishTerminalScreen(userId: string, sessionId: string, raw: string): Promise<void> {
     const channel = `terminal:${sessionId}#${userId}`;
     try {
-      await this.publish(channel, {
-        type: 'screen_dump',
-        raw,
-        timestamp: new Date().toISOString(),
-      });
+      await this.publish(channel, { type: 'screen_dump', raw: raw.slice(0, 60000), timestamp: new Date().toISOString() });
+      for (let offset = 60000; offset < raw.length; offset += 60000) await this.publish(channel, { type: 'output', data: raw.slice(offset, offset + 60000) });
     } catch (err) {
       console.error(`[Centrifugo] Failed to publish terminal screen to ${channel}:`, err);
     }

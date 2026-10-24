@@ -18,8 +18,11 @@ const client = new Client({
   password: process.env.PGPASSWORD ?? "ftown",
   database: process.env.PGDATABASE ?? "ftown",
 });
+if (!["localhost", "127.0.0.1", "::1"].includes(process.env.PGHOST ?? "localhost")) throw new Error('E2E setup requires its isolated loopback PostgreSQL instance');
 
 const PUSH_DDL = await (await import("node:fs/promises")).readFile(new URL("../../ui/migrations/0005_web_push.sql", import.meta.url), "utf8");
+const OAUTH_DDL = await (await import("node:fs/promises")).readFile(new URL("../../ui/migrations/0004_mcp_oauth.sql", import.meta.url), "utf8");
+const SECURITY_DDL = await (await import("node:fs/promises")).readFile(new URL("../../ui/migrations/0006_endpoint_security.sql", import.meta.url), "utf8");
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS users (
@@ -68,7 +71,10 @@ CREATE INDEX IF NOT EXISTS idx_pairing_user_code ON pairing_requests(user_code);
 await client.connect();
 await client.query(DDL);
 await client.query(PUSH_DDL);
+await client.query('BEGIN');
+try { await client.query(OAUTH_DDL); await client.query(SECURITY_DDL); await client.query('COMMIT'); }
+catch (error) { await client.query('ROLLBACK'); throw error; }
 await client.end();
 console.log(
-  "[setup-db] schema ready (users, rate_limit_attempts, bridge_refresh, pairing_requests)",
+  "[setup-db] schema ready (auth, push, MCP OAuth, encrypted endpoints and security history)",
 );

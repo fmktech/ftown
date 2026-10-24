@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createRpcCore } from "./useBridgeRpc";
 import type { Command, CommandResponse } from "@/types";
+import type { MessagePublishOptions } from "@/lib/message-client";
 
 const cmd = (requestId: string, type: Command["type"] = "list_sessions"): Command => ({
   type,
@@ -29,6 +30,26 @@ describe("createRpcCore", () => {
   });
 
   describe("sendCommand", () => {
+    it("passes its absolute deadline and aborts queued transport work when the caller times out", async () => {
+      let admission: MessagePublishOptions | undefined;
+      const timed = createRpcCore((_command, options) => { admission = options; }, 100);
+      const start = Date.now(); const pending = timed.sendCommand(cmd("late"));
+      expect(admission?.deadline).toBe(start + 100); expect(admission?.signal?.aborted).toBe(false);
+      const rejected = expect(pending).rejects.toThrow('timed out'); await vi.advanceTimersByTimeAsync(100); await rejected;
+      expect(admission?.signal?.aborted).toBe(true);
+    });
+    it("rejects asynchronous encryption/approval failures immediately and clears pending timeouts", async () => {
+      const unavailable = createRpcCore(() => Promise.reject(new Error("approval_required")));
+      await expect(unavailable.sendCommand(cmd("blocked"))).rejects.toThrow("approval_required");
+      expect(vi.getTimerCount()).toBe(0);
+      unavailable.handleResponse(resp("blocked"));
+    });
+
+    it("captures synchronous publisher failures without leaving a timeout", async () => {
+      const unavailable = createRpcCore(() => { throw new Error("closed"); });
+      await expect(unavailable.sendCommand(cmd("blocked"))).rejects.toThrow("closed");
+      expect(vi.getTimerCount()).toBe(0);
+    });
     it("publishes the command and resolves with the first matching response", async () => {
       const promise = core.sendCommand(cmd("r1"));
       expect(published).toEqual([cmd("r1")]);

@@ -40,7 +40,7 @@ add_candidate() {
 ENV_PORT="${FTOWN_HOOK_PORT:-}"
 ENV_TOKEN="${FTOWN_HOOK_TOKEN:-}"
 add_candidate "$ENV_PORT" "$ENV_TOKEN"
-BRIDGE_JSON="${HOME:-}/.ftown/bridge.json"
+BRIDGE_JSON="${FTOWN_BRIDGE_POINTER:-${HOME:-}/.ftown/bridge.json}"
 if [ -n "${HOME:-}" ] && [ -f "$BRIDGE_JSON" ]; then
   BPORT=$(jq -r '.port // empty' "$BRIDGE_JSON" 2>/dev/null)
   BTOKEN=$(jq -r '.token // empty' "$BRIDGE_JSON" 2>/dev/null)
@@ -89,27 +89,11 @@ post_hook "$PAYLOAD"
 if [ "$HOOK_EVENT" = "Stop" ]; then
   SID_ENC=$(jq -n -r --arg s "$FTOWN_SESSION_ID" '$s | @uri' 2>/dev/null)
   [ -n "$SID_ENC" ] || exit 0
-  _tmp=$(mktemp /tmp/ftown-muse-inbox.XXXXXX 2>/dev/null) || exit 0
-  INBOX=""
-  while IFS=' ' read -r _port _token _rest; do
-    [ -n "${_port:-}" ] || continue
-    if [ -n "${_token:-}" ]; then
-      _code=$(curl -s -o "$_tmp" -w '%{http_code}' \
-        "http://127.0.0.1:${_port}/api/sessions/${SID_ENC}/inbox?wait=0" \
-        -H "Authorization: Bearer ${_token}" \
-        --connect-timeout 1 --max-time 2 2>/dev/null)
-    else
-      _code=$(curl -s -o "$_tmp" -w '%{http_code}' \
-        "http://127.0.0.1:${_port}/api/sessions/${SID_ENC}/inbox?wait=0" \
-        --connect-timeout 1 --max-time 2 2>/dev/null)
-    fi
-    case "${_code:-}" in
-      2*) INBOX=$(cat "$_tmp" 2>/dev/null); break ;;
-    esac
-  done <<CANDIDATES_EOF
-$CANDIDATES
-CANDIDATES_EOF
-  rm -f "$_tmp"
+  FTOWN_SECURE_CLI=$(command -v ftown 2>/dev/null || true)
+  [ -n "$FTOWN_SECURE_CLI" ] || FTOWN_SECURE_CLI="${HOME:-}/.ftown/bin/ftown"
+  [ -x "$FTOWN_SECURE_CLI" ] || exit 0
+  REQUEST=$(jq -n -c --arg path "/api/sessions/${SID_ENC}/inbox?wait=0" '{method:"GET",path:$path,timeoutMs:2000}') || exit 0
+  INBOX=$(printf '%s' "$REQUEST" | "$FTOWN_SECURE_CLI" security proxy 2>/dev/null | jq -c 'select(.status >= 200 and .status < 300) | .body' 2>/dev/null)
   [ -n "$INBOX" ] || exit 0
   COUNT=$(printf '%s' "$INBOX" | jq -r '(.messages // []) | length' 2>/dev/null)
   if [ -n "$COUNT" ] && [ "$COUNT" -gt 0 ] 2>/dev/null; then

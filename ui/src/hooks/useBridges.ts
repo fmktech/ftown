@@ -1,6 +1,5 @@
 "use client";
 
-import { createCloudLocalAccess } from "@/lib/cloud-local-access";
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { MessageClient, MessageSubscription } from "@/lib/message-client";
 
@@ -87,7 +86,6 @@ export function useBridges(client: MessageClient | null, userId: string | null):
   const [bridges, setBridges] = useState<BridgeInfo[]>([]);
   const subRef = useRef<MessageSubscription | null>(null);
   const localAdvertsRef = useRef<unknown[]>([]);
-  const provisionRef = useRef<((info: unknown) => Promise<void>) | null>(null);
   // Every known client per bridgeId (not deduped) — the source of truth fed
   // to dedupeBridges to produce the exposed `bridges` list. Kept in a ref
   // (not state) since it's an internal accumulator; only the derived,
@@ -98,7 +96,6 @@ export function useBridges(client: MessageClient | null, userId: string | null):
     try {
       const result = await sub.presence();
       localAdvertsRef.current = Object.values(result.clients).map(info => info.connInfo);
-      for (const info of localAdvertsRef.current) void provisionRef.current?.(info);
       const bridgeList: BridgeInfo[] = Object.entries(result.clients)
         .filter(([, info]) => info.connInfo && typeof info.connInfo === "object" && "bridgeId" in (info.connInfo as Record<string, unknown>))
         .map(([clientId, info]) => {
@@ -127,7 +124,6 @@ export function useBridges(client: MessageClient | null, userId: string | null):
     }
 
     const abort = new AbortController();
-    provisionRef.current = createCloudLocalAccess(abort.signal);
     const channel = `bridges:presence#${userId}`;
 
     const existing = client.getSubscription(channel);
@@ -147,7 +143,6 @@ export function useBridges(client: MessageClient | null, userId: string | null):
       const data = ctx.info.connInfo as { bridgeId?: string; hostname?: string; connectedAt?: string } | undefined;
       if (!data?.bridgeId) return;
       localAdvertsRef.current.push(ctx.info.connInfo);
-      void provisionRef.current?.(ctx.info.connInfo);
       const bridge: BridgeInfo = {
         clientId: ctx.info.client,
         bridgeId: data.bridgeId,
@@ -172,7 +167,6 @@ export function useBridges(client: MessageClient | null, userId: string | null):
 
     return () => {
       abort.abort();
-      provisionRef.current = null;
       localAdvertsRef.current = [];
       clearInterval(presenceInterval);
       sub.removeAllListeners();
@@ -193,7 +187,7 @@ export function useBridges(client: MessageClient | null, userId: string | null):
         await Promise.race([fetchPresence(subRef.current), new Promise<void>(resolve => { timer = setTimeout(resolve, 3000); })]);
       } finally { if (timer) clearTimeout(timer); }
     }
-    await Promise.all(localAdvertsRef.current.map(info => provisionRef.current?.(info)));
+    // Local discovery grants no authority; explicit invitation approval is required.
   }, [fetchPresence]);
 
   return {

@@ -1,8 +1,9 @@
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
-import { BRIDGE_HOME } from "./config";
+import { BRIDGE_HOME, E2E_DIR } from "./config";
 
 /**
  * Direct access to the bridge's loopback HTTP API (127.0.0.1:<port>) for testing
@@ -42,7 +43,7 @@ export function readBridgePointer(bridgeHome: string = BRIDGE_HOME): BridgePoint
   }
   const parsed = JSON.parse(raw) as Partial<BridgePointer>;
   if (typeof parsed.port !== "number" || typeof parsed.token !== "string") {
-    throw new Error(`bridge pointer at ${path} is malformed: ${raw}`);
+    throw new Error(`bridge pointer at ${path} is malformed`);
   }
   return parsed as BridgePointer;
 }
@@ -54,6 +55,8 @@ export interface BridgeApiResult<T = unknown> {
 }
 
 export interface BridgeApiOptions {
+  /** Explicit transport guard coverage; ordinary business calls use encryption. */
+  raw?: boolean;
   /** Override the `Origin` header. Omit to send none (the common legit case). */
   origin?: string;
   /**
@@ -83,12 +86,21 @@ export interface BridgeApiOptions {
  * @param method HTTP method, e.g. "GET" | "POST" | "DELETE".
  * @param path   API path beginning with "/", e.g. "/api/sessions".
  */
-export function bridgeApiFetch(
+export async function bridgeApiFetch(
   method: string,
   path: string,
   options: BridgeApiOptions = {},
 ): Promise<BridgeApiResult> {
   const pointer = readBridgePointer(options.bridgeHome);
+  const guardRequest = options.raw || options.host !== undefined || options.origin !== undefined || options.bearer !== undefined;
+  // Hooks use the fresh pointer's scoped bearer without an Origin; business APIs use HPKE.
+  const hookRequest = method === "POST" && path === "/hook";
+  if (!guardRequest && !hookRequest && !path.startsWith("/api/security/") && !path.startsWith("/api/browser/")) {
+    const cli = await import(pathToFileURL(join(E2E_DIR, "..", "bridge", "dist", "cli-client.js")).href) as {
+      apiResponse(pointer: unknown, method: string, path: string, body?: unknown): Promise<BridgeApiResult>;
+    };
+    return cli.apiResponse(pointer, method, path, options.body);
+  }
   const hostHeader = options.host ?? `127.0.0.1:${pointer.port}`;
   const bearer = options.bearer === undefined ? pointer.token : options.bearer;
 

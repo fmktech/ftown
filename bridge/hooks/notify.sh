@@ -6,7 +6,7 @@ SESSION_ID="${FTOWN_SESSION_ID:-}"
 TOKEN="${FTOWN_HOOK_TOKEN:-}"
 SOURCE=""
 
-BRIDGE_JSON="${HOME}/.ftown/bridge.json"
+BRIDGE_JSON="${FTOWN_BRIDGE_POINTER:-${HOME}/.ftown/bridge.json}"
 REGISTRY="${HOME}/.ftown/session-registry.json"
 
 if [ -z "$PORT" ] && [ -f "$BRIDGE_JSON" ]; then

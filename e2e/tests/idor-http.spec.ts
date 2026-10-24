@@ -1,4 +1,5 @@
-import { test, expect, type APIRequestContext } from "@playwright/test";
+import { expect, type APIRequestContext } from "@playwright/test";
+import { test } from "../helpers/fixtures";
 import { login, registerUser, makeUser, sharedEmail, E2E_PASSWORD, type UserCreds } from "../helpers/app";
 import { bridgeApiFetch, readBridgePointer } from "../helpers/bridge-api";
 import { UI_BASE_URL } from "../helpers/config";

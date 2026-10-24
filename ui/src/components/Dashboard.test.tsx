@@ -6,6 +6,7 @@ import type { Session } from "@/types";
 import type { SessionActivity } from "@/hooks/useAllSessionEvents";
 import { Dashboard } from "./Dashboard";
 import { buildBridgeCommand } from "@/lib/bridge-command";
+import type { MessageClient } from "@/lib/message-client";
 
 const state = vi.hoisted(() => ({
   sessions: [] as Session[],
@@ -43,7 +44,9 @@ function session(id: string, name: string, fields: Partial<Session> = {}): Sessi
   return { id, name, bridgeId: "bridge-a", status: "running", shellType: "shell", createdAt: "2026-10-16T00:00:00Z", updatedAt: "2026-10-16T00:00:00Z", ...fields };
 }
 function dashboard(localMode = false) {
-  return render(<Dashboard client={null} connectionStatus="connected" connectionError={null}
+  const client = { securityRuntime: { ownerId: "00000000-0000-4000-8000-000000000001", state: (bridgeId: string) => ({ bridgeId, status: "ready", endpoint: null }),
+    snapshot: () => [], onChange: () => () => {}, identity: { endpoint: { id: "approved-browser" } } } } as unknown as MessageClient;
+  return render(<Dashboard client={client} connectionStatus="connected" connectionError={null}
     userId="user" token="test" centrifugoUrl="ws://localhost" transport={null} onDisconnect={vi.fn()} localMode={localMode} />);
 }
 
