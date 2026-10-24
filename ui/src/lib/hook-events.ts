@@ -79,12 +79,14 @@ export function extractManualInputNotice(
   };
 }
 
-/** Hooks that prove a previously blocking manual-input interaction has moved on. */
+/** Explicit agent requests outlive tool activity; blocking tool notices keep their legacy lifecycle. */
 export function clearsManualInputNotice(
   eventName: string,
   data: Record<string, unknown>,
+  currentNotice?: ManualInputNotice,
 ): boolean {
   if (eventName === "UserPromptSubmit" || eventName === "beforeSubmitPrompt") return true;
+  if (currentNotice?.type === "agent_needs_input") return false;
   if (eventName === "Notification") {
     return data.notification_type === "elicitation_complete"
       || data.notification_type === "elicitation_response";

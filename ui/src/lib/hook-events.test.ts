@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { clearsManualInputNotice, extractManualInputNotice, hookEventToActivity } from "./hook-events";
+import { clearsManualInputNotice, extractManualInputNotice, hookEventToActivity, type ManualInputNotice } from "./hook-events";
 
 describe("extractManualInputNotice", () => {
   it.each(["permission_prompt", "elicitation_dialog", "agent_needs_input"])(
@@ -102,6 +102,31 @@ describe("clearsManualInputNotice", () => {
     expect(clearsManualInputNotice("PostToolUse", { tool_name: "Bash" })).toBe(true);
     expect(clearsManualInputNotice("postToolUseFailure", { toolName: "Bash" })).toBe(true);
     expect(clearsManualInputNotice("Notification", { notification_type: "elicitation_complete" })).toBe(true);
+  });
+});
+
+describe("current attention lifecycle", () => {
+  const notice = (type: ManualInputNotice["type"]): ManualInputNotice => ({ type, title: "Input", message: "Review this", receivedAt: 1 });
+
+  it.each(["PostToolUse", "postToolUse", "postToolUseFailure"])("keeps explicit agent attention after %s", (event) => {
+    expect(clearsManualInputNotice(event, { tool_name: "Bash" }, notice("agent_needs_input"))).toBe(false);
+  });
+
+  it.each(["elicitation_complete", "elicitation_response"])("keeps explicit agent attention after unrelated %s", (notification_type) => {
+    expect(clearsManualInputNotice("Notification", { notification_type }, notice("agent_needs_input"))).toBe(false);
+  });
+
+  it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("lets %s clear every existing notice type", (event) => {
+    for (const type of ["agent_needs_input", "permission_prompt", "elicitation_dialog", "ask_user"] as const) {
+      expect(clearsManualInputNotice(event, {}, notice(type))).toBe(true);
+    }
+  });
+
+  it.each(["permission_prompt", "elicitation_dialog", "ask_user"] as const)("preserves the legacy %s tool-completion lifecycle", (type) => {
+    for (const event of ["PostToolUse", "postToolUse", "postToolUseFailure"]) {
+      expect(clearsManualInputNotice(event, {}, notice(type))).toBe(true);
+    }
+    expect(clearsManualInputNotice("Notification", { notification_type: "elicitation_complete" }, notice(type))).toBe(true);
   });
 });
 

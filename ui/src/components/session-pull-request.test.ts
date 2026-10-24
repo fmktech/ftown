@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Session } from "@/types";
+import type { Session, SessionUsage } from "@/types";
 import { PullRequestLink } from "./PullRequestLink";
 import { SessionList } from "./SessionList";
 import { Terminal } from "./Terminal";
@@ -38,22 +38,54 @@ describe("session PR destinations", () => {
     expect(within(container).getByText(session.name)).toBeTruthy();
   });
 
-  it("shows a noninteractive sidebar badge and keeps row selection", () => {
+  it("opens a sibling sidebar PR link without selecting the session or nesting controls", () => {
     const onSelectSession = vi.fn();
     const { container } = render(createElement(SessionList, {
       sessions: [session], bridges: [], bridgeOrder: ["bridge"], selectedSessionId: null, onSelectSession,
     }));
     const original = container.querySelector<HTMLButtonElement>('button[draggable="true"]')!;
-    const badge = within(original).getByText("PR #123", { exact: true }).parentElement!;
-    expect(badge.tagName).toBe("SPAN");
-    expect(badge.title).toBe(description);
-    expect(within(original).getByText(description).className).toBe("sr-only");
-    expect(badge.getAttribute("tabindex")).toBeNull();
-    expect(badge.getAttribute("role")).toBeNull();
+    const wrapper = original.parentElement!;
+    const link = within(wrapper).getByRole("link", { name: description });
+    expect(wrapper.dataset.sessionRow).toBe(session.id);
+    expect(original.nextElementSibling).toBe(link);
+    expect(link.getAttribute("href")).toBe(prUrl);
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(link.getAttribute("draggable")).toBe("false");
+    expect(link.style.minHeight).toBe("44px");
+    expect(link.style.minWidth).toBe("44px");
+    expect(link.className).toContain("focus-visible:outline-2");
     expect(original.querySelector("a, button")).toBeNull();
+    expect(original.draggable).toBe(true);
+    expect(Number.parseFloat(original.style.minWidth)).toBe(0);
+    expect(original.style.width).toBe("");
     expect(within(original).getByText(session.name)).toBeTruthy();
-    fireEvent.click(badge);
+    // Navigation is a browser boundary; the E2E opens the native destination.
+    link.addEventListener("click", event => event.preventDefault());
+    fireEvent.click(link);
+    expect(onSelectSession).not.toHaveBeenCalled();
+    fireEvent.click(within(original).getByText(session.name));
     expect(onSelectSession).toHaveBeenCalledExactlyOnceWith(session.id);
+  });
+
+  it("removes sidebar usage while retaining persisted usage in the terminal header", () => {
+    const usage: SessionUsage = {
+      inputTokens: 1200, outputTokens: 45, cacheReadTokens: 100, cacheWriteTokens: 0,
+      totalTokens: 1345, models: [], harness: "codex", collectedAt: "2026-10-23T12:00:00Z",
+    };
+    const { container } = render(createElement(SessionList, {
+      sessions: [{ ...session, usage }], bridges: [], bridgeOrder: ["bridge"],
+      selectedSessionId: session.id, onSelectSession: () => {},
+    }));
+    expect(container.textContent).not.toContain("1.2K in");
+    expect(container.querySelector('[title^="Input:"]')).toBeNull();
+    const header = document.createElement("div");
+    header.innerHTML = renderToStaticMarkup(createElement(Terminal, {
+      transport: null, sessionId: session.id, bridgeId: session.bridgeId, isRunning: true,
+      sessionName: session.name, pullRequestUrl: prUrl, persistedUsage: usage,
+    }));
+    expect(within(header).getByText("1.2K in · 45 out")).toBeTruthy();
+    expect(header.querySelector('[title^="Input:"]')).not.toBeNull();
   });
 
   it("removes replaced and cleared header destinations", () => {
