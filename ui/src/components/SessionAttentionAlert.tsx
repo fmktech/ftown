@@ -38,17 +38,14 @@ export function SessionAttentionAlert({
           <div style={{ fontSize: 12, color: "var(--text-primary)", fontWeight: 700 }}>
             {attention.title}
           </div>
-          <div style={{ marginTop: 3, fontSize: 11, color: "var(--text-muted)" }}>
+          <div style={{ marginTop: 3, fontSize: 11, color: "var(--text-muted)", overflowWrap: "anywhere" }}>
             {attention.sessionName}: {attention.message}
           </div>
           <button
             type="button"
             className="btn-warn"
             style={{ marginTop: 10 }}
-            onClick={() => {
-              onDismiss(attention.sessionId);
-              onOpen(attention.sessionId);
-            }}
+            onClick={() => onOpen(attention.sessionId)}
           >
             Open session
           </button>

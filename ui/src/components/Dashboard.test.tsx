@@ -3,13 +3,14 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "@/types";
+import type { SessionActivity } from "@/hooks/useAllSessionEvents";
 import { Dashboard } from "./Dashboard";
 import { buildBridgeCommand } from "@/lib/bridge-command";
 
 const state = vi.hoisted(() => ({
   sessions: [] as Session[],
   bridges: [{ clientId: "client-a", bridgeId: "bridge-a", hostname: "alpha", connectedAt: "2026-10-16T00:00:00Z" }],
-  activity: new Map<string, never>(),
+  activity: new Map<string, SessionActivity>(),
   createSession: vi.fn().mockResolvedValue(undefined),
   stopSession: vi.fn(),
   retrySession: vi.fn(),
@@ -46,6 +47,7 @@ function dashboard(localMode = false) {
 beforeEach(() => {
   localStorage.clear();
   vi.clearAllMocks();
+  state.activity = new Map();
   state.createSession.mockResolvedValue(undefined);
   state.sessions = [
     session("ordinary", "Regular shell"),
@@ -134,7 +136,7 @@ describe("new-session navigation", () => {
     await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("created-id"));
     expect(screen.getByRole("button", { name: "Terminal" }).classList.contains("mobile-tab-active")).toBe(true);
     expect(screen.getByRole("button", { name: /Regular shell/ })).toBeTruthy();
-    expect(state.clearSessionAttention).toHaveBeenLastCalledWith("created-id");
+    expect(state.clearSessionAttention).not.toHaveBeenCalled();
   });
 
   it("keeps the selected session and mobile workspace when creation fails", async () => {
@@ -148,6 +150,33 @@ describe("new-session navigation", () => {
     expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
     expect(screen.getByRole("button", { name: "Workspace" }).classList.contains("mobile-tab-active")).toBe(true);
     expect(screen.getByText("New Session")).toBeTruthy();
-    expect(state.clearSessionAttention).toHaveBeenCalledTimes(1);
+    expect(state.clearSessionAttention).not.toHaveBeenCalled();
+  });
+});
+
+describe("attention navigation preserves the request", () => {
+  it.each([true, false])("keeps attention through original, shortcut, popup and repeat selection (desktop=%s)", desktop => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: desktop, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    const { container } = dashboard();
+    const original = Array.from(container.querySelectorAll<HTMLButtonElement>('button[draggable="true"]'))
+      .find(row => row.textContent?.includes("Regular shell"))!;
+    fireEvent.click(original);
+    // A newly arriving notice on the already selected session must also survive
+    // selecting that same session again.
+    state.activity = new Map([["ordinary", { activity: "idle", attention: {
+      type: "agent_needs_input", title: "Review requested", message: "Inspect the result before continuing", receivedAt: 10,
+    } }]]);
+    fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+    const shortcut = screen.getByRole("button", { name: "Regular shell: Review requested. Inspect the result before continuing" });
+    for (const control of [original, original, shortcut, screen.getByRole("button", { name: "Open session" })]) {
+      fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+      fireEvent.click(control);
+      expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
+      expect(screen.getByRole("button", { name: "Terminal" }).classList.contains("mobile-tab-active")).toBe(true);
+      expect(screen.getByRole("alert")).toBeTruthy();
+      expect(state.clearSessionAttention).not.toHaveBeenCalled();
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss notification" }));
+    expect(state.clearSessionAttention).toHaveBeenCalledExactlyOnceWith("ordinary");
   });
 });

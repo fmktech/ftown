@@ -1261,23 +1261,6 @@ export function SessionList({
           </div>
         </div>
 
-        {sessionActivity?.get(session.id)?.attention && (
-          <div
-            title={sessionActivity.get(session.id)?.attention?.message}
-            style={{
-              fontSize: 10,
-              color: "var(--status-pending)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              marginBottom: 2,
-            }}
-          >
-            <span aria-hidden style={{ marginRight: 4 }}>!</span>
-            {sessionActivity.get(session.id)?.attention?.message ?? "Session needs your input"}
-          </div>
-        )}
-
         {isSelected && session.status === "running" && (() => {
           const act = sessionActivity?.get(session.id);
           if (!act || act.activity === "idle") return null;
@@ -1624,12 +1607,30 @@ export function SessionList({
                 <span style={{
                   flex: 1,
                   minWidth: 0,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                  fontWeight: isSelected ? 600 : 400,
                 }}>
-                  {displayName}
+                  <span style={{
+                    display: "block",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    fontWeight: isSelected ? 600 : 400,
+                  }}>
+                    {displayName}
+                  </span>
+                  <span style={{
+                    display: "-webkit-box",
+                    WebkitLineClamp: 3,
+                    WebkitBoxOrient: "vertical",
+                    overflow: "hidden",
+                    whiteSpace: "normal",
+                    overflowWrap: "anywhere",
+                    marginTop: 3,
+                    fontSize: 11,
+                    lineHeight: 1.4,
+                    color: "var(--text-muted)",
+                  }}>
+                    {attention.message}
+                  </span>
                 </span>
                 <span aria-hidden style={{
                   width: 5,

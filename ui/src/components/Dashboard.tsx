@@ -347,12 +347,11 @@ PY`;
   }, []);
 
   const handleSelectSession = useCallback((id: string | null) => {
-    if (id) clearSessionAttention(id);
     setSelectedSessionId(id);
     if (id) {
       setMobileTab("terminal");
     }
-  }, [clearSessionAttention]);
+  }, []);
 
   const handleCreateSession = useCallback(
     async (prompt: string, options: CreateSessionOptions): Promise<void> => {

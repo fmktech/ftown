@@ -1,0 +1,40 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "branch": "fix/attention-open-behavior",
+  "base": "54c2ca6760b5229fb5fcb41d13dd890928d37318",
+  "model": "gpt-6.1-sol",
+  "reasoning_effort": "high",
+  "owners": {
+    "/root": [
+      "docs/investigations/2026-10-24-attention-open-behavior.md",
+      "docs/investigations/2026-10-24-attention-open-behavior.ownership.json"
+    ],
+    "/root/session_ui": [
+      "ui/src/components/SessionList.tsx",
+      "ui/src/components/Dashboard.tsx",
+      "ui/src/components/SessionAttentionAlert.tsx",
+      "ui/src/components/session-needs-attention.test.ts",
+      "ui/src/components/Dashboard.test.tsx",
+      "ui/src/components/SessionAttentionAlert.test.ts",
+      "e2e/tests/session-tools.spec.ts",
+      "e2e/tests/session-needs-attention.spec.ts"
+    ],
+    "/root/npx_review": [],
+    "/root/npx_implementation": []
+  },
+  "integration_owner": "/root/npx_implementation",
+  "contract": "Move the visible attention message preview into its top Needs attention entry: one-line name plus message wrapping up to three lines, overflowWrap:anywhere/minWidth0, full title/message preserved in accessible name/title and popup. Remove duplicate message paragraph from original session row, retain Input needed status. Opening/selecting via original sidebar, top shortcut, or popup Open session navigates normally (including mobile Terminal tab) without clearing attention. Remove both Dashboard handleSelectSession clear and popup Open onDismiss call. Explicit popup Dismiss and a new user prompt still clear. Existing legacy permission/tool resolution remains unchanged; no hook/backend/store change, no new dismiss control, public props/exports stable. Keep unbroken message text within both top preview and existing popup using bounded overflow wrapping; no popup truncation.",
+  "dependencies": {
+    "implementation": "pre-freeze independent approval complete",
+    "checks": "all source writes handed off and exact snapshot verified",
+    "root E2E": "unit/static check lease released",
+    "landing": "source review and focused runtime/visual gates passed"
+  },
+  "resources": {
+    "Git index/history": "npx_implementation exclusive final exact-ten-file commit/push/PR lease; preserve unrelated notes; no merge",
+    "Boat setup/source/deps": "released; bx_h698rejq deleted and absent from inventory after evidence retrieval",
+    "unit/static/build": "released after all checks passed and ten snapshot hashes matched",
+    "E2E/browser/services/database": "released after root4/4 E2E,10screenshots, verified Docker/PID/port cleanup and sandbox deletion"
+  },
+  "status": "All implementation/review/unit/static/runtime/visual gates passed; source/review workers completed; integration owner solely acquires final Git lease then releases and stops"
+}

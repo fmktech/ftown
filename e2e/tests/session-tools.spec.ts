@@ -278,11 +278,19 @@ for (const viewport of [
       await screenshot("attention-with-associated-pr");
       await shortcut.click();
       await expect(replacementLink).toBeVisible();
-      await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
+      await expect(page.getByRole("alert").filter({ hasText: message })).toBeVisible();
       if (mobile) await expect(page.getByRole("button", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
+      await page.getByRole("alert").getByRole("button", { name: "Open session", exact: true }).click();
+      await expect(replacementLink).toBeVisible();
+      await expect(page.getByRole("alert").filter({ hasText: message })).toBeVisible();
       await tabIntoHeaderLink(page, replacementLink, mobile);
       await screenshot("selected-session-pr-link");
       await showWorkspace();
+      await expect(shortcut).toBeVisible();
+      await expect(shortcut.getByText(message, { exact: true })).toBeVisible();
+      await expect(originalRow(page, targetName).getByText(message, { exact: true })).toHaveCount(0);
+      await page.getByRole("button", { name: "Dismiss notification", exact: true }).click();
+      await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
       await expect(region.getByRole("button", { name: new RegExp(targetName) })).toHaveCount(0);
 
       const unchanged = await bridgeApiFetch("GET", `/api/sessions/${otherId}`);

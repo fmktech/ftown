@@ -64,7 +64,7 @@ for (const viewport of [
       await postHook(idleId, "Stop");
       const attentionRegion = page.getByRole("region", { name: "Needs attention", exact: true });
       await expect(attentionRegion).toHaveCount(0);
-      const message = "Review the complete deployment plan before proceeding.";
+      const message = `Review the complete deployment plan before proceeding. Reference: ${"migrationApprovalReference".repeat(12)}`;
       await postHook(secondId, "Notification", {
         notification_type: "agent_needs_input", title: "API approval requested", message: "Approve the API changes before continuing.",
       });
@@ -76,6 +76,10 @@ for (const viewport of [
         name: `${firstName}: Deployment approval requested. ${message}`, exact: true,
       });
       await expect(firstShortcut).toBeVisible();
+      const messagePreview = firstShortcut.getByText(message, { exact: true });
+      await expect(messagePreview).toBeVisible();
+      await expect(originalRow(page, firstName).getByText(message, { exact: true })).toHaveCount(0);
+      await expect(originalRow(page, firstName).getByRole("img", { name: "Input needed", exact: true })).toBeVisible();
       await expect(attentionRegion.getByRole("button")).toHaveCount(2);
       await expect(attentionRegion.getByRole("button").first()).toHaveAccessibleName(
         `${firstName}: Deployment approval requested. ${message}`,
@@ -93,6 +97,14 @@ for (const viewport of [
         await expect(row.locator("[data-harness-icon]")).toHaveCount(1);
       }
       expect(await attentionRegion.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      expect(await messagePreview.evaluate(element => {
+        const style = getComputedStyle(element);
+        return element.scrollWidth <= element.clientWidth
+          && element.getBoundingClientRect().height <= Number.parseFloat(style.lineHeight) * 3 + 1;
+      })).toBe(true);
+      const popupBody = page.getByRole("alert").getByText(`${firstName}: ${message}`, { exact: true });
+      await expect(popupBody).toBeVisible();
+      expect(await popupBody.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
       if (!isMobile) {
@@ -117,8 +129,36 @@ for (const viewport of [
         await expect(page.getByRole("button", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
       }
       await showWorkspace();
-      await expect(attentionRegion.getByRole("button", { name: new RegExp(firstName) })).toHaveCount(0);
+      await expect(firstShortcut).toBeVisible();
+      await expect(page.getByRole("alert").filter({ hasText: message })).toBeVisible();
       await expect(originalRow(page, firstName)).toBeVisible();
+      await expect(attentionRegion.getByRole("button")).toHaveCount(2);
+
+      // Original-row navigation and selecting the already open session retain
+      // the same request; only a new prompt or explicit dismissal handles it.
+      await originalRow(page, firstName).click();
+      await expect(page.getByRole("alert").filter({ hasText: message })).toBeVisible();
+      if (isMobile) await expect(page.getByRole("button", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
+      await showWorkspace();
+      await expect(firstShortcut).toBeVisible();
+      const openedScreenshot = testInfo.outputPath(`needs-attention-after-open-${viewport.name}.png`);
+      await page.screenshot({ path: openedScreenshot, fullPage: true });
+      await testInfo.attach(`Needs attention after open ${viewport.name}`, { path: openedScreenshot, contentType: "image/png" });
+      await postHook(firstId, "UserPromptSubmit");
+      await expect(firstShortcut).toHaveCount(0);
+      await expect(attentionRegion.getByRole("button")).toHaveCount(1);
+
+      // A fresh request on the already selected session remains after another
+      // selection. The explicit dismissal removes only that request.
+      const freshMessage = "Request received while this session is already open.";
+      await postHook(firstId, "Notification", { notification_type: "agent_needs_input", title: "Review still pending", message: freshMessage });
+      const freshShortcut = attentionRegion.getByRole("button", { name: `${firstName}: Review still pending. ${freshMessage}`, exact: true });
+      await expect(freshShortcut).toBeVisible();
+      await originalRow(page, firstName).click();
+      await expect(page.getByRole("alert").filter({ hasText: freshMessage })).toBeVisible();
+      await page.getByRole("button", { name: "Dismiss notification", exact: true }).click();
+      await showWorkspace();
+      await expect(freshShortcut).toHaveCount(0);
       await expect(attentionRegion.getByRole("button")).toHaveCount(1);
 
       // Existing Hide behavior removes the shortcut without deleting the
