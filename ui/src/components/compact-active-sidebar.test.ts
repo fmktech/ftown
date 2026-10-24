@@ -33,6 +33,32 @@ afterEach(() => {
 });
 
 describe("sidebar bridge groups", () => {
+  it("makes the full hostname a disclosure control while keeping drag and cleanup independent", () => {
+    const hostname = "development-machine-with-a-long-readable-hostname.example.test";
+    const onSelectSession = vi.fn();
+    const onRemoveSession = vi.fn();
+    const { container } = render(createElement(SessionList, {
+      sessions: [session("finished", "bridge-a", "Finished task", { status: "completed" })],
+      bridges: [{ ...bridges[0], hostname }], bridgeOrder: ["bridge-a"], selectedSessionId: null,
+      onSelectSession, onRemoveSession,
+    }));
+    const disclosure = screen.getByRole("button", { name: `Collapse ${hostname}` });
+    expect(disclosure.title).toBe(hostname);
+    expect(within(disclosure).getByText(hostname).title).toBe(hostname);
+    expect(within(disclosure).queryAllByRole("button")).toHaveLength(0);
+    const drag = container.querySelector('[data-bridge-drag="bridge-a"]')!;
+    expect(drag.getAttribute("draggable")).toBe("true");
+    expect(drag.getAttribute("title")).toContain(hostname);
+    const clear = screen.getByRole("button", { name: `Clear completed sessions on ${hostname}` });
+    expect(disclosure.parentElement).toBe(clear.parentElement);
+    expect(disclosure.contains(clear)).toBe(false);
+    fireEvent.click(within(disclosure).getByText(hostname));
+    expect(screen.getByRole("button", { name: `Expand ${hostname}` }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("Finished task")).toBeNull();
+    expect(onSelectSession).not.toHaveBeenCalled();
+    expect(onRemoveSession).not.toHaveBeenCalled();
+  });
+
   it("selecting a session expands its bridge and never collapses others", async () => {
     const sessions = [
       session("session-a", "bridge-a", "Alpha session"),

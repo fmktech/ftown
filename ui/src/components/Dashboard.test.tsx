@@ -158,7 +158,7 @@ describe("new-session navigation", () => {
 });
 
 describe("attention navigation preserves the request", () => {
-  it.each([true, false])("keeps attention through original, shortcut, popup and repeat selection (desktop=%s)", desktop => {
+  it.each([true, false])("keeps attention through original, shortcut and repeat selection without an overlay (desktop=%s)", desktop => {
     window.matchMedia = vi.fn().mockReturnValue({ matches: desktop, addEventListener: vi.fn(), removeEventListener: vi.fn() });
     const { container } = dashboard();
     const original = Array.from(container.querySelectorAll<HTMLButtonElement>('button[draggable="true"]'))
@@ -171,15 +171,18 @@ describe("attention navigation preserves the request", () => {
     } }]]);
     fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
     const shortcut = screen.getByRole("button", { name: "Regular shell: Review requested. Inspect the result before continuing" });
-    for (const control of [original, original, shortcut, screen.getByRole("button", { name: "Open session" })]) {
+    for (const control of [original, original, shortcut]) {
       fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
       fireEvent.click(control);
       expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
       expect(screen.getByRole("button", { name: "Terminal" }).classList.contains("mobile-tab-active")).toBe(true);
-      expect(screen.getByRole("alert")).toBeTruthy();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.getByRole("button", { name: "Dismiss attention for Regular shell" })).toBeTruthy();
       expect(state.clearSessionAttention).not.toHaveBeenCalled();
     }
-    fireEvent.click(screen.getByRole("button", { name: "Dismiss notification" }));
+    fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss attention for Regular shell" }));
     expect(state.clearSessionAttention).toHaveBeenCalledExactlyOnceWith("ordinary");
+    expect(screen.getByRole("button", { name: "Workspace" }).classList.contains("mobile-tab-active")).toBe(true);
   });
 });
