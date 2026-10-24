@@ -111,6 +111,37 @@ test('only explicit continuation resolves; storage failure cannot report durable
   await assert.rejects(new AttentionStore(resolve).record('missing', 'Notification', notice()), (e: unknown) => e instanceof AttentionError && e.code === 'attention_storage_error');
 });
 
+test('record returns its own committed public event through concurrent requests and deduplication', async (t) => {
+  const f = await fixture(t);
+  const pushed: string[] = [];
+  const store = new AttentionStore(f.resolve, 500, (_id, event) => { pushed.push(event.eventKey); });
+  const [first, second, duplicate] = await Promise.all([
+    store.record('s1', 'Notification', notice('First question')),
+    store.record('s1', 'Notification', notice('Second question')),
+    store.record('s1', 'Notification', notice('First question')),
+  ]);
+  assert.ok(first && second && duplicate);
+  assert.equal(first.message, 'First question');
+  assert.equal(second.message, 'Second question');
+  assert.notEqual(first.id, second.id);
+  assert.equal(duplicate.id, first.id);
+  assert.equal(first.occurrences, 1, 'returned snapshots do not change under a later duplicate');
+  assert.equal(duplicate.occurrences, 2);
+  assert.deepEqual(pushed, [`question:${first.id}`, `question:${second.id}`]);
+  assert.equal(Object.hasOwn(first, 'fingerprint'), false);
+  assert.equal(Object.hasOwn(first, 'sourceId'), false);
+  assert.deepEqual((await new AttentionStore(f.resolve).list('s1')).events.map((event) => event.id), [first.id, second.id]);
+  await store.mutate('s1', [first.id], 'resolve');
+  const recurrence = await store.record('s1', 'Notification', notice('First question'));
+  assert.ok(recurrence);
+  assert.notEqual(recurrence.id, first.id);
+  assert.equal(pushed.length, 3);
+  assert.equal(await store.record('s1', 'UnrelatedEvent', {}), undefined);
+  assert.equal(await store.record('s1', 'PostToolUse', {}), undefined);
+  await assert.rejects(store.record('missing', 'Notification', notice()), /could not be persisted/);
+  assert.equal(pushed.length, 3, 'failed persistence cannot dispatch a question');
+});
+
 
 function clock() {
   let now = Date.parse('2026-10-18T12:00:00.000Z');

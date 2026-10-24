@@ -8,6 +8,7 @@ import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 import type { SessionStore } from './session-store.js';
 import type { MailStore } from './mail-store.js';
 import { AttentionStore, AttentionError } from './attention-store.js';
+import { sanitizeAttentionText } from './attention-events.js';
 import type { Session } from './types.js';
 import { MailDeliveryService, sanitizeMessageText, parseNativeWakeRegistration, NativeWakeRegistrationError } from './mail-delivery.js';
 import type { ProcessRunner } from './claude-runner.js';
@@ -531,8 +532,31 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     const attentionMatch = path.match(/^\/api\/sessions\/([a-zA-Z0-9_-]+)\/attention(?:\/(ack|resolve))?$/);
     if (attentionMatch) {
       const id = attentionMatch[1];
-      if (!await this.store.loadSession(id)) { jsonResponse(res, 404, { error: 'Session not found', code: 'unknown_session' }); return; }
+      const session = await this.store.loadSession(id);
+      if (!session) { jsonResponse(res, 404, { error: 'Session not found', code: 'unknown_session' }); return; }
       if (!this.attention) { jsonResponse(res, 503, { error: 'Attention store not ready', code: 'attention_not_ready' }); return; }
+      if (!attentionMatch[2] && req.method === 'POST') {
+        if (session.status !== 'running' && session.status !== 'pending') {
+          jsonResponse(res, 409, { error: 'Session is not active', code: 'session_not_active' }); return;
+        }
+        const body = await parseBody(req);
+        if (!body || typeof body !== 'object' || Array.isArray(body)
+          || Object.keys(body).some((key) => !['title', 'message'].includes(key))) throw new BadRequestError('Invalid attention arguments');
+        if (typeof body.message !== 'string' || !body.message.trim() || body.message.trim().length > 2000) throw new BadRequestError('Invalid attention message');
+        if (body.title !== undefined && (typeof body.title !== 'string' || !body.title.trim() || body.title.trim().length > 200)) throw new BadRequestError('Invalid attention title');
+        const title = sanitizeAttentionText(typeof body.title === 'string' ? body.title : 'Session needs your input', 200);
+        const message = sanitizeAttentionText(body.message, 2000);
+        if (!title || !message) throw new BadRequestError('Attention text must not be empty');
+        const event = await this.attention.record(id, 'Notification', { notification_type: 'agent_needs_input', title, message });
+        if (!event) throw new AttentionError('attention_storage_error', 'Attention history could not be persisted', 500);
+        // Durable commit precedes publication; the live stream carries only
+        // the sanitized request and its exact committed record identifier.
+        this.emit('event', { sessionId: id, eventName: 'Notification', source: 'api', data: {
+          notification_type: 'agent_needs_input', title: event.title, message: event.message, notification_id: event.id,
+        } });
+        jsonResponse(res, 200, { event });
+        return;
+      }
       if (!attentionMatch[2] && req.method === 'GET') {
         const integer = (name: string, fallback: number, maximum: number) => {
           const raw = url.searchParams.get(name);
@@ -608,7 +632,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         jsonResponse(res, 404, { error: 'Session not found' });
         return;
       }
-      jsonResponse(res, 200, { session: toWireSession(session), ...(this.attention ? { capabilities: { attention: { version: 1 } } } : {}) });
+      jsonResponse(res, 200, { session: toWireSession(session), capabilities: {
+        ...(this.attention ? { attention: { version: 1, request: true } } : {}),
+        sessionMetadata: { pullRequest: true },
+      } });
       return;
     }
 
@@ -734,14 +761,15 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return;
     }
 
-    // PATCH /api/sessions/:id — rename and/or reparent
+    // PATCH /api/sessions/:id — rename, reparent and/or associate a pull request
     if (sessionMatch && req.method === 'PATCH') {
       const sessionId = sessionMatch[1];
       const body = await parseBody(req);
       const name = body.name as string | undefined;
       const hasParentField = Object.prototype.hasOwnProperty.call(body, 'parentSessionId');
+      const hasPullRequestField = Object.prototype.hasOwnProperty.call(body, 'pullRequestUrl');
 
-      if (name === undefined && !hasParentField) {
+      if (name === undefined && !hasParentField && !hasPullRequestField) {
         jsonResponse(res, 400, { error: 'Nothing to update' });
         return;
       }
@@ -755,6 +783,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       const result = await controller.update(sessionId, {
         ...(name === undefined ? {} : { name }),
         ...(hasParentField ? { parent: { value: body.parentSessionId } } : {}),
+        ...(hasPullRequestField ? { pullRequestUrl: body.pullRequestUrl as string | null } : {}),
       });
       if (!result.ok) {
         jsonResponse(res, result.code === 'not_found' ? 404 : 400, { error: result.message });

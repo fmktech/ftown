@@ -12,6 +12,7 @@ import { usePersistentState, stringSetCodec } from "@/lib/use-persistent-state";
 import { formatUsage, formatUsageDetail } from "@/lib/format-usage";
 import { HarnessIcon } from "./HarnessIcon";
 import { SessionStateIndicator } from "./SessionStateIndicator";
+import { PullRequestLink } from "./PullRequestLink";
 
 interface SessionListProps {
   sessions: Session[];
@@ -1159,6 +1160,7 @@ export function SessionList({
               {displayName}
             </span>
           )}
+          <PullRequestLink url={session.pullRequestUrl} badge />
           {treeProps?.isCollapsed && treeProps.descendantCount > 0 && (
             <span
               title={`${treeProps.descendantCount} hidden child session${treeProps.descendantCount === 1 ? "" : "s"}`}

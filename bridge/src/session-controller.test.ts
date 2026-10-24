@@ -115,6 +115,85 @@ describe('SessionController.update — rename', () => {
   });
 });
 
+describe('SessionController.update — pull request metadata', () => {
+  it('attaches, replaces, preserves and clears the URL on retained sessions', async () => {
+    const h = setup([makeSession()]);
+    const first = await h.controller.update('sess-1', { pullRequestUrl: ' https://github.com/fmktech/ftown/pull/128/?tab=files#review ' });
+    assert.ok(first.ok);
+    assert.equal(h.store.sessions.get('sess-1')?.pullRequestUrl, 'https://github.com/fmktech/ftown/pull/128');
+    await h.controller.update('sess-1', { name: 'renamed' });
+    assert.equal(h.store.sessions.get('sess-1')?.pullRequestUrl, 'https://github.com/fmktech/ftown/pull/128');
+    await h.controller.update('sess-1', { pullRequestUrl: 'https://github.com/fmktech/ftown/pull/129' });
+    assert.equal(h.published.at(-1)?.pullRequestUrl, 'https://github.com/fmktech/ftown/pull/129');
+    await h.controller.update('sess-1', { pullRequestUrl: null });
+    assert.equal(Object.hasOwn(h.store.sessions.get('sess-1')!, 'pullRequestUrl'), false);
+    assert.equal(Object.hasOwn(h.published.at(-1)!, 'pullRequestUrl'), false);
+    await h.controller.update('sess-1', { pullRequestUrl: null });
+    assert.equal(h.store.saved.length, 5);
+    assert.equal(h.published.length, 5);
+  });
+
+  it('validates every field before mutating even a store-owned reference', async () => {
+    for (const input of [
+      { name: 'must not change', pullRequestUrl: 'https://evil.test/owner/repo/pull/1' },
+      { name: 'must not change', parent: { value: 'missing' }, pullRequestUrl: 'https://github.com/owner/repo/pull/1' },
+      { name: '', pullRequestUrl: 'https://github.com/owner/repo/pull/1' },
+      { pullRequestUrl: '' },
+      { pullRequestUrl: 42 as unknown as string },
+    ]) {
+      const original = makeSession();
+      const before = { ...original };
+      const h = setup([original]);
+      const result = await h.controller.update('sess-1', input);
+      assert.equal(result.ok, false);
+      assert.deepEqual(original, before);
+      assert.equal(h.store.saved.length, 0);
+      assert.equal(h.published.length, 0);
+    }
+  });
+
+  for (const injected of [false, true]) it(`serializes concurrent rename and PR updates (${injected ? 'injected session boundary' : 'local fallback'})`, async () => {
+    let snapshot = makeSession();
+    let firstLoaded!: () => void;
+    const loaded = new Promise<void>((resolve) => { firstLoaded = resolve; });
+    let releaseFirst!: () => void;
+    const release = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let reads = 0;
+    const h = setup();
+    h.store.loadSession = async () => {
+      const result = { ...snapshot };
+      reads++;
+      if (reads === 1) { firstLoaded(); await release; }
+      return result;
+    };
+    h.store.saveSession = async (value) => { snapshot = { ...value }; };
+    let boundary = Promise.resolve();
+    const controller = new SessionController({
+      store: h.store, runner: { stop: () => false }, removeSession: async () => null,
+      publishSessionUpdate: async (value) => { h.published.push({ ...value }); },
+      ...(injected ? { withSessionWrite: (_id: string, task: () => Promise<void>) => {
+        const next = boundary.then(task); boundary = next.catch(() => {}); return next;
+      } } : {}),
+    });
+    const rename = controller.update('sess-1', { name: 'concurrent rename' });
+    await loaded;
+    const attach = controller.update('sess-1', { pullRequestUrl: 'https://github.com/fmktech/ftown/pull/128' });
+    // A microtask turn gives an unguarded second read a chance to enter; no
+    // wall-clock delay or polling is needed to expose the lost-update ordering.
+    await Promise.resolve();
+    const readsBeforeRelease = reads;
+    releaseFirst();
+    const results = await Promise.all([rename, attach]);
+    assert.equal(readsBeforeRelease, 1);
+    assert.ok(results.every((result) => result.ok));
+    assert.equal(snapshot.name, 'concurrent rename');
+    assert.equal(snapshot.pullRequestUrl, 'https://github.com/fmktech/ftown/pull/128');
+    assert.equal(h.published.length, 2);
+    assert.equal(h.published[1].name, 'concurrent rename');
+    assert.equal(h.published[1].pullRequestUrl, 'https://github.com/fmktech/ftown/pull/128');
+  });
+});
+
 describe('SessionController.update — reparent', () => {
   it('flattens to the proposed parent\'s root so trees stay one level deep', async () => {
     const h = setup([

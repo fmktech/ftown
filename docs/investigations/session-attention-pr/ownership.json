@@ -1,0 +1,63 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "branch": "feat/session-attention-pr",
+  "model": "gpt-6.1-sol",
+  "reasoning_effort": "high",
+  "owners": {
+    "/root": [
+      "docs/investigations/session-attention-pr/contract.md",
+      "docs/investigations/session-attention-pr/ownership.json"
+    ],
+    "/root/attention_implementation": [
+      "bridge/src/types.ts",
+      "bridge/src/wire-types.ts",
+      "bridge/src/pull-request-url.ts",
+      "bridge/src/pull-request-url.test.ts",
+      "bridge/src/session-controller.ts",
+      "bridge/src/session-controller.test.ts",
+      "bridge/src/attention-store.ts",
+      "bridge/src/attention-store.test.ts",
+      "bridge/src/local-api-server.ts",
+      "bridge/src/local-api-server.test.ts",
+      "bridge/src/installation-manifest.ts",
+      "bridge/src/session-store.test.ts"
+    ],
+    "/root/npx_implementation": [
+      "bridge/src/sessions-commands.ts",
+      "bridge/src/sessions-commands.test.ts",
+      "bridge/src/mcp/server.ts",
+      "bridge/src/mcp/attention.test.ts",
+      "bridge/src/mcp/mcp.test.ts",
+      "bridge/skills/ftown/SKILL.md",
+      "bridge/skills/ftown/references/sessions.md",
+      "bridge/package.json",
+      "bridge/package-lock.json"
+    ],
+    "/root/session_ui": [
+      "ui/src/types.ts",
+      "ui/src/lib/pull-request-url.ts",
+      "ui/src/lib/pull-request-url.test.ts",
+      "ui/src/hooks/useSessions.ts",
+      "ui/src/hooks/useSessions.test.ts",
+      "ui/src/components/Dashboard.tsx",
+      "ui/src/components/Terminal.tsx",
+      "ui/src/components/SessionList.tsx",
+      "ui/src/components/PullRequestLink.tsx",
+      "ui/src/components/session-pull-request.test.ts",
+      "e2e/tests/session-tools.spec.ts"
+    ],
+    "/root/npx_review": []
+  },
+  "resources": {
+    "Git index/history": "/root/npx_implementation: exclusive 34-manifest-path commit/push/PR lease",
+    "package version and lockfile": "released: synchronized version-only 0.19.51",
+    "Boat development snapshot/checks": "released; bx_k5bkykpb deleted and absent from inventory",
+    "CI/E2E/browser/services/generated fixtures": "/root: focused E2E completed, services/database removed; automatic CI monitoring"
+  },
+  "dependencies": [
+    "independent contract review before implementation",
+    "frozen shared field/capability/URL contracts across writers",
+    "all source writers stopped before shared snapshot checks and Git landing"
+  ],
+  "status": "Implementation, independent review, all scoped checks and visual gates complete; Boat deleted and absence verified. Integration owner scoped Git/PR landing active; root monitors automatic CI."
+}

@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { runSessions } from './sessions-commands.js';
 
 interface Request { url: string; method: string; body?: unknown }
-async function fixture(run: (requests: Request[], output: string[]) => Promise<void>): Promise<void> {
+async function fixture(run: (requests: Request[], output: string[]) => Promise<void>, reply?: (request: Request) => unknown): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), 'ftown-sessions-unit-'));
   const previousHome = process.env.HOME;
   const previousSession = process.env.FTOWN_SESSION_ID;
@@ -20,7 +20,7 @@ async function fixture(run: (requests: Request[], output: string[]) => Promise<v
   delete process.env.FTOWN_SESSION_ID;
   globalThis.fetch = async (url, init) => {
     requests.push({ url: String(url), method: init?.method ?? 'GET', ...(init?.body ? { body: JSON.parse(String(init.body)) as unknown } : {}) });
-    return new Response(JSON.stringify({ session: { id: 'created', name: 'unit', status: 'idle' }, sessions: [], messages: [] }));
+    return new Response(JSON.stringify(reply ? reply(requests.at(-1)!) : { session: { id: 'created', name: 'unit', status: 'idle' }, sessions: [], messages: [] }));
   };
   console.log = (...args: unknown[]) => { output.push(args.map(String).join(' ')); };
   console.error = (...args: unknown[]) => { output.push(args.map(String).join(' ')); };
@@ -39,7 +39,7 @@ test('create --help describes options without opening transport or creating a se
 }));
 
 test('generated help and invalid command options finish before any transport access', async () => fixture(async (requests, output) => {
-  for (const command of ['list', 'create', 'get', 'screen', 'grep', 'keys', 'tell', 'inbox', 'mail', 'running', 'usage', 'remove', 'archive', 'revive']) {
+  for (const command of ['list', 'create', 'get', 'screen', 'grep', 'keys', 'tell', 'inbox', 'mail', 'running', 'usage', 'remove', 'archive', 'revive', 'attention', 'pr']) {
     assert.equal(await runSessions([command, '--help']), 0, command);
   }
   assert.ok(output.some((line) => line.includes('Usage: ftown sessions create')));
@@ -79,3 +79,68 @@ test('fanout without message fails before resolving any target session', async (
   for (const mode of ['--parent', '--children', '--siblings']) assert.equal(await runSessions(['tell', mode]), 1);
   assert.equal(requests.length, 0, 'missing message must not fetch sessions for fanout');
 }));
+
+const newCapabilities = { capabilities: { attention: { version: 1, request: true }, sessionMetadata: { pullRequest: true } } };
+
+test('attention uses trimmed self identity, probes support and returns the exact sanitized result', async () => fixture(async (requests, output) => {
+  process.env.FTOWN_SESSION_ID = '  self-id  ';
+  assert.equal(await runSessions(['attention', '--message', ' Please check API_KEY=secret ', '--title', ' Review requested ']), 0);
+  assert.deepEqual(requests.map(({ method, url }) => [method, new URL(url).pathname]), [
+    ['GET', '/api/sessions/self-id'], ['POST', '/api/sessions/self-id/attention'],
+  ]);
+  assert.deepEqual(requests[1].body, { message: 'Please check API_KEY=[redacted]', title: 'Review requested' });
+  assert.deepEqual(JSON.parse(output.at(-1) ?? ''), { event: { id: 'exact-event', occurrences: 2 } });
+}, (request) => request.method === 'GET' ? newCapabilities : { event: { id: 'exact-event', occurrences: 2 } }));
+
+test('explicit self-action target overrides env; PR attach, replace and clear preserve HTTP envelopes', async () => fixture(async (requests, output) => {
+  process.env.FTOWN_SESSION_ID = 'invalid/env';
+  for (const [input, expected] of [
+    [' https://github.com/fmktech/ftown/pull/128/?view=1#discussion ', 'https://github.com/fmktech/ftown/pull/128'],
+    ['https://github.com/other/repo/pull/5', 'https://github.com/other/repo/pull/5'],
+  ]) {
+    assert.equal(await runSessions(['pr', input, '--session-id', ' explicit-id ']), 0);
+    assert.equal(requests.at(-1)?.method, 'PATCH');
+    assert.ok(requests.at(-1)?.url.endsWith('/api/sessions/explicit-id'));
+    assert.deepEqual(requests.at(-1)?.body, { pullRequestUrl: expected });
+    assert.deepEqual(JSON.parse(output.at(-1) ?? ''), { session: { id: 'explicit-id', pullRequestUrl: expected } });
+  }
+  assert.equal(await runSessions(['pr', '--clear', '--session-id', 'explicit-id', '--plain']), 0);
+  assert.deepEqual(requests.at(-1)?.body, { pullRequestUrl: null });
+  assert.equal(output.at(-1), 'pull request cleared for explicit-id');
+  assert.equal(await runSessions(['attention', '--message', 'Check this', '--session-id', 'explicit-id']), 0);
+  assert.deepEqual(requests.at(-1)?.body, { message: 'Check this' });
+}, (request) => request.method === 'GET' ? newCapabilities : { session: { id: 'explicit-id', ...(request.body as object) } }));
+
+test('self-action local validation rejects invalid identity and arguments without opening transport', async () => fixture(async (requests) => {
+  for (const env of [undefined, ' ', '../session', 'session/id']) {
+    if (env === undefined) delete process.env.FTOWN_SESSION_ID; else process.env.FTOWN_SESSION_ID = env;
+    assert.equal(await runSessions(['attention', '--message', 'Review']), 1);
+    assert.equal(await runSessions(['pr', '--clear']), 1);
+  }
+  process.env.FTOWN_SESSION_ID = 'self';
+  const invalid = [
+    ['attention'], ['attention', '--message', ' '], ['attention', '--message', '\x1b[31m'],
+    ['attention', '--message', 'x'.repeat(2001)], ['attention', '--message', 'ok', '--title', ' '],
+    ['attention', '--message', 'ok', '--title', 'x'.repeat(201)], ['attention', '--message', 'ok', 'extra'],
+    ['attention', '--message', 'ok', '--session-id', '../bad'], ['pr'], ['pr', '--clear', '--session-id', ' '],
+    ['pr', 'https://github.com/o/r/pull/1', '--clear'], ['pr', 'https://github.com/o/r/pull/1', 'extra'],
+    ...['', 'http://github.com/o/r/pull/1', 'https://evil.example/o/r/pull/1', 'https://u@github.com/o/r/pull/1',
+      'https://github.com:444/o/r/pull/1', 'https://github.com/o/r/pull/0', 'https://github.com/o/r/pull/9007199254740992',
+      'https://github.com/o%2Fr/r/pull/1', 'https://github.com/o/r/pull/1/files'].map((url) => ['pr', url]),
+  ];
+  for (const args of invalid) assert.equal(await runSessions(args), 1, args.join(' '));
+  assert.equal(requests.length, 0, 'no pointer/fetch access is needed for invalid self actions');
+}));
+
+test('new self-actions fail closed on old, false or mismatched capabilities before mutation', async () => {
+  for (const capabilities of [{}, { attention: { version: 1 } }, { attention: { version: 2, request: true } },
+    { attention: { version: 1, request: false }, sessionMetadata: { pullRequest: false } }]) {
+    await fixture(async (requests, output) => {
+      process.env.FTOWN_SESSION_ID = 'self';
+      assert.equal(await runSessions(['attention', '--message', 'Review']), 1);
+      assert.equal(await runSessions(['pr', '--clear']), 1);
+      assert.deepEqual(requests.map((r) => r.method), ['GET', 'GET']);
+      assert.ok(output.every((line) => line.includes('bridge_upgrade_required')));
+    }, () => ({ capabilities }));
+  }
+});
