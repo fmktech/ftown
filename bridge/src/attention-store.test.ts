@@ -7,6 +7,37 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { AttentionStore, AttentionError, IDLE_NOTIFICATION_DELAY_MS, type AttentionNotificationOptions } from './attention-store.js';
 
 const notice = (message = 'Approve this command?', extra: Record<string, unknown> = {}) => ({ notification_type: 'permission_prompt', message, ...extra });
+
+test('explicit snapshots survive restart, prefer creation order and filter legacy and acknowledged requests', async t => {
+  const f = await fixture(t);
+  const a = (await f.store.record('s1', 'Notification', notice('A', { notification_type: 'agent_needs_input' })))!;
+  const b = (await f.store.record('s1', 'Notification', notice('B', { notification_type: 'agent_needs_input' })))!;
+  await f.store.record('s1', 'Notification', notice('A', { notification_type: 'agent_needs_input' }));
+  await f.store.record('s1', 'Notification', notice('Legacy'));
+  assert.equal((await new AttentionStore(f.resolve).explicitSnapshot('s1')).attention?.id, b.id);
+  await f.store.mutate('s1', [b.id], 'ack');
+  assert.equal((await f.store.explicitSnapshot('s1')).attention?.id, a.id);
+  await f.store.record('s1', 'UserPromptSubmit', {});
+  assert.deepEqual(await new AttentionStore(f.resolve).explicitSnapshot('s1'), { attention: null, sequence: 3 });
+});
+
+test('explicit dismissal atomically covers predecessors while preserving newer and legacy incidents', async t => {
+  const f = await fixture(t);
+  const a = (await f.store.record('s1', 'Notification', notice('A', { notification_type: 'agent_needs_input' })))!;
+  const b = (await f.store.record('s1', 'Notification', notice('B', { notification_type: 'agent_needs_input' })))!;
+  const legacy = (await f.store.record('s1', 'Notification', notice('Legacy')))!;
+  const c = (await f.store.record('s1', 'Notification', notice('C', { notification_type: 'agent_needs_input' })))!;
+  const before = await readFile(join(f.dir, 's1/attention.json'), 'utf8');
+  await assert.rejects(f.store.resolveExplicitThrough('s1', 'unknown'), /Unknown explicit/);
+  await assert.rejects(f.store.resolveExplicitThrough('s1', legacy.id), /Unknown explicit/);
+  assert.equal(await readFile(join(f.dir, 's1/attention.json'), 'utf8'), before);
+  assert.equal((await f.store.resolveExplicitThrough('s1', b.id)).attention?.id, c.id);
+  const events = (await f.store.list('s1', { includeResolved: true })).events;
+  for (const id of [a.id, b.id]) assert.equal(events.find(event => event.id === id)?.resolution, 'manual');
+  for (const id of [legacy.id, c.id]) assert.equal(events.find(event => event.id === id)?.resolvedAt, undefined);
+  await f.store.resolveExplicitThrough('s1', c.id);
+  assert.equal((await new AttentionStore(f.resolve).explicitSnapshot('s1')).attention, null);
+});
 async function fixture(t: { after: (fn: () => Promise<void>) => void }, retention = 500) {
   const dir = await mkdtemp(join(tmpdir(), 'ftown-attention-unit-'));
   await mkdir(join(dir, 's1')); await mkdir(join(dir, 's2'));

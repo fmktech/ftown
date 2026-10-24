@@ -5,6 +5,8 @@ export interface ManualInputNotice {
   title: string;
   message: string;
   receivedAt: number;
+  attentionId?: string;
+  attentionSequence?: number;
 }
 
 const MANUAL_INPUT_NOTIFICATION_TYPES = new Set<ManualInputNotice["type"]>([
@@ -75,7 +77,11 @@ export function extractManualInputNotice(
     message: typeof data.message === "string" && data.message.trim()
       ? data.message
       : "Open the session to respond.",
-    receivedAt,
+    receivedAt: type === "agent_needs_input" && typeof data.attentionCreatedAt === "string" && Number.isFinite(Date.parse(data.attentionCreatedAt))
+      ? Date.parse(data.attentionCreatedAt) : receivedAt,
+    ...(type === "agent_needs_input" && typeof data.attentionId === "string" && /^[A-Za-z0-9_-]+$/.test(data.attentionId)
+      && typeof data.attentionSequence === "number" && Number.isSafeInteger(data.attentionSequence) && data.attentionSequence > 0
+      ? { attentionId: data.attentionId, attentionSequence: data.attentionSequence } : {}),
   };
 }
 

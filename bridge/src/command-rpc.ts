@@ -8,6 +8,7 @@ import { toWireSession } from './session-wire.js';
 import { WorkingDirMissingError } from './create-ftown-session.js';
 import { AUTOMATION_REMOVED_CODE, AUTOMATION_REMOVED_MESSAGE, AutomationRemovedError, RETIRED_AUTOMATION_COMMANDS } from './retired-automation.js';
 import type { SessionController } from './session-controller.js';
+import { AttentionError, type AttentionStore } from './attention-store.js';
 
 import type {
   BridgeExecPayload,
@@ -49,6 +50,7 @@ export interface CommandRpcDeps {
   bridgeId: string;
   relayRequest?: (id: string, payload: Record<string, unknown>) => Promise<unknown>;
   sessionController: SessionController;
+  attentionStore?: AttentionStore;
   publishCommandResponse: (response: CommandResponse) => Promise<void>;
 }
 
@@ -73,6 +75,22 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command) =
     try {
       if (RETIRED_AUTOMATION_COMMANDS.has(command.type)) throw new AutomationRemovedError();
       switch (command.type) {
+        case 'get_session_attention':
+        case 'resolve_session_attention': {
+          const payload = command.payload as Record<string, unknown>;
+          const allowed = command.type === 'resolve_session_attention' ? ['bridgeId', 'sessionId', 'eventId'] : ['bridgeId', 'sessionId'];
+          if (payload.bridgeId !== bridgeId || typeof payload.sessionId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(payload.sessionId)
+            || Object.keys(payload).some(key => !allowed.includes(key))) throw new Error('Invalid attention target');
+          if (command.type === 'resolve_session_attention' && (typeof payload.eventId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(payload.eventId))) throw new Error('Invalid attention eventId');
+          const session = await sessionController.get(payload.sessionId);
+          if (!session || session.bridgeId !== bridgeId) throw new Error('Unknown session');
+          if (!deps.attentionStore) throw new AttentionError('attention_not_ready', 'Attention store is not ready', 503);
+          const snapshot = command.type === 'get_session_attention'
+            ? await deps.attentionStore.explicitSnapshot(payload.sessionId)
+            : await deps.attentionStore.resolveExplicitThrough(payload.sessionId, payload.eventId as string);
+          response = { requestId: command.requestId, success: true, data: { sessionId: payload.sessionId, ...snapshot } };
+          break;
+        }
         case 'mcp_request': {
           if (payloadBridgeId !== bridgeId || !deps.relayRequest) throw new Error('MCP relay unavailable or missing target');
           const data = await deps.relayRequest(command.requestId, command.payload as Record<string, unknown>);

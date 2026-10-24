@@ -24,7 +24,10 @@ vi.mock("@/hooks/useSessions", () => ({ useSessions: () => ({
   retrySession: state.retrySession, removeSession: state.removeSession,
   renameSession: vi.fn(), setSessionParent: vi.fn(), refreshSessions: vi.fn(),
 }) }));
-vi.mock("@/hooks/useBridgeRpc", () => ({ useBridgeRpc: () => ({ bridgeExec: state.bridgeExec }) }));
+vi.mock("@/hooks/useBridgeRpc", () => ({ useBridgeRpc: () => ({ bridgeExec: state.bridgeExec,
+  sendCommand: vi.fn().mockResolvedValue({ success: true, data: { sessionId: "ordinary", attention: null, sequence: 0 } }),
+  onSubscribed: () => () => {},
+}) }));
 vi.mock("@/hooks/useBridges", () => ({ useBridges: () => ({ bridges: state.bridges, hasBridges: true, prepareLocalAccess: vi.fn() }) }));
 vi.mock("@/hooks/useAllSessionEvents", () => ({ useAllSessionEvents: () => ({
   sessionActivity: state.activity, markSessionIdle: vi.fn(), clearSessionAttention: state.clearSessionAttention,

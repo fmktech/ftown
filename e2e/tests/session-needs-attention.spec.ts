@@ -144,9 +144,23 @@ for (const viewport of [
       const openedScreenshot = testInfo.outputPath(`needs-attention-after-open-${viewport.name}.png`);
       await page.screenshot({ path: openedScreenshot, fullPage: true });
       await testInfo.attach(`Needs attention after open ${viewport.name}`, { path: openedScreenshot, contentType: "image/png" });
+      // Prompt resolution is durable even when no dashboard receives its hook.
+      await page.goto("about:blank");
       await postHook(firstId, "UserPromptSubmit");
+      const continued = await bridgeApiFetch("GET", `/api/sessions/${firstId}/attention?includeResolved=true`);
+      expect(continued.status, JSON.stringify(continued.body)).toBe(200);
+      const continuedEvent = (continued.body as { events: Array<{ message: string; resolvedAt?: string; resolution?: string }> })
+        .events.find(event => event.message === message);
+      expect(continuedEvent?.resolvedAt).toBeTruthy();
+      expect(continuedEvent?.resolution).toBe("user_prompt");
+      await page.goto("/dashboard");
+      await waitForBridgeOnline(page);
+      await showWorkspace();
+      await expect(originalRow(page, firstName)).toBeVisible();
       await expect(firstShortcut).toHaveCount(0);
       await expect(attentionRegion.getByRole("button")).toHaveCount(1);
+      await originalRow(page, firstName).click();
+      await showWorkspace();
 
       // A fresh request on the already selected session remains after another
       // selection. The explicit dismissal removes only that request.
@@ -173,6 +187,12 @@ for (const viewport of [
       await postHook(secondId, "UserPromptSubmit");
       await expect(attentionRegion).toHaveCount(0);
       await expect(originalRow(page, secondName)).toBeVisible();
+      await page.reload();
+      await waitForBridgeOnline(page);
+      await showWorkspace();
+      await expect(originalRow(page, firstName)).toBeVisible();
+      await expect(originalRow(page, secondName)).toBeVisible();
+      await expect(attentionRegion).toHaveCount(0);
     } finally {
       for (const id of sessionIds.reverse()) {
         await bridgeApiFetch("DELETE", `/api/sessions/${id}`).catch(() => undefined);

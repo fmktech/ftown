@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MessageClient, MessageEvents, MessageSubscription } from "@/lib/message-client";
-import type { Session } from "@/types";
+import type { Command, CommandResponse, Session } from "@/types";
 import { useAllSessionEvents } from "./useAllSessionEvents";
 
 const sessions: Session[] = [{ id: "agent", name: "Agent", bridgeId: "bridge", status: "running", createdAt: "2026-10-23", updatedAt: "2026-10-23" }];
@@ -105,5 +105,224 @@ describe("explicit agent attention through actual hook subscriptions", () => {
     expect(h.current()?.attention?.type).toBe("elicitation_dialog");
     act(() => h.publish("Notification", { notification_type: "elicitation_complete" }));
     expect(h.current()).toEqual({ activity: "tool_use", toolName: "Bash", attention: undefined });
+  });
+});
+
+// These tests begin from durable RPC state, with no live event required. They
+// discriminate reload restoration from a cache or a delivery-only projection.
+const saved = { id: "saved-request", sequence: 1, type: "agent_needs_input" as const,
+  title: "Saved request", message: "Review the persisted result.", createdAt: "2026-10-24T10:00:00.000Z" };
+const newer = { ...saved, id: "newer-request", sequence: 2, title: "Newer request" };
+function reply(attention: typeof saved | null, sequence = attention?.sequence ?? 1): CommandResponse {
+  return { requestId: "response", success: true, data: { sessionId: "agent", attention, sequence } };
+}
+function deferred() {
+  let resolve!: (value: CommandResponse) => void;
+  const promise = new Promise<CommandResponse>(done => { resolve = done; });
+  return { promise, resolve };
+}
+function durableClient() {
+  const publications: Array<(event: MessageEvents["publication"]) => void> = [];
+  const subscribed: Array<() => void> = [];
+  const client: MessageClient = {
+    getSubscription: () => null, removeSubscription: () => {},
+    newSubscription: () => {
+      const sub: MessageSubscription = {
+        state: "subscribed", subscribe: () => {}, unsubscribe: () => {},
+        publish: async () => {}, presence: async () => ({ clients: {} }),
+        on: <K extends keyof MessageEvents>(event: K, listener: (value: MessageEvents[K]) => void) => {
+          if (event === "publication") publications.push(listener as (event: MessageEvents["publication"]) => void);
+          if (event === "subscribed") subscribed.push(listener as () => void);
+          return sub;
+        },
+        off: () => sub, removeAllListeners: () => {},
+      };
+      return sub;
+    },
+  };
+  return { client, publications, subscribed };
+}
+function durableSetup(handle: (command: Command) => Promise<CommandResponse> = async () => reply(saved)) {
+  const transport = durableClient();
+  const reconnects = new Set<() => void>();
+  const rpc = { sendCommand: vi.fn(handle), onSubscribed: (callback: () => void) => {
+    reconnects.add(callback); return () => { reconnects.delete(callback); };
+  } };
+  const hook = renderHook(({ client, user, rows }) => useAllSessionEvents(client, rows, user, rpc), {
+    initialProps: { client: transport.client, user: "user", rows: sessions },
+  });
+  const publish = (eventName: string, data: Record<string, unknown> = {}) => {
+    transport.publications.at(-1)!({ data: { type: "hook_event", eventName, data } });
+  };
+  const publishSaved = (item = saved) => publish("Notification", { notification_type: item.type, title: item.title,
+    message: item.message, attentionId: item.id, attentionSequence: item.sequence, attentionCreatedAt: item.createdAt });
+  return { ...hook, ...transport, rpc, publish, publishSaved,
+    current: () => hook.result.current.sessionActivity.get("agent"),
+    reconnect: () => { for (const callback of reconnects) callback(); } };
+}
+async function settle() { await act(async () => { await Promise.resolve(); }); }
+
+describe("durable explicit attention restoration", () => {
+  it("restores a persisted explicit request on a fresh mount without a live publication", async () => {
+    const first = durableSetup();
+    await settle();
+    expect(first.current()?.attention).toMatchObject({ attentionId: saved.id, attentionSequence: 1,
+      receivedAt: Date.parse(saved.createdAt), message: saved.message });
+    expect(first.rpc.sendCommand).toHaveBeenCalledWith(expect.objectContaining({ type: "get_session_attention",
+      payload: { bridgeId: "bridge", sessionId: "agent" } }));
+    first.unmount();
+    const reopened = durableSetup();
+    await settle();
+    expect(reopened.current()?.attention).toMatchObject({ attentionId: saved.id, receivedAt: Date.parse(saved.createdAt) });
+  });
+
+  it.each(["PostToolUse", "Stop"])("restores a pending snapshot despite ordinary %s activity", async event => {
+    const read = deferred();
+    const h = durableSetup(() => read.promise);
+    act(() => h.publish(event, { tool_name: "exec_command" }));
+    await act(async () => read.resolve(reply(saved)));
+    expect(h.current()).toMatchObject({ activity: event === "Stop" ? "idle" : "thinking", attention: { attentionId: saved.id } });
+  });
+
+  it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("a %s fences a delayed saved request", async event => {
+    const read = deferred();
+    let reads = 0;
+    const h = durableSetup(() => ++reads === 1 ? read.promise : Promise.resolve(reply(null)));
+    act(() => { h.publish(event); h.publishSaved(); });
+    await act(async () => read.resolve(reply(saved)));
+    expect(h.current()?.attention).toBeUndefined();
+  });
+
+  it("canonical null rejects an old recovered publication after restoration", async () => {
+    const h = durableSetup(async () => reply(null));
+    await settle();
+    act(() => h.publishSaved());
+    expect(h.current()?.attention).toBeUndefined();
+  });
+
+  it("canonical null removes a replay delivered while the first snapshot is pending", async () => {
+    const read = deferred();
+    const h = durableSetup(() => read.promise);
+    act(() => h.publishSaved());
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    await act(async () => read.resolve(reply(null)));
+    expect(h.current()?.attention).toBeUndefined();
+  });
+
+  it("does not replace a fresh legacy notice with a delayed explicit snapshot", async () => {
+    const read = deferred();
+    const h = durableSetup(() => read.promise);
+    act(() => h.publish("Notification", { notification_type: "permission_prompt", message: "Approve tool access" }));
+    await act(async () => read.resolve(reply(saved)));
+    expect(h.current()?.attention).toMatchObject({ type: "permission_prompt", message: "Approve tool access" });
+  });
+
+  it("preserves a newer live request over a delayed snapshot and older duplicate", async () => {
+    const read = deferred();
+    const h = durableSetup(() => read.promise);
+    act(() => h.publishSaved(newer));
+    await act(async () => read.resolve(reply(saved)));
+    act(() => h.publishSaved());
+    expect(h.current()?.attention?.attentionId).toBe(newer.id);
+  });
+
+  it("reconnect reconciles resolved state and a prompt retires the canonical replay exception", async () => {
+    let response = reply(saved);
+    const h = durableSetup(async () => response);
+    await settle();
+    response = reply(null);
+    act(() => h.publish("UserPromptSubmit"));
+    await settle();
+    act(() => h.publishSaved());
+    expect(h.current()?.attention).toBeUndefined();
+    act(() => h.reconnect());
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(3);
+    expect(h.current()?.attention).toBeUndefined();
+  });
+
+  it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("preserves a newer restored request when an older %s publication arrives later", async event => {
+    const reread = deferred();
+    let reads = 0;
+    const h = durableSetup(() => ++reads === 1 ? Promise.resolve(reply(newer)) : reread.promise);
+    await settle();
+    expect(h.current()?.attention?.attentionId).toBe(newer.id);
+    act(() => h.publish(event));
+    expect(h.current()?.attention?.attentionId).toBe(newer.id);
+    await act(async () => reread.resolve(reply(newer)));
+    expect(h.current()?.attention?.attentionId).toBe(newer.id);
+    act(() => h.publishSaved(newer));
+    expect(h.current()?.attention?.attentionId).toBe(newer.id);
+  });
+
+  it("retains a failed dismissal and persists successful dismissal across remount", async () => {
+    let current: typeof saved | null = saved;
+    let fail = true;
+    const handle = async (command: Command) => {
+      if (command.type === "resolve_session_attention") {
+        if (fail) return { requestId: command.requestId, success: false, error: "disk unavailable" };
+        current = null;
+      }
+      return reply(current);
+    };
+    const h = durableSetup(handle);
+    await settle();
+    act(() => h.result.current.clearSessionAttention("agent"));
+    await settle();
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    act(() => h.publishSaved());
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    fail = false;
+    act(() => h.result.current.clearSessionAttention("agent"));
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledWith(expect.objectContaining({ type: "resolve_session_attention",
+      payload: { bridgeId: "bridge", sessionId: "agent", eventId: saved.id } }));
+    act(() => h.publishSaved());
+    expect(h.current()?.attention).toBeUndefined();
+    h.unmount();
+    const reopened = durableSetup(handle);
+    await settle();
+    expect(reopened.current()?.attention).toBeUndefined();
+  });
+
+  it("does not clear a newer request when an earlier dismissal finishes", async () => {
+    const write = deferred();
+    const h = durableSetup(command => command.type === "resolve_session_attention" ? write.promise : Promise.resolve(reply(saved)));
+    await settle();
+    act(() => h.result.current.clearSessionAttention("agent"));
+    act(() => h.publishSaved(newer));
+    await act(async () => write.resolve(reply(null)));
+    expect(h.current()?.attention?.attentionId).toBe(newer.id);
+  });
+
+  it("drops stale reads and retained publication/subscribed callbacks after an account and client switch", async () => {
+    const read = deferred();
+    const h = durableSetup(() => read.promise);
+    const oldPublication = h.publications[0];
+    const oldSubscribed = h.subscribed[0];
+    const replacement = durableClient();
+    h.rerender({ client: replacement.client, user: "other-user", rows: sessions });
+    const count = h.rpc.sendCommand.mock.calls.length;
+    act(() => {
+      oldPublication({ data: { type: "hook_event", eventName: "Notification", data: request } });
+      oldSubscribed();
+    });
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(count);
+    expect(h.current()?.attention).toBeUndefined();
+    h.rerender({ client: replacement.client, user: "other-user", rows: [] });
+    await act(async () => read.resolve(reply(saved)));
+    expect(h.current()).toBeUndefined();
+  });
+
+  it("degrades to live-only with an older bridge and preserves legacy lifecycles", async () => {
+    const h = durableSetup(async () => { throw new Error("unknown command"); });
+    await settle();
+    act(() => h.publish("Notification", request));
+    expect(h.current()?.attention?.type).toBe("agent_needs_input");
+    act(() => h.result.current.clearSessionAttention("agent"));
+    expect(h.current()?.attention).toBeUndefined();
+    act(() => h.publish("Notification", { notification_type: "permission_prompt", message: "Permission needed" }));
+    act(() => h.publish("PostToolUse"));
+    expect(h.current()?.attention).toBeUndefined();
   });
 });

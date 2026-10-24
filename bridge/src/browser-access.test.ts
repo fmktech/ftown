@@ -10,6 +10,23 @@ import type { Command, CommandResponse } from './types.js';
 const origin = 'https://ftown.ia.br';
 const other = 'https://preview.example.com';
 const bootstrap = () => ({ version: 1 as const, userId: 'local', bridgeId: 'bridge-1', hostname: 'laptop', localPort: 1234, localNonce: 'admin-secret' });
+
+test('browser attention RPC allows authenticated owner targets and rejects malformed or foreign targets', async () => {
+  const commands: Command[] = [];
+  const f = await fixture(async command => { commands.push(command); return { requestId: command.requestId, success: true, data: { sessionId: 'session', attention: null } }; });
+  try {
+    const p = await f.pair();
+    const body = { requestId: 'read', type: 'get_session_attention', payload: { bridgeId: 'bridge-1', sessionId: 'session' } };
+    assert.equal((await f.call('commands', 'POST', body)).status, 401);
+    assert.equal((await f.call('commands', 'POST', { ...body, payload: { sessionId: 'session' } }, p.token)).status, 400);
+    assert.equal((await f.call('commands', 'POST', { ...body, payload: { bridgeId: 'foreign', sessionId: 'session' } }, p.token)).status, 403);
+    assert.equal((await f.call('commands', 'POST', { ...body, payload: { ...body.payload, sessionId: '../session' } }, p.token)).status, 400);
+    assert.equal(commands.length, 0);
+    assert.equal((await f.call('commands', 'POST', body, p.token)).body.success, true);
+    assert.equal((await f.call('commands', 'POST', { ...body, requestId: 'resolve', type: 'resolve_session_attention', payload: { ...body.payload, eventId: 'event' } }, p.token)).body.success, true);
+    assert.equal(commands.length, 2);
+  } finally { await f.close(); }
+});
 async function fixture(execute: (c: Command) => Promise<CommandResponse> = async c => ({ requestId: c.requestId, success: true }), cloudNonce?: string) {
   const dataDir = mkdtempSync(join(tmpdir(), 'browser-access-'));
   let revoked = 0;

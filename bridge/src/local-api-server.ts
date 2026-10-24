@@ -553,6 +553,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         // the sanitized request and its exact committed record identifier.
         this.emit('event', { sessionId: id, eventName: 'Notification', source: 'api', data: {
           notification_type: 'agent_needs_input', title: event.title, message: event.message, notification_id: event.id,
+          attentionId: event.id, attentionSequence: event.sequence, attentionCreatedAt: event.createdAt,
         } });
         jsonResponse(res, 200, { event });
         return;
@@ -1141,17 +1142,22 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         source = resolved?.source;
       }
       if (!ftownSessionId || !hookEventName) { jsonResponse(res, 200, { ok: true }); return; }
-      const { ftown_session_id: _, ftown_session_source: __, ...rest } = payload;
+      const { ftown_session_id: _, ftown_session_source: __, attentionId: _attentionId,
+        attentionSequence: _attentionSequence, attentionCreatedAt: _attentionCreatedAt, ...rest } = payload;
+      let committedAttention: Awaited<ReturnType<AttentionStore['record']>> = undefined;
       // Workspace fallback can identify a foreign agent in the same directory.
       // Only known explicit/native-attributed sessions may produce authoritative records.
       if (this.attention && source !== 'workspace' && /^[a-zA-Z0-9_-]+$/.test(ftownSessionId) && await this.store?.loadSession(ftownSessionId)) {
-        await this.attention.record(ftownSessionId, hookEventName, rest);
+        committedAttention = await this.attention.record(ftownSessionId, hookEventName, rest);
       }
       if (hookEventName === 'UserPromptSubmit' || hookEventName === 'PreToolUse' || hookEventName === 'PostToolUse') this.mail.markAgentBusy(ftownSessionId);
       else if (hookEventName === 'Stop' || hookEventName === 'SessionEnd') this.mail.markAgentIdle(ftownSessionId);
       const conversationId = payload.conversation_id;
       if (typeof conversationId === 'string' && conversationId && source !== 'workspace') registerSessionConversation(ftownSessionId, conversationId);
-      const hookEvent: HookEvent = { sessionId: ftownSessionId, eventName: hookEventName, data: rest, source };
+      const hookEvent: HookEvent = { sessionId: ftownSessionId, eventName: hookEventName, data: {
+        ...rest,
+        ...(committedAttention ? { attentionId: committedAttention.id, attentionSequence: committedAttention.sequence, attentionCreatedAt: committedAttention.createdAt } : {}),
+      }, source };
       // Persistence is complete before listeners can publish and before HTTP success.
       this.emit('event', hookEvent);
       jsonResponse(res, 200, { ok: true });

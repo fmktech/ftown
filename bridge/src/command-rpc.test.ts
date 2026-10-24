@@ -1,10 +1,38 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { AttentionStore } from './attention-store.js';
 
 import type { CommandRpcDeps } from './command-rpc.js';
 import { createCommandHandler } from './command-rpc.js';
 import type { SessionController } from './session-controller.js';
 import type { Command, CommandResponse, Session } from './types.js';
+
+test('attention RPC requires owner targeting and persists read/resolve results', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'attention-rpc-'));
+  await mkdir(join(dir, 'session'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const attentionStore = new AttentionStore(id => join(dir, id));
+  const event = (await attentionStore.record('session', 'Notification', { notification_type: 'agent_needs_input', message: 'Review' }))!;
+  const responses: CommandResponse[] = [];
+  const handler = createCommandHandler({ bridgeId: 'owner', attentionStore,
+    sessionController: { get: async (id: string) => id === 'session' ? { id, bridgeId: 'owner' } : null } as unknown as SessionController,
+    publishCommandResponse: async response => { responses.push(response); } });
+  for (const payload of [{ sessionId: 'session' }, { bridgeId: 'owner', sessionId: 'missing' }, { bridgeId: 'owner', sessionId: '../session' }]) {
+    await handler({ type: 'get_session_attention', requestId: 'invalid', payload });
+    assert.equal(responses.at(-1)?.success, false);
+  }
+  const count = responses.length;
+  await handler({ type: 'get_session_attention', requestId: 'foreign', payload: { bridgeId: 'foreign', sessionId: 'session' } });
+  assert.equal(responses.length, count);
+  await handler({ type: 'get_session_attention', requestId: 'read', payload: { bridgeId: 'owner', sessionId: 'session' } });
+  assert.deepEqual(responses.at(-1)?.data, { sessionId: 'session', attention: event, sequence: event.sequence });
+  await handler({ type: 'resolve_session_attention', requestId: 'resolve', payload: { bridgeId: 'owner', sessionId: 'session', eventId: event.id } });
+  assert.equal(responses.at(-1)?.success, true);
+  assert.equal((await new AttentionStore(id => join(dir, id)).explicitSnapshot('session')).attention, null);
+});
 
 test('update_session_parent rejects a missing or invalid parentSessionId', async () => {
   const responses: CommandResponse[] = [];

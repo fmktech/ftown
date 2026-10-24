@@ -811,7 +811,7 @@ program
         if (!ready) return { requestId: command.requestId, success: false, error: 'Bridge is starting; try again shortly' };
         let result: CommandResponse | undefined;
         await createCommandHandler({
-          bridgeId, sessionController,
+          bridgeId, sessionController, attentionStore,
           publishCommandResponse: async (response) => { result = response; },
         })(command);
         return result ?? { requestId: command.requestId, success: false, error: 'Command was not handled' };
@@ -824,6 +824,7 @@ program
 
     const handleCommand = createCommandHandler({
       bridgeId,
+      attentionStore,
       relayRequest: createRelayHandler(hookPort, apiToken),
       sessionController,
       publishCommandResponse: (response) => centrifugo.publishCommandResponse(userId, response),
