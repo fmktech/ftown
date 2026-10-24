@@ -9,7 +9,7 @@ import { CENTRIFUGO_TOKEN_SECRET, UI_BASE_URL } from "../helpers/config";
 // Real authenticated routes, SQL state, worker receipt/privacy/display/click code run.
 // Vanilla Chromium here reports Notification.permission denied despite granted
 // Permissions API state, independently reproduced outside the application.
-test("explicit push opt-in/opt-out and closed-page service-worker display/click",async({page,context},testInfo)=>{
+test("explicit push opt-in/opt-out and foreground/closed-page service-worker display/click",async({page,context},testInfo)=>{
  const key=createECDH("prime256v1");key.generateKeys();
  const subscription={endpoint:`https://fcm.googleapis.com/ftown-e2e-${randomUUID()}`,keys:{p256dh:key.getPublicKey().toString("base64url"),auth:Buffer.alloc(16,1).toString("base64url")}};
  await context.addInitScript((value)=>{
@@ -48,7 +48,7 @@ test("explicit push opt-in/opt-out and closed-page service-worker display/click"
  await enable.click();await expect(page.getByRole("button",{name:"Disable push notifications"})).toBeEnabled();
  expect(await page.evaluate(()=>(Notification as unknown as {fixtureRequests:number}).fixtureRequests)).toBe(1);
  await page.getByRole("button",{name:"Disable push notifications"}).click();await expect(enable).toBeEnabled();
- // End all app pages; the independent SW target receives a provider-shaped event.
+ // Enable again before testing both foreground and closed-page delivery.
  await enable.click();await expect(page.getByRole("button",{name:"Disable push notifications"})).toBeEnabled();
  await page.screenshot({path:testInfo.outputPath("notifications-enabled.png"),fullPage:true});
  const ownerHash=await page.evaluate(async()=>Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(localStorage.getItem("ftown:pushOwner")!))),byte=>byte.toString(16).padStart(2,"0")).join(""));
@@ -62,6 +62,20 @@ test("explicit push opt-in/opt-out and closed-page service-worker display/click"
   scope.clients.openWindow=async(url)=>{scope.testOpenedUrls.push(url);return null;};
   scope.registration.showNotification=async(title,options)=>{scope.testNotifications.push({title,options:options??{}});};
  });
+ const foregroundId=randomUUID().replace(/-/g,"").repeat(2);
+ await page.bringToFront();
+ expect(await page.evaluate(()=>document.visibilityState)).toBe("visible");
+ await worker.evaluate(async({id,ownerHash})=>{
+  const payload={id,ownerHash,sessionId:"foreground-push-session",title:"Foreground question",body:"Agent: review while the app is open"};
+  let pending=Promise.resolve();const event=new Event("push");
+  Object.defineProperties(event,{data:{value:{json:()=>payload}},waitUntil:{value:(promise:Promise<void>)=>{pending=promise;}}});
+  self.dispatchEvent(event);await pending;
+ },{id:foregroundId,ownerHash});
+ await expect.poll(()=>worker.evaluate(()=>(self as unknown as {testNotifications:unknown[]}).testNotifications.length)).toBe(1);
+ expect(await worker.evaluate(()=>(self as unknown as {testNotifications:{title:string;options:NotificationOptions}[]}).testNotifications[0]))
+  .toMatchObject({title:"Foreground question",options:{body:"Agent: review while the app is open",data:{sessionId:"foreground-push-session"}}});
+ // End all app pages; a distinct provider receipt still displays through the
+ // same real service worker, independently of the foreground notification.
  await page.close();
  const id=randomUUID().replace(/-/g,"").repeat(2);
  await worker.evaluate(async({id,ownerHash})=>{
@@ -70,13 +84,13 @@ test("explicit push opt-in/opt-out and closed-page service-worker display/click"
   Object.defineProperties(event,{data:{value:{json:()=>payload}},waitUntil:{value:(promise:Promise<void>)=>{pending=promise;}}});
   self.dispatchEvent(event);await pending;
  },{id,ownerHash});
- await expect.poll(()=>worker.evaluate(()=>(self as unknown as {testNotifications:unknown[]}).testNotifications.length)).toBe(1);
+ await expect.poll(()=>worker.evaluate(()=>(self as unknown as {testNotifications:unknown[]}).testNotifications.length)).toBe(2);
  await worker.evaluate(async({id,ownerHash})=>{
   let pending=Promise.resolve();const event=new Event("push");
   Object.defineProperties(event,{data:{value:{json:()=>({id,ownerHash,sessionId:"push-test-session",title:"Question",body:"duplicate"})}},waitUntil:{value:(promise:Promise<void>)=>{pending=promise;}}});
   self.dispatchEvent(event);await pending;
  },{id,ownerHash});
- await expect.poll(()=>worker.evaluate(()=>(self as unknown as {testNotifications:unknown[]}).testNotifications.length)).toBe(1);
+ await expect.poll(()=>worker.evaluate(()=>(self as unknown as {testNotifications:unknown[]}).testNotifications.length)).toBe(2);
  await worker.evaluate(async()=>{
   let pending=Promise.resolve();const event=new Event("notificationclick");
   Object.defineProperties(event,{notification:{value:{close(){},data:{sessionId:"push-test-session"}}},waitUntil:{value:(promise:Promise<void>)=>{pending=promise;}}});

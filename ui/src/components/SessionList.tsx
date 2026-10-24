@@ -20,6 +20,7 @@ interface SessionListProps {
   bridgeOrder: string[];
   selectedSessionId: string | null;
   onSelectSession: (sessionId: string) => void;
+  onDismissSessionAttention?: (sessionId: string) => void;
   onRenameSession?: (sessionId: string, name: string) => void;
   onStopSession?: (sessionId: string) => void;
   onRemoveSession?: (sessionId: string, onlyIfFinished?: boolean) => void;
@@ -482,6 +483,7 @@ export function SessionList({
   bridgeOrder,
   selectedSessionId,
   onSelectSession,
+  onDismissSessionAttention,
   onRenameSession,
   onStopSession,
   onRemoveSession,
@@ -1353,6 +1355,8 @@ export function SessionList({
         className="flex flex-col"
       >
         <div
+          data-bridge-row={bridgeId}
+          className="min-h-[52px] md:min-h-0"
           onDragOver={(e) => handleBridgeDragOver(e, bridgeId)}
           onDragLeave={() => { setDragOverKey(null); setDragOverZone(null); }}
           onDrop={(e) => handleBridgeDrop(e, bridgeId)}
@@ -1377,17 +1381,18 @@ export function SessionList({
           onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
         >
           <span
+            data-bridge-drag={bridgeId}
+            className="inline-flex min-h-11 min-w-11 items-center justify-center text-lg md:min-h-0 md:min-w-0 md:text-[10px]"
             draggable
             onDragStart={(e) => {
               e.stopPropagation();
               handleDragStart(e, { kind: "bridge", id: bridgeId });
             }}
             onDragEnd={handleDragEnd}
-            title="Drag to reorder"
+            title={`Drag to reorder ${label}`}
             style={{
               cursor: "grab",
               color: "var(--text-faint)",
-              fontSize: 10,
               lineHeight: 1,
               padding: "0 2px",
               flexShrink: 0,
@@ -1398,8 +1403,10 @@ export function SessionList({
           </span>
           <button
             type="button"
+            className="flex min-h-11 min-w-0 flex-1 items-center gap-2 text-sm md:min-h-0 md:gap-1.5 md:text-[11px]"
             aria-expanded={!isBridgeCollapsed}
             aria-label={`${isBridgeCollapsed ? "Expand" : "Collapse"} ${label}`}
+            title={label}
             onClick={(e) => {
               e.stopPropagation();
               toggleBridgeCollapsed(bridgeId);
@@ -1409,34 +1416,35 @@ export function SessionList({
               border: "none",
               cursor: "pointer",
               color: "var(--text-faint)",
-              fontSize: 10,
               padding: 0,
-              width: 12,
-              lineHeight: 1,
+              textAlign: "left",
               fontFamily: "var(--font-mono)",
             }}
           >
-            {isBridgeCollapsed ? "▸" : "▾"}
+            <span aria-hidden className="shrink-0 text-lg md:text-[10px]" style={{ width: 12, lineHeight: 1 }}>
+              {isBridgeCollapsed ? "▸" : "▾"}
+            </span>
+            <span
+              style={{
+                fontWeight: 600,
+                color: "var(--text-secondary)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                flex: 1,
+                minWidth: 0,
+              }}
+              title={label}
+            >
+              {label}
+            </span>
           </button>
-          <span
-            style={{
-              fontSize: 11,
-              fontWeight: 600,
-              color: "var(--text-secondary)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              flex: 1,
-              minWidth: 0,
-            }}
-            title={bridgeId}
-          >
-            {label}
-          </span>
           {finishedSessions.length > 0 && onRemoveSession && (
             <button
               type="button"
+              className="inline-flex min-h-11 min-w-11 items-center justify-center text-lg md:min-h-0 md:min-w-0 md:text-[10px]"
               disabled={!isOnline}
+              aria-label={`Clear completed sessions on ${label}`}
               title={isOnline
                 ? `Clear ${finishedSessions.length} completed/error session${finishedSessions.length === 1 ? "" : "s"}`
                 : "Bridge is offline — sessions cannot be removed"}
@@ -1454,7 +1462,6 @@ export function SessionList({
                 cursor: isOnline ? "pointer" : "default",
                 opacity: isOnline ? 1 : 0.4,
                 color: "var(--text-faint)",
-                fontSize: 10,
                 padding: "0 2px",
                 lineHeight: 1,
                 flexShrink: 0,
@@ -1572,82 +1579,102 @@ export function SessionList({
             const displayName = session.name || session.prompt?.slice(0, 36) || "Session";
             const requestLabel = `${displayName}: ${attention.title}. ${attention.message}`;
             return (
-              <button
-                key={session.id}
-                type="button"
-                aria-label={requestLabel}
-                aria-current={isSelected ? "true" : undefined}
-                title={requestLabel}
-                onClick={() => onSelectSession(session.id)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 7,
-                  width: "100%",
-                  minWidth: 0,
-                  minHeight: 44,
-                  padding: "7px 12px 7px 10px",
-                  border: "none",
-                  borderLeft: `2px solid ${isSelected ? "var(--accent)" : "transparent"}`,
-                  background: isSelected ? "var(--bg-elevated)" : "transparent",
-                  color: isSelected ? "var(--text-primary)" : "var(--text-secondary)",
-                  textAlign: "left",
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 11,
-                  cursor: "pointer",
-                }}
-                onMouseEnter={(e) => {
-                  if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)";
-                }}
-                onMouseLeave={(e) => {
-                  if (!isSelected) e.currentTarget.style.background = "transparent";
-                }}
-              >
-                <HarnessIcon harness={session.shellType} size={17} />
-                <span style={{
-                  flex: 1,
-                  minWidth: 0,
-                }}>
-                  <span style={{
-                    display: "block",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                    fontWeight: isSelected ? 600 : 400,
-                  }}>
-                    {displayName}
-                  </span>
-                  <span style={{
-                    display: "-webkit-box",
-                    WebkitLineClamp: 3,
-                    WebkitBoxOrient: "vertical",
-                    overflow: "hidden",
-                    whiteSpace: "normal",
-                    overflowWrap: "anywhere",
-                    marginTop: 3,
+              <div key={session.id} data-attention-entry={session.id} className="flex min-w-0 items-center">
+                <button
+                  type="button"
+                  data-attention-open={session.id}
+                  aria-label={requestLabel}
+                  aria-current={isSelected ? "true" : undefined}
+                  title={requestLabel}
+                  onClick={() => onSelectSession(session.id)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 7,
+                    flex: 1,
+                    minWidth: 0,
+                    minHeight: 44,
+                    padding: "7px 12px 7px 10px",
+                    border: "none",
+                    borderLeft: `2px solid ${isSelected ? "var(--accent)" : "transparent"}`,
+                    background: isSelected ? "var(--bg-elevated)" : "transparent",
+                    color: isSelected ? "var(--text-primary)" : "var(--text-secondary)",
+                    textAlign: "left",
+                    fontFamily: "var(--font-mono)",
                     fontSize: 11,
-                    lineHeight: 1.4,
-                    color: "var(--text-muted)",
+                    cursor: "pointer",
+                  }}
+                  onMouseEnter={(e) => {
+                    if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)";
+                  }}
+                  onMouseLeave={(e) => {
+                    if (!isSelected) e.currentTarget.style.background = "transparent";
+                  }}
+                >
+                  <HarnessIcon harness={session.shellType} size={17} />
+                  <span style={{
+                    flex: 1,
+                    minWidth: 0,
                   }}>
-                    {attention.message}
+                    <span style={{
+                      display: "block",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      fontWeight: isSelected ? 600 : 400,
+                    }}>
+                      {displayName}
+                    </span>
+                    <span style={{
+                      display: "-webkit-box",
+                      WebkitLineClamp: 3,
+                      WebkitBoxOrient: "vertical",
+                      overflow: "hidden",
+                      whiteSpace: "normal",
+                      overflowWrap: "anywhere",
+                      marginTop: 3,
+                      fontSize: 11,
+                      lineHeight: 1.4,
+                      color: "var(--text-muted)",
+                    }}>
+                      {attention.message}
+                    </span>
                   </span>
-                </span>
-                <span aria-hidden style={{
-                  width: 5,
-                  height: 5,
-                  flexShrink: 0,
-                  borderRadius: "50%",
-                  background: "var(--status-pending)",
-                }} />
-                <span style={{
-                  flexShrink: 0,
-                  fontSize: 10,
-                  color: "var(--text-faint)",
-                  fontVariantNumeric: "tabular-nums",
-                }}>
-                  {formatTimestamp(new Date(attention.receivedAt).toISOString())}
-                </span>
-              </button>
+                  <span aria-hidden style={{
+                    width: 5,
+                    height: 5,
+                    flexShrink: 0,
+                    borderRadius: "50%",
+                    background: "var(--status-pending)",
+                  }} />
+                  <span style={{
+                    flexShrink: 0,
+                    fontSize: 10,
+                    color: "var(--text-faint)",
+                    fontVariantNumeric: "tabular-nums",
+                  }}>
+                    {formatTimestamp(new Date(attention.receivedAt).toISOString())}
+                  </span>
+                </button>
+                {onDismissSessionAttention && (
+                  <button
+                    type="button"
+                    aria-label={`Dismiss attention for ${displayName}`}
+                    title={`Dismiss attention for ${displayName}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onDismissSessionAttention(session.id);
+                    }}
+                    style={{
+                      display: "inline-flex", alignItems: "center", justifyContent: "center",
+                      minWidth: 44, minHeight: 44, flexShrink: 0,
+                      color: "var(--text-faint)", fontSize: 18, lineHeight: 1, cursor: "pointer",
+                    }}
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
             );
           })}
         </section>

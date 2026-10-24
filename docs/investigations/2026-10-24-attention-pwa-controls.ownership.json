@@ -1,0 +1,63 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "phase": "validated; PR landing",
+  "workers": {
+    "/root/session_ui": {
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "high",
+      "writable_files": [
+        "ui/src/components/SessionList.tsx",
+        "ui/src/components/Dashboard.tsx",
+        "ui/src/components/Dashboard.test.tsx",
+        "ui/src/components/session-needs-attention.test.ts",
+        "ui/src/components/compact-active-sidebar.test.ts",
+        "ui/src/components/SessionAttentionAlert.tsx",
+        "ui/src/components/SessionAttentionAlert.test.ts",
+        "ui/src/lib/session-attention.ts",
+        "ui/src/lib/session-attention.test.ts",
+        "e2e/tests/session-tools.spec.ts",
+        "e2e/tests/session-needs-attention.spec.ts",
+        "e2e/tests/push-notifications.spec.ts"
+      ],
+      "dependencies": [
+        "existing push path verified by independent reviewer",
+        "scope and UX contract frozen"
+      ],
+      "resource_leases": [],
+      "status": "accepted handoff; retired"
+    },
+    "/root/npx_review": {
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "high",
+      "writable_files": [],
+      "dependencies": [],
+      "resource_leases": [],
+      "status": "approved; retired"
+    },
+    "/root/npx_implementation": {
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "high",
+      "writable_files": [],
+      "dependencies": [],
+      "resource_leases": [],
+      "status": "validation accepted; designated Git/PR landing owner"
+    }
+  },
+  "root_writable_files": [
+    "docs/investigations/2026-10-24-attention-pwa-controls.md",
+    "docs/investigations/2026-10-24-attention-pwa-controls.ownership.json"
+  ],
+  "integration_owner": "/root/npx_implementation",
+  "e2e_owner": "/root",
+  "ownership_validated": true,
+  "deleted_files": [
+    "ui/src/components/SessionAttentionAlert.tsx",
+    "ui/src/components/SessionAttentionAlert.test.ts",
+    "ui/src/lib/session-attention.ts",
+    "ui/src/lib/session-attention.test.ts"
+  ],
+  "base": "0e3e8c7e8150ec46770a297c414e3d2d6c11927b",
+  "resource_leases": {
+    "Git/index/commit/push/PR": "/root/npx_implementation"
+  }
+}

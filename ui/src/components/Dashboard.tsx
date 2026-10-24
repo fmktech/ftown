@@ -14,13 +14,11 @@ import { Terminal, TerminalHandle } from "./Terminal";
 import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
 import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
 import { CloudConnectionNotice } from "./CloudConnectionNotice";
-import { SessionAttentionAlert } from "./SessionAttentionAlert";
 import { PushNotificationsControl, detachPushSubscription } from "./PushNotificationsControl";
 import { mergeBridgeOrder } from "@/lib/bridge-order";
 import { buildBridgeCommand } from "@/lib/bridge-command";
 import { StatusDot } from "@/lib/StatusDot";
 import { usePersistentState, useHiddenSet } from "@/lib/use-persistent-state";
-import { latestVisibleSessionAttention } from "@/lib/session-attention";
 import { deriveSessionReachabilityStatus } from "@/lib/session-reachability";
 import { getSessionRelaunchLabel } from "@/lib/session-relaunch";
 import {
@@ -167,12 +165,6 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     });
   }, [bridges, rawSessions, setBridgeOrder]);
   const { sessionActivity, markSessionIdle, clearSessionAttention } = useAllSessionEvents(client, rawSessions, userId, rpc);
-  const latestAttention = useMemo(() => latestVisibleSessionAttention({
-    sessions: rawSessions,
-    sessionActivity,
-    hiddenSessionIds,
-    hiddenBridgeIds,
-  }), [sessionActivity, rawSessions, hiddenSessionIds, hiddenBridgeIds]);
   const installedHookBridges = useRef(new Set<string>());
 
   useEffect(() => {
@@ -933,6 +925,7 @@ PY`;
               bridgeOrder={bridgeOrder}
               selectedSessionId={selectedSessionId}
               onSelectSession={handleSelectSession}
+              onDismissSessionAttention={clearSessionAttention}
               onRenameSession={renameSession}
               onStopSession={stopSession}
               onRemoveSession={handleRemoveSession}
@@ -1005,15 +998,6 @@ PY`;
         defaults={sessionDefaults}
         bridgeExec={bridgeExec}
       />
-
-      {latestAttention && (
-        <SessionAttentionAlert
-          attention={latestAttention}
-          isDesktop={isDesktop}
-          onOpen={handleSelectSession}
-          onDismiss={clearSessionAttention}
-        />
-      )}
 
     </div>
   );

@@ -46,6 +46,36 @@ afterEach(() => {
 });
 
 describe("Needs attention shortcuts", () => {
+  it("dismisses each request with an independent accessible control without selecting a session", () => {
+    const onSelectSession = vi.fn();
+    const onDismissSessionAttention = vi.fn();
+    const props = { ...baseProps, onSelectSession, onDismissSessionAttention,
+      sessions: [session("review"), session("other")], selectedSessionId: "other",
+      sessionActivity: new Map([["review", attention()], ["other", attention()]]),
+    };
+    const { rerender } = render(createElement(SessionList, props));
+    const region = screen.getByRole("region", { name: "Needs attention" });
+    const open = within(region).getByRole("button", { name: /^review: Approval requested/ });
+    const dismiss = within(region).getByRole("button", { name: "Dismiss attention for review" });
+    expect(dismiss.parentElement).toBe(open.parentElement);
+    expect(open.contains(dismiss)).toBe(false);
+    expect(within(open).queryAllByRole("button")).toHaveLength(0);
+    expect(dismiss.style.minWidth).toBe("44px");
+    expect(dismiss.style.minHeight).toBe("44px");
+    dismiss.focus();
+    expect(document.activeElement).toBe(dismiss);
+    fireEvent.click(dismiss);
+    expect(onDismissSessionAttention).toHaveBeenCalledExactlyOnceWith("review");
+    expect(onSelectSession).not.toHaveBeenCalled();
+    // The durable hook controls removal. A pending/failed write leaves the
+    // request available; its success updates only the resolved session.
+    expect(within(region).getByRole("button", { name: /^review: Approval requested/ })).toBeTruthy();
+    rerender(createElement(SessionList, { ...props, sessionActivity: new Map([["other", attention()]]) }));
+    expect(within(region).queryByRole("button", { name: "Dismiss attention for review" })).toBeNull();
+    expect(within(region).getByRole("button", { name: "Dismiss attention for other" })).toBeTruthy();
+    expect(within(region).getByRole("button", { name: /^other: Approval requested/ }).getAttribute("aria-current")).toBe("true");
+  });
+
   it("duplicates sessions above their original groups with the full request and request age", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-10-23T12:00:00Z"));
