@@ -22,6 +22,8 @@ const nextConfig: NextConfig = {
     };
     config.resolve.alias['@hpke/core'] = path.join(path.dirname(require.resolve('@hpke/core/package.json')), 'esm/mod.js');
     config.resolve.alias['@hpke/common'] = path.join(path.dirname(require.resolve('@hpke/common/package.json')), 'esm/mod.js');
+    // Shared bridge schemas must resolve from this independently installed app.
+    config.resolve.alias['zod$'] = path.join(path.dirname(require.resolve('zod/package.json')), 'index.js');
     return config;
   },
   async headers() {

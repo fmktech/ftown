@@ -17,6 +17,8 @@ export default defineConfig({
       "@security": path.resolve(__dirname, "../bridge/src/security"),
       "@hpke/core": path.resolve(__dirname, "./node_modules/@hpke/core/esm/mod.js"),
       "@hpke/common": path.resolve(__dirname, "./node_modules/@hpke/common/esm/mod.js"),
+      "zod": path.resolve(__dirname, "./node_modules/zod/index.js"),
+      "commander": path.resolve(__dirname, "./node_modules/commander/esm.mjs"),
     },
   },
 });

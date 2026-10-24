@@ -243,5 +243,5 @@
       ]
     }
   ],
-  "phase": "All local acceptance gates passed; exclusive integration Git/PR lease to MCP worker, root owns CI and finite Boat cleanup."
+  "phase": "UI-only packaging repair passed clean install/unit/types/build and focused runtime; independent closure accepted; MCP exclusively owns repair commit/push/PR; root owns CI and Boat cleanup."
 }
