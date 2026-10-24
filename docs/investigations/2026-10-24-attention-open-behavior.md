@@ -1,0 +1,26 @@
+# Attention message placement and navigation lifetime
+
+User screenshot and request: show the attention message in the top Needs attention entry; keep it on opening the session until a new message or explicit dismissal. The current live dashboard displays the message in the original session row instead.
+
+## Contract
+Move the visible attention message preview into its top Needs attention entry: one-line name plus message wrapping up to three lines, overflowWrap:anywhere/minWidth0, full title/message preserved in accessible name/title and popup. Remove duplicate message paragraph from original session row, retain Input needed status. Opening/selecting via original sidebar, top shortcut, or popup Open session navigates normally (including mobile Terminal tab) without clearing attention. Remove both Dashboard handleSelectSession clear and popup Open onDismiss call. Explicit popup Dismiss and a new user prompt still clear. Existing legacy permission/tool resolution remains unchanged; no hook/backend/store change, no new dismiss control, public props/exports stable.
+
+## Ownership and acceptance
+The adjacent manifest assigns eight exact application/test files to one native gpt-6.1-sol/high UI worker in the shared checkout, root coordination documents, read-only reviewer and separately leased integration/check owner. Four unrelated dirty notes preserved against `/tmp/ftown-attention-open-notes-before.json`. No dependencies or public interface changes. Root alone executes E2E/browser/live operations.
+
+Unit coverage must exercise both navigation clear sources independently, top message rendering/long message bounds and removed duplication, manual Dismiss and message clearing. Root focused desktop/mobile suite covers original row, top shortcut and popup Open session retaining attention, mobile tab navigation, explicit dismissal, actual user-prompt hook delivery, PR menu/touch preservation, and screenshots. Reuse existing hook lifecycle tests; do not alter legacy permission/tool behavior or add a new persistent notice store. Validate full UI suite, UI/E2E types and bridge/UI builds, independent review, exact source hashes and cleanup. Always open a PR; no merge/deployment.
+
+Pre-freeze independent review approved. Both known clear calls are necessary to remove; remaining explicit Dismiss wiring stays. Include an already-selected session receiving a request and being selected again. Long unbroken messages must remain within both top preview and full-message popup; bounded overflow wrapping in the existing alert file is authorized. Contract frozen before application edits. Task Boat sandbox: bx_h698rejq.
+
+## Source review and unit evidence
+All eight source/test files frozen and handed off; source leases released. Independent combined review approved both navigation changes, explicit dismissal, unchanged hook clearing, visible upper preview/full accessible context, popup wrapping and tests for all navigation routes, already-selected requests and prompt/dismiss resolution. React review found stable public props and no extra stores/effects/dependencies. Reviewer completed with no write/check leases.
+
+Exact ten-file SHA256 overlay verified in Boat. Focused suite passed48/48 across5files; full UI passed433/433 across41files. Chromium installation completed separately under root setup lease before tests. UI and E2E TypeScript checks plus bridge build passed; all inner exit codes0 and ten source hashes matched. Check lease released before root runtime execution.
+
+## Runtime, screenshots and cleanup
+Root ran `playwright test tests/session-tools.spec.ts tests/session-needs-attention.spec.ts` in the isolated Boat snapshot: **4/4 passed** in11.4s, desktop1280 and mobile390. The runtime exercises opening through original row, top shortcut and popup; reselection and a fresh request while already selected; actual UserPromptSubmit clearing; explicit dismissal scoped to one notice; mobile tab navigation; long unbroken preview/popup bounds; prior PR menu/touch and four completion-hook regressions. Production UI build passed. Root inspected all ten screenshots: message is visible in the upper entry before/after opening; original-row duplicate is gone, status retained; three-line long preview and full popup stay within viewport; header/PR/mobile menus remain intact.
+
+Preflight verified effective localhost database ftown:5432, shim443, UI3000, Centrifugo8000, isolated scratch bridge HOME, no inherited remote/deployment selectors or existing service leases before schema/startup. E2E teardown passed: no compose containers, no service PID files, all test ports closed. All ten remote snapshot hashes retained, and all eight application/test files match the local checkout. Logs, report and ten screenshots saved under `/tmp/ftown-attention-open-evidence/`. Sandbox bx_h698rejq deleted; subsequent inventory empty. Live user bridge/services left untouched.
+
+## Landing handoff
+Source and independent review workers completed and released all leases; their handoffs are accepted. Root releases E2E/setup resources. Only the designated integration owner is reactivated for the exact ten-file commit/push/PR, preserving the four unrelated notes against the baseline, then releases Git and stops. Full CI runs automatically after PR creation. No merge or production deployment authorized.

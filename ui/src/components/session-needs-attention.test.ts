@@ -69,6 +69,28 @@ describe("Needs attention shortcuts", () => {
     expect(shortcut.hasAttribute("draggable")).toBe(false);
     expect(within(shortcut).queryAllByRole("button")).toHaveLength(0);
     expect(within(shortcut).queryByText("review prompt")).toBeNull();
+    expect(within(shortcut).getByText("Review the complete deployment plan before proceeding.")).toBeTruthy();
+    const original = container.querySelector<HTMLButtonElement>('button[draggable="true"]')!;
+    expect(within(original).queryByText("Review the complete deployment plan before proceeding.")).toBeNull();
+    expect(within(original).getByRole("img", { name: "Input needed" })).toBeTruthy();
+  });
+
+  it("wraps long unbroken messages in a three-line upper preview with full accessible text", () => {
+    const message = "x".repeat(2000);
+    const { container } = render(createElement(SessionList, {
+      ...baseProps, sessions: [session("review")],
+      sessionActivity: new Map([["review", { activity: "idle" as const, attention: {
+        type: "agent_needs_input" as const, title: "Review requested", message, receivedAt: 1,
+      } }]]),
+    }));
+    const region = screen.getByRole("region", { name: "Needs attention" });
+    const shortcut = within(region).getByRole("button", { name: `review: Review requested. ${message}` });
+    const preview = within(shortcut).getByText(message);
+    expect(preview.style.overflowWrap).toBe("anywhere");
+    expect(preview.style.whiteSpace).toBe("normal");
+    expect(preview.style.getPropertyValue("-webkit-line-clamp")).toBe("3");
+    expect(shortcut.title).toBe(`review: Review requested. ${message}`);
+    expect(container.querySelector('button[draggable="true"]')?.textContent).not.toContain(message);
   });
 
   it("includes manual attention in every activity state but never idle alone or removed sessions", () => {
