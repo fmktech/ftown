@@ -1,0 +1,71 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "phase": "validated; authorized PR landing",
+  "workers": {
+    "/root/session_ui": {
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "high",
+      "writable_files": [
+        "bridge/src/attention-store.ts",
+        "bridge/src/attention-store.test.ts",
+        "bridge/src/command-rpc.ts",
+        "bridge/src/command-rpc.test.ts",
+        "bridge/src/local-api-server.ts",
+        "bridge/src/local-api-server.test.ts",
+        "bridge/src/index.ts",
+        "bridge/src/types.ts",
+        "bridge/src/browser-access.ts",
+        "bridge/src/browser-access.test.ts",
+        "bridge/package.json",
+        "bridge/package-lock.json",
+        "ui/src/types.ts",
+        "ui/src/lib/hook-events.ts",
+        "ui/src/lib/hook-events.test.ts",
+        "ui/src/lib/local-browser-client.test.ts",
+        "ui/src/hooks/useAllSessionEvents.ts",
+        "ui/src/hooks/useAllSessionEvents.test.ts",
+        "ui/src/components/Dashboard.tsx",
+        "ui/src/components/Dashboard.test.tsx",
+        "e2e/tests/session-tools.spec.ts",
+        "e2e/tests/session-needs-attention.spec.ts"
+      ],
+      "dependencies": [
+        "root evidence gate passed",
+        "independent contract review refinements accepted"
+      ],
+      "resource_leases": [],
+      "status": "completed source and two-file repair; writes stopped"
+    },
+    "/root/npx_review": {
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "high",
+      "writable_files": [],
+      "dependencies": [],
+      "resource_leases": [],
+      "status": "completed independent final approval; no writes or leases"
+    },
+    "/root/npx_implementation": {
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "high",
+      "writable_files": [],
+      "dependencies": [],
+      "resource_leases": [
+        "Git/index for exact 24-file commit, push and PR"
+      ],
+      "status": "authorized landing after root validation"
+    }
+  },
+  "root_writable_files": [
+    "docs/investigations/2026-10-24-attention-refresh.md",
+    "docs/investigations/2026-10-24-attention-refresh.ownership.json"
+  ],
+  "integration_owner": "/root/npx_implementation",
+  "e2e_owner": "/root",
+  "ownership_validated": true,
+  "resource_leases": {
+    "Boat bx_3snb3bmu dependency installs and E2E services/ports/database": "released; sandbox removed",
+    "Git/index": "/root/npx_implementation",
+    "ui/bridge/e2e unit and static runs": "released"
+  },
+  "root_documents_status": "final and stopped for landing"
+}

@@ -95,6 +95,7 @@ export interface SessionMessage {
 }
 
 export type CommandType =
+  | 'get_session_attention' | 'resolve_session_attention'
   | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history'
   | 'retry_session' | 'rename_session' | 'remove_session' | 'bridge_exec'
   | 'update_session_parent'
@@ -105,6 +106,13 @@ export interface Command {
   payload: CommandPayload;
   requestId: string;
 }
+
+export interface GetSessionAttentionPayload { bridgeId: string; sessionId: string }
+export interface ResolveSessionAttentionPayload extends GetSessionAttentionPayload { eventId: string }
+export interface PersistedSessionAttention {
+  id: string; sequence: number; type: 'agent_needs_input'; title: string; message: string; createdAt: string;
+}
+export interface SessionAttentionResponse { sessionId: string; attention: PersistedSessionAttention | null; sequence: number }
 
 export interface CreateSessionPayload {
   command?: string;
@@ -169,7 +177,7 @@ export interface BridgeExecPayload {
   bridgeId?: string;
 }
 
-export type CommandPayload = CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>;
+export type CommandPayload = GetSessionAttentionPayload | ResolveSessionAttentionPayload | CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>;
 
 export interface CommandResponse {
   requestId: string;

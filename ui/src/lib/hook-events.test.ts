@@ -3,6 +3,12 @@ import { describe, expect, it } from "vitest";
 import { clearsManualInputNotice, extractManualInputNotice, hookEventToActivity, type ManualInputNotice } from "./hook-events";
 
 describe("extractManualInputNotice", () => {
+  it("uses committed ledger identity and creation time rather than a harness notification id", () => {
+    const notice = extractManualInputNotice("Notification", { notification_type: "agent_needs_input", notification_id: "harness-id",
+      attentionId: "ledger-id", attentionSequence: 2, attentionCreatedAt: "2026-10-24T10:00:00Z", message: "Review" }, 999);
+    expect(notice).toMatchObject({ attentionId: "ledger-id", attentionSequence: 2, receivedAt: Date.parse("2026-10-24T10:00:00Z") });
+    expect(extractManualInputNotice("Notification", { notification_type: "agent_needs_input", notification_id: "harness-id" }, 999)).not.toHaveProperty("attentionId");
+  });
   it.each(["permission_prompt", "elicitation_dialog", "agent_needs_input"])(
     "recognizes %s as requiring human input",
     (notificationType) => {

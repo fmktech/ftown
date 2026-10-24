@@ -5,6 +5,29 @@ import type { MessageClient, MessageSubscription } from "@/lib/message-client";
 import { Session } from "@/types";
 import { clearsManualInputNotice, hookEventToActivity, extractManualInputNotice, extractToolLabel, type ManualInputNotice } from "@/lib/hook-events";
 import { TokenUsage } from "./useSessionEvents";
+import type { BridgeRpc } from "./useBridgeRpc";
+import type { PersistedSessionAttention, SessionAttentionResponse } from "@/types";
+import { v4 as uuidv4 } from "uuid";
+
+function snapshotResponse(value: unknown, sessionId: string): SessionAttentionResponse | null {
+  if (!value || typeof value !== "object") return null;
+  const response = value as Record<string, unknown>;
+  if (response.sessionId !== sessionId || typeof response.sequence !== "number" || !Number.isSafeInteger(response.sequence) || response.sequence < 0) return null;
+  if (response.attention === null) return { sessionId, attention: null, sequence: response.sequence };
+  if (!response.attention || typeof response.attention !== "object") return null;
+  const item = response.attention as Record<string, unknown>;
+  if (item.type !== "agent_needs_input" || typeof item.id !== "string" || !/^[A-Za-z0-9_-]+$/.test(item.id)
+    || typeof item.sequence !== "number" || !Number.isSafeInteger(item.sequence) || item.sequence < 1
+    || typeof item.title !== "string" || typeof item.message !== "string" || typeof item.createdAt !== "string"
+    || !Number.isFinite(Date.parse(item.createdAt))) return null;
+  if (item.sequence > response.sequence) return null;
+  return { sessionId, attention: item as unknown as PersistedSessionAttention, sequence: response.sequence };
+}
+
+function restoredNotice(item: PersistedSessionAttention): ManualInputNotice {
+  return { type: "agent_needs_input", title: item.title, message: item.message, receivedAt: Date.parse(item.createdAt),
+    attentionId: item.id, attentionSequence: item.sequence };
+}
 
 export interface SessionActivity {
   activity: "thinking" | "tool_use" | "idle";
@@ -34,14 +57,58 @@ export interface AllSessionEvents {
 export function useAllSessionEvents(
   client: MessageClient | null,
   sessions: Session[],
-  userId: string
+  userId: string,
+  rpc?: Pick<BridgeRpc, "sendCommand" | "onSubscribed">,
 ): AllSessionEvents {
   const [activityMap, setActivityMap] = useState<Map<string, SessionActivity>>(new Map());
   const subsRef = useRef<Map<string, { client: MessageClient; sub: MessageSubscription }>>(new Map());
   const clientRef = useRef(client);
   const userIdRef = useRef(userId);
+  const rpcRef = useRef(rpc);
+  const sessionsRef = useRef(sessions);
+  const activityRef = useRef(activityMap);
+  const observations = useRef(new Map<string, number>());
+  const reads = useRef(new Map<string, number>());
+  const dismissedThrough = useRef(new Map<string, number>());
+  const canonical = useRef(new Map<string, { sequence: number; activeId: string | null }>());
   clientRef.current = client;
   userIdRef.current = userId;
+  rpcRef.current = rpc;
+  sessionsRef.current = sessions;
+  activityRef.current = activityMap;
+
+  const hydrate = useCallback(async (sessionId: string) => {
+    const owner = subsRef.current.get(sessionId);
+    const user = userIdRef.current;
+    const session = sessionsRef.current.find(row => row.id === sessionId && row.status === "running");
+    if (!owner || !session || !rpcRef.current) return;
+    const observation = observations.current.get(sessionId) ?? 0;
+    const read = (reads.current.get(sessionId) ?? 0) + 1;
+    reads.current.set(sessionId, read);
+    try {
+      const response = await rpcRef.current.sendCommand({ type: "get_session_attention", requestId: uuidv4(),
+        payload: { bridgeId: session.bridgeId, sessionId } });
+      if (!response.success || userIdRef.current !== user || clientRef.current !== owner.client
+        || subsRef.current.get(sessionId) !== owner || reads.current.get(sessionId) !== read
+        || (observations.current.get(sessionId) ?? 0) !== observation
+        || !sessionsRef.current.some(row => row.id === sessionId && row.bridgeId === session.bridgeId && row.status === "running")) return;
+      const snapshot = snapshotResponse(response.data, sessionId);
+      if (!snapshot) return;
+      const known = canonical.current.get(sessionId);
+      if (known && known.sequence > snapshot.sequence) return;
+      canonical.current.set(sessionId, { sequence: snapshot.sequence, activeId: snapshot.attention?.id ?? null });
+      setActivityMap(prev => {
+        if (userIdRef.current !== user || clientRef.current !== owner.client || subsRef.current.get(sessionId) !== owner
+          || (observations.current.get(sessionId) ?? 0) !== observation || reads.current.get(sessionId) !== read) return prev;
+        const current = prev.get(sessionId) ?? { activity: "idle" as const };
+        if (current.attention && (current.attention.type !== "agent_needs_input" || !current.attention.attentionId)) return prev;
+        if ((current.attention?.attentionSequence ?? 0) > snapshot.sequence) return prev;
+        const attention = snapshot.attention && snapshot.attention.sequence > (dismissedThrough.current.get(sessionId) ?? 0)
+          ? restoredNotice(snapshot.attention) : undefined;
+        return new Map(prev).set(sessionId, { ...current, attention });
+      });
+    } catch { /* Older/offline bridges retain the existing live-only dashboard. */ }
+  }, []);
 
   const subscribe = useCallback((sessionId: string) => {
     const c = clientRef.current;
@@ -52,22 +119,37 @@ export function useAllSessionEvents(
     const channel = `events:${sessionId}#${u}`;
 
     const onPublication = (ctx: { data: unknown }): void => {
+      if (clientRef.current !== c || userIdRef.current !== u || subsRef.current.get(sessionId)?.sub !== sub) return;
       const msg = ctx.data as HookEventMessage;
       if (msg.type !== "hook_event") return;
 
       const attention = extractManualInputNotice(msg.eventName, msg.data);
       const activity = hookEventToActivity(msg.eventName);
-
+      if ((attention && !attention.attentionId) || msg.eventName === "UserPromptSubmit" || msg.eventName === "beforeSubmitPrompt") {
+        observations.current.set(sessionId, (observations.current.get(sessionId) ?? 0) + 1);
+      }
       setActivityMap((prev) => {
+        if (clientRef.current !== c || userIdRef.current !== u || subsRef.current.get(sessionId)?.sub !== sub) return prev;
         const current = prev.get(sessionId) ?? { activity: "idle" as const };
         // Use the latest queued notice, including a Notification from this React batch.
-        const clearsAttention = clearsManualInputNotice(msg.eventName, msg.data, current.attention);
+        // A delayed prompt publication may predate an already restored newer
+        // request. Only the committed snapshot can resolve a stamped notice.
+        const durablePrompt = (msg.eventName === "UserPromptSubmit" || msg.eventName === "beforeSubmitPrompt")
+          && current.attention?.type === "agent_needs_input" && !!current.attention.attentionId;
+        const clearsAttention = !durablePrompt && clearsManualInputNotice(msg.eventName, msg.data, current.attention);
         if (!activity && !attention && !clearsAttention) return prev;
         const toolName =
           activity === "tool_use"
             ? extractToolLabel(msg.eventName, msg.data)
             : undefined;
 
+        if (clearsAttention && current.attention?.attentionSequence) dismissedThrough.current.set(sessionId,
+          Math.max(dismissedThrough.current.get(sessionId) ?? 0, current.attention.attentionSequence));
+        const incomingSequence = attention?.attentionSequence;
+        const known = canonical.current.get(sessionId);
+        const olderExplicit = incomingSequence !== undefined && (incomingSequence <= (dismissedThrough.current.get(sessionId) ?? 0)
+          || (known !== undefined && incomingSequence <= known.sequence && attention?.attentionId !== known.activeId)
+          || (current.attention?.type === "agent_needs_input" && incomingSequence < (current.attention.attentionSequence ?? 0)));
         const updated: SessionActivity = {
           ...current,
           ...(activity
@@ -76,7 +158,7 @@ export function useAllSessionEvents(
                 toolName: activity === "tool_use" ? toolName : undefined,
               }
             : {}),
-          ...(attention ? { attention } : {}),
+          ...(attention && !olderExplicit ? { attention } : {}),
           ...(clearsAttention ? { attention: undefined } : {}),
           ...(activity === "idle" && msg.usage
             ? {
@@ -92,6 +174,9 @@ export function useAllSessionEvents(
         next.set(sessionId, updated);
         return next;
       });
+      // Prompt hooks have already resolved the ledger. Learn its watermark
+      // even if the first read was pending and no displayed ID was known yet.
+      if (msg.eventName === "UserPromptSubmit" || msg.eventName === "beforeSubmitPrompt") void hydrate(sessionId);
     };
 
     const existing = c.getSubscription(channel);
@@ -106,10 +191,13 @@ export function useAllSessionEvents(
     });
 
     sub.on("publication", onPublication);
-
-    sub.subscribe();
+    sub.on("subscribed", () => {
+      if (clientRef.current === c && userIdRef.current === u && subsRef.current.get(sessionId)?.sub === sub) void hydrate(sessionId);
+    });
     subsRef.current.set(sessionId, { client: c, sub });
-  }, []);
+    sub.subscribe();
+    if (sub.state === "subscribed") void hydrate(sessionId);
+  }, [hydrate]);
 
   const unsubscribe = useCallback((sessionId: string) => {
     const owned = subsRef.current.get(sessionId);
@@ -128,7 +216,14 @@ export function useAllSessionEvents(
     for (const sessionId of Array.from(subsRef.current.keys())) {
       unsubscribe(sessionId);
     }
+    observations.current.clear(); reads.current.clear(); dismissedThrough.current.clear(); canonical.current.clear();
+    setActivityMap(new Map());
   }, [client, userId, unsubscribe]);
+
+  useEffect(() => rpc?.onSubscribed(() => {
+    if (clientRef.current !== client || userIdRef.current !== userId) return;
+    for (const id of subsRef.current.keys()) void hydrate(id);
+  }), [rpc?.onSubscribed, client, userId, hydrate]);
 
   useEffect(() => {
     if (!client || !userId) return;
@@ -180,6 +275,36 @@ export function useAllSessionEvents(
   }, []);
 
   const clearSessionAttention = useCallback((sessionId: string) => {
+    const captured = activityRef.current.get(sessionId)?.attention;
+    const session = sessionsRef.current.find(row => row.id === sessionId);
+    const owner = subsRef.current.get(sessionId);
+    const user = userIdRef.current;
+    if (captured?.type === "agent_needs_input" && captured.attentionId) {
+      if (!session || !owner || !rpcRef.current) return;
+      observations.current.set(sessionId, (observations.current.get(sessionId) ?? 0) + 1);
+      const observation = observations.current.get(sessionId);
+      void rpcRef.current.sendCommand({ type: "resolve_session_attention", requestId: uuidv4(),
+        payload: { bridgeId: session.bridgeId, sessionId, eventId: captured.attentionId } }).then(response => {
+        if (!response.success || userIdRef.current !== user || clientRef.current !== owner.client
+          || subsRef.current.get(sessionId) !== owner
+          || !sessionsRef.current.some(row => row.id === sessionId && row.bridgeId === session.bridgeId)) return;
+        const snapshot = snapshotResponse(response.data, sessionId);
+        if (!snapshot) return;
+        dismissedThrough.current.set(sessionId, Math.max(dismissedThrough.current.get(sessionId) ?? 0, captured.attentionSequence ?? 0));
+        if (observations.current.get(sessionId) !== observation) return;
+        const known = canonical.current.get(sessionId);
+        if (!known || snapshot.sequence >= known.sequence) canonical.current.set(sessionId, { sequence: snapshot.sequence, activeId: snapshot.attention?.id ?? null });
+        observations.current.set(sessionId, (observations.current.get(sessionId) ?? 0) + 1);
+        setActivityMap(prev => {
+          if (userIdRef.current !== user || clientRef.current !== owner.client || subsRef.current.get(sessionId) !== owner) return prev;
+          const current = prev.get(sessionId);
+          if (!current || current.attention?.attentionId !== captured.attentionId) return prev;
+          return new Map(prev).set(sessionId, { ...current, attention: snapshot.attention ? restoredNotice(snapshot.attention) : undefined });
+        });
+      }).catch(() => { /* Failed/uncertain writes keep the request visible and retryable. */ });
+      return;
+    }
+    observations.current.set(sessionId, (observations.current.get(sessionId) ?? 0) + 1);
     setActivityMap((prev) => {
       const current = prev.get(sessionId);
       if (!current?.attention) return prev;

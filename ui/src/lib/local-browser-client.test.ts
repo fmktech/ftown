@@ -40,14 +40,14 @@ describe('local browser control', () => {
       expect(info?.user).toBe(boot.userId);
       core.handleResponse((data as { response: Parameters<typeof core.handleResponse>[0] }).response);
     });
-    for (const type of ['create_session', 'remove_session', 'rename_session'] as const) {
+    for (const type of ['create_session', 'remove_session', 'rename_session', 'get_session_attention', 'resolve_session_attention'] as const) {
       await expect(core.sendCommand({ type, requestId: type, payload: {} })).resolves.toMatchObject({ success: true });
     }
     fetcher.mockRejectedValueOnce(new Error('connection lost'));
     await expect(core.sendCommand({ type: 'create_session', requestId: 'lost', payload: {} })).resolves.toMatchObject({
       success: false, error: expect.stringContaining('Delivery may be uncertain'),
     });
-    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(fetcher).toHaveBeenCalledTimes(6);
     expect(fetcher.mock.calls.every(([url]) => url === 'http://127.0.0.1:43127/api/browser/commands')).toBe(true);
     expect(JSON.stringify(client.presence())).not.toContain(device.credential);
     client.close();

@@ -408,7 +408,7 @@ async function sessionToolsFixture(t: { after: (fn: () => void) => void }, withA
   server.on('event', (event) => {
     // A live notification must refer to an already committed exact record.
     const ledger = JSON.parse(readFileSync(join(store.sessionDir(event.sessionId), 'attention.json'), 'utf8')) as { events: AttentionItem[] };
-    assert.ok(ledger.events.some((item) => item.id === event.data.notification_id));
+    if (event.data.attentionId) assert.ok(ledger.events.some((item) => item.id === event.data.attentionId));
     events.push(event);
   });
   const port = await server.start();
@@ -417,6 +417,19 @@ async function sessionToolsFixture(t: { after: (fn: () => void) => void }, withA
 }
 
 describe('LocalApiServer explicit session attention and PR metadata', () => {
+  it('stamps native notifications with committed identity and ignores caller-supplied ledger metadata', async t => {
+    const f = await sessionToolsFixture(t);
+    const response = await api(f.port, f.token, 'POST', '/hook', { ftown_session_id: f.sample.id, hook_event_name: 'Notification',
+      notification_type: 'agent_needs_input', notification_id: 'harness-source', message: 'Native request',
+      attentionId: 'forged', attentionSequence: 999, attentionCreatedAt: 'forged' });
+    assert.equal(response.status, 200);
+    const item = (await f.attention.list(f.sample.id)).events[0];
+    assert.equal(f.events[0].data.attentionId, item.id);
+    assert.equal(f.events[0].data.attentionSequence, item.sequence);
+    assert.equal(f.events[0].data.attentionCreatedAt, item.createdAt);
+    assert.notEqual(item.id, 'harness-source');
+    assert.notEqual(item.id, 'forged');
+  });
   it('returns exact committed sanitized attention events, deduplicates pushes and allows recurrence', async (t) => {
     const f = await sessionToolsFixture(t);
     const path = `/api/sessions/${f.sample.id}/attention`;
@@ -431,6 +444,7 @@ describe('LocalApiServer explicit session attention and PR metadata', () => {
     assert.equal(event.type, 'agent_needs_input');
     assert.deepEqual(f.events[0], { sessionId: f.sample.id, eventName: 'Notification', source: 'api', data: {
       notification_type: 'agent_needs_input', title: event.title, message: event.message, notification_id: event.id,
+      attentionId: event.id, attentionSequence: event.sequence, attentionCreatedAt: event.createdAt,
     } });
     const duplicate = await api(f.port, f.token, 'POST', path, body);
     assert.equal((duplicate.data.event as AttentionItem).id, event.id);

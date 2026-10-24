@@ -22,7 +22,7 @@ function canonical(value: unknown): string {
 }
 class HttpError extends Error { constructor(public status: number, public code: string, message: string) { super(message); } }
 const fail = (status: number, code: string, message: string): never => { throw new HttpError(status, code, message); };
-const commandTypes = new Set(['create_session', 'stop_session', 'list_sessions', 'get_history', 'retry_session', 'send_message', 'rename_session', 'remove_session', 'bridge_exec', 'clear_terminal', 'update_session_parent', 'get_session_usage', 'get_sessions_usage', ...RETIRED_AUTOMATION_COMMANDS]);
+const commandTypes = new Set(['create_session', 'stop_session', 'list_sessions', 'get_history', 'retry_session', 'send_message', 'rename_session', 'remove_session', 'bridge_exec', 'clear_terminal', 'update_session_parent', 'get_session_usage', 'get_sessions_usage', 'get_session_attention', 'resolve_session_attention', ...RETIRED_AUTOMATION_COMMANDS]);
 
 /** Loopback browser consent and control. No cloud dependency and no raw persisted tokens. */
 export class BrowserAccess {
@@ -212,6 +212,12 @@ export class BrowserAccess {
         requestId = body.requestId as string;
         const payload = body.payload as Record<string, unknown>;
         if (payload.bridgeId !== undefined && payload.bridgeId !== this.opts.bootstrap().bridgeId) fail(403, 'wrong_bridge', 'Command targets another bridge');
+        if (body.type === 'get_session_attention' || body.type === 'resolve_session_attention') {
+          const allowed = body.type === 'resolve_session_attention' ? ['bridgeId', 'sessionId', 'eventId'] : ['bridgeId', 'sessionId'];
+          if (payload.bridgeId !== this.opts.bootstrap().bridgeId || typeof payload.sessionId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(payload.sessionId)
+            || Object.keys(payload).some(key => !allowed.includes(key))
+            || (body.type === 'resolve_session_attention' && (typeof payload.eventId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(payload.eventId)))) fail(400, 'invalid_command', 'Invalid attention target');
+        }
         const key = `${device!.id}:${requestId}`;
         const serialized = canonical(body);
         let cached = this.commands.get(key);

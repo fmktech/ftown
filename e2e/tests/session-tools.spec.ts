@@ -8,7 +8,7 @@ import { BRIDGE_HOME, E2E_DIR } from "../helpers/config";
 
 const execute = promisify(execFile);
 interface SessionResult { session: { id: string; pullRequestUrl?: string } }
-interface AttentionEvent { id: string; title: string; message: string }
+interface AttentionEvent { id: string; title: string; message: string; resolvedAt?: string; resolution?: string }
 interface AttentionResult { event: AttentionEvent }
 interface AttentionPage { events: AttentionEvent[] }
 
@@ -166,6 +166,9 @@ for (const viewport of [
 
       const title = "PR review requested";
       const message = "Please inspect the associated pull request before I continue.";
+      // The dashboard is closed at creation, including on mobile: restoration
+      // must come from the bridge snapshot, not a previously delivered notice.
+      await page.goto("about:blank");
       const attention = await sessionCommand<AttentionResult>(targetId, ["attention", "--title", title, "--message", message]);
       expect(attention.event).toMatchObject({ title, message });
       expect(attention.event.id).toBeTruthy();
@@ -179,11 +182,22 @@ for (const viewport of [
       expect((observerAttention.body as AttentionPage).events).not.toEqual(expect.arrayContaining([
         expect.objectContaining({ id: attention.event.id }),
       ]));
+      await page.goto("/dashboard");
+      await waitForBridgeOnline(page);
+      await showWorkspace();
       const region = page.getByRole("region", { name: "Needs attention", exact: true });
       const shortcut = region.getByRole("button", { name: `${targetName}: ${title}. ${message}`, exact: true });
       await expect(shortcut).toBeVisible();
       await expect(region.getByRole("button", { name: new RegExp(otherName) })).toHaveCount(0);
       await expect(page.getByRole("alert").filter({ hasText: message })).toBeVisible();
+      await screenshot("restored-attention-with-pr");
+      await page.reload();
+      await waitForBridgeOnline(page);
+      await showWorkspace();
+      await expect(shortcut).toBeVisible();
+      await expect(page.getByRole("alert").filter({ hasText: message })).toBeVisible();
+      await originalRow(page, otherName).click();
+      await showWorkspace();
 
       // The requesting agent's completion hook must not dismiss its explicit
       // request. Wait for actual browser delivery before checking React state.
@@ -292,6 +306,17 @@ for (const viewport of [
       await page.getByRole("button", { name: "Dismiss notification", exact: true }).click();
       await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
       await expect(region.getByRole("button", { name: new RegExp(targetName) })).toHaveCount(0);
+      const dismissed = await bridgeApiFetch("GET", `/api/sessions/${targetId}/attention?includeResolved=true`);
+      expect(dismissed.status, JSON.stringify(dismissed.body)).toBe(200);
+      const dismissedEvent = (dismissed.body as AttentionPage).events.find(event => event.id === attention.event.id);
+      expect(dismissedEvent?.resolvedAt).toBeTruthy();
+      expect(dismissedEvent?.resolution).toBe("manual");
+      await page.reload();
+      await waitForBridgeOnline(page);
+      await showWorkspace();
+      await expect(originalRow(page, targetName)).toBeVisible();
+      await expect(region.getByRole("button", { name: new RegExp(targetName) })).toHaveCount(0);
+      await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
 
       const unchanged = await bridgeApiFetch("GET", `/api/sessions/${otherId}`);
       expect(unchanged.status).toBe(200);

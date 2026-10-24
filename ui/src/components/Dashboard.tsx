@@ -166,7 +166,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
       return next;
     });
   }, [bridges, rawSessions, setBridgeOrder]);
-  const { sessionActivity, markSessionIdle, clearSessionAttention } = useAllSessionEvents(client, rawSessions, userId);
+  const { sessionActivity, markSessionIdle, clearSessionAttention } = useAllSessionEvents(client, rawSessions, userId, rpc);
   const latestAttention = useMemo(() => latestVisibleSessionAttention({
     sessions: rawSessions,
     sessionActivity,

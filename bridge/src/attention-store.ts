@@ -27,6 +27,7 @@ export interface AttentionPage {
   events: AttentionItem[]; cursor: string; hasMore: boolean; cursorReset: boolean; activity: Activity; openCount: number; latest?: AttentionItem;
 }
 export interface AttentionReadOptions { cursor?: string; limit?: number; includeResolved?: boolean; actionableOnly?: boolean }
+export interface ExplicitAttentionSnapshot { attention: AttentionItem | null; sequence: number }
 export class AttentionError extends Error {
   constructor(readonly code: string, message: string, readonly status = 400) { super(message); }
 }
@@ -231,6 +232,35 @@ export class AttentionStore {
       // Do not skip records omitted by this page; filtered-out rows do not block later actionable events.
       const sequence = hasMore ? events.at(-1)!.sequence : ledger.sequence;
       return { events: events.map(publicItem), cursor: this.cursor(id, ledger, sequence), hasMore, cursorReset, activity: { ...ledger.activity }, openCount: ledger.events.filter((event) => !event.resolvedAt).length, ...(ledger.events.filter((event) => !event.resolvedAt).at(-1) ? { latest: publicItem(ledger.events.filter((event) => !event.resolvedAt).at(-1)!) } : {}) };
+    });
+  }
+  private latestExplicit(ledger: Ledger): AttentionItem | null {
+    const latest = ledger.events.filter(event => event.type === 'agent_needs_input' && !event.resolvedAt && !event.acknowledgedAt)
+      .reduce<StoredItem | undefined>((current, event) => !current || event.sequence > current.sequence ? event : current, undefined);
+    return latest ? publicItem(latest) : null;
+  }
+  async explicitSnapshot(id: string): Promise<ExplicitAttentionSnapshot> {
+    return this.withLock(id, async () => {
+      const ledger = await this.load(id);
+      return { attention: this.latestExplicit(ledger), sequence: ledger.sequence };
+    });
+  }
+  /** Dismiss the displayed incident and its superseded explicit predecessors. */
+  async resolveExplicitThrough(id: string, eventId: string): Promise<ExplicitAttentionSnapshot> {
+    return this.withLock(id, async () => {
+      const ledger = await this.load(id);
+      const displayed = ledger.events.find(event => event.id === eventId && event.type === 'agent_needs_input');
+      if (!displayed) throw new AttentionError('unknown_attention', 'Unknown explicit attention request');
+      const timestamp = new Date().toISOString();
+      for (const event of ledger.events) {
+        if (event.type === 'agent_needs_input' && event.sequence <= displayed.sequence && !event.resolvedAt) {
+          event.resolvedAt = timestamp;
+          event.resolution = 'manual';
+        }
+      }
+      this.prune(ledger);
+      await this.save(id, ledger);
+      return { attention: this.latestExplicit(ledger), sequence: ledger.sequence };
     });
   }
   async mutate(id: string, ids: string[], operation: 'ack' | 'resolve', reason?: string): Promise<AttentionItem[]> {
