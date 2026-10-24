@@ -1,0 +1,36 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "branch": "fix/sidebar-pr-menu",
+  "base": "537639eec99d835ff74db671bef8b45aab5e3a92",
+  "model": "gpt-6.1-sol",
+  "reasoning_effort": "high",
+  "owners": {
+    "/root": [
+      "docs/investigations/2026-10-24-sidebar-pr-menu.md",
+      "docs/investigations/2026-10-24-sidebar-pr-menu.ownership.json"
+    ],
+    "/root/session_ui": [
+      "ui/src/components/SessionList.tsx",
+      "ui/src/components/PullRequestLink.tsx",
+      "ui/src/components/session-pull-request.test.ts",
+      "e2e/tests/session-tools.spec.ts"
+    ],
+    "/root/npx_review": [],
+    "/root/npx_implementation": []
+  },
+  "integration_owner": "/root/npx_implementation",
+  "dependencies": {
+    "implementation": "independent pre-freeze review approved; contract frozen",
+    "checks": "all four source/test writes handed off and exact snapshot overlaid",
+    "root E2E": "unit/static checks lease released",
+    "landing": "review and root focused runtime/visual gates passed"
+  },
+  "resources": {
+    "Git index/history": "npx_implementation exclusive final landing lease: stage exact six manifest paths, preserve four unrelated notes, commit/push/open PR only; no merge",
+    "Boat bx_2s93y5hd": "deleted; inventory absence verified after evidence retrieval",
+    "unit/static/build": "released after affected repair checks and source SHA match",
+    "E2E/browser/services/database": "released after root focused4/4 and8screenshots; Docker/PID/ports cleanup verified; sandbox deleted"
+  },
+  "contract": "Restore the compact passive sidebar PR badge inside the session selection button. Put canonical Open pull request navigation inside that session's portaled actions menu as a native anchor: safe existing parser, _blank/noopener noreferrer, no preventDefault, close menu without selecting session or clearing attention. Header PR link stays unchanged. Keep the existing data-session-row wrapper for selector stability; no unrelated wrapper refactor. Mobile below md: trigger at least44x44 with readable roughly20px ellipsis; every menu item at least44px high with14px type; menu approximately220px wide capped at viewport minus16px. Desktop remains compact. Avoid inline styles defeating responsive classes. Preserve drag/select, existing keyboard Tab/Enter/Escape/outside-close, attention lifecycle and usage removal. No public props/exports/dependencies change.",
+  "status": "All implementation/review/static/runtime/visual gates passed; source/review workers completed. Integration owner solely reacquires Git for exact-six-file commit/push/PR then releases and stops."
+}

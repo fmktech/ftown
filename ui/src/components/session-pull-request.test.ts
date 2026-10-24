@@ -38,34 +38,84 @@ describe("session PR destinations", () => {
     expect(within(container).getByText(session.name)).toBeTruthy();
   });
 
-  it("opens a sibling sidebar PR link without selecting the session or nesting controls", () => {
+  it("shows a passive compact sidebar badge inside the original selection button", () => {
     const onSelectSession = vi.fn();
     const { container } = render(createElement(SessionList, {
       sessions: [session], bridges: [], bridgeOrder: ["bridge"], selectedSessionId: null, onSelectSession,
     }));
     const original = container.querySelector<HTMLButtonElement>('button[draggable="true"]')!;
     const wrapper = original.parentElement!;
-    const link = within(wrapper).getByRole("link", { name: description });
+    const badge = within(original).getByText("PR #123", { exact: true }).parentElement!;
     expect(wrapper.dataset.sessionRow).toBe(session.id);
-    expect(original.nextElementSibling).toBe(link);
-    expect(link.getAttribute("href")).toBe(prUrl);
-    expect(link.getAttribute("target")).toBe("_blank");
-    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
-    expect(link.getAttribute("draggable")).toBe("false");
-    expect(link.style.minHeight).toBe("44px");
-    expect(link.style.minWidth).toBe("44px");
-    expect(link.className).toContain("focus-visible:outline-2");
+    expect(badge.tagName).toBe("SPAN");
+    expect(badge.title).toBe(description);
+    expect(badge.getAttribute("tabindex")).toBeNull();
+    expect(badge.getAttribute("role")).toBeNull();
+    expect(within(badge).getByText(description).className).toBe("sr-only");
+    expect(wrapper.querySelector("a")).toBeNull();
     expect(original.querySelector("a, button")).toBeNull();
     expect(original.draggable).toBe(true);
     expect(Number.parseFloat(original.style.minWidth)).toBe(0);
     expect(original.style.width).toBe("");
     expect(within(original).getByText(session.name)).toBeTruthy();
-    // Navigation is a browser boundary; the E2E opens the native destination.
-    link.addEventListener("click", event => event.preventDefault());
-    fireEvent.click(link);
-    expect(onSelectSession).not.toHaveBeenCalled();
-    fireEvent.click(within(original).getByText(session.name));
+    fireEvent.click(badge);
     expect(onSelectSession).toHaveBeenCalledExactlyOnceWith(session.id);
+  });
+
+  it("opens the native PR menu action without selecting the session or clearing attention", () => {
+    const onSelectSession = vi.fn();
+    const { container } = render(createElement(SessionList, {
+      sessions: [session, { ...session, id: "observer", name: "Observer", pullRequestUrl: undefined }],
+      bridges: [], bridgeOrder: ["bridge"], selectedSessionId: "observer", onSelectSession,
+      onStopSession: vi.fn(), onRemoveSession: vi.fn(),
+      sessionActivity: new Map([[session.id, { activity: "idle" as const, attention: {
+        type: "agent_needs_input" as const, title: "Review requested", message: "Please review", receivedAt: 1,
+      } }]]),
+    }));
+    const original = container.querySelector<HTMLButtonElement>('button[draggable="true"]')!;
+    const trigger = within(original).getByRole("button", { name: "Session actions" });
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    const menu = screen.getByRole("menu", { name: "Session actions" });
+    const action = within(menu).getByRole("menuitem", { name: `Open pull request: ${description}` });
+    expect(within(menu).getAllByRole("menuitem")[0]).toBe(action);
+    expect(action.tagName).toBe("A");
+    expect(action.getAttribute("href")).toBe(prUrl);
+    expect(action.getAttribute("target")).toBe("_blank");
+    expect(action.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(original.contains(action)).toBe(false);
+    expect(onSelectSession).not.toHaveBeenCalled();
+    // Stop navigation only at the test's browser boundary; E2E exercises the
+    // native default action, which production intentionally never cancels.
+    action.addEventListener("click", event => event.preventDefault());
+    fireEvent.click(action);
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByRole("region", { name: "Needs attention" })).toBeTruthy();
+    expect(onSelectSession).not.toHaveBeenCalled();
+    fireEvent.keyDown(trigger, { key: " " });
+    expect(screen.getByRole("menu", { name: "Session actions" })).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(onSelectSession).not.toHaveBeenCalled();
+  });
+
+  it("uses replaced metadata and omits the PR action after clearing", () => {
+    const props = {
+      sessions: [session], bridges: [], bridgeOrder: ["bridge"], selectedSessionId: null,
+      onSelectSession: vi.fn(), onStopSession: vi.fn(), onRemoveSession: vi.fn(),
+    };
+    const view = render(createElement(SessionList, props));
+    const openMenu = () => fireEvent.click(screen.getByRole("button", { name: "Session actions" }));
+    openMenu();
+    expect(screen.getByRole("menuitem", { name: /^Open pull request:/ }).getAttribute("href")).toBe(prUrl);
+    fireEvent.keyDown(document, { key: "Escape" });
+    view.rerender(createElement(SessionList, { ...props, sessions: [{ ...session, pullRequestUrl: "https://github.com/Org/repo/pull/456/?tab=files" }] }));
+    openMenu();
+    expect(screen.getByRole("menuitem", { name: /^Open pull request:/ }).getAttribute("href")).toBe("https://github.com/Org/repo/pull/456");
+    fireEvent.keyDown(document, { key: "Escape" });
+    view.rerender(createElement(SessionList, { ...props, sessions: [{ ...session, pullRequestUrl: undefined }] }));
+    openMenu();
+    expect(screen.queryByRole("menuitem", { name: /^Open pull request:/ })).toBeNull();
+    expect(screen.queryByText("PR #456", { exact: true })).toBeNull();
   });
 
   it("removes sidebar usage while retaining persisted usage in the terminal header", () => {
@@ -104,13 +154,18 @@ describe("session PR destinations", () => {
     expect(container.querySelector("a, img, script")).toBeNull();
   });
 
-  it("keeps malformed-metadata sessions selectable without an unsafe sidebar link", () => {
+  it.each(["javascript:alert(1)", "https://github.com.evil.test/Org/repo/pull/123", ""])("omits unsafe PR menu actions and keeps selection for %s", pullRequestUrl => {
     const onSelectSession = vi.fn();
     const { container } = render(createElement(SessionList, {
-      sessions: [{ ...session, pullRequestUrl: "javascript:alert(1)" }], bridges: [],
+      sessions: [{ ...session, pullRequestUrl }], bridges: [],
       bridgeOrder: ["bridge"], selectedSessionId: null, onSelectSession,
+      onStopSession: vi.fn(), onRemoveSession: vi.fn(),
     }));
     expect(container.querySelector("a")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Session actions" }));
+    expect(screen.queryByRole("menuitem", { name: /^Open pull request:/ })).toBeNull();
+    expect(onSelectSession).not.toHaveBeenCalled();
+    fireEvent.keyDown(document, { key: "Escape" });
     fireEvent.click(screen.getByText(session.name));
     expect(onSelectSession).toHaveBeenCalledExactlyOnceWith(session.id);
     expect(screen.queryByText("PR #123")).toBeNull();
