@@ -35,6 +35,7 @@ export interface RunPairingOptions {
 }
 
 export interface PairingResult {
+  ownerId: string;
   token: string;
   refreshToken: string;
   centrifugoUrl: string;
@@ -59,6 +60,7 @@ type PairPollStatus =
   | 'slow_down';
 
 interface PairPollResponse {
+  ownerId?: string;
   status: PairPollStatus;
   token?: string;
   refreshToken?: string;
@@ -116,15 +118,15 @@ export async function runPairing(opts: RunPairingOptions): Promise<PairingResult
     const poll = await postJson<PairPollResponse>(fetchImpl, `${apiUrl}/api/auth/bridge/pair/poll`, {
       deviceCode,
       localPort,
-      localNonce,
     });
 
     switch (poll.status) {
       case 'approved': {
-        if (!poll.token || !poll.refreshToken || !poll.centrifugoUrl || !poll.userId) {
+        if (!poll.ownerId || !poll.token || !poll.refreshToken || !poll.centrifugoUrl || !poll.userId) {
           throw new Error('Pairing approved but token bundle was incomplete');
         }
         return {
+          ownerId: poll.ownerId,
           token: poll.token,
           refreshToken: poll.refreshToken,
           centrifugoUrl: poll.centrifugoUrl,

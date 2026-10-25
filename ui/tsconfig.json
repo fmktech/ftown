@@ -19,7 +19,13 @@
       }
     ],
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@security/*": ["../bridge/src/security/*"],
+      "@hpke/core": ["./node_modules/@hpke/core/esm/mod.d.ts"],
+      "@hpke/common": ["./node_modules/@hpke/common/esm/mod.d.ts"],
+      "zod": ["./node_modules/zod/index.d.cts"],
+      "commander": ["./node_modules/commander/typings/index.d.ts"],
+      "pg": ["./node_modules/@types/pg/index.d.ts"]
     },
     "forceConsistentCasingInFileNames": true
   },

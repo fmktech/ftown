@@ -1,4 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
+import type { BridgeSecurityService } from '../security/bridge/security.js';
+import { EncryptedPeerChannel } from '../security/bridge/direct.js';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
 
 import type { Server as HttpServer, IncomingMessage } from 'node:http';
@@ -47,6 +49,7 @@ function isLocalhostOrigin(origin: string): boolean {
 }
 
 export interface LoopbackPeerServerOptions {
+  security?: BridgeSecurityService;
   /** This bridge's identity (as advertised on bridges:presence). */
   bridgeId: string;
   /** Per-process nonce; upgrade requires `?nonce=` to match this exactly. */
@@ -77,13 +80,19 @@ class LoopbackPeer {
   private readonly seq = new Map<string, number>();
   private pingTimer?: ReturnType<typeof setInterval>;
   private missedPings = 0;
+  private readonly secure?: EncryptedPeerChannel;
 
-  constructor(server: LoopbackPeerServer, ws: WebSocket) {
+  constructor(server: LoopbackPeerServer, ws: WebSocket, pairId: string) {
     this.server = server;
     this.ws = ws;
+    if (server.security) this.secure = new EncryptedPeerChannel(server.security, { transport: 'loopback-ws',
+      channel: `direct:loopback-ws:${server.bridgeId}:${pairId}`, bridgeId: server.bridgeId, pairId },
+      json => { if (ws.readyState === WebSocket.OPEN) ws.send(json); }, frame => this.handleFrame(JSON.stringify(frame)),
+      () => { this.helloOk = true; }, () => server.remove(this));
     ws.on('message', (data: RawData, isBinary: boolean) => {
       if (isBinary) return;
-      this.handleFrame(this.decode(data));
+      if (!this.secure) { server.remove(this); return; }
+      void this.secure.receive(this.decode(data));
     });
     ws.on('close', () => this.server.remove(this));
     ws.on('error', () => this.server.remove(this));
@@ -119,6 +128,7 @@ class LoopbackPeer {
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.attached.clear();
     this.seq.clear();
+    this.secure?.close();
     try { this.ws.close(); } catch { /* already gone */ }
     try { this.ws.terminate(); } catch { /* already gone */ }
   }
@@ -198,7 +208,7 @@ class LoopbackPeer {
   private send(msg: DirectMessage): void {
     if (this.closed || this.ws.readyState !== WebSocket.OPEN) return;
     try {
-      this.ws.send(JSON.stringify(msg));
+      this.secure?.send(msg);
     } catch {
       // Drop the frame rather than kill the socket; a genuinely dead socket is
       // caught by close/error or missed pings. One socket's failure must never
@@ -215,6 +225,7 @@ class LoopbackPeer {
  * attached sockets.
  */
 export class LoopbackPeerServer {
+  readonly security?: BridgeSecurityService;
   readonly bridgeId: string;
   private readonly nonce: string;
   private readonly authorize?: (token: string, origin: string) => boolean;
@@ -228,6 +239,7 @@ export class LoopbackPeerServer {
   private upgradeHandler?: (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
 
   constructor(options: LoopbackPeerServerOptions) {
+    this.security = options.security;
     this.bridgeId = options.bridgeId;
     this.nonce = options.nonce;
     this.authorize = options.authorize;
@@ -316,14 +328,14 @@ export class LoopbackPeerServer {
       this.reject(socket, 403, 'Forbidden');
       return;
     }
-    const token = url.searchParams.get('nonce');
-    if (!this.nonceMatches(token) && !(token && req.headers.origin && this.authorize?.(token, req.headers.origin))) {
+    const pairId = url.searchParams.get('pairId');
+    if (!this.security || !pairId || !/^[A-Za-z0-9_-]{1,128}$/.test(pairId)) {
       this.reject(socket, 403, 'Forbidden');
       return;
     }
 
     this.wss.handleUpgrade(req, socket, head, (ws) => {
-      this.peers.add(new LoopbackPeer(this, ws));
+      this.peers.add(new LoopbackPeer(this, ws, pairId));
     });
   }
 

@@ -32,6 +32,7 @@ export function register(on) {
     const ftownId = await $.env.get('FTOWN_SESSION_ID');
     if (!ftownId || !/^[a-zA-Z0-9_-]+$/.test(ftownId)) return next(e);
     const home = await $.env.get('HOME') || await $.env.get('USERPROFILE');
+    const pointerPath = await $.env.get('FTOWN_BRIDGE_POINTER') || (home ? home + '/.ftown/bridge.json' : '');
     const port = await $.env.get('FTOWN_HOOK_PORT');
     const token = await $.env.get('FTOWN_HOOK_TOKEN');
     let connection = /^\d+$/.test(port || '') && Number(port) > 0 && Number(port) <= 65535 && token
@@ -60,17 +61,17 @@ export function register(on) {
         // the current pointer; the bridge still verifies both exact identities.
         for (let attempt = 0; attempt < 2; attempt += 1) {
           if (attempt || !connection) {
-            if (!home) return;
+            if (!pointerPath) return;
             try {
-              const pointer = JSON.parse(await $.fs.read(home + '/.ftown/bridge.json'));
+              const pointer = JSON.parse(await $.fs.read(pointerPath));
               if (!Number.isInteger(pointer.port) || pointer.port < 1 || pointer.port > 65535 || typeof pointer.token !== 'string' || !pointer.token) return;
               connection = { port: pointer.port, token: pointer.token };
             } catch { return; }
           }
-          const registration = blockedSignature ? '' : '&adapter=claude-mod&nativeSessionId=' + encodeURIComponent(currentId);
-          const url = 'http://127.0.0.1:' + connection.port + '/api/sessions/' + encodeURIComponent(ftownId) + '/inbox?peek=1&wait=0' + registration;
+          const url = 'http://127.0.0.1:' + connection.port + '/hook';
+          const body = JSON.stringify({ hook_event_name: 'FtownNativeWake', ftown_session_id: ftownId, session_id: currentId, adapter: 'claude-mod', registerWake: !blockedSignature });
           try {
-            response = await $.http.fetch(url, { headers: { Authorization: 'Bearer ' + connection.token } });
+            response = await $.http.fetch(url, { method: 'POST', body, headers: { Authorization: 'Bearer ' + connection.token, 'Content-Type': 'application/json' } });
           } catch { response = undefined; }
           if (response && response.ok) break;
           // Identity conflicts are authoritative: never redirect them to a

@@ -1,3 +1,4 @@
+import { applicationJson, type SecureEndpointRuntime } from "../secure-endpoint-runtime";
 import {
   DIRECT_PROTOCOL_VERSION,
   DATA_CHANNEL_LABEL,
@@ -13,6 +14,7 @@ export interface WebRtcPeerOptions {
   bridgeId: string;
   clientId: string;
   sendSignal: (msg: SignalMessage) => void;
+  securityRuntime?: SecureEndpointRuntime;
 }
 
 /** Public surface of {@link WebRtcPeer}; kept structural so tests can inject a fake. */
@@ -38,6 +40,9 @@ export class WebRtcPeer implements WebRtcPeerApi {
   private readonly clientId: string;
   private readonly sendSignal: (msg: SignalMessage) => void;
   private readonly pairId: string;
+  private readonly securityRuntime?: SecureEndpointRuntime;
+  private incoming: Promise<void> = Promise.resolve();
+  private outgoing: Promise<void> = Promise.resolve();
 
   private pc: RTCPeerConnection | null = null;
   private channel: RTCDataChannel | null = null;
@@ -61,6 +66,7 @@ export class WebRtcPeer implements WebRtcPeerApi {
 
   constructor(opts: WebRtcPeerOptions) {
     this.bridgeId = opts.bridgeId;
+    this.securityRuntime = opts.securityRuntime;
     this.clientId = opts.clientId;
     this.sendSignal = opts.sendSignal;
     this.pairId = crypto.randomUUID();
@@ -118,30 +124,36 @@ export class WebRtcPeer implements WebRtcPeerApi {
   }
 
   private onChannelOpen(): void {
-    this.send({ kind: 'hello', clientId: this.clientId, protocolVersion: DIRECT_PROTOCOL_VERSION });
+    if (!this.securityRuntime) { this.fail(new Error('Encrypted bridge approval is required')); return; }
+    void this.securityRuntime.handshake(this.bridgeId, this.secureChannel(), async packet => {
+      if (!this.channel || this.channel.readyState !== 'open' || this.closed) throw new Error('datachannel closed');
+      this.channel.send(JSON.stringify(packet));
+    }).then(() => {
+      if (this.closed) return;
+      if (this.pairTimer) clearTimeout(this.pairTimer);
+      this.pairTimer = null; this.startPing(); this.resolve();
+    }).catch(() => this.fail(new Error('Encrypted peer handshake failed')));
   }
 
+  private secureChannel(): string { return `direct:webrtc:${this.bridgeId}:${this.pairId}`; }
+
   private onFrame(raw: unknown): void {
-    if (typeof raw !== 'string') return;
-    let msg: DirectMessage;
-    try {
-      msg = JSON.parse(raw) as DirectMessage;
-    } catch {
-      return;
-    }
+    this.incoming = this.incoming.then(async () => {
+      if (this.closed || !this.securityRuntime || typeof raw !== 'string') return;
+      const packet: unknown = JSON.parse(raw);
+      for (const delivered of await this.securityRuntime.receive(packet, this.secureChannel())) {
+        if (this.closed) return;
+        const app = delivered.application;
+        if (delivered.bridgeId !== this.bridgeId || app.route.kind !== 'terminal' || app.route.pairId !== this.pairId
+          || !app.data || typeof app.data !== 'object' || Array.isArray(app.data) || typeof app.data.kind !== 'string'
+          || app.route.frameType !== app.data.kind || app.route.sessionId !== ('sessionId' in app.data ? app.data.sessionId : '')) continue;
+        this.handleMessage(app.data as unknown as DirectMessage);
+      }
+    }).catch(() => this.fail(new Error('Encrypted peer frame rejected')));
+  }
+
+  private handleMessage(msg: DirectMessage): void {
     switch (msg.kind) {
-      case 'hello_ack':
-        if (msg.protocolVersion !== DIRECT_PROTOCOL_VERSION) {
-          this.close();
-          return;
-        }
-        if (this.pairTimer) {
-          clearTimeout(this.pairTimer);
-          this.pairTimer = null;
-        }
-        this.startPing();
-        this.resolve();
-        break;
       case 'screen':
         this.handlers.get(msg.sessionId)?.onScreen(msg.data);
         break;
@@ -236,10 +248,13 @@ export class WebRtcPeer implements WebRtcPeerApi {
   }
 
   private send(msg: DirectMessage): void {
-    const ch = this.channel;
-    if (ch && ch.readyState === 'open') {
-      ch.send(JSON.stringify(msg));
-    }
+    this.outgoing = this.outgoing.then(async () => {
+      if (this.closed || !this.securityRuntime) return;
+      const packet = await this.securityRuntime.sealApplication(this.bridgeId, this.secureChannel(), { type: 'application',
+        route: { kind: 'terminal', sessionId: 'sessionId' in msg ? msg.sessionId : '', frameType: msg.kind, pairId: this.pairId },
+        data: applicationJson(msg), mcp: null });
+      if (!this.closed && this.channel && this.channel.readyState === 'open') this.channel.send(JSON.stringify(packet));
+    }).catch(() => this.fail(new Error('Encrypted peer send failed')));
   }
 
   onClose(cb: () => void): void {

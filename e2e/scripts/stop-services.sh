@@ -2,7 +2,7 @@
 # Kill ONLY the exact PIDs recorded by start-services.sh. Never pkill/killall.
 set -uo pipefail
 E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-for name in bridge ui; do
+for name in mcp mcp-tls bridge-2 bridge ui; do
   f="$E2E_DIR/.$name.pid"
   if [ -f "$f" ]; then
     pid="$(cat "$f")"
@@ -15,4 +15,7 @@ for name in bridge ui; do
     rm -f "$f"
   fi
 done
+# The caller must stop/await Playwright before this teardown. Trust cleanup is
+# independently guarded and never touches the runner's real HOME/NSS database.
+node "$E2E_DIR/scripts/setup-browser-trust.mjs" --cleanup || exit 1
 echo "[stop] done (docker infra left running; use 'docker compose down -v' in e2e/ to remove)"

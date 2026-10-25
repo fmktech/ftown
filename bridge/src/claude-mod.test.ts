@@ -11,7 +11,7 @@ const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 function fixture() {
   const hooks = new Map<string, Hook>();
   const timers: Array<() => Promise<void>> = [];
-  const requests: Array<{ url: string; token: string }> = [];
+  const requests: Array<{ url: string; token: string; body: Record<string, unknown> }> = [];
   const prompts: string[] = [];
   let identity = 'native-1';
   let readIdentity = async () => identity;
@@ -25,7 +25,7 @@ function fixture() {
     session: { id: () => readIdentity() },
     clock: { now: async () => now, every: (_delay: number, callback: () => Promise<void>) => { assert.equal(_delay, 5000); timers.push(callback); return { cancel() {} }; } },
     fs: { read: async (path: string) => { assert.equal(path, '/scratch/.ftown/bridge.json'); return JSON.stringify({ port: 2345, token: 'new-token' }); } },
-    http: { fetch: async (url: string, options: { headers: { Authorization: string } }) => { requests.push({ url, token: options.headers.Authorization }); return fetch(url); } },
+    http: { fetch: async (url: string, options: { body: string; headers: { Authorization: string } }) => { requests.push({ url, token: options.headers.Authorization, body: JSON.parse(options.body) as Record<string, unknown> }); return fetch(url); } },
     prompt: { submit: ({ text }: { text: string }) => { prompts.push(text); return submit(); } },
   };
   register((name, handler) => hooks.set(name, handler));
@@ -50,9 +50,10 @@ test('manual sessions are inert; native wakes contain no body and never drain in
   assert.match(f.prompts[0], /ftown harness mail read/);
   assert.doesNotMatch(f.prompts[0], /PRIVATE MAIL BODY|mail-1/);
   for (const request of f.requests) {
-    const url = new URL(request.url);
-    assert.equal(url.searchParams.get('peek'), '1'); assert.equal(url.searchParams.get('wait'), '0');
-    assert.equal(url.searchParams.get('adapter'), 'claude-mod'); assert.equal(url.searchParams.get('nativeSessionId'), 'native-1');
+    assert.equal(new URL(request.url).pathname, '/hook');
+    assert.equal(request.body.hook_event_name, 'FtownNativeWake');
+    assert.equal(request.body.adapter, 'claude-mod'); assert.equal(request.body.session_id, 'native-1');
+    assert.equal(request.body.registerWake, true);
     assert.equal(request.token, 'Bearer test-token');
   }
   f.setMessages([]); await f.tick(); f.setMessages([{ id: 'mail-2' }]); await f.tick();
@@ -84,11 +85,11 @@ test('definite drops retry with a bound; unknown admission does not duplicate or
   await f.fire('session.start');
   for (let n = 0; n < 10; n += 1) await f.tick(60000);
   assert.equal(f.prompts.length, 3);
-  assert.equal(new URL(f.requests.at(-1)!.url).searchParams.has('adapter'), false);
+  assert.equal(f.requests.at(-1)!.body.registerWake, false);
   const unknown = fixture(); unknown.setMessages([{ id: 'one' }]); unknown.setSubmit(async () => { throw new Error('transport uncertain'); });
   await unknown.fire('session.start'); await unknown.tick(); await unknown.tick(60000);
   assert.equal(unknown.prompts.length, 1);
-  assert.equal(new URL(unknown.requests.at(-1)!.url).searchParams.has('adapter'), false);
+  assert.equal(unknown.requests.at(-1)!.body.registerWake, false);
 });
 
 test('identity changes fence pending receipt and polling callbacks; clear/resume retain polling', async () => {
@@ -101,7 +102,7 @@ test('identity changes fence pending receipt and polling callbacks; clear/resume
   assert.equal(f.prompts.length, 2, 'old finally must not clear the new pending submission');
   releases[1]({ text: 'accepted' }); await settle(); await f.tick();
   assert.equal(f.prompts.length, 2);
-  assert.equal(new URL(f.requests.at(-1)!.url).searchParams.get('nativeSessionId'), 'native-2');
+  assert.equal(f.requests.at(-1)!.body.session_id, 'native-2');
 });
 
 test('bridge restart recovers using current pointer; identity conflicts never submit', async () => {

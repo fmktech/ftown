@@ -27,6 +27,9 @@ it("shows a distinct full-identity push once and opens only its fixed session UR
  await w.emit("message",{source:{url:"https://app.test/dashboard"},data:{type:"ftown-push-owner",ownerHash:payload.ownerHash},ports:[]});
  await Promise.all([w.emit("push",{data:{json:()=>payload}}),w.emit("push",{data:{json:()=>payload}})]);
  expect(w.shown).toHaveLength(1);
+ expect(w.shown[0]).toMatchObject({title:"FTown attention",options:{body:"Open FTown to view details."}});
+ expect(JSON.stringify(w.shown)).not.toContain("Agent: choose");
+ expect(JSON.stringify(w.shown)).not.toContain("Question");
  await w.emit("push",{data:{json:()=>({...payload,id:"b".repeat(64)})}});expect(w.shown).toHaveLength(2);
  await w.emit("notificationclick",{notification:{close(){},data:{sessionId:"session-1",url:"https://evil.test"}}});expect(w.opened).toEqual(["https://app.test/dashboard?session=session-1"]);
  await w.emit("notificationclick",{notification:{close(){},data:{sessionId:"../outside"}}});expect(w.opened).toHaveLength(1);

@@ -2,6 +2,11 @@ import type { BrowserAccess } from './browser-access.js';
 import { createServer } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { Readable } from 'node:stream';
+import type { ApplicationJson, BridgeSecurityInfo, EnrollmentPacket, LocalEventPage, SecureEnvelope, VerifiedApplication } from './security/protocol.js';
+import { BridgeSecurityService, applicationJson } from './security/bridge/security.js';
+import { executeSecurePacket } from './security/bridge/execute.js';
+import { nativeWake } from './security/bridge/native-wake.js';
 
 import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 
@@ -175,6 +180,87 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private attention: AttentionStore | null = null;
   private userId: string = '';
   private authToken: string = '';
+  private security: BridgeSecurityService | null = null;
+  private securityInfo: BridgeSecurityInfo | null = null;
+  private secureCommand: ((message: VerifiedApplication) => Promise<ApplicationJson>) | null = null;
+  private localEventSequence = 0;
+  private localEvents: LocalEventPage['events'] = [];
+  private localEventBytes = 0;
+  private readonly localEventWaiters = new Set<() => void>();
+
+  setSecurity(security: BridgeSecurityService, info: BridgeSecurityInfo,
+    command: (message: VerifiedApplication) => Promise<ApplicationJson>): void {
+    this.security = security; this.securityInfo = info; this.secureCommand = command;
+  }
+  recordPublication(channel: string, data: unknown): void {
+    const item = { channel, data: applicationJson(data), cursor: ++this.localEventSequence };
+    this.localEvents.push(item); this.localEventBytes += Buffer.byteLength(JSON.stringify(item));
+    while (this.localEvents.length > 1000 || this.localEventBytes > 2_000_000) {
+      const removed = this.localEvents.shift(); if (!removed) break;
+      this.localEventBytes -= Buffer.byteLength(JSON.stringify(removed));
+    }
+    for (const wake of this.localEventWaiters) wake();
+  }
+
+  async dispatchSecure(message: VerifiedApplication): Promise<ApplicationJson> {
+    if (!this.security) throw new Error('Security is starting');
+    const route = message.application.route;
+    if (route.kind === 'command') {
+      if (!this.secureCommand) throw new Error('Commands are starting');
+      return this.secureCommand(message);
+    }
+    if (route.kind !== 'http') throw new Error('Invalid application route');
+    if (route.method === 'GET' && route.path.startsWith('/api/browser/events')) {
+      const url = new URL(route.path, 'http://localhost');
+      const raw = url.searchParams.get('after') ?? '0';
+      if (!/^\d{1,16}$/.test(raw) || !Number.isSafeInteger(Number(raw))) throw new Error('Invalid event cursor');
+      const after = Number(raw);
+      if (after === this.localEventSequence) await new Promise<void>(resolve => {
+        const wake = () => { clearTimeout(timer); this.localEventWaiters.delete(wake); resolve(); };
+        const timer = setTimeout(wake, 20000); this.localEventWaiters.add(wake);
+      });
+      await this.security.revalidate(message.principal);
+      let reset = after > this.localEventSequence || after < (this.localEvents[0]?.cursor ?? this.localEventSequence + 1) - 1;
+      const events = this.localEvents.filter(event => reset || event.cursor > after);
+      const page: LocalEventPage['events'] = [];
+      let bytes = 0;
+      let cursor = reset ? 0 : after;
+      for (const event of events) {
+        const size = Buffer.byteLength(JSON.stringify(event));
+        if (size > 250000) { cursor = event.cursor; reset = true; continue; }
+        if (bytes + size > 250000) break;
+        page.push(event); bytes += size; cursor = event.cursor;
+      }
+      return applicationJson({ events: page, cursor: events.length ? cursor : this.localEventSequence, reset });
+    }
+    const input = message.application.data as { body?: ApplicationJson; callerSessionId?: string };
+    const request = Readable.from([Buffer.from(JSON.stringify(input.body ?? {}), 'utf8')]) as unknown as IncomingMessage;
+    request.method = route.method; request.url = route.path; request.headers = {};
+    if (input.callerSessionId && message.principal.endpoint.kind === 'local-cli') request.headers['x-ftown-session-id'] = input.callerSessionId;
+    // This response adapter is in-process only. It never creates a socket or exports a bearer capability.
+    const response = new EventEmitter() as EventEmitter & { statusCode: number; destroyed: boolean; headersSent: boolean;
+      writeHead: (status: number) => void; setHeader: () => void; end: (body?: string) => void };
+    response.statusCode = 200; response.destroyed = false; response.headersSent = false;
+    const completed = new Promise<ApplicationJson>((resolve, reject) => {
+      response.writeHead = status => { response.statusCode = status; response.headersSent = true; };
+      response.setHeader = () => undefined;
+      response.end = text => {
+        try {
+          const body: ApplicationJson = text ? JSON.parse(text) as ApplicationJson : null;
+          if (Buffer.byteLength(text ?? '') > 300000) resolve({ status: 413, body: { error: 'response_too_large', code: 'response_too_large', outcomeUnknown: route.method !== 'GET' } });
+          else resolve({ status: response.statusCode, body });
+        } catch { reject(new Error('Invalid internal response')); }
+      };
+    });
+    await this.security.revalidate(message.principal);
+    void this.handleApiRoute(request, response as unknown as ServerResponse, new URL(route.path, 'http://localhost').pathname,
+      new URL(route.path, 'http://localhost')).catch(error => {
+        if (error instanceof BadRequestError) jsonResponse(response as unknown as ServerResponse, 400, { error: error.message });
+        else if (error instanceof AttentionError) jsonResponse(response as unknown as ServerResponse, error.status, { error: error.message, code: error.code });
+        else jsonResponse(response as unknown as ServerResponse, 500, { error: 'bridge_error', code: 'bridge_error' });
+      });
+    return completed;
+  }
   private port: number = 0;
   private sessionController: SessionController | null = null;
   private lifecycleController: SessionController | null = null;
@@ -333,6 +419,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   }
 
   stop(): void {
+    for (const wake of this.localEventWaiters) wake();
     this.recoveryStopped = true;
     this.recoveryEpoch++;
     if (this.runnerReadyListener) this.runner?.off?.('ready', this.runnerReadyListener);
@@ -355,59 +442,45 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     try { url = new URL(req.url ?? '/', `http://${req.headers.host}`); }
     catch { jsonResponse(res, 400, { error: 'Invalid request URL' }); return; }
     const path = url.pathname;
-    if (path.startsWith('/api/browser/')) {
-      if (!this.browserAccess) {
-        jsonResponse(res, 503, { error: 'Local browser access is starting', code: 'NOT_READY', requestId: randomUUID() });
+    const securityOrigin = req.headers.origin;
+    if (path.startsWith('/api/security/')) {
+      if (securityOrigin && !/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|$)/.test(securityOrigin)
+        && securityOrigin !== this.security?.options.browserOrigin) { jsonResponse(res, 403, { error: 'Forbidden origin' }); return; }
+      if (securityOrigin) {
+        res.setHeader('Access-Control-Allow-Origin', securityOrigin); res.setHeader('Vary', 'Origin');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS'); res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+        if (req.headers['access-control-request-private-network'] === 'true') res.setHeader('Access-Control-Allow-Private-Network', 'true');
+      }
+      if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+      if (!this.security || !this.securityInfo) { jsonResponse(res, 503, { error: 'security_setup_required', code: 'security_setup_required' }); return; }
+      if (path === '/api/security/info' && req.method === 'GET') { jsonResponse(res, 200, this.securityInfo); return; }
+      if (req.method === 'POST' && (path === '/api/security/envelope' || path === '/api/security/events')) {
+        const security = this.security;
+        void parseBody(req).then(async body => {
+          if (Buffer.byteLength(JSON.stringify(body)) > 450000) throw new Error('Packet too large');
+          const events = path === '/api/security/events';
+          const packet = body as unknown as SecureEnvelope | EnrollmentPacket;
+          const result = await executeSecurePacket(security, packet, { transport: events ? 'local-events' : 'local-http',
+            channel: `${events ? 'local-events' : 'local-http'}:${security.bridgeId}`, bridgeId: security.bridgeId, pairId: null }, async message => {
+              if (events && (message.application.route.kind !== 'http' || message.application.route.method !== 'GET'
+                || !message.application.route.path.startsWith('/api/browser/events?'))) throw new Error('Invalid event route');
+              return this.dispatchSecure(message);
+            });
+          jsonResponse(res, 200, result);
+        }).catch(() => { if (!res.headersSent) jsonResponse(res, 400, { error: 'invalid_envelope', code: 'invalid_envelope' }); });
         return;
       }
-      const presented = extractBearer(req);
-      const admin = req.headers.origin === undefined && !!this.authToken && !!presented &&
-        constantTimeEq(presented, this.authToken);
-      void this.browserAccess.handle(req, res, admin).catch(() => {
-        if (!res.headersSent) jsonResponse(res, 500, { error: 'Internal server error', code: 'INTERNAL_ERROR', requestId: randomUUID() });
-        else res.end();
-      });
-      return;
+      jsonResponse(res, 404, { error: 'Not found' }); return;
     }
-
-    const origin = req.headers.origin;
-    if (typeof origin === 'string' && origin && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|$)/.test(origin)) {
-      jsonResponse(res, 403, { error: 'Forbidden origin' });
-      return;
-    }
-
-    if (this.authToken) {
-      const presented = extractBearer(req);
-      if (!presented || !constantTimeEq(presented, this.authToken)) {
-        res.setHeader('WWW-Authenticate', 'Bearer realm="ftown-bridge"');
-        jsonResponse(res, 401, { error: 'Unauthorized' });
-        return;
-      }
-    }
-
     if (path === '/hook' && req.method === 'POST') {
-      void this.handleHook(req, res);
-      return;
+      const presented = extractBearer(req);
+      if (!presented || !this.authToken || !constantTimeEq(presented, this.authToken) || securityOrigin) {
+        jsonResponse(res, 401, { error: 'Unauthorized' }); return;
+      }
+      void this.handleHook(req, res); return;
     }
-
-    if (path.startsWith('/api/')) {
-      this.handleApiRoute(req, res, path, url).catch((err) => {
-        if (err instanceof AttentionError) {
-          if (!res.destroyed) jsonResponse(res, err.status, { error: err.message, code: err.code });
-          return;
-        }
-        if (err instanceof BadRequestError) {
-          jsonResponse(res, 400, { error: err.message });
-          return;
-        }
-        console.error('[LocalApiServer] API route error:', err instanceof Error ? err.message : String(err));
-        jsonResponse(res, 500, { error: 'Internal server error' });
-      });
-      return;
-    }
-
-    res.writeHead(404);
-    res.end();
+    // Raw bearer application/browser APIs are retired, including old local pairing capabilities.
+    jsonResponse(res, 426, { error: 'upgrade_required', code: 'upgrade_required' }); return;
   }
 
   private async handleApiRoute(
@@ -1133,6 +1206,16 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private async handleHook(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       const payload = await parseBody(req);
+      if (payload.hook_event_name === 'FtownNativeWake') {
+        if (!this.store || !this.mailStore) { jsonResponse(res, 503, { error: 'not_ready' }); return; }
+        try {
+          const result = await nativeWake(payload, { getSession: id => this.store!.loadSession(id),
+            register: (session, registration) => this.mail.registerNativeWake(session, registration),
+            unread: id => this.mailStore!.listUndelivered(id) });
+          jsonResponse(res, 200, result);
+        } catch { jsonResponse(res, 409, { error: 'invalid_native_target' }); }
+        return;
+      }
       const hookEventName = typeof payload.hook_event_name === 'string' ? payload.hook_event_name : undefined;
       let ftownSessionId = typeof payload.ftown_session_id === 'string' ? payload.ftown_session_id : undefined;
       let source = typeof payload.ftown_session_source === 'string' ? payload.ftown_session_source : undefined;

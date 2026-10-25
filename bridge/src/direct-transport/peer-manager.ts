@@ -1,4 +1,6 @@
 import { PeerConnection } from 'node-datachannel';
+import type { BridgeSecurityService } from '../security/bridge/security.js';
+import { EncryptedPeerChannel } from '../security/bridge/direct.js';
 
 import {
   DATA_CHANNEL_LABEL,
@@ -37,6 +39,7 @@ export type PeerConnectionFactory = (
 ) => DirectPeerConnection;
 
 export interface DirectPeerManagerOptions {
+  security?: BridgeSecurityService;
   /** This bridge's identity (as advertised on bridges:presence). */
   bridgeId: string;
   /** Emits bridge-originated answers/ICE over the signaling channel. */
@@ -104,6 +107,7 @@ class DirectPeer {
   private missedPings = 0;
   private iceDisconnectTimer?: ReturnType<typeof setTimeout>;
   private pairingTimer?: ReturnType<typeof setTimeout>;
+  private secure?: EncryptedPeerChannel;
 
   constructor(
     manager: DirectPeerManager,
@@ -137,6 +141,7 @@ class DirectPeer {
   hasAttached(sessionId: string): boolean {
     return this.attached.has(sessionId);
   }
+  async drain(): Promise<void> { await this.secure?.drain(); }
 
   /** Throws on native rejection of the SDP; the manager catches and tears down. */
   applyOffer(sdp: string): void {
@@ -187,15 +192,20 @@ class DirectPeer {
     if (this.pairingTimer) clearTimeout(this.pairingTimer);
     this.attached.clear();
     this.seq.clear();
+    this.secure?.close();
     try { this.dc?.close(); } catch { /* already gone */ }
     try { this.pc.close(); } catch { /* already gone */ }
   }
 
   private bindDataChannel(dc: DirectDataChannel): void {
     this.dc = dc;
+    if (!this.manager.security) { this.manager.teardown(this.pairId); return; }
+    this.secure = new EncryptedPeerChannel(this.manager.security, { transport: 'webrtc', channel: `direct:webrtc:${this.manager.bridgeId}:${this.pairId}`,
+      bridgeId: this.manager.bridgeId, pairId: this.pairId }, json => { if (dc.isOpen()) dc.sendMessage(json); },
+      frame => this.handleFrame(JSON.stringify(frame)), () => { this.helloOk = true; }, () => this.manager.teardown(this.pairId));
     dc.onMessage((msg) => {
       if (typeof msg !== 'string') return;
-      this.handleFrame(msg);
+      return this.secure?.receive(msg);
     });
     dc.onClosed(() => this.manager.teardown(this.pairId));
     dc.onError(() => this.manager.teardown(this.pairId));
@@ -292,7 +302,7 @@ class DirectPeer {
   private send(msg: DirectMessage): void {
     if (this.closed || !this.dc || !this.dc.isOpen()) return;
     try {
-      this.dc.sendMessage(JSON.stringify(msg));
+      this.secure?.send(msg);
     } catch {
       // Drop the frame rather than kill the connection; a genuinely dead
       // channel is detected by onClosed/onError or missed pings.
@@ -306,6 +316,7 @@ class DirectPeer {
  * attached peers over the `ftown` DataChannel.
  */
 export class DirectPeerManager {
+  readonly security?: BridgeSecurityService;
   readonly bridgeId: string;
   private readonly sendSignalCb: (msg: SignalMessage) => void;
   private readonly onInputCb: (sessionId: string, data: string) => void;
@@ -315,6 +326,7 @@ export class DirectPeerManager {
   private readonly peers = new Map<string, DirectPeer>();
 
   constructor(options: DirectPeerManagerOptions) {
+    this.security = options.security;
     this.bridgeId = options.bridgeId;
     this.sendSignalCb = options.sendSignal;
     this.onInputCb = options.onInput;
@@ -387,6 +399,7 @@ export class DirectPeerManager {
     for (const peer of this.peers.values()) peer.close();
     this.peers.clear();
   }
+  async drain(): Promise<void> { await Promise.all([...this.peers.values()].map(peer => peer.drain())); }
 
   teardown(pairId: string): void {
     const peer = this.peers.get(pairId);

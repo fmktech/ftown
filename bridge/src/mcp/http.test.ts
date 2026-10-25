@@ -19,12 +19,16 @@ import { createGateway, gatewayConfigSchema } from "./http.js";
 import { FtownOAuthProvider } from "./oauth.js";
 import type { OAuthStore, OAuthTransaction } from "./oauth-store.js";
 import { createRelayHandler } from "./relay-handler.js";
+import { TestIdentityStore, TestAuditStore, approvalAssertion } from "./test-support.js";
+import { BridgeSecurityService, applicationJson } from "../security/bridge/security.js";
+import { generateEndpoint } from "../security/crypto.js";
+import { LOCAL_RECOVERY_AUTHORITY } from "../security/bridge/policy.js";
 
 class MemoryStore implements OAuthStore {
   data = new Map<string, { value: any; expires: number }>();
   owners = new Map([
-    ["user-a", ["machine-a"]],
-    ["user-b", ["machine-b"]],
+    ["349f8d2e-38e4-4d59-888d-687dcfa19e39", ["machine-a"]],
+    ["619f68a6-77c1-49f6-ae2d-c5fa169d284b", ["machine-b"]],
   ]);
   private queue: Promise<unknown> = Promise.resolve();
   transaction<T>(fn: (tx: OAuthTransaction) => Promise<T>): Promise<T> {
@@ -69,8 +73,8 @@ test("HTTP OAuth flow: PKCE, consent, machine isolation, refresh replay and revo
       ],
     },
     access: [
-      { subject: "user-a", machines: ["machine-a", "machine-b"] },
-      { subject: "user-b", machines: ["machine-b"] },
+      { subject: "349f8d2e-38e4-4d59-888d-687dcfa19e39", machines: ["machine-a", "machine-b"] },
+      { subject: "619f68a6-77c1-49f6-ae2d-c5fa169d284b", machines: ["machine-b"] },
     ],
   });
   const secret = "test-only-approval-secret-not-production-123456";
@@ -81,11 +85,13 @@ test("HTTP OAuth flow: PKCE, consent, machine isolation, refresh replay and revo
   t.after(() => server.close());
   const base = `http://127.0.0.1:${(server.address() as any).port}`;
   config.publicUrl = base.replace("http:", "https:");
+  const keys = new TestIdentityStore();
+  const audit = new TestAuditStore();
   const provider = new FtownOAuthProvider(store, {
     ...config,
     approvalSecret: secret,
-  });
-  server.on("request", createGateway(config, provider));
+  }, keys);
+  server.on("request", createGateway(config, provider, undefined, audit));
   const headers = { "X-Forwarded-Proto": "https" };
   const request = (path: string, init: RequestInit = {}) =>
     fetch(base + path, {
@@ -145,23 +151,32 @@ test("HTTP OAuth flow: PKCE, consent, machine isolation, refresh replay and revo
     scope: "mcp:read",
     state: "state-value",
   };
+  const signedApprovals = new Map<string, Promise<string>>();
   const sign = (
     id: string,
     purpose: string,
     machines?: string[],
-    subject = "user-a",
-  ) =>
-    jwt.sign({ request: id, purpose, machines }, secret, {
+    subject = "349f8d2e-38e4-4d59-888d-687dcfa19e39",
+  ) => {
+    if (purpose === 'approve') {
+      const cacheKey = JSON.stringify([id, subject, machines]);
+      const existing = signedApprovals.get(cacheKey);
+      if (existing) return existing;
+      const result = approvalAssertion(provider, keys, id, subject, machines ?? [], secret);
+      signedApprovals.set(cacheKey, result); return result;
+    }
+    return jwt.sign({ request: id, purpose, machines }, secret, {
       issuer: config.loginUrl,
       audience: config.publicUrl,
       subject,
       expiresIn: 60,
     });
-  const consent = (action: string, assertion: string) =>
+  };
+  const consent = async (action: string, assertion: string | Promise<string>) =>
     request(`/consent/${action}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ assertion }),
+      body: JSON.stringify({ assertion: await assertion }),
     });
   const authorize = await request(
     "/authorize?" + new URLSearchParams(authParams),
@@ -207,7 +222,7 @@ test("HTTP OAuth flow: PKCE, consent, machine isolation, refresh replay and revo
   ]);
   assert.deepEqual(concurrent.map((r) => r.status).sort(), [200, 400]);
   const tokens = await concurrent.find((r) => r.status === 200)!.json();
-  const otherResource = new FtownOAuthProvider(store, { ...config, publicUrl: "https://another-gateway.example", approvalSecret: secret });
+  const otherResource = new FtownOAuthProvider(store, { ...config, publicUrl: "https://another-gateway.example", approvalSecret: secret }, keys);
   await assert.rejects(otherResource.verifyAccessToken(tokens.access_token));
   await assert.rejects(otherResource.exchangeRefreshToken(client, tokens.refresh_token, undefined, new URL(otherResource.resource)));
   const discovery = await (await request("/.well-known/oauth-authorization-server")).json();
@@ -236,6 +251,12 @@ test("HTTP OAuth flow: PKCE, consent, machine isolation, refresh replay and revo
   });
   assert.equal(hidden.isError, true);
   assert.equal((hidden.structuredContent as any).error.code, "forbidden");
+  await mcp.callTool({ name: 'submitted_sensitive_unknown_name', arguments: { prompt: 'never-log-arguments' } }).catch(() => undefined);
+  await mcp.callTool({ name: 'sessions_create', arguments: { machine: 'machine-a', prompt: 'never-log-mutation' } }).catch(() => undefined);
+  assert.ok(audit.events.some(event => event.tool === 'unknown_tool' && event.status === 'rejected'));
+  assert.ok(audit.events.some(event => event.tool === 'sessions_create' && event.status === 'rejected' && event.errorCode === 'permission_denied'));
+  assert.ok(!JSON.stringify(audit.events).includes('submitted_sensitive'));
+  assert.ok(!JSON.stringify(audit.events).includes('never-log'));
   const refresh = {
     client_id: client.client_id,
     grant_type: "refresh_token",
@@ -271,9 +292,9 @@ test("HTTP OAuth flow: PKCE, consent, machine isolation, refresh replay and revo
       code: callback.searchParams.get("code")!,
     })
   ).json();
-  store.owners.set("user-a", []);
+  store.owners.set("349f8d2e-38e4-4d59-888d-687dcfa19e39", []);
   await assert.rejects(provider.verifyAccessToken(tokens2.access_token));
-  store.owners.set("user-a", ["machine-a"]);
+  store.owners.set("349f8d2e-38e4-4d59-888d-687dcfa19e39", ["machine-a"]);
   assert.equal(
     (
       await post("/revoke", {
@@ -286,59 +307,36 @@ test("HTTP OAuth flow: PKCE, consent, machine isolation, refresh replay and revo
   await assert.rejects(provider.verifyAccessToken(tokens2.access_token));
 });
 
-test("bridge relay adapter deduplicates mutations and rejects loops and expired commands", async (t) => {
-  let calls = 0;
-  const server = createServer((req, res) => {
-    calls++;
-    assert.equal(req.headers.authorization, "Bearer local-token");
-    res.end(JSON.stringify({ session: { id: "created" } }));
-  });
-  server.listen(0, "127.0.0.1");
-  await new Promise<void>((r) => server.once("listening", r));
-  t.after(() => server.close());
-  const handle = createRelayHandler(
-    (server.address() as any).port,
-    "local-token",
-  );
-  const payload = {
-    expiresAt: Date.now() + 15000,
-    request: {
-      method: "POST",
-      path: "/api/sessions",
-      body: { prompt: "hello" },
-      timeoutMs: 1000,
-    },
-  };
-  const results = await Promise.all([
-    handle("same", payload),
-    handle("same", payload),
-  ]);
-  assert.equal(calls, 1);
-  assert.deepEqual(results[0], results[1]);
-  await assert.rejects(
-    handle("same", {
-      ...payload,
-      request: { ...payload.request, body: { prompt: "changed" } },
-    }),
-  );
-  await assert.rejects(handle("expired", { ...payload, expiresAt: 0 }));
-  await assert.rejects(
-    handle("loop", {
-      ...payload,
-      request: { ...payload.request, path: "/api/loops" },
-    }),
-  );
+test("legacy native relay adapter rejects every plaintext request before HTTP", async () => {
+  const handle = createRelayHandler(1, 'must-not-be-used');
+  for (const request of [
+    { method: 'GET', path: '/api/sessions', timeoutMs: 1000 },
+    { method: 'POST', path: '/api/sessions', body: { prompt: 'sensitive' }, timeoutMs: 1000 },
+    { method: 'POST', path: '/api/loops', timeoutMs: 1000 },
+  ]) await assert.rejects(handle('legacy', { expiresAt: Date.now() + 1000, request }), { code: 'upgrade_required', outcomeUnknown: false });
 });
-
 
 test("real hook ledger through OAuth MCP: SSE, shared ack, source restart and revocation", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "ftown-attention-http-"));
   const sessions = new SessionStore(join(dir, "data"));
   const sample = { id: "attention-worker", name: "Attention worker", command: "test", status: "running" as const, bridgeId: "machine-a", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
   await sessions.saveSession(sample);
+  const keys = new TestIdentityStore();
+  const bridgeIdentity = await keys.bridge("349f8d2e-38e4-4d59-888d-687dcfa19e39", "machine-a");
+  const security = new BridgeSecurityService(bridgeIdentity, "machine-a", join(dir, "security"), { relayUserId: "owner@example.test" });
+  const browser = await generateEndpoint("349f8d2e-38e4-4d59-888d-687dcfa19e39", "browser");
+  const invitation = await security.policy.createInvitation(LOCAL_RECOVERY_AUTHORITY, { label: "Test admin" });
+  await security.policy.consumeInvitation({ type: 'enroll', candidate: browser.endpoint, invitationId: invitation.invitationId, invitationSecret: invitation.secret, label: 'Test admin' });
   const api = new LocalApiServer();
   api.setAuthToken("local-attention-token");
-  api.setDependencies(sessions, {} as ProcessRunner, {} as CentrifugoClient, "user-a");
+  api.setSecurity(security, { protocolVersion: 1, ownerId: bridgeIdentity.endpoint.ownerId, bridgeId: 'machine-a', endpoint: bridgeIdentity.endpoint, relayUserId: 'owner@example.test' }, async message => {
+    if (message.application.route.kind === 'command' && message.application.route.command === 'security_activate_mcp') {
+      const result = await security.activateMcp(message.principal, message.principal.grantId!);
+      return applicationJson({ type: 'command_response', response: { requestId: message.application.route.requestId, success: true, data: result } });
+    }
+    return applicationJson({ error: 'unsupported test command' });
+  });
+  api.setDependencies(sessions, {} as ProcessRunner, {} as CentrifugoClient, "349f8d2e-38e4-4d59-888d-687dcfa19e39");
   api.setAttentionStore(new AttentionStore((id) => sessions.sessionDir(id)));
   let apiPort = await api.start();
   const bridgeFile = join(dir, "bridge.json");
@@ -349,14 +347,15 @@ test("real hook ledger through OAuth MCP: SSE, shared ack, source restart and re
   const address = gateway.address();
   assert.ok(address && typeof address !== "string");
   const base = `http://127.0.0.1:${address.port}`;
-  const config = gatewayConfigSchema.parse({ publicUrl: base.replace("http:", "https:"), loginUrl: "https://ftown.example.test", fleet: { machines: [{ id: "machine-a", transport: "local", bridgeFile }] }, access: [{ subject: "user-a", machines: ["machine-a"] }] });
+  const config = gatewayConfigSchema.parse({ publicUrl: base.replace("http:", "https:"), loginUrl: "https://ftown.example.test", fleet: { machines: [{ id: "machine-a", transport: "local", bridgeFile }] }, access: [{ subject: "349f8d2e-38e4-4d59-888d-687dcfa19e39", machines: ["machine-a"] }] });
   const secret = "test-only-attention-approval-secret-123456789";
-  const provider = new FtownOAuthProvider(oauthStore, { ...config, approvalSecret: secret });
-  gateway.on("request", createGateway(config, provider));
+  const provider = new FtownOAuthProvider(oauthStore, { ...config, approvalSecret: secret }, keys);
+  gateway.on("request", createGateway(config, provider, undefined, new TestAuditStore()));
   const clients: Client[] = [];
   t.after(async () => {
     try { for (const client of clients) await client.close(); }
     finally {
+      await security.close();
       gateway.closeAllConnections();
       await new Promise<void>((resolve) => gateway.close(() => resolve()));
       api.getHttpServer()?.closeAllConnections(); api.stop();
@@ -371,7 +370,7 @@ test("real hook ledger through OAuth MCP: SSE, shared ack, source restart and re
     const verifier = randomBytes(32).toString("base64url");
     const auth = await request("/authorize?" + new URLSearchParams({ client_id: client.client_id, redirect_uri: client.redirect_uris[0], response_type: "code", code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256", resource: provider.resource, scope }));
     const id = new URL(auth.headers.get("location")!).searchParams.get("request")!;
-    const assertion = jwt.sign({ request: id, purpose: "approve", machines: ["machine-a"] }, secret, { subject: "user-a", issuer: config.loginUrl, audience: config.publicUrl, expiresIn: 60 });
+    const assertion = await approvalAssertion(provider, keys, id, "349f8d2e-38e4-4d59-888d-687dcfa19e39", ['machine-a'], secret, async metadata => security.approveMcp(await security.policy.principal(browser.endpoint.id), { requestId: metadata.requestId, grantId: metadata.grantId, endpoint: metadata.endpoint, permissions: metadata.permissions, expiresAt: metadata.expiresAt, activeExpiresAt: metadata.activeExpiresAt }));
     const consent = await request("/consent/approve", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ assertion }) });
     const redirect = new URL((await consent.json()).redirect);
     const exchange = await request("/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ client_id: client.client_id, grant_type: "authorization_code", code: redirect.searchParams.get("code")!, code_verifier: verifier, redirect_uri: client.redirect_uris[0], resource: provider.resource }) });
@@ -405,7 +404,7 @@ test("real hook ledger through OAuth MCP: SSE, shared ack, source restart and re
   const call = async (name: string, args: Record<string, unknown> = {}) => client.callTool({ name, arguments: args });
   const identity = await call("whoami", target);
   const who = identity.structuredContent as { account: { subject: string }; self: null; target: { sessionId: string } };
-  assert.equal(who.account.subject, "user-a"); assert.equal(who.self, null); assert.equal(who.target.sessionId, sample.id);
+  assert.equal(who.account.subject, "349f8d2e-38e4-4d59-888d-687dcfa19e39"); assert.equal(who.self, null); assert.equal(who.target.sessionId, sample.id);
   const inbox = await call("attention_inbox", target);
   const cursor = (inbox.structuredContent as { cursor: string }).cursor;
   const hook = async (message: string) => {
@@ -448,11 +447,11 @@ test("real hook ledger through OAuth MCP: SSE, shared ack, source restart and re
   const revokeCursor = (beforeRevocation.structuredContent as { cursor: string }).cursor;
   const revokeProgress: number[] = [];
   const revokingWait = client.callTool({ name: "attention_wait", arguments: { targets: [{ ...target, cursor: revokeCursor }], timeoutSeconds: 3 } }, undefined, { onprogress: (value) => revokeProgress.push(value.progress) });
-  await delay(30); oauthStore.owners.set("user-a", []); await hook("A new question after revocation");
+  await delay(30); oauthStore.owners.set("349f8d2e-38e4-4d59-888d-687dcfa19e39", []); await hook("A new question after revocation");
   const revoked = await revokingWait;
   assert.equal(revoked.isError, true); assert.deepEqual(revokeProgress, []);
   assert.equal((revoked.structuredContent as { error: { code: string } }).error.code, "forbidden");
-  oauthStore.owners.set("user-a", ["machine-a"]);
+  oauthStore.owners.set("349f8d2e-38e4-4d59-888d-687dcfa19e39", ["machine-a"]);
   // Drain every observed response (including the revocation wait) before client
   // close aborts the transport. Failed body reads remain test failures.
   const completedFrames = await Promise.all(frames);

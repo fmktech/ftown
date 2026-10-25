@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtempSync, mkdirSync, lstatSync, readFileSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, lstatSync, readFileSync, symlinkSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -106,6 +106,7 @@ interface ScriptResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  proxyRequest?: { method: string; path: string };
 }
 
 async function runScript(
@@ -127,7 +128,8 @@ async function runScript(
     execution.child.stdin?.end(stdin);
     const { stdout, stderr } = await execution;
     if (stdinError) throw stdinError;
-    return { exitCode: 0, stdout, stderr };
+    const proxyFile = env.FTOWN_TEST_PROXY_REQUEST;
+    return { exitCode: 0, stdout, stderr, ...(proxyFile && existsSync(proxyFile) ? { proxyRequest: JSON.parse(readFileSync(proxyFile, 'utf8')) } : {}) };
   } catch (err) {
     const e = err as { code?: unknown; stdout?: unknown; stderr?: unknown };
     return {
@@ -139,14 +141,14 @@ async function runScript(
 }
 
 function scriptEnv(stub: StubBridge, extra: Record<string, string | undefined> = {}): Record<string, string | undefined> {
-  return {
-    HOME: mkdtempSync(join(tmpdir(), 'ftown-muse-home-')),
-    MUSE_PLUGIN_ROOT: BUNDLE_DIR,
-    FTOWN_SESSION_ID: 'ftown-sid-1',
-    FTOWN_HOOK_PORT: String(stub.port),
-    FTOWN_HOOK_TOKEN: 'test-token',
-    ...extra,
-  };
+  const home = extra.HOME ?? mkdtempSync(join(tmpdir(), 'ftown-muse-home-'));
+  const bin = join(home, '.ftown', 'bin'); mkdirSync(bin, { recursive: true });
+  const response = join(home, 'proxy-response.json'); const request = join(home, 'proxy-request.json');
+  writeFileSync(response, JSON.stringify({ status: 200, body: stub.inboxPayload }));
+  // Mock only the local CLI dependency. Production shell sends its request exclusively over stdin.
+  writeFileSync(join(bin, 'ftown'), '#!/bin/sh\n[ "$1" = security ] && [ "$2" = proxy ] || exit 1\ncat > "$FTOWN_TEST_PROXY_REQUEST"\ncat "$FTOWN_TEST_PROXY_RESPONSE"\n', { mode: 0o700 });
+  return { HOME: home, MUSE_PLUGIN_ROOT: BUNDLE_DIR, FTOWN_SESSION_ID: 'ftown-sid-1', FTOWN_HOOK_PORT: String(stub.port),
+    FTOWN_HOOK_TOKEN: 'test-token', FTOWN_TEST_PROXY_REQUEST: request, FTOWN_TEST_PROXY_RESPONSE: response, ...extra };
 }
 
 describe('muse process fixture', () => {
@@ -283,10 +285,9 @@ describe('muse hook scripts', () => {
       session_id: '01a0d03f-c337-7b60-92c8-0c4278a7360b',
       cwd: '/private/tmp/muse-hook-probe2/proj',
     });
-    const drain = stub.requests.find((request) => request.method === 'GET');
-    assert.ok(drain);
-    assert.equal(drain.url, '/api/sessions/ftown-sid-1/inbox?wait=0');
-    assert.equal(drain.authorization, 'Bearer test-token');
+    assert.equal(stub.requests.some(request => request.method === 'GET'), false, 'no plaintext inbox request');
+    assert.equal(result.proxyRequest?.method, 'GET');
+    assert.equal(result.proxyRequest?.path, '/api/sessions/ftown-sid-1/inbox?wait=0');
     assert.deepEqual(JSON.parse(result.stdout), {
       hookSpecificOutput: {
         hookEventName: 'Stop',
@@ -305,7 +306,8 @@ describe('muse hook scripts', () => {
     assert.equal(result.exitCode, 0);
     assert.equal(result.stdout, '');
     assert.equal(stub.requests.filter((request) => request.method === 'POST').length, 1);
-    assert.equal(stub.requests.filter((request) => request.method === 'GET').length, 1);
+    assert.equal(stub.requests.filter((request) => request.method === 'GET').length, 0);
+    assert.equal(result.proxyRequest?.method, 'GET');
   });
 
   it('exits 0 fast when the bridge is unreachable', async () => {

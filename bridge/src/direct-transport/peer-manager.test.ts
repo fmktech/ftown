@@ -8,7 +8,14 @@
  * peerConnectionFactory?, now? }`. Fakes below implement those structural interfaces
  * directly rather than the real `node-datachannel` classes.
  */
-import { describe, it } from 'node:test';
+import { describe, it, after } from 'node:test';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { secureFixture } from '../security/bridge/fixtures.test.js';
+import { loadLocalIdentity } from '../security/bridge/identity.js';
+import { seal, open } from '../security/crypto.js';
 import assert from 'node:assert/strict';
 
 import { DirectPeerManager } from './peer-manager.js';
@@ -16,7 +23,11 @@ import type { DirectDataChannel, DirectPeerConnection, PeerConnectionFactory } f
 import { DIRECT_PROTOCOL_VERSION } from './contract.js';
 import type { SignalMessage } from './contract.js';
 
-const OUR_BRIDGE_ID = 'bridge-under-test';
+const OUR_BRIDGE_ID = 'bridge';
+const directory = await mkdtemp(join(tmpdir(), 'ftown-peer-unit-'));
+const secure = await secureFixture(directory, async () => new Response('{}'));
+const remote = await loadLocalIdentity(directory, secure.pointer.ownerId!);
+after(async () => { await secure.security.close(); await rm(directory, { recursive: true, force: true }); });
 
 interface DirectFrame {
   kind: string;
@@ -31,6 +42,8 @@ class FakeDataChannel implements DirectDataChannel {
   public closed = false;
   /** When true, sendMessage throws (simulates a native send failure). */
   public failSend = false;
+  pairId = 'pair-1';
+  private decodeQueue: Promise<void> = Promise.resolve();
   private open = true;
   private messageCb?: (msg: string | Buffer | ArrayBuffer) => void;
   private closedCb?: () => void;
@@ -53,7 +66,13 @@ class FakeDataChannel implements DirectDataChannel {
 
   sendMessage(payload: string): boolean {
     if (this.failSend) throw new Error('native send failure');
-    this.sent.push(JSON.parse(payload));
+    this.decodeQueue = this.decodeQueue.then(async () => {
+      const packet = JSON.parse(payload);
+      const decoded = JSON.parse(new TextDecoder().decode(await open(remote, secure.security.endpoint, packet, {
+        ownerId: remote.endpoint.ownerId, bridgeId: OUR_BRIDGE_ID, channel: `direct:webrtc:${OUR_BRIDGE_ID}:${this.pairId}`,
+        recipientId: remote.endpoint.id, purpose: packet.purpose })));
+      this.sent.push(packet.purpose === 'welcome' ? { kind: 'hello_ack', bridgeId: OUR_BRIDGE_ID, protocolVersion: DIRECT_PROTOCOL_VERSION } : decoded.data);
+    });
     return true;
   }
 
@@ -64,9 +83,19 @@ class FakeDataChannel implements DirectDataChannel {
   }
 
   /** Test helper: simulate an inbound JSON text frame from the remote peer. */
-  receive(frame: DirectFrame): void {
-    this.messageCb?.(JSON.stringify(frame));
+  async receive(frame: DirectFrame): Promise<void> {
+    const hello = frame.kind === 'hello';
+    const channel = `direct:webrtc:${OUR_BRIDGE_ID}:${this.pairId}`;
+    const body = hello ? { type: 'hello', challenge: randomUUID() } : { type: 'application', route: { kind: 'terminal',
+      sessionId: typeof frame.sessionId === 'string' ? frame.sessionId : '', frameType: frame.kind, pairId: this.pairId }, data: frame, mcp: null };
+    const packet = await seal(remote, secure.security.endpoint, { type: 'ftown_encrypted', version: 1,
+      senderId: remote.endpoint.id, recipientId: secure.security.endpoint.id, ownerId: remote.endpoint.ownerId,
+      bridgeId: OUR_BRIDGE_ID, channel, purpose: hello ? 'hello' : 'application', messageId: randomUUID(), createdAt: Date.now(),
+      expiresAt: Date.now() + 60000, receiverEpoch: hello ? null : secure.security.receiverEpoch }, new TextEncoder().encode(JSON.stringify(body)));
+    await this.messageCb?.(JSON.stringify(hello && frame.protocolVersion !== DIRECT_PROTOCOL_VERSION ? { ...packet, version: 2 } : packet));
+    await this.decodeQueue;
   }
+  async flush(): Promise<void> { await this.decodeQueue; }
 }
 
 class FakePeerConnection implements DirectPeerConnection {
@@ -138,6 +167,7 @@ function makeManager(
 
   const peerConnectionFactory: PeerConnectionFactory = (_peerName, _config) => {
     const pc = new FakePeerConnection();
+    pc.dataChannel.pairId = _peerName.slice('ftown-'.length);
     configurePc?.(pc, peers.length);
     peers.push(pc);
     return pc;
@@ -145,6 +175,7 @@ function makeManager(
 
   const manager = new DirectPeerManager({
     bridgeId: OUR_BRIDGE_ID,
+    security: secure.security,
     sendSignal: (msg) => sendSignalCalls.push(msg),
     onInput: (sessionId, data) => inputCalls.push([sessionId, data]),
     onResize: (sessionId, cols, rows) => resizeCalls.push([sessionId, cols, rows]),
@@ -167,7 +198,7 @@ function offerMsg(overrides: Partial<SignalMessage> = {}): SignalMessage {
 }
 
 /** Drives a peer all the way to an attached, open DataChannel. Returns the fakes. */
-function attachPeer(
+async function attachPeer(
   manager: DirectPeerManager,
   peers: FakePeerConnection[],
   sessionId: string,
@@ -180,14 +211,14 @@ function attachPeer(
   pc.triggerLocalDescription('ANSWER_SDP', 'answer');
   const dc = pc.triggerDataChannel();
 
-  dc.receive({ kind: 'hello', clientId, protocolVersion: DIRECT_PROTOCOL_VERSION });
-  dc.receive({ kind: 'attach', sessionId });
+  await dc.receive({ kind: 'hello', clientId, protocolVersion: DIRECT_PROTOCOL_VERSION });
+  await dc.receive({ kind: 'attach', sessionId });
 
   return { pc, dc };
 }
 
-describe('DirectPeerManager.handleSignal', () => {
-  it('webrtc_offer creates a peer connection, sets the remote description, and answers via sendSignal with matching pairId/clientId', () => {
+describe('DirectPeerManager.handleSignal', async () => {
+  it('webrtc_offer creates a peer connection, sets the remote description, and answers via sendSignal with matching pairId/clientId', async () => {
     const { manager, peers, sendSignalCalls } = makeManager();
     manager.handleSignal(offerMsg());
 
@@ -204,7 +235,7 @@ describe('DirectPeerManager.handleSignal', () => {
     assert.strictEqual(sendSignalCalls[0].bridgeId, OUR_BRIDGE_ID);
   });
 
-  it('ignores signaling messages addressed to a different bridgeId', () => {
+  it('ignores signaling messages addressed to a different bridgeId', async () => {
     const { manager, peers, sendSignalCalls } = makeManager();
     manager.handleSignal(offerMsg({ bridgeId: 'some-other-bridge' }));
 
@@ -212,7 +243,7 @@ describe('DirectPeerManager.handleSignal', () => {
     assert.deepStrictEqual(sendSignalCalls, []);
   });
 
-  it('webrtc_close tears down the corresponding peer connection', () => {
+  it('webrtc_close tears down the corresponding peer connection', async () => {
     const { manager, peers } = makeManager();
     manager.handleSignal(offerMsg());
     const pc = peers[0];
@@ -231,31 +262,33 @@ describe('DirectPeerManager.handleSignal', () => {
   });
 });
 
-describe('DirectPeerManager DataChannel protocol', () => {
-  it('hello with a mismatched protocol version closes the peer', () => {
+describe('DirectPeerManager DataChannel protocol', async () => {
+  it('hello with a mismatched protocol version closes the peer', async () => {
     const { manager, peers } = makeManager();
     manager.handleSignal(offerMsg());
     const pc = peers[0];
     pc.triggerLocalDescription('ANSWER_SDP', 'answer');
     const dc = pc.triggerDataChannel();
 
-    dc.receive({ kind: 'hello', clientId: 'client-1', protocolVersion: DIRECT_PROTOCOL_VERSION + 1 });
+    await dc.receive({ kind: 'hello', clientId: 'client-1', protocolVersion: DIRECT_PROTOCOL_VERSION + 1 });
 
     assert.ok(pc.closed || dc.closed, 'expected the peer or channel to be closed on version mismatch');
   });
 
-  it('attach triggers onAttach and sends a screen frame before any output frames, with seq starting at 0 and increasing monotonically', () => {
+  it('attach triggers onAttach and sends a screen frame before any output frames, with seq starting at 0 and increasing monotonically', async () => {
     const attachedSessions: string[] = [];
     const { manager, peers } = makeManager((sessionId) => {
       attachedSessions.push(sessionId);
       return 'CURRENT-SCREEN';
     });
 
-    const { dc } = attachPeer(manager, peers, 'sess-1');
+    const { dc } = await attachPeer(manager, peers, 'sess-1');
     assert.deepStrictEqual(attachedSessions, ['sess-1']);
 
     manager.sendOutput('sess-1', 'chunk-1');
+    await manager.drain(); await Promise.all(peers.map(peer => peer.dataChannel.flush()));
     manager.sendOutput('sess-1', 'chunk-2');
+    await manager.drain(); await Promise.all(peers.map(peer => peer.dataChannel.flush()));
 
     const framesForSession = dc.sent.filter((f) => f.sessionId === 'sess-1');
     assert.strictEqual(framesForSession[0].kind, 'screen');
@@ -267,47 +300,48 @@ describe('DirectPeerManager DataChannel protocol', () => {
     assert.strictEqual(framesForSession[2].seq, 2);
   });
 
-  it('re-attaching a session resets seq (screen resync per R1/R7)', () => {
+  it('re-attaching a session resets seq (screen resync per R1/R7)', async () => {
     const { manager, peers } = makeManager(() => 'SCREEN');
-    const { dc } = attachPeer(manager, peers, 'sess-1');
+    const { dc } = await attachPeer(manager, peers, 'sess-1');
     manager.sendOutput('sess-1', 'chunk-1'); // seq 1
+    await manager.drain(); await Promise.all(peers.map(peer => peer.dataChannel.flush()));
 
-    dc.receive({ kind: 'attach', sessionId: 'sess-1' }); // re-attach
+    await dc.receive({ kind: 'attach', sessionId: 'sess-1' }); // re-attach
 
     const framesAfterReattach = dc.sent.filter((f) => f.sessionId === 'sess-1').slice(-1);
     assert.strictEqual(framesAfterReattach[0].kind, 'screen');
     assert.strictEqual(framesAfterReattach[0].seq, 0);
   });
 
-  it('input and resize frames invoke the callbacks supplied at construction, with the sessionId', () => {
+  it('input and resize frames invoke the callbacks supplied at construction, with the sessionId', async () => {
     const { manager, peers, inputCalls, resizeCalls } = makeManager();
-    const { dc } = attachPeer(manager, peers, 'sess-1');
+    const { dc } = await attachPeer(manager, peers, 'sess-1');
 
-    dc.receive({ kind: 'input', sessionId: 'sess-1', data: 'ls\n' });
-    dc.receive({ kind: 'resize', sessionId: 'sess-1', cols: 80, rows: 24 });
+    await dc.receive({ kind: 'input', sessionId: 'sess-1', data: 'ls\n' });
+    await dc.receive({ kind: 'resize', sessionId: 'sess-1', cols: 80, rows: 24 });
 
     assert.deepStrictEqual(inputCalls, [['sess-1', 'ls\n']]);
     assert.deepStrictEqual(resizeCalls, [['sess-1', 80, 24]]);
   });
 
-  it('unknown frame kinds are ignored without throwing and without invoking any callback', () => {
+  it('unknown frame kinds are ignored without throwing and without invoking any callback', async () => {
     const { manager, peers, inputCalls } = makeManager();
-    const { dc } = attachPeer(manager, peers, 'sess-1');
+    const { dc } = await attachPeer(manager, peers, 'sess-1');
 
-    assert.doesNotThrow(() => dc.receive({ kind: 'bogus_kind', sessionId: 'sess-1' }));
+    await dc.receive({ kind: 'bogus_kind', sessionId: 'sess-1' });
     assert.deepStrictEqual(inputCalls, []);
   });
 
-  it('hasAttachedPeers reflects whether a session has an attached peer', () => {
+  it('hasAttachedPeers reflects whether a session has an attached peer', async () => {
     const { manager, peers } = makeManager();
     assert.strictEqual(manager.hasAttachedPeers('sess-1'), false);
-    attachPeer(manager, peers, 'sess-1');
+    await attachPeer(manager, peers, 'sess-1');
     assert.strictEqual(manager.hasAttachedPeers('sess-1'), true);
   });
 });
 
-describe('DirectPeerManager.closeAll', () => {
-  it('closes every tracked peer connection', () => {
+describe('DirectPeerManager.closeAll', async () => {
+  it('closes every tracked peer connection', async () => {
     const { manager, peers } = makeManager();
     manager.handleSignal(offerMsg({ pairId: 'pair-1', clientId: 'client-1' }));
     manager.handleSignal(offerMsg({ pairId: 'pair-2', clientId: 'client-2' }));
@@ -319,7 +353,7 @@ describe('DirectPeerManager.closeAll', () => {
   });
 });
 
-describe('DirectPeerManager malformed signal hardening', () => {
+describe('DirectPeerManager malformed signal hardening', async () => {
   const badPayloadCases: Array<{ name: string; payload: unknown }> = [
     { name: 'empty string', payload: '' },
     { name: 'undefined', payload: undefined },
@@ -327,7 +361,7 @@ describe('DirectPeerManager malformed signal hardening', () => {
   ];
 
   for (const { name, payload } of badPayloadCases) {
-    it(`webrtc_offer with ${name} payload is ignored without creating a peer`, () => {
+    it(`webrtc_offer with ${name} payload is ignored without creating a peer`, async () => {
       const { manager, peers, sendSignalCalls } = makeManager();
       assert.doesNotThrow(() =>
         manager.handleSignal(offerMsg({ payload: payload as never })),
@@ -337,7 +371,7 @@ describe('DirectPeerManager malformed signal hardening', () => {
     });
   }
 
-  it('webrtc_offer whose SDP is rejected natively does not throw, tears down only that pairing, and emits webrtc_close', () => {
+  it('webrtc_offer whose SDP is rejected natively does not throw, tears down only that pairing, and emits webrtc_close', async () => {
     const { manager, peers, sendSignalCalls } = makeManager(
       () => 'SCREEN',
       (pc, index) => {
@@ -347,7 +381,7 @@ describe('DirectPeerManager malformed signal hardening', () => {
     );
 
     // A healthy attached peer that must survive the bad offer.
-    const healthy = attachPeer(manager, peers, 'sess-1', { pairId: 'pair-good', clientId: 'client-good' });
+    const healthy = await attachPeer(manager, peers, 'sess-1', { pairId: 'pair-good', clientId: 'client-good' });
 
     assert.doesNotThrow(() =>
       manager.handleSignal(offerMsg({ pairId: 'pair-bad', clientId: 'client-bad', payload: 'GARBAGE_SDP' })),
@@ -371,7 +405,7 @@ describe('DirectPeerManager malformed signal hardening', () => {
   ];
 
   for (const { name, payload } of badIceCases) {
-    it(`webrtc_ice with ${name} is dropped without tearing down the peer`, () => {
+    it(`webrtc_ice with ${name} is dropped without tearing down the peer`, async () => {
       const { manager, peers } = makeManager();
       manager.handleSignal(offerMsg());
       const pc = peers[0];
@@ -385,7 +419,7 @@ describe('DirectPeerManager malformed signal hardening', () => {
     });
   }
 
-  it('webrtc_ice whose candidate is rejected natively is dropped without teardown', () => {
+  it('webrtc_ice whose candidate is rejected natively is dropped without teardown', async () => {
     const { manager, peers } = makeManager(() => 'SCREEN', (pc) => {
       pc.failAddRemoteCandidate = true;
     });
@@ -405,9 +439,9 @@ describe('DirectPeerManager malformed signal hardening', () => {
     assert.strictEqual(pc.closed, false);
   });
 
-  it('a new webrtc_offer for a clientId with an existing live peer tears down the old peer first', () => {
+  it('a new webrtc_offer for a clientId with an existing live peer tears down the old peer first', async () => {
     const { manager, peers } = makeManager(() => 'SCREEN');
-    const old = attachPeer(manager, peers, 'sess-1', { pairId: 'pair-old', clientId: 'client-1' });
+    const old = await attachPeer(manager, peers, 'sess-1', { pairId: 'pair-old', clientId: 'client-1' });
     assert.strictEqual(manager.hasAttachedPeers('sess-1'), true);
 
     manager.handleSignal(offerMsg({ pairId: 'pair-new', clientId: 'client-1' }));
@@ -420,14 +454,15 @@ describe('DirectPeerManager malformed signal hardening', () => {
   });
 });
 
-describe('DirectPeerManager chunking', () => {
-  it('sendScreen larger than the chunk size emits one screen frame (seq 0) plus output continuations (seq 1..n) that reconstruct the input', () => {
+describe('DirectPeerManager chunking', async () => {
+  it('sendScreen larger than the chunk size emits one screen frame (seq 0) plus output continuations (seq 1..n) that reconstruct the input', async () => {
     const { manager, peers } = makeManager(() => '');
-    const { dc } = attachPeer(manager, peers, 'sess-1');
+    const { dc } = await attachPeer(manager, peers, 'sess-1');
     dc.sent.length = 0; // discard the attach-time screen frame
 
     const big = 'x'.repeat(CHUNK_SIZE) + 'y'.repeat(CHUNK_SIZE) + 'z'.repeat(123);
     manager.sendScreen('sess-1', big);
+    await manager.drain(); await Promise.all(peers.map(peer => peer.dataChannel.flush()));
 
     const frames = dc.sent.filter((f) => f.sessionId === 'sess-1');
     assert.strictEqual(frames.length, 3);
@@ -440,14 +475,16 @@ describe('DirectPeerManager chunking', () => {
     assert.ok(frames.every((f) => (f.data as string).length <= CHUNK_SIZE));
   });
 
-  it('sendOutput larger than the chunk size emits multiple output frames with monotonic seq that reconstruct the input', () => {
+  it('sendOutput larger than the chunk size emits multiple output frames with monotonic seq that reconstruct the input', async () => {
     const { manager, peers } = makeManager(() => '');
-    const { dc } = attachPeer(manager, peers, 'sess-1');
+    const { dc } = await attachPeer(manager, peers, 'sess-1');
     dc.sent.length = 0;
 
     const big = 'a'.repeat(CHUNK_SIZE + 1); // exactly two chunks
     manager.sendOutput('sess-1', big);
+    await manager.drain(); await Promise.all(peers.map(peer => peer.dataChannel.flush()));
     manager.sendOutput('sess-1', 'tail'); // seq keeps climbing after the chunked burst
+    await manager.drain(); await Promise.all(peers.map(peer => peer.dataChannel.flush()));
 
     const frames = dc.sent.filter((f) => f.sessionId === 'sess-1');
     assert.deepStrictEqual(frames.map((f) => f.kind), ['output', 'output', 'output']);
@@ -456,14 +493,15 @@ describe('DirectPeerManager chunking', () => {
     assert.strictEqual(frames[2].data, 'tail');
   });
 
-  it('a send failure on one peer drops the frame without tearing down that peer or affecting other peers', () => {
+  it('a send failure on one peer drops the frame without tearing down that peer or affecting other peers', async () => {
     const { manager, peers } = makeManager(() => 'SCREEN');
-    const good = attachPeer(manager, peers, 'sess-1', { pairId: 'pair-good', clientId: 'client-good' });
-    const bad = attachPeer(manager, peers, 'sess-1', { pairId: 'pair-bad', clientId: 'client-bad' });
+    const good = await attachPeer(manager, peers, 'sess-1', { pairId: 'pair-good', clientId: 'client-good' });
+    const bad = await attachPeer(manager, peers, 'sess-1', { pairId: 'pair-bad', clientId: 'client-bad' });
     good.dc.sent.length = 0;
     bad.dc.failSend = true;
 
     assert.doesNotThrow(() => manager.sendOutput('sess-1', 'payload'));
+    await manager.drain(); await Promise.all(peers.map(peer => peer.dataChannel.flush()));
 
     assert.deepStrictEqual(
       good.dc.sent.map((f) => [f.kind, f.data]),
@@ -475,14 +513,15 @@ describe('DirectPeerManager chunking', () => {
     // The failing peer keeps working once sends succeed again.
     bad.dc.failSend = false;
     manager.sendOutput('sess-1', 'after-recovery');
+    await manager.drain(); await Promise.all(peers.map(peer => peer.dataChannel.flush()));
     assert.ok(bad.dc.sent.some((f) => f.kind === 'output' && f.data === 'after-recovery'));
   });
 });
 
-describe('DirectPeerManager pairing timeout', () => {
+describe('DirectPeerManager pairing timeout', async () => {
   const PAIRING_TIMEOUT_MS = 30_000; // private const in peer-manager.ts
 
-  it('a peer whose channel never opens is torn down after the 30s pairing timeout', (t) => {
+  it('a peer whose channel never opens is torn down after the 30s pairing timeout', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     const { manager, peers } = makeManager();
     manager.handleSignal(offerMsg());
@@ -494,10 +533,10 @@ describe('DirectPeerManager pairing timeout', () => {
     assert.strictEqual(pc.closed, true);
   });
 
-  it('a peer whose channel opens in time is NOT torn down by the pairing timeout', (t) => {
+  it('a peer whose channel opens in time is NOT torn down by the pairing timeout', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     const { manager, peers } = makeManager(() => 'SCREEN');
-    const { pc } = attachPeer(manager, peers, 'sess-1'); // channel open ⇒ keepalive started, pairing timer cleared
+    const { pc } = await attachPeer(manager, peers, 'sess-1'); // channel open ⇒ keepalive started, pairing timer cleared
 
     t.mock.timers.tick(PAIRING_TIMEOUT_MS * 2);
 
@@ -506,26 +545,16 @@ describe('DirectPeerManager pairing timeout', () => {
   });
 });
 
-describe('DirectPeerManager handshake gating', () => {
-  it('input and resize frames BEFORE hello are ignored; after hello they flow', () => {
+describe('DirectPeerManager handshake gating', async () => {
+  it('pre-handshake input closes the unauthenticated peer; a separately authenticated peer delivers input and resize', async () => {
     const { manager, peers, inputCalls, resizeCalls } = makeManager();
     manager.handleSignal(offerMsg());
-    const pc = peers[0];
-    pc.triggerLocalDescription('ANSWER_SDP', 'answer');
-    const dc = pc.triggerDataChannel();
-
-    // Pre-hello: must be dropped.
-    dc.receive({ kind: 'input', sessionId: 'sess-1', data: 'evil\n' });
-    dc.receive({ kind: 'resize', sessionId: 'sess-1', cols: 10, rows: 5 });
-    assert.deepStrictEqual(inputCalls, []);
-    assert.deepStrictEqual(resizeCalls, []);
-
-    dc.receive({ kind: 'hello', clientId: 'client-1', protocolVersion: DIRECT_PROTOCOL_VERSION });
-
-    // Post-hello: same frames flow through.
-    dc.receive({ kind: 'input', sessionId: 'sess-1', data: 'ls\n' });
-    dc.receive({ kind: 'resize', sessionId: 'sess-1', cols: 80, rows: 24 });
-    assert.deepStrictEqual(inputCalls, [['sess-1', 'ls\n']]);
-    assert.deepStrictEqual(resizeCalls, [['sess-1', 80, 24]]);
-  });
-});
+    const unauthenticated = peers[0].triggerDataChannel();
+    await unauthenticated.receive({ kind: 'input', sessionId: 'sess-1', data: 'evil' });
+    assert.equal(peers[0].closed, true); assert.deepEqual(inputCalls, []); assert.deepEqual(resizeCalls, []);
+    const { dc } = await attachPeer(manager, peers, 'sess-1', { pairId: 'authorized', clientId: 'authorized' });
+    await dc.receive({ kind: 'input', sessionId: 'sess-1', data: 'ls\n' });
+    await dc.receive({ kind: 'resize', sessionId: 'sess-1', cols: 80, rows: 24 });
+    assert.deepEqual(inputCalls, [['sess-1', 'ls\n']]); assert.deepEqual(resizeCalls, [['sess-1', 80, 24]]);
+    manager.closeAll();
+  });});

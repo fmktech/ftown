@@ -1,4 +1,5 @@
-import { test, expect } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "../helpers/fixtures";
 import { createShellSession, login, openSession, runMarkerInTerminal, sharedEmail, waitForBridgeOnline } from "../helpers/app";
 import { bridgeApiFetch } from "../helpers/bridge-api";
 import { sessionIdsFor, waitForNewSessionId } from "../helpers/centrifugo";
@@ -8,15 +9,19 @@ const removed = {
   error: "Recurring loops and factory automation have been removed",
 };
 
-test("retired loop HTTP routes reject authenticated callers after the existing auth guard", async () => {
+test("retired loop HTTP routes require encryption and return retirement to authenticated callers", async () => {
   for (const path of ["/api/loops", "/api/loops/legacy", "/api/loops/legacy/run-now", "/api/loops/legacy/runs"]) {
     const unauthenticated = await bridgeApiFetch("GET", path, { bearer: null });
-    expect(unauthenticated.status, `auth must run before retirement for ${path}`).toBe(401);
-    for (const method of ["GET", "POST", "PATCH", "DELETE", "PUT"]) {
+    expect(unauthenticated.status, `plaintext must require an upgrade for ${path}`).toBe(426);
+    expect(unauthenticated.body).toEqual({ error: "upgrade_required", code: "upgrade_required" });
+    for (const method of ["GET", "POST", "PATCH", "DELETE"]) {
       const response = await bridgeApiFetch(method, path, { body: { enabled: true, task: "must not execute" } });
       expect(response.status, `${method} ${path}`).toBe(410);
       expect(response.body).toEqual(removed);
     }
+    const unsupported = await bridgeApiFetch("PUT", path, { body: { enabled: true, task: "must not execute" } });
+    expect(unsupported.status, `unsupported PUT ${path} must fail closed`).toBe(403);
+    expect(unsupported.body).toEqual({ error: "permission_denied", code: "permission_denied", outcomeUnknown: false });
   }
   expect((await bridgeApiFetch("GET", "/api/sessions")).status).toBe(200);
 });

@@ -1,287 +1,111 @@
-/**
- * Contract-level tests for LoopbackPeer (docs/plans/loopback-transport-addendum.md,
- * rules L1/L3/L4/L5 + "Module surface (frozen)" section). Written against the addendum
- * and direct-transport-contract.md before loopback-peer.ts lands — module-not-found
- * failures are expected until then.
- *
- * ASSUMPTIONS (not fully pinned down by the addendum, reconciled once the real
- * implementation lands without invalidating the behavioral assertions below):
- * - Constructor takes `{ bridgeId, clientId, port, nonce, wsFactory? }`. `wsFactory`
- *   defaults to the real `WebSocket` constructor and is the addendum's "injectable
- *   WebSocket factory for tests" (module surface section); it is invoked with the full
- *   `ws://127.0.0.1:{port}/ws?nonce=<nonce>` URL (L1) synchronously inside `connect()`.
- * - Public surface mirrors WebRtcPeer exactly (module surface section): `connect():
- *   Promise<void>`, `attach(sessionId, handlers)`, `detach(sessionId)`,
- *   `sendInput(sessionId, data)`, `sendResize(sessionId, cols, rows)`, `close()`,
- *   `onClose(cb)`. No `handleSignal` — loopback has no signaling plane (L1: it's a plain
- *   WS upgrade, not WebRTC).
- * - `LOOPBACK_TIMEOUT_MS` is the addendum's L4 constant (1_500). It is not yet exported
- *   from `./contract` (contract.ts pre-dates the addendum landing) so it is redefined
- *   locally here with the frozen value; once the addendum lands and contract.ts exports
- *   it, this local const should be replaced with the real import.
- * - `connect()` resolves only after the hello/hello_ack handshake completes over the
- *   open WebSocket (L3: same hello_ack gating as WebRTC), mirroring WebRtcPeer.
- * - Ping/pong reuses the existing `PING_INTERVAL_MS` / 2-missed-pongs-is-dead semantics
- *   from direct-transport-contract.md (L3: "same wire protocol ... same semantics"),
- *   symmetric with WebRtcPeer's client-side keepalive.
- * - A synchronous throw from `wsFactory(url)` (e.g. a browser blocking mixed-content
- *   `ws://` from an `https://` page) is caught inside `connect()` and surfaces as a
- *   rejected `connect()` promise, not a thrown exception — mirroring how
- *   HybridTerminalTransport already treats a synchronously-throwing `peerFactory` as a
- *   connect-time failure rather than a construction-time one.
- */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { DIRECT_PROTOCOL_VERSION, PING_INTERVAL_MS } from './contract';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { generateEndpoint, open, seal } from '@security/crypto';
+import type { SecureApplication, SecureEnvelope } from '@security/protocol';
+import { SecureEndpointRuntime } from '../secure-endpoint-runtime';
+import { LoopbackPeer, type WebSocketLike } from './loopback-peer';
+import { LOOPBACK_TIMEOUT_MS, PING_INTERVAL_MS } from './contract';
 
-// LoopbackPeer does not exist yet — this import is expected to fail until the loopback
-// UI dev agent lands it.
-import { LoopbackPeer } from './loopback-peer';
-
-/** Frozen by docs/plans/loopback-transport-addendum.md L4; see header assumption. */
-const LOOPBACK_TIMEOUT_MS = 1_500;
-
-class FakeWebSocket {
-  static instances: FakeWebSocket[] = [];
-
-  readyState: 0 | 1 | 2 | 3 = 0; // CONNECTING
-  onopen: (() => void) | null = null;
-  onmessage: ((ev: { data: string }) => void) | null = null;
-  onclose: (() => void) | null = null;
-  onerror: ((ev: unknown) => void) | null = null;
-  sent: unknown[] = [];
-
-  constructor(public url: string) {
-    FakeWebSocket.instances.push(this);
+const ownerId = '00000000-0000-4000-8000-000000000001';
+class Socket implements WebSocketLike {
+  readyState = 0;
+  onopen: WebSocketLike['onopen'] = null; onmessage: WebSocketLike['onmessage'] = null;
+  onerror: WebSocketLike['onerror'] = null; onclose: WebSocketLike['onclose'] = null;
+  sent: unknown[] = []; wire: ((packet: SecureEnvelope) => Promise<void>) | null = null;
+  constructor(readonly url: string) {}
+  send(raw: string) { const packet = JSON.parse(raw) as SecureEnvelope; this.sent.push(packet); void this.wire?.(packet); }
+  close() { this.readyState = 3; this.onclose?.(undefined); }
+  open() { this.readyState = 1; this.onopen?.(undefined); }
+  receive(value: unknown) { this.onmessage?.({ data: JSON.stringify(value) }); }
+}
+afterEach(() => vi.useRealTimers());
+async function fixture() {
+  const browser = await generateEndpoint(ownerId, 'browser'); const bridge = await generateEndpoint(ownerId, 'bridge');
+  const runtime = new SecureEndpointRuntime(browser, [{ bridgeId: 'bridge-one', endpoint: bridge.endpoint, permissions: ['read', 'control', 'admin'] }]);
+  let socket!: Socket;
+  const peer = new LoopbackPeer({ bridgeId: 'bridge-one', clientId: 'tab', port: 43127, nonce: 'legacy-capability', securityRuntime: runtime,
+    wsFactory: url => socket = new Socket(url) });
+  const connecting = peer.connect();
+  const pairId = new URL(socket.url).searchParams.get('pairId')!;
+  const channel = `direct:loopback-ws:bridge-one:${pairId}`;
+  const received: SecureApplication[] = [];
+  async function respond(data: unknown, purpose: 'welcome' | 'application', messageId = crypto.randomUUID()) {
+    const now = Date.now();
+    const packet = await seal(bridge, browser.endpoint, { type: 'ftown_encrypted', version: 1, senderId: bridge.endpoint.id, recipientId: browser.endpoint.id,
+      ownerId, bridgeId: 'bridge-one', channel, purpose, messageId, createdAt: now, expiresAt: now + 120000, receiverEpoch: null }, new TextEncoder().encode(JSON.stringify(data)));
+    socket.receive(packet); return packet;
   }
-
-  send(data: string): void {
-    this.sent.push(JSON.parse(data));
-  }
-
-  close(): void {
-    if (this.readyState === 3) return;
-    this.readyState = 3;
-    this.onclose?.();
-  }
-
-  simulateOpen(): void {
-    this.readyState = 1;
-    this.onopen?.();
-  }
-
-  simulateMessage(msg: unknown): void {
-    this.onmessage?.({ data: JSON.stringify(msg) });
-  }
+  socket.wire = async packet => {
+    const plain = JSON.parse(new TextDecoder().decode(await open(bridge, browser.endpoint, packet,
+      { ownerId, bridgeId: 'bridge-one', channel, recipientId: bridge.endpoint.id, purpose: packet.purpose })));
+    if (packet.purpose === 'hello') await respond({ type: 'welcome', challenge: plain.challenge, receiverEpoch: 'boot-one' }, 'welcome', packet.messageId);
+    else received.push(plain as SecureApplication);
+  };
+  return { peer, socket, runtime, connecting, pairId, received, respond };
 }
 
-async function flush(): Promise<void> {
-  await vi.advanceTimersByTimeAsync(0);
-}
-
-describe('LoopbackPeer', () => {
-  beforeEach(() => {
+describe('encrypted loopback peer', () => {
+  it('uses a discovery pair ID without bearer nonce and gates connection on authenticated welcome', async () => {
+    const f = await fixture(); let connected = false; void f.connecting.then(() => { connected = true; });
+    expect(f.socket.url).not.toContain('legacy-capability'); expect(f.socket.url).not.toContain('nonce=');
+    expect(connected).toBe(false); f.socket.open(); await f.connecting; expect(connected).toBe(true);
+    expect(f.socket.sent[0]).toMatchObject({ type: 'ftown_encrypted', purpose: 'hello' }); f.peer.close(); f.runtime.dispose();
+  });
+  it('encrypts ordered attach/input/resize and authenticates output before delivery', async () => {
+    const f = await fixture(); f.socket.open(); await f.connecting;
+    const output = vi.fn(); f.peer.attach('session-one', { onOutput: output, onScreen: vi.fn() });
+    f.peer.sendInput('session-one', 'PRIVATE-INPUT'); f.peer.sendResize('session-one', 90, 30);
+    await vi.waitFor(() => expect(f.received).toHaveLength(3));
+    expect(f.received.map(value => value.route.kind === 'terminal' && value.route.frameType)).toEqual(['attach', 'input', 'resize']);
+    expect(JSON.stringify(f.socket.sent)).not.toContain('PRIVATE-INPUT');
+    const encrypted = await f.respond({ type: 'application', route: { kind: 'terminal', sessionId: 'session-one', frameType: 'output', pairId: f.pairId }, data: { kind: 'output', sessionId: 'session-one', data: 'PRIVATE-OUTPUT' }, mcp: null }, 'application');
+    await vi.waitFor(() => expect(output).toHaveBeenCalledExactlyOnceWith('PRIVATE-OUTPUT'));
+    f.socket.receive(encrypted); await Promise.resolve(); expect(output).toHaveBeenCalledOnce(); f.peer.close(); f.runtime.dispose();
+  });
+  it('fails closed on a plaintext hello acknowledgement', async () => {
+    const f = await fixture(); f.socket.wire = null; const rejected = expect(f.connecting).rejects.toThrow();
+    f.socket.open(); f.socket.receive({ kind: 'hello_ack', protocolVersion: 1 });
+    await rejected; expect(f.socket.readyState).toBe(3); f.runtime.dispose();
+  });
+  it('closes only its own socket if closed before handshake completion', async () => {
+    const f = await fixture(); const rejected = expect(f.connecting).rejects.toThrow();
+    f.peer.close(); await rejected; expect(f.socket.readyState).toBe(3); f.runtime.dispose();
+  });
+  it('rejects an unopened socket after the loopback budget and reports factory failures asynchronously', async () => {
     vi.useFakeTimers();
-    FakeWebSocket.instances = [];
+    let socket!: Socket;
+    const peer = new LoopbackPeer({ bridgeId: 'bridge-one', clientId: 'tab', port: 43127, wsFactory: url => socket = new Socket(url) });
+    const rejected = expect(peer.connect()).rejects.toThrow('loopback timeout');
+    await vi.advanceTimersByTimeAsync(LOOPBACK_TIMEOUT_MS); await rejected; expect(socket.readyState).toBe(3);
+    const broken = new LoopbackPeer({ bridgeId: 'bridge-one', clientId: 'tab', port: 43127, wsFactory: () => { throw new Error('mixed content'); } });
+    await expect(broken.connect()).rejects.toThrow('mixed content');
   });
-
-  afterEach(() => {
-    vi.useRealTimers();
+  it('preserves screen/output ordering and isolates detached sessions', async () => {
+    const f = await fixture(); f.socket.open(); await f.connecting;
+    const frames: string[] = []; const other = vi.fn();
+    f.peer.attach('session-one', { onScreen: data => frames.push(`screen:${data}`), onOutput: data => frames.push(`output:${data}`) });
+    f.peer.attach('session-two', { onScreen: other, onOutput: other });
+    for (const [kind, sessionId, data] of [['screen', 'session-one', 'snapshot'], ['output', 'session-one', 'delta'], ['output', 'unknown', 'foreign']] as const) {
+      await f.respond({ type: 'application', route: { kind: 'terminal', sessionId, frameType: kind, pairId: f.pairId }, data: { kind, sessionId, data, seq: 1 }, mcp: null }, 'application');
+    }
+    await vi.waitFor(() => expect(frames).toEqual(['screen:snapshot', 'output:delta'])); expect(other).not.toHaveBeenCalled();
+    f.peer.detach('session-one');
+    await f.respond({ type: 'application', route: { kind: 'terminal', sessionId: 'session-one', frameType: 'output', pairId: f.pairId }, data: { kind: 'output', sessionId: 'session-one', data: 'detached', seq: 2 }, mcp: null }, 'application');
+    await f.respond({ type: 'application', route: { kind: 'terminal', sessionId: 'session-two', frameType: 'output', pairId: f.pairId }, data: { kind: 'output', sessionId: 'session-two', data: 'sibling', seq: 1 }, mcp: null }, 'application');
+    await vi.waitFor(() => expect(other).toHaveBeenCalledExactlyOnceWith('sibling')); expect(frames).toHaveLength(2);
+    await vi.waitFor(() => expect(f.received.some(app => app.route.kind === 'terminal' && app.route.frameType === 'detach')).toBe(true));
+    f.peer.close(); f.runtime.dispose();
   });
-
-  function makePeer(wsFactory?: (url: string) => FakeWebSocket) {
-    const factory = wsFactory ?? ((url: string) => new FakeWebSocket(url));
-    const peer = new LoopbackPeer({
-      bridgeId: 'bridge-1',
-      clientId: 'client-1',
-      port: 41999,
-      nonce: 'nonce-abc',
-      wsFactory: factory,
-    });
-    return { peer, factory };
-  }
-
-  it('opens ws://127.0.0.1:{port}/ws?nonce=… and resolves connect() after open + hello_ack', async () => {
-    const { peer } = makePeer();
-    let resolved = false;
-    const connectPromise = peer.connect().then(() => {
-      resolved = true;
-    });
-    await flush();
-
-    expect(FakeWebSocket.instances).toHaveLength(1);
-    const ws = FakeWebSocket.instances[0];
-    expect(ws.url).toBe('ws://127.0.0.1:41999/ws?nonce=nonce-abc');
-
-    ws.simulateOpen();
-    await flush();
-
-    expect(
-      ws.sent.some(
-        (m) =>
-          (m as { kind: string }).kind === 'hello' &&
-          (m as { clientId: string }).clientId === 'client-1' &&
-          (m as { protocolVersion: number }).protocolVersion === DIRECT_PROTOCOL_VERSION,
-      ),
-    ).toBe(true);
-    expect(resolved).toBe(false);
-
-    ws.simulateMessage({ kind: 'hello_ack', bridgeId: 'bridge-1', protocolVersion: DIRECT_PROTOCOL_VERSION });
-    await flush();
-    expect(resolved).toBe(true);
-    await connectPromise;
-  });
-
-  it('rejects connect() after LOOPBACK_TIMEOUT_MS with no successful handshake', async () => {
-    const { peer } = makePeer();
-    const connectPromise = peer.connect();
-    connectPromise.catch(() => {});
-
-    await vi.advanceTimersByTimeAsync(LOOPBACK_TIMEOUT_MS);
-
-    await expect(connectPromise).rejects.toBeTruthy();
-  });
-
-  it('closes the connection on protocol version mismatch', async () => {
-    const { peer } = makePeer();
-    const onCloseSpy = vi.fn();
-    peer.onClose(onCloseSpy);
-
-    const connectPromise = peer.connect();
-    connectPromise.catch(() => {});
-    await flush();
-
-    const ws = FakeWebSocket.instances[0];
-    ws.simulateOpen();
-    await flush();
-
-    ws.simulateMessage({
-      kind: 'hello_ack',
-      bridgeId: 'bridge-1',
-      protocolVersion: DIRECT_PROTOCOL_VERSION + 1,
-    });
-    await flush();
-
-    expect(ws.readyState).toBe(3);
-    expect(onCloseSpy).toHaveBeenCalled();
-    await expect(connectPromise).rejects.toBeTruthy();
-  });
-
-  async function connectedPeer() {
-    const { peer } = makePeer();
-    const connectPromise = peer.connect();
-    await flush();
-    const ws = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
-    ws.simulateOpen();
-    await flush();
-    ws.simulateMessage({ kind: 'hello_ack', bridgeId: 'bridge-1', protocolVersion: DIRECT_PROTOCOL_VERSION });
-    await flush();
-    await connectPromise;
-    ws.sent = [];
-    return { peer, ws };
-  }
-
-  it('attaches a session and calls onScreen before onOutput for that session', async () => {
-    const { peer, ws } = await connectedPeer();
-    const order: string[] = [];
-    const onScreen = vi.fn((data: string) => order.push(`screen:${data}`));
-    const onOutput = vi.fn((data: string) => order.push(`output:${data}`));
-
-    peer.attach('session-1', { onScreen, onOutput });
-    await flush();
-
-    expect(
-      ws.sent.some(
-        (m) => (m as { kind: string }).kind === 'attach' && (m as { sessionId: string }).sessionId === 'session-1',
-      ),
-    ).toBe(true);
-
-    ws.simulateMessage({ kind: 'screen', sessionId: 'session-1', data: 'full-screen', seq: 0 });
-    ws.simulateMessage({ kind: 'output', sessionId: 'session-1', data: 'chunk-1', seq: 1 });
-    await flush();
-
-    expect(order).toEqual(['screen:full-screen', 'output:chunk-1']);
-
-    // Messages for a non-attached session are ignored.
-    ws.simulateMessage({ kind: 'output', sessionId: 'session-2', data: 'ignored', seq: 1 });
-    await flush();
-    expect(onOutput).toHaveBeenCalledTimes(1);
-
-    peer.detach('session-1');
-    await flush();
-    ws.simulateMessage({ kind: 'output', sessionId: 'session-1', data: 'after-detach', seq: 2 });
-    await flush();
-    expect(onOutput).toHaveBeenCalledTimes(1);
-  });
-
-  it('routes sendInput/sendResize as WS frames', async () => {
-    const { peer, ws } = await connectedPeer();
-    peer.sendInput('session-1', 'ls\n');
-    peer.sendResize('session-1', 80, 24);
-
-    expect(ws.sent).toContainEqual({ kind: 'input', sessionId: 'session-1', data: 'ls\n' });
-    expect(ws.sent).toContainEqual({ kind: 'resize', sessionId: 'session-1', cols: 80, rows: 24 });
-  });
-
-  it('sends periodic pings and closes after 2 consecutive missed pongs', async () => {
-    const { ws: healthyWs } = await connectedPeer();
-    const onCloseSpy = vi.fn();
-    const { peer, ws } = await connectedPeer();
-    peer.onClose(onCloseSpy);
-
-    const pingCount = () => ws.sent.filter((m) => (m as { kind: string }).kind === 'ping').length;
-
+  it('resets missed pongs and closes only the unresponsive encrypted peer', async () => {
+    vi.useFakeTimers(); const f = await fixture(); const sibling = await fixture();
+    f.socket.open(); sibling.socket.open(); await Promise.all([f.connecting, sibling.connecting]);
+    const closed = vi.fn(); f.peer.onClose(closed);
+    await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS * 2);
+    await sibling.respond({ type: 'application', route: { kind: 'terminal', sessionId: '', frameType: 'pong', pairId: sibling.pairId }, data: { kind: 'pong' }, mcp: null }, 'application');
+    // A following ping/pong exchange proves the earlier pong was processed in order.
+    await sibling.respond({ type: 'application', route: { kind: 'terminal', sessionId: '', frameType: 'ping', pairId: sibling.pairId }, data: { kind: 'ping' }, mcp: null }, 'application');
+    await vi.waitFor(() => expect(sibling.received.some(app => app.route.kind === 'terminal' && app.route.frameType === 'pong')).toBe(true));
     await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS);
-    healthyWs.simulateMessage({ kind: 'pong' });
-    expect(pingCount()).toBe(1);
-    expect(ws.readyState).not.toBe(3);
-
-    await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS);
-    healthyWs.simulateMessage({ kind: 'pong' });
-    expect(pingCount()).toBe(2);
-    expect(ws.readyState).not.toBe(3);
-
-    await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS);
-    expect(ws.readyState).toBe(3);
-    expect(onCloseSpy).toHaveBeenCalled();
-
-    expect(healthyWs.readyState).not.toBe(3);
-  });
-
-  it('resets the missed-pong counter when a pong is received', async () => {
-    const { peer, ws } = await connectedPeer();
-    const onCloseSpy = vi.fn();
-    peer.onClose(onCloseSpy);
-
-    await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS);
-    ws.simulateMessage({ kind: 'pong' });
-
-    await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS);
-    expect(ws.readyState).not.toBe(3);
-    expect(onCloseSpy).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS);
-    expect(ws.readyState).not.toBe(3);
-    expect(onCloseSpy).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS);
-    expect(ws.readyState).toBe(3);
-    expect(onCloseSpy).toHaveBeenCalled();
-  });
-
-  it('propagates a synchronous wsFactory throw as a connect() failure, not a thrown exception', async () => {
-    const throwingFactory = vi.fn(() => {
-      throw new Error('mixed content blocked');
-    });
-    const { peer } = makePeer(throwingFactory as unknown as (url: string) => FakeWebSocket);
-
-    let rejected: unknown;
-    await expect(
-      peer.connect().catch((err) => {
-        rejected = err;
-        throw err;
-      }),
-    ).rejects.toBeTruthy();
-    expect(rejected).toBeInstanceOf(Error);
-    expect(throwingFactory).toHaveBeenCalledTimes(1);
+    expect(f.socket.readyState).toBe(3); expect(closed).toHaveBeenCalledOnce(); expect(sibling.socket.readyState).toBe(1);
+    sibling.peer.close(); f.runtime.dispose(); sibling.runtime.dispose();
   });
 });

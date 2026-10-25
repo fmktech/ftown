@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { runSessions } from './sessions-commands.js';
+import { secureFixture } from './security/bridge/fixtures.test.js';
 
 interface Request { url: string; method: string; body?: unknown }
 async function fixture(run: (requests: Request[], output: string[]) => Promise<void>, reply?: (request: Request) => unknown): Promise<void> {
@@ -15,19 +16,21 @@ async function fixture(run: (requests: Request[], output: string[]) => Promise<v
   const previousError = console.error;
   const requests: Request[] = []; const output: string[] = [];
   mkdirSync(join(home, '.ftown'));
-  writeFileSync(join(home, '.ftown', 'bridge.json'), '{"port":12345,"token":"unit-only"}');
   process.env.HOME = home;
   delete process.env.FTOWN_SESSION_ID;
-  globalThis.fetch = async (url, init) => {
+  const secure = await secureFixture(join(home, '.ftown'), async (url, init) => {
     requests.push({ url: String(url), method: init?.method ?? 'GET', ...(init?.body ? { body: JSON.parse(String(init.body)) as unknown } : {}) });
     return new Response(JSON.stringify(reply ? reply(requests.at(-1)!) : { session: { id: 'created', name: 'unit', status: 'idle' }, sessions: [], messages: [] }));
-  };
+  }, 12345);
+  writeFileSync(join(home, '.ftown', 'bridge.json'), JSON.stringify(secure.pointer));
+  globalThis.fetch = secure.fetch;
   console.log = (...args: unknown[]) => { output.push(args.map(String).join(' ')); };
   console.error = (...args: unknown[]) => { output.push(args.map(String).join(' ')); };
   try { await run(requests, output); }
   finally {
     if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
     if (previousSession === undefined) delete process.env.FTOWN_SESSION_ID; else process.env.FTOWN_SESSION_ID = previousSession;
+    await secure.security.close();
     globalThis.fetch = previousFetch; console.log = previousLog; console.error = previousError;
     rmSync(home, { recursive: true, force: true });
   }

@@ -1,4 +1,5 @@
-import { test, expect } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "../helpers/fixtures";
 import {
   sharedEmail,
   login,
@@ -8,7 +9,7 @@ import {
   runMarkerInTerminal,
 } from "../helpers/app";
 import { sessionIdsFor, waitForNewSessionId } from "../helpers/centrifugo";
-import { bridgeApiFetch } from "../helpers/bridge-api";
+import { bridgeApiFetch, readBridgePointer } from "../helpers/bridge-api";
 import { restartBridge } from "../helpers/bridge-process";
 
 /**
@@ -26,8 +27,8 @@ import { restartBridge } from "../helpers/bridge-process";
  *  - The bridge loopback HTTP API via bridgeApiFetch("GET","/api/sessions/:id") →
  *    { session: { status } } (200) or { error } (404). status ∈
  *    'pending'|'running'|'completed'|'error' (bridge/src/types.ts). A stopped
- *    session becomes 'completed'; a dead/failed one 'error'. The pointer
- *    (port+bearer) is re-read fresh on every call, so it survives a bridge restart.
+ *    session becomes 'completed'; a dead/failed one 'error'. The encrypted CLI
+ *    client re-reads bridge discovery on every call, so it survives a restart.
  *  - The session-list UI badge text: running→"running"/"idle", completed→"done".
  */
 
@@ -130,9 +131,8 @@ test.describe("session lifecycle", () => {
 
       await parentBRow.getByRole("button", { name: "Expand children" }).click();
       await expect(childRow).toBeVisible();
-      const bridgeRoot = page.getByTitle(
-        "Drop a child session here to move it back to the bridge root",
-      );
+      const bridgeRoot = page.locator(`[data-bridge-row="${readBridgePointer().bridgeId}"]`);
+      await expect(bridgeRoot).toHaveAttribute("title", "Drop a child session here to move it back to the bridge root");
       await childRow.dragTo(bridgeRoot);
       await expect.poll(() => parentOf(child), { timeout: 20_000 }).toBeNull();
     } finally {

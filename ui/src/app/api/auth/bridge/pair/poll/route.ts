@@ -3,7 +3,7 @@ import jwt from "jsonwebtoken";
 
 import { parseLocalAdvert } from "../../local-advert";
 import { getByDeviceCode, consumePairingRequest } from "@/lib/pairing-store";
-import { upsertBridgeRefresh } from "@/lib/bridge-refresh";
+import { upsertBridgeRefresh, getOwnerIdForSub } from "@/lib/bridge-refresh";
 import { getRequiredSecret } from "@/lib/secrets";
 import { checkRateLimit, recordAttempt, type RateLimitConfig } from "@/lib/login-rate-limit";
 
@@ -31,6 +31,7 @@ interface PairPollResponse {
   refreshToken?: string;
   centrifugoUrl?: string;
   userId?: string;
+  ownerId?: string;
 }
 
 const PAIR_POLL_RATE_LIMIT: RateLimitConfig = {
@@ -120,11 +121,15 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: advert.error }, { status: 400 });
   }
 
+  let ownerId: string;
+  try { ownerId = await getOwnerIdForSub(consumed.sub); }
+  catch { return NextResponse.json({ error: 'Bridge account is unavailable' }, { status: 401 }); }
   const token = jwt.sign(
     {
       sub: consumed.sub,
       info: {
         bridgeId: consumed.bridgeId,
+        ownerId,
         hostname: consumed.hostname,
         connectedAt: new Date().toISOString(),
         ...(advert ?? {}),
@@ -143,6 +148,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       bridgeId: consumed.bridgeId,
       type: "bridge_refresh",
       jti: consumed.refreshJti,
+      ownerId,
     },
     secret,
     { audience: "ftown:bridge-refresh", expiresIn: "30d" },
@@ -154,5 +160,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     refreshToken,
     centrifugoUrl: process.env.NEXT_PUBLIC_CENTRIFUGO_URL,
     userId: consumed.sub,
+    ownerId,
   } satisfies PairPollResponse);
 }

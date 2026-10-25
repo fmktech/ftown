@@ -14,26 +14,80 @@ https://github.com/user-attachments/assets/e9c1ce70-70b0-4ba0-81d8-080d4eeef445
 
 ## Architecture
 
-```
-                        ┌─────────────┐
-                   ┌────┤  Centrifugo  ├────┐
-                   │    │  (pub/sub)   │    │
-              WebSocket └─────────────┘ WebSocket
-       (control · signaling · rung 3: cloud fallback)
-                   │                     │
-                   ▼                     ▼
-            ┌─────────────┐       ┌─────────────┐
-            │   Browser   │◄─────►│   Bridge    │
-            │  (Next.js)  │       │ (node-pty)  │
-            └─────────────┘       └─────────────┘
-       rung 1: loopback WS — ws://127.0.0.1 (same machine)
-       rung 2: WebRTC DataChannel — direct P2P (localhost / LAN)
-     self-healing: browser keeps retrying rung 1 → 2 while on rung 3
+```mermaid
+flowchart TB
+  Browser["Browser / PWA<br/>Non-extractable key in IndexedDB<br/>Pinned bridge identities"]
+  Relay["Centrifugo relay<br/>Opaque application content<br/>Visible routing metadata"]
+  Bridge["Bridge: trusted plaintext endpoint<br/>Local identity + approved-device policy<br/>Sessions, terminal history and mail"]
+  Client["AI / MCP client + its provider"]
+  Gateway["Hosted MCP: trusted plaintext endpoint<br/>Distinct encrypted grant identity"]
+  Database["PostgreSQL<br/>Encrypted MCP private keys + bound pins<br/>Account, OAuth and audit records"]
+  Secret["Separately provisioned service wrapping secret"]
+  Account["Account login / OAuth consent<br/>Public key directory + device metadata"]
+  Push["Push provider<br/>Generic notice + opaque routing references"]
+  Agent["Local agents, tools and files"]
+  Provider["External model providers"]
+  Browser <-->|"HPKE Auth application encryption"| Relay
+  Relay <-->|"HPKE Auth application encryption"| Bridge
+  Browser <-->|"Same application encryption over local HTTP/WS or WebRTC"| Bridge
+  Client <-->|"HTTPS + OAuth: gateway sees tool calls/results"| Gateway
+  Gateway <-->|"HPKE Auth application encryption"| Bridge
+  Gateway <-->|"Authenticated ciphertext for private keys"| Database
+  Secret -->|"AES-256-GCM wrapping; not stored in DB"| Gateway
+  Browser <-->|"HTTPS: account/consent/metadata"| Account
+  Bridge -->|"Generic notification only"| Push
+  Push --> Browser
+  Bridge <-->|"Decrypted local dispatch; local hooks are plaintext"| Agent
+  Agent <-->|"Provider's own protocol/trust boundary"| Provider
 ```
 
 - **UI** (`/ui`) — Next.js 15 web dashboard with real-time terminal streaming, climbing the transport ladder (local → P2P → Centrifugo) to reach the bridge
 - **Bridge** (`/bridge`) — CLI tool that runs on remote machines, spawns processes via PTY, serves a loopback WebSocket for same-machine access, and relays I/O directly to the browser over WebRTC (or through Centrifugo when neither direct rung is possible)
 - **Centrifugo** (`/centrifugo`) — WebSocket messaging server handling sessions, presence, and signaling, and serving as the last-resort (rung 3) data plane for terminal I/O
+
+## Encryption and device trust
+
+Application content is encrypted between approved Browser/PWA, bridge, and MCP
+gateway endpoints using HPKE Auth (P-256, HKDF-SHA256, AES-256-GCM). Commands,
+terminal I/O and history, session names and paths, mail, prompts/results,
+attention text, PR details, and WebRTC SDP/ICE use authenticated encryption on
+every transport. Direct transport failure can select another encrypted route;
+it cannot enable plaintext fallback. Older clients and bridges require upgrade
+and explicit pairing.
+
+A bridge-generated, single-use invitation pins its key and binds the account.
+Open its `/connect` link, sign in, verify the account and bridge fingerprint,
+and explicitly approve. Its five-minute secret stays in the URL fragment and
+inside the encrypted enrollment packet. An administrator browser can invite
+another device. A public-key directory is discovery only, never permission to
+replace a pinned identity. The browser keeps its private key non-extractable in
+IndexedDB; clearing storage requires fresh approval. This is browser storage,
+not a hardware-key or encrypted-browser-profile guarantee. Account password
+reset cannot recover a lost endpoint key.
+
+The hosted MCP gateway is a trusted plaintext endpoint for standard HTTPS/OAuth
+clients. Each OAuth grant gets a distinct bridge-facing identity, approved by
+an administrator browser for selected bridges and read/control scopes. Its
+private key and bridge pins are authenticated ciphertext in PostgreSQL, wrapped
+with a separate service secret. Standard MCP clients need no model PIN. Local
+agents and external model providers remain separate trusted endpoints.
+
+Open **Security → Devices** to inspect approvals, create invitations, or revoke
+access on a bridge. **Security → Activity** shows retained MCP gateway attempts
+and independent bridge execution records. Gateway history remains available
+while a bridge is offline. An unknown outcome or timeout does not prove that
+an operation was not executed. Logs retain up to 30 days and 10,000 events per
+store; raw arguments, results, commands and tokens are excluded.
+
+Routing metadata remains visible: account/bridge/session identifiers, hostname,
+online state, endpoint keys, sizes and timing. Login, OAuth consent, public-key
+directory and device metadata use HTTPS. Push notifications contain only a
+generic notice and opaque routing references. Minimal health/discovery and
+local hook ingestion are explicit plaintext exceptions. The bridge decrypts
+before dispatching local tools; this protocol does not encrypt their files or
+replace their provider security. Endpoint software and same-origin browser code
+remain trusted. No anonymity, forward secrecy, hardware-backed key protection,
+or zero-knowledge hosted MCP is claimed. See [operational setup](docs/e2ee-operations.md).
 
 ## Features
 
@@ -46,12 +100,12 @@ npx ftown start --solo
 
 Your code, terminals and agent output never leave your network. ftown Solo has no account, no cloud service and no telemetry; the only outbound traffic is two one-time downloads from GitHub, plus whatever your AI agents themselves send to their model providers.
 
-Prints a link like `http://192.168.1.10:8040/#k=<key>` — open it on any device on your Wi-Fi and drive your agents. No Centrifugo to install (a checksum-pinned hub binary is downloaded and managed for you), no UI hosting (the panel bundle is fetched from a GitHub release on first run), no account service.
+Prints a local access link. Open it on trustworthy localhost, or configure an HTTPS tunnel for another device on your Wi-Fi before connecting; plain LAN HTTP cannot enable encrypted controls. No Centrifugo to install (a checksum-pinned hub binary is downloaded and managed for you), no UI hosting (the panel bundle is fetched from a GitHub release on first run), no account service.
 
 - **Single port**: panel + bridge API + websocket hub behind one listener; the hub and panel themselves only bind loopback. Tunnels (Tailscale serve, cloudflared, ngrok) just point at the one port when you want off-LAN access
 - **No telemetry**: panel analytics are compiled out of Solo builds — no script is ever requested
 - **Key auth**: 256-bit key lives in the URL fragment (never sent to a server in a request path/query); only its SHA-256 hash is persisted; `--rotate-key` regenerates it offline; `--port` overrides the default (`8040`)
-- ⚠️ LAN traffic is plain HTTP by design — anyone on the same network can capture your key from the wire. Use a tailnet or tunnel with TLS when that matters.
+- **Secure browser context required**: encrypted controls require HTTPS or trustworthy localhost. Put LAN access behind a TLS tunnel; plain `http://<LAN-IP>` shows setup guidance and never enables plaintext controls. Protect the Solo access credential with TLS as well.
 - **Docker**: `cd docker/solo && docker compose up -d --build` — see [`docker/solo/README.md`](docker/solo/README.md)
 
 Full guide: [docs/solo.md](docs/solo.md)
@@ -62,7 +116,7 @@ Full guide: [docs/solo.md](docs/solo.md)
 - Live **Local / P2P / Cloud** badges in the terminal UI, each with a hoverable diagnostic tooltip explaining exactly why you're on that rung (e.g. "P2P unavailable — connection blocked (VPN or firewall may be interfering)")
 - **Self-healing auto-upgrade**: while on Cloud, the browser keeps retrying the ladder in the background (backoff 15s → 30s → 60s → 120s with jitter, plus immediate retry on network-online / tab-visible events) and seamlessly flips a live session from Cloud to Local/P2P with a full screen resync — no reload
 - Local-first, private transport: terminal output never touches the cloud while you're on the same machine or network; Centrifugo relays only while a remote viewer is actively watching
-- Loopback WS is gated by a per-process random nonce plus Origin check; presence adverts are scoped to the owning user's JWT
+- Loopback WS requires an approved HPKE endpoint and authenticated pair binding, with Origin/Host checks retained; localPort is discovery metadata only, and presence adverts are scoped to the owning user's JWT
 
 ### Everything else
 

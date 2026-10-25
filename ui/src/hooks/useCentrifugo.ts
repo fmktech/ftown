@@ -3,6 +3,9 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Centrifuge, UnauthorizedError } from "centrifuge";
 import { v4 as uuidv4 } from "uuid";
+import type { MessageClient } from "@/lib/message-client";
+import { SecureMessageClient } from "@/lib/secure-message-client";
+import type { SecureEndpointRuntime } from "@/lib/secure-endpoint-runtime";
 import { HybridTerminalTransport } from "@/lib/direct-transport/hybrid-terminal-transport";
 import { clearConnectionHistory, recordConnectionEvent } from "@/lib/connection-history";
 import {
@@ -77,7 +80,7 @@ async function fetchCentrifugoToken(): Promise<string> {
 }
 
 interface UseCentrifugoResult {
-  client: Centrifuge | null;
+  client: MessageClient | null;
   status: ConnectionStatus;
   error: string | null;
   /** One HybridTerminalTransport per live connection; null while disconnected. */
@@ -91,6 +94,7 @@ interface UseCentrifugoResult {
  */
 interface UseCentrifugoOptions {
   /** Replaces the default session-gated token mint (solo: POST /api/solo/token). */
+  securityRuntime?: SecureEndpointRuntime;
   tokenRefresher?: () => Promise<string>;
   /** Replaces the default "/login" redirect on a permanent auth rejection. */
   onUnauthorized?: () => void;
@@ -104,6 +108,7 @@ export function useCentrifugo(
 ): UseCentrifugoResult {
   // Destructured so the connect effect below depends on stable callback
   // identities, not a fresh options object literal every render.
+  const securityRuntime = options?.securityRuntime;
   const tokenRefresher = options?.tokenRefresher;
   const onUnauthorized = options?.onUnauthorized;
 
@@ -111,6 +116,7 @@ export function useCentrifugo(
   const [error, setError] = useState<string | null>(null);
   const [transport, setTransport] = useState<TerminalTransportApi | null>(null);
   const clientRef = useRef<Centrifuge | null>(null);
+  const secureClientRef = useRef<SecureMessageClient | null>(null);
   const transportRef = useRef<TerminalTransportApi | null>(null);
   // Stable per-tab id for the lifetime of this hook instance (survives
   // reconnects; a fresh page load gets a fresh id).
@@ -119,6 +125,8 @@ export function useCentrifugo(
   if (!clientIdRef.current) clientIdRef.current = uuidv4();
 
   const cleanup = useCallback(() => {
+    secureClientRef.current?.dispose();
+    secureClientRef.current = null;
     if (transportRef.current) {
       transportRef.current.dispose();
       transportRef.current = null;
@@ -131,7 +139,7 @@ export function useCentrifugo(
   }, []);
 
   useEffect(() => {
-    if (!token || !centrifugoUrl || !userId) {
+    if (!token || !centrifugoUrl || !userId || !securityRuntime) {
       cleanup();
       setStatus("disconnected");
       return;
@@ -193,17 +201,20 @@ export function useCentrifugo(
     });
 
     clientRef.current = client;
+    const secureClient = new SecureMessageClient(client, userId, securityRuntime);
+    secureClientRef.current = secureClient;
 
     // Signaling/watch commands ride the same commands:rpc#{userId} channel
     // useSessions publishes RPCs on; publish directly on the client so no
     // second Subscription object is created for it (useSessions owns that).
     const commandsChannel = `commands:rpc#${userId}`;
     const publishCommand = (msg: DirectCommandMessage) => {
-      client.publish(commandsChannel, msg).catch(() => {});
+      secureClient.publish(commandsChannel, msg).catch(() => {});
     };
 
     const hybridTransport = new HybridTerminalTransport({
-      centrifuge: client,
+      centrifuge: secureClient,
+      securityRuntime,
       userId,
       clientId: clientIdRef.current,
       publishCommand,
@@ -220,7 +231,7 @@ export function useCentrifugo(
     // useSessions.ts). Only remove this specific listener on cleanup; never
     // unsubscribe/removeSubscription, since useSessions may still need it.
     const commandsSub =
-      client.getSubscription(commandsChannel) ?? client.newSubscription(commandsChannel);
+      secureClient.getSubscription(commandsChannel) ?? secureClient.newSubscription(commandsChannel);
     const handleInboundSignal = (ctx: { data: unknown }) => {
       try {
         const data = ctx.data as { type?: string };
@@ -239,10 +250,10 @@ export function useCentrifugo(
       commandsSub.off("publication", handleInboundSignal);
       cleanup();
     };
-  }, [token, centrifugoUrl, userId, cleanup, tokenRefresher, onUnauthorized]);
+  }, [token, centrifugoUrl, userId, cleanup, tokenRefresher, onUnauthorized, securityRuntime]);
 
   return {
-    client: clientRef.current,
+    client: secureClientRef.current,
     status,
     error,
     transport,

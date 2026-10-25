@@ -1,4 +1,4 @@
-const CACHE_NAME = "ftown-v2";
+const CACHE_NAME = "ftown-v3";
 const APP_SHELL = ["/", "/icon.svg", "/manifest.json"];
 
 self.addEventListener("install", (event) => {
@@ -99,12 +99,11 @@ self.addEventListener("push", (event) => {
     let data;
     try { data = event.data?.json(); } catch { return; }
     if (!data || typeof data.id !== "string" || !/^[a-f0-9]{64}$/.test(data.id)
-      || typeof data.sessionId !== "string" || !/^[a-zA-Z0-9_-]{1,200}$/.test(data.sessionId)
-      || typeof data.title !== "string" || typeof data.body !== "string") return;
+      || typeof data.sessionId !== "string" || !/^[a-zA-Z0-9_-]{1,200}$/.test(data.sessionId)) return;
     if (typeof data.ownerHash !== "string" || data.ownerHash !== await pushOwner()) return;
     if (!await claimNotification(data.id)) return;
-    await self.registration.showNotification(data.title.slice(0, 120), {
-      body: data.body.slice(0, 650), icon: "/icon.svg", tag: `ftown-${data.id}`,
+    await self.registration.showNotification('FTown attention', {
+      body: 'Open FTown to view details.', icon: "/icon.svg", tag: `ftown-${data.id}`,
       data: { sessionId: data.sessionId },
     });
   }));

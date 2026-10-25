@@ -12,7 +12,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     const store=new PushStore(); await store.rate(`${identity.owner}:${identity.bridgeId}`,"push-events",120);
     const saved=await store.ingest(identity.owner,identity.bridgeId,event);
     const deliveries=await store.claim(identity.owner,saved.id);
-    const payload=JSON.stringify({ id:saved.id, ownerHash:createHash("sha256").update(identity.owner).digest("hex"), title:saved.event.title, body:`${saved.event.sessionName}: ${saved.event.message}`,
+    const payload=JSON.stringify({ id:saved.id, ownerHash:createHash("sha256").update(identity.owner).digest("hex"), title:'FTown attention', body:'Open FTown to view details.',
       sessionId:saved.event.sessionId, url:`/dashboard?session=${encodeURIComponent(saved.event.sessionId)}` });
     // At most ten endpoints; two bounded batches avoid unbounded provider fanout.
     for(let i=0;i<deliveries.length;i+=5) await Promise.all(deliveries.slice(i,i+5).map(async(delivery)=>{

@@ -82,7 +82,9 @@ export class BridgePushNotifier {
             if (!current()) continue;
             const response = await this.deps.fetch(`${this.options.apiUrl.replace(/\/$/, '')}/api/push/events`, {
               method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-              body: JSON.stringify({ ...item.notice, bridgeId: this.options.bridgeId, sessionId: item.sessionId, sessionName: session.name }),
+              body: JSON.stringify({ kind: item.notice.kind, eventKey: item.notice.eventKey, occurredAt: item.notice.occurredAt,
+                title: 'FTown attention', message: 'Open FTown to view details.', bridgeId: this.options.bridgeId,
+                sessionId: item.sessionId, sessionName: 'FTown' }),
               signal: controller.signal,
             });
             transient = response.status === 408 || response.status === 429 || response.status >= 500;

@@ -11,6 +11,11 @@ import { configSchema, Fleet, FleetError } from "./fleet.js";
 import type { FleetRelay } from "./relay.js";
 import { createMcpServer } from "./server.js";
 import { FtownOAuthProvider, MCP_SCOPES } from "./oauth.js";
+import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { errorResult } from './fleet.js';
+import { SecurityEventStore, READ_MCP_TOOLS, safeTool, safeFailureCode, securityOutcome, finishSecurityEvent, type SecurityOutcome, type SecurityFinalizationState } from './security-events.js';
+import type { McpActionContext, SecurityEvent } from '../security/protocol.js';
 
 const httpsOrigin = z
   .string()
@@ -52,14 +57,46 @@ export function createGateway(
   config: GatewayConfig,
   provider: FtownOAuthProvider,
   relay?: FleetRelay,
+  audit?: Pick<SecurityEventStore, 'admit' | 'finish'>,
 ) {
   const app = express();
   const rootFleet = new Fleet(
     config.fleet,
     relay
-      ? (user, id, request, signal) => relay.request(user, id, request, signal)
+      ? (user, id, request, signal, context) => relay.request(user, id, request, signal, context)
       : undefined,
   );
+  const actions = new AsyncLocalStorage<McpActionContext>();
+  interface RequestState extends SecurityFinalizationState { action: McpActionContext; dispatched: boolean }
+  const states = new WeakMap<express.Request, RequestState>();
+  const finish = (state: RequestState, outcome: SecurityOutcome) => finishSecurityEvent(audit, state, outcome);
+  const admission = async (req: express.Request, res: express.Response): Promise<RequestState> => {
+    if (!audit || !provider.keys) throw new FleetError('security_setup_required', 'Encrypted MCP storage and security audit must be configured');
+    const subject = String(req.auth!.extra!.subject);
+    const tool = req.body?.method === 'tools/call' ? safeTool(req.body?.params?.name)
+      : req.body?.method === 'initialize' ? 'initialize' : req.body?.method === 'tools/list' ? 'tools_list'
+      : req.body?.method === 'resources/list' ? 'resources_list' : req.body?.method === 'resources/read' ? 'resources_read'
+      : req.body?.id === undefined ? 'protocol_notification' : 'protocol_request';
+    const target = req.body?.params?.arguments;
+    const allowed = req.auth!.extra!.machines as string[];
+    const actionId = randomUUID();
+    const action: McpActionContext = { actionId, parentActionId: null, clientId: req.auth!.clientId, grantId: String(req.auth!.extra!.grantId), tool, operation: null };
+    const event: SecurityEvent = {
+      version: 1, id: actionId, actionId, parentActionId: null, ownerId: subject, source: 'gateway',
+      bridgeId: typeof target?.machine === 'string' && allowed.includes(target.machine) ? target.machine : null,
+      clientId: action.clientId, grantId: action.grantId, endpointId: String(req.auth!.extra!.endpointId), tool, operation: null,
+      sessionId: typeof target?.sessionId === 'string' && /^[A-Za-z0-9_-]{1,200}$/.test(target.sessionId) ? target.sessionId : null,
+      startedAt: new Date().toISOString(), finishedAt: null, status: 'started', errorCode: null,
+      mutating: req.body?.method === 'tools/call' && !READ_MCP_TOOLS.has(tool),
+    };
+    await audit.admit(event);
+    const state = { event, action, finished: false, dispatched: false };
+    states.set(req, state);
+    res.once('close', () => {
+      if (!state.finished) void finish(state, { status: state.dispatched ? 'unknown' : 'rejected', errorCode: state.dispatched ? 'outcome_unknown' : res.statusCode >= 400 ? 'invalid_request' : 'cancelled' }).catch(() => {});
+    });
+    return state;
+  };
   app.disable("x-powered-by");
   // Fly's edge is the sole HTTP ingress; forwarded headers are not used for authorization.
   app.set("trust proxy", 1);
@@ -132,7 +169,7 @@ export function createGateway(
       standardHeaders: true,
       legacyHeaders: false,
     }),
-    express.json({ limit: "16kb" }),
+    express.json({ limit: "512kb" }),
   );
   app.post("/consent/:action", async (req, res) => {
     try {
@@ -193,6 +230,11 @@ export function createGateway(
       ).href,
     }),
   );
+  app.use('/mcp', express.json({ limit: '1mb' }));
+  app.use('/mcp', async (req, res, next) => {
+    try { await admission(req, res); next(); }
+    catch { res.status(503).json({ error: 'Security audit or encrypted endpoint is unavailable' }); }
+  });
   app.use(
     "/mcp",
     rateLimit({
@@ -201,9 +243,22 @@ export function createGateway(
       keyGenerator: (req) => String(req.auth?.extra?.subject),
       standardHeaders: true,
       legacyHeaders: false,
+      handler: (req, res) => {
+        const state = states.get(req);
+        void (state ? finish(state, { status: 'rejected', errorCode: 'capacity_exceeded' }) : Promise.resolve()).catch(() => {}).finally(() => res.status(429).json({ error: 'MCP request limit exceeded' }));
+      },
     }),
   );
-  app.post("/mcp", express.json({ limit: "1mb" }), async (req, res) => {
+  app.post("/mcp", async (req, res) => {
+    const state = states.get(req)!;
+    let identity;
+    try {
+      identity = await provider.keys!.loadGrantIdentity(state.event.ownerId, state.action.grantId);
+      await provider.keys!.markActive(identity.ownerId, identity.requestId);
+    } catch {
+      await finish(state, { status: 'rejected', errorCode: 'approval_required' });
+      res.status(403).json({ error: 'Renew encrypted bridge consent' }); return;
+    }
     const allowed = req.auth!.extra!.machines as string[];
     const fleet: Pick<Fleet, "config" | "request"> = {
       config: {
@@ -218,7 +273,11 @@ export function createGateway(
               "Machine is not authorized for this grant",
             ),
           );
-        return rootFleet.request(id, ...args);
+        state.dispatched = true;
+        return rootFleet.scoped({ grant: identity, action: actions.getStore() ?? state.action, revalidate: async () => {
+          const current = await provider.verifyAccessToken(req.auth!.token);
+          if (!(current.extra?.machines as string[]).includes(id) || (state.event.mutating && !current.scopes.includes('mcp:control'))) throw new FleetError('forbidden', 'MCP access changed before dispatch');
+        } }).request(id, ...args);
       },
     };
     const server = createMcpServer(fleet, {
@@ -231,6 +290,28 @@ export function createGateway(
         const authorized = current.extra?.machines as string[];
         if (machines.some((machine) => !authorized.includes(machine))) throw new FleetError("forbidden", "Machine access was revoked during this request");
       },
+      runChild: async (name, args, run) => {
+        const actionId = randomUUID();
+        const child: SecurityEvent = {
+          ...state.event, id: actionId, actionId, parentActionId: state.event.actionId, tool: safeTool(name), operation: safeTool(name),
+          bridgeId: typeof args.machine === 'string' && allowed.includes(args.machine) ? args.machine : null,
+          sessionId: typeof args.sessionId === 'string' && /^[A-Za-z0-9_-]{1,200}$/.test(args.sessionId) ? args.sessionId : null,
+          startedAt: new Date().toISOString(), mutating: !READ_MCP_TOOLS.has(name),
+        };
+        await audit!.admit(child);
+        const action = { ...state.action, actionId, parentActionId: state.event.actionId, tool: child.tool, operation: child.operation };
+        let outcome: SecurityOutcome;
+        try {
+          const result = await actions.run(action, run);
+          outcome = securityOutcome(result);
+          await audit!.finish(child, outcome);
+          return result;
+        } catch (error) {
+          const failure = errorResult(error);
+          await audit!.finish(child, { status: failure.outcomeUnknown ? 'unknown' : ['forbidden', 'permission_denied'].includes(failure.code) ? 'rejected' : 'failed', errorCode: safeFailureCode(failure.code) });
+          throw error;
+        }
+      },
     });
     // Stateless transport: every request is authenticated and reconstructs its own scoped tool surface.
     const transport = new StreamableHTTPServerTransport({
@@ -239,23 +320,42 @@ export function createGateway(
       // No GET stream/session map or unsolicited server notifications are advertised.
       enableJsonResponse: !(req.body?.method === "tools/call" && req.body?.params?.name === "attention_wait"),
     });
+    const send = transport.send.bind(transport);
+    transport.send = async (message, options) => {
+      if ('id' in message && message.id === req.body?.id && ('result' in message || 'error' in message)) {
+        let outcome: SecurityOutcome = 'error' in message ? { status: 'rejected', errorCode: message.error.code === -32602 ? 'invalid_arguments' : message.error.code === -32601 ? 'unknown_tool' : 'invalid_request' } : securityOutcome(message.result);
+        if (state.event.mutating && !req.auth!.scopes.includes('mcp:control')) outcome = { status: 'rejected', errorCode: 'permission_denied' };
+        try { await finish(state, outcome); }
+        catch {
+          await finish(state, { status: 'unknown', errorCode: 'outcome_unknown' }).catch(() => {});
+          await send({ jsonrpc: '2.0', id: message.id, error: { code: -32603, message: 'Operation outcome is unknown because final audit storage failed', data: { code: 'outcome_unknown', outcomeUnknown: true } } }, options);
+          return;
+        }
+      }
+      await send(message, options);
+    };
     res.on("close", () => {
       void server.close();
     });
     try {
       await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
+      await actions.run(state.action, () => transport.handleRequest(req, res, req.body));
+      if (!state.finished && res.statusCode >= 400) await finish(state, { status: 'rejected', errorCode: 'invalid_request' });
+      else if (!state.finished && req.body?.id === undefined) await finish(state, { status: 'succeeded', errorCode: null });
     } catch {
+      if (!state.finished) await finish(state, { status: state.dispatched && state.event.mutating ? 'unknown' : 'failed', errorCode: state.dispatched && state.event.mutating ? 'outcome_unknown' : 'internal_error' }).catch(() => {});
       if (!res.headersSent)
         res.status(500).json({ error: "MCP request failed" });
     }
   });
-  app.all("/mcp", (_req, res) => {
+  app.all("/mcp", async (_req, res) => {
+    const state = states.get(_req);
+    if (state) await finish(state, { status: 'rejected', errorCode: 'invalid_request' }).catch(() => {});
     res.setHeader("Allow", "POST, OPTIONS");
     res.status(405).end();
   });
   app.use(
-    (
+    async (
       error: unknown,
       _req: express.Request,
       res: express.Response,
@@ -268,6 +368,12 @@ export function createGateway(
         error.status === 413
           ? 413
           : 400;
+      if (_req.auth) {
+        try {
+          const state = states.get(_req) ?? await admission(_req, res);
+          await finish(state, { status: 'rejected', errorCode: 'invalid_request' });
+        } catch { res.status(503).json({ error: 'Security audit storage is unavailable' }); return; }
+      }
       res.status(status).json({ error: "Invalid request" });
     },
   );

@@ -30,6 +30,9 @@ import { canonicalNotifyPath } from './install-notify-script.js';
 import { unregisterSession, configureSessionRegistryHome } from './session-registry.js';
 import { createFtownSession, type CreateFtownSessionDeps } from './create-ftown-session.js';
 import { createRelayHandler } from './mcp/relay-handler.js';
+import { loadOrCreateIdentity } from './security/bridge/identity.js';
+import { BridgeSecurityService, applicationJson } from './security/bridge/security.js';
+import type { ApplicationJson, VerifiedApplication } from './security/protocol.js';
 import { createCommandHandler } from './command-rpc.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { SessionResurrection, shouldResurrectStoredSession } from './session-resurrection.js';
@@ -122,6 +125,8 @@ program
     // Read-only default resolution; explicit setup owns legacy data migration.
     const defaultDataDir = resolveDefaultDataDir();
     const dataDir = opts.dataDir ? resolve(opts.dataDir) : defaultDataDir;
+    // Every child/local CLI must resolve this exact instance, including custom --data-dir bridges.
+    process.env.FTOWN_DATA_DIR = dataDir;
     // Instance-scoped ".ftown home" for pointer and registry files. The DEFAULT
     // data dir resolves to $HOME/.ftown (unchanged — the harness CLIs hardcode
     // that path). A non-default --data-dir (Solo test, Docker, a second bridge)
@@ -129,6 +134,7 @@ program
     // or session-registry.json. Configure the store
     // singletons ONCE here, before any of them is read/written.
     const ftownHome = resolveFtownHome(dataDir, defaultDataDir);
+    process.env.FTOWN_BRIDGE_POINTER = join(ftownHome, 'bridge.json');
     configureSessionRegistryHome(ftownHome);
     // Bridge identity sticks to the data dir so a plain restart auto-resumes:
     // same id → same dashboard entry, sessions reattach without any flags.
@@ -391,7 +397,7 @@ program
 
     let auth: BridgeAuthResponse;
     if (opts.local) {
-      auth = { userId: 'local', token: '', refreshToken: '', centrifugoUrl: 'ws://127.0.0.1/disabled' };
+      auth = { ownerId: `solo:${bridgeId}`, userId: 'local', token: '', refreshToken: '', centrifugoUrl: 'ws://127.0.0.1/disabled' };
     } else if (solo) {
       // Solo mode: identity is synthesized locally (contract S2/S10). No
       // refresh token exists; getToken() mints a fresh hub JWT on demand.
@@ -403,6 +409,7 @@ program
         info: { bridgeId, hostname: osHostname() },
       });
       auth = {
+        ownerId: `solo:${bridgeId}`,
         userId: SOLO_USER_ID,
         token,
         refreshToken: '',
@@ -449,6 +456,23 @@ program
             );
           },
         });
+
+    if (!auth.ownerId) throw new Error('security_setup_required: bridge auth must provide immutable ownerId');
+    const identity = await loadOrCreateIdentity(dataDir, auth.ownerId, 'bridge');
+    const localIdentity = await loadOrCreateIdentity(dataDir, auth.ownerId, 'local-cli');
+    const security = new BridgeSecurityService(identity, bridgeId, dataDir, {
+      relayUserId: auth.userId, relayUrl: auth.centrifugoUrl, browserOrigin: new URL(opts.apiUrl).origin,
+      localOrigin: `http://127.0.0.1:${hookPort}`,
+    });
+    await security.policy.provisionLocalEndpoint(localIdentity.endpoint);
+    await security.audit.initialize();
+    if (!solo && !opts.local) {
+      const registration = await fetch(`${opts.apiUrl.replace(/\/$/, '')}/api/security/endpoints`, { method: 'PUT',
+        headers: { Authorization: `Bearer ${currentBridgeToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ endpoint: identity.endpoint, bridgeId, label: osHostname(), protocolVersion: 1 }) });
+      if (!registration.ok) throw new Error('security_setup_required: endpoint directory registration failed');
+    }
+    console.log('[Bridge] Encrypted endpoint ready. Run ftown security invite to pair a browser.');
 
     const userId = auth.userId;
     const centrifugoUrl = auth.centrifugoUrl;
@@ -516,12 +540,15 @@ program
         );
       },
     });
+    centrifugo.setSecurity(security);
+    centrifugo.onLocalPublication((channel, data) => localApiServer.recordPublication(channel, data));
     // Direct transport (WebRTC DataChannel) data plane. Peers attach per session;
     // terminal output/screen fan out to them directly, and to Centrifugo only when
     // the session has an unexpired remote watcher (R2). Signaling and watch
     // heartbeats ride the existing commands:rpc channel.
     const watchRegistry = new WatchRegistry();
     const directPeers = new DirectPeerManager({
+      security,
       bridgeId,
       sendSignal: (msg) => {
         centrifugo.publishSignal(userId, msg).catch((err) => {
@@ -540,6 +567,7 @@ program
     let apiOrigin = '';
     try { apiOrigin = new URL(opts.apiUrl).origin; } catch { /* leave empty; only localhost origins accepted */ }
     const loopbackServer = new LoopbackPeerServer({
+      security,
       bridgeId,
       nonce: localNonce,
       authorize: (token, origin) => browserAccess?.authorize(token, origin) ?? false,
@@ -737,6 +765,7 @@ program
           port: hookPort,
           apiUrl: opts.apiUrl,
           token: apiToken,
+          dataDir, ownerId: auth.ownerId, endpoint: security.endpoint,
           bridgeId,
           pid: process.pid,
           startedAt: new Date().toISOString(),
@@ -802,33 +831,24 @@ program
     });
 
     let ready = false;
-    browserAccess = new BrowserAccess({
-      dataDir,
-      cloudNonce: opts.local || solo ? undefined : localNonce,
-      allowedOrigins: apiOrigin ? [apiOrigin] : [],
-      bootstrap: () => ({ version: 1, userId, bridgeId, hostname: osHostname(), localPort: hookPort, localNonce: '' }),
-      execute: async (command) => {
-        if (!ready) return { requestId: command.requestId, success: false, error: 'Bridge is starting; try again shortly' };
-        let result: CommandResponse | undefined;
-        await createCommandHandler({
-          bridgeId, sessionController, attentionStore,
-          publishCommandResponse: async (response) => { result = response; },
-        })(command);
-        return result ?? { requestId: command.requestId, success: false, error: 'Command was not handled' };
-      },
-      onRevoke: () => loopbackServer.disconnectPeers(),
-    });
-    localApiServer.setBrowserAccess(browserAccess);
-    centrifugo.onLocalPublication((channel, data) => browserAccess?.publish(channel, data));
-    console.log(`[Bridge] Local browser access: run ${commandName} pair${opts.dataDir ? ` --data-dir ${JSON.stringify(dataDir)}` : ''}`);
-
-    const handleCommand = createCommandHandler({
-      bridgeId,
-      attentionStore,
-      relayRequest: createRelayHandler(hookPort, apiToken),
-      sessionController,
-      publishCommandResponse: (response) => centrifugo.publishCommandResponse(userId, response),
-    });
+    const dispatchCommand = async (message: VerifiedApplication): Promise<ApplicationJson> => {
+      if (!ready) return { type: 'command_response', response: { requestId: message.envelope.messageId, success: false, error: 'bridge_offline' } };
+      const route = message.application.route;
+      if (route.kind !== 'command') throw new Error('Invalid command route');
+      const direct = ['webrtc_offer', 'webrtc_answer', 'webrtc_ice', 'webrtc_close', 'terminal_watch', 'terminal_unwatch'].includes(route.command);
+      if (direct) {
+        await security.revalidate(message.principal);
+        publishRouter.handleCommand(message.application.data as unknown as Parameters<typeof publishRouter.handleCommand>[0]);
+        return { type: 'command_response', response: { requestId: route.requestId, success: true } };
+      }
+      let result: CommandResponse | undefined;
+      await createCommandHandler({ bridgeId, security, sessionController, attentionStore,
+        publishCommandResponse: async response => { result = response; },
+      })(message.application.data as unknown as Parameters<ReturnType<typeof createCommandHandler>>[0], message);
+      return applicationJson({ type: 'command_response', response: result ?? { requestId: route.requestId, success: false, error: 'bridge_error' } });
+    };
+    localApiServer.setSecurity(security, { protocolVersion: 1, ownerId: auth.ownerId, bridgeId, endpoint: security.endpoint,
+      relayUserId: userId }, dispatchCommand);
 
     // Solo: the hub child must be healthy before connecting (L1 gates the
     // transport, not the front). A failed hub is fatal for solo — exit cleanly
@@ -846,13 +866,9 @@ program
     centrifugo.joinBridgesChannel(userId, bridgeId);
     centrifugo.subscribeToSessions(userId);
 
-    centrifugo.subscribeToCommands(userId, (command) => {
-      if (!ready) return;
-      handleCommand(command).catch((err) => {
-        console.error(`[Bridge] Unhandled error in command handler:`, err);
-      });
-    }, (directCommand) => {
-      publishRouter.handleCommand(directCommand);
+    centrifugo.subscribeSecureCommands(userId, async message => {
+      if (!ready) throw new Error('Bridge is starting');
+      return localApiServer.dispatchSecure(message);
     });
     setTimeout(() => {
       void (async () => {
@@ -879,6 +895,7 @@ program
         solo.hub.stop();
       }
       localApiServer.stop();
+      void security.close();
       runner.stopAll();
       loopbackServer.closeAll();
       directPeers.closeAll();

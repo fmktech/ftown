@@ -4,6 +4,12 @@ import assert from 'node:assert/strict';
 import { toWireSession } from './session-wire.js';
 import { CentrifugoClient } from './centrifugo-client.js';
 import type { Session } from './types.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { generateEndpoint, open } from './security/crypto.js';
+import type { SecureEnvelope } from './security/protocol.js';
+import { BridgeSecurityService } from './security/bridge/security.js';
 
 function makeSession(overrides: Partial<Session> = {}): Session {
   return {
@@ -74,30 +80,48 @@ interface PublishCapture {
 }
 
 describe('CentrifugoClient.publishSessionUpdate — token never crosses the wire', () => {
-  it('publishes a session whose env (and token) is stripped', async () => {
+  it('publishes only ciphertext and decrypts a session whose env (and token) is stripped', async t => {
     const client = new CentrifugoClient('ws://127.0.0.1:0/connection/websocket', 'tok', async () => 'tok');
+    const ownerId = '7bac2a7f-c58e-4845-856f-8283fb07ad96';
+    const dir = await mkdtemp(join(tmpdir(), 'ftown-session-wire-'));
+    const bridge = await generateEndpoint(ownerId, 'bridge');
+    const browser = await generateEndpoint(ownerId, 'local-cli');
+    const security = new BridgeSecurityService(bridge, 'bridge-1', dir, { relayUserId: 'user-1' });
+    await security.policy.provisionLocalEndpoint(browser.endpoint);
+    client.setSecurity(security);
+    t.after(async () => { await security.close(); await rm(dir, { recursive: true, force: true }); });
 
     const captured: { channel?: string; data?: Record<string, unknown> } = {};
+    let delivered!: () => void;
+    const delivery = new Promise<void>(resolve => { delivered = resolve; });
     (client as unknown as { client: PublishCapture }).client = {
       state: 'connected',
       publish: async (channel: string, data: Record<string, unknown>) => {
         captured.channel = channel;
         captured.data = data;
+        delivered();
         return {};
       },
     };
 
     const session = makeSession();
     await client.publishSessionUpdate('user-1', session);
+    await delivery;
 
-    const publishedSession = (captured.data?.session ?? {}) as Session;
+    const envelope = captured.data as unknown as SecureEnvelope;
+    assert.equal(envelope.type, 'ftown_encrypted');
+    const decrypted = JSON.parse(new TextDecoder().decode(await open(browser, bridge.endpoint, envelope,
+      { ownerId, bridgeId: 'bridge-1', channel: 'sessions:updates#user-1', recipientId: browser.endpoint.id, purpose: 'application' }))) as { data: { type: string; session: Session } };
+    const publishedSession = decrypted.data.session;
     assert.strictEqual(publishedSession.env, undefined);
     assert.ok(!('env' in publishedSession));
     // The full payload must contain no token value anywhere.
     assert.ok(!JSON.stringify(captured.data).includes('sk-secret-token'));
+    assert.ok(!JSON.stringify(captured.data).includes(session.command));
+    assert.ok(!JSON.stringify(decrypted).includes('sk-secret-token'));
     // Sanity: the rest of the session is intact on the wire.
     assert.strictEqual(publishedSession.id, session.id);
-    assert.strictEqual(captured.data?.type, 'session_update');
+    assert.strictEqual(decrypted.data.type, 'session_update');
     // The original session keeps its env for server-side spawn/resume.
     assert.deepStrictEqual(session.env, { ANTHROPIC_AUTH_TOKEN: 'sk-secret-token', PATH: '/usr/bin' });
   });

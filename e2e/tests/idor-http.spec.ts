@@ -1,4 +1,5 @@
-import { test, expect, type APIRequestContext } from "@playwright/test";
+import { expect, type APIRequestContext } from "@playwright/test";
+import { test } from "../helpers/fixtures";
 import { login, registerUser, makeUser, sharedEmail, E2E_PASSWORD, type UserCreds } from "../helpers/app";
 import { bridgeApiFetch, readBridgePointer } from "../helpers/bridge-api";
 import { UI_BASE_URL } from "../helpers/config";
@@ -8,10 +9,11 @@ import { UI_BASE_URL } from "../helpers/config";
  * RETURNS THE SECURE STATUS for hostile input — it never exploits anything and
  * never mutates cross-tenant state. Two groups:
  *
- *  GROUP 1 — the bridge's loopback HTTP API (bind 127.0.0.1) triple-guards
- *  /api/**: a spoofed Host ⇒ 421, a non-localhost Origin ⇒ 403, a missing/wrong
- *  bearer ⇒ 401. A positive control (legit pointer bearer + loopback host) ⇒ 200
- *  proves the guards deny ONLY bad input.
+ *  GROUP 1 — the bridge's loopback HTTP API (bind 127.0.0.1): a spoofed Host
+ *  returns 421; public security discovery/envelope routes reject hostile Origins
+ *  with 403. Raw business calls require an encryption upgrade (426), including
+ *  calls with the valid hook-only bearer. An authenticated encrypted call returns
+ *  200, proving the business API remains available to approved endpoints.
  *
  *  GROUP 2 — the Next.js UI API routes (NextAuth-protected, owner-scoped). Acting
  *  as user B (or unauthenticated) against user A's resources must never leak or
@@ -50,24 +52,34 @@ test.describe("GROUP 1 — bridge loopback API guards", () => {
     expect(res.status, "spoofed Host must be rejected with 421").toBe(421);
   });
 
-  test("non-localhost Origin ⇒ 403", async () => {
-    const res = await bridgeApiFetch("GET", "/api/sessions", { origin: "http://evil.example.com" });
-    expect(res.status, "non-localhost Origin must be rejected with 403").toBe(403);
+  test("hostile Origin is rejected by security discovery and envelope routes", async () => {
+    for (const [method, path] of [["GET", "/api/security/info"], ["POST", "/api/security/envelope"]]) {
+      const res = await bridgeApiFetch(method, path, { origin: "http://evil.example.com", body: method === "POST" ? {} : undefined });
+      expect(res.status, `${method} ${path} must reject a hostile Origin`).toBe(403);
+    }
+    const allowed = await bridgeApiFetch("GET", "/api/security/info", { origin: UI_BASE_URL });
+    expect(allowed.status, "security discovery accepts the configured browser origin").toBe(200);
   });
 
-  test("missing bearer ⇒ 401", async () => {
+  test("plaintext business API without a bearer requires encryption", async () => {
     const res = await bridgeApiFetch("GET", "/api/sessions", { bearer: null });
-    expect(res.status, "missing Authorization must be rejected with 401").toBe(401);
+    expect(res.status).toBe(426);
+    expect(res.body).toEqual({ error: "upgrade_required", code: "upgrade_required" });
   });
 
-  test("wrong bearer ⇒ 401", async () => {
-    const res = await bridgeApiFetch("GET", "/api/sessions", { bearer: "wrong-token-xxxx" });
-    expect(res.status, "wrong bearer token must be rejected with 401").toBe(401);
+  test("plaintext business API with wrong or valid hook bearer still requires encryption", async () => {
+    for (const bearer of ["wrong-token-xxxx", readBridgePointer().token]) {
+      const res = await bridgeApiFetch("GET", "/api/sessions", { bearer });
+      expect(res.status).toBe(426);
+      expect(res.body).toEqual({ error: "upgrade_required", code: "upgrade_required" });
+    }
+    const hostileOrigin = await bridgeApiFetch("GET", "/api/sessions", { origin: "http://evil.example.com" });
+    expect(hostileOrigin.status, "plaintext business routes cannot bypass encryption through Origin headers").toBe(426);
   });
 
-  test("positive control: legit pointer bearer + loopback host/origin ⇒ 200", async () => {
+  test("positive control: approved encrypted loopback request ⇒ 200", async () => {
     const res = await bridgeApiFetch("GET", "/api/sessions", {});
-    expect(res.status, "guards must ADMIT a legitimate loopback+bearer call").toBe(200);
+    expect(res.status, "approved encrypted endpoints must retain business API access").toBe(200);
   });
 });
 

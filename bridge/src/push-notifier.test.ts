@@ -14,7 +14,10 @@ test('nonblocking notifier scopes a single event, excludes shells and stops queu
   notifier.notify('shell',notice);notifier.notify('agent',notice);notifier.notify('agent',notice);
   await tick();
   assert.equal(bodies.length,1);
-  assert.equal(JSON.parse(bodies[0]).sessionName,'agent');
+  assert.equal(JSON.parse(bodies[0]).sessionName,'FTown');
+  assert.equal(JSON.parse(bodies[0]).title,'FTown attention');
+  assert.equal(JSON.parse(bodies[0]).message,'Open FTown to view details.');
+  assert.ok(!bodies[0].includes('Ready'));
   assert.equal(JSON.parse(bodies[0]).eventKey,'idle');
   notifier.stop();notifier.notify('later',notice);await tick();assert.equal(bodies.length,1);
 });

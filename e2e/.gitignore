@@ -3,5 +3,7 @@ certs/
 playwright-report/
 test-results/
 .bridge-home/
+.bridge-home-2/
+.browser-home/
 *.log
 .run-email

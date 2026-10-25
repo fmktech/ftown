@@ -8,8 +8,8 @@
 export function parseLocalAdvert(body: {
   localPort?: unknown;
   localNonce?: unknown;
-}): { localPort: number; localNonce: string } | null | { error: string } {
-  if (body.localPort === undefined && body.localNonce === undefined) return null;
+}): { localPort: number } | null | { error: string } {
+  if (body.localPort === undefined) return null;
   if (
     typeof body.localPort !== "number" ||
     !Number.isInteger(body.localPort) ||
@@ -18,8 +18,6 @@ export function parseLocalAdvert(body: {
   ) {
     return { error: "localPort must be an integer between 1 and 65535" };
   }
-  if (typeof body.localNonce !== "string" || !/^[0-9a-f]{32}$/.test(body.localNonce)) {
-    return { error: "localNonce must be a 32-character lowercase hex string" };
-  }
-  return { localPort: body.localPort, localNonce: body.localNonce };
+  // A port is discovery metadata. Never advertise an authorization capability.
+  return { localPort: body.localPort };
 }

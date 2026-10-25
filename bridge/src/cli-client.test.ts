@@ -4,20 +4,27 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { api, fetchInbox, loadPointer, resolveSessionId, sendMail } from './cli-client.js';
+import { secureFixture } from './security/bridge/fixtures.test.js';
 import type { Session } from './wire-types.js';
 
-test('shared request preserves caller headers/body, loopback URL and API errors', async () => {
-  const pointer = { port: 1234, token: 'local' };
+test('shared request encrypts bodies and caller metadata, preserves API errors, and rejects old pointers', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'ftown-cli-secure-'));
   let request: RequestInit | undefined;
-  const fake = (async (url: URL | RequestInfo, init?: RequestInit) => {
-    assert.equal(url, 'http://127.0.0.1:1234/api/test'); request = init;
-    return new Response('{"ok":true}', { status: 200 });
-  }) as typeof fetch;
-  assert.deepEqual(await api(pointer, 'POST', '/api/test', { text: 'literal $ value' }, { 'X-Ftown-Session-Id': 'caller' }, undefined, fake), { ok: true });
-  assert.deepEqual(request?.headers, { Authorization: 'Bearer local', 'X-Ftown-Session-Id': 'caller', 'Content-Type': 'application/json' });
-  assert.equal(request?.body, '{"text":"literal $ value"}');
-  await assert.rejects(api(pointer, 'GET', '/api/test', undefined, undefined, undefined, (async () => new Response('{"error":"denied"}', { status: 403 })) as typeof fetch), /denied/);
-  await assert.rejects(api(pointer, 'GET', '/api/test', undefined, undefined, undefined, (async () => new Response('not json', { status: 500 })) as typeof fetch), /HTTP 500/);
+  const secure = await secureFixture(directory, (async (url, init) => {
+    assert.equal(url, 'http://127.0.0.1:1234/api/sessions'); request = init;
+    return new Response('{"ok":true}');
+  }) as typeof fetch);
+  try {
+    assert.deepEqual(await api(secure.pointer, 'POST', '/api/sessions', { text: 'literal $ value' },
+      { 'X-Ftown-Session-Id': 'caller' }, undefined, secure.fetch), { ok: true });
+    assert.deepEqual(request?.headers, { 'x-ftown-session-id': 'caller' });
+    assert.equal(request?.body, '{"text":"literal $ value"}');
+    await assert.rejects(api({ port: 1234, token: 'old' }, 'GET', '/api/sessions'), { code: 'upgrade_required' });
+  } finally { await secure.security.close(); rmSync(directory, { recursive: true, force: true }); }
+  const denied = mkdtempSync(join(tmpdir(), 'ftown-cli-denied-'));
+  const rejected = await secureFixture(denied, (async () => new Response('{"error":"denied"}', { status: 403 })) as typeof fetch);
+  try { await assert.rejects(api(rejected.pointer, 'GET', '/api/sessions', undefined, undefined, undefined, rejected.fetch), /denied/); }
+  finally { await rejected.security.close(); rmSync(denied, { recursive: true, force: true }); }
 });
 
 test('pointer is read lazily and validates its local port', () => {
@@ -30,16 +37,18 @@ test('pointer is read lazily and validates its local port', () => {
   } finally { if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous; rmSync(home, { recursive: true, force: true }); }
 });
 
-test('mail groups use the same inbox query and send payload helpers', async () => {
+test('mail groups preserve inbox queries and send payload through authenticated envelopes', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'ftown-cli-mail-'));
   const original = globalThis.fetch; const calls: Array<{ url: string; init?: RequestInit }> = [];
-  globalThis.fetch = (async (url, init) => { calls.push({ url: String(url), init }); return new Response(init?.method === 'POST' ? '{"id":"m1"}' : '{"messages":[]}'); }) as typeof fetch;
+  const secure = await secureFixture(directory, (async (url, init) => { calls.push({ url: String(url), init });
+    return new Response(init?.method === 'POST' ? '{"id":"m1"}' : '{"messages":[]}'); }) as typeof fetch);
+  globalThis.fetch = secure.fetch;
   try {
-    const pointer = { port: 1234, token: 'local' };
-    assert.deepEqual(await fetchInbox(pointer, 'self', { peek: true, all: true, limit: 7 }), []);
+    assert.deepEqual(await fetchInbox(secure.pointer, 'self', { peek: true, all: true, limit: 7 }), []);
     assert.match(calls[0].url, /wait=0&peek=1&limit=7&all=1/);
-    assert.deepEqual(await sendMail(pointer, 'parent', { body: 'done', type: 'result' }), { id: 'm1' });
+    assert.deepEqual(await sendMail(secure.pointer, 'parent', { body: 'done', type: 'result' }), { id: 'm1' });
     assert.equal(calls[1].init?.body, '{"body":"done","type":"result"}');
-  } finally { globalThis.fetch = original; }
+  } finally { globalThis.fetch = original; await secure.security.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('session resolution retains exact/name/prefix and ambiguity behavior', () => {

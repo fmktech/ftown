@@ -37,6 +37,7 @@ interface SessionListProps {
   onHideBridge?: (bridgeId: string) => void;
   onUnhideBridge?: (bridgeId: string) => void;
   onCreateSession?: (bridgeId: string) => void;
+  onOpenSecurity?: (bridgeId: string) => void;
 }
 
 type ContextMenuState =
@@ -433,6 +434,7 @@ function BridgeContextMenu({
   isOnline,
   isHidden,
   onCreateSession,
+  onOpenSecurity,
   onHide,
   onUnhide,
   onClose,
@@ -441,6 +443,7 @@ function BridgeContextMenu({
   isOnline: boolean;
   isHidden: boolean;
   onCreateSession: (bridgeId: string) => void;
+  onOpenSecurity?: (bridgeId: string) => void;
   onHide: (bridgeId: string) => void;
   onUnhide: (bridgeId: string) => void;
   onClose: () => void;
@@ -467,6 +470,7 @@ function BridgeContextMenu({
           onClose();
         }}
       />
+      {onOpenSecurity && <ContextMenuButton largeOnMobile label="Security log" onClick={() => { onOpenSecurity(menu.bridgeId); onClose(); }} />}
       {isHidden ? (
         <ContextMenuButton label="Unhide" onClick={() => { onUnhide(menu.bridgeId); onClose(); }} />
       ) : (
@@ -500,6 +504,7 @@ export function SessionList({
   onHideBridge,
   onUnhideBridge,
   onCreateSession,
+  onOpenSecurity,
 }: SessionListProps) {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -1473,6 +1478,10 @@ export function SessionList({
               ✕
             </button>
           )}
+          {onOpenSecurity && <button type="button" aria-label={`Security log for ${label}`} title={`Security log for ${label}`}
+            className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center text-sm md:min-h-6 md:min-w-6"
+            style={{ color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer" }}
+            onClick={event => { event.stopPropagation(); onOpenSecurity(bridgeId); }}>◇</button>}
           <StatusDot kind={isOnline ? "connected" : "disconnected"} />
           <span style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>
             {bridgeSessions.length}
@@ -1809,6 +1818,7 @@ export function SessionList({
           isOnline={onlineBridgeIds.has(contextMenu.bridgeId)}
           isHidden={hiddenBridgeSet.has(contextMenu.bridgeId)}
           onCreateSession={onCreateSession ?? (() => {})}
+          onOpenSecurity={onOpenSecurity}
           onHide={onHideBridge ?? (() => {})}
           onUnhide={onUnhideBridge ?? (() => {})}
           onClose={closeContextMenu}

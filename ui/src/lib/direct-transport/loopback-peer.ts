@@ -1,3 +1,4 @@
+import { applicationJson, type SecureEndpointRuntime } from "../secure-endpoint-runtime";
 import {
   DIRECT_PROTOCOL_VERSION,
   LOOPBACK_TIMEOUT_MS,
@@ -30,7 +31,9 @@ export interface LoopbackPeerOptions {
   bridgeId: string;
   clientId: string;
   port: number;
-  nonce: string;
+  /** Legacy source compatibility only; never sent or used for authorization. */
+  nonce?: string;
+  securityRuntime?: SecureEndpointRuntime;
   /** Injectable for tests; defaults to the browser-native WebSocket. */
   wsFactory?: WebSocketFactory;
 }
@@ -66,7 +69,11 @@ const defaultWebSocketFactory: WebSocketFactory = (url) =>
 export class LoopbackPeer implements LoopbackPeerApi {
   private readonly clientId: string;
   private readonly port: number;
-  private readonly nonce: string;
+  private readonly bridgeId: string;
+  private readonly pairId = crypto.randomUUID();
+  private readonly securityRuntime?: SecureEndpointRuntime;
+  private incoming: Promise<void> = Promise.resolve();
+  private outgoing: Promise<void> = Promise.resolve();
   private readonly wsFactory: WebSocketFactory;
 
   private ws: WebSocketLike | null = null;
@@ -88,7 +95,8 @@ export class LoopbackPeer implements LoopbackPeerApi {
   constructor(opts: LoopbackPeerOptions) {
     this.clientId = opts.clientId;
     this.port = opts.port;
-    this.nonce = opts.nonce;
+    this.bridgeId = opts.bridgeId;
+    this.securityRuntime = opts.securityRuntime;
     this.wsFactory = opts.wsFactory ?? defaultWebSocketFactory;
   }
 
@@ -114,7 +122,7 @@ export class LoopbackPeer implements LoopbackPeerApi {
   }
 
   private openSocket(): void {
-    const url = `ws://127.0.0.1:${this.port}/ws?nonce=${encodeURIComponent(this.nonce)}`;
+    const url = `ws://127.0.0.1:${this.port}/ws?pairId=${encodeURIComponent(this.pairId)}`;
     const ws = this.wsFactory(url);
     this.ws = ws;
     ws.onopen = () => this.onOpen();
@@ -124,30 +132,36 @@ export class LoopbackPeer implements LoopbackPeerApi {
   }
 
   private onOpen(): void {
-    this.send({ kind: 'hello', clientId: this.clientId, protocolVersion: DIRECT_PROTOCOL_VERSION });
+    if (!this.securityRuntime) { this.fail(new Error('Encrypted bridge approval is required')); return; }
+    void this.securityRuntime.handshake(this.bridgeId, this.secureChannel(), async packet => {
+      if (!this.ws || this.ws.readyState !== WS_OPEN || this.closed) throw new Error('loopback closed');
+      this.ws.send(JSON.stringify(packet));
+    }).then(() => {
+      if (this.closed) return;
+      if (this.connectTimer) clearTimeout(this.connectTimer);
+      this.connectTimer = null; this.startPing(); this.resolve();
+    }).catch(() => this.fail(new Error('Encrypted loopback handshake failed')));
   }
 
+  private secureChannel(): string { return `direct:loopback-ws:${this.bridgeId}:${this.pairId}`; }
+
   private onFrame(raw: unknown): void {
-    if (typeof raw !== 'string') return;
-    let msg: DirectMessage;
-    try {
-      msg = JSON.parse(raw) as DirectMessage;
-    } catch {
-      return;
-    }
+    this.incoming = this.incoming.then(async () => {
+      if (this.closed || !this.securityRuntime || typeof raw !== 'string') return;
+      const packet: unknown = JSON.parse(raw);
+      for (const delivered of await this.securityRuntime.receive(packet, this.secureChannel())) {
+        if (this.closed) return;
+        const app = delivered.application;
+        if (delivered.bridgeId !== this.bridgeId || app.route.kind !== 'terminal' || app.route.pairId !== this.pairId
+          || !app.data || typeof app.data !== 'object' || Array.isArray(app.data) || typeof app.data.kind !== 'string'
+          || app.route.frameType !== app.data.kind || app.route.sessionId !== ('sessionId' in app.data ? app.data.sessionId : '')) continue;
+        this.handleMessage(app.data as unknown as DirectMessage);
+      }
+    }).catch(() => this.fail(new Error('Encrypted peer frame rejected')));
+  }
+
+  private handleMessage(msg: DirectMessage): void {
     switch (msg.kind) {
-      case 'hello_ack':
-        if (msg.protocolVersion !== DIRECT_PROTOCOL_VERSION) {
-          this.close();
-          return;
-        }
-        if (this.connectTimer) {
-          clearTimeout(this.connectTimer);
-          this.connectTimer = null;
-        }
-        this.startPing();
-        this.resolve();
-        break;
       case 'screen':
         this.handlers.get(msg.sessionId)?.onScreen(msg.data);
         break;
@@ -195,10 +209,13 @@ export class LoopbackPeer implements LoopbackPeerApi {
   }
 
   private send(msg: DirectMessage): void {
-    const ws = this.ws;
-    if (ws && ws.readyState === WS_OPEN) {
-      ws.send(JSON.stringify(msg));
-    }
+    this.outgoing = this.outgoing.then(async () => {
+      if (this.closed || !this.securityRuntime) return;
+      const packet = await this.securityRuntime.sealApplication(this.bridgeId, this.secureChannel(), { type: 'application',
+        route: { kind: 'terminal', sessionId: 'sessionId' in msg ? msg.sessionId : '', frameType: msg.kind, pairId: this.pairId },
+        data: applicationJson(msg), mcp: null });
+      if (!this.closed && this.ws && this.ws.readyState === WS_OPEN) this.ws.send(JSON.stringify(packet));
+    }).catch(() => this.fail(new Error('Encrypted peer send failed')));
   }
 
   onClose(cb: () => void): void {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { Centrifuge, Subscription } from "centrifuge";
+import type { MessageClient, MessageSubscription } from "@/lib/message-client";
 import { hookEventToActivity } from "@/lib/hook-events";
 
 export interface TokenUsage {
@@ -26,13 +26,13 @@ interface UseSessionEventsResult {
 }
 
 export function useSessionEvents(
-  client: Centrifuge | null,
+  client: MessageClient | null,
   sessionId: string | null,
   userId: string | null
 ): UseSessionEventsResult {
   const [usage, setUsage] = useState<TokenUsage>({ inputTokens: 0, outputTokens: 0 });
   const [activity, setActivity] = useState<"thinking" | "tool_use" | "idle">("idle");
-  const subRef = useRef<Subscription | null>(null);
+  const subRef = useRef<MessageSubscription | null>(null);
 
   useEffect(() => {
     if (!client || !sessionId || !userId) {

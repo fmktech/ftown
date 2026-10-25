@@ -10,6 +10,8 @@ const db = new Client({ connectionString: process.env.DATABASE_URL });
 await db.connect();
 try {
   await db.query('SELECT 1 FROM mcp_oauth_records LIMIT 1');
+  await db.query('SELECT 1 FROM mcp_endpoint_identities LIMIT 1');
+  await db.query('SELECT 1 FROM mcp_security_events LIMIT 1');
   const { rows: owners } = await db.query(
     "SELECT u.id, u.email FROM users u JOIN bridge_refresh b ON b.sub=u.email WHERE b.bridge_id=$1 AND b.current_jti <> 'revoked'",
     [process.env.FTOWN_MCP_OWNER_BRIDGE_ID],

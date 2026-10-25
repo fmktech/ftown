@@ -1,4 +1,5 @@
-import { test, expect } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "../helpers/fixtures";
 import { createECDH, randomUUID } from "node:crypto";
 import jwt from "jsonwebtoken";
 import pg from "pg";
@@ -72,8 +73,10 @@ test("explicit push opt-in/opt-out and foreground/closed-page service-worker dis
   self.dispatchEvent(event);await pending;
  },{id:foregroundId,ownerHash});
  await expect.poll(()=>worker.evaluate(()=>(self as unknown as {testNotifications:unknown[]}).testNotifications.length)).toBe(1);
- expect(await worker.evaluate(()=>(self as unknown as {testNotifications:{title:string;options:NotificationOptions}[]}).testNotifications[0]))
-  .toMatchObject({title:"Foreground question",options:{body:"Agent: review while the app is open",data:{sessionId:"foreground-push-session"}}});
+ const foreground=await worker.evaluate(()=>(self as unknown as {testNotifications:{title:string;options:NotificationOptions}[]}).testNotifications[0]);
+ expect(foreground).toMatchObject({title:"FTown attention",options:{body:"Open FTown to view details.",data:{sessionId:"foreground-push-session"}}});
+ expect(JSON.stringify(foreground)).not.toContain("Foreground question");
+ expect(JSON.stringify(foreground)).not.toContain("Agent: review while the app is open");
  // End all app pages; a distinct provider receipt still displays through the
  // same real service worker, independently of the foreground notification.
  await page.close();
@@ -85,6 +88,10 @@ test("explicit push opt-in/opt-out and foreground/closed-page service-worker dis
   self.dispatchEvent(event);await pending;
  },{id,ownerHash});
  await expect.poll(()=>worker.evaluate(()=>(self as unknown as {testNotifications:unknown[]}).testNotifications.length)).toBe(2);
+ const closedPage=await worker.evaluate(()=>(self as unknown as {testNotifications:{title:string;options:NotificationOptions}[]}).testNotifications[1]);
+ expect(closedPage).toMatchObject({title:"FTown attention",options:{body:"Open FTown to view details.",data:{sessionId:"push-test-session"}}});
+ expect(JSON.stringify(closedPage)).not.toContain("Question");
+ expect(JSON.stringify(closedPage)).not.toContain("Agent: choose");
  await worker.evaluate(async({id,ownerHash})=>{
   let pending=Promise.resolve();const event=new Event("push");
   Object.defineProperties(event,{data:{value:{json:()=>({id,ownerHash,sessionId:"push-test-session",title:"Question",body:"duplicate"})}},waitUntil:{value:(promise:Promise<void>)=>{pending=promise;}}});

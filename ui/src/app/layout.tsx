@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Analytics } from "@vercel/analytics/next";
+import { InvitationSafeAnalytics } from "@/lib/auth-mode";
 import { Providers } from "./providers";
 import { ServiceWorkerRegister } from "./sw-register";
 import "./globals.css";
@@ -38,7 +38,7 @@ export default function RootLayout({
         <ServiceWorkerRegister />
         <Providers>{children}</Providers>
         {/* Solo promises no telemetry; the same-origin analytics script would 404 anyway but must not be requested. */}
-        {process.env.NEXT_PUBLIC_SOLO !== "1" && <Analytics />}
+        {process.env.NEXT_PUBLIC_SOLO !== "1" && <InvitationSafeAnalytics />}
       </body>
     </html>
   );

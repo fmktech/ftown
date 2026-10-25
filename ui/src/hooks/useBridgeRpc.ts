@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { Command, CommandResponse, BridgeExecPayload } from "@/types";
+import type { MessagePublishOptions } from "@/lib/message-client";
 
 /** How long a request/response RPC waits before rejecting. */
 const RPC_TIMEOUT_MS = 30_000;
@@ -31,7 +32,7 @@ interface CommandResponseMessage {
 export interface BridgeRpcSubscriptionLike {
   state: string;
   subscribe(): void;
-  publish(data: unknown): Promise<unknown>;
+  publish(data: unknown, options?: MessagePublishOptions): Promise<unknown>;
   on(event: "publication", listener: (ctx: { data: unknown; info?: { user?: string } }) => void): unknown;
   on(event: "subscribed", listener: () => void): unknown;
   off(event: "publication", listener: (ctx: { data: unknown; info?: { user?: string } }) => void): unknown;
@@ -65,7 +66,7 @@ export interface RpcCore {
   bridgeExec(command: string, workingDir: string, bridgeId: string): Promise<BridgeExecResponse>;
 }
 
-export function createRpcCore(publish: (command: Command) => void, timeoutMs = RPC_TIMEOUT_MS): RpcCore {
+export function createRpcCore(publish: (command: Command, options?: MessagePublishOptions) => unknown, timeoutMs = RPC_TIMEOUT_MS): RpcCore {
   // First-response callbacks: resolve once, then self-delete.
   const pendingCallbacks = new Map<string, (response: CommandResponse) => void>();
   // Broadcast-collect callbacks: unlike pendingCallbacks (which resolves on
@@ -74,6 +75,10 @@ export function createRpcCore(publish: (command: Command) => void, timeoutMs = R
   // merge replies from every connected bridge instead of silently dropping
   // all but the fastest.
   const collectingCallbacks = new Map<string, (response: CommandResponse) => void>();
+  const publishSafely = (command: Command, options: MessagePublishOptions, onError: (error: unknown) => void): void => {
+    try { void Promise.resolve(publish(command, options)).catch(onError); }
+    catch (error) { onError(error); }
+  };
 
   const handleResponse = (response: CommandResponse): void => {
     const cb = pendingCallbacks.get(response.requestId);
@@ -90,34 +95,43 @@ export function createRpcCore(publish: (command: Command) => void, timeoutMs = R
 
   const sendCommand = (command: Command): Promise<CommandResponse> => {
     return new Promise((resolve, reject) => {
+      const cancellation = new AbortController(); const deadline = Date.now() + timeoutMs;
       const timeout = setTimeout(() => {
+        cancellation.abort();
         pendingCallbacks.delete(command.requestId);
         reject(new Error(`${command.type} timed out`));
       }, timeoutMs);
 
       pendingCallbacks.set(command.requestId, (resp) => {
         clearTimeout(timeout);
+        cancellation.abort();
         resolve(resp);
       });
 
-      publish(command);
+      publishSafely(command, { deadline, signal: cancellation.signal }, error => {
+        clearTimeout(timeout); cancellation.abort(); pendingCallbacks.delete(command.requestId); reject(error);
+      });
     });
   };
 
   const sendCommandCollect = (command: Command, windowMs = 1500): Promise<CommandResponse[]> => {
     return new Promise((resolve) => {
+      const cancellation = new AbortController();
       const responses: CommandResponse[] = [];
       collectingCallbacks.set(command.requestId, (resp) => {
         responses.push(resp);
       });
       // Fixed window rather than resolve-on-first: a broadcast has an unknown
       // number of responders, so we collect until the window closes.
-      setTimeout(() => {
+      const timeout = setTimeout(() => {
+        cancellation.abort();
         collectingCallbacks.delete(command.requestId);
         resolve(responses);
       }, windowMs);
 
-      publish(command);
+      publishSafely(command, { deadline: Date.now() + windowMs, signal: cancellation.signal }, () => {
+        clearTimeout(timeout); cancellation.abort(); collectingCallbacks.delete(command.requestId); resolve(responses);
+      });
     });
   };
 
@@ -127,14 +141,17 @@ export function createRpcCore(publish: (command: Command) => void, timeoutMs = R
     bridgeId: string
   ): Promise<BridgeExecResponse> => {
     return new Promise((resolve, reject) => {
+      const cancellation = new AbortController(); const deadline = Date.now() + timeoutMs;
       const requestId = uuidv4();
       const timeout = setTimeout(() => {
+        cancellation.abort();
         pendingCallbacks.delete(requestId);
         reject(new Error("bridge_exec timed out"));
       }, timeoutMs);
 
       pendingCallbacks.set(requestId, (resp) => {
         clearTimeout(timeout);
+        cancellation.abort();
         if (resp.success) {
           resolve(resp.data as BridgeExecResponse);
         } else {
@@ -143,7 +160,9 @@ export function createRpcCore(publish: (command: Command) => void, timeoutMs = R
       });
 
       const payload: BridgeExecPayload = { command, workingDir, bridgeId };
-      publish({ type: "bridge_exec", payload, requestId });
+      publishSafely({ type: "bridge_exec", payload, requestId }, { deadline, signal: cancellation.signal }, error => {
+        clearTimeout(timeout); cancellation.abort(); pendingCallbacks.delete(requestId); reject(error);
+      });
     });
   };
 
@@ -189,8 +208,8 @@ export function useBridgeRpc(client: CentrifugoClientLike | null, userId: string
   const subscribedListenersRef = useRef<Set<() => void>>(new Set());
   const coreRef = useRef<RpcCore | null>(null);
   if (coreRef.current === null) {
-    coreRef.current = createRpcCore((command) => {
-      commandsSubRef.current?.publish(command);
+    coreRef.current = createRpcCore((command, options) => {
+      return commandsSubRef.current?.publish(command, options);
     }, client?.commandTimeoutMs);
   }
   const core = coreRef.current;
@@ -251,8 +270,12 @@ export function useBridgeRpc(client: CentrifugoClientLike | null, userId: string
 
   const publishCommand = useCallback((command: Command) => {
     if (!commandsSubRef.current) return;
-    commandsSubRef.current.publish(command);
-  }, []);
+    void commandsSubRef.current.publish(command).catch(() => {
+      const response: CommandResponse = { requestId: command.requestId, success: false, error: "Encrypted request could not be delivered", data: { code: "approval_required" } };
+      core.handleResponse(response); setLastResponse(response);
+      for (const listener of responseListenersRef.current) listener(response);
+    });
+  }, [core]);
 
   const sendCommand = useCallback(
     (command: Command): Promise<CommandResponse> => {

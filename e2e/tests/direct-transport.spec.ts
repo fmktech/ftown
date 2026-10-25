@@ -1,4 +1,5 @@
-import { test, expect, type BrowserContext, type Page } from "@playwright/test";
+import { expect, type BrowserContext, type Page } from "@playwright/test";
+import { test } from "../helpers/fixtures";
 import {
   sharedEmail,
   login,
@@ -23,7 +24,8 @@ import {
  * ladder to one rung via two browser-side knobs (no product code involved):
  *
  *  - BLOCK LOOPBACK: LoopbackPeer connects with the browser-global
- *    `new WebSocket("ws://127.0.0.1:{port}/ws?nonce=…")` (loopback-peer.ts),
+ *    `new WebSocket("ws://127.0.0.1:{port}/ws?pairId=…")` (loopback-peer.ts),
+ *    where pairId is discovery metadata and the endpoint handshake authenticates the peer,
  *    while the Centrifuge client targets `ws://localhost:8000/...` — the
  *    hostnames differ, so we wrap window.WebSocket and redirect ONLY
  *    `ws://127.0.0.1` URLs to a dead port (127.0.0.1:1). The socket fails with

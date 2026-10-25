@@ -1,4 +1,5 @@
-import { test, expect } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "../helpers/fixtures";
 import { bridgeApiFetch } from "../helpers/bridge-api";
 
 /** Durable mail regression coverage through the bridge loopback API. */

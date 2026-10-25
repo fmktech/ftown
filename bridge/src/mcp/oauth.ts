@@ -18,6 +18,10 @@ import {
 } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import type { OAuthStore, OAuthTransaction } from "./oauth-store.js";
+import { z } from 'zod';
+import { open, parseSecureEnvelope } from '../security/crypto.js';
+import type { ApprovedBridge } from '../security/protocol.js';
+import type { McpIdentityStore } from './mcp-key-store.js';
 
 const secretToken = () => randomBytes(32).toString("base64url");
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -31,10 +35,15 @@ interface Pending {
   state?: string;
   scopes: string[];
   resource: string;
+  expiresAt: number;
+  subject?: string;
+  grantId?: string;
 }
 interface Code extends Pending {
   subject: string;
   machines: string[];
+  grantId: string;
+  activeExpiresAt: string;
 }
 interface Grant {
   resource: string;
@@ -63,6 +72,7 @@ export class FtownOAuthProvider implements OAuthServerProvider {
   constructor(
     readonly store: OAuthStore,
     readonly options: OAuthOptions,
+    readonly keys?: McpIdentityStore,
   ) {
     this.resource = new URL("/mcp", options.publicUrl).href;
   }
@@ -146,6 +156,7 @@ export class FtownOAuthProvider implements OAuthServerProvider {
       state: params.state,
       scopes,
       resource: this.resource,
+      expiresAt: now() + 600,
     };
     await this.store.transaction((tx) =>
       tx.put("pending", id, pending, now() + 600),
@@ -176,8 +187,15 @@ export class FtownOAuthProvider implements OAuthServerProvider {
       pending: await tx.get<Pending>("pending", claims.request),
       owned: await tx.ownedMachines(claims.sub!),
     }));
-    if (!pending || pending.resource !== this.resource)
+    if (!pending || pending.resource !== this.resource || !pending.expiresAt || (pending.subject && pending.subject !== claims.sub))
       throw new InvalidRequestError("Authorization request expired");
+    if (!this.keys) throw new InvalidRequestError('Encrypted MCP identities must be configured');
+    const security = await this.keys.ensurePendingIdentity(claims.request, claims.sub!, pending.scopes.includes('mcp:control') ? ['read', 'control'] : ['read']);
+    await this.store.transaction(async tx => {
+      const current = await tx.get<Pending>('pending', claims.request);
+      if (!current || (current.subject && current.subject !== claims.sub)) throw new InvalidRequestError('Authorization request expired');
+      await tx.put('pending', claims.request, { ...current, subject: claims.sub, grantId: security.grantId }, current.expiresAt);
+    });
     return {
       clientName: pending.clientName,
       redirectUri: pending.redirectUri,
@@ -185,49 +203,69 @@ export class FtownOAuthProvider implements OAuthServerProvider {
       machines: this.currentMachines(claims.sub!).filter((m) =>
         owned.includes(m),
       ),
+      security,
     };
   }
   async approve(assertion: string, deny = false) {
     const claims = this.assertion(assertion, deny ? "deny" : "approve");
-    return this.store.transaction(async (tx) => {
-      const pending = await tx.take<Pending>("pending", claims.request);
-      if (!pending || pending.resource !== this.resource)
-        throw new InvalidRequestError(
-          "Authorization request expired or already handled",
-        );
-      const redirect = new URL(pending.redirectUri);
-      if (pending.state !== undefined)
-        redirect.searchParams.set("state", pending.state);
-      redirect.searchParams.set("iss", this.options.publicUrl);
-      if (deny) {
-        redirect.searchParams.set("error", "access_denied");
-        return redirect.href;
-      }
-      const machines = claims.machines;
-      const owned = await tx.ownedMachines(claims.sub!);
-      const allowed = this.currentMachines(claims.sub!).filter((m) =>
-        owned.includes(m),
-      );
-      if (
-        !Array.isArray(machines) ||
-        !machines.length ||
-        machines.some((m) => typeof m !== "string" || !allowed.includes(m))
-      )
-        throw new InvalidRequestError("No authorized machines selected");
-      const code = secretToken();
-      await tx.put(
-        "code",
-        hash(code),
-        {
-          ...pending,
-          subject: claims.sub!,
-          machines: [...new Set(machines)],
-        } satisfies Code,
-        now() + 120,
-      );
-      redirect.searchParams.set("code", code);
+    // Never hold an OAuth pool connection while the key store acquires another.
+    const { pending, owned } = await this.store.transaction(async tx => ({
+      pending: await tx.get<Pending>('pending', claims.request),
+      owned: deny ? [] : await tx.ownedMachines(claims.sub!),
+    }));
+    if (!pending || pending.resource !== this.resource) throw new InvalidRequestError('Authorization request expired or already handled');
+    const redirect = new URL(pending.redirectUri);
+    if (pending.state !== undefined) redirect.searchParams.set('state', pending.state);
+    redirect.searchParams.set('iss', this.options.publicUrl);
+    if (deny) {
+      await this.store.transaction(async tx => {
+        if (!await tx.take<Pending>('pending', claims.request)) throw new InvalidRequestError('Authorization request expired or already handled');
+      });
+      redirect.searchParams.set('error', 'access_denied');
       return redirect.href;
+    }
+    if (!this.keys || pending.subject !== claims.sub || !pending.grantId) throw new InvalidRequestError('Inspect and approve the encrypted endpoint before continuing');
+    const machines = claims.machines;
+    const allowed = this.currentMachines(claims.sub!).filter(machine => owned.includes(machine));
+    if (!Array.isArray(machines) || !machines.length || machines.some(machine => typeof machine !== 'string' || !allowed.includes(machine))) throw new InvalidRequestError('No authorized machines selected');
+    const selected = [...new Set(machines)] as string[];
+    if (selected.length > 64) throw new InvalidRequestError('Select at most 64 computers');
+    const identity = await this.keys.loadByRequest(claims.sub!, claims.request);
+    if (identity.grantId !== pending.grantId || identity.state !== 'pending' || Date.parse(identity.pendingExpiresAt) <= Date.now()) throw new InvalidRequestError('Encrypted endpoint approval expired');
+    const pins = await this.approvalPins(claims.approvals, selected, identity);
+    // The row-locked transition permits one winner. If code persistence fails,
+    // the orphan approval has no usable OAuth token and fresh consent is required.
+    await this.keys.approve(claims.sub!, claims.request, pins);
+    const code = secretToken();
+    await this.store.transaction(async tx => {
+      const current = await tx.take<Pending>('pending', claims.request);
+      if (!current || current.subject !== claims.sub || current.grantId !== identity.grantId || JSON.stringify(current) !== JSON.stringify(pending)) throw new InvalidRequestError('Authorization request expired or already handled');
+      const currentOwned = await tx.ownedMachines(claims.sub!);
+      if (selected.some(machine => !currentOwned.includes(machine) || !this.currentMachines(claims.sub!).includes(machine))) throw new InvalidRequestError('Machine access revoked');
+      await tx.put('code', hash(code), { ...current, subject: claims.sub!, machines: selected, grantId: identity.grantId, activeExpiresAt: identity.activeExpiresAt } satisfies Code, now() + 120);
     });
+    redirect.searchParams.set('code', code);
+    return redirect.href;
+  }
+  private async approvalPins(value: unknown, machines: string[], identity: Awaited<ReturnType<McpIdentityStore['loadByRequest']>>): Promise<ApprovedBridge[]> {
+    const endpoint = z.object({ version: z.literal(1), id: z.string().regex(/^[A-Za-z0-9_-]{43}$/), ownerId: z.string().uuid(), kind: z.literal('bridge'), publicKey: z.string().regex(/^[A-Za-z0-9_-]{87}$/) }).strict();
+    const approvals = z.array(z.object({ bridgeId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/), bridge: endpoint, receipt: z.unknown() }).strict()).min(1).max(64).safeParse(value);
+    if (!approvals.success || approvals.data.length !== machines.length || new Set(approvals.data.map(approval => approval.bridgeId)).size !== machines.length) throw new InvalidRequestError('Every selected bridge must return encrypted approval');
+    const pins: ApprovedBridge[] = [];
+    for (const approval of approvals.data) {
+      if (!machines.includes(approval.bridgeId) || approval.bridge.ownerId !== identity.ownerId) throw new InvalidRequestError('Bridge approval does not match this account');
+      let receipt: unknown;
+      try {
+        const envelope = parseSecureEnvelope(approval.receipt);
+        receipt = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(await open(identity.identity, approval.bridge, envelope, { ownerId: identity.ownerId, bridgeId: approval.bridgeId, channel: `mcp-approval:${approval.bridgeId}:${identity.requestId}`, recipientId: identity.identity.endpoint.id, purpose: 'mcp-approval' })));
+      } catch { throw new InvalidRequestError('Bridge encrypted approval could not be verified'); }
+      const parsed = z.object({ type: z.literal('mcp-approval'), approvalId: z.string().min(1).max(200), requestId: z.literal(identity.requestId), ownerId: z.literal(identity.ownerId), grantId: z.literal(identity.grantId), candidateEndpointId: z.literal(identity.identity.endpoint.id), bridgeId: z.literal(approval.bridgeId), bridge: endpoint, permissions: z.array(z.enum(['read', 'control'])).min(1).max(2), expiresAt: z.string().datetime(), activeExpiresAt: z.literal(identity.activeExpiresAt) }).strict().safeParse(receipt);
+      if (!parsed.success || parsed.data.bridge.id !== approval.bridge.id || parsed.data.bridge.publicKey !== approval.bridge.publicKey
+        || [...parsed.data.permissions].sort().join(' ') !== [...identity.permissions].sort().join(' ')
+        || Date.parse(parsed.data.expiresAt) <= Date.now() || Date.parse(parsed.data.expiresAt) > Date.parse(identity.pendingExpiresAt)) throw new InvalidRequestError('Bridge approval does not match this consent');
+      pins.push({ bridgeId: approval.bridgeId, endpoint: approval.bridge, permissions: parsed.data.permissions });
+    }
+    return pins;
   }
   async challengeForAuthorizationCode(
     client: OAuthClientInformationFull,
@@ -275,24 +313,22 @@ export class FtownOAuthProvider implements OAuthServerProvider {
     redirectUri?: string,
     resource?: URL,
   ) {
+    const prepared = await this.store.transaction(tx => tx.get<Code>('code', hash(code)));
+    if (!prepared || prepared.clientId !== client.client_id || prepared.redirectUri !== redirectUri || prepared.resource !== this.resource || resource?.href !== this.resource) throw new InvalidGrantError('Invalid code, redirect URI or resource');
+    if (!this.keys || !prepared.grantId || !prepared.activeExpiresAt) throw new InvalidGrantError('Renew consent to authorize an encrypted endpoint');
+    const identity = await this.keys.loadGrantIdentity(prepared.subject, prepared.grantId);
+    if (identity.state !== 'approved' || identity.activeExpiresAt !== prepared.activeExpiresAt) throw new InvalidGrantError('Encrypted endpoint consent is unavailable');
     return this.store.transaction(async (tx) => {
-      const record = await tx.take<Code>("code", hash(code));
-      if (
-        !record ||
-        record.clientId !== client.client_id ||
-        record.redirectUri !== redirectUri ||
-        record.resource !== this.resource ||
-        resource?.href !== this.resource
-      )
-        throw new InvalidGrantError("Invalid code, redirect URI or resource");
-      const grantId = secretToken();
+      const record = await tx.take<Code>('code', hash(code));
+      if (!record || JSON.stringify(record) !== JSON.stringify(prepared)) throw new InvalidGrantError('Invalid or already used authorization code');
+      const grantId = record.grantId;
       const grant: Grant = {
         resource: this.resource,
         subject: record.subject,
         machines: record.machines,
         scopes: record.scopes,
         clientId: client.client_id,
-        expiresAt: now() + 30 * 86400,
+        expiresAt: Math.floor(Date.parse(record.activeExpiresAt) / 1000),
         revoked: false,
       };
       await tx.put("grant", grantId, grant, grant.expiresAt);
@@ -346,7 +382,7 @@ export class FtownOAuthProvider implements OAuthServerProvider {
     return result;
   }
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    return this.store.transaction(async (tx) => {
+    const result = await this.store.transaction(async (tx) => {
       const record = await tx.get<TokenRecord>("access", hash(token));
       const grant = record && (await tx.get<Grant>("grant", record.grantId));
       if (!record || !grant || grant.revoked || grant.resource !== this.resource)
@@ -364,9 +400,14 @@ export class FtownOAuthProvider implements OAuthServerProvider {
         scopes: record.scopes,
         expiresAt: record.expiresAt,
         resource: new URL(this.resource),
-        extra: { subject: grant.subject, machines },
+        extra: { subject: grant.subject, machines, grantId: record.grantId },
       };
     });
+    if (!this.keys) throw new InvalidTokenError('Renew consent to authorize an encrypted endpoint');
+    let identity;
+    try { identity = await this.keys.loadGrantIdentity(result.extra.subject, result.extra.grantId); }
+    catch { throw new InvalidTokenError('Encrypted endpoint approval expired or requires renewed consent'); }
+    return { ...result, extra: { ...result.extra, endpointId: identity.identity.endpoint.id } };
   }
   async revokeToken(
     client: OAuthClientInformationFull,

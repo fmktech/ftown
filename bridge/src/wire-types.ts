@@ -2,6 +2,9 @@
 
 /** Contents of ~/.ftown/bridge.json, pointing a CLI at the running LocalApiServer. */
 export interface BridgePointer {
+  dataDir?: string;
+  ownerId?: string;
+  endpoint?: import('./security/protocol.js').EndpointPublic;
   port: number;
   token: string;
   bridgeId?: string;

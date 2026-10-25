@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "@/lib/db";
-import { endpointHash, eventIdentity, PushError, type BrowserSubscription, type PushEvent } from "./push";
+import { endpointHash, eventIdentity, genericPushEvent, PushError, type BrowserSubscription, type PushEvent } from "./push";
 
 type Query = (text: string, params: unknown[]) => Promise<Record<string, unknown>[]>;
 export interface StoredDelivery { endpointHash: string; subscription: BrowserSubscription; lease: string }
@@ -33,6 +33,7 @@ export class PushStore {
     await this.query("DELETE FROM push_subscriptions WHERE sub=$1 AND endpoint_hash=$2", [owner, endpointHash(endpoint)]);
   }
   async ingest(owner: string, bridgeId: string, event: PushEvent): Promise<{ id: string; event: PushEvent }> {
+    event = genericPushEvent(event);
     const id = eventIdentity(owner, bridgeId, event);
     // Recipient snapshot is part of the same atomic statement as first event creation.
     await this.query(`WITH created AS (
@@ -44,7 +45,8 @@ export class PushStore {
     [id,owner,bridgeId,event.sessionId,event.eventKey,event.kind,JSON.stringify(event),event.occurredAt]);
     const rows = await this.query("SELECT payload FROM push_events WHERE id=$1 AND sub=$2", [id,owner]);
     if (!rows[0]) throw new PushError("push_unavailable",503);
-    return { id, event: rows[0].payload as unknown as PushEvent };
+    // Legacy rows are also projected to generic text; their content never re-enters delivery.
+    return { id, event: genericPushEvent(rows[0].payload as unknown as PushEvent) };
   }
   async claim(owner: string, id: string): Promise<StoredDelivery[]> {
     const lease = randomUUID();

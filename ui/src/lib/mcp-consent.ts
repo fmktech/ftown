@@ -1,5 +1,6 @@
 import jwt from "jsonwebtoken";
 import { getRequiredSecret } from "@/lib/secrets";
+import type { McpBridgeApproval } from '@security/protocol';
 
 export function mcpOrigins() {
   const gateway = process.env.FTOWN_MCP_PUBLIC_URL;
@@ -19,11 +20,12 @@ export async function mcpConsentRequest<T>(
   request: string,
   purpose: "inspect" | "approve" | "deny",
   machines?: string[],
+  approvals?: McpBridgeApproval[],
 ): Promise<T> {
   if (!/^[A-Za-z0-9_-]{43}$/.test(request)) throw new Error("Invalid request");
   const { gateway, login } = mcpOrigins();
   const assertion = jwt.sign(
-    { request, purpose, ...(machines ? { machines } : {}) },
+    { request, purpose, ...(machines ? { machines } : {}), ...(approvals ? { approvals } : {}) },
     getRequiredSecret("FTOWN_MCP_APPROVAL_SECRET"),
     {
       algorithm: "HS256",

@@ -24,28 +24,54 @@ bridge, and Centrifugo.
 
 ## Run locally
 
+The TLS browser checks use Linux Chromium with `certutil` from Ubuntu/Debian's
+`libnss3-tools` package. Use the isolated Linux development sandbox for these
+checks on other operating systems. The parent Node process keeps its normal
+HOME and Playwright executable cache; only the browser child receives the
+dedicated HOME and XDG directories below.
+
 ```bash
 cd e2e
+sudo apt-get install -y libnss3-tools
 npm ci
+set -a
+export E2E_DIR="$PWD"
+source env.sh                   # generate ephemeral secrets once in this shell
+set +a
 npm run infra:up          # gen certs + docker compose up --wait (needs :443 :8000 :5432 free)
+node scripts/setup-browser-trust.mjs
 npm run setup-db          # create users + login_attempts tables
 ( cd ../ui && npm ci && npm run build )       # NEXT_PUBLIC_* is build-time inlined
 ( cd ../bridge && npm ci && npm run build )
 npx playwright install chromium
 bash scripts/start-services.sh   # starts UI (next start) + bridge (scratch HOME); records PIDs
-set -a; E2E_DIR="$PWD" source env.sh; export E2E_USER_EMAIL="$(cat .run-email)"; set +a
+export E2E_USER_EMAIL="$(cat .run-email)"
 npx playwright test
 ```
 
 The bridge always runs with `HOME` overridden to `e2e/.bridge-home` — it never
 touches the real `~/.ftown`.
 
+`E2E_BROWSER_HOME` must be exactly the canonical absolute
+`$E2E_DIR/.browser-home`. Setup and Playwright reject other or relative locations.
+The browser uses that HOME plus `.local/share`, `.config` and `.cache` XDG
+descendants. The setup script validates the generated localhost certificate's
+validity, self-signature and localhost/127.0.0.1 SANs, then imports only that exact
+certificate with peer trust `P,,` in the modern
+`.local/share/pki/nssdb` database. It verifies the exported fingerprint and only
+updates its fixed nickname on repeat setup. A legacy `.pki/nssdb` or symlinked
+path is rejected; no system/user certificate store is changed. Chromium's
+[Linux certificate documentation](https://chromium.googlesource.com/chromium/src/+/main/docs/linux/cert_management.md)
+describes the modern store and self-signed peer trust. No certificate-error bypass
+is needed for the TLS endpoints.
+
 ## Cleanup
 
 ```bash
-bash scripts/stop-services.sh   # kills ONLY the recorded UI + bridge PIDs (never pkill)
+# Run after Playwright/browser shutdown; also removes the guarded browser HOME.
+bash scripts/stop-services.sh   # kills ONLY recorded UI/bridge/MCP/proxy PIDs
 npm run infra:down              # docker compose down -v (drops the throwaway postgres)
-rm -rf .bridge-home certs .run-email *.log
+rm -rf .bridge-home .bridge-home-2 certs .run-email *.log
 ```
 
 The registered DB user is intentionally left behind (throwaway Postgres); `infra:down`

@@ -94,7 +94,7 @@ export interface Command {
   requestId: string;
 }
 
-export type CommandType = 'mcp_request' | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'clear_terminal' | 'update_session_parent' | 'get_session_usage' | 'get_sessions_usage' | 'get_session_attention' | 'resolve_session_attention';
+export type CommandType = 'security_devices' | 'security_invite' | 'security_revoke' | 'security_approve_mcp' | 'security_activate_mcp' | 'security_activity' | 'mcp_request' | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'clear_terminal' | 'update_session_parent' | 'get_session_usage' | 'get_sessions_usage' | 'get_session_attention' | 'resolve_session_attention';
 
 export interface GetSessionAttentionPayload { bridgeId: string; sessionId: string }
 export interface ResolveSessionAttentionPayload extends GetSessionAttentionPayload { eventId: string }

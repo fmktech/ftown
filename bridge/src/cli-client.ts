@@ -1,9 +1,17 @@
 import { readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { localApplication } from './security/bridge/local-client.js';
+import { applicationJson } from './security/bridge/security.js';
+import type { ApplicationJson } from './security/protocol.js';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { BridgePointer, Session, MailMessage } from './wire-types.js';
+import { resolveDefaultDataDir, resolveFtownHome } from './ftown-home.js';
 
-export function bridgePointerPath(): string { return join(homedir(), '.ftown', 'bridge.json'); }
+export function bridgePointerPath(): string {
+  if (process.env.FTOWN_DATA_DIR) return join(resolveFtownHome(process.env.FTOWN_DATA_DIR, resolveDefaultDataDir()), 'bridge.json');
+  return join(homedir(), '.ftown', 'bridge.json');
+}
 
 export function loadPointer(): BridgePointer {
   const path = bridgePointerPath();
@@ -21,16 +29,39 @@ export async function api<T = unknown>(
   extraHeaders?: Record<string, string>, signal?: AbortSignal,
   fetchFn: typeof fetch = fetch,
 ): Promise<T> {
-  const response = await fetchFn(`http://127.0.0.1:${pointer.port}${path}`, {
-    method,
-    headers: { Authorization: `Bearer ${pointer.token}`, ...extraHeaders, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
-    body: body === undefined ? undefined : JSON.stringify(body), signal,
-  });
-  const text = await response.text();
-  let data: unknown = null;
-  if (text) { try { data = JSON.parse(text) as unknown; } catch { data = { raw: text }; } }
-  if (!response.ok) throw new Error((data as { error?: string } | null)?.error ?? `HTTP ${response.status} ${path}`);
-  return data as T;
+  const result = await apiResponse(pointer, method, path, body, extraHeaders, signal, fetchFn);
+  if (result.status < 200 || result.status >= 300) {
+    const error = result.body && typeof result.body === 'object' && !Array.isArray(result.body) ? result.body.error : undefined;
+    throw new Error(typeof error === 'string' ? error : `HTTP ${result.status}`);
+  }
+  return result.body as T;
+}
+
+
+export async function apiResponse(pointer: BridgePointer, method: string, path: string, body?: unknown,
+  extraHeaders?: Record<string, string>, signal?: AbortSignal, fetchFn: typeof fetch = fetch): Promise<{ status: number; body: ApplicationJson }> {
+  if (!['GET', 'POST', 'PATCH', 'PUT', 'DELETE'].includes(method)) throw new Error('Unsupported API method');
+  const requestId = randomUUID();
+  const data: { [key: string]: ApplicationJson } = { timeoutMs: 60000 };
+  if (body !== undefined) data.body = applicationJson(body);
+  const caller = Object.entries(extraHeaders ?? {}).find(([key]) => key.toLowerCase() === 'x-ftown-session-id')?.[1];
+  if (caller) data.callerSessionId = caller;
+  const response = await localApplication(pointer, { type: 'application', route: { kind: 'http', requestId,
+    method: method as 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE', path }, data, mcp: null }, signal, fetchFn);
+  if (!response || typeof response !== 'object' || Array.isArray(response) || typeof response.status !== 'number' || !('body' in response)) throw new Error('Invalid encrypted API response');
+  return { status: response.status, body: response.body };
+}
+
+export async function securityCommand(pointer: BridgePointer, type: 'security_devices' | 'security_invite' | 'security_revoke',
+  payload: Record<string, ApplicationJson> = {}): Promise<ApplicationJson> {
+  if (!pointer.bridgeId) throw new Error('Bridge upgrade required');
+  const requestId = randomUUID();
+  const data = await localApplication(pointer, { type: 'application', route: { kind: 'command', command: type, requestId, sessionId: null },
+    data: { type, requestId, payload: { bridgeId: pointer.bridgeId, ...payload } }, mcp: null });
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Invalid encrypted command response');
+  const response = data.response;
+  if (!response || typeof response !== 'object' || Array.isArray(response) || response.success !== true) throw new Error('Encrypted security command failed');
+  return response.data ?? null;
 }
 
 export async function listSessions(pointer: BridgePointer): Promise<Session[]> {

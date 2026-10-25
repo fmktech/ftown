@@ -74,6 +74,7 @@ function makeClock(): { sleepImpl: (ms: number) => Promise<void>; waits: number[
 
 const APPROVED = {
   status: 'approved',
+  ownerId: '7bac2a7f-c58e-4845-856f-8283fb07ad96',
   token: 'connect-token-secret',
   refreshToken: 'refresh-token-secret',
   centrifugoUrl: 'wss://centrifugo.example/connection/websocket',
@@ -110,6 +111,7 @@ describe('runPairing', () => {
     });
 
     assert.deepEqual(result, {
+      ownerId: APPROVED.ownerId,
       token: APPROVED.token,
       refreshToken: APPROVED.refreshToken,
       centrifugoUrl: APPROVED.centrifugoUrl,
@@ -195,6 +197,6 @@ describe('runPairing', () => {
     // The loopback advert (localPort/localNonce) rides the poll body so the poll
     // route can embed it in the Centrifugo connect token's presence `info` claim.
     assert.equal((pollReq?.body as { localPort?: number }).localPort, LOCAL_PORT);
-    assert.equal((pollReq?.body as { localNonce?: string }).localNonce, LOCAL_NONCE);
+    assert.equal((pollReq?.body as { localNonce?: string }).localNonce, undefined, 'cloud never receives a local authorization capability');
   });
 });

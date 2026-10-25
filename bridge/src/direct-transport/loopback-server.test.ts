@@ -21,6 +21,13 @@
  * http server + fetch).
  */
 import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { secureFixture } from '../security/bridge/fixtures.test.js';
+import { loadLocalIdentity } from '../security/bridge/identity.js';
+import { seal, open } from '../security/crypto.js';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
@@ -31,9 +38,10 @@ import { LoopbackPeerServer } from './loopback-server.js';
 import { DIRECT_PROTOCOL_VERSION } from './contract.js';
 import type { DirectMessage } from './contract.js';
 
-const NONCE = 'test-nonce-0123456789abcdef';
+const NONCE = 'unit-public-pair-id';
 const ALLOWED_ORIGIN = 'http://localhost:5173';
-const BRIDGE_ID = 'bridge-under-test';
+const BRIDGE_ID = 'bridge';
+const secureHarnesses = new Map<number, { security: Awaited<ReturnType<typeof secureFixture>>['security']; remote: Awaited<ReturnType<typeof loadLocalIdentity>>; directory: string }>();
 
 /** Private chunking constant mirrored from peer-manager.ts (MAX_FRAME_DATA_CHARS). */
 const CHUNK_SIZE = 32_000;
@@ -49,11 +57,15 @@ interface Harness {
 
 async function startHarness(overrides?: { attachScreens?: Map<string, string> }): Promise<Harness> {
   const httpServer = createServer();
+  const directory = await mkdtemp(join(tmpdir(), 'ftown-loopback-unit-'));
+  const secure = await secureFixture(directory, async () => new Response('{}'));
+  const remote = await loadLocalIdentity(directory, secure.pointer.ownerId!);
   const onInputCalls: Array<[string, string]> = [];
   const onResizeCalls: Array<[string, number, number]> = [];
   const attachScreens = overrides?.attachScreens ?? new Map<string, string>();
 
   const loopback = new LoopbackPeerServer({
+    security: secure.security,
     nonce: NONCE,
     allowedOrigins: [ALLOWED_ORIGIN],
     bridgeId: BRIDGE_ID,
@@ -65,17 +77,20 @@ async function startHarness(overrides?: { attachScreens?: Map<string, string> })
 
   await new Promise<void>((resolve) => httpServer.listen(0, '127.0.0.1', resolve));
   const port = (httpServer.address() as AddressInfo).port;
+  secureHarnesses.set(port, { security: secure.security, remote, directory });
 
   return { httpServer, loopback, port, onInputCalls, onResizeCalls, attachScreens };
 }
 
 async function stopHarness(h: Harness): Promise<void> {
   h.loopback.closeAll();
+  const secure = secureHarnesses.get(h.port); secureHarnesses.delete(h.port);
+  if (secure) { await secure.security.close(); await rm(secure.directory, { recursive: true, force: true }); }
   await new Promise<void>((resolve) => h.httpServer.close(() => resolve()));
 }
 
 function wsUrl(port: number, nonce?: string): string {
-  const qs = nonce === undefined ? '' : `?nonce=${encodeURIComponent(nonce)}`;
+  const qs = nonce === undefined ? '' : `?pairId=${encodeURIComponent(nonce)}`;
   return `ws://127.0.0.1:${port}/ws${qs}`;
 }
 
@@ -93,12 +108,18 @@ class MessageQueue {
   private readonly waiters: Array<(msg: DirectMessage) => void> = [];
 
   constructor(socket: WebSocket) {
-    socket.on('message', (raw) => {
-      const msg = JSON.parse(raw.toString()) as DirectMessage;
-      const waiter = this.waiters.shift();
-      if (waiter) waiter(msg);
-      else this.pending.push(msg);
-    });
+    let pending = Promise.resolve();
+    socket.on('message', raw => {
+      pending = pending.then(async () => {
+        const location = new URL(socket.url); const state = secureHarnesses.get(Number(location.port))!;
+        const packet = JSON.parse(String(raw));
+        const decoded = JSON.parse(new TextDecoder().decode(await open(state.remote, state.security.endpoint, packet, {
+          ownerId: state.remote.endpoint.ownerId, bridgeId: BRIDGE_ID, channel: `direct:loopback-ws:${BRIDGE_ID}:${location.searchParams.get('pairId')}`,
+          recipientId: state.remote.endpoint.id, purpose: packet.purpose })));
+        const msg = packet.purpose === 'welcome' ? { kind: 'hello_ack', bridgeId: BRIDGE_ID, protocolVersion: DIRECT_PROTOCOL_VERSION } as DirectMessage : decoded.data as DirectMessage;
+        const waiter = this.waiters.shift(); if (waiter) waiter(msg); else this.pending.push(msg);
+      });
+    });;
   }
 
   next(): Promise<DirectMessage> {
@@ -137,6 +158,25 @@ function connect(
         ...(opts.host === undefined ? {} : { Host: opts.host }),
       },
     });
+    const nativeSend = socket.send.bind(socket);
+    let outgoing = Promise.resolve();
+    socket.send = ((data: unknown) => {
+      let frame: { kind?: string; sessionId?: string; protocolVersion?: number };
+      try { frame = JSON.parse(String(data)); } catch { nativeSend(data as WebSocket.Data); return; }
+      outgoing = outgoing.then(async () => {
+        const state = secureHarnesses.get(port)!;
+        const pairId = new URL(socket.url).searchParams.get('pairId')!;
+        const channel = `direct:loopback-ws:${BRIDGE_ID}:${pairId}`;
+        const hello = frame.kind === 'hello';
+        const body = hello ? { type: 'hello', challenge: randomUUID() } : { type: 'application', route: { kind: 'terminal',
+          sessionId: frame.sessionId ?? '', frameType: frame.kind, pairId }, data: frame, mcp: null };
+        const packet = await seal(state.remote, state.security.endpoint, { type: 'ftown_encrypted', version: 1, senderId: state.remote.endpoint.id,
+          recipientId: state.security.endpoint.id, ownerId: state.remote.endpoint.ownerId, bridgeId: BRIDGE_ID, channel,
+          purpose: hello ? 'hello' : 'application', messageId: randomUUID(), createdAt: Date.now(), expiresAt: Date.now() + 60000,
+          receiverEpoch: hello ? null : state.security.receiverEpoch }, new TextEncoder().encode(JSON.stringify(body)));
+        nativeSend(JSON.stringify(hello && frame.protocolVersion !== DIRECT_PROTOCOL_VERSION ? { ...packet, version: 2 } : packet));
+      });
+    }) as typeof socket.send;
     // Arm the message queue immediately — before 'open' — so nothing sent by
     // the server the instant the connection opens can be missed.
     queueFor(socket);
@@ -169,7 +209,7 @@ function waitForClose(socket: WebSocket): Promise<number> {
 
 async function handshake(port: number): Promise<WebSocket> {
   const { socket } = await connect(port, { nonce: NONCE, origin: ALLOWED_ORIGIN });
-  assert.ok(socket, 'expected the correct-nonce/allowed-origin connection to open');
+  assert.ok(socket, 'expected the valid-pair-id/allowed-origin connection to open');
   const hello: DirectMessage = { kind: 'hello', clientId: 'client-1', protocolVersion: DIRECT_PROTOCOL_VERSION };
   socket!.send(JSON.stringify(hello));
   const ack = await waitForMessage(socket!);
@@ -186,13 +226,13 @@ describe('LoopbackPeerServer upgrade auth (L1)', () => {
     await stopHarness(h);
   });
 
-  it('rejects an upgrade with a wrong nonce (403 before upgrade)', async () => {
-    const result = await connect(h.port, { nonce: 'wrong-nonce', origin: ALLOWED_ORIGIN });
+  it('rejects a malformed public pair identifier before upgrade', async () => {
+    const result = await connect(h.port, { nonce: 'invalid/pair/id', origin: ALLOWED_ORIGIN });
     assert.ok(result.rejected, 'expected the upgrade to be rejected');
     assert.strictEqual(result.rejected!.statusCode, 403);
   });
 
-  it('rejects an upgrade with a missing nonce', async () => {
+  it('rejects an upgrade with a missing public pair identifier', async () => {
     const result = await connect(h.port, { origin: ALLOWED_ORIGIN });
     assert.ok(result.rejected, 'expected the upgrade to be rejected');
     assert.strictEqual(result.rejected!.statusCode, 403);
@@ -204,7 +244,7 @@ describe('LoopbackPeerServer upgrade auth (L1)', () => {
     assert.strictEqual(result.rejected!.statusCode, 403);
   });
 
-  it('accepts an upgrade with the correct nonce and an allowed localhost Origin', async () => {
+  it('accepts an upgrade with the well-formed public pair identifier and an allowed localhost Origin', async () => {
     const result = await connect(h.port, { nonce: NONCE, origin: ALLOWED_ORIGIN });
     assert.ok(result.socket, 'expected the connection to open');
     result.socket!.close();
@@ -385,7 +425,7 @@ describe('LoopbackPeerServer frame handling edge cases', () => {
     await stopHarness(h);
   });
 
-  it('ignores frames with an unknown kind', async () => {
+  it('ignores frames with an unauthorized unknown kind', async () => {
     const socket = await handshake(h.port);
     socket.send(JSON.stringify({ kind: 'bogus', sessionId: 'sess-1' }));
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -482,6 +522,8 @@ describe('LoopbackPeerServer concurrent peers', () => {
     const closedA = waitForClose(socketA);
     const closedB = waitForClose(socketB);
     h.loopback.closeAll();
+  const secure = secureHarnesses.get(h.port); secureHarnesses.delete(h.port);
+  if (secure) { await secure.security.close(); await rm(secure.directory, { recursive: true, force: true }); }
     await Promise.all([closedA, closedB]);
 
     assert.strictEqual(h.loopback.hasAttachedPeers('sess-1'), false);
@@ -497,7 +539,7 @@ describe('LoopbackPeerServer host-header guard (L1 defense in depth)', () => {
     await stopHarness(h);
   });
 
-  it('rejects an upgrade with a non-loopback Host header with 421, even with correct nonce + allowed Origin', async () => {
+  it('rejects an upgrade with a non-loopback Host header with 421, even with well-formed public pair identifier + allowed Origin', async () => {
     // DNS-rebinding style request: TCP lands on 127.0.0.1 but the Host header
     // names a foreign authority. Must be refused (421 Misdirected Request)
     // before the Origin/nonce checks even run — correct credentials must not save it.
@@ -531,7 +573,7 @@ describe('LoopbackPeerServer missing Origin header (L1)', () => {
     await stopHarness(h);
   });
 
-  it('rejects an upgrade with no Origin header at all, even with the correct nonce (403)', async () => {
+  it('rejects an upgrade with no Origin header at all, even with the well-formed public pair identifier (403)', async () => {
     // Pinned contract behavior per addendum L1: the upgrade requires the nonce
     // AND "an Origin header that is either the configured api-url origin or a
     // localhost origin" — an ABSENT Origin satisfies neither clause, so it is

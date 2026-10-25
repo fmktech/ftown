@@ -3,6 +3,8 @@
 import { createContext, useContext, useMemo } from "react";
 import type { ReactNode } from "react";
 import { signOut } from "next-auth/react";
+import { usePathname } from "next/navigation";
+import { Analytics } from "@vercel/analytics/next";
 
 import { clearKey, getStoredKey, mintToken } from "@/lib/solo-client";
 
@@ -83,4 +85,10 @@ export function useSoloRequired(): AuthModeValue {
   const ctx = useAuthMode();
   if (ctx.mode !== "solo") throw new Error("This surface requires solo mode.");
   return ctx;
+}
+
+/** Invitation fragments are captured on a telemetry-free route. */
+export function InvitationSafeAnalytics() {
+  const pathname = usePathname();
+  return pathname === "/connect" ? null : <Analytics />;
 }

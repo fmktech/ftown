@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { DashboardClient } from "@/components/DashboardClient";
+import type { BridgeSecurityInfo } from "@security/protocol";
+import { BrowserSecurityUnavailable, DashboardClient } from "@/components/DashboardClient";
 import { KeyEntry } from "@/components/local/KeyEntry";
 import { StartingState } from "@/components/local/StartingState";
 import {
@@ -25,9 +26,10 @@ import {
  *     └─ children booting  → StartingState polling /healthz every 2s
  */
 
-type Phase = "connecting" | "needs-key" | "starting" | "ready";
+type Phase = "connecting" | "needs-key" | "starting" | "ready" | "unsupported";
 
 interface BootstrapInfo {
+  ownerId: string;
   userId: string;
   centrifugoUrl: string;
   token: string;
@@ -46,7 +48,11 @@ export default function SoloLocalPage() {
   const runBootstrap = useCallback(async (key: string): Promise<void> => {
     try {
       const result = await bootstrap(key);
-      setBoot(result);
+      const infoResponse = await fetch("/api/security/info", { cache: "no-store", credentials: "omit", redirect: "error" });
+      if (!infoResponse.ok) throw new Error("Upgrade bridge for encrypted access");
+      const info = await infoResponse.json() as BridgeSecurityInfo;
+      if (info.protocolVersion !== 1 || !info.ownerId.startsWith("solo:") || info.endpoint.ownerId !== info.ownerId) throw new Error("Invalid Solo encryption metadata");
+      setBoot({ ...result, ownerId: info.ownerId });
       setStartDetail(null);
       setPhase("ready");
     } catch (err) {
@@ -65,6 +71,10 @@ export default function SoloLocalPage() {
   }, []);
 
   useEffect(() => {
+    if (!window.isSecureContext || !crypto.subtle) {
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+      setPhase("unsupported"); return;
+    }
     const captured = captureKeyFromHash();
     const key = captured ?? getStoredKey();
     if (!key) {
@@ -139,9 +149,12 @@ export default function SoloLocalPage() {
     setPhase("needs-key");
   }, []);
 
+  if (phase === "unsupported") return <BrowserSecurityUnavailable code="secure_context_required" />;
+
   if (phase === "ready" && boot) {
     return (
       <DashboardClient
+        ownerId={boot.ownerId}
         userId={boot.userId}
         token={boot.token}
         centrifugoUrl={boot.centrifugoUrl}

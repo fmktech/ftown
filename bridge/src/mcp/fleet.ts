@@ -1,8 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { execFile } from "node:child_process";
 import { z } from "zod";
+import { parseSecureEnvelope, MAX_ENVELOPE_BYTES, SecurityError } from '../security/crypto.js';
+import { SecureMcpClient, type McpRequestContext } from './secure-client.js';
 
 const machineBase = {
   id: z.string().regex(/^[a-zA-Z0-9_-]+$/),
@@ -104,6 +105,7 @@ export class FleetError extends Error {
   }
 }
 export function errorResult(error: unknown) {
+  if (error instanceof SecurityError) return { code: error.code, message: error.message, outcomeUnknown: error.code === 'outcome_unknown' };
   if (error instanceof FleetError)
     return {
       code: error.code,
@@ -190,13 +192,15 @@ export async function localRequest(
   request: BridgeRequest,
   bridgeFile = join(homedir(), ".ftown", "bridge.json"),
   signal?: AbortSignal,
+  context?: McpRequestContext,
+  machineId?: string,
 ) {
+  if (!context || !machineId) throw new FleetError('upgrade_required', 'Legacy MCP proxy requests require an approved encrypted endpoint');
   let credentials;
   try {
     credentials = z
       .object({
         port: z.number().int().min(1).max(65535),
-        token: z.string().min(1),
       })
       .parse(JSON.parse(await readFile(bridgeFile, "utf8")));
   } catch {
@@ -205,12 +209,36 @@ export async function localRequest(
       "Cannot read bridge credentials; start ftown-bridge on this machine",
     );
   }
-  return httpRequest(
+  return secureHttpRequest(
     `http://127.0.0.1:${credentials.port}`,
-    credentials.token,
+    context,
+    machineId,
     requestSchema.parse(request),
     signal,
   );
+}
+async function secureHttpRequest(origin: string, context: McpRequestContext, machineId: string, request: BridgeRequest, signal?: AbortSignal): Promise<unknown> {
+  const client = new SecureMcpClient(context, machineId, `local-http:${machineId}`, async (packet, deadline, mutating, abort) => {
+    let sent = false;
+    try {
+      if (abort?.aborted || Date.now() >= deadline) throw new FleetError('cancelled', 'Encrypted request cancelled before dispatch');
+      sent = true;
+      const timeout = AbortSignal.timeout(Math.max(1, deadline - Date.now()));
+      const response = await fetch(new URL('/api/security/envelope', origin), { method: 'POST', redirect: 'error', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(packet), signal: abort ? AbortSignal.any([abort, timeout]) : timeout });
+      if (!response.ok) throw new FleetError([404, 426].includes(response.status) ? 'upgrade_required' : 'bridge_error', 'Bridge encrypted endpoint is unavailable', mutating && response.status >= 500, response.status);
+      const reader = response.body?.getReader();
+      if (!reader) throw new FleetError('bridge_error', 'Bridge encrypted response is missing', mutating);
+      let size = 0; const chunks: Uint8Array[] = [];
+      try {
+        while (true) { const chunk = await reader.read(); if (chunk.done) break; size += chunk.value.byteLength; if (size > MAX_ENVELOPE_BYTES) { await reader.cancel(); throw new FleetError('response_too_large', 'Encrypted bridge response is too large', mutating); } chunks.push(chunk.value); }
+      } finally { reader.releaseLock(); }
+      return parseSecureEnvelope(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    } catch (error) {
+      if (error instanceof FleetError) throw error;
+      throw new FleetError(abort?.aborted ? 'cancelled' : 'connection_error', 'Encrypted bridge request failed', sent && mutating);
+    }
+  });
+  return client.request(request, signal);
 }
 export async function loadConfig(path?: string): Promise<FleetConfig> {
   return configSchema.parse(
@@ -246,8 +274,12 @@ export class Fleet {
       machineId: string,
       request: BridgeRequest,
       signal?: AbortSignal,
+      context?: McpRequestContext,
     ) => Promise<unknown>,
   ) {}
+  scoped(context: McpRequestContext): Pick<Fleet, 'config' | 'request'> {
+    return { config: this.config, request: (machineId, method, path, body, signal, timeout) => this.request(machineId, method, path, body, signal, timeout, context) };
+  }
   async request(
     machineId: string,
     method: BridgeRequest["method"],
@@ -255,11 +287,13 @@ export class Fleet {
     body?: unknown,
     signal?: AbortSignal,
     timeoutMs = this.config.timeoutMs,
+    context?: McpRequestContext,
   ): Promise<any> {
     const machine = this.config.machines.find((m) => m.id === machineId);
     if (!machine)
       throw new FleetError("unknown_machine", `Unknown machine: ${machineId}`);
     const request = requestSchema.parse({ method, path, body, timeoutMs });
+    if (!context) throw new FleetError('approval_required', 'An encrypted MCP grant is required');
     if (this.active >= this.config.concurrency)
       await new Promise<void>((resolve, reject) => {
         const acquire = () => { signal?.removeEventListener("abort", cancel); resolve(); };
@@ -275,6 +309,7 @@ export class Fleet {
       });
     else this.active++;
     try {
+      await context.revalidate?.();
       if (signal?.aborted)
         throw new FleetError("cancelled", "Request cancelled before dispatch");
       if (machine.transport === "relay") {
@@ -283,74 +318,14 @@ export class Fleet {
             "configuration_error",
             "Relay transport is not configured",
           );
-        return await this.relay(machine.userId, machine.id, request, signal);
+        return await this.relay(machine.userId, machine.id, request, signal, context);
       }
       if (machine.transport === "local")
-        return await localRequest(request, machine.bridgeFile, signal);
+        return await localRequest(request, machine.bridgeFile, signal, context, machine.id);
       if (machine.transport === "http") {
-        const token = process.env[machine.tokenEnv];
-        if (!token)
-          throw new FleetError(
-            "configuration_error",
-            "Configured token environment variable is missing",
-          );
-        return await httpRequest(machine.url, token, request, signal);
+        return await secureHttpRequest(machine.url, context, machine.id, request, signal);
       }
-      // Only a trusted configured executable enters the remote shell. All tool arguments travel over stdin.
-      const command = `'${machine.executable.replaceAll("'", "'\\''")}' --proxy`;
-      return await new Promise((resolve, reject) => {
-        const child = execFile(
-          "ssh",
-          [
-            "-T",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            "ConnectTimeout=10",
-            "--",
-            machine.host,
-            command,
-          ],
-          { timeout: timeoutMs + 1000, maxBuffer: maxBytes, signal },
-          (error, stdout) => {
-            if (error) {
-              reject(
-                new FleetError(
-                  "ssh_error",
-                  "SSH proxy failed; verify SSH access and remote ftown-mcp installation",
-                  method !== "GET",
-                ),
-              );
-              return;
-            }
-            try {
-              const result = JSON.parse(stdout);
-              if (result.error)
-                reject(
-                  new FleetError(
-                    result.error.code,
-                    result.error.message,
-                    result.error.outcomeUnknown,
-                    result.error.status,
-                  ),
-                );
-              else resolve(result.data);
-            } catch {
-              reject(
-                new FleetError(
-                  "protocol_error",
-                  "Invalid SSH proxy response",
-                  method !== "GET",
-                ),
-              );
-            }
-          },
-        );
-        child.stdin?.on("error", () => {});
-        child.stdin?.end(JSON.stringify(request));
-      });
+      throw new FleetError('upgrade_required', 'Legacy SSH MCP adapters do not negotiate encrypted endpoint framing');
     } finally {
       const next = this.waiters.shift();
       if (next) next();
