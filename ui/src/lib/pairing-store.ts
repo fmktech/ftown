@@ -1,4 +1,5 @@
 import { getDb } from "@/lib/db";
+import type { AccountEnrollmentBundle, AccountEnrollmentRequest, AccountHead } from '@security/account-protocol';
 
 /**
  * Store for `pairing_requests` — the ONLY module that touches that table.
@@ -19,6 +20,8 @@ export interface PairingRequestRow {
   createdAt: string;
   expiresAt: string;
   approvedAt: string | null;
+  enrollment: AccountEnrollmentRequest | null;
+  accountApproval: AccountEnrollmentBundle | null;
 }
 
 interface PairingRequestDbRow {
@@ -33,6 +36,8 @@ interface PairingRequestDbRow {
   created_at: string;
   expires_at: string;
   approved_at: string | null;
+  enrollment: AccountEnrollmentRequest | null;
+  account_approval: AccountEnrollmentBundle | null;
 }
 
 function toRow(r: PairingRequestDbRow): PairingRequestRow {
@@ -48,6 +53,8 @@ function toRow(r: PairingRequestDbRow): PairingRequestRow {
     createdAt: r.created_at,
     expiresAt: r.expires_at,
     approvedAt: r.approved_at,
+    enrollment: r.enrollment ?? null,
+    accountApproval: r.account_approval ?? null,
   };
 }
 
@@ -58,12 +65,13 @@ export async function createPairingRequest(r: {
   hostname: string | null;
   platform: string | null;
   expiresAtIso: string;
+  enrollment?: AccountEnrollmentRequest;
 }): Promise<void> {
   const sql = getDb();
   await sql.query(
-    `INSERT INTO pairing_requests (device_code, user_code, bridge_id, hostname, platform, status, expires_at)
-     VALUES ($1, $2, $3, $4, $5, 'pending', $6)`,
-    [r.deviceCode, r.userCode, r.bridgeId, r.hostname, r.platform, r.expiresAtIso]
+    `INSERT INTO pairing_requests (device_code, user_code, bridge_id, hostname, platform, status, expires_at, enrollment)
+     VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7::jsonb)`,
+    [r.deviceCode, r.userCode, r.bridgeId, r.hostname, r.platform, r.expiresAtIso, r.enrollment ? JSON.stringify(r.enrollment) : null]
   );
 }
 
@@ -75,7 +83,8 @@ export async function createPairingRequest(r: {
 export async function deleteExpiredRequests(): Promise<void> {
   const sql = getDb();
   await sql.query(
-    `DELETE FROM pairing_requests WHERE expires_at < now() - interval '1 hour'`
+    `DELETE FROM pairing_requests WHERE device_code IN
+      (SELECT device_code FROM pairing_requests WHERE expires_at < now() - interval '1 hour' ORDER BY expires_at LIMIT 1000)`
   );
 }
 
@@ -106,13 +115,23 @@ export async function getByUserCode(userCode: string): Promise<PairingRequestRow
 export async function approvePairingRequest(
   userCode: string,
   sub: string,
-  refreshJti: string
+  refreshJti: string,
+  account?: PairingAccountBinding,
 ): Promise<PairingRequestRow | null> {
   const sql = getDb();
+  if (account) {
+    const rows = (await sql.query(`UPDATE pairing_requests p
+      SET status='approved',sub=$2,refresh_jti=COALESCE(refresh_jti,$3),approved_at=COALESCE(approved_at,NOW()),account_approval=$4::jsonb
+      WHERE user_code=$1 AND expires_at>NOW() AND enrollment=$5::jsonb
+      AND (status='pending' OR (status='approved' AND sub=$2 AND account_approval->'approver'=$4::jsonb->'approver'))
+      AND EXISTS(SELECT 1 FROM security_account_history h WHERE h.owner_id=$6 AND h.root_id=$7 AND h.revision=$8 AND h.head=$9)
+      RETURNING p.*`, [userCode, sub, refreshJti, JSON.stringify(account.bundle), JSON.stringify(account.enrollment), account.ownerId, account.head.rootId, account.head.revision, account.head.head])) as PairingRequestDbRow[];
+    return rows.length === 1 ? toRow(rows[0]) : null;
+  }
   const rows = (await sql.query(
     `UPDATE pairing_requests
      SET status = 'approved', sub = $2, refresh_jti = $3, approved_at = NOW()
-     WHERE user_code = $1 AND status = 'pending' AND expires_at > NOW()
+     WHERE user_code = $1 AND status = 'pending' AND expires_at > NOW() AND enrollment IS NULL
      RETURNING *`,
     [userCode, sub, refreshJti]
   )) as PairingRequestDbRow[];
@@ -127,7 +146,7 @@ export async function denyPairingRequest(userCode: string): Promise<boolean> {
   const rows = (await sql.query(
     `UPDATE pairing_requests
      SET status = 'denied'
-     WHERE user_code = $1 AND status = 'pending'
+     WHERE user_code = $1 AND status = 'pending' AND expires_at > NOW()
      RETURNING device_code`,
     [userCode]
   )) as { device_code: string }[];
@@ -140,12 +159,20 @@ export async function denyPairingRequest(userCode: string): Promise<boolean> {
  * to hit this transition observes a non-null row (carrying sub/bridgeId/
  * refreshJti for token issuance); every subsequent poll sees no matching row.
  */
-export async function consumePairingRequest(deviceCode: string): Promise<PairingRequestRow | null> {
+export interface PairingAccountBinding { ownerId: string; head: AccountHead; enrollment: AccountEnrollmentRequest; bundle: AccountEnrollmentBundle }
+export async function consumePairingRequest(deviceCode: string, account?: PairingAccountBinding): Promise<PairingRequestRow | null> {
   const sql = getDb();
+  if (account) {
+    const rows = (await sql.query(`UPDATE pairing_requests p SET status='consumed'
+      WHERE device_code=$1 AND status='approved' AND expires_at>NOW() AND enrollment=$2::jsonb AND account_approval=$3::jsonb
+      AND EXISTS(SELECT 1 FROM security_account_history h WHERE h.owner_id=$4 AND h.root_id=$5 AND h.revision=$6 AND h.head=$7)
+      RETURNING p.*`, [deviceCode, JSON.stringify(account.enrollment), JSON.stringify(account.bundle), account.ownerId, account.head.rootId, account.head.revision, account.head.head])) as PairingRequestDbRow[];
+    return rows.length === 1 ? toRow(rows[0]) : null;
+  }
   const rows = (await sql.query(
     `UPDATE pairing_requests
      SET status = 'consumed'
-     WHERE device_code = $1 AND status = 'approved'
+     WHERE device_code = $1 AND status = 'approved' AND expires_at > NOW() AND enrollment IS NULL
      RETURNING *`,
     [deviceCode]
   )) as PairingRequestDbRow[];

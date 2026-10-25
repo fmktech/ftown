@@ -2,6 +2,8 @@ import { Command, CommanderError } from 'commander';
 import { readLocalPointer } from './local-pair-cli.js';
 import { apiResponse, securityCommand } from './cli-client.js';
 import type { BridgeInvitation } from './security/protocol.js';
+import { pendingPairingLink } from './security/bridge/pending-enrollment.js';
+import { resolveDefaultDataDir } from './ftown-home.js';
 
 export function invitationLink(invitation: BridgeInvitation, apiUrl = 'https://ftown.ia.br'): string {
   const url = new URL('/connect', apiUrl);
@@ -13,6 +15,11 @@ export async function runSecurity(argv: string[]): Promise<number> {
   const program = new Command().name('ftown security').description('Manage this bridge’s encrypted endpoint trust')
     .option('--data-dir <path>', 'Bridge instance data directory').exitOverride();
   const pointer = () => readLocalPointer(program.opts().dataDir as string | undefined);
+  program.command('pair-link').description('Display the current private first-computer approval link (explicit local output only)')
+    .action(async () => {
+      const dataDir = program.opts().dataDir as string | undefined;
+      console.log(await pendingPairingLink(dataDir ?? resolveDefaultDataDir()));
+    });
   program.command('invite').description('Create a one-use browser invitation (secret is printed only on this explicit request)')
     .option('--label <label>', 'Device label', 'Browser')
     .action(async options => {

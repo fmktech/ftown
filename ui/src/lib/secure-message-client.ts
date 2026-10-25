@@ -61,11 +61,20 @@ export class SecureMessageClient implements MessageClient {
   private generation = 0;
   private closed = false;
   private recovering = new Set<string>();
+  private stopTrustObserver: () => void;
   constructor(private raw: Centrifuge, readonly userId: string, readonly securityRuntime: SecureEndpointRuntime) {
     const commands = this.newSubscription(`commands:rpc#${userId}`);
     commands.subscribe();
     raw.on("connected", this.connected);
     raw.on("disconnected", this.disconnected);
+    this.stopTrustObserver = securityRuntime.onChange(() => {
+      if (this.closed || this.raw.state !== "connected") return;
+      for (const pin of securityRuntime.pinnedBridges()) if (securityRuntime.state(pin.bridgeId).status === "offline") {
+        void this.ensureReady(pin.bridgeId).then(() => {
+          if (!this.closed) this.getSubscription(`commands:rpc#${this.userId}`)?.emit("subscribed", undefined);
+        }).catch(() => {});
+      }
+    });
   }
   private connected = () => {
     for (const pin of this.securityRuntime.pinnedBridges()) void this.ensureReady(pin.bridgeId, true).catch(() => {});
@@ -96,6 +105,7 @@ export class SecureMessageClient implements MessageClient {
       const generation = this.generation;
       pending = this.securityRuntime.handshake(bridgeId, `commands:rpc#${this.userId}`, async packet => {
         if (this.closed || generation !== this.generation) throw new SecurityError("bridge_offline", "Encrypted connection changed");
+        this.securityRuntime.assertCanSend(bridgeId);
         await this.raw.publish(`commands:rpc#${this.userId}`, packet);
       }).then(() => {
         if (generation !== this.generation) throw new SecurityError("bridge_offline", "Connection changed during handshake");
@@ -152,6 +162,7 @@ export class SecureMessageClient implements MessageClient {
           : record(packet.payload) ? { ...packet, payload: { ...packet.payload, bridgeId } } : { ...packet, bridgeId };
         const encrypted = await this.securityRuntime.sealApplication(bridgeId, channel, { type: "application", route, data: applicationJson(data), mcp: null });
         admit();
+        this.securityRuntime.assertCanSend(bridgeId);
         await this.raw.publish(channel, encrypted);
         });
         this.outbound.set(key, next);
@@ -210,6 +221,7 @@ export class SecureMessageClient implements MessageClient {
   executeSecurity = <C extends SecurityCommand>(command: C): Promise<SecurityCommandResults[C["type"]]> => this.securityRuntime.command(command, value => this.request(value));
   dispose(): void {
     this.closed = true; this.abort.abort(); this.generation++; this.recovering.clear();
+    this.stopTrustObserver();
     this.raw.off("connected", this.connected); this.raw.off("disconnected", this.disconnected);
     for (const subscription of this.subscriptions.values()) subscription.destroy();
     this.subscriptions.clear(); this.outbound.clear(); this.handshakes.clear(); this.sessionOwners.clear();

@@ -34,7 +34,7 @@ export class SecureEndpointRuntime {
   private requestAliases = new Map<string, { requestId: string; expiresAt: number }>();
   private closed = false;
 
-  constructor(identity: EndpointIdentity, pins: ApprovedBridge[]) {
+  constructor(identity: EndpointIdentity, pins: ApprovedBridge[], private accountAuthority?: (bridgeId: string) => void) {
     this.identity = identity;
     for (const pin of pins) {
       if (pin.endpoint.ownerId !== identity.endpoint.ownerId || pin.endpoint.kind !== "bridge") throw new SecurityError("wrong_context", "Bridge approval belongs to another identity");
@@ -42,6 +42,23 @@ export class SecureEndpointRuntime {
     }
   }
   get ownerId(): string { return this.identity.endpoint.ownerId; }
+  /** Caller supplies only locally verified roster pins plus independent legacy pins. */
+  replacePins(pins: ApprovedBridge[]): void {
+    if (this.closed) return;
+    const next = new Map(pins.map(pin => [pin.bridgeId, pin]));
+    for (const [id] of this.bridges) if (!next.has(id)) {
+      this.bridges.delete(id); this.epochs.delete(id); this.setState(id, "revoked", null);
+      for (const [key, pending] of this.responses) if (pending.bridgeId === id) this.rejectPending(this.responses, key, new SecurityError("endpoint_revoked", "Computer access changed"));
+    }
+    for (const pin of pins) {
+      if (pin.endpoint.ownerId !== this.ownerId || pin.endpoint.kind !== "bridge") throw new SecurityError("wrong_context", "Invalid computer trust");
+      const previous = this.bridges.get(pin.bridgeId);
+      if (previous && previous.endpoint.id !== pin.endpoint.id) { this.epochs.delete(pin.bridgeId); this.setState(pin.bridgeId, "key_changed"); continue; }
+      this.bridges.set(pin.bridgeId, pin);
+      if (!previous) this.setState(pin.bridgeId, "offline", pin.endpoint);
+    }
+    for (const listener of this.listeners) listener();
+  }
   pinnedBridges(): ApprovedBridge[] { return [...this.bridges.values()]; }
   bridge(bridgeId: string): ApprovedBridge | null { return this.bridges.get(bridgeId) ?? null; }
   state(bridgeId: string): BridgeSecurityState { return this.states.get(bridgeId) ?? { bridgeId, status: "unpaired", endpoint: null }; }
@@ -60,7 +77,10 @@ export class SecureEndpointRuntime {
       if (!["key_changed", "revoked"].includes(this.state(id).status)) this.setState(id, "offline");
     }
   }
+  /** A queued transport must recheck immediately before its actual publication. */
+  assertCanSend(bridgeId: string): void { this.usable(bridgeId); }
   private usable(bridgeId: string): EndpointPublic {
+    this.accountAuthority?.(bridgeId);
     if (this.closed) throw new SecurityError("endpoint_revoked", "Encrypted connection is closed");
     const state = this.state(bridgeId);
     if (state.status === "revoked") throw new SecurityError("endpoint_revoked", "Bridge access was revoked");
@@ -95,7 +115,7 @@ export class SecureEndpointRuntime {
     const waiting = this.pending(this.welcomes, challenge, bridgeId, channel);
     this.setState(bridgeId, "connecting");
     void seal(this.identity, peer, this.header(bridgeId, peer, channel, "hello", null), encoder.encode(JSON.stringify({ type: "hello", challenge })))
-      .then(transmit).catch(error => this.rejectPending(this.welcomes, challenge, error));
+      .then(packet => { this.usable(bridgeId); return transmit(packet); }).catch(error => this.rejectPending(this.welcomes, challenge, error));
     try { const epoch = await waiting; this.usable(bridgeId); this.epochs.set(bridgeId, epoch); this.setState(bridgeId, "ready"); }
     catch (error) { this.disconnected(bridgeId); throw error; }
   }
@@ -140,10 +160,13 @@ export class SecureEndpointRuntime {
       if (envelope.recipientId !== this.identity.endpoint.id) continue;
       const sender = envelope.purpose === "enrolled" ? this.candidates.get(envelope.bridgeId) : this.bridges.get(envelope.bridgeId)?.endpoint;
       if (!sender || sender.id !== envelope.senderId) continue;
+      if (envelope.purpose !== "enrolled") { try { this.accountAuthority?.(envelope.bridgeId); } catch { continue; } }
       if (envelope.purpose !== "enrolled" && (this.state(envelope.bridgeId).status === "revoked" || this.state(envelope.bridgeId).status === "key_changed")) continue;
       const value = decoded(await open(this.identity, sender, envelope, { ownerId: this.ownerId, bridgeId: envelope.bridgeId,
         recipientId: this.identity.endpoint.id, channel, purpose: envelope.purpose }));
       if (this.closed) return [];
+      if (envelope.purpose !== "enrolled") { try { this.accountAuthority?.(envelope.bridgeId); } catch { continue; } }
+      if (envelope.purpose !== "enrolled" && (!this.bridges.has(envelope.bridgeId) || ["revoked", "key_changed"].includes(this.state(envelope.bridgeId).status))) continue;
       if (envelope.purpose === "welcome") {
         if (!record(value) || value.type !== "welcome" || typeof value.challenge !== "string" || typeof value.receiverEpoch !== "string"
           || envelope.expiresAt < Date.now() || envelope.createdAt > Date.now() + 30_000) continue;
@@ -174,12 +197,14 @@ export class SecureEndpointRuntime {
       if (app.route.kind === "response") this.settle(this.responses, app.route.requestId, app.data, envelope);
       delivered.push({ bridgeId: envelope.bridgeId, application: app });
     }
-    return delivered;
+    return this.closed ? [] : delivered.filter(value => {
+      try { this.accountAuthority?.(value.bridgeId); return true; } catch { return false; }
+    });
   }
   async request(bridgeId: string, channel: string, route: Extract<ApplicationRoute, { kind: "http" | "command" }>, data: unknown, transmit: SecureTransmit): Promise<ApplicationJson> {
     const waiting = this.pending(this.responses, route.requestId, bridgeId, channel, 40_000);
     void this.sealApplication(bridgeId, channel, { type: "application", route, data: applicationJson(data), mcp: null })
-      .then(transmit).catch(error => this.rejectPending(this.responses, route.requestId, error));
+      .then(packet => { this.usable(bridgeId); return transmit(packet); }).catch(error => this.rejectPending(this.responses, route.requestId, error));
     return waiting;
   }
   async command<C extends SecurityCommand>(command: C, send: (value: unknown) => Promise<unknown>): Promise<SecurityCommandResults[C["type"]]> {

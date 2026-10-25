@@ -1,6 +1,7 @@
 import { exec } from 'node:child_process';
 import type { McpApproval, SecurityPageQuery, VerifiedApplication } from './security/protocol.js';
 import type { BridgeSecurityService } from './security/bridge/security.js';
+import { BridgeSecurityError } from './security/bridge/errors.js';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -83,6 +84,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
         case 'security_revoke':
         case 'security_approve_mcp':
         case 'security_activate_mcp':
+        case 'security_account_adopt':
         case 'security_activity': {
           if (!deps.security || !verified || payloadBridgeId !== bridgeId) throw new Error('approval_required');
           const payload = command.payload as Record<string, unknown>;
@@ -92,6 +94,9 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           else if (command.type === 'security_revoke') {
             if (typeof payload.endpointId !== 'string') throw new Error('invalid_envelope');
             await deps.security.revokeEndpoint(verified.principal, payload.endpointId); result = { endpointId: payload.endpointId, revoked: true };
+          } else if (command.type === 'security_account_adopt') {
+            if (Object.keys(payload).some(key => key !== 'bridgeId' && key !== 'head')) throw new Error('invalid_envelope');
+            result = { head: await deps.security.adoptAccount(verified.principal, payload.head as import('./security/account-protocol.js').AccountHead) };
           } else if (command.type === 'security_approve_mcp') result = await deps.security.approveMcp(verified.principal, payload.approval as McpApproval);
           else if (command.type === 'security_activate_mcp') {
             if (typeof payload.grantId !== 'string') throw new Error('invalid_envelope');
@@ -337,6 +342,8 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
       const errorMessage = err instanceof Error ? err.message : String(err);
       response = err instanceof AutomationRemovedError
         ? { requestId: command.requestId, success: false, error: AUTOMATION_REMOVED_MESSAGE, data: { code: AUTOMATION_REMOVED_CODE } }
+        : err instanceof BridgeSecurityError
+        ? { requestId: command.requestId, success: false, error: err.message, data: { code: err.code } }
         : err instanceof WorkingDirMissingError
         ? {
             requestId: command.requestId,

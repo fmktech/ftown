@@ -2,6 +2,9 @@ import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { runPairing } from './pairing-client.js';
+import { createAccountEnrollment, createAccountGenesis, generateAccountBridgeCandidate, generateAccountSigningIdentity,
+  sealAccountApproval, signAccountTransition, verifyAccountHistory } from './security/account-crypto.js';
+import { generateEndpoint } from './security/crypto.js';
 
 const API = 'https://ftown.example';
 const DEVICE_CODE = 'super-secret-device-code-32bytes';
@@ -198,5 +201,42 @@ describe('runPairing', () => {
     // route can embed it in the Centrifugo connect token's presence `info` claim.
     assert.equal((pollReq?.body as { localPort?: number }).localPort, LOCAL_PORT);
     assert.equal((pollReq?.body as { localNonce?: string }).localNonce, undefined, 'cloud never receives a local authorization capability');
+  });
+
+  it('virgin enrollment uploads no fragment secret and displays only an operator-origin proof-bound link through the explicit TTY sink', async () => {
+    const clock = makeClock(); restoreClock = clock.restore;
+    const candidate = await generateAccountBridgeCandidate('bridge-1');
+    const link = await createAccountEnrollment(candidate, 'Computer', null, 'bridge-1');
+    const browser = await generateEndpoint(APPROVED.ownerId, 'browser'); const signing = await generateAccountSigningIdentity();
+    const genesis = await createAccountGenesis(APPROVED.ownerId, browser.endpoint, signing, 'Browser');
+    const state = await verifyAccountHistory({ genesis, transitions: [] }, null);
+    const history = { genesis, transitions: [await signAccountTransition(state, browser.endpoint.id, signing,
+      { type: 'add_bridge', bridge: { bridgeId: 'bridge-1', endpoint: { ...candidate.endpoint, ownerId: APPROVED.ownerId }, label: 'Computer', approvedAt: new Date(Date.now()).toISOString() } })] };
+    const approval = await sealAccountApproval(browser, link, history);
+    const scripted = makeFetch([{ ...APPROVED, accountApproval: approval, accountHistory: history }]);
+    const fetchImpl: typeof fetch = async (url, init) => String(url).endsWith('/pair/start')
+      ? (scripted.requests.push({ url: String(url), body: JSON.parse(String(init?.body)) }), jsonResponse({ ...START, verificationUri: 'https://attacker.example/pair' }) as unknown as Response)
+      : scripted.fetchImpl(url, init);
+    const logs: string[] = []; const display: string[] = []; const codes: string[] = [];
+    const result = await runPairing({ apiUrl: API, bridgeId: 'bridge-1', hostname: 'Computer', platform: 'linux', localPort: LOCAL_PORT,
+      localNonce: LOCAL_NONCE, fetchImpl, enrollment: link, sleepImpl: clock.sleepImpl, log: value => logs.push(value),
+      onPairingCode: async code => { codes.push(code); }, displayEnrollmentUrl: url => display.push(url) });
+    assert.deepEqual(result.accountApproval, approval); assert.deepEqual(codes, [START.userCode]);
+    const shown = new URL(display[0]); assert.equal(shown.origin, API); assert.equal(shown.pathname, '/pair');
+    assert.equal(shown.searchParams.get('code'), START.userCode); assert.ok(shown.hash.startsWith('#account='));
+    const start = scripted.requests.find(item => item.url.endsWith('/pair/start'))!;
+    assert.deepEqual((start.body as { enrollment: unknown }).enrollment, link.request);
+    const uploads = JSON.stringify(scripted.requests); const logged = logs.join('\n');
+    assert.ok(!uploads.includes(link.secret)); assert.ok(!logged.includes('#account='));
+    for (const secret of [link.secret, DEVICE_CODE, result.token, result.refreshToken]) assert.ok(!logged.includes(secret));
+  });
+
+  it('new enrollment cannot downgrade to legacy credentials when an encrypted approval is missing', async () => {
+    const clock = makeClock(); restoreClock = clock.restore;
+    const identity = await generateAccountBridgeCandidate('bridge-1');
+    const link = await createAccountEnrollment(identity, 'Computer', null, 'bridge-1');
+    const { fetchImpl } = makeFetch([APPROVED]);
+    await assert.rejects(runPairing({ apiUrl: API, bridgeId: 'bridge-1', hostname: 'Computer', platform: 'linux', localPort: LOCAL_PORT,
+      localNonce: LOCAL_NONCE, fetchImpl, enrollment: link, sleepImpl: clock.sleepImpl, log: () => {}, displayEnrollmentUrl: () => {} }), /no legacy fallback/);
   });
 });

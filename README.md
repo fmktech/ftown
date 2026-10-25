@@ -16,14 +16,14 @@ https://github.com/user-attachments/assets/e9c1ce70-70b0-4ba0-81d8-080d4eeef445
 
 ```mermaid
 flowchart TB
-  Browser["Browser / PWA<br/>Non-extractable key in IndexedDB<br/>Pinned bridge identities"]
+  Browser["Browser / PWA<br/>Separate non-extractable HPKE + ECDSA keys<br/>Pinned signed account history"]
   Relay["Centrifugo relay<br/>Opaque application content<br/>Visible routing metadata"]
   Bridge["Bridge: trusted plaintext endpoint<br/>Local identity + approved-device policy<br/>Sessions, terminal history and mail"]
   Client["AI / MCP client + its provider"]
   Gateway["Hosted MCP: trusted plaintext endpoint<br/>Distinct encrypted grant identity"]
   Database["PostgreSQL<br/>Encrypted MCP private keys + bound pins<br/>Account, OAuth and audit records"]
   Secret["Separately provisioned service wrapping secret"]
-  Account["Account login / OAuth consent<br/>Public key directory + device metadata"]
+  Account["Account login / OAuth consent<br/>Signed public device/computer roster<br/>Service orders and delivers updates"]
   Push["Push provider<br/>Generic notice + opaque routing references"]
   Agent["Local agents, tools and files"]
   Provider["External model providers"]
@@ -55,15 +55,41 @@ every transport. Direct transport failure can select another encrypted route;
 it cannot enable plaintext fallback. Older clients and bridges require upgrade
 and explicit pairing.
 
-A bridge-generated, single-use invitation pins its key and binds the account.
-Open its `/connect` link, sign in, verify the account and bridge fingerprint,
-and explicitly approve. Its five-minute secret stays in the URL fragment and
-inside the encrypted enrollment packet. An administrator browser can invite
-another device. A public-key directory is discovery only, never permission to
-replace a pinned identity. The browser keeps its private key non-extractable in
-IndexedDB; clearing storage requires fresh approval. This is browser storage,
-not a hardware-key or encrypted-browser-profile guarantee. Account password
-reset cannot recover a lost endpoint key.
+Connect a computer once using its private `/pair` link and compare the displayed
+code. For an account without trust history, that same confirmation approves the
+first browser. On another browser or phone, sign in, create its approval link,
+and open it on an approved device. Compare both codes and approve once: this
+installation then has access to all current and future account computers.
+Background services print instructions; retrieve their pending link explicitly
+with `ftown security pair-link`. Secrets stay in URL fragments and per-tab
+continuations, never ordinary query parameters or operational logs.
+
+Each browser installation stores separate non-extractable HPKE encryption and
+ECDSA signing private keys in IndexedDB. A signed account roster and pinned
+history establish device/computer trust; an unsigned directory cannot grant
+access or replace a known root. The service still orders and delivers history.
+Connected computers refresh every 30 seconds, with account access paused after
+24 hours without a valid authenticated refresh. This connectivity allowance is
+not a guaranteed revocation deadline against a service withholding updates.
+Clearing site storage requires new device approval. Browser storage does not
+promise hardware protection or an encrypted browser profile; password resets
+cannot recover lost signing keys.
+
+Existing bridge approvals remain independent until an administrator chooses
+**Security → Devices → Use account device approvals** for that computer. Adoption
+replaces its legacy browser grants and outstanding invitations, preserving local
+CLI recovery and existing MCP grants. Solo remains independent. A local
+`ftown security invite` recovery link accesses one computer; it cannot reset or
+sign account trust. Losing every account signing key requires explicit recovery
+of each existing computer, with no automatic root reset.
+
+The hosted `/dashboard` uses account trust on every transport, including local
+HTTP, loopback WebSocket, and WebRTC. The standalone `/local` page remains the
+independent per-bridge legacy/local-recovery mode; it does not enroll account
+devices or replace account approvals. Each new browser process must refresh its
+pinned account history successfully before using account-derived access. During
+that process, later outages allow at most 24 hours from the last valid read,
+checked against both wall-clock highwaters and elapsed monotonic time.
 
 The hosted MCP gateway is a trusted plaintext endpoint for standard HTTPS/OAuth
 clients. Each OAuth grant gets a distinct bridge-facing identity, approved by
@@ -72,8 +98,9 @@ private key and bridge pins are authenticated ciphertext in PostgreSQL, wrapped
 with a separate service secret. Standard MCP clients need no model PIN. Local
 agents and external model providers remain separate trusted endpoints.
 
-Open **Security → Devices** to inspect approvals, create invitations, or revoke
-access on a bridge. **Security → Activity** shows retained MCP gateway attempts
+Open **Security → Devices** to inspect the account roster and revoke a device
+across account computers. The last account administrator cannot be revoked;
+approve another device first. **Security → Activity** shows retained MCP gateway attempts
 and independent bridge execution records. Gateway history remains available
 while a bridge is offline. An unknown outcome or timeout does not prove that
 an operation was not executed. Logs retain up to 30 days and 10,000 events per

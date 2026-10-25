@@ -46,11 +46,29 @@ npm run setup-db          # create users + login_attempts tables
 npx playwright install chromium
 bash scripts/start-services.sh   # starts UI (next start) + bridge (scratch HOME); records PIDs
 export E2E_USER_EMAIL="$(cat .run-email)"
+export E2E_MCP_USER_EMAIL="$(cat .run-mcp-email)"
 npx playwright test
 ```
 
-The bridge always runs with `HOME` overridden to `e2e/.bridge-home` — it never
-touches the real `~/.ftown`.
+The original account uses `e2e/.bridge-home` and `.bridge-home-2`. MCP account
+migration uses a separate run-scoped `E2E_MCP_USER_EMAIL`, recorded in
+`.run-mcp-email`, and `E2E_MCP_USER_PASSWORD` (default `e2e-password-123`). Its
+`E2E_MCP_BRIDGE_HOME` and `E2E_MCP_SECOND_BRIDGE_HOME` must be the exact absolute
+`e2e/.mcp-bridge-home` and `.mcp-bridge-home-2` paths. These two bridges start with
+auth-only bootstrap credentials, then the MCP test explicitly migrates only this
+account. The shared original account and grants remain unchanged. The gateway
+registry authorizes both immutable account UUIDs, each with only its two exact
+bridge IDs. All four bridges use isolated HOME and data directories; the real
+`~/.ftown` is never used. Preflight rejects unexpected homes, selectors, PID
+records or occupied application ports before any reset or service startup.
+
+The root-only database acceptance harness runs independently in a temporary
+schema on the same isolated PostgreSQL. After resource preflight and sourcing
+the run environment, invoke once from the repository root on Node24.22.1+:
+`node e2e/scripts/check-account-trust-db.mjs`. It loads the real stores, verifies
+populated migration0007 twice, signed CAS/owner/tamper checks, concurrent enrollment
+capacity and pairing guards, and drops only its owned schema in finally. It logs
+no fixture rows or secrets. It does not replace the browser checks.
 
 `E2E_BROWSER_HOME` must be exactly the canonical absolute
 `$E2E_DIR/.browser-home`. Setup and Playwright reject other or relative locations.
@@ -69,13 +87,17 @@ is needed for the TLS endpoints.
 
 ```bash
 # Run after Playwright/browser shutdown; also removes the guarded browser HOME.
-bash scripts/stop-services.sh   # kills ONLY recorded UI/bridge/MCP/proxy PIDs
+bash scripts/stop-services.sh   # removes sessions using encrypted local clients, then exact recorded PIDs
 npm run infra:down              # docker compose down -v (drops the throwaway postgres)
-rm -rf .bridge-home .bridge-home-2 certs .run-email *.log
+rm -rf certs *.log
 ```
 
-The registered DB user is intentionally left behind (throwaway Postgres); `infra:down`
-removes it with the volume.
+Teardown removes all four guarded scratch homes, run-email files and browser
+trust home after successful cleanup. Dedicated MCP PIDs are `.mcp-bridge.pid`
+and `.mcp-bridge-2.pid`; logs are `mcp-bridge.log` and `mcp-bridge-2.log`.
+Failed session/process identity verification preserves the scratch homes and
+returns failure for root inspection. The two registered DB accounts remain in
+the throwaway PostgreSQL; `infra:down` removes them with the volume.
 
 ## Note on the direct path (Test A) behind a full-tunnel VPN
 

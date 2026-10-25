@@ -4,6 +4,9 @@ import { genDeviceCode, genUserCode, PAIR_REQUEST_TTL_MS, PAIR_POLL_INTERVAL_MS 
 import { createPairingRequest, deleteExpiredRequests } from "@/lib/pairing-store";
 import { checkRateLimit, recordAttempt, type RateLimitConfig } from "@/lib/login-rate-limit";
 import { clientIp } from "@/lib/client-ip";
+import { boundedSecurityJson } from '@/lib/security-store';
+import { parseAccountEnrollmentRequest } from '@security/account-crypto';
+import type { AccountEnrollmentRequest } from '@security/account-protocol';
 
 export const runtime = "nodejs";
 
@@ -11,6 +14,7 @@ interface PairStartRequestBody {
   bridgeId: string;
   hostname?: string;
   platform?: string;
+  enrollment?: unknown;
 }
 
 const PAIR_START_RATE_LIMIT: RateLimitConfig = {
@@ -33,13 +37,24 @@ function isUniqueViolation(err: unknown): boolean {
 export async function POST(request: NextRequest): Promise<NextResponse> {
   let body: PairStartRequestBody;
   try {
-    body = (await request.json()) as PairStartRequestBody;
+    body = (await boundedSecurityJson(request, 8192)) as PairStartRequestBody;
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  if (!body || typeof body.bridgeId !== "string" || body.bridgeId.length === 0) {
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['bridgeId', 'hostname', 'platform', 'enrollment'].includes(key))
+    || typeof body.bridgeId !== "string" || !/^[A-Za-z0-9_-]{1,200}$/.test(body.bridgeId)
+    || (body.hostname !== undefined && (typeof body.hostname !== 'string' || body.hostname.length > 200 || /[\x00-\x1f\x7f]/.test(body.hostname)))
+    || (body.platform !== undefined && (typeof body.platform !== 'string' || body.platform.length > 100 || /[\x00-\x1f\x7f]/.test(body.platform)))) {
     return NextResponse.json({ error: "bridgeId is required" }, { status: 400 });
+  }
+
+  let enrollment: AccountEnrollmentRequest | undefined;
+  if (body.enrollment !== undefined) {
+    try {
+      enrollment = await parseAccountEnrollmentRequest(body.enrollment);
+      if (enrollment.kind !== 'bridge' || enrollment.bridgeId !== body.bridgeId) throw new Error('invalid enrollment');
+    } catch { return NextResponse.json({ error: 'Invalid account enrollment' }, { status: 400 }); }
   }
 
   const ip = clientIp(request);
@@ -66,7 +81,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const hostname = typeof body.hostname === "string" ? body.hostname : null;
   const platform = typeof body.platform === "string" ? body.platform : null;
   const deviceCode = genDeviceCode();
-  const expiresAtIso = new Date(Date.now() + PAIR_REQUEST_TTL_MS).toISOString();
+  const expiresAtIso = enrollment?.expiresAt ?? new Date(Date.now() + PAIR_REQUEST_TTL_MS).toISOString();
 
   let userCode = genUserCode();
   let created = false;
@@ -80,6 +95,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         hostname,
         platform,
         expiresAtIso,
+        ...(enrollment ? { enrollment } : {}),
       });
       created = true;
       break;
@@ -104,6 +120,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     userCode,
     verificationUri: `${new URL(request.url).origin}/pair?code=${userCode}`,
     intervalMs: PAIR_POLL_INTERVAL_MS,
-    expiresInMs: PAIR_REQUEST_TTL_MS,
+    expiresInMs: Math.max(0, Date.parse(expiresAtIso) - Date.now()),
   });
 }

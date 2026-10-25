@@ -9,6 +9,9 @@ import { BridgeAuditStore } from './audit.js';
 import { BridgeSecurityError } from './errors.js';
 import { classifyCommand, classifyHttp, classifyTerminal, type OperationPermission } from './permissions.js';
 import { endpointSchema } from './metadata.js';
+import { ACCOUNT_TRUST_LIMITS, AccountTrustError } from '../account-crypto.js';
+import type { AccountHead, AccountHistory, VerifiedAccountTrust } from '../account-protocol.js';
+import { AccountReadUnavailable } from './account-client.js';
 
 const token = z.string().regex(/^[A-Za-z0-9_-]{1,200}$/);
 const actionSchema = z.object({ actionId: token, parentActionId: token.nullable(), clientId: token, grantId: token,
@@ -24,7 +27,10 @@ const object = (value: ApplicationJson): Record<string, ApplicationJson> => {
   return value;
 };
 export const applicationJson = (value: unknown): ApplicationJson => JSON.parse(JSON.stringify(value)) as ApplicationJson;
-export interface BridgeSecurityOptions extends PolicyOptions { relayUserId: string; browserOrigin?: string }
+export interface BridgeSecurityOptions extends PolicyOptions {
+  relayUserId: string; browserOrigin?: string;
+  readAccountHistory?: (signal?: AbortSignal) => Promise<AccountHistory | null>;
+}
 
 export class BridgeSecurityService implements BridgeSecurity {
   readonly endpoint;
@@ -37,6 +43,9 @@ export class BridgeSecurityService implements BridgeSecurity {
   private readonly admissions = new Map<string, string>();
   private readonly verified = new WeakSet<VerifiedApplication>();
   private closed = false;
+  private accountTimer: ReturnType<typeof setInterval> | null = null;
+  private accountRefresh: Promise<void> | null = null;
+  private readonly accountAbort = new AbortController();
   constructor(readonly identity: EndpointIdentity, readonly bridgeId: string, dataDir: string, readonly options: BridgeSecurityOptions) {
     this.endpoint = identity.endpoint; this.now = options.now ?? Date.now;
     this.policy = new BridgePolicyStore(dataDir, bridgeId, this.endpoint, options);
@@ -99,7 +108,11 @@ export class BridgeSecurityService implements BridgeSecurity {
     this.freshness(envelope, false);
     const principal = await this.policy.principal(envelope.senderId, true);
     const hello = z.object({ type: z.literal('hello'), challenge: token }).strict().parse(await this.decode(principal.endpoint, envelope, route));
-    return this.reply(principal.endpoint, 'welcome', { type: 'welcome', challenge: hello.challenge, receiverEpoch: this.receiverEpoch }, route, envelope.messageId);
+    const welcome = await this.reply(principal.endpoint, 'welcome', { type: 'welcome', challenge: hello.challenge, receiverEpoch: this.receiverEpoch }, route, envelope.messageId);
+    // Pending MCP identities may hello but cannot acquire ordinary application permissions.
+    const current = await this.policy.principal(principal.endpoint.id, true);
+    if (current.endpoint.publicKey !== principal.endpoint.publicKey) throw new BridgeSecurityError('wrong_context');
+    return welcome;
   }
   private parseApplication(value: unknown): SecureApplication {
     const parsed = z.object({ type: z.literal('application'), route: routeSchema, data: z.unknown(), mcp: actionSchema.nullable() }).strict().parse(value);
@@ -225,7 +238,8 @@ export class BridgeSecurityService implements BridgeSecurity {
     const packets: SecureEnvelope[] = [];
     for (const recipient of recipients) {
       try { packets.push(await this.sealTo(recipient.endpoint.id, application, { transport: 'cloud', channel, bridgeId: this.bridgeId, pairId: null })); }
-      catch (error) { if (!(error instanceof BridgeSecurityError) || !['endpoint_revoked', 'approval_required', 'expired'].includes(error.code)) throw error; }
+      catch (error) { if (!(error instanceof BridgeSecurityError) || (!['endpoint_revoked', 'approval_required', 'expired', 'invalid_account_trust'].includes(error.code)
+        && !error.code.startsWith('account_'))) throw error; }
     }
     return packets;
   }
@@ -242,6 +256,64 @@ export class BridgeSecurityService implements BridgeSecurity {
     await this.policy.revoke(actor, endpointId);
     for (const listener of this.revoked) listener(endpointId);
   }
+  /** Called once at startup; legacy/Solo stores never adopt an unsigned server directory. */
+  async startAccount(trust?: VerifiedAccountTrust): Promise<void> {
+    if (trust) await this.policy.pinBootstrap(trust);
+    await this.refreshAccount().catch(() => undefined);
+    if (!this.closed && !this.accountTimer && this.options.readAccountHistory) {
+      this.accountTimer = setInterval(() => { void this.refreshAccount().catch(() => undefined); }, ACCOUNT_TRUST_LIMITS.refreshIntervalMs);
+      this.accountTimer.unref();
+    }
+  }
+  private accountFailure(error: unknown): BridgeSecurityError {
+    return error instanceof BridgeSecurityError ? error : new BridgeSecurityError(error instanceof AccountTrustError ? error.code : 'invalid_account_trust');
+  }
+  private emitRevoked(endpointIds: string[]): void {
+    for (const id of endpointIds) for (const listener of this.revoked) listener(id);
+  }
+  async refreshAccount(): Promise<void> {
+    if (this.accountRefresh) return this.accountRefresh;
+    const run = async (): Promise<void> => {
+      if (this.closed || !await this.policy.accountTrust()) return;
+      try {
+        if (!this.options.readAccountHistory) throw new AccountReadUnavailable();
+        const history = await this.options.readAccountHistory(this.accountAbort.signal);
+        if (!history) throw new BridgeSecurityError('account_trust_rollback');
+        if (this.closed) return;
+        const result = await this.policy.applyAccountRead(history);
+        this.emitRevoked(result.revoked);
+      } catch (error) {
+        if (!(error instanceof AccountReadUnavailable)) this.policy.blockAccount(this.accountFailure(error).code);
+        if (!await this.policy.accountAvailable()) this.emitRevoked(await this.policy.accountEndpointIds());
+        throw error;
+      }
+    };
+    this.accountRefresh = run().finally(() => { this.accountRefresh = null; });
+    return this.accountRefresh;
+  }
+  async adoptAccount(actor: VerifiedPrincipal, head: AccountHead): Promise<AccountHead> {
+    await this.policy.revalidate(actor, 'admin');
+    if (actor.endpoint.kind !== 'browser' || !this.options.readAccountHistory) throw new BridgeSecurityError('account_approval_required');
+    try {
+      const parsedHead = z.object({ rootId: z.string().regex(/^[A-Za-z0-9_-]{43}$/), head: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+        revision: z.number().int().min(0).max(ACCOUNT_TRUST_LIMITS.maxTransitions) }).strict().parse(head);
+      const history = await this.options.readAccountHistory(this.accountAbort.signal);
+      if (!history) throw new BridgeSecurityError('account_approval_required');
+      if (this.closed) throw new BridgeSecurityError('account_storage_unavailable');
+      const result = await this.policy.applyAccountRead(history, { actor, head: parsedHead });
+      this.emitRevoked(result.revoked);
+      return result.head;
+    } catch (error) {
+      if (error instanceof AccountReadUnavailable) throw new BridgeSecurityError('account_storage_unavailable');
+      throw this.accountFailure(error);
+    }
+  }
   onRevoked(listener: (endpointId: string) => void): () => void { this.revoked.add(listener); return () => this.revoked.delete(listener); }
-  async close(): Promise<void> { this.closed = true; this.revoked.clear(); this.replay.clear(); await this.audit.close(); await this.policy.close(); }
+  async close(): Promise<void> {
+    this.closed = true; this.accountAbort.abort();
+    if (this.accountTimer) clearInterval(this.accountTimer);
+    this.accountTimer = null;
+    await this.accountRefresh?.catch(() => undefined);
+    this.revoked.clear(); this.replay.clear(); await this.audit.close(); await this.policy.close();
+  }
 }

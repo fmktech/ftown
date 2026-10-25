@@ -6,9 +6,9 @@ const session = /^[A-Za-z0-9_-]+$/;
 const readCommands = new Set(['list_sessions', 'get_history', 'get_session_usage', 'get_sessions_usage', 'get_session_attention']);
 const controlCommands = new Set(['create_session', 'stop_session', 'retry_session', 'send_message', 'rename_session', 'remove_session',
   'bridge_exec', 'clear_terminal', 'update_session_parent', 'resolve_session_attention']);
-const adminCommands = new Set(['security_devices', 'security_invite', 'security_revoke', 'security_approve_mcp', 'security_activity']);
+const adminCommands = new Set(['security_devices', 'security_invite', 'security_revoke', 'security_approve_mcp', 'security_activity', 'security_account_adopt']);
 const result = (permission: EndpointPermission, operation: string, sessionId: string | null = null): OperationPermission =>
-  ({ permission, mutating: permission === 'control' || ['security_invite', 'security_revoke', 'security_approve_mcp'].includes(operation), operation, sessionId });
+  ({ permission, mutating: permission === 'control' || ['security_invite', 'security_revoke', 'security_approve_mcp', 'security_account_adopt'].includes(operation), operation, sessionId });
 const deny = (): never => { throw new BridgeSecurityError('permission_denied'); };
 const object = (value: ApplicationJson | undefined): { [key: string]: ApplicationJson } | undefined =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? value : undefined;

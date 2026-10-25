@@ -13,6 +13,7 @@ vi.mock("@/hooks/useCentrifugo", () => ({ useCentrifugo: () => ({ client: { exec
 vi.mock("@/lib/secure-endpoint-runtime", () => ({ SecureEndpointRuntime: class {
   state(id: string) { return { bridgeId: id, status: mocks.states.get(id) ?? "unpaired" }; }
   onChange() { return () => {}; }
+  replacePins() {}
   dispose() {}
 } }));
 
@@ -34,7 +35,7 @@ describe("encrypted MCP consent", () => {
     expect((approve as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByLabelText(/Select all listed/));
     expect((approve as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText(/Selected offline or unpaired bridges block completion/)).toBeTruthy();
+    expect(screen.getByText(/Selected offline or unavailable computers block completion/)).toBeTruthy();
     expect(mocks.execute).not.toHaveBeenCalled();
     fireEvent.click(screen.getByLabelText(/Desktop/));
     await waitFor(() => expect((approve as HTMLButtonElement).disabled).toBe(false));

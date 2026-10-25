@@ -15,13 +15,13 @@ export function EncryptionDiagram() {
     </div>
     <figure aria-label="FTown encryption surfaces" className="space-y-4">
       <div className="grid gap-3 md:grid-cols-[1fr_1.2fr_1fr]">
-        <Endpoint title="Browser / PWA" trusted>Non-extractable private key in this browser’s IndexedDB. Bridge fingerprints are pinned after an explicit invitation approval.</Endpoint>
+        <Endpoint title="Browser / PWA" trusted>Separate non-extractable HPKE encryption and ECDSA signing keys in this installation’s IndexedDB. One device approval covers current and future account computers.</Endpoint>
         <div className="flex min-w-0 flex-col justify-center gap-2 rounded-lg border border-[var(--border-muted)] p-4 text-center text-xs">
           <div className="font-semibold text-[var(--accent)]">Application encryption ↔</div>
           <div className="leading-relaxed text-[var(--text-muted)]">Local HTTP / WebSocket · WebRTC P2P · Centrifugo relay</div>
           <div className="rounded border border-dashed border-[var(--border-muted)] p-2 text-[11px] text-[var(--text-faint)]">Relay carries opaque content; routing metadata remains visible.</div>
         </div>
-        <Endpoint title="Your bridge" trusted>Private key and approved-device policy stay in its local data directory. Decrypted sessions, terminal history, and mail are processed here.</Endpoint>
+        <Endpoint title="Your bridge" trusted>Private key and pinned signed account history stay in its local data directory. One computer approval establishes trust. Decrypted sessions, terminal history, and mail are processed here.</Endpoint>
       </div>
       <div className="grid gap-3 md:grid-cols-[1fr_1.2fr_1fr]">
         <Endpoint title="AI / MCP client">Standard HTTPS + OAuth to the hosted MCP gateway. The client and its AI provider can see the requests and results you give them.</Endpoint>
@@ -29,11 +29,12 @@ export function EncryptionDiagram() {
         <div className="flex flex-col justify-center gap-2 rounded-lg border border-[var(--border-muted)] p-4 text-center text-xs"><span className="font-semibold text-[var(--accent)]">Application encryption ↔ Bridge</span><span className="leading-relaxed text-[var(--text-muted)]">Browser-approved grant, pinned bridge key, read or control permission. No model PIN.</span></div>
       </div>
       <div className="grid gap-3 sm:grid-cols-2">
-        <Endpoint title="Account, directory & notifications">HTTPS protects account login, OAuth consent, and device metadata in transit. Public keys, IDs, hostname, online state, sizes and timing are not hidden. Push carries a generic FTown notice and opaque routing references.</Endpoint>
+        <Endpoint title="Account, directory & notifications">HTTPS carries signed public device/computer history. The service orders and delivers updates; a directory alone cannot approve keys. IDs, hostname, online state, sizes and timing remain visible. Push carries a generic notice.</Endpoint>
         <Endpoint title="Local agents & model providers">The bridge decrypts before dispatching to local agents and tools. Their files, terminal data, and external model-provider connections have their own storage and trust boundaries. Local hook ingestion is an explicit plaintext exception.</Endpoint>
       </div>
       <figcaption className="space-y-2 border-t border-[var(--border-subtle)] pt-4 text-xs leading-relaxed text-[var(--text-faint)]">
-        <p>Application encryption: HPKE Auth with P-256, HKDF-SHA256 and AES-256-GCM. Explicit invitation approval establishes trust; a mutable public-key directory cannot authorize a device. Security → Activity shows gateway attempts and independent bridge evidence.</p>
+        <p>Application encryption: HPKE Auth with P-256, HKDF-SHA256 and AES-256-GCM. Account history uses separate ECDSA P-256 signatures and pinned continuity. Compare the private link’s code before approving a computer or device. Security → Activity shows gateway attempts and independent bridge evidence.</p>
+        <p>Connected computers refresh account trust every 30 seconds. Account access pauses after 24 hours without a valid refresh; this is not a guaranteed revocation deadline against a service withholding updates. Existing bridge approvals require explicit migration; Solo and local recovery remain independent.</p>
         <p>Browser crypto requires HTTPS or trustworthy localhost, including Solo. Plain LAN HTTP cannot unlock encrypted controls. Minimal health/discovery and local hook ingestion remain outside application framing.</p>
         <p>Endpoint software and an unlocked browser remain trusted. This does not provide anonymity, hardware-backed key protection, forward secrecy, or a zero-knowledge hosted MCP service.</p>
       </figcaption>

@@ -27,7 +27,8 @@ export async function executeSecurePacket(security: BridgeSecurityService, packe
   } catch (error) {
     // Never authenticate an error on behalf of an unauthenticated/tampered packet.
     if (!verified && (!(error instanceof BridgeSecurityError)
-      || !['permission_denied', 'epoch_changed', 'expired', 'replayed', 'capacity_exceeded', 'audit_unavailable'].includes(error.code))) throw error;
+      || (!['permission_denied', 'epoch_changed', 'expired', 'replayed', 'capacity_exceeded', 'audit_unavailable', 'invalid_account_trust'].includes(error.code)
+        && !error.code.startsWith('account_')))) throw error;
     const code = error instanceof BridgeSecurityError ? error.code : dispatchStarted ? 'outcome_unknown' : 'permission_denied';
     if (verified) await security.complete(verified, dispatchStarted ? 'unknown' : 'rejected', code).catch(() => undefined);
     return security.sealTo(packet.senderId, { type: 'application', route: { kind: 'response', requestId: packet.messageId },

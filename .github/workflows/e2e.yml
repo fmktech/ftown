@@ -70,6 +70,7 @@ jobs:
         run: |
           npm ci
           npm test
+          node --test ../e2e/scripts/ci-fixtures.test.mjs
           set -a; E2E_DIR="$GITHUB_WORKSPACE/e2e" source "$GITHUB_WORKSPACE/e2e/env.sh"; set +a
           npm run build
 

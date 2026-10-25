@@ -6,6 +6,12 @@ import { getByDeviceCode, consumePairingRequest } from "@/lib/pairing-store";
 import { upsertBridgeRefresh, getOwnerIdForSub } from "@/lib/bridge-refresh";
 import { getRequiredSecret } from "@/lib/secrets";
 import { checkRateLimit, recordAttempt, type RateLimitConfig } from "@/lib/login-rate-limit";
+import { boundedSecurityJson } from '@/lib/security-store';
+import { AccountTrustStore } from '@/lib/account-trust-store';
+import { accountError } from '@/app/api/security/account/_shared';
+import { AccountTrustError } from '@security/account-crypto';
+import type { AccountEnrollmentBundle, AccountHistory } from '@security/account-protocol';
+import type { PairingAccountBinding } from '@/lib/pairing-store';
 
 export const runtime = "nodejs";
 
@@ -32,6 +38,8 @@ interface PairPollResponse {
   centrifugoUrl?: string;
   userId?: string;
   ownerId?: string;
+  accountApproval?: AccountEnrollmentBundle;
+  accountHistory?: AccountHistory;
 }
 
 const PAIR_POLL_RATE_LIMIT: RateLimitConfig = {
@@ -44,14 +52,17 @@ const PAIR_POLL_SCOPE = "pair-poll";
 export async function POST(request: NextRequest): Promise<NextResponse> {
   let body: PairPollRequestBody;
   try {
-    body = (await request.json()) as PairPollRequestBody;
+    body = (await boundedSecurityJson(request, 2048)) as PairPollRequestBody;
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  if (!body || typeof body.deviceCode !== "string" || body.deviceCode.length === 0) {
+  if (!body || Object.keys(body).some(key => !['deviceCode', 'localPort', 'localNonce'].includes(key)) || typeof body.deviceCode !== "string" || body.deviceCode.length === 0 || body.deviceCode.length > 200) {
     return NextResponse.json({ error: "deviceCode is required" }, { status: 400 });
   }
+
+  const advert = parseLocalAdvert(body);
+  if (advert && 'error' in advert) return NextResponse.json({ error: advert.error }, { status: 400 });
 
   const rateLimit = await checkRateLimit(PAIR_POLL_SCOPE, body.deviceCode);
   if (!rateLimit.allowed) {
@@ -72,6 +83,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ status: "consumed" } satisfies PairPollResponse);
   }
 
+  if (!Number.isFinite(Date.parse(row.expiresAt)) || Date.parse(row.expiresAt) <= Date.now()) return NextResponse.json({ status: 'expired' } satisfies PairPollResponse);
+
   if (row.status === "pending") {
     if (new Date(row.expiresAt).getTime() < Date.now()) {
       return NextResponse.json({ status: "expired" } satisfies PairPollResponse);
@@ -79,9 +92,27 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ status: "pending" } satisfies PairPollResponse);
   }
 
-  // row.status === "approved"
-  const consumed = await consumePairingRequest(body.deviceCode);
+  // Validate credentials, fresh bindings and current signed membership BEFORE the one-use transition.
+  if (!row.sub || !row.refreshJti) return NextResponse.json({ status: 'denied' } satisfies PairPollResponse);
+  let secret: string;
+  try { secret = getRequiredSecret('CENTRIFUGO_TOKEN_SECRET'); }
+  catch { return NextResponse.json({ error: 'Server misconfiguration' }, { status: 500 }); }
+  let ownerId: string;
+  try { ownerId = await getOwnerIdForSub(row.sub); }
+  catch { return NextResponse.json({ error: 'Bridge account is unavailable' }, { status: 401 }); }
+  let account: PairingAccountBinding | undefined;
+  let accountHistory: AccountHistory | undefined;
+  if (row.enrollment) {
+    try {
+      if (row.enrollment.kind !== 'bridge' || row.enrollment.bridgeId !== row.bridgeId || !row.accountApproval) throw new AccountTrustError('account_enrollment_invalid');
+      const verified = await new AccountTrustStore().validateApproval(ownerId, row.enrollment, row.accountApproval, true);
+      account = { ownerId, head: verified.head, enrollment: verified.request, bundle: verified.bundle };
+      accountHistory = verified.history;
+    } catch (error) { return accountError(error); }
+  } else if (row.accountApproval) return NextResponse.json({ error: 'Invalid account pairing' }, { status: 400 });
+  const consumed = account ? await consumePairingRequest(body.deviceCode, account) : await consumePairingRequest(body.deviceCode);
   if (!consumed) {
+    if (account) return accountError(new AccountTrustError('account_trust_conflict'));
     // Raced with another poll that already consumed this request.
     return NextResponse.json({ status: "consumed" } satisfies PairPollResponse);
   }
@@ -89,17 +120,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (!consumed.sub || !consumed.refreshJti) {
     // Should not happen: approve() always sets both alongside status='approved'.
     return NextResponse.json({ status: "consumed" } satisfies PairPollResponse);
-  }
-
-  let secret: string;
-  try {
-    secret = getRequiredSecret("CENTRIFUGO_TOKEN_SECRET");
-  } catch (err) {
-    console.error(
-      "[auth/bridge/pair/poll] secret misconfiguration:",
-      err instanceof Error ? err.message : String(err),
-    );
-    return NextResponse.json({ error: "Server misconfiguration" }, { status: 500 });
   }
 
   // HIGH-1 defense in depth: the owner-scoped upsert is a no-op (returns false)
@@ -116,14 +136,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ status: "denied" } satisfies PairPollResponse);
   }
 
-  const advert = parseLocalAdvert(body);
-  if (advert && "error" in advert) {
-    return NextResponse.json({ error: advert.error }, { status: 400 });
-  }
-
-  let ownerId: string;
-  try { ownerId = await getOwnerIdForSub(consumed.sub); }
-  catch { return NextResponse.json({ error: 'Bridge account is unavailable' }, { status: 401 }); }
   const token = jwt.sign(
     {
       sub: consumed.sub,
@@ -161,5 +173,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     centrifugoUrl: process.env.NEXT_PUBLIC_CENTRIFUGO_URL,
     userId: consumed.sub,
     ownerId,
+    ...(account ? { accountApproval: account.bundle, accountHistory } : {}),
   } satisfies PairPollResponse);
 }

@@ -1,5 +1,6 @@
 import { hostname as osHostname } from 'node:os';
 import { UnauthorizedError } from 'centrifuge';
+import type { AccountEnrollmentBundle, AccountHistory } from './security/account-protocol.js';
 
 /** Loopback advert embedded in the Centrifugo connection JWT `info` claim (L2). */
 export interface BridgeLocalAdvert {
@@ -13,6 +14,8 @@ export interface BridgeAuthResponse {
   refreshToken: string;
   centrifugoUrl: string;
   userId: string;
+  accountApproval?: AccountEnrollmentBundle;
+  accountHistory?: AccountHistory;
 }
 
 export async function fetchBridgeToken(

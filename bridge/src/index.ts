@@ -30,9 +30,12 @@ import { canonicalNotifyPath } from './install-notify-script.js';
 import { unregisterSession, configureSessionRegistryHome } from './session-registry.js';
 import { createFtownSession, type CreateFtownSessionDeps } from './create-ftown-session.js';
 import { createRelayHandler } from './mcp/relay-handler.js';
-import { loadOrCreateIdentity } from './security/bridge/identity.js';
+import { loadOrCreateIdentity, readBoundBridgeIdentity } from './security/bridge/identity.js';
+import { bindPendingBridgeIdentity, prepareBridgeEnrollment, savePairingVerificationUrl, type PendingBridgeEnrollment } from './security/bridge/pending-enrollment.js';
+import { readAccountHistory } from './security/bridge/account-client.js';
+import { openAccountApproval } from './security/account-crypto.js';
 import { BridgeSecurityService, applicationJson } from './security/bridge/security.js';
-import type { ApplicationJson, VerifiedApplication } from './security/protocol.js';
+import type { ApplicationJson, EndpointIdentity, VerifiedApplication } from './security/protocol.js';
 import { createCommandHandler } from './command-rpc.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { SessionResurrection, shouldResurrectStoredSession } from './session-resurrection.js';
@@ -378,12 +381,15 @@ program
     // else interactive device pairing. Pairing yields the SAME token bundle shape
     // as /api/auth/bridge, so all three paths converge on `auth` and the identical
     // refresh-token persist/resume logic below.
+    const boundAtStartup = await readBoundBridgeIdentity(dataDir);
+    let pendingEnrollment: PendingBridgeEnrollment | undefined;
     const onboard = async (): Promise<BridgeAuthResponse> => {
       if (opts.token) {
         console.log('[Bridge] Authenticating with API...');
         return fetchBridgeToken(opts.apiUrl, opts.token, bridgeId, local);
       }
       console.log('[Bridge] No bootstrap token or stored session — starting device pairing...');
+      if (!boundAtStartup) pendingEnrollment = await prepareBridgeEnrollment(dataDir, bridgeId, osHostname());
       return runPairing({
         apiUrl: opts.apiUrl,
         bridgeId,
@@ -392,6 +398,8 @@ program
         localPort: local.localPort,
         localNonce: local.localNonce,
         log: (msg) => console.log(msg),
+        enrollment: pendingEnrollment?.link,
+        onPairingCode: async code => { await savePairingVerificationUrl(dataDir, opts.apiUrl, code); },
       });
     };
 
@@ -429,9 +437,11 @@ program
     } else {
       auth = await onboard();
     }
+    if (boundAtStartup && boundAtStartup.identity.endpoint.ownerId !== auth.ownerId) throw new Error('wrong_context');
     const currentRefreshToken = auth.refreshToken;
     let currentBridgeToken = auth.token;
-    if (!solo && !opts.local) persistRefreshToken(currentRefreshToken);
+    // A virgin enrollment saves its same-point normalized identity/root before credentials.
+    if (!solo && !opts.local && boundAtStartup) persistRefreshToken(currentRefreshToken);
 
     const tokenRefresher = solo || opts.local
       ? null
@@ -458,14 +468,29 @@ program
         });
 
     if (!auth.ownerId) throw new Error('security_setup_required: bridge auth must provide immutable ownerId');
-    const identity = await loadOrCreateIdentity(dataDir, auth.ownerId, 'bridge');
+    let identity: EndpointIdentity;
+    let accountBootstrap = boundAtStartup?.bootstrap;
+    if (pendingEnrollment) {
+      if (!auth.accountApproval || !auth.accountHistory) throw new Error('account_approval_required');
+      const history = await readAccountHistory(opts.apiUrl, currentBridgeToken);
+      if (!history) throw new Error('account_approval_required');
+      accountBootstrap = await openAccountApproval(pendingEnrollment.identity, pendingEnrollment.link, auth.accountApproval, history);
+      if (accountBootstrap.checkpoint.ownerId !== auth.ownerId) throw new Error('wrong_context');
+      identity = await bindPendingBridgeIdentity(dataDir, accountBootstrap);
+    } else {
+      identity = boundAtStartup?.identity ?? await loadOrCreateIdentity(dataDir, auth.ownerId, 'bridge');
+      if (identity.endpoint.ownerId !== auth.ownerId) throw new Error('wrong_context');
+    }
+    if (!solo && !opts.local) persistRefreshToken(currentRefreshToken);
     const localIdentity = await loadOrCreateIdentity(dataDir, auth.ownerId, 'local-cli');
     const security = new BridgeSecurityService(identity, bridgeId, dataDir, {
       relayUserId: auth.userId, relayUrl: auth.centrifugoUrl, browserOrigin: new URL(opts.apiUrl).origin,
       localOrigin: `http://127.0.0.1:${hookPort}`,
+      readAccountHistory: !solo && !opts.local ? signal => readAccountHistory(opts.apiUrl, currentBridgeToken, signal) : undefined,
     });
     await security.policy.provisionLocalEndpoint(localIdentity.endpoint);
     await security.audit.initialize();
+    await security.startAccount(accountBootstrap);
     if (!solo && !opts.local) {
       const registration = await fetch(`${opts.apiUrl.replace(/\/$/, '')}/api/security/endpoints`, { method: 'PUT',
         headers: { Authorization: `Bearer ${currentBridgeToken}`, 'Content-Type': 'application/json' },
@@ -882,7 +907,10 @@ program
       })();
     }, 2000);
 
-    const shutdown = (): void => {
+    let shuttingDown = false;
+    const shutdown = async (): Promise<void> => {
+      if (shuttingDown) return;
+      shuttingDown = true;
       console.log('\n[Bridge] Shutting down...');
       attentionStore.stopNotifications();
       stopPushSessionObserver();
@@ -895,7 +923,6 @@ program
         solo.hub.stop();
       }
       localApiServer.stop();
-      void security.close();
       runner.stopAll();
       loopbackServer.closeAll();
       directPeers.closeAll();
@@ -903,7 +930,8 @@ program
       // node-datachannel module-level cleanup — avoids the native crash-on-exit race.
       try { ndcCleanup(); } catch { /* native lib already torn down */ }
       centrifugo.disconnect();
-      process.exit(0);
+      try { await security.close(); process.exit(0); }
+      catch { console.error('[Bridge] Failed to persist security shutdown state.'); process.exit(1); }
     };
 
     process.on('SIGINT', shutdown);

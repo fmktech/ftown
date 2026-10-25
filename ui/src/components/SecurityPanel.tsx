@@ -4,6 +4,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import type { BridgeInvitation, BridgeSecurityState, SecurityCommand, SecurityCommandResults } from "@security/protocol";
 import { SecurityActivity } from "./SecurityActivity";
 import { SecurityDevices } from "./SecurityDevices";
+import type { AccountSecurityClient, AccountSecuritySnapshot } from "@/lib/account-security-client";
 
 export interface SecurityBridge {
   bridgeId: string;
@@ -22,6 +23,8 @@ export interface SecurityPanelProps {
   initialBridgeId?: string;
   gatewayAvailable?: boolean;
   onInvitation?: (invitation: BridgeInvitation) => void;
+  accountClient?: AccountSecurityClient;
+  accountState?: AccountSecuritySnapshot;
 }
 
 export function securityStateLabel(state: BridgeSecurityState["status"]): string {
@@ -35,6 +38,18 @@ export function securityStateLabel(state: BridgeSecurityState["status"]): string
 export function securityErrorMessage(error: unknown): string {
   const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
   const messages: Record<string, string> = {
+    invalid_account_trust: "Account trust could not be verified. Access is paused; use an approved device or explicit recovery.",
+    account_trust_conflict: "Account devices changed. Refresh and review this action again.",
+    account_trust_rollback: "The server returned older or conflicting account trust. Access is paused; no keys were replaced.",
+    account_approval_required: "Approve this device using an existing approved device first.",
+    account_device_revoked: "This account device was revoked or its signing key is unavailable. Use another approved device for recovery.",
+    account_bridge_revoked: "This computer was removed from account trust.",
+    account_offline_expired: "Account access paused: reconnect to refresh trust and check this device's clock.",
+    account_last_admin: "Approve another device before revoking the last account administrator.",
+    account_capacity_exceeded: "Account trust reached its supported capacity. Contact your administrator for explicit recovery or rotation.",
+    account_enrollment_expired: "This approval request expired. Create a new request on the device you want to add.",
+    account_enrollment_invalid: "This approval link or response could not be verified. Reopen the original link and compare both codes.",
+    account_storage_unavailable: "Account trust could not be refreshed or stored. Check the connection and browser storage, then try again.",
     permission_denied: "This device does not have permission for this action.",
     approval_required: "Approve this browser on the bridge first.", endpoint_revoked: "This device's bridge access was revoked.",
     bridge_offline: "The bridge is offline. Reconnect it and try again.", key_changed: "The bridge key changed. Verify it with a fresh invitation.",
@@ -46,7 +61,7 @@ export function securityErrorMessage(error: unknown): string {
 }
 
 export function SecurityPanel({ open, onClose, bridges, currentEndpointId, execute, initialBridgeId,
-  gatewayAvailable = true, onInvitation }: SecurityPanelProps) {
+  gatewayAvailable = true, onInvitation, accountClient, accountState }: SecurityPanelProps) {
   const [view, setView] = useState<"activity" | "devices">("activity");
   const [bridgeId, setBridgeId] = useState(initialBridgeId ?? "");
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -86,19 +101,19 @@ export function SecurityPanel({ open, onClose, bridges, currentEndpointId, execu
             {tab === "activity" ? "Activity" : "Devices"}
           </button>)}
         </div>
-        <label className="flex min-w-0 flex-col gap-1 text-xs text-[var(--text-muted)]">Bridge
+        {(view === "activity" || !accountClient || !accountState?.trust && !!accountState?.legacyBridges.length) && <label className="flex min-w-0 flex-col gap-1 text-xs text-[var(--text-muted)]">Bridge
           <select aria-label="Security bridge" value={bridgeId} onChange={event => setBridgeId(event.target.value)}
             className="min-h-11 w-full max-w-full rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)] px-3 text-sm text-[var(--text-primary)] sm:max-w-72">
             <option value="">All bridges</option>
             {bridges.map(bridge => <option key={bridge.bridgeId} value={bridge.bridgeId}>{bridge.label}</option>)}
           </select>
-        </label>
+        </label>}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:p-6">
         {selected && <p className="mb-4 text-xs text-[var(--text-muted)]">{selected.label}: {securityStateLabel(selected.security.status)}</p>}
         <section role="tabpanel" id={`${titleId}-${view}`} aria-labelledby={`${titleId}-tab-${view}`}>
           {view === "activity" ? <SecurityActivity bridgeId={bridgeId} selectedBridge={selected} execute={execute} gatewayAvailable={gatewayAvailable} />
-            : <SecurityDevices bridge={selected} currentEndpointId={currentEndpointId} execute={execute} onInvitation={onInvitation} />}
+            : <SecurityDevices bridge={selected} bridges={bridges} currentEndpointId={currentEndpointId} execute={execute} onInvitation={onInvitation} accountClient={accountClient} accountState={accountState} />}
         </section>
       </div>
     </div>

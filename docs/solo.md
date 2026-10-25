@@ -144,6 +144,11 @@ port mapping.
 
 ## Encryption setup
 
+Solo remains an independent bridge-only trust model. Hosted account device
+approvals and signed account history do not change Solo enrollment or authorize
+another Solo instance. Local recovery invitations never restore account signing
+authority or replace an established account root.
+
 Open **Security → Devices** after pairing to inspect the bridge's local approvals
 and revoke a particular endpoint. Keep access to the bridge's local CLI for
 recovery. A different bridge fingerprint requires verification and a fresh
@@ -218,3 +223,9 @@ The container image also needs the new npm package published before rebuilding;
 this PR does not claim to build or deploy that image. Reverting requires the
 matching older package/config/binary; restarting either version loses the hub's
 in-memory publication history, not the separate durable FTown mailbox.
+
+
+Hosted account trust does not change Solo's independent local identity. On a
+hosted deployment, `/dashboard` carries account-derived access over every
+supported transport; the standalone `/local` page remains explicit per-bridge
+legacy/local recovery and does not approve account signing keys.

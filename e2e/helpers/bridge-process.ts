@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { openSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { E2E_DIR, BRIDGE_HOME, UI_BASE_URL } from "./config";
 import { mintBridgeBootstrapToken } from "./jwt";
@@ -10,7 +10,7 @@ import { readBridgePointer } from "./bridge-api";
 
 /**
  * Stop and restart the e2e bridge for resurrection tests. start-services.sh
- * launches the bridge as `node dist/index.js --token <jwt> --api-url <ui>` with
+ * launches the bridge with its absolute dist/index.js entrypoint and
  * HOME overridden to e2e/.bridge-home, recording its PID in e2e/.bridge.pid.
  * This helper kills that exact PID and relaunches an identical process against
  * the SAME scratch HOME and data dir, so the new bridge resumes its persisted
@@ -89,7 +89,7 @@ export async function restartBridge(options: RestartBridgeOptions = {}): Promise
   const e2eDir = options.e2eDir ?? E2E_DIR;
   const bridgeHome = options.bridgeHome ?? BRIDGE_HOME;
   const apiUrl = options.apiUrl ?? UI_BASE_URL;
-  const repoDir = join(e2eDir, "..");
+  const repoDir = resolve(e2eDir, "..");
   const pidPath = join(e2eDir, ".bridge.pid");
 
   // --- stop the currently recorded bridge ---
@@ -116,10 +116,10 @@ export async function restartBridge(options: RestartBridgeOptions = {}): Promise
 
   const child = spawn(
     "node",
-    ["dist/index.js", "--token", token, "--api-url", apiUrl],
+    [join(repoDir, "bridge/dist/index.js"), "--token", token, "--api-url", apiUrl],
     {
       cwd: join(repoDir, "bridge"),
-      env: { ...process.env, HOME: bridgeHome },
+      env: { ...process.env, HOME: bridgeHome, USERPROFILE: bridgeHome, FTOWN_DATA_DIR: join(bridgeHome, ".ftown/data") },
       stdio: ["ignore", logFd, logFd],
       detached: true,
     },

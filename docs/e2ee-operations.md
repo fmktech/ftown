@@ -7,12 +7,13 @@ The public endpoint directory provides discovery metadata and grants no access.
 Apply `ui/migrations/0006_endpoint_security.sql` before starting the upgraded
 gateway or UI. This additive migration creates empty security tables and indexes;
 it does not rewrite existing users, bridge credentials or OAuth records. DDL uses
-five-second lock and thirty-second statement limits. Existing MCP grants require
-fresh consent. An upgraded bridge requires explicit device enrollment.
+five-second lock and thirty-second statement limits. Grants from before the
+encrypted-endpoint release require fresh consent; existing encrypted MCP grants
+remain usable. An upgraded bridge requires explicit device enrollment.
 
 Set the UI's server-only `FTOWN_PUBLIC_URL` to its exact canonical public HTTPS
 origin, for example `https://ftown.ia.br`: no trailing slash, path, credentials,
-query or fragment. Cookie-authenticated consent, browser-directory and push
+query or fragment. Cookie-authenticated account, pairing, consent, browser-directory and push
 mutations accept a single canonical `Origin` matching either the existing request
 URL's origin or this operator-configured public origin. This supports TLS proxies
 where Next reconstructs an internal listener origin; `Host` and forwarded headers
@@ -64,8 +65,52 @@ process lease expires or their result is saved.
 
 Rollback retains additive tables and the original wrapping key. An old client or
 bridge does not regain plaintext access: restore connectivity by fixing forward
-and explicitly approving supported endpoints. Lost browser keys require fresh
-local bridge invitation approval; account password reset cannot recover keys.
+and explicitly approving supported endpoints. Lost browser keys require another
+trusted account device to approve a replacement, or explicit local bridge
+recovery; account password reset cannot recover keys.
+
+## Account trust rollout (0.19.54)
+
+Apply `ui/migrations/0007_account_trust.sql` before the upgraded UI. It adds two
+empty public history/enrollment tables, indexes and nullable JSONB columns on
+`pairing_requests`; existing users, credentials, pairings and MCP grants are not
+rewritten. The nullable additions take a brief exclusive metadata lock, bounded
+by the migration's five-second lock and thirty-second statement limits. Deploy
+schema first. Rolling the app back leaves new trust records intact; fix forward
+instead of deleting established trust history.
+
+A browser keeps separate nonextractable HPKE and signing keys. First bridge
+approval or explicit migration pins the account root; storing self-signed public
+history in PostgreSQL alone grants no access. Later browser installations need
+one existing trusted device approval, and current/future account bridges use the
+verified roster. Enrollment links carry their proof secret only in the fragment,
+which never reaches server storage. Requests expire after five minutes; an
+approved encrypted response may be resealed by the same approver while the
+request is still valid. Server checks public bindings; candidates independently
+verify the secret HMAC, encrypted head and full signed history.
+
+An adopted bridge removes legacy browser grants and outstanding invitations
+atomically. Local CLI recovery and already-approved fixed-expiry MCP grants
+remain separate. Account revocation applies when learned, without cascading to
+independently approved devices or previous MCP grants. MCP still requires all
+selected bridges online for its existing exact-bridge receipts; future bridges
+require new consent.
+
+History is bounded to 1,024 transitions and 2 MiB; active rosters to 128 browsers
+and 128 bridges. Browser enrollment rows have a hard 128-slot cap per account.
+Each new request cleans up to 1,000 globally expired enrollment rows; an inactive
+installation does not imply an automatic physical deletion deadline. Clients
+refresh signed history every thirty seconds, fail closed on known rollback or
+conflict, and preserve clock highwaters. Running clients allow up to twenty-four
+hours without a successful matching account read; after restart an authenticated
+refresh is required before account-derived access. A malicious service can
+withhold updates, so this is not a guaranteed global revocation deadline.
+
+Losing every signing key requires explicit recovery/rebootstrap of each bridge;
+OS-local access cannot restore account signing authority. There is no automatic
+root reset when a server returns an empty history. This rollout provisions no
+new environment secret, does not migrate Zod, and performs no production schema
+execution or deployment by itself.
 
 This rollout cannot remove plaintext already observed by earlier relays or push
 providers. Pre-upgrade broker history lasts until its configured expiry. Existing

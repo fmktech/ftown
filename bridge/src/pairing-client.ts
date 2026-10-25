@@ -10,6 +10,9 @@
  * returned token/refreshToken stay out of the `log` sink; only the low-value,
  * single-use `userCode` and the verification URL are printed.
  */
+import { encodeAccountEnrollmentLink, parseAccountEnrollmentLink } from './security/account-crypto.js';
+import type { AccountEnrollmentBundle, AccountEnrollmentLink, AccountHistory } from './security/account-protocol.js';
+import { accountReadUrl } from './security/bridge/account-client.js';
 
 export interface RunPairingOptions {
   apiUrl: string;
@@ -32,6 +35,12 @@ export interface RunPairingOptions {
   sleepImpl?: (ms: number) => Promise<void>;
   /** Where user-facing lines go; defaults to console.log. NEVER receives secrets. */
   log?: (msg: string) => void;
+  /** The secret remains local; only request is uploaded. */
+  enrollment?: AccountEnrollmentLink;
+  /** Persist public verification metadata in the private pending record. */
+  onPairingCode?: (code: string) => Promise<void>;
+  /** Human-facing TTY ONLY; must never be an operational logger. */
+  displayEnrollmentUrl?: (url: string) => void;
 }
 
 export interface PairingResult {
@@ -40,6 +49,8 @@ export interface PairingResult {
   refreshToken: string;
   centrifugoUrl: string;
   userId: string;
+  accountApproval?: AccountEnrollmentBundle;
+  accountHistory?: AccountHistory;
 }
 
 interface PairStartResponse {
@@ -66,6 +77,8 @@ interface PairPollResponse {
   refreshToken?: string;
   centrifugoUrl?: string;
   userId?: string;
+  accountApproval?: AccountEnrollmentBundle;
+  accountHistory?: AccountHistory;
 }
 
 const realSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -88,15 +101,31 @@ export async function runPairing(opts: RunPairingOptions): Promise<PairingResult
     sleepImpl = realSleep,
     log = (msg: string): void => console.log(msg),
   } = opts;
+  const enrollment = opts.enrollment ? await parseAccountEnrollmentLink(opts.enrollment) : undefined;
+  if (enrollment && (enrollment.request.kind !== 'bridge' || enrollment.request.bridgeId !== bridgeId)) throw new Error('Invalid encrypted bridge enrollment');
 
   const start = await postJson<PairStartResponse>(fetchImpl, `${apiUrl}/api/auth/bridge/pair/start`, {
     bridgeId,
     hostname,
     platform,
+    ...(enrollment ? { enrollment: enrollment.request } : {}),
   });
 
   // P8: userCode + URL are printed; deviceCode is NEVER logged.
-  log(
+  if (enrollment) {
+    accountReadUrl(apiUrl);
+    if (typeof start.userCode !== 'string' || !/^[A-Za-z0-9-]{1,100}$/.test(start.userCode)
+      || typeof start.deviceCode !== 'string' || start.deviceCode.length < 1 || start.deviceCode.length > 200
+      || !Number.isInteger(start.intervalMs) || start.intervalMs < 100 || start.intervalMs > 60000
+      || !Number.isInteger(start.expiresInMs) || start.expiresInMs < 1 || start.expiresInMs > 300000) throw new Error('Invalid encrypted bridge approval response');
+    await opts.onPairingCode?.(start.userCode);
+    const url = new URL('/pair', apiUrl); url.searchParams.set('code', start.userCode);
+    url.hash = `account=${encodeAccountEnrollmentLink(enrollment)}`;
+    // An interactive CLI may display this directly; redirected logs only receive instructions.
+    if (opts.displayEnrollmentUrl) opts.displayEnrollmentUrl(url.href);
+    else if (process.stderr.isTTY) process.stderr.write(`Approve this computer: ${url.href}\n`);
+    log('Waiting for encrypted computer approval. Run ftown security pair-link to display the current private approval link.');
+  } else log(
     'Approve this machine to connect it to ftown:\n' +
       `    ${start.verificationUri}\n` +
       `    code: ${start.userCode}\n` +
@@ -105,7 +134,7 @@ export async function runPairing(opts: RunPairingOptions): Promise<PairingResult
 
   const deviceCode = start.deviceCode;
   const intervalMs = start.intervalMs;
-  const deadline = Date.now() + start.expiresInMs;
+  const deadline = Math.min(Date.now() + start.expiresInMs, enrollment ? Date.parse(enrollment.request.expiresAt) : Infinity);
 
   // Wait one interval before the first poll (the user needs time to approve).
   await sleepImpl(intervalMs);
@@ -125,12 +154,14 @@ export async function runPairing(opts: RunPairingOptions): Promise<PairingResult
         if (!poll.ownerId || !poll.token || !poll.refreshToken || !poll.centrifugoUrl || !poll.userId) {
           throw new Error('Pairing approved but token bundle was incomplete');
         }
+        if (enrollment && (!poll.accountApproval || !poll.accountHistory)) throw new Error('Encrypted bridge approval is required; no legacy fallback');
         return {
           ownerId: poll.ownerId,
           token: poll.token,
           refreshToken: poll.refreshToken,
           centrifugoUrl: poll.centrifugoUrl,
           userId: poll.userId,
+          ...(enrollment ? { accountApproval: poll.accountApproval!, accountHistory: poll.accountHistory! } : {}),
         };
       }
       case 'pending':
@@ -161,8 +192,7 @@ async function postJson<T>(fetchImpl: typeof fetch, url: string, body: unknown):
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Pairing request to ${url} failed (${res.status}): ${text}`);
+    throw new Error(`Pairing request failed (${res.status})`);
   }
   return res.json() as Promise<T>;
 }

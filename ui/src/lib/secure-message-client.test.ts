@@ -31,9 +31,9 @@ async function establish(runtime: SecureEndpointRuntime, bridgeId: string, bridg
     await runtime.receive(reply, channel);
   });
 }
-async function setup() {
+async function setup(authority?: (bridgeId: string) => void) {
   const browser = await generateEndpoint(ownerId, 'browser'); const a = await generateEndpoint(ownerId, 'bridge'); const b = await generateEndpoint(ownerId, 'bridge');
-  const runtime = new SecureEndpointRuntime(browser, [{ bridgeId: 'bridge-a', endpoint: a.endpoint, permissions: ['read', 'control', 'admin'] }, { bridgeId: 'bridge-b', endpoint: b.endpoint, permissions: ['read', 'control', 'admin'] }]);
+  const runtime = new SecureEndpointRuntime(browser, [{ bridgeId: 'bridge-a', endpoint: a.endpoint, permissions: ['read', 'control', 'admin'] }, { bridgeId: 'bridge-b', endpoint: b.endpoint, permissions: ['read', 'control', 'admin'] }], authority);
   await establish(runtime, 'bridge-a', a); await establish(runtime, 'bridge-b', b);
   const raw = new RawClient(); const client = new SecureMessageClient(raw as unknown as Centrifuge, userId, runtime);
   client.observe('bridge-a', { type: 'application', route: { kind: 'publication' }, data: { type: 'session_update', session: { id: 'session-one', bridgeId: 'bridge-a' } }, mcp: null });
@@ -146,4 +146,16 @@ describe('secure broker adapter', () => {
     await expect(pending).resolves.toMatchObject({ requestId: 'stop-one', success: true });
     client.dispose(); runtime.dispose();
   });
+  it('rechecks account authority immediately before raw publication after awaited encryption', async () => {
+    let approved = true;
+    const f = await setup(id => { if (id === 'bridge-a' && !approved) throw new Error('Account authority expired'); });
+    const original = f.runtime.sealApplication.bind(f.runtime);
+    vi.spyOn(f.runtime, 'sealApplication').mockImplementation(async (...args) => {
+      const packet = await original(...args); approved = false; return packet;
+    });
+    await expect(f.client.publish(channel, { type: 'stop_session', requestId: 'expired-after-encrypt', payload: { bridgeId: 'bridge-a' } })).rejects.toThrow('Account authority expired');
+    expect(f.raw.publish).not.toHaveBeenCalled();
+    approved = true; f.client.dispose(); f.runtime.dispose();
+  });
+
 });
