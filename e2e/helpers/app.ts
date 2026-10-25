@@ -1,4 +1,5 @@
 import { expect, type Page } from "@playwright/test";
+import { createHash } from "node:crypto";
 import { UI_BASE_URL } from "./config";
 import { pairBrowser } from "./secure-browser";
 import { readBridgePointer } from "./bridge-api";
@@ -40,9 +41,19 @@ export function makeUser(prefix = "e2e-b"): UserCreds {
  * accounts — any 2xx is success.
  */
 export async function registerUser(email: string, password: string = E2E_PASSWORD): Promise<void> {
+  // Distinct fixture users model distinct proxied clients, retaining the real
+  // registration limiter for repeated requests by the same normalized user.
+  // Never send fixture source headers or credentials to another destination.
+  const normalized = email.trim().toLowerCase();
+  if (UI_BASE_URL !== "http://localhost:3000" || normalized.length > 254
+    || !/^[a-z0-9][a-z0-9._+-]*@ftown\.test$/.test(normalized)) {
+    throw new Error("Registration fixtures require the canonical local UI and a test account");
+  }
+  const digest = createHash("sha256").update("ftown-e2e-registration-source-v1\0").update(normalized).digest("hex").slice(0, 24);
+  const source = `2001:db8:${digest.match(/.{4}/g)!.join(":")}`;
   const res = await fetch(`${UI_BASE_URL}/api/auth/register`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "x-real-ip": source },
     body: JSON.stringify({ email, password }),
   });
   const body = await res.text();
