@@ -8,11 +8,11 @@
 # NOTES:
 # - main-only: runs on push to main and via manual dispatch. It deliberately does
 #   NOT run on pull_request, so prod secrets are never exposed to PR/fork branches.
-# - Races Vercel's deploy on the same push: both trigger from the merge commit and
-#   run concurrently. Our migrations are additive (CREATE TABLE IF NOT EXISTS, guarded
-#   data copy), so the brief window where new code meets the old schema — or new
-#   schema meets old code — is safe. Keep future migrations additive/backwards
-#   compatible to preserve this property.
+# - Vercel deployment and this workflow run concurrently; this job does not gate
+#   app promotion. Additive schema keeps the old app compatible, but a new app
+#   may require it. Pending approvals requires prerequisite migration0008's schema
+#   PR merged and its production migrate job successful BEFORE the feature PR is
+#   merged or promoted. A failed migration must block that feature rollout.
 # - The concurrency group serializes the migrator itself so two quick pushes can't
 #   race each other into the same database.
 # - FIRST run still needs the MIGRATION_DATABASE_URL secret configured in the repo.
