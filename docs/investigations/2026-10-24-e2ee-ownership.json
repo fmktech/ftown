@@ -243,5 +243,5 @@
       ]
     }
   ],
-  "phase": "UI-only packaging repair passed clean install/unit/types/build and focused runtime; independent closure accepted; MCP exclusively owns repair commit/push/PR; root owns CI and Boat cleanup."
+  "phase": "CI fixture repairs independently accepted; root focused23pass/1existing skip and cleanup passed; MCP exclusively owns six-path commit/push/PR, root owns automatic CI and final Boat cleanup."
 }
