@@ -1,6 +1,6 @@
 import { expect, type BrowserContext, type Page } from "@playwright/test";
 import { test } from "../helpers/fixtures";
-import { accountBrowserState, approveAccountComputer, createAccountShell, startAccountTestBridge, type AccountTestBridge } from "../helpers/account-pairing";
+import { accountBrowserState, approveAccountComputer, createAccountShell, startAccountTestBridge, usePrivateApprovalLink, type AccountTestBridge } from "../helpers/account-pairing";
 import { bridgeSecurityCommand } from "../helpers/secure-browser";
 import { readBridgePointer } from "../helpers/bridge-api";
 import type { ApprovedEndpoint } from "../../bridge/src/security/protocol";
@@ -46,22 +46,41 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
         socket.on("framereceived", ({ payload }) => frames.push(String(payload)));
       });
       await login(phone, user.email, user.password, { pairBridge: false });
+      await usePrivateApprovalLink(phone);
       await expect(phone.getByRole("heading", { name: "Approve this device", exact: true })).toBeVisible();
       await phone.getByRole("textbox", { name: "Device name", exact: true }).fill("Account test phone");
       await phone.getByRole("button", { name: "Create approval link", exact: true }).click();
       const privateLink = await phone.getByRole("textbox", { name: "Private approval link", exact: true }).inputValue();
       const comparison = await phone.getByLabel("Comparison code", { exact: true }).textContent();
+      const encoded = new URLSearchParams(new URL(privateLink).hash.slice(1)).get("account")!;
+      const pendingRequest = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as { request: { requestId: string; signingProof: string } };
+      const enrollmentPath = `/api/security/account/enrollments/${pendingRequest.request.requestId}`;
+      const pendingIdentity = (await accountBrowserState(phone))[0];
+      expect(pendingIdentity.trust).toBeNull();
+      // Reload must restore the exact persisted request and restart its poll.
+      // No Generate/Refresh action is allowed between reload and approval.
+      const resumedPoll = phone.waitForRequest(request => request.method() === "GET" && new URL(request.url()).pathname === enrollmentPath, { timeout: 15000 })
+        .then(() => true, () => false);
+      await phone.reload();
+      await expect(phone.getByRole("heading", { name: "Approve this device", exact: true })).toBeVisible();
+      const restoredLink = phone.getByRole("textbox", { name: "Private approval link", exact: true });
+      await expect(restoredLink).toBeVisible();
+      // Compare privately so assertion diagnostics cannot print the fragment.
+      expect(await restoredLink.inputValue() === privateLink).toBe(true);
+      await expect(phone.getByLabel("Comparison code", { exact: true })).toHaveText(comparison!);
+      expect(await resumedPoll).toBe(true);
+      expect((await accountBrowserState(phone))[0].endpointId).toBe(pendingIdentity.endpointId);
       await noOverflow(phone); await phone.screenshot({ path: info.outputPath("account-phone-pending.png"), fullPage: true });
       // A different signed-in owner must never acquire authority from the link.
       const foreign = makeUser("account-foreign"); await registerUser(foreign.email, foreign.password);
       const foreignContext = await browser.newContext({ baseURL: origin, ignoreHTTPSErrors: false }); contexts.push(foreignContext);
       const foreignPage = await foreignContext.newPage(); await login(foreignPage, foreign.email, foreign.password, { pairBridge: false });
       await foreignPage.goto(privateLink); await expect(foreignPage).toHaveURL(`${origin}/devices/approve`);
-      await expect(foreignPage.getByRole("alert").filter({ hasText: /\S/ })).toBeVisible();
-      await expect(foreignPage.getByRole("button", { name: "Codes match — approve device", exact: true })).toBeDisabled();
+      await expect(foreignPage.getByRole("heading", { name: "Waiting for device approval", exact: true })).toBeVisible();
+      await expect(foreignPage.getByRole("button", { name: "Codes match — approve device", exact: true })).toHaveCount(0);
+      expect((await accountBrowserState(foreignPage))[0].trust).toBeNull();
       // Tampering with the candidate proof cannot be repaired by account login.
-      const tampered = new URL(privateLink); const encoded = new URLSearchParams(tampered.hash.slice(1)).get("account")!;
-      const value = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as { request: { signingProof: string } };
+      const tampered = new URL(privateLink); const value = structuredClone(pendingRequest);
       value.request.signingProof = `${value.request.signingProof[0] === "A" ? "B" : "A"}${value.request.signingProof.slice(1)}`;
       tampered.hash = `account=${Buffer.from(JSON.stringify(value)).toString("base64url")}`;
       const invalid = await desktop.newPage(); await invalid.goto(tampered.href);
@@ -69,10 +88,36 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       await page.goto(privateLink); await expect(page).toHaveURL(`${origin}/devices/approve`);
       await expect(page.getByLabel("Comparison code", { exact: true })).toHaveText(comparison!);
       await noOverflow(page); await page.screenshot({ path: info.outputPath("account-device-confirmation.png"), fullPage: true });
-      await page.getByRole("button", { name: "Codes match — approve device", exact: true }).click();
+      // Simulate an ambiguous reply only after the real server commits the
+      // approval. The retry must deliver the same request without adding again.
+      const enrollmentRoute = (url: URL) => url.pathname === enrollmentPath;
+      let committedResponseDropped = false;
+      await page.route(enrollmentRoute, async route => {
+        if (route.request().method() === "POST" && !committedResponseDropped) {
+          const committed = await route.fetch();
+          if (!committed.ok()) { await route.fulfill({ response: committed }); return; }
+          committedResponseDropped = true;
+          await route.abort("connectionreset");
+        } else await route.continue();
+      });
+      const approve = page.getByRole("button", { name: "Codes match — approve device", exact: true });
+      await approve.click();
+      await expect.poll(() => committedResponseDropped, { timeout: 15000 }).toBe(true);
+      await expect(page.getByRole("alert").filter({ hasText: /\S/ })).toBeVisible();
+      await expect(approve).toBeEnabled();
+      const committedTrust = (await accountBrowserState(page))[0].trust!;
+      expect(committedTrust.checkpoint.devices.filter(device => device.endpoint.id === pendingIdentity.endpointId)).toHaveLength(1);
+      await approve.click();
       await expect(page.getByText(/Device approved\. It can now finish connecting/)).toBeVisible();
+      await expect(page.getByRole("alert").filter({ hasText: /\S/ })).toHaveCount(0);
+      const retriedTrust = (await accountBrowserState(page))[0].trust!;
+      expect(retriedTrust.checkpoint.revision).toBe(committedTrust.checkpoint.revision);
+      expect(retriedTrust.checkpoint.devices.filter(device => device.endpoint.id === pendingIdentity.endpointId)).toHaveLength(1);
+      await page.unroute(enrollmentRoute);
       await expect(phone.locator(`[data-bridge-row="${firstId}"]`)).toBeVisible({ timeout: 60000 });
       await expect(phone.locator(`[data-bridge-row="${secondId}"]`)).toBeVisible({ timeout: 60000 });
+      await expect(phone.getByRole("heading", { name: "Approve this device", exact: true })).toHaveCount(0);
+      await expect(phone.getByRole("alert").filter({ hasText: "Approve this device using an existing approved device first." })).toHaveCount(0);
       const phoneIdentity = (await accountBrowserState(phone))[0]; expect(phoneIdentity.endpointId).not.toBe(initial.endpointId);
       expect(phoneIdentity.hpkeExtractable).toBe(false); expect(phoneIdentity.signingExtractable).toBe(false);
       for (const [index, bridgeId] of [firstId, secondId].entries()) await createAccountShell(phone, bridgeId, `ACCOUNT_PRIVATE_${viewport.width}_${index}_${Date.now()}`);

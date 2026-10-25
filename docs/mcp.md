@@ -99,6 +99,38 @@ https://YOUR-MCP-HOST/mcp
 
 Use the client's OAuth connection flow. It discovers the authorization server, registers a public client, opens FTown's login/consent page, and exchanges its authorization code using PKCE. Approve the browser once as an account device, then choose computers and read/control permission in one consent. The browser automatically obtains the existing exact-bridge grant receipts; there is no second browser pairing for each account computer. All selected computers must be online and ready; an offline selection blocks completion rather than being silently skipped. Future computers are excluded from that MCP grant and require new consent. Legacy computers need explicit account-device migration or their independent administrator approval.
 
+An unapproved browser automatically requests device access and waits while
+keeping the MCP consent continuation. On an already approved browser, open
+**Security → Devices → Pending approvals**, choose **Review**, and compare the
+verification code on both actual devices. Confirm the match locally on each,
+then approve in the trusted browser. Review, login and a server status alone do
+not grant encrypted access. Only the approved browser's signing key can add
+account devices; a computer bridge cannot sign that approval. The waiting
+browser resumes the original consent after verifying its approval.
+
+New computers can request the same account-level review with
+`ftown start --account you@example.com`. The email is routing metadata, not
+authorization. The computer displays its own code through its terminal or
+`ftown security pair-status`; confirm with `ftown security pair-confirm <code>`.
+This adds the computer to browser account access, **not** to an existing MCP
+grant. MCP still needs consent for the exact selected computers and permissions.
+
+Browser reload resumes the saved request and verification state. Requests last
+five minutes; delivery can be renewed from the trusted approval view while that
+request is valid. Lost finalization replies resume the exact committed approval
+without another membership addition. Reject or cancel mismatches. Expiry,
+competing history or lost temporary verification state requires an explicit new
+attempt; restarting a bridge loses its in-memory verification secret. These
+states never bypass browser approval or silently select private-link setup.
+
+For the first account device, explicit `ftown start --bootstrap` retains the
+private-link computer/bootstrap confirmation. **Use a private approval link**
+is also an explicit browser fallback requiring an existing trusted approver.
+Local recovery and Solo remain independent: restoring one computer does not
+recover lost account signing keys. Keep another approved browser available;
+losing every signing key has no automatic account-root reset. The hosted gateway
+remains a trusted plaintext endpoint for MCP calls/results after consent.
+
 There is no local command to launch in the MCP client, and no bridge token to paste into it. Clients must support Streamable HTTP, public OAuth clients with S256 PKCE, and resource indicators. HTTPS browser clients must also have their origin added to `allowedOrigins` in gateway config. Non-browser clients normally omit `Origin`.
 
 ## OAuth behavior

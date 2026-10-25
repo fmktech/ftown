@@ -69,7 +69,7 @@ export function McpSecureApproval({ requestId, ownerId, email, details, devices 
     } finally { setBusy(false); setProgress(null); }
   }
 
-  if (identity.account?.status === "unapproved" && identity.account.historyExists && !identity.bridges.length && identity.accountClient) return <main className="min-h-dvh p-4 sm:p-8"><DeviceApproval ownerId={ownerId} email={email} client={identity.accountClient} /></main>;
+  if (identity.account?.status === "unapproved" && !identity.bridges.length && identity.accountClient) return <main className="min-h-dvh p-4 sm:p-8"><DeviceApproval ownerId={ownerId} email={email} client={identity.accountClient} /></main>;
   return <main className="mx-auto max-w-2xl space-y-5 p-4 sm:p-8">
     <h1 className="break-words text-2xl font-semibold">Connect {details.clientName} to FTown</h1>
     <p className="text-sm text-[var(--text-muted)]">Signed in as {email}.</p>

@@ -124,6 +124,7 @@ describe("Security devices and dialog", () => {
 
 
 describe("Account devices", () => {
+  beforeEach(() => { vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ requests: [] }), { status: 200 }))); });
   function accountFixture(count: number, offline = false) {
     const devices = Array.from({ length: count }, (_, index) => ({ endpoint: device(String(index), "").endpoint, label: index ? "Phone" : "Laptop", signingPublicKey: "signing-public", approvedAt: "2026-10-25T00:00:00Z" }));
     const state: AccountSecuritySnapshot = { status: "ready", identity: { endpoint: devices[0].endpoint, keyPair: {} as CryptoKeyPair }, signing: null, legacyBridges: [], historyExists: true, code: null, offline,

@@ -48,6 +48,7 @@ async function fixture(seed = true) {
     const storage: typeof accountStorage = {
       loadBrowserIdentity: async () => existingIdentity, loadAccountSigningIdentity: async () => existingSigning, readPinnedBridges: async () => [],
       readAccountTrust: async () => stored, readAccountEnrollment: async () => pending, storeAccountEnrollment: async (_owner, link) => { pending = link; },
+      clearAccountEnrollment: async (_owner, requestId) => { if (pending?.request.requestId === requestId) pending = null; },
       persistAccountTrust: async (_owner, verified, options = {}) => {
         if (!stored && !options.bootstrap) throw new AccountTrustError("account_approval_required");
         const now = options.now ?? Date.now();
@@ -288,4 +289,108 @@ it("retries a failed bridge adoption after roster append without adding its exac
   await expect(browser.client.migrate(pin, execute)).resolves.toBeUndefined();
   expect(f.history()!.transitions).toHaveLength(1); expect(heads).toHaveLength(2); expect(heads[1]).toEqual(heads[0]);
   expect(browser.client.snapshot().trust!.checkpoint.bridges).toHaveLength(1);
+});
+
+it("resumes/reposts the same durable request after remount or a lost create reply without generating another", async () => {
+  const f = await fixture(); const browser = await f.installation(false);
+  expect(await browser.client.resumeDevice()).toBeNull(); expect(f.calls).toHaveLength(0);
+  const implementation = vi.mocked(f.fetcher).getMockImplementation()!;
+  vi.mocked(f.fetcher).mockImplementationOnce(async (input, init) => {
+    await implementation(input, init); throw new Error("lost create response");
+  });
+  await expect(browser.client.requestDevice("Phone")).rejects.toBeTruthy();
+  const saved = await browser.storage.readAccountEnrollment(owner);
+  expect(saved).not.toBeNull();
+  const remounted = new AccountSecurityClient(owner, f.fetcher, browser.storage);
+  const resumed = await remounted.resumeDevice();
+  expect(resumed).toEqual(saved);
+  expect(await remounted.requestDevice("Do not replace this request")).toEqual(saved);
+  expect(f.calls.filter(call => call.path.endsWith("/enrollments")).map(call => call.body)).toEqual([saved!.request, saved!.request, saved!.request]);
+});
+
+it("resume ignores expired or differently keyed stored requests and never generates their replacement", async () => {
+  const f = await fixture(); const browser = await f.installation(false);
+  const foreign = await createAccountEnrollment(await generateEndpoint(owner, "browser"), "Other installation", await generateAccountSigningIdentity(), null);
+  await browser.storage.storeAccountEnrollment(owner, foreign);
+  expect(await browser.client.resumeDevice()).toBeNull();
+  const own = await createAccountEnrollment(f.identity, "Expired", f.signing, null);
+  await browser.storage.storeAccountEnrollment(owner, own);
+  vi.spyOn(Date, "now").mockReturnValue(Date.parse(own.request.expiresAt) + 1);
+  expect(await browser.client.resumeDevice()).toBeNull();
+  expect(f.calls).toHaveLength(0);
+});
+
+it("coalesces simultaneous create actions into one saved and published request", async () => {
+  const f = await fixture(); const browser = await f.installation(false);
+  const [first, duplicate] = await Promise.all([browser.client.requestDevice("Phone"), browser.client.requestDevice("Duplicate click")]);
+  expect(first).toEqual(duplicate);
+  expect(f.calls.filter(call => call.path === "/api/security/account/enrollments")).toHaveLength(1);
+  expect(await browser.storage.readAccountEnrollment(owner)).toEqual(first);
+});
+
+it("retries bundle publication after membership committed without appending the device twice", async () => {
+  const f = await fixture(); const trusted = await f.installation(true);
+  const candidate = await f.installation(false, await generateEndpoint(owner, "browser"), await generateAccountSigningIdentity());
+  const link = await candidate.client.requestDevice("Phone");
+  const implementation = vi.mocked(f.fetcher).getMockImplementation()!; let failed = false;
+  vi.mocked(f.fetcher).mockImplementation(async (input, init) => {
+    if (!failed && String(input).endsWith(link.request.requestId) && init?.body) { failed = true; throw new Error("publication unavailable"); }
+    return implementation(input, init);
+  });
+  await expect(trusted.client.approveDevice(link)).rejects.toBeTruthy();
+  expect(f.history()!.transitions).toHaveLength(1);
+  expect(await candidate.client.finishDevice(link)).toBe(false);
+  await expect(trusted.client.approveDevice(link)).resolves.toBeUndefined();
+  expect(f.history()!.transitions).toHaveLength(1);
+  expect(await candidate.client.finishDevice(link)).toBe(true);
+});
+
+it("durable verified approval succeeds even if obsolete enrollment cleanup fails", async () => {
+  const f = await fixture(); const trusted = await f.installation(true);
+  const candidate = await f.installation(false, await generateEndpoint(owner, "browser"), await generateAccountSigningIdentity());
+  const link = await candidate.client.requestDevice("Phone"); await trusted.client.approveDevice(link);
+  candidate.storage.clearAccountEnrollment = vi.fn().mockRejectedValue(new Error("storage cleanup unavailable"));
+  await expect(candidate.client.finishDevice(link)).resolves.toBe(true);
+  expect(candidate.client.snapshot().status).toBe("ready"); expect(candidate.stored()).not.toBeNull();
+  expect(candidate.storage.clearAccountEnrollment).toHaveBeenCalledWith(owner, link.request.requestId);
+  expect((await new AccountSecurityClient(owner, f.fetcher, candidate.storage).refresh()).status).toBe("ready");
+});
+
+it("a timed-out request releases refresh deduplication and aborts its native operation", async () => {
+  const f = await fixture(); const browser = await f.installation(true); await browser.client.refresh();
+  let signal: AbortSignal | undefined;
+  vi.mocked(f.fetcher).mockImplementationOnce((_input, init) => { signal = init?.signal as AbortSignal; return new Promise(() => {}); });
+  vi.useFakeTimers();
+  const reading = browser.client.refresh();
+  // Key/history storage still resolves through promises before the network timeout starts.
+  await vi.waitFor(() => expect(signal).toBeDefined());
+  await vi.advanceTimersByTimeAsync(15000);
+  expect((await reading).offline).toBe(true); expect(signal!.aborted).toBe(true);
+  vi.useRealTimers();
+  expect((await browser.client.refresh()).offline).toBe(false);
+});
+
+it("pending completion cannot expose ready when the atomic candidate/trust commit loses or aborts", async () => {
+  const f = await fixture(); const browser = await f.installation(false); await browser.client.refresh();
+  const history = f.history()!; const verified = { history, checkpoint: await verifyAccountHistory(history, null) };
+  const persist = vi.spyOn(browser.storage, "persistAccountTrust"); const states: string[] = [];
+  browser.client.subscribe(() => { states.push(browser.client.snapshot().status); });
+  const losing = vi.fn(async () => false);
+  expect(await browser.client.acceptPendingTrust(verified, Date.now(), losing)).toBe(false);
+  expect(losing).toHaveBeenCalledOnce(); expect(persist).not.toHaveBeenCalled(); expect(browser.stored()).toBeNull();
+  expect(browser.client.snapshot().status).toBe("unapproved"); expect(states).not.toContain("ready");
+  await expect(browser.client.acceptPendingTrust(verified, Date.now(), async () => { throw new DOMException("", "AbortError"); })).rejects.toMatchObject({ name: "AbortError" });
+  expect(browser.stored()).toBeNull(); expect(states).not.toContain("ready");
+  expect(await browser.client.acceptPendingTrust(verified, Date.now(), async (previous, trust) => {
+    expect(previous).toBeNull(); browser.setStored(trust); return true;
+  })).toBe(true);
+  expect(browser.client.snapshot().status).toBe("ready"); expect(browser.stored()?.checkpoint.head).toBe(verified.checkpoint.head);
+});
+
+it("durable commit presence is readable without establishing fresh account authority", async () => {
+  const f = await fixture(); const browser = await f.installation(true);
+  expect(await browser.client.hasCommittedTrust()).toBe(true);
+  expect(browser.client.snapshot().status).toBe("checking"); expect(browser.client.snapshot().trust).toBeNull(); expect(f.calls).toHaveLength(0);
+  const fresh = await f.installation(false);
+  expect(await fresh.client.hasCommittedTrust()).toBe(false); expect(fresh.client.snapshot().status).toBe("checking");
 });

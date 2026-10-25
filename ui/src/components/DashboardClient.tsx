@@ -36,7 +36,7 @@ export function DashboardClient(props: DashboardClientProps) {
   const state = useBrowserIdentity(props.ownerId);
   if (state.status === "checking") return <main className="flex min-h-dvh items-center justify-center p-4"><p role="status" className="text-sm text-[var(--text-muted)]">Opening this browser's encryption identity…</p></main>;
   if (state.status === "error") return <BrowserSecurityUnavailable code={state.code} />;
-  if (state.account?.status === "unapproved" && state.account.historyExists && !state.bridges.length && state.accountClient) return <main className="min-h-dvh p-4 pt-8 sm:p-8"><DeviceApproval ownerId={props.ownerId} email={props.userId} client={state.accountClient} /></main>;
+  if (state.account?.status === "unapproved" && !state.bridges.length && state.accountClient) return <main className="min-h-dvh p-4 pt-8 sm:p-8"><DeviceApproval ownerId={props.ownerId} email={props.userId} client={state.accountClient} /></main>;
   return <EncryptedDashboardClient {...props} identity={state.identity} pins={state.bridges} accountClient={state.accountClient} accountState={state.account} />;
 }
 

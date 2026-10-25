@@ -13,21 +13,27 @@ const binding: PairingAccountBinding = {
 it('legacy approvals and consumption cannot silently accept account-enrolled rows and both enforce TTL in SQL', async () => {
   query.mockResolvedValue([]);
   expect(await approvePairingRequest('ABCD-1234', 'owner@example.test', 'jti')).toBeNull();
-  expect(query.mock.calls[0][0]).toContain('expires_at > NOW() AND enrollment IS NULL');
+  expect(query.mock.calls[0][0]).toContain('enrollment IS NULL');
+  expect(query.mock.calls[0][0]).toContain('expires_at > NOW()');
+  expect(query.mock.calls[0][0]).toContain('NOT EXISTS(SELECT 1 FROM security_pending_approvals');
   expect(await consumePairingRequest('device-code')).toBeNull();
-  expect(query.mock.calls[1][0]).toContain('expires_at > NOW() AND enrollment IS NULL');
+  expect(query.mock.calls[1][0]).toContain('enrollment IS NULL');
+  expect(query.mock.calls[1][0]).toContain('expires_at > NOW()');
+  expect(query.mock.calls[1][0]).toContain('NOT EXISTS(SELECT 1 FROM security_pending_approvals');
 });
 it('account approval/reseal is owner/head/request bound and consumption requires exact encrypted bundle', async () => {
   query.mockResolvedValue([]);
   await approvePairingRequest('ABCD-1234', 'owner@example.test', 'jti', binding);
   const [approvalSql, approvalParams] = query.mock.calls[0];
   expect(approvalSql).toContain('enrollment=$5::jsonb');
+  expect(approvalSql).toContain('NOT EXISTS(SELECT 1 FROM security_pending_approvals');
   expect(approvalSql).toContain('h.owner_id=$6 AND h.root_id=$7 AND h.revision=$8 AND h.head=$9');
   expect(approvalSql).toContain("account_approval->'approver'");
   expect(approvalParams.slice(5)).toEqual([binding.ownerId, binding.head.rootId, 2, binding.head.head]);
   await consumePairingRequest('device-code', binding);
   const [consumeSql, consumeParams] = query.mock.calls[1];
   expect(consumeSql).toContain("status='approved' AND expires_at>NOW()");
+  expect(consumeSql).toContain('NOT EXISTS(SELECT 1 FROM security_pending_approvals');
   expect(consumeSql).toContain('enrollment=$2::jsonb AND account_approval=$3::jsonb');
   expect(consumeSql).toContain('h.owner_id=$4 AND h.root_id=$5 AND h.revision=$6 AND h.head=$7');
   expect(consumeParams.slice(3)).toEqual([binding.ownerId, binding.head.rootId, 2, binding.head.head]);

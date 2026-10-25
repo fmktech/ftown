@@ -1,3 +1,5 @@
+import { PendingApprovalStore } from '@/lib/pending-approval-store';
+import { ACCOUNT_HEADERS } from '@/app/api/security/account/_shared';
 import { NextRequest, NextResponse } from "next/server";
 import jwt from "jsonwebtoken";
 
@@ -73,6 +75,23 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const row = await getByDeviceCode(body.deviceCode);
   if (!row) {
     return NextResponse.json({ status: "unknown" } satisfies PairPollResponse);
+  }
+
+  if (row.pendingV1) {
+    if (!advert || !('localPort' in advert)) return NextResponse.json({ error: 'localPort is required' }, { status: 400, headers: ACCOUNT_HEADERS });
+    try {
+      const secret = getRequiredSecret('CENTRIFUGO_TOKEN_SECRET');
+      const centrifugoUrl = process.env.NEXT_PUBLIC_CENTRIFUGO_URL;
+      if (!centrifugoUrl) return NextResponse.json({ error: 'Server misconfiguration' }, { status: 500, headers: ACCOUNT_HEADERS });
+      const delivery = await new PendingApprovalStore().deliver(body.deviceCode, advert.localPort);
+      if ('status' in delivery) return NextResponse.json(delivery, { headers: ACCOUNT_HEADERS });
+      const { snapshot } = delivery;
+      return NextResponse.json({ status: 'approved', ownerId: snapshot.ownerId,
+        token: jwt.sign(snapshot.connection, secret, { algorithm: 'HS256' }),
+        refreshToken: jwt.sign(snapshot.refresh, secret, { algorithm: 'HS256' }),
+        centrifugoUrl,
+        userId: snapshot.sub, pendingApproval: delivery.state.result }, { headers: ACCOUNT_HEADERS });
+    } catch (error) { return accountError(error); }
   }
 
   if (row.status === "denied") {

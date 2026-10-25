@@ -82,6 +82,15 @@ jobs:
           npm test
           node --test ../scripts/release/*.test.mjs
 
+      - name: Check pending approval atomicity on isolated PostgreSQL
+        run: |
+          set -a
+          export E2E_DIR="$GITHUB_WORKSPACE/e2e"
+          source "$E2E_DIR/env.sh"
+          set +a
+          export E2E_USER_EMAIL="e2e-db-pending+${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}@ftown.test"
+          node e2e/scripts/pending-approvals-db.ts
+
       - name: Check managed Solo security boundaries
         run: timeout 120s node bridge/scripts/centrifugo-security-smoke.mjs
 

@@ -5,6 +5,9 @@ import type { ApprovedEndpoint, BridgeInvitation } from "@security/protocol";
 import { securityErrorMessage, type SecurityBridge, type SecurityCommandExecutor } from "./SecurityPanel";
 import type { AccountSecurityClient, AccountSecuritySnapshot } from "@/lib/account-security-client";
 import { DeviceApproval } from "./DeviceApproval";
+import type { PendingApprovalClient, PendingSnapshot } from "@/lib/pending-approval-client";
+import { usePendingApprovals } from "@/hooks/usePendingApprovals";
+import { PendingDeviceInbox } from "./PendingDeviceApprovals";
 
 interface Props {
   bridge?: SecurityBridge;
@@ -14,9 +17,11 @@ interface Props {
   bridges?: SecurityBridge[];
   accountClient?: AccountSecurityClient;
   accountState?: AccountSecuritySnapshot;
+  pendingClient?: PendingApprovalClient;
+  pendingState?: PendingSnapshot;
 }
 
-export function SecurityDevices({ bridge, currentEndpointId, execute, onInvitation, bridges = [], accountClient, accountState }: Props) {
+export function SecurityDevices({ bridge, currentEndpointId, execute, onInvitation, bridges = [], accountClient, accountState, pendingClient, pendingState }: Props) {
   const [devices, setDevices] = useState<ApprovedEndpoint[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -69,7 +74,7 @@ export function SecurityDevices({ bridge, currentEndpointId, execute, onInvitati
     finally { if (request === generation.current) setBusy(null); }
   }
 
-  if (accountClient && accountState) return <AccountDevices client={accountClient} initial={accountState} bridges={bridges} selected={bridge} execute={execute} />;
+  if (accountClient && accountState) return <AccountDevices client={accountClient} initial={accountState} bridges={bridges} selected={bridge} execute={execute} pendingClient={pendingClient} pendingState={pendingState} />;
   if (!bridge) return <p className="rounded-md border border-[var(--border-muted)] p-4 text-sm text-[var(--text-muted)]">Choose a bridge to inspect its approved devices or invite another browser.</p>;
   if (!ready) return <div role="status" className="space-y-3 text-sm text-[var(--text-muted)]">
     <p>Device management needs an encrypted connection to this bridge.</p>
@@ -133,8 +138,10 @@ export function SecurityDevices({ bridge, currentEndpointId, execute, onInvitati
   </div>;
 }
 
-function AccountDevices({ client, initial, bridges, selected, execute }: { client: AccountSecurityClient; initial: AccountSecuritySnapshot; bridges: SecurityBridge[]; selected?: SecurityBridge; execute: SecurityCommandExecutor }) {
+function AccountDevices({ client, initial, bridges, selected, execute, pendingClient, pendingState }: { client: AccountSecurityClient; initial: AccountSecuritySnapshot; bridges: SecurityBridge[]; selected?: SecurityBridge; execute: SecurityCommandExecutor; pendingClient?: PendingApprovalClient; pendingState?: PendingSnapshot }) {
   const state = useSyncExternalStore(client.subscribe, client.snapshot, () => initial);
+  const pending = usePendingApprovals(client, pendingClient ? "passive" : "reviewer", pendingClient);
+  useEffect(() => () => { pending.client?.dismissReview(); }, [pending.client]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<string | null>(null);
@@ -164,6 +171,7 @@ function AccountDevices({ client, initial, bridges, selected, execute }: { clien
   }
   const devices = state.trust?.checkpoint.devices ?? [];
   return <div className="space-y-5">
+    {state.status === "ready" && pending.client && <PendingDeviceInbox client={pending.client} snapshot={pendingState ?? pending.snapshot} offline={state.offline} />}
     <div className="flex flex-wrap items-start justify-between gap-3"><div className="max-w-xl space-y-2"><h3 className="font-semibold">Account devices</h3><p className="text-xs leading-relaxed text-[var(--text-muted)]">An approved device can control all current and future account computers and approve other devices. Sign-in alone does not grant access.</p></div>
       <button className="btn-ghost min-h-11" disabled={!!busy} onClick={() => { void client.refresh(); }}>Refresh devices</button></div>
     {(error || state.status === "error") && <p role="alert" className="text-sm text-[var(--status-error)]">{error ?? securityErrorMessage({ code: state.code })}</p>}
@@ -177,7 +185,7 @@ function AccountDevices({ client, initial, bridges, selected, execute }: { clien
         <div className="flex flex-wrap gap-3"><button className="btn-danger min-h-11" disabled={!!busy} onClick={() => void revoke(device.endpoint.id)}>Confirm account revoke</button><button className="btn-ghost min-h-11" onClick={() => setConfirm(null)}>Cancel</button></div></div>}
     </li>)}</ul>}
     {devices.length === 1 && <p className="text-xs text-[var(--text-muted)]">This is the last account administrator. Approve another device before revoking it.</p>}
-    {state.status === "ready" && <section className="space-y-2 rounded-lg border border-[var(--border-muted)] p-4"><h3 className="text-sm font-semibold">Add another device</h3><p className="text-sm text-[var(--text-muted)]">Sign in to FTown on the new browser or phone, create its private approval link, and open that link here. Compare both codes before approving. One approval covers all current and future account computers.</p></section>}
+    {state.status === "ready" && <section className="space-y-2 rounded-lg border border-[var(--border-muted)] p-4"><h3 className="text-sm font-semibold">Add another device</h3><p className="text-sm text-[var(--text-muted)]">Sign in on the new browser or phone, or start its bridge for this account. Its request appears above. Review it, compare the code on both devices and confirm on each. One browser approval covers all current and future account computers.</p></section>}
     {state.status === "unapproved" && state.historyExists && <DeviceApproval ownerId={client.ownerId} email="your account" client={client} />}
     {state.legacyBridges.filter(pin => !adopted.has(pin.bridgeId) && (state.trust || !selected || selected.bridgeId === pin.bridgeId)).map(pin => {
       const bridge = bridges.find(item => item.bridgeId === pin.bridgeId); const ready = bridge?.security.status === "ready";

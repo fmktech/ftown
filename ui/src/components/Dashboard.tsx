@@ -11,6 +11,7 @@ import { useBridges } from "@/hooks/useBridges";
 import { useAllSessionEvents } from "@/hooks/useAllSessionEvents";
 import type { SecurityCommand, SecurityCommandResults } from "@security/protocol";
 import { SecurityPanel } from "./SecurityPanel";
+import { usePendingApprovals } from "@/hooks/usePendingApprovals";
 import type { AccountSecurityClient, AccountSecuritySnapshot } from "@/lib/account-security-client";
 import { SessionList } from "./SessionList";
 import { Terminal, TerminalHandle } from "./Terminal";
@@ -66,6 +67,9 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const { hidden: hiddenBridgeIds, hide: hideBridge, unhide: handleUnhideBridge } = useHiddenSet("ftown:hiddenBridges");
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showSecurity, setShowSecurity] = useState(false);
+  const [securityView, setSecurityView] = useState<"activity" | "devices">("activity");
+  const pending = usePendingApprovals(accountClient, "reviewer");
+  const pendingCount = pending.snapshot.inbox.filter(item => !["approved", "rejected", "cancelled", "expired", "conflict"].includes(item.status)).length;
   const [securityBridgeId, setSecurityBridgeId] = useState<string | undefined>(undefined);
   const [securityGeneration, setSecurityGeneration] = useState(0);
   const [directlyReachableBridgeIds, setDirectlyReachableBridgeIds] = useState<Set<string>>(
@@ -587,6 +591,7 @@ PY`;
           )}
         </div>
 
+        {accountState?.status === "ready" && <button type="button" className="btn-accent min-h-11 shrink-0 text-xs" aria-label={pendingCount ? `Review ${pendingCount} pending device approvals` : "Review device approvals"} onClick={() => { setSecurityView("devices"); setShowSecurity(true); }}>Review{pendingCount ? ` (${pendingCount})` : ""}</button>}
         {/* Right cluster */}
         <div className="hidden md:flex items-center gap-4">
           {connectionError && (
@@ -972,8 +977,8 @@ PY`;
             />
           </div>
           <button type="button" className="flex min-h-11 shrink-0 items-center justify-center gap-2 border-t border-[var(--border-subtle)] px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
-            title="Security: devices and MCP activity" aria-label="Open security" onClick={() => openSecurity()}>
-            <span aria-hidden="true">◇</span><span className={isDesktop && sidebarCollapsed ? "sr-only" : ""}>Security</span>
+            title="Security: devices and MCP activity" aria-label="Open security" onClick={() => { setSecurityView("activity"); openSecurity(); }}>
+            <span aria-hidden="true">◇</span><span className={isDesktop && sidebarCollapsed ? "sr-only" : ""}>Security{pendingCount > 0 ? ` (${pendingCount})` : ""}</span>
           </button>
           <PushNotificationsControl localMode={localMode} accountId={userId} />
           {!sidebarCollapsed && (
@@ -1024,6 +1029,7 @@ PY`;
       <SecurityPanel open={showSecurity} onClose={() => setShowSecurity(false)} bridges={securityBridges}
         currentEndpointId={securityRuntime?.identity.endpoint.id ?? null} execute={executeSecurity}
         accountClient={accountClient} accountState={accountState}
+        pendingClient={pending.client ?? undefined} pendingState={pending.snapshot} initialView={securityView}
         initialBridgeId={securityBridgeId} gatewayAvailable={!localMode && !securityRuntime?.ownerId.startsWith("solo:")} />
       <NewSessionModal
         isOpen={showNewSession}

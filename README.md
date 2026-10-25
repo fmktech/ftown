@@ -23,7 +23,7 @@ flowchart TB
   Gateway["Hosted MCP: trusted plaintext endpoint<br/>Distinct encrypted grant identity"]
   Database["PostgreSQL<br/>Encrypted MCP private keys + bound pins<br/>Account, OAuth and audit records"]
   Secret["Separately provisioned service wrapping secret"]
-  Account["Account login / OAuth consent<br/>Signed public device/computer roster<br/>Service orders and delivers updates"]
+  Account["Account login / OAuth consent<br/>Pending requests + signed public roster<br/>Service orders and delivers updates"]
   Push["Push provider<br/>Generic notice + opaque routing references"]
   Agent["Local agents, tools and files"]
   Provider["External model providers"]
@@ -34,7 +34,8 @@ flowchart TB
   Gateway <-->|"HPKE Auth application encryption"| Bridge
   Gateway <-->|"Authenticated ciphertext for private keys"| Database
   Secret -->|"AES-256-GCM wrapping; not stored in DB"| Gateway
-  Browser <-->|"HTTPS: account/consent/metadata"| Account
+  Browser <-->|"HTTPS: account/approval/consent metadata"| Account
+  Bridge <-->|"HTTPS: pending requests + signed public history"| Account
   Bridge -->|"Generic notification only"| Push
   Push --> Browser
   Bridge <-->|"Decrypted local dispatch; local hooks are plaintext"| Agent
@@ -55,17 +56,47 @@ every transport. Direct transport failure can select another encrypted route;
 it cannot enable plaintext fallback. Older clients and bridges require upgrade
 and explicit pairing.
 
-Connect a computer once using its private `/pair` link and compare the displayed
-code. For an account without trust history, that same confirmation approves the
-first browser. On another browser or phone, sign in, create its approval link,
-and open it on an approved device. Compare both codes and approve once: this
-installation then has access to all current and future account computers.
-Background services print instructions; retrieve their pending link explicitly
-with `ftown security pair-link`. Secrets stay in URL fragments and per-tab
-continuations, never ordinary query parameters or operational logs.
+On an account with an approved device, normal onboarding needs no copied link:
+
+1. Sign in on a new browser or phone. It creates one request and shows **Waiting
+   for approval**. For a new computer, start the bridge with
+   `ftown start --account you@example.com`; the email routes its request and
+   grants no access.
+2. On an approved browser, open **Security → Devices → Pending approvals** and
+   choose **Review** for the device you recognize. Review alone grants no access.
+3. Compare the verification code displayed on both actual devices. Confirm the
+   match locally on each, then approve in the trusted browser. Only verified
+   approval enables encrypted access. A browser approval covers all current and
+   future account computers; each new computer is approved once.
+
+Reject an unexpected request. If the codes differ, cancel and begin a fresh
+attempt; do not keep approving until one works. A bridge can show its local code
+with `ftown security pair-status`; use `ftown security pair-confirm <code>` on
+that computer to confirm it, or `ftown security pair-reject` to cancel.
+Background services log instructions rather than codes or private links.
+
+The very first account device still needs explicit bootstrap: start the first
+computer with `ftown start --bootstrap`, open its private `/pair` link and compare
+the code. That confirmation enrolls the first browser and computer together.
+**Use a private approval link** remains an explicit browser fallback; an
+established account still requires an approved browser to confirm it. Retrieve a
+background bootstrap link explicitly with `ftown security pair-link`. Fragment
+secrets stay in the browser tab, never ordinary query parameters or operational
+logs. Automatic approval never silently switches to this fallback.
+
+Requests expire after five minutes. Browser reload resumes the same saved
+request and verification state; a lost reply retries the exact committed
+operation without adding membership twice. Expired delivery may require reopening
+the trusted approval view while the request is still valid. Rejection, mismatch,
+expiry, competing history, or loss of the temporary verification state requires
+an explicit fresh attempt while preserving long-term device keys. A bridge
+process restart loses that temporary state; it cannot silently reuse the old
+comparison with a new secret.
 
 Each browser installation stores separate non-extractable HPKE encryption and
-ECDSA signing private keys in IndexedDB. A signed account roster and pinned
+ECDSA signing private keys in IndexedDB. Only an approved browser signs account
+device membership; a bridge's encryption key cannot approve other devices.
+A signed account roster and pinned
 history establish device/computer trust; an unsigned directory cannot grant
 access or replace a known root. The service still orders and delivers history.
 Connected computers refresh every 30 seconds, with account access paused after
@@ -115,6 +146,13 @@ before dispatching local tools; this protocol does not encrypt their files or
 replace their provider security. Endpoint software and same-origin browser code
 remain trusted. No anonymity, forward secrecy, hardware-backed key protection,
 or zero-knowledge hosted MCP is claimed. See [operational setup](docs/e2ee-operations.md).
+
+Automatic approval uses FTown's committed verification-code protocol over HPKE;
+it is not externally audited or compatible with another messenger's pairing
+protocol. Its code comparison gives approximately 48-bit protection per attempt
+when users check both devices. A matching code alone, login, or a server-reported
+approved status cannot unlock access. This comparison does not inherit the
+256-bit out-of-band assurance of the explicit private-link fallback.
 
 ## Features
 
@@ -204,21 +242,27 @@ npm install
 npm run build
 ```
 
-Start a bridge with a **bootstrap token**. In the dashboard, click **Generate
-bridge token** (it fetches a fresh, short-lived ~10 min token from the
-session-gated `POST /api/auth/bridge/bootstrap`, audience `ftown:bridge-bootstrap`,
-and copies it to your clipboard):
+For an account that already has an approved browser, start a new computer using
+that account's email:
 
 ```bash
 npx ftown setup
-npx ftown start --token <bootstrap-jwt> --api-url http://localhost:3000
+npx ftown start --account you@example.com --api-url http://localhost:3000
 ```
 
-The bootstrap token is used **once** to onboard the bridge; it is then exchanged
-for a 30-day rotating refresh token stored under the bridge data dir
-(`~/.ftown/data/refresh-token`, `0600`). Restarts resume from that token, so the
-bootstrap token does not need to stay valid — generate a fresh one each time you
-onboard a new bridge.
+Review it in **Security → Devices → Pending approvals**, compare both local
+codes and confirm on both devices. Use HTTPS or trustworthy localhost for the
+browser. With no approved browser yet, explicitly choose
+`npx ftown start --bootstrap --api-url http://localhost:3000` and follow its
+first-computer private-link setup instead.
+
+Completed pairing stores a 30-day rotating refresh token under the bridge data
+directory (`~/.ftown/data/refresh-token`, `0600`); normal restarts reuse it.
+The explicit legacy `--token <bootstrap-jwt>` path remains available. **Generate
+bridge token** in the dashboard obtains its short-lived token from the
+session-gated `POST /api/auth/bridge/bootstrap` (audience
+`ftown:bridge-bootstrap`). This authenticates the computer but does not grant
+account encryption authority; use its independent approval or explicit migration.
 
 Run setup from the package entrypoint before first start. For an upgrade, use
 the exact new package version shown by the startup readiness hint:
@@ -250,6 +294,16 @@ ftown harness status
 ftown harness here -n 20
 ftown harness ls
 ```
+
+### Hosted upgrade ordering
+
+Pending approvals requires [`0008_pending_approvals.sql`](ui/migrations/0008_pending_approvals.sql).
+Merge its prerequisite schema PR and verify that the production **migrate** job
+succeeds **before merging or promoting the pending-approvals feature PR**. Keep the
+feature rollout blocked if migration fails. The old app tolerates the additive
+schema; the new app requires the pending table, including for legacy pairing.
+Vercel deployment and the migration workflow run concurrently, so an automatic
+app deployment does not wait for migration success.
 
 ## Agent control over MCP
 
@@ -529,8 +583,9 @@ sudo docker run -d --name centrifugo \
 
 Incremental schema changes live in `ui/migrations/*.sql`. They are applied
 **automatically** by the `.github/workflows/migrate.yml` GitHub Actions workflow
-on every push to `main` (and via manual **workflow_dispatch**) — no more manual
-"apply the SQL to Neon before deploy" step.
+on every push to `main` (and via manual **workflow_dispatch**). Automation applies
+the SQL, but schema-dependent features still require migration success before
+feature merge or promotion; follow [hosted upgrade ordering](#hosted-upgrade-ordering).
 
 One-time setup: add a repo secret **`MIGRATION_DATABASE_URL`** = a Neon **direct**
 `postgresql://` connection string (the standard TCP host, **not** the
@@ -538,8 +593,12 @@ One-time setup: add a repo secret **`MIGRATION_DATABASE_URL`** = a Neon **direct
 (`ui/scripts/migrate.mjs`) tracks applied files in a `schema_migrations` table,
 runs each pending migration in a single transaction, and is idempotent (safe to
 re-run, and safe even if a migration was already applied by hand). The workflow
-runs concurrently with Vercel's deploy on the same push; migrations are kept
-additive so that window is safe.
+runs concurrently with Vercel's deploy on the same push. Additive migrations keep
+the existing app compatible with the expanded schema; they do not make a new
+schema-dependent app compatible with the old schema. For pending approvals,
+merge prerequisite migration0008 and verify its production migrate job succeeds
+before the feature PR is merged or promoted, as described in
+[hosted upgrade ordering](#hosted-upgrade-ordering).
 
 #### Bridge
 
@@ -547,8 +606,12 @@ On any machine where you want to run Claude or Cursor Agent sessions:
 
 ```bash
 npx ftown setup
-npx ftown start --token <jwt> --api-url https://your-domain.vercel.app
+npx ftown start --account you@example.com --api-url https://your-domain.vercel.app
 ```
+
+Review the new computer from an approved account browser, compare its local
+verification code and confirm on both devices. Use explicit `--bootstrap` only
+for first-account/private-link setup; an account routing email is not approval.
 
 ## Upgrade notes
 
