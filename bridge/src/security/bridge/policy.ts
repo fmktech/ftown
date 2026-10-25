@@ -6,6 +6,10 @@ import type { ApprovedEndpoint, BridgeInvitation, EndpointPermission, EndpointPu
 import { BridgeSecurityError } from './errors.js';
 import { approvedSchema, boundedId, displayLabel, endpointSchema, permissionSchema } from './metadata.js';
 import { AtomicSnapshot } from './snapshot.js';
+import { verifyAccountHistory } from '../account-crypto.js';
+import type { AccountHead, AccountHistory, StoredAccountTrust, VerifiedAccountTrust } from '../account-protocol.js';
+import { AccountConnectivity, storedAccountSchema } from './account-state.js';
+import type { SecurityErrorCode } from '../protocol.js';
 
 const FIVE_MINUTES = 300_000;
 const THIRTY_DAYS = 30 * 86_400_000;
@@ -13,12 +17,15 @@ const MAX_ENDPOINTS = 1000;
 const digest = (secret: string) => createHash('sha256').update(secret).digest('hex');
 const invitationSchema = z.object({ id: z.string().uuid(), secretHash: z.string().regex(/^[a-f0-9]{64}$/),
   label: z.string().max(100), permissions: z.array(permissionSchema).max(3), expiresAt: z.string().datetime(),
-  consumedBy: z.string().nullable() }).strict();
+  consumedBy: z.string().nullable(), provenance: z.enum(['legacy', 'local-recovery']).default('legacy') }).strict();
 const pendingSchema = z.object({ approved: approvedSchema, approvalId: z.string().uuid(), requestId: boundedId,
   expiresAt: z.string().datetime(), activeExpiresAt: z.string().datetime(), active: z.boolean() }).strict();
 const policySchema = z.object({ version: z.literal(1), ownerId: z.string(), bridgeId: z.string(), bridgeEndpointId: z.string(),
   generation: z.number().int().nonnegative(), devices: z.array(approvedSchema).max(MAX_ENDPOINTS),
-  invitations: z.array(invitationSchema).max(256), mcp: z.array(pendingSchema).max(MAX_ENDPOINTS) }).strict().superRefine((state, context) => {
+  invitations: z.array(invitationSchema).max(256), mcp: z.array(pendingSchema).max(MAX_ENDPOINTS),
+  account: storedAccountSchema.nullable().default(null),
+  provenance: z.record(z.enum(['legacy', 'local-recovery', 'account', 'local-cli', 'mcp'])).default({}),
+}).strict().superRefine((state, context) => {
   if (new Set(state.devices.map(device => device.endpoint.id)).size !== state.devices.length
     || new Set(state.mcp.map(item => item.approved.grantId)).size !== state.mcp.length
     || state.devices.some(device => device.endpoint.ownerId !== state.ownerId
@@ -34,19 +41,21 @@ type Pending = Policy['mcp'][number];
 /** Identity comparison matters: request JSON cannot manufacture this recovery capability. */
 export const LOCAL_RECOVERY_AUTHORITY: LocalRecoveryAuthority = Object.freeze({ source: 'os-local-recovery' });
 
-export interface PolicyOptions { now?: () => number; relayUrl?: string; localOrigin?: string }
+export interface PolicyOptions { now?: () => number; monotonicNow?: () => number; relayUrl?: string; localOrigin?: string }
 
 /** Bridge-owned authorization. Directory entries and caller-claimed permissions never enter this store. */
 export class BridgePolicyStore {
   private readonly snapshot: AtomicSnapshot<Policy>;
   private readonly now: () => number;
+  private readonly connectivity: AccountConnectivity;
   constructor(dataDir: string, readonly bridgeId: string, readonly bridge: EndpointPublic, private readonly options: PolicyOptions = {}) {
     endpointSchema.parse(bridge);
     if (bridge.kind !== 'bridge') throw new BridgeSecurityError('wrong_context');
     this.now = options.now ?? Date.now;
-    this.snapshot = new AtomicSnapshot(join(dataDir, 'security', 'policy.json'), policySchema, () => ({
+    this.connectivity = new AccountConnectivity(this.now, options.monotonicNow ?? (() => performance.now()));
+    this.snapshot = new AtomicSnapshot<Policy>(join(dataDir, 'security', 'policy.json'), policySchema, () => ({
       version: 1, ownerId: bridge.ownerId, bridgeId, bridgeEndpointId: bridge.id, generation: 0,
-      devices: [], invitations: [], mcp: [],
+      devices: [], invitations: [], mcp: [], account: null, provenance: {},
     }));
   }
   private check(state: Policy): void {
@@ -56,6 +65,13 @@ export class BridgePolicyStore {
   }
   private active(state: Policy, endpointId: string, pendingAllowed = false): ApprovedEndpoint {
     this.check(state);
+    const account = state.account;
+    const member = account?.checkpoint.devices.find(item => item.endpoint.id === endpointId);
+    if (member) {
+      this.connectivity.check(account!);
+      const own = account!.checkpoint.bridges.find(item => item.bridgeId === this.bridgeId);
+      if (!own || own.endpoint.id !== this.bridge.id || own.endpoint.publicKey !== this.bridge.publicKey) throw new BridgeSecurityError('account_bridge_revoked');
+    } else if (account?.checkpoint.revokedDeviceIds.includes(endpointId)) throw new BridgeSecurityError('account_device_revoked');
     const record = state.devices.find(device => device.endpoint.id === endpointId);
     if (!record) throw new BridgeSecurityError('approval_required');
     const pending = state.mcp.find(item => item.approved.endpoint.id === endpointId);
@@ -97,11 +113,14 @@ export class BridgePolicyStore {
     const expiresAt = new Date(this.now() + FIVE_MINUTES).toISOString();
     await this.snapshot.transact(state => {
       this.check(state);
-      if (actor !== LOCAL_RECOVERY_AUTHORITY) this.authorize(state, actor as VerifiedPrincipal, 'admin');
+      if (actor !== LOCAL_RECOVERY_AUTHORITY) {
+        this.authorize(state, actor as VerifiedPrincipal, 'admin');
+        if (state.account && (actor as VerifiedPrincipal).endpoint.kind !== 'local-cli') throw new BridgeSecurityError('account_approval_required');
+      }
       state.invitations = state.invitations.filter(invitation => Date.parse(invitation.expiresAt) > this.now());
       if (state.invitations.length >= 256) throw new BridgeSecurityError('capacity_exceeded');
       state.invitations.push({ id: invitationId, secretHash: digest(secret), label: displayLabel(options.label),
-        permissions: ['read', 'control', 'admin'], expiresAt, consumedBy: null });
+        permissions: ['read', 'control', 'admin'], expiresAt, consumedBy: null, provenance: state.account ? 'local-recovery' : 'legacy' });
     });
     return { version: 1, invitationId, ownerId: this.bridge.ownerId, bridgeId: this.bridgeId, bridge: this.bridge,
       secret, expiresAt, relayUrl: this.options.relayUrl ?? null, localOrigin: this.options.localOrigin ?? null };
@@ -119,6 +138,10 @@ export class BridgePolicyStore {
         throw new BridgeSecurityError('invitation_invalid');
       }
       if (Date.parse(invitation.expiresAt) <= this.now()) throw new BridgeSecurityError('invitation_expired');
+      if (state.account && invitation.provenance !== 'local-recovery') throw new BridgeSecurityError('invitation_invalid');
+      // Independent recovery must never shadow an account membership or revive its tombstone.
+      if (state.account && (state.account.checkpoint.devices.some(item => item.endpoint.id === candidate.id)
+        || state.account.checkpoint.revokedDeviceIds.includes(candidate.id))) throw new BridgeSecurityError('account_approval_required');
       if (invitation.consumedBy) {
         if (invitation.consumedBy !== candidate.id) throw new BridgeSecurityError('invitation_consumed');
         // Lost enrollment acknowledgements may recover only the already approved exact identity.
@@ -130,12 +153,21 @@ export class BridgePolicyStore {
         permissions: [...invitation.permissions], approvedAt: new Date(this.now()).toISOString(), grantId: null, expiresAt: null };
       invitation.consumedBy = candidate.id;
       state.devices.push(approved);
+      state.provenance[candidate.id] = invitation.provenance;
       state.generation++;
       return approved;
     });
   }
   async list(actor: VerifiedPrincipal): Promise<ApprovedEndpoint[]> {
-    return this.snapshot.read(state => { this.authorize(state, actor, 'admin'); return state.devices; });
+    return this.snapshot.read(state => {
+      this.authorize(state, actor, 'admin');
+      return state.devices.map(device => {
+        const provenance = state.provenance[device.endpoint.id];
+        if (provenance === 'account') return { ...device, source: 'account' as const };
+        if (provenance === 'local-cli' || provenance === 'local-recovery') return { ...device, source: 'local' as const };
+        return { ...device };
+      });
+    });
   }
   async recipients(): Promise<ApprovedEndpoint[]> {
     return this.snapshot.read(state => {
@@ -198,7 +230,9 @@ export class BridgePolicyStore {
   async revoke(actor: VerifiedPrincipal, endpointId: string): Promise<void> {
     await this.snapshot.transact(state => {
       this.authorize(state, actor, 'admin');
+      if (state.account?.checkpoint.devices.some(item => item.endpoint.id === endpointId)) throw new BridgeSecurityError('account_approval_required');
       state.devices = state.devices.filter(device => device.endpoint.id !== endpointId);
+      delete state.provenance[endpointId];
       state.mcp = state.mcp.filter(item => item.approved.endpoint.id !== endpointId);
       state.generation++;
     });
@@ -212,7 +246,103 @@ export class BridgePolicyStore {
       if (state.devices.length >= MAX_ENDPOINTS) throw new BridgeSecurityError('capacity_exceeded');
       state.devices.push({ endpoint: candidate, label: 'Local CLI', permissions: ['read', 'control', 'admin'],
         approvedAt: new Date(this.now()).toISOString(), grantId: null, expiresAt: null }); state.generation++;
+      state.provenance[candidate.id] = 'local-cli';
     });
   }
-  async close(): Promise<void> { await this.snapshot.close(); }
+  async accountTrust(): Promise<StoredAccountTrust | null> {
+    return this.snapshot.read(state => { this.check(state); return state.account; });
+  }
+  async accountEndpointIds(): Promise<string[]> {
+    return this.snapshot.read(state => { this.check(state); return state.account?.checkpoint.devices.map(item => item.endpoint.id) ?? []; });
+  }
+  blockAccount(code: SecurityErrorCode): void { this.connectivity.block(code); }
+  async accountAvailable(): Promise<boolean> {
+    return this.snapshot.read(state => {
+      this.check(state);
+      if (!state.account) return true;
+      try {
+        this.connectivity.check(state.account);
+        return state.account.checkpoint.bridges.some(item => item.bridgeId === this.bridgeId && item.endpoint.id === this.bridge.id);
+      } catch { return false; }
+    });
+  }
+  /** Trusted startup bootstrap only; no remote endpoint can call this entry point. */
+  async pinBootstrap(trust: VerifiedAccountTrust): Promise<void> {
+    await this.snapshot.transact(async state => {
+      this.check(state);
+      if (state.account) {
+        if (state.account.checkpoint.rootId !== trust.checkpoint.rootId) throw new BridgeSecurityError('account_trust_rollback');
+        return;
+      }
+      const checkpoint = await verifyAccountHistory(trust.history, trust.checkpoint, this.now());
+      this.requireOwnBridge(checkpoint);
+      this.projectAccount(state, { ...trust, checkpoint, lastServerReadAt: 0, lastObservedAt: 0 });
+    });
+  }
+  private requireOwnBridge(checkpoint: StoredAccountTrust['checkpoint']): void {
+    const own = checkpoint.bridges.find(item => item.bridgeId === this.bridgeId);
+    if (checkpoint.ownerId !== this.bridge.ownerId || !own || own.endpoint.id !== this.bridge.id
+      || own.endpoint.publicKey !== this.bridge.publicKey || own.endpoint.ownerId !== this.bridge.ownerId) throw new BridgeSecurityError('wrong_context');
+  }
+  private projectAccount(state: Policy, trust: StoredAccountTrust): string[] {
+    const previous = state.devices.filter(item => item.endpoint.kind === 'browser');
+    const first = state.account === null;
+    const unchanged = state.account?.checkpoint.head === trust.checkpoint.head;
+    state.devices = state.devices.filter(item => item.endpoint.kind !== 'browser'
+      || (!first && state.provenance[item.endpoint.id] === 'local-recovery'
+        && !trust.checkpoint.devices.some(member => member.endpoint.id === item.endpoint.id)
+        && !trust.checkpoint.revokedDeviceIds.includes(item.endpoint.id)));
+    if (first) state.invitations = [];
+    for (const entry of previous) if (!state.devices.some(item => item.endpoint.id === entry.endpoint.id)) delete state.provenance[entry.endpoint.id];
+    const own = trust.checkpoint.bridges.find(item => item.bridgeId === this.bridgeId);
+    if (own?.endpoint.id === this.bridge.id && own.endpoint.publicKey === this.bridge.publicKey) {
+      for (const member of trust.checkpoint.devices) {
+        if (state.devices.some(item => item.endpoint.id === member.endpoint.id)) throw new BridgeSecurityError('wrong_context');
+        state.devices.push({ endpoint: member.endpoint, label: displayLabel(member.label), permissions: ['read', 'control', 'admin'],
+          approvedAt: member.approvedAt, grantId: null, expiresAt: null });
+        state.provenance[member.endpoint.id] = 'account';
+      }
+    }
+    state.account = trust;
+    if (!unchanged) state.generation++;
+    return previous.filter(item => !state.devices.some(next => next.endpoint.id === item.endpoint.id)).map(item => item.endpoint.id);
+  }
+  /** Only an authenticated API read reaches here; browser-supplied timestamps never do. */
+  async applyAccountRead(history: AccountHistory, adoption?: { actor: VerifiedPrincipal; head: AccountHead }): Promise<{ head: AccountHead; revoked: string[] }> {
+    const result = await this.snapshot.transact(async state => {
+      this.check(state);
+      if (!state.account && !adoption) throw new BridgeSecurityError('account_approval_required');
+      if (adoption) {
+        if (adoption.actor.endpoint.kind !== 'browser') throw new BridgeSecurityError('permission_denied');
+        this.authorize(state, adoption.actor, 'admin');
+      }
+      const checkpoint = await verifyAccountHistory(history, state.account?.checkpoint ?? null, this.now());
+      if (checkpoint.ownerId !== this.bridge.ownerId) throw new BridgeSecurityError('wrong_context');
+      if (adoption) {
+        const head = adoption.head;
+        if (head.rootId !== checkpoint.rootId || head.revision !== checkpoint.revision || head.head !== checkpoint.head) throw new BridgeSecurityError('account_trust_conflict');
+        this.requireOwnBridge(checkpoint);
+        const member = checkpoint.devices.find(item => item.endpoint.id === adoption.actor.endpoint.id);
+        if (!member || member.endpoint.publicKey !== adoption.actor.endpoint.publicKey || member.endpoint.ownerId !== adoption.actor.endpoint.ownerId) {
+          throw new BridgeSecurityError('account_device_revoked');
+        }
+        this.authorize(state, adoption.actor, 'admin');
+      }
+      const initial = state.account ?? { checkpoint, history, lastServerReadAt: 0, lastObservedAt: 0 };
+      const now = this.connectivity.observed(initial);
+      const trust = { checkpoint, history, lastServerReadAt: Math.max(initial.lastServerReadAt, now),
+        lastObservedAt: Math.max(initial.lastObservedAt, now) };
+      const revoked = this.projectAccount(state, trust);
+      return { head: { rootId: checkpoint.rootId, revision: checkpoint.revision, head: checkpoint.head }, revoked, trust };
+    });
+    this.connectivity.renew(result.trust);
+    return { head: result.head, revoked: result.revoked };
+  }
+  async close(): Promise<void> {
+    await this.snapshot.transact(state => {
+      this.check(state);
+      if (state.account) state.account.lastObservedAt = Math.max(state.account.lastObservedAt, this.connectivity.highwater());
+    });
+    await this.snapshot.close();
+  }
 }

@@ -6,6 +6,8 @@
  * Types only. All implementation modules depend on this file, never vice versa.
  */
 
+import type { AccountErrorCode, AccountHead } from './account-protocol.js';
+
 /** Existing application JSON is intentionally open; domain handlers validate it. */
 export type ApplicationJson = null | boolean | number | string | ApplicationJson[] | { [key: string]: ApplicationJson };
 export type EndpointKind = 'bridge' | 'browser' | 'mcp' | 'local-cli';
@@ -90,6 +92,7 @@ export interface SecureCrypto {
 }
 
 export type SecurityErrorCode =
+  | AccountErrorCode
   | 'security_setup_required' | 'secure_context_required' | 'storage_unavailable'
   | 'upgrade_required' | 'approval_required' | 'key_changed' | 'endpoint_revoked'
   | 'invalid_envelope' | 'authentication_failed' | 'wrong_context'
@@ -114,6 +117,8 @@ export interface ApprovedEndpoint {
   grantId: string | null;
   /** Null means no time expiry; revocation remains enforced. */
   expiresAt: string | null;
+  /** Absent means existing per-bridge grant; account grants follow signed roster. */
+  source?: 'local' | 'account';
 }
 
 export interface ApprovedBridge {
@@ -278,9 +283,11 @@ export type SecurityCommand =
   | { type: 'security_revoke'; bridgeId: string; endpointId: string }
   | { type: 'security_approve_mcp'; bridgeId: string; approval: McpApproval }
   | { type: 'security_activate_mcp'; bridgeId: string; grantId: string }
-  | { type: 'security_activity'; bridgeId: string; page: SecurityPageQuery };
+  | { type: 'security_activity'; bridgeId: string; page: SecurityPageQuery }
+  | { type: 'security_account_adopt'; bridgeId: string; head: AccountHead };
 
 export interface SecurityCommandResults {
+  security_account_adopt: { head: AccountHead };
   security_devices: { devices: ApprovedEndpoint[] };
   security_invite: BridgeInvitation;
   security_revoke: { endpointId: string; revoked: true };
@@ -351,6 +358,7 @@ export interface BridgeSecurity {
   approveMcp(actor: VerifiedPrincipal, approval: McpApproval): Promise<McpBridgeApproval>;
   activateMcp(actor: VerifiedPrincipal, grantId: string): Promise<{ grantId: string; expiresAt: string }>;
   revokeEndpoint(actor: VerifiedPrincipal, endpointId: string): Promise<void>;
+  adoptAccount(actor: VerifiedPrincipal, head: AccountHead): Promise<AccountHead>;
   onRevoked(listener: (endpointId: string) => void): () => void;
   close(): Promise<void>;
 }

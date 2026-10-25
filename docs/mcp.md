@@ -97,7 +97,7 @@ Add a remote MCP server using your deployed URL:
 https://YOUR-MCP-HOST/mcp
 ```
 
-Use the client's OAuth connection flow. It discovers the authorization server, registers a public client, opens ftown's login/consent page, and exchanges its authorization code using PKCE. The user selects which owned computers to authorize. The consent browser must already have administrator approval on each selected bridge. Offline or unpaired bridges remain visibly blocked; consent cannot silently skip their approval.
+Use the client's OAuth connection flow. It discovers the authorization server, registers a public client, opens FTown's login/consent page, and exchanges its authorization code using PKCE. Approve the browser once as an account device, then choose computers and read/control permission in one consent. The browser automatically obtains the existing exact-bridge grant receipts; there is no second browser pairing for each account computer. All selected computers must be online and ready; an offline selection blocks completion rather than being silently skipped. Future computers are excluded from that MCP grant and require new consent. Legacy computers need explicit account-device migration or their independent administrator approval.
 
 There is no local command to launch in the MCP client, and no bridge token to paste into it. Clients must support Streamable HTTP, public OAuth clients with S256 PKCE, and resource indicators. HTTPS browser clients must also have their origin added to `allowedOrigins` in gateway config. Non-browser clients normally omit `Origin`.
 

@@ -90,5 +90,5 @@ export function useSoloRequired(): AuthModeValue {
 /** Invitation fragments are captured on a telemetry-free route. */
 export function InvitationSafeAnalytics() {
   const pathname = usePathname();
-  return pathname === "/connect" ? null : <Analytics />;
+  return pathname === "/connect" || pathname === "/pair" || pathname === "/devices/approve" ? null : <Analytics />;
 }

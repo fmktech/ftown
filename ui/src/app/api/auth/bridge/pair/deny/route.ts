@@ -3,6 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { denyPairingRequest } from "@/lib/pairing-store";
 import { checkRateLimit, recordAttempt, type RateLimitConfig } from "@/lib/login-rate-limit";
+import { isTrustedBrowserOrigin } from '@/lib/request-origin';
+import { boundedSecurityJson } from '@/lib/security-store';
 
 export const runtime = "nodejs";
 
@@ -23,6 +25,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (!email) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  if (!isTrustedBrowserOrigin(request)) return NextResponse.json({ error: 'forbidden_origin' }, { status: 403 });
 
   // MED-4: throttle userCode brute-forcing by a logged-in attacker.
   const rateLimit = await checkRateLimit(PAIR_DENY_SCOPE, email);
@@ -36,12 +39,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   let body: PairDenyRequestBody;
   try {
-    body = (await request.json()) as PairDenyRequestBody;
+    body = (await boundedSecurityJson(request, 1024)) as PairDenyRequestBody;
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  if (!body || typeof body.userCode !== "string" || body.userCode.length === 0) {
+  if (!body || Object.keys(body).length !== 1 || typeof body.userCode !== "string" || !/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(body.userCode)) {
     return NextResponse.json({ error: "userCode is required" }, { status: 400 });
   }
 

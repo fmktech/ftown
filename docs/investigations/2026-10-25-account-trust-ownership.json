@@ -1,0 +1,215 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "branch": "feat/account-trust-pairing",
+  "base": "8425849",
+  "phase": "implementation/reviews/focusedvalidation complete; exclusive integrationlanding",
+  "integrationOwner": "/root/mcp_security_impl",
+  "e2eOwner": "/root",
+  "workers": [
+    {
+      "agent": "/root",
+      "files": [
+        "bridge/src/security/protocol.ts",
+        "bridge/src/security/account-protocol.ts",
+        "docs/investigations/2026-10-25-account-trust-contract.md",
+        "docs/investigations/2026-10-25-account-trust.md",
+        "docs/investigations/2026-10-25-account-trust-ownership.json"
+      ],
+      "directories": [],
+      "resources": [
+        "coordination",
+        "all E2E/browser/server/DB/ports/sandboxes"
+      ],
+      "dependencies": []
+    },
+    {
+      "agent": "/root/mcp_security_impl",
+      "model": "gpt-6.1-sol",
+      "reasoningEffort": "high",
+      "files": [
+        "bridge/src/security/account-crypto.ts",
+        "bridge/src/security/account-crypto.test.ts",
+        "ui/src/lib/account-trust-store.ts",
+        "ui/src/lib/account-trust-store.test.ts",
+        "ui/src/lib/pairing-store.ts",
+        "ui/src/lib/pairing-store.test.ts",
+        "ui/src/lib/security-store.ts",
+        "ui/src/lib/security-store.test.ts",
+        "ui/src/lib/bridge-refresh.ts",
+        "ui/src/lib/mcp-consent.ts",
+        "ui/src/lib/mcp-consent.test.ts",
+        "ui/migrations/0007_account_trust.sql",
+        "ui/schema.sql",
+        "bridge/package.json",
+        "bridge/package-lock.json",
+        "ui/package.json",
+        "ui/package-lock.json",
+        "ui/tsconfig.json",
+        "ui/vitest.config.ts",
+        "ui/next.config.ts",
+        "e2e/env.sh",
+        "e2e/README.md",
+        ".github/workflows/e2e.yml",
+        "docs/e2ee-operations.md",
+        "docs/investigations/2026-10-25-account-trust-server-review.md",
+        "e2e/.gitignore"
+      ],
+      "directories": [
+        "ui/src/app/api/security/account",
+        "ui/src/app/api/auth/bridge",
+        "ui/src/app/api/mcp",
+        "e2e/scripts"
+      ],
+      "resources": [
+        "Git/index/push/PR only by explicit lease",
+        "dependency installs/lockfiles/build config exclusive",
+        "pure unit checks only until root E2E"
+      ],
+      "dependencies": [
+        "frozen account contracts",
+        "core first; review before server implementation"
+      ],
+      "status": "soleintegrationlease Git/index/commit/push/PR; ownreport and /tmpPRbody only; allsource frozen; lease ends onhandoff"
+    },
+    {
+      "agent": "/root/bridge_security_impl",
+      "model": "gpt-6.1-sol",
+      "reasoningEffort": "high",
+      "files": [
+        "bridge/src/index.ts",
+        "bridge/src/pairing-client.ts",
+        "bridge/src/pairing-client.test.ts",
+        "bridge/src/bridge-auth.ts",
+        "bridge/src/bridge-auth.test.ts",
+        "bridge/src/command-rpc.ts",
+        "bridge/src/command-rpc.test.ts",
+        "bridge/src/types.ts",
+        "bridge/src/wire-types.ts",
+        "bridge/src/local-api-server.ts",
+        "bridge/src/local-api-server.test.ts",
+        "bridge/src/centrifugo-client.ts",
+        "bridge/src/centrifugo-client.test.ts",
+        "bridge/src/cli-client.ts",
+        "bridge/src/cli-client.test.ts",
+        "bridge/src/security-cli.ts",
+        "bridge/src/security-cli.test.ts",
+        "bridge/src/local-pair-cli.ts",
+        "bridge/src/local-pair-cli.test.ts",
+        "bridge/src/mcp/relay-handler.ts",
+        "bridge/src/mcp/relay-handler.test.ts",
+        "bridge/src/solo/solo-server.ts",
+        "bridge/src/solo/solo-server.test.ts",
+        "docs/investigations/2026-10-25-account-trust-bridge-review.md",
+        "bridge/src/ftown-cli.ts",
+        "bridge/src/ftown-cli.test.ts"
+      ],
+      "directories": [
+        "bridge/src/security/bridge"
+      ],
+      "resources": [
+        "isolated pure unit checks only; no servers"
+      ],
+      "dependencies": [
+        "frozen contracts",
+        "reviewed account-crypto core"
+      ],
+      "status": "completed/stopped exactpolicy.ts/account-policy.test.ts repair25PASS/TS; allleasesreleased"
+    },
+    {
+      "agent": "/root/security_ui_impl",
+      "model": "gpt-6.1-sol",
+      "reasoningEffort": "high",
+      "files": [
+        "ui/src/app/pair/PairClient.tsx",
+        "ui/src/app/pair/page.tsx",
+        "ui/src/app/login/page.tsx",
+        "ui/src/app/page.tsx",
+        "ui/src/app/connect/page.tsx",
+        "ui/src/components/DashboardClient.tsx",
+        "ui/src/components/Dashboard.tsx",
+        "ui/src/components/BrowserInvitation.tsx",
+        "ui/src/components/SecurityPanel.tsx",
+        "ui/src/components/SecurityDevices.tsx",
+        "ui/src/components/McpSecureApproval.tsx",
+        "ui/src/components/DeviceApproval.tsx",
+        "ui/src/components/EncryptionDiagram.tsx",
+        "ui/src/components/LocalDashboard.tsx",
+        "ui/src/components/local/SoloLocalPage.tsx",
+        "ui/src/lib/browser-identity.ts",
+        "ui/src/lib/browser-identity.test.ts",
+        "ui/src/lib/account-security-client.ts",
+        "ui/src/lib/account-security-client.test.ts",
+        "ui/src/lib/secure-endpoint-runtime.ts",
+        "ui/src/lib/secure-endpoint-runtime.test.ts",
+        "ui/src/lib/secure-message-client.ts",
+        "ui/src/lib/secure-message-client.test.ts",
+        "ui/src/lib/auth-mode.tsx",
+        "ui/src/hooks/useBrowserIdentity.ts",
+        "ui/src/hooks/useAccountSecurity.ts",
+        "ui/src/hooks/useCentrifugo.ts",
+        "ui/src/components/security-panel.test.tsx",
+        "ui/src/components/mcp-secure-approval.test.tsx",
+        "ui/src/components/DeviceApproval.test.tsx",
+        "ui/src/components/BrowserInvitation.test.tsx",
+        "README.md",
+        "docs/mcp.md",
+        "docs/solo.md",
+        "docs/investigations/2026-10-25-account-trust-ui-review.md",
+        "ui/src/app/layout.tsx",
+        "ui/src/app/pair/PairClient.test.tsx",
+        "ui/src/app/login/page.test.tsx",
+        "ui/src/hooks/useAccountSecurity.test.ts",
+        "ui/src/components/LocalDashboard.test.ts"
+      ],
+      "directories": [
+        "ui/src/app/devices/approve",
+        "e2e/helpers",
+        "e2e/tests"
+      ],
+      "resources": [
+        "pure UI unit checks only; no browser/E2E/server"
+      ],
+      "dependencies": [
+        "frozen contracts",
+        "reviewed account-crypto core",
+        "server API/bridge adopt seams"
+      ],
+      "status": "completed/stopped exactscopeassertion repair E2ETS PASS; allleasesreleased"
+    },
+    {
+      "agent": "/root/account_server_review",
+      "model": "gpt-6.1-sol",
+      "reasoningEffort": "high",
+      "status": "completed/stopped projectionclosurePASS; allleasesreleased",
+      "files": [
+        "docs/investigations/2026-10-25-account-trust-server-independent-review.md",
+        "docs/investigations/2026-10-25-account-trust-bridge-independent-review.md",
+        "docs/investigations/2026-10-25-account-trust-ui-independent-review.md"
+      ],
+      "directories": [],
+      "resources": [
+        "read-only application review; report only"
+      ],
+      "dependencies": [
+        "server STOP-WRITE handoff; frozen core/contracts"
+      ]
+    }
+  ],
+  "landing": {
+    "owner": "/root/mcp_security_impl",
+    "model": "gpt-6.1-sol",
+    "reasoningEffort": "high",
+    "resources": [
+      "Git index",
+      "commit",
+      "push",
+      "PR metadata"
+    ],
+    "sourceEdits": false,
+    "protectedNotes": "four baseline hashes unchanged; exclude fromstage",
+    "dependencies": [
+      "974bridge+549UI+builds+PG+9focusedE2E+securityreviewsPASS"
+    ],
+    "root": "alltrackedroot coordination writes frozen forlanding; soleCI/runtimecleanup owner"
+  }
+}

@@ -140,3 +140,27 @@ CREATE INDEX IF NOT EXISTS mcp_security_events_owner_newest
   ON mcp_security_events(owner_id, started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS mcp_security_events_owner_bridge_newest
   ON mcp_security_events(owner_id, bridge_id, started_at DESC, id DESC);
+
+-- Signed public account history is a delivery log, never a trust authority.
+CREATE TABLE IF NOT EXISTS security_account_history (
+  owner_id TEXT PRIMARY KEY,
+  root_id TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK (revision BETWEEN 0 AND 1024),
+  head TEXT NOT NULL,
+  history JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS security_account_enrollments (
+  owner_id TEXT NOT NULL,
+  request_id TEXT NOT NULL UNIQUE,
+  request JSONB NOT NULL,
+  bundle JSONB,
+  expires_at TIMESTAMPTZ NOT NULL,
+  approved_at TIMESTAMPTZ,
+  slot SMALLINT NOT NULL CHECK (slot BETWEEN 0 AND 127),
+  PRIMARY KEY(owner_id,request_id),
+  UNIQUE(owner_id,slot)
+);
+CREATE INDEX IF NOT EXISTS security_account_enrollments_expiry ON security_account_enrollments(expires_at);
+ALTER TABLE pairing_requests ADD COLUMN IF NOT EXISTS enrollment JSONB;
+ALTER TABLE pairing_requests ADD COLUMN IF NOT EXISTS account_approval JSONB;

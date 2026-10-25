@@ -1,14 +1,14 @@
 import { expect, test as base, type Page } from "@playwright/test";
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
-import type { ApplicationJson, BridgeInvitation } from "../../bridge/src/security/protocol.js";
+import type { ApplicationJson, ApprovedEndpoint, BridgeInvitation } from "../../bridge/src/security/protocol.js";
 import { readBridgePointer } from "./bridge-api";
 import { BRIDGE_HOME, E2E_DIR, UI_BASE_URL } from "./config";
 
 interface LocalCli {
   securityCommand(pointer: unknown, type: "security_devices" | "security_invite" | "security_revoke", payload?: Record<string, ApplicationJson>): Promise<ApplicationJson>;
 }
-const approvals = new Map<string, { endpointId: string; bridgeHome?: string }[]>();
+const approvals = new Map<string, { endpointId: string; bridgeHome?: string; accountMigrationConfirmed?: boolean; accountMigrationExpected?: boolean }[]>();
 class InvitationPageError extends Error {}
 async function failOnInvitationAlert<T>(page: Page, step: Promise<T>): Promise<T> {
   const invitation = page.getByRole("main").locator("section").filter({ has: page.getByRole("heading", { name: "Approve this browser", exact: true }) });
@@ -36,9 +36,45 @@ async function failOnInvitationAlert<T>(page: Page, step: Promise<T>): Promise<T
 export async function cleanupBrowserApprovals(testId: string): Promise<void> {
   const owned = approvals.get(testId) ?? []; approvals.delete(testId);
   const failures: unknown[] = [];
-  for (const approval of owned) try { await bridgeSecurityCommand("security_revoke", { endpointId: approval.endpointId }, approval.bridgeHome); }
+  for (const approval of owned) try {
+    // A committed account migration clears independent browser grants. Never
+    // convert cleanup of one old bridge grant into account-wide revocation.
+    const result = await bridgeSecurityCommand("security_devices", {}, approval.bridgeHome) as unknown as { devices: ApprovedEndpoint[] };
+    const existing = result.devices.find(device => device.endpoint.id === approval.endpointId);
+    if (!existing) continue;
+    if (existing.source === "account") {
+      if (approval.accountMigrationConfirmed || approval.accountMigrationExpected) continue;
+      throw new Error("Tracked legacy approval unexpectedly remains as account authority");
+    }
+    await bridgeSecurityCommand("security_revoke", { endpointId: approval.endpointId }, approval.bridgeHome);
+  }
   catch (error) { failures.push(error); }
   if (failures.length) throw new Error(`Could not revoke ${failures.length} task-created browser approvals`);
+}
+
+/** Scope cleanup before dispatch so an ACK/UI failure cannot strand a committed migration. */
+export async function prepareTestBrowserMigration(page: Page, bridgeHome: string): Promise<void> {
+  const endpointId = await browserEndpointId(page);
+  const tracked = approvals.get(base.info().testId)?.find(item => item.endpointId === endpointId && item.bridgeHome === bridgeHome);
+  if (!tracked) throw new Error("Account migration cleanup requires this test's exact legacy browser approval");
+  tracked.accountMigrationExpected = true;
+}
+
+/** Only after the exact dedicated test bridge acknowledged account adoption. */
+export async function confirmTestBrowserMigration(page: Page, bridgeHome: string): Promise<void> {
+  const endpointId = await browserEndpointId(page);
+  const tracked = approvals.get(base.info().testId)?.find(item => item.endpointId === endpointId && item.bridgeHome === bridgeHome);
+  if (!tracked) throw new Error("Account migration cleanup requires this test's exact legacy browser approval");
+  // Only this exact test-owned endpoint/home may change provenance after its
+  // explicit adoption request. Cleanup still requires a real sourceaccount read.
+  tracked.accountMigrationExpected = true;
+  await expect.poll(async () => {
+    try {
+      const result = await bridgeSecurityCommand("security_devices", {}, bridgeHome) as unknown as { devices: ApprovedEndpoint[] };
+      return result.devices.some(device => device.endpoint.id === endpointId && device.source === "account");
+    } catch { return false; }
+  }, { timeout: 30000, intervals: [100, 250, 500, 1000], message: "Exact browser account migration must be committed on this bridge" }).toBe(true);
+  tracked.accountMigrationConfirmed = true;
 }
 
 /** Uses the production OS-local CLI authority and encrypted command path. */
@@ -80,7 +116,7 @@ export async function pairBrowser(page: Page, options: { bridgeHome?: string; or
 
 export async function browserEndpointId(page: Page, ownerId?: string): Promise<string> {
   return page.evaluate(async owner => {
-    const db = await new Promise<IDBDatabase>((resolve, reject) => { const request = indexedDB.open("ftown-endpoint-security", 1); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(new Error("Browser identity storage unavailable")); });
+    const db = await new Promise<IDBDatabase>((resolve, reject) => { const request = indexedDB.open("ftown-endpoint-security"); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(new Error("Browser identity storage unavailable")); });
     try {
       const identities = await new Promise<{ endpoint: { id: string; ownerId: string }; keyPair: { privateKey: CryptoKey } }[]>((resolve, reject) => { const request = db.transaction("identities").objectStore("identities").getAll(); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(new Error("Browser identity unavailable")); });
       const matching = owner ? identities.filter(identity => identity.endpoint.ownerId === owner) : identities;

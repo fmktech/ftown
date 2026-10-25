@@ -11,6 +11,7 @@ import { useBridges } from "@/hooks/useBridges";
 import { useAllSessionEvents } from "@/hooks/useAllSessionEvents";
 import type { SecurityCommand, SecurityCommandResults } from "@security/protocol";
 import { SecurityPanel } from "./SecurityPanel";
+import type { AccountSecurityClient, AccountSecuritySnapshot } from "@/lib/account-security-client";
 import { SessionList } from "./SessionList";
 import { Terminal, TerminalHandle } from "./Terminal";
 import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
@@ -44,9 +45,11 @@ interface DashboardProps {
   transport: TerminalTransportApi | null;
   onDisconnect: () => void;
   localMode?: boolean;
+  accountClient?: AccountSecurityClient;
+  accountState?: AccountSecuritySnapshot;
 }
 
-export function Dashboard({ client, connectionStatus, connectionError, userId, token, centrifugoUrl, transport, onDisconnect, localMode = false }: DashboardProps) {
+export function Dashboard({ client, connectionStatus, connectionError, userId, token, centrifugoUrl, transport, onDisconnect, localMode = false, accountClient, accountState }: DashboardProps) {
   const connectCommand = buildBridgeCommand({ apiUrl: typeof window !== "undefined" ? window.location.origin : "" });
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [showNewSession, setShowNewSession] = useState(false);
@@ -1020,6 +1023,7 @@ PY`;
 
       <SecurityPanel open={showSecurity} onClose={() => setShowSecurity(false)} bridges={securityBridges}
         currentEndpointId={securityRuntime?.identity.endpoint.id ?? null} execute={executeSecurity}
+        accountClient={accountClient} accountState={accountState}
         initialBridgeId={securityBridgeId} gatewayAvailable={!localMode && !securityRuntime?.ownerId.startsWith("solo:")} />
       <NewSessionModal
         isOpen={showNewSession}

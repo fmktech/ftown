@@ -4,6 +4,7 @@ import { useState, FormEvent } from "react";
 import { signIn } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { safeAccountReturnTo } from "@/lib/account-security-client";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -31,7 +32,7 @@ export default function LoginPage() {
       }
 
       const returnTo = new URLSearchParams(window.location.search).get("returnTo");
-      router.push(returnTo?.startsWith("/mcp/consent?request=") ? returnTo : "/dashboard");
+      router.push(safeAccountReturnTo(returnTo) ?? "/dashboard");
     } catch (err) {
       console.error(err);
       setError("An unexpected error occurred");

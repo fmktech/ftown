@@ -74,4 +74,35 @@ describe('browser secure runtime', () => {
     });
     expect(runtime.state('bridge-one')).toMatchObject({ status: 'ready', endpoint: replacement.endpoint }); runtime.dispose();
   });
+  it('learns only caller-verified roster pins and drops a removed bridge even during decrypt', async () => {
+    const { browser, bridge, runtime } = await fixture();
+    const another = await generateEndpoint(ownerId, 'bridge');
+    runtime.replacePins([{ bridgeId: 'bridge-one', endpoint: bridge.endpoint, permissions: ['read', 'control', 'admin'] },
+      { bridgeId: 'bridge-two', endpoint: another.endpoint, permissions: ['read', 'control', 'admin'] }]);
+    expect(runtime.state('bridge-two').status).toBe('offline');
+    const message = await packet(bridge, browser, 'application', { type: 'application', route: { kind: 'publication' }, data: { private: 'removed-computer' }, mcp: null });
+    let release!: () => void; gate.wait = new Promise<void>(resolve => { release = resolve; });
+    const receiving = runtime.receive(message, channel);
+    runtime.replacePins([{ bridgeId: 'bridge-two', endpoint: another.endpoint, permissions: ['read', 'control', 'admin'] }]);
+    release(); expect(await receiving).toEqual([]); expect(runtime.state('bridge-one').status).toBe('revoked');
+    expect(runtime.state('bridge-two').status).toBe('offline'); runtime.dispose();
+  });
+
+  it('rechecks account authority after crypto waits while independent legacy pins remain usable', async () => {
+    const browser = await generateEndpoint(ownerId, 'browser'); const bridge = await generateEndpoint(ownerId, 'bridge');
+    let allowed = true;
+    const runtime = new SecureEndpointRuntime(browser, [{ bridgeId: 'bridge-one', endpoint: bridge.endpoint, permissions: ['read', 'control', 'admin'] }], id => {
+      if (id === 'bridge-one' && !allowed) throw new Error('Account access paused');
+    });
+    await establish(runtime, bridge, browser);
+    const message = await packet(bridge, browser, 'application', { type: 'application', route: { kind: 'publication' }, data: { private: 'must-not-deliver' }, mcp: null });
+    let release!: () => void; gate.wait = new Promise<void>(resolve => { release = resolve; });
+    const receiving = runtime.receive(message, channel); allowed = false; release();
+    expect(await receiving).toEqual([]);
+    await expect(runtime.sealApplication('bridge-one', channel, { type: 'application', route: { kind: 'terminal', sessionId: 'session', frameType: 'input', pairId: null }, data: {}, mcp: null })).rejects.toThrow('Account access paused');
+    const legacy = await generateEndpoint(ownerId, 'bridge');
+    runtime.replacePins([{ bridgeId: 'legacy', endpoint: legacy.endpoint, permissions: ['read', 'control', 'admin'] }]);
+    expect(() => runtime.assertCanSend('legacy')).not.toThrow(); runtime.dispose();
+  });
+
 });

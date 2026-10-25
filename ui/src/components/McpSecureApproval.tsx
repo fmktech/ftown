@@ -6,6 +6,7 @@ import { useBrowserIdentity } from "@/hooks/useBrowserIdentity";
 import { useCentrifugo } from "@/hooks/useCentrifugo";
 import { SecureEndpointRuntime } from "@/lib/secure-endpoint-runtime";
 import { securityErrorMessage, securityStateLabel } from "./SecurityPanel";
+import { DeviceApproval } from "./DeviceApproval";
 
 export interface McpConsentDetails {
   clientName: string;
@@ -18,7 +19,9 @@ interface Props { requestId: string; ownerId: string; email: string; details: Mc
 
 export function McpSecureApproval({ requestId, ownerId, email, details, devices }: Props) {
   const identity = useBrowserIdentity(ownerId);
-  const resource = useMemo(() => identity.status === "ready" ? { runtime: new SecureEndpointRuntime(identity.identity, identity.bridges), leases: 0 } : null, [identity]);
+  const endpoint = identity.status === "ready" ? identity.identity : null;
+  const resource = useMemo(() => endpoint ? { runtime: new SecureEndpointRuntime(endpoint, identity.bridges, identity.accountClient?.assertBridgeAccess), leases: 0 } : null, [endpoint, identity.accountClient]);
+  useEffect(() => { if (resource) resource.runtime.replacePins(identity.bridges); }, [resource, identity.bridges]);
   const [bootstrap, setBootstrap] = useState<{ token: string; centrifugoUrl: string } | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
@@ -38,7 +41,7 @@ export function McpSecureApproval({ requestId, ownerId, email, details, devices 
   const { client } = useCentrifugo(bootstrap?.token ?? null, bootstrap?.centrifugoUrl ?? null, email, { securityRuntime: resource?.runtime });
   const valid = details.security?.requestId === requestId && details.security.endpoint.ownerId === ownerId && details.security.endpoint.kind === "mcp";
   const expired = Date.parse(details.security?.expiresAt ?? "") <= Date.now();
-  const allReady = selected.length > 0 && selected.every(id => resource?.runtime.state(id).status === "ready");
+  const allReady = !identity.account?.offline && selected.length > 0 && selected.every(id => resource?.runtime.state(id).status === "ready");
 
   async function complete(decision: "approve" | "deny") {
     if (decision === "approve" && (!valid || expired || !allReady || !client?.executeSecurity)) return;
@@ -66,13 +69,14 @@ export function McpSecureApproval({ requestId, ownerId, email, details, devices 
     } finally { setBusy(false); setProgress(null); }
   }
 
+  if (identity.account?.status === "unapproved" && identity.account.historyExists && !identity.bridges.length && identity.accountClient) return <main className="min-h-dvh p-4 sm:p-8"><DeviceApproval ownerId={ownerId} email={email} client={identity.accountClient} /></main>;
   return <main className="mx-auto max-w-2xl space-y-5 p-4 sm:p-8">
     <h1 className="break-words text-2xl font-semibold">Connect {details.clientName} to FTown</h1>
     <p className="text-sm text-[var(--text-muted)]">Signed in as {email}.</p>
     <p className="text-sm leading-relaxed">{details.scopes.includes("mcp:control")
       ? "This client can read sessions and conversations, launch and stop agents, send messages, and control terminals on the bridges you select."
       : "This client can read sessions, conversations, messages and usage on the bridges you select."}</p>
-    <p className="text-xs leading-relaxed text-[var(--text-muted)]">The hosted MCP gateway sees tool requests and results over HTTPS. Its distinct grant key is encrypted at rest and must be explicitly approved on each bridge. No model PIN is needed.</p>
+    <p className="text-xs leading-relaxed text-[var(--text-muted)]">The hosted MCP gateway sees tool requests and results over HTTPS. Its separate grant key is encrypted at rest. This single consent obtains verified read/control receipts from all selected computers; the gateway cannot approve account devices. No model PIN is needed.</p>
     <p className="break-all text-xs text-[var(--text-faint)]">Client callback: {details.redirectUri}</p>
     {!valid && <p role="alert" className="text-sm text-[var(--status-error)]">This authorization identity is invalid. Start again from your MCP client.</p>}
     {expired && <p role="alert" className="text-sm text-[var(--status-error)]">This authorization request expired. Start again from your MCP client.</p>}
@@ -88,12 +92,12 @@ export function McpSecureApproval({ requestId, ownerId, email, details, devices 
           <input type="checkbox" className="mt-1" checked={selected.includes(device.bridgeId)} onChange={event => setSelected(previous => event.target.checked ? [...previous, device.bridgeId] : previous.filter(id => id !== device.bridgeId))} />
           <span className="min-w-0"><span className="block break-words font-semibold">{device.hostname || device.bridgeId}</span>
             <span className="mt-1 block text-xs text-[var(--text-muted)]">{securityStateLabel(state?.status ?? "unpaired")}</span>
-            {state?.status !== "ready" && <span className="mt-1 block text-xs text-[var(--text-faint)]">Connect this bridge and pair this browser as administrator before approval.</span>}</span>
+            {state?.status !== "ready" && <span className="mt-1 block text-xs text-[var(--text-faint)]">Connect this computer and wait for its account trust update. A legacy computer must first use account device approvals.</span>}</span>
         </label>;
       })}
       {devices.length === 0 && <p className="text-sm text-[var(--text-muted)]">No eligible computers are available for this account.</p>}
     </fieldset>
-    <p className="text-xs text-[var(--text-muted)]">Only the selected computers are included; adding computers later requires new consent. Selected offline or unpaired bridges block completion. Cancelled pending approvals expire automatically.</p>
+    <p className="text-xs text-[var(--text-muted)]">Only the selected computers are included; future computers require new consent. Selected offline or unavailable computers block completion. Cancelled pending approvals expire automatically.</p>
     {error && <p role="alert" className="text-sm text-[var(--status-error)]">{error}</p>}
     {progress && <p role="status" className="text-sm text-[var(--text-muted)]">{progress}</p>}
     <div className="flex flex-wrap gap-3"><button type="button" className="btn-accent min-h-11" disabled={busy || !valid || expired || !allReady} onClick={() => void complete("approve")}>Approve encrypted access</button>

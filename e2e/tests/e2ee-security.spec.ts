@@ -2,11 +2,14 @@ import { expect, request as requestFactory, type APIRequestContext, type Browser
 import { test } from "../helpers/fixtures";
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { createShellSession, E2E_PASSWORD, login, openSession, runMarkerInTerminal, sharedEmail, waitForBridgeOnline } from "../helpers/app";
 import { bridgeApiFetch, readBridgePointer } from "../helpers/bridge-api";
-import { browserEndpointId, pairBrowser } from "../helpers/secure-browser";
+import { bridgeSecurityCommand, browserEndpointId, confirmTestBrowserMigration, pairBrowser, prepareTestBrowserMigration } from "../helpers/secure-browser";
 import { sessionIdsFor, waitForNewSessionId } from "../helpers/centrifugo";
 import { E2E_DIR } from "../helpers/config";
+import { createAccountShell } from "../helpers/account-pairing";
+import type { BridgeInvitation } from "../../bridge/src/security/protocol";
 
 test.setTimeout(180000);
 const secondHome = process.env.E2E_SECOND_BRIDGE_HOME ?? join(E2E_DIR, ".bridge-home-2");
@@ -35,6 +38,8 @@ async function authorizeMcp(page: Page, scope: "mcp:read" | "mcp:read mcp:contro
   await page.goto(`${mcpOrigin}/authorize?${query}`);
   await expect(page.getByRole("heading", { name: "Connect Encrypted E2E client to FTown" })).toBeVisible();
   for (const bridgeId of bridgeIds) await page.locator(`label[data-bridge-id="${bridgeId}"] input`).check();
+  const checked = await page.locator("label[data-bridge-id]").evaluateAll(labels => labels.filter(label => label.querySelector<HTMLInputElement>("input")?.checked).map(label => label.getAttribute("data-bridge-id")));
+  expect(checked.sort()).toEqual([...bridgeIds].sort());
   const approve = page.getByRole("button", { name: "Approve encrypted access" });
   await expect(approve).toBeEnabled({ timeout: 45000 });
   await approve.click(); await page.waitForURL("**/e2e-mcp-callback?**", { timeout: 45000 });
@@ -151,14 +156,18 @@ test("an approved browser uses encrypted local HTTP control and event polling", 
   } finally { if (sessionId) await bridgeApiFetch("DELETE", `/api/sessions/${sessionId}`); }
 });
 
-test("real OAuth MCP grant approvals enforce read/control and expose safe correlated activity", async ({ browser }, info) => {
+test("account-migrated OAuth MCP uses one selected-computer consent, enforces read/control and exposes safe correlated activity", async ({ browser }, info) => {
+  const mcpHome = process.env.E2E_MCP_BRIDGE_HOME ?? join(E2E_DIR, ".mcp-bridge-home");
+  const mcpSecondHome = process.env.E2E_MCP_SECOND_BRIDGE_HOME ?? join(E2E_DIR, ".mcp-bridge-home-2");
+  const mcpPassword = process.env.E2E_MCP_USER_PASSWORD ?? E2E_PASSWORD;
+  const mcpEmail = process.env.E2E_MCP_USER_EMAIL ?? readFileSync(join(E2E_DIR, ".run-mcp-email"), "utf8").trim();
   const started = Date.now(); let stage = "setup";
   const lifecycle: { elapsedMs: number; event: string; stage: string }[] = [];
   const recordLifecycle = (event: string) => lifecycle.push({ elapsedMs: Date.now() - started, event, stage });
   const setStage = (next: string) => { stage = next; recordLifecycle("stage"); };
   const disconnected = () => { recordLifecycle("browser-disconnected"); };
   browser.on("disconnected", disconnected);
-  let context: BrowserContext | undefined; let cleanupRequest: APIRequestContext | undefined;
+  let context: BrowserContext | undefined; let bypassContext: BrowserContext | undefined; let cleanupRequest: APIRequestContext | undefined;
   const tokens: { token: string; clientId: string }[] = []; let sessionId: string | undefined; let primaryFailed = false;
   try {
     cleanupRequest = await requestFactory.newContext({ ignoreHTTPSErrors: true });
@@ -167,27 +176,61 @@ test("real OAuth MCP grant approvals enforce read/control and expose safe correl
     const page = await context.newPage();
     page.on("crash", () => { recordLifecycle("page-crash"); });
     page.on("close", () => { recordLifecycle("page-close"); });
-    const frames = captureBroker(page); const primary = readBridgePointer(); const secondary = readBridgePointer(secondHome);
+    const frames = captureBroker(page); const primary = readBridgePointer(mcpHome); const secondary = readBridgePointer(mcpSecondHome);
     setStage("pair-primary");
-    await pairBrowser(page, { origin: tlsUi, label: "E2E MCP approver", email: sharedEmail(), password: E2E_PASSWORD });
+    await pairBrowser(page, { bridgeHome: mcpHome, origin: tlsUi, label: "E2E MCP approver", email: mcpEmail, password: mcpPassword });
     setStage("pair-secondary");
-    await pairBrowser(page, { bridgeHome: secondHome, origin: tlsUi, label: "E2E MCP approver", email: sharedEmail(), password: E2E_PASSWORD });
+    await pairBrowser(page, { bridgeHome: mcpSecondHome, origin: tlsUi, label: "E2E MCP approver", email: mcpEmail, password: mcpPassword });
     setStage("bridge-ready");
     await waitForBridgeOnline(page);
-    const before = await sessionIdsFor(sharedEmail()); const originalName = `E2EEMCP${Date.now()}`;
+    const oldInvitation = await bridgeSecurityCommand("security_invite", { label: "Must not bypass account migration" }, mcpHome) as unknown as BridgeInvitation;
+    setStage("explicit-account-migration");
+    await page.getByRole("button", { name: "Open security", exact: true }).click();
+    await page.getByRole("tab", { name: "Devices", exact: true }).click();
+    for (const [bridgeId, home] of [[primary.bridgeId, mcpHome], [secondary.bridgeId, mcpSecondHome]]) {
+      const migration = page.locator(`[data-account-migration="${bridgeId}"]`);
+      await expect(migration).toBeVisible();
+      await prepareTestBrowserMigration(page, home);
+      await migration.getByRole("button", { name: "Use account device approvals", exact: true }).click();
+      await expect(migration).toHaveCount(0, { timeout: 45000 });
+      await confirmTestBrowserMigration(page, home);
+    }
+    await expect(page.getByRole("list", { name: "Account devices", exact: true })).toHaveCount(1);
+    await page.getByRole("button", { name: "Close security" }).click();
+    setStage("legacy-invitation-denied-after-adoption");
+    bypassContext = await browser.newContext({ baseURL: tlsUi, ignoreHTTPSErrors: false });
+    const bypass = await bypassContext.newPage();
+    await login(bypass, mcpEmail, mcpPassword, { pairBridge: false });
+    try { await bypass.goto(`${tlsUi}/connect#invite=${encodeURIComponent(JSON.stringify(oldInvitation))}`); }
+    catch { throw new Error("Migration bypass fixture navigation failed"); }
+    await expect(bypass.getByRole("button", { name: "Approve browser and connect", exact: true })).toBeEnabled();
+    await bypass.getByRole("button", { name: "Approve browser and connect", exact: true }).click();
+    await expect(bypass.getByRole("alert").filter({ hasText: /\S/ })).toBeVisible({ timeout: 45000 });
+    await expect(bypass).toHaveURL(`${tlsUi}/connect`);
+    await bypassContext.close(); bypassContext = undefined;
+    const before = await sessionIdsFor(mcpEmail); const originalName = `E2EEMCP${Date.now()}`;
     setStage("create-session");
-    await createShellSession(page, originalName); sessionId = await waitForNewSessionId(sharedEmail(), before);
+    await createAccountShell(page, primary.bridgeId, originalName); sessionId = await waitForNewSessionId(mcpEmail, before);
     setStage("authorize-read");
-    const read = await authorizeMcp(page, "mcp:read", [primary.bridgeId, secondary.bridgeId]); tokens.push({ token: read.access_token, clientId: read.clientId });
+    const read = await authorizeMcp(page, "mcp:read", [primary.bridgeId]); tokens.push({ token: read.access_token, clientId: read.clientId });
     setStage("initialize-read");
     await initializeMcp(context.request, read.access_token);
     setStage("list-read");
-    const list = await mcp(context.request, read.access_token, "tools/call", { name: "sessions_list", arguments: { machines: [primary.bridgeId, secondary.bridgeId], status: "all" } }, 2);
+    const list = await mcp(context.request, read.access_token, "tools/call", { name: "sessions_list", arguments: { machines: [primary.bridgeId], status: "all" } }, 2);
     expect(record(list.result) && list.result.isError !== true).toBe(true);
+    const selectedData = record(list.result) && record(list.result.structuredContent) ? list.result.structuredContent : {};
+    expect(selectedData.errors).toEqual([]);
+    expect(selectedData.sessions).toEqual(expect.arrayContaining([expect.objectContaining({ machine: primary.bridgeId, id: sessionId, name: originalName })]));
+    const unselected = await mcp(context.request, read.access_token, "tools/call", { name: "sessions_list", arguments: { machines: [secondary.bridgeId], status: "all" } }, 20);
+    const unselectedData = record(unselected.result) && record(unselected.result.structuredContent) ? unselected.result.structuredContent : {};
+    expect(unselectedData.sessions).toEqual([]); expect(unselectedData.total).toBe(0);
+    expect(unselectedData.errors).toEqual([{ machine: secondary.bridgeId, error: {
+      code: "forbidden", message: "Machine is not authorized for this grant", outcomeUnknown: false,
+    } }]);
     setStage("deny-read-mutation");
     const denied = await mcp(context.request, read.access_token, "tools/call", { name: "sessions_update", arguments: { machine: primary.bridgeId, sessionId, name: "MUST-NOT-CHANGE" } }, 3);
     expect(!!denied.error || record(denied.result) && denied.result.isError === true).toBe(true);
-    const unchanged = await bridgeApiFetch("GET", `/api/sessions/${sessionId}`); expect(JSON.stringify(unchanged.body)).toContain(originalName);
+    const unchanged = await bridgeApiFetch("GET", `/api/sessions/${sessionId}`, { bridgeHome: mcpHome }); expect(JSON.stringify(unchanged.body)).toContain(originalName);
     setStage("authorize-control");
     await page.goto(`${tlsUi}/dashboard`);
     const control = await authorizeMcp(page, "mcp:read mcp:control", [primary.bridgeId, secondary.bridgeId]); tokens.push({ token: control.access_token, clientId: control.clientId });
@@ -197,7 +240,7 @@ test("real OAuth MCP grant approvals enforce read/control and expose safe correl
     setStage("mutate-control");
     const changed = await mcp(context.request, control.access_token, "tools/call", { name: "sessions_update", arguments: { machine: primary.bridgeId, sessionId, name: privateName } }, 4);
     expect(record(changed.result) && changed.result.isError !== true).toBe(true);
-    expect(JSON.stringify((await bridgeApiFetch("GET", `/api/sessions/${sessionId}`)).body)).toContain(privateName);
+    expect(JSON.stringify((await bridgeApiFetch("GET", `/api/sessions/${sessionId}`, { bridgeHome: mcpHome })).body)).toContain(privateName);
     expect(frames.join("\n")).not.toContain(privateName);
     setStage("security-history");
     await page.goto(`${tlsUi}/dashboard`); await page.getByRole("button", { name: "Open security", exact: true }).click();
@@ -224,9 +267,10 @@ test("real OAuth MCP grant approvals enforce read/control and expose safe correl
       if (!response.ok()) throw new Error("Token revocation failed");
     });
     if (sessionId) await attempt("session-delete", async () => {
-      const result = await bridgeApiFetch("DELETE", `/api/sessions/${sessionId}`);
+      const result = await bridgeApiFetch("DELETE", `/api/sessions/${sessionId}`, { bridgeHome: mcpHome });
       if (result.status < 200 || result.status >= 300) throw new Error("Session deletion failed");
     });
+    if (bypassContext) await attempt("bypass-context-close", () => bypassContext!.close());
     if (context) await attempt("context-close", () => context!.close());
     if (cleanupRequest) await attempt("cleanup-request-dispose", () => cleanupRequest!.dispose());
     browser.off("disconnected", disconnected);

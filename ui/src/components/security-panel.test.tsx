@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApprovedEndpoint, SecurityEvent, SecurityPage } from "@security/protocol";
 import { SecurityPanel, type SecurityBridge, type SecurityCommandExecutor } from "./SecurityPanel";
 import { SecurityActivity } from "./SecurityActivity";
 import { SecurityDevices } from "./SecurityDevices";
+import type { AccountSecurityClient, AccountSecuritySnapshot } from "@/lib/account-security-client";
 import { EncryptionDiagram } from "./EncryptionDiagram";
 
 // Vitest's Mock utility erases generic return correlation; keep that assertion
@@ -119,4 +120,63 @@ describe("Security devices and dialog", () => {
     expect(screen.getByText(/routing metadata remains visible/)).toBeTruthy();
     expect(screen.getByText(/does not provide anonymity/)).toBeTruthy();
   });
+});
+
+
+describe("Account devices", () => {
+  function accountFixture(count: number, offline = false) {
+    const devices = Array.from({ length: count }, (_, index) => ({ endpoint: device(String(index), "").endpoint, label: index ? "Phone" : "Laptop", signingPublicKey: "signing-public", approvedAt: "2026-10-25T00:00:00Z" }));
+    const state: AccountSecuritySnapshot = { status: "ready", identity: { endpoint: devices[0].endpoint, keyPair: {} as CryptoKeyPair }, signing: null, legacyBridges: [], historyExists: true, code: null, offline,
+      trust: { history: {} as NonNullable<AccountSecuritySnapshot["trust"]>["history"], lastServerReadAt: 1, lastObservedAt: 1,
+        checkpoint: { version: 1, ownerId: "owner", rootId: "root", revision: 0, head: "head", devices, bridges: [], revokedDeviceIds: [], revokedBridgeIds: [] } } };
+    const revoke = vi.fn().mockResolvedValue(undefined);
+    const client = { snapshot: () => state, subscribe: () => () => {}, revoke, refresh: vi.fn() } as unknown as AccountSecurityClient;
+    return { state, client, revoke };
+  }
+  it("keeps the last account administrator and offline device revocation disabled", () => {
+    const f = accountFixture(1); const execute = mockExecutor();
+    const view = render(<SecurityDevices currentEndpointId="0" execute={execute} accountClient={f.client} accountState={f.state} />);
+    expect((screen.getByRole("button", { name: "Revoke account device Laptop" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/last account administrator/)).toBeTruthy(); expect(execute).not.toHaveBeenCalled();
+    const offline = accountFixture(2, true);
+    view.rerender(<SecurityDevices currentEndpointId="0" execute={execute} accountClient={offline.client} accountState={offline.state} />);
+    expect((screen.getByRole("button", { name: "Revoke account device Phone" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/Showing verified stored account trust/)).toBeTruthy();
+  });
+  it("requires explicit account-wide confirmation and never sends a per-bridge revoke", async () => {
+    const f = accountFixture(2); const execute = mockExecutor();
+    render(<SecurityDevices currentEndpointId="0" execute={execute} accountClient={f.client} accountState={f.state} />);
+    fireEvent.click(screen.getByRole("button", { name: "Revoke account device Phone" })); expect(f.revoke).not.toHaveBeenCalled();
+    expect(screen.getByText(/offline computers apply it when they reconnect/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm account revoke" }));
+    await waitFor(() => expect(f.revoke).toHaveBeenCalledWith("1")); expect(execute).not.toHaveBeenCalled();
+  });
+  it("keeps a pending or failed adoption retryable even after its signed roster addition", async () => {
+    const f = accountFixture(1); let current = f.state; const listeners = new Set<() => void>();
+    const pin = { bridgeId: bridge.bridgeId, endpoint: { ...device("bridge-key", "").endpoint, kind: "bridge" as const }, permissions: ["read", "control", "admin"] as const };
+    current = { ...current, legacyBridges: [{ ...pin, permissions: [...pin.permissions] }] };
+    f.client.snapshot = () => current;
+    f.client.subscribe = listener => { listeners.add(listener); return () => { listeners.delete(listener); }; };
+    let rejectAdoption: (error: unknown) => void = () => {};
+    const migrate = vi.fn().mockImplementationOnce(async () => {
+      current = { ...current, trust: { ...current.trust!, checkpoint: { ...current.trust!.checkpoint,
+        bridges: [{ bridgeId: pin.bridgeId, endpoint: pin.endpoint, label: "Computer", approvedAt: "2026-10-25T00:00:00Z" }] } } };
+      for (const listener of listeners) listener();
+      await new Promise<void>((_resolve, reject) => { rejectAdoption = reject; });
+    }).mockResolvedValue(undefined);
+    f.client.migrate = migrate;
+    const execute = mockExecutor().mockResolvedValue({ devices: [device("0", "Laptop")] });
+    const view = render(<SecurityDevices currentEndpointId="0" bridges={[bridge]} execute={execute} accountClient={f.client} accountState={current} />);
+    fireEvent.click(screen.getByRole("button", { name: "Use account device approvals" }));
+    await screen.findByRole("button", { name: "Migrating computer…" });
+    expect(view.container.querySelector(`[data-account-migration="${pin.bridgeId}"]`)).not.toBeNull();
+    await act(async () => { rejectAdoption({ code: "account_storage_unavailable" }); });
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getByText(/Computer migration is not confirmed/)).toBeTruthy();
+    const retry = screen.getByRole("button", { name: "Use account device approvals" }) as HTMLButtonElement;
+    expect(retry.disabled).toBe(false); fireEvent.click(retry);
+    await waitFor(() => expect(view.container.querySelector(`[data-account-migration="${pin.bridgeId}"]`)).toBeNull());
+    expect(migrate).toHaveBeenCalledTimes(2);
+  });
+
 });

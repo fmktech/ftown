@@ -1,275 +1,102 @@
 "use client";
 
-import { useCallback, useEffect, useState, FormEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
+import { accountComparisonCode, parseAccountEnrollmentLink, parseAccountEnrollmentRequest } from "@security/account-crypto";
+import type { AccountEnrollmentLink, AccountPairingLookup } from "@security/account-protocol";
+import { captureAccountLink, clearAccountLink, readAccountSession, safeAccountReturnTo } from "@/lib/account-security-client";
+import { useAccountSecurity } from "@/hooks/useAccountSecurity";
+import { DeviceApproval } from "@/components/DeviceApproval";
+import { securityErrorMessage } from "@/components/SecurityPanel";
 
-interface PairClientProps {
-  userEmail: string;
-}
+interface PendingDevice extends AccountPairingLookup { bridgeId: string; hostname: string; platform: string; createdAt: string }
+function normalize(raw: string): string { const value = raw.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8); return value.length > 4 ? `${value.slice(0, 4)}-${value.slice(4)}` : value; }
 
-interface PendingDevice {
-  bridgeId: string;
-  hostname: string;
-  platform: string;
-  createdAt: string;
-}
-
-type Phase = "idle" | "looking-up" | "found" | "not-found" | "approved" | "denied";
-
-function normalizeUserCode(raw: string): string {
-  const cleaned = raw.toUpperCase().replace(/[^A-Z0-9]/g, "");
-  if (cleaned.length <= 4) return cleaned;
-  return `${cleaned.slice(0, 4)}-${cleaned.slice(4, 8)}`;
-}
-
-function shortBridgeId(bridgeId: string): string {
-  return bridgeId.length > 12 ? `${bridgeId.slice(0, 8)}…` : bridgeId;
-}
-
-function relativeTime(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  if (Number.isNaN(ms)) return "recently";
-  const seconds = Math.round(ms / 1000);
-  if (seconds < 5) return "just now";
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  return `${hours}h ago`;
-}
-
-const inputClass =
-  "w-full px-3 py-2 rounded-[var(--radius-sm)] bg-[var(--bg-base)] border border-[var(--border-default)] text-sm text-[var(--text-primary)] placeholder:text-[var(--text-faint)] outline-none focus-visible:border-[var(--accent)] focus-visible:shadow-[var(--focus-ring)] font-mono tracking-widest text-center uppercase";
-
-export function PairClient({ userEmail }: PairClientProps) {
-  const searchParams = useSearchParams();
+export function PairClient({ userEmail, ownerId, onConnected }: { userEmail: string | null; ownerId?: string | null; onConnected?: () => void }) {
+  const params = useSearchParams();
+  const [session, setSession] = useState<{ id: string; email: string } | null | undefined>(ownerId && userEmail ? { id: ownerId, email: userEmail } : undefined);
   const [userCode, setUserCode] = useState("");
-  const [phase, setPhase] = useState<Phase>("idle");
+  const [link, setLink] = useState<AccountEnrollmentLink | null>(null);
+  const [comparison, setComparison] = useState("");
   const [device, setDevice] = useState<PendingDevice | null>(null);
+  const [phase, setPhase] = useState<"idle" | "loading" | "found" | "approved" | "denied">("idle");
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [actionLoading, setActionLoading] = useState(false);
-
-  const lookup = useCallback(async (code: string) => {
-    const normalized = normalizeUserCode(code);
-    if (normalized.length < 9) {
-      setError("Enter the full 8-character code.");
-      return;
+  const captured = useRef<{ encoded: string | null; failed: boolean } | null>(null);
+  const { client, snapshot } = useAccountSecurity(session?.id ?? null);
+  useLayoutEffect(() => {
+    let active = true;
+    if (!captured.current) {
+      try { captured.current = { encoded: captureAccountLink(), failed: false }; }
+      catch { captured.current = { encoded: null, failed: true }; }
     }
-
-    setPhase("looking-up");
-    setError(null);
-    setDevice(null);
-
+    if (captured.current.failed) setError("The private approval link is invalid or expired. Request a fresh link on the computer.");
+    else if (captured.current.encoded) void parseAccountEnrollmentLink(captured.current.encoded).then(async value => {
+      if (value.request.kind !== "bridge") throw { code: "account_enrollment_invalid" };
+      const code = await accountComparisonCode(value);
+      if (active) { setLink(value); setComparison(code); }
+    }).catch(failure => { if (active) setError(securityErrorMessage(failure)); });
+    if (!ownerId || !userEmail) void readAccountSession().then(value => { if (active) setSession(value); }).catch(() => { if (active) setError("Sign-in is unavailable. Refresh and try again."); });
+    return () => { active = false; };
+  }, [ownerId, userEmail]);
+  async function lookup(value: string) {
+    const code = normalize(value); setUserCode(code);
+    if (!/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(code)) { setError("Enter the full eight-character computer code."); return; }
+    setPhase("loading"); setError(null); setDevice(null);
     try {
-      const response = await fetch("/api/auth/bridge/pair/lookup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ userCode: normalized }),
-      });
-
-      if (response.status === 404) {
-        setPhase("not-found");
-        return;
-      }
-
-      if (!response.ok) {
-        const data = (await response.json().catch(() => ({}))) as { error?: string };
-        setError(data.error || "Could not look up that code.");
-        setPhase("idle");
-        return;
-      }
-
-      const data = (await response.json()) as PendingDevice;
-      setDevice(data);
-      setPhase("found");
-    } catch {
-      setError("Network error — please try again.");
-      setPhase("idle");
-    }
-  }, []);
-
+      const response = await fetch("/api/auth/bridge/pair/lookup", { method: "POST", credentials: "include", cache: "no-store", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ userCode: code }) });
+      if (!response.ok) throw new Error();
+      const value = await response.json() as PendingDevice;
+      if (typeof value.bridgeId !== "string" || !value.enrollment) { setError("This computer uses the previous pairing flow. Upgrade and restart it to connect with account device approvals."); setPhase("idle"); return; }
+      const enrollment = await parseAccountEnrollmentRequest(value.enrollment);
+      if (enrollment.kind !== "bridge" || enrollment.bridgeId !== value.bridgeId) throw new Error();
+      setDevice({ ...value, enrollment }); setPhase("found");
+    } catch { setError("That computer code is invalid, expired, or unavailable. Request a fresh link on the computer."); setPhase("idle"); }
+  }
   useEffect(() => {
-    const prefill = searchParams.get("code");
-    if (prefill) {
-      const normalized = normalizeUserCode(prefill);
-      setUserCode(normalized);
-      void lookup(normalized);
-    }
-    // Only run once on mount with the initial query param.
+    const code = params.get("code");
+    if (session && code) void lookup(code);
+    // The initial public code is read once for each authenticated account.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const handleSubmit = useCallback(
-    (e: FormEvent<HTMLFormElement>) => {
-      e.preventDefault();
-      void lookup(userCode);
-    },
-    [userCode, lookup],
-  );
-
-  const handleDecision = useCallback(
-    async (decision: "approve" | "deny") => {
-      setActionLoading(true);
-      setError(null);
-
-      try {
-        const response = await fetch(`/api/auth/bridge/pair/${decision}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({ userCode: normalizeUserCode(userCode) }),
-        });
-
-        if (!response.ok) {
-          const data = (await response.json().catch(() => ({}))) as { error?: string };
-          setError(data.error || `Could not ${decision} this device.`);
-          setActionLoading(false);
-          return;
-        }
-
-        setPhase(decision === "approve" ? "approved" : "denied");
-      } catch {
-        setError("Network error — please try again.");
-      } finally {
-        setActionLoading(false);
-      }
-    },
-    [userCode],
-  );
-
-  const busy = phase === "looking-up" || actionLoading;
-
-  return (
-    <div className="min-h-screen flex items-center justify-center p-4">
-      <div className="w-full max-w-sm sm:max-w-md rounded-[var(--radius-md)] border border-[var(--border-muted)] bg-[var(--bg-surface)] p-6 sm:p-8">
-        <h1 className="text-xl font-bold text-[var(--accent)] mb-2">Approve device</h1>
-        <p className="text-[var(--text-secondary)] text-sm mb-6">
-          Signed in as <span className="text-[var(--text-primary)]">{userEmail}</span>. Approving a
-          device lets that machine act as your bridge — connect to your account, run agents, and
-          send/receive on your behalf. Only approve a device you recognize.
-        </p>
-
-        {phase !== "approved" && phase !== "denied" && (
-          <form onSubmit={handleSubmit} className="space-y-3 mb-4">
-            <div>
-              <label htmlFor="userCode" className="block text-sm text-[var(--text-secondary)] mb-1">
-                Device code
-              </label>
-              <input
-                id="userCode"
-                type="text"
-                inputMode="text"
-                autoComplete="off"
-                autoCapitalize="characters"
-                value={userCode}
-                onChange={(e) => setUserCode(normalizeUserCode(e.target.value))}
-                placeholder="XXXX-XXXX"
-                maxLength={9}
-                className={inputClass}
-              />
-            </div>
-            <button type="submit" disabled={busy} className="btn-accent w-full !py-2.5 flex items-center justify-center gap-2">
-              {phase === "looking-up" && (
-                <span
-                  className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin"
-                  aria-hidden="true"
-                />
-              )}
-              {phase === "looking-up" ? "Looking up..." : "Look up code"}
-            </button>
-          </form>
-        )}
-
-        {error && (
-          <div
-            role="alert"
-            aria-live="assertive"
-            className="fade-in flex items-start gap-2 px-3 py-2 mb-4 rounded-[var(--radius-sm)] bg-[rgba(255,68,102,0.08)] border border-[var(--status-error)] text-[var(--status-error)] text-sm"
-          >
-            <span aria-hidden="true">⚠</span>
-            <span>{error}</span>
-          </div>
-        )}
-
-        {phase === "not-found" && (
-          <p className="text-sm text-[var(--text-faint)]">
-            That code is invalid or expired. Double-check the code shown on the device, or ask it to
-            print a new one.
-          </p>
-        )}
-
-        {phase === "found" && device && (
-          <div className="fade-in space-y-4">
-            <div className="rounded-[var(--radius-sm)] border border-[var(--border-default)] p-4 bg-[var(--bg-base)]">
-              <p className="text-xs text-[var(--text-faint)] mb-1">This device is requesting access</p>
-              <p className="text-lg font-semibold text-[var(--text-primary)] break-all">
-                {device.hostname || "Unknown host"}
-              </p>
-              <p className="text-sm text-[var(--text-secondary)] mt-1">
-                {device.platform || "unknown platform"} · id {shortBridgeId(device.bridgeId)}
-              </p>
-              <p className="text-xs text-[var(--text-faint)] mt-1">
-                requested {relativeTime(device.createdAt)}
-              </p>
-            </div>
-
-            <p className="text-xs text-[var(--text-faint)]">
-              Make sure this is a machine you own before approving. Approving grants it full bridge
-              access to your account until you revoke it.
-            </p>
-
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => void handleDecision("approve")}
-                disabled={busy}
-                className="btn-accent flex-1 !py-2.5 flex items-center justify-center gap-2"
-              >
-                {actionLoading && (
-                  <span
-                    className="inline-block w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin"
-                    aria-hidden="true"
-                  />
-                )}
-                Approve this device
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleDecision("deny")}
-                disabled={busy}
-                className="btn-ghost flex-1 !py-2.5 !text-[var(--status-error)]"
-              >
-                Deny
-              </button>
-            </div>
-          </div>
-        )}
-
-        {phase === "approved" && device && (
-          <div
-            role="status"
-            aria-live="polite"
-            className="fade-in flex items-start gap-2 px-3 py-3 rounded-[var(--radius-sm)] bg-[var(--accent-dim)] border border-[var(--accent)] text-[var(--text-primary)] text-sm"
-          >
-            <span aria-hidden="true" className="text-[var(--accent)]">✓</span>
-            <span>
-              Approved — <strong>{device.hostname || "the device"}</strong> is now connecting.
-            </span>
-          </div>
-        )}
-
-        {phase === "denied" && (
-          <div
-            role="status"
-            aria-live="polite"
-            className="fade-in flex items-start gap-2 px-3 py-3 rounded-[var(--radius-sm)] bg-[var(--bg-base)] border border-[var(--border-default)] text-[var(--text-secondary)] text-sm"
-          >
-            <span aria-hidden="true">✕</span>
-            <span>Denied. This device was not granted access.</span>
-          </div>
-        )}
-      </div>
-    </div>
-  );
+  }, [session?.id]);
+  const exactLink = !!link && !!device?.enrollment && JSON.stringify(link.request) === JSON.stringify(device.enrollment);
+  async function decide(decision: "approve" | "deny") {
+    if (!client || !session || !device || decision === "approve" && (!exactLink || !link)) return;
+    setBusy(true); setError(null);
+    try {
+      const accountApproval = decision === "approve" ? await client.approve(link!, true) : undefined;
+      const response = await fetch(`/api/auth/bridge/pair/${decision}`, { method: "POST", credentials: "include", cache: "no-store", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userCode: normalize(userCode), ...(accountApproval ? { accountApproval } : {}) }) });
+      if (!response.ok) throw { code: response.status === 409 ? "account_trust_conflict" : "account_enrollment_invalid" };
+      clearAccountLink(); setPhase(decision === "approve" ? "approved" : "denied");
+      if (decision === "approve") { if (onConnected) onConnected(); else window.location.assign("/dashboard"); }
+    } catch (failure) { setError(securityErrorMessage(failure)); }
+    finally { setBusy(false); }
+  }
+  const returnTo = typeof window !== "undefined" ? safeAccountReturnTo(window.location.pathname + window.location.search) ?? "/pair" : "/pair";
+  return <main className="min-h-dvh p-4 pt-8 sm:p-8"><section className="mx-auto w-full max-w-xl space-y-5 rounded-xl border border-[var(--border-muted)] bg-[var(--bg-surface)] p-5 sm:p-8">
+    <h1 className="text-2xl font-semibold">Connect a computer</h1>
+    <p className="text-sm leading-relaxed text-[var(--text-muted)]">One approval connects this computer to your account and establishes encrypted trust. Your approved devices gain access automatically.</p>
+    {error && <p role="alert" className="break-words text-sm text-[var(--status-error)]">{error}</p>}
+    {session === undefined ? <p role="status">Checking account…</p> : !session ? <><p className="text-sm">Sign in to continue. The private link stays in this tab.</p><a href={`/login?returnTo=${encodeURIComponent(returnTo)}`} className="btn-accent inline-flex min-h-11 items-center">Sign in</a></> : <>
+      <p className="break-words text-sm text-[var(--text-muted)]">Signed in as {session.email}.</p>
+      {snapshot.status === "unapproved" && snapshot.historyExists && !snapshot.bootstrapRecoverable && client ? <DeviceApproval ownerId={session.id} email={session.email} client={client} /> : <>
+        <form onSubmit={event => { event.preventDefault(); void lookup(userCode); }} className="space-y-3">
+          <label className="flex flex-col gap-2 text-sm">Computer code<input autoComplete="off" autoCapitalize="characters" value={userCode} onChange={event => setUserCode(normalize(event.target.value))} placeholder="XXXX-XXXX" maxLength={9} className="min-h-11 rounded border border-[var(--border-muted)] bg-[var(--bg-base)] p-3 text-center font-mono tracking-widest" /></label>
+          <button disabled={phase === "loading" || busy} className="btn-ghost min-h-11 w-full">{phase === "loading" ? "Looking up…" : "Look up code"}</button>
+        </form>
+        {device && phase === "found" && <div className="space-y-4 rounded-lg border border-[var(--border-muted)] p-4">
+          <h2 className="break-words text-lg font-semibold">{device.hostname || device.bridgeId}</h2><p className="text-xs text-[var(--text-muted)]">{device.platform} · {device.bridgeId}</p>
+          {exactLink ? <><p className="text-sm">Compare this code with the computer:</p><p aria-label="Comparison code" className="break-all font-mono text-xl tracking-wider">{comparison}</p>
+            <p className="text-xs leading-relaxed text-[var(--text-muted)]">{snapshot.historyExists ? "Only approve a computer you recognize." : "This also approves this browser as your first account device. It can control your account computers and approve other devices."}</p></>
+            : <p role="alert" className="text-sm text-[var(--status-error)]">Open the full private pairing link from this computer. The public code alone cannot establish encryption trust.</p>}
+          {snapshot.status === "error" && <p role="alert" className="text-sm text-[var(--status-error)]">{securityErrorMessage({ code: snapshot.code })}</p>}
+          <div className="flex flex-wrap gap-3"><button disabled={busy || !exactLink || snapshot.status === "checking" || snapshot.status === "error" || snapshot.offline} onClick={() => void decide("approve")} className="btn-accent min-h-11">{busy ? "Connecting securely…" : "Codes match — connect computer"}</button>
+            <button disabled={busy} onClick={() => void decide("deny")} className="btn-ghost min-h-11">Deny</button></div>
+        </div>}
+      </>}
+    </>}
+    {phase === "approved" && <p role="status">Computer approved. Opening the dashboard while it establishes its encrypted connection…</p>}
+    {phase === "denied" && <p role="status">Computer denied. No access was granted.</p>}
+  </section></main>;
 }

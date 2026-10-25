@@ -74,7 +74,7 @@ const mockCheckRateLimit = vi.mocked(checkRateLimit);
 function jsonRequest(url: string, body: unknown): NextRequest {
   return new NextRequest(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", origin: new URL(url).origin },
     body: JSON.stringify(body),
   });
 }
@@ -92,6 +92,8 @@ function row(overrides: Partial<PairingRequestRow>): PairingRequestRow {
     createdAt: new Date().toISOString(),
     expiresAt: new Date(Date.now() + 600_000).toISOString(),
     approvedAt: null,
+    enrollment: null,
+    accountApproval: null,
     ...overrides,
   };
 }
@@ -446,6 +448,7 @@ describe("POST /api/auth/bridge/pair/lookup", () => {
       hostname: "host-9",
       platform: "linux",
       createdAt: pendingRow.createdAt,
+      enrollment: null,
     });
   });
 

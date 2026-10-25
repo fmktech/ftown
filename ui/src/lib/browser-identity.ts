@@ -1,8 +1,10 @@
 import { generateEndpoint, exportPublicKey, importPublicKey, SecurityError } from "@security/crypto";
 import type { ApprovedBridge, BridgeInvitation, EndpointIdentity, EndpointPublic } from "@security/protocol";
+import { AccountTrustError, generateAccountSigningIdentity, verifyAccountHistory } from "@security/account-crypto";
+import type { AccountEnrollmentLink, AccountSigningIdentity, StoredAccountTrust, VerifiedAccountTrust } from "@security/account-protocol";
 
 const DATABASE = "ftown-endpoint-security";
-const VERSION = 1;
+const VERSION = 2;
 interface PinRecord { key: string; ownerId: string; bridge: ApprovedBridge }
 
 function requireStorage(): void {
@@ -18,11 +20,104 @@ async function database(): Promise<IDBDatabase> {
     request.onupgradeneeded = () => {
       if (!request.result.objectStoreNames.contains("identities")) request.result.createObjectStore("identities", { keyPath: "endpoint.ownerId" });
       if (!request.result.objectStoreNames.contains("pins")) request.result.createObjectStore("pins", { keyPath: "key" });
+      for (const name of ["account-signing", "account-trust", "account-enrollments"]) {
+        if (!request.result.objectStoreNames.contains(name)) request.result.createObjectStore(name, { keyPath: "ownerId" });
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(new SecurityError("storage_unavailable", "Browser key storage is unavailable"));
     request.onblocked = () => reject(new SecurityError("storage_unavailable", "Close older FTown tabs to open browser key storage"));
   });
+}
+
+/** One independent nonextractable signing key per account; tabs reload the atomic winner. */
+export async function loadAccountSigningIdentity(ownerId: string): Promise<AccountSigningIdentity> {
+  const db = await database();
+  async function validate(value: AccountSigningIdentity): Promise<AccountSigningIdentity> {
+    try {
+      const pair = value.keyPair;
+      if (pair.privateKey.extractable || pair.privateKey.type !== "private" || pair.privateKey.algorithm.name !== "ECDSA"
+        || !pair.privateKey.usages.includes("sign") || pair.publicKey.algorithm.name !== "ECDSA") throw new Error();
+      const raw = new Uint8Array(await crypto.subtle.exportKey("raw", pair.publicKey));
+      const encoded = btoa(String.fromCharCode(...raw)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+      if (encoded !== value.publicKey) throw new Error();
+      const proof = new TextEncoder().encode("ftown-stored-account-signing-key-v1");
+      const signature = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, proof);
+      if (!await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, pair.publicKey, signature, proof)) throw new Error();
+      return value;
+    } catch { throw new AccountTrustError("account_storage_unavailable"); }
+  }
+  try {
+    const existing = await result(db.transaction("account-signing").objectStore("account-signing").get(ownerId)) as { identity: AccountSigningIdentity } | undefined;
+    if (existing) return validate(existing.identity);
+    const identity = await generateAccountSigningIdentity(false);
+    const tx = db.transaction("account-signing", "readwrite"); const done = completed(tx);
+    tx.objectStore("account-signing").add({ ownerId, identity });
+    try { await done; return identity; }
+    catch {
+      const winner = await result(db.transaction("account-signing").objectStore("account-signing").get(ownerId)) as { identity: AccountSigningIdentity } | undefined;
+      if (!winner) throw new AccountTrustError("account_storage_unavailable");
+      return validate(winner.identity);
+    }
+  } finally { db.close(); }
+}
+
+export async function readAccountTrust(ownerId: string): Promise<StoredAccountTrust | null> {
+  const db = await database();
+  try {
+    const record = await result(db.transaction("account-trust").objectStore("account-trust").get(ownerId)) as { trust: StoredAccountTrust } | undefined;
+    if (!record) return null;
+    const trust = record.trust;
+    if (trust?.checkpoint?.ownerId !== ownerId || !Number.isSafeInteger(trust.lastServerReadAt) || trust.lastServerReadAt < 0
+      || !Number.isSafeInteger(trust.lastObservedAt) || trust.lastObservedAt < trust.lastServerReadAt) throw new AccountTrustError("invalid_account_trust");
+    await verifyAccountHistory(trust.history, trust.checkpoint);
+    return trust;
+  } finally { db.close(); }
+}
+
+/** CAS against the durable pin also protects concurrent tabs from rolling back history or clocks. */
+export async function persistAccountTrust(ownerId: string, verified: VerifiedAccountTrust, options: { bootstrap?: boolean; serverReadAt?: number; now?: number } = {}): Promise<StoredAccountTrust> {
+  const now = options.now ?? Date.now();
+  if (verified.checkpoint.ownerId !== ownerId || !Number.isSafeInteger(now) || now < 0
+    || options.serverReadAt !== undefined && (!Number.isSafeInteger(options.serverReadAt) || options.serverReadAt < 0 || options.serverReadAt > now)) throw new AccountTrustError("invalid_account_trust");
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const previous = await readAccountTrust(ownerId);
+    if (!previous && !options.bootstrap) throw new AccountTrustError("account_approval_required");
+    if (previous && now < previous.lastObservedAt) throw new AccountTrustError("account_offline_expired");
+    const checkpoint = await verifyAccountHistory(verified.history, previous?.checkpoint ?? null, now);
+    if (checkpoint.head !== verified.checkpoint.head) throw new AccountTrustError("invalid_account_trust");
+    const trust: StoredAccountTrust = { history: verified.history, checkpoint,
+      lastServerReadAt: Math.max(previous?.lastServerReadAt ?? 0, options.serverReadAt ?? 0), lastObservedAt: now };
+    const db = await database(); let raced = false;
+    try {
+      const tx = db.transaction("account-trust", "readwrite"); const done = completed(tx); const store = tx.objectStore("account-trust");
+      const request = store.get(ownerId);
+      request.onsuccess = () => {
+        const current = (request.result as { trust: StoredAccountTrust } | undefined)?.trust;
+        if ((current?.checkpoint.head ?? null) !== (previous?.checkpoint.head ?? null)
+          || current?.lastObservedAt !== previous?.lastObservedAt || current?.lastServerReadAt !== previous?.lastServerReadAt) { raced = true; tx.abort(); return; }
+        store.put({ ownerId, trust });
+      };
+      try { await done; return trust; } catch { if (!raced) throw new AccountTrustError("account_storage_unavailable"); }
+    } finally { db.close(); }
+  }
+  throw new AccountTrustError("account_trust_conflict");
+}
+
+export async function readAccountEnrollment(ownerId: string): Promise<AccountEnrollmentLink | null> {
+  const db = await database();
+  try {
+    const value = await result(db.transaction("account-enrollments").objectStore("account-enrollments").get(ownerId)) as { link: AccountEnrollmentLink } | undefined;
+    return value?.link ?? null;
+  } finally { db.close(); }
+}
+export async function storeAccountEnrollment(ownerId: string, link: AccountEnrollmentLink | null): Promise<void> {
+  const db = await database();
+  try {
+    const tx = db.transaction("account-enrollments", "readwrite"); const done = completed(tx);
+    if (link) tx.objectStore("account-enrollments").put({ ownerId, link }); else tx.objectStore("account-enrollments").delete(ownerId);
+    await done;
+  } finally { db.close(); }
 }
 function result<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });

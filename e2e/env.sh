@@ -28,6 +28,10 @@ export FTOWN_MCP_APPROVAL_SECRET="${FTOWN_MCP_APPROVAL_SECRET:-$(node -e 'proces
 export FTOWN_MCP_KEY_ENCRYPTION_SECRET="${FTOWN_MCP_KEY_ENCRYPTION_SECRET:-$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("base64url"))')}"
 export FTOWN_MCP_KEY_ENCRYPTION_KEY_ID="e2e-ephemeral-v1"
 export E2E_SECOND_BRIDGE_HOME="${E2E_SECOND_BRIDGE_HOME:-${E2E_DIR}/.bridge-home-2}"
+export E2E_MCP_USER_EMAIL="${E2E_MCP_USER_EMAIL:-e2e-mcp+$(date +%s)-${BASHPID:-$$}@ftown.test}"
+export E2E_MCP_USER_PASSWORD="${E2E_MCP_USER_PASSWORD:-e2e-password-123}"
+export E2E_MCP_BRIDGE_HOME="${E2E_MCP_BRIDGE_HOME:-${E2E_DIR}/.mcp-bridge-home}"
+export E2E_MCP_SECOND_BRIDGE_HOME="${E2E_MCP_SECOND_BRIDGE_HOME:-${E2E_DIR}/.mcp-bridge-home-2}"
 # Only Playwright's browser child uses this HOME and its XDG descendants.
 # The trust setup/config reject relative paths or any location except this one.
 export E2E_BROWSER_HOME="${E2E_BROWSER_HOME:-${E2E_DIR}/.browser-home}"

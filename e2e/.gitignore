@@ -4,6 +4,10 @@ playwright-report/
 test-results/
 .bridge-home/
 .bridge-home-2/
+.mcp-bridge-home/
+.mcp-bridge-home-2/
 .browser-home/
 *.log
 .run-email
+.run-mcp-email
+.*.pid

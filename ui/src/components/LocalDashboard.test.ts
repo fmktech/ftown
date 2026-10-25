@@ -7,7 +7,11 @@ import { readDevice, rememberDevice } from '@/lib/local-browser-client';
 import { SecurityError } from '@security/crypto';
 
 const cryptoState = vi.hoisted(() => ({ handshake: vi.fn(), loadIdentity: vi.fn(), readPins: vi.fn(), dispose: vi.fn() }));
-vi.mock('@/lib/browser-identity', () => ({ loadBrowserIdentity: cryptoState.loadIdentity, readPinnedBridges: cryptoState.readPins }));
+vi.mock('@/lib/browser-identity', async importOriginal => ({
+  ...await importOriginal<typeof import('@/lib/browser-identity')>(),
+  loadBrowserIdentity: cryptoState.loadIdentity,
+  readPinnedBridges: cryptoState.readPins,
+}));
 vi.mock('@/lib/secure-endpoint-runtime', () => ({ SecureEndpointRuntime: class {
   discover() {}
   handshake(...args: unknown[]) { return cryptoState.handshake(...args); }
