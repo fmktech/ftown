@@ -3,7 +3,7 @@
   "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
   "branch": "feat/pending-device-approvals",
   "contract": "docs/investigations/2026-10-25-pending-approval-contract.md",
-  "state": "source implementation/reviews and focused runtime gates accepted; feature publication/CI tracked on PR",
+  "state": "CI account-controls repair and independent review accepted; integration push then automatic CI",
   "integrationOwner": "/root/mcp_security_impl",
   "workers": [
     {
@@ -38,10 +38,8 @@
         "README.md",
         ".github/workflows/migrate.yml"
       ],
-      "resources": [
-        "Git index/history/push/PR only after root gate; explicit task files only, protectednotes excluded"
-      ],
-      "status": "exclusive feature integration publication assignment"
+      "resources": [],
+      "status": "prior ownership released; historical scope only"
     },
     {
       "agent": "/root/security_ui_impl",
@@ -75,10 +73,8 @@
         "e2e/tests/device-pairing.spec.ts",
         "e2e/tests/e2ee-security.spec.ts"
       ],
-      "resources": [
-        "none; all leases released"
-      ],
-      "status": "all source and repairs accepted by independent closure; stopped/released"
+      "resources": [],
+      "status": "prior ownership released; historical scope only"
     },
     {
       "agent": "/root/bridge_security_impl",
@@ -99,10 +95,8 @@
         "bridge/src/security/bridge/pending-approval.ts",
         "bridge/src/security/bridge/pending-approval.test.ts"
       ],
-      "resources": [
-        "none; all leases released"
-      ],
-      "status": "all implementation and virgin repair independently accepted; supported runtime PASS; stopped/released"
+      "resources": [],
+      "status": "prior ownership released; historical scope only"
     }
   ],
   "rootWrites": [
@@ -116,8 +110,8 @@
     "bridge/src/security/pending-approval-crypto.test.ts"
   ],
   "runtimeOwner": "/root",
-  "runtime": "Boat bx_3sbv4qu8; all E2E/build servers/database/ports/CI/fixtures/cleanup exclusively root",
-  "git": "Exclusive feature publication lease to mcp_security_impl. Source authors/reviewers stopped. No merge/deploy/force-push; release on PR publication handoff. Subsequent CI evidence recorded in PR without routine source commits.",
+  "runtime": "Root owns CI monitoring and E2E execution. Boat bx_3sbv4qu8 deleted and absence verified; no active local test services.",
+  "git": "Exclusive repair integration lease to mcp_security_impl: exactly five repair/coordination files, normal commit/push existing feature branch only; no merge/deploy/force-push. Source owners/reviewer stopped. Release on handoff.",
   "reviews": [
     {
       "agent": "/root/account_server_review",
@@ -126,5 +120,55 @@
       "status": "all source review/repair closures PASS including virgin initializer; stopped/released",
       "writes": []
     }
-  ]
+  ],
+  "activeWave": {
+    "id": "ci-account-controls",
+    "contract": "Auth-only pending shell; current email/menu/disconnect and existing optional push control only. Never mount encrypted runtime, hub or session hooks before existing gate admits. Existing E2E assertions unchanged.",
+    "owners": [
+      {
+        "agent": "/root/mcp_security_impl",
+        "model": "gpt-6.1-sol",
+        "reasoningEffort": "high",
+        "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+        "writes": [
+          "ui/src/components/DashboardClient.tsx",
+          "ui/src/components/DashboardClient.test.tsx",
+          "docs/investigations/2026-10-25-pending-account-controls-ci.md"
+        ],
+        "dependencies": [
+          "root boundary accepted; independent boundary review passed"
+        ],
+        "resources": [
+          "isolated component units and noEmit only; existing supported Node 24.22.1; no dependency/generated/Git/runtime resources"
+        ],
+        "status": "source writes stopped/released"
+      },
+      {
+        "agent": "/root",
+        "writes": [
+          "docs/investigations/2026-10-25-pending-approval-ownership.json",
+          "docs/investigations/2026-10-25-pending-approvals.md"
+        ],
+        "resources": [
+          "CI/E2E/setup/cleanup exclusive"
+        ],
+        "status": "source writes stopped/released"
+      }
+    ],
+    "reviewer": {
+      "agent": "/root/account_server_review",
+      "model": "gpt-6.1-sol",
+      "reasoningEffort": "high",
+      "writes": [],
+      "status": "PASS; stopped/released; no material findings"
+    },
+    "integrationOwner": "/root/mcp_security_impl",
+    "publicationFiles": [
+      "ui/src/components/DashboardClient.tsx",
+      "ui/src/components/DashboardClient.test.tsx",
+      "docs/investigations/2026-10-25-pending-account-controls-ci.md",
+      "docs/investigations/2026-10-25-pending-approval-ownership.json",
+      "docs/investigations/2026-10-25-pending-approvals.md"
+    ]
+  }
 }
