@@ -17,6 +17,7 @@ const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const schema = `ftown_pending_check_${randomBytes(10).toString('hex')}`;
 const adapterSymbol = Symbol.for('ftown.pending-db-acceptance');
 const virtualAdapter = 'ftown-pending-db:adapter';
+const virtualAuth = 'ftown-pending-db:unused-auth';
 let stage = 'selector validation';
 let admin: PgClient | undefined;
 let pool: PgPool | undefined;
@@ -63,6 +64,8 @@ try {
   const bridgeRoot = pathToFileURL(join(repo, 'bridge/src/')).href;
   hooks = registerHooks({
     resolve(specifier, context, next) {
+      if (specifier === '@/lib/auth' && context.parentURL?.startsWith(uiRoot)) return { url: virtualAuth, shortCircuit: true };
+      if (specifier === 'next/server' && context.parentURL?.startsWith(uiRoot)) return { url: pathToFileURL(requireUi.resolve('next/server')).href, shortCircuit: true };
       if (specifier === '@/lib/db' && context.parentURL?.startsWith(uiRoot)) return { url: virtualAdapter, shortCircuit: true };
       if (specifier.startsWith('@/lib/') && context.parentURL?.startsWith(uiRoot)) {
         assert.match(specifier, /^@\/lib\/[a-z-]+$/); return { url: new URL(specifier.slice(2) + '.ts', uiRoot).href, shortCircuit: true };
@@ -76,6 +79,7 @@ try {
       return next(specifier, context);
     },
     load(url, context, next) {
+      if (url === virtualAuth) return { format: 'module', shortCircuit: true, source: 'export async function auth(){throw new Error("Authentication must not run in store acceptance");}' };
       if (url === virtualAdapter) return { format: 'module', shortCircuit: true, source: 'export function getDb(){return globalThis[Symbol.for("ftown.pending-db-acceptance")];}' };
       if ((url.startsWith(uiRoot) || url.startsWith(bridgeRoot)) && url.endsWith('.ts')) return { format: 'module', shortCircuit: true,
         source: ts.transpileModule(readFileSync(new URL(url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022, isolatedModules: true } }).outputText };
@@ -85,6 +89,7 @@ try {
   const { PendingApprovalStore, PENDING_NORMALIZED_EMAIL_SQL } = await import(new URL('lib/pending-approval-store.ts', uiRoot).href);
   const { AccountTrustStore, accountHead } = await import(new URL('lib/account-trust-store.ts', uiRoot).href);
   const pairing = await import(new URL('lib/pairing-store.ts', uiRoot).href);
+  const { accountRateLimit, accountError } = await import(new URL('app/api/security/account/_shared.ts', uiRoot).href);
   const core = await import(new URL('account-crypto.ts', securityRoot).href) as typeof import('../../bridge/src/security/account-crypto.js');
   const pending = await import(new URL('pending-approval-crypto.ts', securityRoot).href) as typeof import('../../bridge/src/security/pending-approval-crypto.js');
   const { generateEndpoint } = await import(new URL('crypto.ts', securityRoot).href) as typeof import('../../bridge/src/security/crypto.js');
@@ -96,6 +101,50 @@ try {
   await query(baseline);
   const owner = randomUUID(), foreign = randomUUID(); const email = `e2e-db-${randomUUID()}@ftown.test`; const legacyCode = randomCode();
   await query('INSERT INTO users(id,email,password_hash) VALUES($1,$2,$3),($4,$5,$3)', [owner, email, 'non-login-fixture', foreign, `e2e-db-${randomUUID()}@ftown.test`]);
+  stage = 'account request window exact threshold, isolation and repeated recovery';
+  const rateRow = async (scope: string, key = owner) => (await query('SELECT failed_count,locked_until,updated_at FROM rate_limit_attempts WHERE scope=$1 AND key=$2', [scope, key]))[0];
+  const expireRateWindow = (scope: string, key = owner) => query("UPDATE rate_limit_attempts SET updated_at=statement_timestamp()-INTERVAL '60 seconds' WHERE scope=$1 AND key=$2", [scope, key]);
+  const deniedRate = async (scope: string, limit: number, key = owner) => {
+    const outcome = await accountRateLimit(key, scope, limit).then(() => null, (error: unknown) => error);
+    assert.ok(outcome, 'Over-budget request must be denied');
+    const response = accountError(outcome); assert.equal(response.status, 429);
+    const retryAfter = Number(response.headers.get('retry-after'));
+    assert.ok(Number.isInteger(retryAfter) && retryAfter >= 1 && retryAfter <= 60);
+    assert.deepEqual(await response.json(), { error: 'rate_limited' });
+  };
+  // More than one lifetime budget remains usable across successive fixed windows.
+  for (let window = 0; window < 4; window++) {
+    if (window) await expireRateWindow('account-read');
+    await accountRateLimit(owner, 'account-read', 3);
+    const first = await rateRow('account-read'); assert.equal(first.failed_count, 1);
+    for (let request = 1; request < 3; request++) await accountRateLimit(owner, 'account-read', 3);
+    assert.deepEqual((await rateRow('account-read')).updated_at, first.updated_at);
+    for (let request = 0; request < 4; request++) await deniedRate('account-read', 3);
+    const last = await rateRow('account-read');
+    assert.deepEqual(last.updated_at, first.updated_at); assert.equal(last.failed_count, 4);
+  }
+  // A different scope or owner has an independent budget.
+  await accountRateLimit(owner, 'account-write', 3); await accountRateLimit(foreign, 'account-read', 3);
+  assert.equal((await rateRow('account-write')).failed_count, 1);
+  assert.equal((await rateRow('account-read', foreign)).failed_count, 1);
+  stage = 'account request window concurrent admission cap';
+  const rateRace = await Promise.allSettled(Array.from({ length: 32 }, () => accountRateLimit(owner, 'account-read-race', 7)));
+  assert.equal(rateRace.filter(result => result.status === 'fulfilled').length, 7);
+  for (const result of rateRace) if (result.status === 'rejected') assert.equal(accountError(result.reason).status, 429);
+  assert.equal((await rateRow('account-read-race')).failed_count, 8);
+  stage = 'legacy over-threshold account counter ignores stale lock and recovers';
+  await query("INSERT INTO rate_limit_attempts(scope,key,failed_count,locked_until,updated_at) VALUES('account-read-legacy',$1,346,statement_timestamp()+INTERVAL '1 day',statement_timestamp()-INTERVAL '61 seconds')", [owner]);
+  await accountRateLimit(owner, 'account-read-legacy', 300);
+  const recoveredRate = await rateRow('account-read-legacy');
+  assert.equal(recoveredRate.failed_count, 1); assert.equal(recoveredRate.locked_until, null);
+  // A recent legacy row waits only for its original 60-second window, regardless of locked_until.
+  await query("UPDATE rate_limit_attempts SET failed_count=346,locked_until=statement_timestamp()+INTERVAL '1 day' WHERE scope='account-read-legacy' AND key=$1", [owner]);
+  const legacyAnchor = (await rateRow('account-read-legacy')).updated_at;
+  await deniedRate('account-read-legacy', 300);
+  assert.deepEqual((await rateRow('account-read-legacy')).updated_at, legacyAnchor);
+  await expireRateWindow('account-read-legacy'); await accountRateLimit(owner, 'account-read-legacy', 300);
+  assert.equal((await rateRow('account-read-legacy')).failed_count, 1);
+
   await query('INSERT INTO bridge_refresh(bridge_id,sub,current_jti,hostname,last_seen) VALUES($1,$2,$3,$4,NOW())', ['legacy-bridge', email, randomUUID(), 'Legacy']);
   await pairing.createPairingRequest({ deviceCode: legacyCode, userCode: 'LEGA-0001', bridgeId: 'legacy-bridge', hostname: 'Legacy', platform: 'linux', expiresAtIso: new Date(Date.now() + 600000).toISOString() });
   const accounts = new AccountTrustStore(query);
@@ -368,7 +417,7 @@ try {
   // Legacy auth-only behavior remains usable after expansion and pending guards.
   assert.equal((await pairing.approvePairingRequest('LEGA-0001', email, randomUUID())).status, 'approved');
   assert.equal((await pairing.consumePairingRequest(legacyCode)).status, 'consumed');
-  console.log('PASS: actual runner atomic tracking rollback/idempotency and bounded caller-owned0008 preserve legacy rows; exact ASCII/owner routing; real signed atomic final/replay/cancel/stale/rollback; immutable credential replay/renew/revoke and first-delivery predecessor CAS; hard target/global slots and bounded cleanup; legacy pairing.');
+  console.log('PASS: atomic account request windows (exact threshold, fixed anchor, repeated recovery, concurrent cap, scope/owner isolation, legacy counter recovery); actual runner atomic tracking rollback/idempotency and bounded caller-owned0008 preserve legacy rows; exact ASCII/owner routing; real signed atomic final/replay/cancel/stale/rollback; immutable credential replay/renew/revoke and first-delivery predecessor CAS; hard target/global slots and bounded cleanup; legacy pairing.');
 } catch (error) {
   failed = true; console.error(`FAIL: pending approval DB acceptance during ${stage}; code=${safeCode(error)}; harnessLine=${safeLine(error)}; fixture details suppressed.`);
 } finally {

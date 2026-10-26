@@ -119,7 +119,9 @@ export class AccountSecurityClient {
         signal, ...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }) });
     } catch { this.active(); throw new AccountReadUnavailable(); }
     this.active();
-    if (response.status >= 500) throw new AccountReadUnavailable();
+    if (response.status >= 500 || response.status === 429) {
+      await response.body?.cancel().catch(() => {}); throw new AccountReadUnavailable();
+    }
     const text = await response.text(); this.active();
     if (text.length > ACCOUNT_TRUST_LIMITS.maxHistoryBytes + 65536) throw new AccountTrustError("account_capacity_exceeded");
     let value: unknown; try { value = JSON.parse(text); } catch { throw new AccountTrustError("invalid_account_trust"); }
