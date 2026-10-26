@@ -15,6 +15,14 @@ test.setTimeout(180000);
 const secondHome = process.env.E2E_SECOND_BRIDGE_HOME ?? join(E2E_DIR, ".bridge-home-2");
 const tlsUi = process.env.FTOWN_PUBLIC_URL ?? "https://localhost:8444";
 const mcpOrigin = process.env.FTOWN_MCP_PUBLIC_URL ?? "https://localhost:8443";
+async function waitForSecurityLayout(page: Page, width: number) {
+  await expect.poll(() => page.getByRole("dialog", { name: "Security", exact: true }).evaluate((element, mobile) => {
+    const transitioning = element.getAnimations({ subtree: true }).some(animation => animation instanceof CSSTransition && animation.playState === "running");
+    const controls = [...element.querySelectorAll<HTMLElement>("button,select,summary")].filter(control => control.checkVisibility());
+    return !transitioning && controls.length > 0 && controls.every(control => mobile ? control.getBoundingClientRect().height >= 44 : control.getBoundingClientRect().height <= 36);
+  }, width < 640), { timeout: 2000, intervals: [25, 50, 100], message: "Security responsive transitions and control geometry must settle" }).toBe(true);
+}
+
 async function openSeparateApprovals(page: Page, bridgeId: string) {
   const card = page.locator(`[data-computer-access="${bridgeId}"]`);
   if (await card.count()) await card.getByText("Separate approvals and recovery", { exact: true }).click();
@@ -106,10 +114,12 @@ test("real browser pairing persists its non-extractable key; cloud terminal fram
     await page.getByRole("button", { name: "Open security", exact: true }).click();
     await expect(page.getByRole("dialog", { name: "Security", exact: true })).toBeVisible();
     await page.setViewportSize({ width: 1280, height: 900 });
+    await waitForSecurityLayout(page, 1280);
     await expect(page.getByRole("tab", { name: "Access", exact: true })).toHaveAttribute("aria-selected", "true");
     await expect(page.getByRole("heading", { name: "Your computers", exact: true })).toBeVisible();
     await page.screenshot({ path: info.outputPath("security-access-desktop.png"), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
+    await waitForSecurityLayout(page, 390);
     await page.getByRole("tab", { name: "Access", exact: true }).click();
     await page.screenshot({ path: info.outputPath("security-access-mobile.png"), fullPage: true });
     await page.getByLabel("Security computer", { exact: true }).selectOption(pointer.bridgeId);
@@ -270,6 +280,7 @@ test("account-migrated OAuth MCP uses one selected-computer consent, enforces re
     await page.screenshot({ path: info.outputPath("mcp-security-evidence.png"), fullPage: true });
     for (const size of [{ width: 1280, height: 900 }, { width: 900, height: 760 }, { width: 390, height: 844 }]) {
       await page.setViewportSize(size);
+      await waitForSecurityLayout(page, size.width);
       const layout = await page.getByRole("dialog", { name: "Security", exact: true }).evaluate(element => ({
         headerHeight: element.querySelector("header")!.getBoundingClientRect().height,
         overflow: element.scrollWidth > element.clientWidth,

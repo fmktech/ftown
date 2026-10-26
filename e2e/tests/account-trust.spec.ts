@@ -16,6 +16,14 @@ async function devices(page: Page) {
 async function noOverflow(page: Page) { expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); }
 
 
+async function waitForSecurityLayout(page: Page, width: number) {
+  await expect.poll(() => page.getByRole("dialog", { name: "Security", exact: true }).evaluate((element, mobile) => {
+    const transitioning = element.getAnimations({ subtree: true }).some(animation => animation instanceof CSSTransition && animation.playState === "running");
+    const controls = [...element.querySelectorAll<HTMLElement>("button,select,summary")].filter(control => control.checkVisibility());
+    return !transitioning && controls.length > 0 && controls.every(control => mobile ? control.getBoundingClientRect().height >= 44 : control.getBoundingClientRect().height <= 36);
+  }, width < 640), { timeout: 2000, intervals: [25, 50, 100], message: "Security responsive transitions and control geometry must settle" }).toBe(true);
+}
+
 async function compactAccessEvidence(page: Page, info: TestInfo, bridgeIds: string[]) {
   await page.getByRole("button", { name: "Open security", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Security", exact: true });
@@ -24,6 +32,7 @@ async function compactAccessEvidence(page: Page, info: TestInfo, bridgeIds: stri
   const measurements = [];
   for (const size of [{ width: 1280, height: 900 }, { width: 900, height: 760 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(size);
+    await waitForSecurityLayout(page, size.width);
     await dialog.locator("[data-security-content]").evaluate(element => { element.scrollTop = 0; });
     const measured = await dialog.evaluate((element, ids) => {
       const content = element.querySelector<HTMLElement>("[data-security-content]")!;
