@@ -58,6 +58,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // DIFFERENT account. The owner-scoped upsert in poll is the defense-in-depth
   // backstop; this gives the approver a clear 409 instead of a silent failure.
   const pending = await getByUserCode(body.userCode);
+  if (pending?.pendingV1) return NextResponse.json({ error: 'Pending approval requires device comparison' }, { status: 409 });
   if (pending) {
     const owner = await getBridgeRefreshOwner(pending.bridgeId);
     if (owner !== null && owner !== email) {

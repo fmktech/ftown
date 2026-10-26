@@ -5,11 +5,12 @@ import { promisify } from "node:util";
 import { expect, type Page } from "@playwright/test";
 import { E2E_DIR } from "./config";
 import { bridgeApiFetch, readBridgePointer } from "./bridge-api";
+import type { PendingBridgeStatus } from "../../bridge/src/security/pending-approval-protocol";
 
 const execute = promisify(execFile);
-export interface AccountTestBridge { home: string; dataDir: string; child: ChildProcess; link(): Promise<string>; stop(): Promise<void> }
+export interface AccountTestBridge { home: string; dataDir: string; child: ChildProcess; link(): Promise<string>; pendingStatus(): Promise<PendingBridgeStatus>; confirmPending(code: string): Promise<void>; rejectPending(): Promise<void>; stop(): Promise<void> }
 /** Authored fixture; only the root's coordinated Playwright run executes processes. */
-export async function startAccountTestBridge(origin: string): Promise<AccountTestBridge> {
+export async function startAccountTestBridge(origin: string, accountHint?: string): Promise<AccountTestBridge> {
   const home = await mkdtemp(join(E2E_DIR, ".account-bridge-"));
   const dataDir = join(home, ".ftown", "data");
   const environment = { ...process.env, HOME: home, USERPROFILE: home, FTOWN_DATA_DIR: dataDir };
@@ -24,7 +25,7 @@ export async function startAccountTestBridge(origin: string): Promise<AccountTes
     await rm(home, { recursive: true, force: true });
     throw new Error("Test-owned virgin bridge shell setup failed");
   }
-  const child = spawn(process.execPath, [join(E2E_DIR, "..", "bridge", "dist", "index.js"), "--api-url", origin, "--data-dir", dataDir], {
+  const child = spawn(process.execPath, [join(E2E_DIR, "..", "bridge", "dist", "index.js"), "--api-url", origin, "--data-dir", dataDir, ...(accountHint ? ["--account", accountHint] : ["--bootstrap"])], {
     cwd: home, env: environment, stdio: "ignore",
   });
   let exited = false; child.once("exit", () => { exited = true; }); child.once("error", () => { exited = true; });
@@ -35,6 +36,20 @@ export async function startAccountTestBridge(origin: string): Promise<AccountTes
     return stopped();
   }
   return { home, dataDir, child,
+    async pendingStatus() {
+      const { stdout } = await execute(process.execPath, [join(E2E_DIR, "..", "bridge", "dist", "ftown-cli.js"), "security", "--data-dir", dataDir, "pair-status"],
+        { cwd: home, env: environment, timeout: 5000, maxBuffer: 32768 });
+      return JSON.parse(stdout) as PendingBridgeStatus;
+    },
+    async confirmPending(code: string) {
+      if (!/^[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}$/.test(code)) throw new Error("Invalid local verification code");
+      try { await execute(process.execPath, [join(E2E_DIR, "..", "bridge", "dist", "ftown-cli.js"), "security", "--data-dir", dataDir, "pair-confirm", code],
+        { cwd: home, env: environment, timeout: 5000, maxBuffer: 32768 }); } catch { throw new Error("Local test computer confirmation failed"); }
+    },
+    async rejectPending() {
+      try { await execute(process.execPath, [join(E2E_DIR, "..", "bridge", "dist", "ftown-cli.js"), "security", "--data-dir", dataDir, "pair-reject"],
+        { cwd: home, env: environment, timeout: 5000, maxBuffer: 32768 }); } catch { throw new Error("Local test computer rejection failed"); }
+    },
     async link() {
       const deadline = Date.now() + 30000;
       do {
@@ -64,6 +79,23 @@ export async function startAccountTestBridge(origin: string): Promise<AccountTes
       if (failures.length) throw new Error("Test-owned account bridge cleanup failed");
     },
   };
+}
+
+export async function usePrivateApprovalLink(page: Page): Promise<void> {
+  await page.getByText("First device or another way to connect?", { exact: true }).click();
+  await page.getByRole("button", { name: "Use a private approval link", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Approve this device", exact: true })).toBeVisible();
+}
+
+/** Only public request coordinates, never candidate credentials or retained keys. */
+export async function pendingBrowserRequest(page: Page): Promise<{ requestId: string | null; candidateId: string } | null> {
+  return page.evaluate(async () => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => { const request = indexedDB.open("ftown-endpoint-security"); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(new Error("Pending browser storage unavailable")); });
+    try { if (!db.objectStoreNames.contains("pending-candidates")) return null;
+      const records = await new Promise<{ candidateId: string; request: { requestId: string } | null }[]>((resolve, reject) => { const request = db.transaction("pending-candidates").objectStore("pending-candidates").getAll(); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(new Error("Pending browser storage unavailable")); });
+      return records.length === 1 ? { requestId: records[0].request?.requestId ?? null, candidateId: records[0].candidateId } : null;
+    } finally { db.close(); }
+  });
 }
 
 export async function approveAccountComputer(page: Page, bridge: AccountTestBridge): Promise<string> {

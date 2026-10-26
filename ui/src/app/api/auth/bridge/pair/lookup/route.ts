@@ -52,6 +52,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   const row = await getByUserCode(body.userCode);
+  if (row?.pendingV1) return NextResponse.json({ error: 'Pending approval requires device comparison' }, { status: 409 });
   if (!row || !['pending', 'approved'].includes(row.status) || new Date(row.expiresAt).getTime() <= Date.now()) {
     return NextResponse.json(NOT_FOUND_RESPONSE, { status: 404 });
   }

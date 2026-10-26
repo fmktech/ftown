@@ -5,6 +5,7 @@ import type { BridgeInvitation, BridgeSecurityState, SecurityCommand, SecurityCo
 import { SecurityActivity } from "./SecurityActivity";
 import { SecurityDevices } from "./SecurityDevices";
 import type { AccountSecurityClient, AccountSecuritySnapshot } from "@/lib/account-security-client";
+import type { PendingApprovalClient, PendingSnapshot } from "@/lib/pending-approval-client";
 
 export interface SecurityBridge {
   bridgeId: string;
@@ -25,6 +26,9 @@ export interface SecurityPanelProps {
   onInvitation?: (invitation: BridgeInvitation) => void;
   accountClient?: AccountSecurityClient;
   accountState?: AccountSecuritySnapshot;
+  pendingClient?: PendingApprovalClient;
+  pendingState?: PendingSnapshot;
+  initialView?: "activity" | "devices";
 }
 
 export function securityStateLabel(state: BridgeSecurityState["status"]): string {
@@ -48,7 +52,7 @@ export function securityErrorMessage(error: unknown): string {
     account_last_admin: "Approve another device before revoking the last account administrator.",
     account_capacity_exceeded: "Account trust reached its supported capacity. Contact your administrator for explicit recovery or rotation.",
     account_enrollment_expired: "This approval request expired. Create a new request on the device you want to add.",
-    account_enrollment_invalid: "This approval link or response could not be verified. Reopen the original link and compare both codes.",
+    account_enrollment_invalid: "This approval request or response could not be verified. Start again from the requesting device, or reopen its original private link.",
     account_storage_unavailable: "Account trust could not be refreshed or stored. Check the connection and browser storage, then try again.",
     permission_denied: "This device does not have permission for this action.",
     approval_required: "Approve this browser on the bridge first.", endpoint_revoked: "This device's bridge access was revoked.",
@@ -61,7 +65,7 @@ export function securityErrorMessage(error: unknown): string {
 }
 
 export function SecurityPanel({ open, onClose, bridges, currentEndpointId, execute, initialBridgeId,
-  gatewayAvailable = true, onInvitation, accountClient, accountState }: SecurityPanelProps) {
+  gatewayAvailable = true, onInvitation, accountClient, accountState, pendingClient, pendingState, initialView = "activity" }: SecurityPanelProps) {
   const [view, setView] = useState<"activity" | "devices">("activity");
   const [bridgeId, setBridgeId] = useState(initialBridgeId ?? "");
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -70,11 +74,12 @@ export function SecurityPanel({ open, onClose, bridges, currentEndpointId, execu
   useEffect(() => {
     if (!open) return;
     setBridgeId(initialBridgeId ?? "");
+    setView(initialView);
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const dialog = dialogRef.current;
     dialog?.showModal();
     return () => { dialog?.close(); previous?.focus(); };
-  }, [open, initialBridgeId]);
+  }, [open, initialBridgeId, initialView]);
 
   if (!open) return null;
   const selected = bridges.find(bridge => bridge.bridgeId === bridgeId);
@@ -113,7 +118,7 @@ export function SecurityPanel({ open, onClose, bridges, currentEndpointId, execu
         {selected && <p className="mb-4 text-xs text-[var(--text-muted)]">{selected.label}: {securityStateLabel(selected.security.status)}</p>}
         <section role="tabpanel" id={`${titleId}-${view}`} aria-labelledby={`${titleId}-tab-${view}`}>
           {view === "activity" ? <SecurityActivity bridgeId={bridgeId} selectedBridge={selected} execute={execute} gatewayAvailable={gatewayAvailable} />
-            : <SecurityDevices bridge={selected} bridges={bridges} currentEndpointId={currentEndpointId} execute={execute} onInvitation={onInvitation} accountClient={accountClient} accountState={accountState} />}
+            : <SecurityDevices bridge={selected} bridges={bridges} currentEndpointId={currentEndpointId} execute={execute} onInvitation={onInvitation} accountClient={accountClient} accountState={accountState} pendingClient={pendingClient} pendingState={pendingState} />}
         </section>
       </div>
     </div>

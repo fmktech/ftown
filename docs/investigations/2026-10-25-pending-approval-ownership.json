@@ -1,0 +1,174 @@
+{
+  "version": 1,
+  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "branch": "feat/pending-device-approvals",
+  "contract": "docs/investigations/2026-10-25-pending-approval-contract.md",
+  "state": "CI account-controls repair and independent review accepted; integration push then automatic CI",
+  "integrationOwner": "/root/mcp_security_impl",
+  "workers": [
+    {
+      "agent": "/root/mcp_security_impl",
+      "model": "gpt-6.1-sol",
+      "reasoningEffort": "high",
+      "role": "server and later integration",
+      "dependsOn": [
+        "core acceptance"
+      ],
+      "writes": [
+        "ui/src/lib/pending-approval-store.ts",
+        "ui/src/lib/pending-approval-store.test.ts",
+        "ui/src/lib/pending-approval-http.ts",
+        "ui/src/lib/pending-approval-http.test.ts",
+        "ui/src/lib/account-trust-store.ts",
+        "ui/src/lib/account-trust-store.test.ts",
+        "ui/src/lib/pairing-store.ts",
+        "ui/src/lib/pairing-store.test.ts",
+        "ui/src/lib/bridge-refresh.ts",
+        "ui/src/lib/bridge-refresh.test.ts",
+        "ui/src/app/api/security/approvals/",
+        "ui/src/app/api/security/account/",
+        "ui/src/app/api/auth/bridge/pair/",
+        "ui/schema.sql",
+        "ui/migrations/0008_pending_approvals.sql",
+        "e2e/scripts/setup-db.mjs",
+        "e2e/scripts/pending-approvals-db.ts",
+        ".github/workflows/e2e.yml",
+        "bridge/package.json",
+        "bridge/package-lock.json",
+        "README.md",
+        ".github/workflows/migrate.yml"
+      ],
+      "resources": [],
+      "status": "prior ownership released; historical scope only"
+    },
+    {
+      "agent": "/root/security_ui_impl",
+      "model": "gpt-6.1-sol",
+      "reasoningEffort": "high",
+      "role": "browser UI/persistence/docs and E2E authoring",
+      "dependsOn": [
+        "core acceptance"
+      ],
+      "writes": [
+        "ui/src/components/",
+        "ui/src/hooks/",
+        "ui/src/lib/account-security-client.ts",
+        "ui/src/lib/account-security-client.test.ts",
+        "ui/src/lib/browser-identity.ts",
+        "ui/src/lib/browser-identity.test.ts",
+        "ui/src/lib/pending-approval-client.ts",
+        "ui/src/lib/pending-approval-client.test.ts",
+        "ui/src/lib/pending-approval-storage.ts",
+        "ui/src/lib/pending-approval-storage.test.ts",
+        "ui/src/app/devices/approve/",
+        "ui/src/app/pair/",
+        "ui/src/app/login/",
+        "ui/src/app/mcp/consent/",
+        "ui/src/app/dashboard/",
+        "ui/src/app/page.tsx",
+        "docs/mcp.md",
+        "e2e/helpers/account-pairing.ts",
+        "e2e/tests/account-trust.spec.ts",
+        "e2e/tests/pending-approvals.spec.ts",
+        "e2e/tests/device-pairing.spec.ts",
+        "e2e/tests/e2ee-security.spec.ts"
+      ],
+      "resources": [],
+      "status": "prior ownership released; historical scope only"
+    },
+    {
+      "agent": "/root/bridge_security_impl",
+      "model": "gpt-6.1-sol",
+      "reasoningEffort": "high",
+      "role": "bridge CLI and pairing runtime",
+      "dependsOn": [
+        "core acceptance"
+      ],
+      "writes": [
+        "bridge/src/index.ts",
+        "bridge/src/pairing-client.ts",
+        "bridge/src/pairing-client.test.ts",
+        "bridge/src/security-cli.ts",
+        "bridge/src/security-cli.test.ts",
+        "bridge/src/security/bridge/pending-enrollment.ts",
+        "bridge/src/security/bridge/pending-enrollment.test.ts",
+        "bridge/src/security/bridge/pending-approval.ts",
+        "bridge/src/security/bridge/pending-approval.test.ts"
+      ],
+      "resources": [],
+      "status": "prior ownership released; historical scope only"
+    }
+  ],
+  "rootWrites": [
+    "bridge/src/security/pending-approval-protocol.ts",
+    "docs/investigations/2026-10-25-pending-approval-contract.md",
+    "docs/investigations/2026-10-25-pending-approvals.md",
+    "docs/investigations/2026-10-25-pending-approval-ownership.json"
+  ],
+  "reservedCore": [
+    "bridge/src/security/pending-approval-crypto.ts",
+    "bridge/src/security/pending-approval-crypto.test.ts"
+  ],
+  "runtimeOwner": "/root",
+  "runtime": "Root owns CI monitoring and E2E execution. Boat bx_3sbv4qu8 deleted and absence verified; no active local test services.",
+  "git": "Exclusive repair integration lease to mcp_security_impl: exactly five repair/coordination files, normal commit/push existing feature branch only; no merge/deploy/force-push. Source owners/reviewer stopped. Release on handoff.",
+  "reviews": [
+    {
+      "agent": "/root/account_server_review",
+      "model": "gpt-6.1-sol",
+      "reasoningEffort": "high",
+      "status": "all source review/repair closures PASS including virgin initializer; stopped/released",
+      "writes": []
+    }
+  ],
+  "activeWave": {
+    "id": "ci-account-controls",
+    "contract": "Auth-only pending shell; current email/menu/disconnect and existing optional push control only. Never mount encrypted runtime, hub or session hooks before existing gate admits. Existing E2E assertions unchanged.",
+    "owners": [
+      {
+        "agent": "/root/mcp_security_impl",
+        "model": "gpt-6.1-sol",
+        "reasoningEffort": "high",
+        "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+        "writes": [
+          "ui/src/components/DashboardClient.tsx",
+          "ui/src/components/DashboardClient.test.tsx",
+          "docs/investigations/2026-10-25-pending-account-controls-ci.md"
+        ],
+        "dependencies": [
+          "root boundary accepted; independent boundary review passed"
+        ],
+        "resources": [
+          "isolated component units and noEmit only; existing supported Node 24.22.1; no dependency/generated/Git/runtime resources"
+        ],
+        "status": "source writes stopped/released"
+      },
+      {
+        "agent": "/root",
+        "writes": [
+          "docs/investigations/2026-10-25-pending-approval-ownership.json",
+          "docs/investigations/2026-10-25-pending-approvals.md"
+        ],
+        "resources": [
+          "CI/E2E/setup/cleanup exclusive"
+        ],
+        "status": "source writes stopped/released"
+      }
+    ],
+    "reviewer": {
+      "agent": "/root/account_server_review",
+      "model": "gpt-6.1-sol",
+      "reasoningEffort": "high",
+      "writes": [],
+      "status": "PASS; stopped/released; no material findings"
+    },
+    "integrationOwner": "/root/mcp_security_impl",
+    "publicationFiles": [
+      "ui/src/components/DashboardClient.tsx",
+      "ui/src/components/DashboardClient.test.tsx",
+      "docs/investigations/2026-10-25-pending-account-controls-ci.md",
+      "docs/investigations/2026-10-25-pending-approval-ownership.json",
+      "docs/investigations/2026-10-25-pending-approvals.md"
+    ]
+  }
+}

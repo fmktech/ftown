@@ -7,6 +7,7 @@ import { hostname as osHostname, networkInterfaces, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+import { createInterface } from 'node:readline/promises';
 import { cleanup as ndcCleanup } from 'node-datachannel';
 
 import { CentrifugoClient } from './centrifugo-client.js';
@@ -31,7 +32,10 @@ import { unregisterSession, configureSessionRegistryHome } from './session-regis
 import { createFtownSession, type CreateFtownSessionDeps } from './create-ftown-session.js';
 import { createRelayHandler } from './mcp/relay-handler.js';
 import { loadOrCreateIdentity, readBoundBridgeIdentity } from './security/bridge/identity.js';
-import { bindPendingBridgeIdentity, prepareBridgeEnrollment, savePairingVerificationUrl, type PendingBridgeEnrollment } from './security/bridge/pending-enrollment.js';
+import { bindPendingBridgeIdentity, prepareBridgeEnrollment, preparePendingBridgeEnrollment, previousPendingBridgeAttempt,
+  savePairingVerificationUrl, type PendingBridgeEnrollment } from './security/bridge/pending-enrollment.js';
+import { selectBridgePairingMode, waitForPendingBridgeDecision, writePendingBridgeStatus } from './security/bridge/pending-approval.js';
+import type { PendingBridgeDecision, PendingPairingVerified } from './security/pending-approval-protocol.js';
 import { readAccountHistory } from './security/bridge/account-client.js';
 import { openAccountApproval } from './security/account-crypto.js';
 import { BridgeSecurityService, applicationJson } from './security/bridge/security.js';
@@ -47,7 +51,7 @@ import { fetchBridgeToken, refreshBridgeToken, type BridgeAuthResponse } from '.
 import { RotatingTokenRefresher } from './rotating-token-refresher.js';
 import { resolveDefaultDataDir, resolveFtownHome } from './ftown-home.js';
 import { SessionController } from './session-controller.js';
-import { runPairing } from './pairing-client.js';
+import { cancelPreviousPendingPairing, runPairing } from './pairing-client.js';
 import { createServer } from 'node:http';
 import { generateAccessKey, mintHubJwt, sha256Hex } from './solo/solo-auth.js';
 import { DEFAULT_SOLO_PORT, SOLO_USER_ID, type SoloConfig } from './solo/contract.js';
@@ -103,11 +107,15 @@ program
   .option('--port <port>', 'Public port for --solo front (default: see DEFAULT_SOLO_PORT)')
   .option('--rotate-key', 'With --solo: regenerate the access key, print the new banner, exit (offline)')
   .option('--token <jwt>', 'Bridge bootstrap token from the ftown dashboard (short-lived; used once to onboard, then a rotating refresh token is stored). Optional: with no token and no stored refresh token, the bridge runs interactive device pairing instead.')
+  .option('--account <email>', 'Request approval in this account’s trusted-device inbox; compare and confirm on both devices')
+  .option('--bootstrap', 'Explicit first-computer setup using a private approval link')
   .option('--api-url <url>', 'ftown UI API URL', DEFAULT_API_URL)
   .option('--data-dir <path>', 'Directory for session data (default: ~/.ftown/data)')
   .option('--bridge-id <id>', 'Bridge instance ID (default: persisted per data dir)')
-  .action(async (opts: { local?: boolean; solo?: boolean; port?: string; rotateKey?: boolean; token?: string; apiUrl: string; dataDir?: string; bridgeId?: string }) => {
+  .action(async (opts: { local?: boolean; solo?: boolean; port?: string; rotateKey?: boolean; token?: string; account?: string; bootstrap?: boolean; apiUrl: string; dataDir?: string; bridgeId?: string }) => {
     if (opts.local && opts.solo) program.error('--local and --solo cannot be combined');
+    if (opts.account !== undefined && opts.bootstrap) program.error('--account and --bootstrap cannot be combined');
+    if ((opts.local || opts.solo) && (opts.account !== undefined || opts.bootstrap)) program.error('--account and --bootstrap require cloud mode');
     const apiUrl = new URL(opts.apiUrl);
     const isLocalHost =
       apiUrl.hostname === 'localhost' ||
@@ -383,13 +391,55 @@ program
     // refresh-token persist/resume logic below.
     const boundAtStartup = await readBoundBridgeIdentity(dataDir);
     let pendingEnrollment: PendingBridgeEnrollment | undefined;
+    let pendingVerified: PendingPairingVerified | undefined;
     const onboard = async (): Promise<BridgeAuthResponse> => {
       if (opts.token) {
         console.log('[Bridge] Authenticating with API...');
         return fetchBridgeToken(opts.apiUrl, opts.token, bridgeId, local);
       }
       console.log('[Bridge] No bootstrap token or stored session — starting device pairing...');
-      if (!boundAtStartup) pendingEnrollment = await prepareBridgeEnrollment(dataDir, bridgeId, osHostname());
+      if (!boundAtStartup) {
+        const interactive = Boolean(process.stdin.isTTY && process.stderr.isTTY);
+        const previous = await previousPendingBridgeAttempt(dataDir);
+        const mode = await selectBridgePairingMode({ account: opts.account, bootstrap: opts.bootstrap, interactive, previousPending: Boolean(previous) }, async () => {
+          const input = createInterface({ input: process.stdin, output: process.stderr });
+          try { return await input.question('Account email (leave blank only for first-computer private-link setup): '); }
+          finally { input.close(); }
+        });
+        if (previous) await cancelPreviousPendingPairing(opts.apiUrl, previous, AbortSignal.timeout(15000));
+        if (mode.method === 'pending-v1') {
+          const enrollment = await preparePendingBridgeEnrollment(dataDir, bridgeId, osHostname());
+          const lifetime = new AbortController();
+          const abort = () => lifetime.abort(new Error('Computer approval interrupted.'));
+          process.once('SIGINT', abort); process.once('SIGTERM', abort);
+          try {
+            const result = await runPairing({ apiUrl: opts.apiUrl, bridgeId, hostname: osHostname(), platform: process.platform,
+              localPort: local.localPort, localNonce: local.localNonce, accountHint: mode.accountHint,
+              pending: { identity: enrollment.identity, request: enrollment.request, candidateToken: enrollment.candidateToken,
+                signal: lifetime.signal, pinOffer: enrollment.pinOffer, pinHello: enrollment.pinHello,
+                onLocalStatus: state => writePendingBridgeStatus(dataDir, state),
+                waitForLocalDecision: async (state, signal) => {
+                  if (!interactive || state.phase !== 'comparing') return waitForPendingBridgeDecision(dataDir, state, signal);
+                  const localAbort = new AbortController();
+                  const combined = AbortSignal.any([signal, localAbort.signal]);
+                  const input = createInterface({ input: process.stdin, output: process.stderr });
+                  const answer = input.question(`Verification code: ${state.comparisonCode}\nDoes it match the code on your trusted browser? [y/N] `, { signal: combined })
+                    .then(value => ({ version: 1 as const, requestId: state.requestId, processNonce: state.processNonce, expiresAt: state.expiresAt,
+                      ...(value.trim().toLowerCase() === 'y' || value.trim().toLowerCase() === 'yes'
+                        ? { decision: 'confirm' as const, offerHash: state.offerHash, comparisonCode: state.comparisonCode }
+                        : { decision: 'reject' as const, offerHash: state.offerHash }) }) satisfies PendingBridgeDecision);
+                  try { return await Promise.race([answer, waitForPendingBridgeDecision(dataDir, state, combined)]); }
+                  finally { localAbort.abort(); input.close(); }
+                } },
+            });
+            if (result.approvalMethod !== 'pending-v1' || !result.verifiedAccountTrust || result.lastServerReadAt === undefined) throw new Error('account_approval_required');
+            pendingVerified = result;
+            return result;
+          } finally { lifetime.abort(); process.removeListener('SIGINT', abort); process.removeListener('SIGTERM', abort); }
+        }
+        if (!interactive && !opts.bootstrap) console.log('[Bridge] Private-link setup selected. Use --account <email> to request approval without copying a link.');
+        pendingEnrollment = await prepareBridgeEnrollment(dataDir, bridgeId, osHostname(), Date.now(), Boolean(previous) || Boolean(opts.bootstrap));
+      }
       return runPairing({
         apiUrl: opts.apiUrl,
         bridgeId,
@@ -470,7 +520,11 @@ program
     if (!auth.ownerId) throw new Error('security_setup_required: bridge auth must provide immutable ownerId');
     let identity: EndpointIdentity;
     let accountBootstrap = boundAtStartup?.bootstrap;
-    if (pendingEnrollment) {
+    if (pendingVerified) {
+      accountBootstrap = pendingVerified.verifiedAccountTrust;
+      if (accountBootstrap.checkpoint.ownerId !== auth.ownerId) throw new Error('wrong_context');
+      identity = await bindPendingBridgeIdentity(dataDir, accountBootstrap);
+    } else if (pendingEnrollment) {
       if (!auth.accountApproval || !auth.accountHistory) throw new Error('account_approval_required');
       const history = await readAccountHistory(opts.apiUrl, currentBridgeToken);
       if (!history) throw new Error('account_approval_required');

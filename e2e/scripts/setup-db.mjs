@@ -25,6 +25,8 @@ const OAUTH_DDL = await (await import("node:fs/promises")).readFile(new URL("../
 const SECURITY_DDL = await (await import("node:fs/promises")).readFile(new URL("../../ui/migrations/0006_endpoint_security.sql", import.meta.url), "utf8");
 const ACCOUNT_DDL = await (await import("node:fs/promises")).readFile(new URL("../../ui/migrations/0007_account_trust.sql", import.meta.url), "utf8");
 
+const PENDING_DDL = await (await import("node:fs/promises")).readFile(new URL("../../ui/migrations/0008_pending_approvals.sql", import.meta.url), "utf8");
+
 const DDL = `
 CREATE TABLE IF NOT EXISTS users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -70,12 +72,18 @@ CREATE INDEX IF NOT EXISTS idx_pairing_user_code ON pairing_requests(user_code);
 `;
 
 await client.connect();
-await client.query(DDL);
-await client.query(PUSH_DDL);
-await client.query('BEGIN');
-try { await client.query(OAUTH_DDL); await client.query(SECURITY_DDL); await client.query(ACCOUNT_DDL); await client.query('COMMIT'); }
-catch (error) { await client.query('ROLLBACK'); throw error; }
-await client.end();
+try {
+  await client.query(DDL);
+  await client.query(PUSH_DDL);
+  await client.query('BEGIN');
+  try {
+    await client.query(OAUTH_DDL);
+    await client.query(SECURITY_DDL);
+    await client.query(ACCOUNT_DDL);
+    await client.query(PENDING_DDL);
+    await client.query('COMMIT');
+  } catch (error) { await client.query('ROLLBACK'); throw error; }
+} finally { await client.end(); }
 console.log(
-  "[setup-db] schema ready (auth, push, MCP OAuth, encrypted endpoints, account trust and security history)",
+  "[setup-db] schema ready (auth, push, MCP OAuth, encrypted endpoints, account trust, pending approvals and security history)",
 );

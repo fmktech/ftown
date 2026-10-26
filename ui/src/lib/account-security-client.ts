@@ -2,10 +2,10 @@ import { AccountTrustError, ACCOUNT_TRUST_LIMITS, createAccountEnrollment, creat
   openAccountApproval, parseAccountEnrollmentLink, parseAccountEnrollmentRequest, parseAccountHistory, sealAccountApproval,
   signAccountTransition, verifyAccountHistory } from "@security/account-crypto";
 import type { AccountEnrollmentBundle, AccountEnrollmentLink, AccountEnrollmentRequest, AccountEnrollmentStatus, AccountErrorCode,
-  AccountHistory, AccountOperation, AccountSigningIdentity, StoredAccountTrust } from "@security/account-protocol";
+  AccountHistory, AccountOperation, AccountSigningIdentity, StoredAccountTrust, VerifiedAccountTrust } from "@security/account-protocol";
 import type { ApprovedBridge, EndpointIdentity, SecurityCommand, SecurityCommandResults } from "@security/protocol";
 import { loadAccountSigningIdentity, loadBrowserIdentity, persistAccountTrust, readAccountEnrollment, readAccountTrust,
-  readPinnedBridges, storeAccountEnrollment } from "./browser-identity";
+  readPinnedBridges, storeAccountEnrollment, clearAccountEnrollment, prepareAccountTrust } from "./browser-identity";
 
 export type AccountSecuritySnapshot = {
   status: "checking" | "unapproved" | "ready" | "error";
@@ -14,7 +14,7 @@ export type AccountSecuritySnapshot = {
   bootstrapRecoverable?: boolean;
 };
 export type ExecuteSecurity = <C extends SecurityCommand>(command: C) => Promise<SecurityCommandResults[C["type"]]>;
-export const accountStorage = { loadBrowserIdentity, loadAccountSigningIdentity, readAccountTrust, persistAccountTrust, readPinnedBridges, readAccountEnrollment, storeAccountEnrollment };
+export const accountStorage = { loadBrowserIdentity, loadAccountSigningIdentity, readAccountTrust, persistAccountTrust, readPinnedBridges, readAccountEnrollment, storeAccountEnrollment, clearAccountEnrollment };
 const codes: readonly string[] = ["invalid_account_trust", "account_trust_conflict", "account_trust_rollback", "account_approval_required", "account_device_revoked",
   "account_bridge_revoked", "account_offline_expired", "account_last_admin", "account_capacity_exceeded", "account_enrollment_expired", "account_enrollment_invalid", "account_storage_unavailable"];
 function object(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
@@ -29,6 +29,7 @@ export class AccountSecurityClient {
   private value: AccountSecuritySnapshot = { status: "checking", identity: null, signing: null, trust: null, legacyBridges: [], historyExists: false, code: null, offline: false };
   private listeners = new Set<() => void>();
   private refreshing: Promise<AccountSecuritySnapshot> | null = null;
+  private requesting: Promise<AccountEnrollmentLink> | null = null;
   private generation = 0;
   private abort = new AbortController();
   private closed = false;
@@ -99,11 +100,23 @@ export class AccountSecurityClient {
   }
   private async json(path: string, body?: unknown): Promise<unknown> {
     this.active();
+    const controller = new AbortController();
+    let interrupt: () => void = () => {};
+    const interrupted = new Promise<never>((_resolve, reject) => {
+      interrupt = () => { controller.abort(); reject(new AccountReadUnavailable()); };
+    });
+    const timer = setTimeout(interrupt, 15000);
+    this.abort.signal.addEventListener("abort", interrupt, { once: true });
+    try { return await Promise.race([this.readJson(path, body, controller.signal), interrupted]); }
+    catch (error) { this.active(); if (controller.signal.aborted) throw new AccountReadUnavailable(); throw error; }
+    finally { clearTimeout(timer); this.abort.signal.removeEventListener("abort", interrupt); }
+  }
+  private async readJson(path: string, body: unknown, signal: AbortSignal): Promise<unknown> {
     let response: Response;
     try {
       // Browser fetch is a global capability, not a method of this client.
       response = await this.fetcher.call(globalThis, path, { method: body === undefined ? "GET" : "POST", credentials: "include", cache: "no-store", redirect: "error",
-        signal: this.abort.signal, ...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }) });
+        signal, ...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }) });
     } catch { this.active(); throw new AccountReadUnavailable(); }
     this.active();
     if (response.status >= 500) throw new AccountReadUnavailable();
@@ -233,19 +246,34 @@ export class AccountSecurityClient {
     }
     return sealAccountApproval(this.value.identity!, link, trust.history);
   }
-  async requestDevice(label: string): Promise<AccountEnrollmentLink> {
+  /** Restores/reposts only an existing request; loading this view never creates one. */
+  async resumeDevice(): Promise<AccountEnrollmentLink | null> {
     await this.keys(); this.active();
     let link = await this.storage.readAccountEnrollment(this.ownerId);
+    this.active();
     if (link) {
       try {
         link = await parseAccountEnrollmentLink(link);
-        if (link.request.kind !== "browser" || link.request.candidate.id !== this.value.identity!.endpoint.id || link.request.signingPublicKey !== this.value.signing!.publicKey) link = null;
+        const candidate = this.value.identity!.endpoint;
+        if (link.request.kind !== "browser" || link.request.candidate.id !== candidate.id || link.request.candidate.ownerId !== this.ownerId
+          || link.request.candidate.publicKey !== candidate.publicKey || link.request.signingPublicKey !== this.value.signing!.publicKey) link = null;
       } catch { link = null; }
     }
-    if (!link) {
-      link = await createAccountEnrollment(this.value.identity!, label.trim() || "Browser", this.value.signing!, null);
-      await this.storage.storeAccountEnrollment(this.ownerId, link);
-    }
+    this.active();
+    if (!link) return null;
+    await this.json("/api/security/account/enrollments", link.request); this.active();
+    return link;
+  }
+  requestDevice(label: string): Promise<AccountEnrollmentLink> {
+    if (this.requesting) return this.requesting;
+    const work = this.createDeviceRequest(label); this.requesting = work;
+    void work.finally(() => { if (this.requesting === work) this.requesting = null; }).catch(() => {});
+    return work;
+  }
+  private async createDeviceRequest(label: string): Promise<AccountEnrollmentLink> {
+    const existing = await this.resumeDevice(); if (existing) return existing;
+    const link = await createAccountEnrollment(this.value.identity!, label.trim() || "Browser", this.value.signing!, null); this.active();
+    await this.storage.storeAccountEnrollment(this.ownerId, link); this.active();
     await this.json("/api/security/account/enrollments", link.request); this.active();
     return link;
   }
@@ -267,8 +295,32 @@ export class AccountSecurityClient {
     const history = await this.history(); if (!history) throw new AccountTrustError("account_trust_rollback");
     const verified = await openAccountApproval(this.value.identity!, parsed, value.bundle, history); this.active();
     const trust = await this.persist(this.ownerId, verified, { bootstrap: true, serverReadAt: Date.now() }); this.active();
-    this.verified(trust); await this.storage.storeAccountEnrollment(this.ownerId, null); this.active();
-    this.update({ ...this.value, status: "ready", trust, historyExists: true, code: null, offline: false }); return true;
+    this.verified(trust);
+    this.update({ ...this.value, status: "ready", trust, historyExists: true, code: null, offline: false });
+    // Verified durable trust is the commit. Obsolete request cleanup cannot undo it.
+    try { await this.storage.clearAccountEnrollment(this.ownerId, parsed.request.requestId); } catch { /* Retry cleanup on a later completion. */ }
+    this.active(); return true;
+  }
+  /** Local persistence evidence only; this never grants authority or freshness. */
+  async hasCommittedTrust(): Promise<boolean> {
+    // A durable pin proves a local commit occurred, never current authority or
+    // freshness. In particular, this must not mark a new/offline client ready.
+    const trust = await this.storage.readAccountTrust(this.ownerId); this.active();
+    if (trust && trust.checkpoint.ownerId !== this.ownerId) throw new AccountTrustError("invalid_account_trust");
+    return trust !== null;
+  }
+  /** Internal pending-protocol seam: caller verified a result against this fresh authenticated GET. */
+  async acceptPendingTrust(verified: VerifiedAccountTrust, serverReadAt: number,
+    commit: (previous: StoredAccountTrust | null, trust: StoredAccountTrust) => Promise<boolean>): Promise<boolean> {
+    await this.keys(); this.active();
+    this.checkMember({ ...verified, lastServerReadAt: serverReadAt, lastObservedAt: serverReadAt });
+    const previous = await this.storage.readAccountTrust(this.ownerId); this.active();
+    const trust = await prepareAccountTrust(this.ownerId, verified, previous, { bootstrap: true, serverReadAt }); this.active();
+    if (!await commit(previous, trust)) { this.active(); return false; }
+    this.active();
+    this.verified(trust);
+    this.update({ ...this.value, status: "ready", trust, historyExists: true, code: null, offline: false });
+    return true;
   }
   async revoke(endpointId: string): Promise<void> { await this.append({ type: "revoke_device", endpointId }); }
   async migrate(bridge: ApprovedBridge, execute: ExecuteSecurity): Promise<void> {
@@ -313,7 +365,8 @@ export function safeAccountReturnTo(value: string | null): string | null {
   if (!value || value.length > 2048 || !value.startsWith("/") || value.startsWith("//") || value.includes("#") || value.includes("\\")) return null;
   const url = new URL(value, window.location.origin);
   if (url.origin !== window.location.origin) return null;
-  if (url.pathname === "/devices/approve" && !url.search) return url.pathname;
+  if (url.pathname === "/devices/approve" && (!url.search || [...url.searchParams.keys()].every(key => key === "request")
+    && url.searchParams.getAll("request").length === 1 && /^[A-Za-z0-9_-]{43}$/.test(url.searchParams.get("request")!))) return url.pathname + url.search;
   if (url.pathname === "/pair" && [...url.searchParams.keys()].every(key => key === "code") && url.searchParams.getAll("code").length <= 1
     && (!url.searchParams.has("code") || /^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(url.searchParams.get("code")!))) return url.pathname + url.search;
   if (url.pathname === "/mcp/consent" && [...url.searchParams.keys()].every(key => key === "request") && url.searchParams.getAll("request").length === 1

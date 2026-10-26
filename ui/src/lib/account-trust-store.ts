@@ -115,29 +115,38 @@ export class AccountTrustStore {
     const request = await parseAccountEnrollmentRequest(inputRequest, this.now());
     const current = await this.readVerified(ownerId);
     if (!current) return reject('account_approval_required');
-    const value = record(inputBundle, ['version', 'requestId', 'ownerId', 'approver', 'envelope']);
-    const approver = record(value.approver, ['version', 'id', 'ownerId', 'kind', 'publicKey']);
-    if (value.ownerId !== ownerId) throw new AccountStoreError(403);
-    if (value.version !== 1 || value.requestId !== request.requestId) return reject('account_enrollment_invalid');
-    const candidates = historicalApprover ? [current.history.genesis.payload.device, ...current.history.transitions.flatMap(item => item.payload.operation.type === 'add_device' ? [item.payload.operation.device] : [])] : current.checkpoint.devices;
-    const signer = candidates.find(item => item.endpoint.id === approver.id);
-    if (!signer || Object.entries(signer.endpoint).some(([key, field]) => approver[key] !== field)) return reject('account_enrollment_invalid');
-    const expectedCandidate = { ...request.candidate, ownerId };
-    if (request.kind === 'browser') {
-      const member = current.checkpoint.devices.find(item => item.endpoint.id === request.candidate.id);
-      if (request.candidate.ownerId !== ownerId || !member || !sameEndpoint(member.endpoint, expectedCandidate) || member.signingPublicKey !== request.signingPublicKey || member.label !== request.label) return reject('account_device_revoked');
-    } else {
-      const member = current.checkpoint.bridges.find(item => item.bridgeId === request.bridgeId);
-      if (!member || !sameEndpoint(member.endpoint, expectedCandidate) || member.label !== request.label) return reject('account_bridge_revoked');
-    }
-    let envelope;
-    try { envelope = parseSecureEnvelope(value.envelope); } catch { return reject('account_enrollment_invalid'); }
-    if (envelope.ownerId !== ownerId || envelope.senderId !== signer.endpoint.id || envelope.recipientId !== request.candidate.id || envelope.purpose !== 'enrolled'
-      || envelope.messageId !== request.requestId || envelope.receiverEpoch !== null || envelope.channel !== `account-enrollment:${request.requestId}`
-      || envelope.bridgeId !== (request.kind === 'bridge' ? request.bridgeId : `account_${ownerId}`)
-      || envelope.createdAt > this.now() + ACCOUNT_TRUST_LIMITS.maxFutureSkewMs || envelope.expiresAt > Date.parse(request.expiresAt)
-      || envelope.expiresAt - envelope.createdAt > 120000 || (requireFreshEnvelope && envelope.expiresAt <= this.now())) return reject('account_enrollment_invalid');
-    const bundle: AccountEnrollmentBundle = { version: 1, ownerId, requestId: request.requestId, approver: signer.endpoint, envelope };
-    return { ...current, request, bundle, head: accountHead(current.checkpoint) };
+    return validateApprovalAgainst(ownerId, request, inputBundle, current, { historicalApprover, requireFreshEnvelope, now: this.now() });
   }
+}
+
+/** Pure prospective validation; the supplied history must already be signature-verified. */
+export async function validateApprovalAgainst(ownerId: string, inputRequest: unknown, inputBundle: unknown,
+  current: VerifiedAccountRow, options: { historicalApprover?: boolean; requireFreshEnvelope?: boolean; now?: number } = {}): Promise<ValidatedAccountApproval> {
+  const now = options.now ?? Date.now();
+  if (current.checkpoint.ownerId !== ownerId) throw new AccountStoreError(403);
+  const request = await parseAccountEnrollmentRequest(inputRequest, now);
+  const value = record(inputBundle, ['version', 'requestId', 'ownerId', 'approver', 'envelope']);
+  const approver = record(value.approver, ['version', 'id', 'ownerId', 'kind', 'publicKey']);
+  if (value.ownerId !== ownerId) throw new AccountStoreError(403);
+  if (value.version !== 1 || value.requestId !== request.requestId) return reject('account_enrollment_invalid');
+  const candidates = options.historicalApprover ? [current.history.genesis.payload.device, ...current.history.transitions.flatMap(item => item.payload.operation.type === 'add_device' ? [item.payload.operation.device] : [])] : current.checkpoint.devices;
+  const signer = candidates.find(item => item.endpoint.id === approver.id);
+  if (!signer || Object.entries(signer.endpoint).some(([key, field]) => approver[key] !== field)) return reject('account_enrollment_invalid');
+  const expectedCandidate = { ...request.candidate, ownerId };
+  if (request.kind === 'browser') {
+    const member = current.checkpoint.devices.find(item => item.endpoint.id === request.candidate.id);
+    if (request.candidate.ownerId !== ownerId || !member || !sameEndpoint(member.endpoint, expectedCandidate) || member.signingPublicKey !== request.signingPublicKey || member.label !== request.label) return reject('account_device_revoked');
+  } else {
+    const member = current.checkpoint.bridges.find(item => item.bridgeId === request.bridgeId);
+    if (!member || !sameEndpoint(member.endpoint, expectedCandidate) || member.label !== request.label) return reject('account_bridge_revoked');
+  }
+  let envelope;
+  try { envelope = parseSecureEnvelope(value.envelope); } catch { return reject('account_enrollment_invalid'); }
+  if (envelope.ownerId !== ownerId || envelope.senderId !== signer.endpoint.id || envelope.recipientId !== request.candidate.id || envelope.purpose !== 'enrolled'
+    || envelope.messageId !== request.requestId || envelope.receiverEpoch !== null || envelope.channel !== `account-enrollment:${request.requestId}`
+    || envelope.bridgeId !== (request.kind === 'bridge' ? request.bridgeId : `account_${ownerId}`)
+    || envelope.createdAt > now + ACCOUNT_TRUST_LIMITS.maxFutureSkewMs || envelope.expiresAt > Date.parse(request.expiresAt)
+    || envelope.expiresAt - envelope.createdAt > 120000 || (options.requireFreshEnvelope !== false && envelope.expiresAt <= now)) return reject('account_enrollment_invalid');
+  const bundle: AccountEnrollmentBundle = { version: 1, ownerId, requestId: request.requestId, approver: signer.endpoint, envelope };
+  return { ...current, request, bundle, head: accountHead(current.checkpoint) };
 }

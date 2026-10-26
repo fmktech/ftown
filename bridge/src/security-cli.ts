@@ -4,6 +4,7 @@ import { apiResponse, securityCommand } from './cli-client.js';
 import type { BridgeInvitation } from './security/protocol.js';
 import { pendingPairingLink } from './security/bridge/pending-enrollment.js';
 import { resolveDefaultDataDir } from './ftown-home.js';
+import { readPendingBridgeStatus, submitPendingBridgeDecision } from './security/bridge/pending-approval.js';
 
 export function invitationLink(invitation: BridgeInvitation, apiUrl = 'https://ftown.ia.br'): string {
   const url = new URL('/connect', apiUrl);
@@ -15,6 +16,13 @@ export async function runSecurity(argv: string[]): Promise<number> {
   const program = new Command().name('ftown security').description('Manage this bridge’s encrypted endpoint trust')
     .option('--data-dir <path>', 'Bridge instance data directory').exitOverride();
   const pointer = () => readLocalPointer(program.opts().dataDir as string | undefined);
+  const dataDirectory = () => program.opts().dataDir as string | undefined ?? resolveDefaultDataDir();
+  program.command('pair-status').description('Display this computer’s local pending approval status and comparison code')
+    .action(async () => { console.log(JSON.stringify(await readPendingBridgeStatus(dataDirectory()))); });
+  program.command('pair-confirm <code>').description('Confirm the code matches your trusted browser (XXXX-XXXX-XXXX)')
+    .action(async code => { await submitPendingBridgeDecision(dataDirectory(), 'confirm', String(code)); console.log('Local comparison confirmed; waiting for trusted-device approval.'); });
+  program.command('pair-reject').description('Reject this computer’s current approval attempt')
+    .action(async () => { await submitPendingBridgeDecision(dataDirectory(), 'reject'); console.log('Local rejection recorded.'); });
   program.command('pair-link').description('Display the current private first-computer approval link (explicit local output only)')
     .action(async () => {
       const dataDir = program.opts().dataDir as string | undefined;

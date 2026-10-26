@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { generateEndpoint } from '@security/crypto';
-import { captureInvitation, loadBrowserIdentity, parseInvitation } from './browser-identity';
+import { captureInvitation, clearAccountEnrollment, loadBrowserIdentity, parseInvitation } from './browser-identity';
 import { BridgePolicyStore, LOCAL_RECOVERY_AUTHORITY } from '@security/bridge/policy';
 import { invitationLink } from '../../../bridge/src/security-cli';
 const ownerId = '00000000-0000-4000-8000-000000000001';
@@ -50,4 +50,29 @@ it('requires secure browser context and durable key storage without fallback', a
   Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
   vi.stubGlobal('indexedDB', undefined);
   await expect(loadBrowserIdentity(ownerId)).rejects.toMatchObject({ code: 'storage_unavailable' });
+});
+
+it('cleans only the completed enrollment in the same read/write transaction, preserving a newer request', async () => {
+  let stored: unknown = { link: { request: { requestId: 'newer-request' } } };
+  const remove = vi.fn(() => { stored = undefined; });
+  const close = vi.fn();
+  const transaction = vi.fn((_name: string, mode: string) => {
+    expect(mode).toBe('readwrite');
+    const tx = { oncomplete: null as (() => void) | null, onabort: null, onerror: null,
+      objectStore: () => ({ delete: remove, get: () => {
+        const request = { result: stored, onsuccess: null as (() => void) | null };
+        queueMicrotask(() => { request.onsuccess?.(); queueMicrotask(() => tx.oncomplete?.()); });
+        return request;
+      } }) };
+    return tx;
+  });
+  vi.stubGlobal('indexedDB', { open: () => {
+    const request = { result: { transaction, close }, onsuccess: null as (() => void) | null };
+    queueMicrotask(() => request.onsuccess?.()); return request;
+  } });
+  await clearAccountEnrollment(ownerId, 'completed-request');
+  expect(remove).not.toHaveBeenCalled(); expect(stored).toBeDefined();
+  await clearAccountEnrollment(ownerId, 'newer-request');
+  expect(remove).toHaveBeenCalledExactlyOnceWith(ownerId); expect(stored).toBeUndefined();
+  expect(transaction).toHaveBeenCalledTimes(2); expect(close).toHaveBeenCalledTimes(2);
 });

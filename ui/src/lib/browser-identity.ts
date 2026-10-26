@@ -4,7 +4,7 @@ import { AccountTrustError, generateAccountSigningIdentity, verifyAccountHistory
 import type { AccountEnrollmentLink, AccountSigningIdentity, StoredAccountTrust, VerifiedAccountTrust } from "@security/account-protocol";
 
 const DATABASE = "ftown-endpoint-security";
-const VERSION = 2;
+const VERSION = 3;
 interface PinRecord { key: string; ownerId: string; bridge: ApprovedBridge }
 
 function requireStorage(): void {
@@ -13,7 +13,7 @@ function requireStorage(): void {
   }
   if (!globalThis.indexedDB) throw new SecurityError("storage_unavailable", "Browser key storage is unavailable");
 }
-async function database(): Promise<IDBDatabase> {
+export async function openBrowserSecurityDatabase(): Promise<IDBDatabase> {
   requireStorage();
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DATABASE, VERSION);
@@ -23,12 +23,16 @@ async function database(): Promise<IDBDatabase> {
       for (const name of ["account-signing", "account-trust", "account-enrollments"]) {
         if (!request.result.objectStoreNames.contains(name)) request.result.createObjectStore(name, { keyPath: "ownerId" });
       }
+      for (const name of ["pending-candidates", "pending-reviewers"]) {
+        if (!request.result.objectStoreNames.contains(name)) request.result.createObjectStore(name, { keyPath: "key" });
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(new SecurityError("storage_unavailable", "Browser key storage is unavailable"));
     request.onblocked = () => reject(new SecurityError("storage_unavailable", "Close older FTown tabs to open browser key storage"));
   });
 }
+const database = openBrowserSecurityDatabase;
 
 /** One independent nonextractable signing key per account; tabs reload the atomic winner. */
 export async function loadAccountSigningIdentity(ownerId: string): Promise<AccountSigningIdentity> {
@@ -76,26 +80,34 @@ export async function readAccountTrust(ownerId: string): Promise<StoredAccountTr
 }
 
 /** CAS against the durable pin also protects concurrent tabs from rolling back history or clocks. */
-export async function persistAccountTrust(ownerId: string, verified: VerifiedAccountTrust, options: { bootstrap?: boolean; serverReadAt?: number; now?: number } = {}): Promise<StoredAccountTrust> {
+export async function prepareAccountTrust(ownerId: string, verified: VerifiedAccountTrust, previous: StoredAccountTrust | null,
+  options: { bootstrap?: boolean; serverReadAt?: number; now?: number } = {}): Promise<StoredAccountTrust> {
   const now = options.now ?? Date.now();
   if (verified.checkpoint.ownerId !== ownerId || !Number.isSafeInteger(now) || now < 0
     || options.serverReadAt !== undefined && (!Number.isSafeInteger(options.serverReadAt) || options.serverReadAt < 0 || options.serverReadAt > now)) throw new AccountTrustError("invalid_account_trust");
+  if (!previous && !options.bootstrap) throw new AccountTrustError("account_approval_required");
+  if (previous && now < previous.lastObservedAt) throw new AccountTrustError("account_offline_expired");
+  const checkpoint = await verifyAccountHistory(verified.history, previous?.checkpoint ?? null, now);
+  if (checkpoint.head !== verified.checkpoint.head) throw new AccountTrustError("invalid_account_trust");
+  return { history: verified.history, checkpoint, lastServerReadAt: Math.max(previous?.lastServerReadAt ?? 0, options.serverReadAt ?? 0), lastObservedAt: now };
+}
+export function sameAccountTrustPin(current: StoredAccountTrust | null, previous: StoredAccountTrust | null): boolean {
+  return (current?.checkpoint.head ?? null) === (previous?.checkpoint.head ?? null)
+    && current?.checkpoint.rootId === previous?.checkpoint.rootId && current?.checkpoint.revision === previous?.checkpoint.revision
+    && current?.lastObservedAt === previous?.lastObservedAt && current?.lastServerReadAt === previous?.lastServerReadAt;
+}
+export async function persistAccountTrust(ownerId: string, verified: VerifiedAccountTrust, options: { bootstrap?: boolean; serverReadAt?: number; now?: number } = {}): Promise<StoredAccountTrust> {
+  const now = options.now ?? Date.now();
   for (let attempt = 0; attempt < 5; attempt++) {
     const previous = await readAccountTrust(ownerId);
-    if (!previous && !options.bootstrap) throw new AccountTrustError("account_approval_required");
-    if (previous && now < previous.lastObservedAt) throw new AccountTrustError("account_offline_expired");
-    const checkpoint = await verifyAccountHistory(verified.history, previous?.checkpoint ?? null, now);
-    if (checkpoint.head !== verified.checkpoint.head) throw new AccountTrustError("invalid_account_trust");
-    const trust: StoredAccountTrust = { history: verified.history, checkpoint,
-      lastServerReadAt: Math.max(previous?.lastServerReadAt ?? 0, options.serverReadAt ?? 0), lastObservedAt: now };
+    const trust = await prepareAccountTrust(ownerId, verified, previous, { ...options, now });
     const db = await database(); let raced = false;
     try {
       const tx = db.transaction("account-trust", "readwrite"); const done = completed(tx); const store = tx.objectStore("account-trust");
       const request = store.get(ownerId);
       request.onsuccess = () => {
-        const current = (request.result as { trust: StoredAccountTrust } | undefined)?.trust;
-        if ((current?.checkpoint.head ?? null) !== (previous?.checkpoint.head ?? null)
-          || current?.lastObservedAt !== previous?.lastObservedAt || current?.lastServerReadAt !== previous?.lastServerReadAt) { raced = true; tx.abort(); return; }
+        const current = (request.result as { trust: StoredAccountTrust } | undefined)?.trust ?? null;
+        if (!sameAccountTrustPin(current, previous)) { raced = true; tx.abort(); return; }
         store.put({ ownerId, trust });
       };
       try { await done; return trust; } catch { if (!raced) throw new AccountTrustError("account_storage_unavailable"); }
@@ -116,6 +128,19 @@ export async function storeAccountEnrollment(ownerId: string, link: AccountEnrol
   try {
     const tx = db.transaction("account-enrollments", "readwrite"); const done = completed(tx);
     if (link) tx.objectStore("account-enrollments").put({ ownerId, link }); else tx.objectStore("account-enrollments").delete(ownerId);
+    await done;
+  } finally { db.close(); }
+}
+/** A completed request must not remove a newer enrollment started by another tab. */
+export async function clearAccountEnrollment(ownerId: string, requestId: string): Promise<void> {
+  const db = await database();
+  try {
+    const tx = db.transaction("account-enrollments", "readwrite"); const done = completed(tx);
+    const store = tx.objectStore("account-enrollments"); const request = store.get(ownerId);
+    request.onsuccess = () => {
+      const current = request.result as { link?: AccountEnrollmentLink } | undefined;
+      if (current?.link?.request.requestId === requestId) store.delete(ownerId);
+    };
     await done;
   } finally { db.close(); }
 }
