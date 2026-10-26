@@ -209,7 +209,9 @@ test("account-migrated OAuth MCP uses one selected-computer consent, enforces re
       await expect(migration).toHaveCount(0, { timeout: 45000 });
       await confirmTestBrowserMigration(page, home);
     }
+    await page.getByText(/^Browsers with access/).click();
     await expect(page.getByRole("list", { name: "Account devices", exact: true })).toHaveCount(1);
+    await expect(page.getByRole("list", { name: "Account devices", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Close security" }).click();
     setStage("legacy-invitation-denied-after-adoption");
     bypassContext = await browser.newContext({ baseURL: tlsUi, ignoreHTTPSErrors: false });

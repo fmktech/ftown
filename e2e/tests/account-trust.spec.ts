@@ -33,6 +33,7 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       await page.getByRole("button", { name: "Open security", exact: true }).click();
       await expect(page.getByRole("tab", { name: "Access", exact: true })).toHaveAttribute("aria-selected", "true");
       await expect(page.getByRole("heading", { name: "Your computers", exact: true })).toBeVisible();
+      await expect(page.locator(`[data-computer-access="${firstId}"]`)).toContainText("Shared with your approved browsers", { timeout: 60000 });
       await noOverflow(page); await page.screenshot({ path: info.outputPath(`security-access-${viewport.width}.png`), fullPage: true });
       await page.getByText(/^Browsers with access/).click();
       await expect(page.getByRole("button", { name: /^Remove access for / })).toBeDisabled();

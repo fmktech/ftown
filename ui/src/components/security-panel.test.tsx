@@ -172,6 +172,40 @@ describe("Account devices", () => {
     expect(screen.getByText(/browsers outside your account approvals lose access/)).toBeTruthy();
   });
 
+  it("waits for a roster-only computer to connect and verify without requesting another approval", async () => {
+    const f = accountFixture(1);
+    const endpoint = { ...device("bridge-key", "").endpoint, kind: "bridge" as const };
+    f.state.trust!.checkpoint.bridges = [{ bridgeId: bridge.bridgeId, endpoint, label: "Computer", approvedAt: "2026-10-25T00:00:00Z" }];
+    let complete!: (value: { devices: ApprovedEndpoint[] }) => void;
+    const execute = mockExecutor().mockImplementation(() => new Promise(resolve => { complete = resolve; }));
+    const props = { currentEndpointId: "0", execute, accountClient: f.client, accountState: f.state };
+    const view = render(<SecurityDevices {...props} bridges={[{ ...bridge, security: { ...bridge.security, status: "connecting" } }]} />);
+    expect(screen.getByText("Checking access…")).toBeTruthy();
+    expect(screen.getByText("Waiting for this computer to connect.")).toBeTruthy();
+    expect(screen.queryByText(/Finish sharing from a browser/)).toBeNull();
+    expect(execute).not.toHaveBeenCalled();
+    view.rerender(<SecurityDevices {...props} bridges={[bridge]} />);
+    await waitFor(() => expect(execute).toHaveBeenCalledOnce());
+    expect(screen.getByText("Checking how access is set up…")).toBeTruthy();
+    expect(screen.queryByText(/Finish sharing from a browser/)).toBeNull();
+    await act(async () => complete({ devices: [{ ...device("0", "Laptop"), source: "account" }] }));
+    expect(screen.getByText("Shared with your approved browsers")).toBeTruthy();
+  });
+
+  it("offers setup guidance only after an independent result and refresh advice after verification failure", async () => {
+    const f = accountFixture(1);
+    const endpoint = { ...device("bridge-key", "").endpoint, kind: "bridge" as const };
+    f.state.trust!.checkpoint.bridges = [{ bridgeId: bridge.bridgeId, endpoint, label: "Computer", approvedAt: "2026-10-25T00:00:00Z" }];
+    const execute = mockExecutor().mockResolvedValueOnce({ devices: [device("0", "Laptop")] }).mockRejectedValue({ code: "bridge_offline" });
+    render(<SecurityDevices currentEndpointId="0" bridges={[bridge]} execute={execute} accountClient={f.client} accountState={f.state} />);
+    await screen.findByText("Finishing setup");
+    expect(screen.getByText(/Finish sharing from a browser already approved/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh access" }));
+    await screen.findByText("Setup needs attention");
+    expect(screen.getByText("Could not verify access. Reconnect this computer, then refresh access.")).toBeTruthy();
+    expect(screen.queryByText(/Finish sharing from a browser/)).toBeNull();
+  });
+
   it("confirms account sharing once per connection and qualifies offline or changed-key status", async () => {
     const f = accountFixture(1); const execute = mockExecutor().mockResolvedValue({ devices: [{ ...device("0", "Laptop"), source: "account" }] });
     const props = { currentEndpointId: "0", execute, accountClient: f.client, accountState: f.state };
