@@ -11,6 +11,7 @@ import { useBridges } from "@/hooks/useBridges";
 import { useAllSessionEvents } from "@/hooks/useAllSessionEvents";
 import type { SecurityCommand, SecurityCommandResults } from "@security/protocol";
 import { SecurityPanel } from "./SecurityPanel";
+import { SecurityLockIcon } from "./SecurityLockIcon";
 import { usePendingApprovals } from "@/hooks/usePendingApprovals";
 import type { AccountSecurityClient, AccountSecuritySnapshot } from "@/lib/account-security-client";
 import { SessionList } from "./SessionList";
@@ -172,6 +173,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     for (const state of securityRuntime?.snapshot() ?? []) if (!known.has(state.bridgeId)) known.set(state.bridgeId, { bridgeId: state.bridgeId, label: state.bridgeId, security: state });
     return [...known.values()];
   }, [bridges, securityRuntime, securityGeneration]);
+  const bridgeSecurityStates = useMemo(() => new Map(securityBridges.map(bridge => [bridge.bridgeId, bridge.security.status])), [securityBridges]);
   const executeSecurity = useCallback(<C extends SecurityCommand>(command: C): Promise<SecurityCommandResults[C["type"]]> => {
     if (!client?.executeSecurity) return Promise.reject({ code: "security_setup_required" });
     return client.executeSecurity(command);
@@ -974,11 +976,12 @@ PY`;
               onUnhideBridge={handleUnhideBridge}
               onCreateSession={handleCreateSessionOnBridge}
               onOpenSecurity={openSecurity}
+              bridgeSecurityStates={bridgeSecurityStates}
             />
           </div>
           <button type="button" className="flex min-h-11 shrink-0 items-center justify-center gap-2 border-t border-[var(--border-subtle)] px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
             title="Security: computer and browser access" aria-label="Open security" onClick={() => openSecurity()}>
-            <span aria-hidden="true">◇</span><span className={isDesktop && sidebarCollapsed ? "sr-only" : ""}>Security{pendingCount > 0 ? ` (${pendingCount})` : ""}</span>
+            <SecurityLockIcon state="unknown" /><span className={isDesktop && sidebarCollapsed ? "sr-only" : ""}>Security{pendingCount > 0 ? ` (${pendingCount})` : ""}</span>
           </button>
           <PushNotificationsControl localMode={localMode} accountId={userId} />
           {!sidebarCollapsed && (

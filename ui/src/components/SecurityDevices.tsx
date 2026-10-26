@@ -5,6 +5,8 @@ import type { ApprovedEndpoint, BridgeInvitation } from "@security/protocol";
 import { securityErrorMessage, type SecurityBridge, type SecurityCommandExecutor } from "./SecurityPanel";
 import type { AccountSecurityClient, AccountSecuritySnapshot } from "@/lib/account-security-client";
 import { DeviceApproval } from "./DeviceApproval";
+import { SecurityAccessMap, accessBrowserLabel, type SecurityAccessBrowserNode, type SecurityAccessBridgeNode, type SecurityAccessSelection } from "./SecurityAccessMap";
+import type { SecurityLockState } from "./SecurityLockIcon";
 import type { PendingApprovalClient, PendingSnapshot } from "@/lib/pending-approval-client";
 import { usePendingApprovals } from "@/hooks/usePendingApprovals";
 import { PendingDeviceInbox } from "./PendingDeviceApprovals";
@@ -146,6 +148,7 @@ function AccountDevices({ client, initial, bridges, selected, execute, pendingCl
   const [busy, setBusy] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<string | null>(null);
   const [refreshRound, setRefreshRound] = useState(0);
+  const [selection, setSelection] = useState<{ scope: string; node: SecurityAccessSelection } | null>(null);
   const [expandedComputers, setExpandedComputers] = useState<Record<string, boolean>>({});
   const [confirmedComputers, setConfirmedComputers] = useState<Record<string, boolean>>({});
   const [failedChecks, setFailedChecks] = useState<Record<string, boolean>>({});
@@ -200,6 +203,42 @@ function AccountDevices({ client, initial, bridges, selected, execute, pendingCl
   const inbox = pendingState ?? pending.snapshot;
   const needsReview = !!inbox.review || !!inbox.inboxError || inbox.inbox.some(item => !["rejected", "cancelled", "expired", "conflict"].includes(item.status));
   const browserName = (label: string, self: boolean) => self && /^(this device|this browser|browser)$/i.test(label.trim()) ? "This browser" : !self && /^this (device|browser)$/i.test(label.trim()) ? "Browser" : label || "Browser";
+  const accountCurrent = state.status === "ready" && !!state.trust && !state.offline;
+  const accountHistorical = state.status === "ready" && !!state.trust && state.offline;
+  const browserNodes: SecurityAccessBrowserNode[] = devices.map(device => ({ id: device.endpoint.id,
+    label: browserName(device.label, device.endpoint.id === state.identity?.endpoint.id), current: device.endpoint.id === state.identity?.endpoint.id,
+    accessText: accountCurrent ? "Approved for your account" : accountHistorical ? "Last verified · offline" : "Access paused",
+    lockState: accountCurrent ? "secured" : accountHistorical ? "unknown" : "approval_needed", edge: accountCurrent ? "current" : accountHistorical ? "historical" : "none" }));
+  if (state.identity && !browserNodes.some(node => node.id === state.identity!.endpoint.id)) browserNodes.unshift({ id: state.identity.endpoint.id,
+    label: "This browser", current: true, accessText: state.status === "checking" ? "Checking access…" : state.status === "error" ? state.code === "account_device_revoked" ? "Access revoked" : "Access paused" : "Account approval needed", lockState: state.status === "checking" ? "unknown" : "approval_needed", edge: "none" });
+  const computerViews = [...computers.values()].map(computer => {
+    const key = proofKey(computer); const confirmed = confirmedComputers[key] === true;
+    const ready = computer.security.status === "ready";
+    const blocked = ["revoked", "key_changed"].includes(computer.security.status) || state.status === "error" || !!state.trust?.checkpoint.revokedBridgeIds.includes(computer.bridgeId);
+    const pin = state.legacyBridges.find(item => item.bridgeId === computer.bridgeId);
+    const inRoster = roster.some(item => item.bridgeId === computer.bridgeId);
+    const shared = confirmed && !blocked && !checkingComputers[key] && !failedChecks[key] && state.status === "ready" && !state.offline;
+    const verifying = !confirmed && !failedChecks[key] && (checkingComputers[key] || computer.security.status === "connecting" || inRoster && confirmedComputers[key] !== false);
+    const access = blocked ? "Access needs attention" : verifying ? "Checking access…" : checkingComputers[key] && ready && !state.offline ? "Checking sharing…" : confirmed ? failedChecks[key] && ready ? "Previously shared · check access" : shared && ready ? "Shared with your approved browsers" : "Previously shared · reconnect to verify" : inRoster ? failedChecks[key] ? "Setup needs attention" : "Finishing setup" : pin ? "Only separately approved browsers" : "Approval needed";
+    const connection = ready ? "Connected" : computer.security.status === "connecting" ? "Connecting…" : computer.security.status === "offline" ? "Offline" : "Not connected";
+    const current = accountCurrent && shared && ready;
+    const historical = !!state.trust && confirmed && !blocked && !checkingComputers[key] && !failedChecks[key] && state.status === "ready" && (state.offline || computer.security.status === "offline");
+    const lockState: SecurityLockState = current ? "secured" : blocked || ["unpaired", "revoked", "key_changed", "upgrade_required"].includes(computer.security.status) ? "approval_needed"
+      : ["offline", "connecting"].includes(computer.security.status) || verifying || failedChecks[key] || confirmed ? "unknown" : "approval_needed";
+    const node: SecurityAccessBridgeNode = { id: computer.bridgeId, label: computer.label || "Computer", accessText: access, connectionText: connection,
+      lockState, edge: current ? "current" : historical ? "historical" : "none" };
+    return { computer, key, confirmed, ready, blocked, pin, inRoster, verifying, node };
+  });
+  const scope = `${context}:${selected?.bridgeId ?? ""}`;
+  const validSelection = (node: SecurityAccessSelection) => node.kind === "browser" ? browserNodes.some(item => item.id === node.id) : computerViews.some(item => item.node.id === node.id);
+  const fallback: SecurityAccessSelection | null = selected && computerViews.some(item => item.node.id === selected.bridgeId) ? { kind: "bridge", id: selected.bridgeId }
+    : browserNodes.find(node => node.current) ? { kind: "browser", id: browserNodes.find(node => node.current)!.id }
+    : browserNodes[0] ? { kind: "browser", id: browserNodes[0].id } : computerViews[0] ? { kind: "bridge", id: computerViews[0].node.id } : null;
+  const active = selection?.scope === scope && validSelection(selection.node) ? selection.node : fallback;
+  const selectedBrowser = active?.kind === "browser" ? browserNodes.find(node => node.id === active.id) : undefined;
+  const selectedDevice = selectedBrowser ? devices.find(device => device.endpoint.id === selectedBrowser.id) : undefined;
+  const selectedComputer = active?.kind === "bridge" ? computerViews.find(item => item.node.id === active.id) : undefined;
+  const selectedBrowserLabel = selectedBrowser ? accessBrowserLabel(selectedBrowser, browserNodes) : "Browser";
   return <div className="space-y-3">
     <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
       <p className="text-xs"><span className="font-semibold">This browser</span><span className="text-[var(--text-muted)]"> · {state.status === "ready" ? state.offline ? "Reconnect to verify access" : "Approved for your account" : state.status === "checking" ? "Checking access…" : state.status === "error" ? state.code === "account_device_revoked" ? "Access revoked" : "Access paused" : "Account approval needed"}</span></p>
@@ -209,46 +248,33 @@ function AccountDevices({ client, initial, bridges, selected, execute, pendingCl
     {state.status === "ready" && pending.client && (needsReview
       ? <PendingDeviceInbox client={pending.client} snapshot={inbox} offline={state.offline} />
       : <details className="text-sm"><summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2">Add a browser or review requests</summary><p className="mb-2 text-xs text-[var(--text-muted)]">Sign in on the new browser, then review its request here and compare the code on both devices.</p><PendingDeviceInbox client={pending.client} snapshot={inbox} offline={state.offline} /></details>)}
-    <section aria-labelledby="security-computers-title" className="space-y-1">
-      <h3 id="security-computers-title" className="text-sm font-semibold">Your computers</h3>
-      {!computers.size && <p className="text-sm text-[var(--text-muted)]">Start FTown on a computer to connect it to your account.</p>}
-      <ul aria-label="Computer access" className="divide-y divide-[var(--border-subtle)] border-y border-[var(--border-subtle)]">{[...computers.values()].map(computer => {
-        const key = proofKey(computer); const confirmed = confirmedComputers[key] === true;
-        const ready = computer.security.status === "ready";
-        const blocked = ["revoked", "key_changed"].includes(computer.security.status) || state.status === "error" || !!state.trust?.checkpoint.revokedBridgeIds.includes(computer.bridgeId);
-        const pin = state.legacyBridges.find(item => item.bridgeId === computer.bridgeId);
-        const inRoster = roster.some(item => item.bridgeId === computer.bridgeId);
-        const shared = confirmed && !blocked && !checkingComputers[key] && !failedChecks[key] && state.status === "ready" && !state.offline;
-        const verifying = !confirmed && !failedChecks[key] && (checkingComputers[key] || computer.security.status === "connecting" || inRoster && confirmedComputers[key] !== false);
-        const access = blocked ? "Access needs attention" : verifying ? "Checking access…" : checkingComputers[key] && ready && !state.offline ? "Checking sharing…" : confirmed ? failedChecks[key] && ready ? "Previously shared · check access" : shared && ready ? "Shared with your approved browsers" : "Previously shared · reconnect to verify" : inRoster ? failedChecks[key] ? "Setup needs attention" : "Finishing setup" : pin ? "Only separately approved browsers" : "Approval needed";
-        const connection = ready ? "Connected" : computer.security.status === "connecting" ? "Connecting…" : computer.security.status === "offline" ? "Offline" : "Not connected";
-        return <li key={computer.bridgeId} data-computer-access={computer.bridgeId} data-account-migration={pin && !confirmed ? computer.bridgeId : undefined} className="space-y-1 py-2.5">
-          <div className="flex items-start justify-between gap-3"><h4 className="min-w-0 flex-1 break-words text-sm font-semibold [overflow-wrap:anywhere]">{computer.label || "Computer"}</h4><span className="shrink-0 pt-0.5 text-xs text-[var(--text-muted)]">{connection}</span></div>
-          <p className="text-xs leading-5 text-[var(--text-secondary)]">{access}</p>
+    <SecurityAccessMap browsers={browserNodes} bridges={computerViews.map(item => item.node)}
+      account={{ statusText: accountCurrent ? "Verified" : accountHistorical ? "Offline approval" : state.status === "checking" ? "Checking" : state.status === "error" ? "Access paused" : "Account approval needed", lockState: accountCurrent ? "secured" : accountHistorical || state.status === "checking" ? "unknown" : "approval_needed" }}
+      selected={active} onSelect={node => { setSelection({ scope, node }); setConfirm(null); }} />
+    {active && <section aria-label="Selected access details" className="space-y-2 rounded-md border border-[var(--border-muted)] p-3">
+      {selectedBrowser && <>
+        <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="min-w-0 break-words text-sm font-semibold">{selectedBrowserLabel}{selectedBrowser.current && selectedBrowserLabel !== "This browser" ? " · This browser" : ""}</h3>
+          {selectedDevice && <button className="btn-ghost min-h-11 sm:min-h-8 text-[var(--status-error)]" aria-label={`Remove access for ${selectedBrowserLabel}`} disabled={!!busy || state.offline || devices.length === 1} onClick={() => setConfirm(selectedBrowser.id)}>Remove access</button>}</div>
+        <p className="text-xs text-[var(--text-muted)]">{selectedBrowser.accessText}. Account-approved browsers can control shared computers and approve other browsers.</p>
+        {state.offline && <p role="status" className="text-xs text-[var(--text-muted)]">Showing verified stored account trust. Reconnect before removing access.</p>}
+        <details className="text-xs"><summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2">Browser details</summary>{selectedDevice && <p>Approved {new Date(selectedDevice.approvedAt).toLocaleString()}.</p>}<p className="break-all font-mono">Fingerprint: {selectedBrowser.id}</p></details>
+        {confirm === selectedBrowser.id && selectedDevice && <div role="group" aria-label="Confirm account device revocation" className="space-y-3 rounded-md border border-[var(--border-muted)] p-3"><p className="text-sm">Remove this browser from all shared computers? Connected computers stop its access after receiving the update; offline computers apply it when they reconnect. Other browsers and MCP grants keep their access.</p><div className="flex flex-wrap gap-2"><button className="btn-danger min-h-11 sm:min-h-8" disabled={!!busy} onClick={() => void revoke(selectedBrowser.id)}>Confirm remove access</button><button className="btn-ghost min-h-11 sm:min-h-8" onClick={() => setConfirm(null)}>Cancel</button></div></div>}
+        {devices.length === 1 && <p className="text-xs text-[var(--text-muted)]">This is the last account administrator. Approve another browser before removing its access.</p>}
+      </>}
+      {selectedComputer && (() => {
+        const { computer, key, confirmed, pin, ready, blocked, inRoster, verifying } = selectedComputer;
+        return <div data-computer-details={computer.bridgeId} data-account-migration={pin && !confirmed ? computer.bridgeId : undefined} className="space-y-2">
+          <h3 className="break-words text-sm font-semibold">{computer.label || "Computer"}</h3>
           {pin && !confirmed && <><p className="text-xs leading-relaxed text-[var(--text-muted)]">Sharing lets your account-approved browsers control this computer. It replaces separate browser approvals and old invitations; browsers outside your account approvals lose access.</p>
             <button className="btn-accent min-h-11 sm:min-h-8 w-full sm:w-auto" disabled={!!busy || !ready || blocked || state.offline || state.status === "unapproved" && state.historyExists} onClick={() => void migrate(computer)}>{busy === computer.bridgeId ? "Sharing computer…" : "Share with my other browsers"}</button></>}
           {!pin && !confirmed && !blocked && <p className="text-xs text-[var(--text-muted)]">{failedChecks[key] ? "Could not verify access. Reconnect this computer, then refresh access." : verifying ? ready ? "Checking how access is set up…" : "Waiting for this computer to connect." : inRoster ? "Finish sharing from a browser already approved on this computer." : "Approve this computer from its setup request, or use its local invitation."}</p>}
+          {confirmed && <p className="text-xs text-[var(--text-muted)]">{selectedComputer.node.edge === "current" ? "Your approved account browsers can use this computer." : "Reconnect and refresh access to verify sharing on this computer."}</p>}
           {pin && !confirmed && !ready && <p className="text-xs text-[var(--text-muted)]">Connect this computer to share it.</p>}
           {pin && ready && !confirmed && <details className="text-xs" onToggle={event => { const open = event.currentTarget.open; setExpandedComputers(previous => previous[key] === open ? previous : { ...previous, [key]: open }); }}><summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2">Separate approvals and recovery</summary>{expandedComputers[key] && <SecurityDevices bridge={computer} currentEndpointId={state.identity?.endpoint.id ?? null} execute={execute} />}</details>}
-        </li>;
-      })}</ul>
-    </section>
+        </div>;
+      })()}
+    </section>}
     {state.status === "unapproved" && state.historyExists && <DeviceApproval ownerId={client.ownerId} email="your account" client={client} />}
-    <details className="border-b border-[var(--border-subtle)] pb-1">
-      <summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2 text-sm font-semibold">Browsers with access ({devices.length})</summary>
-      <p className="mb-2 text-xs text-[var(--text-muted)]">These browsers can control shared computers and approve other browsers.</p>
-      {state.offline && <p role="status" className="mb-3 text-xs text-[var(--text-muted)]">Showing verified stored account trust. Reconnect before removing access.</p>}
-      {devices.length > 0 && <ul aria-label="Account devices" className="divide-y divide-[var(--border-subtle)]">{devices.map(device => {
-        const self = device.endpoint.id === state.identity?.endpoint.id; const label = browserName(device.label, self);
-        return <li key={device.endpoint.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(7rem,1fr)_auto]">
-          <h4 className="min-w-0 self-center break-words text-sm font-semibold [overflow-wrap:anywhere]">{label}{self && label !== "This browser" ? " · This browser" : ""}</h4>
-          <button className="btn-ghost col-start-2 row-start-1 min-h-11 sm:min-h-8 text-[var(--status-error)] sm:col-start-3" aria-label={`Remove access for ${label}`} disabled={!!busy || state.offline || devices.length === 1} onClick={() => setConfirm(device.endpoint.id)}>Remove access</button>
-          <details className="col-span-2 col-start-1 row-start-2 min-w-0 text-xs sm:col-span-1 sm:col-start-2 sm:row-start-1"><summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2">Browser details</summary><p>Approved {new Date(device.approvedAt).toLocaleString()}.</p><p className="break-all font-mono">Fingerprint: {device.endpoint.id}</p></details>
-          {confirm === device.endpoint.id && <div role="group" aria-label="Confirm account device revocation" className="col-span-full space-y-3 rounded-md border border-[var(--border-muted)] p-3"><p className="text-sm">Remove this browser from all shared computers? Connected computers stop its access after receiving the update; offline computers apply it when they reconnect. Other browsers and MCP grants keep their access.</p><div className="flex flex-wrap gap-2"><button className="btn-danger min-h-11 sm:min-h-8" disabled={!!busy} onClick={() => void revoke(device.endpoint.id)}>Confirm remove access</button><button className="btn-ghost min-h-11 sm:min-h-8" onClick={() => setConfirm(null)}>Cancel</button></div></div>}
-        </li>;
-      })}</ul>}
-      {devices.length === 1 && <p className="mt-3 text-xs text-[var(--text-muted)]">This is the last account administrator. Approve another browser before removing its access.</p>}
-    </details>
     <details className="text-xs text-[var(--text-muted)]"><summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2">Recovery and security details</summary><p>Clearing browser storage loses its private key. Password resets cannot recover it. Keep an approved browser and local CLI access available. If every account signing key is lost, each computer needs explicit account-trust recovery. Local recovery cannot reset account approvals.</p></details>
   </div>;
 }

@@ -10,7 +10,6 @@ const origin = process.env.FTOWN_PUBLIC_URL ?? "https://localhost:8444";
 async function devices(page: Page) {
   await page.getByRole("button", { name: "Open security", exact: true }).click();
   await page.getByRole("tab", { name: "Access", exact: true }).click();
-  await page.getByText(/^Browsers with access/).click();
   await expect(page.getByRole("list", { name: "Account devices", exact: true })).toBeVisible();
 }
 async function noOverflow(page: Page) { expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); }
@@ -20,50 +19,59 @@ async function waitForSecurityLayout(page: Page, width: number) {
   await expect.poll(() => page.getByRole("dialog", { name: "Security", exact: true }).evaluate((element, mobile) => {
     const transitioning = element.getAnimations({ subtree: true }).some(animation => animation instanceof CSSTransition && animation.playState === "running");
     const controls = [...element.querySelectorAll<HTMLElement>("button,select,summary")].filter(control => control.checkVisibility());
-    return !transitioning && controls.length > 0 && controls.every(control => mobile ? control.getBoundingClientRect().height >= 44 : control.getBoundingClientRect().height <= 36);
+    return !transitioning && controls.length > 0 && (!mobile || controls.every(control => control.getBoundingClientRect().height >= 44));
   }, width < 640), { timeout: 2000, intervals: [25, 50, 100], message: "Security responsive transitions and control geometry must settle" }).toBe(true);
 }
 
-async function compactAccessEvidence(page: Page, info: TestInfo, bridgeIds: string[]) {
+async function accessMapEvidence(page: Page, info: TestInfo, bridgeIds: string[], otherBrowserId: string) {
   await page.getByRole("button", { name: "Open security", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Security", exact: true });
   await expect(dialog.getByRole("tab", { name: "Access", exact: true })).toHaveAttribute("aria-selected", "true");
-  for (const bridgeId of bridgeIds) await expect(dialog.locator(`[data-computer-access="${bridgeId}"]`)).toContainText("Shared with your approved browsers", { timeout: 60000 });
+  for (const bridgeId of bridgeIds) {
+    await expect(dialog.locator(`[data-computer-access="${bridgeId}"]`)).toContainText("Shared with your approved browsers", { timeout: 60000 });
+    await expect(dialog.locator(`[data-access-edge="bridge:${bridgeId}"]`)).toHaveAttribute("data-certainty", "current");
+  }
   const measurements = [];
-  for (const size of [{ width: 1280, height: 900 }, { width: 900, height: 760 }, { width: 390, height: 844 }]) {
+  for (const size of [{ width: 1280, height: 900 }, { width: 900, height: 760 }, { width: 390, height: 844 }, { width: 320, height: 760 }]) {
     await page.setViewportSize(size);
     await waitForSecurityLayout(page, size.width);
+    await dialog.getByRole("button", { name: /\(this browser\):/ }).click();
     await dialog.locator("[data-security-content]").evaluate(element => { element.scrollTop = 0; });
-    const measured = await dialog.evaluate((element, ids) => {
+    const measured = await dialog.evaluate(element => {
       const content = element.querySelector<HTMLElement>("[data-security-content]")!;
       const bounds = content.getBoundingClientRect();
       return { headerHeight: element.querySelector("header")!.getBoundingClientRect().height,
         contentTop: bounds.top, contentBottom: bounds.bottom, scrollTop: content.scrollTop,
         overflow: element.scrollWidth > element.clientWidth || content.scrollWidth > content.clientWidth,
-        rows: ids.map(id => { const row = element.querySelector(`[data-computer-access="${id}"]`)!.getBoundingClientRect(); return { top: row.top, bottom: row.bottom, height: row.height }; }),
+        nodes: [...element.querySelectorAll<HTMLElement>("[data-access-node]")].map(node => { const rect = node.getBoundingClientRect(); return { kind: node.dataset.accessKind, top: rect.top, bottom: rect.bottom, height: rect.height }; }),
         targets: [...element.querySelectorAll<HTMLElement>("button,select,summary")].filter(control => control.checkVisibility()).map(control => control.getBoundingClientRect().height) };
-    }, bridgeIds);
+    });
     expect(measured.headerHeight).toBeLessThanOrEqual(64);
     expect(measured.overflow).toBe(false); expect(measured.scrollTop).toBe(0);
-    expect(measured.rows).toHaveLength(3);
-    for (const row of measured.rows) {
-      expect(row.height).toBeLessThanOrEqual(size.width < 640 ? 100 : 76);
-      if (size.width >= 640) { expect(row.top).toBeGreaterThanOrEqual(measured.contentTop); expect(row.bottom).toBeLessThanOrEqual(measured.contentBottom); }
+    expect(measured.nodes.filter(node => node.kind === "bridge")).toHaveLength(3);
+    for (const node of measured.nodes) {
+      expect(node.height).toBeGreaterThanOrEqual(44);
+      if (size.width >= 640) { expect(node.top).toBeGreaterThanOrEqual(measured.contentTop); expect(node.bottom).toBeLessThanOrEqual(measured.contentBottom); }
     }
     if (size.width < 640) for (const height of measured.targets) expect(height).toBeGreaterThanOrEqual(44);
     await noOverflow(page);
-    await page.screenshot({ path: info.outputPath(`security-compact-access-${size.width}.png`), fullPage: true });
-    await dialog.getByText(/^Browsers with access/).click();
-    const browserList = dialog.getByRole("list", { name: "Account devices", exact: true });
-    await expect(browserList).toBeVisible();
-    const browserHeights = await browserList.getByRole("listitem").evaluateAll(rows => rows.map(row => row.getBoundingClientRect().height));
-    for (const height of browserHeights) expect(height).toBeLessThanOrEqual(size.width < 640 ? 128 : 76);
+    await page.screenshot({ path: info.outputPath(`security-access-map-${size.width}.png`), fullPage: true });
+    const browser = dialog.locator(`[data-access-kind="browser"][data-access-node="${otherBrowserId}"]`);
+    await browser.focus(); await browser.press("Enter");
+    await expect(browser).toHaveAttribute("aria-pressed", "true");
+    await expect(dialog.getByRole("button", { name: "Remove access for Account test phone", exact: true })).toBeVisible();
+    await dialog.getByRole("region", { name: "Selected access details" }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: info.outputPath(`security-access-browser-${size.width}.png`), fullPage: true });
+    const computer = dialog.locator(`[data-computer-access="${bridgeIds[0]}"]`);
+    await computer.focus(); await computer.press("Enter");
+    await expect(computer).toHaveAttribute("aria-pressed", "true");
+    await expect(dialog.locator(`[data-computer-details="${bridgeIds[0]}"]`)).toBeVisible();
     await noOverflow(page);
-    await page.screenshot({ path: info.outputPath(`security-compact-browsers-${size.width}.png`), fullPage: true });
-    measurements.push({ ...size, ...measured, browserHeights });
-    await dialog.getByText(/^Browsers with access/).click();
+    await dialog.getByRole("region", { name: "Selected access details" }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: info.outputPath(`security-access-computer-${size.width}.png`), fullPage: true });
+    measurements.push({ ...size, ...measured });
   }
-  await info.attach("security-density.json", { body: JSON.stringify(measurements, null, 2), contentType: "application/json" });
+  await info.attach("security-access-map-density.json", { body: JSON.stringify(measurements, null, 2), contentType: "application/json" });
   await dialog.getByRole("button", { name: "Close security" }).click();
   await page.setViewportSize({ width: 1280, height: 900 });
 }
@@ -88,7 +96,6 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       await expect(page.getByRole("heading", { name: "Your computers", exact: true })).toBeVisible();
       await expect(page.locator(`[data-computer-access="${firstId}"]`)).toContainText("Shared with your approved browsers", { timeout: 60000 });
       await noOverflow(page); await page.screenshot({ path: info.outputPath(`security-access-${viewport.width}.png`), fullPage: true });
-      await page.getByText(/^Browsers with access/).click();
       await expect(page.getByRole("button", { name: /^Remove access for / })).toBeDisabled();
       await expect(page.getByText(/last account administrator/)).toBeVisible(); await noOverflow(page);
       await page.screenshot({ path: info.outputPath("account-first-device.png"), fullPage: true });
@@ -218,12 +225,13 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
         await expect(phone.locator("text=/^(P2P|Local|Cloud)$/").first()).toHaveText("Cloud", { timeout: 15000 });
         expect(frames.some(frame => frame.includes("ftown_encrypted"))).toBe(true);
         expect(frames.some(frame => frame.includes(privateName) || frame.includes(marker))).toBe(false);
-        if (viewport.width === 1280) await compactAccessEvidence(page, info, [firstId, secondId, thirdId]);
+        if (viewport.width === 1280) await accessMapEvidence(page, info, [firstId, secondId, thirdId], phoneIdentity.endpointId);
       } finally { release(); await staleTab.close(); }
 
       await devices(page); await noOverflow(page);
       await expect(page.getByRole("list", { name: "Account devices", exact: true })).toContainText("Account test phone");
       await page.screenshot({ path: info.outputPath("account-devices.png"), fullPage: true });
+      await page.getByRole("button", { name: /^Browser Account test phone:/ }).click();
       await page.getByRole("button", { name: "Remove access for Account test phone", exact: true }).click();
       await page.getByRole("button", { name: "Confirm remove access", exact: true }).click();
       await expect(page.getByRole("list", { name: "Account devices", exact: true })).not.toContainText("Account test phone");
