@@ -320,6 +320,13 @@ export class PendingApprovalStore {
     return (await this.query('SELECT request_id FROM security_pending_approvals WHERE pair_device_code=$1', [deviceCode])).length === 1;
   }
   async deliver(deviceCode: string, localPort: number): Promise<PendingPairDelivery | { status: 'pending' | 'expired' | 'denied' }> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await this.deliveryAttempt(deviceCode, localPort);
+      if (result !== null) return result;
+    }
+    return { status: 'denied' };
+  }
+  private async deliveryAttempt(deviceCode: string, localPort: number): Promise<PendingPairDelivery | { status: 'pending' | 'expired' | 'denied' } | null> {
     if (!Number.isSafeInteger(localPort) || localPort < 1 || localPort > 65535) return invalid();
     const rows = await this.query('SELECT * FROM security_pending_approvals WHERE pair_device_code=$1', [deviceCode]);
     if (rows.length !== 1) return invalid();
@@ -371,8 +378,14 @@ export class PendingApprovalStore {
       counts AS (SELECT (SELECT COUNT(*) FROM ready WHERE credential_snapshot IS NULL) AS n,(SELECT COUNT(*) FROM refreshed) AS r,
         (SELECT COUNT(*) FROM consumed) AS c,(SELECT COUNT(*) FROM saved) AS s)
       SELECT 1 / CASE WHEN (r=0 AND c=0 AND s=0) OR (n=1 AND r=1 AND c=1 AND s=1) THEN 1 ELSE 0 END AS integrity_guard,
-        COALESCE((SELECT credential_snapshot FROM saved),(SELECT credential_snapshot FROM ready)) AS snapshot FROM counts`,
+        COALESCE((SELECT credential_snapshot FROM saved),(SELECT credential_snapshot FROM ready)) AS snapshot,
+        n::int AS n,r::int AS r,c::int AS c,s::int AS s FROM counts`,
     [row.request_id, JSON.stringify(snapshot), ownerId, verified.head.rootId, verified.head.revision, verified.head.head, sub, bridgeId, jti, row.pair_metadata.hostname]);
+    // A lock waiter can see the winner's updated pending row but miss its new
+    // refresh row in this statement's READ COMMITTED snapshot. Only a proven
+    // zero-effect result permits one fresh attempt, including all preflight.
+    if (result.length === 1 && result[0].integrity_guard === 1 && result[0].snapshot === null
+      && result[0].n === 0 && result[0].r === 0 && result[0].c === 0 && result[0].s === 0) return null;
     if (result.length !== 1 || !result[0].snapshot) return { status: 'denied' };
     const saved = validatedSnapshot(result[0].snapshot, ownerId, sub, bridgeId, this.now());
     return { snapshot: saved, state };
