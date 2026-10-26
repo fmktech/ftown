@@ -104,9 +104,12 @@ describe("Security devices and dialog", () => {
     const execute = mockExecutor();
     const opener = document.createElement("button"); document.body.append(opener); opener.focus();
     const view = render(<SecurityPanel open onClose={onClose} bridges={[]} currentEndpointId="self" execute={execute} />);
+    expect(screen.getByRole("tab", { name: "Access" }).getAttribute("aria-selected")).toBe("true");
+    expect(fetch).not.toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByRole("tab", { name: "Access" }), { key: "ArrowRight" });
     await screen.findByText(/No MCP activity/);
-    fireEvent.keyDown(screen.getByRole("tab", { name: "Activity" }), { key: "ArrowRight" });
-    expect(screen.getByRole("tab", { name: "Devices" }).getAttribute("aria-selected")).toBe("true");
+    fireEvent.keyDown(screen.getByRole("tab", { name: "Activity" }), { key: "Home" });
+    expect(screen.getByRole("tab", { name: "Access" }).getAttribute("aria-selected")).toBe("true");
     expect(screen.getByText(/Choose a bridge to inspect its approved devices/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Close security" }));
     expect(onClose).toHaveBeenCalledOnce();
@@ -137,21 +140,126 @@ describe("Account devices", () => {
   it("keeps the last account administrator and offline device revocation disabled", () => {
     const f = accountFixture(1); const execute = mockExecutor();
     const view = render(<SecurityDevices currentEndpointId="0" execute={execute} accountClient={f.client} accountState={f.state} />);
-    expect((screen.getByRole("button", { name: "Revoke account device Laptop" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByText(/^Browsers with access/));
+    expect((screen.getByRole("button", { name: "Remove access for Laptop" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText(/last account administrator/)).toBeTruthy(); expect(execute).not.toHaveBeenCalled();
     const offline = accountFixture(2, true);
     view.rerender(<SecurityDevices currentEndpointId="0" execute={execute} accountClient={offline.client} accountState={offline.state} />);
-    expect((screen.getByRole("button", { name: "Revoke account device Phone" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Remove access for Phone" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText(/Showing verified stored account trust/)).toBeTruthy();
   });
   it("requires explicit account-wide confirmation and never sends a per-bridge revoke", async () => {
     const f = accountFixture(2); const execute = mockExecutor();
     render(<SecurityDevices currentEndpointId="0" execute={execute} accountClient={f.client} accountState={f.state} />);
-    fireEvent.click(screen.getByRole("button", { name: "Revoke account device Phone" })); expect(f.revoke).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText(/^Browsers with access/));
+    fireEvent.click(screen.getByRole("button", { name: "Remove access for Phone" })); expect(f.revoke).not.toHaveBeenCalled();
     expect(screen.getByText(/offline computers apply it when they reconnect/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Confirm account revoke" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm remove access" }));
     await waitFor(() => expect(f.revoke).toHaveBeenCalledWith("1")); expect(execute).not.toHaveBeenCalled();
   });
+  it("puts computer sharing before collapsed browsers and never marks a roster-only computer shared", async () => {
+    const f = accountFixture(2);
+    const endpoint = { ...device("bridge-key", "").endpoint, kind: "bridge" as const };
+    f.state.legacyBridges = [{ bridgeId: bridge.bridgeId, endpoint, permissions: ["read", "control", "admin"] }];
+    f.state.trust!.checkpoint.bridges = [{ bridgeId: bridge.bridgeId, endpoint, label: "Computer", approvedAt: "2026-10-25T00:00:00Z" }];
+    const execute = mockExecutor().mockRejectedValue({ code: "bridge_offline" });
+    const view = render(<SecurityDevices currentEndpointId="0" bridges={[bridge]} execute={execute} accountClient={f.client} accountState={f.state} />);
+    await screen.findByText("Setup needs attention");
+    expect(screen.queryByText("Shared with your approved browsers")).toBeNull();
+    expect(screen.getByRole("button", { name: "Share with my other browsers" })).toBeTruthy();
+    expect((screen.getByText(/^Browsers with access/).closest("details") as HTMLDetailsElement).open).toBe(false);
+    expect(view.container.textContent!.indexOf("Your computers")).toBeLessThan(view.container.textContent!.indexOf("Browsers with access"));
+    expect(screen.getByText(/browsers outside your account approvals lose access/)).toBeTruthy();
+  });
+
+  it("confirms account sharing once per connection and qualifies offline or changed-key status", async () => {
+    const f = accountFixture(1); const execute = mockExecutor().mockResolvedValue({ devices: [{ ...device("0", "Laptop"), source: "account" }] });
+    const props = { currentEndpointId: "0", execute, accountClient: f.client, accountState: f.state };
+    const view = render(<SecurityDevices {...props} bridges={[bridge]} />);
+    await screen.findByText("Shared with your approved browsers");
+    view.rerender(<SecurityDevices {...props} bridges={[{ ...bridge }]} />);
+    expect(execute).toHaveBeenCalledTimes(1);
+    view.rerender(<SecurityDevices {...props} bridges={[{ ...bridge, security: { ...bridge.security, status: "offline" } }]} />);
+    expect(screen.getByText("Previously shared · reconnect to verify")).toBeTruthy();
+    view.rerender(<SecurityDevices {...props} bridges={[{ ...bridge, security: { ...bridge.security, status: "key_changed" } }]} />);
+    expect(screen.getByText("Access needs attention")).toBeTruthy();
+    expect(screen.queryByText("Shared with your approved browsers")).toBeNull();
+  });
+
+  it("qualifies a previous confirmation after a failed refresh and overrides it with roster revocation", async () => {
+    const f = accountFixture(1);
+    const execute = mockExecutor().mockResolvedValueOnce({ devices: [{ ...device("0", "Laptop"), source: "account" }] }).mockRejectedValue({ code: "bridge_offline" });
+    const props = { currentEndpointId: "0", bridges: [bridge], execute, accountClient: f.client, accountState: f.state };
+    const view = render(<SecurityDevices {...props} />);
+    await screen.findByText("Shared with your approved browsers");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh access" }));
+    await screen.findByText("Previously shared · check access");
+    expect(screen.queryByText("Shared with your approved browsers")).toBeNull();
+    f.state.trust!.checkpoint.revokedBridgeIds = [bridge.bridgeId];
+    view.rerender(<SecurityDevices {...props} bridges={[{ ...bridge }]} />);
+    expect(screen.getByText("Access needs attention")).toBeTruthy();
+  });
+
+  it("ignores a late sharing probe after the computer connection changes", async () => {
+    const f = accountFixture(1); let complete!: (value: { devices: ApprovedEndpoint[] }) => void;
+    const execute = mockExecutor().mockImplementation(() => new Promise(resolve => { complete = resolve; }));
+    const view = render(<SecurityDevices currentEndpointId="0" bridges={[bridge]} execute={execute} accountClient={f.client} accountState={f.state} />);
+    view.rerender(<SecurityDevices currentEndpointId="0" bridges={[{ ...bridge, security: { ...bridge.security, status: "offline" } }]} execute={execute} accountClient={f.client} accountState={f.state} />);
+    await act(async () => { complete({ devices: [{ ...device("0", "Laptop"), source: "account" }] }); });
+    expect(screen.queryByText(/Shared with your approved browsers|Previously shared/)).toBeNull();
+  });
+
+  it("keeps another computer's pending verification alive while sharing one computer", async () => {
+    const f = accountFixture(1);
+    const endpoint = { ...device("bridge-key", "").endpoint, kind: "bridge" as const };
+    f.state.legacyBridges = [{ bridgeId: bridge.bridgeId, endpoint, permissions: ["read", "control", "admin"] }];
+    const other: SecurityBridge = { ...bridge, bridgeId: "bridge-two", label: "Other laptop", security: { ...bridge.security, bridgeId: "bridge-two" } };
+    let finishOther!: (value: { devices: ApprovedEndpoint[] }) => void;
+    const execute = mockExecutor().mockImplementation(command => command.bridgeId === other.bridgeId
+      ? new Promise(resolve => { finishOther = resolve; }) : Promise.resolve({ devices: [device("0", "Laptop")] }));
+    f.client.migrate = vi.fn().mockResolvedValue(undefined);
+    const view = render(<SecurityDevices currentEndpointId="0" bridges={[bridge, other]} execute={execute} accountClient={f.client} accountState={f.state} />);
+    await waitFor(() => expect(execute).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("button", { name: "Share with my other browsers" }));
+    await waitFor(() => expect(view.container.querySelector(`[data-account-migration="${bridge.bridgeId}"]`)).toBeNull());
+    await act(async () => finishOther({ devices: [{ ...device("0", "Laptop"), source: "account" }] }));
+    const otherCard = view.container.querySelector(`[data-computer-access="${other.bridgeId}"]`)!;
+    expect(otherCard.textContent).toContain("Shared with your approved browsers");
+    expect(otherCard.textContent).not.toContain("Checking sharing");
+  });
+
+  it("does not let a bootstrap-time independent probe overwrite successful sharing", async () => {
+    const f = accountFixture(1); const listeners = new Set<() => void>();
+    const endpoint = { ...device("bridge-key", "").endpoint, kind: "bridge" as const };
+    let current: AccountSecuritySnapshot = { ...f.state, status: "unapproved", trust: null, historyExists: false,
+      legacyBridges: [{ bridgeId: bridge.bridgeId, endpoint, permissions: ["read", "control", "admin"] }] };
+    f.client.snapshot = () => current;
+    f.client.subscribe = listener => { listeners.add(listener); return () => { listeners.delete(listener); }; };
+    let finishSharing!: () => void; let finishProbe!: (value: { devices: ApprovedEndpoint[] }) => void;
+    f.client.migrate = vi.fn(async () => {
+      current = { ...current, status: "ready", trust: f.state.trust, historyExists: true };
+      listeners.forEach(listener => listener());
+      await new Promise<void>(resolve => { finishSharing = resolve; });
+    });
+    const execute = mockExecutor().mockImplementation(() => new Promise(resolve => { finishProbe = resolve; }));
+    render(<SecurityDevices currentEndpointId="0" bridges={[bridge]} execute={execute} accountClient={f.client} accountState={current} />);
+    fireEvent.click(screen.getByRole("button", { name: "Share with my other browsers" }));
+    await screen.findByRole("button", { name: "Sharing computer…" });
+    await waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+    await act(async () => finishSharing());
+    await screen.findByText("Shared with your approved browsers");
+    await act(async () => finishProbe({ devices: [device("0", "Laptop")] }));
+    expect(screen.getByText("Shared with your approved browsers")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Share with my other browsers" })).toBeNull();
+  });
+
+  it.each(["account_device_revoked", "account_trust_rollback"] as const)("shows the current browser's actual paused or revoked state (%s)", code => {
+    const f = accountFixture(1); f.state.status = "error"; f.state.code = code;
+    render(<SecurityDevices currentEndpointId="0" execute={mockExecutor()} accountClient={f.client} accountState={f.state} />);
+    expect(screen.getByText(code === "account_device_revoked" ? /· Access revoked/ : /· Access paused/)).toBeTruthy();
+    expect(screen.queryByText(/· Account approval needed/)).toBeNull();
+  });
+
   it("keeps a pending or failed adoption retryable even after its signed roster addition", async () => {
     const f = accountFixture(1); let current = f.state; const listeners = new Set<() => void>();
     const pin = { bridgeId: bridge.bridgeId, endpoint: { ...device("bridge-key", "").endpoint, kind: "bridge" as const }, permissions: ["read", "control", "admin"] as const };
@@ -168,13 +276,14 @@ describe("Account devices", () => {
     f.client.migrate = migrate;
     const execute = mockExecutor().mockResolvedValue({ devices: [device("0", "Laptop")] });
     const view = render(<SecurityDevices currentEndpointId="0" bridges={[bridge]} execute={execute} accountClient={f.client} accountState={current} />);
-    fireEvent.click(screen.getByRole("button", { name: "Use account device approvals" }));
-    await screen.findByRole("button", { name: "Migrating computer…" });
+    fireEvent.click(screen.getByRole("button", { name: "Share with my other browsers" }));
+    await screen.findByRole("button", { name: "Sharing computer…" });
     expect(view.container.querySelector(`[data-account-migration="${pin.bridgeId}"]`)).not.toBeNull();
     await act(async () => { rejectAdoption({ code: "account_storage_unavailable" }); });
     expect(await screen.findByRole("alert")).toBeTruthy();
-    expect(screen.getByText(/Computer migration is not confirmed/)).toBeTruthy();
-    const retry = screen.getByRole("button", { name: "Use account device approvals" }) as HTMLButtonElement;
+    expect(screen.getByText(/Sharing is not confirmed/)).toBeTruthy();
+    expect(view.container.querySelector(`[data-computer-access="${pin.bridgeId}"]`)!.textContent).not.toContain("Checking sharing");
+    const retry = screen.getByRole("button", { name: "Share with my other browsers" }) as HTMLButtonElement;
     expect(retry.disabled).toBe(false); fireEvent.click(retry);
     await waitFor(() => expect(view.container.querySelector(`[data-account-migration="${pin.bridgeId}"]`)).toBeNull());
     expect(migrate).toHaveBeenCalledTimes(2);

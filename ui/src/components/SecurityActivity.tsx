@@ -74,28 +74,28 @@ export function SecurityActivity({ bridgeId, selectedBridge, execute, gatewayAva
 
   return <div className="space-y-4">
     <div className="flex flex-wrap items-center justify-between gap-3">
-      <label className="flex min-w-0 flex-col gap-1 text-xs text-[var(--text-muted)]">Evidence source
+      <label className="flex min-w-0 flex-col gap-1 text-xs text-[var(--text-muted)]">Source
         <select aria-label="Activity source" value={source} onChange={event => setSource(event.target.value as "gateway" | "bridge")}
           className="min-h-11 max-w-full rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)] px-3 text-sm text-[var(--text-primary)]">
-          {gatewayAvailable && <option value="gateway">MCP gateway</option>}
-          <option value="bridge">Bridge execution</option>
+          {gatewayAvailable && <option value="gateway">MCP actions</option>}
+          <option value="bridge">Computer actions</option>
         </select>
       </label>
       <button type="button" className="btn-ghost min-h-11" disabled={loading || !available} onClick={() => void load()}>Refresh activity</button>
     </div>
     <p className="text-xs leading-relaxed text-[var(--text-muted)]">
-      {source === "gateway" ? "Gateway records include authenticated MCP attempts, denied calls, and calls that never reach a bridge. This history is available while bridges are offline."
-        : "Bridge records show authenticated operations received by this bridge. Compare their action IDs with gateway records to investigate delivery."}
+      {source === "gateway" ? "MCP actions include requests that never reached a computer."
+        : "Computer actions show requests received by this computer."}
       {" "}A timeout or unknown outcome does not prove an action was not executed.
     </p>
     {!available && <p role="status" className="rounded-md border border-[var(--border-muted)] p-4 text-sm text-[var(--text-secondary)]">
-      {!bridgeId ? "Choose a bridge to inspect its execution log." : "Connect and approve this bridge to read its execution log. Gateway activity remains available separately."}
+      {!bridgeId ? "Choose a computer to see its actions." : "Connect and approve this computer to see its actions. MCP actions are available separately."}
     </p>}
     {error && <div role="alert" className="rounded-md border border-[var(--status-error)] p-3 text-sm text-[var(--status-error)]">
       {error}{page && <span className="block text-xs text-[var(--text-muted)]">Previously loaded activity is still shown.</span>}
     </div>}
     {loading && <p role="status" className="text-sm text-[var(--text-muted)]">Loading security activity…</p>}
-    {available && page?.events.length === 0 && <p className="rounded-md border border-[var(--border-muted)] p-6 text-sm text-[var(--text-muted)]">No MCP activity in the retained history for this selection.</p>}
+    {available && page?.events.length === 0 && <p className="rounded-md border border-[var(--border-muted)] p-6 text-sm text-[var(--text-muted)]">No MCP activity for this selection.</p>}
     {page && page.events.length > 0 && <ol aria-label="MCP security activity" className="space-y-3">
       {page.events.map(event => <li key={`${event.source}:${event.id}`} className="rounded-lg border border-[var(--border-muted)] bg-[var(--bg-base)] p-4">
         <div className="flex flex-wrap items-start justify-between gap-2">
@@ -107,12 +107,12 @@ export function SecurityActivity({ bridgeId, selectedBridge, execute, gatewayAva
           <span>{event.source === "gateway" ? "Gateway evidence" : "Bridge evidence"}</span>
           <span>{event.mutating ? "Control action" : "Read action"}</span>
         </div>
-        <dl className="mt-3 grid min-w-0 grid-cols-1 gap-2 text-xs sm:grid-cols-2">
+        <details className="mt-2 text-xs"><summary className="min-h-11 cursor-pointer py-3">Action details</summary><dl className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
           <div><dt className="text-[var(--text-faint)]">Bridge</dt><dd className="break-all text-[var(--text-secondary)]">{event.bridgeId ?? "Fleet / no bridge reached"}</dd></div>
           <div><dt className="text-[var(--text-faint)]">Client</dt><dd className="break-all text-[var(--text-secondary)]">{event.clientId ?? event.endpointId ?? "Unavailable"}</dd></div>
           {event.sessionId && <div><dt className="text-[var(--text-faint)]">Session</dt><dd className="break-all text-[var(--text-secondary)]">{event.sessionId}</dd></div>}
           <div><dt className="text-[var(--text-faint)]">Action ID</dt><dd className="break-all font-mono text-[var(--text-secondary)]">{event.actionId}</dd></div>
-        </dl>
+        </dl></details>
         {event.status === "unknown" && <p className="mt-3 text-xs text-[var(--text-muted)]">Execution may have occurred. Check bridge evidence before retrying.</p>}
       </li>)}
     </ol>}

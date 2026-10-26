@@ -65,8 +65,8 @@ export function securityErrorMessage(error: unknown): string {
 }
 
 export function SecurityPanel({ open, onClose, bridges, currentEndpointId, execute, initialBridgeId,
-  gatewayAvailable = true, onInvitation, accountClient, accountState, pendingClient, pendingState, initialView = "activity" }: SecurityPanelProps) {
-  const [view, setView] = useState<"activity" | "devices">("activity");
+  gatewayAvailable = true, onInvitation, accountClient, accountState, pendingClient, pendingState, initialView = "devices" }: SecurityPanelProps) {
+  const [view, setView] = useState<"activity" | "devices">("devices");
   const [bridgeId, setBridgeId] = useState(initialBridgeId ?? "");
   const dialogRef = useRef<HTMLDialogElement>(null);
   const titleId = useId();
@@ -88,28 +88,28 @@ export function SecurityPanel({ open, onClose, bridges, currentEndpointId, execu
     className="fixed inset-0 m-auto max-h-[min(92dvh,920px)] w-[calc(100%_-_24px)] max-w-4xl overflow-hidden rounded-xl border border-[var(--border-muted)] bg-[var(--bg-surface)] p-0 text-[var(--text-primary)] shadow-2xl backdrop:bg-black/70">
     <div className="flex max-h-[min(92dvh,920px)] flex-col" onClick={event => event.stopPropagation()}>
       <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border-muted)] px-4 py-3 sm:px-6">
-        <div><h2 id={titleId} className="text-lg font-semibold">Security</h2><p className="text-xs text-[var(--text-muted)]">Devices, trust, and MCP activity</p></div>
+        <div><h2 id={titleId} className="text-lg font-semibold">Security</h2><p className="text-xs text-[var(--text-muted)]">Computer and browser access</p></div>
         <button type="button" aria-label="Close security" className="btn-ghost min-h-11 min-w-11" onClick={onClose}>✕</button>
       </header>
       <div className="flex shrink-0 flex-col gap-3 border-b border-[var(--border-subtle)] p-4 sm:flex-row sm:items-end sm:justify-between sm:px-6">
         <div role="tablist" aria-label="Security views" className="flex gap-2">
-          {(["activity", "devices"] as const).map(tab => <button key={tab} type="button" role="tab"
+          {(["devices", "activity"] as const).map(tab => <button key={tab} type="button" role="tab"
             aria-selected={view === tab} aria-controls={`${titleId}-${tab}`} id={`${titleId}-tab-${tab}`}
             tabIndex={view === tab ? 0 : -1}
             onKeyDown={event => {
               if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
               event.preventDefault();
-              const next = event.key === "Home" ? "activity" : event.key === "End" ? "devices" : tab === "activity" ? "devices" : "activity";
+              const next = event.key === "Home" ? "devices" : event.key === "End" ? "activity" : tab === "activity" ? "devices" : "activity";
               setView(next); document.getElementById(`${titleId}-tab-${next}`)?.focus();
             }}
             className={`${view === tab ? "btn-accent" : "btn-ghost"} min-h-11`} onClick={() => setView(tab)}>
-            {tab === "activity" ? "Activity" : "Devices"}
+            {tab === "activity" ? "Activity" : "Access"}
           </button>)}
         </div>
-        {(view === "activity" || !accountClient || !accountState?.trust && !!accountState?.legacyBridges.length) && <label className="flex min-w-0 flex-col gap-1 text-xs text-[var(--text-muted)]">Bridge
-          <select aria-label="Security bridge" value={bridgeId} onChange={event => setBridgeId(event.target.value)}
+        {(view === "activity" || !accountClient || !accountState?.trust && !!accountState?.legacyBridges.length) && <label className="flex min-w-0 flex-col gap-1 text-xs text-[var(--text-muted)]">Computer
+          <select aria-label="Security computer" value={bridgeId} onChange={event => setBridgeId(event.target.value)}
             className="min-h-11 w-full max-w-full rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)] px-3 text-sm text-[var(--text-primary)] sm:max-w-72">
-            <option value="">All bridges</option>
+            <option value="">All computers</option>
             {bridges.map(bridge => <option key={bridge.bridgeId} value={bridge.bridgeId}>{bridge.label}</option>)}
           </select>
         </label>}
