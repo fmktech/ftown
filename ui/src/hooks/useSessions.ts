@@ -184,6 +184,10 @@ export function useSessions(
     if (!userId) return;
     let active = true;
     let generation = 0;
+    // Keep correlation alive for the same budget the transport allows its replies.
+    const commandTimeoutMs = client?.commandTimeoutMs;
+    const listReplyWindowMs = typeof commandTimeoutMs === "number" && Number.isFinite(commandTimeoutMs) && commandTimeoutMs > 0
+      ? commandTimeoutMs : LIST_REPLY_WINDOW_MS;
     const contextGeneration = usageGenerationRef.current;
     let coalescingTimer: ReturnType<typeof setTimeout> | undefined;
     const requests = new Map<string, { generation: number; contextGeneration: number; cutoff: number; expiry: number; applied: Set<string> }>();
@@ -203,7 +207,7 @@ export function useSessions(
         && [...requests.values()].some(r => r.generation === generation && r.applied.size === 0)) return;
       const requestId = uuidv4();
       requests.set(requestId, { generation: ++generation, contextGeneration, cutoff: mutationRef.current,
-        expiry: Date.now() + LIST_REPLY_WINDOW_MS, applied: new Set() });
+        expiry: Date.now() + listReplyWindowMs, applied: new Set() });
       while (requests.size > MAX_LIST_REQUESTS) requests.delete(requests.keys().next().value!);
       clearTimeout(coalescingTimer);
       coalescingTimer = setTimeout(() => { coalescingTimer = undefined; }, 0);
