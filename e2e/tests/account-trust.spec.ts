@@ -9,7 +9,8 @@ import { login, makeUser, openSession, registerUser, runMarkerInTerminal } from 
 const origin = process.env.FTOWN_PUBLIC_URL ?? "https://localhost:8444";
 async function devices(page: Page) {
   await page.getByRole("button", { name: "Open security", exact: true }).click();
-  await page.getByRole("tab", { name: "Devices", exact: true }).click();
+  await page.getByRole("tab", { name: "Access", exact: true }).click();
+  await page.getByText(/^Browsers with access/).click();
   await expect(page.getByRole("list", { name: "Account devices", exact: true })).toBeVisible();
 }
 async function noOverflow(page: Page) { expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); }
@@ -29,7 +30,13 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       const initial = (await accountBrowserState(page))[0];
       expect(initial.hpkeExtractable).toBe(false); expect(initial.signingExtractable).toBe(false);
       expect(initial.trust?.checkpoint.devices).toHaveLength(1);
-      await devices(page); await expect(page.getByRole("button", { name: /^Revoke account device / })).toBeDisabled();
+      await page.getByRole("button", { name: "Open security", exact: true }).click();
+      await expect(page.getByRole("tab", { name: "Access", exact: true })).toHaveAttribute("aria-selected", "true");
+      await expect(page.getByRole("heading", { name: "Your computers", exact: true })).toBeVisible();
+      await expect(page.locator(`[data-computer-access="${firstId}"]`)).toContainText("Shared with your approved browsers", { timeout: 60000 });
+      await noOverflow(page); await page.screenshot({ path: info.outputPath(`security-access-${viewport.width}.png`), fullPage: true });
+      await page.getByText(/^Browsers with access/).click();
+      await expect(page.getByRole("button", { name: /^Remove access for / })).toBeDisabled();
       await expect(page.getByText(/last account administrator/)).toBeVisible(); await noOverflow(page);
       await page.screenshot({ path: info.outputPath("account-first-device.png"), fullPage: true });
       await page.getByRole("button", { name: "Close security" }).click();
@@ -163,10 +170,10 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       await devices(page); await noOverflow(page);
       await expect(page.getByRole("list", { name: "Account devices", exact: true })).toContainText("Account test phone");
       await page.screenshot({ path: info.outputPath("account-devices.png"), fullPage: true });
-      await page.getByRole("button", { name: "Revoke account device Account test phone", exact: true }).click();
-      await page.getByRole("button", { name: "Confirm account revoke", exact: true }).click();
+      await page.getByRole("button", { name: "Remove access for Account test phone", exact: true }).click();
+      await page.getByRole("button", { name: "Confirm remove access", exact: true }).click();
       await expect(page.getByRole("list", { name: "Account devices", exact: true })).not.toContainText("Account test phone");
-      await expect(page.getByRole("button", { name: /^Revoke account device / })).toBeDisabled();
+      await expect(page.getByRole("button", { name: /^Remove access for / })).toBeDisabled();
       await Promise.all(bridges.map(bridge => expect.poll(async () => {
         const result = await bridgeSecurityCommand("security_devices", {}, bridge.home) as unknown as { devices: ApprovedEndpoint[] };
         return result.devices.some(device => device.endpoint.id === phoneIdentity.endpointId);

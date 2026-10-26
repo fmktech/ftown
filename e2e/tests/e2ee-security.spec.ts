@@ -15,6 +15,10 @@ test.setTimeout(180000);
 const secondHome = process.env.E2E_SECOND_BRIDGE_HOME ?? join(E2E_DIR, ".bridge-home-2");
 const tlsUi = process.env.FTOWN_PUBLIC_URL ?? "https://localhost:8444";
 const mcpOrigin = process.env.FTOWN_MCP_PUBLIC_URL ?? "https://localhost:8443";
+async function openSeparateApprovals(page: Page, bridgeId: string) {
+  const card = page.locator(`[data-computer-access="${bridgeId}"]`);
+  if (await card.count()) await card.getByText("Separate approvals and recovery", { exact: true }).click();
+}
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 function captureBroker(page: Page): string[] {
   const frames: string[] = [];
@@ -101,10 +105,15 @@ test("real browser pairing persists its non-extractable key; cloud terminal fram
     await page.reload(); await waitForBridgeOnline(page); expect(await browserEndpointId(page)).toBe(endpointId);
     await page.getByRole("button", { name: "Open security", exact: true }).click();
     await expect(page.getByRole("dialog", { name: "Security", exact: true })).toBeVisible();
-    await page.screenshot({ path: info.outputPath("security-desktop.png"), fullPage: true });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await expect(page.getByRole("tab", { name: "Access", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("heading", { name: "Your computers", exact: true })).toBeVisible();
+    await page.screenshot({ path: info.outputPath("security-access-desktop.png"), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.getByRole("tab", { name: "Devices", exact: true }).click();
-    await page.getByLabel("Security bridge", { exact: true }).selectOption(pointer.bridgeId);
+    await page.getByRole("tab", { name: "Access", exact: true }).click();
+    await page.screenshot({ path: info.outputPath("security-access-mobile.png"), fullPage: true });
+    await page.getByLabel("Security computer", { exact: true }).selectOption(pointer.bridgeId);
+    await openSeparateApprovals(page, pointer.bridgeId);
     await expect(page.getByRole("list", { name: "Approved devices" })).toContainText("This browser");
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await page.screenshot({ path: info.outputPath("security-mobile-devices.png"), fullPage: true });
@@ -125,11 +134,12 @@ test("two isolated browser installations approve two independent bridges and ret
     await pairBrowser(phone, { bridgeHome: secondHome, label: "E2E phone", email: sharedEmail(), password: E2E_PASSWORD });
     expect(await browserEndpointId(phone)).not.toBe(firstId);
     await phone.getByRole("button", { name: "Open security", exact: true }).click();
-    const picker = phone.getByLabel("Security bridge", { exact: true });
+    const picker = phone.getByLabel("Security computer", { exact: true });
     await expect(picker.locator(`option[value="${readBridgePointer().bridgeId}"]`)).toHaveCount(1);
     await expect(picker.locator(`option[value="${readBridgePointer(secondHome).bridgeId}"]`)).toHaveCount(1);
-    await phone.getByRole("tab", { name: "Devices", exact: true }).click();
+    await phone.getByRole("tab", { name: "Access", exact: true }).click();
     await picker.selectOption(readBridgePointer(secondHome).bridgeId);
+    await openSeparateApprovals(phone, readBridgePointer(secondHome).bridgeId);
     await expect(phone.getByRole("list", { name: "Approved devices" })).toContainText("E2E phone · This browser");
   } finally { await second.close(); }
 });
@@ -150,8 +160,9 @@ test("an approved browser uses encrypted local HTTP control and event polling", 
     expect(frames.join("\n")).not.toContain(marker);
     await page.getByRole("button", { name: "Open security", exact: true }).click();
     await expect(page.getByRole("dialog", { name: "Security", exact: true })).toBeVisible();
-    await page.getByRole("tab", { name: "Devices", exact: true }).click();
-    await page.getByLabel("Security bridge", { exact: true }).selectOption(pointer.bridgeId);
+    await page.getByRole("tab", { name: "Access", exact: true }).click();
+    await page.getByLabel("Security computer", { exact: true }).selectOption(pointer.bridgeId);
+    await openSeparateApprovals(page, pointer.bridgeId);
     await expect(page.getByRole("list", { name: "Approved devices" })).toContainText("This browser");
   } finally { if (sessionId) await bridgeApiFetch("DELETE", `/api/sessions/${sessionId}`); }
 });
@@ -186,16 +197,21 @@ test("account-migrated OAuth MCP uses one selected-computer consent, enforces re
     const oldInvitation = await bridgeSecurityCommand("security_invite", { label: "Must not bypass account migration" }, mcpHome) as unknown as BridgeInvitation;
     setStage("explicit-account-migration");
     await page.getByRole("button", { name: "Open security", exact: true }).click();
-    await page.getByRole("tab", { name: "Devices", exact: true }).click();
+    await page.getByRole("tab", { name: "Access", exact: true }).click();
     for (const [bridgeId, home] of [[primary.bridgeId, mcpHome], [secondary.bridgeId, mcpSecondHome]]) {
       const migration = page.locator(`[data-account-migration="${bridgeId}"]`);
       await expect(migration).toBeVisible();
+      await expect(migration.getByRole("button", { name: "Share with my other browsers", exact: true })).toBeVisible();
+      await expect(migration).toContainText("browsers outside your account approvals lose access");
+      await page.screenshot({ path: info.outputPath(`security-share-${bridgeId}.png`), fullPage: true });
       await prepareTestBrowserMigration(page, home);
-      await migration.getByRole("button", { name: "Use account device approvals", exact: true }).click();
+      await migration.getByRole("button", { name: "Share with my other browsers", exact: true }).click();
       await expect(migration).toHaveCount(0, { timeout: 45000 });
       await confirmTestBrowserMigration(page, home);
     }
+    await page.getByText(/^Browsers with access/).click();
     await expect(page.getByRole("list", { name: "Account devices", exact: true })).toHaveCount(1);
+    await expect(page.getByRole("list", { name: "Account devices", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Close security" }).click();
     setStage("legacy-invitation-denied-after-adoption");
     bypassContext = await browser.newContext({ baseURL: tlsUi, ignoreHTTPSErrors: false });
@@ -244,10 +260,11 @@ test("account-migrated OAuth MCP uses one selected-computer consent, enforces re
     expect(frames.join("\n")).not.toContain(privateName);
     setStage("security-history");
     await page.goto(`${tlsUi}/dashboard`); await page.getByRole("button", { name: "Open security", exact: true }).click();
+    await page.getByRole("tab", { name: "Activity", exact: true }).click();
     await expect(page.getByRole("list", { name: "MCP security activity" })).toContainText("sessions_update");
     const audit = await context.request.get(`${tlsUi}/api/security/activity?limit=100`); expect(audit.ok()).toBe(true);
     const history = await audit.json(); expect(JSON.stringify(history)).not.toContain(privateName); expect(JSON.stringify(history)).not.toContain(read.access_token);
-    await page.getByLabel("Security bridge", { exact: true }).selectOption(primary.bridgeId);
+    await page.getByLabel("Security computer", { exact: true }).selectOption(primary.bridgeId);
     await page.getByLabel("Activity source", { exact: true }).selectOption("bridge");
     await expect(page.getByRole("list", { name: "MCP security activity" })).toContainText("sessions_update");
     await page.screenshot({ path: info.outputPath("mcp-security-evidence.png"), fullPage: true });

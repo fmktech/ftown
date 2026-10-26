@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { generateEndpoint } from '@security/crypto';
 import * as account from '@security/account-crypto';
 import * as core from '@security/pending-approval-crypto';
-import { PendingApprovalStore, pendingCanonical, PENDING_NORMALIZED_EMAIL_SQL } from './pending-approval-store';
+import { PendingApprovalStore, pendingCanonical, PENDING_NORMALIZED_EMAIL_SQL, type CredentialSnapshot } from './pending-approval-store';
 import { accountHead, validateApprovalAgainst } from './account-trust-store';
 import type { AccountHistory } from '@security/account-protocol';
 import type { PendingApprovalState, PendingReviewerAction } from '@security/pending-approval-protocol';
@@ -179,4 +179,144 @@ it('credential query distinguishes missing-row insertion from exact predecessor 
   expect(sql).toContain("p.refresh_predecessor=jsonb_build_object('status','absent') AND NOT EXISTS(SELECT 1 FROM refresh)");
   expect(sql).toContain('(r=0 AND c=0 AND s=0) OR (n=1 AND r=1 AND c=1 AND s=1)');
   expect(pendingCanonical(approved)).not.toContain(predecessor.version);
+});
+
+
+const zeroDelivery = () => ({ integrity_guard: 1, snapshot: null, n: 0, r: 0, c: 0, s: 0 });
+async function deliveryFixture() {
+  const f = await fixture('bridge');
+  const checkpoint = await account.verifyAccountHistory(f.approved, null, f.now);
+  const state: PendingApprovalState = { request: f.link.request, revision: 5, status: 'approved', offer: f.local.offer,
+    hello: f.hello.hello, reveal: f.reveal, confirmation: f.confirmation, result: f.result };
+  const row: Record<string, unknown> = { request_id: f.link.request.requestId, request: f.link.request, state, revision: 5, owner_id: owner,
+    target_sub: 'user@ftown.test', pair_device_code: credential(), pair_metadata: { hostname: 'Computer' },
+    expires_at: f.link.request.expiresAt, credential_snapshot: null, refresh_predecessor: { status: 'absent' } };
+  const controls = { now: f.now, history: f.approved, checkpoint, email: 'user@ftown.test', ownerRows: [{ owner_id: owner, email: 'user@ftown.test' }] };
+  const atomic = vi.fn(async (params: unknown[]): Promise<Record<string, unknown>[]> => [{ snapshot: JSON.parse(params[1] as string) }]);
+  const query = vi.fn(async (text: string, params: unknown[]): Promise<Record<string, unknown>[]> => {
+    if (text.startsWith('SELECT * FROM security_pending')) return [structuredClone(row)];
+    if (text.startsWith('WITH owner')) return controls.ownerRows;
+    if (text.startsWith('SELECT root_id')) return [{ history: controls.history, root_id: controls.checkpoint.rootId,
+      revision: controls.checkpoint.revision, head: controls.checkpoint.head }];
+    if (text.startsWith('SELECT email')) return [{ email: controls.email }];
+    if (text.startsWith('WITH locked')) return atomic(params);
+    throw new Error('Unexpected isolated delivery query');
+  });
+  return { f, row, controls, atomic, query, store: new PendingApprovalStore(query, () => controls.now) };
+}
+
+it('retries a zero-effect delivery with full fresh preflight and returns the immutable winner rather than new credentials', async () => {
+  const db = await deliveryFixture(); let winner!: CredentialSnapshot;
+  db.atomic.mockImplementationOnce(async params => {
+    winner = JSON.parse(params[1] as string) as CredentialSnapshot;
+    winner.connection.info.localPort = 34567;
+    db.row.credential_snapshot = winner;
+    return [zeroDelivery()];
+  }).mockImplementationOnce(async () => [{ ...zeroDelivery(), snapshot: winner }]);
+  const delivered = await db.store.deliver('private-code', 23456);
+  expect('snapshot' in delivered).toBe(true);
+  if ('snapshot' in delivered) { expect(delivered.snapshot).toEqual(winner); expect(delivered.state).toEqual(db.row.state); }
+  for (const prefix of ['SELECT * FROM security_pending', 'WITH owner', 'SELECT root_id', 'SELECT email', 'WITH locked']) {
+    expect(db.query.mock.calls.filter(([text]) => text.startsWith(prefix))).toHaveLength(2);
+  }
+  const [sql] = db.query.mock.calls.find(([text]) => text.startsWith('WITH locked'))!;
+  expect(sql).toContain('n::int AS n,r::int AS r,c::int AS c,s::int AS s');
+});
+
+it('denies persistent zero-effect delivery after exactly two complete attempts', async () => {
+  const db = await deliveryFixture(); db.atomic.mockResolvedValue([zeroDelivery()]);
+  expect(await db.store.deliver('private-code', 23456)).toEqual({ status: 'denied' });
+  expect(db.atomic).toHaveBeenCalledTimes(2);
+  expect(db.query.mock.calls.filter(([text]) => text.startsWith('SELECT root_id'))).toHaveLength(2);
+});
+
+it.each([
+  [], [zeroDelivery(), zeroDelivery()], [{ snapshot: null }], [{ ...zeroDelivery(), integrity_guard: 0 }],
+  [{ ...zeroDelivery(), integrity_guard: '1' }], [{ ...zeroDelivery(), snapshot: undefined }],
+  ...(['n', 'r', 'c', 's'] as const).flatMap(key => [[{ ...zeroDelivery(), [key]: 1 }], [{ ...zeroDelivery(), [key]: '0' }]]),
+].map(rows => ({ rows })))('does not retry absent or malformed atomic delivery results (%#)', async ({ rows }) => {
+  const db = await deliveryFixture(); db.atomic.mockResolvedValue(rows);
+  expect(await db.store.deliver('private-code', 23456)).toEqual({ status: 'denied' });
+  expect(db.atomic).toHaveBeenCalledOnce();
+  expect(db.query.mock.calls.filter(([text]) => text.startsWith('SELECT * FROM security_pending'))).toHaveLength(1);
+});
+
+it('does not retry SQL integrity errors or invalid returned credential snapshots', async () => {
+  for (const error of [Object.assign(new Error('integrity'), { code: '22012' }), null]) {
+    const db = await deliveryFixture();
+    if (error) db.atomic.mockRejectedValue(error); else db.atomic.mockResolvedValue([{ snapshot: {} }]);
+    await expect(db.store.deliver('private-code', 23456)).rejects.toMatchObject({ code: error ? '22012' : 'account_storage_unavailable' });
+    expect(db.atomic).toHaveBeenCalledOnce();
+    expect(db.query.mock.calls.filter(([text]) => text.startsWith('SELECT * FROM security_pending'))).toHaveLength(1);
+  }
+});
+
+it.each(['pending', 'expired', 'rejected'] as const)('does not retry early delivery status %s', async status => {
+  const db = await deliveryFixture();
+  db.row.state = { request: db.f.link.request, revision: 5, status };
+  expect(await db.store.deliver('private-code', 23456)).toEqual({ status: status === 'rejected' ? 'denied' : status });
+  expect(db.atomic).not.toHaveBeenCalled();
+  expect(db.query).toHaveBeenCalledOnce();
+});
+
+it('fresh retry notices expiry before re-entering authority checks or SQL', async () => {
+  const db = await deliveryFixture();
+  db.atomic.mockImplementationOnce(async () => { db.controls.now = Date.parse(db.f.link.request.expiresAt); return [zeroDelivery()]; });
+  expect(await db.store.deliver('private-code', 23456)).toEqual({ status: 'expired' });
+  expect(db.atomic).toHaveBeenCalledOnce();
+  expect(db.query.mock.calls.filter(([text]) => text.startsWith('SELECT * FROM security_pending'))).toHaveLength(2);
+  expect(db.query.mock.calls.filter(([text]) => text.startsWith('WITH owner'))).toHaveLength(1);
+});
+
+it('fresh retry rejects changed owner routing without another credential write', async () => {
+  const db = await deliveryFixture();
+  db.atomic.mockImplementationOnce(async () => { db.controls.ownerRows = [{ owner_id: other, email: 'user@ftown.test' }]; return [zeroDelivery()]; });
+  await expect(db.store.deliver('private-code', 23456)).rejects.toMatchObject({ code: 'account_trust_conflict' });
+  expect(db.atomic).toHaveBeenCalledOnce();
+  expect(db.query.mock.calls.filter(([text]) => text.startsWith('WITH owner'))).toHaveLength(2);
+});
+
+it('fresh retry verifies signed history and rejects a bridge revoked between attempts', async () => {
+  const db = await deliveryFixture();
+  if (db.f.link.request.kind !== 'bridge') throw new Error('fixture');
+  const revoked = await account.signAccountTransition(db.controls.checkpoint, db.f.admin.endpoint.id, db.f.signing,
+    { type: 'revoke_bridge', bridgeId: db.f.link.request.bridgeId }, db.f.now);
+  const history: AccountHistory = { ...db.f.approved, transitions: [...db.f.approved.transitions, revoked] };
+  const checkpoint = await account.verifyAccountHistory(history, null, db.f.now);
+  db.atomic.mockImplementationOnce(async () => { db.controls.history = history; db.controls.checkpoint = checkpoint; return [zeroDelivery()]; });
+  await expect(db.store.deliver('private-code', 23456)).rejects.toMatchObject({ code: 'account_bridge_revoked' });
+  expect(db.atomic).toHaveBeenCalledOnce();
+  expect(db.query.mock.calls.filter(([text]) => text.startsWith('SELECT root_id'))).toHaveLength(2);
+});
+
+it('fresh retry rejects invalid predecessor metadata and never exposes a stored snapshot without SQL authorization', async () => {
+  const malformed = await deliveryFixture();
+  malformed.atomic.mockImplementationOnce(async () => { malformed.row.refresh_predecessor = null; return [zeroDelivery()]; });
+  expect(await malformed.store.deliver('private-code', 23456)).toEqual({ status: 'denied' });
+  expect(malformed.atomic).toHaveBeenCalledOnce();
+  const rotated = await deliveryFixture();
+  rotated.atomic.mockImplementationOnce(async params => {
+    rotated.row.credential_snapshot = JSON.parse(params[1] as string); return [zeroDelivery()];
+  }).mockResolvedValue([zeroDelivery()]);
+  expect(await rotated.store.deliver('private-code', 23456)).toEqual({ status: 'denied' });
+  expect(rotated.atomic).toHaveBeenCalledTimes(2);
+});
+
+it('fresh retry rereads the current owner email before the locked credential guard', async () => {
+  const db = await deliveryFixture();
+  db.atomic.mockImplementationOnce(async () => { db.controls.email = 'changed@ftown.test'; return [zeroDelivery()]; })
+    .mockImplementationOnce(async params => { expect(params[6]).toBe('changed@ftown.test'); return [zeroDelivery()]; });
+  expect(await db.store.deliver('private-code', 23456)).toEqual({ status: 'denied' });
+  expect(db.atomic).toHaveBeenCalledTimes(2);
+});
+
+it('does not retry a cryptographically invalid history on fresh preflight', async () => {
+  const db = await deliveryFixture();
+  db.atomic.mockImplementationOnce(async () => {
+    db.controls.history = { ...db.f.approved, genesis: { ...db.f.approved.genesis, signature: 'A'.repeat(86) } };
+    return [zeroDelivery()];
+  });
+  await expect(db.store.deliver('private-code', 23456)).rejects.toHaveProperty('code');
+  expect(db.atomic).toHaveBeenCalledOnce();
+  expect(db.query.mock.calls.filter(([text]) => text.startsWith('SELECT root_id'))).toHaveLength(2);
 });

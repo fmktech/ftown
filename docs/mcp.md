@@ -101,7 +101,7 @@ Use the client's OAuth connection flow. It discovers the authorization server, r
 
 An unapproved browser automatically requests device access and waits while
 keeping the MCP consent continuation. On an already approved browser, open
-**Security → Devices → Pending approvals**, choose **Review**, and compare the
+**Security → Access → Pending approvals**, choose **Review**, and compare the
 verification code on both actual devices. Confirm the match locally on each,
 then approve in the trusted browser. Review, login and a server status alone do
 not grant encrypted access. Only the approved browser's signing key can add

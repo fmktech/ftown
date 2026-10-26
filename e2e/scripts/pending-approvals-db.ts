@@ -322,7 +322,57 @@ try {
 
   stage = 'immutable credential delivery, renewal, rotation/revocation replay denial';
   await store.reviewer(owner, blocked.link.request.requestId, blocked.final);
-  const deliveries = await Promise.all([store.deliver(blocked.pair!.deviceCode, 23456), store.deliver(blocked.pair!.deviceCode, 34567)]);
+  const deliveries = await (async () => {
+    const clients: import('pg').PoolClient[] = [];
+    let outcomes: Promise<PromiseSettledResult<Awaited<ReturnType<typeof store.deliver>>>[]> | undefined;
+    try {
+      for (let index = 0; index < 3; index++) clients.push(await ownedPool.connect());
+      const [blocker, ...callers] = clients;
+      const blockerPid = (await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number;
+      const callerPids = await Promise.all(callers.map(async client => (await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid as number));
+      await blocker.query('BEGIN');
+      const held = await blocker.query('SELECT request_id FROM security_pending_approvals WHERE request_id=$1 FOR UPDATE', [blocked.link.request.requestId]);
+      assert.equal(held.rowCount, 1);
+      let submitted = 0;
+      outcomes = Promise.allSettled(callers.map((client, index) => new PendingApprovalStore(async (text: string, params: unknown[] = []) => {
+        assert.ok(performance.now() < deadline, 'Acceptance deadline reached');
+        if (text.startsWith('WITH locked') && text.includes('inserted_refresh AS')) submitted++;
+        return (await client.query(text, params)).rows;
+      }).deliver(blocked.pair!.deviceCode, [23456, 34567][index])));
+      const overlapDeadline = performance.now() + 3000;
+      let waiting = 0;
+      while (performance.now() < overlapDeadline) {
+        // A waiter may be queued behind the other waiter. Follow both hard and
+        // soft blockers to prove each actual statement waits on our held row.
+        const observed = await query(`WITH RECURSIVE blockers(origin,pid,path) AS (
+          SELECT pid,pid,ARRAY[pid] FROM unnest($1::int[]) AS callers(pid)
+          UNION ALL SELECT b.origin,next.pid,b.path || next.pid FROM blockers b
+            CROSS JOIN LATERAL unnest(pg_blocking_pids(b.pid)) AS next(pid) WHERE NOT next.pid=ANY(b.path))
+          SELECT COUNT(DISTINCT origin)::int AS waiting FROM blockers WHERE pid=$2`, [callerPids, blockerPid]);
+        waiting = observed[0].waiting as number;
+        if (submitted === 2 && waiting === 2) break;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      assert.equal(submitted, 2, 'Both real delivery statements must be submitted');
+      assert.equal(waiting, 2, 'Both delivery statements must wait on the controlled row lock');
+      console.log('Concurrent delivery overlap verified: submitted=2 blocked=2.');
+      await blocker.query('COMMIT');
+      const results = await outcomes;
+      return results.map(result => {
+        if (result.status === 'rejected') throw result.reason;
+        return result.value;
+      });
+    } finally {
+      // Release the blocker before awaiting callers, including failed setup or
+      // overlap assertions. No task-owned checked-out client survives cleanup.
+      try { if (clients[0]) await clients[0].query('ROLLBACK'); }
+      finally {
+        try { if (outcomes) await outcomes; }
+        finally { for (const client of clients) client.release(); }
+      }
+    }
+  })();
+  console.log(`Concurrent delivery result counts: snapshots=${deliveries.filter(result => 'snapshot' in result).length} denied=${deliveries.filter(result => 'status' in result && result.status === 'denied').length}.`);
   assert.ok(deliveries.every(result => 'snapshot' in result));
   assert.deepEqual(deliveries[0].snapshot, deliveries[1].snapshot);
   const snapshot = deliveries[0].snapshot;

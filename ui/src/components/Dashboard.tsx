@@ -67,7 +67,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const { hidden: hiddenBridgeIds, hide: hideBridge, unhide: handleUnhideBridge } = useHiddenSet("ftown:hiddenBridges");
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showSecurity, setShowSecurity] = useState(false);
-  const [securityView, setSecurityView] = useState<"activity" | "devices">("activity");
+  const [securityView, setSecurityView] = useState<"activity" | "devices">("devices");
   const pending = usePendingApprovals(accountClient, "reviewer");
   const pendingCount = pending.snapshot.inbox.filter(item => !["approved", "rejected", "cancelled", "expired", "conflict"].includes(item.status)).length;
   const [securityBridgeId, setSecurityBridgeId] = useState<string | undefined>(undefined);
@@ -176,7 +176,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     if (!client?.executeSecurity) return Promise.reject({ code: "security_setup_required" });
     return client.executeSecurity(command);
   }, [client]);
-  const openSecurity = useCallback((bridgeId?: string) => { setSecurityBridgeId(bridgeId); setShowSecurity(true); }, []);
+  const openSecurity = useCallback((bridgeId?: string) => { setSecurityView("devices"); setSecurityBridgeId(bridgeId); setShowSecurity(true); }, []);
 
   // Keep bridgeOrder stable when bridges connect/disconnect; only append new ids (sorted).
   useEffect(() => {
@@ -977,7 +977,7 @@ PY`;
             />
           </div>
           <button type="button" className="flex min-h-11 shrink-0 items-center justify-center gap-2 border-t border-[var(--border-subtle)] px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
-            title="Security: devices and MCP activity" aria-label="Open security" onClick={() => { setSecurityView("activity"); openSecurity(); }}>
+            title="Security: computer and browser access" aria-label="Open security" onClick={() => openSecurity()}>
             <span aria-hidden="true">◇</span><span className={isDesktop && sidebarCollapsed ? "sr-only" : ""}>Security{pendingCount > 0 ? ` (${pendingCount})` : ""}</span>
           </button>
           <PushNotificationsControl localMode={localMode} accountId={userId} />
