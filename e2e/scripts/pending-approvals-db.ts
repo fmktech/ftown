@@ -73,8 +73,11 @@ try {
       if (specifier.startsWith('@security/')) {
         assert.match(specifier, /^@security\/[a-z-]+$/); return { url: new URL(specifier.slice(10) + '.ts', securityRoot).href, shortCircuit: true };
       }
-      if (specifier.startsWith('.') && specifier.endsWith('.js') && context.parentURL?.startsWith(bridgeRoot)) {
-        const candidate = new URL(specifier.slice(0, -3) + '.ts', context.parentURL); if (existsSync(candidate)) return { url: candidate.href, shortCircuit: true };
+      // UI helpers also import bridge source through extensionless relative paths.
+      if (specifier.startsWith('.') && (specifier.endsWith('.js') || !/\.[^/]+$/.test(specifier))
+        && (context.parentURL?.startsWith(uiRoot) || context.parentURL?.startsWith(bridgeRoot))) {
+        const candidate = new URL((specifier.endsWith('.js') ? specifier.slice(0, -3) : specifier) + '.ts', context.parentURL);
+        if ((candidate.href.startsWith(uiRoot) || candidate.href.startsWith(bridgeRoot)) && existsSync(candidate)) return { url: candidate.href, shortCircuit: true };
       }
       return next(specifier, context);
     },
