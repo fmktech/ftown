@@ -12,7 +12,7 @@ const row = (id: string, bridgeId = "a", extra: Partial<Session> = {}): Session 
   id, bridgeId, name: id, status: "completed", createdAt: "2026-09-30", updatedAt: "2026-09-30", ...extra,
 
 });
-function harness(immediate = false) {
+function harness(immediate = false, commandTimeoutMs?: number) {
   const responses = new Set<(r: CommandResponse) => void>();
   const subscribed = new Set<() => void>();
   const subscriptions: Array<ReturnType<typeof subscription>> = [];
@@ -25,7 +25,7 @@ function harness(immediate = false) {
       subscribe: vi.fn(), unsubscribe: vi.fn(), removeAllListeners: vi.fn(() => listeners.clear()),
     };
   }
-  const client = { getSubscription: () => null, newSubscription: () => { const s = subscription(); subscriptions.push(s); return s; }, removeSubscription: vi.fn() };
+  const client = { commandTimeoutMs, getSubscription: () => null, newSubscription: () => { const s = subscription(); subscriptions.push(s); return s; }, removeSubscription: vi.fn() };
   const commands: Command[] = [];
   const rpc: BridgeRpc = {
     publishCommand: vi.fn(c => { commands.push(c); }),
@@ -46,8 +46,8 @@ function harness(immediate = false) {
 let visibility = "visible";
 beforeEach(() => { vi.useFakeTimers(); visibility = "visible"; Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility }); localStorage.clear(); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
-function setup(immediate = false) {
-  const h = harness(immediate);
+function setup(immediate = false, commandTimeoutMs?: number) {
+  const h = harness(immediate, commandTimeoutMs);
   const hook = renderHook(({ userId }) => useSessions(h.client, userId, h.rpc), { initialProps: { userId: "user" as string | null } });
   const refresh = () => act(() => hook.result.current.refreshSessions());
   const ids = () => hook.result.current.sessions.map(s => s.id);
@@ -80,6 +80,41 @@ describe("structured session creation through the actual hook", () => {
     expect(command.payload).not.toHaveProperty("createMissingWorkingDir");
     expect(command.payload).not.toHaveProperty("initialInput");
     expect(command.payload).not.toHaveProperty("command");
+  });
+});
+
+describe("session-list transport deadlines through the actual hook", () => {
+  it("retains independent broadcast replies after 35 seconds with a 40-second transport budget", () => {
+    const h = setup(true, 40_000); const request = h.request(); visibility = "hidden";
+    act(() => vi.advanceTimersByTime(35_000));
+    h.reply(request, [row("delayed-a")], "a");
+    h.reply(request, [row("delayed-b", "b")], "b");
+    expect(h.ids()).toEqual(["delayed-a", "delayed-b"]);
+  });
+
+  it.each([40_000, 40_001])("rejects a snapshot at or after the 40-second transport deadline (%s ms)", delay => {
+    const h = setup(false, 40_000); h.publication(row("keep")); h.recover(); const request = h.request(); visibility = "hidden";
+    act(() => vi.advanceTimersByTime(delay));
+    h.reply(request, [row("unexpected")], "a");
+    expect(h.ids()).toEqual(["keep"]);
+  });
+
+  it("honors a finite positive transport budget shorter than the fallback", () => {
+    const h = setup(true, 5_000); const early = h.request(); visibility = "hidden";
+    act(() => vi.advanceTimersByTime(4_999)); h.reply(early, [row("keep")], "a");
+    expect(h.ids()).toEqual(["keep"]);
+    h.refresh(); const late = h.request(); act(() => vi.advanceTimersByTime(5_000));
+    h.reply(late, [row("unexpected")], "a");
+    expect(h.ids()).toEqual(["keep"]);
+  });
+
+  it.each([undefined, Number.NaN, Number.POSITIVE_INFINITY, 0, -1])("retains the 30-second fallback for an absent or invalid budget (%s)", budget => {
+    const h = setup(true, budget); const early = h.request(); visibility = "hidden";
+    act(() => vi.advanceTimersByTime(29_999)); h.reply(early, [row("keep")], "a");
+    expect(h.ids()).toEqual(["keep"]);
+    h.refresh(); const late = h.request(); act(() => vi.advanceTimersByTime(30_000));
+    h.reply(late, [row("unexpected")], "a");
+    expect(h.ids()).toEqual(["keep"]);
   });
 });
 
