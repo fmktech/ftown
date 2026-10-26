@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApprovedEndpoint, SecurityEvent, SecurityPage } from "@security/protocol";
 import { SecurityPanel, type SecurityBridge, type SecurityCommandExecutor } from "./SecurityPanel";
@@ -204,6 +204,27 @@ describe("Account devices", () => {
     await screen.findByText("Setup needs attention");
     expect(screen.getByText("Could not verify access. Reconnect this computer, then refresh access.")).toBeTruthy();
     expect(screen.queryByText(/Finish sharing from a browser/)).toBeNull();
+  });
+
+  it("keeps three shared computers identifiable in one list, including a long hostname", async () => {
+    const f = accountFixture(2);
+    const longName = "my-computer-with-an-unusually-long-continuous-hostname-".repeat(3);
+    const computers = ["Work laptop", "Home computer", longName].map((label, index): SecurityBridge => ({
+      ...bridge, bridgeId: `computer-${index}`, label, security: { ...bridge.security, bridgeId: `computer-${index}` },
+    }));
+    const execute = mockExecutor().mockResolvedValue({ devices: [{ ...device("0", "Laptop"), source: "account" }] });
+    render(<SecurityDevices currentEndpointId="0" bridges={computers} execute={execute} accountClient={f.client} accountState={f.state} />);
+    const list = screen.getByRole("list", { name: "Computer access" });
+    await waitFor(() => expect(within(list).getAllByText("Shared with your approved browsers")).toHaveLength(3));
+    expect(within(list).getAllByRole("listitem")).toHaveLength(3);
+    expect(within(list).getByRole("heading", { name: longName })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Share with my other browsers" })).toBeNull();
+    fireEvent.click(screen.getByText(/^Browsers with access/));
+    fireEvent.click(screen.getByRole("button", { name: "Remove access for Phone" }));
+    expect(screen.getByRole("group", { name: "Confirm account device revocation" })).toBeTruthy();
+    expect(f.revoke).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("group", { name: "Confirm account device revocation" })).toBeNull();
   });
 
   it("confirms account sharing once per connection and qualifies offline or changed-key status", async () => {

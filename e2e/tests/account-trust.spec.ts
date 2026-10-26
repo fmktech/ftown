@@ -1,4 +1,4 @@
-import { expect, type BrowserContext, type Page } from "@playwright/test";
+import { expect, type BrowserContext, type Page, type TestInfo } from "@playwright/test";
 import { test } from "../helpers/fixtures";
 import { accountBrowserState, approveAccountComputer, createAccountShell, startAccountTestBridge, usePrivateApprovalLink, type AccountTestBridge } from "../helpers/account-pairing";
 import { bridgeSecurityCommand } from "../helpers/secure-browser";
@@ -14,6 +14,59 @@ async function devices(page: Page) {
   await expect(page.getByRole("list", { name: "Account devices", exact: true })).toBeVisible();
 }
 async function noOverflow(page: Page) { expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); }
+
+
+async function waitForSecurityLayout(page: Page, width: number) {
+  await expect.poll(() => page.getByRole("dialog", { name: "Security", exact: true }).evaluate((element, mobile) => {
+    const transitioning = element.getAnimations({ subtree: true }).some(animation => animation instanceof CSSTransition && animation.playState === "running");
+    const controls = [...element.querySelectorAll<HTMLElement>("button,select,summary")].filter(control => control.checkVisibility());
+    return !transitioning && controls.length > 0 && controls.every(control => mobile ? control.getBoundingClientRect().height >= 44 : control.getBoundingClientRect().height <= 36);
+  }, width < 640), { timeout: 2000, intervals: [25, 50, 100], message: "Security responsive transitions and control geometry must settle" }).toBe(true);
+}
+
+async function compactAccessEvidence(page: Page, info: TestInfo, bridgeIds: string[]) {
+  await page.getByRole("button", { name: "Open security", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Security", exact: true });
+  await expect(dialog.getByRole("tab", { name: "Access", exact: true })).toHaveAttribute("aria-selected", "true");
+  for (const bridgeId of bridgeIds) await expect(dialog.locator(`[data-computer-access="${bridgeId}"]`)).toContainText("Shared with your approved browsers", { timeout: 60000 });
+  const measurements = [];
+  for (const size of [{ width: 1280, height: 900 }, { width: 900, height: 760 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(size);
+    await waitForSecurityLayout(page, size.width);
+    await dialog.locator("[data-security-content]").evaluate(element => { element.scrollTop = 0; });
+    const measured = await dialog.evaluate((element, ids) => {
+      const content = element.querySelector<HTMLElement>("[data-security-content]")!;
+      const bounds = content.getBoundingClientRect();
+      return { headerHeight: element.querySelector("header")!.getBoundingClientRect().height,
+        contentTop: bounds.top, contentBottom: bounds.bottom, scrollTop: content.scrollTop,
+        overflow: element.scrollWidth > element.clientWidth || content.scrollWidth > content.clientWidth,
+        rows: ids.map(id => { const row = element.querySelector(`[data-computer-access="${id}"]`)!.getBoundingClientRect(); return { top: row.top, bottom: row.bottom, height: row.height }; }),
+        targets: [...element.querySelectorAll<HTMLElement>("button,select,summary")].filter(control => control.checkVisibility()).map(control => control.getBoundingClientRect().height) };
+    }, bridgeIds);
+    expect(measured.headerHeight).toBeLessThanOrEqual(64);
+    expect(measured.overflow).toBe(false); expect(measured.scrollTop).toBe(0);
+    expect(measured.rows).toHaveLength(3);
+    for (const row of measured.rows) {
+      expect(row.height).toBeLessThanOrEqual(size.width < 640 ? 100 : 76);
+      if (size.width >= 640) { expect(row.top).toBeGreaterThanOrEqual(measured.contentTop); expect(row.bottom).toBeLessThanOrEqual(measured.contentBottom); }
+    }
+    if (size.width < 640) for (const height of measured.targets) expect(height).toBeGreaterThanOrEqual(44);
+    await noOverflow(page);
+    await page.screenshot({ path: info.outputPath(`security-compact-access-${size.width}.png`), fullPage: true });
+    await dialog.getByText(/^Browsers with access/).click();
+    const browserList = dialog.getByRole("list", { name: "Account devices", exact: true });
+    await expect(browserList).toBeVisible();
+    const browserHeights = await browserList.getByRole("listitem").evaluateAll(rows => rows.map(row => row.getBoundingClientRect().height));
+    for (const height of browserHeights) expect(height).toBeLessThanOrEqual(size.width < 640 ? 128 : 76);
+    await noOverflow(page);
+    await page.screenshot({ path: info.outputPath(`security-compact-browsers-${size.width}.png`), fullPage: true });
+    measurements.push({ ...size, ...measured, browserHeights });
+    await dialog.getByText(/^Browsers with access/).click();
+  }
+  await info.attach("security-density.json", { body: JSON.stringify(measurements, null, 2), contentType: "application/json" });
+  await dialog.getByRole("button", { name: "Close security" }).click();
+  await page.setViewportSize({ width: 1280, height: 900 });
+}
 
 for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
   test(`account trust: one computer confirmation, one device approval, future computers and durable two-tab pins (${viewport.width})`, async ({ browser }, info) => {
@@ -165,6 +218,7 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
         await expect(phone.locator("text=/^(P2P|Local|Cloud)$/").first()).toHaveText("Cloud", { timeout: 15000 });
         expect(frames.some(frame => frame.includes("ftown_encrypted"))).toBe(true);
         expect(frames.some(frame => frame.includes(privateName) || frame.includes(marker))).toBe(false);
+        if (viewport.width === 1280) await compactAccessEvidence(page, info, [firstId, secondId, thirdId]);
       } finally { release(); await staleTab.close(); }
 
       await devices(page); await noOverflow(page);
