@@ -193,6 +193,8 @@ it("an invalid current history stays blocked through a subsequent network failur
   vi.mocked(f.fetcher).mockRejectedValueOnce(new Error("now unavailable"));
   expect((await browser.client.refresh()).code).toBe("account_trust_rollback");
   expect(browser.client.snapshot().status).toBe("error");
+  vi.mocked(f.fetcher).mockResolvedValueOnce(response({ error: "rate_limited" }, 429));
+  expect((await browser.client.refresh()).code).toBe("account_trust_rollback");
   f.setHistory(initial); expect((await browser.client.refresh()).status).toBe("ready");
 });
 it("checks elapsed monotonic grace at account admission even with a frozen wall and no refresh timer", async () => {
@@ -243,6 +245,9 @@ it("blocks an existing runtime callback after another tab durably revoked this d
   const latest = f.history()!;
   browser.setStored({ history: latest, checkpoint: await verifyAccountHistory(latest, browser.stored()!.checkpoint), lastServerReadAt: Date.now(), lastObservedAt: Date.now() });
   vi.mocked(f.fetcher).mockRejectedValueOnce(new Error("offline after another tab committed revoke"));
+  expect((await browser.client.refresh()).code).toBe("account_device_revoked");
+  expect(() => browser.client.assertBridgeAccess("revocation-computer")).toThrowError(expect.objectContaining({ code: "account_device_revoked" }));
+  vi.mocked(f.fetcher).mockResolvedValueOnce(response({ error: "rate_limited" }, 429));
   expect((await browser.client.refresh()).code).toBe("account_device_revoked");
   expect(() => browser.client.assertBridgeAccess("revocation-computer")).toThrowError(expect.objectContaining({ code: "account_device_revoked" }));
 });
@@ -393,4 +398,39 @@ it("durable commit presence is readable without establishing fresh account autho
   expect(browser.client.snapshot().status).toBe("checking"); expect(browser.client.snapshot().trust).toBeNull(); expect(f.calls).toHaveLength(0);
   const fresh = await f.installation(false);
   expect(await fresh.client.hasCommittedTrust()).toBe(false); expect(fresh.client.snapshot().status).toBe("checking");
+});
+
+
+it("HTTP 429 preserves only previously verified bounded grace and never parses a throttle body", async () => {
+  const f = await fixture(); const browser = await f.installation(true);
+  const computer = await generateAccountBridgeCandidate("throttled-computer");
+  await browser.client.approve(await createAccountEnrollment(computer, "Computer", null, "throttled-computer"));
+  const pin = browser.stored()!; const start = performance.now();
+  const throttled = new Response("not account history", { status: 429 });
+  const readBody = vi.spyOn(throttled, "text");
+  vi.spyOn(throttled.body!, "cancel").mockRejectedValueOnce(new Error("body cancellation unavailable"));
+  vi.mocked(f.fetcher).mockResolvedValueOnce(throttled);
+  expect(await browser.client.refresh()).toMatchObject({ status: "ready", code: "account_storage_unavailable", offline: true });
+  expect(readBody).not.toHaveBeenCalled();
+  expect(browser.stored()!.lastServerReadAt).toBe(pin.lastServerReadAt);
+  expect(() => browser.client.assertBridgeAccess("throttled-computer")).not.toThrow();
+  vi.spyOn(performance, "now").mockReturnValue(start + 86400001);
+  vi.mocked(f.fetcher).mockResolvedValueOnce(response({ error: "rate_limited" }, 429));
+  expect((await browser.client.refresh()).code).toBe("account_offline_expired");
+  expect(() => browser.client.assertBridgeAccess("throttled-computer")).toThrowError(expect.objectContaining({ code: "account_offline_expired" }));
+  expect(browser.stored()!.lastServerReadAt).toBe(pin.lastServerReadAt);
+  expect((await browser.client.refresh()).status).toBe("ready");
+  expect(() => browser.client.assertBridgeAccess("throttled-computer")).not.toThrow();
+});
+it("a reloaded client with a durable pin cannot acquire authority from HTTP 429", async () => {
+  const f = await fixture(); const trusted = await f.installation(true);
+  const computer = await generateAccountBridgeCandidate("throttle-startup");
+  await trusted.client.approve(await createAccountEnrollment(computer, "Computer", null, "throttle-startup"));
+  const browser = await f.installation(true); const before = browser.stored()!;
+  vi.mocked(f.fetcher).mockResolvedValueOnce(response({ error: "rate_limited" }, 429));
+  expect(await browser.client.refresh()).toMatchObject({ status: "error", code: "account_storage_unavailable", offline: true });
+  expect(browser.stored()).toBe(before);
+  expect(() => browser.client.assertBridgeAccess("throttle-startup")).toThrowError(expect.objectContaining({ code: "account_approval_required" }));
+  expect((await browser.client.refresh()).status).toBe("ready");
+  expect(() => browser.client.assertBridgeAccess("throttle-startup")).not.toThrow();
 });

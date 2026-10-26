@@ -1,6 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest';
-const mocks = vi.hoisted(() => ({ auth: vi.fn(), rate: vi.fn(), create: vi.fn(), inbox: vi.fn(), read: vi.fn(), reviewer: vi.fn(), candidate: vi.fn() }));
+const mocks = vi.hoisted(() => ({ auth: vi.fn(), rate: vi.fn(), create: vi.fn(), inbox: vi.fn(), read: vi.fn(), reviewer: vi.fn(), candidate: vi.fn(), query: vi.fn() }));
 vi.mock('@/lib/auth', () => ({ auth: mocks.auth }));
+vi.mock('@/lib/db', () => ({ getDb: () => ({ query: mocks.query }) }));
 vi.mock('@/lib/login-rate-limit', () => ({ checkRateLimit: mocks.rate, recordAttempt: vi.fn() }));
 vi.mock('@/lib/pending-approval-store', () => ({ PendingApprovalStore: class {
   createBrowser = mocks.create; inbox = mocks.inbox; read = mocks.read; reviewer = mocks.reviewer; candidate = mocks.candidate;
@@ -9,7 +10,7 @@ import { pendingCreate, pendingInbox, pendingRead, pendingReview, pendingCandida
 const owner = '349f8d2e-38e4-4d59-888d-687dcfa19e39';
 const request = (path: string, body?: unknown, origin?: string) => new Request('https://localhost:3000/api/security/approvals' + path,
   { method: body === undefined ? 'GET' : 'POST', headers: { ...(origin ? { origin } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-beforeEach(() => { vi.clearAllMocks(); vi.stubEnv('FTOWN_PUBLIC_URL', 'https://localhost:8444'); mocks.auth.mockResolvedValue({ user: { id: owner } }); mocks.rate.mockResolvedValue({ allowed: true }); });
+beforeEach(() => { vi.clearAllMocks(); vi.stubEnv('FTOWN_PUBLIC_URL', 'https://localhost:8444'); mocks.auth.mockResolvedValue({ user: { id: owner } }); mocks.rate.mockResolvedValue({ allowed: true }); mocks.query.mockResolvedValue([{ failed_count: 1, retry_after: 60 }]); });
 it('anonymous public-proxy mutation reaches authentication; foreign/missing origins stop before auth', async () => {
   mocks.auth.mockResolvedValue(null);
   expect((await pendingCreate(request('', {}, 'https://localhost:8444'))).status).toBe(401);
