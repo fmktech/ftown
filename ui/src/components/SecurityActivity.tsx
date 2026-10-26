@@ -72,42 +72,42 @@ export function SecurityActivity({ bridgeId, selectedBridge, execute, gatewayAva
     return () => { active.current?.abort(); generation.current++; };
   }, [available, load]);
 
-  return <div className="space-y-4">
-    <div className="flex flex-wrap items-center justify-between gap-3">
-      <label className="flex min-w-0 flex-col gap-1 text-xs text-[var(--text-muted)]">Source
+  return <div className="space-y-3">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <label className="flex min-w-0 items-center gap-2 text-xs text-[var(--text-muted)]">Source
         <select aria-label="Activity source" value={source} onChange={event => setSource(event.target.value as "gateway" | "bridge")}
-          className="min-h-11 max-w-full rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)] px-3 text-sm text-[var(--text-primary)]">
+          className="min-h-11 sm:min-h-8 max-w-full rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)] px-3 text-sm text-[var(--text-primary)]">
           {gatewayAvailable && <option value="gateway">MCP actions</option>}
           <option value="bridge">Computer actions</option>
         </select>
       </label>
-      <button type="button" className="btn-ghost min-h-11" disabled={loading || !available} onClick={() => void load()}>Refresh activity</button>
+      <button type="button" className="btn-ghost min-h-11 sm:min-h-8" disabled={loading || !available} onClick={() => void load()}>Refresh activity</button>
     </div>
     <p className="text-xs leading-relaxed text-[var(--text-muted)]">
       {source === "gateway" ? "MCP actions include requests that never reached a computer."
         : "Computer actions show requests received by this computer."}
       {" "}A timeout or unknown outcome does not prove an action was not executed.
     </p>
-    {!available && <p role="status" className="rounded-md border border-[var(--border-muted)] p-4 text-sm text-[var(--text-secondary)]">
+    {!available && <p role="status" className="rounded-md border border-[var(--border-muted)] p-3 text-sm text-[var(--text-secondary)]">
       {!bridgeId ? "Choose a computer to see its actions." : "Connect and approve this computer to see its actions. MCP actions are available separately."}
     </p>}
     {error && <div role="alert" className="rounded-md border border-[var(--status-error)] p-3 text-sm text-[var(--status-error)]">
       {error}{page && <span className="block text-xs text-[var(--text-muted)]">Previously loaded activity is still shown.</span>}
     </div>}
     {loading && <p role="status" className="text-sm text-[var(--text-muted)]">Loading security activity…</p>}
-    {available && page?.events.length === 0 && <p className="rounded-md border border-[var(--border-muted)] p-6 text-sm text-[var(--text-muted)]">No MCP activity for this selection.</p>}
-    {page && page.events.length > 0 && <ol aria-label="MCP security activity" className="space-y-3">
-      {page.events.map(event => <li key={`${event.source}:${event.id}`} className="rounded-lg border border-[var(--border-muted)] bg-[var(--bg-base)] p-4">
+    {available && page?.events.length === 0 && <p className="rounded-md border border-[var(--border-muted)] p-3 text-sm text-[var(--text-muted)]">No MCP activity for this selection.</p>}
+    {page && page.events.length > 0 && <ol aria-label="MCP security activity" className="divide-y divide-[var(--border-subtle)] border-y border-[var(--border-subtle)]">
+      {page.events.map(event => <li key={`${event.source}:${event.id}`} className="py-2.5">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0 break-words text-sm font-semibold">{event.tool}{event.operation ? ` · ${event.operation}` : ""}</div>
           <span className={`shrink-0 rounded border px-2 py-1 text-xs ${event.status === "succeeded" ? "border-[var(--accent-dim)] text-[var(--accent)]" : event.status === "unknown" || event.status === "failed" ? "border-[var(--status-error)] text-[var(--status-error)]" : "border-[var(--border-muted)] text-[var(--text-muted)]"}`}>{statuses[event.status]}</span>
         </div>
-        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-[var(--text-muted)]">
+        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-[var(--text-muted)]">
           <time dateTime={event.startedAt}>{safeTime(event.startedAt)}</time>
           <span>{event.source === "gateway" ? "Gateway evidence" : "Bridge evidence"}</span>
           <span>{event.mutating ? "Control action" : "Read action"}</span>
         </div>
-        <details className="mt-2 text-xs"><summary className="min-h-11 cursor-pointer py-3">Action details</summary><dl className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
+        <details className="mt-1 text-xs"><summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2">Action details</summary><dl className="grid min-w-0 grid-cols-1 gap-2 sm:grid-cols-2">
           <div><dt className="text-[var(--text-faint)]">Bridge</dt><dd className="break-all text-[var(--text-secondary)]">{event.bridgeId ?? "Fleet / no bridge reached"}</dd></div>
           <div><dt className="text-[var(--text-faint)]">Client</dt><dd className="break-all text-[var(--text-secondary)]">{event.clientId ?? event.endpointId ?? "Unavailable"}</dd></div>
           {event.sessionId && <div><dt className="text-[var(--text-faint)]">Session</dt><dd className="break-all text-[var(--text-secondary)]">{event.sessionId}</dd></div>}
@@ -116,13 +116,13 @@ export function SecurityActivity({ bridgeId, selectedBridge, execute, gatewayAva
         {event.status === "unknown" && <p className="mt-3 text-xs text-[var(--text-muted)]">Execution may have occurred. Check bridge evidence before retrying.</p>}
       </li>)}
     </ol>}
-    {page && <div className="space-y-3 border-t border-[var(--border-subtle)] pt-4">
+    {page && <div className="space-y-2 border-t border-[var(--border-subtle)] pt-2">
       <p className="text-xs leading-relaxed text-[var(--text-faint)]">Retained for {page.retentionDays} days, up to {page.maxEvents.toLocaleString()} events per store.
         {page.oldestAvailableAt ? ` Oldest available: ${safeTime(page.oldestAvailableAt)}.` : ""}
         {page.truncated ? " Older activity has been removed by retention limits." : ""}
         {page.reset ? " History changed; the newest available page is shown." : ""}
       </p>
-      {page.nextCursor && <button type="button" className="btn-ghost min-h-11 w-full sm:w-auto" disabled={loading} onClick={() => void load(page.nextCursor ?? undefined)}>Load older activity</button>}
+      {page.nextCursor && <button type="button" className="btn-ghost min-h-11 sm:min-h-8 w-full sm:w-auto" disabled={loading} onClick={() => void load(page.nextCursor ?? undefined)}>Load older activity</button>}
     </div>}
   </div>;
 }

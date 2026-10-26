@@ -85,14 +85,11 @@ export function SecurityPanel({ open, onClose, bridges, currentEndpointId, execu
   const selected = bridges.find(bridge => bridge.bridgeId === bridgeId);
   return <dialog ref={dialogRef} aria-labelledby={titleId} onCancel={event => { event.preventDefault(); onClose(); }}
     onClick={event => { if (event.target === event.currentTarget) onClose(); }}
-    className="fixed inset-0 m-auto max-h-[min(92dvh,920px)] w-[calc(100%_-_24px)] max-w-4xl overflow-hidden rounded-xl border border-[var(--border-muted)] bg-[var(--bg-surface)] p-0 text-[var(--text-primary)] shadow-2xl backdrop:bg-black/70">
+    className="fixed inset-0 m-auto max-h-[min(92dvh,920px)] w-[calc(100%_-_16px)] max-w-4xl overflow-hidden rounded-xl border border-[var(--border-muted)] bg-[var(--bg-surface)] p-0 text-[var(--text-primary)] shadow-2xl backdrop:bg-black/70">
     <div className="flex max-h-[min(92dvh,920px)] flex-col" onClick={event => event.stopPropagation()}>
-      <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border-muted)] px-4 py-3 sm:px-6">
-        <div><h2 id={titleId} className="text-lg font-semibold">Security</h2><p className="text-xs text-[var(--text-muted)]">Computer and browser access</p></div>
-        <button type="button" aria-label="Close security" className="btn-ghost min-h-11 min-w-11" onClick={onClose}>✕</button>
-      </header>
-      <div className="flex shrink-0 flex-col gap-3 border-b border-[var(--border-subtle)] p-4 sm:flex-row sm:items-end sm:justify-between sm:px-6">
-        <div role="tablist" aria-label="Security views" className="flex gap-2">
+      <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--border-muted)] px-3 py-1.5 sm:px-4">
+        <h2 id={titleId} className="shrink-0 text-base font-semibold">Security</h2>
+        <div role="tablist" aria-label="Security views" className="flex min-w-0 flex-1 gap-1">
           {(["devices", "activity"] as const).map(tab => <button key={tab} type="button" role="tab"
             aria-selected={view === tab} aria-controls={`${titleId}-${tab}`} id={`${titleId}-tab-${tab}`}
             tabIndex={view === tab ? 0 : -1}
@@ -102,20 +99,21 @@ export function SecurityPanel({ open, onClose, bridges, currentEndpointId, execu
               const next = event.key === "Home" ? "devices" : event.key === "End" ? "activity" : tab === "activity" ? "devices" : "activity";
               setView(next); document.getElementById(`${titleId}-tab-${next}`)?.focus();
             }}
-            className={`${view === tab ? "btn-accent" : "btn-ghost"} min-h-11`} onClick={() => setView(tab)}>
+            className={`${view === tab ? "btn-accent" : "btn-ghost"} min-h-11 sm:min-h-8`} onClick={() => setView(tab)}>
             {tab === "activity" ? "Activity" : "Access"}
           </button>)}
         </div>
-        {(view === "activity" || !accountClient || !accountState?.trust && !!accountState?.legacyBridges.length) && <label className="flex min-w-0 flex-col gap-1 text-xs text-[var(--text-muted)]">Computer
+        {(view === "activity" || !accountClient || !accountState?.trust && !!accountState?.legacyBridges.length) && <label className="order-last flex w-full min-w-0 items-center gap-2 text-xs text-[var(--text-muted)] sm:order-none sm:w-auto">Computer
           <select aria-label="Security computer" value={bridgeId} onChange={event => setBridgeId(event.target.value)}
-            className="min-h-11 w-full max-w-full rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)] px-3 text-sm text-[var(--text-primary)] sm:max-w-72">
+            className="min-h-11 min-w-0 flex-1 rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)] px-2 text-sm text-[var(--text-primary)] sm:min-h-8 sm:max-w-56">
             <option value="">All computers</option>
             {bridges.map(bridge => <option key={bridge.bridgeId} value={bridge.bridgeId}>{bridge.label}</option>)}
           </select>
         </label>}
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:p-6">
-        {selected && <p className="mb-4 text-xs text-[var(--text-muted)]">{selected.label}: {securityStateLabel(selected.security.status)}</p>}
+        <button type="button" aria-label="Close security" className="btn-ghost min-h-11 min-w-11 shrink-0 sm:min-h-8 sm:min-w-8" onClick={onClose}>✕</button>
+      </header>
+      <div data-security-content className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4">
+        {selected && <p className="mb-2 text-xs text-[var(--text-muted)]">{selected.label}: {securityStateLabel(selected.security.status)}</p>}
         <section role="tabpanel" id={`${titleId}-${view}`} aria-labelledby={`${titleId}-tab-${view}`}>
           {view === "activity" ? <SecurityActivity bridgeId={bridgeId} selectedBridge={selected} execute={execute} gatewayAvailable={gatewayAvailable} />
             : <SecurityDevices bridge={selected} bridges={bridges} currentEndpointId={currentEndpointId} execute={execute} onInvitation={onInvitation} accountClient={accountClient} accountState={accountState} pendingClient={pendingClient} pendingState={pendingState} />}

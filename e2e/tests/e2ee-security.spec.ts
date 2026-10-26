@@ -268,6 +268,19 @@ test("account-migrated OAuth MCP uses one selected-computer consent, enforces re
     await page.getByLabel("Activity source", { exact: true }).selectOption("bridge");
     await expect(page.getByRole("list", { name: "MCP security activity" })).toContainText("sessions_update");
     await page.screenshot({ path: info.outputPath("mcp-security-evidence.png"), fullPage: true });
+    for (const size of [{ width: 1280, height: 900 }, { width: 900, height: 760 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(size);
+      const layout = await page.getByRole("dialog", { name: "Security", exact: true }).evaluate(element => ({
+        headerHeight: element.querySelector("header")!.getBoundingClientRect().height,
+        overflow: element.scrollWidth > element.clientWidth,
+        targets: [...element.querySelectorAll<HTMLElement>("button,select,summary")].filter(control => control.checkVisibility()).map(control => control.getBoundingClientRect().height),
+      }));
+      expect(layout.headerHeight).toBeLessThanOrEqual(size.width < 640 ? 112 : 64);
+      expect(layout.overflow).toBe(false);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      if (size.width < 640) for (const height of layout.targets) expect(height).toBeGreaterThanOrEqual(44);
+      await page.screenshot({ path: info.outputPath(`security-compact-activity-${size.width}.png`), fullPage: true });
+    }
     setStage("body-complete");
   } catch (error) {
     primaryFailed = true; recordLifecycle("body-failed"); throw error;
