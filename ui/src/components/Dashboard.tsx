@@ -190,7 +190,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   // session management consumes this shared transport.
   const rpc = useBridgeRpc(client, userId);
   const { bridgeExec } = rpc;
-  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, setSessionParent, removeSession, refreshSessions } = useSessions(client, userId, rpc);
+  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, setSessionParent, removeSession } = useSessions(client, userId, rpc);
   const { bridges, prepareLocalAccess } = useBridges(client, userId);
   const securityRuntime = client?.securityRuntime;
   useEffect(() => securityRuntime?.onChange(() => setSecurityGeneration(value => value + 1)), [securityRuntime]);
@@ -605,9 +605,11 @@ PY`;
           </button>
 
           <button
+            type="button"
             className="btn-ghost hidden md:inline-flex"
-            onClick={refreshSessions}
-            title="Refresh sessions"
+            onClick={() => window.location.reload()}
+            aria-label="Reconnect and refresh"
+            title="Reconnect and refresh (reload this page)"
             style={{ padding: "4px 8px", lineHeight: 1, alignItems: "center", justifyContent: "center" }}
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -644,6 +646,10 @@ PY`;
           <nav id="dashboard-navigation" ref={navigationRef} aria-label="Dashboard actions" hidden={!isDesktop && !showNavigation}
             className={`${isDesktop || showNavigation ? "flex" : "hidden"} absolute right-2 top-full z-50 mt-1 max-h-[calc(100dvh_-_60px)] w-[min(288px,calc(100vw_-_16px))] flex-col gap-2 overflow-y-auto rounded-md border border-[var(--border-muted)] bg-[var(--bg-surface)] p-3 shadow-xl md:static md:mt-0 md:w-auto md:max-h-none md:flex-row md:items-center md:overflow-visible md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none`}>
             {accountState?.status === "ready" && <button type="button" className="btn-accent min-h-11 shrink-0 text-xs md:min-h-8" aria-label={pendingCount ? `Review ${pendingCount} pending device approvals` : "Review device approvals"} onClick={() => { if (showNavigation) closeNavigation(true); setSecurityView("devices"); setShowSecurity(true); }}>Review{pendingCount ? ` (${pendingCount})` : ""}</button>}
+            <button type="button" className="btn-ghost flex min-h-11 items-center gap-2 text-left md:hidden" aria-label="Reconnect and refresh" title="Reconnect and refresh (reload this page)" onClick={() => window.location.reload()}>
+              <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M1 1v5h5" /><path d="M3.51 10a5 5 0 1 0 .49-5.38L1 6" /></svg>
+              <span>Reconnect and refresh</span>
+            </button>
             <PushNotificationsControl localMode={localMode} accountId={userId} presentation="responsive" />
             <button type="button" className="btn-ghost flex min-h-11 items-center gap-2 md:min-h-8 md:w-8 md:justify-center" style={{ padding: "4px 6px" }} title={`Security: computer and browser access${pendingCount ? `; ${pendingCount} requests` : ""}`} aria-label="Open security" onClick={() => openSecurity()}><SecurityLockIcon state="unknown" /><span className="md:sr-only">Security{pendingCount > 0 ? ` (${pendingCount})` : ""}</span></button>
             <a href={localMode ? "/dashboard" : "/local"} style={{ padding: "4px 6px" }} aria-label={localMode ? "Use Cloud" : "Use This computer"} title={localMode ? "Use Cloud" : "Use This computer"} onClick={localMode ? () => closeNavigation() : event => { event.preventDefault(); closeNavigation(); void prepareLocalAccess().then(() => { window.location.href = "/local"; }); }} className="btn-ghost flex min-h-11 items-center gap-2 md:min-h-8 md:w-8 md:justify-center"><NavigationIcon kind="switch" /><span className="md:sr-only">{localMode ? "Cloud" : "This computer"}</span></a>

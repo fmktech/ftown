@@ -239,11 +239,30 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       await expect(phone.getByRole("alert").filter({ hasText: "Approve this device using an existing approved device first." })).toHaveCount(0);
       const phoneIdentity = (await accountBrowserState(phone))[0]; expect(phoneIdentity.endpointId).not.toBe(initial.endpointId);
       expect(phoneIdentity.hpkeExtractable).toBe(false); expect(phoneIdentity.signingExtractable).toBe(false);
-      for (const [index, bridgeId] of [firstId, secondId].entries()) await createAccountShell(phone, bridgeId, `ACCOUNT_PRIVATE_${viewport.width}_${index}_${Date.now()}`);
-      await phone.reload(); await expect(phone.locator(`[data-bridge-row="${firstId}"]`)).toBeVisible({ timeout: 45000 });
+      const existingNames = [firstId, secondId].map((_, index) => `ACCOUNT_PRIVATE_${viewport.width}_${index}_${Date.now()}`);
+      for (const [index, bridgeId] of [firstId, secondId].entries()) await createAccountShell(phone, bridgeId, existingNames[index]);
+      // The user's mobile reconnect action must perform a real document reload
+      // and restore the same approved identity, bridges and running sessions.
+      await phone.getByRole("button", { name: "Open navigation menu", exact: true }).click();
+      await Promise.all([
+        phone.waitForEvent("load", { timeout: 30000 }),
+        phone.getByRole("navigation", { name: "Dashboard actions" }).getByRole("button", { name: "Reconnect and refresh", exact: true }).click(),
+      ]);
+      for (const bridgeId of [firstId, secondId]) await expect(phone.locator(`[data-bridge-row="${bridgeId}"]`)).toBeVisible({ timeout: 60000 });
       expect((await accountBrowserState(phone))[0].endpointId).toBe(phoneIdentity.endpointId);
+      for (const name of existingNames) await expect(phone.getByRole("button", { name: new RegExp(name) })).toBeVisible({ timeout: 60000 });
 
       await page.goto("/dashboard");
+      if (viewport.width >= 768) {
+        await expect(page.locator(`[data-bridge-row="${firstId}"]`)).toBeVisible({ timeout: 60000 });
+        await Promise.all([
+          page.waitForEvent("load", { timeout: 30000 }),
+          page.getByRole("button", { name: "Reconnect and refresh", exact: true }).click(),
+        ]);
+        for (const bridgeId of [firstId, secondId]) await expect(page.locator(`[data-bridge-row="${bridgeId}"]`)).toBeVisible({ timeout: 60000 });
+        expect((await accountBrowserState(page))[0].endpointId).toBe(initial.endpointId);
+        for (const name of existingNames) await expect(page.getByRole("button", { name: new RegExp(name) })).toBeVisible({ timeout: 60000 });
+      }
       const accountRead = await page.request.get(`${origin}/api/security/account`); expect(accountRead.ok()).toBe(true);
       const oldHistory: unknown = await accountRead.json();
       const staleTab = await desktop.newPage(); let release: () => void = () => {};

@@ -198,3 +198,15 @@ The pane target must be resolved as a pane ID: the earlier isolated driver prove
 Decisive interpretations: native pane nonblank/prompt true while bridge blank means the live shell has text and the bridge PTY/headless route loses it; native pane empty plus stripped after-Stop output lacking text means the bridge mirrors the native shell/tmux state, directing work to startup/terminal negotiation. Native prompt plus stripped output lacking prompt distinguishes tmux attach output from the underlying pane. Native and raw both contain printable prompt but headless remains blank directs a deterministic ANSI/state replay. The next change should follow one of these observations, not a guessed reset.
 
 STOP: third-CI bounded diagnosis complete; report lease released. No source/test edits, runtime, E2E, browser, server, database, CI or Git operations by this worker.
+
+
+## CI40541613241: fourth non-content diagnostic
+Extracted only the named local-rerun-diagnostics.json attachment into /tmp/ftown-rerun-diagnosis/fourth-local-rerun-diagnostics.json. The complete6676-byte log has pre-Stop boundary5057; no truncation/shrink. Both authenticated bridge screen and browser remain37 blank rows. The VT-stripped after-Stop slice contains493 characters and a prompt-pattern character; this count includes whitespace and is not an ordered proof of a visible prompt.
+
+Recorded control order relative to pre-Stop: old home20/clear23, alternate exit103, lost tty120, new alternate enter132/home156/clear159, then homes535/823/957/1065/1384. There is no later recorded full-clear, but unrecorded erase-line/overwrite controls can still erase content. Native pane comparison is unavailable, so it cannot establish whether native shell text exists.
+
+The collector catches list-panes failure, strict seven-field parse failure, revalidation failure and capture-pane failure into the same unavailable flag. Its exact-session plus trailing-colon target syntax is supported by the installed tmux manual; no target bug is proved. A possible parsing hazard is trimEnd removing a trailing empty pane_dead field; explicit format #{?pane_dead,1,0} would remove that ambiguity, but actual failing stage is unknown. Future instrumentation should record only stage/code, not arbitrary stderr/content.
+
+A synthetic prompt-then-erase TerminalManager replay would not prove the missing CI byte order. If diagnosis resumes, a bounded in-memory replay of this test-owned full log and post-Stop slice at80x37 versus120x40, retaining only nonblank/prompt/cursor/buffer counts, could discriminate actual stream geometry from live manager state without attaching text. Native comparison remains useful after stage reporting. No source fix is justified yet.
+
+Root stopped this investigation to prioritize the user's back/refresh work. PR remains draft with the known local-rerun failure. No further diagnostic execution authorized by this handoff. STOP; report and temporary authoring leases released. No application/test edits or runtime/CI/Git execution by this worker.

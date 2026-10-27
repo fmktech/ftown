@@ -194,6 +194,47 @@ describe("attention navigation preserves the request", () => {
 });
 
 
+describe("reconnect and refresh", () => {
+  it.each([
+    { desktop: true, local: false }, { desktop: false, local: false },
+    { desktop: true, local: true }, { desktop: false, local: true },
+  ])("reloads the current page on explicit action (desktop=$desktop, local=$local)", ({ desktop, local }) => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: desktop, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    // jsdom does not navigate documents, but emits this event when Location.reload
+    // attempts a real reload. That checks the production handler without replacing it.
+    const virtualConsole = (window as unknown as { _virtualConsole: {
+      on(event: "jsdomError", handler: (error: Error) => void): void;
+      off(event: "jsdomError", handler: (error: Error) => void): void;
+    } })._virtualConsole;
+    const errors: Error[] = [];
+    const record = (error: Error) => errors.push(error);
+    virtualConsole.on("jsdomError", record);
+    try {
+      localStorage.setItem("ftown:test-trust", "keep");
+      sessionStorage.setItem("ftown:test-local-port", "keep");
+      const { container } = dashboard(local);
+      const desktopButton = container.querySelector<HTMLButtonElement>('button[aria-label="Reconnect and refresh"].hidden')!;
+      let action: HTMLButtonElement;
+      if (desktop) {
+        action = desktopButton;
+      } else {
+        fireEvent.click(screen.getByRole("button", { name: "Open navigation menu" }));
+        action = within(screen.getByRole("navigation", { name: "Dashboard actions" })).getByRole("button", { name: "Reconnect and refresh" });
+      }
+      expect(action.title).toContain("reload this page");
+      fireEvent.click(action);
+      expect(errors.filter(error => error.message.includes("Not implemented: navigation"))).toHaveLength(1);
+      expect(localStorage.getItem("ftown:test-trust")).toBe("keep");
+      expect(sessionStorage.getItem("ftown:test-local-port")).toBe("keep");
+      expect(state.stopSession).not.toHaveBeenCalled();
+      expect(state.retrySession).not.toHaveBeenCalled();
+    } finally {
+      virtualConsole.off("jsdomError", record);
+      sessionStorage.removeItem("ftown:test-local-port");
+    }
+  });
+});
+
 describe("navigation and selected-session actions", () => {
   it("keeps one notification controller in a dismissible mobile disclosure and restores focus", async () => {
     window.matchMedia = vi.fn().mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() });
