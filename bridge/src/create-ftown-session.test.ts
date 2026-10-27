@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { buildSessionCommand } from './agent-commands.js';
+import { TerminalManager } from './terminal-manager.js';
 import {
   assertProviderAuthAvailable,
   buildChildBriefing,
@@ -52,6 +53,8 @@ interface RecordedRun {
   hookPort?: number;
   hookToken?: string;
   parentSessionId?: string;
+  cols?: number;
+  rows?: number;
 }
 
 function fakeDeps(existingSessions: Session[] = []): {
@@ -89,6 +92,8 @@ function fakeDeps(existingSessions: Session[] = []): {
             hookPort?: number;
             hookToken?: string;
             parentSessionId?: string;
+            cols?: number;
+            rows?: number;
           },
         ) => {
           runs.push({
@@ -102,6 +107,8 @@ function fakeDeps(existingSessions: Session[] = []): {
             hookPort: opts.hookPort,
             hookToken: opts.hookToken,
             parentSessionId: opts.parentSessionId,
+            ...(opts.cols !== undefined ? { cols: opts.cols } : {}),
+            ...(opts.rows !== undefined ? { rows: opts.rows } : {}),
           });
         },
       } as CreateFtownSessionDeps['runner'],
@@ -747,6 +754,55 @@ describe('createFtownSession — Pi launch', () => {
 // All three session-launch entry points — fresh create with a resume id, the
 // retry_session RPC, and restart resurrection — must hand the runner the same
 // invocation. This is the lock on "how is a session launched has one answer".
+describe('relaunchFtownSession — retained terminal geometry', () => {
+  it('uses current manager dimensions for retry and resume, including later resizes', async () => {
+    const h = fakeDeps();
+    const manager = new TerminalManager();
+    const session = { ...fakeSession('sized'), status: 'error' as const };
+    manager.write(session.id, '');
+    manager.resize(session.id, 80, 37);
+    h.deps.getTerminalSize = (id) => manager.getSize(id);
+    try {
+      await relaunchFtownSession(h.deps, session, 'retry');
+      await relaunchFtownSession(h.deps, session, 'resume');
+      manager.resize(session.id, 91, 29);
+      await relaunchFtownSession(h.deps, session, 'retry');
+      assert.deepEqual(h.runs.map(({ cols, rows }) => ({ cols, rows })), [
+        { cols: 80, rows: 37 }, { cols: 80, rows: 37 }, { cols: 91, rows: 29 },
+      ]);
+    } finally { manager.destroy(session.id); }
+  });
+
+  it('omits dimensions with no lookup or when the lookup has no terminal', async () => {
+    const h = fakeDeps();
+    const session = { ...fakeSession('missing'), status: 'error' as const };
+    await relaunchFtownSession(h.deps, session, 'retry');
+    h.deps.getTerminalSize = () => undefined;
+    await relaunchFtownSession(h.deps, session, 'resume');
+    for (const run of h.runs) {
+      assert.equal(Object.hasOwn(run, 'cols'), false);
+      assert.equal(Object.hasOwn(run, 'rows'), false);
+    }
+  });
+
+  it('reads dimensions after awaited preparation and does not affect fresh creates', async () => {
+    const h = fakeDeps();
+    const manager = new TerminalManager();
+    const session = { ...fakeSession('late-size'), status: 'error' as const };
+    manager.write(session.id, '');
+    manager.resize(session.id, 80, 37);
+    h.deps.getTerminalSize = (id) => manager.getSize(id);
+    h.deps.centrifugo.publishSessionUpdate = async () => { manager.resize(session.id, 94, 31); };
+    try {
+      await relaunchFtownSession(h.deps, session, 'retry');
+      assert.deepEqual({ cols: h.runs[0].cols, rows: h.runs[0].rows }, { cols: 94, rows: 31 });
+      await createFtownSession(h.deps, { command: 'cmd', shellType: 'shell' });
+      assert.equal(Object.hasOwn(h.runs[1], 'cols'), false);
+      assert.equal(Object.hasOwn(h.runs[1], 'rows'), false);
+    } finally { manager.destroy(session.id); }
+  });
+});
+
 describe('relaunchFtownSession — entry-point parity with createFtownSession', () => {
   it('fresh create with a resume id, retry, and resume relaunch produce the same runner.run invocation', async () => {
     const realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];

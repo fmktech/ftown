@@ -15,7 +15,7 @@ hypotheses_proven: 1
 # Local rerun CI and process-generation ownership
 
 ## Scope and distinction
-This report proves a separately reproducible ProcessRunner ownership defect exposed while investigating the CI failure. It does **not** prove the exact early prompt erasure in CI is caused solely by that defect. The CI symptom remains unresolved pending another focused runtime observation.
+This report initially proved a separate ProcessRunner ownership defect, which did not resolve early prompt erasure. The final geometry gate below now proves an actual-runner reproduction and counterfactual for blanking: a replacement paint stream at120x40 is interpreted by retained80x37 terminals after delayed device responses. The narrowly scoped factory geometry repair is ready; the real browser/CI regression must still pass before declaring the original failure resolved.
 
 The worker owns only this report and inert /tmp scripts. No application/test source, live bridge, browser/E2E, database, user data, Git or CI was modified/executed.
 
@@ -220,3 +220,76 @@ Complete6697-byte log, pre-Stop5080, after-Stop1617 bytes. VT-stripped post-Stop
 The repeat supports the same stable PTY/headless sequence; it does not establish native pane contents or justify a guessed application fix. The unchanged collector cannot distinguish the remaining hypotheses. If investigation resumes, use the bounded replay/native-stage discriminators already documented; another broad run with identical instrumentation adds little evidence. PR remains draft with the known local-rerun failure.
 
 STOP; report/temp authoring leases released. No application/test changes or runtime/browser/E2E/server/database/CI/Git execution by this worker.
+
+
+## Resumed after PR146 integration: actual-source bounded experiment
+At a876cc8 the merged main change affects test concurrency/configuration, not the failing application/test bodies. Existing repeated bridge/browser blank evidence is reused; no new identical CI was requested by this worker. Exact native collector failing stage remains unknown because the current catch collapses subprocess/parse/capture failures. The isolated actual-source harness below records each stage and whether the previous strict parser accepts the same native listing (explicit normalized pane_dead plus original field category); this can prove a local parser issue without guessing from unavailable.
+
+Authored /tmp/ftown-rerun-diagnosis/actual-runner-diagnostic.mjs; syntax-only node --check passes. NOT executed by this worker. Root command from bridge/: `rtk proxy node --import tsx /tmp/ftown-rerun-diagnosis/actual-runner-diagnostic.mjs /Users/fkesheh/projects/ftown-simplify-all`.
+
+The harness dynamically imports actual ProcessRunner, TerminalPump and TerminalManager and uses real node-pty/tmux through a guard-only spawn wrapper. A persistent browser-like headless emulator receives the actual pump's coalesced bytes and returns its generated device-query replies through actual runner.write. Bridge headless-generated replies are counted but left unrouted, matching production. Two bounded cases use normal versus32ms FIFO-delayed browser replies. Each creates a controlled shell, verifies its marker, exercises a mobile size roundtrip, Stops and restarts the same ID, snapshots200/1300ms, and compares a corrective resize. Native pane, bridge state and browser state produce only non-content counts/booleans/control offsets/cursor/buffer metadata. This tests process/manager lifecycle and response routing that the earlier standalone geometry harness bypassed; encryption/DOM remain outside its boundary.
+
+Safety: a fresh /tmp HOME/ZDOTDIR/TMPDIR/TMUX_TMPDIR is created; inherited environment is erased before importing source. All actual -L ftown operations resolve within that unique TMUX_TMPDIR, separate from user sessions. Fixed CI zsh init and marker commands only, no bridge API/account/DB; no raw output, pane text, environment or secrets are exported. Only counts go to non-content-results.json under the scratch directory.25second watchdog and private-server cleanup; root must inspect cleanup metadata before accepting evidence. Root is sole native/runtime executor.
+
+Falsification: prompt survives both cases -> this isolated lifecycle/response schedule is insufficient, and no reset fix is justified. Native prompt but manager/browser blank narrows to emitted stream/emulator state; manager prompt but browser blank narrows to pump/delivery/receiver. A delayed-only failure with rejected/misgeneration device writes identifies a scheduling dependency requiring an inert deterministic regression before implementation. No app/test source repair is authorized by harness authorship.
+
+STOP; scratch driver and report authoring leases released for root execution/review. No native runtime, E2E, browser, server, DB, CI or Git executed by this worker.
+
+
+## Actual-source native reproduction: delayed device replies
+Root executed /tmp/ftown-rerun-diagnosis/actual-runner-diagnostic.mjs; non-content results /tmp/ftown-actual-runner-v62G4Y/non-content-results.json. Actual ProcessRunner+TerminalPump+TerminalManager reproduced the failure. With normal browser device replies, prompt remains visible after same-ID restart. With32ms FIFO-delayed replies, both persistent manager and browser become completely blank at200ms and1300ms after restart, alternate buffer active, cursor30,0. A79→80x37 corrective resize restores prompt; subsequent known-marker input succeeds. Root confirmed no sessions remained in the private TMUX_TMPDIR. This is real source/native evidence; it still bypasses encryption/DOM and does not alone identify the exact causal control sequence.
+
+Missing process/input ownership is falsified for this reproduced blank: the replacement accepts input and produces the marker. Browser-only loss is falsified because the actual bridge manager is also blank. The controls match repeated CI shape: old clear/alternate exit/lost tty, new alternate enter/clear, then homes. The earlier standalone geometry-only pass remains valid; delayed terminal responses introduce a material interaction absent from that experiment.
+
+Native collector is independently unavailable at parse, one row/one field, in this actual-source setup. It must not be interpreted as missing pane. No further native format guessing is needed for the geometry counterfactual; state comparisons and successful input already establish a live replacement.
+
+### Counterfactual prepared; root execution pending
+The same scratch driver now runs only two32ms FIFO cases, varying replacement runner.run options: explicit120x40 versus explicit80x37 (the persistent manager/browser dimensions). No corrective resize occurs before200/1300ms snapshots. At1300ms the exact in-memory post-Stop stream is replayed through fresh ACTUAL TerminalManager instances at80x37 and120x40; only counts/cursor/buffer metadata is retained. Console output is compact; no terminal bytes/text are exported. Syntax check passed; worker did not execute native runtime. Driver lease released to root immediately after preparation.
+
+If matched geometry prevents blank while the otherwise-identical default geometry case blanks, and replay distinguishes the grids, this supports the narrowly bounded contract: expose existing TerminalManager geometry without creating a terminal; inject an optional factory lookup into CreateFtownSessionDeps; have relaunchFtownSession pass current cols/rows immediately before runner.run; wire lookup in index.ts. Fresh launches/resurrection with no manager retain120x40 defaults. Do not preserve stale runner process metadata indefinitely or alter UI subscription behavior just to retain dimensions. Proposed source boundaries are terminal-manager.ts, create-ftown-session.ts and index.ts, plus focused accessor/relaunch regression tests; exact naming/test ownership must be frozen by root after counterfactual evidence.
+
+STOP; scratch driver/report authoring leases released. No app/test edits or native/runtime/CI/Git execution by this worker.
+
+
+## FINAL DEBUG GATE: retained terminal geometry on relaunch — PROVEN
+Root-run counterfactual evidence: /tmp/ftown-actual-runner-cPlyEv/non-content-results.json, actual ProcessRunner+TerminalPump+TerminalManager, fresh private TMUX_TMPDIR, controlled shell,32ms FIFO browser device-response route. Worker independently read the non-content result. Root verified exit0 and no sessions remaining.
+
+Observed table:
+-Default replacement120x40; persistent manager/browser80x37:0 nonblank rows, no prompt at200ms AND1300ms before correction.
+-The EXACT same in-memory post-Stop bytes replay through fresh actual TerminalManager:80x37 gives0 nonblank/no prompt;120x40 gives1 nonblank/prompt.
+-Matched replacement80x37, with the SAME delayed reply route: both manager/browser show1 nonblank/prompt at200ms AND1300ms before correction. Its post-Stop stream replays with prompt at both geometries.
+-Corrective resize restores a blank default-sized replacement, and subsequent known-marker input succeeds; the process remains live.
+-Previous immediate-response and standalone geometry experiments passed. Therefore geometry mismatch does not always blank; delayed capability-response timing exposes the incorrect producer/consumer geometry. Those earlier passes are valid counterexamples to an overly broad hypothesis, not evidence against this now-isolated interaction.
+
+### Hypotheses and falsification
+R1, native process failure or missing input receiver: REJECTED for this reproduced blank. Actual replacement signals ready, remains running, accepts later input and produces the marker; changing only geometry prevents blank.
+
+R2, browser-only layout/selector or transport fault: REJECTED as sufficient cause. Actual bridge TerminalManager also blanks, and offline replay of the same bytes changes only with receiving grid size. No browser/DOM/encryption is needed to reproduce it.
+
+R3, relaunch omits retained terminal geometry, so tmux emits a paint stream for120x40 while manager/browser remain80x37; response timing makes that stream erase rendered content: PROVEN. The controlled counterfactual changes replacement size only, and the exact-byte replay discriminates receiver sizes. Matching source geometry prevents the failure before any corrective resize or input. Native collector parse failure remains a separate diagnostic defect and is not used as proof.
+
+### 5 Whys
+1. Why is the replacement terminal blank although the process lives? Its emitted paint stream produces an empty result when interpreted on the retained smaller terminal grid.
+2. Why does producer geometry differ? Replacement tmux/PTY starts120x40 while bridge manager and mounted browser retain80x37.
+3. Why does replacement use120x40? relaunchFtownSession passes no cols/rows to runner.run, whose launch defaults apply.
+4. Why is current geometry unavailable at that launch boundary? The previous process's metadata is correctly retired, while the persistent TerminalManager is not consulted.
+5. Why is the persistent receiver's state omitted? The factory dependency contract exposes the runner and transport wiring but no current terminal geometry lookup, even though a same-ID relaunch reuses the terminal consumers.
+
+### Independently reviewed frozen repair contract — PASS
+TerminalManager.getSize(sessionId: string): { cols: number; rows: number } | undefined reads only an existing managed terminal, does not create a terminal, and returns a fresh size copy; missing/destroyed returns undefined. Optional CreateFtownSessionDeps.getTerminalSize has that same callback signature. Resolve it AFTER awaited staggerHarnessSpawn, immediately before runner.run in relaunchFtownSession, and spread dimensions only when present. Index wires sid => terminalManager.getSize(sid). Fresh create and absent-manager launches keep existing defaults; retry/resume share the corrected relaunch boundary. No terminal reset/history loss, stale runner-metadata retention, UI resubscription, extra timing, authorization or protocol changes.
+
+Complete runtime wiring inventory: the sole production factory is index.ts769; it is supplied to localApiServer.setSessionFactory780, resurrection800 and shared SessionController821. LocalApiServer's lazy controller reuses sessionDeps. Other CreateFtownSessionDeps constructions are tests. One index callback therefore covers local HTTP, dashboard/cloud RPC, MCP through local API, and resume relaunch; no second runtime factory is omitted.
+
+Approved implementation ownership is root's Tier1 five-file brief: bridge/src/terminal-manager.ts; NEW bridge/src/terminal-manager.test.ts; bridge/src/create-ftown-session.ts; bridge/src/create-ftown-session.test.ts; bridge/src/index.ts. Required RED→GREEN: missing accessor/no terminal allocation, resized dimensions/copy isolation, destroyed absence; real manager plus mocked runner passes80x37 for retry/resume, reads a later resize for a later launch, preserves no-getter/undefined fallback, and resolves after awaited preparation. Existing RecordedRun/fake runner must actually record cols/rows so the regression can fail. Independent source review and root-owned repaired-factory native/browser checks remain mandatory.
+
+DEBUG GATE READY: this is a proved defect and a falsified/counterfactual-tested bounded repair, not a speculative workaround. Actual CI remains a required validation boundary. Root may release the already-briefed Tier1 writer to implement the frozen contract.
+
+
+## Final independent repair review and actual-factory validation
+Independent read-only five-file review: PASS, no findings. getSize reads the allocated terminal and returns a fresh dimensions copy; missing/destroyed instances remain absent. Optional factory getter is resolved after awaited stagger immediately before runner.run. Production index callback reaches the previously inventoried shared local/RPC/MCP/resurrection factory. Defaults, fresh create, command/env/status/publish/wire order, process cleanup and UI behavior remain unchanged. The test fake records cols/rows conditionally so old exact comparisons remain meaningful. New real-manager/mocked-runner tests cover retry/resume, later resize, no getter/undefined, fresh-create unaffected and awaited preparation; accessor tests cover absence/no terminal allocation, copy and destroy. Worker reported RED4 expected failures then GREEN83 scoped tests, noEmit/diff checks passed; this reviewer inspected the source/tests without repeating already-valid checks.
+
+Root then executed the ACTUAL relaunchFtownSession scratch driver against the repaired source. Non-content evidence: /tmp/ftown-actual-runner-SBiEE6/non-content-results.json; console summary /tmp/ftown-rerun-diagnosis/factory-runtime-output.txt. Control with no getter retains blank bridge/browser at200ms and1300ms. Identical delayed response path with getTerminalSize wired to real manager.getSize shows prompt at both times, before corrective resize; final input marker succeeds. Private namespace cleanup confirms no sessions remaining; process exit0. No raw terminal contents exported.
+
+Source review and bounded actual-factory native validation therefore pass. The unchanged real browser assertion must still pass in CI before PR145 is marked ready or the user-facing issue declared fully resolved. No additional speculative changes or diagnostic full-suite loop are required; root owns one coherent post-push E2E validation.
+
+FINAL STOP: all report and scratch authoring leases released. No application/test edits or native/browser/E2E/server/database/CI/Git execution by this investigation/review worker. Root may integrate/push the five-file repair and this report.

@@ -776,6 +776,7 @@ program
       hookToken: apiToken,
       notifyScriptPath,
       wireTerminalInput,
+      getTerminalSize: (sid) => terminalManager.getSize(sid),
     };
     localApiServer.setSessionFactory(sessionFactoryDeps);
 

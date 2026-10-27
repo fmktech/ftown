@@ -25,6 +25,7 @@ export interface CreateFtownSessionDeps {
   hookToken: string;
   notifyScriptPath: string;
   wireTerminalInput: (sessionId: string) => void;
+  getTerminalSize?: (sessionId: string) => { cols: number; rows: number } | undefined;
 }
 
 export interface CreateFtownSessionInput {
@@ -363,7 +364,9 @@ export async function relaunchFtownSession(
 
   await staggerHarnessSpawn(session.shellType);
 
+  const terminalSize = deps.getTerminalSize?.(session.id);
   deps.runner.run(session.id, command, {
+    ...terminalSize,
     workingDir: session.workingDir,
     env: session.env,
     hookPort: deps.hookPort,
