@@ -1,5 +1,6 @@
 import { expect, type BrowserContext, type Page } from "@playwright/test";
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
 import { mkdir, realpath, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { test } from "../helpers/fixtures";
@@ -7,11 +8,11 @@ import { login, makeUser, registerUser } from "../helpers/app";
 import { approveAccountComputer, startAccountTestBridge, usePrivateApprovalLink, type AccountTestBridge } from "../helpers/account-pairing";
 import { bridgeApiFetch } from "../helpers/bridge-api";
 import { E2E_DIR } from "../helpers/config";
-import { recordVideo, type Video } from "./record-video";
-import { AI_MODEL, AI_NAME, DEMO_WORKSPACE, INITIAL_PROMPT, prepareDemo, provisionCodex, removeDemo, verifyDemo, waitForTurn } from "./ai-demo";
+import { recordScenes, recordVideo, type Video } from "./record-video";
+import { AI_MODEL, AI_NAME, DELEGATION_PROMPT, DEMO_WORKSPACE, INITIAL_PROMPT, PiProofDiagnosticError, findParentSynthesis, prepareDemo, provisionCodex, removeDemo, verifyChildTranscripts, verifyDemo, verifyParentCreation, waitForTurn, type FleetMail, type FleetSession } from "./ai-demo";
 
 const origin = process.env.FTOWN_PUBLIC_URL ?? "https://localhost:8444";
-const names = [AI_NAME, "Review test results", "Explore workspace"] as const;
+const names = [AI_NAME, "Claude review", "Pi test check"] as const;
 const repo = resolve(E2E_DIR, "..");
 const sharp = createRequire(join(repo, "ui/package.json"))("sharp");
 
@@ -53,6 +54,13 @@ async function openWorkspace(page: Page) {
   const workspace = page.getByRole("button", { name: "Workspace", exact: true });
   if (await workspace.isVisible()) await workspace.click();
 }
+async function expandChildren(page: Page) {
+  await openWorkspace(page);
+  const toggle = sessionRow(page, AI_NAME).getByRole("button", { name: /^(Expand|Collapse) children$/ });
+  await expect(toggle).toBeVisible({ timeout: 45_000 });
+  if (await toggle.getAttribute("aria-expanded") === "false") await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+}
 async function openAgent(page: Page) {
   await openWorkspace(page);
   const row = sessionRow(page, names[0]);
@@ -62,9 +70,23 @@ async function openAgent(page: Page) {
 }
 async function followUp(page: Page, home: string, previous: number, prompt: string): Promise<number> {
   await page.locator(".xterm").first().click();
-  await page.keyboard.type(prompt, { delay: 45 });
+  await page.keyboard.type(prompt, { delay: 12 });
   await page.keyboard.press("Enter");
   return waitForTurn(page, home, previous, 55_000, prompt);
+}
+async function showChildResult(page: Page, name: string, body: string) {
+  await expandChildren(page);
+  await sessionRow(page, name).click();
+  const terminal = page.locator(".xterm").first();
+  await expect(terminal).toBeVisible();
+  const words = body.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(" ");
+  await expect.poll(async () => {
+    const screen = (await page.locator(".xterm-rows").first().textContent() ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    return words.some((_, index) => {
+      const phrase = words.slice(index, index + 4).join("");
+      return index + 4 <= words.length && phrase.length >= 15 && screen.includes(phrase);
+    });
+  }, { timeout: 20_000, message: `Actual ${name} result was not visible in its terminal` }).toBe(true);
 }
 
 async function exportImages(directory: string): Promise<Record<string, Capture>> {
@@ -158,27 +180,15 @@ test("capture real isolated workspace, phone and access panel", async ({ browser
     sessions.push(agentSession!.id!);
     expect(agentSession?.shellType).toBe("codex");
     expect(agentSession?.model).toBe(AI_MODEL);
-    for (const name of names.slice(1)) {
-      const result = await bridgeApiFetch("POST", "/api/sessions", { bridgeHome: bridge.home, body: { shellType: "shell", name } });
-      expect(result.status).toBe(201);
-      const id = (result.body as { session?: { id?: string; bridgeId?: string } }).session?.id;
-      expect(id).toBeTruthy();
-      sessions.push(id!);
-    }
     await openAgent(desktop);
     let turns = await waitForTurn(desktop, bridge.home, 0);
     await verifyDemo();
-    const attention = await bridgeApiFetch("POST", `/api/sessions/${sessions[0]}/attention`, {
-      bridgeHome: bridge.home, body: { title: "Review formatter", message: "Four formatter tests passed. Review the change." },
-    });
-    expect(attention.status).toBe(200);
-    const region = desktop.getByRole("region", { name: "Needs attention", exact: true });
-    await expect(region.getByRole("button", { name: /^Build duration formatter: Review formatter/ })).toBeVisible({ timeout: 30_000 });
-    for (const name of names) await expect(sessionRow(desktop, name)).toBeVisible();
+    const initialSessions = await bridgeApiFetch("GET", "/api/sessions", { bridgeHome: bridge.home });
+    expect(initialSessions.status).toBe(200);
+    const initialList = (initialSessions.body as { sessions?: FleetSession[] }).sessions ?? [];
+    expect(initialList.map(item => item.id)).toEqual([sessions[0]]);
     await expect(sessionRow(desktop, AI_NAME).getByRole("img", { name: "Codex agent", exact: true })).toBeVisible();
     await noOverflow(desktop);
-    await desktop.evaluate(() => document.fonts.ready);
-    await desktop.screenshot({ path: join(directory, "desktop.png"), animations: "disabled" });
 
     await desktop.setViewportSize({ width: 1280, height: 900 });
     await desktop.getByRole("button", { name: "Open security", exact: true }).click();
@@ -196,26 +206,96 @@ test("capture real isolated workspace, phone and access panel", async ({ browser
     await desktop.setViewportSize({ width: 1280, height: 800 });
     await expect(desktop).toHaveURL(`${origin}/dashboard`);
     await expect(phone).toHaveURL(`${origin}/dashboard`);
-    await expect(region.getByRole("button", { name: /^Build duration formatter: Review formatter/ })).toBeVisible();
     await openAgent(desktop);
     await waitForTurn(desktop, bridge.home, 0);
     let desktopPhase = "initial view";
     let desktopVideo: Video;
+    let children: FleetSession[] = [];
+    let replies: FleetMail[] = [];
+    let claudeModel = "";
+    const initialTurnCount = turns;
+    let synthesisTurn: number | undefined;
     try {
-    desktopVideo = await recordVideo(desktop, directory, "desktop-workspace", { width: 1280, height: 800 }, async () => {
+    desktopVideo = await recordScenes(desktop, directory, "desktop-workspace", { width: 1280, height: 800 }, [{ record: async () => {
       const startedAt = performance.now();
       await hold(1800);
-      desktopPhase = "follow-up response";
-      turns = await followUp(desktop, bridge!.home, turns, "Why are minutes padded after an hour? Answer briefly.");
-      desktopPhase = "completed response";
+      desktopPhase = "parent creates children";
+      await desktop.locator(".xterm").first().click();
+      await desktop.keyboard.type(DELEGATION_PROMPT, { delay: 12 });
+      await desktop.keyboard.press("Enter");
+      await expandChildren(desktop);
+      for (const name of names.slice(1)) await expect(sessionRow(desktop, name)).toBeVisible({ timeout: 45_000 });
       await holdResult(startedAt);
-    });
-    } catch (error) { throw new Error(`Desktop walkthrough failed at phase: ${desktopPhase}`, { cause: error }); }
+    } }, { before: async () => {
+      desktopPhase = "child identities and replies";
+      await expect.poll(async () => {
+        const result = await bridgeApiFetch("GET", "/api/sessions", { bridgeHome: bridge!.home });
+        const list = (result.body as { sessions?: FleetSession[] }).sessions ?? [];
+        children = list.filter(item => item.parentSessionId === sessions[0]);
+        return result.status === 200 && children.length === 2 && children.some(item => item.name === names[1] && item.shellType === "claude" && item.model === "sonnet" && item.bridgeId === bridgeId) && children.some(item => item.name === names[2] && item.shellType === "pi" && item.model === "openai/gpt-6.1-terra:xhigh" && item.bridgeId === bridgeId);
+      }, { timeout: 120_000, intervals: [1000] }).toBe(true);
+      await expect.poll(async () => {
+        const result = await bridgeApiFetch("GET", `/api/sessions/${sessions[0]}/inbox?peek=1&all=1`, { bridgeHome: bridge!.home });
+        replies = ((result.body as { messages?: FleetMail[] }).messages ?? []).filter(mail => mail.type === "result" && mail.to === sessions[0] && children.some(child => child.id === mail.from) && mail.body.trim().length >= 20);
+        return result.status === 200 && replies.length === 2 && new Set(replies.map(mail => mail.from)).size === 2;
+      }, { timeout: 120_000, intervals: [1000] }).toBe(true);
+      let childDiagnostic = "native transcript unavailable or unsupported";
+      try { await expect.poll(async () => {
+        const result = await bridgeApiFetch("GET", "/api/sessions", { bridgeHome: bridge!.home });
+        children = ((result.body as { sessions?: FleetSession[] }).sessions ?? []).filter(item => item.parentSessionId === sessions[0]);
+        try { claudeModel = await verifyChildTranscripts(bridge!.home, children.find(item => item.name === names[1])!, children.find(item => item.name === names[2])!, replies); return true; }
+        catch (error) {
+          const safe = error instanceof Error ? error.message : "";
+          if (error instanceof PiProofDiagnosticError) childDiagnostic = error.message;
+          if (["Child native session identities are missing", "Pi transcript is outside the scratch home", "Claude Sonnet completion or successful mail tool trace missing", "Pi Terra xhigh completion, passing native test, or successful mail tool trace missing"].includes(safe)) childDiagnostic = safe;
+          return false;
+        }
+      }, { timeout: 30_000, intervals: [1000], message: "Child native completion or mail trace missing" }).toBe(true); }
+      catch (error) { throw new Error(`Child proof failed: ${childDiagnostic}`, { cause: error }); }
+      desktopPhase = "parent completes delegation turn";
+      turns = await waitForTurn(desktop, bridge!.home, turns, 55_000, DELEGATION_PROMPT);
+      await verifyParentCreation(bridge!.home, children);
+      const inbox = await bridgeApiFetch("GET", `/api/sessions/${sessions[0]}/inbox?peek=1&all=1`, { bridgeHome: bridge!.home });
+      if (inbox.status !== 200) throw new Error("Parent inbox unavailable");
+      const all = (inbox.body as { messages?: FleetMail[] }).messages ?? [];
+      replies = replies.map(reply => all.find(mail => mail.id === reply.id) ?? reply);
+      synthesisTurn = await findParentSynthesis(bridge!.home, replies, initialTurnCount);
+    }, record: async () => {
+      const startedAt = performance.now();
+      desktopPhase = "show child replies";
+      for (const child of children) { await showChildResult(desktop, child.name, replies.find(mail => mail.from === child.id)!.body); await hold(3500); }
+      await openAgent(desktop);
+      desktopPhase = "show parent synthesis";
+      if (synthesisTurn === undefined) {
+        const previous = turns;
+        turns = await followUp(desktop, bridge!.home, previous, 'Read both child result messages with "$HOME/.ftown/ftown" harness mail read, then summarize each child\'s actual finding in two short bullets.');
+        await expect.poll(async () => {
+          const result = await bridgeApiFetch("GET", `/api/sessions/${sessions[0]}/inbox?peek=1&all=1`, { bridgeHome: bridge!.home });
+          const all = (result.body as { messages?: FleetMail[] }).messages ?? [];
+          const delivered = replies.map(reply => all.find(mail => mail.id === reply.id && Boolean(mail.deliveredAt)));
+          if (result.status === 200 && delivered.every(Boolean)) replies = delivered as FleetMail[];
+          return result.status === 200 && delivered.every(Boolean);
+        }, { timeout: 30_000 }).toBe(true);
+        synthesisTurn = await findParentSynthesis(bridge!.home, replies, previous);
+        if (synthesisTurn === undefined) throw new Error("Parent synthesis does not establish both delivered replies");
+      } else {
+        turns = await waitForTurn(desktop, bridge!.home, synthesisTurn - 1, 20_000, DELEGATION_PROMPT);
+      }
+      await writeFile(join(directory, "fleet-proof.json"), JSON.stringify({ parent: sessions[0], children: children.map(({ id, name, shellType, model, parentSessionId }) => ({ id, name, shellType, model, parentSessionId })), claudeModel, replies: replies.map(({ id, from, to, ts, deliveredAt, body }) => ({ id, from, to, ts, deliveredAt, bodySha256: createHash("sha256").update(body).digest("hex") })), checks: ["parent-create-tool-results", "child-native-provider-and-mail-tool-results", "parent-delivered-mail-and-synthesis"] }, null, 2), { flag: "wx", mode: 0o600 });
+      await holdResult(startedAt);
+    } }]);
+    await desktop.evaluate(() => document.fonts.ready);
+    await desktop.screenshot({ path: join(directory, "desktop.png"), animations: "disabled" });
+    } catch (error) {
+      const detail = error instanceof Error && error.message.startsWith("Child proof failed: ") ? `; ${error.message}` : "";
+      throw new Error(`Desktop walkthrough failed at phase: ${desktopPhase}${detail}`, { cause: error });
+    }
     await desktopContext.close();
     contexts.splice(contexts.indexOf(desktopContext), 1);
 
     const touchControls = phone.locator(".touch-control-bar");
     await openWorkspace(phone);
+    await expandChildren(phone);
     for (const name of names) await expect(sessionRow(phone, name)).toBeVisible();
     let mobilePhase = "workspace";
     let mobileVideo: Video;
@@ -223,6 +303,7 @@ test("capture real isolated workspace, phone and access panel", async ({ browser
       mobileVideo = await recordVideo(phone, directory, "mobile-terminal", { width: 390, height: 844 }, async () => {
         const startedAt = performance.now();
         await hold(2200);
+        for (const child of children) { await showChildResult(phone, child.name, replies.find(mail => mail.from === child.id)!.body); await hold(2000); await openWorkspace(phone); }
         await openAgent(phone);
         await expect(phone.getByRole("button", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
         await hold(1200);
@@ -230,7 +311,7 @@ test("capture real isolated workspace, phone and access panel", async ({ browser
         await phone.locator(".xterm").first().click();
         await phone.keyboard.press("Control+L");
         mobilePhase = "follow-up response";
-        turns = await followUp(phone, bridge!.home, turns, "Summarize the fix and test results in three short bullets.");
+        turns = await followUp(phone, bridge!.home, turns, "Summarize the Claude review and Pi test check replies in two short bullets.");
         mobilePhase = "touch controls";
         await expect(touchControls).toBeVisible();
         await expect(touchControls.getByRole("button", { name: "Show keyboard", exact: true })).toBeVisible();
@@ -257,6 +338,18 @@ test("capture real isolated workspace, phone and access panel", async ({ browser
         if (result.status < 200 || result.status >= 300) failures.push("session");
       } catch { failures.push("session"); }
     }
+    // The parent is stopped first so it cannot create another child during the
+    // final inventory. The bridge and every session on it belong to this test.
+    if (bridge && sessions.length) try {
+      const inventory = await bridgeApiFetch("GET", "/api/sessions", { bridgeHome: bridge.home });
+      if (inventory.status !== 200) throw new Error("inventory failed");
+      for (const child of (inventory.body as { sessions?: FleetSession[] }).sessions ?? []) {
+        const result = await bridgeApiFetch("DELETE", `/api/sessions/${child.id}`, { bridgeHome: bridge.home });
+        if (result.status < 200 || result.status >= 300) throw new Error("child removal failed");
+      }
+      const remaining = await bridgeApiFetch("GET", "/api/sessions", { bridgeHome: bridge.home });
+      if (remaining.status !== 200 || ((remaining.body as { sessions?: FleetSession[] }).sessions ?? []).length) throw new Error("sessions remain");
+    } catch { failures.push("descendant sessions"); }
     for (const context of contexts.reverse()) try { await context.close(); } catch { failures.push("browser context"); }
     if (bridge) try { await bridge.stop(); } catch { failures.push("account bridge"); }
     if (demoOwned) try { await removeDemo(); } catch { failures.push("demo workspace"); }

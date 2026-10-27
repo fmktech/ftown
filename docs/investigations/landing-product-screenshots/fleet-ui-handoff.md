@@ -1,0 +1,8 @@
+# FLEET-UI handoff
+
+Tier 1 `gpt-6.1-terra` / `xhigh`, shared checkout `/Users/fkesheh/projects/ftown-e2e-performance`.
+
+- `ui/src/components/ProductScreenshots.tsx`: removed all three screenshot links and unused link styling; added the approved desktop fleet caption with explicit “Waiting time omitted.”, exact desktop/mobile alt text and phone copy. The security figure and responsive image/player interfaces remain unchanged.
+- `e2e/tests/landing-product-screenshots.spec.ts`: retains eight focused cases and the existing error/retry, PWA, routing, focus, image and playback checks. It asserts no screenshot/WebP anchors, validates successful WebP responses for actual selected image sources, checks idle Tab order, activates the phone by keyboard before clicking desktop, and uses document-relative caption/Solo-section boundaries for layout stability. Playback validates measured MP4 bytes against manifest and per-kind 10–120s/10MiB desktop and 10–60s/5MiB mobile limits.
+
+`node --check` passed for the spec. Bounded static copy, no-anchor, duration/size, playback order and whitespace checks passed. No runtime, browser/E2E, build, dependency install or Git operations were run. Root must supply the reviewed real fleet media and matching manifest, then run the eight focused cases and UI lint/typecheck/unit/build plus final rendered/footage review. The current prior single-agent assets cannot substantiate the new copy and must not be published with it. `ProductWalkthrough.tsx` was read-only and unchanged. Source/test/handoff leases released; later Git ownership requires explicit transfer.

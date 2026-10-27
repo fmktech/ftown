@@ -1,0 +1,71 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-e2e-performance",
+  "phase": "final reviewed deliverable; exclusive Git landing delegated",
+  "integrationOwner": "/root/site_integration",
+  "runtimeOwner": "/root",
+  "leases": {
+    "site_capture": {
+      "agent": "/root/site_capture",
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "files": [
+        "e2e/capture/README.md",
+        "e2e/capture/ai-demo.ts",
+        "e2e/capture/product.spec.ts",
+        "e2e/capture/record-video.ts",
+        "e2e/capture/run.sh",
+        "docs/investigations/landing-product-screenshots/fleet-capture-findings.md",
+        "docs/investigations/landing-product-screenshots/fleet-capture-handoff.md"
+      ],
+      "status": "all source/report leases released; capture accepted; native agent completed/retired"
+    },
+    "site_review": {
+      "agent": "/root/site_review",
+      "model": "gpt-6.1-sol",
+      "effort": "max",
+      "files": [
+        "docs/investigations/landing-product-screenshots/fleet-design-review.md",
+        "docs/investigations/landing-product-screenshots/fleet-badge-review.md"
+      ],
+      "status": "all source, media, desktop/mobile visual reviews accepted; reports released; native agent completed/retired"
+    },
+    "root": {
+      "agent": "/root",
+      "files": [
+        "docs/investigations/landing-product-screenshots/fleet-revision.md",
+        "docs/investigations/landing-product-screenshots/fleet-ownership.json",
+        "docs/investigations/landing-product-screenshots/fleet-validation.md",
+        "ui/public/product/"
+      ],
+      "status": "all media/coordination writes frozen for landing; runtime complete and sandbox deleted; CI monitoring remains root-owned"
+    },
+    "site_integration": {
+      "agent": "/root/site_integration",
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "files": [
+        "ui/src/components/ProductScreenshots.tsx",
+        "ui/src/components/PullRequestLink.tsx",
+        "ui/src/components/SessionList.tsx",
+        "ui/src/components/session-pull-request.test.ts",
+        "e2e/tests/landing-product-screenshots.spec.ts",
+        "e2e/tests/session-tools.spec.ts",
+        "docs/investigations/landing-product-screenshots/fleet-ui-handoff.md",
+        "docs/investigations/landing-product-screenshots/fleet-badge-handoff.md"
+      ],
+      "status": "all source/report leases released; exclusive Git/PR landing lease assigned under FLEET-LAND"
+    }
+  },
+  "ownershipValidation": "Mechanically checked 21 distinct file/directory ownership entries: no equal or ancestor/descendant cross-owner paths. All source writers stopped before Git landing.",
+  "gitLease": {
+    "owner": "/root/site_integration",
+    "scope": "stage explicit 30 task files; commit/push existing branch; update PR147; no merge",
+    "dependencies": [
+      "source writers completed",
+      "independent reviews accepted",
+      "focused runtime passed",
+      "sandbox cleanup verified"
+    ],
+    "status": "assigned"
+  }
+}

@@ -1,26 +1,28 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { registerAndLogin } from "../helpers/app";
 
 const captures = [
   {
-    alt: "FTown desktop dashboard showing a real Codex coding session and its output.",
-    link: "Open desktop screenshot",
+    alt: "FTown desktop showing Codex receiving replies from its Claude Code and Pi sessions.",
     loading: "eager",
     widths: [640, 1120, 2240],
   },
   {
-    alt: "FTown on a phone-sized screen showing the same Codex session with touch controls.",
-    link: "Open mobile screenshot",
+    alt: "FTown on a phone-sized screen showing Codex's summary of replies from Claude Code and Pi, with touch controls.",
     loading: "lazy",
     widths: [390, 780],
   },
   {
     alt: "FTown Security Access panel showing approved browsers and verified computer access.",
-    link: "Open security screenshot",
     loading: "lazy",
     widths: [],
   },
 ] as const;
+
+const desktopCaption = "Codex opens Claude Code and Pi, delegates two checks and reads their replies. Waiting time omitted.";
+function sceneBoundary(page: Page, kind: "desktop" | "mobile") {
+  return kind === "desktop" ? page.getByText(desktopCaption, { exact: true }) : page.locator("#solo");
+}
 
 for (const viewport of [{ width: 1280, height: 900 }, { width: 1000, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 844 }]) {
   test(`public landing shows real product captures at ${viewport.width}px`, async ({ page }, info) => {
@@ -33,6 +35,10 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 1000, height: 900
     await expect(page.locator("video[autoplay], video[loop]")).toHaveCount(0);
     await expect(page.locator("details")).toHaveCount(0);
     await expect(page.getByText(/Watch (desktop|mobile) walkthrough/)).toHaveCount(0);
+    await expect(page.getByRole("link", { name: /Open .*screenshot/i })).toHaveCount(0);
+    await expect(page.locator('a[href*=".webp"]')).toHaveCount(0);
+    await expect(page.getByText(desktopCaption, { exact: true })).toBeVisible();
+    await expect(page.getByText("Follow the same agents and their replies from your phone.", { exact: true })).toBeVisible();
     for (const label of ["Play desktop AI demo", "Play mobile AI demo"]) {
       const button = page.getByRole("button", { name: label });
       const box = await button.boundingBox();
@@ -97,17 +103,17 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 1000, height: 900
       expect(metrics.objectFit).not.toBe("cover");
       const expectedWidths: readonly number[] = capture.widths.length ? capture.widths : [...new Set([Math.min(896, metrics.intrinsicWidth), metrics.intrinsicWidth])];
       for (const width of expectedWidths) expect(metrics.candidates).toContain(` ${width}w`);
-      const link = page.getByRole("link", { name: capture.link });
-      const href = await link.getAttribute("href");
-      expect(href).toMatch(/^\/product\/.*\.webp$/);
-      await expect(link).not.toHaveAttribute("target", "_blank");
+      const response = await page.request.get(metrics.source);
+      expect(response.ok()).toBe(true);
+      expect(response.headers()["content-type"]).toMatch(/^image\/webp\b/);
+      expect((await response.body()).byteLength).toBeGreaterThan(0);
     }
     await expect(hero).toHaveAttribute("fetchpriority", "high");
     await expect(page.getByAltText(captures[1].alt)).not.toHaveAttribute("fetchpriority", "high");
     await expect(page.getByAltText(captures[2].alt)).not.toHaveAttribute("fetchpriority", "high");
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 
-    for (const name of ["Sign In", "Try Hosted", "Self-host (Open Source)", ...captures.map((capture) => capture.link)]) {
+    for (const name of ["Sign In", "Try Hosted", "Self-host (Open Source)"]) {
       const target = page.getByRole("link", { name, exact: true }).first();
       const box = await target.boundingBox();
       expect(box, name).not.toBeNull();
@@ -120,10 +126,7 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 1000, height: 900
       page.getByRole("link", { name: "Self-host (Open Source)", exact: true }).first(),
       page.getByRole("link", { name: "GitHub", exact: true }).first(),
       page.getByRole("button", { name: "Play desktop AI demo" }),
-      page.getByRole("link", { name: captures[0].link }),
       page.getByRole("button", { name: "Play mobile AI demo" }),
-      page.getByRole("link", { name: captures[1].link }),
-      page.getByRole("link", { name: captures[2].link }),
     ];
     for (const focused of focusOrder) {
       await page.keyboard.press("Tab");
@@ -148,25 +151,13 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 1000, height: 900
     await hero.screenshot({ path: info.outputPath(`hero-${viewport.width}.png`) });
     await page.getByRole("region", { name: "Your workspace, wherever you are." }).screenshot({ path: info.outputPath(`supporting-${viewport.width}.png`) });
 
-    for (const capture of captures) {
-      const link = page.getByRole("link", { name: capture.link });
-      const href = (await link.getAttribute("href"))!;
-      const responsePromise = page.waitForResponse((response) => new URL(response.url()).pathname === href);
-      await link.click();
-      const response = await responsePromise;
-      expect(response.ok()).toBe(true);
-      expect(response.headers()["content-type"]).toMatch(/^image\/webp\b/);
-      expect(new URL(page.url()).pathname).toBe(href);
-      await page.goBack();
-      await expect(page.getByRole("link", { name: capture.link })).toBeVisible();
-    }
     if (viewport.width === 320 || viewport.width === 1000) {
       for (const item of [
-        { kind: "desktop", button: "Play desktop AI demo", link: captures[0].link },
-        { kind: "mobile", button: "Play mobile AI demo", link: captures[1].link },
-      ]) {
+        { kind: "desktop", button: "Play desktop AI demo" },
+        { kind: "mobile", button: "Play mobile AI demo" },
+      ] as const) {
         const scene = page.locator(`[data-product-scene="${item.kind}"]`);
-        const next = page.getByRole("link", { name: item.link });
+        const next = sceneBoundary(page, item.kind);
         const before = await scene.boundingBox();
         const nextBefore = await next.evaluate((element) => element.getBoundingClientRect().top + window.scrollY);
         await scene.getByRole("button", { name: item.button }).click();
@@ -221,7 +212,7 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     expect(manifestResponse.ok()).toBe(true);
     const manifest = await manifestResponse.json() as {
       version: number;
-      videos: Record<"desktop" | "mobile", { src: string; width: number; height: number; durationSeconds: number }>;
+      videos: Record<"desktop" | "mobile", { src: string; width: number; height: number; durationSeconds: number; bytes: number }>;
     };
     expect(manifest.version).toBe(2);
     expect(mediaRequests).toEqual([]);
@@ -229,14 +220,14 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     await page.screenshot({ path: info.outputPath(`ai-idle-${viewport.width}.png`), fullPage: true });
 
     for (const item of [
-      { kind: "desktop", button: "Play desktop AI demo", previous: "GitHub", alt: captures[0].alt, link: captures[0].link, path: "/product/desktop-workspace.mp4", width: 1280, height: 800 },
-      { kind: "mobile", button: "Play mobile AI demo", previous: captures[0].link, alt: captures[1].alt, link: captures[1].link, path: "/product/mobile-terminal.mp4", width: 390, height: 844 },
+      { kind: "mobile", button: "Play mobile AI demo", alt: captures[1].alt, path: "/product/mobile-terminal.mp4", width: 390, height: 844, maxDuration: 60, maxBytes: 5 * 1024 * 1024 },
+      { kind: "desktop", button: "Play desktop AI demo", alt: captures[0].alt, path: "/product/desktop-workspace.mp4", width: 1280, height: 800, maxDuration: 120, maxBytes: 10 * 1024 * 1024 },
     ] as const) {
       const scene = page.locator(`[data-product-scene="${item.kind}"]`);
       const poster = scene.getByAltText(item.alt);
       const video = scene.locator("video");
       const button = scene.getByRole("button", { name: item.button });
-      const next = page.getByRole("link", { name: item.link });
+      const next = sceneBoundary(page, item.kind);
       const metadata = manifest.videos[item.kind];
       await expect(poster).toBeVisible();
       await expect(video).not.toBeVisible();
@@ -251,25 +242,35 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       expect(metadata.src).toBe(item.path);
       expect(metadata.width).toBe(item.width);
       expect(metadata.height).toBe(item.height);
+      expect(metadata.bytes).toBeGreaterThan(0);
+      expect(metadata.bytes).toBeLessThanOrEqual(item.maxBytes);
       expect(mediaRequests).not.toContain(item.path);
       await button.scrollIntoViewIfNeeded();
       const before = await scene.boundingBox();
       const nextBefore = await next.evaluate((element) => element.getBoundingClientRect().top + window.scrollY);
       expect(before).not.toBeNull();
       const responsePromise = page.waitForResponse((response) => new URL(response.url()).pathname === item.path);
-      if (item.kind === "desktop") {
-        await button.click();
-      } else {
-        await page.getByRole("link", { name: item.previous, exact: true }).first().focus();
+      if (item.kind === "mobile") {
+        await page.getByRole("link", { name: "GitHub", exact: true }).first().focus();
+        await page.keyboard.press("Tab");
+        const desktopButton = page.getByRole("button", { name: "Play desktop AI demo" });
+        await expect(desktopButton).toBeFocused();
         await page.keyboard.press("Tab");
         await expect(button).toBeFocused();
         expect(await button.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
         expect(await button.evaluate((element) => getComputedStyle(element).boxShadow)).toContain("inset");
         await page.keyboard.press("Enter");
+      } else {
+        await button.click();
       }
       const response = await responsePromise;
       expect(response.ok()).toBe(true);
       expect(response.headers()["content-type"]).toMatch(/^video\/mp4\b/);
+      const fullVideoResponse = await page.request.get(item.path);
+      expect(fullVideoResponse.ok()).toBe(true);
+      expect(fullVideoResponse.headers()["content-type"]).toMatch(/^video\/mp4\b/);
+      expect((await fullVideoResponse.body()).byteLength).toBe(metadata.bytes);
+      if (item.kind === "mobile") expect(mediaRequests).not.toContain("/product/desktop-workspace.mp4");
       await expect(video).toBeVisible();
       await expect(video).toBeFocused();
       if (item.kind === "mobile") {
@@ -286,8 +287,8 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       });
       expect(playback.width).toBe(item.width);
       expect(playback.height).toBe(item.height);
-      expect(playback.duration).toBeGreaterThan(0);
-      expect(playback.duration).toBeLessThanOrEqual(60);
+      expect(playback.duration).toBeGreaterThanOrEqual(10);
+      expect(playback.duration).toBeLessThanOrEqual(item.maxDuration);
       expect(Math.abs(playback.duration - metadata.durationSeconds)).toBeLessThan(0.15);
       expect(playback.paused).toBe(true);
       expect(playback.errorCode).toBeNull();

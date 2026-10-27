@@ -5,7 +5,6 @@ type Capture = (typeof manifest.images)["desktop"];
 
 const imageClass = "block w-full h-auto rounded-[var(--radius-md)] border border-[var(--border-muted)] bg-[var(--bg-elevated)]";
 const captionClass = "font-[family-name:var(--font-sans)] text-[13px] leading-relaxed text-[var(--text-secondary)]";
-const linkClass = "inline-flex min-h-11 items-center rounded-[var(--radius-sm)] text-[13px] text-[var(--accent)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:shadow-[var(--focus-ring)]";
 
 function sources(capture: Capture) {
   return capture.variants.map((variant) => `${variant.src} ${variant.width}w`).join(", ");
@@ -20,14 +19,13 @@ export function DesktopScreenshot() {
           kind="desktop"
           image={capture}
           video={manifest.videos.desktop}
-          alt="FTown desktop dashboard showing a real Codex coding session and its output."
+          alt="FTown desktop showing Codex receiving replies from its Claude Code and Pi sessions."
           sizes="(min-width: 1168px) 1120px, (min-width: 640px) calc(100vw - 48px), calc(100vw - 32px)"
           loading="eager"
           fetchPriority="high"
         />
         <figcaption className="mt-3">
-          <p className={captionClass}>A real Codex coding session in FTown, captured in an isolated demo workspace.</p>
-          <a className={linkClass} href={capture.src}>Open desktop screenshot</a>
+          <p className={captionClass}>Codex opens Claude Code and Pi, delegates two checks and reads their replies. Waiting time omitted.</p>
         </figcaption>
       </figure>
     </div>
@@ -46,17 +44,16 @@ export function SupportingScreenshots() {
         <figure className="min-w-0 rounded-[var(--radius-lg)] border border-[var(--border-muted)] bg-[var(--bg-surface)] p-4 sm:p-6">
           <figcaption className="mb-4">
             <h3 className="font-[family-name:var(--font-sans)] text-lg font-bold text-[var(--text-primary)] mb-2">Pick up from your phone.</h3>
-            <p className={captionClass}>Follow the same Codex session from a phone-sized browser.</p>
+            <p className={captionClass}>Follow the same agents and their replies from your phone.</p>
           </figcaption>
           <ProductWalkthrough
             kind="mobile"
             image={mobile}
             video={manifest.videos.mobile}
-            alt="FTown on a phone-sized screen showing the same Codex session with touch controls."
+            alt="FTown on a phone-sized screen showing Codex's summary of replies from Claude Code and Pi, with touch controls."
             sizes="(min-width: 346px) 280px, calc(100vw - 66px)"
             loading="lazy"
           />
-          <a className={`${linkClass} mt-2`} href={mobile.src}>Open mobile screenshot</a>
         </figure>
         <figure className="min-w-0 rounded-[var(--radius-lg)] border border-[var(--border-muted)] bg-[var(--bg-surface)] p-4 sm:p-6">
           <figcaption className="mb-4">
@@ -74,7 +71,6 @@ export function SupportingScreenshots() {
             loading="lazy"
             className={imageClass}
           />
-          <a className={`${linkClass} mt-2`} href={security.src}>Open security screenshot</a>
         </figure>
       </div>
     </section>

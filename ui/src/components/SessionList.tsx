@@ -12,7 +12,7 @@ import { usePersistentState, stringSetCodec } from "@/lib/use-persistent-state";
 import { parsePullRequestUrl } from "@/lib/pull-request-url";
 import { HarnessIcon } from "./HarnessIcon";
 import { SessionStateIndicator } from "./SessionStateIndicator";
-import { PullRequestLink } from "./PullRequestLink";
+import { PullRequestBadgePlaceholder, PullRequestLink } from "./PullRequestLink";
 import type { BridgeSecurityState } from "@security/protocol";
 import { SecurityLockIcon, bridgeConnectionLock } from "./SecurityLockIcon";
 
@@ -1053,12 +1053,23 @@ export function SessionList({
       );
     }
 
+    const hasPullRequest = Boolean(parsePullRequestUrl(session.pullRequestUrl));
+    const hasCollapsedCount = Boolean(treeProps?.isCollapsed && treeProps.descendantCount > 0);
+    const headerTopPadding = (isSelected ? 9 : 6) + (isDragOver && dragOverZone === "above" ? 2 : 0);
+    const headerBottomMargin = isSelected ? 4 : 0;
+
     return (
       <div
         key={session.id}
         data-session-row={session.id}
-        className="flex items-stretch min-w-0"
-        style={{ borderBottom: "1px solid var(--border-subtle)", background: isSelected ? "var(--bg-elevated)" : "transparent" }}
+        className="min-w-0"
+        style={{
+          display: "grid",
+          gridTemplateColumns: `minmax(0, 1fr) ${hasPullRequest ? 6 : 0}px auto ${hasCollapsedCount ? 6 : 0}px auto 8px auto`,
+          gridTemplateRows: "auto auto",
+          borderBottom: "1px solid var(--border-subtle)",
+          background: isSelected ? "var(--bg-elevated)" : "transparent",
+        }}
       >
       <button
         draggable
@@ -1094,7 +1105,10 @@ export function SessionList({
           }
         }}
         style={{
-          flex: 1,
+          gridColumn: "1 / -1",
+          gridRow: "1 / 3",
+          gridTemplateColumns: "subgrid",
+          gridTemplateRows: "subgrid",
           minWidth: 0,
           textAlign: "left",
           padding: isSelected
@@ -1109,7 +1123,7 @@ export function SessionList({
           cursor: "grab",
           transition: "background 0.12s ease, border-color 0.12s ease",
           fontFamily: "var(--font-mono)",
-          display: "block",
+          display: "grid",
           opacity: isFinished ? 0.55 : 1,
         }}
         onMouseEnter={(e) => {
@@ -1119,8 +1133,8 @@ export function SessionList({
           if (!isSelected) e.currentTarget.style.background = "transparent";
         }}
       >
-        <div className={`flex items-center justify-between gap-2 ${isSelected ? "mb-1" : ""}`}>
-          <div className="flex items-center gap-1.5" style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "subgrid", gridColumn: "1 / -1", gridRow: 1, alignItems: "center", marginBottom: headerBottomMargin }}>
+          <div className="flex items-center gap-1.5" style={{ gridColumn: 1, minWidth: 0 }}>
           {treeProps?.hasChildren ? (
             <span
               role="button"
@@ -1202,11 +1216,15 @@ export function SessionList({
               {displayName}
             </span>
           )}
-          <PullRequestLink url={session.pullRequestUrl} badge />
+          </div>
+          <div style={{ gridColumn: 3, display: "flex", alignItems: "center" }}>
+            <PullRequestBadgePlaceholder url={session.pullRequestUrl} />
+          </div>
           {treeProps?.isCollapsed && treeProps.descendantCount > 0 && (
             <span
               title={`${treeProps.descendantCount} hidden child session${treeProps.descendantCount === 1 ? "" : "s"}`}
               style={{
+                gridColumn: 5,
                 fontSize: 9,
                 fontWeight: 600,
                 lineHeight: 1,
@@ -1222,8 +1240,7 @@ export function SessionList({
               {treeProps.descendantCount}
             </span>
           )}
-          </div>
-          <div className="flex items-center gap-1.5" style={{ flexShrink: 0 }}>
+          <div className="flex items-center gap-1.5" style={{ gridColumn: 7 }}>
             <SessionStateIndicator
               status={session.status}
               activity={sessionActivity?.get(session.id)?.activity}
@@ -1272,6 +1289,7 @@ export function SessionList({
           </div>
         </div>
 
+        <div style={{ gridColumn: "1 / -1", gridRow: 2, minWidth: 0 }}>
         {isSelected && session.status === "running" && (() => {
           const act = sessionActivity?.get(session.id);
           if (!act || act.activity === "idle") return null;
@@ -1319,7 +1337,13 @@ export function SessionList({
             </span>
           </div>
         )}
+        </div>
       </button>
+      {hasPullRequest && (
+        <div style={{ gridColumn: 3, gridRow: 1, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none", paddingTop: headerTopPadding, paddingBottom: headerBottomMargin, fontFamily: "var(--font-mono)", opacity: isFinished ? 0.55 : 1 }}>
+          <PullRequestLink url={session.pullRequestUrl} badge />
+        </div>
+      )}
       </div>
     );
   }

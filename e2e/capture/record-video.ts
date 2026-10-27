@@ -14,6 +14,7 @@ const MAX_SECONDS = 60;
 
 type Frame = { filename: string; timestamp: number };
 export type Video = { src: string; width: number; height: number; durationSeconds: number; bytes: number };
+export type Scene = { record: () => Promise<void>; before?: () => Promise<void> };
 
 /** Record only the already-approved dashboard; no setup or browser-context video. */
 export async function recordVideo(page: Page, directory: string, name: "desktop-workspace" | "mobile-terminal", size: { width: number; height: number }, actions: () => Promise<void>): Promise<Video> {
@@ -33,7 +34,7 @@ export async function recordVideo(page: Page, directory: string, name: "desktop-
   const frames: Frame[] = [];
   let totalBytes = 0;
   let pending: Promise<void> = Promise.resolve();
-  let lastObserved: number | undefined;
+  let highWater: number | undefined;
   let latestUnsampled: { data: Buffer; timestamp: number; metadata: { deviceWidth?: number; deviceHeight?: number; pageScaleFactor?: number } } | undefined;
   const acknowledgements = new Set<Promise<void>>();
   let failure: Error | undefined;
@@ -75,11 +76,21 @@ export async function recordVideo(page: Page, directory: string, name: "desktop-
     void acknowledgement.then(() => acknowledgements.delete(acknowledgement));
     if (failure) return;
     const timestamp = frame.metadata.timestamp;
-    if (typeof timestamp !== "number" || !Number.isFinite(timestamp) || timestamp <= 0
-      || Math.abs(timestamp - Date.now() / 1000) > 5 || (lastObserved !== undefined && timestamp <= lastObserved)) {
-      fail(new Error("Invalid or out-of-order screencast timestamp")); return;
+    const wall = Date.now() / 1000;
+    const reason = typeof timestamp !== "number" ? "missing-or-nonnumeric"
+      : !Number.isFinite(timestamp) ? "non-finite"
+        : timestamp <= 0 ? "non-positive"
+          : Math.abs(timestamp - wall) > 5 ? "outside-wall-window"
+            : undefined;
+    if (reason || typeof timestamp !== "number") {
+      const safe = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value.toFixed(6) : "unavailable";
+      const lag = typeof timestamp === "number" && Number.isFinite(timestamp) ? wall - timestamp : undefined;
+      fail(new Error(`Invalid screencast timestamp: reason=${reason} observed=${safe(timestamp)} previous=${safe(highWater)} wallLagSeconds=${safe(lag)}`)); return;
     }
-    lastObserved = timestamp;
+    // CDP frame swap timestamps can arrive out of order. Keep only strictly
+    // newer actual arrivals, including those held for the 24 fps sampler.
+    if (highWater !== undefined && timestamp <= highWater) return;
+    highWater = timestamp;
     const data = Buffer.from(frame.data, "base64");
     if (!data.length || data.length > MAX_BYTES) {
       fail(new Error("Screencast frame or storage limit exceeded")); return;
@@ -140,5 +151,45 @@ export async function recordVideo(page: Page, directory: string, name: "desktop-
   const bytes = (await stat(output)).size;
   if (probe.streams?.length !== 1 || !stream || stream.codec_name !== "h264" || stream.pix_fmt !== "yuv420p" || stream.width !== size.width || stream.height !== size.height
     || !Number.isFinite(duration) || duration < 10 || duration > MAX_SECONDS || bytes <= 0 || bytes > 5 * 1024 * 1024) throw new Error("Encoded video violates capture contract");
+  return { src: `/product/${name}.mp4`, width: stream.width, height: stream.height, durationSeconds: duration, bytes };
+}
+
+/** Two chronological real scenes, with the provider wait outside either recording. */
+export async function recordScenes(page: Page, directory: string, name: "desktop-workspace", size: { width: number; height: number }, scenes: readonly [Scene, Scene]): Promise<Video> {
+  if (name !== "desktop-workspace" || scenes.length !== 2) throw new Error("Desktop recording requires exactly two scenes");
+  for (let index = 0; index < scenes.length; index++) {
+    const scene = scenes[index];
+    if (scene.before) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let expired = false;
+      const preparation = scene.before();
+      try {
+        await Promise.race([preparation, new Promise<never>((_, reject) => { timer = setTimeout(() => { expired = true; reject(new Error("Scene preparation exceeded its deadline")); }, 180_000); })]);
+      } catch (error) {
+        if (expired) {
+          const cleanup: unknown[] = [];
+          try { await page.close(); } catch (failure) { cleanup.push(failure); }
+          // Do not let the aborted preparation continue mutating capture state
+          // after the owner starts resource cleanup.
+          try { await preparation; } catch { /* The deadline remains primary. */ }
+          if (cleanup.length) throw new AggregateError([error, ...cleanup], "Scene preparation and cleanup failed", { cause: error });
+        }
+        throw error;
+      } finally { if (timer) clearTimeout(timer); }
+    }
+    const sceneDirectory = join(directory, `desktop-scene-${index + 1}`);
+    await mkdir(sceneDirectory);
+    await recordVideo(page, sceneDirectory, name, size, scene.record);
+  }
+  const list = join(directory, "desktop-scenes.txt");
+  await writeFile(list, "file 'desktop-scene-1/desktop-workspace.mp4'\nfile 'desktop-scene-2/desktop-workspace.mp4'\n", { flag: "wx" });
+  const output = join(directory, `${name}.mp4`);
+  await execute("ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "1", "-i", list, "-map", "0:v:0", "-an", "-c", "copy", "-movflags", "+faststart", "-n", output], { timeout: 120_000, maxBuffer: 1024 * 1024 });
+  const { stdout } = await execute("ffprobe", ["-v", "error", "-show_entries", "stream=codec_name,pix_fmt,width,height,r_frame_rate:format=duration", "-of", "json", output], { timeout: 15_000, maxBuffer: 1024 * 1024 });
+  const probe = JSON.parse(stdout) as { streams?: { codec_name?: string; pix_fmt?: string; width?: number; height?: number; r_frame_rate?: string }[]; format?: { duration?: string } };
+  const stream = probe.streams?.[0];
+  const duration = Number(probe.format?.duration);
+  const bytes = (await stat(output)).size;
+  if (probe.streams?.length !== 1 || !stream || stream.codec_name !== "h264" || stream.pix_fmt !== "yuv420p" || stream.width !== size.width || stream.height !== size.height || stream.r_frame_rate !== "24/1" || !Number.isFinite(duration) || duration < 10 || duration > 120 || bytes <= 0 || bytes > 10 * 1024 * 1024) throw new Error("Combined desktop video violates capture contract");
   return { src: `/product/${name}.mp4`, width: stream.width, height: stream.height, durationSeconds: duration, bytes };
 }
