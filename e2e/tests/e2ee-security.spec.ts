@@ -215,6 +215,8 @@ test("account-migrated OAuth MCP uses one selected-computer consent, enforces re
       await page.locator(`[data-computer-access="${bridgeId}"]`).click();
       const migration = page.locator(`[data-account-migration="${bridgeId}"]`);
       await expect(migration).toBeVisible();
+      await expect(page.locator(`[data-access-card="bridge:${bridgeId}"]`).getByRole("region", { name: "Selected access details" })).toHaveCount(1);
+      expect(await page.getByRole("dialog", { name: "Security", exact: true }).locator("button button").count()).toBe(0);
       await expect(migration.getByRole("button", { name: "Share with my other browsers", exact: true })).toBeVisible();
       await expect(migration).toContainText("browsers outside your account approvals lose access");
       await page.screenshot({ path: info.outputPath(`security-share-${bridgeId}.png`), fullPage: true });

@@ -349,8 +349,24 @@ describe("Account devices", () => {
   it.each(["account_device_revoked", "account_trust_rollback"] as const)("shows the current browser's actual paused or revoked state (%s)", code => {
     const f = accountFixture(1); f.state.status = "error"; f.state.code = code;
     render(<SecurityDevices currentEndpointId="0" execute={mockExecutor()} accountClient={f.client} accountState={f.state} />);
-    expect(screen.getByText(code === "account_device_revoked" ? /· Access revoked/ : /· Access paused/)).toBeTruthy();
-    expect(screen.queryByText(/· Account approval needed/)).toBeNull();
+    expect(screen.getByRole("button", { name: code === "account_device_revoked" ? /^Browser Laptop \(this browser\): Access revoked/ : /^Browser Laptop \(this browser\): Access paused/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Browser Laptop.*Account approval needed/ })).toBeNull();
+  });
+
+  it("consolidates toolbar and guarded actions inside the selected node without duplicate external panels", () => {
+    const f = accountFixture(2); const execute = mockExecutor();
+    const view = render(<SecurityDevices currentEndpointId="0" execute={execute} accountClient={f.client} accountState={f.state} />);
+    const map = screen.getByRole("region", { name: "Browser and computer access map" });
+    expect(map.contains(screen.getByRole("button", { name: "Refresh access" }))).toBe(true);
+    const details = screen.getByRole("region", { name: "Selected access details" });
+    expect(details.closest("[data-access-card]")?.getAttribute("data-access-card")).toBe("browser:0");
+    expect(screen.getAllByText("This browser")).toHaveLength(1);
+    expect(view.container.querySelector("button button")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /^Browser Phone:/ }));
+    const remove = screen.getByRole("button", { name: "Remove access for Phone" });
+    fireEvent.click(remove);
+    expect(screen.getByRole("group", { name: "Confirm account device revocation" }).closest("[data-access-card]")?.getAttribute("data-access-card")).toBe("browser:1");
+    expect(f.revoke).not.toHaveBeenCalled(); expect(execute).not.toHaveBeenCalled();
   });
 
   it("falls back to the current browser when a selected browser disappears or identity changes", () => {
