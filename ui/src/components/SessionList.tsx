@@ -13,6 +13,8 @@ import { parsePullRequestUrl } from "@/lib/pull-request-url";
 import { HarnessIcon } from "./HarnessIcon";
 import { SessionStateIndicator } from "./SessionStateIndicator";
 import { PullRequestLink } from "./PullRequestLink";
+import type { BridgeSecurityState } from "@security/protocol";
+import { SecurityLockIcon, bridgeConnectionLock } from "./SecurityLockIcon";
 
 interface SessionListProps {
   sessions: Session[];
@@ -38,6 +40,7 @@ interface SessionListProps {
   onUnhideBridge?: (bridgeId: string) => void;
   onCreateSession?: (bridgeId: string) => void;
   onOpenSecurity?: (bridgeId: string) => void;
+  bridgeSecurityStates?: ReadonlyMap<string, BridgeSecurityState["status"]>;
 }
 
 type ContextMenuState =
@@ -505,6 +508,7 @@ export function SessionList({
   onUnhideBridge,
   onCreateSession,
   onOpenSecurity,
+  bridgeSecurityStates,
 }: SessionListProps) {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -1478,10 +1482,10 @@ export function SessionList({
               ✕
             </button>
           )}
-          {onOpenSecurity && <button type="button" aria-label={`Security log for ${label}`} title={`Security log for ${label}`}
+          {onOpenSecurity && <button type="button" aria-label={`Security log for ${label}`} title={`Security log for ${label}: ${bridgeConnectionLock(bridgeSecurityStates?.get(bridgeId)).title}`}
             className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center text-sm md:min-h-6 md:min-w-6"
             style={{ color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer" }}
-            onClick={event => { event.stopPropagation(); onOpenSecurity(bridgeId); }}>◇</button>}
+            onClick={event => { event.stopPropagation(); onOpenSecurity(bridgeId); }}><SecurityLockIcon state={bridgeConnectionLock(bridgeSecurityStates?.get(bridgeId)).state} /></button>}
           <StatusDot kind={isOnline ? "connected" : "disconnected"} />
           <span style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>
             {bridgeSessions.length}

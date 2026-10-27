@@ -19,13 +19,16 @@ async function waitForSecurityLayout(page: Page, width: number) {
   await expect.poll(() => page.getByRole("dialog", { name: "Security", exact: true }).evaluate((element, mobile) => {
     const transitioning = element.getAnimations({ subtree: true }).some(animation => animation instanceof CSSTransition && animation.playState === "running");
     const controls = [...element.querySelectorAll<HTMLElement>("button,select,summary")].filter(control => control.checkVisibility());
-    return !transitioning && controls.length > 0 && controls.every(control => mobile ? control.getBoundingClientRect().height >= 44 : control.getBoundingClientRect().height <= 36);
+    return !transitioning && controls.length > 0 && (!mobile || controls.every(control => control.getBoundingClientRect().height >= 44));
   }, width < 640), { timeout: 2000, intervals: [25, 50, 100], message: "Security responsive transitions and control geometry must settle" }).toBe(true);
 }
 
 async function openSeparateApprovals(page: Page, bridgeId: string) {
   const card = page.locator(`[data-computer-access="${bridgeId}"]`);
-  if (await card.count()) await card.getByText("Separate approvals and recovery", { exact: true }).click();
+  if (await card.count()) {
+    await card.click();
+    await page.locator(`[data-computer-details="${bridgeId}"]`).getByText("Separate approvals and recovery", { exact: true }).click();
+  }
 }
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 function captureBroker(page: Page): string[] {
@@ -209,6 +212,7 @@ test("account-migrated OAuth MCP uses one selected-computer consent, enforces re
     await page.getByRole("button", { name: "Open security", exact: true }).click();
     await page.getByRole("tab", { name: "Access", exact: true }).click();
     for (const [bridgeId, home] of [[primary.bridgeId, mcpHome], [secondary.bridgeId, mcpSecondHome]]) {
+      await page.locator(`[data-computer-access="${bridgeId}"]`).click();
       const migration = page.locator(`[data-account-migration="${bridgeId}"]`);
       await expect(migration).toBeVisible();
       await expect(migration.getByRole("button", { name: "Share with my other browsers", exact: true })).toBeVisible();
@@ -219,7 +223,6 @@ test("account-migrated OAuth MCP uses one selected-computer consent, enforces re
       await expect(migration).toHaveCount(0, { timeout: 45000 });
       await confirmTestBrowserMigration(page, home);
     }
-    await page.getByText(/^Browsers with access/).click();
     await expect(page.getByRole("list", { name: "Account devices", exact: true })).toHaveCount(1);
     await expect(page.getByRole("list", { name: "Account devices", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Close security" }).click();
