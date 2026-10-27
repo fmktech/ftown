@@ -50,6 +50,30 @@ export E2E_MCP_USER_EMAIL="$(cat .run-mcp-email)"
 npx playwright test
 ```
 
+The command above runs both Chromium projects with at most two workers. The
+`chromium` project serializes shared-account and shared-bridge tests; the
+`chromium-isolated` project runs the account-trust and pending-approvals cases
+in parallel using their independently owned accounts and bridge homes. New specs
+stay in the shared lane by default. Add a spec to the isolated allowlist only
+after reviewing its account, bridge, session, filesystem and service ownership
+and verifying safe overlap in a full run.
+
+After the setup above, these commands select the intended coverage:
+
+```bash
+npx playwright test                              # both projects, full suite
+npx playwright test --workers=1                  # both projects, serial diagnostic
+npx playwright test --project=chromium-isolated # isolated account scenarios only
+```
+
+`--project=chromium` runs only the shared lane; it no longer includes
+`account-trust.spec.ts` or `pending-approvals.spec.ts`. For historical commands
+that include either file with that filter, omit the project filter or select
+`--project=chromium-isolated` instead. The root coordinator owns the service
+lifecycle and executes browser runs; use the setup and cleanup steps on this
+page. Each repeated full run needs a fresh task-local database and environment
+because virgin bridge pairing consumes a real per-IP quota.
+
 The original account uses `e2e/.bridge-home` and `.bridge-home-2`. MCP account
 migration uses a separate run-scoped `E2E_MCP_USER_EMAIL`, recorded in
 `.run-mcp-email`, and `E2E_MCP_USER_PASSWORD` (default `e2e-password-123`). Its

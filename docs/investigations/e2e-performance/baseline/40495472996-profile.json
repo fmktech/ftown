@@ -1,0 +1,93 @@
+{
+  "runId": 40495472996,
+  "head": "ae8f4c142195587bfe789877deb2b34c8209d130",
+  "topSteps": [
+    {
+      "job": "direct-transport-e2e",
+      "step": "Start isolated services and run Playwright e2e",
+      "seconds": 524.0
+    },
+    {
+      "job": "direct-transport-e2e",
+      "step": "Install zsh + tmux + isolated browser trust tools",
+      "seconds": 87.0
+    },
+    {
+      "job": "direct-transport-e2e",
+      "step": "Build UI",
+      "seconds": 74.0
+    },
+    {
+      "job": "direct-transport-e2e",
+      "step": "Build bridge",
+      "seconds": 38.0
+    },
+    {
+      "job": "direct-transport-e2e",
+      "step": "Start infra (postgres + neon-http-shim + centrifugo)",
+      "seconds": 15.0
+    },
+    {
+      "job": "direct-transport-e2e",
+      "step": "Tear down infra",
+      "seconds": 11.0
+    },
+    {
+      "job": "direct-transport-e2e",
+      "step": "Stop UI + bridge (only recorded PIDs)",
+      "seconds": 10.0
+    },
+    {
+      "job": "direct-transport-e2e",
+      "step": "Install Playwright OS deps only (browsers cached)",
+      "seconds": 9.0
+    }
+  ],
+  "testCount": 50,
+  "topTests": [
+    {
+      "test": "tests/account-trust.spec.ts:80:3",
+      "seconds": 132.0
+    },
+    {
+      "test": "tests/account-trust.spec.ts:80:3",
+      "seconds": 132.0
+    },
+    {
+      "test": "tests/pending-approvals.spec.ts:13:3",
+      "seconds": 72.0
+    },
+    {
+      "test": "tests/pending-approvals.spec.ts:13:3",
+      "seconds": 43.4
+    },
+    {
+      "test": "tests/session-tools.spec.ts:101:3",
+      "seconds": 9.6
+    },
+    {
+      "test": "tests/e2ee-security.spec.ts:183:1",
+      "seconds": 9.2
+    },
+    {
+      "test": "tests/session-tools.spec.ts:101:3",
+      "seconds": 9.0
+    },
+    {
+      "test": "tests/device-pairing.spec.ts:16:3",
+      "seconds": 8.8
+    },
+    {
+      "test": "tests/idor-channels.spec.ts:144:3",
+      "seconds": 8.7
+    },
+    {
+      "test": "tests/session-lifecycle.spec.ts:195:3",
+      "seconds": 6.1
+    }
+  ],
+  "testSummary": [
+    "2026-10-27T11:33:59.2487303Z   2 skipped",
+    "2026-10-27T11:33:59.2488006Z   50 passed (8.5m)"
+  ]
+}
