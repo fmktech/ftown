@@ -1,11 +1,14 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SecurityAccessMap, type SecurityAccessMapProps } from "./SecurityAccessMap";
 import { bridgeConnectionLock } from "./SecurityLockIcon";
 import { SessionList } from "./SessionList";
+import { deriveCurrentComputerIds } from "./Dashboard";
+import type { SecurityBridge } from "./SecurityPanel";
+import type { TerminalTransportMode } from "@/lib/direct-transport/contract";
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 beforeEach(() => localStorage.clear());
 const props = (): SecurityAccessMapProps => ({
   browsers: [
@@ -70,4 +73,68 @@ it("passes actual sidebar state independently of bridge presence and preserves t
   expect(button.style.color).toBe("var(--text-muted)");
   fireEvent.click(button); expect(open).toHaveBeenCalledExactlyOnceWith("bridge");
   expect(data.onSelectSession).not.toHaveBeenCalled();
+});
+
+it("embeds toolbar and selected controls as siblings of the selector, with independent current and selection markers", () => {
+  const data = props(); const action = vi.fn(); data.bridges = data.bridges.map(node => ({ ...node, current: node.id === "independent" }));
+  const view = render(<SecurityAccessMap {...data} toolbar={<button type="button">Refresh preview</button>}
+    selectedDetails={<button type="button" onClick={action}>Remove preview browser</button>} />);
+  const remove = screen.getByRole("button", { name: "Remove preview browser" });
+  expect(remove.closest("[data-access-card]")?.getAttribute("data-access-card")).toBe("browser:self-browser");
+  expect(view.container.querySelector("button button")).toBeNull();
+  fireEvent.click(remove); expect(action).toHaveBeenCalledOnce(); expect(data.onSelect).not.toHaveBeenCalled();
+  expect(screen.getByText("This computer")).toBeTruthy();
+  const current = view.container.querySelector('[data-current-device="bridge"]');
+  expect(current?.getAttribute("data-access-card")).toBe("bridge:independent");
+  expect(view.container.querySelector('[data-access-edge="bridge:independent"]')).toBeNull();
+  expect(view.container.querySelector('[data-current-device="browser"]')?.getAttribute("data-access-card")).toBe("browser:self-browser");
+  view.rerender(<SecurityAccessMap {...data} bridges={data.bridges.map(node => ({ ...node, current: false }))} />);
+  expect(view.container.querySelector('[data-current-device="bridge"]')).toBeNull();
+});
+
+const localityBridges: SecurityBridge[] = ["local", "remote"].map(bridgeId => ({ bridgeId, label: bridgeId,
+  security: { bridgeId, status: "ready", endpoint: null } }));
+const localitySessions = [{ id: "local-session", bridgeId: "local" }, { id: "remote-session", bridgeId: "remote" }];
+it.each(["local", "direct", "centrifugo", "connecting"] as const)("marks only verified same-machine transport mode %s", mode => {
+  const transport = { getMode: (id: string): TerminalTransportMode => id === "local-session" ? mode : "direct" };
+  expect([...deriveCurrentComputerIds({ localMode: false, connectionStatus: "connected", sessions: localitySessions, transport, bridges: localityBridges })]).toEqual(mode === "local" ? ["local"] : []);
+});
+it("drops locality on mode, session removal, connection, or secure state changes and accepts a verified local controller", () => {
+  let mode: TerminalTransportMode = "local";
+  const data = { localMode: false, connectionStatus: "connected" as const, sessions: localitySessions, transport: { getMode: () => mode }, bridges: localityBridges };
+  expect([...deriveCurrentComputerIds(data)]).toEqual(["local", "remote"]);
+  mode = "direct"; expect([...deriveCurrentComputerIds(data)]).toEqual([]);
+  mode = "local"; expect([...deriveCurrentComputerIds({ ...data, sessions: [] })]).toEqual([]);
+  expect([...deriveCurrentComputerIds({ ...data, connectionStatus: "connecting" })]).toEqual([]);
+  expect([...deriveCurrentComputerIds({ ...data, bridges: localityBridges.map(node => ({ ...node, security: { ...node.security, status: "offline" as const } })) })]).toEqual([]);
+  expect([...deriveCurrentComputerIds({ ...data, transport: null, sessions: [], localMode: true, localBridgeId: "local" })]).toEqual(["local"]);
+  expect([...deriveCurrentComputerIds({ ...data, transport: null, sessions: [], localMode: false, localBridgeId: "local" })]).toEqual([]);
+});
+
+it("reanchors connectors when inline card or hub expansion moves nodes without resizing the root", () => {
+  const observed = new Set<Element>(); let notify!: (element: Element) => void;
+  vi.stubGlobal("ResizeObserver", class {
+    constructor(callback: ResizeObserverCallback) { notify = element => { if (observed.has(element)) callback([], this as unknown as ResizeObserver); }; }
+    observe(element: Element) { observed.add(element); }
+    unobserve(element: Element) { observed.delete(element); }
+    disconnect() { observed.clear(); }
+  });
+  const data = props();
+  const view = render(<SecurityAccessMap {...data} selectedDetails={<button>Details action</button>} />);
+  const hub = screen.getByRole("heading", { name: "Account access" }).parentElement!;
+  const canvas = hub.parentElement!;
+  const node = view.container.querySelector<HTMLButtonElement>('[data-access-node="alpha-browser-abcdef"]')!;
+  let top = 80; let hubHeight = 60;
+  vi.spyOn(canvas, "getBoundingClientRect").mockImplementation(() => new DOMRect(0, 0, 900, 400));
+  vi.spyOn(hub, "getBoundingClientRect").mockImplementation(() => new DOMRect(400, 100, 100, hubHeight));
+  vi.spyOn(node, "getBoundingClientRect").mockImplementation(() => new DOMRect(10, top, 200, 60));
+  act(() => notify(canvas));
+  const edge = view.container.querySelector('[data-access-edge="browser:alpha-browser-abcdef"]')!;
+  const before = edge.getAttribute("d");
+  // A preceding selected card expands; this button moves but keeps its size.
+  top = 180; act(() => notify(node.parentElement!));
+  expect(edge.getAttribute("d")).not.toBe(before);
+  const afterCard = edge.getAttribute("d");
+  hubHeight = 100; act(() => notify(hub));
+  expect(edge.getAttribute("d")).not.toBe(afterCard);
 });

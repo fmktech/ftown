@@ -14,6 +14,7 @@ import { PendingDeviceInbox } from "./PendingDeviceApprovals";
 interface Props {
   bridge?: SecurityBridge;
   currentEndpointId: string | null;
+  currentComputerIds?: ReadonlySet<string>;
   execute: SecurityCommandExecutor;
   onInvitation?: (invitation: BridgeInvitation) => void;
   bridges?: SecurityBridge[];
@@ -23,7 +24,7 @@ interface Props {
   pendingState?: PendingSnapshot;
 }
 
-export function SecurityDevices({ bridge, currentEndpointId, execute, onInvitation, bridges = [], accountClient, accountState, pendingClient, pendingState }: Props) {
+export function SecurityDevices({ bridge, currentEndpointId, currentComputerIds, execute, onInvitation, bridges = [], accountClient, accountState, pendingClient, pendingState }: Props) {
   const [devices, setDevices] = useState<ApprovedEndpoint[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -76,7 +77,7 @@ export function SecurityDevices({ bridge, currentEndpointId, execute, onInvitati
     finally { if (request === generation.current) setBusy(null); }
   }
 
-  if (accountClient && accountState) return <AccountDevices client={accountClient} initial={accountState} bridges={bridges} selected={bridge} execute={execute} pendingClient={pendingClient} pendingState={pendingState} />;
+  if (accountClient && accountState) return <AccountDevices currentComputerIds={currentComputerIds} client={accountClient} initial={accountState} bridges={bridges} selected={bridge} execute={execute} pendingClient={pendingClient} pendingState={pendingState} />;
   if (!bridge) return <p className="rounded-md border border-[var(--border-muted)] p-4 text-sm text-[var(--text-muted)]">Choose a bridge to inspect its approved devices or invite another browser.</p>;
   if (!ready) return <div role="status" className="space-y-3 text-sm text-[var(--text-muted)]">
     <p>Device management needs an encrypted connection to this bridge.</p>
@@ -140,7 +141,7 @@ export function SecurityDevices({ bridge, currentEndpointId, execute, onInvitati
   </div>;
 }
 
-function AccountDevices({ client, initial, bridges, selected, execute, pendingClient, pendingState }: { client: AccountSecurityClient; initial: AccountSecuritySnapshot; bridges: SecurityBridge[]; selected?: SecurityBridge; execute: SecurityCommandExecutor; pendingClient?: PendingApprovalClient; pendingState?: PendingSnapshot }) {
+function AccountDevices({ client, initial, bridges, selected, execute, pendingClient, pendingState, currentComputerIds }: { currentComputerIds?: ReadonlySet<string>; client: AccountSecurityClient; initial: AccountSecuritySnapshot; bridges: SecurityBridge[]; selected?: SecurityBridge; execute: SecurityCommandExecutor; pendingClient?: PendingApprovalClient; pendingState?: PendingSnapshot }) {
   const state = useSyncExternalStore(client.subscribe, client.snapshot, () => initial);
   const pending = usePendingApprovals(client, pendingClient ? "passive" : "reviewer", pendingClient);
   useEffect(() => () => { pending.client?.dismissReview(); }, [pending.client]);
@@ -207,7 +208,7 @@ function AccountDevices({ client, initial, bridges, selected, execute, pendingCl
   const accountHistorical = state.status === "ready" && !!state.trust && state.offline;
   const browserNodes: SecurityAccessBrowserNode[] = devices.map(device => ({ id: device.endpoint.id,
     label: browserName(device.label, device.endpoint.id === state.identity?.endpoint.id), current: device.endpoint.id === state.identity?.endpoint.id,
-    accessText: accountCurrent ? "Approved for your account" : accountHistorical ? "Last verified · offline" : "Access paused",
+    accessText: accountCurrent ? "Approved for your account" : accountHistorical ? "Last verified · offline" : device.endpoint.id === state.identity?.endpoint.id && state.code === "account_device_revoked" ? "Access revoked" : "Access paused",
     lockState: accountCurrent ? "secured" : accountHistorical ? "unknown" : "approval_needed", edge: accountCurrent ? "current" : accountHistorical ? "historical" : "none" }));
   if (state.identity && !browserNodes.some(node => node.id === state.identity!.endpoint.id)) browserNodes.unshift({ id: state.identity.endpoint.id,
     label: "This browser", current: true, accessText: state.status === "checking" ? "Checking access…" : state.status === "error" ? state.code === "account_device_revoked" ? "Access revoked" : "Access paused" : "Account approval needed", lockState: state.status === "checking" ? "unknown" : "approval_needed", edge: "none" });
@@ -225,7 +226,7 @@ function AccountDevices({ client, initial, bridges, selected, execute, pendingCl
     const historical = !!state.trust && confirmed && !blocked && !checkingComputers[key] && !failedChecks[key] && state.status === "ready" && (state.offline || computer.security.status === "offline");
     const lockState: SecurityLockState = current ? "secured" : blocked || ["unpaired", "revoked", "key_changed", "upgrade_required"].includes(computer.security.status) ? "approval_needed"
       : ["offline", "connecting"].includes(computer.security.status) || verifying || failedChecks[key] || confirmed ? "unknown" : "approval_needed";
-    const node: SecurityAccessBridgeNode = { id: computer.bridgeId, label: computer.label || "Computer", accessText: access, connectionText: connection,
+    const node: SecurityAccessBridgeNode = { current: currentComputerIds?.has(computer.bridgeId) ?? false, id: computer.bridgeId, label: computer.label || "Computer", accessText: access, connectionText: connection,
       lockState, edge: current ? "current" : historical ? "historical" : "none" };
     return { computer, key, confirmed, ready, blocked, pin, inRoster, verifying, node };
   });
@@ -239,41 +240,38 @@ function AccountDevices({ client, initial, bridges, selected, execute, pendingCl
   const selectedDevice = selectedBrowser ? devices.find(device => device.endpoint.id === selectedBrowser.id) : undefined;
   const selectedComputer = active?.kind === "bridge" ? computerViews.find(item => item.node.id === active.id) : undefined;
   const selectedBrowserLabel = selectedBrowser ? accessBrowserLabel(selectedBrowser, browserNodes) : "Browser";
-  return <div className="space-y-3">
-    <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-      <p className="text-xs"><span className="font-semibold">This browser</span><span className="text-[var(--text-muted)]"> · {state.status === "ready" ? state.offline ? "Reconnect to verify access" : "Approved for your account" : state.status === "checking" ? "Checking access…" : state.status === "error" ? state.code === "account_device_revoked" ? "Access revoked" : "Access paused" : "Account approval needed"}</span></p>
-      <button className="btn-ghost min-h-11 sm:min-h-8 text-xs" disabled={!!busy} onClick={() => { setRefreshRound(value => value + 1); void client.refresh(); }}>Refresh access</button>
-    </div>
-    {(error || state.status === "error") && <p role="alert" className="text-sm text-[var(--status-error)]">{error ?? securityErrorMessage({ code: state.code })}</p>}
-    {state.status === "ready" && pending.client && (needsReview
-      ? <PendingDeviceInbox client={pending.client} snapshot={inbox} offline={state.offline} />
-      : <details className="text-sm"><summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2">Add a browser or review requests</summary><p className="mb-2 text-xs text-[var(--text-muted)]">Sign in on the new browser, then review its request here and compare the code on both devices.</p><PendingDeviceInbox client={pending.client} snapshot={inbox} offline={state.offline} /></details>)}
-    <SecurityAccessMap browsers={browserNodes} bridges={computerViews.map(item => item.node)}
-      account={{ statusText: accountCurrent ? "Verified" : accountHistorical ? "Offline approval" : state.status === "checking" ? "Checking" : state.status === "error" ? "Access paused" : "Account approval needed", lockState: accountCurrent ? "secured" : accountHistorical || state.status === "checking" ? "unknown" : "approval_needed" }}
-      selected={active} onSelect={node => { setSelection({ scope, node }); setConfirm(null); }} />
-    {active && <section aria-label="Selected access details" className="space-y-2 rounded-md border border-[var(--border-muted)] p-3">
+  const selectedDetails = active && <section aria-label="Selected access details" className="space-y-2">
       {selectedBrowser && <>
-        <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="min-w-0 break-words text-sm font-semibold">{selectedBrowserLabel}{selectedBrowser.current && selectedBrowserLabel !== "This browser" ? " · This browser" : ""}</h3>
+        <div className="flex flex-wrap items-center gap-2">
           {selectedDevice && <button className="btn-ghost min-h-11 sm:min-h-8 text-[var(--status-error)]" aria-label={`Remove access for ${selectedBrowserLabel}`} disabled={!!busy || state.offline || devices.length === 1} onClick={() => setConfirm(selectedBrowser.id)}>Remove access</button>}</div>
-        <p className="text-xs text-[var(--text-muted)]">{selectedBrowser.accessText}. Account-approved browsers can control shared computers and approve other browsers.</p>
         {state.offline && <p role="status" className="text-xs text-[var(--text-muted)]">Showing verified stored account trust. Reconnect before removing access.</p>}
-        <details className="text-xs"><summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2">Browser details</summary>{selectedDevice && <p>Approved {new Date(selectedDevice.approvedAt).toLocaleString()}.</p>}<p className="break-all font-mono">Fingerprint: {selectedBrowser.id}</p></details>
+        <details className="text-xs"><summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2">Browser details</summary><p className="mb-2">Account-approved browsers can control shared computers and approve other browsers.</p>{selectedDevice && <p>Approved {new Date(selectedDevice.approvedAt).toLocaleString()}.</p>}<p className="break-all font-mono">Fingerprint: {selectedBrowser.id}</p></details>
         {confirm === selectedBrowser.id && selectedDevice && <div role="group" aria-label="Confirm account device revocation" className="space-y-3 rounded-md border border-[var(--border-muted)] p-3"><p className="text-sm">Remove this browser from all shared computers? Connected computers stop its access after receiving the update; offline computers apply it when they reconnect. Other browsers and MCP grants keep their access.</p><div className="flex flex-wrap gap-2"><button className="btn-danger min-h-11 sm:min-h-8" disabled={!!busy} onClick={() => void revoke(selectedBrowser.id)}>Confirm remove access</button><button className="btn-ghost min-h-11 sm:min-h-8" onClick={() => setConfirm(null)}>Cancel</button></div></div>}
         {devices.length === 1 && <p className="text-xs text-[var(--text-muted)]">This is the last account administrator. Approve another browser before removing its access.</p>}
       </>}
       {selectedComputer && (() => {
         const { computer, key, confirmed, pin, ready, blocked, inRoster, verifying } = selectedComputer;
         return <div data-computer-details={computer.bridgeId} data-account-migration={pin && !confirmed ? computer.bridgeId : undefined} className="space-y-2">
-          <h3 className="break-words text-sm font-semibold">{computer.label || "Computer"}</h3>
           {pin && !confirmed && <><p className="text-xs leading-relaxed text-[var(--text-muted)]">Sharing lets your account-approved browsers control this computer. It replaces separate browser approvals and old invitations; browsers outside your account approvals lose access.</p>
             <button className="btn-accent min-h-11 sm:min-h-8 w-full sm:w-auto" disabled={!!busy || !ready || blocked || state.offline || state.status === "unapproved" && state.historyExists} onClick={() => void migrate(computer)}>{busy === computer.bridgeId ? "Sharing computer…" : "Share with my other browsers"}</button></>}
           {!pin && !confirmed && !blocked && <p className="text-xs text-[var(--text-muted)]">{failedChecks[key] ? "Could not verify access. Reconnect this computer, then refresh access." : verifying ? ready ? "Checking how access is set up…" : "Waiting for this computer to connect." : inRoster ? "Finish sharing from a browser already approved on this computer." : "Approve this computer from its setup request, or use its local invitation."}</p>}
-          {confirmed && <p className="text-xs text-[var(--text-muted)]">{selectedComputer.node.edge === "current" ? "Your approved account browsers can use this computer." : "Reconnect and refresh access to verify sharing on this computer."}</p>}
+          {confirmed && selectedComputer.node.edge !== "current" && <p className="text-xs text-[var(--text-muted)]">Reconnect and refresh access to verify sharing on this computer.</p>}
+          {confirmed && <details className="text-xs"><summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2">Computer details</summary><p>Your approved account browsers can use this computer after access is verified.</p>{computer.security.endpoint && <p className="break-all font-mono">Fingerprint: {computer.security.endpoint.id}</p>}</details>}
           {pin && !confirmed && !ready && <p className="text-xs text-[var(--text-muted)]">Connect this computer to share it.</p>}
           {pin && ready && !confirmed && <details className="text-xs" onToggle={event => { const open = event.currentTarget.open; setExpandedComputers(previous => previous[key] === open ? previous : { ...previous, [key]: open }); }}><summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2">Separate approvals and recovery</summary>{expandedComputers[key] && <SecurityDevices bridge={computer} currentEndpointId={state.identity?.endpoint.id ?? null} execute={execute} />}</details>}
         </div>;
       })()}
-    </section>}
+    </section>;
+  return <div className="space-y-3">
+    <SecurityAccessMap browsers={browserNodes} bridges={computerViews.map(item => item.node)}
+      account={{ statusText: accountCurrent ? "Verified" : accountHistorical ? "Offline approval" : state.status === "checking" ? "Checking" : state.status === "error" ? "Access paused" : "Account approval needed", lockState: accountCurrent ? "secured" : accountHistorical || state.status === "checking" ? "unknown" : "approval_needed" }}
+      selected={active} onSelect={node => { setSelection({ scope, node }); setConfirm(null); }} selectedDetails={selectedDetails}
+      toolbar={<div className="flex flex-wrap items-start gap-2">
+        <button className="btn-ghost min-h-11 sm:min-h-8 text-xs" disabled={!!busy} onClick={() => { setRefreshRound(value => value + 1); void client.refresh(); }}>Refresh access</button>
+        {state.status === "ready" && pending.client && !needsReview && <details className="min-w-0 text-xs open:w-full"><summary className="min-h-11 sm:min-h-8 cursor-pointer rounded-md border border-[var(--border-muted)] px-2 py-3 sm:py-2">Add / review</summary><p className="my-2 text-xs text-[var(--text-muted)]">Sign in on the new browser, then review its request here and compare the code on both devices.</p><PendingDeviceInbox client={pending.client} snapshot={inbox} offline={state.offline} /></details>}
+        {(error || state.status === "error") && <p role="alert" className="w-full text-sm text-[var(--status-error)]">{error ?? securityErrorMessage({ code: state.code })}</p>}
+        {state.status === "ready" && pending.client && needsReview && <div className="w-full"><PendingDeviceInbox client={pending.client} snapshot={inbox} offline={state.offline} /></div>}
+      </div>} />
     {state.status === "unapproved" && state.historyExists && <DeviceApproval ownerId={client.ownerId} email="your account" client={client} />}
     <details className="text-xs text-[var(--text-muted)]"><summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2">Recovery and security details</summary><p>Clearing browser storage loses its private key. Password resets cannot recover it. Keep an approved browser and local CLI access available. If every account signing key is lost, each computer needs explicit account-trust recovery. Local recovery cannot reset account approvals.</p></details>
   </div>;

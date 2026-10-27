@@ -10,7 +10,7 @@ import { useBridgeRpc } from "@/hooks/useBridgeRpc";
 import { useBridges } from "@/hooks/useBridges";
 import { useAllSessionEvents } from "@/hooks/useAllSessionEvents";
 import type { SecurityCommand, SecurityCommandResults } from "@security/protocol";
-import { SecurityPanel } from "./SecurityPanel";
+import { SecurityPanel, type SecurityBridge } from "./SecurityPanel";
 import { SecurityLockIcon } from "./SecurityLockIcon";
 import { usePendingApprovals } from "@/hooks/usePendingApprovals";
 import type { AccountSecurityClient, AccountSecuritySnapshot } from "@/lib/account-security-client";
@@ -51,6 +51,20 @@ interface DashboardProps {
   accountState?: AccountSecuritySnapshot;
 }
 
+/** Only validated same-machine paths identify the browser's current computer. */
+export function deriveCurrentComputerIds({ localMode, connectionStatus, localBridgeId, sessions, transport, bridges }: {
+  localMode: boolean; connectionStatus: ConnectionStatus; localBridgeId?: string;
+  sessions: readonly Pick<Session, "id" | "bridgeId">[]; transport: Pick<TerminalTransportApi, "getMode"> | null;
+  bridges: readonly SecurityBridge[];
+}): ReadonlySet<string> {
+  const current = new Set<string>();
+  if (connectionStatus !== "connected") return current;
+  const ready = new Set(bridges.filter(bridge => bridge.security.status === "ready").map(bridge => bridge.bridgeId));
+  if (localMode && localBridgeId && ready.has(localBridgeId)) current.add(localBridgeId);
+  for (const session of sessions) if (ready.has(session.bridgeId) && transport?.getMode(session.id) === "local") current.add(session.bridgeId);
+  return current;
+}
+
 export function Dashboard({ client, connectionStatus, connectionError, userId, token, centrifugoUrl, transport, onDisconnect, localMode = false, accountClient, accountState }: DashboardProps) {
   const connectCommand = buildBridgeCommand({ apiUrl: typeof window !== "undefined" ? window.location.origin : "" });
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -73,6 +87,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const pendingCount = pending.snapshot.inbox.filter(item => !["approved", "rejected", "cancelled", "expired", "conflict"].includes(item.status)).length;
   const [securityBridgeId, setSecurityBridgeId] = useState<string | undefined>(undefined);
   const [securityGeneration, setSecurityGeneration] = useState(0);
+  const [localityGeneration, setLocalityGeneration] = useState(0);
   const [directlyReachableBridgeIds, setDirectlyReachableBridgeIds] = useState<Set<string>>(
     () => new Set()
   );
@@ -96,6 +111,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     }
 
     const unsubscribe = transport.onBridgeReachabilityChange((bridgeId, reachable) => {
+      setLocalityGeneration(value => value + 1);
       setDirectlyReachableBridgeIds((current) => {
         const next = new Set(current);
         if (reachable) next.add(bridgeId);
@@ -104,7 +120,8 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
       });
     });
     setDirectlyReachableBridgeIds(new Set(transport.getDirectlyReachableBridgeIds()));
-    return unsubscribe;
+    const unsubscribeMode = transport.onModeChange(() => setLocalityGeneration(value => value + 1));
+    return () => { unsubscribe(); unsubscribeMode(); };
   }, [transport]);
 
   const scheduleTerminalRenderAdjustment = useCallback(() => {
@@ -173,6 +190,9 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     for (const state of securityRuntime?.snapshot() ?? []) if (!known.has(state.bridgeId)) known.set(state.bridgeId, { bridgeId: state.bridgeId, label: state.bridgeId, security: state });
     return [...known.values()];
   }, [bridges, securityRuntime, securityGeneration]);
+  const currentComputerIds = useMemo(() => deriveCurrentComputerIds({ localMode, connectionStatus,
+    localBridgeId: client?.sessionSnapshotBridgeId, sessions: rawSessions, transport, bridges: securityBridges }),
+  [localMode, connectionStatus, client, rawSessions, transport, securityBridges, localityGeneration]);
   const bridgeSecurityStates = useMemo(() => new Map(securityBridges.map(bridge => [bridge.bridgeId, bridge.security.status])), [securityBridges]);
   const executeSecurity = useCallback(<C extends SecurityCommand>(command: C): Promise<SecurityCommandResults[C["type"]]> => {
     if (!client?.executeSecurity) return Promise.reject({ code: "security_setup_required" });
@@ -1030,7 +1050,7 @@ PY`;
       </div>
 
       <SecurityPanel open={showSecurity} onClose={() => setShowSecurity(false)} bridges={securityBridges}
-        currentEndpointId={securityRuntime?.identity.endpoint.id ?? null} execute={executeSecurity}
+        currentEndpointId={securityRuntime?.identity.endpoint.id ?? null} currentComputerIds={currentComputerIds} execute={executeSecurity}
         accountClient={accountClient} accountState={accountState}
         pendingClient={pending.client ?? undefined} pendingState={pending.snapshot} initialView={securityView}
         initialBridgeId={securityBridgeId} gatewayAvailable={!localMode && !securityRuntime?.ownerId.startsWith("solo:")} />

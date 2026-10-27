@@ -20,6 +20,7 @@ export interface SecurityPanelProps {
   onClose: () => void;
   bridges: SecurityBridge[];
   currentEndpointId: string | null;
+  currentComputerIds?: ReadonlySet<string>;
   execute: SecurityCommandExecutor;
   initialBridgeId?: string;
   gatewayAvailable?: boolean;
@@ -64,7 +65,7 @@ export function securityErrorMessage(error: unknown): string {
   return messages[code] ?? "This security action could not be completed. Refresh and try again.";
 }
 
-export function SecurityPanel({ open, onClose, bridges, currentEndpointId, execute, initialBridgeId,
+export function SecurityPanel({ open, onClose, bridges, currentEndpointId, currentComputerIds, execute, initialBridgeId,
   gatewayAvailable = true, onInvitation, accountClient, accountState, pendingClient, pendingState, initialView = "devices" }: SecurityPanelProps) {
   const [view, setView] = useState<"activity" | "devices">("devices");
   const [bridgeId, setBridgeId] = useState(initialBridgeId ?? "");
@@ -116,7 +117,7 @@ export function SecurityPanel({ open, onClose, bridges, currentEndpointId, execu
         {selected && <p className="mb-2 text-xs text-[var(--text-muted)]">{selected.label}: {securityStateLabel(selected.security.status)}</p>}
         <section role="tabpanel" id={`${titleId}-${view}`} aria-labelledby={`${titleId}-tab-${view}`}>
           {view === "activity" ? <SecurityActivity bridgeId={bridgeId} selectedBridge={selected} execute={execute} gatewayAvailable={gatewayAvailable} />
-            : <SecurityDevices bridge={selected} bridges={bridges} currentEndpointId={currentEndpointId} execute={execute} onInvitation={onInvitation} accountClient={accountClient} accountState={accountState} pendingClient={pendingClient} pendingState={pendingState} />}
+            : <SecurityDevices bridge={selected} bridges={bridges} currentEndpointId={currentEndpointId} currentComputerIds={currentComputerIds} execute={execute} onInvitation={onInvitation} accountClient={accountClient} accountState={accountState} pendingClient={pendingClient} pendingState={pendingState} />}
         </section>
       </div>
     </div>
