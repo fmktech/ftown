@@ -26,7 +26,7 @@ test.describe("device pairing", () => {
       await page.goto("/pair");
       await page.getByLabel("Computer code").fill("AB");
       await page.getByRole("button", { name: "Look up code" }).click();
-      await expect(page.getByRole("alert")).toContainText("Enter the full eight-character computer code.");
+      await expect(page.getByRole("alert").filter({ hasText: "Enter the full eight-character computer code." })).toBeVisible();
       await page.getByRole("link", { name: "Back to dashboard" }).click();
       await expect(page).toHaveURL(/\/dashboard$/);
 

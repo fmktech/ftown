@@ -210,3 +210,13 @@ The collector catches list-panes failure, strict seven-field parse failure, reva
 A synthetic prompt-then-erase TerminalManager replay would not prove the missing CI byte order. If diagnosis resumes, a bounded in-memory replay of this test-owned full log and post-Stop slice at80x37 versus120x40, retaining only nonblank/prompt/cursor/buffer counts, could discriminate actual stream geometry from live manager state without attaching text. Native comparison remains useful after stage reporting. No source fix is justified yet.
 
 Root stopped this investigation to prioritize the user's back/refresh work. PR remains draft with the known local-rerun failure. No further diagnostic execution authorized by this handoff. STOP; report and temporary authoring leases released. No application/test edits or runtime/CI/Git execution by this worker.
+
+
+## CI40545214003: fifth diagnostic unchanged in material respects
+Read the root coordination section `CI40545214003 pairing test locator repair`; the independent pairing error-selector collision has its own one-file repair and does not explain terminal blanking. Extracted only local-rerun-diagnostics.json into /tmp/ftown-rerun-diagnosis/fifth-local-rerun-diagnostics.json.
+
+Complete6697-byte log, pre-Stop5080, after-Stop1617 bytes. VT-stripped post-Stop length491/prompt-pattern true. Ordered controls are identical to the fourth run through offset823; remaining homes differ by only2 bytes (955/1063/1382 versus957/1065/1384). Both authenticated bridge screen and browser remain37 blank rows with no marker/prompt. Native pane remains unavailable, with no error-stage information.
+
+The repeat supports the same stable PTY/headless sequence; it does not establish native pane contents or justify a guessed application fix. The unchanged collector cannot distinguish the remaining hypotheses. If investigation resumes, use the bounded replay/native-stage discriminators already documented; another broad run with identical instrumentation adds little evidence. PR remains draft with the known local-rerun failure.
+
+STOP; report/temp authoring leases released. No application/test changes or runtime/browser/E2E/server/database/CI/Git execution by this worker.
