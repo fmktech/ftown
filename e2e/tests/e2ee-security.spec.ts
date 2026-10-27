@@ -1,6 +1,8 @@
 import { expect, request as requestFactory, type APIRequestContext, type BrowserContext, type Page, type TestInfo } from "@playwright/test";
 import { test } from "../helpers/fixtures";
 import { createHash, randomBytes } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify, stripVTControlCharacters } from "node:util";
 import { join, resolve } from "node:path";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -104,6 +106,25 @@ function diagnosticPreStopOffset(sessionId: string, existingIds: Set<string>, ex
   } catch { return null; }
 }
 
+const execFileAsync = promisify(execFile);
+
+function terminalSummary(value: string, knownMarker: string) {
+  const count = (pattern: RegExp) => [...value.matchAll(pattern)].length;
+  const printable = stripVTControlCharacters(value);
+  const controls: { kind: string; offset: number }[] = [];
+  const pattern = /\x1b\[2J|\x1b\[H|\x1b\[\?1049[hl]|\[lost tty\]/g;
+  const kinds: Record<string, string> = { "\x1b[2J": "clear", "\x1b[H": "home",
+    "\x1b[?1049h": "alternateEnter", "\x1b[?1049l": "alternateExit", "[lost tty]": "lostTty" };
+  for (const match of value.matchAll(pattern)) {
+    if (controls.length === 128) break;
+    controls.push({ kind: kinds[match[0]], offset: match.index! });
+  }
+  return { fullClearCount: count(/\x1b\[2J/g), cursorHomeCount: count(/\x1b\[H/g),
+    alternateScreenEnterCount: count(/\x1b\[\?1049h/g), alternateScreenExitCount: count(/\x1b\[\?1049l/g),
+    lostTtyCount: count(/\[lost tty\]/g), controls, printableLength: printable.length,
+    hasKnownMarker: printable.includes(knownMarker), hasPromptCharacter: /[$%#>]/.test(printable) };
+}
+
 async function captureRerunFailure(page: Page, info: TestInfo, sessionId: string,
   existingIds: Set<string>, expectedName: string, expectedPointer: BridgePointer, preStopOffset: number | null, knownMarker: string): Promise<void> {
   const evidence: Record<string, unknown> = { preStopOffset };
@@ -129,15 +150,9 @@ async function captureRerunFailure(page: Page, info: TestInfo, sessionId: string
       const text = buffer.subarray(0, bytesRead).toString("utf8");
       const afterPreStopAvailable = preStopOffset !== null && preStopOffset >= start && preStopOffset <= start + bytesRead;
       const afterPreStop = afterPreStopAvailable ? buffer.subarray(preStopOffset! - start, bytesRead).toString("utf8") : null;
-      const summarize = (value: string) => {
-        const count = (pattern: RegExp) => [...value.matchAll(pattern)].length;
-        return { fullClearCount: count(/\x1b\[2J/g), cursorHomeCount: count(/\x1b\[H/g),
-          alternateScreenEnterCount: count(/\x1b\[\?1049h/g), alternateScreenExitCount: count(/\x1b\[\?1049l/g),
-          lostTtyCount: count(/\[lost tty\]/g), hasKnownMarker: value.includes(knownMarker), hasPromptCharacter: /[$%#>]/.test(value) };
-      };
       evidence.terminalLog = { totalBytes: stat.size, start, bytesRead, truncated: start > 0,
         shrunkSincePreStop: preStopOffset !== null && stat.size < preStopOffset,
-        entireTail: summarize(text), afterPreStop: afterPreStop === null ? null : summarize(afterPreStop) };
+        entireTail: terminalSummary(text, knownMarker), afterPreStop: afterPreStop === null ? null : terminalSummary(afterPreStop, knownMarker) };
     } finally { closeSync(fd); }
   } catch { evidence.terminalLog = { unavailable: true }; }
 
@@ -153,11 +168,35 @@ async function captureRerunFailure(page: Page, info: TestInfo, sessionId: string
       undefined, undefined, AbortSignal.timeout(5000));
     const body = record(screen.body) ? screen.body : {};
     const lines = Array.isArray(body.lines) ? body.lines.filter((line): line is string => typeof line === "string").slice(0, 120) : [];
+    const printableLines = lines.map(stripVTControlCharacters);
     evidence.screen = { status: screen.status, totalLines: typeof body.totalLines === "number" ? body.totalLines : null,
       offset: typeof body.offset === "number" ? body.offset : null, limit: typeof body.limit === "number" ? body.limit : null,
-      returnedLines: lines.length, nonblankLines: lines.filter(line => line.trim().length > 0).length,
-      hasKnownMarker: lines.some(line => line.includes(knownMarker)), hasPromptCharacter: lines.some(line => /[$%#>]/.test(line)) };
+      returnedLines: lines.length, nonblankLines: printableLines.filter(line => line.trim().length > 0).length,
+      hasKnownMarker: printableLines.some(line => line.includes(knownMarker)), hasPromptCharacter: printableLines.some(line => /[$%#>]/.test(line)) };
   } catch { evidence.screen = { unavailable: true }; }
+
+  try {
+    // Verify the isolated session again before querying only its exact pane.
+    // Never pass the rest of the test environment (or its credentials) to tmux.
+    diagnosticSessionContext(sessionId, existingIds, expectedName, expectedPointer);
+    const env: NodeJS.ProcessEnv = { HOME: resolve(BRIDGE_HOME), PATH: process.env.PATH };
+    if (process.env.TMPDIR) env.TMPDIR = process.env.TMPDIR;
+    if (process.env.TMUX_TMPDIR) env.TMUX_TMPDIR = process.env.TMUX_TMPDIR;
+    const options = { env, timeout: 2000, maxBuffer: 64 * 1024, encoding: "utf8" as const };
+    const name = `ftown-${sessionId}`;
+    const format = "#{session_name}\t#{pane_id}\t#{pane_width}\t#{pane_height}\t#{cursor_x}\t#{cursor_y}\t#{pane_dead}";
+    const listing = await execFileAsync("tmux", ["-L", "ftown", "-f", "/dev/null", "list-panes", "-t", `=${name}:`, "-F", format], options);
+    const rows = listing.stdout.trimEnd().split("\n");
+    const fields = rows.length === 1 ? rows[0].split("\t") : [];
+    if (fields.length !== 7 || fields[0] !== name || !/^%\d+$/.test(fields[1]) ||
+        !fields.slice(2, 6).every(field => /^\d{1,6}$/.test(field)) || !/^[01]$/.test(fields[6])) {
+      throw new Error("Invalid isolated pane metadata");
+    }
+    diagnosticSessionContext(sessionId, existingIds, expectedName, expectedPointer);
+    const pane = await execFileAsync("tmux", ["-L", "ftown", "-f", "/dev/null", "capture-pane", "-p", "-t", fields[1]], options);
+    evidence.nativePane = { width: Number(fields[2]), height: Number(fields[3]), cursorX: Number(fields[4]),
+      cursorY: Number(fields[5]), dead: fields[6] === "1", ...terminalSummary(pane.stdout, knownMarker) };
+  } catch { evidence.nativePane = { unavailable: true }; }
 
   try {
     evidence.browser = await page.evaluate(marker => {

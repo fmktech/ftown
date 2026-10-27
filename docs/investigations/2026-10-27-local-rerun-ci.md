@@ -172,3 +172,29 @@ Falsifiable next interpretations: raw log containing a correct prompt while brid
 
 ## Follow-up handoff
 Phone trace diagnosis and native geometry falsification are complete. Only this report and the isolated /tmp driver were authored by this worker; no application/test edits or runtime/CI/Git execution. Proposed diagnostic implementation must receive its own exact file lease. STOP; report and authoring leases released.
+
+
+## CI40538246849: loss exists in the bridge screen
+Only the failure-specific non-content attachment was extracted from the target test trace: test.attach@133 references resources/cc9d932e5a5d767c942ff0bc21faa4d9a6129cba. Local copy: /tmp/ftown-rerun-diagnosis/third-local-rerun-diagnostics.json. No other embedded content or credentials were extracted.
+
+Observed diagnostic:
+-Complete6761-byte terminal.log, not truncated or shrunk; pre-Stop boundary5144, so1617 bytes follow it.
+-After boundary:2 full clears,7 cursor homes,1 alternate-screen enter,1 alternate-screen exit,1 lost-tty notice, no original known marker.
+-Authenticated bridge screen HTTP200:37 lines,0 nonblank, no prompt character or marker.
+-Browser:37 rows,0 nonblank rows,16 spaces, viewport900x760, terminal bounds640x666.
+
+Conclusion: the empty state already exists in the authoritative bridge headless emulator. Browser-only navigation/layout or transport loss cannot by itself explain these two matching empty views. The pump writes each PTY chunk to TerminalManager before buffering/appending the same bytes to terminal.log (terminal-pump.ts79–104). Stop/retry do not explicitly replay/reset/destroy this headless terminal; retry rewires terminal input while the persistent emulator receives the new tmux client's ANSI stream. The replacement process remains attached in the earlier trace/log evidence. This narrows investigation to native shell/tmux output and persistent-emulator control/state, without proving either one.
+
+Critical measurement limitation: summarize.hasPromptCharacter applies /[$%#>]/ to RAW terminal bytes. Capability queries such as ESC[>c contain `>` and return true even with no visible prompt. Therefore the attachment does not prove that a printable shell prompt was emitted after Stop. Control counts omit order and positions, so they also cannot prove an erase occurred after a prompt. No speculative terminal reset/resize repair is justified by these counters.
+
+### Smallest decisive additional diagnostic
+Keep the existing single-test failure collector and ownership/path guards; no application edit. Before its current finally DELETE, await two non-content additions:
+
+1. Use node:util stripVTControlCharacters on afterPreStop bytes before counting printable non-whitespace and prompt characters. Add ordered offsets/types for the known full-clear/home/alternate enter/exit controls only (maximum128 records), plus printable-run lengths if needed; never include printable values or OSC/DCS payloads. This corrects the false-positive prompt measurement without exposing contents.
+2. Read the exact test-owned native tmux pane, then retain only dimensions/cursor/dead/nonblank/prompt/marker booleans. With the already-validated new UUID and isolated current bridge pointer, run read-only `tmux -L ftown list-panes -t ftown-<owned-uuid>: -F` with format session_name,pane_id,pane_width,pane_height,cursor_x,cursor_y,pane_dead. Require exactly one result, exact session_name equality to ftown-<owned-uuid>, and a validated %<digits> pane ID; otherwise record unavailable. Then `tmux -L ftown capture-pane -p -t %<validated-id>` with2second timeout and64KiB maxBuffer. Summarize entirely in memory; attach no pane text, arbitrary process args, environment, pointer, or command stderr. No attach/resize/send-keys/kill commands, no default socket, no global session query. Use the current E2E environment only to resolve the same ftown socket, without serializing it.
+
+The pane target must be resolved as a pane ID: the earlier isolated driver proved that supplying a bare exact-session target to capture-pane failed. Preserve all existing ownership/symlink guards and the original assertion; collectors complete before the existing session deletion.
+
+Decisive interpretations: native pane nonblank/prompt true while bridge blank means the live shell has text and the bridge PTY/headless route loses it; native pane empty plus stripped after-Stop output lacking text means the bridge mirrors the native shell/tmux state, directing work to startup/terminal negotiation. Native prompt plus stripped output lacking prompt distinguishes tmux attach output from the underlying pane. Native and raw both contain printable prompt but headless remains blank directs a deterministic ANSI/state replay. The next change should follow one of these observations, not a guessed reset.
+
+STOP: third-CI bounded diagnosis complete; report lease released. No source/test edits, runtime, E2E, browser, server, database, CI or Git operations by this worker.
