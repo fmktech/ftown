@@ -1,0 +1,811 @@
+{
+  "source": "concurrent run2,fresh DB/environment,same exact-path config",
+  "environment": "Boat bx_4t4e2was,4vCPU/8GiB,Node24.22.1,Playwright1.61.1,task-local fresh Compose DB",
+  "stats": {
+    "startTime": "2026-10-27T17:15:04.643Z",
+    "duration": 240536.962,
+    "expected": 50,
+    "skipped": 2,
+    "unexpected": 0,
+    "flaky": 0
+  },
+  "workers": 2,
+  "measurement": {
+    "durationSeconds": 240.536962,
+    "baselineSeconds": 458.785161,
+    "reductionPercent": 47.57,
+    "maxConcurrent": 2,
+    "maxSharedConcurrent": 1,
+    "crossLaneOverlapSeconds": 78.061,
+    "actualWorkerIndices": [
+      0,
+      1,
+      2
+    ],
+    "identical52CasesAndSkips": true
+  },
+  "tests": [
+    {
+      "identity": "auth-session.spec.ts:5 auth-session.spec.ts / Credentials session authorizes until normal UI signout, then fails closed",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 1691,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:04.938Z"
+        }
+      ]
+    },
+    {
+      "identity": "automation-sunset.spec.ts:12 automation-sunset.spec.ts / retired loop HTTP routes require encryption and return retirement to authenticated callers",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 724,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:06.790Z"
+        }
+      ]
+    },
+    {
+      "identity": "automation-sunset.spec.ts:30 automation-sunset.spec.ts / legacy crons sidebar state opens ordinary sessions on desktop and mobile",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 1770,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:07.522Z"
+        }
+      ]
+    },
+    {
+      "identity": "automation-sunset.spec.ts:30 automation-sunset.spec.ts / legacy factory sidebar state opens ordinary sessions on desktop and mobile",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 1667,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:09.297Z"
+        }
+      ]
+    },
+    {
+      "identity": "automation-sunset.spec.ts:69 automation-sunset.spec.ts / landing page presents MCP fleet control and attention with current setup guidance",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 665,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:10.970Z"
+        }
+      ]
+    },
+    {
+      "identity": "device-pairing.spec.ts:16 device-pairing.spec.ts / device pairing / bridge with no token pairs via /pair approval and comes online",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 6864,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:11.645Z"
+        }
+      ]
+    },
+    {
+      "identity": "direct-transport.spec.ts:101 direct-transport.spec.ts / transport ladder / A: WebRTC rung \u2014 loopback blocked \u21d2 badge P2P, no terminal:<sid> subscriber",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 1535,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:18.518Z"
+        }
+      ]
+    },
+    {
+      "identity": "direct-transport.spec.ts:125 direct-transport.spec.ts / transport ladder / B': loopback rung \u2014 WebRTC disabled \u21d2 badge Local, no terminal:<sid> subscriber",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 1449,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:20.057Z"
+        }
+      ]
+    },
+    {
+      "identity": "direct-transport.spec.ts:149 direct-transport.spec.ts / transport ladder / C: cloud fallback \u2014 WebRTC disabled AND loopback blocked \u21d2 badge Cloud, subscriber present",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 1544,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:21.510Z"
+        }
+      ]
+    },
+    {
+      "identity": "e2ee-security.spec.ts:87 e2ee-security.spec.ts / real browser pairing persists its non-extractable key; cloud terminal frames stay opaque; mobile security can revoke it",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 3244,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:23.064Z"
+        }
+      ]
+    },
+    {
+      "identity": "e2ee-security.spec.ts:141 e2ee-security.spec.ts / two isolated browser installations approve two independent bridges and retain distinct keys",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 2564,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:26.313Z"
+        }
+      ]
+    },
+    {
+      "identity": "e2ee-security.spec.ts:160 e2ee-security.spec.ts / an approved browser uses encrypted local HTTP control and event polling",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 1810,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:28.882Z"
+        }
+      ]
+    },
+    {
+      "identity": "e2ee-security.spec.ts:183 e2ee-security.spec.ts / account-migrated OAuth MCP uses one selected-computer consent, enforces read/control and exposes safe correlated activity",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 5791,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:30.696Z"
+        }
+      ]
+    },
+    {
+      "identity": "idor-channels.spec.ts:124 idor-channels.spec.ts / IDOR: cross-tenant channel isolation / B cannot subscribe to A's session events channel",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 39,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:36.495Z"
+        }
+      ]
+    },
+    {
+      "identity": "idor-channels.spec.ts:129 idor-channels.spec.ts / IDOR: cross-tenant channel isolation / B cannot subscribe to A's terminal output channel",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 3,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:38.558Z"
+        }
+      ]
+    },
+    {
+      "identity": "idor-channels.spec.ts:134 idor-channels.spec.ts / IDOR: cross-tenant channel isolation / B cannot subscribe to A's terminal-input (keystroke-injection) channel",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 3,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:38.569Z"
+        }
+      ]
+    },
+    {
+      "identity": "idor-channels.spec.ts:139 idor-channels.spec.ts / IDOR: cross-tenant channel isolation / B cannot subscribe to A's bridge presence channel",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 3,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:38.577Z"
+        }
+      ]
+    },
+    {
+      "identity": "idor-channels.spec.ts:144 idor-channels.spec.ts / IDOR: cross-tenant channel isolation / raw B and owner commands cannot drive A's bridge; an approved encrypted browser can",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 8361,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:38.586Z"
+        }
+      ]
+    },
+    {
+      "identity": "idor-channels.spec.ts:234 idor-channels.spec.ts / IDOR: cross-tenant channel isolation / positive control: B CAN subscribe to B's OWN command/RPC channel",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 2,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:46.954Z"
+        }
+      ]
+    },
+    {
+      "identity": "idor-http.spec.ts:50 idor-http.spec.ts / GROUP 1 \u2014 bridge loopback API guards / wrong Host \u21d2 421 (Misdirected Request)",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 2,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:47.037Z"
+        }
+      ]
+    },
+    {
+      "identity": "idor-http.spec.ts:55 idor-http.spec.ts / GROUP 1 \u2014 bridge loopback API guards / hostile Origin is rejected by security discovery and envelope routes",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 2,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:47.042Z"
+        }
+      ]
+    },
+    {
+      "identity": "idor-http.spec.ts:64 idor-http.spec.ts / GROUP 1 \u2014 bridge loopback API guards / plaintext business API without a bearer requires encryption",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 0,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:47.049Z"
+        }
+      ]
+    },
+    {
+      "identity": "idor-http.spec.ts:70 idor-http.spec.ts / GROUP 1 \u2014 bridge loopback API guards / plaintext business API with wrong or valid hook bearer still requires encryption",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 2,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:47.052Z"
+        }
+      ]
+    },
+    {
+      "identity": "idor-http.spec.ts:80 idor-http.spec.ts / GROUP 1 \u2014 bridge loopback API guards / positive control: approved encrypted loopback request \u21d2 200",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 13,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:47.058Z"
+        }
+      ]
+    },
+    {
+      "identity": "idor-http.spec.ts:98 idor-http.spec.ts / GROUP 2 \u2014 UI API route authZ / IDOR / Centrifugo connect-token sub is the session email \u2014 body input is ignored",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 585,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:47.073Z"
+        }
+      ]
+    },
+    {
+      "identity": "idor-http.spec.ts:122 idor-http.spec.ts / GROUP 2 \u2014 UI API route authZ / IDOR / unauthenticated /api/auth/token and /api/bridges/devices are rejected",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 27,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:47.855Z"
+        }
+      ]
+    },
+    {
+      "identity": "idor-http.spec.ts:138 idor-http.spec.ts / GROUP 2 \u2014 UI API route authZ / IDOR / device revoke IDOR \u2014 B cannot revoke A's bridge; A's bridge survives",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 1478,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:47.887Z"
+        }
+      ]
+    },
+    {
+      "identity": "idor-http.spec.ts:186 idor-http.spec.ts / GROUP 2 \u2014 UI API route authZ / IDOR / device list isolation \u2014 B's device list never contains A's bridgeId",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 505,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:49.368Z"
+        }
+      ]
+    },
+    {
+      "identity": "mail.spec.ts:51 mail.spec.ts / mail delivery service / inbox deliver + read: message is stored with sender and text",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 77,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:49.887Z"
+        }
+      ]
+    },
+    {
+      "identity": "mail.spec.ts:74 mail.spec.ts / mail delivery service / long-poll delivery: an open poll resolves when mail arrives",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 822,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:49.968Z"
+        }
+      ]
+    },
+    {
+      "identity": "mail.spec.ts:118 mail.spec.ts / mail delivery service / nudge injects a mail pointer into the session PTY",
+      "project": "chromium",
+      "status": "skipped",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "skipped",
+          "duration": 0,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:50.793Z"
+        }
+      ]
+    },
+    {
+      "identity": "new-session-navigation.spec.ts:9 new-session-navigation.spec.ts / successful + creation opens its terminal immediately (desktop)",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 1579,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:50.796Z"
+        }
+      ]
+    },
+    {
+      "identity": "new-session-navigation.spec.ts:9 new-session-navigation.spec.ts / successful + creation opens its terminal immediately (mobile)",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 1454,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:52.380Z"
+        }
+      ]
+    },
+    {
+      "identity": "push-notifications.spec.ts:13 push-notifications.spec.ts / explicit push opt-in/opt-out and foreground/closed-page service-worker display/click",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 1584,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:53.856Z"
+        }
+      ]
+    },
+    {
+      "identity": "push-notifications.spec.ts:114 push-notifications.spec.ts / real push API binds bridge owner and durably deduplicates idle cycles/questions without recipients",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 861,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:55.445Z"
+        }
+      ]
+    },
+    {
+      "identity": "session-lifecycle.spec.ts:68 session-lifecycle.spec.ts / session lifecycle / drag a root between two children to enter their subgroup",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 1389,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:56.321Z"
+        }
+      ]
+    },
+    {
+      "identity": "session-lifecycle.spec.ts:103 session-lifecycle.spec.ts / session lifecycle / drag a child to another parent and back to the bridge root",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 1538,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:57.715Z"
+        }
+      ]
+    },
+    {
+      "identity": "session-lifecycle.spec.ts:145 session-lifecycle.spec.ts / session lifecycle / create \u2192 interact \u2192 stop \u2192 remove (controller CRUD round-trip)",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 1872,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:59.258Z"
+        }
+      ]
+    },
+    {
+      "identity": "session-lifecycle.spec.ts:195 session-lifecycle.spec.ts / session lifecycle / resurrection across bridge restart (SessionResurrection + relaunch 'resume')",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 4244,
+          "retry": 0,
+          "startTime": "2026-10-27T17:16:01.135Z"
+        }
+      ]
+    },
+    {
+      "identity": "session-lifecycle.spec.ts:256 session-lifecycle.spec.ts / session lifecycle / retry a stopped/errored session round-trips a new marker",
+      "project": "chromium",
+      "status": "skipped",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "skipped",
+          "duration": 0,
+          "retry": 0,
+          "startTime": "2026-10-27T17:16:05.382Z"
+        }
+      ]
+    },
+    {
+      "identity": "session-needs-attention.spec.ts:27 session-needs-attention.spec.ts / desktop attention controls / manual attention shortcuts retain originals and navigate on desktop",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 3345,
+          "retry": 0,
+          "startTime": "2026-10-27T17:16:05.388Z"
+        }
+      ]
+    },
+    {
+      "identity": "session-needs-attention.spec.ts:27 session-needs-attention.spec.ts / mobile attention controls / manual attention shortcuts retain originals and navigate on mobile",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 3735,
+          "retry": 0,
+          "startTime": "2026-10-27T17:16:08.739Z"
+        }
+      ]
+    },
+    {
+      "identity": "session-tools.spec.ts:101 session-tools.spec.ts / desktop session tools / agent CLI attention and session PR association on desktop",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 5997,
+          "retry": 0,
+          "startTime": "2026-10-27T17:16:12.489Z"
+        }
+      ]
+    },
+    {
+      "identity": "session-tools.spec.ts:101 session-tools.spec.ts / mobile session tools / agent CLI attention and session PR association on mobile",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 7000,
+          "retry": 0,
+          "startTime": "2026-10-27T17:16:18.493Z"
+        }
+      ]
+    },
+    {
+      "identity": "usage.spec.ts:97 usage.spec.ts / per-session usage collection / claude: extracts totals, per-model breakdown, model order, and no costUsd",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 66,
+          "retry": 0,
+          "startTime": "2026-10-27T17:16:25.505Z"
+        }
+      ]
+    },
+    {
+      "identity": "usage.spec.ts:148 usage.spec.ts / per-session usage collection / claude: dedups repeated message.id (multi-content-block lines count once)",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 64,
+          "retry": 0,
+          "startTime": "2026-10-27T17:16:25.575Z"
+        }
+      ]
+    },
+    {
+      "identity": "usage.spec.ts:211 usage.spec.ts / per-session usage collection / codex: decomposes cached out of input and omits perModel",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 56,
+          "retry": 0,
+          "startTime": "2026-10-27T17:16:25.643Z"
+        }
+      ]
+    },
+    {
+      "identity": "usage.spec.ts:253 usage.spec.ts / per-session usage collection / no-usage harness: a plain shell session yields null, not fabricated numbers",
+      "project": "chromium",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 0,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 71,
+          "retry": 0,
+          "startTime": "2026-10-27T17:16:25.704Z"
+        }
+      ]
+    },
+    {
+      "identity": "account-trust.spec.ts:85 account-trust.spec.ts / account trust: one computer confirmation, one device approval, future computers and durable two-tab pins (1280)",
+      "project": "chromium-isolated",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 1,
+          "parallelIndex": 1,
+          "status": "passed",
+          "duration": 130140,
+          "retry": 0,
+          "startTime": "2026-10-27T17:15:04.974Z"
+        }
+      ]
+    },
+    {
+      "identity": "account-trust.spec.ts:85 account-trust.spec.ts / account trust: one computer confirmation, one device approval, future computers and durable two-tab pins (390)",
+      "project": "chromium-isolated",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 2,
+          "parallelIndex": 0,
+          "status": "passed",
+          "duration": 129819,
+          "retry": 0,
+          "startTime": "2026-10-27T17:16:26.215Z"
+        }
+      ]
+    },
+    {
+      "identity": "pending-approvals.spec.ts:13 pending-approvals.spec.ts / automatic device approvals: browser and computer, both confirmations, reload and reject (1280)",
+      "project": "chromium-isolated",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 1,
+          "parallelIndex": 1,
+          "status": "passed",
+          "duration": 70274,
+          "retry": 0,
+          "startTime": "2026-10-27T17:17:15.253Z"
+        }
+      ]
+    },
+    {
+      "identity": "pending-approvals.spec.ts:13 pending-approvals.spec.ts / automatic device approvals: browser and computer, both confirmations, reload and reject (390)",
+      "project": "chromium-isolated",
+      "status": "expected",
+      "results": [
+        {
+          "workerIndex": 1,
+          "parallelIndex": 1,
+          "status": "passed",
+          "duration": 39562,
+          "retry": 0,
+          "startTime": "2026-10-27T17:18:25.536Z"
+        }
+      ]
+    }
+  ],
+  "cleanup": "PASS stop-services + compose down-v exit0; owned containers,volumes,all7ports,PID records,canonical homes,accounttempdirs,nodechildren absent; zero HTTP429 log matches",
+  "jsonPrivacy": "config and project keys omit use/env/launchOptions"
+}

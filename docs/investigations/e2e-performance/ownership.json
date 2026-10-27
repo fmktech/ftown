@@ -1,0 +1,70 @@
+{
+  "task": "E2E performance and concurrency",
+  "base": "acf5a180039d04753f7d79433477b1bcde938a32",
+  "checkout": "/Users/fkesheh/projects/ftown-e2e-performance",
+  "branch": "perf/e2e-concurrency",
+  "budget": {
+    "workload": "entire Chromium E2E suite, current50pass2existing skips, standard CI fixture/data and supported Node",
+    "target": "browser suite <=300 seconds, no coverage or authorization/isolation regressions; bounded concurrency initially2",
+    "baseline": "CI Playwright8.2/8.5/8.8min; median8.5min and observed max8.8min (3samples, not a stable tail estimate). Latest exact phase502s including startup; workflow13m23s median/27m29s max.",
+    "constraints": "preserve all assertions; no new skips/retries masking failures; no production/test shared data; preserve existing CI provider/trusted event routing; root sole runtime owner"
+  },
+  "phase": "all source/runtime/review gates accepted; exclusive PR landing",
+  "integrationOwner": "/root/e2e_integration",
+  "rootWrites": [
+    "docs/investigations/e2e-performance/coordination.md",
+    "docs/investigations/e2e-performance/ownership.json",
+    "docs/investigations/e2e-performance/contract.md",
+    "docs/investigations/e2e-performance/baseline/"
+  ],
+  "workers": [
+    {
+      "agent": "/root/e2e_integration",
+      "tier": 1,
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "writes": [
+        "e2e/playwright.config.ts",
+        "e2e/scripts/ci-fixtures.test.mjs",
+        "e2e/README.md",
+        "docs/investigations/e2e-performance/ci-audit.md"
+      ],
+      "role": "config, fixture guards, documentation; later integration owner",
+      "dependencies": [
+        "accepted audits",
+        "contract.md"
+      ],
+      "resources": [],
+      "dispatchVerified": true,
+      "status": "source/repair leases released; sole Git landing owner, pending final handoff"
+    },
+    {
+      "agent": "/root/e2e_review",
+      "tier": 2,
+      "model": "gpt-6.1-sol",
+      "effort": "max",
+      "writes": [
+        "docs/investigations/e2e-performance/test-audit.md"
+      ],
+      "role": "bounded complex concurrency/slow-test planning and later independent review",
+      "dependencies": [],
+      "resources": [],
+      "dispatchVerified": true,
+      "status": "completed/retired after final evidence acceptance; report and all resources released"
+    }
+  ],
+  "resources": {
+    "Git": "/root/e2e_integration exclusive commit,push,PR; exact3sourcefiles and docs/investigations/e2e-performance only",
+    "E2E/CI/processes/DB/ports/generated fixtures": "root; all sandbox processes/volumes/homes/ports verifiedclean; sandboxdeleted; automatic PR CI monitoring next",
+    "installs/lockfiles": "released; no lockfile edits"
+  },
+  "sandbox": {
+    "id": "bx_4t4e2was",
+    "owner": "/root",
+    "type": "default (4 vCPU/8 GiB; previously proven sufficient for FTown)",
+    "createdWith": "no-env, no-snapshots",
+    "autoStop": "2026-10-27T18:51:49Z",
+    "purpose": "controlled before/after dev E2E; all DBs local to sandbox",
+    "status": "deleted 2026-10-27T17:20:54Z; list --all returned no sandboxes"
+  }
+}
