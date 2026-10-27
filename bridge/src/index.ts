@@ -551,8 +551,6 @@ program
         body: JSON.stringify({ endpoint: identity.endpoint, bridgeId, label: osHostname(), protocolVersion: 1 }) });
       if (!registration.ok) throw new Error('security_setup_required: endpoint directory registration failed');
     }
-    console.log('[Bridge] Encrypted endpoint ready. Run ftown security invite to pair a browser.');
-
     const userId = auth.userId;
     const centrifugoUrl = auth.centrifugoUrl;
 
@@ -836,6 +834,7 @@ program
     // Write and cleanup unlink MUST use this same resolved path.
     const bridgeStateDir = ftownHome;
     const bridgePointerPath = join(bridgeStateDir, 'bridge.json');
+    let bridgePointerPublished = false;
     try {
       mkdirSync(bridgeStateDir, { recursive: true, mode: 0o700 });
       writeFileSync(
@@ -853,6 +852,7 @@ program
         }, null, 2),
         { mode: 0o600 },
       );
+      bridgePointerPublished = true;
       console.log(`[Bridge] Wrote bridge pointer to ${bridgePointerPath}`);
     } catch (err) {
       console.error('[Bridge] Failed to write bridge pointer:', err);
@@ -953,6 +953,7 @@ program
       void (async () => {
         ready = true;
         console.log('[Bridge] Ready and listening for commands');
+        if (bridgePointerPublished) console.log('[Bridge] Encrypted endpoint ready. Run ftown security invite to pair a browser.');
         try {
           await resurrection.resurrectSessions();
         } catch (err) {

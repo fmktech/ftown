@@ -143,6 +143,7 @@ test.describe("session lifecycle", () => {
   });
 
   test("create → interact → stop → remove (controller CRUD round-trip)", async ({ page }) => {
+    test.setTimeout(150_000);
     const email = sharedEmail();
     await login(page, email);
     await waitForBridgeOnline(page);
@@ -161,6 +162,24 @@ test.describe("session lifecycle", () => {
     await expect
       .poll(() => statusOf(sid), { timeout: 20_000, message: `session ${sid} should be running` })
       .toBe("running");
+
+    // Selected actions belong to the session header, on both phone views.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole("button", { name: "Workspace", exact: true }).click();
+    const workspaceHeader = page.getByRole("region", { name: "Selected session header" });
+    await expect(workspaceHeader).toContainText(name);
+    await expect(workspaceHeader.getByRole("button", { name: "Stop", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Terminal", exact: true }).click();
+    const headerActions = page.getByRole("group", { name: "Selected session actions" });
+    await expect(headerActions).toHaveCount(1);
+    await headerActions.getByRole("button", { name: "Stop", exact: true }).click();
+    await expect.poll(() => statusOf(sid), { timeout: 30_000 }).toBe("completed");
+    await expect(headerActions.getByRole("button", { name: "Stop", exact: true })).toHaveCount(0);
+    await headerActions.getByRole("button", { name: "Rerun", exact: true }).click();
+    await expect.poll(() => statusOf(sid), { timeout: 30_000 }).toBe("running");
+    await expect(headerActions.getByRole("button", { name: "Rerun", exact: true })).toHaveCount(0);
+    await runMarkerInTerminal(page, `RERUN${Date.now()}`);
+    await page.setViewportSize({ width: 1280, height: 900 });
 
     // --- STOP via the row context menu (Stop menuitem renders only while running/pending) ---
     await row.click({ button: "right" });
@@ -244,7 +263,7 @@ test.describe("session lifecycle", () => {
   /**
    * RETRY: the affordance EXISTS but is unreachable in a shell-only harness.
    *
-   * Retry is a Dashboard toolbar button (className "btn-warn",
+   * Retry is a selected-session header button (className "btn-warn",
    * getByRole("button",{name:"Retry"})) that renders ONLY when the selected
    * session's status === 'error'. It is NOT in the session context menu and is NOT
    * shown for a 'completed'/'done' session. A plain-zsh shell session that is
@@ -254,7 +273,7 @@ test.describe("session lifecycle", () => {
    * documented (per the task: SKIP with a note when there is no honest path).
    */
   test.skip("retry a stopped/errored session round-trips a new marker", async () => {
-    // Intentionally skipped — Retry UI confirmed to exist (Dashboard toolbar,
+    // Intentionally skipped — Retry UI confirmed to exist (selected-session header,
     // error-gated) but not reachable with the shell-only harness. See note above.
   });
 });

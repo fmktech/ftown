@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ApprovedEndpoint, SecurityEvent, SecurityPage } from "@security/protocol";
+import type { ApprovedEndpoint, BridgeInvitation, SecurityEvent, SecurityPage } from "@security/protocol";
 import { SecurityPanel, type SecurityBridge, type SecurityCommandExecutor } from "./SecurityPanel";
 import { SecurityActivity } from "./SecurityActivity";
 import { SecurityDevices } from "./SecurityDevices";
@@ -82,12 +82,14 @@ describe("Security devices and dialog", () => {
   it("requires explicit confirmation before self-revocation and targets only the selected bridge", async () => {
     const execute = mockExecutor().mockResolvedValueOnce({ devices: [device("self", "My browser"), device("other", "Phone")] }).mockResolvedValueOnce({ endpointId: "self", revoked: true });
     render(<SecurityDevices bridge={bridge} currentEndpointId="self" execute={execute} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Browser My browser \(this browser\):/ }));
     fireEvent.click(await screen.findByRole("button", { name: "Revoke My browser" }));
     expect(execute).toHaveBeenCalledTimes(1);
     expect(screen.getByText(/Revoking this browser disconnects/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Confirm revoke" }));
     await waitFor(() => expect(execute).toHaveBeenCalledWith({ type: "security_revoke", bridgeId: "bridge-one", endpointId: "self" }));
     await waitFor(() => expect(screen.queryByText("My browser · This browser")).toBeNull());
+    expect(screen.queryByRole("button", { name: /^Browser My browser/ })).toBeNull();
     expect(screen.getByText("Phone")).toBeTruthy();
   });
 
@@ -126,6 +128,97 @@ describe("Security devices and dialog", () => {
 });
 
 
+describe("Computer-scoped access map", () => {
+  it("uses actual browser grants and keeps MCP/CLI management separate from account authority", async () => {
+    const cli = { ...device("cli", "Local CLI"), endpoint: { ...device("cli", "Local CLI").endpoint, kind: "local-cli" as const }, source: "local" as const };
+    const mcp = { ...device("mcp", "My MCP client"), endpoint: { ...device("mcp", "My MCP client").endpoint, kind: "mcp" as const }, permissions: ["read"] as const, expiresAt: "2030-01-01T00:00:00Z" };
+    const execute = mockExecutor().mockResolvedValue({ devices: [device("self", "My browser"), device("phone", "Phone"), cli, { ...mcp, permissions: [...mcp.permissions] }] });
+    const view = render(<SecurityDevices bridge={bridge} currentEndpointId="self" currentComputerIds={new Set([bridge.bridgeId])} execute={execute} />);
+    await screen.findByRole("button", { name: "Create secure invitation" });
+    expect(screen.getByRole("heading", { name: "Computer access" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Account access" })).toBeNull();
+    expect(screen.getByText(/Approvals apply only to this computer/)).toBeTruthy();
+    expect(within(screen.getByRole("list", { name: "Approved devices" })).getAllByRole("button")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: /^Browser My MCP client/ })).toBeNull();
+    const otherClients = screen.getByRole("list", { name: "Other approved clients" });
+    expect(within(otherClients).getByText("local-cli · read, control, admin")).toBeTruthy();
+    expect(within(otherClients).getByText("mcp · read")).toBeTruthy();
+    expect(within(otherClients).getByRole("button", { name: "Revoke My MCP client" })).toBeTruthy();
+    expect(view.container.querySelectorAll('[data-certainty="current"]')).toHaveLength(3);
+    expect(view.container.querySelector('[data-current-device="bridge"]')).not.toBeNull();
+    expect(view.container.querySelector("button button")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Share with my other browsers" })).toBeNull();
+    expect(execute).toHaveBeenCalledExactlyOnceWith({ type: "security_devices", bridgeId: bridge.bridgeId });
+  });
+
+  it("keeps account-source grants non-revocable and does not offer prohibited browser invitations", async () => {
+    const execute = mockExecutor().mockResolvedValue({ devices: [{ ...device("self", "Account browser"), source: "account" }] });
+    render(<SecurityDevices bridge={bridge} currentEndpointId="self" execute={execute} />);
+    await screen.findByText(/Manage account browsers from the hosted dashboard/);
+    expect(screen.queryByRole("button", { name: "Create secure invitation" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /^Browser Account browser/ }));
+    expect(screen.queryByRole("button", { name: "Revoke Account browser" })).toBeNull();
+    expect(screen.getByText(/manage its account-wide access from the hosted dashboard/)).toBeTruthy();
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("never offers admin actions to a read-only browser", async () => {
+    const execute = mockExecutor().mockResolvedValue({ devices: [{ ...device("self", "Read browser"), permissions: ["read"] }, device("phone", "Phone")] });
+    render(<SecurityDevices bridge={bridge} currentEndpointId="self" execute={execute} />);
+    await screen.findByText(/An approved administrator browser/);
+    fireEvent.click(screen.getByRole("button", { name: /^Browser Phone:/ }));
+    expect(screen.queryByRole("button", { name: "Revoke Phone" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Create secure invitation" })).toBeNull();
+  });
+
+  it("creates a private computer-only invitation only after its explicit admin action", async () => {
+    const invitation: BridgeInvitation = { version: 1, invitationId: "invite-one", ownerId: "owner", bridgeId: bridge.bridgeId,
+      bridge: { ...device("bridge-key", "").endpoint, kind: "bridge" }, secret: "private-fixture-secret", expiresAt: "2030-01-01T00:00:00Z", relayUrl: null, localOrigin: null };
+    const execute = mockExecutor().mockResolvedValueOnce({ devices: [device("self", "My browser")] }).mockResolvedValueOnce(invitation);
+    render(<SecurityDevices bridge={bridge} currentEndpointId="self" execute={execute} />);
+    await screen.findByRole("button", { name: "Create secure invitation" });
+    expect(execute).toHaveBeenCalledTimes(1);
+    fireEvent.change(screen.getByRole("textbox", { name: "Device label" }), { target: { value: "Phone" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create secure invitation" }));
+    const link = await screen.findByRole("textbox", { name: "Private invitation link" }) as HTMLInputElement;
+    expect(execute).toHaveBeenLastCalledWith({ type: "security_invite", bridgeId: bridge.bridgeId, label: "Phone" });
+    const url = new URL(link.value);
+    expect(url.pathname).toBe("/connect"); expect(url.search).toBe("");
+    expect(JSON.parse(decodeURIComponent(url.hash.slice("#invite=".length)))).toEqual(invitation);
+  });
+
+  it("ignores an old bridge roster and drops all trusted edges while offline", async () => {
+    let finish!: (value: { devices: ApprovedEndpoint[] }) => void;
+    const execute = mockExecutor().mockImplementationOnce(() => new Promise(resolve => { finish = resolve; })).mockResolvedValue({ devices: [device("self", "New browser")] });
+    const view = render(<SecurityDevices bridge={bridge} currentEndpointId="self" execute={execute} />);
+    const next = { ...bridge, bridgeId: "next", label: "Next computer", security: { ...bridge.security, bridgeId: "next" } };
+    view.rerender(<SecurityDevices bridge={next} currentEndpointId="self" execute={execute} />);
+    await screen.findByRole("button", { name: /^Browser New browser/ });
+    await act(async () => finish({ devices: [device("old", "Old private label")] }));
+    expect(screen.queryByText("Old private label")).toBeNull();
+    view.rerender(<SecurityDevices bridge={{ ...next, security: { ...next.security, status: "offline" } }} currentEndpointId="self" execute={execute} />);
+    expect(view.container.querySelector('[data-certainty="current"]')).toBeNull();
+    expect(screen.queryByRole("button", { name: "Create secure invitation" })).toBeNull();
+    expect(screen.getByText(/while its FTown bridge is running/)).toBeTruthy();
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("expires a displayed browser grant without granting it a lasting solid edge", async () => {
+    vi.useFakeTimers();
+    try {
+      const execute = mockExecutor().mockResolvedValue({ devices: [device("self", "My browser"), { ...device("phone", "Phone"), expiresAt: new Date(Date.now() + 100).toISOString() }] });
+      let view!: ReturnType<typeof render>;
+      await act(async () => { view = render(<SecurityDevices bridge={bridge} currentEndpointId="self" execute={execute} />); });
+      expect(view.container.querySelector('[data-access-edge="browser:phone"]')).not.toBeNull();
+      await act(async () => vi.advanceTimersByTime(101));
+      expect(view.container.querySelector('[data-access-edge="browser:phone"]')).toBeNull();
+      expect(screen.getByRole("button", { name: /Browser Phone: Approval expired/ })).toBeTruthy();
+      expect(execute).toHaveBeenCalledTimes(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+});
+
 describe("Account devices", () => {
   beforeEach(() => { vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ requests: [] }), { status: 200 }))); });
   function accountFixture(count: number, offline = false) {
@@ -137,6 +230,21 @@ describe("Account devices", () => {
     const client = { snapshot: () => state, subscribe: () => () => {}, revoke, refresh: vi.fn() } as unknown as AccountSecurityClient;
     return { state, client, revoke };
   }
+  it("puts private CLI recovery instructions on an independent computer without implying account sharing", () => {
+    const f = accountFixture(1); const execute = mockExecutor();
+    render(<SecurityDevices bridge={{ ...bridge, security: { ...bridge.security, status: "unpaired" } }} bridges={[{ ...bridge, security: { ...bridge.security, status: "unpaired" } }]} currentEndpointId="0" execute={execute} accountClient={f.client} accountState={f.state} />);
+    expect(screen.getByText("ftown security invite")).toBeTruthy();
+    expect(screen.getByText(/On that computer, while its FTown bridge is running/)).toBeTruthy();
+    expect(screen.getByText(/Open the printed private link in this browser/)).toBeTruthy();
+    expect(screen.getByText(/does not restore account signing keys or share the computer/)).toBeTruthy();
+    expect(execute).not.toHaveBeenCalled();
+  });
+  it("keeps paused account trust from suggesting a per-computer approval bypass", () => {
+    const f = accountFixture(1); f.state.status = "error"; f.state.code = "account_device_revoked";
+    const unpaired = { ...bridge, security: { ...bridge.security, status: "unpaired" as const } };
+    render(<SecurityDevices bridge={unpaired} bridges={[unpaired]} currentEndpointId="0" execute={mockExecutor()} accountClient={f.client} accountState={f.state} />);
+    expect(screen.queryByText("ftown security invite")).toBeNull();
+  });
   it("keeps the last account administrator and offline device revocation disabled", () => {
     const f = accountFixture(1); const execute = mockExecutor();
     const view = render(<SecurityDevices currentEndpointId="0" execute={execute} accountClient={f.client} accountState={f.state} />);

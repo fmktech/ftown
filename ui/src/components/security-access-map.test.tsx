@@ -48,6 +48,16 @@ it("keeps historical links dashed and never invents an edge from a closed lock o
   fireEvent.click(screen.getByRole("button", { name: /^Computer Foad-Kesheh/ }));
   expect(data.onSelect).toHaveBeenCalledExactlyOnceWith({ kind: "bridge", id: "independent" });
 });
+it("labels computer scope explicitly while keeping default account authority separate", () => {
+  const data = props(); const view = render(<SecurityAccessMap {...data} scope="computer" />);
+  expect(screen.getByRole("heading", { name: "Computer access" })).toBeTruthy();
+  expect(screen.getByRole("list", { name: "Approved devices" })).toBeTruthy();
+  expect(screen.queryByRole("heading", { name: "Account access" })).toBeNull();
+  expect(screen.getByText(/Approvals apply only to this computer/)).toBeTruthy();
+  view.rerender(<SecurityAccessMap {...data} />);
+  expect(screen.getByRole("heading", { name: "Account access" })).toBeTruthy();
+  expect(screen.getByRole("list", { name: "Account devices" })).toBeTruthy();
+});
 it.each([
   ["ready", "secured", "Encrypted connection"], ["unpaired", "approval_needed", "Approval required"],
   ["revoked", "approval_needed", "Access revoked"], ["key_changed", "approval_needed", "Computer key changed"],

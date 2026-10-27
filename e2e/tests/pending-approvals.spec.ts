@@ -49,6 +49,8 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       const sibling = await candidateContext.newPage(); await sibling.goto("/dashboard");
       expect(await pendingId(sibling)).toBe(requestId);
 
+      const navigation = trusted.getByRole("button", { name: "Open navigation menu", exact: true });
+      if (await navigation.isVisible()) await navigation.click();
       const reviewEntry = trusted.getByRole("button", { name: /^Review \d+ pending device approvals$/ });
       await expect(reviewEntry).toBeVisible({ timeout: 15000 }); await reviewEntry.click();
       const requestRow = trusted.locator(`[data-pending-request="${requestId}"]`); await expect(requestRow).toHaveCount(1);

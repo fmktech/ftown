@@ -7,10 +7,45 @@ import type { ApprovedEndpoint } from "../../bridge/src/security/protocol";
 import { login, makeUser, openSession, registerUser, runMarkerInTerminal } from "../helpers/app";
 
 const origin = process.env.FTOWN_PUBLIC_URL ?? "https://localhost:8444";
-async function devices(page: Page) {
+async function openSecurityNavigation(page: Page) {
+  const navigation = page.getByRole("button", { name: "Open navigation menu", exact: true });
+  if (await navigation.isVisible()) await navigation.click();
   await page.getByRole("button", { name: "Open security", exact: true }).click();
+}
+async function devices(page: Page) {
+  await openSecurityNavigation(page);
   await page.getByRole("tab", { name: "Access", exact: true }).click();
   await expect(page.getByRole("list", { name: "Account devices", exact: true })).toBeVisible();
+}
+async function navigationEvidence(page: Page, info: TestInfo) {
+  const initialViewport = page.viewportSize()!;
+  for (const width of [1280, 900, 390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    const menu = page.getByRole("button", { name: "Open navigation menu", exact: true });
+    const nav = page.getByRole("navigation", { name: "Dashboard actions" });
+    if (width < 768) {
+      await menu.click();
+      await expect(nav).toBeVisible();
+      await expect(nav.getByRole("button", { name: "Open security", exact: true })).toBeVisible();
+      await expect(nav.getByRole("link", { name: "Use This computer", exact: true })).toBeVisible();
+      await expect(nav.getByRole("button", { name: "Review device approvals", exact: true })).toBeVisible();
+      await expect.poll(() => nav.locator("button,a").evaluateAll(controls => controls.filter(control => control.checkVisibility()).every(control => control.getBoundingClientRect().height >= 44)), { timeout: 2000 }).toBe(true);
+      await page.screenshot({ path: info.outputPath(`navigation-menu-${width}.png`), fullPage: true });
+      await page.keyboard.press("Escape"); await expect(menu).toBeFocused();
+      await expect(nav).toBeHidden();
+    } else {
+      await expect(nav).toBeVisible();
+      await expect(nav.getByRole("button", { name: "Open security", exact: true })).toBeVisible();
+    }
+    await expect(nav.locator("[data-push-state]")).toHaveCount(1);
+    const diagnostics = page.getByRole("button", { name: "Connection status and diagnostics", exact: true });
+    await expect(diagnostics).toBeVisible();
+    expect(await diagnostics.locator("button").count()).toBe(0);
+    if (width < 768) await expect.poll(() => diagnostics.evaluate(element => element.getBoundingClientRect().height), { timeout: 2000 }).toBeGreaterThanOrEqual(44);
+    await noOverflow(page);
+    await page.screenshot({ path: info.outputPath(`navigation-bar-${width}.png`), fullPage: true });
+  }
+  await page.setViewportSize(initialViewport);
 }
 async function noOverflow(page: Page) { expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); }
 
@@ -24,7 +59,7 @@ async function waitForSecurityLayout(page: Page, width: number) {
 }
 
 async function accessMapEvidence(page: Page, info: TestInfo, bridgeIds: string[], otherBrowserId: string) {
-  await page.getByRole("button", { name: "Open security", exact: true }).click();
+  await openSecurityNavigation(page);
   const dialog = page.getByRole("dialog", { name: "Security", exact: true });
   await expect(dialog.getByRole("tab", { name: "Access", exact: true })).toHaveAttribute("aria-selected", "true");
   for (const bridgeId of bridgeIds) {
@@ -96,7 +131,8 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       const initial = (await accountBrowserState(page))[0];
       expect(initial.hpkeExtractable).toBe(false); expect(initial.signingExtractable).toBe(false);
       expect(initial.trust?.checkpoint.devices).toHaveLength(1);
-      await page.getByRole("button", { name: "Open security", exact: true }).click();
+      await navigationEvidence(page, info);
+      await openSecurityNavigation(page);
       await expect(page.getByRole("tab", { name: "Access", exact: true })).toHaveAttribute("aria-selected", "true");
       await expect(page.getByRole("heading", { name: "Your computers", exact: true })).toBeVisible();
       await expect(page.locator(`[data-computer-access="${firstId}"]`)).toContainText("Shared with your approved browsers", { timeout: 60000 });

@@ -8,6 +8,7 @@ export type SecurityAccessSelection = { kind: "browser"; id: string } | { kind: 
 export interface SecurityAccessBrowserNode { id: string; label: string; current: boolean; accessText: string; lockState: SecurityLockState; edge: AccessEdgeCertainty }
 export interface SecurityAccessBridgeNode { current?: boolean; id: string; label: string; accessText: string; connectionText: string; lockState: SecurityLockState; edge: AccessEdgeCertainty }
 export interface SecurityAccessMapProps {
+  scope?: "account" | "computer";
   browsers: readonly SecurityAccessBrowserNode[];
   bridges: readonly SecurityAccessBridgeNode[];
   account: { statusText: string; lockState: SecurityLockState };
@@ -37,7 +38,7 @@ type Point = { x: number; y: number };
 type Connector = { from: Point; to: Point };
 
 /** Read-only access relationships. Selection never calls an approval action. */
-export function SecurityAccessMap({ browsers, bridges, account, selected, onSelect, toolbar, selectedDetails }: SecurityAccessMapProps) {
+export function SecurityAccessMap({ scope = "account", browsers, bridges, account, selected, onSelect, toolbar, selectedDetails }: SecurityAccessMapProps) {
   const root = useRef<HTMLDivElement>(null);
   const hub = useRef<HTMLDivElement>(null);
   const nodes = useRef(new Map<string, HTMLButtonElement>());
@@ -75,7 +76,7 @@ export function SecurityAccessMap({ browsers, bridges, account, selected, onSele
   const currentStyle = { background: "color-mix(in srgb, var(--shell-claude) 9%, var(--bg-base))" };
   return <section aria-label="Browser and computer access map" className="space-y-2">
     {toolbar}
-    <p className="text-[10px] text-[var(--text-muted)]">Approved browsers → Account access → Shared computers. Lines show access, not network connections.</p>
+    <p className="text-[10px] text-[var(--text-muted)]">{scope === "account" ? "Approved browsers → Account access → Shared computers." : "Approved browsers → Computer access → Selected computer. Approvals apply only to this computer."} Lines show access, not network connections.</p>
     <div ref={root} className="relative grid grid-cols-1 items-center gap-x-6 gap-y-3 sm:gap-y-6 sm:grid-cols-[minmax(0,1fr)_6.5rem_minmax(0,1fr)]">
       <svg aria-hidden="true" className="pointer-events-none absolute inset-0 h-full w-full overflow-visible" fill="none">
         {edges.filter(node => node.edge !== "none").map(node => {
@@ -87,7 +88,7 @@ export function SecurityAccessMap({ browsers, bridges, account, selected, onSele
       </svg>
       <div className="relative space-y-1">
         <h3 className="text-xs font-semibold">Browsers</h3>
-        <ul aria-label="Account devices" className="grid grid-cols-3 gap-2 sm:grid-cols-1">
+        <ul aria-label={scope === "account" ? "Account devices" : "Approved devices"} className="grid grid-cols-3 gap-2 sm:grid-cols-1">
           {browsers.map(node => {
             const label = accessBrowserLabel(node, browsers); const active = selected?.kind === "browser" && selected.id === node.id;
             return <li key={node.id} data-access-card={`browser:${node.id}`} data-current-device={node.current ? "browser" : undefined} className={`${cardClass(node.current, active)} ${active && selectedDetails ? "col-span-full sm:col-span-1" : ""}`} style={node.current ? currentStyle : undefined}><button type="button" ref={element => { if (element) nodes.current.set(`browser:${node.id}`, element); else nodes.current.delete(`browser:${node.id}`); }}
@@ -103,7 +104,7 @@ export function SecurityAccessMap({ browsers, bridges, account, selected, onSele
       </div>
       <div ref={hub} className="relative z-10 mx-auto flex w-fit max-w-full items-center gap-2 rounded-md border border-[var(--border-muted)] bg-[var(--bg-surface)] px-3 py-2 text-left sm:block sm:w-full sm:p-2 sm:text-center">
         <SecurityLockIcon state={account.lockState} className="shrink-0 text-[var(--text-muted)] sm:mx-auto sm:mb-1" />
-        <h3 className="text-xs font-semibold">Account access</h3><p className="text-[10px] leading-4 text-[var(--text-muted)] sm:mt-1">{account.statusText}</p>
+        <h3 className="text-xs font-semibold">{scope === "account" ? "Account access" : "Computer access"}</h3><p className="text-[10px] leading-4 text-[var(--text-muted)] sm:mt-1">{account.statusText}</p>
       </div>
       <div className="relative space-y-1">
         <h3 className="text-xs font-semibold">Your computers</h3>

@@ -44,11 +44,22 @@ test("explicit push opt-in/opt-out and foreground/closed-page service-worker dis
  expect(afterReload.fixtureRequests).toBe(0);
  expect(afterReload.permissions).toBe("granted");
  const config=await page.request.get("/api/push");expect(config.status()).toBe(200);expect((await config.json()).enabled).toBe(true);
+ // One responsive controller survives opening/closing the phone disclosure.
+ await page.setViewportSize({width:390,height:844});
+ const navigation=page.getByRole("button",{name:"Open navigation menu",exact:true});
+ await navigation.click();
+ const nav=page.getByRole("navigation",{name:"Dashboard actions"});
+ await expect(nav.locator("[data-push-state]")).toHaveCount(1);
+ await page.keyboard.press("Escape");await expect(navigation).toBeFocused();
+ await navigation.click();
  const enable=page.getByRole("button",{name:"Enable push notifications"});await expect(enable).toBeEnabled();
  expect(await page.evaluate(()=>localStorage.getItem("ftown:pushOwner"))).toBeNull();
  await enable.click();await expect(page.getByRole("button",{name:"Disable push notifications"})).toBeEnabled();
  expect(await page.evaluate(()=>(Notification as unknown as {fixtureRequests:number}).fixtureRequests)).toBe(1);
  await page.getByRole("button",{name:"Disable push notifications"}).click();await expect(enable).toBeEnabled();
+ // Resizing changes presentation without replacing the owner-bound controller.
+ await page.setViewportSize({width:1280,height:900});
+ await expect(page.getByRole("navigation",{name:"Dashboard actions"}).locator("[data-push-state]")).toHaveCount(1);
  // Enable again before testing both foreground and closed-page delivery.
  await enable.click();await expect(page.getByRole("button",{name:"Disable push notifications"})).toBeEnabled();
  await page.screenshot({path:testInfo.outputPath("notifications-enabled.png"),fullPage:true});

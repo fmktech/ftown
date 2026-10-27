@@ -35,6 +35,15 @@ import {
   sidebarWidthFromDrag,
 } from "@/lib/sidebar-width";
 
+function NavigationIcon({ kind }: { kind: "bridge" | "local" | "p2p" | "cloud" | "menu" | "switch" }) {
+  return <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    {kind === "bridge" || kind === "local" ? <><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8M12 17v4" />{kind === "local" && <path d="M7 10h10" />}</>
+      : kind === "p2p" ? <><circle cx="5" cy="7" r="3" /><circle cx="19" cy="7" r="3" /><circle cx="12" cy="19" r="3" /><path d="m7 10 3 6m7-6-3 6M8 7h8" /></>
+      : kind === "cloud" ? <path d="M7 18a5 5 0 0 1-1-10 6 6 0 0 1 11-2 5 5 0 1 1 1 12H7Z" />
+      : kind === "menu" ? <path d="M4 6h16M4 12h16M4 18h16" /> : <path d="M4 7h16m-4-4 4 4-4 4M20 17H4m4-4-4 4 4 4" />}
+  </svg>;
+}
+
 interface DashboardProps {
   client: MessageClient | null;
   connectionStatus: ConnectionStatus;
@@ -81,6 +90,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const { hidden: hiddenSessionIds, hide: handleHideSession, unhide: handleUnhideSession } = useHiddenSet("ftown:hiddenSessions");
   const { hidden: hiddenBridgeIds, hide: hideBridge, unhide: handleUnhideBridge } = useHiddenSet("ftown:hiddenBridges");
   const [showUserMenu, setShowUserMenu] = useState(false);
+  const [showNavigation, setShowNavigation] = useState(false);
   const [showSecurity, setShowSecurity] = useState(false);
   const [securityView, setSecurityView] = useState<"activity" | "devices">("devices");
   const pending = usePendingApprovals(accountClient, "reviewer");
@@ -95,6 +105,8 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const mobileControlRef = useRef<MobileControlBarHandle>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const userMenuRef = useRef<HTMLDivElement>(null);
+  const navigationRef = useRef<HTMLElement>(null);
+  const navigationButtonRef = useRef<HTMLButtonElement>(null);
   const sidebarResizeRef = useRef<{
     pointerId: number;
     startClientX: number;
@@ -198,7 +210,16 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     if (!client?.executeSecurity) return Promise.reject({ code: "security_setup_required" });
     return client.executeSecurity(command);
   }, [client]);
-  const openSecurity = useCallback((bridgeId?: string) => { setSecurityView("devices"); setSecurityBridgeId(bridgeId); setShowSecurity(true); }, []);
+  const closeNavigation = useCallback((restoreFocus = false) => { setShowNavigation(false); if (restoreFocus) navigationButtonRef.current?.focus(); }, []);
+  const openSecurity = useCallback((bridgeId?: string) => { if (showNavigation) closeNavigation(true); setSecurityView("devices"); setSecurityBridgeId(bridgeId); setShowSecurity(true); }, [showNavigation, closeNavigation]);
+  useEffect(() => {
+    if (!showNavigation) return;
+    const outside = (event: globalThis.PointerEvent) => { if (!navigationRef.current?.contains(event.target as Node) && !navigationButtonRef.current?.contains(event.target as Node)) closeNavigation(true); };
+    const escape = (event: globalThis.KeyboardEvent) => { if (event.key === "Escape") { event.preventDefault(); closeNavigation(true); } };
+    document.addEventListener("pointerdown", outside, true); document.addEventListener("keydown", escape);
+    return () => { document.removeEventListener("pointerdown", outside, true); document.removeEventListener("keydown", escape); };
+  }, [showNavigation, closeNavigation]);
+  useEffect(() => { if (isDesktop) setShowNavigation(false); }, [isDesktop]);
 
   // Keep bridgeOrder stable when bridges connect/disconnect; only append new ids (sorted).
   useEffect(() => {
@@ -353,6 +374,11 @@ PY`;
   const handleRelaunchSession = useCallback(() => {
     if (selectedSessionId) retrySession(selectedSessionId);
   }, [selectedSessionId, retrySession]);
+  const selectedTransportMode = selectedSessionId ? transport?.getMode(selectedSessionId) ?? "connecting" : null;
+  const sessionHeaderActions = selectedSession ? <div role="group" aria-label="Selected session actions" className="flex items-center gap-2">
+    {selectedSession.status === "running" && <button type="button" className="btn-danger min-h-11 md:min-h-8" onClick={handleStopSession}>Stop</button>}
+    {sessionRelaunchLabel && <button type="button" className="btn-warn min-h-11 md:min-h-8" onClick={handleRelaunchSession} title="Relaunch this session using the same command">{sessionRelaunchLabel}</button>}
+  </div> : null;
 
   // Claude's Stop hook does not fire on user interrupt, so a lone ESC leaves the
   // dashboard stuck on "thinking"/"tool_use". Optimistically clear it locally.
@@ -520,6 +546,7 @@ PY`;
       <header
         className="shrink-0 flex items-center justify-between px-4"
         style={{
+          position: "relative", zIndex: 40,
           height: "calc(44px + env(safe-area-inset-top))",
           paddingTop: "env(safe-area-inset-top)",
           paddingLeft: "max(16px, env(safe-area-inset-left))",
@@ -597,85 +624,31 @@ PY`;
             Connect a bridge
           </button>}
 
-          {selectedSession?.status === "running" && (
-            <button className="btn-danger" onClick={handleStopSession}>
-              Stop
-            </button>
-          )}
-          {sessionRelaunchLabel && (
-            <button
-              className="btn-warn"
-              onClick={handleRelaunchSession}
-              title="Relaunch this session using the same command"
-            >
-              {sessionRelaunchLabel}
-            </button>
-          )}
         </div>
 
-        {accountState?.status === "ready" && <button type="button" className="btn-accent min-h-11 shrink-0 text-xs" aria-label={pendingCount ? `Review ${pendingCount} pending device approvals` : "Review device approvals"} onClick={() => { setSecurityView("devices"); setShowSecurity(true); }}>Review{pendingCount ? ` (${pendingCount})` : ""}</button>}
-        {/* Right cluster */}
-        <div className="hidden md:flex items-center gap-4">
-          {connectionError && (
-            <span style={{ fontSize: 11, color: "var(--status-error)" }}>
-              {connectionError}
-            </span>
-          )}
-
-          {/* Bridge count */}
-          <div
-            className="flex items-center gap-1.5"
-            title={bridges.map((b) => `${b.bridgeId} (${b.hostname})`).join("\n")}
-          >
-            <StatusDot kind={hasBridges ? "connected" : "error"} />
-            <span style={{ fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
-              {bridges.length} {bridges.length === 1 ? "bridge" : "bridges"}
-            </span>
+        <div className="ml-auto flex min-w-0 items-center gap-1.5 md:gap-2">
+          <div role="group" aria-label="Connection overview" className="flex shrink-0 items-center gap-1.5 text-[var(--text-muted)]">
+            <span role="img" aria-label={`${bridges.length} bridges; ${readyBridges.length} encrypted connections ready`} title={bridges.map(bridge => bridge.hostname).join("\n") || "No bridges"} className="flex items-center gap-1 text-[11px]"><NavigationIcon kind="bridge" /><span>{bridges.length}</span></span>
+            <span role="img" aria-label={selectedTransportMode === "local" ? "Selected terminal: Local" : localMode && connectionStatus === "connected" ? "Local controller connected" : "No selected Local terminal"} title={selectedTransportMode === "local" ? "Selected terminal uses this computer's loopback socket" : localMode ? "Local controller connection" : "No selected terminal using Local"}
+              className={`${selectedTransportMode === "local" || localMode ? "flex" : "hidden md:flex"} items-center`} style={{ color: selectedTransportMode === "local" || localMode && connectionStatus === "connected" ? "var(--status-running)" : "var(--text-faint)" }}><NavigationIcon kind="local" /></span>
+            <span role="img" aria-label={selectedTransportMode === "direct" ? "Selected terminal: P2P" : "No selected P2P terminal"} title={selectedTransportMode === "direct" ? "Selected terminal uses WebRTC P2P" : "No selected terminal using P2P"}
+              className={`${selectedTransportMode === "direct" ? "flex" : "hidden md:flex"} items-center`} style={{ color: selectedTransportMode === "direct" ? "var(--status-running)" : "var(--text-faint)" }}><NavigationIcon kind="p2p" /></span>
+            {localMode ? <span role="img" aria-label={`Local ${connectionStatus}`} title={connectionError ?? "This computer mode — cloud is not used"} className="text-[var(--text-faint)]"><NavigationIcon kind="cloud" /></span>
+              : <div role="group" aria-label={`Cloud ${connectionStatus}`} className="[&>div>button]:min-h-11 [&>div>button]:min-w-11 [&>div>button]:justify-center md:[&>div>button]:min-h-8 md:[&>div>button]:min-w-8">
+                <CloudConnectionNotice connectionStatus={connectionStatus} connectionError={connectionError} centrifugoUrl={centrifugoUrl} token={token} onRetry={() => window.location.reload()} directBridgeCount={directlyReachableBridgeIds.size}>
+                  <span role="img" aria-label={`Cloud ${connectionStatus}${selectedTransportMode === "centrifugo" ? "; selected terminal: Cloud" : ""}`} title={connectionError ?? (connectionStatus === "connected" ? "Cloud connected" : "Cloud reconnecting")} style={{ color: connectionStatus === "connected" ? "var(--text-muted)" : "var(--status-pending)" }}><NavigationIcon kind="cloud" /></span>
+                </CloudConnectionNotice>
+              </div>}
           </div>
-
-          <span style={{ width: 1, height: 12, background: "var(--border-muted)" }} />
-
-          {/* Connection status */}
-          {localMode ? <span className="flex items-center gap-1.5" title={connectionError ?? "Connected directly to this computer; no cloud required."}>
-            <StatusDot kind={connectionStatus} />
-            <span style={{ fontSize: 11 }}>{connectionStatus === "connected" ? "Local connected" : "Local reconnecting"}</span>
-          </span> : <CloudConnectionNotice connectionStatus={connectionStatus} connectionError={connectionError}
-            centrifugoUrl={centrifugoUrl} token={token} onRetry={() => window.location.reload()}
-            directBridgeCount={directlyReachableBridgeIds.size}>
-            {directlyReachableBridgeIds.size > 0 && (
-              <>
-                <StatusDot kind="connected" title="Local/P2P connected" />
-                <span style={{ fontSize: 11, color: "var(--status-running)" }}>
-                  Local/P2P connected
-                </span>
-                <span aria-hidden="true" style={{ color: "var(--text-muted)" }}>·</span>
-              </>
-            )}
-            <StatusDot
-              kind={connectionStatus === "connected" ? "connected" : directlyReachableBridgeIds.size > 0 ? "connecting" : connectionStatus}
-              title={connectionStatus === "connected" ? "Cloud connected" : "Cloud reconnecting"}
-            />
-            <span
-              style={{
-                fontSize: 11,
-                color: connectionStatus !== "connected" && directlyReachableBridgeIds.size > 0
-                  ? "var(--status-pending)"
-                  : connectionStatus === "error" || connectionStatus === "disconnected"
-                  ? "var(--status-error)"
-                  : "var(--text-muted)",
-              }}
-            >
-              {connectionStatus === "connected" ? "Cloud connected" : "Cloud reconnecting"}
-            </span>
-          </CloudConnectionNotice>}
-          <a href={localMode ? "/dashboard" : "/local"} onClick={localMode ? undefined : (event) => {
-            event.preventDefault();
-            void prepareLocalAccess().then(() => { window.location.href = "/local"; });
-          }} className="btn-ghost">{localMode ? "Cloud" : "This computer"}</a>
-
-          <span style={{ width: 1, height: 12, background: "var(--border-muted)" }} />
-
-          <a
+          <button ref={navigationButtonRef} type="button" className="btn-ghost flex min-h-11 min-w-11 items-center justify-center md:hidden" aria-label={showNavigation ? "Close navigation menu" : "Open navigation menu"} aria-expanded={showNavigation} aria-controls="dashboard-navigation" title="Dashboard menu" onClick={() => setShowNavigation(value => !value)}><NavigationIcon kind="menu" /></button>
+          <nav id="dashboard-navigation" ref={navigationRef} aria-label="Dashboard actions" hidden={!isDesktop && !showNavigation}
+            className={`${isDesktop || showNavigation ? "flex" : "hidden"} absolute right-2 top-full z-50 mt-1 max-h-[calc(100dvh_-_60px)] w-[min(288px,calc(100vw_-_16px))] flex-col gap-2 overflow-y-auto rounded-md border border-[var(--border-muted)] bg-[var(--bg-surface)] p-3 shadow-xl md:static md:mt-0 md:w-auto md:max-h-none md:flex-row md:items-center md:overflow-visible md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none`}>
+            {accountState?.status === "ready" && <button type="button" className="btn-accent min-h-11 shrink-0 text-xs md:min-h-8" aria-label={pendingCount ? `Review ${pendingCount} pending device approvals` : "Review device approvals"} onClick={() => { if (showNavigation) closeNavigation(true); setSecurityView("devices"); setShowSecurity(true); }}>Review{pendingCount ? ` (${pendingCount})` : ""}</button>}
+            <PushNotificationsControl localMode={localMode} accountId={userId} presentation="responsive" />
+            <button type="button" className="btn-ghost flex min-h-11 items-center gap-2 md:min-h-8 md:w-8 md:justify-center" style={{ padding: "4px 6px" }} title={`Security: computer and browser access${pendingCount ? `; ${pendingCount} requests` : ""}`} aria-label="Open security" onClick={() => openSecurity()}><SecurityLockIcon state="unknown" /><span className="md:sr-only">Security{pendingCount > 0 ? ` (${pendingCount})` : ""}</span></button>
+            <a href={localMode ? "/dashboard" : "/local"} style={{ padding: "4px 6px" }} aria-label={localMode ? "Use Cloud" : "Use This computer"} title={localMode ? "Use Cloud" : "Use This computer"} onClick={localMode ? () => closeNavigation() : event => { event.preventDefault(); closeNavigation(); void prepareLocalAccess().then(() => { window.location.href = "/local"; }); }} className="btn-ghost flex min-h-11 items-center gap-2 md:min-h-8 md:w-8 md:justify-center"><NavigationIcon kind="switch" /><span className="md:sr-only">{localMode ? "Cloud" : "This computer"}</span></a>
+            <p className="text-xs text-[var(--text-muted)] md:hidden">{localMode ? `This computer: ${connectionStatus}` : `Cloud: ${connectionStatus}`} · Selected terminal: {selectedTransportMode === "local" ? "Local" : selectedTransportMode === "direct" ? "P2P" : selectedTransportMode === "centrifugo" ? "Cloud" : "none / connecting"}{connectionError ? ` · ${connectionError}` : ""}</p>
+            <div className="hidden md:flex">          <a
             href="https://github.com/fmktech/ftown"
             target="_blank"
             rel="noopener noreferrer"
@@ -688,11 +661,8 @@ PY`;
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false">
               <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/>
             </svg>
-          </a>
-
-          <span style={{ width: 1, height: 12, background: "var(--border-muted)" }} />
-
-          <div ref={userMenuRef} style={{ position: "relative" }}>
+          </a></div>
+          <div ref={userMenuRef} hidden={!isDesktop} style={{ position: "relative" }}>
             <button
               onClick={() => setShowUserMenu((v) => !v)}
               title={userId}
@@ -788,6 +758,8 @@ PY`;
               </div>
             )}
           </div>
+
+          </nav>
         </div>
       </header>
 
@@ -971,6 +943,9 @@ PY`;
             )}
           </div>
 
+          {!isDesktop && mobileTab === "sessions" && selectedSession && <section aria-label="Selected session header" className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3 py-1">
+            <span className="min-w-0 flex-1 truncate text-xs">{selectedSession.name || selectedSession.prompt?.slice(0, 48) || "Selected session"}</span>{sessionHeaderActions}
+          </section>}
           <div className="flex-1 overflow-y-auto">
             <SessionList
               sessions={sessions}
@@ -999,11 +974,6 @@ PY`;
               bridgeSecurityStates={bridgeSecurityStates}
             />
           </div>
-          <button type="button" className="flex min-h-11 shrink-0 items-center justify-center gap-2 border-t border-[var(--border-subtle)] px-3 py-2 text-sm text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
-            title="Security: computer and browser access" aria-label="Open security" onClick={() => openSecurity()}>
-            <SecurityLockIcon state="unknown" /><span className={isDesktop && sidebarCollapsed ? "sr-only" : ""}>Security{pendingCount > 0 ? ` (${pendingCount})` : ""}</span>
-          </button>
-          <PushNotificationsControl localMode={localMode} accountId={userId} />
           {!sidebarCollapsed && (
             <div
               role="separator"
@@ -1027,13 +997,14 @@ PY`;
         </aside>
 
         {/* Terminal area */}
-        <main className={`flex-1 flex-col min-h-0 min-w-0 ${mobileTab === "terminal" ? "flex" : "hidden"} md:flex`}>
+        <main aria-hidden={!isDesktop && mobileTab !== "terminal"} className={`flex-1 flex-col min-h-0 min-w-0 ${mobileTab === "terminal" ? "flex" : "hidden"} md:flex`}>
           <Terminal
             ref={terminalRef}
             transport={transport}
             sessionId={selectedSessionId}
             bridgeId={selectedSession?.bridgeId ?? null}
             isRunning={selectedSession?.status === "running"}
+            headerActions={sessionHeaderActions}
             sessionName={selectedSession?.name ?? selectedSession?.prompt?.slice(0, 48) ?? null}
             pullRequestUrl={selectedSession?.pullRequestUrl}
             usage={selectedSessionId ? sessionActivity.get(selectedSessionId)?.usage : undefined}

@@ -19,6 +19,15 @@ beforeEach(() => localStorage.clear());
 afterEach(cleanup);
 
 describe("session PR destinations", () => {
+  it("renders caller actions only inside an actual selected session header", () => {
+    const actions=createElement("div",{role:"group","aria-label":"Selected session actions"},createElement("button",null,"Stop"));
+    const header=document.createElement("div");
+    const props={transport:null,sessionId:session.id,bridgeId:session.bridgeId,isRunning:true,headerActions:actions};
+    header.innerHTML=renderToStaticMarkup(createElement(Terminal,props));
+    expect(within(header).getByRole("group",{name:"Selected session actions"}).querySelector("button")?.textContent).toBe("Stop");
+    header.innerHTML=renderToStaticMarkup(createElement(Terminal,{...props,sessionId:null}));
+    expect(within(header).queryByRole("group",{name:"Selected session actions"})).toBeNull();
+  });
   it("renders the real terminal header link with repository context and safe new-tab attributes", () => {
     // Static rendering exercises the real header without starting a terminal,
     // browser socket, or xterm's canvas renderer.
