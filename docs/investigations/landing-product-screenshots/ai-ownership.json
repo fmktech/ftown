@@ -1,6 +1,6 @@
 {
   "checkout": "/Users/fkesheh/projects/ftown-e2e-performance",
-  "phase": "final integration; Git lease released on successful PR handoff",
+  "phase": "evidence-only integration; Git lease released on successful PR handoff",
   "integrationOwner": "/root/site_integration",
   "leases": {
     "site_integration": {
@@ -13,7 +13,7 @@
         "e2e/tests/landing-product-screenshots.spec.ts",
         "docs/investigations/landing-product-screenshots/ui-handoff.md"
       ],
-      "status": "source/test leases released; Git lease ends on successful PR handoff"
+      "status": "application and diagnostic leases released; Git lease ends on successful evidence PR handoff"
     },
     "site_capture": {
       "agent": "/root/site_capture",
@@ -33,9 +33,10 @@
       "model": "gpt-6.1-sol",
       "effort": "max",
       "files": [
-        "docs/investigations/landing-product-screenshots/ai-design-review.md"
+        "docs/investigations/landing-product-screenshots/ai-design-review.md",
+        "docs/investigations/landing-product-screenshots/ai-ci-findings.md"
       ],
-      "status": "released; source/media/visual/runtime evidence accepted"
+      "status": "completed; source/media and CI findings reviewed; all leases released; native completed"
     },
     "root": {
       "agent": "/root",
@@ -51,7 +52,7 @@
   },
   "runtimeOwner": "/root",
   "sandbox": null,
-  "runtimeState": "completed: capture and focused E2E passed; services/DB/key cleaned; sandbox deleted and absence verified",
+  "runtimeState": "Both root-owned sandboxes deleted after successful cleanup; isolated account reproduction1pass and logging-only concurrent diagnostic2pass; no cause reproduced",
   "gitOwner": "/root/site_integration",
-  "retirement": "Capture and review task-owned workers completed with released file leases; integration completes and Git lease is released on successful PR handoff. Native completion is the available retirement mechanism."
+  "retirement": "Capture and review task-owned workers completed with released leases; integration completes and releases Git lease on successful PR handoff. Native completion is the available retirement mechanism."
 }
