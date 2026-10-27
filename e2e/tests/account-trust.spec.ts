@@ -22,10 +22,13 @@ async function navigationEvidence(page: Page, info: TestInfo) {
   for (const width of [1280, 900, 390, 320]) {
     await page.setViewportSize({ width, height: 844 });
     const menu = page.getByRole("button", { name: "Open navigation menu", exact: true });
-    const nav = page.getByRole("navigation", { name: "Dashboard actions" });
+    // Keep addressing the mounted navigation even after Escape hides it from
+    // the accessibility tree. Visibility is checked separately below.
+    const nav = page.locator("#dashboard-navigation");
     if (width < 768) {
       await menu.click();
       await expect(nav).toBeVisible();
+      await expect(page.getByRole("navigation", { name: "Dashboard actions" })).toBeVisible();
       await expect(nav.getByRole("button", { name: "Open security", exact: true })).toBeVisible();
       await expect(nav.getByRole("link", { name: "Use This computer", exact: true })).toBeVisible();
       await expect(nav.getByRole("button", { name: "Review device approvals", exact: true })).toBeVisible();
@@ -35,9 +38,17 @@ async function navigationEvidence(page: Page, info: TestInfo) {
       await expect(nav).toBeHidden();
     } else {
       await expect(nav).toBeVisible();
+      await expect(page.getByRole("navigation", { name: "Dashboard actions" })).toBeVisible();
       await expect(nav.getByRole("button", { name: "Open security", exact: true })).toBeVisible();
     }
-    await expect(nav.locator("[data-push-state]")).toHaveCount(1);
+    const pushControl = nav.locator("[data-push-state]");
+    await expect(pushControl).toHaveCount(1);
+    if (width === 1280) {
+      await pushControl.evaluate(element => element.setAttribute("data-e2e-push-instance", "initial"));
+    } else {
+      // Resizing and opening/closing the menu must not replace the controller.
+      await expect(pushControl).toHaveAttribute("data-e2e-push-instance", "initial");
+    }
     const diagnostics = page.getByRole("button", { name: "Connection status and diagnostics", exact: true });
     await expect(diagnostics).toBeVisible();
     expect(await diagnostics.locator("button").count()).toBe(0);

@@ -88,3 +88,214 @@ describe('ProcessRunner attachment readiness', () => {
     assert.deepEqual(errors, ['failed-create', 'failed-attach']);
   });
 });
+
+function controlledPty(pid: number) {
+  let exit!: (event: { exitCode: number; signal?: number }) => void;
+  let data!: (value: string) => void;
+  const writes: string[] = [];
+  const kills: (string | undefined)[] = [];
+  const process = {
+    pid,
+    onData: (handler: (value: string) => void) => { data = handler; return { dispose() {} }; },
+    onExit: (handler: (event: { exitCode: number; signal?: number }) => void) => { exit = handler; return { dispose() {} }; },
+    write: (value: string) => { writes.push(value); },
+    resize: () => {},
+    kill: (signal?: string) => { kills.push(signal); },
+  } as unknown as IPty;
+  return { process, writes, kills, exit: (code = 0) => exit({ exitCode: code }), data: (value: string) => data(value) };
+}
+
+describe('ProcessRunner session generation ownership', () => {
+  for (const runtime of ['direct', 'tmux'] as const) {
+    it(`${runtime}: a current stop still force-kills an unresponsive process`, async () => {
+      const timers: (() => void)[] = [];
+      const original = globalThis.setTimeout;
+      globalThis.setTimeout = ((callback: () => void, delay?: number) => {
+        if (delay === 5000) { timers.push(callback); return {} as NodeJS.Timeout; }
+        return original(callback, delay);
+      }) as typeof setTimeout;
+      try {
+        const current = controlledPty(1);
+        const runner = new ProcessRunner({ spawn: () => current.process, createTmuxSession: async () => {} });
+        runner.getPreferredRuntime = () => runtime;
+        (runner as unknown as { killTmuxSessionLogged: () => void }).killTmuxSessionLogged = () => {};
+        const events: string[] = [];
+        runner.on('complete', id => events.push(`complete:${id}`));
+        runner.on('error', id => events.push(`error:${id}`));
+        runner.run('current', 'command');
+        if (runtime === 'tmux') await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(runner.resize('current', 91, 27), true);
+        assert.equal(runner.stop('current'), true);
+        assert.equal(timers.length, 1);
+        timers[0]();
+        assert.deepEqual(current.kills, [undefined, 'SIGKILL']);
+        assert.equal(runner.isRunning('current'), false);
+        current.exit();
+        assert.equal(runner.getRuntime('current'), undefined);
+        assert.equal((runner as unknown as { lastSizes: Map<string, unknown> }).lastSizes.has('current'), false);
+        assert.equal((runner as unknown as { generations: Map<string, unknown> }).generations.has('current'), false);
+        assert.deepEqual(events, []);
+      } finally { globalThis.setTimeout = original; }
+    });
+
+    it(`${runtime}: ignores an old stop timer after a new process owns the same session`, async () => {
+      const timers: (() => void)[] = [];
+      const original = globalThis.setTimeout;
+      globalThis.setTimeout = ((callback: () => void, delay?: number) => {
+        if (delay === 5000) { timers.push(callback); return {} as NodeJS.Timeout; }
+        return original(callback, delay);
+      }) as typeof setTimeout;
+      try {
+        const old = controlledPty(1), replacement = controlledPty(2);
+        const processes = [old.process, replacement.process];
+        const runner = new ProcessRunner({ spawn: () => processes.shift()!, createTmuxSession: async () => {} });
+        runner.getPreferredRuntime = () => runtime;
+        (runner as unknown as { killTmuxSessionLogged: () => void }).killTmuxSessionLogged = () => {};
+        runner.run('same', 'first');
+        if (runtime === 'tmux') await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(runner.stop('same'), true);
+        old.exit();
+        runner.run('same', 'replacement');
+        if (runtime === 'tmux') await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(runner.write('same', 'before'), true);
+        assert.equal(timers.length, 1);
+        timers[0]();
+        assert.equal(runner.write('same', 'after'), true);
+        assert.deepEqual(replacement.writes, ['before', 'after']);
+        assert.deepEqual(replacement.kills, []);
+        assert.deepEqual(old.kills, [undefined]);
+      } finally { globalThis.setTimeout = original; }
+    });
+
+    it(`${runtime}: an exit after forced stop cannot clean up a replacement`, async () => {
+      const timers: (() => void)[] = [];
+      const original = globalThis.setTimeout;
+      globalThis.setTimeout = ((callback: () => void, delay?: number) => {
+        if (delay === 5000) { timers.push(callback); return {} as NodeJS.Timeout; }
+        return original(callback, delay);
+      }) as typeof setTimeout;
+      try {
+        const old = controlledPty(1), replacement = controlledPty(2);
+        const processes = [old.process, replacement.process];
+        const runner = new ProcessRunner({ spawn: () => processes.shift()!, createTmuxSession: async () => {} });
+        runner.getPreferredRuntime = () => runtime;
+        (runner as unknown as { killTmuxSessionLogged: () => void }).killTmuxSessionLogged = () => {};
+        const events: string[] = [];
+        runner.on('complete', id => events.push(id));
+        runner.on('error', id => events.push(id));
+        runner.run('same', 'old');
+        if (runtime === 'tmux') await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(runner.stop('same'), true);
+        timers[0]();
+        assert.equal(runner.isRunning('same'), false);
+        runner.run('same', 'new');
+        if (runtime === 'tmux') await new Promise<void>(resolve => setImmediate(resolve));
+        assert.equal(runner.resize('same', 80, 24), true);
+        old.exit();
+        assert.equal(runner.write('same', 'alive'), true);
+        assert.equal(runner.getRuntime('same'), runtime);
+        assert.deepEqual((runner as unknown as { lastSizes: Map<string, unknown> }).lastSizes.get('same'), { cols: 80, rows: 24 });
+        assert.deepEqual(events, []);
+      } finally { globalThis.setTimeout = original; }
+    });
+
+    it(`${runtime}: ignores late exit and data without consuming a new generation stop`, async () => {
+      const old = controlledPty(1), replacement = controlledPty(2);
+      const processes = [old.process, replacement.process];
+      const runner = new ProcessRunner({ spawn: () => processes.shift()!, createTmuxSession: async () => {} });
+      runner.getPreferredRuntime = () => runtime;
+      (runner as unknown as { killTmuxSessionLogged: () => void }).killTmuxSessionLogged = () => {};
+      const events: string[] = [];
+      runner.on('complete', id => events.push(`complete:${id}`));
+      runner.on('error', id => events.push(`error:${id}`));
+      runner.on('data', (_id, value) => events.push(`data:${value}`));
+      runner.run('same', 'first');
+      if (runtime === 'tmux') await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(runner.stop('same'), true);
+      runner.run('same', 'replacement');
+      if (runtime === 'tmux') await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(runner.resize('same', 91, 27), true);
+      assert.equal(runner.stop('same'), true);
+      old.data('stale'); old.exit();
+      assert.equal(runner.isRunning('same'), true);
+      assert.equal(runner.getRuntime('same'), runtime);
+      assert.deepEqual((runner as unknown as { lastSizes: Map<string, unknown> }).lastSizes.get('same'), { cols: 91, rows: 27 });
+      assert.deepEqual(events, []);
+      replacement.exit();
+      assert.equal(runner.isRunning('same'), false);
+      assert.deepEqual(events, []);
+    });
+  }
+
+  it('current direct exit removes its own process and emits completion', () => {
+    const current = controlledPty(1);
+    const runner = new ProcessRunner({ spawn: () => current.process });
+    runner.getPreferredRuntime = () => 'direct';
+    const completed: string[] = [];
+    runner.on('complete', id => completed.push(id));
+    runner.run('current', 'command');
+    current.exit();
+    assert.equal(runner.isRunning('current'), false);
+    assert.deepEqual(completed, ['current']);
+  });
+
+  it('tmux detach on shutdown suppresses completion and removes only its own client', () => {
+    const current = controlledPty(1);
+    const runner = new ProcessRunner({ spawn: () => current.process });
+    runner.hasTmuxSession = () => true;
+    const events: string[] = [];
+    runner.on('complete', id => events.push(id));
+    runner.on('error', id => events.push(id));
+    assert.equal(runner.reattach('current'), true);
+    runner.stopAll();
+    current.exit();
+    assert.equal(runner.isRunning('current'), false);
+    assert.deepEqual(current.kills, [undefined]);
+    assert.deepEqual(events, []);
+  });
+
+  it('honors stop while tmux creation is pending without attaching or emitting completion', async () => {
+    let finish!: () => void;
+    let attached = 0, killed = 0;
+    const runner = new ProcessRunner({
+      createTmuxSession: () => new Promise<void>(resolve => { finish = resolve; }),
+      spawn: () => { attached++; return controlledPty(1).process; },
+    });
+    runner.getPreferredRuntime = () => 'tmux';
+    (runner as unknown as { killTmuxSessionLogged: () => void }).killTmuxSessionLogged = () => { killed++; };
+    const events: string[] = [];
+    runner.on('complete', id => events.push(id));
+    runner.on('error', id => events.push(id));
+    runner.run('pending', 'command');
+    assert.equal(runner.stop('pending'), true);
+    finish();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(attached, 0);
+    assert.equal(killed, 2);
+    assert.equal(runner.getRuntime('pending'), undefined);
+    assert.deepEqual(events, []);
+  });
+
+  it('does not let a stale pending tmux creation cancel a newer launch', async () => {
+    const finishes: (() => void)[] = [];
+    const replacement = controlledPty(2);
+    let killed = 0;
+    const runner = new ProcessRunner({
+      createTmuxSession: () => new Promise<void>(resolve => { finishes.push(resolve); }),
+      spawn: () => replacement.process,
+    });
+    runner.getPreferredRuntime = () => 'tmux';
+    (runner as unknown as { killTmuxSessionLogged: () => void }).killTmuxSessionLogged = () => { killed++; };
+    runner.run('same', 'old');
+    assert.equal(runner.stop('same'), true);
+    runner.run('same', 'new');
+    finishes[1]();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    finishes[0]();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(runner.write('same', 'still live'), true);
+    assert.deepEqual(replacement.writes, ['still live']);
+    assert.equal(killed, 1, 'stale creation must not kill the new session');
+    assert.equal(runner.getRuntime('same'), 'tmux');
+  });
+});
