@@ -38,7 +38,7 @@ async function waitForSecurityLayout(page: Page, width: number) {
   await expect.poll(() => page.getByRole("dialog", { name: "Security", exact: true }).evaluate((element, mobile) => {
     const transitioning = element.getAnimations({ subtree: true }).some(animation => animation instanceof CSSTransition && animation.playState === "running");
     const controls = [...element.querySelectorAll<HTMLElement>("button,select,summary")].filter(control => control.checkVisibility());
-    return !transitioning && controls.length > 0 && (!mobile || controls.every(control => control.getBoundingClientRect().height >= 44));
+    return !transitioning && document.documentElement.scrollWidth <= innerWidth && controls.length > 0 && (!mobile || controls.every(control => control.getBoundingClientRect().height >= 44));
   }, width < 640), { timeout: 2000, intervals: [25, 50, 100], message: "Security responsive transitions and control geometry must settle" }).toBe(true);
 }
 
@@ -377,6 +377,7 @@ test("an approved browser uses encrypted local HTTP control and event polling", 
     }
     expect(accountRequests).toHaveLength(0);
     await page.setViewportSize({ width: 900, height: 760 });
+    await waitForSecurityLayout(page, 900);
     await dialog.getByRole("button", { name: "Close security" }).click();
     const actions = page.getByRole("group", { name: "Selected session actions", exact: true });
     const runningIds = await sessionIdsFor(sharedEmail());
@@ -388,12 +389,13 @@ test("an approved browser uses encrypted local HTTP control and event polling", 
     await actions.getByRole("button", { name: "Rerun", exact: true }).click();
     await expect(actions.getByRole("button", { name: "Stop", exact: true })).toBeVisible({ timeout: 30000 });
     await openSession(page, name);
+    const rerunMarker = `LOCALRERUN${Date.now()}`;
     try {
-      await runMarkerInTerminal(page, `LOCALRERUN${Date.now()}`);
+      await runMarkerInTerminal(page, rerunMarker);
     } catch (failure) {
       // Collect before the finally block deletes this test-owned session. If a
       // diagnostic itself fails, retain the original assertion failure.
-      try { await captureRerunFailure(page, info, sessionId, before, name, pointer, preStopOffset, marker); } catch { /* preserve failure */ }
+      try { await captureRerunFailure(page, info, sessionId, before, name, pointer, preStopOffset, rerunMarker); } catch { /* preserve failure */ }
       throw failure;
     }
     expect(await sessionIdsFor(sharedEmail())).toEqual(runningIds);
