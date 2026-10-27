@@ -11,6 +11,7 @@ import { Script } from 'node:vm';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const require = createRequire(path.join(repo, 'ui/package.json'));
+const e2eRequire = createRequire(path.join(repo, 'e2e/package.json'));
 const ts = require('typescript');
 function helper(relative, imports, globals = {}) {
   const file = path.join(repo, relative);
@@ -27,6 +28,73 @@ function helper(relative, imports, globals = {}) {
   });
   return module.exports;
 }
+
+function playwrightConfig(browserHome) {
+  const e2e = path.join('/isolated task', 'ftown', 'e2e');
+  return helper('e2e/playwright.config.ts', {
+    '@playwright/test': e2eRequire('@playwright/test'),
+    'node:path': path,
+    './helpers/config': { E2E_DIR: e2e, UI_BASE_URL: 'http://localhost:3000' },
+  }, { process: { env: { CI: 'true', ...(browserHome === undefined ? {} : { E2E_BROWSER_HOME: browserHome }) } } }).default;
+}
+
+test('Playwright assigns only explicitly isolated files to the concurrent lane', () => {
+  const config = playwrightConfig();
+  assert.equal(config.workers, 2);
+  assert.equal(config.fullyParallel, false);
+  assert.equal(config.retries, 0);
+  assert.equal(config.forbidOnly, true);
+  assert.equal(config.timeout, 90_000);
+  assert.equal(config.expect.timeout, 15_000);
+  assert.deepEqual(Array.from(config.projects, project => project.name), ['chromium', 'chromium-isolated']);
+  const [shared, isolated] = config.projects;
+  assert.equal(shared.workers, 1);
+  assert.equal(shared.fullyParallel, false);
+  assert.equal(isolated.fullyParallel, true);
+  assert.equal(shared.dependencies, undefined);
+  assert.equal(isolated.dependencies, undefined);
+  assert.equal(shared.testIgnore, isolated.testMatch);
+  assert.equal(isolated.testMatch.length, 2);
+  const matches = file => isolated.testMatch.some(pattern => pattern.test(file));
+  const testDir = path.join('/isolated task', 'ftown', 'e2e', 'tests');
+  const names = ['account-trust.spec.ts', 'pending-approvals.spec.ts'];
+  for (const [index, name] of names.entries()) {
+    const canonical = path.join(testDir, name);
+    assert.equal(matches(canonical), true, name);
+    assert.equal(isolated.testMatch[index].test(canonical), true);
+    assert.equal(isolated.testMatch[1 - index].test(canonical), false);
+    for (const file of [path.join(testDir, 'nested', 'tests', name), path.join(testDir, 'nested', name),
+      path.join('/unowned/e2e/tests', name), path.join('/isolated task/ftown/e2e-adjacent/tests', name),
+      path.join(testDir, `${name}.extra`), path.join(testDir, `prefix-${name}`)]) {
+      assert.equal(matches(file), false, file);
+    }
+  }
+  assert.equal(matches(path.join(testDir, 'new.spec.ts')), false);
+});
+
+test('Playwright lanes share browser security settings and reject an unowned browser home', () => {
+  const config = playwrightConfig();
+  const [shared, isolated] = config.projects;
+  assert.equal(shared.use, isolated.use);
+  assert.equal(shared.use.channel, 'chromium');
+  const home = path.join('/isolated task', 'ftown', 'e2e', '.browser-home');
+  assert.equal(shared.use.launchOptions.env.HOME, home);
+  assert.equal(shared.use.launchOptions.env.XDG_DATA_HOME, path.join(home, '.local/share'));
+  assert.equal(shared.use.launchOptions.env.XDG_CONFIG_HOME, path.join(home, '.config'));
+  assert.equal(shared.use.launchOptions.env.XDG_CACHE_HOME, path.join(home, '.cache'));
+  assert.deepEqual(Array.from(shared.use.launchOptions.args), [
+    '--disable-features=WebRtcHideLocalIpsWithMdns', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream',
+  ]);
+  assert.equal(config.use.trace, 'retain-on-failure');
+  assert.equal(config.use.video, 'retain-on-failure');
+  assert.equal(config.use.screenshot, 'only-on-failure');
+  assert.deepEqual(Array.from(config.reporter, reporter => reporter[0]), ['list', 'html', 'json']);
+  assert.equal(config.reporter[2][1].outputFile, 'test-results/results.json');
+  assert.doesNotThrow(() => playwrightConfig(home));
+  for (const invalid of ['.browser-home', '/unowned/.browser-home', `${home}/../.browser-home`]) {
+    assert.throws(() => playwrightConfig(invalid), /E2E_BROWSER_HOME must be the canonical/);
+  }
+});
 const { clientIp } = helper('ui/src/lib/client-ip.ts', {});
 function registrar(origin = 'http://localhost:3000') {
   const attempts = new Map(); const requests = [];

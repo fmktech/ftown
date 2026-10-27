@@ -1,0 +1,203 @@
+{
+  "conclusion": "success",
+  "databaseId": 40506167950,
+  "headSha": "acf5a180039d04753f7d79433477b1bcde938a32",
+  "jobs": [
+    {
+      "completedAt": "2026-10-27T13:12:03Z",
+      "conclusion": "success",
+      "databaseId": 122195902641,
+      "name": "direct-transport-e2e",
+      "startedAt": "2026-10-27T12:44:39Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-27T12:44:41Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-27T12:44:40Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T12:44:43Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-10-27T12:44:41Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T12:44:50Z",
+          "conclusion": "success",
+          "name": "Run actions/setup-node@v4",
+          "number": 3,
+          "startedAt": "2026-10-27T12:44:43Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T12:44:54Z",
+          "conclusion": "success",
+          "name": "Cache Playwright browsers",
+          "number": 4,
+          "startedAt": "2026-10-27T12:44:50Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T12:48:05Z",
+          "conclusion": "success",
+          "name": "Install zsh + tmux + isolated browser trust tools",
+          "number": 5,
+          "startedAt": "2026-10-27T12:44:54Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T12:48:05Z",
+          "conclusion": "success",
+          "name": "Fix zsh insecure completion directories",
+          "number": 6,
+          "startedAt": "2026-10-27T12:48:05Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T12:48:25Z",
+          "conclusion": "success",
+          "name": "Start infra (postgres + neon-http-shim + centrifugo)",
+          "number": 7,
+          "startedAt": "2026-10-27T12:48:05Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T12:48:26Z",
+          "conclusion": "success",
+          "name": "Create DB schema",
+          "number": 8,
+          "startedAt": "2026-10-27T12:48:25Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T12:49:22Z",
+          "conclusion": "success",
+          "name": "Build UI",
+          "number": 9,
+          "startedAt": "2026-10-27T12:48:26Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T12:49:53Z",
+          "conclusion": "success",
+          "name": "Build bridge",
+          "number": 10,
+          "startedAt": "2026-10-27T12:49:22Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T12:49:57Z",
+          "conclusion": "success",
+          "name": "Check pending approval atomicity on isolated PostgreSQL",
+          "number": 11,
+          "startedAt": "2026-10-27T12:49:53Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T12:49:59Z",
+          "conclusion": "success",
+          "name": "Check managed Solo security boundaries",
+          "number": 12,
+          "startedAt": "2026-10-27T12:49:57Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T12:49:59Z",
+          "conclusion": "skipped",
+          "name": "Install Playwright chromium (browsers + OS deps)",
+          "number": 13,
+          "startedAt": "2026-10-27T12:49:59Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T13:03:14Z",
+          "conclusion": "success",
+          "name": "Install Playwright OS deps only (browsers cached)",
+          "number": 14,
+          "startedAt": "2026-10-27T12:49:59Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T13:11:36Z",
+          "conclusion": "success",
+          "name": "Start isolated services and run Playwright e2e",
+          "number": 15,
+          "startedAt": "2026-10-27T13:03:14Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T13:11:47Z",
+          "conclusion": "success",
+          "name": "Stop UI + bridge (only recorded PIDs)",
+          "number": 16,
+          "startedAt": "2026-10-27T13:11:36Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T13:11:49Z",
+          "conclusion": "success",
+          "name": "Upload Playwright report + traces",
+          "number": 17,
+          "startedAt": "2026-10-27T13:11:47Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T13:11:49Z",
+          "conclusion": "skipped",
+          "name": "Dump infra logs on failure",
+          "number": 18,
+          "startedAt": "2026-10-27T13:11:49Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T13:12:00Z",
+          "conclusion": "success",
+          "name": "Tear down infra",
+          "number": 19,
+          "startedAt": "2026-10-27T13:11:49Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T13:12:00Z",
+          "conclusion": "success",
+          "name": "Post Cache Playwright browsers",
+          "number": 36,
+          "startedAt": "2026-10-27T13:12:00Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T13:12:00Z",
+          "conclusion": "success",
+          "name": "Post Run actions/setup-node@v4",
+          "number": 37,
+          "startedAt": "2026-10-27T13:12:00Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T13:12:00Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 38,
+          "startedAt": "2026-10-27T13:12:00Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-27T13:12:00Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 39,
+          "startedAt": "2026-10-27T13:12:00Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/fmktech/ftown/actions/runs/40506167950/job/122195902641"
+    }
+  ],
+  "status": "completed"
+}
