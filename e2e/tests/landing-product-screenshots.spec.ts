@@ -3,13 +3,13 @@ import { registerAndLogin } from "../helpers/app";
 
 const captures = [
   {
-    alt: "FTown desktop dashboard with a session sidebar and an open shell terminal.",
+    alt: "FTown desktop dashboard showing a real Codex coding session and its output.",
     link: "Open desktop screenshot",
     loading: "eager",
     widths: [640, 1120, 2240],
   },
   {
-    alt: "FTown mobile terminal with Workspace and Terminal navigation and touch controls.",
+    alt: "FTown on a phone-sized screen showing the same Codex session with touch controls.",
     link: "Open mobile screenshot",
     loading: "lazy",
     widths: [390, 780],
@@ -30,7 +30,16 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 1000, height: 900
     await page.goto("/");
     await expect(page.getByRole("heading", { level: 1 })).toHaveText("Command every coding agent from one browser.");
     await expect(page.getByRole("heading", { name: "Your workspace, wherever you are." })).toBeVisible();
-    await expect(page.locator("video[autoplay]")).toHaveCount(0);
+    await expect(page.locator("video[autoplay], video[loop]")).toHaveCount(0);
+    await expect(page.locator("details")).toHaveCount(0);
+    await expect(page.getByText(/Watch (desktop|mobile) walkthrough/)).toHaveCount(0);
+    for (const label of ["Play desktop AI demo", "Play mobile AI demo"]) {
+      const button = page.getByRole("button", { name: label });
+      const box = await button.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.width).toBeGreaterThanOrEqual(44);
+      expect(box!.height).toBeGreaterThanOrEqual(44);
+    }
     await expect(page.getByRole("link", { name: "Sign In" })).toHaveAttribute("href", "/login");
     await expect(page.getByRole("link", { name: "Try Hosted" }).first()).toHaveAttribute("href", "/register");
     const selfHost = page.getByRole("link", { name: "Self-host (Open Source)" }).first();
@@ -110,10 +119,10 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 1000, height: 900
     const focusOrder = [
       page.getByRole("link", { name: "Self-host (Open Source)", exact: true }).first(),
       page.getByRole("link", { name: "GitHub", exact: true }).first(),
+      page.getByRole("button", { name: "Play desktop AI demo" }),
       page.getByRole("link", { name: captures[0].link }),
-      page.locator("summary").filter({ hasText: "Watch desktop walkthrough" }),
+      page.getByRole("button", { name: "Play mobile AI demo" }),
       page.getByRole("link", { name: captures[1].link }),
-      page.locator("summary").filter({ hasText: "Watch mobile walkthrough" }),
       page.getByRole("link", { name: captures[2].link }),
     ];
     for (const focused of focusOrder) {
@@ -151,6 +160,30 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 1000, height: 900
       await page.goBack();
       await expect(page.getByRole("link", { name: capture.link })).toBeVisible();
     }
+    if (viewport.width === 320 || viewport.width === 1000) {
+      for (const item of [
+        { kind: "desktop", button: "Play desktop AI demo", link: captures[0].link },
+        { kind: "mobile", button: "Play mobile AI demo", link: captures[1].link },
+      ]) {
+        const scene = page.locator(`[data-product-scene="${item.kind}"]`);
+        const next = page.getByRole("link", { name: item.link });
+        const before = await scene.boundingBox();
+        const nextBefore = await next.evaluate((element) => element.getBoundingClientRect().top + window.scrollY);
+        await scene.getByRole("button", { name: item.button }).click();
+        const video = scene.locator("video");
+        await expect(video).toBeVisible();
+        const after = await scene.boundingBox();
+        const nextAfter = await next.evaluate((element) => element.getBoundingClientRect().top + window.scrollY);
+        expect(before).not.toBeNull();
+        expect(after).not.toBeNull();
+        expect(Math.abs(after!.width - before!.width)).toBeLessThanOrEqual(1);
+        expect(Math.abs(after!.height - before!.height)).toBeLessThanOrEqual(1);
+        expect(Math.abs(nextAfter - nextBefore)).toBeLessThanOrEqual(1);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        await video.evaluate((element: HTMLVideoElement) => element.pause());
+        await scene.screenshot({ path: info.outputPath(`ai-playing-${item.kind}-${viewport.width}.png`) });
+      }
+    }
     expect(pageErrors).toEqual([]);
   });
 }
@@ -161,8 +194,9 @@ test("authenticated visitors still redirect from the public landing page", async
   await expect(page).toHaveURL(/\/dashboard$/);
 });
 
+
 for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
-  test(`desktop and mobile walkthroughs play on demand at ${viewport.width}px`, async ({ page }, info) => {
+  test(`AI demos play on demand at ${viewport.width}px`, async ({ page }, info) => {
     await page.setViewportSize(viewport);
     const mediaRequests: string[] = [];
     const errors: string[] = [];
@@ -192,42 +226,59 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     expect(manifest.version).toBe(2);
     expect(mediaRequests).toEqual([]);
     await expect(page.locator("video")).toHaveCount(2);
+    await page.screenshot({ path: info.outputPath(`ai-idle-${viewport.width}.png`), fullPage: true });
 
     for (const item of [
-      { kind: "desktop", label: "Watch desktop walkthrough", alt: captures[0].alt, link: captures[0].link, path: "/product/desktop-workspace.mp4", width: 1280, height: 800 },
-      { kind: "mobile", label: "Watch mobile walkthrough", alt: captures[1].alt, link: captures[1].link, path: "/product/mobile-terminal.mp4", width: 390, height: 844 },
+      { kind: "desktop", button: "Play desktop AI demo", previous: "GitHub", alt: captures[0].alt, link: captures[0].link, path: "/product/desktop-workspace.mp4", width: 1280, height: 800 },
+      { kind: "mobile", button: "Play mobile AI demo", previous: captures[0].link, alt: captures[1].alt, link: captures[1].link, path: "/product/mobile-terminal.mp4", width: 390, height: 844 },
     ] as const) {
-      const summary = page.locator("summary").filter({ hasText: item.label });
-      const details = summary.locator("..");
-      const video = details.locator("video");
+      const scene = page.locator(`[data-product-scene="${item.kind}"]`);
+      const poster = scene.getByAltText(item.alt);
+      const video = scene.locator("video");
+      const button = scene.getByRole("button", { name: item.button });
+      const next = page.getByRole("link", { name: item.link });
       const metadata = manifest.videos[item.kind];
-      await expect(details).not.toHaveAttribute("open", "");
+      await expect(poster).toBeVisible();
+      await expect(video).not.toBeVisible();
+      await expect(button).toBeVisible();
       await expect(video).toHaveAttribute("controls", "");
       await expect(video).toHaveAttribute("playsinline", "");
       await expect(video).toHaveAttribute("preload", "none");
       await expect(video).not.toHaveAttribute("autoplay", "");
       await expect(video).not.toHaveAttribute("loop", "");
-      await expect(video).toHaveAttribute("poster", (await page.getByAltText(item.alt).getAttribute("src"))!);
       await expect(video).toHaveAttribute("src", item.path);
+      expect(await video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBe(0);
       expect(metadata.src).toBe(item.path);
       expect(metadata.width).toBe(item.width);
       expect(metadata.height).toBe(item.height);
-      const target = await summary.boundingBox();
-      expect(target).not.toBeNull();
-      expect(target!.height).toBeGreaterThanOrEqual(44);
-      expect(target!.width).toBeGreaterThanOrEqual(44);
-      await page.getByRole("link", { name: item.link }).focus();
-      await page.keyboard.press("Tab");
-      await expect(summary).toBeFocused();
-      expect(await summary.evaluate((element) => getComputedStyle(element).boxShadow)).not.toBe("none");
-      await page.keyboard.press("Enter");
-      await expect(details).toHaveAttribute("open", "");
-      await expect(video).toBeVisible();
+      expect(mediaRequests).not.toContain(item.path);
+      await button.scrollIntoViewIfNeeded();
+      const before = await scene.boundingBox();
+      const nextBefore = await next.evaluate((element) => element.getBoundingClientRect().top + window.scrollY);
+      expect(before).not.toBeNull();
       const responsePromise = page.waitForResponse((response) => new URL(response.url()).pathname === item.path);
-      await video.evaluate(async (element: HTMLVideoElement) => { await element.play(); });
+      if (item.kind === "desktop") {
+        await button.click();
+      } else {
+        await page.getByRole("link", { name: item.previous, exact: true }).first().focus();
+        await page.keyboard.press("Tab");
+        await expect(button).toBeFocused();
+        expect(await button.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
+        expect(await button.evaluate((element) => getComputedStyle(element).boxShadow)).toContain("inset");
+        await page.keyboard.press("Enter");
+      }
       const response = await responsePromise;
       expect(response.ok()).toBe(true);
       expect(response.headers()["content-type"]).toMatch(/^video\/mp4\b/);
+      await expect(video).toBeVisible();
+      await expect(video).toBeFocused();
+      if (item.kind === "mobile") {
+        expect(await video.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
+        expect(await scene.evaluate((element) => getComputedStyle(element, "::after").boxShadow)).toContain("inset");
+      }
+      await expect(poster).not.toBeVisible();
+      await expect(scene.locator("img:visible")).toHaveCount(0);
+      await expect(scene.getByRole("button", { name: item.button })).toHaveCount(0);
       await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBeGreaterThan(0.2);
       const playback = await video.evaluate((element: HTMLVideoElement) => {
         element.pause();
@@ -240,9 +291,75 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       expect(Math.abs(playback.duration - metadata.durationSeconds)).toBeLessThan(0.15);
       expect(playback.paused).toBe(true);
       expect(playback.errorCode).toBeNull();
+      const after = await scene.boundingBox();
+      const nextAfter = await next.evaluate((element) => element.getBoundingClientRect().top + window.scrollY);
+      expect(after).not.toBeNull();
+      expect(Math.abs(after!.width - before!.width)).toBeLessThanOrEqual(1);
+      expect(Math.abs(after!.height - before!.height)).toBeLessThanOrEqual(1);
+      expect(Math.abs(nextAfter - nextBefore)).toBeLessThanOrEqual(1);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await scene.screenshot({ path: info.outputPath(`ai-playing-${item.kind}-${viewport.width}.png`) });
     }
-    await page.screenshot({ path: info.outputPath(`walkthroughs-${viewport.width}.png`), fullPage: true });
     expect(errors).toEqual([]);
   });
 }
+
+test.describe("video network failure", () => {
+  test.use({ serviceWorkers: "block" });
+
+  test("a failed AI demo offers retry and recovers when the video is available", async ({ page }, info) => {
+    await page.setViewportSize({ width: 320, height: 844 });
+    let attempts = 0;
+    let blocked = true;
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await page.route("**/product/desktop-workspace.mp4", async (route) => {
+      attempts++;
+      if (blocked) await route.abort("failed");
+      else await route.continue();
+    });
+    await page.goto("/");
+    const scene = page.locator('[data-product-scene="desktop"]');
+    const before = await scene.boundingBox();
+    await scene.getByRole("button", { name: "Play desktop AI demo" }).click();
+    await expect.poll(() => attempts).toBeGreaterThanOrEqual(1);
+    await expect(scene.getByRole("status")).toContainText("The demo could not play.");
+    const retry = scene.getByRole("button", { name: "Try again" });
+    await expect(retry).toBeFocused();
+    const video = scene.locator("video");
+    await expect(video).toBeVisible();
+    await expect(video).toHaveAttribute("controls", "");
+    await expect(video).toHaveAttribute("poster", (await scene.locator("img").getAttribute("src"))!);
+    await expect(scene.locator("img")).not.toBeVisible();
+    const fallback = scene.getByRole("link", { name: "Open video file" });
+    await expect(fallback).toHaveAttribute("href", "/product/desktop-workspace.mp4");
+    for (const control of [retry, fallback]) {
+      const box = await control.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.height).toBeGreaterThanOrEqual(44);
+    }
+    await scene.screenshot({ path: info.outputPath("ai-error-320.png") });
+    expect(attempts).toBeGreaterThanOrEqual(1);
+    const attemptsBeforeRetry = attempts;
+    const responsePromise = page.waitForResponse((response) => new URL(response.url()).pathname === "/product/desktop-workspace.mp4");
+    blocked = false;
+    await retry.click();
+    const response = await responsePromise;
+    expect(response.ok()).toBe(true);
+    expect(response.headers()["content-type"]).toMatch(/^video\/mp4\b/);
+    await expect.poll(() => attempts).toBeGreaterThan(attemptsBeforeRetry);
+    await expect(video).toBeVisible();
+    await expect(video).toBeFocused();
+    await expect(scene.getByText("The demo could not play.")).toHaveCount(0);
+    await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBeGreaterThan(0.2);
+    expect(await video.evaluate((element: HTMLVideoElement) => element.error)).toBeNull();
+    await video.evaluate((element: HTMLVideoElement) => element.pause());
+    await scene.screenshot({ path: info.outputPath("ai-recovered-320.png") });
+    const after = await scene.boundingBox();
+    expect(before).not.toBeNull();
+    expect(after).not.toBeNull();
+    expect(Math.abs(after!.width - before!.width)).toBeLessThanOrEqual(1);
+    expect(Math.abs(after!.height - before!.height)).toBeLessThanOrEqual(1);
+    expect(pageErrors).toEqual([]);
+  });
+});

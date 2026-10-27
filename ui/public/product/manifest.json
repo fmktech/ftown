@@ -10,19 +10,19 @@
           "src": "/product/desktop-workspace-640.webp",
           "width": 640,
           "height": 400,
-          "bytes": 24444
+          "bytes": 27718
         },
         {
           "src": "/product/desktop-workspace-1120.webp",
           "width": 1120,
           "height": 700,
-          "bytes": 59664
+          "bytes": 66954
         },
         {
           "src": "/product/desktop-workspace-2240.webp",
           "width": 2240,
           "height": 1400,
-          "bytes": 157476
+          "bytes": 173476
         }
       ]
     },
@@ -35,13 +35,13 @@
           "src": "/product/mobile-terminal-390.webp",
           "width": 390,
           "height": 844,
-          "bytes": 59246
+          "bytes": 40386
         },
         {
           "src": "/product/mobile-terminal-780.webp",
           "width": 780,
           "height": 1688,
-          "bytes": 142474
+          "bytes": 97670
         }
       ]
     },
@@ -54,13 +54,13 @@
           "src": "/product/device-access-896.webp",
           "width": 896,
           "height": 432,
-          "bytes": 24586
+          "bytes": 24504
         },
         {
           "src": "/product/device-access-1792.webp",
           "width": 1792,
           "height": 864,
-          "bytes": 53958
+          "bytes": 53918
         }
       ]
     }
@@ -70,15 +70,15 @@
       "src": "/product/desktop-workspace.mp4",
       "width": 1280,
       "height": 800,
-      "durationSeconds": 15.458333,
-      "bytes": 357634
+      "durationSeconds": 12.083333,
+      "bytes": 304706
     },
     "mobile": {
       "src": "/product/mobile-terminal.mp4",
       "width": 390,
       "height": 844,
-      "durationSeconds": 14.041667,
-      "bytes": 181883
+      "durationSeconds": 12.083333,
+      "bytes": 238696
     }
   }
 }

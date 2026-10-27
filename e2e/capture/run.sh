@@ -9,16 +9,18 @@ fail() { printf "[capture] %s\n" "$*" >&2; exit 1; }
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 [[ "$REPO" == /home/user/ftown && "$(realpath "$REPO")" == "$REPO" ]] || fail "checkout must be canonical /home/user/ftown"
 [[ "$(hostname)" == demo-workstation ]] || fail "actual hostname must be demo-workstation"
-for tool in node npm npx docker zsh tmux certutil openssl ffmpeg ffprobe ss; do
+[[ ! -e /home/user/demo-workspace && ! -L /home/user/demo-workspace ]] || fail "demo workspace already exists"
+for tool in node npm npx docker zsh tmux certutil openssl ffmpeg ffprobe ss codex; do
   command -v "$tool" >/dev/null || fail "missing prerequisite: $tool"
 done
 node -e 'const [a,b,c]=process.versions.node.split(".").map(Number);if(a!==24||b<22||(b===22&&c<1))process.exit(1)' || fail "Node 24.22.1 or newer within major version 24 is required"
+[[ "$(codex --version)" == "codex-cli 0.164.0" ]] || fail "Codex CLI 0.164.0 is required"
 
 # Reject inherited selectors even when empty. Only the two capture controls are allowed.
 while IFS= read -r name; do
   case "$name" in
-    FTOWN_CAPTURE_ISOLATED|FTOWN_CAPTURE_DIR) ;;
-    DATABASE*|DB_*|*_DATABASE_URL|*_DB_URL|DIRECT_URL|SHADOW_*|POSTGRES*|PG*|MIGRAT*|PRISMA*|NEON*|SUPABASE*|DOCKER*|COMPOSE*|E2E_*|FTOWN_*|CENTRIFUGO*|NEXT_PUBLIC_*|NEXTAUTH*|AUTH_*|VERCEL*|DEPLOY*|PUBLIC_URL|API_URL|REGISTRATION_ENABLED|NODE_ENV|NODE_OPTIONS|NODE_EXTRA_CA_CERTS|NPM_CONFIG_*|npm_config_*|PLAYWRIGHT_*|PORT|HOST|HOSTNAME_OVERRIDE)
+    FTOWN_CAPTURE_ISOLATED|FTOWN_CAPTURE_DIR|FTOWN_CAPTURE_OPENAI_KEY_FILE) ;;
+    OPENAI*|ANTHROPIC*|OPENROUTER*|AI_GATEWAY*|CODEX*|CLAUDE*|AZURE_OPENAI*|GOOGLE_API_KEY|GEMINI*|DEEPSEEK*|GROQ*|XAI*|MISTRAL*|FIREWORKS*|TOGETHER*|ZAI*|KIMI*|PROVIDER*|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|http_proxy|https_proxy|all_proxy|DATABASE*|DB_*|*_DATABASE_URL|*_DB_URL|DIRECT_URL|SHADOW_*|POSTGRES*|PG*|MIGRAT*|PRISMA*|NEON*|SUPABASE*|DOCKER*|COMPOSE*|E2E_*|FTOWN_*|CENTRIFUGO*|NEXT_PUBLIC_*|NEXTAUTH*|AUTH_*|VERCEL*|DEPLOY*|PUBLIC_URL|API_URL|REGISTRATION_ENABLED|NODE_ENV|NODE_OPTIONS|NODE_EXTRA_CA_CERTS|NPM_CONFIG_*|npm_config_*|PLAYWRIGHT_*|PORT|HOST|HOSTNAME_OVERRIDE)
       fail "inherited selector $name is not allowed" ;;
   esac
 done < <(compgen -e)
@@ -39,6 +41,13 @@ done
 
 : "${FTOWN_CAPTURE_DIR:?FTOWN_CAPTURE_DIR must be an absolute canonical staging directory}"
 export FTOWN_CAPTURE_DIR
+export FTOWN_CAPTURE_OPENAI_KEY_FILE="${FTOWN_CAPTURE_OPENAI_KEY_FILE:-}"
+node <<'JS' || fail "provider key file must be canonical, private, owned, nonempty and outside checkout and staging"
+const fs=require('node:fs'),path=require('node:path');
+const p=process.env.FTOWN_CAPTURE_OPENAI_KEY_FILE,repo=path.dirname(process.env.E2E_DIR),out=process.env.FTOWN_CAPTURE_DIR;
+if(!p||!path.isAbsolute(p)||path.resolve(p)!==p||p===repo||p.startsWith(repo+'/')||p===out||p.startsWith(out+'/'))process.exit(1);
+const s=fs.lstatSync(p);if(!s.isFile()||s.isSymbolicLink()||fs.realpathSync(p)!==p||s.uid!==process.getuid()||(s.mode&0o7777)!==0o600||s.size<1||s.size>16384)process.exit(1);
+JS
 node <<'JS' || fail "staging directory must be canonical, empty or new, outside checkout, with an existing canonical parent"
 const fs=require("node:fs"),path=require("node:path");
 const p=process.env.FTOWN_CAPTURE_DIR,repo=path.dirname(process.env.E2E_DIR);

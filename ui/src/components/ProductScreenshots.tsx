@@ -1,4 +1,5 @@
 import manifest from "../../public/product/manifest.json";
+import { ProductWalkthrough } from "./ProductWalkthrough";
 
 type Capture = (typeof manifest.images)["desktop"];
 
@@ -10,53 +11,25 @@ function sources(capture: Capture) {
   return capture.variants.map((variant) => `${variant.src} ${variant.width}w`).join(", ");
 }
 
-function Walkthrough({ kind, poster }: { kind: "desktop" | "mobile"; poster: string }) {
-  const video = manifest.videos[kind];
-  const label = kind === "desktop" ? "desktop" : "mobile";
-  return (
-    <details className="mt-2 min-w-0">
-      <summary className={`${linkClass} cursor-pointer gap-2`}><span aria-hidden="true">▸</span>Watch {label} walkthrough</summary>
-      <p className={`${captionClass} mb-3`}>Recorded in the same isolated demo workspace.</p>
-      <video
-        aria-label={`FTown ${label} walkthrough`}
-        controls
-        playsInline
-        preload="none"
-        poster={poster}
-        src={video.src}
-        width={video.width}
-        height={video.height}
-        className={`${imageClass} ${kind === "mobile" ? "mx-auto max-w-[280px]" : ""}`}
-      />
-    </details>
-  );
-}
-
 export function DesktopScreenshot() {
   const capture = manifest.images.desktop;
   return (
     <div className="mt-8">
       <figure>
-        {/* Real, pre-sized captures are served directly so the original image remains available. */}
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={capture.src}
-          srcSet={sources(capture)}
+        <ProductWalkthrough
+          kind="desktop"
+          image={capture}
+          video={manifest.videos.desktop}
+          alt="FTown desktop dashboard showing a real Codex coding session and its output."
           sizes="(min-width: 1168px) 1120px, (min-width: 640px) calc(100vw - 48px), calc(100vw - 32px)"
-          width={capture.width}
-          height={capture.height}
-          alt="FTown desktop dashboard with a session sidebar and an open shell terminal."
           loading="eager"
           fetchPriority="high"
-          className={imageClass}
         />
         <figcaption className="mt-3">
-          <p className={captionClass}>A real FTown workspace: sessions on the left, a live terminal on the right.</p>
-          <p className={`${captionClass} mt-1`}>Captured from a real, isolated FTown demo workspace.</p>
+          <p className={captionClass}>A real Codex coding session in FTown, captured in an isolated demo workspace.</p>
           <a className={linkClass} href={capture.src}>Open desktop screenshot</a>
         </figcaption>
       </figure>
-      <Walkthrough kind="desktop" poster={capture.src} />
     </div>
   );
 }
@@ -73,21 +46,17 @@ export function SupportingScreenshots() {
         <figure className="min-w-0 rounded-[var(--radius-lg)] border border-[var(--border-muted)] bg-[var(--bg-surface)] p-4 sm:p-6">
           <figcaption className="mb-4">
             <h3 className="font-[family-name:var(--font-sans)] text-lg font-bold text-[var(--text-primary)] mb-2">Pick up from your phone.</h3>
-            <p className={captionClass}>Open the same session from a phone-sized browser, with controls made for touch.</p>
+            <p className={captionClass}>Follow the same Codex session from a phone-sized browser.</p>
           </figcaption>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={mobile.src}
-            srcSet={sources(mobile)}
+          <ProductWalkthrough
+            kind="mobile"
+            image={mobile}
+            video={manifest.videos.mobile}
+            alt="FTown on a phone-sized screen showing the same Codex session with touch controls."
             sizes="(min-width: 346px) 280px, calc(100vw - 66px)"
-            width={mobile.width}
-            height={mobile.height}
-            alt="FTown mobile terminal with Workspace and Terminal navigation and touch controls."
             loading="lazy"
-            className={`${imageClass} mx-auto max-w-[280px]`}
           />
           <a className={`${linkClass} mt-2`} href={mobile.src}>Open mobile screenshot</a>
-          <Walkthrough kind="mobile" poster={mobile.src} />
         </figure>
         <figure className="min-w-0 rounded-[var(--radius-lg)] border border-[var(--border-muted)] bg-[var(--bg-surface)] p-4 sm:p-6">
           <figcaption className="mb-4">

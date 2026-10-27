@@ -1,0 +1,57 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-e2e-performance",
+  "phase": "final integration; Git lease released on successful PR handoff",
+  "integrationOwner": "/root/site_integration",
+  "leases": {
+    "site_integration": {
+      "agent": "/root/site_integration",
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "files": [
+        "ui/src/components/ProductScreenshots.tsx",
+        "ui/src/components/ProductWalkthrough.tsx",
+        "e2e/tests/landing-product-screenshots.spec.ts",
+        "docs/investigations/landing-product-screenshots/ui-handoff.md"
+      ],
+      "status": "source/test leases released; Git lease ends on successful PR handoff"
+    },
+    "site_capture": {
+      "agent": "/root/site_capture",
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "files": [
+        "e2e/capture/product.spec.ts",
+        "e2e/capture/ai-demo.ts",
+        "e2e/capture/run.sh",
+        "e2e/capture/README.md",
+        "docs/investigations/landing-product-screenshots/capture-audit.md"
+      ],
+      "status": "released; capture accepted"
+    },
+    "site_review": {
+      "agent": "/root/site_review",
+      "model": "gpt-6.1-sol",
+      "effort": "max",
+      "files": [
+        "docs/investigations/landing-product-screenshots/ai-design-review.md"
+      ],
+      "status": "released; source/media/visual/runtime evidence accepted"
+    },
+    "root": {
+      "agent": "/root",
+      "model": null,
+      "effort": null,
+      "files": [
+        "ui/public/product/",
+        "docs/investigations/landing-product-screenshots/ai-revision.md",
+        "docs/investigations/landing-product-screenshots/ai-ownership.json",
+        "docs/investigations/landing-product-screenshots/ai-validation.md"
+      ]
+    }
+  },
+  "runtimeOwner": "/root",
+  "sandbox": null,
+  "runtimeState": "completed: capture and focused E2E passed; services/DB/key cleaned; sandbox deleted and absence verified",
+  "gitOwner": "/root/site_integration",
+  "retirement": "Capture and review task-owned workers completed with released file leases; integration completes and Git lease is released on successful PR handoff. Native completion is the available retirement mechanism."
+}

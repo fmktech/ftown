@@ -8,11 +8,10 @@ import { approveAccountComputer, startAccountTestBridge, usePrivateApprovalLink,
 import { bridgeApiFetch } from "../helpers/bridge-api";
 import { E2E_DIR } from "../helpers/config";
 import { recordVideo, type Video } from "./record-video";
+import { AI_MODEL, AI_NAME, DEMO_WORKSPACE, INITIAL_PROMPT, prepareDemo, provisionCodex, removeDemo, verifyDemo, waitForTurn } from "./ai-demo";
 
 const origin = process.env.FTOWN_PUBLIC_URL ?? "https://localhost:8444";
-const names = ["Run safety checks", "Review checkout flow", "Explore the workspace"] as const;
-const command = "cd /home/user/ftown && node --test e2e/scripts/ci-fixtures.test.mjs";
-const mobileVideoCommand = "cd /home/user/ftown && node --test --test-reporter=tap e2e/scripts/ci-fixtures.test.mjs";
+const names = [AI_NAME, "Review test results", "Explore workspace"] as const;
 const repo = resolve(E2E_DIR, "..");
 const sharp = createRequire(join(repo, "ui/package.json"))("sharp");
 
@@ -54,39 +53,18 @@ async function openWorkspace(page: Page) {
   const workspace = page.getByRole("button", { name: "Workspace", exact: true });
   if (await workspace.isVisible()) await workspace.click();
 }
-async function openShell(page: Page) {
+async function openAgent(page: Page) {
   await openWorkspace(page);
   const row = sessionRow(page, names[0]);
   await expect(row).toBeVisible({ timeout: 45_000 });
   await row.click();
   await expect(page.locator(".xterm").first()).toBeVisible({ timeout: 45_000 });
 }
-type CheckPhase = "initial prompt" | "clear" | "command" | "pass" | "fail" | "final prompt";
-async function runChecks(page: Page, typingDelay = 0, testCommand = command, onPhase: (phase: CheckPhase) => void = () => {}) {
-  const term = page.locator(".xterm").first();
-  const rows = page.locator(".xterm-rows").first();
-  onPhase("initial prompt");
-  await expect(rows).toContainText(/[$%#>]/, { timeout: 45_000 });
-  await term.click();
-  await page.keyboard.type("PROMPT='demo-workstation %% '");
+async function followUp(page: Page, home: string, previous: number, prompt: string): Promise<number> {
+  await page.locator(".xterm").first().click();
+  await page.keyboard.type(prompt, { delay: 45 });
   await page.keyboard.press("Enter");
-  await expect(rows).toContainText("demo-workstation %", { timeout: 20_000 });
-  onPhase("clear");
-  await page.keyboard.type("clear");
-  await page.keyboard.press("Enter");
-  await expect(rows).not.toContainText(/pass\s+6/i, { timeout: 20_000 });
-  await expect.poll(async () => (await rows.textContent())?.trimEnd().endsWith("demo-workstation %") ?? false,
-    { timeout: 20_000 }).toBe(true);
-  onPhase("command");
-  await page.keyboard.type(testCommand, { delay: typingDelay });
-  await page.keyboard.press("Enter");
-  onPhase("pass");
-  await expect(rows).toContainText(/pass\s+6/i, { timeout: 60_000 });
-  onPhase("fail");
-  await expect(rows).toContainText(/fail\s+0/i, { timeout: 60_000 });
-  onPhase("final prompt");
-  await expect.poll(async () => (await rows.textContent())?.trimEnd().endsWith("demo-workstation %") ?? false,
-    { timeout: 30_000, message: "The real test command must finish and return to the shell prompt" }).toBe(true);
+  return waitForTurn(page, home, previous, 55_000, prompt);
 }
 
 async function exportImages(directory: string): Promise<Record<string, Capture>> {
@@ -126,6 +104,7 @@ async function exportImages(directory: string): Promise<Record<string, Capture>>
 
 // Deliberate viewing holds give people time to see each real state.
 const hold = (milliseconds: number) => new Promise<void>(resolve => setTimeout(resolve, milliseconds));
+const holdResult = (startedAt: number) => hold(Math.max(2500, 12_000 - (performance.now() - startedAt)));
 
 test("capture real isolated workspace, phone and access panel", async ({ browser }) => {
   const directory = await outputDirectory();
@@ -134,6 +113,9 @@ test("capture real isolated workspace, phone and access panel", async ({ browser
   const contexts: BrowserContext[] = [];
   const sessions: string[] = [];
   let bridge: AccountTestBridge | undefined;
+  let demoOwned = false;
+  let primaryError: unknown;
+  let hasPrimaryError = false;
   let images: Record<string, Capture> | undefined;
   let videos: { desktop: Video; mobile: Video } | undefined;
   try {
@@ -164,37 +146,39 @@ test("capture real isolated workspace, phone and access panel", async ({ browser
     await desktop.goto("/dashboard");
     await expect(desktop.locator(`[data-bridge-row="${bridgeId}"]`)).toBeVisible({ timeout: 45_000 });
 
-    for (const name of names) {
+    await prepareDemo();
+    demoOwned = true;
+    await provisionCodex(bridge.home, directory);
+    const agent = await bridgeApiFetch("POST", "/api/sessions", { bridgeHome: bridge.home, body: {
+      shellType: "codex", model: AI_MODEL, name: AI_NAME, workingDir: DEMO_WORKSPACE, prompt: INITIAL_PROMPT,
+    } });
+    expect(agent.status).toBe(201);
+    const agentSession = (agent.body as { session?: { id?: string; shellType?: string; model?: string } }).session;
+    expect(agentSession?.id).toBeTruthy();
+    sessions.push(agentSession!.id!);
+    expect(agentSession?.shellType).toBe("codex");
+    expect(agentSession?.model).toBe(AI_MODEL);
+    for (const name of names.slice(1)) {
       const result = await bridgeApiFetch("POST", "/api/sessions", { bridgeHome: bridge.home, body: { shellType: "shell", name } });
       expect(result.status).toBe(201);
       const id = (result.body as { session?: { id?: string; bridgeId?: string } }).session?.id;
       expect(id).toBeTruthy();
       sessions.push(id!);
     }
-    await openShell(desktop);
-    await runChecks(desktop);
-    const attention = await bridgeApiFetch("POST", `/api/sessions/${sessions[1]}/attention`, {
-      bridgeHome: bridge.home, body: { title: "Demo review requested", message: "Review the local test results." },
+    await openAgent(desktop);
+    let turns = await waitForTurn(desktop, bridge.home, 0);
+    await verifyDemo();
+    const attention = await bridgeApiFetch("POST", `/api/sessions/${sessions[0]}/attention`, {
+      bridgeHome: bridge.home, body: { title: "Review formatter", message: "Four formatter tests passed. Review the change." },
     });
     expect(attention.status).toBe(200);
     const region = desktop.getByRole("region", { name: "Needs attention", exact: true });
-    await expect(region.getByRole("button", { name: /^Review checkout flow: Demo review requested/ })).toBeVisible({ timeout: 30_000 });
+    await expect(region.getByRole("button", { name: /^Build duration formatter: Review formatter/ })).toBeVisible({ timeout: 30_000 });
     for (const name of names) await expect(sessionRow(desktop, name)).toBeVisible();
+    await expect(sessionRow(desktop, AI_NAME).getByRole("img", { name: "Codex agent", exact: true })).toBeVisible();
     await noOverflow(desktop);
     await desktop.evaluate(() => document.fonts.ready);
     await desktop.screenshot({ path: join(directory, "desktop.png"), animations: "disabled" });
-
-    await openShell(phone);
-    await expect(phone.getByRole("button", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
-    await expect(phone.getByRole("button", { name: "Workspace", exact: true })).toBeVisible();
-    await runChecks(phone);
-    await noOverflow(phone);
-    await phone.evaluate(() => document.fonts.ready);
-    const touchControls = phone.locator(".touch-control-bar");
-    await expect(touchControls).toBeVisible();
-    await expect(touchControls.getByRole("button", { name: "Show keyboard", exact: true })).toBeVisible();
-    await expect(touchControls.getByRole("button", { name: "Paste clipboard into terminal", exact: true })).toBeVisible();
-    await phone.screenshot({ path: join(directory, "mobile.png"), animations: "disabled" });
 
     await desktop.setViewportSize({ width: 1280, height: 900 });
     await desktop.getByRole("button", { name: "Open security", exact: true }).click();
@@ -212,52 +196,59 @@ test("capture real isolated workspace, phone and access panel", async ({ browser
     await desktop.setViewportSize({ width: 1280, height: 800 });
     await expect(desktop).toHaveURL(`${origin}/dashboard`);
     await expect(phone).toHaveURL(`${origin}/dashboard`);
-    await expect(region.getByRole("button", { name: /^Review checkout flow: Demo review requested/ })).toBeVisible();
-    const desktopVideo = await recordVideo(desktop, directory, "desktop-workspace", { width: 1280, height: 800 }, async () => {
+    await expect(region.getByRole("button", { name: /^Build duration formatter: Review formatter/ })).toBeVisible();
+    await openAgent(desktop);
+    await waitForTurn(desktop, bridge.home, 0);
+    let desktopPhase = "initial view";
+    let desktopVideo: Video;
+    try {
+    desktopVideo = await recordVideo(desktop, directory, "desktop-workspace", { width: 1280, height: 800 }, async () => {
+      const startedAt = performance.now();
       await hold(1800);
-      await sessionRow(desktop, names[1]).click();
-      await expect(desktop.locator(".xterm").first()).toBeVisible();
-      await hold(1500);
-      await openShell(desktop);
-      await hold(1000);
-      await runChecks(desktop, 80);
-      await hold(2200);
-      await desktop.getByRole("button", { name: "Open security", exact: true }).click();
-      await expect(dialog.getByRole("tab", { name: "Access", exact: true })).toHaveAttribute("aria-selected", "true");
-      await expect(dialog.locator(`[data-computer-access="${bridgeId}"]`)).toContainText("Shared with your approved browsers", { timeout: 60_000 });
-      await expect(dialog.locator(`[data-access-edge="bridge:${bridgeId}"]`)).toHaveAttribute("data-certainty", "current");
-      await expect(dialog.getByRole("list", { name: "Account devices", exact: true })).toContainText("Demo phone");
-      await expect(dialog.getByRole("button", { name: /\(this browser\):/ })).toBeVisible();
-      await hold(2200);
+      desktopPhase = "follow-up response";
+      turns = await followUp(desktop, bridge!.home, turns, "Why are minutes padded after an hour? Answer briefly.");
+      desktopPhase = "completed response";
+      await holdResult(startedAt);
     });
-    await dialog.getByRole("button", { name: "Close security", exact: true }).click();
+    } catch (error) { throw new Error(`Desktop walkthrough failed at phase: ${desktopPhase}`, { cause: error }); }
     await desktopContext.close();
     contexts.splice(contexts.indexOf(desktopContext), 1);
 
+    const touchControls = phone.locator(".touch-control-bar");
     await openWorkspace(phone);
-    const phoneAttention = phone.getByRole("region", { name: "Needs attention", exact: true });
-    await expect(phoneAttention.getByRole("button", { name: /^Review checkout flow: Demo review requested/ })).toBeVisible();
     for (const name of names) await expect(sessionRow(phone, name)).toBeVisible();
-    let mobilePhase: CheckPhase | "workspace" | "touch controls" = "workspace";
+    let mobilePhase = "workspace";
     let mobileVideo: Video;
     try {
       mobileVideo = await recordVideo(phone, directory, "mobile-terminal", { width: 390, height: 844 }, async () => {
+        const startedAt = performance.now();
         await hold(2200);
-        await openShell(phone);
+        await openAgent(phone);
         await expect(phone.getByRole("button", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
         await hold(1200);
-        await runChecks(phone, 80, mobileVideoCommand, phase => { mobilePhase = phase; });
+        mobilePhase = "clear terminal view";
+        await phone.locator(".xterm").first().click();
+        await phone.keyboard.press("Control+L");
+        mobilePhase = "follow-up response";
+        turns = await followUp(phone, bridge!.home, turns, "Summarize the fix and test results in three short bullets.");
         mobilePhase = "touch controls";
         await expect(touchControls).toBeVisible();
         await expect(touchControls.getByRole("button", { name: "Show keyboard", exact: true })).toBeVisible();
         await expect(touchControls.getByRole("button", { name: "Paste clipboard into terminal", exact: true })).toBeVisible();
-        await hold(2500);
+        await holdResult(startedAt);
       });
     } catch (error) {
       throw new Error(`Mobile walkthrough failed at phase: ${mobilePhase}`, { cause: error });
     }
+    await noOverflow(phone);
+    await phone.evaluate(() => document.fonts.ready);
+    await phone.screenshot({ path: join(directory, "mobile.png"), animations: "disabled" });
     videos = { desktop: desktopVideo, mobile: mobileVideo };
+    await verifyDemo();
     images = await exportImages(directory);
+  } catch (error) {
+    primaryError = error;
+    hasPrimaryError = true;
   } finally {
     const failures: string[] = [];
     if (bridge) for (const id of sessions.reverse()) {
@@ -268,8 +259,14 @@ test("capture real isolated workspace, phone and access panel", async ({ browser
     }
     for (const context of contexts.reverse()) try { await context.close(); } catch { failures.push("browser context"); }
     if (bridge) try { await bridge.stop(); } catch { failures.push("account bridge"); }
-    if (failures.length) throw new Error(`Capture cleanup failed: ${failures.join(", ")}`);
+    if (demoOwned) try { await removeDemo(); } catch { failures.push("demo workspace"); }
+    if (failures.length) {
+      const cleanupError = new Error(`Capture cleanup failed: ${failures.join(", ")}`);
+      if (hasPrimaryError) throw new AggregateError([primaryError, cleanupError], "Capture failed and cleanup also failed", { cause: primaryError });
+      throw cleanupError;
+    }
   }
+  if (hasPrimaryError) throw primaryError;
   if (!images || !videos) throw new Error("Capture assets are incomplete");
   await writeFile(join(directory, "manifest.json"), `${JSON.stringify({ version: 2, images, videos }, null, 2)}\n`, { flag: "wx" });
 });

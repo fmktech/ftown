@@ -77,3 +77,37 @@ After the desktop walkthrough and real Security close, `product.spec.ts` closes 
 ## Mobile TAP and phase diagnostics
 
 Root's isolated desktop-context-close experiment still reached the 60-second mobile recording deadline; bounded sampling stayed within its limits and cleanup succeeded. Shared-client resize therefore remains unproven as the cause. Mobile video alone now runs the same genuine six-test command with Node's explicit `--test-reporter=tap`; screenshots and desktop video retain the prior command. Pass-6, fail-0 and returned-prompt checks remain unchanged. Private phase tracking wraps mobile errors with the current workspace, prompt, clear, command, pass, fail, final-prompt or touch-controls phase and retains the original error as cause, without printing terminal contents or secrets. `node --check e2e/capture/product.spec.ts` passed. Root owns the exact isolated rerun; source/report leases released.
+
+## Genuine Codex capture implementation
+
+`e2e/capture/ai-demo.ts` creates the owned buggy duration fixture and four real tests, verifies the baseline failure, provisions Codex API-key login via stdin in the task bridge's scratch home, selects `gpt-6.1-terra`/`xhigh`, and independently verifies the unchanged tests and completed change. It reads only the isolated Codex rollout and requires each actual completed turn to carry the exact model/effort context and a nonempty assistant response; a distinct phrase from that response must appear in the rendered xterm and cannot be merely a repetition of the prompt. `product.spec.ts` creates a genuine named Codex session plus two shell companions, posts attention only after independently verified success, makes real posters and sends genuine different desktop/mobile follow-ups. Private setup precedes recording; desktop closes before the phone video. Failure does not produce the manifest, and cleanup preserves the primary failure.
+
+`run.sh` checks Codex 0.164.0, rejects ambient provider/Codex selectors and requires an owned canonical regular mode-0600 key file outside checkout/staging before mutations. Only the file path enters the environment; the key itself reaches the scratch login via stdin, and the scratch config selects file-based credential storage. `README.md` documents the real paid provider, prerequisites, private file and cleanup. Exact root command: `FTOWN_CAPTURE_ISOLATED=1 FTOWN_CAPTURE_DIR=/tmp/ftown-product-media FTOWN_CAPTURE_OPENAI_KEY_FILE=/home/user/ftown-capture-openai-key bash e2e/capture/run.sh` (from the disposable sandbox checkout with a fresh output directory). Root owns key removal, full wrapper execution, actual provider/model/rollout verification, media review and sandbox cleanup.
+
+Static checks passed: Node `--check` for `ai-demo.ts` and `product.spec.ts`; `bash -n` for `run.sh`. No provider, key content, browser, E2E, services, install or Git operation was run. The pinned client's actual on-disk rollout encoding, screen visibility, provider response timing and xhigh acceptance still require root's isolated capture; missing or incompatible evidence fails rather than substituting synthetic content. Exact source/report leases released for review and execution.
+
+## Walkthrough duration correction
+
+Each real video action sequence now uses monotonic elapsed time to hold the completed assistant response for at least 2.5 seconds and the overall scene for at least 12 seconds. Real inference remains bounded by the unchanged recorder deadline; no fabricated frames or media-speed changes are introduced. `node --check e2e/capture/product.spec.ts` passed. Root owns runtime verification; spec/report leases released.
+
+## Sandbox setup documentation correction
+
+Root observed the image hostname return after OS dependency installation, before any resources started. The README now sets it persistently with `hostnamectl` after installation and asks the operator to verify the actual hostname. Capture examples clear the image-provided `CODEX_PATH` and `CLAUDE_PATH` selectors before the unchanged strict preflight. No runtime or application changes were made. README/report leases released.
+
+## Fixture reporter correction
+
+Root's isolated Node 24.22.1 reproduction showed the fixture baseline uses the spec reporter by default even when piped; the existing verifier expected TAP. Both baseline and independent final test command argument arrays now explicitly select `--test-reporter=tap`. Assertions, fixture and model prompt are unchanged. The failed capture cleaned up successfully and made no provider request. `node --check e2e/capture/ai-demo.ts` passed; root owns focused fixture and full-capture reruns. Helper/report leases released.
+
+## Mobile rendered-response matching repair
+
+Root's isolated run proved a real completed Codex response, four independently passing tests, exact Terra/xhigh contexts and a successful desktop video. The mobile image visibly contained the real response, but terminal characters included collapsed/interleaved spacing, so the prior space-preserving response match timed out. Matching now compares alphanumeric-only text while still requiring a substantive four-word phrase from the completed assistant response, excluding any phrase contained in the user prompt. The genuine new-turn, model, effort and nonempty-response gates are unchanged.
+
+The phone terminal is now opened for its poster only after the desktop video completes and its owned context closes, avoiding the explicit repeated simultaneous attachments during capture. The phone poster verifies the latest real desktop response and the phone video still requires a new real follow-up. No pixels or transcript were modified; existing timeouts remain. `node --check` passed for both modified TypeScript files. Root owns the focused isolated rerun and rendered review; source/report leases released.
+
+## Phone view legibility refinement
+
+The mobile clip now opens the actual AI session from Workspace after the desktop context has closed, sends Codex's real Ctrl+L keyboard action to clear the view while preserving chat, and asks for a genuine three-bullet summary of the fix and test results. It retains the completed-turn/model/effort/rendered-response and touch-control gates, then captures the phone poster after the completed video response. No transcript reset, DOM edit, image alteration, fabricated output or timing cap change. `node --check e2e/capture/product.spec.ts` passed; root owns the isolated rerun and review. Spec/report leases released.
+
+## Codex prerequisite documentation correction
+
+Root's real setup found the image already had Codex 0.164.0, so unconditional npm installation collided with the existing executable. README now checks and reuses the exact version, installs only if absent, and directs conflicting versions/name collisions to their owning installation manager without force overwrite. The pinned wrapper preflight and capture are unchanged. Reviewed the edited README section; no runtime or Git operation. README/report leases released.
