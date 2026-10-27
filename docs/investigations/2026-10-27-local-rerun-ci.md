@@ -125,3 +125,50 @@ No broad retry/authority/crypto protocol changes and no E2E test weakening. Root
 
 ## Handoff
 Diagnostic source and reproduction scripts are complete. No application/test edits. Parent may assign the narrow implementation and independent review; this worker releases report and /tmp authoring leases after handoff.
+
+
+## Follow-up: CI40532133664 at f5b137e5
+The independently proven generation defect was repaired, but the exact local prompt assertion still fails. That repair must not be represented as the explanation for early screen loss.
+
+Second trace evidence (0-trace.trace in /tmp/ftown-navigation-second/test-results/e2ee-security-an-approved--e8a0b-P-control-and-event-polling-chromium/trace.zip):
+-489312 Stop click; Rerun observed by489460.
+-489463 Rerun click; running/Stop observed by489562.
+-Frame489540 contains literal `[lost tty]`; frame489607 is blank; by489694 the cursor is at column15 with blank cells.
+-489580 same session row click;489655 prompt assertion starts, fails519657.
+-The same xterm-dom-renderer-owner-1 survives throughout. There is no observed remount, nor a demonstrated fresh shell prompt in this second run.
+-bridge.log137–152 records create/attach22029, Stop/old exit, retry/new attach22179, and no replacement exit until test cleanup.
+
+Artifact inventory:150 files, comprising bridge/UI logs, browser traces/videos/screenshots and report assets. No session terminal.log or rendered bridge screen was uploaded. Trace event metadata contains no WebSocket payload events; encrypted HTTP response bodies do not expose terminal bytes. These artifacts cannot determine whether the blanking is native PTY output, headless serialization, a transport delivery issue, or browser parsing.
+
+## Separate phone failure: readiness race proven
+The two-isolated-browser failure belongs to the phone context, not the default page screenshot. In its 1-trace.trace, call4586 checks hamburger isVisible at306443 and immediately receives false. The snapshot still shows `Opening this browser's encryption identity…`. call4588 then waits for Open security. By306469 Dashboard has mounted with a collapsed hamburger, which the helper never opens. Phone screenshot test-failed-2.png confirms the collapsed menu; test-failed-1.png belongs to the unrelated desktop page.
+
+This proves a helper readiness race: a one-shot visibility decision occurred before Dashboard mounted. Root assigned the bounded helper repair separately; no application behavior or approval assertion needs weakening.
+
+## Geometry hypothesis and falsification
+Source observation: relaunchFtownSession calls runner.run without cols/rows, so the replacement attaches at120x40. The mounted browser in the failed trace is80x37. Terminal's subscription effect does not depend on isRunning, so the same-ID status change alone does not force a new subscribe/resize. This is a concrete geometry difference, but was a hypothesis, not a proved cause of blanking.
+
+Root executed the isolated native diagnostic after its pane-target/prompt fixes. Evidence: /tmp/ftown-rerun-native-UGuf3v/{summary.json,timeline.json,*raw.log,*json}. Platform darwin, tmux3.6a. A unique task-owned -L socket and fresh HOME/ZDOTDIR/TMUX_TMPDIR were used; only fixed test marker commands ran. Cleanup confirms no sessions remain on that socket.
+
+Observed results:
+-Initial sized80x37: prompt visible in native pane, browser-sized headless emulator, bridge headless emulator and serialized-screen replay.
+-Same-ID replacement120x40 without resize: prompt visible in all four views.
+-Corrective79→80x37 resize: prompt remains visible in all views.
+-Separate immediate-correct-resize scenario: all prompt checks pass.
+
+Verdict: geometry difference ALONE is REJECTED in this isolated macOS/tmux setup. It neither proves Ubuntu's complete transport path healthy nor licenses a speculative resize fix. The driver bypasses encryption, transport and DOM; the real CI raw bytes remain necessary.
+
+## Proposed bounded CI diagnostic; no source changes in this report
+Exact proposed writer scope: e2e/tests/e2ee-security.spec.ts only. Root remains sole E2E/CI executor. Reuse the existing test's Page/TestInfo, BRIDGE_HOME/E2E_DIR constants, owned sessionId and before-session set.
+
+1. Immediately before Stop, record the owned terminal.log file byte size and browser terminal geometry. No terminal input or repaint is added.
+2. Wrap only the final runMarkerInTerminal assertion after Rerun in catch. Before the existing outer finally deletes the session, await best-effort diagnostic collection, then rethrow the original assertion. Do not move deletion earlier, run collection in an unawaited callback, replace the assertion, type Enter to repair the terminal, or broaden retries/timeouts.
+3. Confine disk access to this newly created UUID (not in the preexisting before set). Require canonical BRIDGE_HOME to equal E2E_DIR/.bridge-home, matching start-services.sh15/86/88; reject symlink/path escapes. Read only .ftown/data/sessions/<owned-id>/terminal.log through a bounded file descriptor read, at most128KiB. Record original byte length, selected offset, truncation, pre-Stop byte boundary and exact captured bytes as base64 inside JSON. That preserves control bytes for replay without interpreting active ANSI; it is encoding, not a claim of cryptographic redaction. The shell is the test-owned marker fixture.
+4. Capture GET /api/sessions/<owned-id>/screen?offset=0&limit=120 using the same built cli-client.apiResponse dynamic-import pattern as bridge-api.ts. Pass the fresh pointer only in memory and AbortSignal.timeout(5000) to apiResponse's existing signal parameter. The shared bridgeApiFetch helper currently lacks a signal option; no helper change is needed for this failure-only collector. This uses the existing encrypted authenticated local application path, without raw HTTP/bearer bypasses.
+5. Attach only allowlisted screen status/totalLines/offset/limit and capped lines, plus current xterm rows text/cursor element position/screen bounds/viewport and selected-session action text. Keep the aggregate attachment bounded. Record collector failure as a short diagnostic outcome; never attach response/request headers, pointer contents, session.json/env, process.env, cookies, browser identity/key stores, packet arrays, invitations or account material.
+6. Await collectors and attachments within catch before cleanup, close the file descriptor in finally, and preserve the original test failure even when diagnostic collection fails. The test owns this session until its existing finally DELETE; other fixture sessions remain untouched.
+
+Falsifiable next interpretations: raw log containing a correct prompt while bridge screen lacks it implicates bridge parsing/state; bridge screen correct while browser DOM blank narrows to screen/output delivery or browser parsing; raw log itself lacks a prompt or contains a subsequent erase narrows to native shell/tmux output. Raw-tail truncation or a changed platform must be reported rather than treated as a complete replay. No exact cause is yet proved.
+
+## Follow-up handoff
+Phone trace diagnosis and native geometry falsification are complete. Only this report and the isolated /tmp driver were authored by this worker; no application/test edits or runtime/CI/Git execution. Proposed diagnostic implementation must receive its own exact file lease. STOP; report and authoring leases released.

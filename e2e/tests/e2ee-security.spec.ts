@@ -1,13 +1,14 @@
-import { expect, request as requestFactory, type APIRequestContext, type BrowserContext, type Page } from "@playwright/test";
+import { expect, request as requestFactory, type APIRequestContext, type BrowserContext, type Page, type TestInfo } from "@playwright/test";
 import { test } from "../helpers/fixtures";
 import { createHash, randomBytes } from "node:crypto";
-import { join } from "node:path";
-import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { createShellSession, E2E_PASSWORD, login, openSession, runMarkerInTerminal, sharedEmail, waitForBridgeOnline } from "../helpers/app";
-import { bridgeApiFetch, readBridgePointer } from "../helpers/bridge-api";
+import { bridgeApiFetch, readBridgePointer, type BridgePointer } from "../helpers/bridge-api";
 import { bridgeSecurityCommand, browserEndpointId, confirmTestBrowserMigration, pairBrowser, prepareTestBrowserMigration } from "../helpers/secure-browser";
 import { sessionIdsFor, waitForNewSessionId } from "../helpers/centrifugo";
-import { E2E_DIR } from "../helpers/config";
+import { BRIDGE_HOME, E2E_DIR } from "../helpers/config";
 import { createAccountShell } from "../helpers/account-pairing";
 import type { BridgeInvitation } from "../../bridge/src/security/protocol";
 
@@ -16,9 +17,20 @@ const secondHome = process.env.E2E_SECOND_BRIDGE_HOME ?? join(E2E_DIR, ".bridge-
 const tlsUi = process.env.FTOWN_PUBLIC_URL ?? "https://localhost:8444";
 const mcpOrigin = process.env.FTOWN_MCP_PUBLIC_URL ?? "https://localhost:8443";
 async function openSecurity(page: Page) {
-  const navigation = page.getByRole("button", { name: "Open navigation menu", exact: true });
-  if (await navigation.isVisible() && await navigation.getAttribute("aria-expanded") !== "true") await navigation.click();
-  await page.getByRole("button", { name: "Open security", exact: true }).click();
+  // The dashboard mounts after the browser identity opens. Checking visibility
+  // before then can mistake a not-yet-rendered mobile menu for desktop.
+  const actions = page.locator("#dashboard-navigation");
+  await expect(actions).toBeAttached({ timeout: 30_000 });
+  const mobile = await page.evaluate(() => window.matchMedia("(max-width: 767px)").matches);
+  if (mobile) {
+    const navigation = page.getByRole("button", { name: /^(Open|Close) navigation menu$/ });
+    await expect(navigation).toBeVisible({ timeout: 30_000 });
+    if (await navigation.getAttribute("aria-expanded") !== "true") await navigation.click();
+  }
+  await expect(actions).toBeVisible({ timeout: 30_000 });
+  const security = actions.getByRole("button", { name: "Open security", exact: true });
+  await expect(security).toBeVisible();
+  await security.click();
 }
 async function waitForSecurityLayout(page: Page, width: number) {
   await expect.poll(() => page.getByRole("dialog", { name: "Security", exact: true }).evaluate((element, mobile) => {
@@ -37,6 +49,130 @@ async function openSeparateApprovals(page: Page, bridgeId: string) {
   }
 }
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
+
+// Diagnostics inspect only the test-created session in the isolated E2E home.
+// Artifacts contain counts/booleans only: no terminal contents or pointers.
+function guardedDiagnosticJson(path: string, maxBytes: number): unknown {
+  const entry = lstatSync(path);
+  if (!entry.isFile() || entry.isSymbolicLink() || typeof constants.O_NOFOLLOW !== "number") throw new Error("Invalid diagnostic metadata");
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size <= 0 || stat.size > maxBytes) throw new Error("Invalid diagnostic metadata");
+    const buffer = Buffer.alloc(stat.size);
+    if (readSync(fd, buffer, 0, stat.size, 0) !== stat.size) throw new Error("Incomplete diagnostic metadata");
+    return JSON.parse(buffer.toString("utf8"));
+  } finally { closeSync(fd); }
+}
+
+function diagnosticSessionContext(sessionId: string, existingIds: Set<string>, expectedName: string,
+  expectedPointer: BridgePointer): { terminalPath: string; pointer: unknown } {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId) || existingIds.has(sessionId)) {
+    throw new Error("Diagnostic session ownership check failed");
+  }
+  const e2eDir = resolve(E2E_DIR);
+  const home = join(e2eDir, ".bridge-home");
+  if (resolve(BRIDGE_HOME) !== home || realpathSync(e2eDir) !== e2eDir) throw new Error("Diagnostic bridge home is not isolated");
+  const directories = [home, join(home, ".ftown"), join(home, ".ftown", "data"),
+    join(home, ".ftown", "data", "sessions"), join(home, ".ftown", "data", "sessions", sessionId)];
+  for (const directory of directories) {
+    const stat = lstatSync(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || realpathSync(directory) !== directory) throw new Error("Diagnostic path is not isolated");
+  }
+  // A new channel is not sufficient to identify the session. Verify the
+  // isolated bridge's current pointer and its authoritative session snapshot;
+  // neither JSON object is ever included in an artifact or error message.
+  const pointer = guardedDiagnosticJson(join(home, ".ftown", "bridge.json"), 64 * 1024);
+  if (!/^LOCALPRIVATE\d+$/.test(expectedName) || !Number.isSafeInteger(expectedPointer.pid) || expectedPointer.pid <= 0 ||
+      !Number.isInteger(expectedPointer.port) || expectedPointer.port < 1 || expectedPointer.port > 65535 ||
+      typeof expectedPointer.startedAt !== "string" || !Number.isFinite(Date.parse(expectedPointer.startedAt)) ||
+      !record(pointer) || typeof pointer.bridgeId !== "string" || pointer.bridgeId !== expectedPointer.bridgeId ||
+      typeof pointer.token !== "string" || pointer.token.length === 0 ||
+      pointer.pid !== expectedPointer.pid || pointer.startedAt !== expectedPointer.startedAt || pointer.port !== expectedPointer.port ||
+      pointer.dataDir !== join(home, ".ftown", "data")) throw new Error("Diagnostic bridge identity check failed");
+  const session = guardedDiagnosticJson(join(directories[directories.length - 1], "session.json"), 256 * 1024);
+  if (!record(session) || session.id !== sessionId || session.name !== expectedName || session.bridgeId !== pointer.bridgeId) {
+    throw new Error("Diagnostic session identity check failed");
+  }
+  return { terminalPath: join(directories[directories.length - 1], "terminal.log"), pointer };
+}
+
+function diagnosticPreStopOffset(sessionId: string, existingIds: Set<string>, expectedName: string, expectedPointer: BridgePointer): number | null {
+  try {
+    const stat = lstatSync(diagnosticSessionContext(sessionId, existingIds, expectedName, expectedPointer).terminalPath);
+    return stat.isFile() && !stat.isSymbolicLink() ? stat.size : null;
+  } catch { return null; }
+}
+
+async function captureRerunFailure(page: Page, info: TestInfo, sessionId: string,
+  existingIds: Set<string>, expectedName: string, expectedPointer: BridgePointer, preStopOffset: number | null, knownMarker: string): Promise<void> {
+  const evidence: Record<string, unknown> = { preStopOffset };
+  let context: { terminalPath: string; pointer: unknown };
+  try { context = diagnosticSessionContext(sessionId, existingIds, expectedName, expectedPointer); }
+  catch {
+    evidence.error = "Diagnostic ownership or isolated-home check failed";
+    await info.attach("local-rerun-diagnostics.json", { body: JSON.stringify(evidence), contentType: "application/json" });
+    return;
+  }
+
+  try {
+    const entry = lstatSync(context.terminalPath);
+    if (!entry.isFile() || entry.isSymbolicLink() || typeof constants.O_NOFOLLOW !== "number") throw new Error("Invalid terminal log");
+    const fd = openSync(context.terminalPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile()) throw new Error("Terminal log is not a regular file");
+      const length = Math.min(stat.size, 128 * 1024);
+      const start = stat.size - length;
+      const buffer = Buffer.alloc(length);
+      const bytesRead = readSync(fd, buffer, 0, length, start);
+      const text = buffer.subarray(0, bytesRead).toString("utf8");
+      const afterPreStopAvailable = preStopOffset !== null && preStopOffset >= start && preStopOffset <= start + bytesRead;
+      const afterPreStop = afterPreStopAvailable ? buffer.subarray(preStopOffset! - start, bytesRead).toString("utf8") : null;
+      const summarize = (value: string) => {
+        const count = (pattern: RegExp) => [...value.matchAll(pattern)].length;
+        return { fullClearCount: count(/\x1b\[2J/g), cursorHomeCount: count(/\x1b\[H/g),
+          alternateScreenEnterCount: count(/\x1b\[\?1049h/g), alternateScreenExitCount: count(/\x1b\[\?1049l/g),
+          lostTtyCount: count(/\[lost tty\]/g), hasKnownMarker: value.includes(knownMarker), hasPromptCharacter: /[$%#>]/.test(value) };
+      };
+      evidence.terminalLog = { totalBytes: stat.size, start, bytesRead, truncated: start > 0,
+        shrunkSincePreStop: preStopOffset !== null && stat.size < preStopOffset,
+        entireTail: summarize(text), afterPreStop: afterPreStop === null ? null : summarize(afterPreStop) };
+    } finally { closeSync(fd); }
+  } catch { evidence.terminalLog = { unavailable: true }; }
+
+  try {
+    const cli = await import(pathToFileURL(join(E2E_DIR, "..", "bridge", "dist", "cli-client.js")).href) as {
+      apiResponse(pointer: unknown, method: string, path: string, body?: unknown,
+        headers?: Record<string, string>, signal?: AbortSignal): Promise<{ status: number; body: unknown }>;
+    };
+    // Revalidate immediately before the request; use the no-follow-read pointer,
+    // never a separate unguarded readBridgePointer() for this diagnostic.
+    const current = diagnosticSessionContext(sessionId, existingIds, expectedName, expectedPointer);
+    const screen = await cli.apiResponse(current.pointer, "GET", `/api/sessions/${sessionId}/screen?offset=0&limit=120`,
+      undefined, undefined, AbortSignal.timeout(5000));
+    const body = record(screen.body) ? screen.body : {};
+    const lines = Array.isArray(body.lines) ? body.lines.filter((line): line is string => typeof line === "string").slice(0, 120) : [];
+    evidence.screen = { status: screen.status, totalLines: typeof body.totalLines === "number" ? body.totalLines : null,
+      offset: typeof body.offset === "number" ? body.offset : null, limit: typeof body.limit === "number" ? body.limit : null,
+      returnedLines: lines.length, nonblankLines: lines.filter(line => line.trim().length > 0).length,
+      hasKnownMarker: lines.some(line => line.includes(knownMarker)), hasPromptCharacter: lines.some(line => /[$%#>]/.test(line)) };
+  } catch { evidence.screen = { unavailable: true }; }
+
+  try {
+    evidence.browser = await page.evaluate(marker => {
+      const term = document.querySelector<HTMLElement>(".xterm");
+      const rows = term?.querySelector<HTMLElement>(".xterm-rows");
+      const text = rows?.innerText ?? "";
+      const bounds = term?.getBoundingClientRect();
+      return { textLength: text.length, nonblankRows: text.split("\n").filter(line => line.trim().length > 0).length,
+        hasKnownMarker: text.includes(marker), hasPromptCharacter: /[$%#>]/.test(text),
+        width: bounds?.width ?? null, height: bounds?.height ?? null, rowCount: rows?.children.length ?? 0,
+        viewportWidth: innerWidth, viewportHeight: innerHeight };
+    }, knownMarker);
+  } catch { evidence.browser = { unavailable: true }; }
+  await info.attach("local-rerun-diagnostics.json", { body: JSON.stringify(evidence), contentType: "application/json" });
+}
 function captureBroker(page: Page): string[] {
   const frames: string[] = [];
   page.on("websocket", socket => {
@@ -173,6 +309,7 @@ test("an approved browser uses encrypted local HTTP control and event polling", 
   await login(page, sharedEmail());
   await page.goto(`/local?port=${pointer.port}`); await waitForBridgeOnline(page);
   const before = await sessionIdsFor(sharedEmail()); const name = `LOCALPRIVATE${Date.now()}`; let sessionId: string | undefined;
+  let bodyFailed = false;
   try {
     await createShellSession(page, name); sessionId = await waitForNewSessionId(sharedEmail(), before);
     await openSession(page, name); const marker = `LOCALCONTENT${Date.now()}`; await runMarkerInTerminal(page, marker);
@@ -205,14 +342,37 @@ test("an approved browser uses encrypted local HTTP control and event polling", 
     const actions = page.getByRole("group", { name: "Selected session actions", exact: true });
     const runningIds = await sessionIdsFor(sharedEmail());
     expect(runningIds.has(sessionId)).toBe(true);
+    // Only a byte count is read before stopping; contents are never attached.
+    const preStopOffset = diagnosticPreStopOffset(sessionId, before, name, pointer);
     await actions.getByRole("button", { name: "Stop", exact: true }).click();
     await expect(actions.getByRole("button", { name: "Rerun", exact: true })).toBeVisible({ timeout: 30000 });
     await actions.getByRole("button", { name: "Rerun", exact: true }).click();
     await expect(actions.getByRole("button", { name: "Stop", exact: true })).toBeVisible({ timeout: 30000 });
     await openSession(page, name);
-    await runMarkerInTerminal(page, `LOCALRERUN${Date.now()}`);
+    try {
+      await runMarkerInTerminal(page, `LOCALRERUN${Date.now()}`);
+    } catch (failure) {
+      // Collect before the finally block deletes this test-owned session. If a
+      // diagnostic itself fails, retain the original assertion failure.
+      try { await captureRerunFailure(page, info, sessionId, before, name, pointer, preStopOffset, marker); } catch { /* preserve failure */ }
+      throw failure;
+    }
     expect(await sessionIdsFor(sharedEmail())).toEqual(runningIds);
-  } finally { if (sessionId) await bridgeApiFetch("DELETE", `/api/sessions/${sessionId}`); }
+  } catch (failure) {
+    bodyFailed = true;
+    throw failure;
+  } finally {
+    if (sessionId) {
+      try {
+        const cleanup = await bridgeApiFetch("DELETE", `/api/sessions/${sessionId}`);
+        if (cleanup.status < 200 || cleanup.status >= 300) throw new Error(`Test session cleanup failed: HTTP ${cleanup.status}`);
+      } catch (failure) {
+        if (!bodyFailed) throw failure;
+        // Keep the original failure; do not expose cleanup error contents.
+        console.warn("Test session cleanup failed after the original test failure.");
+      }
+    }
+  }
 });
 
 test("account-migrated OAuth MCP uses one selected-computer consent, enforces read/control and exposes safe correlated activity", async ({ browser }, info) => {
