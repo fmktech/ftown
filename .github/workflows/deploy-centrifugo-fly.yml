@@ -5,6 +5,7 @@ on:
     paths:
       - 'centrifugo/config.fly.json'
       - 'centrifugo/config.prod.json'
+      - 'e2e/centrifugo.config.json'
       - '.github/workflows/deploy-centrifugo.yml'
       - 'scripts/deploy/**'
       - 'centrifugo/Dockerfile.fly'
@@ -22,6 +23,7 @@ on:
     paths:
       - 'centrifugo/config.fly.json'
       - 'centrifugo/config.prod.json'
+      - 'e2e/centrifugo.config.json'
       - '.github/workflows/deploy-centrifugo.yml'
       - 'scripts/deploy/**'
       - 'centrifugo/Dockerfile.fly'

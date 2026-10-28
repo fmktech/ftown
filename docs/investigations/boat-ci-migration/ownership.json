@@ -34,7 +34,9 @@
         ".github/workflows/gitleaks.yml",
         ".github/workflows/check-bridge-release.yml",
         ".github/workflows/bridge-version-bump.yml",
-        ".github/workflows/deploy-centrifugo-fly.yml"
+        ".github/workflows/deploy-centrifugo-fly.yml",
+        "scripts/check-centrifugo-config.mjs",
+        "scripts/check-centrifugo-config.test.mjs"
       ]
     },
     {

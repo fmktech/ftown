@@ -56,9 +56,17 @@ for (const leaf of ['.bridge-home','.bridge-home-2','.mcp-bridge-home','.mcp-bri
 for (const name of ['ui','bridge','bridge-2','mcp-bridge','mcp-bridge-2','mcp','mcp-tls']) {
   if (fs.existsSync(path.join(dir, `.${name}.pid`))) throw Error('Existing PID record');
 }
-Promise.all([443,5432,8000,3000,8080,8443,8444].map(port => new Promise((ok, fail) => {
-  const server = net.createServer(); server.once('error', fail); server.listen(port, '127.0.0.1', () => server.close(error => error ? fail(error) : ok()));
-}))).catch(() => { console.error('CI test ports or scratch homes are not isolated'); process.exitCode = 1; });
+Promise.all([5432,8000,3000,8080,8443,8444].map(port => new Promise((ok, fail) => {
+  const server = net.createServer();
+  server.once('error', error => { console.error(`CI port ${port} bind failed: ${error.code || 'unknown'}`); fail(error); });
+  server.listen(port, '127.0.0.1', () => server.close(error => error ? fail(error) : ok()));
+}))).catch(() => { process.exitCode = 1; });
+JS
+    sudo "$(command -v node)" <<'JS'
+const net = require('node:net');
+const server = net.createServer();
+server.once('error', error => { console.error(`CI port 443 bind failed: ${error.code || 'unknown'}`); process.exitCode = 1; });
+server.listen(443, '127.0.0.1', () => server.close(error => { if (error) { console.error(`CI port 443 close failed: ${error.code || 'unknown'}`); process.exitCode = 1; } }));
 JS
     infra_started=0; trust_started=0; services_started=0
     cleanup() {
