@@ -19,6 +19,7 @@ import { Terminal, TerminalHandle } from "./Terminal";
 import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
 import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
 import { CloudConnectionNotice } from "./CloudConnectionNotice";
+import { HeaderTooltip } from "./HeaderTooltip";
 import { PushNotificationsControl, detachPushSubscription } from "./PushNotificationsControl";
 import { mergeBridgeOrder } from "@/lib/bridge-order";
 import { buildBridgeCommand } from "@/lib/bridge-command";
@@ -591,11 +592,12 @@ PY`;
 
           <span style={{ width: 1, height: 16, background: "var(--border-muted)" }} />
 
+          <HeaderTooltip label={hasBridges ? "Create a new session" : "No computers connected — start a bridge first"} focusable={!hasBridges}>
           <button
             className="btn-accent"
+            aria-label="Create a new session"
             onClick={() => setShowNewSession(true)}
             disabled={!hasBridges}
-            title={hasBridges ? "Create a new session" : "No bridges online — start a bridge first"}
             style={{ padding: "4px 8px", lineHeight: 1, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
           >
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -603,13 +605,14 @@ PY`;
               <line x1="3" y1="8" x2="13" y2="8" />
             </svg>
           </button>
+          </HeaderTooltip>
 
+          <HeaderTooltip label="Reconnect and refresh this page" className="hidden md:inline-flex">
           <button
             type="button"
-            className="btn-ghost hidden md:inline-flex"
+            className="btn-ghost inline-flex"
             onClick={() => window.location.reload()}
             aria-label="Reconnect and refresh"
-            title="Reconnect and refresh (reload this page)"
             style={{ padding: "4px 8px", lineHeight: 1, alignItems: "center", justifyContent: "center" }}
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -617,6 +620,7 @@ PY`;
               <path d="M3.51 10a5 5 0 1 0 .49-5.38L1 6" />
             </svg>
           </button>
+          </HeaderTooltip>
 
           {!localMode && <button
             className="btn-ghost hidden md:inline-flex"
@@ -630,35 +634,46 @@ PY`;
 
         <div className="ml-auto flex min-w-0 items-center gap-1.5 md:gap-2">
           <div role="group" aria-label="Connection overview" className="flex shrink-0 items-center gap-1.5 text-[var(--text-muted)]">
-            <span role="img" aria-label={`${bridges.length} bridges; ${readyBridges.length} encrypted connections ready`} title={bridges.map(bridge => bridge.hostname).join("\n") || "No bridges"} className="flex items-center gap-1 text-[11px]"><NavigationIcon kind="bridge" /><span>{bridges.length}</span></span>
-            <span role="img" aria-label={selectedTransportMode === "local" ? "Selected terminal: Local" : localMode && connectionStatus === "connected" ? "Local controller connected" : "No selected Local terminal"} title={selectedTransportMode === "local" ? "Selected terminal uses this computer's loopback socket" : localMode ? "Local controller connection" : "No selected terminal using Local"}
-              className={`${selectedTransportMode === "local" || localMode ? "flex" : "hidden md:flex"} items-center`} style={{ color: selectedTransportMode === "local" || localMode && connectionStatus === "connected" ? "var(--status-running)" : "var(--text-faint)" }}><NavigationIcon kind="local" /></span>
-            <span role="img" aria-label={selectedTransportMode === "direct" ? "Selected terminal: P2P" : "No selected P2P terminal"} title={selectedTransportMode === "direct" ? "Selected terminal uses WebRTC P2P" : "No selected terminal using P2P"}
-              className={`${selectedTransportMode === "direct" ? "flex" : "hidden md:flex"} items-center`} style={{ color: selectedTransportMode === "direct" ? "var(--status-running)" : "var(--text-faint)" }}><NavigationIcon kind="p2p" /></span>
-            {localMode ? <span role="img" aria-label={`Local ${connectionStatus}`} title={connectionError ?? "This computer mode — cloud is not used"} className="text-[var(--text-faint)]"><NavigationIcon kind="cloud" /></span>
+            <HeaderTooltip label={`Computers: ${bridges.length} connected`} focusable className="flex items-center">
+              <span role="img" aria-label={`${bridges.length} bridges; ${readyBridges.length} encrypted connections ready`} className="flex items-center gap-1 text-[11px]"><NavigationIcon kind="bridge" /><span>{bridges.length}</span></span>
+            </HeaderTooltip>
+            <HeaderTooltip label={selectedTransportMode === "local" ? "Local: this computer" : localMode && connectionStatus === "connected" ? "Local: controller connected" : "Local: not in use"} focusable className={`${selectedTransportMode === "local" || localMode ? "flex" : "hidden md:flex"} items-center`}>
+              <span role="img" aria-label={selectedTransportMode === "local" ? "Selected terminal: Local" : localMode && connectionStatus === "connected" ? "Local controller connected" : "No selected Local terminal"} style={{ color: selectedTransportMode === "local" || localMode && connectionStatus === "connected" ? "var(--status-running)" : "var(--text-faint)" }}><NavigationIcon kind="local" /></span>
+            </HeaderTooltip>
+            <HeaderTooltip label={selectedTransportMode === "direct" ? "Peer-to-peer: direct connection" : "Peer-to-peer: not in use"} focusable className={`${selectedTransportMode === "direct" ? "flex" : "hidden md:flex"} items-center`}>
+              <span role="img" aria-label={selectedTransportMode === "direct" ? "Selected terminal: P2P" : "No selected P2P terminal"} style={{ color: selectedTransportMode === "direct" ? "var(--status-running)" : "var(--text-faint)" }}><NavigationIcon kind="p2p" /></span>
+            </HeaderTooltip>
+            {localMode ? <HeaderTooltip label="Cloud: not in use" focusable className="flex items-center text-[var(--text-faint)]"><span role="img" aria-label="Cloud not in use"><NavigationIcon kind="cloud" /></span></HeaderTooltip>
               : <div role="group" aria-label={`Cloud ${connectionStatus}`} className="[&>div>button]:min-h-11 [&>div>button]:min-w-11 [&>div>button]:justify-center md:[&>div>button]:min-h-8 md:[&>div>button]:min-w-8">
                 <CloudConnectionNotice connectionStatus={connectionStatus} connectionError={connectionError} centrifugoUrl={centrifugoUrl} token={token} onRetry={() => window.location.reload()} directBridgeCount={directlyReachableBridgeIds.size}>
-                  <span role="img" aria-label={`Cloud ${connectionStatus}${selectedTransportMode === "centrifugo" ? "; selected terminal: Cloud" : ""}`} title={connectionError ?? (connectionStatus === "connected" ? "Cloud connected" : "Cloud reconnecting")} style={{ color: connectionStatus === "connected" ? "var(--text-muted)" : "var(--status-pending)" }}><NavigationIcon kind="cloud" /></span>
+                  <span role="img" aria-label={`Cloud ${connectionStatus}${selectedTransportMode === "centrifugo" ? "; selected terminal: Cloud" : ""}`} style={{ color: connectionStatus === "connected" ? "var(--text-muted)" : "var(--status-pending)" }}><NavigationIcon kind="cloud" /></span>
                 </CloudConnectionNotice>
               </div>}
           </div>
-          <button ref={navigationButtonRef} type="button" className="btn-ghost flex min-h-11 min-w-11 items-center justify-center md:hidden" aria-label={showNavigation ? "Close navigation menu" : "Open navigation menu"} aria-expanded={showNavigation} aria-controls="dashboard-navigation" title="Dashboard menu" onClick={() => setShowNavigation(value => !value)}><NavigationIcon kind="menu" /></button>
+          <HeaderTooltip label="Dashboard menu" className="flex md:hidden">
+          <button ref={navigationButtonRef} type="button" className="btn-ghost flex min-h-11 min-w-11 items-center justify-center" aria-label={showNavigation ? "Close navigation menu" : "Open navigation menu"} aria-expanded={showNavigation} aria-controls="dashboard-navigation" onClick={() => setShowNavigation(value => !value)}><NavigationIcon kind="menu" /></button>
+          </HeaderTooltip>
           <nav id="dashboard-navigation" ref={navigationRef} aria-label="Dashboard actions" hidden={!isDesktop && !showNavigation}
             className={`${isDesktop || showNavigation ? "flex" : "hidden"} absolute right-2 top-full z-50 mt-1 max-h-[calc(100dvh_-_60px)] w-[min(288px,calc(100vw_-_16px))] flex-col gap-2 overflow-y-auto rounded-md border border-[var(--border-muted)] bg-[var(--bg-surface)] p-3 shadow-xl md:static md:mt-0 md:w-auto md:max-h-none md:flex-row md:items-center md:overflow-visible md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none`}>
-            {accountState?.status === "ready" && <button type="button" className="btn-accent min-h-11 shrink-0 text-xs md:min-h-8" aria-label={pendingCount ? `Review ${pendingCount} pending device approvals` : "Review device approvals"} onClick={() => { if (showNavigation) closeNavigation(true); setSecurityView("devices"); setShowSecurity(true); }}>Review{pendingCount ? ` (${pendingCount})` : ""}</button>}
+            {accountState?.status === "ready" && <HeaderTooltip label={pendingCount ? `Review ${pendingCount} pending device approvals` : "Review device approvals"} className="flex">
+              <button type="button" className="btn-ghost relative flex min-h-11 items-center gap-2 text-left md:h-8 md:min-h-8 md:w-8 md:justify-center" style={{ padding: "4px 6px", color: pendingCount ? "var(--accent)" : undefined }} aria-label={pendingCount ? `Review ${pendingCount} pending device approvals` : "Review device approvals"} onClick={() => { if (showNavigation) closeNavigation(true); setSecurityView("devices"); setShowSecurity(true); }}>
+                <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M14 3H5v18h14v-9M9 8h5M9 12h3M9 16h3M15 7l2 2 4-4" /></svg>
+                <span className="md:sr-only">Review approvals{pendingCount ? ` (${pendingCount})` : ""}</span>
+                {pendingCount > 0 && <span aria-hidden="true" className="hidden md:flex absolute -right-1 -top-1 min-w-4 h-4 items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[9px] font-bold text-[var(--bg-void)]">{pendingCount}</span>}
+              </button>
+            </HeaderTooltip>}
             <button type="button" className="btn-ghost flex min-h-11 items-center gap-2 text-left md:hidden" aria-label="Reconnect and refresh" title="Reconnect and refresh (reload this page)" onClick={() => window.location.reload()}>
               <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M1 1v5h5" /><path d="M3.51 10a5 5 0 1 0 .49-5.38L1 6" /></svg>
               <span>Reconnect and refresh</span>
             </button>
             <PushNotificationsControl localMode={localMode} accountId={userId} presentation="responsive" />
-            <button type="button" className="btn-ghost flex min-h-11 items-center gap-2 md:min-h-8 md:w-8 md:justify-center" style={{ padding: "4px 6px" }} title={`Security: computer and browser access${pendingCount ? `; ${pendingCount} requests` : ""}`} aria-label="Open security" onClick={() => openSecurity()}><SecurityLockIcon state="unknown" /><span className="md:sr-only">Security{pendingCount > 0 ? ` (${pendingCount})` : ""}</span></button>
-            <a href={localMode ? "/dashboard" : "/local"} style={{ padding: "4px 6px" }} aria-label={localMode ? "Use Cloud" : "Use This computer"} title={localMode ? "Use Cloud" : "Use This computer"} onClick={localMode ? () => closeNavigation() : event => { event.preventDefault(); closeNavigation(); void prepareLocalAccess().then(() => { window.location.href = "/local"; }); }} className="btn-ghost flex min-h-11 items-center gap-2 md:min-h-8 md:w-8 md:justify-center"><NavigationIcon kind="switch" /><span className="md:sr-only">{localMode ? "Cloud" : "This computer"}</span></a>
+            <HeaderTooltip label={`Security: computer and browser access${pendingCount ? `; ${pendingCount} requests` : ""}`} className="flex"><button type="button" className="btn-ghost flex min-h-11 items-center gap-2 md:min-h-8 md:w-8 md:justify-center" style={{ padding: "4px 6px" }} aria-label="Open security" onClick={() => openSecurity()}><SecurityLockIcon state="unknown" /><span className="md:sr-only">Security{pendingCount > 0 ? ` (${pendingCount})` : ""}</span></button></HeaderTooltip>
+            <HeaderTooltip label={localMode ? "Switch to cloud" : "Switch to this computer"} className="flex"><a href={localMode ? "/dashboard" : "/local"} style={{ padding: "4px 6px" }} aria-label={localMode ? "Use Cloud" : "Use This computer"} onClick={localMode ? () => closeNavigation() : event => { event.preventDefault(); closeNavigation(); void prepareLocalAccess().then(() => { window.location.href = "/local"; }); }} className="btn-ghost flex min-h-11 items-center gap-2 md:min-h-8 md:w-8 md:justify-center"><NavigationIcon kind="switch" /><span className="md:sr-only">{localMode ? "Cloud" : "This computer"}</span></a></HeaderTooltip>
             <p className="text-xs text-[var(--text-muted)] md:hidden">{localMode ? `This computer: ${connectionStatus}` : `Cloud: ${connectionStatus}`} · Selected terminal: {selectedTransportMode === "local" ? "Local" : selectedTransportMode === "direct" ? "P2P" : selectedTransportMode === "centrifugo" ? "Cloud" : "none / connecting"}{connectionError ? ` · ${connectionError}` : ""}</p>
-            <div className="hidden md:flex">          <a
+            <HeaderTooltip label="FTown on GitHub" className="hidden md:flex">          <a
             href="https://github.com/fmktech/ftown"
             target="_blank"
             rel="noopener noreferrer"
-            title="GitHub"
             aria-label="View ftown on GitHub"
             style={{ color: "var(--text-faint)", display: "flex", alignItems: "center", transition: "color 0.15s" }}
             onMouseEnter={(e) => (e.currentTarget.style.color = "var(--text-primary)")}
@@ -667,11 +682,12 @@ PY`;
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false">
               <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/>
             </svg>
-          </a></div>
+          </a></HeaderTooltip>
           <div ref={userMenuRef} hidden={!isDesktop} style={{ position: "relative" }}>
+            <HeaderTooltip label={`Account: ${userId}`}>
             <button
+              aria-label={`Account: ${userId}`}
               onClick={() => setShowUserMenu((v) => !v)}
-              title={userId}
               style={{
                 width: 24,
                 height: 24,
@@ -702,6 +718,7 @@ PY`;
             >
               {userId.charAt(0).toUpperCase()}
             </button>
+            </HeaderTooltip>
             {showUserMenu && (
               <div
                 style={{

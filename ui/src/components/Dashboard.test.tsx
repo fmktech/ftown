@@ -11,6 +11,7 @@ import type { ReactNode } from "react";
 
 const state = vi.hoisted(() => ({
   sessions: [] as Session[],
+  pending: [] as Array<{ status: string }>,
   bridges: [{ clientId: "client-a", bridgeId: "bridge-a", hostname: "alpha", connectedAt: "2026-10-16T00:00:00Z" }],
   activity: new Map<string, SessionActivity>(),
   createSession: vi.fn().mockResolvedValue(undefined),
@@ -21,6 +22,7 @@ const state = vi.hoisted(() => ({
   clearSessionAttention: vi.fn(),
 }));
 
+vi.mock("@/hooks/usePendingApprovals", () => ({ usePendingApprovals: () => ({ client: null, snapshot: { inbox: state.pending } }) }));
 vi.mock("@/hooks/useSessions", () => ({ useSessions: () => ({
   sessions: state.sessions, createSession: state.createSession, stopSession: state.stopSession,
   retrySession: state.retrySession, removeSession: state.removeSession,
@@ -44,11 +46,11 @@ vi.mock("./CloudConnectionNotice", () => ({ CloudConnectionNotice: ({ children }
 function session(id: string, name: string, fields: Partial<Session> = {}): Session {
   return { id, name, bridgeId: "bridge-a", status: "running", shellType: "shell", createdAt: "2026-10-16T00:00:00Z", updatedAt: "2026-10-16T00:00:00Z", ...fields };
 }
-function dashboard(localMode = false) {
+function dashboard(localMode = false, readyAccount = false) {
   const client = { securityRuntime: { ownerId: "00000000-0000-4000-8000-000000000001", state: (bridgeId: string) => ({ bridgeId, status: "ready", endpoint: null }),
     snapshot: () => [], onChange: () => () => {}, identity: { endpoint: { id: "approved-browser" } } } } as unknown as MessageClient;
   return render(<Dashboard client={client} connectionStatus="connected" connectionError={null}
-    userId="user" token="test" centrifugoUrl="ws://localhost" transport={null} onDisconnect={vi.fn()} localMode={localMode} />);
+    userId="user" token="test" centrifugoUrl="ws://localhost" transport={null} onDisconnect={vi.fn()} localMode={localMode} accountState={readyAccount ? { status: "ready", identity: null, signing: null, trust: null, legacyBridges: [], historyExists: false, code: null, offline: false } : undefined} />);
 }
 
 beforeEach(() => {
@@ -57,6 +59,7 @@ beforeEach(() => {
   Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value: function(this: HTMLDialogElement) { this.open = false; } });
   vi.clearAllMocks();
   state.activity = new Map();
+  state.pending = [];
   state.createSession.mockResolvedValue(undefined);
   state.sessions = [
     session("ordinary", "Regular shell"),
@@ -92,7 +95,7 @@ describe("dashboard after recurring automation retirement", () => {
 
   it("keeps ordinary session creation, selection and stop controls", async () => {
     dashboard();
-    fireEvent.click(screen.getByTitle("Create a new session"));
+    fireEvent.click(screen.getByRole("button", { name: "Create a new session" }));
     expect(screen.getByText("New Session")).toBeTruthy();
     fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
     expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
@@ -140,7 +143,7 @@ describe("new-session navigation", () => {
     dashboard(local);
     fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
     fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
-    fireEvent.click(screen.getByTitle("Create a new session"));
+    fireEvent.click(screen.getByRole("button", { name: "Create a new session" }));
     fireEvent.click(screen.getByRole("button", { name: "Submit new session" }));
     await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("created-id"));
     expect(screen.getByRole("button", { name: "Terminal" }).classList.contains("mobile-tab-active")).toBe(true);
@@ -153,7 +156,7 @@ describe("new-session navigation", () => {
     dashboard();
     fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
     fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
-    fireEvent.click(screen.getByTitle("Create a new session"));
+    fireEvent.click(screen.getByRole("button", { name: "Create a new session" }));
     fireEvent.click(screen.getByRole("button", { name: "Submit new session" }));
     await waitFor(() => expect(state.createSession).toHaveBeenCalled());
     expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
@@ -213,7 +216,7 @@ describe("reconnect and refresh", () => {
       localStorage.setItem("ftown:test-trust", "keep");
       sessionStorage.setItem("ftown:test-local-port", "keep");
       const { container } = dashboard(local);
-      const desktopButton = container.querySelector<HTMLButtonElement>('button[aria-label="Reconnect and refresh"].hidden')!;
+      const desktopButton = container.querySelector<HTMLButtonElement>('.hidden button[aria-label="Reconnect and refresh"]')!;
       let action: HTMLButtonElement;
       if (desktop) {
         action = desktopButton;
@@ -221,7 +224,11 @@ describe("reconnect and refresh", () => {
         fireEvent.click(screen.getByRole("button", { name: "Open navigation menu" }));
         action = within(screen.getByRole("navigation", { name: "Dashboard actions" })).getByRole("button", { name: "Reconnect and refresh" });
       }
-      expect(action.title).toContain("reload this page");
+      if (desktop) {
+        fireEvent.mouseEnter(action);
+        expect(screen.getByRole("tooltip").textContent).toBe("Reconnect and refresh this page");
+        fireEvent.mouseLeave(action);
+      } else expect(action.title).toContain("reload this page");
       fireEvent.click(action);
       expect(errors.filter(error => error.message.includes("Not implemented: navigation"))).toHaveLength(1);
       expect(localStorage.getItem("ftown:test-trust")).toBe("keep");
@@ -244,7 +251,10 @@ describe("navigation and selected-session actions", () => {
     expect(document.querySelectorAll("[data-push-state]")).toHaveLength(1);
     fireEvent.click(trigger);
     const nav = screen.getByRole("navigation", { name: "Dashboard actions" });
-    expect(within(nav).getByRole("button", { name: "Open security" }).title).toBe("Security: computer and browser access");
+    const security = within(nav).getByRole("button", { name: "Open security" });
+    fireEvent.mouseEnter(security);
+    expect(screen.getByRole("tooltip").textContent).toBe("Security: computer and browser access");
+    fireEvent.mouseLeave(security);
     expect(within(nav).getByRole("link", { name: "Use This computer" })).toBeTruthy();
     expect(within(nav).getByRole("button", { name: "Enable push notifications" })).toBeTruthy();
     expect(nav.getAttribute("role")).toBeNull();
@@ -293,5 +303,20 @@ describe("navigation and selected-session actions", () => {
     expect(screen.queryByRole("button", { name: /^(Stop|Rerun|Retry)$/ })).toBeNull();
     const nav = document.getElementById("dashboard-navigation")!;
     expect(within(nav).queryByRole("button", { name: /^(Stop|Rerun|Retry)$/ })).toBeNull();
+  });
+});
+
+describe("device review navigation", () => {
+  it.each([true, false])("shows the pending count and opens devices (desktop=%s)", async desktop => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: desktop, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    state.pending = [{status: "pending"}, {status: "approved"}, {status: "pending"}];
+    dashboard(false, true);
+    if (!desktop) fireEvent.click(screen.getByRole("button", { name: "Open navigation menu" }));
+    const review = screen.getByRole("button", { name: "Review 2 pending device approvals" });
+    expect(review.textContent).toContain("2");
+    expect(review.querySelector("svg")).toBeTruthy();
+    fireEvent.click(review);
+    expect(await screen.findByRole("dialog", { name: "Security" })).toBeTruthy();
+    if (!desktop) expect(screen.getByRole("button", { name: "Open navigation menu" }).getAttribute("aria-expanded")).toBe("false");
   });
 });

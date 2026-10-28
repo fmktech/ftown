@@ -1511,9 +1511,11 @@ export function SessionList({
             style={{ color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer" }}
             onClick={event => { event.stopPropagation(); onOpenSecurity(bridgeId); }}><SecurityLockIcon state={bridgeConnectionLock(bridgeSecurityStates?.get(bridgeId)).state} /></button>}
           <StatusDot kind={isOnline ? "connected" : "disconnected"} />
-          <span style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>
-            {bridgeSessions.length}
-          </span>
+          {(bridgeSecurityStates === undefined || bridgeSecurityStates.get(bridgeId) === "ready") && (
+            <span style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>
+              {bridgeSessions.length}
+            </span>
+          )}
         </div>
         {!isBridgeCollapsed && (folderGroups === null
           ? renderTree(sessionTree)

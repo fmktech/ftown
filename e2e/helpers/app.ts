@@ -107,7 +107,7 @@ export async function getCentrifugoToken(page: Page): Promise<string> {
  * `disabled={!hasBridges}`, so its becoming enabled is the authoritative signal.
  */
 export async function waitForBridgeOnline(page: Page): Promise<void> {
-  const createBtn = page.locator('button[title="Create a new session"]');
+  const createBtn = page.getByRole("button", { name: "Create a new session", exact: true });
   await expect(createBtn).toBeEnabled({ timeout: 30_000 });
 }
 
@@ -116,7 +116,7 @@ export async function waitForBridgeOnline(page: Page): Promise<void> {
  * key is needed), name it, and submit. Returns the session name.
  */
 export async function createShellSession(page: Page, name: string): Promise<void> {
-  await page.locator('button[title="Create a new session"]').click();
+  await page.getByRole("button", { name: "Create a new session", exact: true }).click();
   await expect(page.getByText("New Session", { exact: true })).toBeVisible();
   await page.locator("#ns-shell-type").selectOption("shell");
   await page.locator("#ns-bridge").selectOption(readBridgePointer().bridgeId);
