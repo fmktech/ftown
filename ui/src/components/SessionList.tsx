@@ -1400,7 +1400,7 @@ export function SessionList({
       >
         <div
           data-bridge-row={bridgeId}
-          className="min-h-[52px] md:min-h-0"
+          className="min-h-[52px] py-[7px] md:min-h-0 md:py-[3px]"
           onDragOver={(e) => handleBridgeDragOver(e, bridgeId)}
           onDragLeave={() => { setDragOverKey(null); setDragOverZone(null); }}
           onDrop={(e) => handleBridgeDrop(e, bridgeId)}
@@ -1409,7 +1409,7 @@ export function SessionList({
             display: "flex",
             alignItems: "center",
             gap: 6,
-            padding: "7px 9px",
+            paddingInline: 9,
             borderBottom: !isBridgeCollapsed ? "1px solid var(--border-subtle)" : "none",
             borderTop: isDragOver && dragOverZone === "above" ? "2px solid var(--accent)" : "none",
             ...(isDragOver && dragOverZone === "below" ? { borderBottom: "2px solid var(--accent)" } : {}),
