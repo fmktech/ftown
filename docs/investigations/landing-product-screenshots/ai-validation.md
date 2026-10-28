@@ -1,0 +1,49 @@
+# AI media revision validation
+
+Parent PR147 at c4c4ab8. Root owns execution; this revision responds to weak duplicated disclosure/video presentation and absence of actual AI in the original shell demo. Prior evidence remains historical; new AI/player evidence is required before publication.
+
+## Isolated runtime
+
+Boat bx_8mbeqmfe, created 2026-10-27 19:36 UTC, default size, no environment inheritance/snapshots, TTL7200s. Actual hostname demo-workstation; canonical repo /home/user/ftown. Node24.22.1 and Codex0.164.0 verified. Source copied from the shared PR checkout; no personal workspace/auth home. Codex was already present in the fresh image at the selected version; prerequisite installation's attempted redundant symlink returned EEXIST, then actual installed version was verified rather than overwritten. OS/browser dependencies installed successfully.
+
+Root verified existing OpenAI key through the official model endpoint; request accepted and gpt-6.1-terra is available. This is entitlement evidence only, not completed AI inference. Required key transferred as an external task-owned0600file; local temporary copy removed. No key value is in source, logs, prompts, public artifacts or this record. Root removes the sandbox input credential and sandbox after runtime.
+
+## Genuine AI capture passed
+
+The complete opt-in wrapper passed with `CAPTURE_EXIT=0` on run4. It launched the real supported Codex0.164.0 harness through FTown, using gpt-6.1-terra with xhigh effort. The capture requires genuine completed rollout turns with that exact model/effort and visible assistant response content distinct from the prompt. The agent changed the actual seeded formatter, preserved the four original test assertions, and ran the tests. Root separately copied the resulting source/tests into private proof output and ran them: **4 passed, 0 failed**.
+
+Desktop records a genuine follow-up about the formatter. Phone opens the same session after desktop closes, performs the real Codex clear-view action, asks for a short summary and displays the actual assistant response. Screenshots and video contain real UI, code edits, test results, attention and mobile controls. There are no fabricated transcripts or DOM/image content edits. The private account approvals and provider login finish before recording. Only the seven reviewed WebPs, two MP4s and unchanged-shape v2 manifest were copied into `ui/public/product/`.
+
+Both clips are1280×800 /390×844 respectively, **12.083333seconds each**, H.264/yuv420p24fps with no audio. Desktop304706bytes; phone238696bytes. Largest three WebPs total325064bytes; all nine media files total1028028bytes. Manifest byte counts and ffprobe metadata match. Root and independent reviewer inspected all three masters, representative responsive exports and six start/middle/end keyframes; no private credentials, approval data or personal account details were visible.
+
+The successful wrapper removed its account bridge/home, sessions, demo workspace, browser contexts/NSS home, services, Compose resources, certificates and run marker. Root verified empty Docker inventory and deleted the external provider key immediately afterward. The sandbox remains temporarily owned for final page verification and will be deleted after evidence collection.
+
+## Resolved capture findings
+
+- A transient `hostname` setting reverted during OS dependency setup. The repeatable instructions now set the persistent hostname with `hostnamectl` after installing prerequisites and verify it. Default Boat CLI selector variables are explicitly unset for capture; the strict inherited-selector guard remains.
+- Node24 uses the human-readable test reporter even for this piped subprocess. Root reproduced the mismatch with the four-test fixture: two expected failures were real, but the helper expected TAP. Both independent fixture checks now explicitly request TAP, preserving all assertions. Targeted `prepareDemo` passed before the full rerun.
+- Run3's actual phone answer was visible, but terminal spacing/reflow caused the rendered-response matcher to miss it. Matching now compares an actual four-word response phrase with at least18alphanumeric characters, excluding text from the prompt, while retaining exact new-turn/model/effort checks. The phone attaches only after desktop closes and uses the native clear-view action before its new summary. No timeout, retry, result or recording cap was weakened. The failed run cleaned its owned resources and emitted no final manifest.
+
+## Final page gates passed
+
+- Final-source UI tests: **701 passed across67files** (12.67s). Production build, lint and typecheck passed. Existing Next metadata themeColor warnings remain unchanged.
+- Targeted reproduction: `cd e2e && npx playwright test tests/landing-product-screenshots.spec.ts --grep "a failed AI demo"` — **1 passed** (1.7s).
+- Combined focused suite: `cd e2e && npx playwright test tests/landing-product-screenshots.spec.ts` — **8 passed** (17.2s). Covers320/390/1000/1280layouts, authentication redirect, actual desktop/mobile playback and failure/retry. Normal cases retain service-worker behavior.
+- Final UI source was unchanged between the passing unit/build and focused run. Only the negative test's failure injection changed, so the unit/build evidence was reused.
+- Root and independent review inspected desktop/mobile hero/supporting/native-player scenes at all four widths. Final320px error/recovered captures show readable fallback controls, visible focus, unobstructed native controls and stable layout.
+
+The first final run passed seven normal cases but failed the error expectation. Source review tightened immediate media-error state and stale-promise guards. The isolated follow-up still saw no error; its network trace showed successful206responses through the PWA service worker, proving that page routing had bypassed failure injection. This was not evidence of a failing media player. The single negative case now blocks service workers, asserts an intercepted request, keeps requests blocked until the error assertions finish, then requires a new successful MP4 request and advancing playback after the user clicks Retry. No retries/timeouts were increased or assertions skipped. Isolated reproduction passed before the full focused run.
+
+Final runtime logged `FINAL_VALIDATION_EXIT=0 CLEANUP_FAILED=0`. Root verified no owned containers, UI PID, certificates or external provider key remained, archived private evidence, and deleted sandbox bx_8mbeqmfe. Boat inventory was empty and `info` returned404 at20:17UTC2026-10-27. No unrelated services were touched.
+
+Private evidence: `/tmp/ftown-ai-media-20261027/r4-review/` contains approved masters/exports, six keyframes and `ftown-ai-proof-r4` source/tests/TAP output. `page-evidence-r3/` contains final browser renders and validation logs; earlier failure traces remain in `page-evidence-r1/` and `page-evidence-r2/`. None of the private proof, raw frames, logs or browser evidence is published as site assets. Git/PR update and automatic CI follow these gates.
+
+## Automatic CI follow-up
+
+PR revision6abbc0efbe94427daa5fdd13eeec7881e2baf9dd deployed successfully and passed both secret scans. CI run40576973672 passed all8new landing cases and57tests overall, with2existing skipped tests. The unchanged desktop account-trust case failed at its parallel bridge revocation check: `BridgeSecurityError: bridge_offline` from local-client's application request. That code maps any non-OK HTTP response to the label, so the evidence does not prove the process was offline. No full CI rerun was used for diagnosis.
+
+Root downloaded the complete logs/report to private ci-report/ci-full.log/ci-failed.log under the task evidence directory. Actual CI: Node24.22.1, npm11.19.1, Ubuntu24.04, Chromium149/Playwright1228,2workers. A new root-owned Boat sandbox bx_tjrm2dv7 (TTL3600s,no-env,no-snapshots) uses the exact committed source and same Node/browser. Before schema/services, root again verified exact isolated loopback database and service selectors. Running the unchanged smallest case with `CI=1 npx playwright test tests/account-trust.spec.ts --project chromium-isolated --grep "1280"`; root owns setup/cleanup and collects results before any rerun decision. Reviewer has report-only ownership for the bounded cause analysis.
+
+The exact unmodified desktop account case passed1/1 in2.2minutes on the isolated sandbox; cleanup exited0. This is a non-reproduction, not a fix. Root archived its logs and results before running a bounded concurrent diagnostic: two copies of the same case with two workers, using independently reviewed opt-in logging copies of policy.ts and the account fixture. Only generation-mismatch metadata is emitted; security behavior/assertions remain unchanged. Temporary copies remain outside the repository and will not be committed. No CI rerun has been triggered.
+
+The bounded concurrent diagnostic also passed2/2 in2.2minutes, with zero generation-mismatch diagnostic events. Both isolated runs logged exit0/cleanup0. Across one unchanged case and two logging-only cases, the CI failure was not reproduced; the suspected race remains unproven. The CI run exercised the complete two-worker suite while these runs exercised the specific case alone and duplicated concurrently, so workload/context differ. No production security behavior, assertions, retries or timeouts were changed. Root retained both reports/logs in private `account-repro-r1/` and `account-diagnostic/`, removed owned services/database/certificates, and deleted the second temporary sandbox. The evidence-only follow-up commit triggers the repository's unfiltered PR workflow once; no additional failed-job rerun or manual dispatch is planned. The subsequent CI result belongs to the PR status/hand-off receipt, avoiding another documentation-only CI trigger.

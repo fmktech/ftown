@@ -32,6 +32,39 @@ function sessionRow(page: Page, name: string) {
   return originalRow(page, name).locator("..");
 }
 
+async function expectBadgeGeometry(row: Locator) {
+  const metrics = await row.evaluate((element) => {
+    const link = element.querySelector<HTMLAnchorElement>("a[data-pull-request-badge]");
+    const placeholder = element.querySelector<HTMLElement>("[data-pull-request-placeholder]");
+    const button = element.querySelector<HTMLButtonElement>('button[draggable="true"]');
+    if (!link || !placeholder || !button) throw new Error("Missing PR badge geometry elements");
+    const rect = (target: Element) => {
+      const box = target.getBoundingClientRect();
+      return { x: box.x, y: box.y, width: box.width, height: box.height };
+    };
+    const css = (target: Element) => {
+      const style = getComputedStyle(target);
+      return { fontSize: style.fontSize, borderWidth: style.borderWidth, borderColor: style.borderColor,
+        borderRadius: style.borderRadius, padding: style.padding, color: style.color };
+    };
+    return { link: rect(link), placeholder: rect(placeholder), row: rect(element), button: rect(button),
+      linkStyle: css(link), placeholderStyle: css(placeholder), placeholderVisibility: getComputedStyle(placeholder).visibility };
+  });
+  for (const key of ["x", "y", "width", "height"] as const) {
+    expect(Math.abs(metrics.link[key] - metrics.placeholder[key]), `badge ${key}`).toBeLessThanOrEqual(1);
+  }
+  expect(metrics.linkStyle).toEqual(metrics.placeholderStyle);
+  expect(metrics.linkStyle.fontSize).toBe("10px");
+  expect(metrics.linkStyle.borderWidth).toBe("1px");
+  expect(metrics.linkStyle.borderRadius).toBe("3px");
+  expect(metrics.linkStyle.padding).toBe("1px 4px");
+  expect(metrics.placeholderVisibility).toBe("hidden");
+  expect(metrics.link.x).toBeGreaterThanOrEqual(metrics.row.x);
+  expect(metrics.link.x + metrics.link.width).toBeLessThanOrEqual(metrics.row.x + metrics.row.width);
+  expect(metrics.link.y).toBeGreaterThanOrEqual(metrics.button.y);
+  expect(metrics.link.y + metrics.link.height).toBeLessThanOrEqual(metrics.button.y + metrics.button.height);
+}
+
 interface ReceivedHook { channel: string; eventName: string; notificationType?: string; toolName?: string }
 
 async function observeHooks(page: Page): Promise<{ received: ReceivedHook[]; brokerFrames: string[] }> {
@@ -111,8 +144,9 @@ for (const viewport of [
     await waitForBridgeOnline(page);
 
     const suffix = `${testInfo.workerIndex}-${Date.now().toString(36)}`;
-    const targetName = `PR review ${suffix}`;
+    const targetName = `PR review ${suffix} with a deliberately long session name`;
     const otherName = `Unchanged observer ${suffix}`;
+    const childName = `Nested check ${suffix}`;
     const created: string[] = [];
     const mobile = viewport.name === "mobile";
     const showWorkspace = async () => {
@@ -135,12 +169,17 @@ for (const viewport of [
         created.push(id);
       }
       const [targetId, otherId] = created;
+      const child = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name: childName, parentSessionId: targetId } });
+      expect(child.status, JSON.stringify(child.body)).toBe(201);
+      const childId = (child.body as SessionResult).session?.id;
+      expect(childId).toBeTruthy();
+      created.push(childId);
       const capabilities = await bridgeApiFetch("GET", `/api/sessions/${targetId}`);
       expect(capabilities.status, JSON.stringify(capabilities.body)).toBe(200);
       expect(capabilities.body).toMatchObject({ capabilities: { attention: { version: 1, request: true }, sessionMetadata: { pullRequest: true } } });
       await showWorkspace();
       await expect(originalRow(page, targetName)).toBeVisible({ timeout: 30_000 });
-      await originalRow(page, targetName).click();
+      await originalRow(page, targetName).getByText(targetName, { exact: true }).click();
 
       const attached = await sessionCommand<SessionResult>(targetId, ["pr", `${prOne}/?tab=files#review`]);
       expect(attached.session.id).toBe(targetId);
@@ -161,15 +200,27 @@ for (const viewport of [
       await expect(destination).toHaveURL(prOne);
       await expect(destination).toHaveTitle("PR destination intercepted");
       await destination.close();
+      await showWorkspace();
+      const expand = originalRow(page, targetName).getByRole("button", { name: "Expand children", exact: true });
+      await expect(expand).toBeVisible();
+      await expand.click();
+      await expect(originalRow(page, targetName).getByRole("button", { name: "Collapse children", exact: true })).toBeVisible();
+      await expect(originalRow(page, childName)).toBeVisible();
+      const collapse = originalRow(page, targetName).getByRole("button", { name: "Collapse children", exact: true });
+      await collapse.click();
+      await expect(originalRow(page, targetName).getByRole("button", { name: "Expand children", exact: true })).toBeVisible();
+      await expect(originalRow(page, targetName).locator('[title="1 hidden child session"]')).toBeVisible();
+      await expectBadgeGeometry(sessionRow(page, targetName));
+      await screenshot("selected-long-name-with-child-count");
 
       // The full list on reload must retain persisted metadata, even before
       // another live update has occurred.
       await page.reload();
       await waitForBridgeOnline(page);
       await showWorkspace();
-      await expect(originalRow(page, targetName).getByText("PR #123", { exact: true })).toBeVisible();
+      await expect(sessionRow(page, targetName).getByRole("link", { name: `PR #123 in fmktech/ftown: ${prOne}`, exact: true })).toBeVisible();
       await expect(sessionRow(page, otherName).getByRole("link")).toHaveCount(0);
-      await originalRow(page, targetName).click();
+      await originalRow(page, targetName).getByText(targetName, { exact: true }).click();
       await expect(headerLink).toBeVisible();
 
       // Explicit identity overrides a different self env. Only target changes.
@@ -180,12 +231,16 @@ for (const viewport of [
       await expect(replacementLink).toBeVisible();
       await expect(headerLink).toHaveCount(0);
       await showWorkspace();
-      const sidebarBadge = originalRow(page, targetName).getByText("PR #456", { exact: true });
+      const sidebarBadge = sessionRow(page, targetName).getByRole("link", { name: `PR #456 in fmktech/ftown: ${prTwo}`, exact: true });
       await expect(sidebarBadge).toBeVisible();
+      await expect(sidebarBadge).toHaveAttribute("href", prTwo);
+      await expect(sidebarBadge).toHaveAttribute("target", "_blank");
+      await expect(sidebarBadge).toHaveAttribute("rel", "noopener noreferrer");
       await expect(originalRow(page, targetName).locator("a")).toHaveCount(0);
-      await expect(sessionRow(page, targetName).getByRole("link")).toHaveCount(0);
+      await expect(sessionRow(page, targetName).getByRole("link")).toHaveCount(1);
       await expect(originalRow(page, targetName)).toHaveAttribute("draggable", "true");
-      await originalRow(page, otherName).click();
+      await expectBadgeGeometry(sessionRow(page, targetName));
+      await originalRow(page, otherName).getByText(otherName, { exact: true }).click();
       await expect(page.locator("main").getByRole("link", { name: /PR #/ })).toHaveCount(0);
       await showWorkspace();
 
@@ -221,7 +276,7 @@ for (const viewport of [
       await showWorkspace();
       await expect(shortcut).toBeVisible();
       await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
-      await originalRow(page, otherName).click();
+      await originalRow(page, otherName).getByText(otherName, { exact: true }).click();
       await showWorkspace();
 
       // The requesting agent's completion hook must not dismiss its explicit
@@ -265,10 +320,11 @@ for (const viewport of [
         await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
       }
 
-      // The badge stays passive; PR navigation belongs to the portaled menu.
-      // Opening it by keyboard or touch must not select the requesting session.
+      // The native sibling link opens without selecting the requesting session
+      // or resolving its independent attention request.
       await expect(sidebarBadge).toBeVisible();
-      await expect(sessionRow(page, targetName).getByRole("link")).toHaveCount(0);
+      await expect(sessionRow(page, targetName).getByRole("link")).toHaveCount(1);
+      await expectBadgeGeometry(sessionRow(page, targetName));
       const menuControl = originalRow(page, targetName).getByRole("button", { name: "Session actions", exact: true });
       const triggerBox = await menuControl.boundingBox();
       expect(triggerBox).not.toBeNull();
@@ -280,6 +336,26 @@ for (const viewport of [
         expect(triggerBox!.height).toBeLessThan(44);
         expect(await menuControl.evaluate(element => Number.parseFloat(getComputedStyle(element).fontSize))).toBe(16);
       }
+      await menuControl.focus();
+      await page.keyboard.press("Tab");
+      await expect(sidebarBadge).toBeFocused();
+      expect(await sidebarBadge.evaluate(element => getComputedStyle(element).boxShadow)).not.toBe("none");
+      const [badgeKeyboardDestination] = await Promise.all([context.waitForEvent("page"), page.keyboard.press("Enter")]);
+      await expect(badgeKeyboardDestination).toHaveURL(prTwo);
+      await expect(badgeKeyboardDestination).toHaveTitle("PR destination intercepted");
+      await badgeKeyboardDestination.close();
+      await expect(shortcut).toBeVisible();
+      await expect(page.locator("main").getByText(otherName, { exact: true })).toHaveCount(1);
+      if (mobile) await expect(page.getByRole("button", { name: "Workspace", exact: true })).toHaveClass(/mobile-tab-active/);
+      const [badgePointerDestination] = await Promise.all([context.waitForEvent("page"), mobile ? sidebarBadge.tap() : sidebarBadge.click()]);
+      await expect(badgePointerDestination).toHaveURL(prTwo);
+      await expect(badgePointerDestination).toHaveTitle("PR destination intercepted");
+      await badgePointerDestination.close();
+      await expect(shortcut).toBeVisible();
+      await expect(page.locator("main").getByText(otherName, { exact: true })).toHaveCount(1);
+      if (mobile) await expect(page.getByRole("button", { name: "Workspace", exact: true })).toHaveClass(/mobile-tab-active/);
+      await screenshot("unselected-session-pr-badge");
+
       await menuControl.focus();
       await page.keyboard.press("Enter");
       const menu = page.getByRole("menu", { name: "Session actions", exact: true });
@@ -339,11 +415,23 @@ for (const viewport of [
       if (mobile) await expect(page.getByRole("button", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
       await tabIntoHeaderLink(page, replacementLink, mobile);
       await screenshot("selected-session-pr-link");
+      const beforeThinking = receivedHooks.length;
+      const thinkingHook = await bridgeApiFetch("POST", "/hook", { body: {
+        ftown_session_id: targetId, hook_event_name: "PostToolUse", tool_name: "exec_command",
+      } });
+      expect(thinkingHook.status, JSON.stringify(thinkingHook.body)).toBeGreaterThanOrEqual(200);
+      expect(thinkingHook.status, JSON.stringify(thinkingHook.body)).toBeLessThan(300);
+      await expect.poll(() => receivedHooks.slice(beforeThinking).some(event =>
+        event.channel.startsWith(`events:${targetId}#`) && event.eventName === "PostToolUse",
+      )).toBe(true);
       await showWorkspace();
+      await expect(originalRow(page, targetName).getByText(/^◌\s*thinking\.\.\.$/)).toBeVisible();
+      await expectBadgeGeometry(sessionRow(page, targetName));
+      await screenshot("selected-thinking-pr-badge");
       await expect(shortcut).toBeVisible();
       await expect(shortcut.getByText(message, { exact: true })).toBeVisible();
       await expect(originalRow(page, targetName).getByText(message, { exact: true })).toHaveCount(0);
-      await originalRow(page, otherName).click();
+      await originalRow(page, otherName).getByText(otherName, { exact: true }).click();
       await showWorkspace();
       const dismissControl = region.getByRole("button", { name: `Dismiss attention for ${targetName}`, exact: true });
       const dismissBox = await dismissControl.boundingBox();
@@ -388,7 +476,7 @@ for (const viewport of [
       await expect(menu.getByRole("menuitem", { name: /^Open pull request:/ })).toHaveCount(0);
       await page.keyboard.press("Escape");
       await expect(menu).toHaveCount(0);
-      await originalRow(page, targetName).click();
+      await originalRow(page, targetName).getByText(targetName, { exact: true }).click();
       await expect(replacementLink).toHaveCount(0);
       await page.reload();
       await waitForBridgeOnline(page);
@@ -396,7 +484,7 @@ for (const viewport of [
       await expect(originalRow(page, targetName)).toBeVisible();
       await expect(originalRow(page, targetName).getByText(/PR #/)).toHaveCount(0);
       await expect(sessionRow(page, targetName).getByRole("link")).toHaveCount(0);
-      await originalRow(page, targetName).click();
+      await originalRow(page, targetName).getByText(targetName, { exact: true }).click();
       await expect(page.locator("main").getByRole("link", { name: /PR #/ })).toHaveCount(0);
     } finally {
       // Session IDs are recorded only after this test created them.

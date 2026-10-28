@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session, SessionUsage } from "@/types";
-import { PullRequestLink } from "./PullRequestLink";
+import { PullRequestBadgePlaceholder, PullRequestLink } from "./PullRequestLink";
 import { SessionList } from "./SessionList";
 import { Terminal } from "./Terminal";
 
@@ -47,27 +47,43 @@ describe("session PR destinations", () => {
     expect(within(container).getByText(session.name)).toBeTruthy();
   });
 
-  it("shows a passive compact sidebar badge inside the original selection button", () => {
+  it("renders a native compact sibling link without selecting the session", () => {
     const onSelectSession = vi.fn();
     const { container } = render(createElement(SessionList, {
       sessions: [session], bridges: [], bridgeOrder: ["bridge"], selectedSessionId: null, onSelectSession,
     }));
     const original = container.querySelector<HTMLButtonElement>('button[draggable="true"]')!;
     const wrapper = original.parentElement!;
-    const badge = within(original).getByText("PR #123", { exact: true }).parentElement!;
+    const badge = within(wrapper).getByRole("link", { name: description }) as HTMLAnchorElement;
+    const placeholder = original.querySelector<HTMLElement>('[data-pull-request-placeholder]')!;
     expect(wrapper.dataset.sessionRow).toBe(session.id);
-    expect(badge.tagName).toBe("SPAN");
-    expect(badge.title).toBe(description);
-    expect(badge.getAttribute("tabindex")).toBeNull();
-    expect(badge.getAttribute("role")).toBeNull();
-    expect(within(badge).getByText(description).className).toBe("sr-only");
-    expect(wrapper.querySelector("a")).toBeNull();
     expect(original.querySelector("a, button")).toBeNull();
+    expect(original.contains(badge)).toBe(false);
     expect(original.draggable).toBe(true);
     expect(Number.parseFloat(original.style.minWidth)).toBe(0);
-    expect(original.style.width).toBe("");
     expect(within(original).getByText(session.name)).toBeTruthy();
+    expect(badge.textContent).toBe("PR #123");
+    expect(badge.title).toBe(description);
+    expect(badge.getAttribute("href")).toBe(prUrl);
+    expect(badge.getAttribute("target")).toBe("_blank");
+    expect(badge.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(badge.draggable).toBe(false);
+    expect(badge.style.fontSize).toBe("10px");
+    expect(badge.style.border).toBe("1px solid var(--border-muted)");
+    expect(badge.style.borderRadius).toBe("3px");
+    expect(badge.style.padding).toBe("1px 4px");
+    expect(placeholder.textContent).toBe("PR #123");
+    expect(placeholder.getAttribute("aria-hidden")).toBe("true");
+    expect(placeholder.style.visibility).toBe("hidden");
+    expect(placeholder.tagName).toBe("SPAN");
+    expect(placeholder.getAttribute("tabindex")).toBeNull();
+    expect(placeholder.style.fontSize).toBe(badge.style.fontSize);
+    expect(placeholder.style.border).toBe(badge.style.border);
+    expect(placeholder.style.padding).toBe(badge.style.padding);
+    badge.addEventListener("click", event => event.preventDefault());
     fireEvent.click(badge);
+    expect(onSelectSession).not.toHaveBeenCalled();
+    fireEvent.click(original);
     expect(onSelectSession).toHaveBeenCalledExactlyOnceWith(session.id);
   });
 
@@ -114,16 +130,19 @@ describe("session PR destinations", () => {
     };
     const view = render(createElement(SessionList, props));
     const openMenu = () => fireEvent.click(screen.getByRole("button", { name: "Session actions" }));
+    expect(screen.getByRole("link", { name: description }).getAttribute("href")).toBe(prUrl);
     openMenu();
     expect(screen.getByRole("menuitem", { name: /^Open pull request:/ }).getAttribute("href")).toBe(prUrl);
     fireEvent.keyDown(document, { key: "Escape" });
     view.rerender(createElement(SessionList, { ...props, sessions: [{ ...session, pullRequestUrl: "https://github.com/Org/repo/pull/456/?tab=files" }] }));
+    expect(screen.getByRole("link", { name: /PR #456 in Org\/repo/ }).getAttribute("href")).toBe("https://github.com/Org/repo/pull/456");
     openMenu();
     expect(screen.getByRole("menuitem", { name: /^Open pull request:/ }).getAttribute("href")).toBe("https://github.com/Org/repo/pull/456");
     fireEvent.keyDown(document, { key: "Escape" });
     view.rerender(createElement(SessionList, { ...props, sessions: [{ ...session, pullRequestUrl: undefined }] }));
     openMenu();
     expect(screen.queryByRole("menuitem", { name: /^Open pull request:/ })).toBeNull();
+    expect(screen.queryByRole("link", { name: /PR #456/ })).toBeNull();
     expect(screen.queryByText("PR #456", { exact: true })).toBeNull();
   });
 
@@ -161,6 +180,14 @@ describe("session PR destinations", () => {
     const { container } = render(createElement(PullRequestLink, { url }));
     expect(container.childElementCount).toBe(0);
     expect(container.querySelector("a, img, script")).toBeNull();
+  });
+
+  it.each(["javascript:alert(1)", "https://github.com.evil.test/Org/repo/pull/123", ""])("omits both compact elements for unsafe metadata %s", url => {
+    const { container } = render(createElement("div", null,
+      createElement(PullRequestLink, { url, badge: true }),
+      createElement(PullRequestBadgePlaceholder, { url }),
+    ));
+    expect(container.querySelector("a, [data-pull-request-placeholder]")).toBeNull();
   });
 
   it.each(["javascript:alert(1)", "https://github.com.evil.test/Org/repo/pull/123", ""])("omits unsafe PR menu actions and keeps selection for %s", pullRequestUrl => {

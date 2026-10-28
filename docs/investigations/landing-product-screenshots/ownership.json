@@ -1,0 +1,83 @@
+{
+  "task": "Real product images for landing",
+  "base": "482662e4a6919d7352aa24d5a496e6e9bfd0115d",
+  "branch": "feat/landing-product-screenshots",
+  "checkout": "/Users/fkesheh/projects/ftown-e2e-performance",
+  "phase": "final acceptance complete; Git integration in progress",
+  "rootWrites": [
+    "docs/investigations/landing-product-screenshots/coordination.md",
+    "docs/investigations/landing-product-screenshots/ownership.json",
+    "docs/investigations/landing-product-screenshots/contract.md",
+    "docs/investigations/landing-product-screenshots/validation.md",
+    "ui/public/product/"
+  ],
+  "workers": [
+    {
+      "agent": "/root/site_integration",
+      "tier": 1,
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "writes": [
+        "ui/src/app/page.tsx",
+        "ui/src/components/ProductScreenshots.tsx",
+        "e2e/tests/landing-product-screenshots.spec.ts",
+        "docs/investigations/landing-product-screenshots/ui-handoff.md"
+      ],
+      "status": "source/test leases released; exclusive Git integration lease active until PR handoff",
+      "role": "SITE-UI; later Git integration"
+    },
+    {
+      "agent": "/root/site_capture",
+      "tier": 1,
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "writes": [
+        "e2e/capture/playwright.config.ts",
+        "e2e/capture/product.spec.ts",
+        "e2e/capture/record-video.ts",
+        "docs/investigations/landing-product-screenshots/capture-audit.md"
+      ],
+      "status": "completed; all file/resource leases released; retired",
+      "role": "SITE-CAPTURE"
+    },
+    {
+      "agent": "/root/site_review",
+      "tier": 2,
+      "model": "gpt-6.1-sol",
+      "effort": "max",
+      "writes": [
+        "docs/investigations/landing-product-screenshots/design-review.md"
+      ],
+      "status": "completed; all file/resource leases released; retired",
+      "role": "read-only UX and independent review"
+    },
+    {
+      "agent": "/root/site_runner",
+      "tier": 1,
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "writes": [
+        "e2e/capture/run.sh",
+        "e2e/capture/README.md",
+        "docs/investigations/landing-product-screenshots/runner-handoff.md"
+      ],
+      "status": "completed; all file/resource leases released; retired",
+      "role": "isolated repeatable setup/cleanup wrapper and documentation"
+    }
+  ],
+  "integrationOwner": "/root/site_integration",
+  "resources": {
+    "Git": "/root/site_integration exclusive commit/push/PR lease after root dispatch",
+    "runtime/E2E/ports/DB/fixtures/assets": "released; task services/DB cleaned and dedicated sandbox deleted",
+    "installs/lockfiles": "root sandbox installs complete; no lockfile changes"
+  },
+  "sandbox": {
+    "id": "bx_9zgq3e5r",
+    "owner": "/root",
+    "type": "default4vCPU8GiB",
+    "autoStop": "2026-10-27T19:41:13Z",
+    "createdWith": "no-env,no-snapshots",
+    "purpose": "isolated real screenshots and focused rendering E2E",
+    "status": "deleted; absent from Boat list --all (18:56 UTC)"
+  }
+}

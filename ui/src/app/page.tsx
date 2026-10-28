@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { buildBridgeCommand } from "@/lib/bridge-command";
 import { EncryptionDiagram } from "@/components/EncryptionDiagram";
+import { DesktopScreenshot, SupportingScreenshots } from "@/components/ProductScreenshots";
 
 function GitHubIcon() {
   return (
@@ -216,13 +217,13 @@ function CtaButtons({ align = "start" }: { align?: "start" | "center" }) {
       >
         <Link
           href="/register"
-          className={`btn-accent !text-[13px] !px-6 !py-2.5 no-underline inline-block ${linkFocus}`}
+          className={`btn-accent !text-[13px] !px-6 !py-2.5 min-h-11 no-underline inline-flex items-center ${linkFocus}`}
         >
           Try Hosted
         </Link>
         <Link
-          href="/register"
-          className={`btn-ghost !text-[13px] !px-6 !py-2.5 no-underline inline-block ${linkFocus}`}
+          href="#solo"
+          className={`btn-ghost !text-[13px] !px-6 !py-2.5 min-h-11 no-underline inline-flex items-center ${linkFocus}`}
         >
           Self-host (Open Source)
         </Link>
@@ -230,7 +231,7 @@ function CtaButtons({ align = "start" }: { align?: "start" | "center" }) {
           href="https://github.com/fmktech/ftown"
           target="_blank"
           rel="noopener noreferrer"
-          className={`inline-flex items-center gap-2 text-[13px] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors no-underline px-1 py-2.5 ${linkFocus}`}
+          className={`inline-flex items-center gap-2 text-[13px] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors no-underline px-1 py-2.5 min-h-11 ${linkFocus}`}
         >
           <GitHubIcon /> GitHub
         </a>
@@ -239,32 +240,6 @@ function CtaButtons({ align = "start" }: { align?: "start" | "center" }) {
         Free during beta — no card required
       </p>
     </div>
-  );
-}
-
-function DemoVideo({
-  src,
-  poster,
-  label,
-  className = "",
-}: {
-  src: string;
-  poster: string;
-  label: string;
-  className?: string;
-}) {
-  return (
-    <video
-      autoPlay
-      loop
-      muted
-      playsInline
-      poster={poster}
-      aria-label={label}
-      className={`rounded-[var(--radius-lg)] border border-[var(--border-muted)] ${className}`}
-    >
-      <source src={src} type="video/mp4" />
-    </video>
   );
 }
 
@@ -293,7 +268,7 @@ export default async function LandingPage() {
       {/* Nav */}
       <nav
         aria-label="Primary"
-        className="px-6 py-4 flex items-center justify-between border-b border-[var(--border-subtle)]"
+        className="px-4 sm:px-6 py-4 flex items-center justify-between border-b border-[var(--border-subtle)]"
       >
         <span className="text-sm font-extrabold tracking-[0.15em] uppercase text-[var(--accent)] [text-shadow:0_0_12px_var(--accent-glow)]">
           ftown
@@ -304,13 +279,13 @@ export default async function LandingPage() {
             target="_blank"
             rel="noopener noreferrer"
             aria-label="View ftown on GitHub"
-            className={`text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors flex items-center ${linkFocus}`}
+            className={`text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors flex items-center justify-center min-w-11 min-h-11 ${linkFocus}`}
           >
             <GitHubIcon />
           </a>
           <Link
             href="/login"
-            className={`text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--border-strong)] border border-[var(--border-muted)] rounded-[var(--radius-sm)] px-3.5 py-1.5 no-underline transition-colors ${linkFocus}`}
+            className={`text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--border-strong)] border border-[var(--border-muted)] rounded-[var(--radius-sm)] px-3.5 py-1.5 min-h-11 inline-flex items-center no-underline transition-colors ${linkFocus}`}
           >
             Sign In
           </Link>
@@ -320,12 +295,11 @@ export default async function LandingPage() {
       {/* Main */}
       <main
         id="main"
-        className="flex-1 flex flex-col items-center px-6 py-12 sm:py-16"
+        className="flex-1 flex flex-col items-center px-4 sm:px-6 py-12 sm:py-16"
       >
         {/* Hero */}
-        <div className="flex flex-col lg:flex-row items-center gap-10 lg:gap-12 w-full max-w-[960px]">
-          {/* Left: text + CTAs */}
-          <div className="flex-1 min-w-0 w-full">
+        <div className="w-full max-w-[1120px]">
+          <div className="w-full max-w-[800px]">
             <p className="text-[11px] tracking-[0.14em] uppercase text-[var(--accent)] font-semibold mb-4">
               Self-hosted · Open source
             </p>
@@ -337,19 +311,15 @@ export default async function LandingPage() {
               from one browser.
             </h1>
 
-            <p className="font-[family-name:var(--font-sans)] text-sm sm:text-base text-[var(--text-secondary)] leading-relaxed max-w-[52ch] mb-6">
-              ftown streams Claude Code, Cursor, Codex, Grok, Pi, Kimi Code, opencode,
-              and shells from any
-              machine to your desktop or phone — no SSH, no port forwarding. Self-hosted,
-              on the subscriptions you already pay for. Terminals stay{" "}
-              <span className="text-[var(--accent)] [text-shadow:0_0_16px_var(--accent-glow)]">
-                local or P2P
-              </span>{" "}
-              whenever possible. Connect an MCP client to inspect your fleet and coordinate
-              sessions from your existing agent workflow.
+            <p className="font-[family-name:var(--font-sans)] text-sm sm:text-base text-[var(--text-secondary)] leading-relaxed max-w-[70ch] mb-6">
+              Stream your coding agents and shells from your machines to a browser on your
+              desktop or phone. Self-hosted, with no SSH or port forwarding. Terminals stay
+              local or P2P whenever possible, and MCP connects your existing agent workflow.
             </p>
 
-            <div className="flex flex-wrap gap-2 mb-7 max-w-[520px]">
+            <CtaButtons />
+
+            <div className="flex flex-wrap gap-2 mt-6 max-w-[800px]">
               {SUPPORTED_AGENTS.map((agent) => (
                 <span
                   key={agent.name}
@@ -364,19 +334,11 @@ export default async function LandingPage() {
               </span>
             </div>
 
-            <CtaButtons />
           </div>
-
-          {/* Right: mobile demo */}
-          <div className="shrink-0">
-            <DemoVideo
-              src="/demo-mobile.mp4"
-              poster="/demo-mobile-poster.jpg"
-              label="Demo of ftown mobile UI"
-              className="w-[220px] max-w-full"
-            />
-          </div>
+          <DesktopScreenshot />
         </div>
+
+        <SupportingScreenshots />
 
         {/* Solo mode */}
         <section
@@ -602,19 +564,6 @@ export default async function LandingPage() {
             </div>
           </div>
         </section>
-
-        {/* Desktop demo */}
-        <div className="mt-14 sm:mt-20 w-full max-w-[960px]">
-          <div className="text-[11px] font-semibold tracking-[0.08em] uppercase text-[var(--text-muted)] mb-2">
-            Desktop
-          </div>
-          <DemoVideo
-            src="/demo-desktop.mp4"
-            poster="/demo-desktop-poster.jpg"
-            label="Demo of ftown desktop UI"
-            className="w-full"
-          />
-        </div>
 
         {/* Closing CTA */}
         <div className="mt-16 sm:mt-24 w-full max-w-[720px] text-center rounded-[var(--radius-lg)] bg-[var(--bg-surface)] border border-[var(--border-muted)] px-6 sm:px-8 py-10 shadow-[var(--shadow-glow-accent)]">

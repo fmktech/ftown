@@ -1,0 +1,84 @@
+{
+  "version": 2,
+  "images": {
+    "desktop": {
+      "src": "/product/desktop-workspace-2240.webp",
+      "width": 2240,
+      "height": 1400,
+      "variants": [
+        {
+          "src": "/product/desktop-workspace-640.webp",
+          "width": 640,
+          "height": 400,
+          "bytes": 30924
+        },
+        {
+          "src": "/product/desktop-workspace-1120.webp",
+          "width": 1120,
+          "height": 700,
+          "bytes": 72028
+        },
+        {
+          "src": "/product/desktop-workspace-2240.webp",
+          "width": 2240,
+          "height": 1400,
+          "bytes": 188490
+        }
+      ]
+    },
+    "mobile": {
+      "src": "/product/mobile-terminal-780.webp",
+      "width": 780,
+      "height": 1688,
+      "variants": [
+        {
+          "src": "/product/mobile-terminal-390.webp",
+          "width": 390,
+          "height": 844,
+          "bytes": 42356
+        },
+        {
+          "src": "/product/mobile-terminal-780.webp",
+          "width": 780,
+          "height": 1688,
+          "bytes": 102632
+        }
+      ]
+    },
+    "security": {
+      "src": "/product/device-access-1792.webp",
+      "width": 1792,
+      "height": 864,
+      "variants": [
+        {
+          "src": "/product/device-access-896.webp",
+          "width": 896,
+          "height": 432,
+          "bytes": 24496
+        },
+        {
+          "src": "/product/device-access-1792.webp",
+          "width": 1792,
+          "height": 864,
+          "bytes": 53936
+        }
+      ]
+    }
+  },
+  "videos": {
+    "desktop": {
+      "src": "/product/desktop-workspace.mp4",
+      "width": 1280,
+      "height": 800,
+      "durationSeconds": 34.666667,
+      "bytes": 974461
+    },
+    "mobile": {
+      "src": "/product/mobile-terminal.mp4",
+      "width": 390,
+      "height": 844,
+      "durationSeconds": 13.666667,
+      "bytes": 326693
+    }
+  }
+}
