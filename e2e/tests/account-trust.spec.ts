@@ -7,10 +7,56 @@ import type { ApprovedEndpoint } from "../../bridge/src/security/protocol";
 import { login, makeUser, openSession, registerUser, runMarkerInTerminal } from "../helpers/app";
 
 const origin = process.env.FTOWN_PUBLIC_URL ?? "https://localhost:8444";
-async function devices(page: Page) {
+async function openSecurityNavigation(page: Page) {
+  const navigation = page.getByRole("button", { name: "Open navigation menu", exact: true });
+  if (await navigation.isVisible()) await navigation.click();
   await page.getByRole("button", { name: "Open security", exact: true }).click();
+}
+async function devices(page: Page) {
+  await openSecurityNavigation(page);
   await page.getByRole("tab", { name: "Access", exact: true }).click();
   await expect(page.getByRole("list", { name: "Account devices", exact: true })).toBeVisible();
+}
+async function navigationEvidence(page: Page, info: TestInfo) {
+  const initialViewport = page.viewportSize()!;
+  for (const width of [1280, 900, 390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    const menu = page.getByRole("button", { name: "Open navigation menu", exact: true });
+    // Keep addressing the mounted navigation even after Escape hides it from
+    // the accessibility tree. Visibility is checked separately below.
+    const nav = page.locator("#dashboard-navigation");
+    if (width < 768) {
+      await menu.click();
+      await expect(nav).toBeVisible();
+      await expect(page.getByRole("navigation", { name: "Dashboard actions" })).toBeVisible();
+      await expect(nav.getByRole("button", { name: "Open security", exact: true })).toBeVisible();
+      await expect(nav.getByRole("link", { name: "Use This computer", exact: true })).toBeVisible();
+      await expect(nav.getByRole("button", { name: "Review device approvals", exact: true })).toBeVisible();
+      await expect.poll(() => nav.locator("button,a").evaluateAll(controls => controls.filter(control => control.checkVisibility()).every(control => control.getBoundingClientRect().height >= 44)), { timeout: 2000 }).toBe(true);
+      await page.screenshot({ path: info.outputPath(`navigation-menu-${width}.png`), fullPage: true });
+      await page.keyboard.press("Escape"); await expect(menu).toBeFocused();
+      await expect(nav).toBeHidden();
+    } else {
+      await expect(nav).toBeVisible();
+      await expect(page.getByRole("navigation", { name: "Dashboard actions" })).toBeVisible();
+      await expect(nav.getByRole("button", { name: "Open security", exact: true })).toBeVisible();
+    }
+    const pushControl = nav.locator("[data-push-state]");
+    await expect(pushControl).toHaveCount(1);
+    if (width === 1280) {
+      await pushControl.evaluate(element => element.setAttribute("data-e2e-push-instance", "initial"));
+    } else {
+      // Resizing and opening/closing the menu must not replace the controller.
+      await expect(pushControl).toHaveAttribute("data-e2e-push-instance", "initial");
+    }
+    const diagnostics = page.getByRole("button", { name: "Connection status and diagnostics", exact: true });
+    await expect(diagnostics).toBeVisible();
+    expect(await diagnostics.locator("button").count()).toBe(0);
+    if (width < 768) await expect.poll(() => diagnostics.evaluate(element => element.getBoundingClientRect().height), { timeout: 2000 }).toBeGreaterThanOrEqual(44);
+    await noOverflow(page);
+    await page.screenshot({ path: info.outputPath(`navigation-bar-${width}.png`), fullPage: true });
+  }
+  await page.setViewportSize(initialViewport);
 }
 async function noOverflow(page: Page) { expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); }
 
@@ -24,7 +70,7 @@ async function waitForSecurityLayout(page: Page, width: number) {
 }
 
 async function accessMapEvidence(page: Page, info: TestInfo, bridgeIds: string[], otherBrowserId: string) {
-  await page.getByRole("button", { name: "Open security", exact: true }).click();
+  await openSecurityNavigation(page);
   const dialog = page.getByRole("dialog", { name: "Security", exact: true });
   await expect(dialog.getByRole("tab", { name: "Access", exact: true })).toHaveAttribute("aria-selected", "true");
   for (const bridgeId of bridgeIds) {
@@ -96,7 +142,8 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       const initial = (await accountBrowserState(page))[0];
       expect(initial.hpkeExtractable).toBe(false); expect(initial.signingExtractable).toBe(false);
       expect(initial.trust?.checkpoint.devices).toHaveLength(1);
-      await page.getByRole("button", { name: "Open security", exact: true }).click();
+      await navigationEvidence(page, info);
+      await openSecurityNavigation(page);
       await expect(page.getByRole("tab", { name: "Access", exact: true })).toHaveAttribute("aria-selected", "true");
       await expect(page.getByRole("heading", { name: "Your computers", exact: true })).toBeVisible();
       await expect(page.locator(`[data-computer-access="${firstId}"]`)).toContainText("Shared with your approved browsers", { timeout: 60000 });
@@ -192,11 +239,30 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       await expect(phone.getByRole("alert").filter({ hasText: "Approve this device using an existing approved device first." })).toHaveCount(0);
       const phoneIdentity = (await accountBrowserState(phone))[0]; expect(phoneIdentity.endpointId).not.toBe(initial.endpointId);
       expect(phoneIdentity.hpkeExtractable).toBe(false); expect(phoneIdentity.signingExtractable).toBe(false);
-      for (const [index, bridgeId] of [firstId, secondId].entries()) await createAccountShell(phone, bridgeId, `ACCOUNT_PRIVATE_${viewport.width}_${index}_${Date.now()}`);
-      await phone.reload(); await expect(phone.locator(`[data-bridge-row="${firstId}"]`)).toBeVisible({ timeout: 45000 });
+      const existingNames = [firstId, secondId].map((_, index) => `ACCOUNT_PRIVATE_${viewport.width}_${index}_${Date.now()}`);
+      for (const [index, bridgeId] of [firstId, secondId].entries()) await createAccountShell(phone, bridgeId, existingNames[index]);
+      // The user's mobile reconnect action must perform a real document reload
+      // and restore the same approved identity, bridges and running sessions.
+      await phone.getByRole("button", { name: "Open navigation menu", exact: true }).click();
+      await Promise.all([
+        phone.waitForEvent("load", { timeout: 30000 }),
+        phone.getByRole("navigation", { name: "Dashboard actions" }).getByRole("button", { name: "Reconnect and refresh", exact: true }).click(),
+      ]);
+      for (const bridgeId of [firstId, secondId]) await expect(phone.locator(`[data-bridge-row="${bridgeId}"]`)).toBeVisible({ timeout: 60000 });
       expect((await accountBrowserState(phone))[0].endpointId).toBe(phoneIdentity.endpointId);
+      for (const name of existingNames) await expect(phone.getByRole("button", { name: new RegExp(name) })).toBeVisible({ timeout: 60000 });
 
       await page.goto("/dashboard");
+      if (viewport.width >= 768) {
+        await expect(page.locator(`[data-bridge-row="${firstId}"]`)).toBeVisible({ timeout: 60000 });
+        await Promise.all([
+          page.waitForEvent("load", { timeout: 30000 }),
+          page.getByRole("button", { name: "Reconnect and refresh", exact: true }).click(),
+        ]);
+        for (const bridgeId of [firstId, secondId]) await expect(page.locator(`[data-bridge-row="${bridgeId}"]`)).toBeVisible({ timeout: 60000 });
+        expect((await accountBrowserState(page))[0].endpointId).toBe(initial.endpointId);
+        for (const name of existingNames) await expect(page.getByRole("button", { name: new RegExp(name) })).toBeVisible({ timeout: 60000 });
+      }
       const accountRead = await page.request.get(`${origin}/api/security/account`); expect(accountRead.ok()).toBe(true);
       const oldHistory: unknown = await accountRead.json();
       const staleTab = await desktop.newPage(); let release: () => void = () => {};

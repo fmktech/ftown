@@ -62,3 +62,19 @@ it("late successful enable cannot restore ownership after logout",async()=>{
  expect(localStorage.getItem("ftown:pushOwner")).toBeNull();
  expect(post.mock.calls.every(([value])=>value.ownerHash===null)).toBe(true);
 });
+
+it("preserves the notification controller when presentation changes and requests permission synchronously on click",async()=>{
+ fixture();const view=render(<PushNotificationsControl accountId="owner" presentation="responsive"/>);
+ await waitFor(()=>expect((screen.getByRole("button") as HTMLButtonElement).disabled).toBe(false));
+ const initialRequests=vi.mocked(fetch).mock.calls.length;
+ expect(permission).not.toHaveBeenCalled();
+ view.rerender(<PushNotificationsControl accountId="owner" presentation="default"/>);
+ expect(vi.mocked(fetch).mock.calls).toHaveLength(initialRequests);
+ fireEvent.click(screen.getByRole("button",{name:"Enable push notifications"}));
+ expect(permission).toHaveBeenCalledTimes(1);
+ await screen.findByRole("button",{name:"Disable push notifications"});
+ view.rerender(<PushNotificationsControl accountId="owner" presentation="responsive"/>);
+ expect(screen.getAllByRole("button",{name:"Disable push notifications"})).toHaveLength(1);
+ expect(localStorage.getItem("ftown:pushOwner")).toBe("owner");
+ expect(vi.mocked(fetch).mock.calls.filter(([,options])=>!options?.method)).toHaveLength(1);
+});

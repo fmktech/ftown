@@ -75,7 +75,10 @@ export function PairClient({ userEmail, ownerId, onConnected }: { userEmail: str
   }
   const returnTo = typeof window !== "undefined" ? safeAccountReturnTo(window.location.pathname + window.location.search) ?? "/pair" : "/pair";
   return <main className="min-h-dvh p-4 pt-8 sm:p-8"><section className="mx-auto w-full max-w-xl space-y-5 rounded-xl border border-[var(--border-muted)] bg-[var(--bg-surface)] p-5 sm:p-8">
-    <h1 className="text-2xl font-semibold">Connect a computer</h1>
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+      <h1 className="text-2xl font-semibold">Connect a computer</h1>
+      {!busy && <a href="/dashboard" className="btn-ghost inline-flex min-h-11 items-center">Back to dashboard</a>}
+    </div>
     <p className="text-sm leading-relaxed text-[var(--text-muted)]">One approval connects this computer to your account and establishes encrypted trust. Your approved devices gain access automatically.</p>
     {error && <p role="alert" className="break-words text-sm text-[var(--status-error)]">{error}</p>}
     {session === undefined ? <p role="status">Checking account…</p> : !session ? <><p className="text-sm">Sign in to continue. The private link stays in this tab.</p><a href={`/login?returnTo=${encodeURIComponent(returnTo)}`} className="btn-accent inline-flex min-h-11 items-center">Sign in</a></> : <>

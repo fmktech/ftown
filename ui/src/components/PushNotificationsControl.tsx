@@ -43,7 +43,7 @@ export async function detachPushSubscription(): Promise<void> {
     finally { if(generation===ownerGeneration) await subscription.unsubscribe(); }
   }
 }
-export function PushNotificationsControl({localMode=false,accountId}:{localMode?:boolean;accountId:string}) {
+export function PushNotificationsControl({localMode=false,accountId,presentation="default"}:{localMode?:boolean;accountId:string;presentation?:"default"|"responsive"}) {
   const [state,setState]=useState<"loading"|"available"|"enabled"|"unavailable"|"denied"|"busy">("loading");
   const [detail,setDetail]=useState(""); const [publicKey,setPublicKey]=useState("");
   useEffect(()=>{
@@ -114,12 +114,17 @@ export function PushNotificationsControl({localMode=false,accountId}:{localMode?
     try {await detachPushSubscription();setState("available");setDetail("");}
     catch {setState("available");setDetail("Browser notifications are off. Server cleanup will retry when its endpoint expires.");}
   };
-  return <div style={{fontSize:11,padding:"8px 12px",maxWidth:280}}>
+  const label=state==="enabled"?"Disable push notifications":state==="busy"?"Updating notifications…":"Enable push notifications";
+  const responsive=presentation==="responsive";
+  return <div className={responsive?"min-w-0 md:w-auto":""} style={responsive?{fontSize:11}:{fontSize:11,padding:"8px 12px",maxWidth:280}}>
     <button type="button" onClick={()=>void(state==="enabled"?disable():enable())}
+      aria-label={label} title={detail?`${label}: ${detail}`:label} data-push-state={state}
+      className={responsive?"btn-ghost flex min-h-11 w-full items-center gap-2 text-left md:min-h-8 md:w-8 md:justify-center":""}
       disabled={!["available","enabled"].includes(state)}
-      style={{minHeight:36,cursor:["available","enabled"].includes(state)?"pointer":"default"}}>
-      {state==="enabled"?"Disable push notifications":state==="busy"?"Updating notifications…":"Enable push notifications"}
+      style={responsive?{padding:"4px 6px",cursor:["available","enabled"].includes(state)?"pointer":"default"}:{minHeight:36,cursor:["available","enabled"].includes(state)?"pointer":"default"}}>
+      {responsive&&<svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/>{state==="enabled"&&<circle cx="19" cy="4" r="2" fill="currentColor" stroke="none"/>}</svg>}
+      <span className={responsive?"md:sr-only":""}>{label}</span>
     </button>
-    {detail && <p role="status" style={{marginTop:4}}>{detail}</p>}
+    {detail && <p role="status" className={responsive?"mt-1 max-w-64 text-xs md:sr-only":""} style={responsive?undefined:{marginTop:4}}>{detail}</p>}
   </div>;
 }

@@ -21,6 +21,15 @@ test.describe("device pairing", () => {
       await registerUser(user.email, user.password);
       await login(page, user.email, user.password, { pairBridge: false });
 
+      // Leaving an invalid code must return to the dashboard without denying
+      // a pending request or changing account trust.
+      await page.goto("/pair");
+      await page.getByLabel("Computer code").fill("AB");
+      await page.getByRole("button", { name: "Look up code" }).click();
+      await expect(page.getByRole("alert").filter({ hasText: "Enter the full eight-character computer code." })).toBeVisible();
+      await page.getByRole("link", { name: "Back to dashboard" }).click();
+      await expect(page).toHaveURL(/\/dashboard$/);
+
       bridge = await startAccountTestBridge(UI_BASE_URL);
       const bridgeId = await approveAccountComputer(page, bridge);
 

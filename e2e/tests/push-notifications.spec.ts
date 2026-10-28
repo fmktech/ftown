@@ -44,11 +44,22 @@ test("explicit push opt-in/opt-out and foreground/closed-page service-worker dis
  expect(afterReload.fixtureRequests).toBe(0);
  expect(afterReload.permissions).toBe("granted");
  const config=await page.request.get("/api/push");expect(config.status()).toBe(200);expect((await config.json()).enabled).toBe(true);
+ // This freshly registered account is waiting for its first device approval.
+ // Its standalone push control is available before the dashboard exists.
+ await page.setViewportSize({width:390,height:844});
+ await expect(page.getByRole("region",{name:"Waiting for device approval"})).toBeVisible();
+ await expect(page.getByRole("navigation",{name:"Dashboard actions"})).toHaveCount(0);
+ const pushControl=page.locator("[data-push-state]");await expect(pushControl).toHaveCount(1);
+ await pushControl.evaluate(element=>element.setAttribute("data-e2e-push-instance","initial"));
  const enable=page.getByRole("button",{name:"Enable push notifications"});await expect(enable).toBeEnabled();
  expect(await page.evaluate(()=>localStorage.getItem("ftown:pushOwner"))).toBeNull();
  await enable.click();await expect(page.getByRole("button",{name:"Disable push notifications"})).toBeEnabled();
  expect(await page.evaluate(()=>(Notification as unknown as {fixtureRequests:number}).fixtureRequests)).toBe(1);
  await page.getByRole("button",{name:"Disable push notifications"}).click();await expect(enable).toBeEnabled();
+ // Resizing the approval shell must not replace its owner-bound controller.
+ await page.setViewportSize({width:1280,height:900});
+ await expect(pushControl).toHaveCount(1);
+ await expect(pushControl).toHaveAttribute("data-e2e-push-instance","initial");
  // Enable again before testing both foreground and closed-page delivery.
  await enable.click();await expect(page.getByRole("button",{name:"Disable push notifications"})).toBeEnabled();
  await page.screenshot({path:testInfo.outputPath("notifications-enabled.png"),fullPage:true});

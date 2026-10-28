@@ -171,6 +171,12 @@ export class TerminalManager {
     managed.terminal.write(rawLog, () => {});
   }
 
+  getSize(sessionId: string): { cols: number; rows: number } | undefined {
+    const managed = this.terminals.get(sessionId);
+    if (!managed) return undefined;
+    return { cols: managed.terminal.cols, rows: managed.terminal.rows };
+  }
+
   resize(sessionId: string, cols: number, rows: number): void {
     const managed = this.terminals.get(sessionId);
     if (managed) {

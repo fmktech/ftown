@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from "react";
+import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle, type ReactNode } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
@@ -24,6 +24,7 @@ interface TerminalProps {
   sessionId: string | null;
   bridgeId: string | null;
   isRunning: boolean;
+  headerActions?: ReactNode;
   sessionName?: string | null;
   pullRequestUrl?: string;
   usage?: TokenUsage;
@@ -125,7 +126,7 @@ function TransportModeBadge({
   );
 }
 
-export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ transport, sessionId, bridgeId, isRunning, sessionName, pullRequestUrl, usage, persistedUsage, onMobileTap, shellType, onInterrupt }, ref) {
+export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ transport, sessionId, bridgeId, isRunning, headerActions, sessionName, pullRequestUrl, usage, persistedUsage, onMobileTap, shellType, onInterrupt }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -453,6 +454,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
 
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 max-w-full py-1">
               <TransportModeBadge mode={mode} fallbackReason={fallbackReason} />
+              {headerActions}
 
               {usage && (usage.inputTokens > 0 || usage.outputTokens > 0) ? (
                 <span

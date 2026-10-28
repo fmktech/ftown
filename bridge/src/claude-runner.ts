@@ -54,15 +54,21 @@ interface TmuxAttachParams {
   submitSuffix?: string;
 }
 
+/** A session ID survives reruns; lifecycle intent belongs to one launch. */
+interface ProcessGeneration {
+  stopping: boolean;
+  detachOnly: boolean;
+  /** PTY removed from activeProcesses by its stop timeout but awaiting exit. */
+  forcedStopProcess?: IPty;
+}
+
 export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
   private readonly activeProcesses: Map<string, IPty> = new Map();
   private readonly runtimes: Map<string, SessionRuntime> = new Map();
-  /** Sessions being killed via stop(); suppresses tmux reattach and exit-event
-   * emission — callers of stop() persist the final status themselves, and a
-   * late 'complete'/'error' save can resurrect a record removal just deleted. */
-  private readonly stopping: Set<string> = new Set();
-  /** Sessions detaching on shutdown; the tmux session stays alive, emit nothing. */
-  private readonly detachOnly: Set<string> = new Set();
+  /** stop/detach intent must not transfer to a later launch with the same ID. */
+  private readonly generations = new Map<string, ProcessGeneration>();
+  /** A tmux generation can attach multiple clients; track each PTY's exit. */
+  private readonly exitedProcesses = new WeakSet<IPty>();
   /** Last client-requested size, so tmux reattach does not snap back to creation-time size. */
   private readonly lastSizes: Map<string, { cols: number; rows: number }> = new Map();
 
@@ -88,14 +94,17 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
     const cols = options.cols ?? 120;
     const rows = options.rows ?? 40;
     const env = this.buildEnv(sessionId, options);
+    const generation: ProcessGeneration = { stopping: false, detachOnly: false };
+    this.generations.set(sessionId, generation);
+    this.activeProcesses.delete(sessionId);
+    this.lastSizes.delete(sessionId);
 
     console.log(`[ProcessRunner] Spawning command in ${cwd} (${this.getPreferredRuntime()}): ${command}`);
 
     if (this.getPreferredRuntime() === 'tmux') {
-      // Registered before the async tmux creation so a stop() arriving in the
-      // creation window is recorded (via this.stopping) instead of lost.
+      // Register the generation before async creation so stop() can cancel it.
       this.runtimes.set(sessionId, 'tmux');
-      void this.runTmux(sessionId, command, env, {
+      void this.runTmux(sessionId, generation, command, env, {
         cwd,
         cols,
         rows,
@@ -106,7 +115,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
       return;
     }
 
-    this.runDirect(sessionId, command, env, cwd, cols, rows, options);
+    this.runDirect(sessionId, generation, command, env, cwd, cols, rows, options);
   }
 
   /** Attach to an existing tmux session without creating it (session resurrection). */
@@ -119,7 +128,9 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
     }
 
     const env = this.buildEnv(sessionId, { parentSessionId: options.parentSessionId });
-    this.attachTmux(sessionId, {
+    const generation: ProcessGeneration = { stopping: false, detachOnly: false };
+    this.generations.set(sessionId, generation);
+    this.attachTmux(sessionId, generation, {
       env,
       cwd: options.workingDir ?? process.cwd(),
       cols: options.cols ?? 120,
@@ -154,9 +165,10 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
   stop(sessionId: string): boolean {
     const proc = this.activeProcesses.get(sessionId);
     const isTmux = this.runtimes.get(sessionId) === 'tmux';
+    const generation = this.generations.get(sessionId);
 
     if (isTmux) {
-      this.stopping.add(sessionId);
+      if (generation) generation.stopping = true;
       this.killTmuxSessionLogged(sessionId);
     }
 
@@ -172,16 +184,19 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
     // Direct runtime: mark stopping so the PTY onExit emits nothing — like the
     // tmux path, the caller owns the final status, and emitting here races
     // remove_session's delete with a status save that recreates the record.
-    if (!isTmux) {
-      this.stopping.add(sessionId);
-    }
+    if (generation) generation.stopping = true;
 
     proc.kill();
 
     setTimeout(() => {
-      if (this.activeProcesses.has(sessionId)) {
+      if (generation && !this.exitedProcesses.has(proc)) {
+        if (this.generations.get(sessionId) === generation && this.activeProcesses.get(sessionId) === proc) {
+          generation.forcedStopProcess = proc;
+        }
         proc.kill('SIGKILL');
-        this.activeProcesses.delete(sessionId);
+        if (this.generations.get(sessionId) === generation && this.activeProcesses.get(sessionId) === proc) {
+          this.activeProcesses.delete(sessionId);
+        }
       }
     }, 5000);
 
@@ -192,7 +207,8 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
     for (const [sessionId, proc] of this.activeProcesses) {
       if (this.runtimes.get(sessionId) === 'tmux') {
         // Detach only — the tmux session keeps running and survives bridge restarts.
-        this.detachOnly.add(sessionId);
+        const generation = this.generations.get(sessionId);
+        if (generation) generation.detachOnly = true;
         proc.kill();
       } else {
         this.stop(sessionId);
@@ -243,6 +259,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
 
   private async runTmux(
     sessionId: string,
+    generation: ProcessGeneration,
     command: string,
     env: Record<string, string>,
     params: Omit<TmuxAttachParams, 'env'>,
@@ -257,7 +274,9 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
         env,
       });
     } catch (err) {
-      const wasStopping = this.stopping.delete(sessionId);
+      if (this.generations.get(sessionId) !== generation) return;
+      const wasStopping = generation.stopping;
+      this.generations.delete(sessionId);
       this.runtimes.delete(sessionId);
       console.error(`[ProcessRunner] Failed to create tmux session:`, err);
       if (!wasStopping) {
@@ -268,16 +287,19 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
 
     // stop() may have arrived while the session was being created; honor it
     // instead of attaching. stop_session already persisted the final status.
-    if (this.stopping.delete(sessionId)) {
+    if (this.generations.get(sessionId) !== generation) return;
+    if (generation.stopping) {
+      this.generations.delete(sessionId);
       this.runtimes.delete(sessionId);
       this.killTmuxSessionLogged(sessionId);
       return;
     }
 
-    this.attachTmux(sessionId, { ...params, env });
+    this.attachTmux(sessionId, generation, { ...params, env });
   }
 
-  private attachTmux(sessionId: string, params: TmuxAttachParams): void {
+  private attachTmux(sessionId: string, generation: ProcessGeneration, params: TmuxAttachParams): void {
+    if (this.generations.get(sessionId) !== generation) return;
     // params holds creation-time cols/rows; prefer the latest client size.
     const size = this.lastSizes.get(sessionId);
     if (size) {
@@ -299,6 +321,9 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
       );
       console.log(`[ProcessRunner] Attached to tmux session ${tmuxSessionName(sessionId)}, client pid: ${proc.pid}`);
     } catch (err) {
+      if (this.generations.get(sessionId) !== generation) return;
+      this.generations.delete(sessionId);
+      this.runtimes.delete(sessionId);
       console.error(`[ProcessRunner] Failed to attach to tmux session:`, err);
       this.emit('error', sessionId, err instanceof Error ? err : new Error(String(err)));
       return;
@@ -308,19 +333,25 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
     this.runtimes.set(sessionId, 'tmux');
 
     proc.onData((data: string) => {
-      this.emit('data', sessionId, data);
+      if (this.generations.get(sessionId) === generation && this.activeProcesses.get(sessionId) === proc) this.emit('data', sessionId, data);
     });
 
     proc.onExit(({ exitCode, signal }) => {
+      this.exitedProcesses.add(proc);
+      if (this.generations.get(sessionId) !== generation ||
+        (this.activeProcesses.get(sessionId) !== proc &&
+          !(generation.stopping && generation.forcedStopProcess === proc && !this.activeProcesses.has(sessionId)))) return;
       console.log(`[ProcessRunner] tmux attach client exited, code: ${exitCode}, signal: ${signal}`);
       this.activeProcesses.delete(sessionId);
       this.runtimes.delete(sessionId);
 
-      if (this.detachOnly.delete(sessionId)) {
+      if (generation.detachOnly) {
+        this.generations.delete(sessionId);
         return;
       }
 
-      if (this.stopping.delete(sessionId)) {
+      if (generation.stopping) {
+        this.generations.delete(sessionId);
         // stop() initiated this exit; stop_session persists the final status,
         // so emit nothing (kill-session makes the trap record a bogus code).
         readAndClearExitCode(sessionId);
@@ -330,11 +361,12 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
 
       if (hasTmuxSession(sessionId)) {
         // Client detached but the command is still running — reattach to keep streaming.
-        this.attachTmux(sessionId, { ...params, initialInput: undefined });
+        this.attachTmux(sessionId, generation, { ...params, initialInput: undefined });
         return;
       }
 
       this.lastSizes.delete(sessionId);
+      this.generations.delete(sessionId);
 
       // The attach client's exit code is unrelated to the command's; the real
       // code is written to a temp file by the command wrapper inside tmux.
@@ -356,6 +388,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
 
   private runDirect(
     sessionId: string,
+    generation: ProcessGeneration,
     command: string,
     env: Record<string, string>,
     cwd: string,
@@ -375,6 +408,9 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
       });
       console.log(`[ProcessRunner] Process spawned, pid: ${proc.pid}`);
     } catch (err) {
+      if (this.generations.get(sessionId) !== generation) return;
+      this.generations.delete(sessionId);
+      this.runtimes.delete(sessionId);
       console.error(`[ProcessRunner] Failed to spawn process:`, err);
       this.emit('error', sessionId, err instanceof Error ? err : new Error(String(err)));
       return;
@@ -384,15 +420,20 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
     this.runtimes.set(sessionId, 'direct');
 
     proc.onData((data: string) => {
-      this.emit('data', sessionId, data);
+      if (this.generations.get(sessionId) === generation && this.activeProcesses.get(sessionId) === proc) this.emit('data', sessionId, data);
     });
 
     proc.onExit(({ exitCode, signal }) => {
+      this.exitedProcesses.add(proc);
+      if (this.generations.get(sessionId) !== generation ||
+        (this.activeProcesses.get(sessionId) !== proc &&
+          !(generation.stopping && generation.forcedStopProcess === proc && !this.activeProcesses.has(sessionId)))) return;
       console.log(`[ProcessRunner] Process exited, code: ${exitCode}, signal: ${signal}`);
       this.activeProcesses.delete(sessionId);
       this.runtimes.delete(sessionId);
       this.lastSizes.delete(sessionId);
-      if (this.stopping.delete(sessionId)) {
+      this.generations.delete(sessionId);
+      if (generation.stopping) {
         // stop() initiated this exit; the caller persists the final status.
         return;
       }

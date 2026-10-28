@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "@/types";
 import type { SessionActivity } from "@/hooks/useAllSessionEvents";
 import { Dashboard } from "./Dashboard";
 import { buildBridgeCommand } from "@/lib/bridge-command";
 import type { MessageClient } from "@/lib/message-client";
+import type { ReactNode } from "react";
 
 const state = vi.hoisted(() => ({
   sessions: [] as Session[],
@@ -33,12 +34,12 @@ vi.mock("@/hooks/useBridges", () => ({ useBridges: () => ({ bridges: state.bridg
 vi.mock("@/hooks/useAllSessionEvents", () => ({ useAllSessionEvents: () => ({
   sessionActivity: state.activity, markSessionIdle: vi.fn(), clearSessionAttention: state.clearSessionAttention,
 }) }));
-vi.mock("./Terminal", () => ({ Terminal: ({ sessionId }: { sessionId: string | null }) => <div data-testid="terminal">{sessionId}</div> }));
+vi.mock("./Terminal", () => ({ Terminal: ({ sessionId, headerActions }: { sessionId: string | null; headerActions?: ReactNode }) => <section aria-label="Terminal session header"><div data-testid="terminal">{sessionId}</div>{headerActions}</section> }));
 vi.mock("./MobileControlBar", () => ({ MobileControlBar: () => <div>Session controls</div> }));
 vi.mock("./NewSessionModal", () => ({ NewSessionModal: ({ isOpen, onSubmit, onClose }: {
   isOpen: boolean; onSubmit: (prompt: string, options: { shellType: "shell" }) => Promise<void>; onClose: () => void;
 }) => isOpen ? <div>New Session<button onClick={() => { void onSubmit("", { shellType: "shell" }).then(onClose).catch(() => {}); }}>Submit new session</button></div> : null }));
-vi.mock("./CloudConnectionNotice", () => ({ CloudConnectionNotice: () => null }));
+vi.mock("./CloudConnectionNotice", () => ({ CloudConnectionNotice: ({ children }: { children: ReactNode }) => <button aria-label="Connection status and diagnostics">{children}</button> }));
 
 function session(id: string, name: string, fields: Partial<Session> = {}): Session {
   return { id, name, bridgeId: "bridge-a", status: "running", shellType: "shell", createdAt: "2026-10-16T00:00:00Z", updatedAt: "2026-10-16T00:00:00Z", ...fields };
@@ -52,6 +53,8 @@ function dashboard(localMode = false) {
 
 beforeEach(() => {
   localStorage.clear();
+  Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value: function(this: HTMLDialogElement) { this.open = true; } });
+  Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value: function(this: HTMLDialogElement) { this.open = false; } });
   vi.clearAllMocks();
   state.activity = new Map();
   state.createSession.mockResolvedValue(undefined);
@@ -187,5 +190,108 @@ describe("attention navigation preserves the request", () => {
     fireEvent.click(screen.getByRole("button", { name: "Dismiss attention for Regular shell" }));
     expect(state.clearSessionAttention).toHaveBeenCalledExactlyOnceWith("ordinary");
     expect(screen.getByRole("button", { name: "Workspace" }).classList.contains("mobile-tab-active")).toBe(true);
+  });
+});
+
+
+describe("reconnect and refresh", () => {
+  it.each([
+    { desktop: true, local: false }, { desktop: false, local: false },
+    { desktop: true, local: true }, { desktop: false, local: true },
+  ])("reloads the current page on explicit action (desktop=$desktop, local=$local)", ({ desktop, local }) => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: desktop, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    // jsdom does not navigate documents, but emits this event when Location.reload
+    // attempts a real reload. That checks the production handler without replacing it.
+    const virtualConsole = (window as unknown as { _virtualConsole: {
+      on(event: "jsdomError", handler: (error: Error) => void): void;
+      off(event: "jsdomError", handler: (error: Error) => void): void;
+    } })._virtualConsole;
+    const errors: Error[] = [];
+    const record = (error: Error) => errors.push(error);
+    virtualConsole.on("jsdomError", record);
+    try {
+      localStorage.setItem("ftown:test-trust", "keep");
+      sessionStorage.setItem("ftown:test-local-port", "keep");
+      const { container } = dashboard(local);
+      const desktopButton = container.querySelector<HTMLButtonElement>('button[aria-label="Reconnect and refresh"].hidden')!;
+      let action: HTMLButtonElement;
+      if (desktop) {
+        action = desktopButton;
+      } else {
+        fireEvent.click(screen.getByRole("button", { name: "Open navigation menu" }));
+        action = within(screen.getByRole("navigation", { name: "Dashboard actions" })).getByRole("button", { name: "Reconnect and refresh" });
+      }
+      expect(action.title).toContain("reload this page");
+      fireEvent.click(action);
+      expect(errors.filter(error => error.message.includes("Not implemented: navigation"))).toHaveLength(1);
+      expect(localStorage.getItem("ftown:test-trust")).toBe("keep");
+      expect(sessionStorage.getItem("ftown:test-local-port")).toBe("keep");
+      expect(state.stopSession).not.toHaveBeenCalled();
+      expect(state.retrySession).not.toHaveBeenCalled();
+    } finally {
+      virtualConsole.off("jsdomError", record);
+      sessionStorage.removeItem("ftown:test-local-port");
+    }
+  });
+});
+
+describe("navigation and selected-session actions", () => {
+  it("keeps one notification controller in a dismissible mobile disclosure and restores focus", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    dashboard();
+    const trigger = screen.getByRole("button", { name: "Open navigation menu" });
+    expect(screen.queryByRole("navigation", { name: "Dashboard actions" })).toBeNull();
+    expect(document.querySelectorAll("[data-push-state]")).toHaveLength(1);
+    fireEvent.click(trigger);
+    const nav = screen.getByRole("navigation", { name: "Dashboard actions" });
+    expect(within(nav).getByRole("button", { name: "Open security" }).title).toBe("Security: computer and browser access");
+    expect(within(nav).getByRole("link", { name: "Use This computer" })).toBeTruthy();
+    expect(within(nav).getByRole("button", { name: "Enable push notifications" })).toBeTruthy();
+    expect(nav.getAttribute("role")).toBeNull();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(trigger);
+    expect(document.querySelectorAll("[data-push-state]")).toHaveLength(1);
+    fireEvent.click(trigger);
+    fireEvent.pointerDown(document.body);
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(trigger);
+    expect(screen.getByRole("button", { name: "Connection status and diagnostics" }).querySelector("button")).toBeNull();
+  });
+
+  it("closes navigation before opening Security and preserves its return focus", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    dashboard();
+    const trigger = screen.getByRole("button", { name: "Open navigation menu" });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("button", { name: "Open security" }));
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(await screen.findByRole("dialog", { name: "Security" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Close security" }));
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it.each([true, false])("targets the selected session in its header, with exclusive status actions (desktop=%s)", async desktop => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: desktop, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    state.sessions = [session("ordinary", "Regular shell"), session("completed", "Completed session", { status: "completed" }), session("failed", "Failed session", { status: "error" }), session("legacy", "Preserved run", { status: "error", loopId: "retired" })];
+    dashboard();
+    for (const [name, id, action] of [["Regular shell", "ordinary", "Stop"], ["Completed session", "completed", "Rerun"], ["Failed session", "failed", "Retry"]]) {
+      fireEvent.click(await screen.findByRole("button", { name: new RegExp(name) }));
+      const header = screen.getByRole("group", { name: "Selected session actions" });
+      expect(within(header).getAllByRole("button")).toHaveLength(1);
+      fireEvent.click(within(header).getByRole("button", { name: action }));
+      expect(action === "Stop" ? state.stopSession : state.retrySession).toHaveBeenLastCalledWith(id);
+      if (!desktop) {
+        fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+        const workspaceHeader = screen.getByRole("region", { name: "Selected session header" });
+        expect(screen.getAllByRole("group", { name: "Selected session actions" })).toHaveLength(1);
+        fireEvent.click(within(workspaceHeader).getByRole("button", { name: action }));
+        expect(action === "Stop" ? state.stopSession : state.retrySession).toHaveBeenLastCalledWith(id);
+      }
+    }
+    fireEvent.click(screen.getByRole("button", { name: /Preserved run/ }));
+    expect(screen.queryByRole("button", { name: /^(Stop|Rerun|Retry)$/ })).toBeNull();
+    const nav = document.getElementById("dashboard-navigation")!;
+    expect(within(nav).queryByRole("button", { name: /^(Stop|Rerun|Retry)$/ })).toBeNull();
   });
 });
