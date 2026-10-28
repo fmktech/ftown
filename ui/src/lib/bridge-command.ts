@@ -4,9 +4,9 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-/** Setup remains explicit; the canonical package starts the bridge by default. */
+/** Setup copies the launcher, so startup survives removal of the npx cache. */
 export function buildBridgeCommand(options: BridgeCommandOptions): string {
   const command = 'npx -y ftown@latest';
   const flags = options.solo ? '--solo' : `--api-url ${shellQuote(options.apiUrl)}`;
-  return `${command} setup && ${command} ${flags}`;
+  return `${command} setup && "$HOME/.ftown/ftown" ${flags}`;
 }
