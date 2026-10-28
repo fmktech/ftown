@@ -9,6 +9,35 @@ import type { CommandRpcDeps } from './command-rpc.js';
 import { createCommandHandler } from './command-rpc.js';
 import type { SessionController } from './session-controller.js';
 import type { Command, CommandResponse, Session } from './types.js';
+import { UpdateAdmission, UpdateResponseTicket } from './update-admission.js';
+import { UpdateEffects } from './update-effects.js';
+import type { BridgeUpdateCoordinator } from './bridge-update.js';
+import type { BridgeSecurityService } from './security/bridge/security.js';
+import type { VerifiedApplication } from './security/protocol.js';
+
+test('targeted update commands validate payloads and bind an accepted ticket to verified dispatch', async () => {
+  const responses: CommandResponse[] = []; let requests = 0, starts = 0;
+  const effects = new UpdateEffects(new UpdateAdmission());
+  const updates = { snapshot: async () => ({ bridgeId: 'bridge' }), request: async () => {
+    requests++; return { accepted: { bridgeId: 'bridge', operation: { id: 'op', targetVersion: '1.2.3' } }, ticket: new UpdateResponseTicket(() => { starts++; }, () => {}) };
+  } } as unknown as BridgeUpdateCoordinator;
+  const security = { revalidate: async () => {} } as unknown as BridgeSecurityService;
+  const handler = createCommandHandler({ bridgeId: 'bridge', updates, updateEffects: effects, security,
+    sessionController: {} as SessionController, publishCommandResponse: async response => { responses.push(response); } });
+  const message = (requestId: string, command: string, payload: Record<string, unknown>) => ({ envelope: { messageId: requestId }, principal: {}, application: { route: { kind: 'command', requestId, command, sessionId: null }, data: { type: command, requestId, payload } } }) as unknown as VerifiedApplication;
+  const payload = { bridgeId: 'bridge', targetVersion: '1.2.3', operationId: 'op' };
+  const verified = message('r', 'update_bridge', payload); effects.admitted(verified);
+  await handler({ type: 'update_bridge', requestId: 'r', payload }, verified);
+  assert.equal(responses.at(-1)?.success, true); assert.equal(requests, 1);
+  effects.sealed(verified, { type: 'command_response', response: responses.at(-1)! as unknown as import('./security/protocol.js').ApplicationJson });
+  assert.equal(starts, 0); effects.delivered('r'); await new Promise(resolve => setImmediate(resolve)); assert.equal(starts, 1);
+  const before = responses.length;
+  await handler({ type: 'update_bridge', requestId: 'foreign', payload: { ...payload, bridgeId: 'other' } }, message('foreign', 'update_bridge', payload));
+  assert.equal(responses.length, before);
+  await handler({ type: 'get_bridge_update', requestId: 'invalid', payload: { bridgeId: 'bridge', refresh: 'yes' } }, message('invalid', 'get_bridge_update', {}));
+  assert.equal(responses.at(-1)?.success, false); assert.equal((responses.at(-1)?.data as { code: string }).code, 'invalid_update_request');
+  await handler({ type: 'update_bridge', requestId: 'unauthenticated', payload }); assert.equal(responses.at(-1)?.success, false); assert.equal(requests, 1);
+});
 
 test('attention RPC requires owner targeting and persists read/resolve results', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'attention-rpc-'));

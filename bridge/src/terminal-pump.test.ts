@@ -317,3 +317,14 @@ function makeRunnerStub(): { on: (event: string, listener: RunnerListener) => un
   };
   return stub;
 }
+
+it('remains busy while terminal completion and usage persistence are outstanding', async () => {
+  let finish!: () => void;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  const h = makeHarness({ collectUsage: async () => { await gate; return null; } });
+  const runner = makeRunnerStub(); h.pump.attach(runner as unknown as Pick<ProcessRunner, 'on'>);
+  runner.emit('complete', 's1'); await settle();
+  assert.equal(h.pump.isIdle(), false);
+  finish(); await settle();
+  assert.equal(h.pump.isIdle(), true);
+});

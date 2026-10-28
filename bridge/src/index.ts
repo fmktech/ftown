@@ -5,7 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { resolve, dirname, join } from 'node:path';
 import { hostname as osHostname, networkInterfaces, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, realpathSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import { cleanup as ndcCleanup } from 'node-datachannel';
@@ -65,6 +65,12 @@ import {
 } from './solo/panel-manager.js';
 import { createSoloServer } from './solo/solo-server.js';
 import { executeCli, isCliEntry } from './cli-entry.js';
+import { UpdateAdmission } from './update-admission.js';
+import { UpdateEffects } from './update-effects.js';
+import { BridgeUpdateCoordinator } from './bridge-update.js';
+import { resolveStableRelease, prepareRelease, discardPreparedRelease } from './update-release.js';
+import { assertUpdateReservationAllowed, readUpdateRestartContext, reportUpdateReady, reserveUpdate,
+  prepareHandoff, readUpdateReceipt, writeUpdateReceipt } from './update-handoff.js';
 
 /** Bridge package version — doubles as the default panel bundle version. */
 const BRIDGE_VERSION = JSON.parse(
@@ -95,6 +101,12 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const DEFAULT_API_URL = 'https://ftown.ia.br';
 
+/** Update restart must not admit work until the helper's final private acknowledgement. */
+export async function finishUpdateRestartAdmission(admission: UpdateAdmission, reportReady: () => Promise<void>): Promise<void> {
+  await reportReady();
+  admission.reopen();
+}
+
 export async function runBridge(argv: string[], commandName = 'ftown-bridge'): Promise<number> {
 const program = new Commander();
 program.exitOverride();
@@ -102,6 +114,7 @@ program.exitOverride();
 program
   .name(commandName)
   .description('ftown orchestrator bridge for Centrifugo')
+  .option('--allow-updates', 'Allow explicit updates for this unsupervised single-bridge installation')
   .option('--local', 'Local browser control only: no cloud account or connection')
   .option('--solo', 'Single-port LAN deployment: no account service, managed hub + panel children, key-based auth')
   .option('--port <port>', 'Public port for --solo front (default: see DEFAULT_SOLO_PORT)')
@@ -112,7 +125,7 @@ program
   .option('--api-url <url>', 'ftown UI API URL', DEFAULT_API_URL)
   .option('--data-dir <path>', 'Directory for session data (default: ~/.ftown/data)')
   .option('--bridge-id <id>', 'Bridge instance ID (default: persisted per data dir)')
-  .action(async (opts: { local?: boolean; solo?: boolean; port?: string; rotateKey?: boolean; token?: string; account?: string; bootstrap?: boolean; apiUrl: string; dataDir?: string; bridgeId?: string }) => {
+  .action(async (opts: { allowUpdates?: boolean; local?: boolean; solo?: boolean; port?: string; rotateKey?: boolean; token?: string; account?: string; bootstrap?: boolean; apiUrl: string; dataDir?: string; bridgeId?: string }) => {
     if (opts.local && opts.solo) program.error('--local and --solo cannot be combined');
     if (opts.account !== undefined && opts.bootstrap) program.error('--account and --bootstrap cannot be combined');
     if ((opts.local || opts.solo) && (opts.account !== undefined || opts.bootstrap)) program.error('--account and --bootstrap require cloud mode');
@@ -130,6 +143,11 @@ program
       );
     }
 
+    // Restart context is authenticated by the private helper channel before any mutation.
+    assertUpdateReservationAllowed(homedir());
+    const updateRestart = readUpdateRestartContext();
+    if (updateRestart && (updateRestart.targetVersion !== BRIDGE_VERSION || opts.token || opts.account || opts.bootstrap || opts.solo))
+      throw new Error('Invalid update restart context');
     // Explicit setup must finish before any migration, identity, network or auth side effect.
     assertSetupReady(BRIDGE_VERSION);
 
@@ -156,6 +174,8 @@ program
     } catch {
       persistedBridgeId = undefined;
     }
+    if (updateRestart && (realpathSync(dataDir) !== realpathSync(defaultDataDir) || !persistedBridgeId || persistedBridgeId !== updateRestart.bridgeId ||
+      (opts.bridgeId && opts.bridgeId !== updateRestart.bridgeId))) throw new Error('Update restart identity mismatch');
     const bridgeId = opts.bridgeId ?? persistedBridgeId ?? uuidv4();
     try {
       mkdirSync(dataDir, { recursive: true });
@@ -198,7 +218,9 @@ program
       const saved = Number(readFileSync(localPortPath, 'utf8').trim());
       if (Number.isInteger(saved) && saved > 0 && saved <= 65535) preferredLocalPort = saved;
     } catch { /* first start */ }
+    if (updateRestart && !preferredLocalPort) throw new Error('Update restart endpoint is missing');
     const hookPort = await localApiServer.start(preferredLocalPort);
+    if (updateRestart && hookPort !== preferredLocalPort) { localApiServer.stop(); throw new Error('Update restart endpoint is unavailable'); }
     writeFileSync(localPortPath, `${hookPort}\n`, { mode: 0o600 });
     console.log(`[Bridge] Local API server started on port ${hookPort}`);
     const localNonce = randomBytes(16).toString('hex');
@@ -390,9 +412,13 @@ program
     // as /api/auth/bridge, so all three paths converge on `auth` and the identical
     // refresh-token persist/resume logic below.
     const boundAtStartup = await readBoundBridgeIdentity(dataDir);
+    if (updateRestart && (!boundAtStartup || boundAtStartup.identity.endpoint.id !== updateRestart.endpointId ||
+      boundAtStartup.identity.endpoint.ownerId !== updateRestart.ownerId || (!opts.local && !persistedRefreshToken)))
+      throw new Error('Update restart identity is unavailable');
     let pendingEnrollment: PendingBridgeEnrollment | undefined;
     let pendingVerified: PendingPairingVerified | undefined;
     const onboard = async (): Promise<BridgeAuthResponse> => {
+      if (updateRestart) throw new Error('Update restart requires existing authentication');
       if (opts.token) {
         console.log('[Bridge] Authenticating with API...');
         return fetchBridgeToken(opts.apiUrl, opts.token, bridgeId, local);
@@ -478,6 +504,7 @@ program
       try {
         auth = await refreshBridgeToken(opts.apiUrl, persistedRefreshToken, bridgeId, local);
       } catch (err) {
+        if (updateRestart) throw new Error('Update restart authentication failed');
         console.warn(
           '[Bridge] Stored refresh token rejected, falling back to bootstrap token / pairing:',
           err instanceof Error ? err.message : String(err),
@@ -586,6 +613,10 @@ program
     const terminalManager = new TerminalManager(50000, 120);
 
     const runner = new ProcessRunner();
+    const updateAdmission = new UpdateAdmission();
+    if (updateRestart) updateAdmission.freeze();
+    const updateEffects = new UpdateEffects(updateAdmission);
+    let resurrectionComplete = false;
     const centrifugo = new CentrifugoClient(centrifugoUrl, auth.token, getToken, {
       disabled: opts.local,
       // On a transport reconnect, re-publish the session snapshot. The UI does
@@ -682,6 +713,8 @@ program
     const ensureWatchedSessionAttached = (sid: string): void => {
       if (runner.isRunning(sid) || watchReattachInFlight.has(sid)) return;
       if (!runner.hasTmuxSession(sid)) return;
+      let release: () => void;
+      try { release = updateAdmission.enter(); } catch { return; }
       watchReattachInFlight.add(sid);
       void store.loadSession(sid)
         .then((session) => {
@@ -700,7 +733,7 @@ program
         .catch((err) => {
           console.error(`[Bridge] Failed to reattach ${sid} for a terminal watcher:`, err);
         })
-        .finally(() => { watchReattachInFlight.delete(sid); });
+        .finally(() => { watchReattachInFlight.delete(sid); release(); });
     };
 
     // Every NEW remote watcher (first, each additional distinct client, or a
@@ -768,6 +801,7 @@ program
 
     const sessionFactoryDeps: CreateFtownSessionDeps = {
       store,
+      updateAdmission,
       runner,
       centrifugo,
       userId,
@@ -829,6 +863,31 @@ program
     });
 
     localApiServer.setSessionController(sessionController);
+
+    const updateHome = realpathSync(homedir());
+    const stagingRoot = join(updateHome, '.ftown', 'updates');
+    const canonicalLaunch = (() => {
+      try { return commandName === 'ftown start' && realpathSync(process.argv[1]) === realpathSync(join(homedir(), '.ftown', 'cli', 'dist', 'ftown-cli.js')); }
+      catch { return false; }
+    })();
+    const updates = new BridgeUpdateCoordinator({
+      bridgeId, currentVersion: BRIDGE_VERSION, stagingRoot, resuming: !!updateRestart,
+      restart: { mode: opts.local ? 'local' : 'cloud', home: updateHome, dataDir: join(updateHome, '.ftown', 'data'), cwd: process.cwd(),
+        apiUrl: opts.apiUrl, bridgeId, ownerId: auth.ownerId, endpointId: security.endpoint.id },
+      support: () => !opts.allowUpdates ? 'not_enabled' : process.platform === 'win32' || !!opts.solo ||
+        !canonicalLaunch || realpathSync(dataDir) !== realpathSync(defaultDataDir) ? 'unsupported_launch' : null,
+      busy: async () => !resurrectionComplete || runner.hasLiveGenerations() || !pump.isIdle() || watchReattachInFlight.size > 0 ||
+        (await store.listSessions()).some(session => session.status === 'running' || session.status === 'pending'),
+      authorize: async (principal, permission) => { await security.policy.revalidate(principal, permission); },
+      resolve: resolveStableRelease,
+      prepare: (release, operationId, signal) => prepareRelease(release, { operationId, stagingRoot, signal }),
+      discard: discardPreparedRelease,
+      reserve: operationId => reserveUpdate(updateHome, operationId),
+      prepareHandoff, readReceipt: () => readUpdateReceipt(stagingRoot),
+      writeReceipt: receipt => writeUpdateReceipt(stagingRoot, receipt),
+      shutdown: () => shutdown(), admission: updateAdmission,
+    });
+
 
     // Pointer lives under the instance home (see configure* above): default →
     // $HOME/.ftown (harness CLIs read it there), custom --data-dir → that dir.
@@ -896,6 +955,8 @@ program
     }
 
     localApiServer.on('event', (hookEvent: HookEvent) => {
+      let release: () => void;
+      try { release = updateAdmission.enter(); } catch { return; }
       pump.withSessionWrite(hookEvent.sessionId, async () => {
         await agentIdPersister.persist(hookEvent);
         const usage = await hookUsagePersister.persist(hookEvent);
@@ -907,7 +968,7 @@ program
         });
       }).catch((err) => {
         console.error(`[Bridge] Failed to handle hook event for ${hookEvent.sessionId}:`, err);
-      });
+      }).finally(release);
     });
 
     let ready = false;
@@ -922,13 +983,13 @@ program
         return { type: 'command_response', response: { requestId: route.requestId, success: true } };
       }
       let result: CommandResponse | undefined;
-      await createCommandHandler({ bridgeId, security, sessionController, attentionStore,
+      await createCommandHandler({ bridgeId, security, sessionController, attentionStore, updates, updateEffects,
         publishCommandResponse: async response => { result = response; },
       })(message.application.data as unknown as Parameters<ReturnType<typeof createCommandHandler>>[0], message);
       return applicationJson({ type: 'command_response', response: result ?? { requestId: route.requestId, success: false, error: 'bridge_error' } });
     };
     localApiServer.setSecurity(security, { protocolVersion: 1, ownerId: auth.ownerId, bridgeId, endpoint: security.endpoint,
-      relayUserId: userId }, dispatchCommand);
+      relayUserId: userId }, dispatchCommand, updateEffects);
 
     // Solo: the hub child must be healthy before connecting (L1 gates the
     // transport, not the front). A failed hub is fatal for solo — exit cleanly
@@ -949,16 +1010,26 @@ program
     centrifugo.subscribeSecureCommands(userId, async message => {
       if (!ready) throw new Error('Bridge is starting');
       return localApiServer.dispatchSecure(message);
-    });
+    }, updateEffects);
     setTimeout(() => {
       void (async () => {
-        ready = true;
-        console.log('[Bridge] Ready and listening for commands');
-        if (bridgePointerPublished) console.log('[Bridge] Encrypted endpoint ready. Run ftown security invite to pair a browser.');
+        if (!updateRestart) {
+          ready = true;
+          console.log('[Bridge] Ready and listening for commands');
+          if (bridgePointerPublished) console.log('[Bridge] Encrypted endpoint ready. Run ftown security invite to pair a browser.');
+        }
         try {
           await resurrection.resurrectSessions();
+          resurrectionComplete = true;
+          if (updateRestart) {
+            if (!bridgePointerPublished) throw new Error('Update restart pointer unavailable');
+            if (!opts.local) await centrifugo.waitUntilSecureCommandsReady(45_000);
+            await finishUpdateRestartAdmission(updateAdmission, () => reportUpdateReady({ version: BRIDGE_VERSION, bridgeId, ownerId: auth.ownerId, endpointId: security.endpoint.id }));
+            ready = true;
+            console.log('[Bridge] Update restart ready and listening for commands');
+          }
         } catch (err) {
-          console.error('[Bridge] Session resurrection failed:', err);
+          console.error('[Bridge] Startup readiness failed:', err);
         }
       })();
     }, 2000);

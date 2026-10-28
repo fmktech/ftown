@@ -615,6 +615,19 @@ for first-account/private-link setup; an account routing email is not approval.
 
 ## Upgrade notes
 
+The dashboard can check an approved bridge for a stable update. Assisted updates
+require an explicitly opted-in, unsupervised single bridge on POSIX, started from
+its installed CLI with `ftown start --allow-updates` and the default FTown home
+and data directory. Stop all running or pending sessions first; the update briefly
+disconnects the bridge. Windows, Solo, development builds, custom instances and
+service-managed bridges use their normal manager or manual setup instructions.
+
+If setup or restart fails, FTown does not promise an automatic rollback. Run
+`npx ftown@<exact-version> setup --repair` with the target version shown in the
+update status, then start the bridge with its usual nonsecret options. The private
+operation receipt is `~/.ftown/updates/operation.json`. Application updates are
+separate: reload the page only when ready to reconnect and lose any unsent input.
+
 Factory and recurring interval/cron automation was retired in bridge 0.19.38.
 Saved definitions, run histories and project files are preserved but inactive.
 Read the [retirement and rollback notes](docs/automation-sunset.md) before upgrading

@@ -6,6 +6,8 @@ import { Readable } from 'node:stream';
 import type { ApplicationJson, BridgeSecurityInfo, EnrollmentPacket, LocalEventPage, SecureEnvelope, VerifiedApplication } from './security/protocol.js';
 import { BridgeSecurityService, applicationJson } from './security/bridge/security.js';
 import { executeSecurePacket } from './security/bridge/execute.js';
+import type { SecureExecutionObserver } from './security/bridge/execution-observer.js';
+import { observeHttpDelivery, scopedUpdateObserver } from './update-effects.js';
 import { nativeWake } from './security/bridge/native-wake.js';
 
 import type { Server, IncomingMessage, ServerResponse } from 'node:http';
@@ -183,14 +185,16 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private security: BridgeSecurityService | null = null;
   private securityInfo: BridgeSecurityInfo | null = null;
   private secureCommand: ((message: VerifiedApplication) => Promise<ApplicationJson>) | null = null;
+  private secureObserver?: SecureExecutionObserver;
   private localEventSequence = 0;
   private localEvents: LocalEventPage['events'] = [];
   private localEventBytes = 0;
   private readonly localEventWaiters = new Set<() => void>();
 
   setSecurity(security: BridgeSecurityService, info: BridgeSecurityInfo,
-    command: (message: VerifiedApplication) => Promise<ApplicationJson>): void {
+    command: (message: VerifiedApplication) => Promise<ApplicationJson>, observer?: SecureExecutionObserver): void {
     this.security = security; this.securityInfo = info; this.secureCommand = command;
+    this.secureObserver = observer;
   }
   recordPublication(channel: string, data: unknown): void {
     const item = { channel, data: applicationJson(data), cursor: ++this.localEventSequence };
@@ -460,13 +464,18 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           if (Buffer.byteLength(JSON.stringify(body)) > 450000) throw new Error('Packet too large');
           const events = path === '/api/security/events';
           const packet = body as unknown as SecureEnvelope | EnrollmentPacket;
-          const result = await executeSecurePacket(security, packet, { transport: events ? 'local-events' : 'local-http',
+          const observer = scopedUpdateObserver(this.secureObserver);
+          const envelope = packet.type === 'ftown_enrollment' ? packet.envelope : packet;
+          const delivery = observeHttpDelivery(res, observer, envelope?.messageId ?? '');
+          let result: SecureEnvelope;
+          try { result = await executeSecurePacket(security, packet, { transport: events ? 'local-events' : 'local-http',
             channel: `${events ? 'local-events' : 'local-http'}:${security.bridgeId}`, bridgeId: security.bridgeId, pairId: null }, async message => {
               if (events && (message.application.route.kind !== 'http' || message.application.route.method !== 'GET'
                 || !message.application.route.path.startsWith('/api/browser/events?'))) throw new Error('Invalid event route');
               return this.dispatchSecure(message);
-            });
-          jsonResponse(res, 200, result);
+            }, undefined, observer); } catch (error) { delivery(false); throw error; }
+          delivery(true);
+          if (!res.destroyed) jsonResponse(res, 200, result);
         }).catch(() => { if (!res.headersSent) jsonResponse(res, 400, { error: 'invalid_envelope', code: 'invalid_envelope' }); });
         return;
       }

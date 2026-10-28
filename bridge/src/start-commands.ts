@@ -1,3 +1,5 @@
+import { homedir } from 'node:os';
+import { assertUpdateReservationAllowed } from './update-handoff.js';
 import { assertSetupReady } from './setup-state.js';
 import { packageVersion } from './setup.js';
 
@@ -11,7 +13,7 @@ export interface StartDependencies {
 }
 
 const dependencies: StartDependencies = {
-  assertReady: () => assertSetupReady(packageVersion()),
+  assertReady: () => { assertUpdateReservationAllowed(homedir()); assertSetupReady(packageVersion()); },
   loadBridge: () => import('./index.js'),
 };
 

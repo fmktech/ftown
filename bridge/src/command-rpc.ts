@@ -12,6 +12,8 @@ import { WorkingDirMissingError } from './create-ftown-session.js';
 import { AUTOMATION_REMOVED_CODE, AUTOMATION_REMOVED_MESSAGE, AutomationRemovedError, RETIRED_AUTOMATION_COMMANDS } from './retired-automation.js';
 import type { SessionController } from './session-controller.js';
 import { AttentionError, type AttentionStore } from './attention-store.js';
+import { BridgeUpdateError, type BridgeUpdateCoordinator } from './bridge-update.js';
+import type { UpdateEffects } from './update-effects.js';
 
 import type {
   BridgeExecPayload,
@@ -53,6 +55,8 @@ export interface CommandRpcDeps {
   relayRequest?: (id: string, payload: Record<string, unknown>) => Promise<unknown>;
   sessionController: SessionController;
   attentionStore?: AttentionStore;
+  updates?: BridgeUpdateCoordinator;
+  updateEffects?: UpdateEffects;
   publishCommandResponse: (response: CommandResponse, verified?: VerifiedApplication) => Promise<void>;
 }
 
@@ -79,6 +83,22 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
       if (deps.security && !verified) throw new Error('approval_required');
       if (deps.security && verified && command.type !== 'security_activate_mcp') await deps.security.revalidate(verified.principal);
       switch (command.type) {
+        case 'get_bridge_update':
+        case 'update_bridge': {
+          if (!verified || !deps.security || !deps.updates || !deps.updateEffects || payloadBridgeId !== bridgeId) throw new BridgeUpdateError('invalid_update_request', 'Update request unavailable');
+          const payload = command.payload as Record<string, unknown>;
+          if (command.type === 'get_bridge_update') {
+            if (Object.keys(payload).some(key => key !== 'bridgeId' && key !== 'refresh') || (payload.refresh !== undefined && typeof payload.refresh !== 'boolean')) throw new BridgeUpdateError('invalid_update_request', 'Invalid update request');
+            const status = await deps.updates.snapshot(verified.principal, payload.refresh === true);
+            response = { requestId: command.requestId, success: true, data: status as unknown as Record<string, unknown> };
+          } else {
+            if (Object.keys(payload).sort().join(',') !== 'bridgeId,operationId,targetVersion' || typeof payload.targetVersion !== 'string' || typeof payload.operationId !== 'string') throw new BridgeUpdateError('invalid_update_request', 'Invalid update request');
+            const result = await deps.updates.request(verified.principal, payload.targetVersion, payload.operationId);
+            if (result.ticket) deps.updateEffects.attachTicket(verified, result.ticket);
+            response = { requestId: command.requestId, success: true, data: result.accepted as unknown as Record<string, unknown> };
+          }
+          break;
+        }
         case 'security_devices':
         case 'security_invite':
         case 'security_revoke':
@@ -340,7 +360,9 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
-      response = err instanceof AutomationRemovedError
+      response = err instanceof BridgeUpdateError
+        ? { requestId: command.requestId, success: false, error: 'Bridge update request could not be completed.', data: { code: err.code } }
+        : err instanceof AutomationRemovedError
         ? { requestId: command.requestId, success: false, error: AUTOMATION_REMOVED_MESSAGE, data: { code: AUTOMATION_REMOVED_CODE } }
         : err instanceof BridgeSecurityError
         ? { requestId: command.requestId, success: false, error: err.message, data: { code: err.code } }
