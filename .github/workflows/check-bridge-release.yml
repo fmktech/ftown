@@ -8,6 +8,8 @@ on:
       - '.github/workflows/publish-bridge.yml'
       - '.github/workflows/check-bridge-release.yml'
       - '.github/workflows/bridge-version-bump.yml'
+      - '.github/actions/run-ci/**'
+      - 'scripts/ci/**'
 
 permissions:
   contents: read
@@ -19,19 +21,17 @@ jobs:
       fail-fast: false
       matrix:
         npm: ['11', 'latest']
-    defaults:
-      run:
-        working-directory: bridge
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
       - uses: actions/setup-node@v4
         with:
           node-version: '24.22.1'
-      - name: Match supported and publishing npm versions
-        run: npm install -g npm@${{ matrix.npm }}
-      - name: Install
-        run: npm ci
-      - name: Build
-        run: npm run build
-      - name: Test release planning and real artifact parity
-        run: node --test ../scripts/release/*.test.mjs
+      - uses: ./.github/actions/run-ci
+        with:
+          job: release-artifacts
+          boat-api-key: ${{ secrets.BOAT_API_KEY }}
+          npm-version: ${{ matrix.npm }}

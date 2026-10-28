@@ -1,0 +1,51 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-bridge-updates",
+  "branch": "ci/boat-runners",
+  "integrationOwner": "/root/site_integration",
+  "owners": [
+    {
+      "owner": "/root",
+      "files": [
+        "/Users/fkesheh/projects/ftown-bridge-updates/docs/investigations/boat-ci-migration/coordination.md",
+        "/Users/fkesheh/projects/ftown-bridge-updates/docs/investigations/boat-ci-migration/ownership.json"
+      ],
+      "resources": [
+        "E2E",
+        "Boat provider",
+        "GitHub CI execution",
+        "CI credential setup"
+      ]
+    },
+    {
+      "owner": "/root/site_integration",
+      "tier": 1,
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "status": "implementation active",
+      "files": [
+        ".github/actions/run-ci/action.yml",
+        "scripts/ci/boat-runner.mjs",
+        "scripts/ci/boat-runner.test.mjs",
+        "scripts/ci/run-job.sh",
+        "scripts/ci/validate-centrifugo.sh",
+        "scripts/ci/setup-runtime.sh",
+        "docs/ci.md",
+        ".github/workflows/e2e.yml",
+        ".github/workflows/gitleaks.yml",
+        ".github/workflows/check-bridge-release.yml",
+        ".github/workflows/bridge-version-bump.yml",
+        ".github/workflows/deploy-centrifugo-fly.yml"
+      ]
+    },
+    {
+      "owner": "/root/boat_ci_review",
+      "tier": 2,
+      "model": "gpt-6.1-sol",
+      "effort": "max",
+      "status": "pre-freeze accepted; source review pending",
+      "files": [
+        "docs/investigations/boat-ci-migration/review.md"
+      ]
+    }
+  ]
+}
