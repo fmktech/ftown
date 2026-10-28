@@ -10,6 +10,14 @@ const idPattern = /^bx_[a-z0-9]+$/;
 const artifacts = ["playwright-report", "test-results", "ui.log", "bridge.log", "ci-infra.log"];
 const cliUrl = "https://boat.dev/api/boat/cli/download?platform=linux-x64&channel=prod";
 
+export async function createPrivateControllerDir() {
+  // Boat's SSH ControlPath includes a long suffix; GitHub's RUNNER_TEMP can
+  // exceed the Unix socket path limit. Keep the private per-job HOME short.
+  const dir = await mkdtemp("/tmp/fci-");
+  try { await chmod(dir, 0o700); } catch (error) { await rm(dir, { recursive: true, force: true }); throw error; }
+  return dir;
+}
+
 export function validate(input) {
   if (!jobs.has(input.job)) throw new Error("Invalid CI job");
   if (input.job === "release-artifacts" && !["11", "latest"].includes(input.npmVersion)) throw new Error("Invalid npm version");
@@ -132,8 +140,7 @@ function inputFromEnv(env) {
 async function main() {
   const input = inputFromEnv(process.env);
   const root = process.cwd();
-  const temp = await mkdtemp(join(process.env.RUNNER_TEMP || "/tmp", "ftown-boat-ci-"));
-  await chmod(temp, 0o700);
+  const temp = await createPrivateControllerDir();
   const boat = join(temp, "boat");
   const cliEnv = { HOME: temp, PATH: process.env.PATH || "/usr/bin:/bin", LANG: "C.UTF-8" };
   let child;

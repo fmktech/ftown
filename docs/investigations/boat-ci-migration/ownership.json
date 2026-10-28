@@ -21,7 +21,7 @@
       "tier": 1,
       "model": "gpt-6.1-terra",
       "effort": "xhigh",
-      "status": "source released; L2 landing active",
+      "status": "R6 source released; L3 landing active",
       "files": [
         ".github/actions/run-ci/action.yml",
         "scripts/ci/boat-runner.mjs",

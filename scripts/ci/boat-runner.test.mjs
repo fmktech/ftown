@@ -1,12 +1,39 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { artifactInspectionSource, historyRestoreScript, orchestrate, parseArtifactInspection, parseExecFrame, parseExecResult, remoteEnvironment, validate } from "./boat-runner.mjs";
+import { artifactInspectionSource, createPrivateControllerDir, historyRestoreScript, orchestrate, parseArtifactInspection, parseExecFrame, parseExecResult, remoteEnvironment, validate } from "./boat-runner.mjs";
 
 const base = { job: "e2e", event: "pull_request", repository: "fmktech/ftown", headRepository: "fmktech/ftown", author: "alice", sender: "alice", actor: "alice", runId: "123", runAttempt: "1", key: "secret" };
+test("short private controller directory supports Boat's SSH socket with a long runner temp", async () => {
+  const previousRunnerTemp = process.env.RUNNER_TEMP, previousTmpdir = process.env.TMPDIR;
+  const suffix = "a_97b_dcd9002d_52ae87477d0b6aa10199481bfcde2ebd07546944.kQurjyh3s0jF5TmJ";
+  process.env.RUNNER_TEMP = "/home/runner/work/_temp/ftown-boat-ci-XXXXXX";
+  process.env.TMPDIR = process.env.RUNNER_TEMP;
+  let dir, server;
+  try {
+    assert(Buffer.byteLength(join(process.env.RUNNER_TEMP, ".ssh", suffix)) > 108);
+    dir = await createPrivateControllerDir();
+    assert.match(dir, /^\/tmp\/fci-[^/]+$/);
+    assert.equal(statSync(dir).mode & 0o777, 0o700);
+    mkdirSync(join(dir, ".ssh"), { mode: 0o700 });
+    const socket = join(dir, ".ssh", suffix);
+    assert(Buffer.byteLength(socket) < 104);
+    server = createServer();
+    await new Promise((resolve, reject) => { server.once("error", reject); server.listen(socket, resolve); });
+    assert(statSync(socket).isSocket());
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    server = undefined;
+  } finally {
+    if (server?.listening) await new Promise(resolve => server.close(resolve));
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    if (previousRunnerTemp === undefined) delete process.env.RUNNER_TEMP; else process.env.RUNNER_TEMP = previousRunnerTemp;
+    if (previousTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previousTmpdir;
+  }
+});
 test("bundle restoration preserves remote-only history and verifies revision objects", () => {
   const temp = mkdtempSync(join(tmpdir(), "boat-history-test-"));
   const env = { PATH: process.env.PATH, HOME: temp, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "init.defaultBranch", GIT_CONFIG_VALUE_0: "main", GIT_AUTHOR_NAME: "CI Test", GIT_AUTHOR_EMAIL: "test@example.invalid", GIT_COMMITTER_NAME: "CI Test", GIT_COMMITTER_EMAIL: "test@example.invalid" };
