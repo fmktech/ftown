@@ -21,7 +21,7 @@
       "tier": 1,
       "model": "gpt-6.1-terra",
       "effort": "xhigh",
-      "status": "implementation active",
+      "status": "source released; L2 landing active",
       "files": [
         ".github/actions/run-ci/action.yml",
         "scripts/ci/boat-runner.mjs",
@@ -44,7 +44,7 @@
       "tier": 2,
       "model": "gpt-6.1-sol",
       "effort": "max",
-      "status": "pre-freeze accepted; source review pending",
+      "status": "review complete; report released; native agent completed",
       "files": [
         "docs/investigations/boat-ci-migration/review.md"
       ]
