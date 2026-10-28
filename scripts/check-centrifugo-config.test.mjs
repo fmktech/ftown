@@ -1,15 +1,37 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { assertCleanCheckconfigOutput, checkConfigurations, CONFIGURATIONS, validateConfiguration } from './check-centrifugo-config.mjs';
+import { assertCleanCheckconfigOutput, checkConfigurations, CONFIGURATIONS, IMAGE_REFERENCES, validateConfiguration } from './check-centrifugo-config.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const load = kind => JSON.parse(readFileSync(join(root, CONFIGURATIONS[kind]), 'utf8'));
 
 test('all committed configs preserve the reviewed permissions/retention/boundaries and image pin', () => checkConfigurations(root));
+test('E2E accepts its HTTPS fixture origin and rejects unexpected origins', () => {
+  const config = load('e2e');
+  assert.ok(config.client.allowed_origins.includes('https://localhost:8444'));
+  validateConfiguration(config, 'e2e');
+  config.client.allowed_origins.push('https://unexpected.example');
+  assert.throws(() => validateConfiguration(config, 'e2e'));
+});
+test('the executed CI validator script must retain the reviewed image pin', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ftown-cf-pin-'));
+  try {
+    for (const file of [...Object.values(CONFIGURATIONS), ...IMAGE_REFERENCES]) {
+      const dest = join(dir, file);
+      mkdirSync(dirname(dest), { recursive: true });
+      copyFileSync(join(root, file), dest);
+    }
+    checkConfigurations(dir);
+    const script = join(dir, 'scripts/ci/validate-centrifugo.sh');
+    const original = readFileSync(script, 'utf8');
+    writeFileSync(script, original.replace(/centrifugo\/centrifugo:v6\.10\.2@sha256:[0-9a-f]{64}/, 'centrifugo/centrifugo:unreviewed'));
+    assert.throws(() => checkConfigurations(dir), /scripts\/ci\/validate-centrifugo\.sh: patched image pin drifted/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 for (const [name, change] of [
   ['unknown root key', c => { c.token_audience = 'ftown:centrifugo'; }],
   ['unknown nested key', c => { c.client.token.hmac_secret = 'typo'; }],

@@ -1,0 +1,52 @@
+name: Run isolated CI validation
+description: Run a fixed validation job in Boat or on the untrusted PR runner
+inputs:
+  job:
+    required: true
+    description: Fixed validation job
+  boat-api-key:
+    required: false
+    description: Boat CI key for trusted events
+  npm-version:
+    required: false
+    description: Release npm matrix version
+  base-sha:
+    required: false
+    description: PR base SHA
+  head-sha:
+    required: false
+    description: PR head SHA
+runs:
+  using: composite
+  steps:
+    - name: Run trusted validation on Boat
+      if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.sender.login != 'dependabot[bot]' && github.actor != 'dependabot[bot]') }}
+      shell: bash
+      env:
+        INPUT_JOB: ${{ inputs.job }}
+        INPUT_NPM_VERSION: ${{ inputs.npm-version }}
+        INPUT_BASE_SHA: ${{ inputs.base-sha }}
+        INPUT_HEAD_SHA: ${{ inputs.head-sha }}
+        CI_EVENT: ${{ github.event_name }}
+        CI_REPOSITORY: ${{ github.repository }}
+        CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        CI_PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        CI_SENDER: ${{ github.event.sender.login }}
+        CI_ACTOR: ${{ github.actor }}
+        BOAT_API_KEY: ${{ inputs.boat-api-key }}
+      run: node scripts/ci/boat-runner.mjs
+    - name: Run untrusted PR validation locally
+      if: ${{ !(github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.sender.login != 'dependabot[bot]' && github.actor != 'dependabot[bot]')) }}
+      shell: bash
+      env:
+        INPUT_JOB: ${{ inputs.job }}
+        INPUT_NPM_VERSION: ${{ inputs.npm-version }}
+        INPUT_BASE_SHA: ${{ inputs.base-sha }}
+        INPUT_HEAD_SHA: ${{ inputs.head-sha }}
+        CI_EVENT: ${{ github.event_name }}
+        CI_REPOSITORY: ${{ github.repository }}
+        CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        CI_PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        CI_SENDER: ${{ github.event.sender.login }}
+        CI_ACTOR: ${{ github.actor }}
+      run: node scripts/ci/boat-runner.mjs

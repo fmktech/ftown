@@ -6,51 +6,27 @@ on:
       - 'bridge/**'
       - '.github/workflows/bridge-version-bump.yml'
       - 'scripts/release/package-changes.mjs'
+      - '.github/actions/run-ci/**'
+      - 'scripts/ci/**'
+
+permissions:
+  contents: read
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
+          persist-credentials: false
           fetch-depth: 0
-
       - uses: actions/setup-node@v4
         with:
           node-version: '24.22.1'
-
-      - name: Check for package-affecting changes
-        id: changes
-        env:
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
-        run: node scripts/release/package-changes.mjs "$BASE" "$HEAD"
-
-      - name: Require bridge version bump
-        if: steps.changes.outputs.package_changed == 'true'
-        run: |
-          set -euo pipefail
-
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
-          BASE_VERSION="$(
-            git show "$BASE:bridge/package.json" \
-              | node -pe "JSON.parse(require('fs').readFileSync(0, 'utf8')).version"
-          )"
-          HEAD_VERSION="$(node -p "require('./bridge/package.json').version")"
-
-          echo "base bridge version: $BASE_VERSION"
-          echo "head bridge version: $HEAD_VERSION"
-
-          if [ "$BASE_VERSION" = "$HEAD_VERSION" ]; then
-            echo "::error::This PR changes bridge package/build inputs but does not bump bridge/package.json version."
-            echo "Run from bridge/: npm version patch --no-git-tag-version"
-            exit 1
-          fi
-
-          LOCK_VERSION="$(node -p "require('./bridge/package-lock.json').packages[''].version")"
-          if [ "$HEAD_VERSION" != "$LOCK_VERSION" ]; then
-            echo "::error::bridge/package-lock.json root version ($LOCK_VERSION) does not match bridge/package.json ($HEAD_VERSION)."
-            echo "Run from bridge/: npm install --package-lock-only"
-            exit 1
-          fi
+      - uses: ./.github/actions/run-ci
+        with:
+          job: bridge-version
+          boat-api-key: ${{ secrets.BOAT_API_KEY }}
+          base-sha: ${{ github.event.pull_request.base.sha }}
+          head-sha: ${{ github.event.pull_request.head.sha }}

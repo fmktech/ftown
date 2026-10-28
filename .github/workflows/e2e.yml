@@ -6,118 +6,25 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   direct-transport-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-
+        with:
+          persist-credentials: false
+          fetch-depth: 1
       - uses: actions/setup-node@v4
         with:
           node-version: '24.22.1'
-          cache: 'npm'
-          cache-dependency-path: |
-            ui/package-lock.json
-            bridge/package-lock.json
-            e2e/package-lock.json
-
-      - name: Cache Playwright browsers
-        id: playwright-cache
-        uses: actions/cache@v4
+      - uses: ./.github/actions/run-ci
         with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('e2e/package-lock.json') }}
-
-      # The bridge spawns sessions with a hardcoded `/bin/zsh -l`; tmux is the
-      # preferred PTY runtime (falls back to direct node-pty if absent).
-      - name: Install zsh + tmux + isolated browser trust tools
-        run: sudo apt-get update && sudo apt-get install -y zsh tmux libnss3-tools
-
-      # Runner images ship group/other-writable zsh function/completion dirs, so
-      # compinit (run by Ubuntu's /etc/zsh/zshrc for interactive shells) prompts
-      # "insecure directories ... [y] or abort" when the bridge spawns
-      # `/bin/zsh -l`, and the session never reaches a prompt. Tighten every dir
-      # compaudit flags (compaudit is a zsh autoload, so invoke it via zsh), then
-      # verify a clean audit. Belt-and-braces with the skip_global_compinit knob
-      # written into the bridge's scratch HOME by start-services.sh.
-      - name: Fix zsh insecure completion directories
-        run: |
-          zsh -c 'autoload -Uz compaudit; compaudit' 2>/dev/null \
-            | xargs -r sudo chmod -R g-w,o-w || true
-          echo "remaining insecure dirs (want none):"
-          zsh -c 'autoload -Uz compaudit; compaudit' || true
-
-      # Postgres + Neon HTTP shim (:443) + Centrifugo (:8000). The shim lets the
-      # UI's @neondatabase/serverless neon() driver reach Postgres unmodified.
-      - name: Start infra (postgres + neon-http-shim + centrifugo)
-        working-directory: e2e
-        run: |
-          bash scripts/gen-certs.sh
-          node --test scripts/setup-browser-trust.test.mjs
-          node scripts/setup-browser-trust.mjs
-          docker compose up -d --build --wait
-          docker compose ps
-
-      - name: Create DB schema
-        working-directory: e2e
-        run: |
-          npm ci
-          node scripts/setup-db.mjs
-
-      - name: Build UI
-        working-directory: ui
-        run: |
-          npm ci
-          npm test
-          node --test ../e2e/scripts/ci-fixtures.test.mjs
-          set -a; E2E_DIR="$GITHUB_WORKSPACE/e2e" source "$GITHUB_WORKSPACE/e2e/env.sh"; set +a
-          npm run build
-
-      - name: Build bridge
-        working-directory: bridge
-        run: |
-          npm ci
-          npm run build
-          npm test
-          node --test ../scripts/release/*.test.mjs
-
-      - name: Check pending approval atomicity on isolated PostgreSQL
-        run: |
-          set -a
-          export E2E_DIR="$GITHUB_WORKSPACE/e2e"
-          source "$E2E_DIR/env.sh"
-          set +a
-          export E2E_USER_EMAIL="e2e-db-pending+${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}@ftown.test"
-          node e2e/scripts/pending-approvals-db.ts
-
-      - name: Check managed Solo security boundaries
-        run: timeout 120s node bridge/scripts/centrifugo-security-smoke.mjs
-
-      - name: Install Playwright chromium (browsers + OS deps)
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        working-directory: e2e
-        run: npx playwright install --with-deps chromium
-
-      - name: Install Playwright OS deps only (browsers cached)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        working-directory: e2e
-        run: npx playwright install-deps chromium
-
-      - name: Start isolated services and run Playwright e2e
-        working-directory: e2e
-        run: |
-          set -a
-          export E2E_DIR="$PWD"
-          source env.sh
-          bash scripts/start-services.sh
-          export E2E_USER_EMAIL="$(cat .run-email)"
-          set +a
-          npx playwright test
-
-      - name: Stop UI + bridge (only recorded PIDs)
-        if: always()
-        run: bash e2e/scripts/stop-services.sh
+          job: e2e
+          boat-api-key: ${{ secrets.BOAT_API_KEY }}
 
       - name: Upload Playwright report + traces
         if: always()
@@ -129,25 +36,5 @@ jobs:
             e2e/test-results/
             e2e/ui.log
             e2e/bridge.log
+            e2e/ci-infra.log
           retention-days: 7
-
-      # Self-explaining failures: dump compose state, healthcheck history and
-      # container logs when any step failed (runs before teardown removes them).
-      - name: Dump infra logs on failure
-        if: failure()
-        working-directory: e2e
-        run: |
-          docker compose ps -a || true
-          echo "===== centrifugo healthcheck history ====="
-          docker inspect --format '{{json .State.Health}}' e2e-centrifugo-1 || true
-          echo "===== centrifugo logs ====="
-          docker compose logs centrifugo || true
-          echo "===== neon-http-shim logs ====="
-          docker compose logs neon-http-shim || true
-          echo "===== postgres logs ====="
-          docker compose logs postgres || true
-
-      - name: Tear down infra
-        if: always()
-        working-directory: e2e
-        run: docker compose down -v
