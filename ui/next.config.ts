@@ -1,5 +1,10 @@
 import type { NextConfig } from "next";
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+
+// Next inlines config.env in both bundles and route handlers at build time.
+const candidate = process.env.VERCEL_GIT_COMMIT_SHA ?? process.env.FTOWN_BUILD_ID;
+const buildId = candidate && /^[A-Za-z0-9._-]{1,100}$/.test(candidate) ? candidate : randomUUID();
 
 const securityHeaders = [
   { key: "X-Frame-Options", value: "DENY" },
@@ -11,6 +16,7 @@ const securityHeaders = [
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  env: { FTOWN_UI_BUILD_ID: buildId },
   webpack(config) {
     // NodeNext shared sources name their emitted .js modules; Next bundles the
     // original TypeScript rather than the bridge's generated output.

@@ -60,6 +60,15 @@ export class TerminalPump {
   // runner exit handlers, stop_session) cannot interleave and resurrect a
   // stale status.
   private readonly sessionWrites = new Map<string, Promise<void>>();
+  private readonly pendingAsync = new Set<Promise<unknown>>();
+  private track<T>(work: Promise<T>): Promise<T> {
+    this.pendingAsync.add(work);
+    void work.then(() => this.pendingAsync.delete(work), () => this.pendingAsync.delete(work));
+    return work;
+  }
+  isIdle(): boolean {
+    return this.outputBuffers.size === 0 && this.sessionWrites.size === 0 && this.pendingAsync.size === 0;
+  }
   private readonly flushIntervalMs: number;
   private readonly maxBufferBytes: number;
 
@@ -94,7 +103,7 @@ export class TerminalPump {
     const timer = this.flushTimers.get(sessionId);
     if (timer) clearTimeout(timer);
     this.flushTimers.delete(sessionId);
-    this.deps.store.appendTerminalData(sessionId, buf).catch((err) => {
+    this.track(this.deps.store.appendTerminalData(sessionId, buf)).catch((err) => {
       console.error(`[Bridge] Failed to store terminal data for ${sessionId}:`, err);
     });
     this.deps.publishTerminalData(sessionId, buf);
@@ -137,7 +146,7 @@ export class TerminalPump {
   private collectAndPersistUsage(sessionId: string): void {
     const collect = this.deps.collectUsage;
     if (!collect) return;
-    void (async () => {
+    void this.track((async () => {
       const session = await this.deps.store.loadSession(sessionId);
       if (!session) return;
       const usage = await collect(session);
@@ -150,7 +159,7 @@ export class TerminalPump {
         await this.deps.store.saveSession(fresh);
         await this.deps.publishSessionUpdate(fresh);
       });
-    })().catch((err) => {
+    })()).catch((err) => {
       console.error(`[Bridge] Failed to collect usage for session ${sessionId}:`, err);
     });
   }
@@ -158,7 +167,7 @@ export class TerminalPump {
   private handleComplete(sessionId: string): void {
     this.flush(sessionId);
     this.publishSyntheticStop(sessionId, 'complete');
-    this.withSessionWrite(sessionId, async () => {
+    void this.track(this.withSessionWrite(sessionId, async () => {
       const session = await this.deps.store.loadSession(sessionId);
       if (session) {
         session.status = 'completed';
@@ -172,7 +181,7 @@ export class TerminalPump {
     }).finally(() => {
       this.collectAndPersistUsage(sessionId);
       this.deps.unregisterSession(sessionId);
-    });
+    }));
   }
 
   /**
@@ -208,7 +217,7 @@ export class TerminalPump {
     const pendingAtError = this.outputBuffers.get(sessionId) ?? '';
     this.flush(sessionId);
     this.publishSyntheticStop(sessionId, 'error');
-    this.withSessionWrite(sessionId, async () => {
+    void this.track(this.withSessionWrite(sessionId, async () => {
       const session = await this.deps.store.loadSession(sessionId);
       if (session) {
         session.status = 'error';
@@ -224,6 +233,6 @@ export class TerminalPump {
       this.collectAndPersistUsage(sessionId);
       this.deps.unregisterSession(sessionId);
       this.deps.terminalManager.destroy(sessionId);
-    });
+    }));
   }
 }

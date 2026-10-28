@@ -1,6 +1,7 @@
 /** One installation inventory for copying, launchers and read-only readiness. */
 export const CLI_RUNTIME_MODULES = [
   'ftown-cli', 'start-commands', 'index', 'cli-entry', 'cli-client', 'sessions-commands', 'harness-commands', 'env-commands',
+  'bridge-update', 'update-admission', 'update-effects', 'update-release', 'update-handoff', 'update-protocol', 'update-runtime-contract',
   'ftown-home', 'wire-types', 'harness-format', 'provider-env-store', 'setup', 'setup-state', 'setup-migrations',
   'installation-manifest', 'production-dependencies', 'attention-store', 'attention-events', 'push-notifier', 'native-mail', 'pull-request-url',
   'install-ftown-command-cli', 'install-notify-script', 'hook-installer', 'cursor-hook-installer',

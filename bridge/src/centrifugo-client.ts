@@ -1,6 +1,8 @@
 import { Centrifuge } from 'centrifuge';
 import { BridgeSecurityService, applicationJson } from './security/bridge/security.js';
 import { executeSecurePacket } from './security/bridge/execute.js';
+import type { SecureExecutionObserver } from './security/bridge/execution-observer.js';
+import { scopedUpdateObserver } from './update-effects.js';
 import type { ApplicationJson, SecureEnvelope, VerifiedApplication } from './security/protocol.js';
 import WebSocket from 'ws';
 
@@ -86,6 +88,8 @@ export class CentrifugoClient {
   private outboundQueued = 0;
   private inbound: Promise<void> = Promise.resolve();
   private readonly terminalInbound = new Map<string, Promise<void>>();
+  private secureCommandSubscription: Subscription | null = null;
+  private secureCommandReady = false;
 
   setSecurity(security: BridgeSecurityService): void { this.security = security; }
   private readonly disabled: boolean;
@@ -115,6 +119,7 @@ export class CentrifugoClient {
     });
 
     this.client.on('connecting', (ctx) => {
+      this.secureCommandReady = false;
       console.log(`[Centrifugo] Connecting: ${ctx.reason}`);
     });
 
@@ -129,6 +134,7 @@ export class CentrifugoClient {
     });
 
     this.client.on('disconnected', (ctx) => {
+      this.secureCommandReady = false;
       console.log(`[Centrifugo] Disconnected: code=${ctx.code} reason=${ctx.reason}`);
       if (!this.disabled && ctx.code === 3) {
         console.log(`[Centrifugo] Reconnecting after message size limit disconnect...`);
@@ -192,10 +198,12 @@ export class CentrifugoClient {
   }
 
   disconnect(): void {
+    this.secureCommandReady = false;
     for (const [channel, sub] of this.subscriptions) {
       sub.unsubscribe();
       this.subscriptions.delete(channel);
     }
+    this.secureCommandSubscription = null;
     this.client.disconnect();
   }
 
@@ -295,12 +303,17 @@ export class CentrifugoClient {
     console.warn('[Centrifugo] Plaintext command subscriptions are disabled');
   }
 
-  subscribeSecureCommands(userId: string, dispatch: (message: VerifiedApplication) => Promise<ApplicationJson>): void {
+  subscribeSecureCommands(userId: string, dispatch: (message: VerifiedApplication) => Promise<ApplicationJson>, observer?: SecureExecutionObserver): void {
     if (this.disabled) return;
     const channel = `commands:rpc#${userId}`;
     const existing = this.subscriptions.get(channel);
-    existing?.unsubscribe();
+    this.secureCommandSubscription = null;
+    this.secureCommandReady = false;
+    if (existing) { existing.unsubscribe(); this.client.removeSubscription(existing); }
     const sub = this.client.newSubscription(channel);
+    this.secureCommandSubscription = sub;
+    sub.on('subscribed', () => { if (this.secureCommandSubscription === sub && this.client.state === 'connected') this.secureCommandReady = true; });
+    sub.on('unsubscribed', () => { if (this.secureCommandSubscription === sub) this.secureCommandReady = false; });
     sub.on('publication', (ctx: PublicationContext) => {
       if (!isOwnerPublication(ctx, userId) || !this.security) return;
       const packet = ctx.data as SecureEnvelope;
@@ -308,16 +321,45 @@ export class CentrifugoClient {
       const envelope = packet.type === 'ftown_encrypted' ? packet : (ctx.data as { envelope?: SecureEnvelope }).envelope;
       if (envelope?.recipientId !== this.security.endpoint.id) return;
       const security = this.security;
+      const scoped = scopedUpdateObserver(observer);
       void (async () => {
+        try {
         const response = await executeSecurePacket(security, ctx.data, { transport: 'cloud', channel, bridgeId: security.bridgeId, pairId: null }, dispatch, accept => {
           const accepted = this.inbound.then(accept);
           this.inbound = accepted.then(() => undefined, () => undefined);
           return accepted;
-        });
+        }, scoped);
         await this.client.publish(channel, response);
+        if (envelope) scoped?.delivered(envelope.messageId);
+        } catch (error) { if (envelope) scoped?.failed(envelope.messageId); throw error; }
       })().catch(() => { console.warn('[Centrifugo] Encrypted command rejected'); });
     });
     sub.subscribe(); this.subscriptions.set(channel, sub);
+  }
+
+  /** Wait for the current secure commands subscription on the current connection. */
+  waitUntilSecureCommandsReady(timeoutMs: number): Promise<void> {
+    const sub = this.secureCommandSubscription;
+    if (this.client.state !== 'connected') this.secureCommandReady = false;
+    if (this.disabled || !sub || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return Promise.reject(new Error('Secure commands unavailable'));
+    return new Promise<void>((resolve, reject) => {
+      let done = false;
+      const finish = (error?: Error) => {
+        if (done) return; done = true; clearTimeout(timer);
+        this.client.off('connected', check); this.client.off('disconnected', disconnected);
+        sub.off('subscribed', check); sub.off('unsubscribed', disconnected);
+        error ? reject(error) : resolve();
+      };
+      const check = () => {
+        if (this.secureCommandSubscription !== sub) return finish(new Error('Secure commands subscription changed'));
+        if (this.client.state === 'connected' && this.secureCommandReady && sub.state === 'subscribed') finish();
+      };
+      const disconnected = () => finish(new Error('Secure commands disconnected'));
+      const timer = setTimeout(() => finish(new Error('Secure commands readiness timed out')), timeoutMs);
+      this.client.on('connected', check); this.client.on('disconnected', disconnected);
+      sub.on('subscribed', check); sub.on('unsubscribed', disconnected);
+      check();
+    });
   }
 
   // The loopback rung advert (localPort/localNonce) rides the connection JWT's

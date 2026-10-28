@@ -1,15 +1,17 @@
 import type { ApplicationJson, EnrollmentPacket, InboundTransportContext, SecureEnvelope, VerifiedApplication } from '../protocol.js';
 import { BridgeSecurityService } from './security.js';
 import { BridgeSecurityError } from './errors.js';
+import type { SecureExecutionObserver } from './execution-observer.js';
 
 export async function executeSecurePacket(security: BridgeSecurityService, packet: SecureEnvelope | EnrollmentPacket,
   route: InboundTransportContext, dispatch: (message: VerifiedApplication) => Promise<ApplicationJson>,
-  admission?: (accept: () => Promise<VerifiedApplication>) => Promise<VerifiedApplication>): Promise<SecureEnvelope> {
+  admission?: (accept: () => Promise<VerifiedApplication>) => Promise<VerifiedApplication>, observer?: SecureExecutionObserver): Promise<SecureEnvelope> {
   if (packet.type === 'ftown_enrollment' || packet.purpose !== 'application') return security.handleHandshake(packet, route);
   let verified: VerifiedApplication | undefined;
   let dispatchStarted = false;
   try {
     verified = await (admission ? admission(() => security.acceptApplication(packet, route)) : security.acceptApplication(packet, route));
+    observer?.admitted(verified);
     const activation = verified.application.route.kind === 'command' && verified.application.route.command === 'security_activate_mcp';
     if (!activation) await security.revalidate(verified.principal);
     const selfRevocation = await security.revokeSelfWithReceipt(verified, route);
@@ -23,8 +25,14 @@ export async function executeSecurePacket(security: BridgeSecurityService, packe
     const unknown = body?.outcomeUnknown === true;
     await security.complete(verified, unknown ? 'unknown' : failedHttp || response?.success === false ? 'rejected' : 'succeeded',
       failedHttp ? typeof body?.code === 'string' ? body.code : 'bridge_error' : response?.success === false ? 'bridge_error' : null);
-    return security.sealTo(packet.senderId, { type: 'application', route: { kind: 'response', requestId: packet.messageId }, data, mcp: null }, route);
+    const sealing = security.sealTo(packet.senderId, { type: 'application', route: { kind: 'response', requestId: packet.messageId }, data, mcp: null }, route);
+    if (!observer) return sealing;
+    const sealed = await sealing;
+    if (unknown || failedHttp || response?.success === false) observer?.failed(verified.envelope.messageId);
+    else observer?.sealed(verified, data);
+    return sealed;
   } catch (error) {
+    if (verified) observer?.failed(verified.envelope.messageId);
     // Never authenticate an error on behalf of an unauthenticated/tampered packet.
     if (!verified && (!(error instanceof BridgeSecurityError)
       || (!['permission_denied', 'epoch_changed', 'expired', 'replayed', 'capacity_exceeded', 'audit_unavailable', 'invalid_account_trust'].includes(error.code)

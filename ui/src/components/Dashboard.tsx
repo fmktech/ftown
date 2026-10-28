@@ -8,6 +8,9 @@ import { Session, ShellType } from "@/types";
 import { CreateSessionOptions, useSessions } from "@/hooks/useSessions";
 import { useBridgeRpc } from "@/hooks/useBridgeRpc";
 import { useBridges } from "@/hooks/useBridges";
+import { useBridgeUpdates } from "@/hooks/useBridgeUpdates";
+import { BridgeUpdatesDialog } from "./BridgeUpdatesDialog";
+import { AppUpdateNotice } from "./AppUpdateNotice";
 import { useAllSessionEvents } from "@/hooks/useAllSessionEvents";
 import type { SecurityCommand, SecurityCommandResults } from "@security/protocol";
 import { SecurityPanel, type SecurityBridge } from "./SecurityPanel";
@@ -93,6 +96,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showNavigation, setShowNavigation] = useState(false);
   const [showSecurity, setShowSecurity] = useState(false);
+  const [updateBridgeId, setUpdateBridgeId] = useState<string | null>(null);
   const [securityView, setSecurityView] = useState<"activity" | "devices">("devices");
   const pending = usePendingApprovals(accountClient, "reviewer");
   const pendingCount = pending.snapshot.inbox.filter(item => !["approved", "rejected", "cancelled", "expired", "conflict"].includes(item.status)).length;
@@ -196,6 +200,9 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const securityRuntime = client?.securityRuntime;
   useEffect(() => securityRuntime?.onChange(() => setSecurityGeneration(value => value + 1)), [securityRuntime]);
   const readyBridges = useMemo(() => bridges.filter(bridge => securityRuntime?.state(bridge.bridgeId).status === "ready"), [bridges, securityRuntime, securityGeneration]);
+  const updateIds = connectionStatus === "connected" ? readyBridges.map(bridge => bridge.bridgeId) : [];
+  const updates = useBridgeUpdates(rpc.sendCommand, updateIds);
+  const updateViews = new Map(bridges.map(bridge => [bridge.bridgeId, updates.get(bridge.bridgeId)]));
   const hasBridges = readyBridges.length > 0;
   const securityBridges = useMemo(() => {
     const known = new Map(bridges.map(bridge => [bridge.bridgeId, { bridgeId: bridge.bridgeId, label: bridge.hostname,
@@ -786,6 +793,8 @@ PY`;
         </div>
       </header>
 
+      <AppUpdateNotice />
+
       {/* ── CLI Token bar ── */}
       {showToken && !localMode && (
         <div
@@ -995,6 +1004,8 @@ PY`;
               onCreateSession={handleCreateSessionOnBridge}
               onOpenSecurity={openSecurity}
               bridgeSecurityStates={bridgeSecurityStates}
+              bridgeUpdates={updateViews}
+              onOpenUpdates={setUpdateBridgeId}
             />
           </div>
           {!sidebarCollapsed && (
@@ -1048,6 +1059,8 @@ PY`;
         accountClient={accountClient} accountState={accountState}
         pendingClient={pending.client ?? undefined} pendingState={pending.snapshot} initialView={securityView}
         initialBridgeId={securityBridgeId} gatewayAvailable={!localMode && !securityRuntime?.ownerId.startsWith("solo:")} />
+      {updateBridgeId && <BridgeUpdatesDialog open name={bridges.find(bridge => bridge.bridgeId === updateBridgeId)?.hostname ?? updateBridgeId}
+        view={updates.get(updateBridgeId)} onClose={() => setUpdateBridgeId(null)} onCheck={() => void updates.check(updateBridgeId, true)} onUpdate={() => void updates.update(updateBridgeId)} />}
       <NewSessionModal
         isOpen={showNewSession}
         onClose={() => { setShowNewSession(false); setSessionDefaults(undefined); }}

@@ -15,6 +15,7 @@ import { SessionStateIndicator } from "./SessionStateIndicator";
 import { PullRequestBadgePlaceholder, PullRequestLink } from "./PullRequestLink";
 import type { BridgeSecurityState } from "@security/protocol";
 import { SecurityLockIcon, bridgeConnectionLock } from "./SecurityLockIcon";
+import type { UpdateView } from "@/hooks/useBridgeUpdates";
 
 interface SessionListProps {
   sessions: Session[];
@@ -41,6 +42,8 @@ interface SessionListProps {
   onCreateSession?: (bridgeId: string) => void;
   onOpenSecurity?: (bridgeId: string) => void;
   bridgeSecurityStates?: ReadonlyMap<string, BridgeSecurityState["status"]>;
+  bridgeUpdates?: ReadonlyMap<string, UpdateView>;
+  onOpenUpdates?: (bridgeId: string) => void;
 }
 
 type ContextMenuState =
@@ -438,6 +441,7 @@ function BridgeContextMenu({
   isHidden,
   onCreateSession,
   onOpenSecurity,
+  onOpenUpdates,
   onHide,
   onUnhide,
   onClose,
@@ -447,6 +451,7 @@ function BridgeContextMenu({
   isHidden: boolean;
   onCreateSession: (bridgeId: string) => void;
   onOpenSecurity?: (bridgeId: string) => void;
+  onOpenUpdates?: (bridgeId: string) => void;
   onHide: (bridgeId: string) => void;
   onUnhide: (bridgeId: string) => void;
   onClose: () => void;
@@ -474,6 +479,7 @@ function BridgeContextMenu({
         }}
       />
       {onOpenSecurity && <ContextMenuButton largeOnMobile label="Security log" onClick={() => { onOpenSecurity(menu.bridgeId); onClose(); }} />}
+      {onOpenUpdates && <ContextMenuButton largeOnMobile label="Updates…" onClick={() => { onOpenUpdates(menu.bridgeId); onClose(); }} />}
       {isHidden ? (
         <ContextMenuButton label="Unhide" onClick={() => { onUnhide(menu.bridgeId); onClose(); }} />
       ) : (
@@ -509,6 +515,8 @@ export function SessionList({
   onCreateSession,
   onOpenSecurity,
   bridgeSecurityStates,
+  bridgeUpdates,
+  onOpenUpdates,
 }: SessionListProps) {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -700,8 +708,10 @@ export function SessionList({
     return map;
   }, [visibleSessions]);
 
+  const bridgeMenuAnchor = useRef<HTMLButtonElement | null>(null);
   const closeContextMenu = useCallback(() => {
     setContextMenu(null);
+    bridgeMenuAnchor.current?.focus(); bridgeMenuAnchor.current = null;
   }, []);
 
   function startEditing(session: Session): void {
@@ -725,6 +735,7 @@ export function SessionList({
   function handleBridgeContextMenu(e: React.MouseEvent, bridgeId: string): void {
     e.preventDefault();
     e.stopPropagation();
+    bridgeMenuAnchor.current = null;
     setContextMenu({ kind: "bridge", bridgeId, x: e.clientX, y: e.clientY });
   }
 
@@ -1472,6 +1483,13 @@ export function SessionList({
               {label}
             </span>
           </button>
+          {bridgeUpdates && <span className="max-w-16 shrink-0 truncate text-[10px] text-[var(--text-faint)]" title={bridgeUpdates.get(bridgeId)?.status ? `Bridge version ${bridgeUpdates.get(bridgeId)!.status!.currentVersion}` : "Bridge version unknown"}>
+            {bridgeUpdates.get(bridgeId)?.status ? `v${bridgeUpdates.get(bridgeId)!.status!.currentVersion}${bridgeUpdates.get(bridgeId)!.status!.availability === "available" ? " ↑" : ""}` : bridgeUpdates.get(bridgeId)?.loading ? "Checking…" : "Unknown"}
+          </span>}
+          {onOpenUpdates && <button type="button" className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center md:min-h-11 md:min-w-11"
+            aria-label={`Actions for ${label}`} aria-haspopup="menu" aria-expanded={contextMenu?.kind === "bridge" && contextMenu.bridgeId === bridgeId}
+            style={{ color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer" }}
+            onClick={event => { event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); bridgeMenuAnchor.current = event.currentTarget; setContextMenu({ kind: "bridge", bridgeId, x: rect.left, y: rect.bottom }); }}>⋯</button>}
           {finishedSessions.length > 0 && onRemoveSession && (
             <button
               type="button"
@@ -1849,6 +1867,7 @@ export function SessionList({
           isHidden={hiddenBridgeSet.has(contextMenu.bridgeId)}
           onCreateSession={onCreateSession ?? (() => {})}
           onOpenSecurity={onOpenSecurity}
+          onOpenUpdates={onOpenUpdates}
           onHide={onHideBridge ?? (() => {})}
           onUnhide={onUnhideBridge ?? (() => {})}
           onClose={closeContextMenu}

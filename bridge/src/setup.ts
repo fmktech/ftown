@@ -16,6 +16,7 @@ import { writeHarnessAgentGuide } from './harness-installer.js';
 import { ensureFtownOnPath } from './ensure-ftown-path.js';
 import { readSetupState, writeSetupState, assertSetupReady, acquireSetupLock, assertSetupVersion } from './setup-state.js';
 import { runSetupMigrations } from './setup-migrations.js';
+import { assertUpdateReservationAllowed } from './update-handoff.js';
 
 export interface IntegrationResult { name: string; status: 'installed' | 'skipped'; detail?: string }
 export interface SetupDependencies {
@@ -73,6 +74,7 @@ export async function performSetup(options: { root?: string; repair?: boolean; d
   const version = packageVersion(root);
   const release = acquireSetupLock();
   try {
+  assertUpdateReservationAllowed(homedir());
   const state = readSetupState();
   let installedVersion = state.packageVersion;
   try { installedVersion = packageVersion(join(homedir(), '.ftown', 'cli')); } catch { /* Fresh runtime; durable ready version still applies. */ }

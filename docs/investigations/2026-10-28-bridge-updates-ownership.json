@@ -1,0 +1,108 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-bridge-updates",
+  "branch": "feat/bridge-update-flow",
+  "base": "ce62d9d3c118528df70b9e49aceea4aaf1e28819",
+  "contract": "docs/investigations/2026-10-28-bridge-updates.md",
+  "briefs": "docs/investigations/2026-10-28-bridge-updates-briefs.md",
+  "integrationOwner": "/root/site_integration",
+  "workers": [
+    {
+      "id": "/root/site_capture",
+      "task": "U1",
+      "tier": 1,
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "state": "complete; handoff accepted, leases released; native worker stopped",
+      "writable": [],
+      "dependencies": [
+        "frozen update-protocol.ts wire/UX contract"
+      ],
+      "resources": "isolated UI unit/static only, no installs/runtime/E2E/Git"
+    },
+    {
+      "id": "/root/site_integration",
+      "task": "P1",
+      "tier": 1,
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "state": "L1 landing prepared; Git and coordination leases release upon successful PR handoff",
+      "writable": [],
+      "dependencies": [
+        "frozen internal/wire contracts"
+      ],
+      "resources": "exclusive Git/index/history/fetch/push/PR; no runtime or source changes",
+      "repair": "Owned guard marker dead-owner reclaim; bounded post-kill termination proof with tagged update_process_uncertain preserving resources."
+    },
+    {
+      "id": "/root/update_runtime",
+      "task": "R1",
+      "tier": 1,
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "state": "complete; handoff accepted, leases released; native worker stopped",
+      "writable": [],
+      "dependencies": [
+        "frozen contracts",
+        "P1 named exports for compile/integration"
+      ],
+      "resources": "scoped unit/static only; no install, Git, runtime/E2E",
+      "repair": "Root fullbridge suite1085tests:3 index-readiness failures, AST harness missing new startup dependencies/await. Reproduceisolated; preserve actualgate assertions and test new async startup contract."
+    },
+    {
+      "id": "/root/site_capture",
+      "task": "R2",
+      "tier": 1,
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "state": "complete; handoff accepted, leases released; native worker stopped",
+      "writable": [],
+      "dependencies": [
+        "frozen SecureExecutionObserver and R1 UpdateAdmission/UpdateResponseTicket"
+      ],
+      "resources": "scoped unit/static only",
+      "boundedRepair": "Accept current when installed>=stable latest, add regression; E2E screenshot each opened real desktop/mobile dialog via testInfo.outputPath for root visual review.",
+      "repair": "Root full UI suite OOM; fresh mock sendCommand rebuilds controller and triggers read/render loop. Stabilize controller/forward latest send with regression; reproduce isolated Dashboard test before full rerun."
+    },
+    {
+      "id": "/root/site_review",
+      "task": "V1",
+      "tier": 2,
+      "model": "gpt-6.1-sol",
+      "effort": "max",
+      "state": "complete; handoff accepted, leases released; native worker stopped",
+      "writable": [],
+      "dependencies": [
+        "P1/R1/U1 handoffs; R2 final source handoff before final judgment"
+      ],
+      "resources": "read-only, report only"
+    }
+  ],
+  "rootWritable": [
+    "bridge/src/update-protocol.ts",
+    "docs/investigations/2026-10-28-bridge-updates.md",
+    "docs/investigations/2026-10-28-bridge-updates-briefs.md",
+    "docs/investigations/2026-10-28-bridge-updates-ownership.json",
+    "bridge/src/update-runtime-contract.ts",
+    "bridge/src/security/bridge/execution-observer.ts",
+    "docs/investigations/bridge-updates-validation.md"
+  ],
+  "resourceLeases": {
+    "E2E/runtime/sandbox/DB/ports/generated": "released; verified sandbox deleted and local test resources cleaned",
+    "dependencyInstall/lockfiles": "released",
+    "Git/index/history": "L1: release upon successful commit/push/PR handoff",
+    "dependencyInstall": "none; root completed install",
+    "bridge/package.json+package-lock.json": "released",
+    "combined build+unit+E2E+runtime": "released; all final gates passed"
+  },
+  "sandbox": {
+    "provider": "Boat",
+    "id": "bx_tcb4qcnu",
+    "size": "default",
+    "ttlSeconds": 7200,
+    "owner": "/root",
+    "noEnv": true,
+    "noSnapshots": true,
+    "state": "deleted, absence verified 2026-10-28T14:01Z"
+  },
+  "ownershipValidation": "Only L1 coordination/Git owner active; no parallel writers; all source/review/runtime gates passed and released."
+}

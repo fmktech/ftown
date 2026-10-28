@@ -1052,3 +1052,24 @@ describe('commandless standard launch boundary', () => {
     assert.equal(h.runs[0].env?.WRAPPER_SETTING, 'preserved');
   });
 });
+
+describe('update launch admission', () => {
+  it('drains an already-admitted relaunch and refuses new creates while frozen', async () => {
+    const { UpdateAdmission } = await import('./update-admission.js');
+    const admission = new UpdateAdmission();
+    const { deps, runs } = fakeDeps();
+    deps.updateAdmission = admission;
+    let publishStarted!: () => void;
+    const started = new Promise<void>(resolve => { publishStarted = resolve; });
+    let resume!: () => void;
+    const gate = new Promise<void>(resolve => { resume = resolve; });
+    deps.centrifugo.publishSessionUpdate = async () => { publishStarted(); await gate; };
+    const launch = relaunchFtownSession(deps, fakeSession('existing'), 'retry');
+    await started; admission.freeze();
+    await assert.rejects(createFtownSession(deps, { command: 'safe', shellType: 'shell' }), /update in progress/i);
+    let drained = false; const drain = admission.drain(1000).then(() => { drained = true; });
+    await Promise.resolve(); assert.equal(drained, false);
+    resume(); await launch; await drain;
+    assert.equal(runs.length, 1);
+  });
+});

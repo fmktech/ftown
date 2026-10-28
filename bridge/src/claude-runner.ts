@@ -216,6 +216,11 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
     }
   }
 
+  /** Includes pending creation and stopping generations, not just attached PTYs. */
+  hasLiveGenerations(): boolean {
+    return this.generations.size > 0 || this.activeProcesses.size > 0;
+  }
+
   isRunning(sessionId: string): boolean {
     return this.activeProcesses.has(sessionId);
   }

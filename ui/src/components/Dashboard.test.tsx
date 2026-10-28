@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "@/types";
 import type { SessionActivity } from "@/hooks/useAllSessionEvents";
@@ -8,6 +8,7 @@ import { Dashboard } from "./Dashboard";
 import { buildBridgeCommand } from "@/lib/bridge-command";
 import type { MessageClient } from "@/lib/message-client";
 import type { ReactNode } from "react";
+import { useBridgeUpdates } from "@/hooks/useBridgeUpdates";
 
 const state = vi.hoisted(() => ({
   sessions: [] as Session[],
@@ -20,6 +21,7 @@ const state = vi.hoisted(() => ({
   removeSession: vi.fn(),
   bridgeExec: vi.fn().mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 }),
   clearSessionAttention: vi.fn(),
+  rpcCommands: [] as string[],
 }));
 
 vi.mock("@/hooks/usePendingApprovals", () => ({ usePendingApprovals: () => ({ client: null, snapshot: { inbox: state.pending } }) }));
@@ -29,7 +31,7 @@ vi.mock("@/hooks/useSessions", () => ({ useSessions: () => ({
   renameSession: vi.fn(), setSessionParent: vi.fn(), refreshSessions: vi.fn(),
 }) }));
 vi.mock("@/hooks/useBridgeRpc", () => ({ useBridgeRpc: () => ({ bridgeExec: state.bridgeExec,
-  sendCommand: vi.fn().mockResolvedValue({ success: true, data: { sessionId: "ordinary", attention: null, sequence: 0 } }),
+  sendCommand: vi.fn().mockImplementation(async command => { state.rpcCommands.push(command.type); return { success: true, data: { sessionId: "ordinary", attention: null, sequence: 0 } }; }),
   onSubscribed: () => () => {},
 }) }));
 vi.mock("@/hooks/useBridges", () => ({ useBridges: () => ({ bridges: state.bridges, hasBridges: true, prepareLocalAccess: vi.fn() }) }));
@@ -60,6 +62,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   state.activity = new Map();
   state.pending = [];
+  state.rpcCommands = [];
   state.createSession.mockResolvedValue(undefined);
   state.sessions = [
     session("ordinary", "Regular shell"),
@@ -71,6 +74,35 @@ beforeEach(() => {
   window.cancelAnimationFrame = vi.fn();
 });
 afterEach(() => { cleanup(); Reflect.deleteProperty(navigator, "clipboard"); Reflect.deleteProperty(document, "execCommand"); });
+
+it("does not reissue bridge update reads when Dashboard rerenders with a fresh RPC callback", async () => {
+  dashboard();
+  await waitFor(() => expect(state.rpcCommands.filter(type => type === "get_bridge_update")).toHaveLength(1));
+  fireEvent.click(screen.getByRole("button", { name: "Connect a bridge" }));
+  expect(screen.getByText("Connect a bridge:")).toBeTruthy();
+  await act(async () => { await Promise.resolve(); });
+  expect(state.rpcCommands.filter(type => type === "get_bridge_update")).toHaveLength(1);
+});
+
+it("preserves the controller and forwards later calls through the latest RPC callback", async () => {
+  const data = { schema: 1, bridgeId: "a", currentVersion: "1.0.0", latestVersion: "1.1.0", checkedAt: null, availability: "available", canUpdate: true, blockedReason: null, operation: null, manualCommand: "npx ftown@1.1.0 setup" };
+  const first = vi.fn().mockResolvedValue({ success: true, data });
+  const second = vi.fn().mockResolvedValue({ success: true, data });
+  const { result, rerender } = renderHook(({ send }) => useBridgeUpdates(send, ["a"]), { initialProps: { send: first } });
+  await waitFor(() => expect(result.current.get("a").status?.currentVersion).toBe("1.0.0"));
+  const original = result.current; rerender({ send: second });
+  expect(result.current).toBe(original); expect(first).toHaveBeenCalledTimes(1); expect(second).not.toHaveBeenCalled();
+  await act(async () => { await result.current.check("a", true); });
+  expect(first).toHaveBeenCalledTimes(1); expect(second).toHaveBeenCalledTimes(1);
+  let resolveMutation!: (value: { success: boolean; data: { code: string } }) => void;
+  second.mockImplementationOnce(() => new Promise(resolve => { resolveMutation = resolve; }));
+  act(() => { void result.current.update("a"); });
+  const operation = result.current.get("a").operation;
+  expect(operation).not.toBeNull();
+  rerender({ send: first });
+  expect(result.current).toBe(original); expect(result.current.get("a").operation).toEqual(operation);
+  await act(async () => { resolveMutation({ success: false, data: { code: "permission_denied" } }); await Promise.resolve(); });
+});
 
 describe("dashboard after recurring automation retirement", () => {
   it.each([null, "crons", "factory"])("shows all session history with sidebar setting %s", async (storedTab) => {

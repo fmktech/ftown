@@ -12,11 +12,13 @@ import { registerSessionWorkspace } from './session-registry.js';
 
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { ProcessRunner } from './claude-runner.js';
+import type { UpdateAdmission } from './update-admission.js';
 import type { SessionStore } from './session-store.js';
 import type { CreateSessionPayload, Session, ShellType } from './types.js';
 
 export interface CreateFtownSessionDeps {
   store: SessionStore;
+  updateAdmission?: UpdateAdmission;
   runner: ProcessRunner;
   centrifugo: CentrifugoClient;
   userId: string;
@@ -341,7 +343,7 @@ export type RelaunchMode = 'retry' | 'resume';
  * sites): retry surfaces publish failures as a command error response, and
  * resurrection's caller marks the session dead.
  */
-export async function relaunchFtownSession(
+async function relaunchFtownSessionImpl(
   deps: CreateFtownSessionDeps,
   session: Session,
   mode: RelaunchMode,
@@ -382,7 +384,7 @@ export async function relaunchFtownSession(
   return command;
 }
 
-export async function createFtownSession(
+async function createFtownSessionImpl(
   deps: CreateFtownSessionDeps,
   input: CreateFtownSessionInput,
 ): Promise<Session> {
@@ -603,4 +605,15 @@ export function parseCreateSessionBody(
     suppressBriefing: body.suppressBriefing === true,
     createMissingWorkingDir: body.createMissingWorkingDir === true,
   };
+}
+
+/** Hold launch admission across all asynchronous preparation and persistence. */
+export async function relaunchFtownSession(deps: CreateFtownSessionDeps, session: Session, mode: RelaunchMode): Promise<string> {
+  const release = deps.updateAdmission?.enter();
+  try { return await relaunchFtownSessionImpl(deps, session, mode); } finally { release?.(); }
+}
+
+export async function createFtownSession(deps: CreateFtownSessionDeps, input: CreateFtownSessionInput): Promise<Session> {
+  const release = deps.updateAdmission?.enter();
+  try { return await createFtownSessionImpl(deps, input); } finally { release?.(); }
 }
