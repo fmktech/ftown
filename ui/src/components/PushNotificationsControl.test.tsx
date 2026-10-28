@@ -78,3 +78,15 @@ it("preserves the notification controller when presentation changes and requests
  expect(localStorage.getItem("ftown:pushOwner")).toBe("owner");
  expect(vi.mocked(fetch).mock.calls.filter(([,options])=>!options?.method)).toHaveLength(1);
 });
+
+it("explains a disabled notification control on hover and focus", () => {
+ fixture();render(<PushNotificationsControl localMode accountId="owner" presentation="responsive"/>);
+ const button=screen.getByRole("button",{name:"Enable push notifications"});
+ const trigger=button.parentElement!;
+ fireEvent.mouseEnter(trigger);
+ expect(screen.getByRole("tooltip").textContent).toContain("require a hosted connection");
+ fireEvent.mouseLeave(trigger);
+ fireEvent.focus(trigger);
+ expect(trigger.getAttribute("aria-describedby")).toBe(screen.getByRole("tooltip").id);
+ expect(permission).not.toHaveBeenCalled();
+});

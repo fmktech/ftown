@@ -112,7 +112,7 @@ export async function approveAccountComputer(page: Page, bridge: AccountTestBrid
 }
 
 export async function createAccountShell(page: Page, bridgeId: string, name: string): Promise<void> {
-  await page.getByTitle("Create a new session", { exact: true }).click();
+  await page.getByRole("button", { name: "Create a new session", exact: true }).click();
   await page.locator("#ns-shell-type").selectOption("shell"); await page.locator("#ns-bridge").selectOption(bridgeId);
   await page.getByPlaceholder("Optional name for this session").fill(name);
   await page.getByRole("button", { name: "Create Session", exact: true }).click();

@@ -312,7 +312,7 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
         return result.devices.some(device => device.endpoint.id === phoneIdentity.endpointId);
       }, { timeout: 60000, message: "Revoked account device must be removed from every task-owned bridge" }).toBe(false)));
       await phone.reload(); await expect(phone.getByRole("alert").filter({ hasText: /\S/ })).toContainText(/revoked/i, { timeout: 30000 });
-      await expect(phone.getByTitle("Create a new session", { exact: true })).toHaveCount(0);
+      await expect(phone.getByRole("button", { name: "Create a new session", exact: true })).toHaveCount(0);
     } catch (error) { primaryFailed = true; throw error; }
     finally {
       const failures: string[] = [];
