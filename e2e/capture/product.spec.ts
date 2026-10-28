@@ -9,7 +9,7 @@ import { approveAccountComputer, startAccountTestBridge, usePrivateApprovalLink,
 import { bridgeApiFetch } from "../helpers/bridge-api";
 import { E2E_DIR } from "../helpers/config";
 import { recordScenes, recordVideo, type Video } from "./record-video";
-import { AI_MODEL, AI_NAME, DELEGATION_PROMPT, DEMO_WORKSPACE, INITIAL_PROMPT, PiProofDiagnosticError, findParentSynthesis, prepareDemo, provisionCodex, removeDemo, verifyChildTranscripts, verifyDemo, verifyParentCreation, waitForTurn, type FleetMail, type FleetSession } from "./ai-demo";
+import { AI_MODEL, AI_NAME, DELEGATION_PROMPT, DEMO_WORKSPACE, INITIAL_PROMPT, PiProofDiagnosticError, findParentSynthesis, prepareDemo, provisionCodex, removeDemo, verifyChildTranscripts, verifyDemo, verifyParentCreation, verifyParentMailQuality, waitForTurn, type FleetMail, type FleetSession } from "./ai-demo";
 
 const origin = process.env.FTOWN_PUBLIC_URL ?? "https://localhost:8444";
 const names = [AI_NAME, "Claude review", "Pi test check"] as const;
@@ -268,7 +268,7 @@ test("capture real isolated workspace, phone and access panel", async ({ browser
       desktopPhase = "show parent synthesis";
       if (synthesisTurn === undefined) {
         const previous = turns;
-        turns = await followUp(desktop, bridge!.home, previous, 'Read both child result messages with "$HOME/.ftown/ftown" harness mail read, then summarize each child\'s actual finding in two short bullets.');
+        turns = await followUp(desktop, bridge!.home, previous, 'Use the child results already received through hooks or earlier reads. Only if a needed reply has not been received, read mail with "$HOME/.ftown/ftown" harness mail read; then summarize each child\'s actual finding in two short bullets.');
         await expect.poll(async () => {
           const result = await bridgeApiFetch("GET", `/api/sessions/${sessions[0]}/inbox?peek=1&all=1`, { bridgeHome: bridge!.home });
           const all = (result.body as { messages?: FleetMail[] }).messages ?? [];
@@ -281,11 +281,11 @@ test("capture real isolated workspace, phone and access panel", async ({ browser
       } else {
         turns = await waitForTurn(desktop, bridge!.home, synthesisTurn - 1, 20_000, DELEGATION_PROMPT);
       }
-      await writeFile(join(directory, "fleet-proof.json"), JSON.stringify({ parent: sessions[0], children: children.map(({ id, name, shellType, model, parentSessionId }) => ({ id, name, shellType, model, parentSessionId })), claudeModel, replies: replies.map(({ id, from, to, ts, deliveredAt, body }) => ({ id, from, to, ts, deliveredAt, bodySha256: createHash("sha256").update(body).digest("hex") })), checks: ["parent-create-tool-results", "child-native-provider-and-mail-tool-results", "parent-delivered-mail-and-synthesis"] }, null, 2), { flag: "wx", mode: 0o600 });
       await holdResult(startedAt);
     } }]);
     await desktop.evaluate(() => document.fonts.ready);
     await desktop.screenshot({ path: join(directory, "desktop.png"), animations: "disabled" });
+    await verifyParentMailQuality(bridge.home);
     } catch (error) {
       const detail = error instanceof Error && error.message.startsWith("Child proof failed: ") ? `; ${error.message}` : "";
       throw new Error(`Desktop walkthrough failed at phase: ${desktopPhase}${detail}`, { cause: error });
@@ -324,6 +324,8 @@ test("capture real isolated workspace, phone and access panel", async ({ browser
     await noOverflow(phone);
     await phone.evaluate(() => document.fonts.ready);
     await phone.screenshot({ path: join(directory, "mobile.png"), animations: "disabled" });
+    const mailQuality = await verifyParentMailQuality(bridge.home);
+    await writeFile(join(directory, "fleet-proof.json"), JSON.stringify({ parent: sessions[0], children: children.map(({ id, name, shellType, model, parentSessionId }) => ({ id, name, shellType, model, parentSessionId })), claudeModel, replies: replies.map(({ id, from, to, ts, deliveredAt, body }) => ({ id, from, to, ts, deliveredAt, bodySha256: createHash("sha256").update(body).digest("hex") })), mailQuality, checks: ["parent-create-tool-results", "child-native-provider-and-mail-tool-results", "parent-delivered-mail-and-synthesis", "parent-mail-quality-through-mobile"] }, null, 2), { flag: "wx", mode: 0o600 });
     videos = { desktop: desktopVideo, mobile: mobileVideo };
     await verifyDemo();
     images = await exportImages(directory);

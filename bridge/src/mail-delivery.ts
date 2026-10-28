@@ -18,7 +18,7 @@ export const MAIL_NUDGE_MIN_INTERVAL_MS = 30_000;
 export const MAIL_NUDGE_BUSY_RECHECK_MS = 60_000;
 export const AGENT_BUSY_STALE_MS = 30 * 60_000;
 export const NATIVE_WAKE_LEASE_MS = 30_000;
-export const MAIL_WAKE_TEXT = 'You have new ftown mail — run `ftown harness mail read` to read it.';
+export const MAIL_WAKE_TEXT = "FTown mail may be available. If this prompt's hooks supplied [ftown mail], process that mail without reading it again. Otherwise run `ftown harness mail read` once; if no mail is returned, no action is needed.";
 export interface NativeWakeRegistration { adapter: 'claude-mod' | 'opencode'; nativeSessionId: string }
 export class NativeWakeRegistrationError extends Error {
   constructor(readonly status: 400 | 409, message: string) { super(message); }
@@ -456,6 +456,11 @@ export class MailDeliveryService {
     this.nudgeTimers.set(sessionId, timer);
   }
 
+  private isAgentRecentlyBusy(sessionId: string): boolean {
+    const busySince = this.agentBusySince.get(sessionId);
+    return busySince !== undefined && this.now() - busySince < AGENT_BUSY_STALE_MS;
+  }
+
   private fireMailNudge(sessionId: string): Promise<void> {
     const epoch = this.dependencyEpoch;
     const previous = this.wakeLocks.get(sessionId) ?? Promise.resolve();
@@ -488,6 +493,10 @@ export class MailDeliveryService {
     }
     const leaseRemaining = this.pluginLeaseRemaining(session);
     if (leaseRemaining > 0) { this.scheduleMailNudge(sessionId, fromLabel, leaseRemaining); return; }
+    if (this.isAgentRecentlyBusy(sessionId)) {
+      this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_BUSY_RECHECK_MS);
+      return;
+    }
 
     if (session.shellType === 'codex' || session.shellType === 'muse') {
       let identity = nativeIdentity(session);
@@ -505,7 +514,7 @@ export class MailDeliveryService {
         const live = await store.loadSession(sessionId);
         const pending = await mailStore.listUndelivered(sessionId);
         return current() && !controller.signal.aborted && !!live && live.status === 'running'
-          && nativeIdentity(live) === identity
+          && nativeIdentity(live) === identity && !this.isAgentRecentlyBusy(sessionId)
           && runner.isRunning(sessionId) && pending.some(message => undelivered.some(original => original.id === message.id));
       };
       let result;
@@ -521,8 +530,7 @@ export class MailDeliveryService {
     const legacyWait = (this.legacyReadyAt.get(sessionId) ?? 0) - this.now();
     if (legacyWait > 0) { this.scheduleMailNudge(sessionId, fromLabel, legacyWait); return; }
 
-    const busySince = this.agentBusySince.get(sessionId);
-    if (busySince !== undefined && this.now() - busySince < AGENT_BUSY_STALE_MS) {
+    if (this.isAgentRecentlyBusy(sessionId)) {
       this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_BUSY_RECHECK_MS);
       return;
     }
@@ -554,8 +562,7 @@ export class MailDeliveryService {
     if (!current() || !pending.length || !session || session.status !== 'running' || !runner.isRunning(sessionId)) return;
     const refreshedLease = this.pluginLeaseRemaining(session);
     if (refreshedLease > 0) { this.scheduleMailNudge(sessionId, fromLabel, refreshedLease); return; }
-    const freshBusySince = this.agentBusySince.get(sessionId);
-    if (freshBusySince !== undefined && this.now() - freshBusySince < AGENT_BUSY_STALE_MS) {
+    if (this.isAgentRecentlyBusy(sessionId)) {
       this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_BUSY_RECHECK_MS);
       return;
     }
@@ -563,7 +570,8 @@ export class MailDeliveryService {
     this.pendingNudgeFrom.delete(sessionId);
     this.lastNudgeAt.set(sessionId, this.now());
     const text = sanitizeMessageText(
-      `You have new ftown mail from ${fromLabel} — run \`ftown harness mail read\` to read it.`,
+      session.shellType === 'codex' ? MAIL_WAKE_TEXT
+        : `You have new ftown mail from ${fromLabel} — run \`ftown harness mail read\` to read it.`,
     );
     await this.injectPtyLine(session, 'ftown-mail', text);
   }

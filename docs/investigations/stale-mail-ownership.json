@@ -1,0 +1,102 @@
+{
+  "checkout": "/Users/fkesheh/projects/ftown-e2e-performance",
+  "base": "881d7044fc137b286251abad03f1014d12e1a62a",
+  "integrationOwner": "/root/site_integration",
+  "runtimeOwner": "/root",
+  "sandbox": {
+    "id": "bx_pd45k3hb",
+    "ttlSeconds": 7200,
+    "type": "default",
+    "noEnv": true,
+    "noSnapshots": true,
+    "noMonitoring": true,
+    "status": "deleted; info404 verified"
+  },
+  "owners": {
+    "/root": {
+      "files": [
+        "docs/investigations/2026-10-27-stale-mail-notification.md",
+        "docs/investigations/stale-mail-discovery.md",
+        "docs/investigations/stale-mail-capture-evidence.md",
+        "docs/investigations/stale-mail-ownership.json",
+        "ui/public/product/"
+      ],
+      "status": "coordination/runtime/media"
+    },
+    "/root/site_integration": {
+      "tier": 1,
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "files": [
+        "bridge/src/mail-delivery.ts",
+        "bridge/src/mail-delivery.test.ts",
+        "bridge/src/native-mail.test.ts",
+        "docs/investigations/stale-mail-repair-handoff.md",
+        "bridge/package.json",
+        "bridge/package-lock.json"
+      ],
+      "status": "MAIL-LAND active: sole Git/PR and own handoff report lease"
+    },
+    "/root/site_capture": {
+      "tier": 1,
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "files": [
+        "e2e/capture/ai-demo.ts",
+        "e2e/capture/product.spec.ts",
+        "e2e/capture/mail-quality.test.ts",
+        "e2e/capture/README.md",
+        "docs/investigations/stale-mail-recapture-handoff.md"
+      ],
+      "status": "all source/report leases released; native completed and retired"
+    },
+    "/root/site_review": {
+      "tier": 2,
+      "model": "gpt-6.1-sol",
+      "effort": "max",
+      "files": [
+        "docs/investigations/stale-mail-repair-review.md"
+      ],
+      "status": "final source/media approved; report released; native completed and retired"
+    }
+  },
+  "validation": "17 ownership paths mechanically disjoint",
+  "gitLease": {
+    "owner": "/root/site_integration",
+    "scope": "commit exact frozen task files, push branch, create new PR; no merge",
+    "status": "active"
+  },
+  "branch": "fix/stale-mail-wake-demo",
+  "runtime": {
+    "owner": "/root",
+    "status": "r4 capture and focused landing passed; all task resources cleaned",
+    "evidence": "/tmp/ftown-mail-repair-20261028"
+  },
+  "landingFiles": [
+    "bridge/package-lock.json",
+    "bridge/package.json",
+    "bridge/src/mail-delivery.test.ts",
+    "bridge/src/mail-delivery.ts",
+    "e2e/capture/README.md",
+    "e2e/capture/ai-demo.ts",
+    "e2e/capture/product.spec.ts",
+    "ui/public/product/desktop-workspace-1120.webp",
+    "ui/public/product/desktop-workspace-2240.webp",
+    "ui/public/product/desktop-workspace-640.webp",
+    "ui/public/product/desktop-workspace.mp4",
+    "ui/public/product/device-access-1792.webp",
+    "ui/public/product/device-access-896.webp",
+    "ui/public/product/manifest.json",
+    "ui/public/product/mobile-terminal-390.webp",
+    "ui/public/product/mobile-terminal-780.webp",
+    "ui/public/product/mobile-terminal.mp4",
+    "docs/investigations/2026-10-27-stale-mail-notification.md",
+    "docs/investigations/stale-mail-capture-evidence.md",
+    "docs/investigations/stale-mail-discovery.md",
+    "docs/investigations/stale-mail-ownership.json",
+    "docs/investigations/stale-mail-recapture-handoff.md",
+    "docs/investigations/stale-mail-repair-handoff.md",
+    "docs/investigations/stale-mail-repair-review.md",
+    "e2e/capture/mail-quality.test.ts"
+  ]
+}

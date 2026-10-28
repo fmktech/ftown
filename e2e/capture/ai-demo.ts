@@ -11,7 +11,7 @@ const execute = promisify(execFile);
 export const DEMO_WORKSPACE = "/home/user/demo-workspace";
 export const AI_NAME = "Codex coordinator";
 export const AI_MODEL = "gpt-6.1-terra";
-export const INITIAL_PROMPT = `Fix only duration.mjs so non-negative integer minutes format as 0m, 5m, 1h, or 1h 05m. Run node --test and briefly explain the change. Work only in this directory. Do not delegate or create sessions yet. For every FTown command use the installed launcher "$HOME/.ftown/ftown". When I later ask you to delegate, use "$HOME/.ftown/ftown" sessions create --parent to start exactly two children in this directory: Claude review with --shell claude --model sonnet, to review zero and hour boundaries; and Pi test check with --shell pi --model openai/gpt-6.1-terra:xhigh, to run node --test --test-reporter=tap duration.test.mjs. In each child prompt explicitly instruct it to use "$HOME/.ftown/ftown" for FTown commands and report its actual findings once via "$HOME/.ftown/ftown" harness mail send --parent --type result, without creating children or editing files. Then read both replies and summarize their findings.`;
+export const INITIAL_PROMPT = `Fix only duration.mjs so non-negative integer minutes format as 0m, 5m, 1h, or 1h 05m. Run node --test and briefly explain the change. Work only in this directory. Do not delegate or create sessions yet. For every FTown command use the installed launcher "$HOME/.ftown/ftown". When I later ask you to delegate, use "$HOME/.ftown/ftown" sessions create --parent to start exactly two children in this directory: Claude review with --shell claude --model sonnet and --command 'claude --permission-mode auto --model sonnet', to review zero and hour boundaries; and Pi test check with --shell pi --model openai/gpt-6.1-terra:xhigh, to run node --test --test-reporter=tap duration.test.mjs. Provide each child's real task through --prompt; in each prompt explicitly instruct it to use "$HOME/.ftown/ftown" for FTown commands and report its actual findings once via "$HOME/.ftown/ftown" harness mail send --parent --type result, without creating children or editing files. After creating both children, end the current turn so they can work. Do not poll mail, read child screens, or drive child keyboards while waiting. Process replies supplied by hooks when delivered; once both actual replies are available, summarize both findings.`;
 export const DELEGATION_PROMPT = "Ask Claude Code to review the fix and Pi to test it. Have both report back.";
 const initialSource = `export function formatDuration(minutes) {\n  return \`${"${minutes}"}m\`;\n}\n`;
 const tests = `import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { formatDuration } from './duration.mjs';\nfor (const [minutes, expected] of [[0, '0m'], [5, '5m'], [60, '1h'], [65, '1h 05m']]) {\n  test(\`formats ${"${minutes}"} minutes\`, () => assert.equal(formatDuration(minutes), expected));\n}\n`;
@@ -47,8 +47,15 @@ export async function provisionCodex(bridgeHome: string, outputDirectory: string
   const configPath = join(codexDir, "config.toml");
   let existing = "";
   try { existing = await readFile(configPath, "utf8"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  if (/^\s*(model_reasoning_effort|cli_auth_credentials_store)\s*=/m.test(existing)) throw new Error("Unexpected existing Codex configuration");
-  await writeFile(configPath, `model_reasoning_effort = "xhigh"\ncli_auth_credentials_store = "file"\n${existing}`, { mode: 0o600 });
+  if (/^\s*(model_reasoning_effort|cli_auth_credentials_store)\s*=/m.test(existing)
+    || /^\s*\[\s*["\']?shell_environment_policy["\']?(?:\s*\]|\s*\.)/m.test(existing)
+    || /^\s*["\']?shell_environment_policy["\']?\s*(?:\.|=)/m.test(existing)) throw new Error("Unexpected existing Codex configuration");
+  await writeFile(configPath, `model_reasoning_effort = "xhigh"\ncli_auth_credentials_store = "file"\n${existing}\n[shell_environment_policy]\nexclude = ["FORCE_COLOR"]\n`, { mode: 0o600 });
+  await writeFile(join(bridgeHome, ".claude.json"), JSON.stringify({
+    hasCompletedOnboarding: true,
+    lastOnboardingVersion: "2.1.310",
+    projects: { [DEMO_WORKSPACE]: { hasTrustDialogAccepted: true } },
+  }) + "\n", { flag: "wx", mode: 0o600 });
   const handle = await open(keyPath, constants.O_RDONLY | constants.O_NOFOLLOW);
   let key: Buffer;
   let keyIdentity: { dev: number; ino: number };
@@ -206,8 +213,8 @@ function toolCommand(value: unknown): string | undefined {
   return typeof record.command === "string" ? record.command : typeof record.cmd === "string" ? record.cmd : undefined;
 }
 
-/** Match a launcher as the executable of a simple shell command, respecting quotes. */
-function ftownCommands(command: string | undefined, home: string, subcommand: readonly string[]): string[][] {
+/** Distinguish unsupported syntax from a supported command with no match. */
+function parsedFtownCommands(command: string | undefined, home: string, subcommand: readonly string[]): string[][] | undefined {
   if (!command) return [];
   const segments: string[][] = [];
   let words: string[] = [], word = "", active = false, quote = "", comment = false;
@@ -217,13 +224,13 @@ function ftownCommands(command: string | undefined, home: string, subcommand: re
     const char = command[index];
     if (comment) { if (char === "\n") { comment = false; endSegment(); } continue; }
     if (quote === "'") { if (char === "'") quote = ""; else word += char === "$" ? "\0$" : char; active = true; continue; }
-    if (char === "\\") { if (++index >= command.length) return []; const escaped = command[index]; word += escaped === "$" ? "\0$" : escaped; active = true; continue; }
+    if (char === "\\") { if (++index >= command.length) return undefined; const escaped = command[index]; word += escaped === "$" ? "\0$" : escaped; active = true; continue; }
     if (quote === '"') { if (char === '"') quote = ""; else word += char; active = true; continue; }
     if (char === "'" || char === '"') { quote = char; active = true; continue; }
     if (char === "#" && !active) { comment = true; continue; }
     // A here-document body is not executable shell input; do not mistake its
     // contents for commands without implementing a full shell parser.
-    if (char === "<" && command[index + 1] === "<") return [];
+    if (char === "<" && command[index + 1] === "<") return undefined;
     if (char === "\n" || char === ";" || char === "&" || char === "|") {
       if ((char === "&" || char === "|") && command[index + 1] === char) index++;
       endSegment(); continue;
@@ -231,10 +238,15 @@ function ftownCommands(command: string | undefined, home: string, subcommand: re
     if (/\s/.test(char)) { endWord(); continue; }
     word += char; active = true;
   }
-  if (quote) return [];
+  if (quote) return undefined;
   endSegment();
   const launcherPaths = new Set(["ftown", `${home}/.ftown/ftown`, "$HOME/.ftown/ftown", "${HOME}/.ftown/ftown", "~/.ftown/ftown"]);
   return segments.filter(segment => launcherPaths.has(segment[0]) && subcommand.every((part, index) => segment[index + 1] === part));
+}
+
+/** Match a launcher as the executable of a simple shell command, respecting quotes. */
+function ftownCommands(command: string | undefined, home: string, subcommand: readonly string[]): string[][] {
+  return parsedFtownCommands(command, home, subcommand) ?? [];
 }
 
 /** Validate native transcripts, without copying them or their content to staging. */
@@ -344,6 +356,63 @@ function demoWorkingDirectory(cwd: unknown): boolean {
 
 function isChildCreation(command: string | undefined, home: string, child: FleetSession): boolean {
   return ftownCommands(command, home, ["sessions", "create"]).some(segment => segment.includes("--parent") && segment.some((part, index) => (part === "--name" && segment[index + 1] === child.name) || part === `--name=${child.name}`));
+}
+
+export type ParentMailQuality = { completedExecutions: number; successfulMailReads: number; emptyReads: number; colorConflicts: number };
+
+/** Inspect native shell execution evidence only; never expose command or output text. */
+export function inspectParentMailQuality(records: readonly unknown[], home: string): ParentMailQuality {
+  const summary: ParentMailQuality = { completedExecutions: 0, successfulMailReads: 0, emptyReads: 0, colorConflicts: 0 };
+  let uninspectableEmpty = false;
+  const ansi = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+  const warning = "The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.";
+  for (const entry of records) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("Invalid parent rollout record");
+    const line = entry as ParentRecord;
+    // No proven link exists between legacy function calls and native execution IDs.
+    // Do not silently ignore an uninspectable legacy mail read.
+    if (line.type === "response_item" && line.payload?.type === "function_call"
+      && ftownCommands(toolCommand(line.payload.arguments), home, ["harness", "mail", "read"]).length) {
+      throw new Error("Unsupported legacy parent mail read evidence");
+    }
+    if (line.type !== "event_msg" || line.payload?.type !== "item_completed" || line.payload.item?.type !== "CommandExecution") continue;
+    const item = line.payload.item;
+    if (typeof item.id !== "string" || !item.id.trim() || typeof item.exit_code !== "number" || !Number.isInteger(item.exit_code)
+      || !((item.status === "completed" && item.exit_code === 0) || (item.status === "failed" && item.exit_code !== 0))
+      || typeof item.aggregated_output !== "string" || !demoWorkingDirectory(item.cwd)
+      || !Array.isArray(item.command) || item.command.length !== 3 || item.command[0] !== "/bin/bash" || item.command[1] !== "-lc" || typeof item.command[2] !== "string") {
+      throw new Error("Unsupported completed parent execution");
+    }
+    summary.completedExecutions++;
+    const output = item.aggregated_output.replace(ansi, "");
+    if (output.includes(warning)) summary.colorConflicts++;
+    if (item.exit_code === 0) {
+      const commands = parsedFtownCommands(item.command[2], home, ["harness", "mail", "read"]);
+      const hasEmptyLine = output.split(/\r?\n/).some(text => text.trim() === "(no mail)");
+      if (commands === undefined && hasEmptyLine) uninspectableEmpty = true;
+      if (commands?.length) {
+        summary.successfulMailReads++;
+        if (hasEmptyLine) summary.emptyReads++;
+      }
+    }
+  }
+  if (!summary.completedExecutions) throw new Error("Parent execution evidence missing");
+  if (uninspectableEmpty) throw new Error("Uninspectable parent empty output in capture");
+  if (summary.emptyReads) throw new Error("Parent empty mail read in capture");
+  if (summary.colorConflicts) throw new Error("Parent color conflict warning in capture");
+  return summary;
+}
+
+/** Inspect the sole complete scratch rollout before its home is removed. */
+export async function verifyParentMailQuality(home: string): Promise<ParentMailQuality> {
+  const files = await rolloutFiles(join(home, ".codex", "sessions"));
+  if (files.length !== 1) throw new Error("Parent rollout identity missing");
+  const data = await readFile(files[0], "utf8");
+  if (!data || !data.endsWith("\n")) throw new Error("Incomplete parent rollout");
+  let records: unknown[];
+  try { records = data.split("\n").slice(0, -1).map(line => JSON.parse(line) as unknown); }
+  catch { throw new Error("Invalid parent rollout"); }
+  return inspectParentMailQuality(records, home);
 }
 
 /** Correlate the parent's actual creation tool calls with later returned child IDs. */

@@ -127,7 +127,7 @@ class FakeRunner implements MailDeliveryRunner {
   }
 
   nudgeLines(): string[] {
-    return this.writes.filter((w) => w.data.includes('You have new ftown mail')).map((w) => w.data);
+    return this.writes.filter((w) => w.data.includes('You have new ftown mail') || w.data.includes(MAIL_WAKE_TEXT)).map((w) => w.data);
   }
 }
 
@@ -769,21 +769,143 @@ describe('MailDeliveryService injectPtyLine', () => {
 const nativeSession = (id = 'native') => makeSession(id, { shellType: 'codex', codexSessionId: '00000000-0000-4000-8000-000000000001' });
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
 
+describe('MailDeliveryService busy native wake regression', () => {
+  it('does not enqueue a stale native pointer when a busy turn consumes the inbox before idle', async () => {
+    const queued: string[] = [];
+    const f = setup(undefined, async (_session, text) => { queued.push(text); return { status: 'accepted' }; });
+    const session = nativeSession();
+    f.store.add(session); f.runner.running.add(session.id); f.service.markAgentBusy(session.id);
+    await f.service.acceptMail(session, { body: 'child reply', from: 'child' });
+    await f.clock.advance(5_000);
+
+    // The turn or its hook reads the same non-peek inbox before going idle.
+    const read = await f.service.readMail(session, { wait: 0, peek: false, all: false, limit: 50 });
+    assert.equal(read.kind, 'immediate');
+    if (read.kind === 'immediate') assert.deepEqual(read.messages.map(message => message.body), ['child reply']);
+    f.service.markAgentIdle(session.id);
+    await f.clock.advance(120_000);
+    assert.deepEqual(await f.service.readMail(session, { wait: 0, peek: false, all: false, limit: 50 }), { kind: 'immediate', messages: [] });
+    assert.deepEqual(queued, [], 'a consumed busy-turn inbox must not leave a native prompt queued');
+    assert.equal(f.runner.writes.length, 0);
+    f.service.stop();
+  });
+
+  it('keeps unread busy-turn mail live and wakes once after the session becomes idle', async () => {
+    const queued: string[] = [];
+    const f = setup(undefined, async (_session, text) => { queued.push(text); return { status: 'accepted' }; });
+    const session = nativeSession();
+    f.store.add(session); f.runner.running.add(session.id); f.service.markAgentBusy(session.id);
+    await f.service.acceptMail(session, { body: 'unread child reply', from: 'child' });
+    await f.clock.advance(5_000);
+    assert.deepEqual(queued, [], 'busy native sessions should not be queued before idle');
+    assert.equal((await f.mailStore.listUndelivered(session.id)).length, 1);
+    f.service.markAgentIdle(session.id);
+    await f.clock.advance(60_000);
+    assert.deepEqual(queued, [MAIL_WAKE_TEXT], 'still-unread mail must eventually wake the idle session');
+    await f.clock.advance(120_000);
+    assert.deepEqual(queued, [MAIL_WAKE_TEXT], 'the same unread batch must not wake repeatedly');
+    f.service.stop();
+  });
+
+  it('wakes for a fresh arrival after a previous native batch was read', async () => {
+    const queued: string[] = [];
+    const f = setup(undefined, async (_session, text) => { queued.push(text); return { status: 'accepted' }; });
+    const session = nativeSession();
+    f.store.add(session); f.runner.running.add(session.id);
+    await f.service.acceptMail(session, { body: 'first reply', from: 'child-one' });
+    await f.clock.advance(5_000);
+    assert.deepEqual(queued, [MAIL_WAKE_TEXT]);
+    const first = await f.service.readMail(session, { wait: 0, peek: false, all: false, limit: 50 });
+    assert.equal(first.kind, 'immediate');
+    if (first.kind === 'immediate') assert.deepEqual(first.messages.map(message => message.body), ['first reply']);
+    await f.service.acceptMail(session, { body: 'second reply', from: 'child-two' });
+    await f.clock.advance(5_000);
+    assert.deepEqual(queued, [MAIL_WAKE_TEXT, MAIL_WAKE_TEXT], 'a different unread batch still needs a wake');
+    assert.deepEqual((await f.mailStore.listUndelivered(session.id)).map(message => message.body), ['second reply']);
+    f.service.stop();
+  });
+});
+
 describe('MailDeliveryService native wakes', () => {
-  it('queues native wake while busy, sends no payload and leaves inbox unread; each batch wakes once', async () => {
+  it('defers busy native wake, sends no payload and leaves inbox unread; each batch wakes once', async () => {
     const calls: string[] = [];
     const f = setup(undefined, async (_session, text) => { calls.push(text); return { status: 'accepted' }; });
     const session = nativeSession(); f.store.add(session); f.runner.running.add(session.id); f.service.markAgentBusy(session.id);
     await f.service.acceptMail(session, { body: 'secret task body', from: 'parent' });
     await f.clock.advance(5_000);
-    assert.deepEqual(calls, [MAIL_WAKE_TEXT]); assert.equal(f.runner.writes.length, 0);
+    assert.deepEqual(calls, []); assert.equal(f.runner.writes.length, 0);
     assert.equal((await f.mailStore.listUndelivered(session.id)).length, 1);
+    f.service.markAgentIdle(session.id);
+    await f.clock.advance(60_000);
+    assert.deepEqual(calls, [MAIL_WAKE_TEXT]); assert.doesNotMatch(calls[0], /secret task body/);
     await f.clock.advance(120_000); assert.equal(calls.length, 1);
     await f.service.acceptMail(session, { body: 'second task' }); await f.clock.advance(5_000);
     assert.equal(calls.length, 2); assert.equal(f.runner.writes.length, 0);
     const drained = await f.service.readMail(session, { peek: false, wait: 0, all: false, limit: 50 });
     assert.equal(drained.kind, 'immediate'); if (drained.kind === 'immediate') assert.equal(drained.messages.length, 2);
     assert.deepEqual((await f.service.readMail(session, { peek: false, wait: 0, all: false, limit: 50 })), { kind: 'immediate', messages: [] });
+    f.service.stop();
+  });
+
+  it('defers when a session becomes busy during the native capability probe', async () => {
+    const gate = deferred<void>();
+    let entered!: () => void;
+    const probing = new Promise<void>(resolve => { entered = resolve; });
+    const queued: string[] = [];
+    let checks = 0;
+    const f = setup(undefined, async (_session, text, _signal, current) => {
+      if (checks++ === 0) { entered(); await gate.promise; }
+      if (!await current?.()) return { status: 'rejected' };
+      queued.push(text);
+      return { status: 'accepted' };
+    });
+    const session = nativeSession(); f.store.add(session); f.runner.running.add(session.id);
+    await f.service.acceptMail(session, { body: 'unread task' });
+    await f.clock.advance(5_000); await probing;
+    f.service.markAgentBusy(session.id);
+    gate.resolve(); await flushAsync();
+    assert.deepEqual(queued, []); assert.deepEqual(f.runner.writes, []);
+    assert.equal((await f.mailStore.listUndelivered(session.id)).length, 1);
+    f.service.markAgentIdle(session.id);
+    await f.clock.advance(60_000);
+    assert.deepEqual(queued, [MAIL_WAKE_TEXT], 'the rejected probe must not suppress a later wake');
+    assert.equal((await f.mailStore.listUndelivered(session.id)).length, 1);
+    f.service.stop();
+  });
+
+  it('waits for a refreshed busy marker but eventually wakes after it becomes stale', async () => {
+    const queued: string[] = [];
+    const f = setup(undefined, async (_session, text) => { queued.push(text); return { status: 'accepted' }; });
+    const session = nativeSession(); f.store.add(session); f.runner.running.add(session.id);
+    f.service.markAgentBusy(session.id);
+    await f.service.acceptMail(session, { body: 'unread task' });
+    await f.clock.advance(AGENT_BUSY_STALE_MS - 60_000);
+    assert.deepEqual(queued, []);
+    f.service.markAgentBusy(session.id);
+    await f.clock.advance(60_000);
+    assert.deepEqual(queued, [], 'refreshing the marker keeps the recipient busy');
+    await f.clock.advance(AGENT_BUSY_STALE_MS);
+    assert.deepEqual(queued, [MAIL_WAKE_TEXT], 'a stale marker must not block unread mail forever');
+    assert.equal((await f.mailStore.listUndelivered(session.id)).length, 1);
+    f.service.stop();
+  });
+
+  it('uses hook-aware instructions for native and Codex fallback without changing other fallback wording', async () => {
+    assert.match(MAIL_WAKE_TEXT, /hooks supplied \[ftown mail\]/);
+    assert.match(MAIL_WAKE_TEXT, /without reading it again/);
+    assert.match(MAIL_WAKE_TEXT, /Otherwise run `ftown harness mail read` once/);
+    assert.match(MAIL_WAKE_TEXT, /if no mail is returned, no action is needed/);
+    const f = setup();
+    const codex = nativeSession(); const other = makeSession('other', { shellType: 'grok' });
+    f.store.add(codex); f.store.add(other); f.runner.running.add(codex.id); f.runner.running.add(other.id);
+    await f.service.acceptMail(codex, { body: 'private codex body', from: 'alice' });
+    await f.service.acceptMail(other, { body: 'private grok body', from: 'bob' });
+    await f.clock.advance(61_200);
+    const lines = f.runner.nudgeLines();
+    assert.equal(lines.length, 2);
+    assert.ok(lines.some(line => line.includes(MAIL_WAKE_TEXT)));
+    assert.ok(lines.some(line => line.includes('You have new ftown mail from bob')));
+    assert.ok(lines.every(line => !line.includes('private')));
     f.service.stop();
   });
 
