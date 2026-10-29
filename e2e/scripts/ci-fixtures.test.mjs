@@ -54,15 +54,17 @@ test('Playwright assigns only explicitly isolated files to the concurrent lane',
   assert.equal(shared.dependencies, undefined);
   assert.equal(isolated.dependencies, undefined);
   assert.equal(shared.testIgnore, isolated.testMatch);
-  assert.equal(isolated.testMatch.length, 2);
+  const names = ['account-trust.spec.ts', 'device-display-names.spec.ts', 'pending-approvals.spec.ts'];
+  assert.equal(isolated.testMatch.length, names.length);
   const matches = file => isolated.testMatch.some(pattern => pattern.test(file));
   const testDir = path.join('/isolated task', 'ftown', 'e2e', 'tests');
-  const names = ['account-trust.spec.ts', 'pending-approvals.spec.ts'];
   for (const [index, name] of names.entries()) {
     const canonical = path.join(testDir, name);
     assert.equal(matches(canonical), true, name);
     assert.equal(isolated.testMatch[index].test(canonical), true);
-    assert.equal(isolated.testMatch[1 - index].test(canonical), false);
+    for (const [otherIndex, pattern] of isolated.testMatch.entries()) {
+      if (otherIndex !== index) assert.equal(pattern.test(canonical), false);
+    }
     for (const file of [path.join(testDir, 'nested', 'tests', name), path.join(testDir, 'nested', name),
       path.join('/unowned/e2e/tests', name), path.join('/isolated task/ftown/e2e-adjacent/tests', name),
       path.join(testDir, `${name}.extra`), path.join(testDir, `prefix-${name}`)]) {

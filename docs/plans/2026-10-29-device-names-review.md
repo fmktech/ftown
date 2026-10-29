@@ -37,3 +37,7 @@ Report lease released.
 ## Runtime closure
 
 The final spec establishes an encrypted shell from the approved phone, reconnects, confirms the same phone identity and restored access, and waits for the bridge's original account grant before recording the comparison baseline. Rename, cross-browser sync, reset, foreign-account denial, and full trust and grant equality assertions remain present. Root reports the focused Chromium test passed in 46.5 seconds, including overflow/touch checks and visual review of 1280, 390, and 320 pixel screenshots. This review inspected the final spec; runtime execution and visual review were performed by root. No blocking findings; report lease released.
+
+## CI fixture guard repair review
+
+**Pass; no blocking findings.** The guard now requires the exact three configured isolated specs in their canonical order and checks each canonical path against every other pattern. Existing unknown, nested, adjacent, prefix and suffix rejection checks, shared/isolated lane settings, and browser security assertions remain intact. This updates the stale roster without widening accepted paths or weakening isolation. Root recorded the baseline `3 !== 2` reproduction; the worker reports the fixture suite passing 6/6 after repair. No tests were rerun in this read-only review. Report lease released.
