@@ -26,6 +26,7 @@ const SECURITY_DDL = await (await import("node:fs/promises")).readFile(new URL("
 const ACCOUNT_DDL = await (await import("node:fs/promises")).readFile(new URL("../../ui/migrations/0007_account_trust.sql", import.meta.url), "utf8");
 
 const PENDING_DDL = await (await import("node:fs/promises")).readFile(new URL("../../ui/migrations/0008_pending_approvals.sql", import.meta.url), "utf8");
+const DISPLAY_NAMES_DDL = await (await import("node:fs/promises")).readFile(new URL("../../ui/migrations/0009_device_display_names.sql", import.meta.url), "utf8");
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS users (
@@ -81,6 +82,7 @@ try {
     await client.query(SECURITY_DDL);
     await client.query(ACCOUNT_DDL);
     await client.query(PENDING_DDL);
+    await client.query(DISPLAY_NAMES_DDL);
     await client.query('COMMIT');
   } catch (error) { await client.query('ROLLBACK'); throw error; }
 } finally { await client.end(); }

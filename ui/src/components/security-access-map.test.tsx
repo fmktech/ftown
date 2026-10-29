@@ -148,3 +148,9 @@ it("reanchors connectors when inline card or hub expansion moves nodes without r
   hubHeight = 100; act(() => notify(hub));
   expect(edge.getAttribute("d")).not.toBe(afterCard);
 });
+
+it("preserves a deliberate generic browser nickname instead of replacing it", () => {
+  const data = props(); data.browsers = [{ ...data.browsers[0], current: false, label: "This browser", customLabel: true }];
+  render(<SecurityAccessMap {...data} />);
+  expect(screen.getByRole("button", { name: /^Browser This browser:/ })).toBeTruthy();
+});

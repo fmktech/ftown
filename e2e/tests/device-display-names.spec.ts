@@ -1,0 +1,108 @@
+import { expect, type BrowserContext, type Page } from "@playwright/test";
+import { test } from "../helpers/fixtures";
+import { accountBrowserState, approveAccountComputer, createAccountShell, startAccountTestBridge, usePrivateApprovalLink, type AccountTestBridge } from "../helpers/account-pairing";
+import { bridgeSecurityCommand } from "../helpers/secure-browser";
+import { login, makeUser, registerUser } from "../helpers/app";
+import type { ApprovedEndpoint } from "../../bridge/src/security/protocol";
+
+const origin = process.env.FTOWN_PUBLIC_URL ?? "https://localhost:8444";
+async function access(page: Page) {
+  const menu = page.getByRole("button", { name: "Open navigation menu", exact: true });
+  if ((page.viewportSize()?.width ?? 1280) < 768) {
+    await expect(menu).toBeVisible();
+    await menu.click();
+  }
+  await page.getByRole("button", { name: "Open security", exact: true }).click();
+  await page.getByRole("tab", { name: "Access", exact: true }).click();
+  await expect(page.getByRole("list", { name: "Account devices", exact: true })).toBeVisible();
+}
+async function rename(page: Page, button: string, name: string) {
+  await page.getByRole("button", { name: button, exact: true }).click();
+  await page.getByLabel("Display name", { exact: true }).fill(name);
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("Display name saved.")).toBeVisible();
+}
+
+test("account names synchronize between approved browsers without changing trust", async ({ browser }, info) => {
+  test.setTimeout(240000);
+  const user = makeUser("display-names"); await registerUser(user.email, user.password);
+  const contexts: BrowserContext[] = []; const bridges: AccountTestBridge[] = []; let primaryFailed = false;
+  try {
+    const desktop = await browser.newContext({ baseURL: origin, viewport: { width: 1280, height: 900 } }); contexts.push(desktop);
+    const page = await desktop.newPage(); await login(page, user.email, user.password, { pairBridge: false });
+    const bridge = await startAccountTestBridge(origin); bridges.push(bridge);
+    const bridgeId = await approveAccountComputer(page, bridge);
+    const phoneContext = await browser.newContext({ baseURL: origin, viewport: { width: 390, height: 844 } }); contexts.push(phoneContext);
+    const phone = await phoneContext.newPage(); await login(phone, user.email, user.password, { pairBridge: false });
+    await usePrivateApprovalLink(phone);
+    await phone.getByRole("textbox", { name: "Device name", exact: true }).fill("Account test phone");
+    await phone.getByRole("button", { name: "Create approval link", exact: true }).click();
+    const privateLink = await phone.getByRole("textbox", { name: "Private approval link", exact: true }).inputValue();
+    await page.goto(privateLink);
+    await page.getByRole("button", { name: "Codes match — approve device", exact: true }).click();
+    await expect(page.getByText(/Device approved\. It can now finish connecting/)).toBeVisible();
+    await expect(phone.locator(`[data-bridge-row="${bridgeId}"]`)).toBeVisible({ timeout: 60000 });
+    const phoneId = (await accountBrowserState(phone))[0].endpointId;
+    // Match the account-trust fixture: exercise an encrypted command, then
+    // reconnect so the approved identity and bridge pins are restored.
+    const shellName = `DISPLAY_NAMES_${Date.now()}`;
+    await createAccountShell(phone, bridgeId, shellName);
+    await phone.getByRole("button", { name: "Open navigation menu", exact: true }).click();
+    await Promise.all([
+      phone.waitForEvent("load"),
+      phone.getByRole("navigation", { name: "Dashboard actions" }).getByRole("button", { name: "Reconnect and refresh", exact: true }).click(),
+    ]);
+    await expect(phone.locator(`[data-bridge-row="${bridgeId}"]`)).toBeVisible();
+    expect((await accountBrowserState(phone))[0].endpointId).toBe(phoneId);
+    await expect(phone.getByRole("button", { name: new RegExp(shellName) })).toBeVisible();
+    await access(phone);
+    await expect(phone.locator(`[data-computer-access="${bridgeId}"]`)).toContainText("Shared with your approved browsers");
+    await phone.getByRole("button", { name: "Close security" }).click();
+    await page.goto("/dashboard"); await expect(page.locator(`[data-bridge-row="${bridgeId}"]`)).toBeVisible({ timeout: 60000 });
+    const trustBefore = await (await page.request.get(`${origin}/api/security/account`)).json();
+    await expect.poll(async () => {
+      const result = await bridgeSecurityCommand("security_devices", {}, bridge.home) as unknown as { devices: ApprovedEndpoint[] };
+      return result.devices.some(device => device.endpoint.id === phoneId && device.label === "Account test phone" && device.source === "account");
+    }).toBe(true);
+    const grantsBefore = await bridgeSecurityCommand("security_devices", {}, bridge.home);
+    await access(page);
+    await expect(page.locator(`[data-computer-access="${bridgeId}"]`)).toContainText("Shared with your approved browsers", { timeout: 60000 });
+    await page.locator(`[data-access-node="${phoneId}"]`).click();
+    await rename(page, "Rename Account test phone", "Browser");
+    await expect(page.locator(`[data-access-node="${phoneId}"]`)).toContainText("Browser");
+    await page.locator(`[data-computer-access="${bridgeId}"]`).click();
+    const computerLabel = await page.locator(`[data-computer-access="${bridgeId}"] span.font-semibold`).first().textContent();
+    expect(computerLabel).toBeTruthy(); await rename(page, `Rename ${computerLabel}`, "Office 💻");
+    for (const width of [1280, 390, 320]) {
+      await page.setViewportSize({ width, height: 900 });
+      const dialog = page.getByRole("dialog", { name: "Security", exact: true });
+      await expect.poll(() => dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+      if (width < 640) await expect.poll(() => dialog.evaluate(element => [...element.querySelectorAll<HTMLElement>("button,summary,input")].filter(item => item.checkVisibility()).every(item => item.getBoundingClientRect().height >= 44))).toBe(true);
+      await page.screenshot({ path: info.outputPath(`display-names-${width}.png`), fullPage: true });
+    }
+    await phone.reload(); await access(phone);
+    await expect(phone.locator(`[data-access-node="${phoneId}"]`)).toContainText("Browser");
+    await expect(phone.locator(`[data-computer-access="${bridgeId}"]`)).toContainText("Office 💻");
+    const foreign = makeUser("display-names-foreign"); await registerUser(foreign.email, foreign.password);
+    const foreignContext = await browser.newContext({ baseURL: origin }); contexts.push(foreignContext);
+    const foreignPage = await foreignContext.newPage(); await login(foreignPage, foreign.email, foreign.password, { pairBridge: false });
+    const foreignNames = await (await foreignPage.request.get(`${origin}/api/security/device-names`)).json();
+    expect(foreignNames.names).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: phoneId })]));
+    for (const target of [{ kind: "browser", id: phoneId }, { kind: "bridge", id: bridgeId }]) {
+      const response = await foreignPage.request.put(`${origin}/api/security/device-names`, { headers: { Origin: origin }, data: { ...target, name: "Intruder" } });
+      expect(response.status()).toBe(404);
+    }
+    await phone.locator(`[data-computer-access="${bridgeId}"]`).click(); await phone.getByRole("button", { name: "Reset name" }).click();
+    await expect(phone.locator(`[data-computer-access="${bridgeId}"]`)).not.toContainText("Office 💻");
+    await phone.locator(`[data-access-node="${phoneId}"]`).click(); await phone.getByRole("button", { name: "Reset name" }).click();
+    await expect(phone.locator(`[data-access-node="${phoneId}"]`)).toContainText("Account test phone");
+    expect(await (await page.request.get(`${origin}/api/security/account`)).json()).toEqual(trustBefore);
+    expect(await bridgeSecurityCommand("security_devices", {}, bridge.home)).toEqual(grantsBefore);
+  } catch (error) { primaryFailed = true; throw error; }
+  finally {
+    const failures: string[] = [];
+    for (const context of contexts.reverse()) try { await context.close(); } catch { failures.push("browser-context"); }
+    for (const bridge of bridges.reverse()) try { await bridge.stop(); } catch { failures.push("account-bridge"); }
+    if (failures.length && !primaryFailed) throw new Error(`Cleanup failed: ${failures.join(", ")}`);
+  }
+});

@@ -190,3 +190,13 @@ CREATE TABLE IF NOT EXISTS security_pending_approvals (
 );
 CREATE INDEX IF NOT EXISTS security_pending_approvals_target_idx ON security_pending_approvals(target_sub, expires_at);
 CREATE INDEX IF NOT EXISTS security_pending_approvals_expiry_idx ON security_pending_approvals(expires_at);
+
+-- Account-owned cosmetic display overrides; never used for trust decisions.
+CREATE TABLE IF NOT EXISTS security_device_display_names (
+  owner_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('browser', 'bridge')),
+  target_id TEXT NOT NULL,
+  display_name TEXT NOT NULL CHECK (char_length(display_name) BETWEEN 1 AND 80),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY(owner_id, kind, target_id)
+);

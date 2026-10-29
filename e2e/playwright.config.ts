@@ -16,6 +16,7 @@ function exactTestPath(filename: string): RegExp {
 }
 const isolatedTests = [
   exactTestPath("account-trust.spec.ts"),
+  exactTestPath("device-display-names.spec.ts"),
   exactTestPath("pending-approvals.spec.ts"),
 ];
 
