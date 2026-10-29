@@ -1,4 +1,7 @@
-import { expect } from "@playwright/test";
+import { expect, type Page, type TestInfo } from "@playwright/test";
+import { randomUUID } from "node:crypto";
+import { rm, rmdir } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { test } from "../helpers/fixtures";
 import {
   sharedEmail,
@@ -11,6 +14,7 @@ import {
 import { sessionIdsFor, waitForNewSessionId } from "../helpers/centrifugo";
 import { bridgeApiFetch, readBridgePointer } from "../helpers/bridge-api";
 import { restartBridge } from "../helpers/bridge-process";
+import { BRIDGE_HOME, seedClaudeTranscript } from "../helpers/bridge-fixtures";
 
 /**
  * Session lifecycle e2e: the refactored launch/lifecycle paths
@@ -64,7 +68,106 @@ async function removeSessionQuietly(sid: string): Promise<void> {
   await bridgeApiFetch("DELETE", `/api/sessions/${sid}`).catch(() => undefined);
 }
 
+async function checkTerminalHeaderGeometry(page: Page, testInfo: TestInfo, action: "Stop" | "Rerun", dense = false) {
+  for (const width of [1280, 900, 390, 320]) {
+    await page.setViewportSize({ width, height: 900 });
+    const header = page.getByTestId("terminal-header");
+    const content = page.getByTestId("terminal-header-content");
+    const button = header.getByRole("button", { name: action, exact: true });
+    await expect(header).toBeVisible();
+    await expect(button).toBeVisible();
+    await expect(button).toHaveCSS("min-height", width < 768 ? "44px" : "32px");
+    const headerBox = await header.boundingBox();
+    const contentBox = await content.boundingBox();
+    const buttonBox = await button.boundingBox();
+    expect(headerBox).not.toBeNull();
+    expect(contentBox).not.toBeNull();
+    expect(buttonBox).not.toBeNull();
+    const paddingRight = await header.evaluate((element) => parseFloat(getComputedStyle(element).paddingRight));
+    expect(Math.abs(headerBox!.x + headerBox!.width - paddingRight - (buttonBox!.x + buttonBox!.width))).toBeLessThanOrEqual(1);
+    expect(contentBox!.x + contentBox!.width).toBeLessThanOrEqual(buttonBox!.x);
+    expect(buttonBox!.x).toBeGreaterThanOrEqual(0);
+    expect(buttonBox!.x + buttonBox!.width).toBeLessThanOrEqual(width);
+    if (width < 768) expect(buttonBox!.height).toBeGreaterThanOrEqual(44);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    if (dense) {
+      const usage = header.getByText("1.2M in · 456.8K out · sonnet-4-5-20250929", { exact: true });
+      const metadata = action === "Stop" ? [usage, header.getByText("running", { exact: true })] : [usage];
+      for (const node of metadata) {
+        await expect(node).toBeVisible();
+        const box = await node.boundingBox();
+        expect(box).not.toBeNull();
+        expect(box!.x).toBeGreaterThanOrEqual(headerBox!.x);
+        expect(box!.x + box!.width).toBeLessThanOrEqual(buttonBox!.x);
+        expect(box!.y).toBeGreaterThanOrEqual(headerBox!.y);
+        expect(box!.y + box!.height).toBeLessThanOrEqual(headerBox!.y + headerBox!.height);
+        expect(await node.evaluate((element) => {
+          const actionButton = element.closest('[data-testid="terminal-header"]')
+            ?.querySelector('[role="group"][aria-label="Selected session actions"] button');
+          return !!actionButton && !!(element.compareDocumentPosition(actionButton) & Node.DOCUMENT_POSITION_FOLLOWING);
+        })).toBe(true);
+      }
+    }
+    await testInfo.attach(`terminal-header-${action.toLowerCase()}-${width}`, {
+      body: await header.screenshot(),
+      contentType: "image/png",
+    });
+  }
+}
+
 test.describe("session lifecycle", () => {
+  test("dense session header actions", async ({ page }, testInfo) => {
+    const nativeId = randomUUID();
+    const workingDir = join(BRIDGE_HOME, "header-actions-e2e", randomUUID());
+    const name = `dense-long-session-name-for-header-layout-and-truncation-${Date.now()}`;
+    const transcript = await seedClaudeTranscript(BRIDGE_HOME, nativeId, workingDir, [
+      { model: "claude-sonnet-4-5-20250929", input: 1234567, output: 456789, cacheRead: 0, cacheWrite: 0 },
+    ]);
+    let sid: string | undefined;
+    try {
+      const created = await bridgeApiFetch("POST", "/api/sessions", {
+        body: { shellType: "shell", name, workingDir, createMissingWorkingDir: true, claudeSessionId: nativeId },
+      });
+      expect(created.status, `create session: ${JSON.stringify(created.body)}`).toBe(201);
+      sid = (created.body as SessionEnvelope).session?.id;
+      expect(sid).toBeTruthy();
+      if (!sid) throw new Error("Created session has no ID");
+      const stopped = await bridgeApiFetch("POST", `/api/sessions/${sid}/stop`);
+      expect(stopped.status).toBe(200);
+      await expect.poll(() => statusOf(sid!), { timeout: 30_000 }).toBe("completed");
+      const usage = await bridgeApiFetch("GET", `/api/sessions/${sid}/usage`);
+      expect(usage.status).toBe(200);
+      expect(usage.body).toMatchObject({ usage: { inputTokens: 1234567, outputTokens: 456789, models: ["claude-sonnet-4-5-20250929"] } });
+
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await login(page, sharedEmail());
+      await waitForBridgeOnline(page);
+      await openSession(page, name);
+      const header = page.getByTestId("terminal-header");
+      await expect(header.getByText("1.2M in · 456.8K out · sonnet-4-5-20250929", { exact: true })).toBeVisible();
+      await checkTerminalHeaderGeometry(page, testInfo, "Rerun", true);
+      await header.getByRole("button", { name: "Rerun", exact: true }).click();
+      await expect.poll(() => statusOf(sid!), { timeout: 30_000 }).toBe("running");
+      await checkTerminalHeaderGeometry(page, testInfo, "Stop", true);
+      await header.getByRole("button", { name: "Stop", exact: true }).click();
+      await expect.poll(() => statusOf(sid!), { timeout: 30_000 }).toBe("completed");
+      await header.getByRole("button", { name: "Rerun", exact: true }).click();
+      await expect.poll(() => statusOf(sid!), { timeout: 30_000 }).toBe("running");
+      await runMarkerInTerminal(page, `DENSE${Date.now()}`);
+    } finally {
+      try {
+        if (sid) {
+          const removed = await bridgeApiFetch("DELETE", `/api/sessions/${sid}`);
+          expect(removed.status, `remove fixture session ${sid}`).toBe(200);
+        }
+      } finally {
+        await rm(transcript, { force: true });
+        await rmdir(dirname(transcript)).catch(() => undefined);
+        await rm(workingDir, { recursive: true, force: true });
+      }
+    }
+  });
+
   test("drag a root between two children to enter their subgroup", async ({ page }) => {
     const email = sharedEmail();
     await login(page, email);
@@ -142,14 +245,14 @@ test.describe("session lifecycle", () => {
     }
   });
 
-  test("create → interact → stop → remove (controller CRUD round-trip)", async ({ page }) => {
+  test("create → interact → stop → remove (controller CRUD round-trip)", async ({ page }, testInfo) => {
     test.setTimeout(150_000);
     const email = sharedEmail();
     await login(page, email);
     await waitForBridgeOnline(page);
 
     // --- CREATE + INTERACT (data plane up) ---
-    const name = `crud-${Date.now()}`;
+    const name = `crud-long-session-name-for-header-layout-and-truncation-${Date.now()}`;
     const before = await sessionIdsFor(email);
     await createShellSession(page, name);
     const sid = await waitForNewSessionId(email, before);
@@ -172,9 +275,14 @@ test.describe("session lifecycle", () => {
     await page.getByRole("button", { name: "Terminal", exact: true }).click();
     const headerActions = page.getByRole("group", { name: "Selected session actions" });
     await expect(headerActions).toHaveCount(1);
-    await headerActions.getByRole("button", { name: "Stop", exact: true }).click();
+    await checkTerminalHeaderGeometry(page, testInfo, "Stop");
+    const stop = headerActions.getByRole("button", { name: "Stop", exact: true });
+    await stop.focus();
+    await expect(stop).toBeFocused();
+    await stop.press("Enter");
     await expect.poll(() => statusOf(sid), { timeout: 30_000 }).toBe("completed");
     await expect(headerActions.getByRole("button", { name: "Stop", exact: true })).toHaveCount(0);
+    await checkTerminalHeaderGeometry(page, testInfo, "Rerun");
     await headerActions.getByRole("button", { name: "Rerun", exact: true }).click();
     await expect.poll(() => statusOf(sid), { timeout: 30_000 }).toBe("running");
     await expect(headerActions.getByRole("button", { name: "Rerun", exact: true })).toHaveCount(0);
