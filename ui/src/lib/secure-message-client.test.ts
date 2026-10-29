@@ -14,6 +14,7 @@ class RawSubscription {
   presence = vi.fn(async () => ({ clients: {} }));
 }
 class RawClient {
+  state = 'disconnected';
   subscriptions = new Map<string, RawSubscription>();
   publish = vi.fn(async (_channel: string, _data: unknown) => {});
   on = vi.fn(); off = vi.fn(); removeSubscription = vi.fn();
@@ -41,6 +42,62 @@ async function setup(authority?: (bridgeId: string) => void) {
 }
 
 describe('secure broker adapter', () => {
+  it('coordinates reentrant recoveries per bridge and ignores stale completion after disconnect', async () => {
+    const raw = new RawClient(); raw.state = 'connected';
+    const states = new Map([['a', 'offline'], ['b', 'ready']]);
+    const pending: Array<{ bridge: string; resolve: () => void; reject: (error: Error) => void }> = [];
+    let changed = () => {};
+    const runtime = {
+      onChange: (callback: () => void) => { changed = callback; return () => {}; },
+      pinnedBridges: () => [{ bridgeId: 'a' }, { bridgeId: 'b' }],
+      state: (id: string) => ({ status: states.get(id) }),
+      disconnected: () => { states.set('a', 'offline'); changed(); },
+      handshake: (bridge: string) => {
+        states.set(bridge, 'connecting'); changed();
+        return new Promise<void>((resolve, reject) => pending.push({ bridge, resolve, reject }));
+      },
+    } as unknown as SecureEndpointRuntime;
+    const client = new SecureMessageClient(raw as unknown as Centrifuge, userId, runtime);
+    let refreshes = 0;
+    client.getSubscription(channel)!.on('subscribed', () => { refreshes++; });
+    changed();
+    expect(pending.map(item => item.bridge)).toEqual(['a']);
+    states.set('a', 'offline'); changed(); changed();
+    expect(pending).toHaveLength(1);
+    states.set('b', 'offline'); changed();
+    expect(pending.map(item => item.bridge)).toEqual(['a', 'b']);
+    states.set('b', 'ready'); pending[1].resolve();
+    await vi.waitFor(() => expect(refreshes).toBe(1));
+
+    raw.state = 'disconnected';
+    raw.on.mock.calls.find(([event]) => event === 'disconnected')![1]();
+    raw.state = 'connected'; changed();
+    expect(pending.map(item => item.bridge)).toEqual(['a', 'b', 'a']);
+    pending[0].resolve();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(refreshes).toBe(1);
+    states.set('a', 'offline'); changed();
+    expect(pending).toHaveLength(3); // old completion cannot clear the new cycle
+    states.set('a', 'ready'); pending[2].resolve();
+    await vi.waitFor(() => expect(refreshes).toBe(2));
+
+    states.set('a', 'offline'); changed();
+    expect(pending).toHaveLength(4);
+    pending[3].reject(new Error('offline'));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(refreshes).toBe(2);
+    states.set('a', 'offline'); changed();
+    expect(pending).toHaveLength(5);
+    states.set('a', 'revoked'); pending[4].resolve();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(refreshes).toBe(2);
+    states.set('a', 'offline'); changed();
+    expect(pending).toHaveLength(6);
+    client.dispose(); states.set('a', 'ready'); pending[5].resolve();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(refreshes).toBe(2);
+  });
+
   it('does not let an offline fanout target delay ready-bridge control and never publishes an expired queued mutation', async () => {
     const f = await setup(); f.runtime.disconnected('bridge-a');
     const list = f.client.publish(channel, { type: 'list_sessions', requestId: 'fanout', payload: {} });
@@ -86,6 +143,7 @@ describe('secure broker adapter', () => {
 
   it('recovers only the restarted bridge with a fresh hello and snapshot signal without replaying its rejected mutation', async () => {
     const f = await setup(); const sub = f.raw.subscriptions.get(channel)!; let readRefresh = 0;
+    f.raw.state = 'connected';
     f.client.getSubscription(channel)!.on('subscribed', () => { readRefresh++; });
     const emit = (packet: SecureEnvelope) => { const listener = sub.on.mock.calls.find(([event]) => event === 'publication')![1]; listener({ data: packet }); };
     f.raw.publish.mockImplementation(async (_channel, value) => {
@@ -100,6 +158,8 @@ describe('secure broker adapter', () => {
     });
     await expect(f.client.request({ type: 'stop_session', requestId: 'rejected-once', payload: { bridgeId: 'bridge-a' } })).resolves.toMatchObject({ success: false, data: { code: 'epoch_changed' } });
     await vi.waitFor(() => expect(readRefresh).toBe(1));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(readRefresh).toBe(1);
     expect(f.runtime.state('bridge-a').status).toBe('ready'); expect(f.runtime.state('bridge-b').status).toBe('ready');
     expect(f.raw.publish.mock.calls.map(([, value]) => (value as SecureEnvelope).purpose)).toEqual(['application', 'hello']);
     const next = await f.runtime.sealApplication('bridge-a', channel, { type: 'application', route: { kind: 'command', command: 'list_sessions', requestId: 'fresh-read', sessionId: null }, data: {}, mcp: null });

@@ -61,7 +61,7 @@ export function useAllSessionEvents(
   rpc?: Pick<BridgeRpc, "sendCommand" | "onSubscribed">,
 ): AllSessionEvents {
   const [activityMap, setActivityMap] = useState<Map<string, SessionActivity>>(new Map());
-  const subsRef = useRef<Map<string, { client: MessageClient; sub: MessageSubscription }>>(new Map());
+  const subsRef = useRef<Map<string, { client: MessageClient; user: string; sub: MessageSubscription; queued: boolean; inFlight: boolean; dirty: boolean }>>(new Map());
   const clientRef = useRef(client);
   const userIdRef = useRef(userId);
   const rpcRef = useRef(rpc);
@@ -77,11 +77,11 @@ export function useAllSessionEvents(
   sessionsRef.current = sessions;
   activityRef.current = activityMap;
 
-  const hydrate = useCallback(async (sessionId: string) => {
+  const readSnapshot = useCallback(async (sessionId: string) => {
     const owner = subsRef.current.get(sessionId);
-    const user = userIdRef.current;
+    const user = owner?.user;
     const session = sessionsRef.current.find(row => row.id === sessionId && row.status === "running");
-    if (!owner || !session || !rpcRef.current) return;
+    if (!owner || owner.client !== clientRef.current || owner.user !== userIdRef.current || !session || !rpcRef.current) return;
     const observation = observations.current.get(sessionId) ?? 0;
     const read = (reads.current.get(sessionId) ?? 0) + 1;
     reads.current.set(sessionId, read);
@@ -109,6 +109,32 @@ export function useAllSessionEvents(
       });
     } catch { /* Older/offline bridges retain the existing live-only dashboard. */ }
   }, []);
+
+  const hydrate = useCallback((sessionId: string) => {
+    const owner = subsRef.current.get(sessionId);
+    if (!owner || owner.client !== clientRef.current || owner.user !== userIdRef.current) return;
+    if (owner.inFlight) {
+      // A later trigger requires a new snapshot; fence the old response now.
+      reads.current.set(sessionId, (reads.current.get(sessionId) ?? 0) + 1);
+      owner.dirty = true;
+      return;
+    }
+    if (owner.queued) return;
+    owner.queued = true;
+    queueMicrotask(() => {
+      if (subsRef.current.get(sessionId) !== owner || owner.client !== clientRef.current || owner.user !== userIdRef.current) return;
+      owner.queued = false;
+      owner.inFlight = true;
+      void readSnapshot(sessionId).finally(() => {
+        if (subsRef.current.get(sessionId) !== owner || owner.client !== clientRef.current || owner.user !== userIdRef.current) return;
+        owner.inFlight = false;
+        if (owner.dirty) {
+          owner.dirty = false;
+          hydrate(sessionId);
+        }
+      });
+    });
+  }, [readSnapshot]);
 
   const subscribe = useCallback((sessionId: string) => {
     const c = clientRef.current;
@@ -194,7 +220,7 @@ export function useAllSessionEvents(
     sub.on("subscribed", () => {
       if (clientRef.current === c && userIdRef.current === u && subsRef.current.get(sessionId)?.sub === sub) void hydrate(sessionId);
     });
-    subsRef.current.set(sessionId, { client: c, sub });
+    subsRef.current.set(sessionId, { client: c, user: u, sub, queued: false, inFlight: false, dirty: false });
     sub.subscribe();
     if (sub.state === "subscribed") void hydrate(sessionId);
   }, [hydrate]);
