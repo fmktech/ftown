@@ -230,6 +230,38 @@ describe("Account devices", () => {
     const client = { snapshot: () => state, subscribe: () => () => {}, revoke, refresh: vi.fn() } as unknown as AccountSecurityClient;
     return { state, client, revoke };
   }
+  it("overlays browser and computer names, then resets without changing access identity", async () => {
+    const f = accountFixture(1);
+    Object.assign(f.client, { ownerId: "owner" });
+    f.state.trust!.checkpoint.bridges = [{ bridgeId: bridge.bridgeId, endpoint: { ...device("bridge-key", "").endpoint, kind: "bridge" }, label: "Signed computer", approvedAt: "2026-10-25T00:00:00Z" }];
+    const names: { kind: "browser" | "bridge"; id: string; name: string }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, options?: RequestInit) => {
+      if (options?.method === "PUT") {
+        const request = JSON.parse(String(options.body));
+        const index = names.findIndex(item => item.kind === request.kind && item.id === request.id);
+        if (index >= 0) names.splice(index, 1);
+        if (request.name !== null) names.push(request);
+        return reply({ name: request.name === null ? null : request });
+      }
+      return reply({ names: [...names], eligible: [{ kind: "browser", id: "0" }, { kind: "bridge", id: bridge.bridgeId }] });
+    }));
+    const execute = mockExecutor().mockResolvedValue({ devices: [{ ...device("0", "Laptop"), source: "account" }] });
+    const view = render(<SecurityDevices currentEndpointId="0" bridges={[bridge]} execute={execute} accountClient={f.client} accountState={f.state} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Rename Laptop" }));
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Browser" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("button", { name: /^Browser Browser \(this browser\):/ });
+    expect(view.container.querySelector('[data-access-edge="browser:0"]')?.getAttribute("data-certainty")).toBe("current");
+    fireEvent.click(screen.getByRole("button", { name: /^Computer My laptop:/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Rename My laptop" }));
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Office 💻" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await screen.findByRole("button", { name: /^Computer Office 💻:/ });
+    fireEvent.click(screen.getByRole("button", { name: "Reset name" }));
+    await screen.findByRole("button", { name: /^Computer My laptop:/ });
+    expect(f.state.trust!.checkpoint.bridges[0].label).toBe("Signed computer");
+    expect(f.state.trust!.checkpoint.devices[0].label).toBe("Laptop");
+  });
   it("puts private CLI recovery instructions on an independent computer without implying account sharing", () => {
     const f = accountFixture(1); const execute = mockExecutor();
     render(<SecurityDevices bridge={{ ...bridge, security: { ...bridge.security, status: "unpaired" } }} bridges={[{ ...bridge, security: { ...bridge.security, status: "unpaired" } }]} currentEndpointId="0" execute={execute} accountClient={f.client} accountState={f.state} />);

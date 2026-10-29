@@ -1,6 +1,6 @@
 import { expect, type BrowserContext, type Page, type TestInfo } from "@playwright/test";
 import { test } from "../helpers/fixtures";
-import { accountBrowserState, approveAccountComputer, createAccountShell, startAccountTestBridge, usePrivateApprovalLink, type AccountTestBridge } from "../helpers/account-pairing";
+import { accountBrowserState, approveAccountComputer, createAccountShell, pendingBrowserRequest, startAccountTestBridge, usePrivateApprovalLink, type AccountTestBridge } from "../helpers/account-pairing";
 import { bridgeSecurityCommand } from "../helpers/secure-browser";
 import { readBridgePointer } from "../helpers/bridge-api";
 import type { ApprovedEndpoint } from "../../bridge/src/security/protocol";
@@ -69,7 +69,7 @@ async function waitForSecurityLayout(page: Page, width: number) {
   }, width < 640), { timeout: 2000, intervals: [25, 50, 100], message: "Security responsive transitions and control geometry must settle" }).toBe(true);
 }
 
-async function accessMapEvidence(page: Page, info: TestInfo, bridgeIds: string[], otherBrowserId: string) {
+async function accessMapEvidence(page: Page, info: TestInfo, bridgeIds: string[], otherBrowserId: string, pendingRequestId: string) {
   await openSecurityNavigation(page);
   const dialog = page.getByRole("dialog", { name: "Security", exact: true });
   await expect(dialog.getByRole("tab", { name: "Access", exact: true })).toHaveAttribute("aria-selected", "true");
@@ -81,6 +81,9 @@ async function accessMapEvidence(page: Page, info: TestInfo, bridgeIds: string[]
   for (const size of [{ width: 1280, height: 900 }, { width: 900, height: 760 }, { width: 390, height: 844 }, { width: 320, height: 760 }]) {
     await page.setViewportSize(size);
     await waitForSecurityLayout(page, size.width);
+    await expect(dialog.getByRole("heading", { name: "Pending approvals", exact: true })).toBeVisible();
+    await expect(dialog.locator(`[data-pending-request="${pendingRequestId}"]`)).toBeVisible();
+    await expect(dialog.locator("[data-pending-request]")).toHaveCount(1);
     await dialog.getByRole("button", { name: /\(this browser\):/ }).click();
     await dialog.locator("[data-security-content]").evaluate(element => { element.scrollTop = 0; });
     const measured = await dialog.evaluate(element => {
@@ -165,6 +168,8 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
         socket.on("framereceived", ({ payload }) => frames.push(String(payload)));
       });
       await login(phone, user.email, user.password, { pairBridge: false });
+      await expect.poll(async () => (await pendingBrowserRequest(phone))?.requestId ?? "", { timeout: 15000 }).not.toBe("");
+      const phoneAutomaticRequestId = (await pendingBrowserRequest(phone))!.requestId!;
       await usePrivateApprovalLink(phone);
       await expect(phone.getByRole("heading", { name: "Approve this device", exact: true })).toBeVisible();
       await phone.getByRole("textbox", { name: "Device name", exact: true }).fill("Account test phone");
@@ -296,7 +301,33 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
         await expect(phone.locator("text=/^(P2P|Local|Cloud)$/").first()).toHaveText("Cloud", { timeout: 15000 });
         expect(frames.some(frame => frame.includes("ftown_encrypted"))).toBe(true);
         expect(frames.some(frame => frame.includes(privateName) || frame.includes(marker))).toBe(false);
-        if (viewport.width === 1280) await accessMapEvidence(page, info, [firstId, secondId, thirdId], phoneIdentity.endpointId);
+        if (viewport.width === 1280) {
+          // The private-link switch cancels locally even if the relay failed.
+          // Read the server inbox explicitly, then reject only this test-owned
+          // phone request if it is still active before creating the layout row.
+          const inboxResponse = await page.request.get(`${origin}/api/security/approvals`);
+          expect(inboxResponse.ok()).toBe(true);
+          const inbox = await inboxResponse.json() as { requests: { request: { requestId: string }; status: string }[] };
+          const phoneRequest = inbox.requests.find(item => item.request.requestId === phoneAutomaticRequestId);
+          if (phoneRequest && !["cancelled", "rejected", "expired", "conflict"].includes(phoneRequest.status)) {
+            expect(phoneRequest.status).not.toBe("approved");
+            await openSecurityNavigation(page);
+            const oldRow = page.locator(`[data-pending-request="${phoneAutomaticRequestId}"]`);
+            await expect(oldRow).toBeVisible();
+            await oldRow.getByRole("button", { name: "Reject", exact: true }).click();
+            await expect(oldRow).toHaveCount(0);
+            await page.getByRole("button", { name: "Close security" }).click();
+          }
+          // A fresh unapproved browser creates a real pending approval, keeping
+          // the inbox expanded during the responsive access-map measurements.
+          const pendingContext = await browser.newContext({ baseURL: origin, ignoreHTTPSErrors: false, viewport: { width: 390, height: 844 } }); contexts.push(pendingContext);
+          const pendingPage = await pendingContext.newPage(); await login(pendingPage, user.email, user.password, { pairBridge: false });
+          await expect(pendingPage.getByRole("heading", { name: "Waiting for device approval", exact: true })).toBeVisible();
+          await expect.poll(async () => (await pendingBrowserRequest(pendingPage))?.requestId ?? "", { timeout: 15000 }).not.toBe("");
+          const pendingRequestId = (await pendingBrowserRequest(pendingPage))!.requestId!;
+          expect((await accountBrowserState(pendingPage))[0].trust).toBeNull();
+          await accessMapEvidence(page, info, [firstId, secondId, thirdId], phoneIdentity.endpointId, pendingRequestId);
+        }
       } finally { release(); await staleTab.close(); }
 
       await devices(page); await noOverflow(page);

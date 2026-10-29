@@ -5,7 +5,7 @@ import { SecurityLockIcon, type SecurityLockState } from "./SecurityLockIcon";
 
 export type AccessEdgeCertainty = "current" | "historical" | "none";
 export type SecurityAccessSelection = { kind: "browser"; id: string } | { kind: "bridge"; id: string };
-export interface SecurityAccessBrowserNode { id: string; label: string; current: boolean; accessText: string; lockState: SecurityLockState; edge: AccessEdgeCertainty }
+export interface SecurityAccessBrowserNode { id: string; label: string; customLabel?: boolean; current: boolean; accessText: string; lockState: SecurityLockState; edge: AccessEdgeCertainty }
 export interface SecurityAccessBridgeNode { current?: boolean; id: string; label: string; accessText: string; connectionText: string; lockState: SecurityLockState; edge: AccessEdgeCertainty }
 export interface SecurityAccessMapProps {
   scope?: "account" | "computer";
@@ -20,6 +20,7 @@ export interface SecurityAccessMapProps {
 
 /** Public identifiers distinguish generic labels; full fingerprints stay in details. */
 export function accessBrowserLabel(node: SecurityAccessBrowserNode, nodes: readonly SecurityAccessBrowserNode[]): string {
+  if (node.customLabel) return node.label;
   if (!/^(browser|this device|this browser)$/i.test(node.label.trim())) return node.label || "Browser";
   if (node.current) return "This browser";
   let length = Math.min(6, node.id.length);
