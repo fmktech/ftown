@@ -86,7 +86,7 @@ function backendUnsupported(result: CommandResult): boolean {
   return result.code !== 0 && /the (?:local app-server daemon|remote app server) does not support thread\/queue\/add; update or restart the (?:local app-server daemon|remote app server)/.test(result.stderr);
 }
 
-/** Native commands are only wake pointers; the durable inbox owns consumption. */
+/** Dispatch native messages with bounded subprocesses and validated receipts. */
 export function createNativeMailWaker(deps: Dependencies = {}): NativeMailWaker {
   const run = deps.run ?? runCommand;
   const now = deps.now ?? Date.now;
@@ -97,7 +97,7 @@ export function createNativeMailWaker(deps: Dependencies = {}): NativeMailWaker 
     if (harness !== 'codex' && harness !== 'muse') return { status: 'unsupported' };
     const nativeId = harness === 'codex' ? session.codexSessionId : session.museSessionId;
     if (!nativeId || !UUID.test(nativeId)) return { status: 'unsupported' };
-    if (session.status !== 'running' || !text.trim() || text.length > 4096 || signal?.aborted) return { status: 'rejected' };
+    if (session.status !== 'running' || !text.trim() || text.length > (harness === 'codex' ? 70 * 1024 : 4096) || signal?.aborted) return { status: 'rejected' };
     // Real Muse 1.4.10 default-preset echo receivers rejected idle AND busy
     // sends with external_agent_ingress_closed and no receipts. Keep the
     // compatibility path until an ingress with verified admission is available;

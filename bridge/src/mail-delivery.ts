@@ -60,6 +60,13 @@ export function sanitizeMessageText(text: string): string {
 interface MailWaiter {
   deliver: (messages: MailMessage[]) => void;
 }
+const codexMetadata = (value: string) => value.slice(0, 200).replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
+const codexMailText = (message: MailMessage) =>
+  `[ftown mail] id=${JSON.stringify(codexMetadata(message.id))} from=${JSON.stringify(codexMetadata(message.from))}`
+  + (message.fromName ? ` fromName=${JSON.stringify(codexMetadata(message.fromName))}` : '')
+  + ` type=${JSON.stringify(codexMetadata(message.type))}`
+  + (message.threadId ? ` threadId=${JSON.stringify(codexMetadata(message.threadId))}` : '')
+  + `\n\n${message.body}`;
 const nativeIdentity = (session: Session) => `${session.shellType}:${session.shellType === 'codex' ? session.codexSessionId ?? '' : session.museSessionId ?? ''}`;
 
 /** The slice of SessionStore the mail engine needs. */
@@ -130,6 +137,9 @@ export class MailDeliveryService {
   private agentBusySince: Map<string, number> = new Map();
   private nativeLeases = new Map<string, NativeWakeRegistration & { until: number }>();
   private nativeBatches = new Map<string, { identity: string; ids: Set<string> }>();
+  private selectionLocks = new Map<string, Promise<void>>();
+  private codexClaims = new Map<string, string>();
+  private codexRetryAt = new Map<string, number>();
   private wakeLocks = new Map<string, Promise<void>>();
   private wakeControllers = new Map<string, AbortController>();
   private legacyReadyAt = new Map<string, number>();
@@ -207,6 +217,7 @@ export class MailDeliveryService {
     this.nativeLeases.clear();
     this.nativeBatches.clear();
     this.legacyReadyAt.clear();
+    this.codexRetryAt.clear();
     for (const controller of this.wakeControllers.values()) controller.abort();
     this.wakeControllers.clear();
   }
@@ -235,6 +246,25 @@ export class MailDeliveryService {
       return 0;
     }
     return lease.until - this.now();
+  }
+
+  private async withSelection<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.selectionLocks.get(sessionId) ?? Promise.resolve();
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const tail = previous.then(() => held);
+    this.selectionLocks.set(sessionId, tail);
+    await previous;
+    try { return await fn(); }
+    finally {
+      release();
+      if (this.selectionLocks.get(sessionId) === tail) this.selectionLocks.delete(sessionId);
+    }
+  }
+
+  private available(sessionId: string, messages: MailMessage[]): MailMessage[] {
+    const claimed = this.codexClaims.get(sessionId);
+    return claimed ? messages.filter(message => message.id !== claimed) : messages;
   }
 
   /** Hook activity (UserPromptSubmit/PreToolUse/PostToolUse): the agent is mid-turn. */
@@ -305,30 +335,25 @@ export class MailDeliveryService {
       typeof body.threadId === 'string' && body.threadId.trim() ? body.threadId.trim() : undefined;
 
     const msg = createMailMessage({ from, fromName, to: session.id, type, threadId, body: text });
-    await this.mailStore.append(msg);
-
-    const waiter = this.mailWaiters.get(session.id);
-    if (waiter) {
-      const undelivered = await this.mailStore.listUndelivered(session.id);
-      // Mirror the timeout path's settled-guard: the waiter may have died
-      // (client disconnected, or a newer waiter replaced it) while we awaited
-      // above. Only mark messages delivered if it is still the live waiter —
-      // otherwise leave them undelivered so the next reader gets them instead
-      // of writing to a dead socket and losing them.
-      if (this.mailWaiters.get(session.id) === waiter && undelivered.length > 0) {
-        const marked = await this.mailStore.markDelivered(
-          session.id,
-          undelivered.map((m) => m.id),
-          'poll',
-        );
-        waiter.deliver(marked);
+    const mailStore = this.mailStore;
+    let hadWaiter = false;
+    await this.withSelection(session.id, async () => {
+      await mailStore.append(msg);
+      const waiter = this.mailWaiters.get(session.id);
+      hadWaiter = !!waiter;
+      if (waiter) {
+        const undelivered = this.available(session.id, await mailStore.listUndelivered(session.id));
+        if (this.mailWaiters.get(session.id) === waiter && undelivered.length > 0) {
+          const marked = await mailStore.markDelivered(session.id, undelivered.map(m => m.id), 'poll');
+          waiter.deliver(marked);
+        }
       }
-    } else if (session.shellType !== 'pi') {
-      // Pi's extension owns wake/retry natively; leave mail undelivered between
-      // polls instead of falling back to terminal keystroke injection.
+    });
+    // A waiter may have consumed this message; a later check clears an empty wake.
+    // Always arm Codex so new arrivals cannot be stranded behind an in-flight claim.
+    if ((!hadWaiter || session.shellType === 'codex') && session.shellType !== 'pi') {
       const legacyDelay = HOOKED_SHELL_TYPES.has(session.shellType ?? 'claude')
-        ? MAIL_NUDGE_DELAY_HOOKED_MS
-        : MAIL_NUDGE_DELAY_MS;
+        ? MAIL_NUDGE_DELAY_HOOKED_MS : MAIL_NUDGE_DELAY_MS;
       if (!this.pendingNudgeFrom.has(session.id)) this.legacyReadyAt.set(session.id, this.now() + legacyDelay);
       const nudgeDelay = session.shellType === 'codex' || session.shellType === 'muse' ? MAIL_NUDGE_DELAY_MS : legacyDelay;
       this.scheduleMailNudge(session.id, fromName ?? from, nudgeDelay);
@@ -370,61 +395,61 @@ export class MailDeliveryService {
       effectiveWait = 0;
     }
 
-    const undelivered = await mailStore.listUndelivered(session.id);
-    if (undelivered.length > 0 || effectiveWait <= 0) {
-      const marked = await mailStore.markDelivered(
-        session.id,
-        undelivered.map((m) => m.id),
-        effectiveWait > 0 ? 'poll' : 'drain',
-      );
-      return { kind: 'immediate', messages: marked };
-    }
+    return this.withSelection(session.id, async () => {
+      const undelivered = this.available(session.id, await mailStore.listUndelivered(session.id));
+      // Claimed mail must not hold the queue-triggered hook open.
+      if (undelivered.length > 0 || effectiveWait <= 0 || this.codexClaims.has(session.id)) {
+        const marked = await mailStore.markDelivered(
+          session.id,
+          undelivered.map((m) => m.id),
+          effectiveWait > 0 ? 'poll' : 'drain',
+        );
+        return { kind: 'immediate', messages: marked };
+      }
 
-    // Long poll: hold until mail arrives or `wait` seconds elapse. One waiter
-    // per session — a newer waiter resolves the previous one with [].
-    const existing = this.mailWaiters.get(session.id);
-    if (existing) existing.deliver([]);
+      // Long poll: hold until mail arrives or `wait` seconds elapse. One waiter
+      // per session — a newer waiter resolves the previous one with [].
+      const existing = this.mailWaiters.get(session.id);
+      if (existing) existing.deliver([]);
 
-    let settled = false;
-    let resolveMessages!: (messages: MailMessage[]) => void;
-    const messages = new Promise<MailMessage[]>((resolve) => {
-      resolveMessages = resolve;
-    });
-    const waiter: MailWaiter = {
-      deliver: (delivered: MailMessage[]) => {
-        if (settled) return;
+      let settled = false;
+      let resolveMessages!: (messages: MailMessage[]) => void;
+      const messages = new Promise<MailMessage[]>((resolve) => {
+        resolveMessages = resolve;
+      });
+      const waiter: MailWaiter = {
+        deliver: (delivered: MailMessage[]) => {
+          if (settled) return;
+          settled = true;
+          this.clearTimeoutFn(timer);
+          if (this.mailWaiters.get(session.id) === waiter) {
+            this.mailWaiters.delete(session.id);
+          }
+          resolveMessages(delivered);
+        },
+      };
+      const timer = this.setTimeoutFn(() => {
+        // Guard each async step on settled: once the client disconnects (or a new
+        // waiter replaced this one) we must not mark messages delivered — they
+        // would be lost without ever reaching a session.
+        if (settled || this.mailWaiters.get(session.id) !== waiter) return;
+        void this.withSelection(session.id, async () => {
+          const pending = this.available(session.id, await mailStore.listUndelivered(session.id));
+          if (settled || this.mailWaiters.get(session.id) !== waiter || pending.length === 0) return [] as MailMessage[];
+          return mailStore.markDelivered(session.id, pending.map(m => m.id), 'poll');
+        }).then(marked => waiter.deliver(marked)).catch(() => waiter.deliver([]));
+      }, effectiveWait * 1000);
+      this.mailWaiters.set(session.id, waiter);
+
+      const abandon = (): void => {
+        if (this.mailWaiters.get(session.id) !== waiter) return;
         settled = true;
         this.clearTimeoutFn(timer);
-        if (this.mailWaiters.get(session.id) === waiter) {
-          this.mailWaiters.delete(session.id);
-        }
-        resolveMessages(delivered);
-      },
-    };
-    const timer = this.setTimeoutFn(() => {
-      // Guard each async step on settled: once the client disconnects (or a new
-      // waiter replaced this one) we must not mark messages delivered — they
-      // would be lost without ever reaching a session.
-      if (settled || this.mailWaiters.get(session.id) !== waiter) return;
-      mailStore
-        .listUndelivered(session.id)
-        .then((pending) => {
-          if (settled || pending.length === 0) return [] as MailMessage[];
-          return mailStore.markDelivered(session.id, pending.map((m) => m.id), 'poll');
-        })
-        .then((marked) => waiter.deliver(marked))
-        .catch(() => waiter.deliver([]));
-    }, effectiveWait * 1000);
-    this.mailWaiters.set(session.id, waiter);
+        this.mailWaiters.delete(session.id);
+      };
 
-    const abandon = (): void => {
-      if (this.mailWaiters.get(session.id) !== waiter) return;
-      settled = true;
-      this.clearTimeoutFn(timer);
-      this.mailWaiters.delete(session.id);
-    };
-
-    return { kind: 'longpoll', messages, abandon };
+      return { kind: 'longpoll', messages, abandon };
+    });
   }
 
   /** A session earns the listen window when it has a native persistent listener
@@ -471,10 +496,74 @@ export class MailDeliveryService {
     return next;
   }
 
+  private async wakeCodex(session: Session, store: MailDeliverySessionStore, mailStore: MailDeliveryMailStore,
+    runner: MailDeliveryRunner | null, epoch: number, fromLabel: string): Promise<void> {
+    const sessionId = session.id;
+    const current = () => !this.stopped && this.dependencyEpoch === epoch && this.mailStore === mailStore;
+    const wait = (this.codexRetryAt.get(sessionId) ?? 0) - this.now();
+    if (wait > 0) { this.scheduleMailNudge(sessionId, fromLabel, wait); return; }
+    if (!runner || !runner.isRunning(sessionId) || session.status !== 'running') {
+      this.codexRetryAt.set(sessionId, this.now() + MAIL_NUDGE_BUSY_RECHECK_MS);
+      this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_BUSY_RECHECK_MS);
+      return;
+    }
+    const message = await this.withSelection(sessionId, async () => {
+      if (!current()) return undefined;
+      const pending = this.available(sessionId, await mailStore.listUndelivered(sessionId));
+      if (!current() || !pending.length) return undefined;
+      this.codexClaims.set(sessionId, pending[0].id);
+      return pending[0];
+    });
+    if (!message) return;
+    if (!current()) {
+      await this.withSelection(sessionId, async () => {
+        if (this.codexClaims.get(sessionId) === message.id) this.codexClaims.delete(sessionId);
+      });
+      return;
+    }
+    const identity = nativeIdentity(session);
+    const controller = new AbortController();
+    this.wakeControllers.set(sessionId, controller);
+    let accepted = false;
+    try {
+      const isCurrent = async () => {
+        if (!current() || controller.signal.aborted) return false;
+        const live = await store.loadSession(sessionId);
+        const pending = await mailStore.listUndelivered(sessionId);
+        return current() && !controller.signal.aborted && !!live && live.status === 'running'
+          && live.shellType === 'codex' && nativeIdentity(live) === identity && runner.isRunning(sessionId)
+          && this.codexClaims.get(sessionId) === message.id && pending.some(m => m.id === message.id);
+      };
+      const result = await this.nativeWake(session, codexMailText(message), controller.signal, isCurrent)
+        .catch(() => ({ status: 'unknown' as const }));
+      if (result.status === 'accepted' && current() && !controller.signal.aborted) {
+        accepted = await this.withSelection(sessionId, async () => {
+          if (!current() || controller.signal.aborted || this.codexClaims.get(sessionId) !== message.id) return false;
+          const marked = await mailStore.markDelivered(sessionId, [message.id], 'cli');
+          return marked.some(m => m.id === message.id);
+        });
+      }
+    } catch {
+      // Mark failures leave the record durable and retry with the same ID.
+    } finally {
+      if (this.wakeControllers.get(sessionId) === controller) this.wakeControllers.delete(sessionId);
+      await this.withSelection(sessionId, async () => {
+        if (this.codexClaims.get(sessionId) === message.id) this.codexClaims.delete(sessionId);
+      });
+    }
+    if (!current()) return;
+    if (!accepted) this.codexRetryAt.set(sessionId, this.now() + MAIL_NUDGE_BUSY_RECHECK_MS);
+    else this.codexRetryAt.delete(sessionId);
+    const pending = await mailStore.listUndelivered(sessionId);
+    if (!current()) return;
+    if (pending.length) this.scheduleMailNudge(sessionId, fromLabel, accepted ? MAIL_NUDGE_DELAY_MS : MAIL_NUDGE_BUSY_RECHECK_MS);
+    else { this.pendingNudgeFrom.delete(sessionId); this.codexRetryAt.delete(sessionId); }
+  }
+
   private async wakeSession(sessionId: string): Promise<void> {
     const { store, mailStore, runner, dependencyEpoch } = this;
     const current = () => !this.stopped && dependencyEpoch === this.dependencyEpoch;
-    if (!current() || !store || !mailStore || !runner) return;
+    if (!current() || !store || !mailStore) return;
 
     const fromLabel = this.pendingNudgeFrom.get(sessionId) ?? 'ftown';
     const undelivered = await mailStore.listUndelivered(sessionId);
@@ -487,7 +576,11 @@ export class MailDeliveryService {
     }
     let session = await store.loadSession(sessionId);
     if (!current()) return;
-    if (!session || session.status !== 'running' || session.shellType === 'pi' || !runner.isRunning(sessionId)) {
+    if (session?.shellType === 'codex') {
+      await this.wakeCodex(session, store, mailStore, runner, dependencyEpoch, fromLabel);
+      return;
+    }
+    if (!session || session.status !== 'running' || session.shellType === 'pi' || !runner || !runner.isRunning(sessionId)) {
       this.nativeLeases.delete(sessionId);
       return;
     }
@@ -498,7 +591,7 @@ export class MailDeliveryService {
       return;
     }
 
-    if (session.shellType === 'codex' || session.shellType === 'muse') {
+    if (session.shellType === 'muse') {
       let identity = nativeIdentity(session);
       const prior = this.nativeBatches.get(sessionId);
       if (prior?.identity === identity && undelivered.every((message) => prior.ids.has(message.id))) return;
@@ -506,6 +599,7 @@ export class MailDeliveryService {
       session = await store.loadSession(sessionId);
       const pending = await mailStore.listUndelivered(sessionId);
       if (!current() || !pending.length || !session || session.status !== 'running' || !runner.isRunning(sessionId)) return;
+      if (session.shellType !== 'muse') { this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_DELAY_MS); return; }
       identity = nativeIdentity(session);
       const controller = new AbortController();
       this.wakeControllers.set(sessionId, controller);
@@ -560,6 +654,7 @@ export class MailDeliveryService {
     const pending = await mailStore.listUndelivered(sessionId);
     session = await store.loadSession(sessionId);
     if (!current() || !pending.length || !session || session.status !== 'running' || !runner.isRunning(sessionId)) return;
+    if (session.shellType === 'codex') { this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_DELAY_MS); return; }
     const refreshedLease = this.pluginLeaseRemaining(session);
     if (refreshedLease > 0) { this.scheduleMailNudge(sessionId, fromLabel, refreshedLease); return; }
     if (this.isAgentRecentlyBusy(sessionId)) {
@@ -570,8 +665,7 @@ export class MailDeliveryService {
     this.pendingNudgeFrom.delete(sessionId);
     this.lastNudgeAt.set(sessionId, this.now());
     const text = sanitizeMessageText(
-      session.shellType === 'codex' ? MAIL_WAKE_TEXT
-        : `You have new ftown mail from ${fromLabel} — run \`ftown harness mail read\` to read it.`,
+      `You have new ftown mail from ${fromLabel} — run \`ftown harness mail read\` to read it.`,
     );
     await this.injectPtyLine(session, 'ftown-mail', text);
   }

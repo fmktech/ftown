@@ -90,3 +90,14 @@ test('an explicitly unsupported daemon permits fallback, while queue-capacity re
   const full=fixture([help(),result({code:1,stderr:'failed to queue session message: queue cannot contain more than 100 submissions'})]);
   assert.equal((await full.wake(session,pointer)).status,'unknown');
 });
+
+test('Codex sends a maximal body and shell metacharacters as one literal argument', async () => {
+  const body = "'`$(printf danger) 雪\n" + 'x'.repeat(65_536 - "'`$(printf danger) 雪\n".length);
+  const text = '[ftown mail] id="id"\n\n' + body;
+  const f = fixture();
+  assert.equal((await f.wake(session, text)).status, 'accepted');
+  assert.deepEqual(f.calls[1][1], ['queue', '--thread', target, '--message', text]);
+  const oversized = fixture();
+  assert.equal((await oversized.wake(session, 'x'.repeat(70 * 1024 + 1))).status, 'rejected');
+  assert.equal(oversized.calls.length, 0);
+});
