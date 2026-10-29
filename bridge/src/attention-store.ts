@@ -15,11 +15,11 @@ const itemSchema = z.object({
   fingerprint: z.string(), sourceId: z.string().optional(), reason: z.string().optional(),
 }).strict();
 const ledgerSchema = z.object({
-  version: z.literal(1), epoch: z.string().uuid(), sequence: z.number().int().nonnegative(),
+  version: z.literal(1), epoch: z.string().guid(), sequence: z.number().int().nonnegative(),
   prunedThrough: z.number().int().nonnegative(),
   activity: z.object({ state: z.enum(['thinking', 'tool_use', 'idle', 'unknown']), lastActivityAt: z.string().optional() }).strict(),
   events: z.array(itemSchema),
-  idleCycle: z.object({ id: z.string().uuid(), startedAt: z.string().datetime(), dueAt: z.string().datetime(), notifiedAt: z.string().datetime().optional() }).strict().optional(),
+  idleCycle: z.object({ id: z.string().guid(), startedAt: z.string().datetime(), dueAt: z.string().datetime(), notifiedAt: z.string().datetime().optional() }).strict().optional(),
 }).strict();
 type Ledger = z.infer<typeof ledgerSchema>;
 type StoredItem = Ledger['events'][number];
@@ -163,7 +163,7 @@ export class AttentionStore {
   private parseCursor(id: string, cursor: string) {
     try {
       if (cursor.length > 1000 || !/^[A-Za-z0-9_-]+$/.test(cursor)) throw new Error();
-      const value = z.object({ v: z.literal(1), session: z.literal(id), epoch: z.string().uuid(), sequence: z.number().int().nonnegative() }).strict().parse(JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')));
+      const value = z.object({ v: z.literal(1), session: z.literal(id), epoch: z.string().guid(), sequence: z.number().int().nonnegative() }).strict().parse(JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')));
       return value;
     } catch { throw new AttentionError('invalid_cursor', 'Cursor is malformed or belongs to another session'); }
   }

@@ -88,7 +88,7 @@ const attentionTarget = { ...target, cursor: cursorInput };
 interface AttentionTargetResult extends Target { events?: AttentionItem[]; cursor?: string; hasMore?: boolean; cursorReset?: boolean; activity?: Activity; error?: ReturnType<typeof errorResult> }
 
 interface Operation {
-  schema: z.AnyZodObject;
+  schema: z.ZodObject;
   description: string;
   readOnly: boolean;
   destructive?: boolean;

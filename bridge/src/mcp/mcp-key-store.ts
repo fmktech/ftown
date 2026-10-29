@@ -6,11 +6,11 @@ import type { ApprovedBridge, EndpointPublic, McpConsentSecurity, McpKeyEncrypti
 
 const MAX_RECORD_BYTES = 65_536;
 const MAX_ACTIVE_MS = 30 * 24 * 60 * 60 * 1000;
-const endpointSchema = z.object({ version: z.literal(1), id: z.string().regex(/^[A-Za-z0-9_-]{43}$/), ownerId: z.string().uuid(), kind: z.enum(['bridge', 'browser', 'mcp', 'local-cli']), publicKey: z.string().regex(/^[A-Za-z0-9_-]{87}$/) }).strict();
+const endpointSchema = z.object({ version: z.literal(1), id: z.string().regex(/^[A-Za-z0-9_-]{43}$/), ownerId: z.string().guid(), kind: z.enum(['bridge', 'browser', 'mcp', 'local-cli']), publicKey: z.string().regex(/^[A-Za-z0-9_-]{87}$/) }).strict();
 const pinSchema = z.object({ bridgeId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/), endpoint: endpointSchema, permissions: z.array(z.enum(['read', 'control'])).min(1).max(2) }).strict();
 const keySchema = z.object({ kty: z.literal('EC'), crv: z.literal('P-256'), x: z.string().regex(/^[A-Za-z0-9_-]{43}$/), y: z.string().regex(/^[A-Za-z0-9_-]{43}$/), d: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }).strict();
 const storedSchema = z.object({
-  version: z.literal(1), ownerId: z.string().uuid(), requestId: z.string().regex(/^[A-Za-z0-9_-]{43}$/), grantId: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  version: z.literal(1), ownerId: z.string().guid(), requestId: z.string().regex(/^[A-Za-z0-9_-]{43}$/), grantId: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
   endpoint: endpointSchema, privateKey: keySchema, bridges: z.array(pinSchema).max(64),
   permissions: z.array(z.enum(['read', 'control'])).min(1).max(2),
   pendingExpiresAt: z.string().datetime(), activeExpiresAt: z.string().datetime(), state: z.enum(['pending', 'approved', 'active', 'revoked']),

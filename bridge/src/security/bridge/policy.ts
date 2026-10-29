@@ -15,16 +15,16 @@ const FIVE_MINUTES = 300_000;
 const THIRTY_DAYS = 30 * 86_400_000;
 const MAX_ENDPOINTS = 1000;
 const digest = (secret: string) => createHash('sha256').update(secret).digest('hex');
-const invitationSchema = z.object({ id: z.string().uuid(), secretHash: z.string().regex(/^[a-f0-9]{64}$/),
+const invitationSchema = z.object({ id: z.string().guid(), secretHash: z.string().regex(/^[a-f0-9]{64}$/),
   label: z.string().max(100), permissions: z.array(permissionSchema).max(3), expiresAt: z.string().datetime(),
   consumedBy: z.string().nullable(), provenance: z.enum(['legacy', 'local-recovery']).default('legacy') }).strict();
-const pendingSchema = z.object({ approved: approvedSchema, approvalId: z.string().uuid(), requestId: boundedId,
+const pendingSchema = z.object({ approved: approvedSchema, approvalId: z.string().guid(), requestId: boundedId,
   expiresAt: z.string().datetime(), activeExpiresAt: z.string().datetime(), active: z.boolean() }).strict();
 const policySchema = z.object({ version: z.literal(1), ownerId: z.string(), bridgeId: z.string(), bridgeEndpointId: z.string(),
   generation: z.number().int().nonnegative(), devices: z.array(approvedSchema).max(MAX_ENDPOINTS),
   invitations: z.array(invitationSchema).max(256), mcp: z.array(pendingSchema).max(MAX_ENDPOINTS),
   account: storedAccountSchema.nullable().default(null),
-  provenance: z.record(z.enum(['legacy', 'local-recovery', 'account', 'local-cli', 'mcp'])).default({}),
+  provenance: z.record(z.string(), z.enum(['legacy', 'local-recovery', 'account', 'local-cli', 'mcp'])).default({}),
 }).strict().superRefine((state, context) => {
   if (new Set(state.devices.map(device => device.endpoint.id)).size !== state.devices.length
     || new Set(state.mcp.map(item => item.approved.grantId)).size !== state.mcp.length

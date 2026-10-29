@@ -36,6 +36,6 @@ export async function localApplication(pointer: BridgePointer, application: Secu
   const hello = z.object({ type: z.literal('welcome'), challenge: z.literal(challenge), receiverEpoch: z.string().min(1).max(128) }).strict()
     .parse(await post('hello', { type: 'hello', challenge }, null, randomUUID()));
   const result = z.object({ type: z.literal('application'), route: z.object({ kind: z.literal('response'), requestId: z.literal(requestId) }).strict(),
-    data: z.unknown(), mcp: z.null() }).strict().parse(await post('application', application, hello.receiverEpoch, requestId));
+    data: z.unknown().optional(), mcp: z.null() }).strict().parse(await post('application', application, hello.receiverEpoch, requestId));
   return result.data as ApplicationJson;
 }

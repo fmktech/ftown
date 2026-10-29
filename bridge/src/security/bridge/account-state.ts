@@ -11,7 +11,7 @@ const device = z.object({ endpoint: endpointSchema, signingPublicKey: z.string()
   label: z.string().max(200), approvedAt: z.string().datetime() }).strict();
 const bridge = z.object({ bridgeId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/), endpoint: endpointSchema,
   label: z.string().max(200), approvedAt: z.string().datetime() }).strict();
-export const accountCheckpointSchema = z.object({ version: z.literal(1), ownerId: z.string().uuid(), rootId: id, head: id,
+export const accountCheckpointSchema = z.object({ version: z.literal(1), ownerId: z.string().guid(), rootId: id, head: id,
     revision: z.number().int().min(0).max(ACCOUNT_TRUST_LIMITS.maxTransitions),
     devices: z.array(device).max(ACCOUNT_TRUST_LIMITS.maxDevices), bridges: z.array(bridge).max(ACCOUNT_TRUST_LIMITS.maxBridges),
     revokedDeviceIds: z.array(id).max(ACCOUNT_TRUST_LIMITS.maxTransitions),

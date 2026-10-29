@@ -93,11 +93,11 @@ export class BridgeSecurityService implements BridgeSecurity {
   async handleHandshake(packet: SecureEnvelope | EnrollmentPacket, route: InboundTransportContext): Promise<SecureEnvelope> {
     this.context(route);
     if (packet.type === 'ftown_enrollment') {
-      const wrapper = z.object({ type: z.literal('ftown_enrollment'), version: z.literal(1), candidate: endpointSchema, envelope: z.unknown() }).strict().parse(packet);
+      const wrapper = z.object({ type: z.literal('ftown_enrollment'), version: z.literal(1), candidate: endpointSchema, envelope: z.unknown().optional() }).strict().parse(packet);
       const envelope = parseSecureEnvelope(wrapper.envelope);
       if (envelope.purpose !== 'enroll') throw new BridgeSecurityError('wrong_context');
       this.freshness(envelope, false);
-      const message = z.object({ type: z.literal('enroll'), candidate: endpointSchema, invitationId: z.string().uuid(),
+      const message = z.object({ type: z.literal('enroll'), candidate: endpointSchema, invitationId: z.string().guid(),
         invitationSecret: z.string().regex(/^[A-Za-z0-9_-]{43}$/), label: z.string().max(200) }).strict().parse(await this.decode(wrapper.candidate, envelope, route));
       if (JSON.stringify(message.candidate) !== JSON.stringify(wrapper.candidate)) throw new BridgeSecurityError('wrong_context');
       const approved = await this.policy.consumeInvitation(message);
@@ -115,7 +115,7 @@ export class BridgeSecurityService implements BridgeSecurity {
     return welcome;
   }
   private parseApplication(value: unknown): SecureApplication {
-    const parsed = z.object({ type: z.literal('application'), route: routeSchema, data: z.unknown(), mcp: actionSchema.nullable() }).strict().parse(value);
+    const parsed = z.object({ type: z.literal('application'), route: routeSchema, data: z.unknown().optional(), mcp: actionSchema.nullable() }).strict().parse(value);
     return { ...parsed, data: applicationJson(parsed.data) };
   }
   private requirement(application: SecureApplication, transport: InboundTransportContext): OperationPermission {

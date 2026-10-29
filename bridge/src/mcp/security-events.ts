@@ -25,12 +25,12 @@ const ERROR_CODES = new Set([
 ]);
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,200}$/);
 const eventSchema = z.object({
-  version: z.literal(1), id: z.string().uuid(), actionId: z.string().uuid(), parentActionId: z.string().uuid().nullable(), ownerId: z.string().uuid(),
+  version: z.literal(1), id: z.string().guid(), actionId: z.string().guid(), parentActionId: z.string().guid().nullable(), ownerId: z.string().guid(),
   source: z.enum(['gateway', 'bridge']), bridgeId: id.nullable(), clientId: id.nullable(), grantId: id.nullable(), endpointId: z.string().regex(/^[A-Za-z0-9_-]{43}$/).nullable(),
   tool: z.string().max(100), operation: z.string().max(100).nullable(), sessionId: id.nullable(), startedAt: z.string().datetime(), finishedAt: z.string().datetime().nullable(),
   status: z.enum(['started', 'succeeded', 'rejected', 'failed', 'unknown']), errorCode: z.string().max(64).nullable(), mutating: z.boolean(),
 }).strict();
-const cursorSchema = z.object({ version: z.literal(1), ownerId: z.string().uuid(), bridgeId: id.nullable(), afterAt: z.string().datetime(), afterId: z.string().uuid(), upperAt: z.string().datetime(), upperId: z.string().uuid() }).strict();
+const cursorSchema = z.object({ version: z.literal(1), ownerId: z.string().guid(), bridgeId: id.nullable(), afterAt: z.string().datetime(), afterId: z.string().guid(), upperAt: z.string().datetime(), upperId: z.string().guid() }).strict();
 export type SecurityQuery = (text: string, values: unknown[]) => Promise<unknown[]>;
 export interface SecurityOutcome { status: Exclude<SecurityEventStatus, 'started'>; errorCode: string | null }
 export interface SecurityFinalizationState { event: SecurityEvent; finished: boolean; finishing?: Promise<void> }
@@ -92,7 +92,7 @@ export function decodeSecurityCursor(cursor: string, ownerId: string, bridgeId?:
   } catch { throw new SecurityError('invalid_cursor', 'Security history cursor is invalid for this account or filter'); }
 }
 export async function listSecurityPage(query: SecurityQuery, ownerId: string, page: SecurityPageQuery = {}): Promise<SecurityPage> {
-  if (!z.string().uuid().safeParse(ownerId).success || (page.bridgeId !== undefined && !id.safeParse(page.bridgeId).success)
+  if (!z.string().guid().safeParse(ownerId).success || (page.bridgeId !== undefined && !id.safeParse(page.bridgeId).success)
     || (page.limit !== undefined && (!Number.isInteger(page.limit) || page.limit < 1 || page.limit > 100))) throw new SecurityError('invalid_cursor', 'Invalid security history filter');
   const limit = page.limit ?? 50;
   const cursor = page.cursor ? decodeSecurityCursor(page.cursor, ownerId, page.bridgeId) : undefined;
