@@ -35,6 +35,40 @@ export interface RateLimitResult {
   retryAfterMs?: number;
 }
 
+/** Atomically consume an admission from a fixed, database-clock window. */
+export async function consumeRateLimit(
+  scope: string,
+  key: string,
+  config: RateLimitConfig
+): Promise<RateLimitResult> {
+  if (!Number.isSafeInteger(config.maxAttempts) || config.maxAttempts < 1 || config.maxAttempts >= 2147483647 ||
+      !Number.isSafeInteger(config.lockoutMs) || config.lockoutMs < 1) {
+    throw new RangeError("Invalid rate limit configuration");
+  }
+
+  const rows = await getDb().query(
+    `INSERT INTO rate_limit_attempts (scope, key, failed_count, locked_until, updated_at)
+     VALUES ($1, $2, 1, NOW() + ($4::double precision / 1000.0) * interval '1 second', NOW())
+     ON CONFLICT (scope, key) DO UPDATE SET
+       failed_count = CASE
+         WHEN rate_limit_attempts.locked_until IS NULL OR rate_limit_attempts.locked_until <= NOW() THEN 1
+         ELSE LEAST(rate_limit_attempts.failed_count, $3::integer) + 1
+       END,
+       locked_until = CASE
+         WHEN rate_limit_attempts.locked_until IS NULL OR rate_limit_attempts.locked_until <= NOW()
+           THEN NOW() + ($4::double precision / 1000.0) * interval '1 second'
+         ELSE rate_limit_attempts.locked_until
+       END,
+       updated_at = NOW()
+     RETURNING failed_count <= $3::integer AS allowed,
+       GREATEST(0, LEAST($4::double precision,
+         CEIL(EXTRACT(EPOCH FROM (locked_until - NOW())) * 1000))) AS retry_after_ms`,
+    [scope, key, config.maxAttempts, config.lockoutMs]
+  ) as { allowed: boolean; retry_after_ms: number | string }[];
+  const row = rows[0];
+  return row.allowed ? { allowed: true } : { allowed: false, retryAfterMs: Number(row.retry_after_ms) };
+}
+
 export async function checkRateLimit(scope: string, key: string): Promise<RateLimitResult> {
   const sql = getDb();
 
@@ -66,18 +100,23 @@ export async function recordAttempt(
 ): Promise<void> {
   const sql = getDb();
 
-  // Single-statement atomic upsert: counter increment, lockout decision, and
-  // expired-lock reset happen together so concurrent requests cannot race past
-  // the threshold (a SELECT-then-UPDATE pair allowed exactly that).
+  // Atomically increment the legacy counter and reset expired locks. A separate
+  // checkRateLimit call is not atomic with this write; use consumeRateLimit
+  // when admission must be decided atomically.
   await sql.query(
     `INSERT INTO rate_limit_attempts (scope, key, failed_count, updated_at)
      VALUES ($1, $2, 1, NOW())
      ON CONFLICT (scope, key) DO UPDATE SET
-       failed_count = rate_limit_attempts.failed_count + 1,
+       failed_count = CASE
+         WHEN rate_limit_attempts.locked_until IS NOT NULL AND rate_limit_attempts.locked_until <= NOW() THEN 1
+         ELSE rate_limit_attempts.failed_count + 1
+       END,
        locked_until = CASE
          WHEN rate_limit_attempts.locked_until IS NOT NULL
               AND rate_limit_attempts.locked_until > NOW()
            THEN rate_limit_attempts.locked_until
+         WHEN rate_limit_attempts.locked_until IS NOT NULL AND rate_limit_attempts.locked_until <= NOW()
+           THEN CASE WHEN $3::integer <= 1 THEN NOW() + ($4::double precision / 1000.0) * interval '1 second' ELSE NULL END
          WHEN rate_limit_attempts.failed_count + 1 >= $3::integer
            THEN NOW() + ($4::double precision / 1000.0) * interval '1 second'
          ELSE NULL
@@ -95,12 +134,9 @@ export async function resetAttempts(scope: string, key: string): Promise<void> {
   );
 }
 
-// --- Login-scoped convenience wrappers (used by the credentials provider) ---
-//
-// Two independent limiters: per-email (slows a targeted attack on one account)
-// and per-IP (slows credential spraying across many accounts from one source).
-// The IP limiter is deliberately looser so shared egress (office NAT, VPN) is
-// not locked out by one user's typos.
+// --- Legacy login-scoped convenience wrappers retained for compatibility ---
+// The credentials provider now consumes an atomic source-IP admission budget
+// via consumeRateLimit rather than using these separate check/write operations.
 
 const LOGIN_SCOPE = "login";
 const LOGIN_IP_SCOPE = "login-ip";

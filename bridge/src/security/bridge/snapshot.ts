@@ -7,7 +7,7 @@ import { BridgeSecurityError } from './errors.js';
 /** One process owns each instance directory. Never publish in-memory state before durable replacement. */
 export class AtomicSnapshot<T> {
   private tail: Promise<unknown> = Promise.resolve();
-  constructor(private readonly file: string, private readonly schema: z.ZodType<T, z.ZodTypeDef, unknown>, private readonly initial: () => T) {}
+  constructor(private readonly file: string, private readonly schema: z.ZodType<T>, private readonly initial: () => NoInfer<T>) {}
 
   private async load(): Promise<T> {
     let handle;

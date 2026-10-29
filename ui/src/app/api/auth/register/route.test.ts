@@ -12,8 +12,7 @@ vi.mock("next/server", async (importOriginal) => ({
 vi.mock("@/lib/db", () => ({ getDb: () => ({ query }) }));
 vi.mock("bcryptjs", () => ({ hash: vi.fn().mockResolvedValue("hashed") }));
 vi.mock("@/lib/login-rate-limit", () => ({
-  checkRateLimit: vi.fn().mockResolvedValue({ allowed: true }),
-  recordAttempt: vi.fn(),
+  consumeRateLimit: vi.fn().mockResolvedValue({ allowed: true }),
   REGISTER_RATE_LIMIT: {},
 }));
 

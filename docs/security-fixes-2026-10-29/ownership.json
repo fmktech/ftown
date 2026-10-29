@@ -1,0 +1,38 @@
+{
+  "ui": [
+    "ui/src/lib/login-rate-limit.ts",
+    "ui/src/lib/login-rate-limit.test.ts",
+    "ui/src/lib/auth.ts",
+    "ui/src/lib/auth.test.ts",
+    "ui/src/lib/auth-security-routes.test.ts",
+    "ui/src/app/api/auth/bridge/route.ts",
+    "ui/src/app/api/auth/bridge/route.test.ts",
+    "ui/src/app/api/auth/bridge/refresh/route.ts",
+    "ui/src/app/api/auth/bridge/refresh/route.test.ts",
+    "ui/src/app/api/bridges/devices/revoke/route.ts",
+    "ui/src/app/api/bridges/devices/revoke/route.test.ts",
+    "ui/src/app/api/auth/register/route.ts",
+    "ui/src/app/api/auth/register/route.test.ts",
+    "ui/src/lib/security-store.ts",
+    "ui/src/lib/security-store.test.ts"
+  ],
+  "deps": [
+    "bridge/",
+    "ui/package.json",
+    "ui/package-lock.json",
+    "docs/security-fixes-2026-10-29/dependencies.md"
+  ],
+  "review": [
+    "docs/security-fixes-2026-10-29/review.md",
+    "e2e/tests/security-admission.spec.ts",
+    "e2e/scripts/rate-limit-db.ts",
+    "e2e/scripts/mcp-body-parser-smoke.ts",
+    "e2e/helpers/app.ts",
+    "scripts/ci/run-job.sh"
+  ],
+  "root": [
+    "docs/security-fixes-2026-10-29/plan.md",
+    "docs/security-fixes-2026-10-29/ownership.json",
+    "docs/security-fixes-2026-10-29/validation.md"
+  ]
+}

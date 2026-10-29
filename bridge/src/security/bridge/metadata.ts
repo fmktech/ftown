@@ -1,3 +1,4 @@
+import { legacyDateTimeSchema } from '../../zod-compat.js';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
@@ -16,7 +17,7 @@ export const endpointSchema = z.object({
 export const permissionSchema = z.enum(['read', 'control', 'admin']);
 export const approvedSchema = z.object({
   endpoint: endpointSchema, label: z.string().max(100), permissions: z.array(permissionSchema).max(3),
-  approvedAt: z.string().datetime(), grantId: boundedId.nullable(), expiresAt: z.string().datetime().nullable(),
+  approvedAt: legacyDateTimeSchema, grantId: boundedId.nullable(), expiresAt: legacyDateTimeSchema.nullable(),
 }).strict();
 export function displayLabel(label: string): string {
   return label.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim().slice(0, 100);

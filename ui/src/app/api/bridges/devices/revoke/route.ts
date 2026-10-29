@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { boundedSecurityJson, SecurityStoreError } from "@/lib/security-store";
 import { revokeDevice } from "@/lib/bridge-refresh";
 
 export const runtime = "nodejs";
@@ -9,7 +10,7 @@ interface RevokeBody {
 }
 
 function parseBody(value: unknown): RevokeBody | null {
-  if (typeof value !== "object" || value === null) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return null;
   }
   const bridgeId = (value as Record<string, unknown>).bridgeId;
@@ -28,9 +29,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   let raw: unknown;
   try {
-    raw = await request.json();
-  } catch {
-    return NextResponse.json({ error: "bridgeId required" }, { status: 400 });
+    raw = await boundedSecurityJson(request, 16_384);
+  } catch (error) {
+    return NextResponse.json({ error: "bridgeId required" }, { status: error instanceof SecurityStoreError ? error.status : 400 });
   }
 
   const body = parseBody(raw);

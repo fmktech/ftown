@@ -1,3 +1,4 @@
+import { legacyDateTimeSchema } from '../../zod-compat.js';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -18,16 +19,16 @@ const safeCodes = new Set(['security_setup_required', 'storage_unavailable', 'up
   'unknown_session', 'unknown_attention', 'attention_storage_error', 'cancelled', 'attention_not_ready', 'timeout', 'connection_error',
   'bridge_error', 'response_too_large', 'internal_error', 'interrupted']);
 const safeOperation = /^[a-z][a-z0-9_]{0,63}$/;
-const eventSchema = z.object({ version: z.literal(1), id: z.string().uuid(), actionId: boundedId, parentActionId: boundedId.nullable(),
+const eventSchema = z.object({ version: z.literal(1), id: z.string().guid(), actionId: boundedId, parentActionId: boundedId.nullable(),
   ownerId: z.string().min(1).max(200), source: z.literal('bridge'), bridgeId: boundedId, clientId: boundedId.nullable(),
   grantId: boundedId.nullable(), endpointId: boundedId.nullable(), tool: z.string().max(64), operation: z.string().max(64).nullable(),
-  sessionId: boundedId.nullable(), startedAt: z.string().datetime(), finishedAt: z.string().datetime().nullable(),
+  sessionId: boundedId.nullable(), startedAt: legacyDateTimeSchema, finishedAt: legacyDateTimeSchema.nullable(),
   status: z.enum(['started', 'succeeded', 'rejected', 'failed', 'unknown']), errorCode: z.string().max(64).nullable(), mutating: z.boolean() }).strict();
-const stateSchema = z.object({ version: z.literal(1), ownerId: z.string(), bridgeId: z.string(), epoch: z.string().uuid(),
+const stateSchema = z.object({ version: z.literal(1), ownerId: z.string(), bridgeId: z.string(), epoch: z.string().guid(),
   sequence: z.number().int().nonnegative(), prunedThrough: z.number().int().nonnegative(), pruning: z.number().int().nonnegative().optional(), truncated: z.boolean(),
   entries: z.array(z.object({ sequence: z.number().int().positive(), admissionId: boundedId, event: eventSchema }).strict()).max(10000) }).strict();
 type State = z.infer<typeof stateSchema>;
-const cursorSchema = z.object({ v: z.literal(1), ownerId: z.string(), bridgeId: z.string(), epoch: z.string().uuid(),
+const cursorSchema = z.object({ v: z.literal(1), ownerId: z.string(), bridgeId: z.string(), epoch: z.string().guid(),
   snapshot: z.number().int().nonnegative(), before: z.number().int().positive(), pruning: z.number().int().nonnegative().default(0) }).strict();
 export interface AuditAdmission {
   admissionId: string; actionId: string; parentActionId: string | null;

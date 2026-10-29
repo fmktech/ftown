@@ -1,3 +1,4 @@
+import { legacyDateTimeSchema } from '../../zod-compat.js';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
@@ -8,7 +9,7 @@ import { BridgeSecurityError } from './errors.js';
 
 const hash = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 const code = z.string().regex(/^[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}$/);
-const common = { version: z.literal(1), requestId: hash, processNonce: hash, expiresAt: z.string().datetime() };
+const common = { version: z.literal(1), requestId: hash, processNonce: hash, expiresAt: legacyDateTimeSchema };
 const statusSchema: z.ZodType<PendingBridgeStatus> = z.union([
   z.object({ ...common, phase: z.literal('waiting'), offerHash: hash.nullable(), comparisonCode: z.null() }).strict(),
   z.object({ ...common, phase: z.enum(['comparing', 'confirming']), offerHash: hash, comparisonCode: code }).strict(),

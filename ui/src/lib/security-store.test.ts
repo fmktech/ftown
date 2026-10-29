@@ -35,3 +35,16 @@ it('streamed security JSON rejects oversized and malformed input', async () => {
   await expect(boundedSecurityJson(request('not-json'))).rejects.toMatchObject({ status: 400 });
   expect(await boundedSecurityJson(request('{"version":1}'))).toEqual({ version: 1 });
 });
+
+it('distinguishes missing and empty bodies from declared oversized bodies', async () => {
+  const headers = { 'Content-Type': 'application/json' };
+  const missing = new Request('https://app.test/', { method: 'POST', headers });
+  await expect(boundedSecurityJson(missing, 50)).rejects.toMatchObject({ status: 400 });
+  const declaredOversize = new Request('https://app.test/', { method: 'POST', headers: { ...headers, 'Content-Length': '51' } });
+  await expect(boundedSecurityJson(declaredOversize, 50)).rejects.toMatchObject({ status: 413 });
+  const emptyStream = new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } });
+  const empty = new Request('https://app.test/', { method: 'POST', headers, body: emptyStream, duplex: 'half' } as RequestInit);
+  await expect(boundedSecurityJson(empty, 50)).rejects.toMatchObject({ status: 400 });
+  const unsupported = new Request('https://app.test/', { method: 'POST', headers: { 'Content-Type': 'text/plain', 'Content-Length': '51' } });
+  await expect(boundedSecurityJson(unsupported, 50)).rejects.toMatchObject({ status: 400 });
+});

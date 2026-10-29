@@ -1,5 +1,5 @@
-import { expect, type Page } from "@playwright/test";
-import { createHash } from "node:crypto";
+import { expect, type BrowserContext, type Page } from "@playwright/test";
+import { createHash, randomBytes } from "node:crypto";
 import { UI_BASE_URL } from "./config";
 import { pairBrowser } from "./secure-browser";
 import { readBridgePointer } from "./bridge-api";
@@ -62,8 +62,32 @@ export async function registerUser(email: string, password: string = E2E_PASSWOR
   }
 }
 
+const loginSourceRoutes = new WeakMap<BrowserContext, Promise<void>>();
+
+/** One logical proxied client per isolated browser context, including repeat logins. */
+async function isolateLoginSource(page: Page): Promise<void> {
+  if (UI_BASE_URL !== "http://localhost:3000") {
+    throw new Error("Login fixtures require the canonical local UI");
+  }
+  const context = page.context();
+  let installed = loginSourceRoutes.get(context);
+  if (!installed) {
+    const groups = randomBytes(12).toString("hex").match(/.{4}/g)!;
+    const source = `2001:db8:${groups.join(":")}`;
+    // Scope the synthetic source to local auth requests so it never accompanies
+    // a navigation to a third-party service. Security specs set their own fixed
+    // source on API contexts and deliberately exercise the real shared budget.
+    installed = context.route("http://localhost:3000/api/auth/**", async (route) => {
+      await route.continue({ headers: { ...route.request().headers(), "x-real-ip": source } });
+    }).then(() => undefined);
+    loginSourceRoutes.set(context, installed);
+  }
+  await installed;
+}
+
 /** Fill the /login credentials form and land on /dashboard. */
 export async function login(page: Page, email: string, password: string = E2E_PASSWORD, options: { pairBridge?: boolean } = {}): Promise<void> {
+  await isolateLoginSource(page);
   await page.goto("/login");
   await page.locator("#email").fill(email);
   await page.locator("#password").fill(password);
