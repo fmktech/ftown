@@ -5,6 +5,7 @@ import jwt from "jsonwebtoken";
 import { parseLocalAdvert } from "../local-advert";
 import { getRequiredSecret } from "@/lib/secrets";
 import { rotateBridgeRefreshJti, getOwnerIdForSub } from "@/lib/bridge-refresh";
+import { boundedSecurityJson, SecurityStoreError } from "@/lib/security-store";
 import { isValidBridgeLabel } from "@/lib/bridge-label";
 
 interface BridgeRefreshRequestBody {
@@ -37,11 +38,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   let body: BridgeRefreshRequestBody;
   try {
-    body = (await request.json()) as BridgeRefreshRequestBody;
-  } catch {
+    const raw = await boundedSecurityJson(request, 16_384);
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error("Invalid body");
+    body = raw as BridgeRefreshRequestBody;
+  } catch (error) {
     return NextResponse.json(
       { error: "Invalid JSON body" },
-      { status: 400 }
+      { status: error instanceof SecurityStoreError ? error.status : 400 }
     );
   }
 

@@ -1,11 +1,8 @@
 import { after, NextResponse } from "next/server";
 import { hash } from "bcryptjs";
 import { getDb } from "@/lib/db";
-import {
-  checkRateLimit,
-  recordAttempt,
-  REGISTER_RATE_LIMIT,
-} from "@/lib/login-rate-limit";
+import { consumeRateLimit, REGISTER_RATE_LIMIT } from "@/lib/login-rate-limit";
+import { boundedSecurityJson, SecurityStoreError } from "@/lib/security-store";
 import { clientIp } from "@/lib/client-ip";
 import { isRegistrationEnabled } from "@/lib/registration";
 import { notifyCustomerSignup } from "@/lib/signup-webhook";
@@ -19,7 +16,7 @@ interface DbUserRow {
   id: string;
 }
 
-const REGISTER_SCOPE = "register";
+const REGISTER_SCOPE = "register-admission";
 
 /**
  * Generic, non-enumerating response (F4). Returned identically whether or not
@@ -37,11 +34,21 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
+  const rateLimit = await consumeRateLimit(REGISTER_SCOPE, clientIp(request), REGISTER_RATE_LIMIT);
+  if (!rateLimit.allowed) {
+    return NextResponse.json(
+      { error: "Too many registration attempts. Try again later." },
+      { status: 429 }
+    );
+  }
+
   let body: RegisterBody;
   try {
-    body = (await request.json()) as RegisterBody;
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    const raw = await boundedSecurityJson(request, 16_384);
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error("Invalid body");
+    body = raw as RegisterBody;
+  } catch (error) {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: error instanceof SecurityStoreError ? error.status : 400 });
   }
 
   const { email, password } = body;
@@ -67,17 +74,6 @@ export async function POST(request: Request): Promise<NextResponse> {
       { status: 400 }
     );
   }
-
-  // F4: throttle registration abuse per client IP.
-  const ip = clientIp(request);
-  const rateLimit = await checkRateLimit(REGISTER_SCOPE, ip);
-  if (!rateLimit.allowed) {
-    return NextResponse.json(
-      { error: "Too many registration attempts. Try again later." },
-      { status: 429 }
-    );
-  }
-  await recordAttempt(REGISTER_SCOPE, ip, REGISTER_RATE_LIMIT);
 
   const sql = getDb();
 

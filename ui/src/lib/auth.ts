@@ -2,14 +2,7 @@ import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import { compare } from "bcryptjs";
 import { getDb } from "@/lib/db";
-import {
-  checkLoginIpRateLimit,
-  checkLoginRateLimit,
-  recordFailedLogin,
-  recordFailedLoginIp,
-  resetLoginAttempts,
-  resetLoginIpAttempts,
-} from "@/lib/login-rate-limit";
+import { consumeRateLimit, LOGIN_IP_RATE_LIMIT } from "@/lib/login-rate-limit";
 import { clientIp } from "@/lib/client-ip";
 import { getRequiredSecret } from "@/lib/secrets";
 
@@ -38,18 +31,11 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         const email = credentials?.email;
         const password = credentials?.password;
 
-        if (typeof email !== "string" || typeof password !== "string") {
+        if (typeof email !== "string" || typeof password !== "string" || password.length > 1024) {
           return null;
         }
 
-        const ip = clientIp(request);
-
-        const ipRateLimit = await checkLoginIpRateLimit(ip);
-        if (!ipRateLimit.allowed) {
-          throw new Error("Too many failed attempts. Try again later.");
-        }
-
-        const rateLimit = await checkLoginRateLimit(email);
+        const rateLimit = await consumeRateLimit("login-ip-admission", clientIp(request), LOGIN_IP_RATE_LIMIT);
         if (!rateLimit.allowed) {
           throw new Error("Too many failed attempts. Try again later.");
         }
@@ -62,8 +48,6 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
 
         if (rows.length === 0) {
           await compare(password, DUMMY_BCRYPT_HASH);
-          await recordFailedLogin(email);
-          await recordFailedLoginIp(ip);
           return null;
         }
 
@@ -71,13 +55,9 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         const isValid = await compare(password, user.password_hash);
 
         if (!isValid) {
-          await recordFailedLogin(email);
-          await recordFailedLoginIp(ip);
           return null;
         }
 
-        await resetLoginAttempts(email);
-        await resetLoginIpAttempts(ip);
         return { id: user.id, email: user.email };
       },
     }),

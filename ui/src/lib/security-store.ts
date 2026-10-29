@@ -25,7 +25,8 @@ export async function parseDirectoryEntry(value: unknown): Promise<EndpointDirec
 }
 export async function boundedSecurityJson(request: Request, maxBytes = 524_288): Promise<unknown> {
   if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json')) throw new SecurityStoreError('invalid_request', 400);
-  if (Number(request.headers.get('content-length')) > maxBytes || !request.body) throw new SecurityStoreError('invalid_request', 413);
+  if (Number(request.headers.get('content-length')) > maxBytes) throw new SecurityStoreError('invalid_request', 413);
+  if (!request.body) throw new SecurityStoreError('invalid_request', 400);
   const reader = request.body.getReader(); let size = 0; const chunks: Uint8Array[] = [];
   try {
     while (true) { const chunk = await reader.read(); if (chunk.done) break; size += chunk.value.byteLength; if (size > maxBytes) { await reader.cancel(); throw new SecurityStoreError('invalid_request', 413); } chunks.push(chunk.value); }
