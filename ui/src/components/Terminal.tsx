@@ -422,78 +422,84 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
         <>
           {/* Terminal header */}
           <div
-            className="shrink-0 flex flex-wrap items-center justify-between gap-x-2 px-3"
+            data-testid="terminal-header"
+            className="shrink-0 flex items-center gap-x-2 px-3"
             style={{
               minHeight: 44,
               borderBottom: "1px solid var(--border-subtle)",
               background: "var(--bg-surface)",
             }}
           >
-            <div className="flex items-center gap-2 min-w-0 grow basis-[200px] overflow-hidden">
-              {shellType ? (
-                <HarnessIcon harness={shellType} size={14} className="shrink-0" title={shellType} />
-              ) : (
-                <span style={{ fontSize: 11, color: "var(--text-faint)" }}>›_</span>
-              )}
-              {sessionName && (
-                <span
-                  style={{
-                    fontSize: 11,
-                    color: "var(--text-secondary)",
-                    maxWidth: 400,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {sessionName}
-                </span>
-              )}
-              <PullRequestLink url={pullRequestUrl} />
-            </div>
-
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 max-w-full py-1">
-              <TransportModeBadge mode={mode} fallbackReason={fallbackReason} />
-              {headerActions}
-
-              {usage && (usage.inputTokens > 0 || usage.outputTokens > 0) ? (
-                <span
-                  title="Input tokens / Output tokens (live)"
-                  style={{
-                    fontSize: 10,
-                    color: "var(--text-muted)",
-                    fontVariantNumeric: "tabular-nums",
-                    letterSpacing: "0.04em",
-                  }}
-                >
-                  {formatTokens(usage.inputTokens)} in / {formatTokens(usage.outputTokens)} out
-                </span>
-              ) : persistedUsage ? (
-                <span
-                  title={formatUsageDetail(persistedUsage)}
-                  style={{
-                    fontSize: 10,
-                    color: "var(--text-muted)",
-                    fontVariantNumeric: "tabular-nums",
-                    letterSpacing: "0.04em",
-                  }}
-                >
-                  {formatUsage(persistedUsage)}
-                </span>
-              ) : null}
-
-              <span className="sr-only" aria-live="polite">
-                {isRunning ? "Session running" : ""}
-              </span>
-              {isRunning && (
-                <div className="flex items-center gap-2">
-                  <span className="status-dot status-dot-running animate-running" />
-                  <span aria-hidden="true" style={{ fontSize: 10, color: "var(--accent)", letterSpacing: "0.08em" }}>
-                    running
+            <div data-testid="terminal-header-content" className="flex flex-1 flex-wrap items-center gap-x-2 min-w-0">
+              <div className="flex items-center gap-2 min-w-0 grow basis-[200px] overflow-hidden">
+                {shellType ? (
+                  <HarnessIcon harness={shellType} size={14} className="shrink-0" title={shellType} />
+                ) : (
+                  <span style={{ fontSize: 11, color: "var(--text-faint)" }}>›_</span>
+                )}
+                {sessionName && (
+                  <span
+                    style={{
+                      fontSize: 11,
+                      color: "var(--text-secondary)",
+                      maxWidth: 400,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {sessionName}
                   </span>
-                </div>
-              )}
+                )}
+                <PullRequestLink url={pullRequestUrl} />
+              </div>
+
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 min-w-0 max-w-full py-1">
+                <TransportModeBadge mode={mode} fallbackReason={fallbackReason} />
+                {usage && (usage.inputTokens > 0 || usage.outputTokens > 0) ? (
+                  <span
+                    title="Input tokens / Output tokens (live)"
+                    style={{
+                      fontSize: 10,
+                      color: "var(--text-muted)",
+                      fontVariantNumeric: "tabular-nums",
+                      letterSpacing: "0.04em",
+                      maxWidth: "100%",
+                      overflowWrap: "anywhere",
+                    }}
+                  >
+                    {formatTokens(usage.inputTokens)} in / {formatTokens(usage.outputTokens)} out
+                  </span>
+                ) : persistedUsage ? (
+                  <span
+                    title={formatUsageDetail(persistedUsage)}
+                    style={{
+                      fontSize: 10,
+                      color: "var(--text-muted)",
+                      fontVariantNumeric: "tabular-nums",
+                      letterSpacing: "0.04em",
+                      maxWidth: "100%",
+                      overflowWrap: "anywhere",
+                    }}
+                  >
+                    {formatUsage(persistedUsage)}
+                  </span>
+                ) : null}
+
+                <span className="sr-only" aria-live="polite">
+                  {isRunning ? "Session running" : ""}
+                </span>
+                {isRunning && (
+                  <div className="flex items-center gap-2">
+                    <span className="status-dot status-dot-running animate-running" />
+                    <span aria-hidden="true" style={{ fontSize: 10, color: "var(--accent)", letterSpacing: "0.08em" }}>
+                      running
+                    </span>
+                  </div>
+                )}
+              </div>
             </div>
+            <div className="shrink-0">{headerActions}</div>
           </div>
         </>
       )}
