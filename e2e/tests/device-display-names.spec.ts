@@ -73,6 +73,26 @@ test("account names synchronize between approved browsers without changing trust
     await page.locator(`[data-computer-access="${bridgeId}"]`).click();
     const computerLabel = await page.locator(`[data-computer-access="${bridgeId}"] span.font-semibold`).first().textContent();
     expect(computerLabel).toBeTruthy(); await rename(page, `Rename ${computerLabel}`, "Office 💻");
+    const helper = page.getByText("Display names appear across your signed-in browsers.", { exact: true });
+    await page.setViewportSize({ width: 900, height: 760 });
+    await expect(helper).toBeHidden();
+    await page.getByRole("button", { name: "Rename Office 💻", exact: true }).click();
+    await expect(helper).toBeVisible(); await helper.scrollIntoViewIfNeeded();
+    await expect.poll(() => helper.evaluate(element => {
+      const content = element.closest<HTMLElement>("[data-security-content]")!;
+      const box = element.getBoundingClientRect(), bounds = content.getBoundingClientRect();
+      return box.left >= bounds.left && box.right <= bounds.right && box.top >= bounds.top && box.bottom <= bounds.bottom && content.scrollWidth <= content.clientWidth;
+    })).toBe(true);
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.setViewportSize({ width: 767, height: 900 });
+    for (const name of ["Rename Office 💻", "Reset name"]) {
+      await expect.poll(() => page.getByRole("button", { name, exact: true }).evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
+    }
+    await page.getByRole("button", { name: "Rename Office 💻", exact: true }).click();
+    for (const control of [page.getByLabel("Display name", { exact: true }), page.getByRole("button", { name: "Save", exact: true }), page.getByRole("button", { name: "Cancel", exact: true })]) {
+      await expect.poll(() => control.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
+    }
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
     for (const width of [1280, 390, 320]) {
       await page.setViewportSize({ width, height: 900 });
       const dialog = page.getByRole("dialog", { name: "Security", exact: true });

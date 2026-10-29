@@ -41,3 +41,19 @@ The final spec establishes an encrypted shell from the approved phone, reconnect
 ## CI fixture guard repair review
 
 **Pass; no blocking findings.** The guard now requires the exact three configured isolated specs in their canonical order and checks each canonical path against every other pattern. Existing unknown, nested, adjacent, prefix and suffix rejection checks, shared/isolated lane settings, and browser security assertions remain intact. This updates the stale roster without widening accepted paths or weakening isolation. Root recorded the baseline `3 !== 2` reproduction; the worker reports the fixture suite passing 6/6 after repair. No tests were rerun in this read-only review. Report lease released.
+
+## CI pending-approval layout repair: pre-implementation review
+
+The proposed compact closed desktop editor is reasonable: retain the account-wide helper on mobile and whenever editing, leaving it visible before a save; retain disabled reasons, live status, original identity details and keyboard behavior. Reducing closed Rename/Reset controls from 44px to 32px matches neighboring desktop actions. Use the desktop `md` breakpoint or a fine-pointer condition for the reduction: `sm` begins at 640px while the application's mobile navigation remains active below 768px, and would reduce touch targets on 640–767px mobile layouts despite the 44px mobile requirement. Preserve 44px at 320/390 and 640–767px.
+
+Verify the actual pending-approval fixture at 900×760, including the selected editor closed and open, rather than assuming CSS height savings fix all states. This is a proposal review only; no runtime or source verification was performed. Report lease released.
+
+## Pending-approval layout repair: closure review
+
+**Source and spec review pass; no blocking findings.** The helper is hidden only in the closed editor at desktop widths and is visible while editing; Rename and Reset retain 44px minimums below 768px and use the compact desktop size above it. The original identity, error/status, and action behavior remains unchanged. The account-trust fixture now creates and verifies a real, unapproved pending request before the existing responsive map bounds checks; those bounds assertions remain intact. The naming spec checks the open helper within the 900×760 content area and measures controls at 767px, with the prior 320/390/1280 overflow and touch checks preserved.
+
+Root reproduced the pending-panel overflow before repair and owns the combined browser run now underway. This review inspected the diffs only and does not claim its result. Report lease released.
+
+## Pending fixture isolation: closure review
+
+**Pass; no concrete blocker.** The spec captures the phone's original automatic request before switching to the private approval link, reads the authenticated account inbox, and only rejects that exact test-owned request if it remains active; an already approved state fails rather than being revoked. The store's inbox excludes expired requests, and the fixture then creates a separate unapproved browser and requires its exact request plus exactly one visible pending row for each responsive measurement. Existing access-map geometry and downstream revocation assertions remain intact. Root owns the in-progress browser rerun; this review did not execute it. Report lease released.

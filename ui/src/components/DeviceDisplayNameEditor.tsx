@@ -19,10 +19,10 @@ export function DeviceDisplayNameEditor({ target, label, customName, disabledRea
     if (success) { setEditing(false); setStatus(name === null ? "Name reset." : "Display name saved."); }
   }
   return <div className="min-w-0 space-y-2 border-t border-[var(--border-subtle)] pt-2">
-    <p className="text-xs text-[var(--text-muted)]">Display names appear across your signed-in browsers.</p>
+    <p className={`text-xs text-[var(--text-muted)] ${editing ? "" : "md:hidden"}`}>Display names appear across your signed-in browsers.</p>
     {!editing ? <div className="flex flex-wrap gap-2">
-      <button type="button" className="btn-ghost min-h-11" aria-label={`Rename ${label}`} disabled={!!disabledReason || saving} onClick={() => { setValue(customName ?? label); setStatus(""); setEditing(true); }}>Rename</button>
-      {customName !== undefined && <button type="button" className="btn-ghost min-h-11" disabled={!!disabledReason || saving} onClick={() => void submit(null)}>{pending === "reset" ? "Resetting…" : "Reset name"}</button>}
+      <button type="button" className="btn-ghost min-h-11 md:min-h-8" aria-label={`Rename ${label}`} disabled={!!disabledReason || saving} onClick={() => { setValue(customName ?? label); setStatus(""); setEditing(true); }}>Rename</button>
+      {customName !== undefined && <button type="button" className="btn-ghost min-h-11 md:min-h-8" disabled={!!disabledReason || saving} onClick={() => void submit(null)}>{pending === "reset" ? "Resetting…" : "Reset name"}</button>}
     </div> : <form className="min-w-0 space-y-2" onSubmit={event => { event.preventDefault(); void submit(trimmed); }} onKeyDown={event => { if (event.key === "Escape" && !saving) { event.preventDefault(); setEditing(false); } }}>
       <label className="flex min-w-0 flex-col gap-1 text-xs text-[var(--text-muted)]">Display name
         <input autoFocus disabled={saving || !!pending || !!disabledReason} value={value} onChange={event => setValue(event.target.value)} maxLength={DEVICE_DISPLAY_NAME_MAX_LENGTH} className="min-h-11 w-full min-w-0 rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)] px-3 text-sm text-[var(--text-primary)]" />

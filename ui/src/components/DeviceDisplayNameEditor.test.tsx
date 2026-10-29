@@ -41,3 +41,15 @@ it("locks the draft during a pending save and styles success separately from err
   expect(status.className).toContain("text-[var(--text-muted)]");
   expect(status.className).not.toContain("text-[var(--status-error)]");
 });
+
+it("shows the account-wide helper when editing and preserves the mobile action minimum", () => {
+  render(<DeviceDisplayNameEditor target={{ kind: "bridge", id: "pc" }} label="Desk" customName="Desk" saving={false} error={null} setName={vi.fn()} />);
+  const helper = screen.getByText("Display names appear across your signed-in browsers.");
+  expect(helper.className).toContain("md:hidden");
+  for (const name of ["Rename Desk", "Reset name"]) {
+    const classes = screen.getByRole("button", { name }).className;
+    expect(classes).toContain("min-h-11"); expect(classes).toContain("md:min-h-8");
+  }
+  fireEvent.click(screen.getByRole("button", { name: "Rename Desk" }));
+  expect(helper.className).not.toContain("md:hidden");
+});
