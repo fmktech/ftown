@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook } from "@testing-library/react";
+import { useLayoutEffect } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MessageClient, MessageEvents, MessageSubscription } from "@/lib/message-client";
 import type { Command, CommandResponse, Session } from "@/types";
@@ -163,6 +164,114 @@ function durableSetup(handle: (command: Command) => Promise<CommandResponse> = a
 async function settle() { await act(async () => { await Promise.resolve(); }); }
 
 describe("durable explicit attention restoration", () => {
+  it("does not dispatch a queued old-owner read during replacement render before passive cleanup", async () => {
+    const queued: Array<() => void> = [];
+    const microtask = vi.spyOn(globalThis, "queueMicrotask").mockImplementation(callback => { queued.push(callback); });
+    try {
+      const old = durableClient(); const replacement = durableClient();
+      const oldRpc = { sendCommand: vi.fn(async () => reply(saved)), onSubscribed: () => () => {} };
+      const newRpc = { sendCommand: vi.fn(async () => reply(newer)), onSubscribed: () => () => {} };
+      const hook = renderHook(({ client, user, rpc }) => {
+        const result = useAllSessionEvents(client, sessions, user, rpc);
+        useLayoutEffect(() => { if (user === "other-user") queued.splice(0).forEach(callback => callback()); }, [user]);
+        return result;
+      }, { initialProps: { client: old.client, user: "user", rpc: oldRpc } });
+      expect(queued).toHaveLength(1);
+      hook.rerender({ client: replacement.client, user: "other-user", rpc: newRpc });
+      expect(oldRpc.sendCommand).not.toHaveBeenCalled();
+      expect(newRpc.sendCommand).not.toHaveBeenCalled();
+      await act(async () => { queued.splice(0).forEach(callback => callback()); await Promise.resolve(); });
+      expect(newRpc.sendCommand).toHaveBeenCalledTimes(1);
+      expect(hook.result.current.sessionActivity.get("agent")?.attention?.attentionId).toBe(newer.id);
+      hook.unmount();
+    } finally { microtask.mockRestore(); }
+  });
+
+  it("bounds eighty overlapping prompts to one pending and one trailing snapshot", async () => {
+    const first = deferred(); const trailing = deferred();
+    let reads = 0;
+    const h = durableSetup(() => ++reads === 1 ? first.promise : trailing.promise);
+    await settle();
+    act(() => { for (let i = 0; i < 80; i++) h.publish("UserPromptSubmit"); });
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+    await act(async () => first.resolve(reply(saved)));
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
+    expect(h.current()?.attention).toBeUndefined();
+    await act(async () => trailing.resolve(reply(null)));
+    expect(h.current()?.attention).toBeUndefined();
+  });
+
+  it("coalesces startup subscription notifications and a burst of pending prompts", async () => {
+    const first = deferred(); const trailing = deferred();
+    let reads = 0;
+    const h = durableSetup(() => ++reads === 1 ? first.promise : trailing.promise);
+    act(() => h.subscribed[0]());
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+    act(() => { for (let i = 0; i < 80; i++) h.publish(i % 2 ? "UserPromptSubmit" : "beforeSubmitPrompt"); });
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+    await act(async () => first.resolve(reply(saved)));
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
+    expect(h.current()?.attention).toBeUndefined();
+    await act(async () => trailing.resolve(reply(null)));
+    expect(h.current()?.attention).toBeUndefined();
+    act(() => h.publish("UserPromptSubmit"));
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(3);
+  });
+
+  it("fences a pending snapshot on reconnect and runs a fresh trailing read after failure", async () => {
+    const first = deferred(); const trailing = deferred();
+    let reads = 0;
+    const h = durableSetup(() => ++reads === 1 ? first.promise : trailing.promise);
+    await settle();
+    act(() => h.reconnect());
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+    await act(async () => first.resolve(reply(saved)));
+    expect(h.current()?.attention).toBeUndefined();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
+    await act(async () => trailing.resolve(reply(null)));
+    expect(h.current()?.attention).toBeUndefined();
+    h.unmount();
+
+    let reject!: (error: Error) => void;
+    const failed = new Promise<CommandResponse>((_, fail) => { reject = fail; });
+    let attempts = 0;
+    const next = durableSetup(() => ++attempts === 1 ? failed : Promise.resolve(reply(saved)));
+    await settle();
+    act(() => next.publish("UserPromptSubmit"));
+    await act(async () => reject(new Error("offline")));
+    expect(next.rpc.sendCommand).toHaveBeenCalledTimes(2);
+    expect(next.current()?.attention?.attentionId).toBe(saved.id);
+  });
+
+  it("does not send a dirty trailing read after unmount", async () => {
+    const read = deferred();
+    const h = durableSetup(() => read.promise);
+    await settle();
+    act(() => h.publish("UserPromptSubmit"));
+    h.unmount();
+    await act(async () => read.resolve(reply(saved)));
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an old owner's completion from affecting a replacement session subscription", async () => {
+    const old = deferred(); const fresh = deferred();
+    let reads = 0;
+    const h = durableSetup(() => ++reads === 1 ? old.promise : fresh.promise);
+    await settle();
+    act(() => h.publish("UserPromptSubmit"));
+    h.rerender({ client: h.client, user: "user", rows: [] });
+    h.rerender({ client: h.client, user: "user", rows: sessions });
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
+    await act(async () => old.resolve(reply(saved)));
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
+    expect(h.current()?.attention).toBeUndefined();
+    await act(async () => fresh.resolve(reply(newer)));
+    expect(h.current()?.attention?.attentionId).toBe(newer.id);
+  });
+
   it("restores a persisted explicit request on a fresh mount without a live publication", async () => {
     const first = durableSetup();
     await settle();
@@ -188,6 +297,7 @@ describe("durable explicit attention restoration", () => {
     const read = deferred();
     let reads = 0;
     const h = durableSetup(() => ++reads === 1 ? read.promise : Promise.resolve(reply(null)));
+    await settle(); // Dispatch the snapshot before delivering the prompt.
     act(() => { h.publish(event); h.publishSaved(); });
     await act(async () => read.resolve(reply(saved)));
     expect(h.current()?.attention).toBeUndefined();

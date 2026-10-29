@@ -60,7 +60,7 @@ export class SecureMessageClient implements MessageClient {
   private expectations = new Map<string, { bridgeIds: Set<string>; expiresAt: number }>();
   private generation = 0;
   private closed = false;
-  private recovering = new Set<string>();
+  private recovering = new Map<string, object>();
   private stopTrustObserver: () => void;
   constructor(private raw: Centrifuge, readonly userId: string, readonly securityRuntime: SecureEndpointRuntime) {
     const commands = this.newSubscription(`commands:rpc#${userId}`);
@@ -70,9 +70,7 @@ export class SecureMessageClient implements MessageClient {
     this.stopTrustObserver = securityRuntime.onChange(() => {
       if (this.closed || this.raw.state !== "connected") return;
       for (const pin of securityRuntime.pinnedBridges()) if (securityRuntime.state(pin.bridgeId).status === "offline") {
-        void this.ensureReady(pin.bridgeId).then(() => {
-          if (!this.closed) this.getSubscription(`commands:rpc#${this.userId}`)?.emit("subscribed", undefined);
-        }).catch(() => {});
+        this.recoverBridge(pin.bridgeId, false);
       }
     });
   }
@@ -86,7 +84,7 @@ export class SecureMessageClient implements MessageClient {
         for (const entry of directory.endpoints) if (entry.bridgeId && entry.endpoint.kind === "bridge") this.securityRuntime.discover(entry.bridgeId, entry.endpoint);
       }).catch(() => {});
   };
-  private disconnected = () => { this.generation++; this.handshakes.clear(); this.securityRuntime.disconnected(); };
+  private disconnected = () => { this.generation++; this.handshakes.clear(); this.recovering.clear(); this.securityRuntime.disconnected(); };
   newSubscription(channel: string, options?: { since: { offset: number; epoch: string } }): SecureSubscription {
     if (this.subscriptions.has(channel)) throw new Error(`Duplicate subscription: ${channel}`);
     const raw = this.raw.getSubscription(channel) ?? this.raw.newSubscription(channel, options);
@@ -171,12 +169,19 @@ export class SecureMessageClient implements MessageClient {
       }));
     } catch (error) { return Promise.reject(error); }
   }
-  private recoverEpoch(bridgeId: string): void {
+  private recoverBridge(bridgeId: string, force: boolean): void {
     if (this.closed || this.recovering.has(bridgeId)) return;
-    this.recovering.add(bridgeId);
-    void this.ensureReady(bridgeId, true).then(() => {
-      if (!this.closed) this.getSubscription(`commands:rpc#${this.userId}`)?.emit("subscribed", undefined);
-    }).catch(() => {}).finally(() => this.recovering.delete(bridgeId));
+    const cycle = {};
+    const generation = this.generation;
+    this.recovering.set(bridgeId, cycle);
+    void this.ensureReady(bridgeId, force).then(() => {
+      if (!this.closed && this.generation === generation && this.recovering.get(bridgeId) === cycle
+        && this.securityRuntime.state(bridgeId).status === "ready") {
+        this.getSubscription(`commands:rpc#${this.userId}`)?.emit("subscribed", undefined);
+      }
+    }).catch(() => {}).finally(() => {
+      if (this.recovering.get(bridgeId) === cycle) this.recovering.delete(bridgeId);
+    });
   }
   observe(bridgeId: string, application: SecureApplication): boolean {
     const value = application.data;
@@ -193,7 +198,7 @@ export class SecureMessageClient implements MessageClient {
       if (application.route.kind !== "response" || response.requestId !== application.route.requestId || typeof response.requestId !== "string") return false;
       const expected = this.expectations.get(response.requestId);
       if (!expected || expected.expiresAt <= Date.now() || !expected.bridgeIds.has(bridgeId)) return false;
-      if (response.success === false && record(response.data) && response.data.code === "epoch_changed") this.recoverEpoch(bridgeId);
+      if (response.success === false && record(response.data) && response.data.code === "epoch_changed") this.recoverBridge(bridgeId, true);
       if (record(response.data)) {
         if (typeof response.data.bridgeId === "string" && response.data.bridgeId !== bridgeId) return false;
         if (Array.isArray(response.data.sessions) && response.data.sessions.some(session => !record(session) || session.bridgeId !== bridgeId)) return false;

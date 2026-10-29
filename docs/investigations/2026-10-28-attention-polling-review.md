@@ -1,3 +1,5 @@
+
+> Historical investigation of logging noise. The user clarified that the target is unnecessary transmissions; the logging-only patch was reverted. See [the transmission investigation](2026-10-28-attention-transmissions.md) and [its final review](2026-10-28-attention-transport-review.md) for the final change.
 # Attention logging: independent review
 
 ## Pre-freeze verdict (2026-10-28)

@@ -16,6 +16,8 @@ related:
 ---
 
 # Repeated attention receipt logs
+> Historical investigation of logging noise. The user clarified that the target is unnecessary transmissions; the logging-only patch was reverted. See [the transmission investigation](2026-10-28-attention-transmissions.md) and [its final review](2026-10-28-attention-transport-review.md) for the final change.
+
 
 ## Symptom
 User pasted approximately 80 lines of the form `[Bridge] Received command: get_session_attention (requestId: 9043d238-b846-4d45-9319-2bd69a6c813a)` with distinct request IDs, interspersed with three `list_sessions`, after `[Bridge] Resurrected session 9a2cd677-9551-48a8-b1df-ffe088709036 via tmux reattach`, and asked `[why so much?`. The desired outcome is a quieter bridge console while preserving useful operation and error visibility. This investigation proves why each receipt is printed; the transcript contains no timestamps, so it does not establish a request rate, fixed interval, excessive traffic, or the precise triggering lifecycle in the deployed UI.
