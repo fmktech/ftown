@@ -69,11 +69,13 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
   const { bridgeId, sessionController } = deps;
 
   return async function handleCommand(command: Command, verified?: VerifiedApplication): Promise<void> {
-    console.log(`[Bridge] Received command: ${command.type} (requestId: ${command.requestId})`);
-
     const payloadBridgeId = (command.payload as Record<string, unknown>).bridgeId as string | undefined;
     if (payloadBridgeId && payloadBridgeId !== bridgeId) {
       return;
+    }
+
+    if (command.type !== 'get_session_attention' || process.env.FTOWN_DEBUG_COMMANDS === '1') {
+      console.log(`[Bridge] Received command: ${command.type} (requestId: ${command.requestId})`);
     }
 
     let response: CommandResponse;

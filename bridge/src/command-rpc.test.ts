@@ -15,6 +15,63 @@ import type { BridgeUpdateCoordinator } from './bridge-update.js';
 import type { BridgeSecurityService } from './security/bridge/security.js';
 import type { VerifiedApplication } from './security/protocol.js';
 
+test('attention receipt logging is quiet by default and opt-in for the owning bridge', async t => {
+  const previousDebug = process.env.FTOWN_DEBUG_COMMANDS;
+  t.after(() => {
+    if (previousDebug === undefined) delete process.env.FTOWN_DEBUG_COMMANDS;
+    else process.env.FTOWN_DEBUG_COMMANDS = previousDebug;
+  });
+  const log = t.mock.method(console, 'log', () => {});
+  const error = t.mock.method(console, 'error', () => {});
+  const responses: CommandResponse[] = [];
+  let publishFails = false;
+  const publishError = new Error('publish failed');
+  const handler = createCommandHandler({
+    bridgeId: 'owner',
+    sessionController: { get: async (id: string) => id === 'session' ? { id, bridgeId: 'owner' } : null } as unknown as SessionController,
+    attentionStore: { explicitSnapshot: async () => ({ attention: null, sequence: 0 }) } as unknown as AttentionStore,
+    publishCommandResponse: async response => {
+      if (publishFails) throw publishError;
+      responses.push(response);
+    },
+  });
+  const read = (requestId: string, bridgeId = 'owner', sessionId = 'session') =>
+    handler({ type: 'get_session_attention', requestId, payload: { bridgeId, sessionId } });
+
+  delete process.env.FTOWN_DEBUG_COMMANDS;
+  await read('default');
+  assert.deepEqual(responses.at(-1), { requestId: 'default', success: true, data: { sessionId: 'session', attention: null, sequence: 0 } });
+  assert.equal(log.mock.callCount(), 0);
+
+  for (const value of ['0', 'true', '']) {
+    process.env.FTOWN_DEBUG_COMMANDS = value;
+    await read(`non-1-${value}`);
+    assert.equal(log.mock.callCount(), 0);
+  }
+  process.env.FTOWN_DEBUG_COMMANDS = '1';
+  const count = responses.length;
+  await read('foreign-read', 'other');
+  await handler({ type: 'stop_session', requestId: 'foreign-mutation', payload: { bridgeId: 'other', sessionId: 'session' } });
+  assert.equal(responses.length, count);
+  assert.equal(log.mock.callCount(), 0);
+  await read('debug');
+  assert.deepEqual(log.mock.calls.map(call => call.arguments), [
+    ['[Bridge] Received command: get_session_attention (requestId: debug)'],
+  ]);
+
+  delete process.env.FTOWN_DEBUG_COMMANDS;
+  await handler({ type: 'resolve_session_attention', requestId: 'mutation', payload: { bridgeId: 'owner', sessionId: 'session', eventId: 'bad!' } });
+  assert.deepEqual(log.mock.calls.at(-1)?.arguments, ['[Bridge] Received command: resolve_session_attention (requestId: mutation)']);
+  await read('invalid', 'owner', 'missing');
+  assert.deepEqual(responses.at(-1), { requestId: 'invalid', success: false, error: 'Unknown session' });
+  assert.equal(log.mock.callCount(), 2);
+
+  publishFails = true;
+  await read('publish-error');
+  assert.equal(log.mock.callCount(), 2);
+  assert.deepEqual(error.mock.calls.map(call => call.arguments), [['[Bridge] Failed to publish command response:', publishError]]);
+});
+
 test('targeted update commands validate payloads and bind an accepted ticket to verified dispatch', async () => {
   const responses: CommandResponse[] = []; let requests = 0, starts = 0;
   const effects = new UpdateEffects(new UpdateAdmission());
