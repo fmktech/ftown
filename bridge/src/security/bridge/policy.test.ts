@@ -86,6 +86,25 @@ test('pending MCP can obtain identity only for hello/activation, respects fixed 
   assert.ok(!(await f.store.recipients()).some(device => device.endpoint.id === mcp.id));
 });
 
+test('legacy minute-precision MCP approvals survive policy reload without timestamp normalization', async t => {
+  const now = Date.UTC(2030, 0, 1, 12);
+  const f = await fixture(t, now);
+  const approval: McpApproval = { requestId: 'legacy', grantId: 'legacy-grant', endpoint: endpoint('mcp'), permissions: ['read'],
+    expiresAt: '2030-01-01T12:02Z', activeExpiresAt: '2030-01-02T11:59Z' };
+  const receipt = await f.store.approveMcp(await f.store.principal(f.browser.id), approval);
+  assert.equal(receipt.expiresAt, approval.expiresAt);
+  assert.equal(receipt.activeExpiresAt, approval.activeExpiresAt);
+  await f.store.close();
+  const restarted = new BridgePolicyStore(f.directory, 'bridge', f.bridge, f.options);
+  t.after(() => restarted.close());
+  const pending = await restarted.principal(approval.endpoint.id, true);
+  const activated = await restarted.activateMcp(pending, approval.grantId);
+  assert.equal(activated.expiresAt, approval.activeExpiresAt);
+  const stored = await readFile(join(f.directory, 'security', 'policy.json'), 'utf8');
+  assert.ok(stored.includes('2030-01-01T12:02Z'));
+  assert.ok(stored.includes('2030-01-02T11:59Z'));
+});
+
 test('corrupt or wrong-bound storage fails closed without replacing policy', async t => {
   const f = await fixture(t);
   const file = join(f.directory, 'security', 'policy.json');

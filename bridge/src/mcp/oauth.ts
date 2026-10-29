@@ -1,3 +1,4 @@
+import { legacyDateTimeSchema } from '../zod-compat.js';
 import { createHash, randomBytes } from "node:crypto";
 import jwt from "jsonwebtoken";
 import type { Response } from "express";
@@ -259,7 +260,7 @@ export class FtownOAuthProvider implements OAuthServerProvider {
         const envelope = parseSecureEnvelope(approval.receipt);
         receipt = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(await open(identity.identity, approval.bridge, envelope, { ownerId: identity.ownerId, bridgeId: approval.bridgeId, channel: `mcp-approval:${approval.bridgeId}:${identity.requestId}`, recipientId: identity.identity.endpoint.id, purpose: 'mcp-approval' })));
       } catch { throw new InvalidRequestError('Bridge encrypted approval could not be verified'); }
-      const parsed = z.object({ type: z.literal('mcp-approval'), approvalId: z.string().min(1).max(200), requestId: z.literal(identity.requestId), ownerId: z.literal(identity.ownerId), grantId: z.literal(identity.grantId), candidateEndpointId: z.literal(identity.identity.endpoint.id), bridgeId: z.literal(approval.bridgeId), bridge: endpoint, permissions: z.array(z.enum(['read', 'control'])).min(1).max(2), expiresAt: z.string().datetime(), activeExpiresAt: z.literal(identity.activeExpiresAt) }).strict().safeParse(receipt);
+      const parsed = z.object({ type: z.literal('mcp-approval'), approvalId: z.string().min(1).max(200), requestId: z.literal(identity.requestId), ownerId: z.literal(identity.ownerId), grantId: z.literal(identity.grantId), candidateEndpointId: z.literal(identity.identity.endpoint.id), bridgeId: z.literal(approval.bridgeId), bridge: endpoint, permissions: z.array(z.enum(['read', 'control'])).min(1).max(2), expiresAt: legacyDateTimeSchema, activeExpiresAt: z.literal(identity.activeExpiresAt) }).strict().safeParse(receipt);
       if (!parsed.success || parsed.data.bridge.id !== approval.bridge.id || parsed.data.bridge.publicKey !== approval.bridge.publicKey
         || [...parsed.data.permissions].sort().join(' ') !== [...identity.permissions].sort().join(' ')
         || Date.parse(parsed.data.expiresAt) <= Date.now() || Date.parse(parsed.data.expiresAt) > Date.parse(identity.pendingExpiresAt)) throw new InvalidRequestError('Bridge approval does not match this consent');

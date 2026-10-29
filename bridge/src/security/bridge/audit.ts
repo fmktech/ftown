@@ -1,3 +1,4 @@
+import { legacyDateTimeSchema } from '../../zod-compat.js';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -21,7 +22,7 @@ const safeOperation = /^[a-z][a-z0-9_]{0,63}$/;
 const eventSchema = z.object({ version: z.literal(1), id: z.string().guid(), actionId: boundedId, parentActionId: boundedId.nullable(),
   ownerId: z.string().min(1).max(200), source: z.literal('bridge'), bridgeId: boundedId, clientId: boundedId.nullable(),
   grantId: boundedId.nullable(), endpointId: boundedId.nullable(), tool: z.string().max(64), operation: z.string().max(64).nullable(),
-  sessionId: boundedId.nullable(), startedAt: z.string().datetime(), finishedAt: z.string().datetime().nullable(),
+  sessionId: boundedId.nullable(), startedAt: legacyDateTimeSchema, finishedAt: legacyDateTimeSchema.nullable(),
   status: z.enum(['started', 'succeeded', 'rejected', 'failed', 'unknown']), errorCode: z.string().max(64).nullable(), mutating: z.boolean() }).strict();
 const stateSchema = z.object({ version: z.literal(1), ownerId: z.string(), bridgeId: z.string(), epoch: z.string().guid(),
   sequence: z.number().int().nonnegative(), prunedThrough: z.number().int().nonnegative(), pruning: z.number().int().nonnegative().optional(), truncated: z.boolean(),

@@ -1,3 +1,4 @@
+import { legacyDateTimeSchema } from '../zod-compat.js';
 import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
 import { z } from 'zod';
@@ -27,10 +28,10 @@ const id = z.string().regex(/^[A-Za-z0-9_-]{1,200}$/);
 const eventSchema = z.object({
   version: z.literal(1), id: z.string().guid(), actionId: z.string().guid(), parentActionId: z.string().guid().nullable(), ownerId: z.string().guid(),
   source: z.enum(['gateway', 'bridge']), bridgeId: id.nullable(), clientId: id.nullable(), grantId: id.nullable(), endpointId: z.string().regex(/^[A-Za-z0-9_-]{43}$/).nullable(),
-  tool: z.string().max(100), operation: z.string().max(100).nullable(), sessionId: id.nullable(), startedAt: z.string().datetime(), finishedAt: z.string().datetime().nullable(),
+  tool: z.string().max(100), operation: z.string().max(100).nullable(), sessionId: id.nullable(), startedAt: legacyDateTimeSchema, finishedAt: legacyDateTimeSchema.nullable(),
   status: z.enum(['started', 'succeeded', 'rejected', 'failed', 'unknown']), errorCode: z.string().max(64).nullable(), mutating: z.boolean(),
 }).strict();
-const cursorSchema = z.object({ version: z.literal(1), ownerId: z.string().guid(), bridgeId: id.nullable(), afterAt: z.string().datetime(), afterId: z.string().guid(), upperAt: z.string().datetime(), upperId: z.string().guid() }).strict();
+const cursorSchema = z.object({ version: z.literal(1), ownerId: z.string().guid(), bridgeId: id.nullable(), afterAt: legacyDateTimeSchema, afterId: z.string().guid(), upperAt: legacyDateTimeSchema, upperId: z.string().guid() }).strict();
 export type SecurityQuery = (text: string, values: unknown[]) => Promise<unknown[]>;
 export interface SecurityOutcome { status: Exclude<SecurityEventStatus, 'started'>; errorCode: string | null }
 export interface SecurityFinalizationState { event: SecurityEvent; finished: boolean; finishing?: Promise<void> }

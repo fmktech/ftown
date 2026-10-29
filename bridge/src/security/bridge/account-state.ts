@@ -1,3 +1,4 @@
+import { legacyDateTimeSchema } from '../../zod-compat.js';
 import { z } from 'zod';
 import { ACCOUNT_TRUST_LIMITS, parseAccountHistory } from '../account-crypto.js';
 import type { AccountHistory, StoredAccountTrust } from '../account-protocol.js';
@@ -8,9 +9,9 @@ import { BridgeSecurityError } from './errors.js';
 const id = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 const timestamp = z.number().int().nonnegative().finite();
 const device = z.object({ endpoint: endpointSchema, signingPublicKey: z.string().regex(/^[A-Za-z0-9_-]{87}$/),
-  label: z.string().max(200), approvedAt: z.string().datetime() }).strict();
+  label: z.string().max(200), approvedAt: legacyDateTimeSchema }).strict();
 const bridge = z.object({ bridgeId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/), endpoint: endpointSchema,
-  label: z.string().max(200), approvedAt: z.string().datetime() }).strict();
+  label: z.string().max(200), approvedAt: legacyDateTimeSchema }).strict();
 export const accountCheckpointSchema = z.object({ version: z.literal(1), ownerId: z.string().guid(), rootId: id, head: id,
     revision: z.number().int().min(0).max(ACCOUNT_TRUST_LIMITS.maxTransitions),
     devices: z.array(device).max(ACCOUNT_TRUST_LIMITS.maxDevices), bridges: z.array(bridge).max(ACCOUNT_TRUST_LIMITS.maxBridges),

@@ -1,3 +1,4 @@
+import { legacyDateTimeSchema } from './zod-compat.js';
 import { open, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -19,7 +20,7 @@ const ledgerSchema = z.object({
   prunedThrough: z.number().int().nonnegative(),
   activity: z.object({ state: z.enum(['thinking', 'tool_use', 'idle', 'unknown']), lastActivityAt: z.string().optional() }).strict(),
   events: z.array(itemSchema),
-  idleCycle: z.object({ id: z.string().guid(), startedAt: z.string().datetime(), dueAt: z.string().datetime(), notifiedAt: z.string().datetime().optional() }).strict().optional(),
+  idleCycle: z.object({ id: z.string().guid(), startedAt: legacyDateTimeSchema, dueAt: legacyDateTimeSchema, notifiedAt: legacyDateTimeSchema.optional() }).strict().optional(),
 }).strict();
 type Ledger = z.infer<typeof ledgerSchema>;
 type StoredItem = Ledger['events'][number];
