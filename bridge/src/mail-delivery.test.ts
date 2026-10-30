@@ -968,3 +968,19 @@ describe('late mail wake revalidation', () => {
       assert.equal(f.runner.writes.length, 0); f.service.stop();
     });
   });
+
+it('post-commit notification drains a live waiter but fences a stopped recipient', async () => {
+  const { store, runner, mailStore, service } = setup();
+  const session = participatingSession('pr'); store.add(session); runner.running.add(session.id);
+  const wait = await service.readMail(session, { wait: 20, peek: false, all: false, limit: 10 });
+  assert.equal(wait.kind, 'longpoll'); if (wait.kind !== 'longpoll') throw new Error('expected waiter');
+  await mailStore.append({ id: 'pr-event', ts: new Date().toISOString(), from: 'external', to: session.id, type: 'message', body: 'result' });
+  store.add({ ...session, status: 'completed' }); runner.running.delete(session.id);
+  await service.notifyCommittedMail(session, 'FTown PR updates', true);
+  assert.equal((await mailStore.listUndelivered(session.id)).length, 1);
+  store.add(session); runner.running.add(session.id);
+  await service.notifyCommittedMail(session, 'FTown PR updates', true);
+  assert.deepEqual((await wait.messages).map(message => message.id), ['pr-event']);
+  assert.equal((await mailStore.listUndelivered(session.id)).length, 0);
+  service.stop();
+});

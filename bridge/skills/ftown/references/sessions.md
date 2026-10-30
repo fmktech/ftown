@@ -260,3 +260,15 @@ exists and installs the `ftown` command, compatible
 launchers, `~/.ftown/notify.sh`, and updates the unified skill
 under `~/.ftown/skills/ftown/` (linked into ~/.agents/skills and
 ~/.claude/skills).
+
+### Automatic PR result mail
+
+A PR linked to an agent session is monitored by the running bridge using the local
+`gh` account. Observed current-head GitHub rollup failures, successes, and merges
+arrive as durable FTown mail, including the PR and checks links. Pending checks are
+typically polled at one minute and completed checks at five minutes; quota, auth or
+offline delays apply, and changes between polls may not be observed. Clear the link
+to stop future observations. Durable enqueue does not guarantee agent processing.
+Already-stopped agents are not restarted; their mail remains
+queued. A delivery admitted before a stop can finish during that stop. A result notification is a fact, not authorization to merge or take other
+actions. Plain shell sessions are not monitored as agents.

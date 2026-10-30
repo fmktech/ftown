@@ -43,6 +43,7 @@ import { BridgeSecurityService, applicationJson } from './security/bridge/securi
 import type { ApplicationJson, EndpointIdentity, VerifiedApplication } from './security/protocol.js';
 import { createCommandHandler } from './command-rpc.js';
 import { PullRequestStatusService } from './pull-request-status.js';
+import { PullRequestEventWatcher } from './pull-request-events.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { SessionResurrection, shouldResurrectStoredSession } from './session-resurrection.js';
 import { TerminalPump } from './terminal-pump.js';
@@ -862,6 +863,12 @@ program
 
     localApiServer.setSessionController(sessionController);
     const pullRequestStatuses = new PullRequestStatusService();
+    const pullRequestEvents = new PullRequestEventWatcher({ bridgeId, store,
+      withSessionMutation: (id, task) => pump.withSessionWrite(id, task),
+      statusService: pullRequestStatuses, mailStore,
+      notifyCommitted: (session, sender) => localApiServer.notifyCommittedMail(session, sender, true),
+    });
+    pullRequestEvents.start();
 
     const updateHome = realpathSync(homedir());
     const stagingRoot = join(updateHome, '.ftown', 'updates');
@@ -1043,6 +1050,7 @@ program
       if (shuttingDown) return;
       shuttingDown = true;
       console.log('\n[Bridge] Shutting down...');
+      await pullRequestEvents.stop();
       attentionStore.stopNotifications();
       stopPushSessionObserver();
       pushNotifier?.stop();

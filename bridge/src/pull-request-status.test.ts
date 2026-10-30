@@ -113,3 +113,46 @@ test('unscoped GraphQL errors conservatively preserve all aliases; rateLimit-onl
   let status = (await service.get([url(1)])).statuses[0]; assert.equal(status.state, 'passed'); assert.equal(status.reason, 'unavailable');
   now += 300_000; status = (await service.get([url(1)])).statuses[0]; assert.equal(status.state, 'failed'); assert.equal(status.stale, false);
 });
+
+test('internal observations expose only verified head and keep the public wire unchanged', async () => {
+  let now = 1_000_000;
+  const service = new PullRequestStatusService(() => now, async () => reply([pr('FAILURE'), pr('SUCCESS', 1, 'wrong')]));
+  service.setBackgroundUrls([url(1), url(2)]);
+  const result = await service.getObservations([url(1), url(2)]);
+  assert.equal(result.observations[0].headOid, 'head'); assert.equal(result.observations[0].state, 'failed');
+  assert.equal(result.observations[1].headOid, undefined); assert.equal(result.observations[1].reason, 'unavailable');
+  assert.ok(result.observations[0].attempt > 0); assert.ok(result.observations[1].attempt > 0);
+  const wire = await service.get([url(1)]); assert.equal('headOid' in wire.statuses[0], false); assert.equal('attempt' in wire.statuses[0], false);
+  now += 60_000; assert.equal((await service.getObservations([url(2)])).observations[0].attempt, result.observations[1].attempt);
+});
+
+test('reserves foreground and pinned background slots amid churn while retaining in-flight entries', async () => {
+  let now = 1_000_000; const queries: string[] = []; let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; }); let first = true;
+  const service = new PullRequestStatusService(() => now, async input => {
+    queries.push(input); if (first) { first = false; await gate; }
+    const count = (input.match(/repository\(/g) ?? []).length;
+    return reply(Array(count).fill(pr('PENDING')));
+  });
+  service.setBackgroundUrls([url(900)]);
+  const pending = service.get(Array.from({ length: 25 }, (_, i) => url(i + 1)));
+  const churn = service.get(Array.from({ length: 600 }, (_, i) => url(i + 1000)));
+  release(); await Promise.all([pending, churn]);
+  assert.match(queries[0], /pullRequest\(number: 900\)/); assert.match(queries[0], /pullRequest\(number: 1\)/);
+  const pinned = (await service.getObservations([url(900)])).observations[0];
+  assert.equal(pinned.state, 'in_progress'); assert.equal(pinned.headOid, 'head');
+  now += 60_000; service.setBackgroundUrls([url(901)]);
+  await service.get(Array.from({ length: 30 }, (_, i) => url(i + 2000)));
+  assert.match(queries[1], /pullRequest\(number: 901\)/);
+});
+
+test('contradictory merged flag and state never produce a fresh merge fact', async () => {
+  const service = new PullRequestStatusService(() => 1_000_000, async () => reply([
+    { state: 'OPEN', merged: true }, { state: 'CLOSED', merged: true },
+    { state: 'MERGED', merged: false }, { state: 'MERGED', merged: null }, { state: 'MERGED', merged: true },
+  ]));
+  service.setBackgroundUrls([url(1), url(2), url(3), url(4), url(5)]);
+  const { observations } = await service.getObservations([url(1), url(2), url(3), url(4), url(5)]);
+  for (const item of observations.slice(0, 4)) { assert.equal(item.state, 'unknown'); assert.equal(item.reason, 'unavailable'); assert.equal(item.stale, true); }
+  assert.equal(observations[4].state, 'merged'); assert.equal(observations[4].stale, false);
+});

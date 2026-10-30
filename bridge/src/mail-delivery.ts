@@ -335,10 +335,22 @@ export class MailDeliveryService {
       typeof body.threadId === 'string' && body.threadId.trim() ? body.threadId.trim() : undefined;
 
     const msg = createMailMessage({ from, fromName, to: session.id, type, threadId, body: text });
+    await this.mailStore.append(msg);
+    await this.notifyCommittedMail(session, fromName ?? from);
+    return { ok: true, id: msg.id };
+  }
+
+  /** Wake existing consumers for committed unread mail without appending it again. */
+  async notifyCommittedMail(session: Session, sender: string, requireRunning = false): Promise<void> {
     const mailStore = this.mailStore;
-    let hadWaiter = false;
+    if (!mailStore || this.stopped) return;
+    let hadWaiter = false, pending = false;
     await this.withSelection(session.id, async () => {
-      await mailStore.append(msg);
+      if (requireRunning) {
+        const current = await this.store?.loadSession(session.id);
+        if (!current || current.status !== 'running' || !this.runner?.isRunning(session.id) || this.stopped) return;
+        session = current;
+      }
       const waiter = this.mailWaiters.get(session.id);
       hadWaiter = !!waiter;
       if (waiter) {
@@ -348,18 +360,15 @@ export class MailDeliveryService {
           waiter.deliver(marked);
         }
       }
+      pending = (await mailStore.listUndelivered(session.id)).length > 0;
     });
-    // A waiter may have consumed this message; a later check clears an empty wake.
-    // Always arm Codex so new arrivals cannot be stranded behind an in-flight claim.
-    if ((!hadWaiter || session.shellType === 'codex') && session.shellType !== 'pi') {
+    if (pending && (!hadWaiter || session.shellType === 'codex') && session.shellType !== 'pi') {
       const legacyDelay = HOOKED_SHELL_TYPES.has(session.shellType ?? 'claude')
         ? MAIL_NUDGE_DELAY_HOOKED_MS : MAIL_NUDGE_DELAY_MS;
       if (!this.pendingNudgeFrom.has(session.id)) this.legacyReadyAt.set(session.id, this.now() + legacyDelay);
       const nudgeDelay = session.shellType === 'codex' || session.shellType === 'muse' ? MAIL_NUDGE_DELAY_MS : legacyDelay;
-      this.scheduleMailNudge(session.id, fromName ?? from, nudgeDelay);
+      this.scheduleMailNudge(session.id, sender, nudgeDelay);
     }
-
-    return { ok: true, id: msg.id };
   }
 
   /**

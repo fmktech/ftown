@@ -54,6 +54,8 @@ export interface Session {
   env?: Record<string, string>;
   parentSessionId?: string;
   pullRequestUrl?: string;
+  /** Private incarnation fencing for linked PR notifications. */
+  pullRequestLinkId?: string;
   preview?: SessionPreviewDescriptor;
   previewSource?: SessionPreviewSource;
   runtime?: SessionRuntime;

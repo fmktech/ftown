@@ -126,3 +126,11 @@ describe('CentrifugoClient.publishSessionUpdate — token never crosses the wire
     assert.deepStrictEqual(session.env, { ANTHROPIC_AUTH_TOKEN: 'sk-secret-token', PATH: '/usr/bin' });
   });
 });
+
+it('keeps PR link incarnation private on the wire', () => {
+  const session = makeSession({ pullRequestUrl: 'https://github.com/owner/repo/pull/1', pullRequestLinkId: 'private-link' });
+  const wire = toWireSession(session);
+  assert.equal(wire.pullRequestUrl, session.pullRequestUrl);
+  assert.equal('pullRequestLinkId' in wire, false);
+  assert.equal(session.pullRequestLinkId, 'private-link');
+});
