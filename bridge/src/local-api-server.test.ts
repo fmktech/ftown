@@ -705,3 +705,43 @@ it('queues browser session replies through the durable mail store without an HTT
   assert.deepEqual({ id: messages[0].id, to: messages[0].to, from: messages[0].from, fromName: messages[0].fromName, type: messages[0].type, body: messages[0].body },
     { id: result.id, to: 'session', from: 'browser', fromName: 'You', type: 'message', body: '  first line\nsecond line  ' });
 });
+
+it('child idle queues one ordinary durable parent message and rejects ineligible targets without a listener', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'ftown-idle-parent-'));
+  const server = new BaseLocalApiServer(); t.after(() => { server.stop(); rmSync(dir, { recursive: true, force: true }); });
+  const base = (id: string): Session => ({ id, name: id, command: 'fake', shellType: 'pi', status: 'running', bridgeId: 'bridge', createdAt: '', updatedAt: '' });
+  const child = { ...base('child'), name: 'Worker', parentSessionId: 'parent' };
+  const parent = base('parent'); const sessions = new Map<string, Session>([['child', child], ['parent', parent]]);
+  let reads = 0; let reparentDuringLookup = false; let cancelDuringLookup = false; let current = true;
+  const store = { listSessions: async () => [], loadSession: async (id: string) => {
+    reads++; if (reparentDuringLookup && reads === 3) sessions.set('child', { ...child, parentSessionId: 'other' });
+    if (cancelDuringLookup && reads === 3) current = false;
+    return sessions.get(id) ?? null;
+  } } as unknown as SessionStore;
+  const running = new Set(['child', 'parent']);
+  const runner = Object.assign(new EventEmitter(), { isRunning: (id: string) => running.has(id), write: () => { throw new Error('unexpected direct terminal write'); } }) as unknown as ProcessRunner;
+  const mail = new MailStore(id => join(dir, id));
+  server.setDependencies(store, runner, {} as CentrifugoClient, 'user'); server.setMailStore(mail);
+  server.setSecurity({} as BridgeSecurityService, { bridgeId: 'bridge' } as Parameters<BaseLocalApiServer['setSecurity']>[1], async () => null);
+  const signal = { sessionId: 'child', cycleId: 'cycle-1', startedAt: '2026-10-30T12:00:00Z' };
+  const attempt = async () => { reads = 0; await server.notifyIdleParent(signal, () => current); };
+  const expectNone = async () => assert.equal((await mail.listAll('parent', 0)).length, 0);
+  for (const invalid of [undefined, { ...child, parentSessionId: undefined }, { ...child, parentSessionId: 'child' }, { ...child, bridgeId: 'other' }, { ...child, status: 'completed' as const }, { ...child, shellType: 'shell' as const }]) {
+    if (invalid) sessions.set('child', invalid); else sessions.delete('child');
+    await attempt(); await expectNone();
+  }
+  sessions.set('child', child);
+  for (const invalid of [undefined, { ...parent, bridgeId: 'other' }, { ...parent, status: 'completed' as const }, { ...parent, shellType: 'shell' as const }]) {
+    if (invalid) sessions.set('parent', invalid); else sessions.delete('parent');
+    await attempt(); await expectNone();
+  }
+  sessions.set('parent', parent);
+  running.delete('child'); await attempt(); await expectNone(); running.add('child');
+  running.delete('parent'); await attempt(); await expectNone(); running.add('parent');
+  current = false; await attempt(); await expectNone(); current = true;
+  cancelDuringLookup = true; await attempt(); await expectNone(); cancelDuringLookup = false; current = true;
+  reparentDuringLookup = true; await attempt(); await expectNone(); reparentDuringLookup = false; sessions.set('child', child);
+  await attempt(); const messages = await mail.listAll('parent', 0); assert.equal(messages.length, 1);
+  assert.deepEqual({ from: messages[0].from, fromName: messages[0].fromName, to: messages[0].to, type: messages[0].type, threadId: messages[0].threadId, body: messages[0].body },
+    { from: 'child', fromName: 'Worker', to: 'parent', type: 'message', threadId: 'cycle-1', body: 'Child session Worker (child) has been idle for 120 seconds. Check its status before assigning more work.' });
+});
