@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import * as publisher from './publish-packages.mjs';
 import { checkReleaseTag, lookupVersion, packPackages, parsePackResult, publishPackages, releasePlan, waitForPublishedPackages } from './publish-packages.mjs';
 
 const commit = 'a'.repeat(40);
@@ -216,4 +217,21 @@ test('both real npm artifacts have identical files, modes and manifest fields ex
     });
     assert.deepEqual(snapshots[0], snapshots[1]);
   } finally { rmSync(temporary, { recursive: true, force: true }); }
+});
+
+
+test('PR version availability rejects either published name including same commit and propagates lookup errors', () => {
+  const seen = [];
+  assert.equal(publisher.assertUnpublishedVersion(version, (name, requestedVersion) => { seen.push([name, requestedVersion]); return undefined; }), undefined);
+  assert.deepEqual(seen, [['ftown', version], ['ftown-bridge', version]]);
+  for (const collision of ['ftown', 'ftown-bridge']) {
+    assert.throws(() => publisher.assertUnpublishedVersion(version, name => name === collision ? { ...metadata, name } : undefined), /already published/);
+  }
+  assert.throws(() => publisher.assertUnpublishedVersion(version, () => { throw new Error('network'); }), /network/);
+  for (const response of [
+    { status: 1, stdout: '{"error":{"code":"E401"}}', stderr: 'auth' },
+    { status: 1, stdout: '{"error":{"code":"ENETUNREACH"}}', stderr: 'network' },
+    { status: 0, stdout: 'invalid', stderr: '' },
+  ]) assert.throws(() => publisher.assertUnpublishedVersion(version, name => lookupVersion(name, version, () => response)), /Cannot inspect|Invalid registry metadata/);
+  assert.deepEqual(releasePlan(version, commit, () => metadata).map(entry => entry.publish), [false, false]);
 });

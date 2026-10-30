@@ -52,6 +52,15 @@ export function parsePackResult(output, name, version) {
   return artifact;
 }
 
+/** PR versions must be unused under both names, regardless of existing gitHead. */
+export function assertUnpublishedVersion(version, lookup = lookupVersion) {
+  for (const name of PACKAGE_NAMES) {
+    if (lookup(name, version) !== undefined) {
+      throw new Error(`${name}@${version} is already published. Bump bridge/package.json and its lockfile before merging.`);
+    }
+  }
+}
+
 /** Pure planning seam: an exact existing version is reusable only from this commit. */
 export function releasePlan(version, commit, lookup = lookupVersion) {
   return PACKAGE_NAMES.map((name) => {
@@ -139,13 +148,18 @@ export function publishPackages(plan, artifacts, publish = (path) => checked('np
 async function main() {
   const [action, outputDirectory] = process.argv.slice(2);
   const { version } = JSON.parse(readFileSync(join(bridgeDirectory, 'package.json'), 'utf8'));
+  if (action === 'check-version') {
+    assertUnpublishedVersion(version);
+    console.log(`Both npm package names are available at ${version}.`);
+    return;
+  }
   const commit = checked('git', ['rev-parse', 'HEAD']);
   if (action === 'pack') {
     if (!outputDirectory) throw new Error('Usage: node scripts/publish-packages.mjs pack OUTPUT_DIRECTORY');
     console.log(JSON.stringify(packPackages(version, commit, outputDirectory), null, 2));
     return;
   }
-  if (!['preflight', 'publish', 'tag'].includes(action)) throw new Error('Expected preflight, pack, publish or tag');
+  if (!['preflight', 'publish', 'tag'].includes(action)) throw new Error('Expected check-version, preflight, pack, publish or tag');
   if (action === 'tag') {
     checkReleaseTag(version, commit);
     await waitForPublishedPackages(version, commit);
