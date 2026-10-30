@@ -28,3 +28,6 @@ Independent review: R1 approved the final card and preview repairs with no findi
 
 ## Final isolated verification
 Root Linux run: all six E2E cases passed in 2.8 minutes, workers=2 and retries=0. Account-trust passed in 2.7 minutes; cross-browser names in 51.4 seconds; preview desktop/mobile and navigation desktop/mobile all passed. Also 83 focused UI unit tests, production build/typecheck, database/rate-limit/security/MCP smokes passed. Log /tmp/pr168-fixed-repro.log. No navigation changes, assertion weakening or retry/timeout increases were needed. Services and isolated browser trust were cleaned up by the guarded wrapper.
+
+## Integration with newer main
+Main0d344db (#169) landed the same durable refresh sequence concept alongside newer quiet authority/cache behavior. The final resolution uses main manualRequested/manualApplied and preserves its transient retry semantics instead of the older terminal-consumption proposal above. Only unregistered acknowledgement differs from main, using the captured sequence so a newer click survives. All main tests retained, our seven regression cases added;44 focused tests and tsc passed. R1 independently approved. See I1 in the PR168 investigation for ownership and integration evidence.

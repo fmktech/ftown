@@ -112,29 +112,45 @@ function authorityFixture() {
   const pin = { bridgeId: 'bridge', endpoint, permissions: ['read', 'control'] };
   const listeners = new Set<() => void>();
   const accountListeners = new Set<() => void>();
-  let allowed = true;
+  let allowed = true; let status = 'ready';
   const runtime = { identity: { endpoint: { ...endpoint, id: 'browser-key', kind: 'browser' } },
-    bridge: () => pin, state: () => ({ status: 'ready', endpoint: pin.endpoint }),
+    bridge: () => pin, state: () => ({ status, endpoint: pin.endpoint }),
     assertCanSend: () => { if (!allowed) throw new Error('revoked'); },
     onChange: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener); } };
   const subscribeAuthority = (listener: () => void) => { accountListeners.add(listener); return () => accountListeners.delete(listener); };
   const notify = () => listeners.forEach(listener => listener());
   const account = (next: boolean) => { allowed = next; accountListeners.forEach(listener => listener()); };
-  return { client: { securityRuntime: runtime } as unknown as MessageClient, pin, notify, account, subscribeAuthority };
+  return { client: { securityRuntime: runtime } as unknown as MessageClient, pin, notify, account, subscribeAuthority, setStatus: (value: string) => { status = value; notify(); }, expire: () => { allowed = false; } };
 }
-it('preserves the verified frame across an unchanged ready-to-ready security notification', async () => {
+it('keeps a verified frame visible across a benign selected or unrelated security notification', async () => {
   const h = stablePreviewHarness(); const auth = authorityFixture();
   const hook = renderHook(({ generation }) => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: generation, sendCommand: h.sendCommand, subscribeAuthority: auth.subscribeAuthority }), { initialProps: { generation: 1 } });
   await act(async () => {});
   const state = hook.result.current.state; if (state.kind !== 'ready') throw new Error('expected ready');
-  act(() => auth.notify());
-  hook.rerender({ generation: 2 });
-  expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: h.html, key: state.key, verifying: true });
+  act(() => auth.notify()); hook.rerender({ generation: 2 });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: h.html, key: state.key });
+});
+it('keeps authorized content while request transport is offline and resumes with knownRevision', async () => {
+  const h = stablePreviewHarness(); const auth = authorityFixture();
+  const hook = renderHook(({ readable }) => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable, securityGeneration: 1, sendCommand: h.sendCommand, subscribeAuthority: auth.subscribeAuthority }), { initialProps: { readable: true } });
+  await act(async () => {}); const old = hook.result.current.state; if (old.kind !== 'ready') throw new Error('expected ready');
+  act(() => auth.setStatus('offline')); hook.rerender({ readable: false });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: h.html, key: old.key });
+  const calls = h.sendCommand.mock.calls.length;
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  expect(h.sendCommand).toHaveBeenCalledTimes(calls);
+  act(() => auth.setStatus('connecting'));
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', key: old.key });
+  act(() => auth.setStatus('ready')); hook.rerender({ readable: true });
   expect(h.sendCommand.mock.calls.at(-1)?.[0].payload).toMatchObject({ knownRevision: h.revision });
-  await act(async () => { h.pending.shift()!({ requestId: 'old', success: true, data: { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
-  expect(hook.result.current.state).toMatchObject({ kind: 'ready', key: state.key, verifying: true });
-  await act(async () => { h.pending.shift()!({ requestId: 'current', success: true, data: { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
-  expect(hook.result.current.state).toMatchObject({ kind: 'ready', key: state.key, verifying: false });
+});
+it('expires authorized content on the existing authority check timer while offline and hidden', async () => {
+  const h = stablePreviewHarness(); const auth = authorityFixture();
+  const hook = renderHook(({ readable, visible }) => useSessionPreview({ client: auth.client, userId: 'user', target, visible, readable, securityGeneration: 1, sendCommand: h.sendCommand, subscribeAuthority: auth.subscribeAuthority }), { initialProps: { readable: true, visible: true } });
+  await act(async () => {}); act(() => auth.setStatus('offline')); hook.rerender({ readable: false, visible: false });
+  expect(hook.result.current.state.kind).toBe('ready'); auth.expire();
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect(hook.result.current.state.kind).not.toBe('ready');
 });
 it('latches account authority loss and recovery in one batch and ignores an old reply', async () => {
   const h = stablePreviewHarness(); const auth = authorityFixture();
@@ -238,7 +254,7 @@ it('ignores a rejected request from a prior security generation', async () => {
   await act(async () => {}); act(() => auth.notify());
   act(() => auth.notify());
   await act(async () => { rejectOld(new Error('late')); });
-  expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: h.html, verifying: true });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: h.html });
 });
 it('latches a selected bridge key change and restoration in one batch', async () => {
   const h = stablePreviewHarness(); const auth = authorityFixture();
@@ -251,6 +267,105 @@ it('latches a selected bridge key change and restoration in one batch', async ()
   await act(async () => { h.pending.shift()!({ requestId: 'new', success: true, data: { state: 'ready', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
   const next = hook.result.current.state; if (next.kind !== 'ready') throw new Error('expected ready');
   expect(next.key).not.toBe(old.key);
+});
+it.each(['bridge_offline', 'epoch_changed', 'permission_denied', 'unknown'])('only retains cached content for the typed response code %s', async code => {
+  const h = stablePreviewHarness(); const auth = authorityFixture();
+  const hook = renderHook(() => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand, subscribeAuthority: auth.subscribeAuthority }));
+  await act(async () => {}); const old = hook.result.current.state; if (old.kind !== 'ready') throw new Error('expected ready');
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  await act(async () => { h.pending.shift()!({ requestId: 'failure', success: false, data: { code } }); });
+  if (code === 'bridge_offline' || code === 'epoch_changed') expect(hook.result.current.state).toMatchObject({ kind: 'ready', key: old.key });
+  else expect(hook.result.current.state.kind).toBe('error');
+});
+it.each(['bridge_offline', 'epoch_changed', 'permission_denied', 'unknown'])('only retains cached content for the typed thrown error %s', async code => {
+  const h = stablePreviewHarness(); const auth = authorityFixture(); let statusCalls = 0;
+  const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
+    if (command.type === 'session_preview_status' && ++statusCalls === 2) return Promise.reject(Object.assign(new Error('failure'), { code }));
+    return h.sendCommand(command);
+  });
+  const hook = renderHook(() => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand, subscribeAuthority: auth.subscribeAuthority }));
+  await act(async () => {}); const old = hook.result.current.state; if (old.kind !== 'ready') throw new Error('expected ready');
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  if (code === 'bridge_offline' || code === 'epoch_changed') expect(hook.result.current.state).toMatchObject({ kind: 'ready', key: old.key });
+  else expect(hook.result.current.state.kind).toBe('error');
+});
+it('latches authority loss and recovery while the preview is offline and hidden', async () => {
+  const h = stablePreviewHarness(); const auth = authorityFixture();
+  const hook = renderHook(({ readable, visible }) => useSessionPreview({ client: auth.client, userId: 'user', target, visible, readable, securityGeneration: 1, sendCommand: h.sendCommand, subscribeAuthority: auth.subscribeAuthority }), { initialProps: { readable: true, visible: true } });
+  await act(async () => {}); const old = hook.result.current.state; if (old.kind !== 'ready') throw new Error('expected ready');
+  act(() => auth.setStatus('offline')); hook.rerender({ readable: false, visible: false });
+  expect(hook.result.current.state.kind).toBe('ready');
+  act(() => { auth.account(false); auth.account(true); });
+  expect(hook.result.current.state.kind).toBe('offline');
+  act(() => auth.setStatus('ready')); hook.rerender({ readable: true, visible: true });
+  expect(h.sendCommand.mock.calls.at(-1)?.[0].payload).not.toHaveProperty('knownRevision');
+  await act(async () => { h.pending.shift()!({ requestId: 'new', success: true, data: { state: 'ready', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  const next = hook.result.current.state; if (next.kind !== 'ready') throw new Error('expected ready');
+  expect(next.key).not.toBe(old.key);
+});
+it('rechecks current account authority before accepting a result even before the next timer', async () => {
+  const h = stablePreviewHarness(); const auth = authorityFixture();
+  const hook = renderHook(() => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand, subscribeAuthority: auth.subscribeAuthority }));
+  await act(async () => {}); expect(hook.result.current.state.kind).toBe('ready');
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  auth.expire();
+  await act(async () => { h.pending.shift()!({ requestId: 'late', success: true, data: { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  expect(hook.result.current.state.kind).toBe('offline');
+});
+it('preserves a manual refresh across a benign authority notification and applies it once after validation', async () => {
+  const h = stablePreviewHarness(); const auth = authorityFixture();
+  const hook = renderHook(() => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand, subscribeAuthority: auth.subscribeAuthority }));
+  await act(async () => {});
+  const initial = hook.result.current.state; if (initial.kind !== 'ready') throw new Error('expected ready');
+  act(() => hook.result.current.refresh());
+  expect(h.pending).toHaveLength(1);
+  act(() => auth.notify());
+  expect(h.pending).toHaveLength(2);
+  const unchanged = { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length };
+  await act(async () => { h.pending.shift()!({ requestId: 'stale', success: true, data: unchanged }); });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', key: initial.key });
+  await act(async () => { h.pending.shift()!({ requestId: 'current', success: true, data: unchanged }); });
+  const refreshed = hook.result.current.state; if (refreshed.kind !== 'ready') throw new Error('expected ready');
+  expect(refreshed.key).not.toBe(initial.key);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  await act(async () => { h.pending.shift()!({ requestId: 'ordinary', success: true, data: unchanged }); });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', key: refreshed.key });
+});
+it('keeps a newer manual refresh requested while the previous one is pending', async () => {
+  const h = stablePreviewHarness(); const auth = authorityFixture();
+  const hook = renderHook(() => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand, subscribeAuthority: auth.subscribeAuthority }));
+  await act(async () => {}); const initial = hook.result.current.state; if (initial.kind !== 'ready') throw new Error('expected ready');
+  act(() => hook.result.current.refresh()); act(() => hook.result.current.refresh());
+  const unchanged = { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length };
+  await act(async () => { h.pending.shift()!({ requestId: 'first', success: true, data: unchanged }); });
+  const first = hook.result.current.state; if (first.kind !== 'ready') throw new Error('expected ready');
+  expect(first.key).not.toBe(initial.key); expect(h.pending).toHaveLength(1);
+  await act(async () => { h.pending.shift()!({ requestId: 'second', success: true, data: unchanged }); });
+  const second = hook.result.current.state; if (second.kind !== 'ready') throw new Error('expected ready');
+  expect(second.key).not.toBe(first.key);
+});
+it('cancels a pending manual refresh on batched authority loss and recovery', async () => {
+  const h = stablePreviewHarness(); const auth = authorityFixture();
+  const hook = renderHook(() => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand, subscribeAuthority: auth.subscribeAuthority }));
+  await act(async () => {});
+  act(() => hook.result.current.refresh());
+  const stale = h.pending.shift()!;
+  act(() => { auth.account(false); auth.account(true); });
+  await act(async () => { stale({ requestId: 'old', success: true, data: { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  expect(hook.result.current.state.kind).toBe('loading');
+  await act(async () => { h.pending.shift()!({ requestId: 'new', success: true, data: { state: 'ready', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  expect(hook.result.current.state.kind).toBe('ready');
+  expect(h.pending).toHaveLength(0);
+});
+it('does not consume a newer refresh when the previous request fails', async () => {
+  const h = stablePreviewHarness(); const auth = authorityFixture();
+  const hook = renderHook(() => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand, subscribeAuthority: auth.subscribeAuthority }));
+  await act(async () => {}); act(() => hook.result.current.refresh()); act(() => hook.result.current.refresh());
+  await act(async () => { h.pending.shift()!({ requestId: 'failed', success: false, data: { code: 'unknown' } }); });
+  expect(hook.result.current.state.kind).toBe('loading');
+  expect(h.pending).toHaveLength(1);
+  await act(async () => { h.pending.shift()!({ requestId: 'retry', success: true, data: { state: 'ready', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  expect(hook.result.current.state.kind).toBe('ready'); expect(h.pending).toHaveLength(0);
 });
 
 it.each([false, true])('manual refresh survives an unchanged authority notification: %s', async (notify) => {
@@ -267,14 +382,14 @@ it.each([false, true])('manual refresh survives an unchanged authority notificat
     act(() => auth.notify());
     expect(h.pending).toHaveLength(1);
     await act(async () => { old({ requestId: 'old', success: true, data: unchanged }); });
-    expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: h.html, key: initial.key, verifying: true });
+    expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: h.html, key: initial.key });
     const current = h.pending.shift()!;
     await act(async () => { current({ requestId: 'current', success: true, data: unchanged }); });
   } else {
     await act(async () => { old({ requestId: 'manual', success: true, data: unchanged }); });
   }
   const result = hook.result.current.state;
-  expect(result).toMatchObject({ kind: 'ready', html: h.html, verifying: false });
+  expect(result).toMatchObject({ kind: 'ready', html: h.html });
   if (result.kind !== 'ready') throw new Error('expected ready after refresh');
   expect(result.key).not.toBe(initial.key);
 });
@@ -297,7 +412,7 @@ it('coalesces refresh clicks during an active request into one follow-up', async
   expect(h.sendCommand).toHaveBeenCalledTimes(4);
 });
 
-it('consumes a failed manual request without an immediate retry loop', async () => {
+it('does not immediately retry a failed manual request', async () => {
   const h = stablePreviewHarness();
   const hook = renderHook(() => useSessionPreview({ client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand }));
   await act(async () => {}); act(() => hook.result.current.refresh());
