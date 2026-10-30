@@ -7,8 +7,9 @@ export const maxDuration = 30;
 export async function POST(request: Request): Promise<NextResponse> {
   try {
     const identity=await bridgePushIdentity(request);
-    const config=pushConfig(); if(!config) throw new PushError("push_unavailable",503);
     const event=parsePushEvent(await boundedJson(request));
+    if(event.kind === "idle") return NextResponse.json({accepted:true,pending:false},{status:202});
+    const config=pushConfig(); if(!config) throw new PushError("push_unavailable",503);
     const store=new PushStore(); await store.rate(`${identity.owner}:${identity.bridgeId}`,"push-events",120);
     const saved=await store.ingest(identity.owner,identity.bridgeId,event);
     const deliveries=await store.claim(identity.owner,saved.id);
