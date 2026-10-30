@@ -14,7 +14,7 @@ import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 
 import type { SessionStore } from './session-store.js';
 import type { MailStore } from './mail-store.js';
-import { AttentionStore, AttentionError } from './attention-store.js';
+import { AttentionStore, AttentionError, type SubagentIdleSignal } from './attention-store.js';
 import { sanitizeAttentionText } from './attention-events.js';
 import type { Session } from './types.js';
 import { MailDeliveryService, sanitizeMessageText, parseNativeWakeRegistration, NativeWakeRegistrationError } from './mail-delivery.js';
@@ -1182,6 +1182,28 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     }
 
     jsonResponse(res, 404, { error: 'Not found' });
+  }
+
+  /** Best-effort child-idle signal through the ordinary durable mail path. */
+  async notifyIdleParent(signal: SubagentIdleSignal, isCurrent: () => boolean): Promise<void> {
+    const store = this.store; const runner = this.runner; const bridgeId = this.securityInfo?.bridgeId;
+    if (!store || !runner || !bridgeId || !this.mail.isReady() || !/^[A-Za-z0-9_-]{1,200}$/.test(signal.sessionId) || !isCurrent()) return;
+    const child = await store.loadSession(signal.sessionId);
+    if (!child || child.id !== signal.sessionId || child.bridgeId !== bridgeId || child.status !== 'running' || child.shellType === 'shell'
+      || !child.parentSessionId || child.parentSessionId === child.id || !/^[A-Za-z0-9_-]{1,200}$/.test(child.parentSessionId)) return;
+    const parentId = child.parentSessionId;
+    const parent = await store.loadSession(parentId);
+    if (!parent || parent.id !== parentId || parent.bridgeId !== bridgeId || parent.status !== 'running' || parent.shellType === 'shell') return;
+    const currentParent = await store.loadSession(parentId);
+    const currentChild = await store.loadSession(signal.sessionId);
+    if (!isCurrent() || !currentChild || currentChild.id !== signal.sessionId || currentChild.bridgeId !== bridgeId || currentChild.status !== 'running'
+      || currentChild.shellType === 'shell' || currentChild.parentSessionId !== parentId
+      || !currentParent || currentParent.id !== parentId || currentParent.bridgeId !== bridgeId || currentParent.status !== 'running' || currentParent.shellType === 'shell'
+      || !runner.isRunning(currentChild.id) || !runner.isRunning(currentParent.id)) return;
+    const name = sanitizeAttentionText(currentChild.name, 200) || 'Session';
+    if (!isCurrent()) return;
+    await this.mail.acceptMail(currentParent, { from: currentChild.id, fromName: name, type: 'message', threadId: signal.cycleId,
+      body: `Child session ${name} (${currentChild.id}) has been idle for 120 seconds. Check its status before assigning more work.` });
   }
 
   private async handleInboxPost(
