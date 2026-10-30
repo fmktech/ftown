@@ -262,6 +262,26 @@ describe("Account devices", () => {
     expect(f.state.trust!.checkpoint.bridges[0].label).toBe("Signed computer");
     expect(f.state.trust!.checkpoint.devices[0].label).toBe("Laptop");
   });
+  it("renames an unselected account browser inline without selecting it or revoking access", async () => {
+    const f = accountFixture(2); Object.assign(f.client, { ownerId: "owner" });
+    const names: { kind: "browser" | "bridge"; id: string; name: string }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, options?: RequestInit) => {
+      if (options?.method === "PUT") { const request = JSON.parse(String(options.body)); names.splice(0, names.length, request); return reply({ name: request }); }
+      return reply({ names, eligible: [{ kind: "browser", id: "0" }, { kind: "browser", id: "1" }] });
+    }));
+    const execute = mockExecutor();
+    const view = render(<SecurityDevices currentEndpointId="0" execute={execute} accountClient={f.client} accountState={f.state} />);
+    const rename = await screen.findByRole("button", { name: "Rename Phone" }); await waitFor(() => expect((rename as HTMLButtonElement).disabled).toBe(false));
+    const phone = screen.getByRole("button", { name: /^Browser Phone:/ }); expect(phone.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(rename); fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Work phone" } });
+    expect(phone.getAttribute("aria-pressed")).toBe("false"); expect(f.revoke).not.toHaveBeenCalled();
+    view.rerender(<SecurityDevices currentEndpointId="0" execute={execute} accountClient={f.client} accountState={f.state} />);
+    expect((screen.getByLabelText("Display name") as HTMLInputElement).value).toBe("Work phone");
+    fireEvent.submit(screen.getByLabelText("Display name").closest("form")!);
+    const newPencil = await screen.findByRole("button", { name: "Rename Work phone" }); expect(document.activeElement).toBe(newPencil);
+    expect(screen.getByRole("button", { name: /^Browser Work phone:/ }).getAttribute("aria-pressed")).toBe("false");
+    expect(view.container.querySelector("button button, button input")).toBeNull(); expect(f.revoke).not.toHaveBeenCalled();
+  });
   it("puts private CLI recovery instructions on an independent computer without implying account sharing", () => {
     const f = accountFixture(1); const execute = mockExecutor();
     render(<SecurityDevices bridge={{ ...bridge, security: { ...bridge.security, status: "unpaired" } }} bridges={[{ ...bridge, security: { ...bridge.security, status: "unpaired" } }]} currentEndpointId="0" execute={execute} accountClient={f.client} accountState={f.state} />);
@@ -504,6 +524,7 @@ describe("Account devices", () => {
     expect(view.container.querySelector("button button")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /^Browser Phone:/ }));
     const remove = screen.getByRole("button", { name: "Remove access for Phone" });
+    expect(remove.textContent).toBe("Disconnect"); expect(remove.getAttribute("title")).toBe("Remove this browser’s access"); expect(remove.querySelector('svg[aria-hidden="true"]')).toBeTruthy();
     fireEvent.click(remove);
     expect(screen.getByRole("group", { name: "Confirm account device revocation" }).closest("[data-access-card]")?.getAttribute("data-access-card")).toBe("browser:1");
     expect(f.revoke).not.toHaveBeenCalled(); expect(execute).not.toHaveBeenCalled();

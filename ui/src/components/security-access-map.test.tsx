@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { DeviceDisplayNameEditor } from "./DeviceDisplayNameEditor";
 import { SecurityAccessMap, type SecurityAccessMapProps } from "./SecurityAccessMap";
 import { bridgeConnectionLock } from "./SecurityLockIcon";
 import { SessionList } from "./SessionList";
@@ -153,4 +154,20 @@ it("preserves a deliberate generic browser nickname instead of replacing it", ()
   const data = props(); data.browsers = [{ ...data.browsers[0], current: false, label: "This browser", customLabel: true }];
   render(<SecurityAccessMap {...data} />);
   expect(screen.getByRole("button", { name: /^Browser This browser:/ })).toBeTruthy();
+});
+
+it("keeps an inline browser editor separate from selection and preserves its draft", () => {
+  const data = props(); const select = vi.fn();
+  const renderName = (node: SecurityAccessMapProps["browsers"][number], label: string) => <DeviceDisplayNameEditor key={node.id} variant="inline" target={{ kind: "browser", id: node.id }} label={label} saving={false} error={null} setName={vi.fn()} />;
+  const view = render(<SecurityAccessMap {...data} onSelect={select} renderBrowserName={renderName} />);
+  const card = view.container.querySelector('[data-access-card="browser:self-browser"]')!;
+  expect(card.querySelector("button button, button input")).toBeNull();
+  const metadata = within(card as HTMLElement).getByText("Approved for your account"); expect(metadata.className).not.toContain("truncate");
+  const pencil = screen.getByRole("button", { name: "Rename This browser" }); fireEvent.click(pencil);
+  const input = screen.getByLabelText("Display name") as HTMLInputElement; fireEvent.change(input, { target: { value: "Draft" } });
+  expect(select).not.toHaveBeenCalled();
+  view.rerender(<SecurityAccessMap {...data} onSelect={select} renderBrowserName={renderName} selected={{ kind: "browser", id: data.browsers[1].id }} />);
+  expect(input.value).toBe("Draft"); expect(card.querySelector("button input, button button")).toBeNull();
+  fireEvent.keyDown(input, { key: "Escape" }); expect(document.activeElement).toBe(screen.getByRole("button", { name: "Rename This browser" }));
+  fireEvent.click(screen.getByRole("button", { name: /^Browser This browser/ })); expect(select).toHaveBeenCalledExactlyOnceWith({ kind: "browser", id: "self-browser" });
 });

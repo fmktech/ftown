@@ -1,14 +1,19 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useLayoutEffect, useRef, useState } from "react";
 import { DEVICE_DISPLAY_NAME_MAX_LENGTH, type DeviceNameTarget, type SetDeviceNameRequest } from "@/lib/device-display-name-contract";
 
-interface Props { target: DeviceNameTarget; label: string; customName?: string; disabledReason?: string; saving: boolean; error: string | null; setName: (input: SetDeviceNameRequest) => Promise<boolean> }
-export function DeviceDisplayNameEditor({ target, label, customName, disabledReason, saving, error, setName }: Props) {
+interface Props { target: DeviceNameTarget; label: string; customName?: string; disabledReason?: string; saving: boolean; error: string | null; setName: (input: SetDeviceNameRequest) => Promise<boolean>; variant?: "details" | "inline" }
+export function DeviceDisplayNameEditor({ target, label, customName, disabledReason, saving, error, setName, variant = "details" }: Props) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState("");
   const [pending, setPending] = useState<"save" | "reset" | null>(null);
   const [status, setStatus] = useState("");
+  const reasonId = useId();
+  const pencilRef = useRef<HTMLButtonElement>(null);
+  const restoreFocus = useRef(false);
+  useLayoutEffect(() => { if (!editing && restoreFocus.current) { restoreFocus.current = false; pencilRef.current?.focus(); } }, [editing]);
+  const closeInline = () => { restoreFocus.current = true; setEditing(false); };
   const trimmed = value.trim();
   const valid = !!trimmed && trimmed.length <= DEVICE_DISPLAY_NAME_MAX_LENGTH && !/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/.test(trimmed);
   async function submit(name: string | null) {
@@ -16,8 +21,24 @@ export function DeviceDisplayNameEditor({ target, label, customName, disabledRea
     setPending(name === null ? "reset" : "save"); setStatus("");
     const success = await setName({ ...target, name });
     setPending(null);
-    if (success) { setEditing(false); setStatus(name === null ? "Name reset." : "Display name saved."); }
+    if (success) { if (variant === "inline") closeInline(); else setEditing(false); setStatus(name === null ? "Name reset." : "Display name saved."); }
   }
+  if (variant === "inline") return <div className="min-w-0" {...(editing ? { "data-browser-name-editing": "" } : {})}>
+    {!editing ? <div className="flex min-w-0 items-center gap-1">
+      <span className="min-w-0 break-words text-[10px] font-semibold sm:text-xs [overflow-wrap:anywhere]">{label}</span>
+      <button ref={pencilRef} type="button" className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] sm:min-h-8 sm:min-w-8" aria-label={`Rename ${label}`} aria-describedby={disabledReason ? reasonId : undefined} title={disabledReason ?? `Rename ${label}`} disabled={!!disabledReason || saving} onClick={() => { setValue(customName ?? label); setStatus(""); setEditing(true); }}>
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="m4 20 4-.8L19 8.2a2.3 2.3 0 0 0-3.2-3.2L4.8 16zM14.5 6.3l3.2 3.2"/></svg>
+      </button>
+    </div> : <form className="min-w-0 space-y-1" onSubmit={event => { event.preventDefault(); void submit(trimmed); }} onKeyDown={event => { if (event.key === "Escape" && !saving && !pending) { event.preventDefault(); closeInline(); } }}>
+      <label className="flex min-w-0 flex-col gap-1 text-xs text-[var(--text-muted)]">Display name
+        <input autoFocus aria-describedby={disabledReason ? reasonId : undefined} disabled={saving || !!pending || !!disabledReason} value={value} onChange={event => setValue(event.target.value)} maxLength={DEVICE_DISPLAY_NAME_MAX_LENGTH} className="min-h-11 w-full min-w-0 rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)] px-3 text-sm text-[var(--text-primary)]" />
+      </label>
+      {!valid && <p className="text-xs text-[var(--status-error)]">Enter a name without control characters.</p>}
+      <div className="flex flex-wrap gap-1"><button type="submit" className="btn-accent min-h-11 sm:min-h-8" disabled={!valid || saving || !!pending || !!disabledReason}>{pending === "save" ? "Saving…" : "Save"}</button><button type="button" className="btn-ghost min-h-11 sm:min-h-8" disabled={saving || !!pending} onClick={closeInline}>Cancel</button>{customName !== undefined && <button type="button" className="btn-ghost min-h-11 sm:min-h-8" disabled={saving || !!pending || !!disabledReason} onClick={() => void submit(null)}>{pending === "reset" ? "Resetting…" : "Reset name"}</button>}</div>
+    </form>}
+    {disabledReason && <span id={reasonId} className={editing ? "block text-xs text-[var(--text-muted)]" : "sr-only"}>{disabledReason}</span>}
+    <p aria-live="polite" className={`break-words text-xs ${editing && error ? "text-[var(--status-error)]" : "text-[var(--text-muted)]"}`}>{editing && error ? error : status}</p>
+  </div>;
   return <div className="min-w-0 space-y-2 border-t border-[var(--border-subtle)] pt-2">
     <p className={`text-xs text-[var(--text-muted)] ${editing ? "" : "md:hidden"}`}>Display names appear across your signed-in browsers.</p>
     {!editing ? <div className="flex flex-wrap gap-2">
