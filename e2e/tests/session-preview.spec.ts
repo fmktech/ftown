@@ -84,6 +84,21 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
 
     const count = documentFrame(page, fileName).getByRole("button", { name: /^Count:/ });
     await count.click(); await expect(count).toHaveText("Count: 1");
+    await iframe(page, fileName).evaluate((element, value) => element.setAttribute("data-preview-node", value), suffix);
+    // The account client refreshes every 30s. Ignore an immediate focus-triggered
+    // read so this observes the subsequent periodic account-history response.
+    const interactedAt = Date.now();
+    await page.waitForResponse(response => {
+      const url = new URL(response.url());
+      return Date.now() - interactedAt >= 20_000 && url.pathname === "/api/security/account"
+        && response.request().method() === "GET" && response.status() === 200;
+    }, { timeout: 60_000 });
+    const afterTrustRefresh = transport.reads.filter(entry => entry.previewId === registration && entry.state === "unchanged").length;
+    await expect.poll(() => transport.reads.filter(entry => entry.previewId === registration && entry.state === "unchanged").length,
+      { timeout: 15_000 }).toBeGreaterThan(afterTrustRefresh);
+    await expect(iframe(page, fileName)).toBeVisible();
+    await expect(iframe(page, fileName)).toHaveAttribute("data-preview-node", suffix);
+    await expect(count).toHaveText("Count: 1");
     const unchanged = transport.reads.filter((entry) => entry.previewId === registration && entry.state === "unchanged").length;
     await expect.poll(() => transport.reads.filter((entry) => entry.previewId === registration && entry.state === "unchanged").length).toBeGreaterThan(unchanged);
     await expect(count).toHaveText("Count: 1");
@@ -112,6 +127,28 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     try { await page.mouse.move(drag.x + 100, drag.y + 60, { steps: 5 }); }
     finally { await page.mouse.up(); }
     await expect.poll(async () => Number(await separator(page).getAttribute("aria-valuenow"))).toBeGreaterThan(beforeDrag);
+    const savedRatio = await separator(page).getAttribute("aria-valuenow");
+    if (savedRatio === null) throw new Error("Preview split ratio unavailable");
+    const expand = page.getByRole("button", { name: "Expand preview", exact: true });
+    await expand.click();
+    await expect(page.getByRole("button", { name: "Collapse preview", exact: true })).toBeFocused();
+    await expect(separator(page)).toHaveCount(0);
+    await expect(page.locator("#dashboard-sidebar")).toBeVisible();
+    const expandedMain = await page.locator("main").boundingBox();
+    const expandedPreview = await previewRegion(page).boundingBox();
+    if (!expandedMain || !expandedPreview) throw new Error("Expanded preview geometry unavailable");
+    expect(Math.abs(expandedPreview.x - expandedMain.x)).toBeLessThanOrEqual(2);
+    expect(Math.abs(expandedPreview.width - expandedMain.width)).toBeLessThanOrEqual(2);
+    await screenshot(page, info, "preview-expanded");
+    await expect(page.locator(`.xterm[data-preview-fixture-terminal="${suffix}"]`)).toHaveCount(1);
+    await expect(page.locator(".xterm")).not.toBeVisible();
+    await expect(iframe(page, fileName)).toHaveAttribute("data-preview-node", suffix);
+    await expect(count).toHaveText("Count: 1");
+    await page.getByRole("button", { name: "Collapse preview", exact: true }).click();
+    await expect(separator(page)).toHaveAttribute("aria-valuenow", savedRatio);
+    await expect(page.locator(".xterm")).toBeVisible();
+    await expect(iframe(page, fileName)).toHaveAttribute("data-preview-node", suffix);
+    await expect(count).toHaveText("Count: 1");
     await separator(page).focus();
     await atomicHtml(path, second);
     await expect(documentFrame(page, fileName).getByRole("heading", { name: `${marker} version 2`, exact: true })).toBeVisible();
@@ -225,11 +262,16 @@ test.describe("mobile preview", () => {
       }
       await noHorizontalOverflow(page);
       await screenshot(page, info, "preview-mobile");
+      await iframe(page, fileName).evaluate((element, value) => element.setAttribute("data-preview-node", value), suffix);
+      const count = documentFrame(page, fileName).getByRole("button", { name: "Count: 0", exact: true });
+      await count.click();
       await terminalTab.click();
       await expect(page.locator(".xterm")).toBeVisible();
       await expect(page.locator(".touch-control-bar")).toBeVisible();
       await previewTab.click();
       await expect(page.locator(".touch-control-bar")).not.toBeVisible();
+      await expect(iframe(page, fileName)).toHaveAttribute("data-preview-node", suffix);
+      await expect(documentFrame(page, fileName).getByRole("button", { name: "Count: 1", exact: true })).toBeVisible();
       await expect(page.locator(`.xterm[data-preview-fixture-terminal="${suffix}"]`)).toHaveCount(1);
       await page.getByRole("tab", { name: "Workspace", exact: true }).click();
       await expect(page.locator("#dashboard-sidebar")).toBeVisible();
