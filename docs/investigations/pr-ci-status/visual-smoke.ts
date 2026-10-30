@@ -21,9 +21,9 @@ import { SessionList } from './src/components/SessionList';
 import { PullRequestLink } from './src/components/PullRequestLink';
 import { PullRequestStatusProvider } from './src/components/PullRequestStatusProvider';
 const now = new Date().toISOString();
-const states = ['unknown','failed','passed','merged','closed','unknown','in_progress'];
+const states = ['merged','failed','passed','merged','closed','unknown','in_progress'];
 const names = ['A very long selected orchestrator session name for geometry validation','Failed','Passed','Merged','Closed','No checks','Running'];
-const sessions = states.map((state, i) => ({ id:'s'+i, name: names[i] + ' session', status:'running', bridgeId:'bridge', createdAt: now, updatedAt: now, pullRequestUrl:'https://github.com/Example/Project/pull/'+(i+1) }));
+const sessions = states.map((state, i) => ({ id:'s'+i, name: names[i] + ' session', status:'running', bridgeId:'bridge', createdAt: now, updatedAt: now, pullRequestUrl:'https://github.com/Example/Project/pull/'+(i===0?161:i+1) }));
 sessions.push({ id:'child', name:'Nested child', status:'running', bridgeId:'bridge', createdAt:now, updatedAt:now, parentSessionId:'s0', pullRequestUrl:'https://github.com/Example/Project/pull/8' });
 const send = command => new Promise(resolve => { window.__deliverStatus = () => resolve({requestId: command.requestId, success:true, data:{bridgeId:'bridge',nextRefreshAt:new Date(Date.now()+60000).toISOString(),statuses:sessions.map((s,i)=>({url:s.pullRequestUrl,state:states[i] ?? 'in_progress',checkedAt:now,stale:i===2, ...(i===5?{reason:'no_checks'}:i===0||i===2?{reason:'unavailable'}:{})}))}}); });
 window.__selectionCount = 0;
@@ -49,13 +49,16 @@ try {
     try {
       await page.goto(`http://127.0.0.1:${address.port}`);
       if (name === 'desktop-min') await page.locator('aside').evaluate(element => { element.style.width = '210px'; });
-      const header = page.locator('section').getByRole('link', { name: /^PR #1 in Example\/Project(?=[:;])/ });
+      const header = page.locator('section').getByRole('link', { name: /^PR #161 in Example\/Project(?=[:;])/ });
       await header.waitFor({ state: 'visible' });
-      if (await header.getAttribute('aria-label') !== 'PR #1 in Example/Project: https://github.com/Example/Project/pull/1') throw new Error(`${name}: initial header is not neutral`);
+      if (await header.getAttribute('aria-label') !== 'PR #161 in Example/Project: https://github.com/Example/Project/pull/161') throw new Error(`${name}: initial header is not neutral`);
       await page.waitForFunction(() => typeof window.__deliverStatus === 'function');
       await page.evaluate(() => window.__deliverStatus());
-      await page.locator('[data-session-row="s0"] [data-pull-request-badge]:visible').filter({ hasText: 'PR #1 · CI unavailable' }).waitFor();
-      if (await header.getAttribute('href') !== 'https://github.com/Example/Project/pull/1' || !(await header.getAttribute('aria-label')).includes('CI unavailable')) throw new Error(`${name}: header PR identity or status changed incorrectly`);
+      const merged = page.locator('[data-session-row="s0"] [data-pull-request-badge]:visible');
+      await page.waitForFunction(() => document.querySelector('[data-session-row="s0"] [data-pull-request-badge]')?.getAttribute('aria-label')?.includes('Merged'));
+      const label = await merged.getAttribute('aria-label');
+      if (await merged.textContent() !== 'PR #161' || !label?.includes('Merged') || !label.includes('Checked') || await merged.getAttribute('title') !== label || await merged.locator('svg[aria-hidden="true"]').count() !== 1) throw new Error(`${name}: compact merged badge or accessible status incorrect`);
+      if (await header.getAttribute('href') !== 'https://github.com/Example/Project/pull/161' || !(await header.getAttribute('aria-label')).includes('Merged')) throw new Error(`${name}: header PR identity or status changed incorrectly`);
     } catch (error) {
       await page.screenshot({ path: `/tmp/ftown-pr-ci-visual/${name}-failure.png`, fullPage: true }).catch(() => {});
       console.error(`${name}: fixture failed; page errors:`, pageErrors);
@@ -69,6 +72,7 @@ try {
     const nameBox = await row.getByText('A very long selected orchestrator session name for geometry validation session', { exact: true }).boundingBox();
     if (!nameBox || nameBox.width < 30) throw new Error(`${name}: selected session name lacks usable width; name=${JSON.stringify(nameBox)}`);
     if (!bb || !pb || Math.abs(bb.width - pb.width) > 1) throw new Error(`${name}: placeholder differs in width`);
+    if (bb.width > 90) throw new Error(`${name}: three-digit merged badge exceeds 90px; width=${bb.width}`);
     if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error(`${name}: horizontal page overflow`);
     const menu = row.getByRole('button', { name: 'Session actions', exact: true });
     const mb = await menu.boundingBox();

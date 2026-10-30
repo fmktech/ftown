@@ -29,9 +29,18 @@ function color(status?: PullRequestStatus): string {
     default: return status && statusText(status) ? "var(--text-muted)" : "var(--accent)";
   }
 }
+function StatusIcon({ state }: { state: PullRequestStatus["state"] }) {
+  return <svg aria-hidden="true" width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ display: "inline", verticalAlign: "-1px", marginLeft: 4 }}>
+    {state === "merged" ? <><circle cx="4" cy="3" r="2"/><circle cx="4" cy="13" r="2"/><circle cx="12" cy="3" r="2"/><path d="M4 5v6M12 5c0 3-8 2-8 6"/></>
+      : state === "passed" ? <path d="m3 8 3 3 7-7"/>
+      : state === "failed" ? <path d="M4 4l8 8M12 4l-8 8"/>
+      : state === "in_progress" ? <><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/></>
+      : state === "closed" ? <><circle cx="8" cy="8" r="6"/><path d="m4 12 8-8"/></>
+      : <><circle cx="8" cy="8" r="6"/><path d="M6.5 6a1.6 1.6 0 1 1 2.5 1.3c-.7.5-1 1-1 1.7M8 11.5h.01"/></>}
+  </svg>;
+}
 function BadgeText({ number, status }: { number: number; status?: PullRequestStatus }) {
-  const text = statusText(status);
-  return <>PR #{number}{text && <> · {status?.state === "merged" && <svg aria-hidden="true" width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ display: "inline", verticalAlign: "-1px", marginRight: 3 }}><circle cx="4" cy="3" r="2"/><circle cx="4" cy="13" r="2"/><circle cx="12" cy="3" r="2"/><path d="M4 5v6M12 5c0 3-8 2-8 6"/></svg>}{text}</>}</>;
+  return <>PR #{number}{status && statusText(status) && <StatusIcon state={status.state} />}</>;
 }
 function description(number: number, repository: string, url: string, status?: PullRequestStatus) {
   const text = statusText(status);
