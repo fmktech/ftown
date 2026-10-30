@@ -4,8 +4,8 @@ set -euo pipefail
 umask 022
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd -P)
 cd "$root"
-if (( $# != 1 )); then echo 'Usage: bash docs/investigations/update-dialog/linux-repro.sh preview|focused' >&2; exit 2; fi
-case "$1" in preview|focused) mode=$1 ;; *) echo 'Invalid reproduction mode' >&2; exit 2 ;; esac
+if (( $# != 1 )); then echo 'Usage: bash docs/investigations/update-dialog/linux-repro.sh preview|focused|push' >&2; exit 2; fi
+case "$1" in preview|focused|push) mode=$1 ;; *) echo 'Invalid reproduction mode' >&2; exit 2 ;; esac
 [[ $(uname -s) == Linux && $(uname -m) == x86_64 && $(node --version) == v24.22.1 ]] || { echo 'Linux x86_64 with Node v24.22.1 required' >&2; exit 1; }
 # Only this temporary copy is written before the inherited resource preflight.
 tmp=$(mktemp -d)
@@ -29,7 +29,7 @@ replaceOnce('    MIGRATION_DATABASE_URL="$DATABASE_URL" timeout 120s node e2e/sc
 replaceOnce('    E2E_USER_EMAIL="e2e-db-pending+${GITHUB_RUN_ID:-0}-${GITHUB_RUN_ATTEMPT:-0}@ftown.test" node e2e/scripts/pending-approvals-db.ts\n', '');
 replaceOnce('    timeout 120s node bridge/scripts/centrifugo-security-smoke.mjs\n', '');
 replaceOnce('    timeout 120s node e2e/scripts/mcp-body-parser-smoke.ts\n', '');
-const specs = mode === 'preview' ? 'tests/session-preview.spec.ts' : 'tests/bridge-updates.spec.ts tests/session-lifecycle.spec.ts tests/session-preview.spec.ts';
+const specs = mode === 'preview' ? 'tests/session-preview.spec.ts' : mode === 'push' ? 'tests/push-notifications.spec.ts --grep "real push API binds bridge owner and durably deduplicates idle cycles/questions without recipients"' : 'tests/bridge-updates.spec.ts tests/session-lifecycle.spec.ts tests/session-preview.spec.ts';
 replaceOnce('    (cd "$E2E_DIR" && npx playwright test)', `    (cd "$E2E_DIR" && npx playwright test ${specs} --project=chromium --workers=1)`);
 fs.writeFileSync(dest, source, { mode: 0o600, flag: 'wx' });
 JS

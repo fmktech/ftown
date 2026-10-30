@@ -35,10 +35,11 @@ export class PushStore {
   async ingest(owner: string, bridgeId: string, event: PushEvent): Promise<{ id: string; event: PushEvent }> {
     event = genericPushEvent(event);
     const id = eventIdentity(owner, bridgeId, event);
+    // Both ID and logical event tuple are unique; concurrent duplicates can conflict on either.
     // Recipient snapshot is part of the same atomic statement as first event creation.
     await this.query(`WITH created AS (
       INSERT INTO push_events(id,sub,bridge_id,session_id,event_key,kind,payload,occurred_at)
-      VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8::timestamptz) ON CONFLICT(id) DO NOTHING RETURNING id,sub,occurred_at)
+      VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8::timestamptz) ON CONFLICT DO NOTHING RETURNING id,sub,occurred_at)
       INSERT INTO push_deliveries(event_id,endpoint_hash)
       SELECT created.id,s.endpoint_hash FROM created JOIN push_subscriptions s ON s.sub=created.sub
       WHERE s.created_at<=created.occurred_at ON CONFLICT DO NOTHING`,
