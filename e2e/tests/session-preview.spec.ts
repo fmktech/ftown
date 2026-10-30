@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { symlink, unlink, writeFile } from "node:fs/promises";
-import { expect, type Page, type TestInfo } from "@playwright/test";
+import { expect, type CDPSession, type Page, type TestInfo } from "@playwright/test";
 import { test } from "../helpers/fixtures";
 import { login, sharedEmail, waitForBridgeOnline, runMarkerInTerminal } from "../helpers/app";
 import { bridgeApiFetch, readBridgePointer } from "../helpers/bridge-api";
@@ -34,6 +34,42 @@ async function noHorizontalOverflow(page: Page): Promise<void> {
 test("real CLI preview is encrypted, interactive, revision-consistent and isolated across sessions", async ({ page, context }, info) => {
   test.setTimeout(240_000);
   await page.setViewportSize({ width: 1440, height: 900 });
+  let cpuSession: CDPSession | undefined;
+  const cpuRate = process.env.FTOWN_PREVIEW_CPU_RATE;
+  if (cpuRate !== undefined) {
+    const rate = Number(cpuRate);
+    if (!/^(?:[2-9]|10)$/.test(cpuRate) || !Number.isInteger(rate)) throw new Error("FTOWN_PREVIEW_CPU_RATE must be an integer from 2 to 10");
+    cpuSession = await context.newCDPSession(page);
+    await cpuSession.send("Emulation.setCPUThrottlingRate", { rate });
+  }
+  // Passive, bounded handshake timeline; attach before fixture cleanup.
+  const scrollTrace: Array<Record<string, unknown>> = [];
+  const recordScroll = (entry: Record<string, unknown>) => { if (scrollTrace.length < 1000) scrollTrace.push(entry); };
+  await page.exposeBinding("__previewScrollTrace", ({ frame }, entry: Record<string, unknown>) => {
+    recordScroll({ ...entry, surface: frame === page.mainFrame() ? "parent" : "child" });
+  });
+  await page.addInitScript(() => {
+    type TraceWindow = Window & { __previewScrollTrace?: (entry: Record<string, unknown>) => Promise<void> };
+    const report = (entry: Record<string, unknown>) => { void (window as TraceWindow).__previewScrollTrace?.({ time: Date.now(), ...entry }); };
+    const topFrame = window === window.parent;
+    window.addEventListener("message", event => {
+      const value = event.data;
+      if (!value || typeof value !== "object" || value.channel !== "ftown-preview-scroll-v1") return;
+      const sourceValid = topFrame ? [...document.querySelectorAll("iframe")].some(element => element.contentWindow === event.source) : event.source === window.parent;
+      report({ kind: typeof value.kind === "string" ? value.kind : "invalid", sourceValid, origin: event.origin,
+        documentId: typeof value.documentId === "string" ? value.documentId.slice(0, 64) : null,
+        requestId: typeof value.requestId === "string" ? value.requestId.slice(0, 64) : null,
+        x: typeof value.x === "number" && Number.isFinite(value.x) ? value.x : null,
+        y: typeof value.y === "number" && Number.isFinite(value.y) ? value.y : null,
+        ...(topFrame ? {} : { readyState: document.readyState, height: document.documentElement?.scrollHeight ?? 0, viewport: window.innerHeight, currentY: window.scrollY }) });
+    });
+    if (!topFrame) {
+      window.addEventListener("scroll", () => report({ kind: "child-scroll", x: window.scrollX, y: window.scrollY }), { passive: true });
+      for (const kind of ["focus", "blur"] as const) window.addEventListener(kind, event => report({ kind: `child-${kind}`, y: window.scrollY, trusted: event.isTrusted }), { capture: true, passive: true });
+      document.addEventListener("DOMContentLoaded", () => report({ kind: "child-dom-content-loaded", height: document.documentElement?.scrollHeight ?? 0, viewport: window.innerHeight, currentY: window.scrollY }));
+      window.addEventListener("load", () => report({ kind: "child-load", height: document.documentElement?.scrollHeight ?? 0, viewport: window.innerHeight, currentY: window.scrollY }));
+    }
+  });
   const fixture = await createPreviewFixture();
   const suffix = `${info.workerIndex}-${Date.now().toString(36)}`;
   const marker = `PREVIEW_PRIVATE_${suffix}`;
@@ -213,10 +249,14 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     await expect(page.locator(".xterm")).toBeVisible();
     await expect(iframe(page, fileName)).toHaveAttribute("data-preview-node", suffix);
     await expect(count).toHaveText("Count: 1");
+    recordScroll({ kind: "test-scroll-request", time: Date.now() });
     await documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollTo(0, 600));
     await expect.poll(() => documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollY)).toBeGreaterThan(500);
     await separator(page).focus();
+    recordScroll({ kind: "test-after-focus", time: Date.now() });
+    recordScroll({ kind: "test-update-request", time: Date.now() });
     await atomicHtml(path, second);
+    recordScroll({ kind: "test-update-complete", time: Date.now() });
     await expect(documentFrame(page, fileName).getByRole("heading", { name: `${marker} version 2`, exact: true })).toHaveCount(1);
     await expect.poll(() => documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollY)).toBeGreaterThan(500);
     await expect(documentFrame(page, fileName).getByRole("button", { name: "Count: 0", exact: true })).toHaveCount(1);
@@ -305,8 +345,13 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     expect(JSON.stringify(archive.body).includes(target)).toBe(true);
     assertSanitized(archive.body, path);
     expect(prohibitedRequests).toBe(0);
+    await info.attach("preview-scroll-timeline", { body: Buffer.from(JSON.stringify(scrollTrace, null, 2)), contentType: "application/json" });
+  } catch (error) {
+    try { await info.attach("preview-scroll-timeline", { body: Buffer.from(JSON.stringify(scrollTrace, null, 2)), contentType: "application/json" }); } catch { /* Preserve the original test failure. */ }
+    throw error;
   } finally {
-    await fixture.cleanup();
+    try { if (cpuSession) { await cpuSession.send("Emulation.setCPUThrottlingRate", { rate: 1 }); await cpuSession.detach(); } }
+    finally { await fixture.cleanup(); }
   }
 });
 
