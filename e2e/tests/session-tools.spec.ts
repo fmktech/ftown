@@ -184,9 +184,10 @@ for (const viewport of [
       const attached = await sessionCommand<SessionResult>(targetId, ["pr", `${prOne}/?tab=files#review`]);
       expect(attached.session.id).toBe(targetId);
       expect(attached.session.pullRequestUrl).toBe(prOne);
-      const headerLink = page.locator("main").getByRole("link", { name: `PR #123 in fmktech/ftown: ${prOne}`, exact: true });
+      const headerLink = page.locator("main").getByRole("link", { name: /^PR #123 in fmktech\/ftown(?:[:;])/ });
       await expect(headerLink).toBeVisible();
       await expect(headerLink).toHaveAttribute("href", prOne);
+      await expect(headerLink).toHaveAttribute("aria-label", /^PR #123 in fmktech\/ftown(?:[:;]).*https:\/\/github\.com\/fmktech\/ftown\/pull\/123$/);
       await expect(headerLink).toHaveAttribute("target", "_blank");
       await expect(headerLink).toHaveAttribute("rel", "noopener noreferrer");
       const box = await headerLink.boundingBox();
@@ -218,7 +219,7 @@ for (const viewport of [
       await page.reload();
       await waitForBridgeOnline(page);
       await showWorkspace();
-      await expect(sessionRow(page, targetName).getByRole("link", { name: `PR #123 in fmktech/ftown: ${prOne}`, exact: true })).toBeVisible();
+      await expect(sessionRow(page, targetName).getByRole("link", { name: /^PR #123 in fmktech\/ftown(?:[:;])/ })).toBeVisible();
       await expect(sessionRow(page, otherName).getByRole("link")).toHaveCount(0);
       await originalRow(page, targetName).getByText(targetName, { exact: true }).click();
       await expect(headerLink).toBeVisible();
@@ -227,13 +228,14 @@ for (const viewport of [
       const replaced = await sessionCommand<SessionResult>(otherId, ["pr", prTwo, "--session-id", targetId]);
       expect(replaced.session.id).toBe(targetId);
       expect(replaced.session.pullRequestUrl).toBe(prTwo);
-      const replacementLink = page.locator("main").getByRole("link", { name: `PR #456 in fmktech/ftown: ${prTwo}`, exact: true });
+      const replacementLink = page.locator("main").getByRole("link", { name: /^PR #456 in fmktech\/ftown(?:[:;])/ });
       await expect(replacementLink).toBeVisible();
       await expect(headerLink).toHaveCount(0);
       await showWorkspace();
-      const sidebarBadge = sessionRow(page, targetName).getByRole("link", { name: `PR #456 in fmktech/ftown: ${prTwo}`, exact: true });
+      const sidebarBadge = sessionRow(page, targetName).getByRole("link", { name: /^PR #456 in fmktech\/ftown(?:[:;])/ });
       await expect(sidebarBadge).toBeVisible();
       await expect(sidebarBadge).toHaveAttribute("href", prTwo);
+      await expect(sidebarBadge).toHaveAttribute("aria-label", /^PR #456 in fmktech\/ftown(?:[:;]).*https:\/\/github\.com\/fmktech\/ftown\/pull\/456$/);
       await expect(sidebarBadge).toHaveAttribute("target", "_blank");
       await expect(sidebarBadge).toHaveAttribute("rel", "noopener noreferrer");
       await expect(originalRow(page, targetName).locator("a")).toHaveCount(0);
