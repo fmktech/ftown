@@ -28,7 +28,20 @@ sessions.push({ id:'child', name:'Nested child', status:'running', bridgeId:'bri
 window.__statusRequests = 0;
 const send = command => new Promise(resolve => { window.__statusRequests++; window.__deliverStatus = () => resolve({requestId: command.requestId, success:true, data:{bridgeId:'bridge',nextRefreshAt:new Date(Date.now()+60000).toISOString(),statuses:sessions.map((s,i)=>({url:s.pullRequestUrl,state:states[i] ?? 'in_progress',checkedAt:now,stale:i===2, ...(i===5?{reason:'no_checks'}:i===0||i===2?{reason:'unavailable'}:{})}))}}); });
 window.__selectionCount = 0;
-function App(){const [selected,setSelected]=React.useState('s0');const [ready,setReady]=React.useState(true);window.__setReady=setReady;return <PullRequestStatusProvider send={send} sessions={sessions} readyBridgeIds={ready?['bridge']:[]} connected><main><aside><SessionList sessions={sessions} bridges={[{clientId:'c',bridgeId:'bridge',hostname:'Demo bridge',connectedAt:now}]} bridgeOrder={['bridge']} selectedSessionId={selected} onSelectSession={id => { window.__selectionCount++; setSelected(id); }} onStopSession={() => {}} onRemoveSession={() => {}} /></aside><section><p id="selection">Selected: {selected || 'none'}</p><PullRequestLink url={sessions[0].pullRequestUrl}/></section></main></PullRequestStatusProvider>};
+const realNow = Date.now.bind(Date); let clockOffset = 0; Date.now = () => realNow() + clockOffset; window.__advanceClock = ms => { clockOffset += ms; };
+const mergedUrl='https://github.com/Example/NewWork/pull/200', freshUrl='https://github.com/Example/NewWork/pull/201';
+window.__newRequests=0;
+const sendNew = command => {
+  window.__newRequests++;
+  const response = (state, url, delay) => ({requestId:command.requestId,success:true,data:{bridgeId:'newbridge',nextRefreshAt:new Date(Date.now()+delay).toISOString(),statuses:[{url,state,checkedAt:new Date(Date.now()).toISOString(),stale:false}]}});
+  if (window.__newRequests === 1) return Promise.resolve(response('merged', mergedUrl, 3600000));
+  return new Promise(resolve => { window.__resolveNew=() => resolve(response('in_progress',freshUrl,60000)); });
+};
+function NewWork(){const [added,setAdded]=React.useState(false);const [ready,setReady]=React.useState(true);window.__addFresh=()=>setAdded(true);window.__setFreshReady=setReady;
+  const items=[{id:'old',bridgeId:'newbridge',pullRequestUrl:mergedUrl},...(added?[{id:'fresh',bridgeId:'newbridge',pullRequestUrl:freshUrl}]:[])];
+  return <PullRequestStatusProvider send={sendNew} sessions={items} readyBridgeIds={ready?['newbridge']:[]} connected><div id="newwork-merged"><PullRequestLink url={mergedUrl}/></div>{added&&<div id="newwork-added"><PullRequestLink url={freshUrl}/></div>}</PullRequestStatusProvider>;
+}
+function App(){const [selected,setSelected]=React.useState('s0');const [ready,setReady]=React.useState(true);window.__setReady=setReady;return <PullRequestStatusProvider send={send} sessions={sessions} readyBridgeIds={ready?['bridge']:[]} connected><main><aside><SessionList sessions={sessions} bridges={[{clientId:'c',bridgeId:'bridge',hostname:'Demo bridge',connectedAt:now}]} bridgeOrder={['bridge']} selectedSessionId={selected} onSelectSession={id => { window.__selectionCount++; setSelected(id); }} onStopSession={() => {}} onRemoveSession={() => {}} /></aside><section><p id="selection">Selected: {selected || 'none'}</p><PullRequestLink url={sessions[0].pullRequestUrl}/><NewWork/></section></main></PullRequestStatusProvider>};
 createRoot(document.getElementById('root')).render(<App/>);
 `;
 const built = await esbuild.build({ stdin: { contents: fixture, sourcefile: "visual-fixture.tsx", resolveDir: resolve(root, "ui"), loader: "tsx" }, jsx: "automatic", bundle: true, write: false, format: "iife", platform: "browser", tsconfig: resolve(root, "ui/tsconfig.json"), define: { "process.env.NODE_ENV": '"production"' } });
@@ -71,6 +84,24 @@ try {
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       await page.waitForFunction(() => document.querySelector('[data-session-row="s6"] [data-pull-request-badge]')?.getAttribute('aria-label')?.includes('Last known CI running'));
       if (await page.evaluate(() => window.__statusRequests) !== before) throw new Error(`${name}: readiness toggle bypassed the refresh deadline`);
+      const oldPr = page.locator('#newwork-merged a');
+      await page.waitForFunction(() => document.querySelector('#newwork-merged a')?.getAttribute('aria-label')?.includes('Merged'));
+      await page.evaluate(() => window.__addFresh());
+      const fresh = page.locator('#newwork-added a'); await fresh.waitFor({ state: 'visible' });
+      if ((await fresh.getAttribute('aria-label'))?.includes('CI running') || await page.evaluate(() => window.__newRequests) !== 1) throw new Error(`${name}: new PR queried before minimum interval`);
+      await page.evaluate(() => { window.__advanceClock(50000); window.__setFreshReady(false); });
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await page.evaluate(() => window.__setFreshReady(true));
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      if (await page.evaluate(() => window.__newRequests) !== 1) throw new Error(`${name}: new PR bypassed minimum interval`);
+      await page.evaluate(() => { window.__advanceClock(10000); window.__setFreshReady(false); });
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await page.evaluate(() => window.__setFreshReady(true));
+      await page.waitForFunction(() => window.__newRequests === 2 && typeof window.__resolveNew === 'function');
+      if ((await fresh.getAttribute('aria-label'))?.includes('CI running')) throw new Error(`${name}: running status appeared before bridge response`);
+      await page.evaluate(() => window.__resolveNew());
+      await page.waitForFunction(() => document.querySelector('#newwork-added a')?.getAttribute('aria-label')?.includes('CI running'));
+      if (!(await oldPr.getAttribute('aria-label'))?.includes('Merged')) throw new Error(`${name}: adding a new PR changed the old merged status`);
     } catch (error) {
       await page.screenshot({ path: `/tmp/ftown-pr-ci-visual/${name}-failure.png`, fullPage: true }).catch(() => {});
       console.error(`${name}: fixture failed; page errors:`, pageErrors);
