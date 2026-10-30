@@ -112,8 +112,13 @@ export async function approveAccountComputer(page: Page, bridge: AccountTestBrid
 }
 
 export async function createAccountShell(page: Page, bridgeId: string, name: string): Promise<void> {
-  await page.getByRole("button", { name: "Create a new session", exact: true }).click();
-  await page.locator("#ns-shell-type").selectOption("shell"); await page.locator("#ns-bridge").selectOption(bridgeId);
+  const create = page.getByRole("button", { name: "Create a new session", exact: true });
+  await expect(create, "Session creation must become available after bridge access is ready").toBeEnabled({ timeout: 60000 });
+  await create.click();
+  await page.locator("#ns-shell-type").selectOption("shell");
+  await expect.poll(() => page.locator("#ns-bridge option").evaluateAll((options, target) => options.some(option => option.getAttribute("value") === target), bridgeId),
+    { timeout: 60000, message: "The requested computer must be available for session creation" }).toBe(true);
+  await page.locator("#ns-bridge").selectOption(bridgeId);
   await page.getByPlaceholder("Optional name for this session").fill(name);
   await page.getByRole("button", { name: "Create Session", exact: true }).click();
   const workspace = page.getByRole("tab", { name: "Workspace", exact: true });

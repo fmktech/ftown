@@ -95,7 +95,7 @@ JS
     MIGRATION_DATABASE_URL="$DATABASE_URL" timeout 120s node e2e/scripts/rate-limit-db.ts
     E2E_USER_EMAIL="e2e-db-pending+${GITHUB_RUN_ID:-0}-${GITHUB_RUN_ATTEMPT:-0}@ftown.test" node e2e/scripts/pending-approvals-db.ts
     timeout 120s node bridge/scripts/centrifugo-security-smoke.mjs
-    (cd "$E2E_DIR" && npx playwright install --with-deps chromium)
+    (cd "$E2E_DIR" && npx playwright install --with-deps --no-shell chromium)
     services_started=1; bash "$E2E_DIR/scripts/start-services.sh"
     timeout 120s node e2e/scripts/mcp-body-parser-smoke.ts
     export E2E_USER_EMAIL; E2E_USER_EMAIL=$(cat "$E2E_DIR/.run-email")

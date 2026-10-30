@@ -59,6 +59,8 @@ export default defineConfig({
   expect: { timeout: 15_000 },
   reporter: [["list"], ["html", { open: "never", outputFolder: "playwright-report" }], ["json", { outputFile: "test-results/results.json" }]],
   use: {
+    // Bound blocked UI actions independently of long scenario timeouts.
+    actionTimeout: 15_000,
     baseURL: UI_BASE_URL,
     trace: "retain-on-failure",
     video: "retain-on-failure",

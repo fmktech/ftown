@@ -8,6 +8,10 @@
     "skipLibCheck": true,
     "types": ["node"],
     "resolveJsonModule": true,
+    "paths": {
+      "@/*": ["../ui/src/*"],
+      "@security/*": ["../bridge/src/security/*"]
+    },
     "noEmit": true
   },
   "include": ["**/*.ts"]

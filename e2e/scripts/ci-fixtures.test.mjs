@@ -46,6 +46,7 @@ test('Playwright assigns only explicitly isolated files to the concurrent lane',
   assert.equal(config.forbidOnly, true);
   assert.equal(config.timeout, 90_000);
   assert.equal(config.expect.timeout, 15_000);
+  assert.equal(config.use.actionTimeout, 15_000);
   assert.deepEqual(Array.from(config.projects, project => project.name), ['chromium', 'chromium-isolated']);
   const [shared, isolated] = config.projects;
   assert.equal(shared.workers, 1);

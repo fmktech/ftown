@@ -9,8 +9,8 @@ async function pendingId(page: Page): Promise<string> {
   await expect.poll(async () => (await pendingBrowserRequest(page))?.requestId ?? "", { timeout: 15000 }).not.toBe("");
   return (await pendingBrowserRequest(page))!.requestId!;
 }
-for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
-  test(`automatic device approvals: browser and computer, both confirmations, reload and reject (${viewport.width})`, async ({ browser }, info) => {
+test("automatic device approvals: desktop and mobile browser and computer confirmations, reload and reject", async ({ browser }, info) => {
+    const viewport = { width: 1280, height: 900 };
     test.setTimeout(300000);
     const user = makeUser(`pending-${viewport.width}`); await registerUser(user.email, user.password);
     const contexts: BrowserContext[] = []; const bridges: AccountTestBridge[] = []; let failed = false;
@@ -19,13 +19,25 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       const trusted = await trustedContext.newPage();
       await trusted.goto("/");
       const diagram = trusted.getByRole("region", { name: "Follow the data, know the endpoints.", exact: true });
-      await expect(diagram).toBeVisible(); await noOverflow(trusted);
-      await trusted.screenshot({ path: info.outputPath("pending-main-page.png"), fullPage: true });
-      await diagram.screenshot({ path: info.outputPath("pending-encryption-diagram.png") });
+      await test.step("landing at desktop and mobile widths", async () => {
+        for (const size of [viewport, { width: 390, height: 844 }]) {
+          await trusted.setViewportSize(size);
+          await expect(diagram).toBeVisible(); await noOverflow(trusted);
+          await trusted.screenshot({ path: info.outputPath(`pending-main-page-${size.width}.png`), fullPage: true });
+          await diagram.screenshot({ path: info.outputPath(`pending-encryption-diagram-${size.width}.png`) });
+        }
+      });
+      await trusted.setViewportSize(viewport);
       await login(trusted, user.email, user.password, { pairBridge: false });
       // First-account bootstrap remains an explicit, independent trust ceremony.
-      await expect(trusted.getByRole("heading", { name: "Waiting for device approval", exact: true })).toBeVisible();
+      for (const size of [viewport, { width: 390, height: 844 }]) {
+        await trusted.setViewportSize(size);
+        await expect(trusted.getByRole("heading", { name: "Waiting for device approval", exact: true })).toBeVisible();
+        // Let responsive layout settle after resizing, while checking the same document-wide overflow predicate.
+        await expect.poll(() => trusted.evaluate(() => document.documentElement.scrollWidth <= innerWidth), { timeout: 2000, intervals: [25, 50, 100] }).toBe(true);
+      }
       const first = await startAccountTestBridge(origin); bridges.push(first); const firstId = await approveAccountComputer(trusted, first);
+      await trusted.setViewportSize(viewport);
       const initial = (await accountBrowserState(trusted))[0]; expect(initial.trust!.checkpoint.devices).toHaveLength(1);
 
       const candidateContext = await browser.newContext({ baseURL: origin, ignoreHTTPSErrors: false, viewport: { width: 390, height: 844 } }); contexts.push(candidateContext);
@@ -49,52 +61,69 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       const sibling = await candidateContext.newPage(); await sibling.goto("/dashboard");
       expect(await pendingId(sibling)).toBe(requestId);
 
-      const navigation = trusted.getByRole("button", { name: "Open navigation menu", exact: true });
-      if (await navigation.isVisible()) await navigation.click();
-      const reviewEntry = trusted.getByRole("button", { name: /^Review \d+ pending device approvals$/ });
-      await expect(reviewEntry).toBeVisible({ timeout: 15000 }); await reviewEntry.click();
-      const requestRow = trusted.locator(`[data-pending-request="${requestId}"]`); await expect(requestRow).toHaveCount(1);
-      await requestRow.getByRole("button", { name: "Review", exact: true }).click();
-      const review = trusted.getByRole("region", { name: "Review device approval", exact: true });
-      await expect(review.getByLabel("Verification code", { exact: true })).toBeVisible({ timeout: 15000 });
-      await expect(candidate.getByLabel("Verification code", { exact: true })).toBeVisible({ timeout: 15000 });
-      const comparison = await candidate.getByLabel("Verification code", { exact: true }).textContent();
-      await expect(review.getByLabel("Verification code", { exact: true })).toHaveText(comparison!);
-      await expect(sibling.getByLabel("Verification code", { exact: true })).toHaveText(comparison!);
-      await noOverflow(trusted); await noOverflow(candidate);
-      await trusted.screenshot({ path: info.outputPath("pending-trusted-review.png"), fullPage: true });
-      await candidate.screenshot({ path: info.outputPath("pending-candidate-comparison.png"), fullPage: true });
-      expect((await accountBrowserState(candidate))[0].trust).toBeNull();
-      // Trusted confirmation alone may not finalize. Candidate confirmation must
-      // be a separate local action on its actual browser.
-      await review.getByRole("button", { name: "Codes match — approve device", exact: true }).click();
-      await expect(review.getByText(/Confirmed here\. Waiting for confirmation/)).toBeVisible();
-      expect((await accountBrowserState(candidate))[0].trust).toBeNull();
-      let finalReplyDropped = false; const finals: string[] = [];
-      await trusted.route(url => url.pathname === `/api/security/approvals/${requestId}`, async route => {
-        const body: unknown = route.request().postDataJSON();
-        const action = body && typeof body === "object" && "payload" in body ? (body as { payload?: { action?: { type?: string } } }).payload?.action : null;
-        if (route.request().method() === "POST" && action?.type === "finish") {
-          finals.push(route.request().postData()!);
-          if (!finalReplyDropped) { const committed = await route.fetch(); if (!committed.ok()) { await route.fulfill({ response: committed }); return; } finalReplyDropped = true; await route.abort("connectionreset"); return; }
+      const approved = await test.step("mobile two-sided confirmation and finish replay", async () => {
+        const navigation = trusted.getByRole("button", { name: "Open navigation menu", exact: true });
+        if (await navigation.isVisible()) await navigation.click();
+        const reviewEntry = trusted.getByRole("button", { name: /^Review \d+ pending device approvals$/ });
+        await expect(reviewEntry).toBeVisible({ timeout: 15000 }); await reviewEntry.click();
+        const requestRow = trusted.locator(`[data-pending-request="${requestId}"]`); await expect(requestRow).toHaveCount(1);
+        await expect(requestRow).toBeVisible(); await noOverflow(trusted);
+        await trusted.screenshot({ path: info.outputPath("pending-request-row-1280.png"), fullPage: true });
+        await trusted.getByRole("button", { name: "Close security" }).click();
+        await trusted.setViewportSize({ width: 390, height: 844 });
+        await navigation.click(); await expect(reviewEntry).toBeVisible(); await reviewEntry.click();
+        await expect(requestRow).toHaveCount(1); await expect(requestRow).toBeVisible(); await noOverflow(trusted);
+        await trusted.screenshot({ path: info.outputPath("pending-request-row-390.png"), fullPage: true });
+        await requestRow.getByRole("button", { name: "Review", exact: true }).click();
+        const review = trusted.getByRole("region", { name: "Review device approval", exact: true });
+        await expect(review.getByLabel("Verification code", { exact: true })).toBeVisible({ timeout: 15000 });
+        await expect(candidate.getByLabel("Verification code", { exact: true })).toBeVisible({ timeout: 15000 });
+        const comparison = await candidate.getByLabel("Verification code", { exact: true }).textContent();
+        await expect(sibling.getByLabel("Verification code", { exact: true })).toHaveText(comparison!);
+        for (const size of [{ width: 390, height: 844 }, viewport]) {
+          await trusted.setViewportSize(size);
+          await expect(review.getByLabel("Verification code", { exact: true })).toBeVisible();
+          await expect(review.getByLabel("Verification code", { exact: true })).toHaveText(comparison!);
+          await expect(review.getByRole("button", { name: "Codes match — approve device", exact: true })).toBeVisible();
+          await noOverflow(trusted);
+          await trusted.screenshot({ path: info.outputPath(`pending-trusted-review-${size.width}.png`), fullPage: true });
         }
-        await route.continue();
+        await trusted.setViewportSize({ width: 390, height: 844 });
+        await noOverflow(candidate);
+        await candidate.screenshot({ path: info.outputPath("pending-candidate-comparison.png"), fullPage: true });
+        expect((await accountBrowserState(candidate))[0].trust).toBeNull();
+        // Trusted confirmation alone may not finalize. Candidate confirmation must
+        // be a separate local action on its actual browser.
+        await review.getByRole("button", { name: "Codes match — approve device", exact: true }).click();
+        await expect(review.getByText(/Confirmed here\. Waiting for confirmation/)).toBeVisible();
+        expect((await accountBrowserState(candidate))[0].trust).toBeNull();
+        let finalReplyDropped = false; const finals: string[] = [];
+        await trusted.route(url => url.pathname === `/api/security/approvals/${requestId}`, async route => {
+          const body: unknown = route.request().postDataJSON();
+          const action = body && typeof body === "object" && "payload" in body ? (body as { payload?: { action?: { type?: string } } }).payload?.action : null;
+          if (route.request().method() === "POST" && action?.type === "finish") {
+            finals.push(route.request().postData()!);
+            if (!finalReplyDropped) { const committed = await route.fetch(); if (!committed.ok()) { await route.fulfill({ response: committed }); return; } finalReplyDropped = true; await route.abort("connectionreset"); return; }
+          }
+          await route.continue();
+        });
+        await candidate.getByRole("button", { name: "Codes match on this device", exact: true }).click();
+        // Exact replay and polling must recover without another confirmation click.
+        await expect.poll(() => finalReplyDropped, { timeout: 15000 }).toBe(true);
+        await expect.poll(() => finals.length >= 2, { timeout: 15000 }).toBe(true);
+        expect(finals[0] === finals[1]).toBe(true);
+        await expect(review.getByText(/Device approved\. It can now finish connecting/)).toBeVisible({ timeout: 15000 });
+        await expect(review.getByRole("alert")).toHaveCount(0);
+        await expect(candidate.locator(`[data-bridge-row="${firstId}"]`)).toBeVisible({ timeout: 60000 });
+        await expect(sibling.locator(`[data-bridge-row="${firstId}"]`)).toBeVisible({ timeout: 60000 });
+        await expect.poll(async () => (await pendingBrowserRequest(sibling))?.requestId ?? "", { timeout: 15000 }).toBe("");
+        await sibling.close();
+        const approved = (await accountBrowserState(candidate))[0]; expect(approved.hpkeExtractable).toBe(false); expect(approved.signingExtractable).toBe(false);
+        expect(approved.trust!.checkpoint.devices.filter(device => device.endpoint.id === approved.endpointId)).toHaveLength(1);
+        await expect(candidate.getByRole("alert").filter({ hasText: "Approve this device using an existing approved device first." })).toHaveCount(0);
+        await review.getByRole("button", { name: "Close review", exact: true }).click();
+        return approved;
       });
-      await candidate.getByRole("button", { name: "Codes match on this device", exact: true }).click();
-      // Exact replay and polling must recover without another confirmation click.
-      await expect.poll(() => finalReplyDropped, { timeout: 15000 }).toBe(true);
-      await expect.poll(() => finals.length >= 2, { timeout: 15000 }).toBe(true);
-      expect(finals[0] === finals[1]).toBe(true);
-      await expect(review.getByText(/Device approved\. It can now finish connecting/)).toBeVisible({ timeout: 15000 });
-      await expect(review.getByRole("alert")).toHaveCount(0);
-      await expect(candidate.locator(`[data-bridge-row="${firstId}"]`)).toBeVisible({ timeout: 60000 });
-      await expect(sibling.locator(`[data-bridge-row="${firstId}"]`)).toBeVisible({ timeout: 60000 });
-      await expect.poll(async () => (await pendingBrowserRequest(sibling))?.requestId ?? "", { timeout: 15000 }).toBe("");
-      await sibling.close();
-      const approved = (await accountBrowserState(candidate))[0]; expect(approved.hpkeExtractable).toBe(false); expect(approved.signingExtractable).toBe(false);
-      expect(approved.trust!.checkpoint.devices.filter(device => device.endpoint.id === approved.endpointId)).toHaveLength(1);
-      await expect(candidate.getByRole("alert").filter({ hasText: "Approve this device using an existing approved device first." })).toHaveCount(0);
-      await review.getByRole("button", { name: "Close review", exact: true }).click();
 
       // An approval URL on an unapproved browser is never an approver shortcut.
       const untrustedContext = await browser.newContext({ baseURL: origin, ignoreHTTPSErrors: false, viewport: { width: 390, height: 844 } }); contexts.push(untrustedContext);
@@ -109,7 +138,8 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       await untrusted.reload(); await expect(untrusted.getByText("This request was rejected. Access was not granted by this request.", { exact: true })).toBeVisible();
       expect(await pendingId(untrusted)).toBe(rejectedId); expect((await accountBrowserState(untrusted))[0].endpointId).toBe(rejectedIdentity); expect((await accountBrowserState(untrusted))[0].trust).toBeNull();
 
-      if (viewport.width === 1280) {
+      await trusted.setViewportSize(viewport);
+      await test.step("browser admission cancellation race", async () => {
         // Hold the valid approved history after remote finalization. A sibling
         // tab's local cancellation must atomically beat native-IDB admission.
         await untrusted.getByRole("button", { name: "Start a new request", exact: true }).click();
@@ -146,7 +176,9 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
         expect((await accountBrowserState(untrusted))[0].trust).toBeNull();
         await untrustedContext.unrouteAll({ behavior: "wait" }); await cancellingTab.close();
         await cancelledBrowserReview.getByRole("button", { name: "Close review", exact: true }).click();
+      });
 
+      await test.step("CLI cancellation", async () => {
         // Exercise actual local IPC cancellation after candidate confirmation,
         // while the trusted browser has deliberately not confirmed its code.
         const cancelled = await startAccountTestBridge(origin, user.email); bridges.push(cancelled);
@@ -172,28 +204,39 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
         const afterResponse = await trusted.request.get("/api/security/account"); expect(afterResponse.ok()).toBe(true);
         expect(JSON.stringify(await afterResponse.json()) === JSON.stringify(beforeCancellation)).toBe(true);
         await cancelledReview.getByRole("button", { name: "Close review", exact: true }).click();
-      }
+      });
 
-      // A virgin CLI computer uses its account inbox and confirms locally. No
-      // private link or remote unauthenticated confirmation endpoint is used.
-      const second = await startAccountTestBridge(origin, user.email); bridges.push(second);
-      await expect.poll(async () => { try { return (await second.pendingStatus()).phase; } catch { return "starting"; } }, { timeout: 30000 }).toBe("waiting");
-      const local = await second.pendingStatus(); const computerRow = trusted.locator(`[data-pending-request="${local.requestId}"]`);
-      await computerRow.getByRole("button", { name: "Review", exact: true }).click();
-      await expect.poll(async () => (await second.pendingStatus()).phase, { timeout: 20000 }).toBe("comparing");
-      const localComparison = await second.pendingStatus(); if (localComparison.phase !== "comparing") throw new Error("Computer comparison did not become ready");
-      const computerReview = trusted.getByRole("region", { name: "Review device approval", exact: true });
-      await expect(computerReview.getByLabel("Verification code", { exact: true })).toHaveText(localComparison.comparisonCode, { timeout: 15000 });
-      await second.confirmPending(localComparison.comparisonCode);
-      await computerReview.getByRole("button", { name: "Codes match — approve device", exact: true }).click();
-      await expect(computerReview.getByText(/Device approved\. It can now finish connecting/)).toBeVisible({ timeout: 20000 });
-      await expect.poll(() => { try { return readBridgePointer(second.home).bridgeId; } catch { return ""; } }, { timeout: 30000 }).not.toBe("");
-      const secondId = readBridgePointer(second.home).bridgeId;
-      await expect(candidate.locator(`[data-bridge-row="${secondId}"]`)).toBeVisible({ timeout: 60000 });
-      await createAccountShell(candidate, secondId, `PENDING_PRIVATE_${viewport.width}_${Date.now()}`);
-      await noOverflow(candidate); await noOverflow(trusted);
-      await trusted.screenshot({ path: info.outputPath("pending-computer-approved.png"), fullPage: true });
-      expect((await accountBrowserState(candidate))[0].endpointId).toBe(approved.endpointId);
+      await test.step("computer approval at desktop and mobile widths", async () => {
+        // A virgin CLI computer uses its account inbox and confirms locally. No
+        // private link or remote unauthenticated confirmation endpoint is used.
+        const second = await startAccountTestBridge(origin, user.email); bridges.push(second);
+        await expect.poll(async () => { try { return (await second.pendingStatus()).phase; } catch { return "starting"; } }, { timeout: 30000 }).toBe("waiting");
+        const local = await second.pendingStatus(); const computerRow = trusted.locator(`[data-pending-request="${local.requestId}"]`);
+        await computerRow.getByRole("button", { name: "Review", exact: true }).click();
+        await expect.poll(async () => (await second.pendingStatus()).phase, { timeout: 20000 }).toBe("comparing");
+        const localComparison = await second.pendingStatus(); if (localComparison.phase !== "comparing") throw new Error("Computer comparison did not become ready");
+        const computerReview = trusted.getByRole("region", { name: "Review device approval", exact: true });
+        for (const size of [viewport, { width: 390, height: 844 }]) {
+          await trusted.setViewportSize(size);
+          await expect(computerReview.getByLabel("Verification code", { exact: true })).toBeVisible({ timeout: 15000 });
+          await expect(computerReview.getByLabel("Verification code", { exact: true })).toHaveText(localComparison.comparisonCode, { timeout: 15000 });
+          await expect(computerReview.getByRole("button", { name: "Codes match — approve device", exact: true })).toBeVisible();
+          await noOverflow(trusted);
+          await trusted.screenshot({ path: info.outputPath(`pending-computer-review-${size.width}.png`), fullPage: true });
+        }
+        await trusted.setViewportSize(viewport);
+        await second.confirmPending(localComparison.comparisonCode);
+        await expect.poll(async () => (await second.pendingStatus()).phase, { timeout: 15000 }).toBe("confirming");
+        await computerReview.getByRole("button", { name: "Codes match — approve device", exact: true }).click();
+        await expect(computerReview.getByText(/Device approved\. It can now finish connecting/)).toBeVisible({ timeout: 20000 });
+        await expect.poll(() => { try { return readBridgePointer(second.home).bridgeId; } catch { return ""; } }, { timeout: 30000 }).not.toBe("");
+        const secondId = readBridgePointer(second.home).bridgeId;
+        await expect(candidate.locator(`[data-bridge-row="${secondId}"]`)).toBeVisible({ timeout: 60000 });
+        await createAccountShell(candidate, secondId, `PENDING_PRIVATE_${viewport.width}_${Date.now()}`);
+        await noOverflow(candidate); await noOverflow(trusted);
+        await trusted.screenshot({ path: info.outputPath("pending-computer-approved.png"), fullPage: true });
+        expect((await accountBrowserState(candidate))[0].endpointId).toBe(approved.endpointId);
+      });
     } catch (error) { failed = true; throw error; }
     finally {
       const failures: string[] = [];
@@ -202,4 +245,3 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       if (!failed && failures.length) throw new Error(`Pending approval fixture cleanup failed: ${failures.join(", ")}`);
     }
   });
-}

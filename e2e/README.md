@@ -52,11 +52,22 @@ npx playwright test
 
 The command above runs both Chromium projects with at most two workers. The
 `chromium` project serializes shared-account and shared-bridge tests; the
-`chromium-isolated` project runs the account-trust and pending-approvals cases
-in parallel using their independently owned accounts and bridge homes. New specs
-stay in the shared lane by default. Add a spec to the isolated allowlist only
-after reviewing its account, bridge, session, filesystem and service ownership
+`chromium-isolated` project runs account-trust, device-display-names and
+pending-approvals with independently owned accounts and bridge homes. The trust
+and pending-approval specs each use one scenario with desktop and mobile
+interactions. Consolidation removes repeated ceremonies only when every distinct
+security, persistence, transport, responsive and error assertion has a surviving
+owner; the [trust coverage map](../docs/investigations/e2e-consolidation/trust-review.md)
+and [suite coverage map](../docs/investigations/e2e-consolidation/suite-review.md)
+record those decisions. New specs stay in the shared lane by default. Add a spec
+to the isolated allowlist only after reviewing its account, bridge, session, filesystem and service ownership
 and verifying safe overlap in a full run.
+
+UI actions have a 15-second timeout to bound blocked interactions. This is
+separate from the 15-second default assertion timeout and the overall test timeout;
+individual scenarios and assertions may use their existing explicit budgets. The
+performance target is a complete CI job under 300 seconds, excluding queue time;
+confirm it with whole-job measurement rather than Playwright timing alone.
 
 After the setup above, these commands select the intended coverage:
 
@@ -64,6 +75,7 @@ After the setup above, these commands select the intended coverage:
 npx playwright test                              # both projects, full suite
 npx playwright test --workers=1                  # both projects, serial diagnostic
 npx playwright test --project=chromium-isolated # isolated account scenarios only
+npx playwright test --project=chromium-isolated tests/account-trust.spec.ts tests/pending-approvals.spec.ts
 ```
 
 `--project=chromium` runs only the shared lane; it no longer includes
