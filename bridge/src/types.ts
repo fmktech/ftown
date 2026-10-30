@@ -4,6 +4,7 @@
 export type { ShellType } from './harness-registry.js';
 import type { ShellType } from './harness-registry.js';
 import type { GetBridgeUpdatePayload, UpdateBridgePayload } from './update-protocol.js';
+import type { GetPullRequestStatusesPayload } from './pull-request-status-protocol.js';
 
 export type SessionRuntime = 'tmux' | 'direct';
 
@@ -95,7 +96,7 @@ export interface Command {
   requestId: string;
 }
 
-export type CommandType = 'get_bridge_update' | 'update_bridge' | 'security_devices' | 'security_invite' | 'security_revoke' | 'security_approve_mcp' | 'security_activate_mcp' | 'security_activity' | 'security_account_adopt' | 'mcp_request' | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'clear_terminal' | 'update_session_parent' | 'get_session_usage' | 'get_sessions_usage' | 'get_session_attention' | 'resolve_session_attention';
+export type CommandType = 'get_pull_request_statuses' | 'get_bridge_update' | 'update_bridge' | 'security_devices' | 'security_invite' | 'security_revoke' | 'security_approve_mcp' | 'security_activate_mcp' | 'security_activity' | 'security_account_adopt' | 'mcp_request' | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'clear_terminal' | 'update_session_parent' | 'get_session_usage' | 'get_sessions_usage' | 'get_session_attention' | 'resolve_session_attention';
 
 export interface GetSessionAttentionPayload { bridgeId: string; sessionId: string }
 export interface ResolveSessionAttentionPayload extends GetSessionAttentionPayload { eventId: string }
@@ -171,7 +172,7 @@ export interface GetSessionsUsagePayload {
   bridgeId?: string;
 }
 
-export type CommandPayload = GetBridgeUpdatePayload | UpdateBridgePayload | GetSessionAttentionPayload | ResolveSessionAttentionPayload | CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | ClearTerminalPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>;
+export type CommandPayload = GetPullRequestStatusesPayload | GetBridgeUpdatePayload | UpdateBridgePayload | GetSessionAttentionPayload | ResolveSessionAttentionPayload | CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | ClearTerminalPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>;
 
 export interface CommandResponse {
   requestId: string;

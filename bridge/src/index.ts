@@ -41,6 +41,7 @@ import { openAccountApproval } from './security/account-crypto.js';
 import { BridgeSecurityService, applicationJson } from './security/bridge/security.js';
 import type { ApplicationJson, EndpointIdentity, VerifiedApplication } from './security/protocol.js';
 import { createCommandHandler } from './command-rpc.js';
+import { PullRequestStatusService } from './pull-request-status.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { SessionResurrection, shouldResurrectStoredSession } from './session-resurrection.js';
 import { TerminalPump } from './terminal-pump.js';
@@ -863,6 +864,7 @@ program
     });
 
     localApiServer.setSessionController(sessionController);
+    const pullRequestStatuses = new PullRequestStatusService();
 
     const updateHome = realpathSync(homedir());
     const stagingRoot = join(updateHome, '.ftown', 'updates');
@@ -983,7 +985,7 @@ program
         return { type: 'command_response', response: { requestId: route.requestId, success: true } };
       }
       let result: CommandResponse | undefined;
-      await createCommandHandler({ bridgeId, security, sessionController, attentionStore, updates, updateEffects,
+      await createCommandHandler({ bridgeId, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses,
         publishCommandResponse: async response => { result = response; },
       })(message.application.data as unknown as Parameters<ReturnType<typeof createCommandHandler>>[0], message);
       return applicationJson({ type: 'command_response', response: result ?? { requestId: route.requestId, success: false, error: 'bridge_error' } });

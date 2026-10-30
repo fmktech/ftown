@@ -40,6 +40,7 @@ test('real read-only MCP principal cannot authorize the control update operation
 
 test('actual operations determine permission and unknown methods/routes/frames deny by default', () => {
   assert.equal(classifyCommand('get_bridge_update').permission, 'read');
+  assert.equal(classifyCommand('get_pull_request_statuses').permission, 'read');
   assert.equal(classifyCommand('update_bridge').permission, 'control');
   assert.equal(classifyCommand('get_history', { sessionId: 'session' }).permission, 'read');
   assert.equal(classifyCommand('bridge_exec', { mutating: false }).permission, 'control');
