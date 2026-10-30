@@ -467,3 +467,15 @@ describe('SessionController.usage', () => {
     assert.equal(result.usage, null);
   });
 });
+
+it('keeps a link incarnation for equivalent URLs and replaces it after unlink', async () => {
+  const h = setup([makeSession()]);
+  await h.controller.update('sess-1', { pullRequestUrl: 'https://github.com/owner/repo/pull/1' });
+  const first = h.store.sessions.get('sess-1')!.pullRequestLinkId; assert.ok(first);
+  await h.controller.update('sess-1', { pullRequestUrl: 'https://github.com/OWNER/REPO/pull/1' });
+  assert.equal(h.store.sessions.get('sess-1')!.pullRequestLinkId, first);
+  await h.controller.update('sess-1', { pullRequestUrl: null });
+  assert.equal(h.store.sessions.get('sess-1')!.pullRequestLinkId, undefined);
+  await h.controller.update('sess-1', { pullRequestUrl: 'https://github.com/owner/repo/pull/1' });
+  assert.notEqual(h.store.sessions.get('sess-1')!.pullRequestLinkId, first);
+});
