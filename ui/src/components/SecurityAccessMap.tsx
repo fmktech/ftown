@@ -16,6 +16,7 @@ export interface SecurityAccessMapProps {
   onSelect: (selection: SecurityAccessSelection) => void;
   toolbar?: ReactNode;
   selectedDetails?: ReactNode;
+  renderBrowserName?: (node: SecurityAccessBrowserNode, label: string) => ReactNode;
 }
 
 /** Public identifiers distinguish generic labels; full fingerprints stay in details. */
@@ -39,10 +40,10 @@ type Point = { x: number; y: number };
 type Connector = { from: Point; to: Point };
 
 /** Read-only access relationships. Selection never calls an approval action. */
-export function SecurityAccessMap({ scope = "account", browsers, bridges, account, selected, onSelect, toolbar, selectedDetails }: SecurityAccessMapProps) {
+export function SecurityAccessMap({ scope = "account", browsers, bridges, account, selected, onSelect, toolbar, selectedDetails, renderBrowserName }: SecurityAccessMapProps) {
   const root = useRef<HTMLDivElement>(null);
   const hub = useRef<HTMLDivElement>(null);
-  const nodes = useRef(new Map<string, HTMLButtonElement>());
+  const nodes = useRef(new Map<string, HTMLElement>());
   const [connectors, setConnectors] = useState<Record<string, Connector>>({});
   const layoutKey = JSON.stringify([browsers.map(node => [node.id, node.label, node.accessText, node.edge]), bridges.map(node => [node.id, node.label, node.accessText, node.connectionText, node.edge]), account.statusText, selected]);
   useLayoutEffect(() => {
@@ -92,14 +93,24 @@ export function SecurityAccessMap({ scope = "account", browsers, bridges, accoun
         <ul aria-label={scope === "account" ? "Account devices" : "Approved devices"} className="grid grid-cols-3 gap-2 sm:grid-cols-1">
           {browsers.map(node => {
             const label = accessBrowserLabel(node, browsers); const active = selected?.kind === "browser" && selected.id === node.id;
-            return <li key={node.id} data-access-card={`browser:${node.id}`} data-current-device={node.current ? "browser" : undefined} className={`${cardClass(node.current, active)} ${active && selectedDetails ? "col-span-full sm:col-span-1" : ""}`} style={node.current ? currentStyle : undefined}><button type="button" ref={element => { if (element) nodes.current.set(`browser:${node.id}`, element); else nodes.current.delete(`browser:${node.id}`); }}
+            return <li key={node.id} data-access-card={`browser:${node.id}`} data-current-device={node.current ? "browser" : undefined} className={`${cardClass(node.current, active)} ${active && selectedDetails ? "col-span-full sm:col-span-1" : ""} ${renderBrowserName ? "has-[[data-browser-name-editing]]:col-span-full sm:has-[[data-browser-name-editing]]:col-span-1" : ""}`} style={node.current ? currentStyle : undefined}>
+            {renderBrowserName ? <div ref={element => { if (element) nodes.current.set(`browser:${node.id}`, element); else nodes.current.delete(`browser:${node.id}`); }} className="relative flex min-w-0 flex-wrap items-start gap-1 rounded-md px-2 py-1">
+              <div className="min-w-[4.5rem] flex-1">{renderBrowserName(node, label)}
+                {node.current && label !== "This browser" && <span className="block text-[10px] text-[var(--shell-claude)]">This browser</span>}
+                <span className="hidden break-words text-[10px] leading-4 text-[var(--text-muted)] sm:block">{node.accessText}</span></div>
+              <button type="button" data-access-kind="browser" data-access-node={node.id} aria-pressed={active} aria-label={`Browser ${label}${node.current ? " (this browser)" : ""}: ${node.accessText}`}
+                className={`flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-1 rounded-md px-1 text-left hover:bg-[var(--bg-hover)] ${node.edge === "current" ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}`} onClick={() => onSelect({ kind: "browser", id: node.id })}>
+                <span className="hidden shrink-0 sm:block"><DeviceIcon browser /></span>
+                <SecurityLockIcon state={node.lockState} className={`shrink-0 ${node.edge === "current" ? "text-[var(--accent)]" : "text-[var(--text-muted)]"}`} />
+              </button>
+            </div> : <button type="button" ref={element => { if (element) nodes.current.set(`browser:${node.id}`, element); else nodes.current.delete(`browser:${node.id}`); }}
               data-access-kind="browser" data-access-node={node.id} aria-pressed={active} aria-label={`Browser ${label}${node.current ? " (this browser)" : ""}: ${node.accessText}`}
               className={buttonClass(node.edge)} onClick={() => onSelect({ kind: "browser", id: node.id })}>
               <span className="hidden shrink-0 pt-0.5 sm:block"><DeviceIcon browser /></span><span className="min-w-0 flex-1"><span className="block break-words text-[10px] font-semibold sm:text-xs [overflow-wrap:anywhere]">{label}</span>
                 {node.current && label !== "This browser" && <span className="block text-[10px] text-[var(--shell-claude)]">This browser</span>}
                 <span className="mt-0.5 hidden text-[10px] leading-4 text-[var(--text-muted)] sm:block">{node.accessText}</span></span>
               <SecurityLockIcon state={node.lockState} className={`shrink-0 ${node.edge === "current" ? "text-[var(--accent)]" : "text-[var(--text-muted)]"}`} />
-            </button>{active && selectedDetails && <div className="border-t border-[var(--border-subtle)] p-2">{selectedDetails}</div>}</li>;
+            </button>}{active && selectedDetails && <div className="border-t border-[var(--border-subtle)] p-2">{selectedDetails}</div>}</li>;
           })}
         </ul>
       </div>

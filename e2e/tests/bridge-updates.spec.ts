@@ -18,15 +18,16 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
     const bounds = await actions.boundingBox();
     expect(bounds && bounds.width >= 44 && bounds.height >= 44).toBeTruthy();
     await actions.click(); await page.getByRole("menuitem", { name: "Updates…" }).click();
-    const dialog = page.getByRole("dialog", { name: /^Updates for / });
+    const dialog = page.getByRole("dialog", { name: "Bridge updates" });
     await expect(dialog).toBeVisible();
-    await expect(dialog.getByText(/^Installed: (?!Unknown)/)).toBeVisible({ timeout: 30_000 });
-    await expect(dialog.getByText(/Manual setup on this computer/)).toBeVisible();
-    const installedText = await dialog.getByText(/^Installed: /).textContent();
-    const latestText = await dialog.getByText(/^Latest: /).textContent();
+    const installedRow = dialog.locator("dl > div").filter({ has: page.getByText("Installed", { exact: true }) });
+    const latestRow = dialog.locator("dl > div").filter({ has: page.getByText("Latest", { exact: true }) });
+    await expect(installedRow.locator("dd")).not.toHaveText("Unknown", { timeout: 30_000 });
+    const installedText = await installedRow.locator("dd").textContent();
+    const latestText = await latestRow.locator("dd").textContent();
     const stable = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
-    const installed = installedText?.replace(/^Installed: /, "") ?? "";
-    const latest = latestText?.replace(/^Latest: /, "") ?? "";
+    const installed = installedText ?? "";
+    const latest = latestText ?? "";
     expect(installed).toMatch(stable);
     expect(latest === "Unknown" || stable.test(latest)).toBe(true);
     const compare = (a: string, b: string) => {
@@ -35,9 +36,11 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       return 0;
     };
     const manualVersion = latest !== "Unknown" && compare(latest, installed) > 0 ? latest : installed;
+    await dialog.getByText("Setup & runtime details").click();
+    await expect(dialog.getByText(/Manual setup on this computer/)).toBeVisible();
     await expect(dialog.locator("code").first()).toHaveText(`npx ftown@${manualVersion} setup`);
-    await expect(dialog.getByRole("button", { name: "Update and restart" })).toBeDisabled();
-    await expect(dialog.getByText(/This installation cannot update itself/)).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Update and restart" })).toHaveCount(0);
+    await expect(dialog.getByText(/Automatic updates aren’t available/)).toBeVisible();
     await expect(page.getByRole("dialog", { name: "App update available", exact: true })).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath(`bridge-updates-${viewport.width}.png`) });
     await page.keyboard.press("Escape"); await expect(dialog).toBeHidden(); await expect(actions).toBeFocused();

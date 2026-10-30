@@ -37,8 +37,49 @@ export async function verifyPreview(bytes: Uint8Array, revision: string): Promis
   return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
 }
 export const PREVIEW_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; media-src 'none'; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; manifest-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
+// Runs inside the opaque sandbox before any user markup or script.
+const PREVIEW_LINK_SCRIPT = String.raw`<script>(() => {
+  const apply = Reflect.apply;
+  const closest = Element.prototype.closest;
+  const getAttribute = Element.prototype.getAttribute;
+  const path = Event.prototype.composedPath;
+  const prevent = Event.prototype.preventDefault;
+  const stop = Event.prototype.stopImmediatePropagation;
+  const button = Object.getOwnPropertyDescriptor(MouseEvent.prototype, 'button').get;
+  const trim = String.prototype.trim;
+  const startsWith = String.prototype.startsWith;
+  const regexTest = RegExp.prototype.test;
+  const absolute = /^https?:\/\//i;
+  const NativeURL = URL;
+  const protocol = Object.getOwnPropertyDescriptor(URL.prototype, 'protocol').get;
+  const href = Object.getOwnPropertyDescriptor(URL.prototype, 'href').get;
+  const open = window.open;
+  const location = window.location;
+  document.addEventListener('click', event => {
+    let link = null;
+    const nodes = apply(path, event, []);
+    for (let index = 0; index < nodes.length; index++) {
+      try { link = apply(closest, nodes[index], ['a[href],area[href]']); } catch { continue; }
+      if (link) break;
+    }
+    if (!link) return;
+    const value = apply(getAttribute, link, ['href']);
+    if (typeof value !== 'string') return;
+    const raw = apply(trim, value, []);
+    apply(prevent, event, []);
+    apply(stop, event, []);
+    if (!event.isTrusted || apply(button, event, []) !== 0) return;
+    if (apply(startsWith, raw, ['#'])) { location.hash = raw; return; }
+    if (!apply(regexTest, absolute, [raw])) return;
+    try {
+      const url = new NativeURL(raw);
+      const scheme = apply(protocol, url, []);
+      if (scheme === 'http:' || scheme === 'https:') apply(open, window, [apply(href, url, []), '_blank', 'noopener,noreferrer']);
+    } catch { /* Invalid URLs do not navigate. */ }
+  }, true);
+})();</script>`;
 export function previewDocument(html: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}"><meta name="referrer" content="no-referrer"></head><body>${html}</body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}"><meta name="referrer" content="no-referrer">${PREVIEW_LINK_SCRIPT}</head><body>${html}</body></html>`;
 }
 export function previewRatioBounds(width: number): [number, number] {
   const usable = Math.max(1, width - 8);

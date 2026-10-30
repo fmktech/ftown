@@ -114,7 +114,7 @@ describe("session PR destinations", () => {
     action.addEventListener("click", event => event.preventDefault());
     fireEvent.click(action);
     expect(screen.queryByRole("menu")).toBeNull();
-    expect(screen.getByRole("region", { name: "Needs attention" })).toBeTruthy();
+    expect(within(original).getByRole("img", { name: "Input needed" })).toBeTruthy();
     expect(onSelectSession).not.toHaveBeenCalled();
     fireEvent.keyDown(trigger, { key: " " });
     expect(screen.getByRole("menu", { name: "Session actions" })).toBeTruthy();

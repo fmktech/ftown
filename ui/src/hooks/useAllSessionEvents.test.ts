@@ -83,7 +83,7 @@ describe("explicit agent attention through actual hook subscriptions", () => {
     act(() => { h.publish("Notification", request); h.publish("PreToolUse", { tool_name: "Bash" }); });
     act(() => h.result.current.markSessionIdle("agent"));
     expect(h.current()).toMatchObject({ activity: "idle", attention: { type: "agent_needs_input" } });
-    act(() => h.result.current.clearSessionAttention("agent"));
+    act(() => { void h.result.current.clearSessionAttention("agent").catch(() => {}); });
     expect(h.current()?.attention).toBeUndefined();
     expect(h.current()?.activity).toBe("idle");
   });
@@ -377,13 +377,13 @@ describe("durable explicit attention restoration", () => {
     };
     const h = durableSetup(handle);
     await settle();
-    act(() => h.result.current.clearSessionAttention("agent"));
+    act(() => { void h.result.current.clearSessionAttention("agent").catch(() => {}); });
     await settle();
     expect(h.current()?.attention?.attentionId).toBe(saved.id);
     act(() => h.publishSaved());
     expect(h.current()?.attention?.attentionId).toBe(saved.id);
     fail = false;
-    act(() => h.result.current.clearSessionAttention("agent"));
+    act(() => { void h.result.current.clearSessionAttention("agent").catch(() => {}); });
     await settle();
     expect(h.rpc.sendCommand).toHaveBeenCalledWith(expect.objectContaining({ type: "resolve_session_attention",
       payload: { bridgeId: "bridge", sessionId: "agent", eventId: saved.id } }));
@@ -399,7 +399,7 @@ describe("durable explicit attention restoration", () => {
     const write = deferred();
     const h = durableSetup(command => command.type === "resolve_session_attention" ? write.promise : Promise.resolve(reply(saved)));
     await settle();
-    act(() => h.result.current.clearSessionAttention("agent"));
+    act(() => { void h.result.current.clearSessionAttention("agent").catch(() => {}); });
     act(() => h.publishSaved(newer));
     await act(async () => write.resolve(reply(null)));
     expect(h.current()?.attention?.attentionId).toBe(newer.id);
@@ -429,10 +429,56 @@ describe("durable explicit attention restoration", () => {
     await settle();
     act(() => h.publish("Notification", request));
     expect(h.current()?.attention?.type).toBe("agent_needs_input");
-    act(() => h.result.current.clearSessionAttention("agent"));
+    act(() => { void h.result.current.clearSessionAttention("agent").catch(() => {}); });
     expect(h.current()?.attention).toBeUndefined();
     act(() => h.publish("Notification", { notification_type: "permission_prompt", message: "Permission needed" }));
     act(() => h.publish("PostToolUse"));
     expect(h.current()?.attention).toBeUndefined();
   });
+});
+
+it("rejects a stale captured notice before sending a durable dismissal", async () => {
+  const h = durableSetup(async () => reply(saved)); await settle();
+  const previous = h.current()!.attention!; act(() => h.publishSaved(newer));
+  const before = h.rpc.sendCommand.mock.calls.length;
+  await expect(h.result.current.clearSessionAttention("agent", previous)).rejects.toThrow("changed");
+  expect(h.rpc.sendCommand).toHaveBeenCalledTimes(before); expect(h.current()?.attention?.attentionId).toBe(newer.id);
+});
+it("rejects a failed stamped dismissal and retains the captured notice", async () => {
+  const h = durableSetup(command => command.type === "resolve_session_attention" ? Promise.resolve({ requestId: command.requestId, success: false }) : Promise.resolve(reply(saved)));
+  await settle(); const captured = h.current()!.attention!;
+  await expect(h.result.current.clearSessionAttention("agent", captured)).rejects.toThrow("Could not dismiss");
+  expect(h.current()?.attention?.attentionId).toBe(saved.id);
+});
+
+it("rejects a durable dismissal in the client/user switch window before any RPC", async () => {
+  const old = durableClient(), replacement = durableClient(); const rpc = { sendCommand: vi.fn(async (_command: Command) => reply(saved)), onSubscribed: () => () => {} };
+  let captured: ReturnType<typeof restoredForTest> | undefined; let attempt: Promise<unknown> | undefined;
+  function restoredForTest() { return { type: "agent_needs_input" as const, title: saved.title, message: saved.message, receivedAt: Date.parse(saved.createdAt), attentionId: saved.id, attentionSequence: saved.sequence }; }
+  const hook = renderHook(({ client, user }) => {
+    const result = useAllSessionEvents(client, sessions, user, rpc);
+    useLayoutEffect(() => { if (user === "other" && captured) attempt = result.clearSessionAttention("agent", captured).catch(error => error); }, [user, result.clearSessionAttention]);
+    return result;
+  }, { initialProps: { client: old.client, user: "user" } });
+  await settle(); captured = restoredForTest(); expect(hook.result.current.sessionActivity.get("agent")?.attention).toEqual(captured);
+  hook.rerender({ client: replacement.client, user: "other" });
+  expect(attempt).toBeDefined(); expect((await attempt) as Error).toMatchObject({ message: expect.stringContaining("changed") });
+  expect(rpc.sendCommand.mock.calls.filter(([command]) => command.type === "resolve_session_attention")).toHaveLength(0);
+});
+it("rejects an old ephemeral dismissal during account change and preserves the new account's matching notice", async () => {
+  const now = vi.spyOn(Date, "now").mockReturnValue(1234);
+  try {
+    const transport = durableClient(); const rpc = { sendCommand: vi.fn(async () => reply(null)), onSubscribed: () => () => {} };
+    let captured: import("@/lib/hook-events").ManualInputNotice | undefined; let attempt: Promise<unknown> | undefined;
+    const hook = renderHook(({ user }) => {
+      const result = useAllSessionEvents(transport.client, sessions, user, rpc);
+      useLayoutEffect(() => { if (user === "other" && captured) attempt = result.clearSessionAttention("agent", captured).catch(error => error); }, [user, result.clearSessionAttention]);
+      return result;
+    }, { initialProps: { user: "user" } });
+    await settle(); act(() => transport.publications.at(-1)!({ data: { type: "hook_event", eventName: "Notification", data: request } }));
+    captured = hook.result.current.sessionActivity.get("agent")?.attention; expect(captured).toBeDefined();
+    hook.rerender({ user: "other" }); expect((await attempt) as Error).toMatchObject({ message: expect.stringContaining("changed") });
+    await settle(); act(() => transport.publications.at(-1)!({ data: { type: "hook_event", eventName: "Notification", data: request } }));
+    expect(hook.result.current.sessionActivity.get("agent")?.attention).toEqual(captured);
+  } finally { now.mockRestore(); }
 });
