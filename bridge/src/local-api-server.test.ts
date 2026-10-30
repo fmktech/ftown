@@ -687,3 +687,21 @@ describe('LocalApiServer native wake heartbeats', () => {
     } finally { server.getHttpServer()?.closeAllConnections(); server.stop(); rmSync(home, { recursive: true, force: true }); }
   });
 });
+
+it('queues browser session replies through the durable mail store without an HTTP listener', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ftown-browser-mail-'));
+  const server = new BaseLocalApiServer();
+  t.after(() => { server.stop(); rmSync(dir, { recursive: true, force: true }); });
+  const session: Session = { id: 'session', name: 'session', command: 'fake', shellType: 'pi', status: 'running', bridgeId: 'bridge', createdAt: '', updatedAt: '' };
+  assert.deepEqual(await server.enqueueSessionMessage(session, 'reply'), { ok: false, error: 'Mail store not ready' });
+  const store = new SessionStore(dir); await store.saveSession(session);
+  const mail = new MailStore(id => store.sessionDir(id));
+  const runner = Object.assign(new EventEmitter(), { isRunning: () => true }) as unknown as ProcessRunner;
+  server.setDependencies(store, runner, {} as CentrifugoClient, 'user'); server.setMailStore(mail);
+  const result = await server.enqueueSessionMessage(session, '  first line\nsecond line  ');
+  assert.equal(result.ok, true); if (!result.ok) throw new Error('expected durable mail');
+  const messages = await mail.listAll(session.id, 10);
+  assert.equal(messages.length, 1);
+  assert.deepEqual({ id: messages[0].id, to: messages[0].to, from: messages[0].from, fromName: messages[0].fromName, type: messages[0].type, body: messages[0].body },
+    { id: result.id, to: 'session', from: 'browser', fromName: 'You', type: 'message', body: '  first line\nsecond line  ' });
+});

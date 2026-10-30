@@ -50,7 +50,7 @@ function session(id: string, name: string, fields: Partial<Session> = {}): Sessi
 }
 function dashboard(localMode = false, readyAccount = false) {
   const client = { securityRuntime: { ownerId: "00000000-0000-4000-8000-000000000001", state: (bridgeId: string) => ({ bridgeId, status: "ready", endpoint: null }),
-    snapshot: () => [], onChange: () => () => {}, identity: { endpoint: { id: "approved-browser" } } } } as unknown as MessageClient;
+    snapshot: () => [], onChange: () => () => {}, bridge: () => ({ permissions: ["read", "control"] }), identity: { endpoint: { id: "approved-browser" } } } } as unknown as MessageClient;
   return render(<Dashboard client={client} connectionStatus="connected" connectionError={null}
     userId="user" token="test" centrifugoUrl="ws://localhost" transport={null} onDisconnect={vi.fn()} localMode={localMode} accountState={readyAccount ? { status: "ready", identity: null, signing: null, trust: null, legacyBridges: [], historyExists: false, code: null, offline: false } : undefined} />);
 }
@@ -75,6 +75,7 @@ beforeEach(() => {
   state.pending = [];
   state.rpcCommands = [];
   state.createSession.mockResolvedValue(undefined);
+  state.clearSessionAttention.mockResolvedValue(undefined);
   state.sessions = [
     session("ordinary", "Regular shell"),
     session("legacy", "Preserved run", { loopId: "retired-loop", status: "error" }),
@@ -210,32 +211,27 @@ describe("new-session navigation", () => {
 });
 
 describe("attention navigation preserves the request", () => {
-  it.each([true, false])("keeps attention through original, shortcut and repeat selection without an overlay (desktop=%s)", desktop => {
+  it.each([true, false])("keeps notices when selecting sessions and only dismisses explicitly (desktop=%s)", async desktop => {
     window.matchMedia = vi.fn().mockReturnValue({ matches: desktop, addEventListener: vi.fn(), removeEventListener: vi.fn() });
     const { container } = dashboard();
-    const original = Array.from(container.querySelectorAll<HTMLButtonElement>('button[draggable="true"]'))
-      .find(row => row.textContent?.includes("Regular shell"))!;
+    const original = Array.from(container.querySelectorAll<HTMLButtonElement>('button[draggable="true"]')).find(row => row.textContent?.includes("Regular shell"))!;
     fireEvent.click(original);
-    // A newly arriving notice on the already selected session must also survive
-    // selecting that same session again.
-    state.activity = new Map([["ordinary", { activity: "idle", attention: {
-      type: "agent_needs_input", title: "Review requested", message: "Inspect the result before continuing", receivedAt: 10,
-    } }]]);
+    const notice = { type: "agent_needs_input" as const, title: "Review requested", message: "Inspect the result before continuing", receivedAt: 10 };
+    state.activity = new Map([["ordinary", { activity: "idle", attention: notice }]]);
     fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
-    const shortcut = screen.getByRole("button", { name: "Regular shell: Review requested. Inspect the result before continuing" });
-    for (const control of [original, original, shortcut]) {
+    for (let i = 0; i < 2; i++) {
+      fireEvent.click(original); expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
       fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
-      fireEvent.click(control);
-      expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
-      expect(screen.getByRole("tab", { name: "Terminal" }).classList.contains("mobile-tab-active")).toBe(true);
-      expect(screen.queryByRole("alert")).toBeNull();
-      expect(screen.getByRole("button", { name: "Dismiss attention for Regular shell" })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 message" }));
+      expect(screen.getByText("Inspect the result before continuing")).toBeTruthy();
       expect(state.clearSessionAttention).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+      expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
+      fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
     }
-    fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
-    fireEvent.click(screen.getByRole("button", { name: "Dismiss attention for Regular shell" }));
-    expect(state.clearSessionAttention).toHaveBeenCalledExactlyOnceWith("ordinary");
-    expect(screen.getByRole("tab", { name: "Workspace" }).classList.contains("mobile-tab-active")).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 message" }));
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(state.clearSessionAttention).toHaveBeenCalledExactlyOnceWith("ordinary", notice));
   });
 });
 
