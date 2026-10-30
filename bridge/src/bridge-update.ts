@@ -2,6 +2,7 @@ import type { VerifiedPrincipal } from './security/protocol.js';
 import type { BridgeUpdateAccepted, BridgeUpdateBlock, BridgeUpdateErrorCode, BridgeUpdateOperation, BridgeUpdateStatus } from './update-protocol.js';
 import type { PreparedHandoff, PreparedRelease, RestartDescriptor, StableRelease, UpdateReceipt, UpdateReservation } from './update-runtime-contract.js';
 import { UpdateAdmission, UpdateResponseTicket } from './update-admission.js';
+import { supportsNode } from './update-release.js';
 
 const versionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -36,6 +37,7 @@ export interface BridgeUpdateDependencies {
   shutdown(): Promise<void>;
   admission: UpdateAdmission;
   now?: () => number;
+  nodeVersion?: string;
 }
 
 /** Server-owned update state. The transport owns and signals the returned ticket. */
@@ -84,9 +86,9 @@ export class BridgeUpdateCoordinator {
     try { await this.deps.authorize(principal, 'control'); } catch { control = false; }
     const available = !!latest && compareVersions(latest.version, this.deps.currentVersion) > 0;
     const blockedReason: BridgeUpdateBlock = !control ? 'permission_denied' : this.deps.support() ??
-      (this.active() || this.deps.admission.isFrozen ? 'in_progress' : busy ? 'busy' : !latest ? 'release_unavailable' : null);
+      (this.active() || this.deps.admission.isFrozen ? 'in_progress' : latest && !supportsNode(latest.nodeEngine, this.deps.nodeVersion ?? process.versions.node) ? 'node_incompatible' : busy ? 'busy' : !latest ? 'release_unavailable' : null);
     return { schema: 1, bridgeId: this.deps.bridgeId, currentVersion: this.deps.currentVersion,
-      latestVersion: latest?.version ?? null, checkedAt: this.checkedAt === null ? null : new Date(this.checkedAt).toISOString(),
+      latestVersion: latest?.version ?? null, ...(latest ? { currentNodeVersion: this.deps.nodeVersion ?? process.versions.node, requiredNodeEngine: latest.nodeEngine } : {}), checkedAt: this.checkedAt === null ? null : new Date(this.checkedAt).toISOString(),
       availability: latest ? available ? 'available' : 'current' : 'unknown', canUpdate: available && blockedReason === null,
       blockedReason, operation: this.operation && { ...this.operation }, manualCommand: `npx ftown@${available ? latest!.version : this.deps.currentVersion} setup` };
   }
@@ -106,9 +108,10 @@ export class BridgeUpdateCoordinator {
     this.operation = { id: operationId, targetVersion, phase: 'staging', startedAt: now, updatedAt: now, error: null };
     const operation = this.operation;
     this.acceptance = (async () => {
-      if (await this.deps.busy()) throw failure('bridge_busy', 'Stop running sessions before updating');
       const release = await this.latestRelease(true);
       if (!release) throw failure('release_unavailable', 'Stable release is unavailable');
+      if (!supportsNode(release.nodeEngine, this.deps.nodeVersion ?? process.versions.node)) throw failure('node_incompatible', 'This release requires a different Node version');
+      if (await this.deps.busy()) throw failure('bridge_busy', 'Stop running sessions before updating');
       if (release.version !== targetVersion || compareVersions(targetVersion, this.deps.currentVersion) <= 0)
         throw failure('update_target_changed', 'The selected release is no longer available');
       await this.deps.authorize(principal, 'control');

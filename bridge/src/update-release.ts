@@ -25,9 +25,12 @@ export function compareStableVersions(a: string, b: string): number {
 export function supportsNode(engine: string, node: string): boolean {
   const current = node.replace(/^v/, '');
   if (!stableVersion(current) || typeof engine !== 'string' || engine.length > 256) return false;
-  return engine.split('||').some(part => {
-    const clauses = part.trim().split(/\s+/).filter(Boolean);
-    if (!clauses.length) return false;
+  const alternatives = engine.split('||').map(part => part.trim().split(/\s+/).filter(Boolean));
+  if (alternatives.some(clauses => !clauses.length || clauses.some(clause => {
+    const m = /^(?:\^|>=|>|<=|<|=)?((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/.exec(clause);
+    return !m || !stableVersion(m[1]);
+  }))) return false;
+  return alternatives.some(clauses => {
     return clauses.every(clause => {
       const m = /^(\^|>=|>|<=|<|=)?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(clause);
       if (!m) return false;
@@ -45,7 +48,7 @@ export function supportsNode(engine: string, node: string): boolean {
     });
   });
 }
-export function validateStableMetadata(value: unknown, nodeVersion = process.versions.node): StableRelease {
+export function parseStableMetadata(value: unknown): StableRelease {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid release metadata');
   const m = value as Record<string, unknown>; const dist = m.dist as Record<string, unknown> | undefined;
   const engines = m.engines as Record<string, unknown> | undefined;
@@ -53,8 +56,13 @@ export function validateStableMetadata(value: unknown, nodeVersion = process.ver
     || !dist || typeof dist.tarball !== 'string' || dist.tarball !== `${REGISTRY}/ftown/-/ftown-${m.version}.tgz`
     || typeof dist.integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(dist.integrity)
     || Buffer.from(dist.integrity.slice(7), 'base64').length !== 64
-    || !engines || typeof engines.node !== 'string' || !supportsNode(engines.node, nodeVersion)) throw new Error('Unsupported release metadata');
+    || !engines || typeof engines.node !== 'string' || !engines.node.trim() || engines.node.length > 256 || /[\x00-\x1f\x7f-\x9f]/.test(engines.node)) throw new Error('Unsupported release metadata');
   return { version: m.version, gitHead: m.gitHead.toLowerCase(), tarballUrl: dist.tarball, integrity: dist.integrity, nodeEngine: engines.node };
+}
+export function validateStableMetadata(value: unknown, nodeVersion = process.versions.node): StableRelease {
+  const release = parseStableMetadata(value);
+  if (!supportsNode(release.nodeEngine, nodeVersion)) throw new Error('Unsupported release metadata');
+  return release;
 }
 async function readBounded(url: string, limit: number, signal: AbortSignal): Promise<Buffer> {
   const response = await fetch(url, { signal, redirect: 'error', headers: { accept: 'application/json, application/octet-stream' } });
@@ -130,7 +138,7 @@ export function createUpdateReleaseApi(overrides: Partial<ReleaseDependencies> =
   return {
     async resolveStableRelease(signal) {
       const bytes = await deps.read(`${REGISTRY}/ftown/latest`, MAX_METADATA, AbortSignal.any([signal, AbortSignal.timeout(15_000)]));
-      return validateStableMetadata(JSON.parse(bytes.toString('utf8')), deps.nowNode);
+      return parseStableMetadata(JSON.parse(bytes.toString('utf8')));
     },
     async prepareRelease(release, options) {
       options.signal.throwIfAborted();

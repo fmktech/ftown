@@ -25,7 +25,7 @@ describe("authenticated bridge update controller", () => {
     waiting.resolve(success(status("a"))); await pending; expect(c.get("a").status).toBeNull();
   });
   it("never mutates for busy, read-only or unsupported statuses", async () => {
-    for (const blockedReason of ["busy", "permission_denied", "unsupported_launch"] as const) {
+    for (const blockedReason of ["busy", "permission_denied", "unsupported_launch", "node_incompatible"] as const) {
       const send = vi.fn(async () => success(status("a", { canUpdate: false, blockedReason })));
       const c = new BridgeUpdatesController(send, () => {}, () => "r"); c.setActive(["a"]); await c.check("a"); await c.update("a");
       expect(send).toHaveBeenCalledTimes(1);
@@ -48,6 +48,11 @@ describe("authenticated bridge update controller", () => {
   it("rejects mismatched identity and malformed status", () => {
     expect(parseBridgeUpdateStatus(status("b"), "a")).toBeNull();
     expect(parseBridgeUpdateStatus({ ...status("a"), canUpdate: "yes" }, "a")).toBeNull();
+    expect(parseBridgeUpdateStatus({ ...status("a"), currentNodeVersion: 24 }, "a")).toBeNull();
+    expect(parseBridgeUpdateStatus({ ...status("a"), requiredNodeEngine: "a".repeat(257) }, "a")).toBeNull();
+    expect(parseBridgeUpdateStatus({ ...status("a"), requiredNodeEngine: "\n>=24.0.0" }, "a")).toBeNull();
+    expect(parseBridgeUpdateStatus({ ...status("a"), requiredNodeEngine: ">=24.0.0\u0085" }, "a")).toBeNull();
+    expect(parseBridgeUpdateStatus(status("a", { canUpdate: false, blockedReason: "node_incompatible", currentNodeVersion: "24.12.0", requiredNodeEngine: "^24.22.1" }), "a")?.requiredNodeEngine).toBe("^24.22.1");
   });
   it("accepts an installed version ahead of stable as current", () => {
     expect(parseBridgeUpdateStatus(status("a", { currentVersion: "2.0.0", latestVersion: "1.9.9", availability: "current", canUpdate: false }), "a")?.currentVersion).toBe("2.0.0");

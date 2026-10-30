@@ -7,10 +7,11 @@ const manual = (value: string | undefined): string => value && /^npx ftown@(?:la
 const reason: Record<string, string> = {
   busy: "Stop running sessions before updating",
   permission_denied: "This device does not have control permission for this computer.",
-  not_enabled: "Updates are not enabled on this computer. Start an unsupervised single-bridge installation with ftown start --allow-updates.",
-  unsupported_launch: "This installation cannot update itself. Use its service manager or the manual setup instructions below. ftown start --allow-updates requires an unsupervised single-bridge installation.",
+  not_enabled: "Updates are disabled on this computer or this bridge uses an older default. Start with ftown start; older bridges may require ftown start --allow-updates.",
+  unsupported_launch: "This installation cannot update itself. Use its service manager or the manual setup instructions below. Assisted updates require an unsupervised single-bridge installation.",
   in_progress: "Another update is already in progress.",
   release_unavailable: "The latest release could not be checked. Try again later.",
+  node_incompatible: "Upgrade Node on this computer to a version supported by the latest release before updating the bridge.",
 };
 
 export function BridgeUpdatesDialog({ open, name, view, onClose, onCheck, onUpdate }: { open: boolean; name: string; view: UpdateView; onClose: () => void; onCheck: () => void; onUpdate: () => void }) {
@@ -33,6 +34,8 @@ export function BridgeUpdatesDialog({ open, name, view, onClose, onCheck, onUpda
     <div className="mt-3 space-y-2 text-sm" role="status" aria-live="polite">
       <p>Installed: {status?.currentVersion ?? "Unknown"}</p>
       <p>Latest: {status?.latestVersion ?? "Unknown"}</p>
+      {status?.currentNodeVersion && <p>Current Node: {status.currentNodeVersion}</p>}
+      {status?.requiredNodeEngine && <p>Required Node: {status.requiredNodeEngine}</p>}
       {view.loading && <p>Checking for updates…</p>}
       {status?.availability === "current" && <p>Up to date.</p>}
       {status?.availability === "available" && <p>Update available.</p>}
@@ -46,7 +49,7 @@ export function BridgeUpdatesDialog({ open, name, view, onClose, onCheck, onUpda
       <code className="block break-all rounded bg-[var(--bg-elevated)] p-2">{command}</code>
       <button type="button" className="min-h-11 rounded border border-[var(--border-muted)] px-3" onClick={() => { if (!navigator.clipboard?.writeText) { setCopied("Copy unavailable; select the command above."); return; } void navigator.clipboard.writeText(command).then(() => setCopied("Copied."), () => setCopied("Copy unavailable; select the command above.")); }}>Copy setup command</button>
       {copied && <span role="status" className="ml-2">{copied}</span>}
-      <p>For an unsupervised single-bridge installation, start with <code>ftown start --allow-updates</code>. For managed installations, use the service manager.</p>
+      <p>For an unsupervised single-bridge installation, start with <code>ftown start</code>. For managed installations, use the service manager.</p>
     </div>
     {confirming && <div className="mt-4 rounded border border-[var(--border-muted)] p-3 text-sm" role="group" aria-label="Confirm bridge update">
       <p>All sessions must be stopped before updating. The bridge will briefly disconnect.</p>

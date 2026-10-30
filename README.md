@@ -630,11 +630,15 @@ for first-account/private-link setup; an account routing email is not approval.
 ## Upgrade notes
 
 The dashboard can check an approved bridge for a stable update. Assisted updates
-require an explicitly opted-in, unsupervised single bridge on POSIX, started from
-its installed CLI with `ftown start --allow-updates` and the default FTown home
-and data directory. Stop all running or pending sessions first; the update briefly
-disconnects the bridge. Windows, Solo, development builds, custom instances and
-service-managed bridges use their normal manager or manual setup instructions.
+are enabled by default for an unsupervised single bridge on POSIX, started from
+its installed CLI with `ftown start` and the default FTown home and data directory.
+Use `ftown start --no-allow-updates` to disable them; older bridges may need
+`ftown start --allow-updates`. Updates still require explicit confirmation and
+never install in the background. Stop all running or pending sessions first; the
+update briefly disconnects the bridge. Windows, Solo, development builds, custom
+instances and service-managed bridges use their normal manager or manual setup
+instructions. If the latest release requires a newer Node version, upgrade Node
+on that computer before updating the bridge.
 
 If setup or restart fails, FTown does not promise an automatic rollback. Run
 `npx ftown@<exact-version> setup --repair` with the target version shown in the

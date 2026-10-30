@@ -37,6 +37,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
     const manualVersion = latest !== "Unknown" && compare(latest, installed) > 0 ? latest : installed;
     await expect(dialog.locator("code").first()).toHaveText(`npx ftown@${manualVersion} setup`);
     await expect(dialog.getByRole("button", { name: "Update and restart" })).toBeDisabled();
+    await expect(dialog.getByText(/This installation cannot update itself/)).toBeVisible();
     await expect(page.getByRole("status").filter({ hasText: "App update available" })).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath(`bridge-updates-${viewport.width}.png`) });
     await page.keyboard.press("Escape"); await expect(dialog).toBeHidden(); await expect(actions).toBeFocused();
