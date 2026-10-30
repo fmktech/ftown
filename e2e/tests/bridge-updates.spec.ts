@@ -6,9 +6,10 @@ import { readBridgePointer } from "../helpers/bridge-api";
 for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
   test(`bridge update menu displays real status at ${viewport.width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
+    await login(page, sharedEmail());
     await Promise.all([
       page.waitForResponse(response => new URL(response.url()).pathname === "/api/version" && response.ok()),
-      login(page, sharedEmail()),
+      page.reload(),
     ]);
     await waitForBridgeOnline(page);
     const bridgeId = readBridgePointer().bridgeId;
