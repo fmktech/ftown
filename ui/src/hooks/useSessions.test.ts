@@ -470,3 +470,18 @@ describe("create result reconciliation boundaries", () => {
     expect(h.ids()).toEqual(["existing"]);
   });
 });
+
+
+describe("session preview metadata", () => {
+  it("accepts a valid descriptor, clears it on omission and fails closed on invalid registration", () => {
+    const h = setup();
+    const preview = { id: "12345678-1234-4234-8234-123456789abc", fileName: "view.html" };
+    h.publication(row("one", "a", { preview }));
+    expect(h.result.current.sessions[0].preview).toEqual(preview);
+    h.publication(row("one"));
+    expect(h.result.current.sessions[0].preview).toBeUndefined();
+    h.publication(row("one", "a", { preview }));
+    h.publication(row("one", "a", { preview: { ...preview, fileName: "../private" } }));
+    expect(h.result.current.sessions[0].preview).toBeUndefined();
+  });
+});

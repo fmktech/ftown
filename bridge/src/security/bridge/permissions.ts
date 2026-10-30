@@ -3,7 +3,7 @@ import { BridgeSecurityError } from './errors.js';
 
 export interface OperationPermission { permission: EndpointPermission; mutating: boolean; operation: string; sessionId: string | null }
 const session = /^[A-Za-z0-9_-]+$/;
-const readCommands = new Set(['get_bridge_update', 'list_sessions', 'get_history', 'get_session_usage', 'get_sessions_usage', 'get_session_attention']);
+const readCommands = new Set(['session_preview_status', 'session_preview_chunk', 'get_bridge_update', 'list_sessions', 'get_history', 'get_session_usage', 'get_sessions_usage', 'get_session_attention']);
 const controlCommands = new Set(['update_bridge', 'create_session', 'stop_session', 'retry_session', 'send_message', 'rename_session', 'remove_session',
   'bridge_exec', 'clear_terminal', 'update_session_parent', 'resolve_session_attention']);
 const adminCommands = new Set(['security_devices', 'security_invite', 'security_revoke', 'security_approve_mcp', 'security_activity', 'security_account_adopt']);
@@ -27,6 +27,8 @@ export function classifyHttp(method: string, path: string): OperationPermission 
   if (method === 'GET' && url.pathname === '/api/archive') return result('read', 'archive_list');
   if (method === 'GET' && url.pathname === '/api/inbox/resolve') return result('read', 'inbox_resolve');
   if (method === 'GET' && url.pathname === '/api/browser/events') return result('read', 'local_events');
+  const preview = /^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/preview$/.exec(url.pathname);
+  if (preview) return !url.search && (method === 'PUT' || method === 'DELETE') ? result('control', 'session_preview_register', preview[1]) : deny();
   if (url.pathname === '/api/loops' || /^\/api\/loops\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)?$/.test(url.pathname)) {
     if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(method)) return deny();
     return { permission: method === 'GET' ? 'read' : 'control', mutating: false, operation: 'automation_removed', sessionId: null };
@@ -63,8 +65,10 @@ export function classifyCommand(command: string, payload?: ApplicationJson): Ope
   if (command === 'mcp_request') {
     const request = object(body?.request);
     if (typeof request?.method !== 'string' || typeof request.path !== 'string') return deny();
+    if (/^\/api\/sessions\/[A-Za-z0-9_-]{1,200}\/preview(?:\?|$)/.test(request.path)) return deny();
     return classifyHttp(request.method, request.path);
   }
+  if (command === 'session_preview_status' || command === 'session_preview_chunk') return sessionId && sessionId.length <= 200 ? result('read', command, sessionId) : deny();
   if (readCommands.has(command)) return result('read', command, sessionId);
   if (controlCommands.has(command)) return result('control', command, sessionId);
   if (adminCommands.has(command)) return result('admin', command, sessionId);

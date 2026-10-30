@@ -9,6 +9,9 @@ import {
 import type { RemoveFtownSessionOptions } from './remove-ftown-session.js';
 import type { Session, SessionUsage } from './types.js';
 import { normalizePullRequestUrl } from './pull-request-url.js';
+import { currentPreview, preparePreview, PreviewError, previewChunk, previewStatus, SessionPreviewReader, validPreviewId, validRevision } from './session-preview.js';
+import type { SessionPreviewChunk, SessionPreviewSource, SessionPreviewStatus } from './preview-protocol.js';
+import { PREVIEW_CHUNK_BYTES } from './preview-protocol.js';
 
 /**
  * Transport-agnostic session operations, defined ONCE and shared by the two
@@ -24,7 +27,7 @@ import { normalizePullRequestUrl } from './pull-request-url.js';
  * - State/lookup failures return typed `{ ok: false, code, message }` results.
  */
 
-export type SessionErrorCode = 'not_found' | 'invalid' | 'conflict' | typeof AUTOMATION_REMOVED_CODE;
+export type SessionErrorCode = 'not_found' | 'invalid' | 'too_large' | 'conflict' | typeof AUTOMATION_REMOVED_CODE;
 
 export interface SessionControllerError {
   ok: false;
@@ -67,6 +70,7 @@ export interface SessionControllerDeps {
   /** Optional: extract token/cost usage from harness-native session files.
    * Required only by usage(); omitted in adapters that never call it. */
   collectUsage?(session: Session): Promise<SessionUsage | null>;
+  previewReader?: SessionPreviewReader;
   // ---- Runtime closures still owned by index.ts. They are injected rather
   // than restructured out of index.ts (a later task splits that file); only
   // stop/clearTerminal need them, so the HTTP adapter may omit them.
@@ -80,9 +84,11 @@ export interface SessionControllerDeps {
 export class SessionController {
   private readonly deps: SessionControllerDeps;
   private readonly metadataWrites = new Map<string, Promise<void>>();
+  private readonly previewReader: SessionPreviewReader;
 
   constructor(deps: SessionControllerDeps) {
     this.deps = deps;
+    this.previewReader = deps.previewReader ?? new SessionPreviewReader();
   }
 
   private require<T>(dep: T | undefined, name: string): T {
@@ -148,12 +154,14 @@ export class SessionController {
       return { ok: true, usage: session.usage ?? null };
     }
     const usage = await collect(session);
-    if (usage && isTerminal) {
-      session.usage = usage;
-      session.updatedAt = new Date().toISOString();
-      await this.deps.store.saveSession(session);
-      await this.deps.publishSessionUpdate(session);
-    }
+    if (usage && isTerminal) await this.withSessionMutation(sessionId, async () => {
+      const fresh = await this.deps.store.loadSession(sessionId);
+      if (!fresh || (fresh.status !== 'completed' && fresh.status !== 'error')) return;
+      fresh.usage = usage;
+      fresh.updatedAt = new Date().toISOString();
+      await this.deps.store.saveSession(fresh);
+      await this.deps.publishSessionUpdate(fresh);
+    });
     return { ok: true, usage: usage ?? session.usage ?? null };
   }
 
@@ -170,6 +178,7 @@ export class SessionController {
 
   /** Re-run a finished/dead session's stored command verbatim. */
   async retry(sessionId: string): Promise<SessionControllerResult<{ session: Session }>> {
+    return this.withSessionMutation(sessionId, async () => {
     const existingSession = await this.deps.store.loadSession(sessionId);
     if (!existingSession) {
       return { ok: false, code: 'not_found', message: 'Session not found' };
@@ -187,6 +196,7 @@ export class SessionController {
     const factory = this.require(this.deps.sessionFactory, 'sessionFactory');
     await relaunchFtownSession(factory, existingSession, 'retry');
     return { ok: true, session: existingSession };
+    });
   }
 
   /**
@@ -199,9 +209,12 @@ export class SessionController {
     sessionId: string,
     input: SessionUpdateInput,
   ): Promise<SessionControllerResult<{ session: Session }>> {
-    const update = () => this.updateMetadata(sessionId, input);
+    return this.withSessionMutation(sessionId, () => this.updateMetadata(sessionId, input));
+  }
+
+  private async withSessionMutation<T>(sessionId: string, update: () => Promise<T>): Promise<T> {
     if (this.deps.withSessionWrite) {
-      let result!: SessionControllerResult<{ session: Session }>;
+      let result!: T;
       await this.deps.withSessionWrite(sessionId, async () => { result = await update(); });
       return result;
     }
@@ -292,8 +305,83 @@ export class SessionController {
     sessionId: string,
     options?: RemoveFtownSessionOptions,
   ): Promise<{ removed: boolean }> {
-    const removed = await this.deps.removeSession(sessionId, options);
-    return { removed: removed !== null };
+    return this.withSessionMutation(sessionId, async () => {
+      const removed = await this.deps.removeSession(sessionId, options);
+      return { removed: removed !== null };
+    });
+  }
+
+  async setPreview(sessionId: string, path: unknown): Promise<SessionControllerResult<{ session: Session }>> {
+    return this.withSessionMutation(sessionId, async () => {
+      const session = await this.deps.store.loadSession(sessionId);
+      if (!session) return { ok: false, code: 'not_found', message: 'Session not found' };
+      try {
+        const prepared = await preparePreview(session, path);
+        session.preview = prepared.preview; session.previewSource = prepared.previewSource;
+        session.updatedAt = new Date().toISOString();
+        await this.deps.store.saveSession(session);
+        await this.deps.publishSessionUpdate(session);
+        return { ok: true, session };
+      } catch (error) {
+        if (error instanceof PreviewError) return { ok: false, code: error.reason === 'too_large' ? 'too_large' : 'invalid', message: 'Invalid preview file' };
+        throw error;
+      }
+    });
+  }
+
+  async clearPreview(sessionId: string): Promise<SessionControllerResult<{ session: Session }>> {
+    return this.withSessionMutation(sessionId, async () => {
+      const session = await this.deps.store.loadSession(sessionId);
+      if (!session) return { ok: false, code: 'not_found', message: 'Session not found' };
+      delete session.preview; delete session.previewSource;
+      session.updatedAt = new Date().toISOString();
+      await this.deps.store.saveSession(session); await this.deps.publishSessionUpdate(session);
+      return { ok: true, session };
+    });
+  }
+
+  private async previewSnapshot(sessionId: string, previewId: string): Promise<{ session: Session; source: SessionPreviewSource | null } | null> {
+    return this.withSessionMutation(sessionId, async () => {
+      const session = await this.deps.store.loadSession(sessionId);
+      if (!session) return null;
+      const source = currentPreview(session, previewId);
+      return { session, source };
+    });
+  }
+
+  async getPreviewStatus(sessionId: string, previewId: string, knownRevision?: string): Promise<SessionControllerResult<{ preview: SessionPreviewStatus }>> {
+    if (!validPreviewId(previewId) || (knownRevision !== undefined && !validRevision(knownRevision))) return { ok: false, code: 'invalid', message: 'Invalid preview request' };
+    const selected = await this.previewSnapshot(sessionId, previewId);
+    if (!selected) return { ok: false, code: 'not_found', message: 'Session not found' };
+    if (!selected.source) return { ok: true, preview: { state: 'unregistered' } };
+    try {
+      const data = await this.previewReader.read(selected.session, selected.source);
+      const current = await this.previewSnapshot(sessionId, previewId);
+      if (!current?.source || current.session.workingDir !== selected.session.workingDir || JSON.stringify(current.source) !== JSON.stringify(selected.source)) return { ok: true, preview: { state: 'unregistered' } };
+      return { ok: true, preview: previewStatus(previewId, data, knownRevision) };
+    } catch (error) {
+      const current = await this.previewSnapshot(sessionId, previewId);
+      if (!current?.source || current.session.workingDir !== selected.session.workingDir || JSON.stringify(current.source) !== JSON.stringify(selected.source)) return { ok: true, preview: { state: 'unregistered' } };
+      return { ok: true, preview: { state: 'unavailable', previewId, reason: error instanceof PreviewError ? error.reason : 'unavailable' } };
+    }
+  }
+
+  async getPreviewChunk(sessionId: string, previewId: string, revision: string, offset: number): Promise<SessionControllerResult<{ preview: SessionPreviewChunk }>> {
+    if (!validPreviewId(previewId) || !validRevision(revision) || !Number.isSafeInteger(offset) || offset < 0 || offset % PREVIEW_CHUNK_BYTES !== 0) return { ok: false, code: 'invalid', message: 'Invalid preview request' };
+    const selected = await this.previewSnapshot(sessionId, previewId);
+    if (!selected) return { ok: false, code: 'not_found', message: 'Session not found' };
+    if (!selected.source) return { ok: true, preview: { state: 'stale_revision' } };
+    try {
+      const data = await this.previewReader.read(selected.session, selected.source);
+      const current = await this.previewSnapshot(sessionId, previewId);
+      if (!current?.source || current.session.workingDir !== selected.session.workingDir || JSON.stringify(current.source) !== JSON.stringify(selected.source)) return { ok: true, preview: { state: 'stale_revision' } };
+      if (data.revision === revision && (data.bytes.length === 0 ? offset !== 0 : offset >= data.bytes.length)) return { ok: false, code: 'invalid', message: 'Invalid preview request' };
+      return { ok: true, preview: previewChunk(previewId, data, revision, offset) };
+    } catch (error) {
+      const current = await this.previewSnapshot(sessionId, previewId);
+      if (!current?.source || current.session.workingDir !== selected.session.workingDir || JSON.stringify(current.source) !== JSON.stringify(selected.source)) return { ok: true, preview: { state: 'stale_revision' } };
+      return { ok: true, preview: { state: 'unavailable', previewId, reason: error instanceof PreviewError ? error.reason : 'unavailable' } };
+    }
   }
 
   /** Flush pending output, wipe the persisted log, drop the live buffer. */

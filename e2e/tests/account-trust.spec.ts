@@ -295,7 +295,7 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
         await expect(phone.locator(`[data-bridge-row="${thirdId}"]`)).toBeVisible({ timeout: 60000 });
         const privateName = `ACCOUNT_FUTURE_PRIVATE_${Date.now()}`; await createAccountShell(phone, thirdId, privateName);
         await openSession(phone, privateName);
-        const terminalTab = phone.getByRole("button", { name: "Terminal", exact: true });
+        const terminalTab = phone.getByRole("tab", { name: "Terminal", exact: true });
         if (await terminalTab.isVisible()) await terminalTab.click();
         const marker = `ACCOUNT_TERMINAL_PRIVATE_${Date.now()}`; await runMarkerInTerminal(phone, marker);
         await expect(phone.locator("text=/^(P2P|Local|Cloud)$/").first()).toHaveText("Cloud", { timeout: 15000 });

@@ -1,0 +1,47 @@
+{
+  "checkout": "/tmp/ftown-html-preview",
+  "integration": "U1 consumer/B1 provider; root Git/runtime/gates",
+  "owners": {
+    "B1": {
+      "agent": "/root/dependency_security",
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "write": [
+        "bridge/",
+        "docs/session-html-preview/backend-handoff.md",
+        "docs/session-html-preview/usage.md"
+      ],
+      "readOnly": [
+        "bridge/src/preview-protocol.ts"
+      ],
+      "lease": "bridge package/lock version bump only"
+    },
+    "U1": {
+      "agent": "/root/html_ui",
+      "model": "gpt-6.1-terra",
+      "effort": "xhigh",
+      "write": [
+        "ui/",
+        "docs/session-html-preview/ui-handoff.md"
+      ],
+      "readOnly": [
+        "ui/package.json",
+        "ui/package-lock.json",
+        "ui/node_modules/"
+      ],
+      "lease": "none"
+    },
+    "E1": {
+      "agent": "/root/auth_review",
+      "model": "gpt-6.1-sol",
+      "effort": "max",
+      "write": [
+        "e2e/tests/session-preview.spec.ts",
+        "e2e/helpers/session-preview.ts",
+        "docs/session-html-preview/e2e-handoff.md"
+      ],
+      "lease": "none"
+    }
+  },
+  "validatedNonOverlapping": true
+}

@@ -51,6 +51,22 @@ ftown sessions archive
 ftown sessions revive <session-id>
 ```
 
+## Preview session HTML
+
+```bash
+ftown sessions preview ./preview.html
+ftown sessions preview --session-id <id> ./preview.html
+ftown sessions preview --clear
+```
+
+The target defaults to `FTOWN_SESSION_ID`. The file must be a UTF-8 `.html` or
+`.htm` file of at most 1 MiB inside that session's working directory. Relative
+paths resolve from the CLI's current directory. Use a self-contained document:
+inline CSS and JavaScript and data images are supported; sibling files and
+network access are not. Write a temporary file and rename it over the registered
+file to publish a complete update. Closing the dashboard preview does not clear
+the registration; `--clear` removes the registration without deleting the file.
+
 ## Ask the human or associate a pull request
 
 ```bash

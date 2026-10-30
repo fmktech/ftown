@@ -268,11 +268,11 @@ test.describe("session lifecycle", () => {
 
     // Selected actions belong to the session header, on both phone views.
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.getByRole("button", { name: "Workspace", exact: true }).click();
+    await page.getByRole("tab", { name: "Workspace", exact: true }).click();
     const workspaceHeader = page.getByRole("region", { name: "Selected session header" });
     await expect(workspaceHeader).toContainText(name);
     await expect(workspaceHeader.getByRole("button", { name: "Stop", exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "Terminal", exact: true }).click();
+    await page.getByRole("tab", { name: "Terminal", exact: true }).click();
     const headerActions = page.getByRole("group", { name: "Selected session actions" });
     await expect(headerActions).toHaveCount(1);
     await checkTerminalHeaderGeometry(page, testInfo, "Stop");

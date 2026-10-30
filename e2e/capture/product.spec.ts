@@ -51,7 +51,7 @@ async function noOverflow(page: Page) {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 }
 async function openWorkspace(page: Page) {
-  const workspace = page.getByRole("button", { name: "Workspace", exact: true });
+  const workspace = page.getByRole("tab", { name: "Workspace", exact: true });
   if (await workspace.isVisible()) await workspace.click();
 }
 async function expandChildren(page: Page) {
@@ -305,7 +305,7 @@ test("capture real isolated workspace, phone and access panel", async ({ browser
         await hold(2200);
         for (const child of children) { await showChildResult(phone, child.name, replies.find(mail => mail.from === child.id)!.body); await hold(2000); await openWorkspace(phone); }
         await openAgent(phone);
-        await expect(phone.getByRole("button", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
+        await expect(phone.getByRole("tab", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
         await hold(1200);
         mobilePhase = "clear terminal view";
         await phone.locator(".xterm").first().click();

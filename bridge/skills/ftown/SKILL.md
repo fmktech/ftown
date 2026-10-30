@@ -43,6 +43,8 @@ ftown sessions screen <session-id> --limit 200
 ftown sessions attention --message "Please review the migration plan" --title "Review requested"
 ftown sessions pr https://github.com/owner/repo/pull/123
 ftown sessions pr --clear
+ftown sessions preview ./preview.html
+ftown sessions preview --clear
 ftown harness mail send <session-id> --type task "review the API client"
 ftown harness mail read
 ftown env --help
@@ -53,6 +55,13 @@ ftown start --help
 Read `references/sessions.md` for the session, mail and terminal command
 reference. Read `references/orchestrator.md` for practical worker coordination
 examples. Each command group also has `--help`.
+
+`ftown sessions preview <path>` registers a self-contained HTML file in the
+current session's working directory for the dashboard. Inline CSS and scripts
+and data images work; sibling assets and network access are unsupported. Publish
+updates by writing a temporary file and atomically renaming it into place. Use
+`--session-id <id>` for an explicit target or `--clear` to remove registration;
+clearing never deletes the file.
 
 ## Identity and reporting
 

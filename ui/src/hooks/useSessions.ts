@@ -16,6 +16,7 @@ import {
 } from "@/types";
 import type { BridgeRpc } from "@/hooks/useBridgeRpc";
 import { buildUsagePollBatches } from "@/lib/live-usage-polling";
+import { isPreviewDescriptor } from "@/lib/session-preview";
 import { parsePullRequestUrl } from "@/lib/pull-request-url";
 
 // Re-exported for existing consumers (NewSessionModal, session pickers); the
@@ -50,7 +51,8 @@ function isSessionRow(value: unknown): value is Session {
   if (!value || typeof value !== "object") return false;
   const row = value as Record<string, unknown>;
   const optionalStrings = ["prompt", "model", "workingDir", "shellType", "claudeSessionId", "cursorSessionId", "codexSessionId", "piSessionId", "piSessionFile", "opencodeSessionId", "museSessionId", "command", "parentSessionId", "loopId"];
-  return optionalStrings.every(key => row[key] === undefined || typeof row[key] === "string")
+  return (row.preview === undefined || isPreviewDescriptor(row.preview))
+    && optionalStrings.every(key => row[key] === undefined || typeof row[key] === "string")
     && (row.usage === undefined || isSessionUsage(row.usage))
     && (row.runtime === undefined || row.runtime === "tmux" || row.runtime === "direct")
     && typeof row.id === "string" && row.id.length > 0
@@ -59,6 +61,21 @@ function isSessionRow(value: unknown): value is Session {
     && typeof row.updatedAt === "string"
     && typeof row.status === "string"
     && ["pending", "running", "completed", "error", "disconnected"].includes(row.status);
+}
+
+// An invalid registration must not leave a previously trusted frame active.
+function clearInvalidPreviews(current: Session[], incoming: unknown[]): Session[] {
+  const invalid = new Set<string>();
+  for (const value of incoming) {
+    if (!value || typeof value !== "object") continue;
+    const row = value as Record<string, unknown>;
+    if (typeof row.id === "string" && typeof row.bridgeId === "string" && row.preview !== undefined && !isPreviewDescriptor(row.preview)) invalid.add(JSON.stringify([row.bridgeId, row.id]));
+  }
+  if (!invalid.size) return current;
+  return current.map(session => {
+    if (!session.preview || !invalid.has(JSON.stringify([session.bridgeId, session.id]))) return session;
+    const next = { ...session }; delete next.preview; return next;
+  });
 }
 
 export function mergeSessionSnapshot(current: Session | undefined, incoming: Session): Session {
@@ -254,7 +271,8 @@ export function useSessions(
       if (!response.data || typeof response.data !== "object") return;
       const data = response.data as { sessions?: unknown; bridgeId?: unknown };
       if (!Array.isArray(data.sessions)) return;
-      const rows = data.sessions.filter(isSessionRow);
+      const snapshotRows = data.sessions;
+      const rows = snapshotRows.filter(isSessionRow);
       const candidate = requests.get(response.requestId);
       const request = candidate?.contextGeneration === usageGenerationRef.current ? candidate : undefined;
       const bridgeId = typeof data.bridgeId === "string" && data.bridgeId.length > 0 ? data.bridgeId : (request ? client?.sessionSnapshotBridgeId : undefined);
@@ -271,7 +289,11 @@ export function useSessions(
       const cutoff = request?.cutoff;
       const newer = (id: string) => cutoff !== undefined && (observationsRef.current.get(id) ?? 0) > cutoff;
       updateSessions(prev => {
-        const merged = new Map(prev.map(s => [s.id, s]));
+        const merged = new Map(clearInvalidPreviews(prev, snapshotRows.filter(value => {
+          if (!value || typeof value !== "object") return false;
+          const id = (value as Record<string, unknown>).id;
+          return typeof id === "string" && !newer(id);
+        })).map(s => [s.id, s]));
         if (authoritative) {
           const present = new Set(rows.map(s => s.id));
           for (const current of prev) {
@@ -307,7 +329,9 @@ export function useSessions(
         if ((data.session.status as string) === "removed") {
           confirm(data.session.id);
           updateSessions(prev => prev.filter(s => s.id !== data.session.id));
-        } else if (isSessionRow(data.session) && !blocked(data.session.id)) {
+        } else if (!isSessionRow(data.session)) {
+          updateSessions(prev => clearInvalidPreviews(prev, [data.session]));
+        } else if (!blocked(data.session.id)) {
           observe(data.session.id);
           updateSessions(prev => {
             const current = prev.find(s => s.id === data.session.id);

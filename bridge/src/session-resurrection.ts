@@ -24,6 +24,7 @@ export interface SessionResurrectionDeps {
   sessionFactoryDeps: CreateFtownSessionDeps;
   publishSessionUpdate: (session: Session) => Promise<void>;
   wireTerminalInput: (sessionId: string) => void;
+  withSessionWrite?: (sessionId: string, task: () => Promise<void>) => Promise<void>;
   /** Exact dedicated-socket operations; injectable without touching a live tmux server. */
   tmux?: {
     available(): boolean;
@@ -112,8 +113,9 @@ export class SessionResurrection {
     for (const snapshot of sessions) {
       if (!retiredIds.has(snapshot.id)) continue;
       try {
+        await (this.deps.withSessionWrite ?? (async (_id, task) => task()))(snapshot.id, async () => {
         const current = await store.loadSession(snapshot.id);
-        if (!current || !isRetiredAutomationSession(current)) continue;
+        if (!current || !isRetiredAutomationSession(current)) return;
         let cleanupFailed = false;
         if (liveTmuxIds.has(current.id)) {
           try { cleanupFailed = !await tmux.kill(current.id); }
@@ -127,6 +129,7 @@ export class SessionResurrection {
           || current.errorReason?.startsWith(`${AUTOMATION_REMOVED_MESSAGE}; failed to stop`)) {
           await this.markSessionDead(current, reason);
         }
+        });
       } catch (error) {
         console.error(`[Bridge] Failed to retire automation session ${snapshot.id}:`, error);
       }
@@ -171,12 +174,14 @@ export class SessionResurrection {
     for (const session of sessions) {
       if (!shouldResurrectStoredSession(session)) continue;
       try {
-        await this.resurrectSession(session.id);
+        await (this.deps.withSessionWrite ?? (async (_id, task) => task()))(session.id, () => this.resurrectSession(session.id));
       } catch (err) {
         console.error(`[Bridge] Failed to resurrect session ${session.id}:`, err);
         try {
-          const current = await store.loadSession(session.id);
-          if (current) await this.markSessionDead(current);
+          await (this.deps.withSessionWrite ?? (async (_id, task) => task()))(session.id, async () => {
+            const current = await store.loadSession(session.id);
+            if (current) await this.markSessionDead(current);
+          });
         } catch (markErr) {
           console.error(`[Bridge] Failed to mark session ${session.id} as error:`, markErr);
         }
