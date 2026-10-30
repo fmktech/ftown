@@ -17,7 +17,7 @@ import type { MailStore } from './mail-store.js';
 import { AttentionStore, AttentionError, type SubagentIdleSignal } from './attention-store.js';
 import { sanitizeAttentionText } from './attention-events.js';
 import type { Session } from './types.js';
-import { MailDeliveryService, sanitizeMessageText, parseNativeWakeRegistration, NativeWakeRegistrationError } from './mail-delivery.js';
+import { MailDeliveryService, sanitizeMessageText, parseNativeWakeRegistration, NativeWakeRegistrationError, type AcceptMailResult } from './mail-delivery.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { TerminalManager } from './terminal-manager.js';
@@ -1159,6 +1159,12 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     }
 
     jsonResponse(res, 404, { error: 'Not found' });
+  }
+
+  /** Queue browser mail using the same durable delivery path as local inbox POST. */
+  async enqueueSessionMessage(session: Session, message: string): Promise<AcceptMailResult> {
+    if (!this.mail.isReady()) return { ok: false, error: 'Mail store not ready' };
+    return this.mail.acceptMail(session, { from: 'browser', fromName: 'You', type: 'message', body: message });
   }
 
   /** Best-effort child-idle signal through the ordinary durable mail path. */

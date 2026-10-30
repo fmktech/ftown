@@ -51,7 +51,7 @@ export interface AllSessionEvents {
   sessionActivity: Map<string, SessionActivity>;
   /** Optimistically clear a session's activity (e.g. on a local ESC interrupt). */
   markSessionIdle: (sessionId: string) => void;
-  clearSessionAttention: (sessionId: string) => void;
+  clearSessionAttention: (sessionId: string, expected?: ManualInputNotice) => Promise<void>;
 }
 
 export function useAllSessionEvents(
@@ -67,6 +67,7 @@ export function useAllSessionEvents(
   const rpcRef = useRef(rpc);
   const sessionsRef = useRef(sessions);
   const activityRef = useRef(activityMap);
+  const activityOwner = useRef({ client, user: userId });
   const observations = useRef(new Map<string, number>());
   const reads = useRef(new Map<string, number>());
   const dismissedThrough = useRef(new Map<string, number>());
@@ -243,6 +244,7 @@ export function useAllSessionEvents(
       unsubscribe(sessionId);
     }
     observations.current.clear(); reads.current.clear(); dismissedThrough.current.clear(); canonical.current.clear();
+    activityOwner.current = { client, user: userId };
     setActivityMap(new Map());
   }, [client, userId, unsubscribe]);
 
@@ -300,43 +302,55 @@ export function useAllSessionEvents(
     });
   }, []);
 
-  const clearSessionAttention = useCallback((sessionId: string) => {
-    const captured = activityRef.current.get(sessionId)?.attention;
+  const clearSessionAttention = useCallback(async (sessionId: string, expected?: ManualInputNotice) => {
+    const sameNotice = (a: ManualInputNotice | undefined, b: ManualInputNotice | undefined) => {
+      if (!a || !b || a.type !== b.type) return false;
+      if (a.attentionId || b.attentionId) return !!a.attentionId && a.attentionId === b.attentionId && a.attentionSequence === b.attentionSequence;
+      return a.receivedAt === b.receivedAt && a.title === b.title && a.message === b.message;
+    };
+    const currentNotice = activityRef.current.get(sessionId)?.attention;
+    if (expected && !sameNotice(currentNotice, expected)) throw new Error("This message has changed. Review the latest notice.");
+    const captured = expected ?? currentNotice;
+    if (!captured) return;
     const session = sessionsRef.current.find(row => row.id === sessionId);
     const owner = subsRef.current.get(sessionId);
     const user = userIdRef.current;
-    if (captured?.type === "agent_needs_input" && captured.attentionId) {
-      if (!session || !owner || !rpcRef.current) return;
+    const activeClient = clientRef.current;
+    if (activityOwner.current.client !== activeClient || activityOwner.current.user !== user
+      || owner && (owner.client !== activeClient || owner.user !== user)) throw new Error("The session changed before dismissal could start.");
+    if (captured.type === "agent_needs_input" && captured.attentionId) {
+      if (!session || !owner || !rpcRef.current) throw new Error("The session is unavailable. Reconnect and try again.");
       observations.current.set(sessionId, (observations.current.get(sessionId) ?? 0) + 1);
       const observation = observations.current.get(sessionId);
-      void rpcRef.current.sendCommand({ type: "resolve_session_attention", requestId: uuidv4(),
-        payload: { bridgeId: session.bridgeId, sessionId, eventId: captured.attentionId } }).then(response => {
-        if (!response.success || userIdRef.current !== user || clientRef.current !== owner.client
-          || subsRef.current.get(sessionId) !== owner
-          || !sessionsRef.current.some(row => row.id === sessionId && row.bridgeId === session.bridgeId)) return;
-        const snapshot = snapshotResponse(response.data, sessionId);
-        if (!snapshot) return;
-        dismissedThrough.current.set(sessionId, Math.max(dismissedThrough.current.get(sessionId) ?? 0, captured.attentionSequence ?? 0));
-        if (observations.current.get(sessionId) !== observation) return;
-        const known = canonical.current.get(sessionId);
-        if (!known || snapshot.sequence >= known.sequence) canonical.current.set(sessionId, { sequence: snapshot.sequence, activeId: snapshot.attention?.id ?? null });
-        observations.current.set(sessionId, (observations.current.get(sessionId) ?? 0) + 1);
-        setActivityMap(prev => {
-          if (userIdRef.current !== user || clientRef.current !== owner.client || subsRef.current.get(sessionId) !== owner) return prev;
-          const current = prev.get(sessionId);
-          if (!current || current.attention?.attentionId !== captured.attentionId) return prev;
-          return new Map(prev).set(sessionId, { ...current, attention: snapshot.attention ? restoredNotice(snapshot.attention) : undefined });
-        });
-      }).catch(() => { /* Failed/uncertain writes keep the request visible and retryable. */ });
+      let response;
+      try { response = await rpcRef.current.sendCommand({ type: "resolve_session_attention", requestId: uuidv4(),
+        payload: { bridgeId: session.bridgeId, sessionId, eventId: captured.attentionId } }); }
+      catch { throw new Error("Could not dismiss this message. Reconnect and try again."); }
+      if (!response.success) throw new Error("Could not dismiss this message. Try again.");
+      if (userIdRef.current !== user || clientRef.current !== owner.client || subsRef.current.get(sessionId) !== owner
+        || !sessionsRef.current.some(row => row.id === sessionId && row.bridgeId === session.bridgeId)) throw new Error("The session changed before dismissal completed.");
+      const snapshot = snapshotResponse(response.data, sessionId);
+      if (!snapshot) throw new Error("Could not confirm dismissal. Try again.");
+      dismissedThrough.current.set(sessionId, Math.max(dismissedThrough.current.get(sessionId) ?? 0, captured.attentionSequence ?? 0));
+      if (observations.current.get(sessionId) !== observation) return;
+      const known = canonical.current.get(sessionId);
+      if (!known || snapshot.sequence >= known.sequence) canonical.current.set(sessionId, { sequence: snapshot.sequence, activeId: snapshot.attention?.id ?? null });
+      observations.current.set(sessionId, (observations.current.get(sessionId) ?? 0) + 1);
+      setActivityMap(prev => {
+        if (userIdRef.current !== user || clientRef.current !== owner.client || subsRef.current.get(sessionId) !== owner) return prev;
+        const current = prev.get(sessionId);
+        if (!current || !sameNotice(current.attention, captured)) return prev;
+        return new Map(prev).set(sessionId, { ...current, attention: snapshot.attention ? restoredNotice(snapshot.attention) : undefined });
+      });
       return;
     }
     observations.current.set(sessionId, (observations.current.get(sessionId) ?? 0) + 1);
-    setActivityMap((prev) => {
+    setActivityMap(prev => {
+      if (userIdRef.current !== user || clientRef.current !== activeClient || activityOwner.current.user !== user || activityOwner.current.client !== activeClient
+        || subsRef.current.get(sessionId) !== owner) return prev;
       const current = prev.get(sessionId);
-      if (!current?.attention) return prev;
-      const next = new Map(prev);
-      next.set(sessionId, { ...current, attention: undefined });
-      return next;
+      if (!current || !sameNotice(current.attention, captured)) return prev;
+      return new Map(prev).set(sessionId, { ...current, attention: undefined });
     });
   }, []);
 
