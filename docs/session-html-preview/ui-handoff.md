@@ -23,3 +23,13 @@ Node 24.22.1: focused Dashboard suite passed 25/25; full `npm test` in a clean `
 Dashboard now keeps the selected session's MobileControlBar mounted inside the Terminal pane; pane visibility controls exposure in compact/mobile views. Separator ARIA min/max/current all use one-decimal precision while actual pane constraints remain unchanged. Added tests reproducing compact desktop Terminal controls after Preview and Home/End at a 655px width; both failed before the fixes and pass afterward.
 
 Node 24.22.1 with clean `env -i`: `npm test -- src/components/Dashboard.test.tsx src/components/SessionWorkspace.test.tsx` passed 27/27 tests; `npm exec tsc -- --noEmit` passed. No E2E, browser, services or database work performed. Released U2 ownership of Dashboard.tsx, SessionWorkspace.tsx, their assigned tests and this handoff.
+
+## U3 touch target repair
+
+Root's focused mobile E2E found Preview tab height 40px versus the required 44px. Set `.mobile-tab` min-width and min-height to 44px; preview toolbar and state-message buttons now also have min-width 44px alongside their existing min-height. No test assertions or TS changed. Root will rerun the focused E2E; no unit, browser, E2E, services or databases were run for this CSS-only repair. Released `ui/src/app/globals.css` and this handoff.
+
+## U4 quiet polling fix
+
+Automatic status checks now leave cached content in its quiet ready state until a ready response starts an actual download. Manual refresh still displays the update indicator; unchanged automatic responses preserve the frame key. Added a deferred status/chunk regression that failed before the fix (automatic pending status incorrectly reported `updating: true`) and verifies quiet polling, manual indication and new-revision download indication.
+
+Node 24.22.1, clean `env -i`: targeted hook, assembler and workspace tests passed 9/9; `npm exec tsc -- --noEmit` passed. No E2E, browser, service or database work run. Released U4 ownership of the hook, hook test and this handoff.

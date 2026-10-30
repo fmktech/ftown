@@ -56,3 +56,39 @@ it('keeps the document key on unchanged polls, remounts on manual refresh, and p
   await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
   expect(sendCommand).toHaveBeenCalledTimes(count);
 });
+it('keeps automatic status checks quiet but shows actual updates and manual refresh', async () => {
+  const { createHash } = await import('node:crypto');
+  const first = '<p>one</p>'; const second = '<p>two</p>';
+  const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+  const firstRevision = hash(first); const secondRevision = hash(second);
+  Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest: async (_algorithm: string, bytes: Uint8Array) => Uint8Array.from(createHash('sha256').update(bytes).digest()).buffer } });
+  const pendingStatuses: Array<(response: CommandResponse) => void> = [];
+  let resolveChunk: ((response: CommandResponse) => void) | undefined;
+  const reply = (data: unknown): CommandResponse => ({ requestId: 'x', success: true, data });
+  const status = (state: 'ready' | 'unchanged', revision: string, text: string) => reply({ state, previewId: id, revision, totalBytes: text.length });
+  const chunk = (revision: string, text: string) => reply({ state: 'chunk', previewId: id, revision, totalBytes: text.length, offset: 0, dataBase64: btoa(text), done: true });
+  let statuses = 0;
+  const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
+    if (command.type === 'session_preview_status') {
+      if (++statuses === 1) return Promise.resolve(status('ready', firstRevision, first));
+      return new Promise(resolve => { pendingStatuses.push(resolve); });
+    }
+    if ('revision' in command.payload && command.payload.revision === firstRevision) return Promise.resolve(chunk(firstRevision, first));
+    return new Promise(resolve => { resolveChunk = resolve; });
+  });
+  const hook = renderHook(() => useSessionPreview({ client, userId: 'user', target, visible: true, readable: true, securityGeneration: 0, sendCommand }));
+  await act(async () => {});
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: first, updating: false });
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: first, updating: false });
+  await act(async () => { pendingStatuses.shift()!(status('unchanged', firstRevision, first)); });
+  act(() => hook.result.current.refresh());
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: first, updating: true });
+  await act(async () => { pendingStatuses.shift()!(status('unchanged', firstRevision, first)); });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: first, updating: false });
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  await act(async () => { pendingStatuses.shift()!(status('ready', secondRevision, second)); });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: first, updating: true });
+  await act(async () => { resolveChunk!(chunk(secondRevision, second)); });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: second, updating: false });
+});

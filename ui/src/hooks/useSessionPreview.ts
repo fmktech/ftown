@@ -51,8 +51,8 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
       busy = true;
       const manual = pendingManual; pendingManual = false;
       try {
-        if (complete) set({ kind: 'ready', ...complete, updating: true });
-        else set({ kind: 'loading' });
+        if (complete && manual) set({ kind: 'ready', ...complete, updating: true });
+        else if (!complete) set({ kind: 'loading' });
         const base = { bridgeId: target.bridgeId, sessionId: target.sessionId, previewId: target.preview.id };
         const raw = await command('session_preview_status', { ...base, ...(complete ? { knownRevision: complete.revision } : {}) });
         if (!isActive()) return;
@@ -64,6 +64,7 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
           if (manual) complete = { ...complete, key: `${identity}:${status.revision}:${++nonce}` };
           set({ kind: 'ready', ...complete, updating: false });
         } else {
+          if (complete) set({ kind: 'ready', ...complete, updating: true });
           const bytes = new Uint8Array(status.totalBytes);
           let offset = 0;
           let abandoned = false;
