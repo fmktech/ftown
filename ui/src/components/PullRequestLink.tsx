@@ -30,7 +30,7 @@ function color(status?: PullRequestStatus): string {
   }
 }
 function StatusIcon({ state }: { state: PullRequestStatus["state"] }) {
-  return <svg aria-hidden="true" width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ display: "inline", verticalAlign: "-1px", marginLeft: 4 }}>
+  return <svg aria-hidden="true" width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ display: "inline", verticalAlign: "-1px", marginRight: 4 }}>
     {state === "merged" ? <><circle cx="4" cy="3" r="2"/><circle cx="4" cy="13" r="2"/><circle cx="12" cy="3" r="2"/><path d="M4 5v6M12 5c0 3-8 2-8 6"/></>
       : state === "passed" ? <path d="m3 8 3 3 7-7"/>
       : state === "failed" ? <path d="M4 4l8 8M12 4l-8 8"/>
@@ -40,7 +40,7 @@ function StatusIcon({ state }: { state: PullRequestStatus["state"] }) {
   </svg>;
 }
 function BadgeText({ number, status }: { number: number; status?: PullRequestStatus }) {
-  return <>PR #{number}{status && statusText(status) && <StatusIcon state={status.state} />}</>;
+  return <>{status && statusText(status) && <StatusIcon state={status.state} />}#{number}</>;
 }
 function description(number: number, repository: string, url: string, status?: PullRequestStatus) {
   const text = statusText(status);

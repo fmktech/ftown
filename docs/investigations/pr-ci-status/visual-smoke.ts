@@ -57,7 +57,7 @@ try {
       const merged = page.locator('[data-session-row="s0"] [data-pull-request-badge]:visible');
       await page.waitForFunction(() => document.querySelector('[data-session-row="s0"] [data-pull-request-badge]')?.getAttribute('aria-label')?.includes('Merged'));
       const label = await merged.getAttribute('aria-label');
-      if (await merged.textContent() !== 'PR #161' || !label?.includes('Merged') || !label.includes('Checked') || await merged.getAttribute('title') !== label || await merged.locator('svg[aria-hidden="true"]').count() !== 1) throw new Error(`${name}: compact merged badge or accessible status incorrect`);
+      if (await merged.textContent() !== '#161' || !label?.includes('Merged') || !label.includes('Checked') || await merged.getAttribute('title') !== label || await merged.locator('svg[aria-hidden="true"]').count() !== 1 || !(await merged.evaluate(el => el.firstElementChild?.tagName.toLowerCase() === 'svg'))) throw new Error(`${name}: compact merged badge or accessible status incorrect`);
       if (await header.getAttribute('href') !== 'https://github.com/Example/Project/pull/161' || !(await header.getAttribute('aria-label')).includes('Merged')) throw new Error(`${name}: header PR identity or status changed incorrectly`);
     } catch (error) {
       await page.screenshot({ path: `/tmp/ftown-pr-ci-visual/${name}-failure.png`, fullPage: true }).catch(() => {});

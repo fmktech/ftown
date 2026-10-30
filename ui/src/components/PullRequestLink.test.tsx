@@ -17,15 +17,15 @@ it.each([
   await display(status); const links = screen.getAllByRole("link");
   const placeholder = document.querySelector("[data-pull-request-placeholder]");
   for (const link of links) {
-    expect(link.textContent).toBe("PR #42"); expect(link.getAttribute("href")).toBe(url); expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.textContent).toBe("#42"); expect(link.getAttribute("href")).toBe(url); expect(link.getAttribute("target")).toBe("_blank");
     expect(link.getAttribute("aria-label")).toContain("Owner/Repo"); expect(link.getAttribute("title")).toBe(link.getAttribute("aria-label"));
     if (text) { expect(link.getAttribute("aria-label")).toContain(text); expect(link.getAttribute("aria-label")).toContain("Checked"); }
     const icon = link.querySelector("svg");
     expect(Boolean(icon)).toBe(Boolean(text));
-    if (icon) { expect(icon.getAttribute("aria-hidden")).toBe("true"); expect(icon.getAttribute("width")).toBe("10"); expect(icon.getAttribute("height")).toBe("10"); }
+    if (icon) { expect(icon.getAttribute("aria-hidden")).toBe("true"); expect(icon.getAttribute("width")).toBe("10"); expect(icon.getAttribute("height")).toBe("10"); expect(link.firstChild).toBe(icon); expect(icon.style.marginRight).toBe("4px"); }
     expect(link.innerHTML).toBe(placeholder?.innerHTML);
   }
-  expect(placeholder?.textContent).toBe("PR #42"); expect(placeholder?.getAttribute("aria-hidden")).toBe("true");
+  expect(placeholder?.textContent).toBe("#42"); expect(placeholder?.getAttribute("aria-hidden")).toBe("true");
 });
 it("describes stale last-known state and checked time", async () => { await display({ state: "passed", stale: true, reason: "unavailable" }); expect(screen.getAllByRole("link")[0].getAttribute("title")).toContain("Last known CI passed; update unavailable"); expect(screen.getAllByRole("link")[0].getAttribute("aria-label")).toContain("Checked"); });
 it("rejects unsafe URLs", () => { render(<PullRequestLink url="https://evil.example/a/b/pull/1" badge/>); expect(screen.queryByRole("link")).toBeNull(); });
