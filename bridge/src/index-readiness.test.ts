@@ -44,6 +44,7 @@ async function startup(pointerFails = false, restart: 'none' | 'success' | 'fail
   timerMs: number;
   handled: string[];
   pointerWarnings: string[];
+  startupSteps: string[];
   during: { response: { success: boolean } } | null;
   frozenDuring: boolean;
   frozenAfter: boolean;
@@ -73,6 +74,7 @@ async function startup(pointerFails = false, restart: 'none' | 'success' | 'fail
     const advicePromises: Promise<{ok: boolean; error?: string}>[] = [];
     const handled: string[] = [];
     const pointerWarnings: string[] = [];
+    const startupSteps: string[] = [];
     const bridgeStateDir = '/inert';
     const bridgePointerPath = '/inert/bridge.json';
     const hookPort = 1234;
@@ -90,10 +92,15 @@ async function startup(pointerFails = false, restart: 'none' | 'success' | 'fail
     const security = { revalidate: async () => {}, endpoint: { id: 'inert' } };
     const updates = {}; const updateEffects = {};
     const sessionController = {};
-    const attentionStore = {};
+    const store = { listSessions: async () => { startupSteps.push('list'); return [
+      { id: 'active', status: 'running', shellType: 'codex' }, { id: 'shell', status: 'running', shellType: 'shell' }, { id: 'stopped', status: 'completed', shellType: 'codex' }]; } };
+    const attentionStore = { restoreIdleNotifications: async (ids: string[]) => {
+      if (!resurrectionComplete || ids.join(',') !== 'active') throw new Error('Invalid idle restore ordering or sessions');
+      startupSteps.push('restore');
+    } };
     const pullRequestStatuses = {};
     const publishRouter = { handleCommand() {} };
-    const resurrection = { resurrectSessions: async () => {} };
+    const resurrection = { resurrectSessions: async () => { startupSteps.push('resurrect'); } };
     const applicationJson = (value: unknown) => value;
     const randomUUID = () => 'isolated-command';
     const createCommandHandler = (deps: { publishCommandResponse: (response: unknown) => Promise<void>; pullRequestStatuses: unknown }) => async (data: { type: string }) => {
@@ -134,7 +141,7 @@ async function startup(pointerFails = false, restart: 'none' | 'success' | 'fail
     await waitBounded(startupWork);
     const adviceResults = await Promise.all(advicePromises);
     const after = await dispatchCommand(messageFor(probe) as never);
-    return { before, after, adviceResults, timerMs, handled, pointerWarnings, during, frozenDuring, frozenAfter: updateAdmission.frozen };
+    return { before, after, adviceResults, timerMs, handled, pointerWarnings, startupSteps, during, frozenDuring, frozenAfter: updateAdmission.frozen };
   `;
   const js = ts.transpileModule(harness, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
@@ -151,6 +158,7 @@ test('invite advice is emitted only when its actual encrypted CLI command can di
 test('startup keeps its command gate closed until the existing readiness timer', async () => {
   const result = await startup();
   assert.equal(result.timerMs, 2000);
+  assert.deepEqual(result.startupSteps, ['resurrect', 'list', 'restore']);
   assert.equal(result.before.response.success, false);
   assert.equal(result.before.response.error, 'bridge_offline');
   assert.equal(result.after.response.success, true);

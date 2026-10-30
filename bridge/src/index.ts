@@ -771,6 +771,7 @@ program
           return !!session && session.status === 'running' && session.shellType !== 'shell';
         },
         onIdleCanceled: (sessionId) => pushNotifier?.cancelIdle(sessionId),
+        onSubagentIdle: (signal, isCurrent) => localApiServer.notifyIdleParent(signal, isCurrent),
       },
     );
     localApiServer.setAttentionStore(attentionStore);
@@ -781,12 +782,6 @@ program
         void attentionStore.cancelIdleNotification(update.session.id).catch(() => { /* Removed sessions have no ledger left to update. */ });
       }
     });
-    if (pushNotifier) {
-      const knownSessions = await store.listSessions();
-      await attentionStore.restoreIdleNotifications(knownSessions
-        .filter((session) => session.status === 'running' && session.shellType !== 'shell')
-        .map((session) => session.id));
-    }
     const mailStore = new MailStore((sessionId) => store.sessionDir(sessionId));
     localApiServer.setMailStore(mailStore);
 
@@ -995,6 +990,7 @@ program
       }
       let result: CommandResponse | undefined;
       await createCommandHandler({ bridgeId, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses,
+        enqueueSessionMessage: (session, message) => localApiServer.enqueueSessionMessage(session, message),
         publishCommandResponse: async response => { result = response; },
       })(message.application.data as unknown as Parameters<ReturnType<typeof createCommandHandler>>[0], message);
       return applicationJson({ type: 'command_response', response: result ?? { requestId: route.requestId, success: false, error: 'bridge_error' } });
@@ -1032,6 +1028,10 @@ program
         try {
           await resurrection.resurrectSessions();
           resurrectionComplete = true;
+          const knownSessions = await store.listSessions();
+          await attentionStore.restoreIdleNotifications(knownSessions
+            .filter(session => session.status === 'running' && session.shellType !== 'shell')
+            .map(session => session.id));
           if (updateRestart) {
             if (!bridgePointerPublished) throw new Error('Update restart pointer unavailable');
             if (!opts.local) await centrifugo.waitUntilSecureCommandsReady(45_000);

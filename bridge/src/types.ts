@@ -5,6 +5,7 @@ export type { ShellType } from './harness-registry.js';
 import type { ShellType } from './harness-registry.js';
 import type { GetBridgeUpdatePayload, UpdateBridgePayload } from './update-protocol.js';
 import type { GetPullRequestStatusesPayload } from './pull-request-status-protocol.js';
+import type { SendSessionMessagePayload } from './session-inbox-protocol.js';
 import type { SessionPreviewDescriptor, SessionPreviewSource, SessionPreviewStatusRequest, SessionPreviewChunkRequest } from './preview-protocol.js';
 
 export type SessionRuntime = 'tmux' | 'direct';
@@ -177,7 +178,7 @@ export interface GetSessionsUsagePayload {
   bridgeId?: string;
 }
 
-export type CommandPayload = GetPullRequestStatusesPayload | SessionPreviewStatusRequest | SessionPreviewChunkRequest | GetBridgeUpdatePayload | UpdateBridgePayload | GetSessionAttentionPayload | ResolveSessionAttentionPayload | CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | ClearTerminalPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>;
+export type CommandPayload = SendSessionMessagePayload | GetPullRequestStatusesPayload | SessionPreviewStatusRequest | SessionPreviewChunkRequest | GetBridgeUpdatePayload | UpdateBridgePayload | GetSessionAttentionPayload | ResolveSessionAttentionPayload | CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | ClearTerminalPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>;
 
 export interface CommandResponse {
   requestId: string;

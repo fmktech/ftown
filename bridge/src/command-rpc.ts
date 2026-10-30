@@ -13,6 +13,8 @@ import type { PullRequestStatusService } from './pull-request-status.js';
 import { WorkingDirMissingError } from './create-ftown-session.js';
 import { AUTOMATION_REMOVED_CODE, AUTOMATION_REMOVED_MESSAGE, AutomationRemovedError, RETIRED_AUTOMATION_COMMANDS } from './retired-automation.js';
 import type { SessionController } from './session-controller.js';
+import type { Session } from './types.js';
+import type { SessionMessageAccepted, SessionMessageErrorCode } from './session-inbox-protocol.js';
 import { AttentionError, type AttentionStore } from './attention-store.js';
 import { BridgeUpdateError, type BridgeUpdateCoordinator } from './bridge-update.js';
 import type { UpdateEffects } from './update-effects.js';
@@ -59,6 +61,7 @@ export interface CommandRpcDeps {
   relayRequest?: (id: string, payload: Record<string, unknown>) => Promise<unknown>;
   sessionController: SessionController;
   pullRequestStatuses?: PullRequestStatusService;
+  enqueueSessionMessage?: (session: Session, message: string) => Promise<{ ok: true; id: string } | { ok: false; error: string }>;
   attentionStore?: AttentionStore;
   updates?: BridgeUpdateCoordinator;
   updateEffects?: UpdateEffects;
@@ -76,7 +79,8 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
   return async function handleCommand(command: Command, verified?: VerifiedApplication): Promise<void> {
     console.log(`[Bridge] Received command: ${command.type} (requestId: ${command.requestId})`);
 
-    const payloadBridgeId = (command.payload as Record<string, unknown>).bridgeId as string | undefined;
+    const payloadBridgeId = command.payload && typeof command.payload === 'object' && !Array.isArray(command.payload)
+      ? (command.payload as Record<string, unknown>).bridgeId as string | undefined : undefined;
     if (payloadBridgeId && payloadBridgeId !== bridgeId) {
       return;
     }
@@ -88,6 +92,36 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
       if (deps.security && !verified) throw new Error('approval_required');
       if (deps.security && verified && command.type !== 'security_activate_mcp') await deps.security.revalidate(verified.principal);
       switch (command.type) {
+        case 'send_message': {
+          if (!deps.security || !verified) throw new BridgeSecurityError('approval_required');
+          await deps.security.policy.revalidate(verified.principal, 'control');
+          const payload = command.payload as Record<string, unknown>;
+          const failure = (code: SessionMessageErrorCode, error: string): CommandResponse =>
+            ({ requestId: command.requestId, success: false, error, data: { code } });
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).sort().join(',') !== 'bridgeId,message,sessionId'
+            || payload.bridgeId !== bridgeId || typeof payload.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(payload.sessionId)
+            || typeof payload.message !== 'string' || !payload.message.trim() || payload.message.length > 65_536) {
+            response = failure('invalid_request', 'Invalid reply request.'); break;
+          }
+          let session: Session | null;
+          try { session = await sessionController.get(payload.sessionId); } catch { session = null; }
+          if (!session || session.bridgeId !== bridgeId || session.status !== 'running') {
+            response = failure('session_unavailable', 'The session is unavailable or not running.'); break;
+          }
+          if (!deps.enqueueSessionMessage) { response = failure('mail_not_ready', 'Mail is not ready on this bridge.'); break; }
+          try {
+            const result = await deps.enqueueSessionMessage(session, payload.message);
+            response = result.ok && typeof result.id === 'string' && result.id.length > 0
+              ? { requestId: command.requestId, success: true, data: { sessionId: session.id, messageId: result.id, status: 'queued' } satisfies SessionMessageAccepted }
+              : !result.ok && result.error === 'Mail store not ready'
+                ? failure('mail_not_ready', 'Mail is not ready on this bridge.')
+                : failure('enqueue_failed', 'Reply may have been queued; check before sending again.');
+          } catch {
+            response = failure('enqueue_failed', 'Reply may have been queued; check before sending again.');
+          }
+          break;
+        }
+
         case 'get_pull_request_statuses': {
           if (!deps.security || !verified || payloadBridgeId !== bridgeId || !deps.pullRequestStatuses) throw new Error('approval_required');
           const payload = command.payload as Record<string, unknown>;

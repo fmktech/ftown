@@ -34,13 +34,18 @@ export class AttentionError extends Error {
 }
 const publicItem = ({ fingerprint: _fingerprint, sourceId: _sourceId, reason: _reason, ...item }: StoredItem): AttentionItem => item;
 
-export const IDLE_NOTIFICATION_DELAY_MS = 600_000;
+export const SUBAGENT_IDLE_DELAY_MS = 120_000;
+/** Compatibility for existing consumers of the previous exported constant. */
+export const IDLE_NOTIFICATION_DELAY_MS = SUBAGENT_IDLE_DELAY_MS;
+const LEGACY_IDLE_DELAY_MS = 600_000;
+export interface SubagentIdleSignal { sessionId: string; cycleId: string; startedAt: string }
 export interface AttentionNotificationOptions {
   now?: () => number;
   schedule?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   cancel?: (timer: ReturnType<typeof setTimeout>) => void;
   isSessionActive?: (sessionId: string) => Promise<boolean>;
   onIdleCanceled?: (sessionId: string) => void;
+  onSubagentIdle?: (signal: SubagentIdleSignal, isCurrent: () => boolean) => Promise<void>;
 }
 interface IdleTimer { cycleId: string; timer: ReturnType<typeof setTimeout> }
 
@@ -50,7 +55,7 @@ export class AttentionStore {
   private listeners = new Map<string, Set<() => void>>();
   private idleTimers = new Map<string, IdleTimer>();
   private notificationsStopped = false;
-  private notificationOptions: Required<Omit<AttentionNotificationOptions, 'onIdleCanceled'>> & Pick<AttentionNotificationOptions, 'onIdleCanceled'>;
+  private notificationOptions: Required<Omit<AttentionNotificationOptions, 'onIdleCanceled' | 'onSubagentIdle'>> & Pick<AttentionNotificationOptions, 'onIdleCanceled' | 'onSubagentIdle'>;
   constructor(private resolveDir: (sessionId: string) => string, private resolvedRetention = 500,
     private onNotification?: (sessionId: string, notice: PushNotice) => void,
     options: AttentionNotificationOptions = {}) {
@@ -68,7 +73,7 @@ export class AttentionStore {
     try { this.notificationOptions.onIdleCanceled?.(id); } catch { /* Optional observer is isolated. */ }
   }
   private scheduleIdle(id: string, cycle: NonNullable<Ledger['idleCycle']>): void {
-    if (this.notificationsStopped || cycle.notifiedAt || !this.onNotification) return;
+    if (this.notificationsStopped || cycle.notifiedAt || !this.notificationOptions.onSubagentIdle) return;
     this.clearIdleTimer(id);
     const remaining = Math.max(0, Date.parse(cycle.dueAt) - this.notificationOptions.now());
     const timer = this.notificationOptions.schedule(() => { void this.emitIdle(id, cycle.id).catch(() => {
@@ -92,9 +97,10 @@ export class AttentionStore {
       cycle.notifiedAt = timestamp;
       await this.save(id, ledger);
       if (!current()) return;
-      this.clearIdleTimer(id);
-      try { this.onNotification?.(id, { kind: 'idle', eventKey: `idle:${cycle.id}`, title: 'Agent has been idle for 10 minutes',
-        message: 'The agent is ready for your next instruction.', occurredAt: timestamp }); } catch { /* Durable qualification is not rolled back by delivery failure. */ }
+      try {
+        await this.notificationOptions.onSubagentIdle?.({ sessionId: id, cycleId: cycle.id, startedAt: cycle.startedAt }, current);
+      } catch { /* At-most-once attempt: an exception can occur after durable enqueue. */ }
+      finally { if (this.idleTimers.get(id)?.cycleId === cycleId) this.clearIdleTimer(id); }
     });
   }
   async restoreIdleNotifications(ids: Iterable<string>): Promise<void> {
@@ -103,7 +109,13 @@ export class AttentionStore {
         await this.withLock(id, async () => {
           if (this.notificationsStopped) return;
           const ledger = await this.load(id);
-          if (ledger.activity.state === 'idle' && ledger.idleCycle && !ledger.idleCycle.notifiedAt) this.scheduleIdle(id, ledger.idleCycle);
+          const cycle = ledger.idleCycle;
+          if (cycle && Date.parse(cycle.dueAt) - Date.parse(cycle.startedAt) === LEGACY_IDLE_DELAY_MS) {
+            cycle.dueAt = new Date(Date.parse(cycle.startedAt) + SUBAGENT_IDLE_DELAY_MS).toISOString();
+            delete cycle.notifiedAt; // The old marker meant human push, not parent mail.
+            await this.save(id, ledger);
+          }
+          if (ledger.activity.state === 'idle' && cycle && !cycle.notifiedAt) this.scheduleIdle(id, cycle);
         });
       } catch { console.warn(`[Bridge] Could not restore idle notification for session ${id}`); }
     }
@@ -185,7 +197,7 @@ export class AttentionStore {
       const notifications: PushNotice[] = [];
       if (cancelIdle) { this.idleCanceled(id); delete ledger.idleCycle; }
       else if (observation.activity === 'idle' && ['thinking', 'tool_use'].includes(ledger.activity.state)) {
-        ledger.idleCycle = { id: randomUUID(), startedAt: timestamp, dueAt: new Date(this.notificationOptions.now() + IDLE_NOTIFICATION_DELAY_MS).toISOString() };
+        ledger.idleCycle = { id: randomUUID(), startedAt: timestamp, dueAt: new Date(this.notificationOptions.now() + SUBAGENT_IDLE_DELAY_MS).toISOString() };
       }
       if (observation.activity) ledger.activity = { state: observation.activity, lastActivityAt: timestamp };
       if (observation.resolve) for (const event of ledger.events) {
