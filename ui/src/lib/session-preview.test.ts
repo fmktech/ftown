@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
+import { runInNewContext } from 'node:vm';
 import { PREVIEW_CHUNK_BYTES } from '../../../bridge/src/preview-protocol';
 import { clampPreviewRatio, isPreviewDescriptor, parseChunk, parseStatus, previewDocument, previewRatioBounds, verifyPreview } from './session-preview';
 const id = '12345678-1234-4234-8234-123456789abc';
@@ -35,9 +36,49 @@ describe('preview protocol validation', () => {
   it('places the fixed policy before all untrusted markup and clamps split bounds', () => {
     const html = previewDocument('<head><base href="https://evil.example"><script>1</script>');
     expect(html.indexOf('Content-Security-Policy')).toBeLessThan(html.indexOf('<base'));
+    expect(html.indexOf('Content-Security-Policy')).toBeLessThan(html.indexOf('<script>'));
+    expect(html.indexOf('<script>')).toBeLessThan(html.indexOf('<base'));
+    expect(html).toContain('noopener,noreferrer');
     expect(html).toContain("connect-src 'none'");
     expect(previewRatioBounds(648)).toEqual([37.5, 62.5]);
     expect(clampPreviewRatio(0, 648)).toBe(37.5);
     expect(clampPreviewRatio(100, 648)).toBe(62.5);
   });
+  it('installs an early delegated trusted-click handler that opens only absolute web links safely', () => {
+    class TestElement {
+      constructor(public value: string) {}
+      closest(selector: string) { expect(selector).toBe('a[href],area[href]'); return this; }
+      getAttribute() { return this.value; }
+    }
+    class TestEvent {
+      prevented = false; stopped = false;
+      constructor(public target: TestElement, public isTrusted: boolean, public buttonValue: number) {}
+      composedPath() { return [this.target]; }
+      preventDefault() { this.prevented = true; }
+      stopImmediatePropagation() { this.stopped = true; }
+    }
+    class TestMouseEvent extends TestEvent { get button() { return this.buttonValue; } }
+    let listener: ((event: TestMouseEvent) => void) | undefined;
+    const calls: unknown[][] = [];
+    const contextWindow = { open: (...args: unknown[]) => { calls.push(args); }, location: { hash: '' } };
+    const document = { addEventListener: (type: string, callback: (event: TestMouseEvent) => void, capture: boolean) => { expect(type).toBe('click'); expect(capture).toBe(true); listener = callback; } };
+    const wrapped = previewDocument('<p>user markup</p>');
+    const script = wrapped.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+    expect(script).toBeDefined();
+    if (!script) throw new Error('expected script');
+    runInNewContext(script, { Element: TestElement, Event: TestEvent, MouseEvent: TestMouseEvent, URL, document, window: contextWindow });
+    TestElement.prototype.getAttribute = () => 'javascript:alert(1)';
+    const click = (value: string, trusted = true, button = 0) => {
+      const event = new TestMouseEvent(new TestElement(value), trusted, button);
+      if (!listener) throw new Error('missing handler');
+      listener(event); expect(event.prevented).toBe(true); expect(event.stopped).toBe(true);
+    };
+    click('https://example.test/path');
+    expect(calls).toEqual([['https://example.test/path', '_blank', 'noopener,noreferrer']]);
+    for (const blocked of ['/relative', 'javascript:alert(1)', 'data:text/html,x', 'file:///tmp/x', 'mailto:user@example.test']) click(blocked);
+    click('https://example.test/other', false); click('https://example.test/other', true, 1);
+    expect(calls).toHaveLength(1);
+    click('#section'); expect(contextWindow.location.hash).toBe('#section'); expect(calls).toHaveLength(1);
+  });
+
 });
