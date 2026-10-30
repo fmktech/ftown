@@ -258,7 +258,7 @@ test("real bridge through MCP: discovery, literal history search, partial batche
   assert.equal(stops, 1);
   assert.equal((await store.loadSession("s1"))?.status, "completed");
   assert.equal(
-    (await call("sessions_wait", { targets: [target], timeoutSeconds: 1 })).data
+    (await call("sessions_wait", { targets: [target] })).data
       .matched,
     true,
   );

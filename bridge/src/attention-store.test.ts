@@ -115,18 +115,49 @@ test('wait wakes only on eligible creation, survives the read/listener race and 
   await store.record('s1', 'Notification', notice());
   const page = await waiting;
   assert.equal(page.events.length, 1);
-  const controller = new AbortController();
+  // Freeze the wait deadline while exercising unrelated persisted operations.
+  const realSetTimeout = setTimeout, realClearTimeout = clearTimeout;
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
+  const controller = new AbortController(), positiveController = new AbortController();
   let completed = false;
   const next = store.wait('s1', { cursor: page.cursor }, 1, controller.signal).finally(() => { completed = true; });
-  await store.record('s1', 'Notification', notice());
-  await store.mutate('s1', [page.events[0].id], 'ack');
-  await store.record('s1', 'PostToolUse', { tool_name: 'Read' });
-  await delay(20); assert.equal(completed, false);
-  controller.abort();
-  await assert.rejects(next, /cancelled/);
-  assert.equal((await store.wait('s1', {}, 0)).events.length, 0, 'acknowledged requests are not fresh wait matches');
-  await store.record('s1', 'Notification', notice('new distinct question'));
-  assert.equal((await store.wait('s1', { cursor: page.cursor }, 0)).events[0].message, 'new distinct question');
+  void next.catch(() => {});
+  let positive: ReturnType<typeof store.wait> | undefined;
+  let guard: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const assertPending = async () => {
+      // The session lock is a barrier for the wait's read and the completed mutation.
+      await store.list('s1');
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(completed, false);
+    };
+    await assertPending();
+    await store.record('s1', 'Notification', notice());
+    await assertPending();
+    await store.mutate('s1', [page.events[0].id], 'ack');
+    await assertPending();
+    await store.record('s1', 'PostToolUse', { tool_name: 'Read' });
+    await assertPending();
+    controller.abort();
+    await assert.rejects(next, /cancelled/);
+    assert.equal((await store.wait('s1', {}, 0)).events.length, 0, 'acknowledged requests are not fresh wait matches');
+    positive = store.wait('s1', { cursor: page.cursor }, 1, positiveController.signal);
+    void positive.catch(() => {});
+    // Complete the wait's initial read before creating the eligible event.
+    await store.list('s1');
+    await new Promise<void>(resolve => setImmediate(resolve));
+    await store.record('s1', 'Notification', notice('new distinct question'));
+    // A real watchdog bounds a broken wake; it does not advance the mocked deadline.
+    const timedOut = new Promise<never>((_, reject) => { guard = realSetTimeout(() => reject(new Error('eligible wait did not wake')), 10000); });
+    const awakened = await Promise.race([positive, timedOut]);
+    assert.equal(awakened.events[0]?.message, 'new distinct question');
+    assert.equal((await store.wait('s1', { cursor: page.cursor }, 0)).events[0].message, 'new distinct question');
+  } finally {
+    controller.abort(); positiveController.abort();
+    if (guard) realClearTimeout(guard);
+    await Promise.allSettled([next, ...(positive ? [positive] : [])]);
+    t.mock.timers.reset();
+  }
 });
 
 test('only explicit continuation resolves; storage failure cannot report durable success', async (t) => {

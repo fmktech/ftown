@@ -25,6 +25,7 @@ import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
 import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
 import { CloudConnectionNotice } from "./CloudConnectionNotice";
 import { HeaderTooltip } from "./HeaderTooltip";
+import { SessionHeaderActions } from "./SessionHeaderActions";
 import { PushNotificationsControl, detachPushSubscription } from "./PushNotificationsControl";
 import { mergeBridgeOrder } from "@/lib/bridge-order";
 import { buildBridgeCommand } from "@/lib/bridge-command";
@@ -415,11 +416,9 @@ PY`;
     if (selectedSessionId) retrySession(selectedSessionId);
   }, [selectedSessionId, retrySession]);
   const selectedTransportMode = selectedSessionId ? transport?.getMode(selectedSessionId) ?? "connecting" : null;
-  const sessionHeaderActions = selectedSession ? <div role="group" aria-label="Selected session actions" className="flex items-center gap-2">
-    {selectedSession.preview && !previewOpen && <button type="button" className="btn-ghost min-h-11" aria-label="Open preview" onClick={() => setPreviewOpen(true)}>Preview</button>}
-    {selectedSession.status === "running" && <button type="button" className="btn-danger min-h-11 md:min-h-8" onClick={handleStopSession}>Stop</button>}
-    {sessionRelaunchLabel && <button type="button" className="btn-warn min-h-11 md:min-h-8" onClick={handleRelaunchSession} title="Relaunch this session using the same command">{sessionRelaunchLabel}</button>}
-  </div> : null;
+  const sessionHeaderActions = selectedSession ? <SessionHeaderActions hasPreview={Boolean(selectedSession.preview)} previewOpen={previewOpen}
+    running={selectedSession.status === "running"} relaunchLabel={sessionRelaunchLabel ?? null}
+    onPreview={() => setPreviewOpen(true)} onStop={handleStopSession} onRelaunch={handleRelaunchSession} /> : null;
 
   // Claude's Stop hook does not fire on user interrupt, so a lone ESC leaves the
   // dashboard stuck on "thinking"/"tool_use". Optimistically clear it locally.
