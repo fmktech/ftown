@@ -7,8 +7,9 @@ import { useSessionPreview } from './useSessionPreview';
 const id = '12345678-1234-4234-8234-123456789abc';
 const target = { bridgeId: 'bridge', sessionId: 'one', preview: { id, fileName: 'demo.html' } };
 const client = {} as MessageClient;
-beforeEach(() => { vi.useFakeTimers(); Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' }); });
-afterEach(() => { cleanup(); vi.useRealTimers(); });
+let subtleDescriptor: PropertyDescriptor | undefined;
+beforeEach(() => { subtleDescriptor = Object.getOwnPropertyDescriptor(globalThis.crypto, 'subtle'); vi.useFakeTimers(); Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' }); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); if (subtleDescriptor) Object.defineProperty(globalThis.crypto, 'subtle', subtleDescriptor); else Reflect.deleteProperty(globalThis.crypto, 'subtle'); vi.useRealTimers(); });
 it('discards a late response after switching sessions and stops after disposal', async () => {
   const resolvers: Array<(value: CommandResponse) => void> = [];
   const sendCommand = vi.fn(() => new Promise<CommandResponse>(r => { resolvers.push(r); }));
@@ -91,4 +92,163 @@ it('keeps automatic status checks quiet but shows actual updates and manual refr
   expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: first, updating: true });
   await act(async () => { resolveChunk!(chunk(secondRevision, second)); });
   expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: second, updating: false });
+});
+
+function stablePreviewHarness() {
+  const html = '<p>unchanged</p>'; const revision = '9'.repeat(64);
+  const digest = Uint8Array.from({ length: 32 }, () => 0x99).buffer;
+  Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest: async () => digest } });
+  const pending: Array<(reply: CommandResponse) => void> = [];
+  let firstStatus = true;
+  const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
+    if (command.type === 'session_preview_chunk') return Promise.resolve({ requestId: 'chunk', success: true, data: { state: 'chunk', previewId: id, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true } });
+    if (firstStatus) { firstStatus = false; return Promise.resolve({ requestId: 'status', success: true, data: { state: 'ready', previewId: id, revision, totalBytes: html.length } }); }
+    return new Promise(resolve => pending.push(resolve));
+  });
+  return { html, revision, sendCommand, pending };
+}
+function authorityFixture() {
+  const endpoint = { version: 1, id: 'bridge-key', ownerId: 'owner', kind: 'bridge', publicKey: 'key' };
+  const pin = { bridgeId: 'bridge', endpoint, permissions: ['read', 'control'] };
+  const listeners = new Set<() => void>();
+  const accountListeners = new Set<() => void>();
+  let allowed = true;
+  const runtime = { identity: { endpoint: { ...endpoint, id: 'browser-key', kind: 'browser' } },
+    bridge: () => pin, state: () => ({ status: 'ready', endpoint: pin.endpoint }),
+    assertCanSend: () => { if (!allowed) throw new Error('revoked'); },
+    onChange: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener); } };
+  const subscribeAuthority = (listener: () => void) => { accountListeners.add(listener); return () => accountListeners.delete(listener); };
+  const notify = () => listeners.forEach(listener => listener());
+  const account = (next: boolean) => { allowed = next; accountListeners.forEach(listener => listener()); };
+  return { client: { securityRuntime: runtime } as unknown as MessageClient, pin, notify, account, subscribeAuthority };
+}
+it('preserves the verified frame across an unchanged ready-to-ready security notification', async () => {
+  const h = stablePreviewHarness(); const auth = authorityFixture();
+  const hook = renderHook(({ generation }) => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: generation, sendCommand: h.sendCommand, subscribeAuthority: auth.subscribeAuthority }), { initialProps: { generation: 1 } });
+  await act(async () => {});
+  const state = hook.result.current.state; if (state.kind !== 'ready') throw new Error('expected ready');
+  act(() => auth.notify());
+  hook.rerender({ generation: 2 });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: h.html, key: state.key, verifying: true });
+  expect(h.sendCommand.mock.calls.at(-1)?.[0].payload).toMatchObject({ knownRevision: h.revision });
+  await act(async () => { h.pending.shift()!({ requestId: 'old', success: true, data: { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', key: state.key, verifying: true });
+  await act(async () => { h.pending.shift()!({ requestId: 'current', success: true, data: { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', key: state.key, verifying: false });
+});
+it('latches account authority loss and recovery in one batch and ignores an old reply', async () => {
+  const h = stablePreviewHarness(); const auth = authorityFixture();
+  const hook = renderHook(() => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand, subscribeAuthority: auth.subscribeAuthority }));
+  await act(async () => {});
+  const state = hook.result.current.state; if (state.kind !== 'ready') throw new Error('expected ready');
+  act(() => auth.notify());
+  const stale = h.pending.shift()!;
+  act(() => { auth.account(false); auth.account(true); });
+  expect(hook.result.current.state.kind).toBe('loading');
+  await act(async () => { stale({ requestId: 'old', success: true, data: { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  expect(hook.result.current.state.kind).toBe('loading');
+  expect(h.sendCommand.mock.calls.at(-1)?.[0].payload).not.toHaveProperty('knownRevision');
+  await act(async () => { h.pending.shift()!({ requestId: 'new', success: true, data: { state: 'ready', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  expect(hook.result.current.state.kind).toBe('ready');
+  if (hook.result.current.state.kind !== 'ready') throw new Error('expected ready');
+  expect(hook.result.current.state.key).not.toBe(state.key);
+});
+it('clears cached content when selected bridge permissions change', async () => {
+  const h = stablePreviewHarness(); const auth = authorityFixture();
+  const hook = renderHook(() => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand }));
+  await act(async () => {}); expect(hook.result.current.state.kind).toBe('ready');
+  act(() => { auth.pin.permissions.splice(0, 1); auth.notify(); });
+  expect(hook.result.current.state.kind).toBe('offline');
+});
+it('preserves the verified frame when the page is hidden and visible again', async () => {
+  const h = stablePreviewHarness();
+  const hook = renderHook(() => useSessionPreview({ client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand }));
+  await act(async () => {});
+  const state = hook.result.current.state; if (state.kind !== 'ready') throw new Error('expected ready');
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+  act(() => document.dispatchEvent(new Event('visibilitychange')));
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: h.html, key: state.key });
+  Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+  act(() => document.dispatchEvent(new Event('visibilitychange')));
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: h.html, key: state.key });
+  expect(h.sendCommand.mock.calls.at(-1)?.[0].payload).toMatchObject({ knownRevision: h.revision });
+});
+it('preserves the verified frame when the preview panel is temporarily hidden', async () => {
+  const h = stablePreviewHarness();
+  const hook = renderHook(({ visible }) => useSessionPreview({ client, userId: 'user', target, visible, readable: true, securityGeneration: 1, sendCommand: h.sendCommand }), { initialProps: { visible: true } });
+  await act(async () => {});
+  const state = hook.result.current.state; if (state.kind !== 'ready') throw new Error('expected ready');
+  hook.rerender({ visible: false });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: h.html, key: state.key });
+  hook.rerender({ visible: true });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: h.html, key: state.key });
+  expect(h.sendCommand.mock.calls.at(-1)?.[0].payload).toMatchObject({ knownRevision: h.revision });
+});
+it('identical pinned bridges still notify the runtime while the bridge stays ready', async () => {
+  const { webcrypto } = await import('node:crypto');
+  vi.stubGlobal('crypto', webcrypto);
+  const { generateEndpoint, open, seal } = await import('@security/crypto');
+  const { SecureEndpointRuntime } = await import('@/lib/secure-endpoint-runtime');
+  const ownerId = '00000000-0000-4000-8000-000000000001';
+  const browser = await generateEndpoint(ownerId, 'browser');
+  const bridge = await generateEndpoint(ownerId, 'bridge');
+  const pin = { bridgeId: 'bridge', endpoint: bridge.endpoint, permissions: ['read', 'control', 'admin'] as const };
+  const pins = [{ ...pin, permissions: [...pin.permissions] }];
+  const runtime = new SecureEndpointRuntime(browser, pins);
+  const channel = 'commands:rpc#user';
+  await runtime.handshake('bridge', channel, async envelope => {
+    if (envelope.type !== 'ftown_encrypted') throw new Error('expected envelope');
+    const hello = JSON.parse(new TextDecoder().decode(await open(bridge, browser.endpoint, envelope, { ownerId, bridgeId: 'bridge', channel, recipientId: bridge.endpoint.id, purpose: 'hello' })));
+    const now = Date.now();
+    const welcome = await seal(bridge, browser.endpoint, { type: 'ftown_encrypted', version: 1, senderId: bridge.endpoint.id, recipientId: browser.endpoint.id, ownerId, bridgeId: 'bridge', channel, purpose: 'welcome', messageId: crypto.randomUUID(), createdAt: now, expiresAt: now + 120000, receiverEpoch: null }, new TextEncoder().encode(JSON.stringify({ type: 'welcome', challenge: hello.challenge, receiverEpoch: 'epoch' })));
+    await runtime.receive(welcome, channel);
+  });
+  expect(runtime.state('bridge').status).toBe('ready');
+  const listener = vi.fn(); runtime.onChange(listener);
+  runtime.replacePins(pins.map(value => ({ ...value, permissions: [...value.permissions] })));
+  expect(runtime.state('bridge').status).toBe('ready');
+  expect(listener).toHaveBeenCalledTimes(1);
+  runtime.dispose(); vi.unstubAllGlobals();
+});
+it('rejects a digest completion started before account authority was revoked', async () => {
+  const auth = authorityFixture(); const html = '<p>secret</p>'; const revision = '9'.repeat(64);
+  let finishDigest!: (value: ArrayBuffer) => void;
+  Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest: () => new Promise<ArrayBuffer>(resolve => { finishDigest = resolve; }) } });
+  const pending: Array<(value: CommandResponse) => void> = []; let first = true;
+  const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
+    if (command.type === 'session_preview_chunk') return Promise.resolve({ requestId: 'c', success: true, data: { state: 'chunk', previewId: id, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true } });
+    if (first) { first = false; return Promise.resolve({ requestId: 's', success: true, data: { state: 'ready', previewId: id, revision, totalBytes: html.length } }); }
+    return new Promise(resolve => pending.push(resolve));
+  });
+  const hook = renderHook(() => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand, subscribeAuthority: auth.subscribeAuthority }));
+  await act(async () => {}); expect(finishDigest).toBeTypeOf('function');
+  act(() => { auth.account(false); auth.account(true); });
+  await act(async () => { finishDigest(Uint8Array.from({ length: 32 }, () => 0x99).buffer); });
+  expect(hook.result.current.state.kind).toBe('loading');
+  expect(pending).toHaveLength(1);
+});
+it('ignores a rejected request from a prior security generation', async () => {
+  const h = stablePreviewHarness(); const auth = authorityFixture();
+  let rejectOld!: (error: Error) => void; let call = 0;
+  const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
+    if (command.type === 'session_preview_status' && ++call === 2) return new Promise((_, reject) => { rejectOld = reject; });
+    return h.sendCommand(command);
+  });
+  const hook = renderHook(() => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand, subscribeAuthority: auth.subscribeAuthority }));
+  await act(async () => {}); act(() => auth.notify());
+  act(() => auth.notify());
+  await act(async () => { rejectOld(new Error('late')); });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: h.html, verifying: true });
+});
+it('latches a selected bridge key change and restoration in one batch', async () => {
+  const h = stablePreviewHarness(); const auth = authorityFixture();
+  const hook = renderHook(() => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand }));
+  await act(async () => {});
+  const old = hook.result.current.state; if (old.kind !== 'ready') throw new Error('expected ready');
+  act(() => { auth.pin.endpoint.publicKey = 'replacement'; auth.notify(); auth.pin.endpoint.publicKey = 'key'; auth.notify(); });
+  expect(hook.result.current.state.kind).toBe('loading');
+  expect(h.sendCommand.mock.calls.at(-1)?.[0].payload).not.toHaveProperty('knownRevision');
+  await act(async () => { h.pending.shift()!({ requestId: 'new', success: true, data: { state: 'ready', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  const next = hook.result.current.state; if (next.kind !== 'ready') throw new Error('expected ready');
+  expect(next.key).not.toBe(old.key);
 });
