@@ -21,17 +21,19 @@ const reasons = new Set(["no_checks", "unavailable", "rate_limited", "unauthenti
 const keyFor = (url: string) => parsePullRequestUrl(url)?.url.toLowerCase();
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
-/** Select one ready bridge for each PR; sorting makes the choice stable across renders. */
-export function statusCandidates(sessions: readonly Pick<Session, "id" | "bridgeId" | "pullRequestUrl">[], readyIds: readonly string[]): Candidate[] {
-  const ready = new Set(readyIds);
+/** Linked owners retain provenance even when their bridge is temporarily offline. */
+function linkedCandidates(sessions: readonly Pick<Session, "id" | "bridgeId" | "pullRequestUrl">[]): Candidate[] {
   const candidates: Candidate[] = [];
   for (const s of sessions) {
     const url = keyFor(s.pullRequestUrl ?? "");
-    if (url && ready.has(s.bridgeId) && /^[A-Za-z0-9_-]{1,200}$/.test(s.id)) candidates.push({ bridgeId: s.bridgeId, sessionId: s.id, url });
+    if (url && /^[A-Za-z0-9_-]{1,200}$/.test(s.id)) candidates.push({ bridgeId: s.bridgeId, sessionId: s.id, url });
   }
-  candidates.sort((a, b) => a.bridgeId.localeCompare(b.bridgeId) || a.sessionId.localeCompare(b.sessionId) || a.url.localeCompare(b.url));
-  const seen = new Set<string>();
-  return candidates.filter(c => !seen.has(c.url) && !!seen.add(c.url));
+  return candidates.sort((a, b) => a.bridgeId.localeCompare(b.bridgeId) || a.sessionId.localeCompare(b.sessionId) || a.url.localeCompare(b.url));
+}
+/** Select one ready bridge for each PR; sorting makes the choice stable across renders. */
+export function statusCandidates(sessions: readonly Pick<Session, "id" | "bridgeId" | "pullRequestUrl">[], readyIds: readonly string[]): Candidate[] {
+  const ready = new Set(readyIds), seen = new Set<string>();
+  return linkedCandidates(sessions).filter(c => ready.has(c.bridgeId) && !seen.has(c.url) && !!seen.add(c.url));
 }
 
 function parseStatus(value: unknown, allowed: Set<string>): PullRequestStatus | null {
@@ -60,13 +62,20 @@ export class PullRequestStatusesController {
     const key = keyFor(url); const status = key ? this.values.get(key)?.status : undefined;
     return status && !status.stale && expiresAt(status) <= this.now() ? { ...status, stale: true } : status;
   }
-  setInputs(candidates: Candidate[], enabled: boolean) {
-    const inputKey = JSON.stringify(candidates);
+  setInputs(candidates: Candidate[], enabled: boolean, linked: Candidate[] = candidates) {
+    const inputKey = JSON.stringify([candidates, linked]);
     if (inputKey !== this.inputKey) {
       this.inputKey = inputKey; this.candidates = candidates; this.generation++;
-      const owners = new Map(candidates.map(c => [c.url, c.bridgeId]));
+      const owners = new Set(linked.map(c => JSON.stringify([c.bridgeId, c.url])));
+      const readyOwners = new Set(candidates.map(c => JSON.stringify([c.bridgeId, c.url])));
       let changed = false;
-      for (const [url, value] of this.values) if (owners.get(url) !== value.bridgeId) { this.values.delete(url); changed = true; }
+      for (const [url, value] of this.values) {
+        const owner = JSON.stringify([value.bridgeId, url]);
+        if (!owners.has(owner)) { this.values.delete(url); changed = true; }
+        else if (!readyOwners.has(owner) && value.status.state !== "merged" && !value.status.stale) {
+          this.values.set(url, { ...value, status: { ...value.status, stale: true, reason: value.status.reason ?? "unavailable" } }); changed = true;
+        }
+      }
       if (changed) this.changed();
     }
     if (this.enabled !== enabled) {
@@ -146,7 +155,7 @@ export function usePullRequestStatuses(send: Send, sessions: readonly Pick<Sessi
   const [online, setOnline] = useState(() => typeof navigator === "undefined" || navigator.onLine);
   const sendRef = useRef(send); sendRef.current = send;
   const controller = useMemo(() => new PullRequestStatusesController(command => sendRef.current(command), () => render(n => n + 1)), []);
-  const key = JSON.stringify(statusCandidates(sessions, readyIds));
+  const key = JSON.stringify([statusCandidates(sessions, readyIds), linkedCandidates(sessions)]);
   useEffect(() => { controller.activate(); return () => controller.dispose(); }, [controller]);
   useEffect(() => {
     const visibility = () => setVisible(document.visibilityState === "visible");
@@ -154,6 +163,6 @@ export function usePullRequestStatuses(send: Send, sessions: readonly Pick<Sessi
     document.addEventListener("visibilitychange", visibility); window.addEventListener("online", connectivity); window.addEventListener("offline", connectivity);
     return () => { document.removeEventListener("visibilitychange", visibility); window.removeEventListener("online", connectivity); window.removeEventListener("offline", connectivity); };
   }, []);
-  useEffect(() => { controller.setInputs(JSON.parse(key) as Candidate[], connected && visible && online); }, [controller, key, connected, visible, online]);
+  useEffect(() => { const [ready, linked] = JSON.parse(key) as [Candidate[], Candidate[]]; controller.setInputs(ready, connected && visible && online, linked); }, [controller, key, connected, visible, online]);
   return controller;
 }

@@ -25,9 +25,10 @@ const states = ['merged','failed','passed','merged','closed','unknown','in_progr
 const names = ['A very long selected orchestrator session name for geometry validation','Failed','Passed','Merged','Closed','No checks','Running'];
 const sessions = states.map((state, i) => ({ id:'s'+i, name: names[i] + ' session', status:'running', bridgeId:'bridge', createdAt: now, updatedAt: now, pullRequestUrl:'https://github.com/Example/Project/pull/'+(i===0?161:i+1) }));
 sessions.push({ id:'child', name:'Nested child', status:'running', bridgeId:'bridge', createdAt:now, updatedAt:now, parentSessionId:'s0', pullRequestUrl:'https://github.com/Example/Project/pull/8' });
-const send = command => new Promise(resolve => { window.__deliverStatus = () => resolve({requestId: command.requestId, success:true, data:{bridgeId:'bridge',nextRefreshAt:new Date(Date.now()+60000).toISOString(),statuses:sessions.map((s,i)=>({url:s.pullRequestUrl,state:states[i] ?? 'in_progress',checkedAt:now,stale:i===2, ...(i===5?{reason:'no_checks'}:i===0||i===2?{reason:'unavailable'}:{})}))}}); });
+window.__statusRequests = 0;
+const send = command => new Promise(resolve => { window.__statusRequests++; window.__deliverStatus = () => resolve({requestId: command.requestId, success:true, data:{bridgeId:'bridge',nextRefreshAt:new Date(Date.now()+60000).toISOString(),statuses:sessions.map((s,i)=>({url:s.pullRequestUrl,state:states[i] ?? 'in_progress',checkedAt:now,stale:i===2, ...(i===5?{reason:'no_checks'}:i===0||i===2?{reason:'unavailable'}:{})}))}}); });
 window.__selectionCount = 0;
-function App(){const [selected,setSelected]=React.useState('s0');return <PullRequestStatusProvider send={send} sessions={sessions} readyBridgeIds={['bridge']} connected><main><aside><SessionList sessions={sessions} bridges={[{clientId:'c',bridgeId:'bridge',hostname:'Demo bridge',connectedAt:now}]} bridgeOrder={['bridge']} selectedSessionId={selected} onSelectSession={id => { window.__selectionCount++; setSelected(id); }} onStopSession={() => {}} onRemoveSession={() => {}} /></aside><section><p id="selection">Selected: {selected || 'none'}</p><PullRequestLink url={sessions[0].pullRequestUrl}/></section></main></PullRequestStatusProvider>};
+function App(){const [selected,setSelected]=React.useState('s0');const [ready,setReady]=React.useState(true);window.__setReady=setReady;return <PullRequestStatusProvider send={send} sessions={sessions} readyBridgeIds={ready?['bridge']:[]} connected><main><aside><SessionList sessions={sessions} bridges={[{clientId:'c',bridgeId:'bridge',hostname:'Demo bridge',connectedAt:now}]} bridgeOrder={['bridge']} selectedSessionId={selected} onSelectSession={id => { window.__selectionCount++; setSelected(id); }} onStopSession={() => {}} onRemoveSession={() => {}} /></aside><section><p id="selection">Selected: {selected || 'none'}</p><PullRequestLink url={sessions[0].pullRequestUrl}/></section></main></PullRequestStatusProvider>};
 createRoot(document.getElementById('root')).render(<App/>);
 `;
 const built = await esbuild.build({ stdin: { contents: fixture, sourcefile: "visual-fixture.tsx", resolveDir: resolve(root, "ui"), loader: "tsx" }, jsx: "automatic", bundle: true, write: false, format: "iife", platform: "browser", tsconfig: resolve(root, "ui/tsconfig.json"), define: { "process.env.NODE_ENV": '"production"' } });
@@ -59,6 +60,17 @@ try {
       const label = await merged.getAttribute('aria-label');
       if (await merged.textContent() !== '#161' || !label?.includes('Merged') || !label.includes('Checked') || await merged.getAttribute('title') !== label || await merged.locator('svg[aria-hidden="true"]').count() !== 1 || !(await merged.evaluate(el => el.firstElementChild?.tagName.toLowerCase() === 'svg'))) throw new Error(`${name}: compact merged badge or accessible status incorrect`);
       if (await header.getAttribute('href') !== 'https://github.com/Example/Project/pull/161' || !(await header.getAttribute('aria-label')).includes('Merged')) throw new Error(`${name}: header PR identity or status changed incorrectly`);
+      const running = page.locator('[data-session-row="s6"] [data-pull-request-badge]');
+      if (!(await running.getAttribute('aria-label'))?.includes('CI running')) throw new Error(`${name}: running status missing`);
+      const before = await page.evaluate(() => window.__statusRequests);
+      await page.evaluate(() => window.__setReady(false));
+      await page.waitForFunction(() => document.querySelector('[data-session-row="s6"] [data-pull-request-badge]')?.getAttribute('aria-label')?.includes('Last known CI running'));
+      if (!(await running.getAttribute('style'))?.includes('var(--status-pending)') || await running.locator('svg[aria-hidden="true"]').count() !== 1) throw new Error(`${name}: stale running badge lost its pending icon or color`);
+      if (!(await merged.getAttribute('aria-label'))?.includes('Merged') || (await merged.getAttribute('aria-label'))?.includes('Last known')) throw new Error(`${name}: merged status changed on disconnect`);
+      await page.evaluate(() => window.__setReady(true));
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await page.waitForFunction(() => document.querySelector('[data-session-row="s6"] [data-pull-request-badge]')?.getAttribute('aria-label')?.includes('Last known CI running'));
+      if (await page.evaluate(() => window.__statusRequests) !== before) throw new Error(`${name}: readiness toggle bypassed the refresh deadline`);
     } catch (error) {
       await page.screenshot({ path: `/tmp/ftown-pr-ci-visual/${name}-failure.png`, fullPage: true }).catch(() => {});
       console.error(`${name}: fixture failed; page errors:`, pageErrors);
