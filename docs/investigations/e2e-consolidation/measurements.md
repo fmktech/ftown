@@ -33,3 +33,8 @@ Failed runs are not counted as performance successes.
 | 15-second action budget | 68 pass, 2 skip, 3 fail; 176.177s | Exposed implicit trust-propagation waits in session creation. Explicit bounded readiness checks preserve enabled-button and exact bridge identity; ordinary interactions keep 15 seconds. All three isolated specs passed in 171.188s, no retries. |
 
 One experimental cleanup trap used a relative path after cwd changed; root immediately performed absolute-path service and Compose teardown and verified resource removal. Subsequent operational traps use absolute paths. Mac archive transport introduced AppleDouble metadata; only generated metadata was removed and source hashes/listing verified. Neither incident changed application code.
+
+## Final integration and cleanup
+Rebased cleanly onto adca13f (release checks/version metadata only; no runtime implementation changes). Rebuilt bridge 0.19.63 in the sandbox and ran all 31 runner/version/release tests successfully. An initial local invocation lacked the built package required by the real-artifact test; the sandbox rebuild satisfied that prerequisite and all checks passed. Browser evidence above predates this release-only rebase; it was not rerun or represented as a new timing sample.
+
+Final full-script teardown removed containers, service PID records and test listeners. Root deleted owned sandbox bx_nwfdv7h3; subsequent Boat inventory no longer lists it. Unrelated sandboxes were preserved.
