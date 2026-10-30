@@ -17,8 +17,8 @@ function atLeast(current: string, latest: string): boolean {
 const id = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9_-]{1,200}$/.test(v);
 const date = (v: unknown) => typeof v === "string" && v.length < 80 && Number.isFinite(Date.parse(v));
 const phases = ["staging", "prepared", "restarting", "succeeded", "failed"];
-const blocks = ["permission_denied", "not_enabled", "unsupported_launch", "busy", "in_progress", "release_unavailable"];
-const rejected = new Set(["invalid_update_request", "permission_denied", "updates_disabled", "bridge_busy", "update_in_progress", "release_unavailable", "update_target_changed"]);
+const blocks = ["permission_denied", "not_enabled", "unsupported_launch", "busy", "in_progress", "release_unavailable", "node_incompatible"];
+const rejected = new Set(["invalid_update_request", "permission_denied", "updates_disabled", "bridge_busy", "update_in_progress", "release_unavailable", "update_target_changed", "node_incompatible"]);
 const responseCode = (response: CommandResponse) => obj(response.data) && typeof response.data.code === "string" ? response.data.code : "";
 
 function parseOperation(value: unknown): BridgeUpdateOperation | null | undefined {
@@ -29,6 +29,8 @@ function parseOperation(value: unknown): BridgeUpdateOperation | null | undefine
 export function parseBridgeUpdateStatus(value: unknown, bridgeId: string): BridgeUpdateStatus | null {
   if (!obj(value) || value.schema !== 1 || value.bridgeId !== bridgeId || typeof value.currentVersion !== "string" || !/^[A-Za-z0-9.+_-]{1,100}$/.test(value.currentVersion)
     || !(value.latestVersion === null || version(value.latestVersion)) || !(value.checkedAt === null || date(value.checkedAt))
+    || !(value.currentNodeVersion === undefined || version(value.currentNodeVersion))
+    || !(value.requiredNodeEngine === undefined || typeof value.requiredNodeEngine === "string" && value.requiredNodeEngine.length <= 256 && value.requiredNodeEngine.trim().length > 0 && !/[\x00-\x1f\x7f-\x9f]/.test(value.requiredNodeEngine))
     || !["current", "available", "unknown"].includes(String(value.availability)) || typeof value.canUpdate !== "boolean"
     || !(value.blockedReason === null || typeof value.blockedReason === "string" && blocks.includes(value.blockedReason))
     || typeof value.manualCommand !== "string" || value.manualCommand.length > 200 || parseOperation(value.operation) === undefined) return null;
@@ -103,7 +105,7 @@ export class BridgeUpdatesController {
       if (response.success && accepted(response.data, bridgeId, operation.id, operation.target)) {
         this.put(bridgeId, { ...this.get(bridgeId), operation, message: "Update requested. Waiting for the computer to reconnect." });
       } else if (!response.success && rejected.has(responseCode(response))) {
-        this.put(bridgeId, { ...this.get(bridgeId), operation: null, message: responseCode(response) === "permission_denied" ? "This device does not have control permission for this computer." : "Update could not be started. Check the status and manual instructions." });
+        this.put(bridgeId, { ...this.get(bridgeId), operation: null, message: responseCode(response) === "permission_denied" ? "This device does not have control permission for this computer." : responseCode(response) === "node_incompatible" ? "Upgrade Node on this computer before updating the bridge." : "Update could not be started. Check the status and manual instructions." });
       } else this.put(bridgeId, { ...this.get(bridgeId), operation, message: "Update outcome is uncertain. Checking status before any retry." });
     } catch {
       if (!this.disposed && this.epochs.get(bridgeId) === epoch) this.put(bridgeId, { ...this.get(bridgeId), operation, message: "Update outcome is uncertain. Checking status before any retry." });

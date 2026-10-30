@@ -8,12 +8,21 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, writeFile, rm, access, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createUpdateReleaseApi, createStagingEnvironment, waitForUpdateChild, supportsNode, validateStableMetadata } from './update-release.js';
+import { createUpdateReleaseApi, createStagingEnvironment, waitForUpdateChild, supportsNode, validateStableMetadata, parseStableMetadata } from './update-release.js';
 
 const tar = Buffer.from('fixture tarball');
 const integrity = `sha512-${createHash('sha512').update(tar).digest('base64')}`;
 const metadata = { name: 'ftown', version: '1.2.3', gitHead: 'a'.repeat(40), dist: { tarball: 'https://registry.npmjs.org/ftown/-/ftown-1.2.3.tgz', integrity }, engines: { node: '^24.22.1 || >=26.12.1' } };
 describe('bounded stable update release', () => {
+  it('discovers a valid release on an incompatible runtime but refuses to stage it', async () => {
+    const liveShape = { ...metadata, version: '0.19.61', dist: { ...metadata.dist, tarball: 'https://registry.npmjs.org/ftown/-/ftown-0.19.61.tgz' }, engines: { node: '^22.23.4 || ^24.22.1 || >=26.12.1' } };
+    const api = createUpdateReleaseApi({ nowNode: '24.12.0', read: async () => Buffer.from(JSON.stringify(liveShape)) });
+    const release = await api.resolveStableRelease(new AbortController().signal);
+    assert.equal(release.version, '0.19.61');
+    assert.throws(() => validateStableMetadata(liveShape, '24.12.0'));
+    assert.equal(validateStableMetadata(liveShape, '24.22.1').version, '0.19.61');
+    await assert.rejects(api.prepareRelease(release, { operationId: randomUUID(), stagingRoot: '/not-used', signal: new AbortController().signal }), /Unsupported release metadata/);
+  });
   it('uses separate private npm configs that the installed npm can read offline', async () => {
     const home = await realpath(await mkdtemp(join(tmpdir(), 'ftown-npm-config-')));
     try {
@@ -35,6 +44,9 @@ describe('bounded stable update release', () => {
   it('accepts canonical fixed-origin metadata and rejects unsafe or incompatible values', () => {
     assert.equal(validateStableMetadata(metadata, '24.22.1').version, '1.2.3');
     assert.equal(supportsNode(metadata.engines.node, '24.22.0'), false);
+    assert.equal(supportsNode('>=24.0.0 || unrecognized', '24.22.1'), false);
+    assert.equal(parseStableMetadata({ ...metadata, engines: { node: 'unrecognized' } }).nodeEngine, 'unrecognized');
+    for (const node of ['', '  ', 'x'.repeat(257), '>=24.0.0\n', '>=24.0.0\u0085']) assert.throws(() => parseStableMetadata({ ...metadata, engines: { node } }));
     for (const bad of [
       { ...metadata, version: '1.2.3-beta.1' }, { ...metadata, version: '01.2.3' },
       { ...metadata, gitHead: 'abc' }, { ...metadata, name: 'ftown-bridge' },

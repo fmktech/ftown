@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, realpat
 import { randomBytes } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import { cleanup as ndcCleanup } from 'node-datachannel';
+import { configureUpdateOptions } from './update-options.js';
 
 import { CentrifugoClient } from './centrifugo-client.js';
 import { WatchRegistry } from './direct-transport/watch-registry.js';
@@ -110,11 +111,11 @@ export async function finishUpdateRestartAdmission(admission: UpdateAdmission, r
 export async function runBridge(argv: string[], commandName = 'ftown-bridge'): Promise<number> {
 const program = new Commander();
 program.exitOverride();
+configureUpdateOptions(program);
 
 program
   .name(commandName)
   .description('ftown orchestrator bridge for Centrifugo')
-  .option('--allow-updates', 'Allow explicit updates for this unsupervised single-bridge installation')
   .option('--local', 'Local browser control only: no cloud account or connection')
   .option('--solo', 'Single-port LAN deployment: no account service, managed hub + panel children, key-based auth')
   .option('--port <port>', 'Public port for --solo front (default: see DEFAULT_SOLO_PORT)')

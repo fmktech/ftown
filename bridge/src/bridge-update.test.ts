@@ -6,7 +6,7 @@ import type { VerifiedPrincipal } from './security/protocol.js';
 import type { PreparedRelease, StableRelease, UpdateReceipt } from './update-runtime-contract.js';
 
 const principal = { bridgeId: 'bridge', permissions: ['read', 'control'] } as VerifiedPrincipal;
-const release: StableRelease = { version: '2.0.0', gitHead: 'a', integrity: 'sha512-a', tarballUrl: 'https://registry.npmjs.org/ftown/-/ftown-2.0.0.tgz', nodeEngine: '>=22' };
+const release: StableRelease = { version: '2.0.0', gitHead: 'a', integrity: 'sha512-a', tarballUrl: 'https://registry.npmjs.org/ftown/-/ftown-2.0.0.tgz', nodeEngine: '>=22.0.0' };
 const prepared: PreparedRelease = { protocol: 1, operationId: '12345678-1234-4234-8234-123456789abc', targetVersion: '2.0.0', jobDir: '/job', packageRoot: '/job/pkg', packageEntry: '/job/pkg/dist/ftown-cli.js' };
 const id = prepared.operationId;
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
@@ -28,6 +28,38 @@ function fixture() {
   };
   return { deps, effects, revoke: () => { authorized = false; }, setBusy: (v: boolean) => { busy = v; }, receipt: () => receipt };
 }
+
+test('known incompatible release reports its version and cannot be accepted or staged', async () => {
+  const f = fixture();
+  f.deps.nodeVersion = '24.12.0';
+  f.deps.resolve = async () => ({ ...release, nodeEngine: '^24.22.1 || >=26.12.1' });
+  const coordinator = new BridgeUpdateCoordinator(f.deps);
+  const status = await coordinator.snapshot(principal);
+  assert.equal(status.latestVersion, '2.0.0');
+  assert.equal(status.availability, 'available');
+  assert.equal(status.currentNodeVersion, '24.12.0');
+  assert.equal(status.requiredNodeEngine, '^24.22.1 || >=26.12.1');
+  assert.equal(status.blockedReason, 'node_incompatible');
+  assert.equal(status.canUpdate, false);
+  f.setBusy(true);
+  assert.equal((await coordinator.snapshot(principal)).blockedReason, 'node_incompatible');
+  await assert.rejects(coordinator.request(principal, '2.0.0', id), { code: 'node_incompatible' });
+  assert.deepEqual(f.effects, []);
+});
+
+test('supported release is eligible and existing control and launch guards take priority', async () => {
+  const f = fixture();
+  f.deps.nodeVersion = '24.22.1';
+  f.deps.resolve = async () => ({ ...release, nodeEngine: '^24.22.1 || >=26.12.1' });
+  const coordinator = new BridgeUpdateCoordinator(f.deps);
+  assert.equal((await coordinator.snapshot(principal)).canUpdate, true);
+  f.deps.support = () => 'unsupported_launch';
+  assert.equal((await coordinator.snapshot(principal)).blockedReason, 'unsupported_launch');
+  await assert.rejects(coordinator.request(principal, '2.0.0', id), { code: 'updates_disabled' });
+  f.revoke();
+  assert.equal((await coordinator.snapshot(principal)).blockedReason, 'permission_denied');
+  assert.deepEqual(f.effects, []);
+});
 
 test('request is idempotent and effects wait for both response signals', async () => {
   const f = fixture(), coordinator = new BridgeUpdateCoordinator(f.deps);

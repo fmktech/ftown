@@ -8,6 +8,14 @@ beforeEach(() => {
   HTMLDialogElement.prototype.showModal = function () { this.setAttribute("open", ""); };
   HTMLDialogElement.prototype.close = function () { this.removeAttribute("open"); };
 });
+it("shows the known release and Node upgrade requirement without enabling update", () => {
+  render(<BridgeUpdatesDialog open name="Workstation" view={{ ...view, status: { ...view.status!, canUpdate: false, blockedReason: "node_incompatible", currentNodeVersion: "24.12.0", requiredNodeEngine: "^24.22.1" } }} onClose={() => {}} onCheck={() => {}} onUpdate={() => {}} />);
+  expect(screen.getByText("Latest: 1.1.0")).toBeTruthy();
+  expect(screen.getByText("Current Node: 24.12.0")).toBeTruthy();
+  expect(screen.getByText("Required Node: ^24.22.1")).toBeTruthy();
+  expect(screen.getByText(/Upgrade Node on this computer/)).toBeTruthy();
+  expect((screen.getByRole("button", { name: "Update and restart" }) as HTMLButtonElement).disabled).toBe(true);
+});
 afterEach(() => cleanup());
 const view: UpdateView = { loading: false, message: null, operation: null, complete: false, status: {
   schema: 1, bridgeId: "a", currentVersion: "1.0.0", latestVersion: "1.1.0", checkedAt: null, availability: "available", canUpdate: true, blockedReason: null, operation: null, manualCommand: "npx ftown@1.1.0 setup",

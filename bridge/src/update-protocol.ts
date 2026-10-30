@@ -7,6 +7,7 @@ export type BridgeUpdateBlock =
   | 'unsupported_launch'
   | 'busy'
   | 'in_progress'
+  | 'node_incompatible'
   | 'release_unavailable'
   | null;
 
@@ -25,6 +26,8 @@ export interface BridgeUpdateStatus {
   bridgeId: string;
   currentVersion: string;
   latestVersion: string | null;
+  currentNodeVersion?: string;
+  requiredNodeEngine?: string;
   checkedAt: string | null;
   availability: 'current' | 'available' | 'unknown';
   canUpdate: boolean;
@@ -58,5 +61,6 @@ export type BridgeUpdateErrorCode =
   | 'bridge_busy'
   | 'update_in_progress'
   | 'release_unavailable'
+  | 'node_incompatible'
   | 'update_target_changed'
   | 'update_failed';
