@@ -50,7 +50,7 @@ for (const storedTab of ["crons", "factory"]) {
       await page.screenshot({ path: testInfo.outputPath("desktop.png"), fullPage: true });
 
       await page.setViewportSize({ width: 390, height: 844 });
-      await page.getByRole("button", { name: "Workspace", exact: true }).click();
+      await page.getByRole("tab", { name: "Workspace", exact: true }).click();
       await expect(page.getByRole("button", { name: new RegExp(name) })).toBeVisible();
       await expect(page.getByTitle("Create a new loop")).toHaveCount(0);
       await expect(page.getByRole("tablist", { name: "Sidebar sections" })).toHaveCount(0);

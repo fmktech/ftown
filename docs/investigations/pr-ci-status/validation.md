@@ -2,6 +2,8 @@
 
 ## CI repair verification
 
+After main added HTML previews in c5d955d, the PR had adjacent merge conflicts. The resolved union preserves both features and bumps bridge version to0.19.62. Independent integration review approved;38focused bridge and76UItests plus both typechecks passed. Root reran all3visual viewport checks and then real Linux focused session-tools+session-preview E2E:4passed in38.3s, all prerequisite suites/builds passed and cleanup succeeded. A first fresh-environment attempt stopped before application tests because PostgreSQL's initialization socket briefly satisfied Docker health before its final TCP server; the root-only launcher now performs bounded TCP SELECT1 readiness before unchanged schema setup. No production CI workflow, assertions or browser retry/timeouts were changed.
+
 The initial CI run exposed a missing inert status-service dependency in the startup test harness. Root reproduced four failures locally; repaired harness preserves all startup assertions and verifies dependency forwarding. Isolated readiness tests now pass5/5, full bridge suite1102passed/4skipped. Repair commit1429fec.
 
 The subsequent full CI browser run passed70, skipped2 and failed both session-tools viewport cases: a wider badge covered the parent expand control, and an exact neutral accessible-name selector became stale when status arrived. Root reproduced the overlap at260px before repair. Rows now reserve space for the tree/name and constrain badge width with ellipsis; complete status remains accessible in title/aria-label. Tests select stable PR identity while preserving href/target/rel, normal navigation and expand/collapse checks.

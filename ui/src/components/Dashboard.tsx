@@ -19,6 +19,7 @@ import { usePendingApprovals } from "@/hooks/usePendingApprovals";
 import type { AccountSecurityClient, AccountSecuritySnapshot } from "@/lib/account-security-client";
 import { SessionList } from "./SessionList";
 import { PullRequestStatusProvider } from "./PullRequestStatusProvider";
+import { SessionWorkspace } from "./SessionWorkspace";
 import { Terminal, TerminalHandle } from "./Terminal";
 import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
 import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
@@ -86,7 +87,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
-  const [mobileTab, setMobileTab] = useState<"sessions" | "terminal">("sessions");
+  const [mobileTab, setMobileTab] = useState<"sessions" | "terminal" | "preview">("sessions");
   const [sidebarCollapsed, setSidebarCollapsed] = usePersistentState<boolean>("ftown:sidebarCollapsed", false);
   const [storedSidebarWidth, setStoredSidebarWidth] = usePersistentState<number>("ftown:sidebarWidth", DEFAULT_SIDEBAR_WIDTH);
   const sidebarWidth = clampSidebarWidth(storedSidebarWidth);
@@ -338,6 +339,36 @@ PY`;
   useEffect(() => {
     if (selectedSessionId && !sessions.some(session => session.id === selectedSessionId)) setSelectedSessionId(null);
   }, [sessions, selectedSessionId]);
+  const [previewChoices, setPreviewChoices] = useState<Record<string, { id: string; open: boolean }>>({});
+  const selectedPreviewKey = selectedSession ? `${selectedSession.bridgeId}:${selectedSession.id}` : "";
+  const choice = previewChoices[selectedPreviewKey];
+  const previewOpen = !!selectedSession?.preview && (choice?.id !== selectedSession.preview.id || choice.open);
+  const observedPreviews = useRef<Record<string, string>>({});
+  useEffect(() => {
+    const observed: Record<string, string> = {};
+    for (const session of sessions) if (session.preview) {
+      const key = `${session.bridgeId}:${session.id}`;
+      observed[key] = session.preview.id;
+      if (session.id === selectedSessionId && observedPreviews.current[key] !== session.preview.id) {
+        setMobileTab(current => current === "sessions" ? current : "preview");
+      }
+    }
+    observedPreviews.current = observed;
+    setPreviewChoices(previous => {
+      const next: typeof previous = {};
+      for (const [key, id] of Object.entries(observed)) next[key] = previous[key]?.id === id ? previous[key] : { id, open: true };
+      if (Object.keys(next).length === Object.keys(previous).length && Object.keys(next).every(key => next[key] === previous[key])) return previous;
+      return next;
+    });
+    if (!selectedSession?.preview) setMobileTab(current => current === "preview" ? "terminal" : current);
+  }, [sessions, selectedSessionId, selectedSession?.preview]);
+  const setPreviewOpen = useCallback((open: boolean) => {
+    if (!selectedSession?.preview) return;
+    setPreviewChoices(previous => ({ ...previous, [selectedPreviewKey]: { id: selectedSession.preview!.id, open } }));
+    if (open) setMobileTab(current => current === "sessions" ? current : "preview");
+    else setMobileTab(current => current === "preview" ? "terminal" : current);
+  }, [selectedSession, selectedPreviewKey]);
+  const refitPreviewTerminal = useCallback(() => { terminalRef.current?.refit({ forceResize: true }); }, []);
   const sessionRelaunchLabel = selectedSession && !selectedSession.loopId
     ? getSessionRelaunchLabel(selectedSession.status)
     : null;
@@ -385,6 +416,7 @@ PY`;
   }, [selectedSessionId, retrySession]);
   const selectedTransportMode = selectedSessionId ? transport?.getMode(selectedSessionId) ?? "connecting" : null;
   const sessionHeaderActions = selectedSession ? <div role="group" aria-label="Selected session actions" className="flex items-center gap-2">
+    {selectedSession.preview && !previewOpen && <button type="button" className="btn-ghost min-h-11" aria-label="Open preview" onClick={() => setPreviewOpen(true)}>Preview</button>}
     {selectedSession.status === "running" && <button type="button" className="btn-danger min-h-11 md:min-h-8" onClick={handleStopSession}>Stop</button>}
     {sessionRelaunchLabel && <button type="button" className="btn-warn min-h-11 md:min-h-8" onClick={handleRelaunchSession} title="Relaunch this session using the same command">{sessionRelaunchLabel}</button>}
   </div> : null;
@@ -428,9 +460,12 @@ PY`;
   const handleSelectSession = useCallback((id: string | null) => {
     setSelectedSessionId(id);
     if (id) {
-      setMobileTab("terminal");
+      const session = sessions.find(item => item.id === id);
+      const key = session ? `${session.bridgeId}:${session.id}` : "";
+      const choice = previewChoices[key];
+      setMobileTab(session?.preview && (choice?.id !== session.preview.id || choice.open) ? "preview" : "terminal");
     }
-  }, []);
+  }, [sessions, previewChoices]);
 
   const handleCreateSession = useCallback(
     async (prompt: string, options: CreateSessionOptions): Promise<void> => {
@@ -456,7 +491,7 @@ PY`;
     return () => navigator.serviceWorker?.removeEventListener("message", onNotification);
   }, [rawSessions, handleSelectSession]);
 
-  const handleMobileTabSwitch = useCallback((tab: "sessions" | "terminal") => {
+  const handleMobileTabSwitch = useCallback((tab: "sessions" | "terminal" | "preview") => {
     setMobileTab(tab);
     if (tab === "terminal") {
       scheduleTerminalRenderAdjustment();
@@ -862,24 +897,32 @@ PY`;
 
       {/* ── Mobile Tab Bar ── */}
       <div
-        className="flex md:hidden shrink-0"
+        className="flex md:hidden shrink-0" role="tablist" aria-label="Workspace navigation" onKeyDown={event => {
+          if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+          const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+          const index = tabs.indexOf(document.activeElement as HTMLButtonElement);
+          const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (Math.max(0, index) + (event.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length;
+          event.preventDefault(); tabs[next]?.focus(); tabs[next]?.click();
+        }}
         style={{
           borderBottom: "1px solid var(--border-muted)",
           background: "var(--bg-surface)",
         }}
       >
         <button
-          className={`mobile-tab ${mobileTab === "sessions" ? "mobile-tab-active" : ""}`}
+          className={`mobile-tab ${mobileTab === "sessions" ? "mobile-tab-active" : ""}`} role="tab" tabIndex={mobileTab === "sessions" ? 0 : -1} aria-selected={mobileTab === "sessions"}
           onClick={() => handleMobileTabSwitch("sessions")}
         >
           Workspace
         </button>
         <button
           className={`mobile-tab ${mobileTab === "terminal" ? "mobile-tab-active" : ""}`}
+          role="tab" tabIndex={mobileTab === "terminal" ? 0 : -1} aria-selected={mobileTab === "terminal"} aria-controls="session-terminal-panel"
           onClick={() => handleMobileTabSwitch("terminal")}
         >
           Terminal
         </button>
+        {selectedSession?.preview && previewOpen && <button className={`mobile-tab ${mobileTab === "preview" ? "mobile-tab-active" : ""}`} role="tab" tabIndex={mobileTab === "preview" ? 0 : -1} aria-selected={mobileTab === "preview"} aria-controls="session-preview-panel" onClick={() => handleMobileTabSwitch("preview")}>Preview</button>}
       </div>
 
       {/* ── Main Layout ── */}
@@ -1033,7 +1076,8 @@ PY`;
         </aside>
 
         {/* Terminal area */}
-        <main aria-hidden={!isDesktop && mobileTab !== "terminal"} className={`flex-1 flex-col min-h-0 min-w-0 ${mobileTab === "terminal" ? "flex" : "hidden"} md:flex`}>
+        <main aria-hidden={!isDesktop && mobileTab === "sessions"} className={`flex-1 flex-col min-h-0 min-w-0 ${mobileTab !== "sessions" ? "flex" : "hidden"} md:flex`}>
+          <SessionWorkspace session={selectedSession} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabSwitch} onRefit={refitPreviewTerminal}>
           <Terminal
             ref={terminalRef}
             transport={transport}
@@ -1052,6 +1096,7 @@ PY`;
           {selectedSessionId && (
             <MobileControlBar ref={mobileControlRef} onSendInput={(data) => terminalRef.current?.sendInput(data)} />
           )}
+          </SessionWorkspace>
         </main>
 
       </div>

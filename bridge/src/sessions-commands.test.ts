@@ -85,6 +85,25 @@ test('fanout without message fails before resolving any target session', async (
 
 const newCapabilities = { capabilities: { attention: { version: 1, request: true }, sessionMetadata: { pullRequest: true } } };
 
+test('preview probes capability before registering and clearing; old bridges never mutate', async () => fixture(async (requests) => {
+  process.env.FTOWN_SESSION_ID = 'self-id';
+  assert.equal(await runSessions(['preview', 'index.html']), 0);
+  assert.equal(requests[0].method, 'GET'); assert.equal(requests[1].method, 'PUT');
+  assert.deepEqual(requests[1].body, { path: new URL('index.html', `file://${process.cwd()}/`).pathname });
+  assert.equal(await runSessions(['preview', '--clear']), 0);
+  assert.equal(requests[2].method, 'GET'); assert.equal(requests[3].method, 'DELETE');
+}, request => request.method === 'GET' ? { capabilities: { sessionMetadata: { preview: true } } } : { session: { id: 'self-id' } }));
+
+test('preview rejects missing or contradictory arguments and missing capability without mutation', async () => fixture(async (requests, output) => {
+  process.env.FTOWN_SESSION_ID = 'self-id';
+  assert.equal(await runSessions(['preview']), 1);
+  assert.equal(await runSessions(['preview', 'index.html', '--clear']), 1);
+  assert.equal(requests.length, 0);
+  assert.equal(await runSessions(['preview', 'index.html']), 1);
+  assert.equal(requests.length, 1); assert.equal(requests[0].method, 'GET');
+  assert.ok(output.some(line => line.includes('bridge_upgrade_required')));
+}, () => ({ capabilities: { sessionMetadata: { pullRequest: true } } })));
+
 test('attention uses trimmed self identity, probes support and returns the exact sanitized result', async () => fixture(async (requests, output) => {
   process.env.FTOWN_SESSION_ID = '  self-id  ';
   assert.equal(await runSessions(['attention', '--message', ' Please check API_KEY=secret ', '--title', ' Review requested ']), 0);

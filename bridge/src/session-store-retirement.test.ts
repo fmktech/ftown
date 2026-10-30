@@ -111,7 +111,7 @@ test('late pump usage save cannot recreate a removed record', { timeout: 5000 },
   await assertAbsent(f);
 });
 
-test('controller usage bypassing the pump queue stays absent after retirement', { timeout: 5000 }, async (t) => {
+test('controller usage reloads under the pump queue after retirement', { timeout: 5000 }, async (t) => {
   const entered = deferred();
   const release = deferred();
   t.after(release.resolve);
@@ -122,12 +122,11 @@ test('controller usage bypassing the pump queue stays absent after retirement', 
   });
   const pending = f.controller.usage(f.session.id);
   await entered.promise;
-  await f.pump.withSessionWrite(f.session.id, async () => { await f.controller.remove(f.session.id); });
+  await f.controller.remove(f.session.id);
   release.resolve();
   assert.equal((await pending).ok, true);
   await assertAbsent(f);
-  // Promise<void> saves still permit late publications; the UI owns that boundary.
-  assert.deepEqual(f.updates.map((s) => s.status), ['removed', 'completed']);
+  assert.deepEqual(f.updates.map((s) => s.status), ['removed']);
 });
 
 test('removal before completion loads leaves only the archive', { timeout: 5000 }, async (t) => {

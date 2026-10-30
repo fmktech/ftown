@@ -17,6 +17,17 @@ test('reads cannot consume inboxes or register native wake targets, while POST h
   assert.equal(classifyCommand('mcp_request', { request: { method: 'GET', path: '/api/sessions/session/inbox' } }).permission, 'control');
 });
 
+test('preview reads require read authority and registration cannot be tunneled through MCP', () => {
+  assert.equal(classifyCommand('session_preview_status', { sessionId: 'session' }).permission, 'read');
+  assert.equal(classifyCommand('session_preview_chunk', { sessionId: 'session' }).permission, 'read');
+  assert.equal(classifyHttp('PUT', '/api/sessions/session/preview').permission, 'control');
+  assert.equal(classifyHttp('DELETE', '/api/sessions/session/preview').permission, 'control');
+  assert.throws(() => classifyCommand('session_preview_chunk', { sessionId: '../session' }), { code: 'permission_denied' });
+  for (const method of ['PUT', 'DELETE']) assert.throws(() => classifyCommand('mcp_request', { request: { method, path: '/api/sessions/session/preview' } }), { code: 'permission_denied' });
+  assert.throws(() => classifyHttp('GET', '/api/sessions/session/preview'), { code: 'permission_denied' });
+  assert.throws(() => classifyHttp('PUT', '/api/sessions/session/preview?x=1'), { code: 'permission_denied' });
+});
+
 test('real read-only MCP principal cannot authorize the control update operation', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'ftown-update-policy-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

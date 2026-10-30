@@ -14,6 +14,7 @@ import { nativeWake } from './native-wake.js';
 import type { Session } from '../../types.js';
 import { LocalApiServer } from '../../local-api-server.js';
 import { SessionStore } from '../../session-store.js';
+import { SessionController } from '../../session-controller.js';
 import { AttentionStore, AttentionError } from '../../attention-store.js';
 import type { ProcessRunner } from '../../claude-runner.js';
 import { EncryptedPeerChannel } from './direct.js';
@@ -36,6 +37,48 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   };
   return { dir, identity, client, security, route, packet };
 }
+
+test('browser control cannot register preview through encrypted HTTP and causes no session mutation', async t => {
+  const f = await fixture(t);
+  const browser = await generateEndpoint(owner, 'browser');
+  const invite = await f.security.policy.createInvitation(await f.security.policy.principal(f.client.endpoint.id), { label: 'browser' });
+  await f.security.policy.consumeInvitation({ type: 'enroll', candidate: browser.endpoint, invitationId: invite.invitationId, invitationSecret: invite.secret, label: 'browser' });
+  const store = new SessionStore(join(f.dir, 'sessions'));
+  await store.saveSession({ id: 'session', name: 'test', command: '', status: 'running', bridgeId: 'bridge', createdAt: '', updatedAt: '', workingDir: f.dir });
+  let publications = 0;
+  const controller = new SessionController({ store, runner: { stop: () => true }, publishSessionUpdate: async () => { publications++; }, removeSession: async () => null });
+  const api = new LocalApiServer(); api.setSessionController(controller);
+  api.setSecurity(f.security, { protocolVersion: 1, ownerId: owner, bridgeId: 'bridge', endpoint: f.identity.endpoint, relayUserId: 'owner@example.test' }, async () => null);
+  const requestId = randomUUID();
+  const app: SecureApplication = { type: 'application', route: { kind: 'http', requestId, method: 'PUT', path: '/api/sessions/session/preview' }, data: { body: { path: join(f.dir, 'private.html') } }, mcp: null };
+  const packet = await f.packet(app, f.route, browser);
+  const reply = await executeSecurePacket(f.security, packet, f.route, message => api.dispatchSecure(message));
+  const plaintext = await open(browser, f.identity.endpoint, reply, { ownerId: owner, bridgeId: 'bridge', channel: f.route.channel, recipientId: browser.endpoint.id, purpose: 'application' });
+  const value = JSON.parse(new TextDecoder().decode(plaintext));
+  assert.equal(value.data.status, 403); assert.equal(value.data.body.code, 'permission_denied');
+  assert.equal((await store.loadSession('session'))?.preview, undefined); assert.equal(publications, 0);
+  await f.security.close();
+});
+
+test('encrypted archive response omits preview source paths', async t => {
+  const f = await fixture(t);
+  const store = new SessionStore(join(f.dir, 'archive-data'));
+  const path = join(f.dir, 'private.html');
+  await store.archiveSession({ id: 'session', name: 'test', command: '', status: 'completed', bridgeId: 'bridge', createdAt: '', updatedAt: '',
+    preview: { id: randomUUID(), fileName: 'private.html' }, previewSource: { version: 1, id: randomUUID(), root: f.dir, filePath: path } });
+  const api = new LocalApiServer();
+  const runner = new EventEmitter() as ProcessRunner;
+  const cloud = new CentrifugoClient('ws://127.0.0.1:1/unused', '', async () => '');
+  api.setDependencies(store, runner, cloud, 'owner@example.test');
+  api.setSecurity(f.security, { protocolVersion: 1, ownerId: owner, bridgeId: 'bridge', endpoint: f.identity.endpoint, relayUserId: 'owner@example.test' }, async () => null);
+  const requestId = randomUUID();
+  const app: SecureApplication = { type: 'application', route: { kind: 'http', requestId, method: 'GET', path: '/api/archive' }, data: {}, mcp: null };
+  const reply = await executeSecurePacket(f.security, await f.packet(app), f.route, message => api.dispatchSecure(message));
+  const plaintext = await open(f.client, f.identity.endpoint, reply, { ownerId: owner, bridgeId: 'bridge', channel: f.route.channel, recipientId: f.client.endpoint.id, purpose: 'application' });
+  const value = new TextDecoder().decode(plaintext);
+  assert.ok(!value.includes('previewSource')); assert.ok(!value.includes(path)); assert.ok(value.includes('private.html'));
+  api.stop(); await f.security.close();
+});
 
 test('authenticated application admission rejects replay, wrong epoch/context and tampering before dispatch', async t => {
   const f = await fixture(t);

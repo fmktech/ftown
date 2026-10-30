@@ -183,6 +183,20 @@ Full guide: [docs/solo.md](docs/solo.md)
 - Local-first, private transport: terminal output never touches the cloud while you're on the same machine or network; Centrifugo relays only while a remote viewer is actively watching
 - Loopback WS requires an approved HPKE endpoint and authenticated pair binding, with Origin/Host checks retained; localPort is discovery metadata only, and presence adverts are scoped to the owning user's JWT
 
+### Live HTML previews
+
+Agents can put an interactive explanation, mockup, or diagram beside their terminal:
+
+```bash
+ftown sessions preview ./design.html
+```
+
+The dashboard opens a resizable preview on the right and refreshes it when the file changes. On mobile and narrow layouts, Terminal and Preview are tabs. Closing the pane keeps the registration; `ftown sessions preview --clear` removes it. Use `--session-id <id>` outside the target session.
+
+Previews are self-contained UTF-8 HTML files inside the session's working directory, up to 1 MiB. Inline CSS, JavaScript, and embedded data images are supported; sibling files, external assets, and backend requests are not. Publish completed edits with a temporary file and atomic rename. Each changed document reloads and resets its interactive state.
+
+The file travels through the existing encrypted connection and runs in an iframe without dashboard-origin access. There is no preview-to-terminal messaging channel. See the [preview guide](docs/session-html-preview/usage.md) for authoring, limitations, and troubleshooting.
+
 ### Everything else
 
 - Eight coding-agent CLIs plus raw shells as full interactive sessions

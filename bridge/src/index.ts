@@ -836,6 +836,7 @@ program
       sessionFactoryDeps,
       publishSessionUpdate: (session) => centrifugo.publishSessionUpdate(userId, session),
       wireTerminalInput,
+      withSessionWrite: (id, task) => pump.withSessionWrite(id, task),
     });
 
     // Persists Claude/Cursor/Codex-native session ids from hook events.

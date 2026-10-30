@@ -214,6 +214,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return this.secureCommand(message);
     }
     if (route.kind !== 'http') throw new Error('Invalid application route');
+    if ((route.method === 'PUT' || route.method === 'DELETE') && /^\/api\/sessions\/[A-Za-z0-9_-]{1,200}\/preview$/.test(route.path.split('?')[0])
+      && message.principal.endpoint.kind !== 'local-cli') return { status: 403, body: { error: 'permission_denied', code: 'permission_denied' } };
     if (route.method === 'GET' && route.path.startsWith('/api/browser/events')) {
       const url = new URL(route.path, 'http://localhost');
       const raw = url.searchParams.get('after') ?? '0';
@@ -588,6 +590,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       const archived = (await this.store.listArchived()).map((record) => {
         const sanitized = { ...record };
         delete sanitized.env;
+        delete sanitized.previewSource;
         return sanitized;
       });
       jsonResponse(res, 200, { archived });
@@ -689,6 +692,19 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     const sessionResizeMatch = path.match(/^\/api\/sessions\/([^/]+)\/resize$/);
     const sessionRunningMatch = path.match(/^\/api\/sessions\/([^/]+)\/running$/);
     const sessionUsageMatch = path.match(/^\/api\/sessions\/([^/]+)\/usage$/);
+    const sessionPreviewMatch = path.match(/^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/preview$/);
+
+    if (sessionPreviewMatch && (req.method === 'PUT' || req.method === 'DELETE')) {
+      const controller = this.getSessionController();
+      if (!controller) { jsonResponse(res, 503, { error: 'Server not ready' }); return; }
+      const body = await parseBody(req);
+      if (req.method === 'PUT' ? Object.keys(body).length !== 1 || typeof body.path !== 'string' : Object.keys(body).length !== 0) {
+        jsonResponse(res, 400, { error: 'Invalid preview request' }); return;
+      }
+      const result = req.method === 'PUT' ? await controller.setPreview(sessionPreviewMatch[1], body.path) : await controller.clearPreview(sessionPreviewMatch[1]);
+      if (!result.ok) { jsonResponse(res, result.code === 'not_found' ? 404 : result.code === 'too_large' ? 413 : 400, { error: result.message }); return; }
+      jsonResponse(res, 200, { session: toWireSession(result.session) }); return;
+    }
 
     // Lifecycle routes use the same controller as dashboard RPC.
     const lifecycleMatch = path.match(/^\/api\/sessions\/([^/]+)\/(stop|retry)$/);
@@ -717,7 +733,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       }
       jsonResponse(res, 200, { session: toWireSession(session), capabilities: {
         ...(this.attention ? { attention: { version: 1, request: true } } : {}),
-        sessionMetadata: { pullRequest: true },
+        sessionMetadata: { pullRequest: true, preview: true },
       } });
       return;
     }

@@ -38,7 +38,7 @@ for (const viewport of [
     let bridgeId = "";
     const isMobile = viewport.name === "mobile";
     const showWorkspace = async () => {
-      if (isMobile) await page.getByRole("button", { name: "Workspace", exact: true }).click();
+      if (isMobile) await page.getByRole("tab", { name: "Workspace", exact: true }).click();
     };
 
     try {
@@ -177,7 +177,7 @@ for (const viewport of [
       await expect(page.locator(".xterm-rows").first()).toContainText(requestedMarker, { timeout: 30_000 });
       await expect(page.locator(".xterm-rows").first()).not.toContainText(idleMarker);
       if (isMobile) {
-        await expect(page.getByRole("button", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
+        await expect(page.getByRole("tab", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
       }
       await showWorkspace();
       await expect(firstShortcut).toBeVisible();
@@ -189,7 +189,7 @@ for (const viewport of [
       // the same request; only a new prompt or explicit dismissal handles it.
       await originalRow(page, firstName).click();
       await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
-      if (isMobile) await expect(page.getByRole("button", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
+      if (isMobile) await expect(page.getByRole("tab", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
       await showWorkspace();
       await expect(firstShortcut).toBeVisible();
       const openedScreenshot = testInfo.outputPath(`needs-attention-after-open-${viewport.name}.png`);

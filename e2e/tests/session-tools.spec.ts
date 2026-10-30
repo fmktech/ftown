@@ -116,7 +116,7 @@ async function tabIntoHeaderLink(page: Page, link: Locator, mobile: boolean) {
   // proves the link is keyboard reachable without entering xterm, where
   // Shift+Tab intentionally sends a terminal escape sequence.
   const precedingControl = mobile
-    ? page.getByRole("button", { name: "Terminal", exact: true })
+    ? page.getByRole("tab", { name: "Terminal", exact: true })
     : page.getByRole("separator", { name: "Resize sidebar", exact: true });
   await precedingControl.focus();
   await expect(precedingControl).toBeFocused();
@@ -150,7 +150,7 @@ for (const viewport of [
     const created: string[] = [];
     const mobile = viewport.name === "mobile";
     const showWorkspace = async () => {
-      if (mobile) await page.getByRole("button", { name: "Workspace", exact: true }).click();
+      if (mobile) await page.getByRole("tab", { name: "Workspace", exact: true }).click();
     };
     const screenshot = async (name: string) => {
       const path = testInfo.outputPath(`${name}-${viewport.name}.png`);
@@ -348,14 +348,14 @@ for (const viewport of [
       await badgeKeyboardDestination.close();
       await expect(shortcut).toBeVisible();
       await expect(page.locator("main").getByText(otherName, { exact: true })).toHaveCount(1);
-      if (mobile) await expect(page.getByRole("button", { name: "Workspace", exact: true })).toHaveClass(/mobile-tab-active/);
+      if (mobile) await expect(page.getByRole("tab", { name: "Workspace", exact: true })).toHaveClass(/mobile-tab-active/);
       const [badgePointerDestination] = await Promise.all([context.waitForEvent("page"), mobile ? sidebarBadge.tap() : sidebarBadge.click()]);
       await expect(badgePointerDestination).toHaveURL(prTwo);
       await expect(badgePointerDestination).toHaveTitle("PR destination intercepted");
       await badgePointerDestination.close();
       await expect(shortcut).toBeVisible();
       await expect(page.locator("main").getByText(otherName, { exact: true })).toHaveCount(1);
-      if (mobile) await expect(page.getByRole("button", { name: "Workspace", exact: true })).toHaveClass(/mobile-tab-active/);
+      if (mobile) await expect(page.getByRole("tab", { name: "Workspace", exact: true })).toHaveClass(/mobile-tab-active/);
       await screenshot("unselected-session-pr-badge");
 
       await menuControl.focus();
@@ -407,14 +407,14 @@ for (const viewport of [
       await expect(page.locator("main").getByRole("link", { name: /PR #/ })).toHaveCount(0);
       await expect(shortcut).toBeVisible();
       await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
-      if (mobile) await expect(page.getByRole("button", { name: "Workspace", exact: true })).toHaveClass(/mobile-tab-active/);
+      if (mobile) await expect(page.getByRole("tab", { name: "Workspace", exact: true })).toHaveClass(/mobile-tab-active/);
       expect(await sessionRow(page, targetName).evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
       await screenshot("attention-with-associated-pr");
       await shortcut.click();
       await expect(replacementLink).toBeVisible();
       await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
-      if (mobile) await expect(page.getByRole("button", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
+      if (mobile) await expect(page.getByRole("tab", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
       await tabIntoHeaderLink(page, replacementLink, mobile);
       await screenshot("selected-session-pr-link");
       const beforeThinking = receivedHooks.length;
@@ -449,7 +449,7 @@ for (const viewport of [
       }
       await expect(page.locator("main").getByText(otherName, { exact: true })).toHaveCount(1);
       await expect(page.locator("main").getByRole("link", { name: /PR #/ })).toHaveCount(0);
-      if (mobile) await expect(page.getByRole("button", { name: "Workspace", exact: true })).toHaveClass(/mobile-tab-active/);
+      if (mobile) await expect(page.getByRole("tab", { name: "Workspace", exact: true })).toHaveClass(/mobile-tab-active/);
       await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
       await expect(region.getByRole("button", { name: new RegExp(targetName) })).toHaveCount(0);
       const dismissed = await bridgeApiFetch("GET", `/api/sessions/${targetId}/attention?includeResolved=true`);

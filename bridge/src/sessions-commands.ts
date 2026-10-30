@@ -6,6 +6,7 @@
 import { Command, CommanderError } from 'commander';
 import { normalizePullRequestUrl } from './pull-request-url.js';
 import { sanitizeAttentionText } from './attention-events.js';
+import { resolve } from 'node:path';
 import { api as request, loadPointer, listSessions, fetchInbox, sendMail } from './cli-client.js';
 import {
   MAIL_TYPES,
@@ -132,7 +133,7 @@ interface SessionsOptions {
   children?: boolean; siblings?: boolean; keys?: boolean; type?: string; thread?: string;
   peek?: boolean; all?: boolean; sessionId?: string; message?: string; title?: string; clear?: boolean;
 }
-type SessionCommand = 'list' | 'create' | 'get' | 'screen' | 'grep' | 'keys' | 'tell'
+type SessionCommand = 'preview' | 'list' | 'create' | 'get' | 'screen' | 'grep' | 'keys' | 'tell'
   | 'inbox' | 'mail' | 'running' | 'usage' | 'remove' | 'archive' | 'revive' | 'attention' | 'pr';
 
 function sessionProgram(): Command {
@@ -187,6 +188,10 @@ function sessionProgram(): Command {
     .option('--clear', 'Remove the current pull request association')
     .option('--session-id <id>', 'Target session; defaults to FTOWN_SESSION_ID')
     .action((url: string | undefined, _opts, cmd: Command) => run('pr', url === undefined ? [] : [url], cmd));
+  command('preview [path]', 'Register a self-contained HTML preview for this session')
+    .option('--clear', 'Remove the preview registration')
+    .option('--session-id <id>', 'Target session; defaults to FTOWN_SESSION_ID')
+    .action((path: string | undefined, _opts, cmd: Command) => run('preview', path === undefined ? [] : [path], cmd));
   return program;
 }
 
@@ -206,7 +211,7 @@ export async function runSessions(argv: string[]): Promise<number> {
 
 function selfSessionId(explicit?: string): string {
   const id = (explicit ?? process.env.FTOWN_SESSION_ID)?.trim();
-  if (!id || !/^[A-Za-z0-9_-]+$/.test(id)) {
+  if (!id || !/^[A-Za-z0-9_-]{1,200}$/.test(id)) {
     throw new Error('Supply a valid --session-id or set FTOWN_SESSION_ID');
   }
   return id;
@@ -220,18 +225,27 @@ function attentionText(value: string, field: string, maxLength: number): string 
   return text;
 }
 
-async function requireSessionCapability(id: string, feature: 'attention' | 'pullRequest'): Promise<void> {
+async function requireSessionCapability(id: string, feature: 'attention' | 'pullRequest' | 'preview'): Promise<void> {
   const { data } = await api('GET', `/api/sessions/${id}`);
-  const capabilities = (data as { capabilities?: { attention?: { version?: number; request?: boolean }; sessionMetadata?: { pullRequest?: boolean } } } | null)?.capabilities;
+  const capabilities = (data as { capabilities?: { attention?: { version?: number; request?: boolean }; sessionMetadata?: { pullRequest?: boolean; preview?: boolean } } } | null)?.capabilities;
   const supported = feature === 'attention'
     ? capabilities?.attention?.version === 1 && capabilities.attention.request === true
-    : capabilities?.sessionMetadata?.pullRequest === true;
-  if (!supported) throw new Error(`bridge_upgrade_required: Upgrade this bridge to support ${feature === 'attention' ? 'attention requests' : 'pull request metadata'}`);
+    : feature === 'preview' ? capabilities?.sessionMetadata?.preview === true : capabilities?.sessionMetadata?.pullRequest === true;
+  if (!supported) throw new Error(`bridge_upgrade_required: Upgrade this bridge to support ${feature === 'attention' ? 'attention requests' : feature === 'preview' ? 'HTML previews' : 'pull request metadata'}`);
 }
 
 async function executeSessionCommand(cmd: SessionCommand, rest: string[], options: SessionsOptions): Promise<void> {
   const jsonOut = !options.plain;
     switch (cmd) {
+      case 'preview': {
+        const id = selfSessionId(options.sessionId);
+        const path = rest[0];
+        if ((path !== undefined && options.clear) || (path === undefined && !options.clear) || path === '') throw new Error('Supply an HTML file path or --clear, but not both');
+        await requireSessionCapability(id, 'preview');
+        const { data } = await api(options.clear ? 'DELETE' : 'PUT', `/api/sessions/${id}/preview`, options.clear ? undefined : { path: resolve(path!) });
+        console.log(jsonOut ? JSON.stringify(data, null, 2) : `preview ${options.clear ? 'cleared' : 'registered'} for ${id}`);
+        break;
+      }
       case 'attention': {
         const id = selfSessionId(options.sessionId);
         const message = attentionText(options.message ?? '', '--message', 2000);

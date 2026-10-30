@@ -1,3 +1,5 @@
+import type { SessionPreviewDescriptor, SessionPreviewStatusRequest, SessionPreviewChunkRequest } from '../../bridge/src/preview-protocol';
+
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error' | 'disconnected';
 
 export type ShellType = 'claude' | 'cursor' | 'codex' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks' | 'grok' | 'pi' | 'kimi-code' | 'muse';
@@ -26,6 +28,7 @@ export interface Session {
   runtime?: 'tmux' | 'direct';
   loopId?: string; // Read-only provenance on sessions created by retired recurring automation.
   usage?: SessionUsage;
+  preview?: SessionPreviewDescriptor;
 }
 
 /** Per-model token breakdown within a session's usage. */
@@ -98,6 +101,7 @@ import type { GetBridgeUpdatePayload, UpdateBridgePayload } from '../../bridge/s
 import type { GetPullRequestStatusesPayload } from '../../bridge/src/pull-request-status-protocol';
 
 export type CommandType =
+  | 'session_preview_status' | 'session_preview_chunk'
   | 'get_bridge_update' | 'update_bridge' | 'get_pull_request_statuses'
   | 'get_session_attention' | 'resolve_session_attention'
   | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history'
@@ -181,7 +185,7 @@ export interface BridgeExecPayload {
   bridgeId?: string;
 }
 
-export type CommandPayload = GetPullRequestStatusesPayload | GetBridgeUpdatePayload | UpdateBridgePayload | GetSessionAttentionPayload | ResolveSessionAttentionPayload | CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>;
+export type CommandPayload = GetPullRequestStatusesPayload | SessionPreviewStatusRequest | SessionPreviewChunkRequest | GetBridgeUpdatePayload | UpdateBridgePayload | GetSessionAttentionPayload | ResolveSessionAttentionPayload | CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>;
 
 export interface CommandResponse {
   requestId: string;

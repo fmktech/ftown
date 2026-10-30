@@ -56,6 +56,17 @@ function dashboard(localMode = false, readyAccount = false) {
 }
 
 beforeEach(() => {
+  // jsdom has no layout observer. Deliver an initial measurement like a browser
+  // so workspace effects exercise their normal setup and cleanup path.
+  class TestResizeObserver implements ResizeObserver {
+    constructor(private callback: ResizeObserverCallback) {}
+    observe(target: Element) {
+      this.callback([{ target, contentRect: target.getBoundingClientRect(), borderBoxSize: [], contentBoxSize: [], devicePixelContentBoxSize: [] }], this);
+    }
+    unobserve() {}
+    disconnect() {}
+  }
+  vi.stubGlobal("ResizeObserver", TestResizeObserver);
   localStorage.clear();
   Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value: function(this: HTMLDialogElement) { this.open = true; } });
   Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value: function(this: HTMLDialogElement) { this.open = false; } });
@@ -73,7 +84,7 @@ beforeEach(() => {
   window.requestAnimationFrame = vi.fn(() => 1);
   window.cancelAnimationFrame = vi.fn();
 });
-afterEach(() => { cleanup(); Reflect.deleteProperty(navigator, "clipboard"); Reflect.deleteProperty(document, "execCommand"); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); Reflect.deleteProperty(navigator, "clipboard"); Reflect.deleteProperty(document, "execCommand"); });
 
 it("does not reissue bridge update reads when Dashboard rerenders with a fresh RPC callback", async () => {
   dashboard();
@@ -174,11 +185,11 @@ describe("new-session navigation", () => {
     state.createSession.mockResolvedValue(created);
     dashboard(local);
     fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
     fireEvent.click(screen.getByRole("button", { name: "Create a new session" }));
     fireEvent.click(screen.getByRole("button", { name: "Submit new session" }));
     await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("created-id"));
-    expect(screen.getByRole("button", { name: "Terminal" }).classList.contains("mobile-tab-active")).toBe(true);
+    expect(screen.getByRole("tab", { name: "Terminal" }).classList.contains("mobile-tab-active")).toBe(true);
     expect(screen.getByRole("button", { name: /Regular shell/ })).toBeTruthy();
     expect(state.clearSessionAttention).not.toHaveBeenCalled();
   });
@@ -187,12 +198,12 @@ describe("new-session navigation", () => {
     state.createSession.mockRejectedValue(new Error("Create rejected"));
     dashboard();
     fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
     fireEvent.click(screen.getByRole("button", { name: "Create a new session" }));
     fireEvent.click(screen.getByRole("button", { name: "Submit new session" }));
     await waitFor(() => expect(state.createSession).toHaveBeenCalled());
     expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
-    expect(screen.getByRole("button", { name: "Workspace" }).classList.contains("mobile-tab-active")).toBe(true);
+    expect(screen.getByRole("tab", { name: "Workspace" }).classList.contains("mobile-tab-active")).toBe(true);
     expect(screen.getByText("New Session")).toBeTruthy();
     expect(state.clearSessionAttention).not.toHaveBeenCalled();
   });
@@ -210,21 +221,21 @@ describe("attention navigation preserves the request", () => {
     state.activity = new Map([["ordinary", { activity: "idle", attention: {
       type: "agent_needs_input", title: "Review requested", message: "Inspect the result before continuing", receivedAt: 10,
     } }]]);
-    fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
     const shortcut = screen.getByRole("button", { name: "Regular shell: Review requested. Inspect the result before continuing" });
     for (const control of [original, original, shortcut]) {
-      fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+      fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
       fireEvent.click(control);
       expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
-      expect(screen.getByRole("button", { name: "Terminal" }).classList.contains("mobile-tab-active")).toBe(true);
+      expect(screen.getByRole("tab", { name: "Terminal" }).classList.contains("mobile-tab-active")).toBe(true);
       expect(screen.queryByRole("alert")).toBeNull();
       expect(screen.getByRole("button", { name: "Dismiss attention for Regular shell" })).toBeTruthy();
       expect(state.clearSessionAttention).not.toHaveBeenCalled();
     }
-    fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
     fireEvent.click(screen.getByRole("button", { name: "Dismiss attention for Regular shell" }));
     expect(state.clearSessionAttention).toHaveBeenCalledExactlyOnceWith("ordinary");
-    expect(screen.getByRole("button", { name: "Workspace" }).classList.contains("mobile-tab-active")).toBe(true);
+    expect(screen.getByRole("tab", { name: "Workspace" }).classList.contains("mobile-tab-active")).toBe(true);
   });
 });
 
@@ -324,7 +335,7 @@ describe("navigation and selected-session actions", () => {
       fireEvent.click(within(header).getByRole("button", { name: action }));
       expect(action === "Stop" ? state.stopSession : state.retrySession).toHaveBeenLastCalledWith(id);
       if (!desktop) {
-        fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+        fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
         const workspaceHeader = screen.getByRole("region", { name: "Selected session header" });
         expect(screen.getAllByRole("group", { name: "Selected session actions" })).toHaveLength(1);
         fireEvent.click(within(workspaceHeader).getByRole("button", { name: action }));
@@ -351,4 +362,14 @@ describe("device review navigation", () => {
     expect(await screen.findByRole("dialog", { name: "Security" })).toBeTruthy();
     if (!desktop) expect(screen.getByRole("button", { name: "Open navigation menu" }).getAttribute("aria-expanded")).toBe("false");
   });
+});
+
+it("keeps terminal controls mounted when a compact desktop switches from preview to Terminal", async () => {
+  state.sessions = [session("ordinary", "Regular shell", { preview: { id: "12345678-1234-4234-8234-123456789abc", fileName: "demo.html" } })];
+  dashboard();
+  fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
+  const tabs = screen.getByRole("tablist", { name: "Session view" });
+  expect(within(tabs).getByRole("tab", { name: "Preview" }).getAttribute("aria-selected")).toBe("true");
+  fireEvent.click(within(tabs).getByRole("tab", { name: "Terminal" }));
+  expect(within(screen.getByRole("tabpanel", { name: "Terminal" })).getByText("Session controls")).toBeTruthy();
 });
