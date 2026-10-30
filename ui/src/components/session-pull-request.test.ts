@@ -37,7 +37,7 @@ describe("session PR destinations", () => {
       isRunning: true, sessionName: session.name, pullRequestUrl: prUrl,
     }));
     const link = within(container).getByRole("link", { name: description });
-    expect(link.textContent).toBe("PR #123");
+    expect(link.textContent).toBe("#123");
     expect(link.getAttribute("href")).toBe(prUrl);
     expect(link.getAttribute("target")).toBe("_blank");
     expect(link.getAttribute("rel")?.split(" ")).toEqual(expect.arrayContaining(["noopener", "noreferrer"]));
@@ -62,7 +62,7 @@ describe("session PR destinations", () => {
     expect(original.draggable).toBe(true);
     expect(Number.parseFloat(original.style.minWidth)).toBe(0);
     expect(within(original).getByText(session.name)).toBeTruthy();
-    expect(badge.textContent).toBe("PR #123");
+    expect(badge.textContent).toBe("#123");
     expect(badge.title).toBe(description);
     expect(badge.getAttribute("href")).toBe(prUrl);
     expect(badge.getAttribute("target")).toBe("_blank");
@@ -72,7 +72,7 @@ describe("session PR destinations", () => {
     expect(badge.style.border).toBe("1px solid var(--border-muted)");
     expect(badge.style.borderRadius).toBe("3px");
     expect(badge.style.padding).toBe("1px 4px");
-    expect(placeholder.textContent).toBe("PR #123");
+    expect(placeholder.textContent).toBe("#123");
     expect(placeholder.getAttribute("aria-hidden")).toBe("true");
     expect(placeholder.style.visibility).toBe("hidden");
     expect(placeholder.tagName).toBe("SPAN");
@@ -143,7 +143,7 @@ describe("session PR destinations", () => {
     openMenu();
     expect(screen.queryByRole("menuitem", { name: /^Open pull request:/ })).toBeNull();
     expect(screen.queryByRole("link", { name: /PR #456/ })).toBeNull();
-    expect(screen.queryByText("PR #456", { exact: true })).toBeNull();
+    expect(screen.queryByText("#456", { exact: true })).toBeNull();
   });
 
   it("removes sidebar usage while retaining persisted usage in the terminal header", () => {
@@ -171,7 +171,7 @@ describe("session PR destinations", () => {
     expect(screen.getByRole("link").getAttribute("href")).toBe(prUrl);
     view.rerender(createElement(PullRequestLink, { url: "https://github.com/Org/other/pull/456" }));
     expect(screen.getByRole("link").getAttribute("href")).toBe("https://github.com/Org/other/pull/456");
-    expect(screen.queryByText("PR #123")).toBeNull();
+    expect(screen.queryByText("#123")).toBeNull();
     view.rerender(createElement(PullRequestLink));
     expect(screen.queryByRole("link")).toBeNull();
   });
@@ -204,6 +204,6 @@ describe("session PR destinations", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     fireEvent.click(screen.getByText(session.name));
     expect(onSelectSession).toHaveBeenCalledExactlyOnceWith(session.id);
-    expect(screen.queryByText("PR #123")).toBeNull();
+    expect(screen.queryByText("#123")).toBeNull();
   });
 });

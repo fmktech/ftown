@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
-import { act, cleanup, renderHook } from "@testing-library/react";
+import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Command, CommandResponse } from "@/types";
 import { statusCandidates, usePullRequestStatuses } from "./usePullRequestStatuses";
+import { PullRequestStatusProvider } from "@/components/PullRequestStatusProvider";
+import { PullRequestLink } from "@/components/PullRequestLink";
 const url = "https://github.com/Owner/Repo/pull/1";
 const sessions = [{ id: "s1", bridgeId: "b1", pullRequestUrl: url }];
 let visibility = "visible", online = true;
@@ -58,4 +60,79 @@ it.each([["in_progress", 60_000], ["unknown", 60_000], ["passed", 300_000], ["fa
   await act(async () => { await vi.advanceTimersByTimeAsync(ttl - 1); }); expect(hook.result.current.get(url)?.stale).toBe(false); const beforeExpiry = renders;
   await act(async () => { await vi.advanceTimersByTimeAsync(1); }); expect(hook.result.current.get(url)?.stale).toBe(true); expect(renders).toBeGreaterThan(beforeExpiry); expect(send).toHaveBeenCalledTimes(1);
   await act(async () => { await vi.advanceTimersByTimeAsync(60_000); }); expect(send).toHaveBeenCalledTimes(1); expect(renders).toBe(beforeExpiry + 1);
+});
+
+it("retains stale running status across bridge readiness loss until the next allowed refresh", async () => {
+  const send = vi.fn(async () => reply("in_progress"));
+  const hook = renderHook(({ ready }) => usePullRequestStatuses(send, sessions, ready, true), { initialProps: { ready: ["b1"] } });
+  await flush(); expect(hook.result.current.get(url)).toMatchObject({ state: "in_progress", stale: false });
+  hook.rerender({ ready: [] }); expect(hook.result.current.get(url)).toMatchObject({ state: "in_progress", stale: true, reason: "unavailable" });
+  hook.rerender({ ready: ["b1"] }); await flush(); expect(send).toHaveBeenCalledTimes(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(59_999); }); expect(send).toHaveBeenCalledTimes(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); }); expect(send).toHaveBeenCalledTimes(2);
+  expect(hook.result.current.get(url)).toMatchObject({ state: "in_progress", stale: false });
+});
+it("keeps last running status stale through a temporary ready-bridge loss", async () => {
+  const send = vi.fn(async () => reply("in_progress"));
+  const hook = renderHook(({ ready }) => usePullRequestStatuses(send, sessions, ready, true), { initialProps: { ready: ["b1"] } });
+  await flush(); hook.rerender({ ready: [] });
+  expect(hook.result.current.get(url)).toMatchObject({ state: "in_progress", stale: true });
+});
+it("renders stale running status with its clock and pending color", async () => {
+  const send = vi.fn(async () => { const result = reply("in_progress"); (result.data as { statuses: Array<{ stale: boolean }> }).statuses[0].stale = true; return result; });
+  render(<PullRequestStatusProvider send={send} sessions={sessions} readyBridgeIds={["b1"]} connected><PullRequestLink url={url} badge/></PullRequestStatusProvider>);
+  await flush(); const link = screen.getByRole("link");
+  expect(link.getAttribute("aria-label")).toContain("Last known CI running");
+  expect(link.getAttribute("style")).toContain("var(--status-pending)"); expect(link.querySelector("svg")).not.toBeNull();
+});
+it("keeps last running status stale when a refresh fails with stable inputs", async () => {
+  const send = vi.fn().mockResolvedValueOnce(reply("in_progress")).mockRejectedValue(new Error("offline"));
+  const hook = renderHook(() => usePullRequestStatuses(send, sessions, ["b1"], true));
+  await flush(); await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  expect(send).toHaveBeenCalledTimes(2); expect(hook.result.current.get(url)).toMatchObject({ state: "in_progress", stale: true, reason: "unavailable" });
+});
+
+it("purges the cached owner when the linked PR is removed", async () => {
+  const send = vi.fn(async () => reply("in_progress"));
+  const hook = renderHook(({ items, ready }) => usePullRequestStatuses(send, items, ready, true), { initialProps: { items: sessions, ready: ["b1"] } });
+  await flush(); hook.rerender({ items: sessions, ready: [] }); expect(hook.result.current.get(url)?.state).toBe("in_progress");
+  hook.rerender({ items: [], ready: [] }); expect(hook.result.current.get(url)).toBeUndefined();
+});
+it("retains exact owner across duplicate PRs until another bridge replies, then purges its removed owner", async () => {
+  let resolveB2!: (value: CommandResponse) => void;
+  const send = vi.fn((command: Command) => {
+    const bridgeId = (command.payload as { bridgeId: string }).bridgeId;
+    return bridgeId === "b1" ? Promise.resolve(reply("in_progress")) : new Promise<CommandResponse>(resolve => { resolveB2 = resolve; });
+  });
+  const duplicate = [...sessions, { id: "s2", bridgeId: "b2", pullRequestUrl: url }];
+  const hook = renderHook(({ items, ready }) => usePullRequestStatuses(send, items, ready, true), { initialProps: { items: duplicate, ready: ["b1", "b2"] } });
+  await flush(); expect(hook.result.current.get(url)).toMatchObject({ state: "in_progress", stale: false });
+  hook.rerender({ items: duplicate, ready: ["b2"] });
+  expect(hook.result.current.get(url)).toMatchObject({ state: "in_progress", stale: true }); expect(send).toHaveBeenCalledTimes(2);
+  const response = reply("passed"); (response.data as { bridgeId: string }).bridgeId = "b2";
+  await act(async () => resolveB2(response)); expect(hook.result.current.get(url)).toMatchObject({ state: "passed", stale: false });
+  hook.rerender({ items: [sessions[0]], ready: ["b1"] }); expect(hook.result.current.get(url)).toBeUndefined();
+});
+it("retains immutable merged status when its linked bridge is not ready", async () => {
+  const send = vi.fn(async () => reply("merged"));
+  const hook = renderHook(({ ready }) => usePullRequestStatuses(send, sessions, ready, true), { initialProps: { ready: ["b1"] } });
+  await flush(); hook.rerender({ ready: [] }); expect(hook.result.current.get(url)).toMatchObject({ state: "merged", stale: false });
+  hook.rerender({ ready: ["b1"] }); await act(async () => { await vi.advanceTimersByTimeAsync(600_000); }); expect(send).toHaveBeenCalledTimes(1);
+});
+it("fences a late response when linked owners change even if the ready candidate is unchanged", async () => {
+  let resolve!: (value: CommandResponse) => void;
+  const send = vi.fn(() => new Promise<CommandResponse>(r => { resolve = r; }));
+  const hook = renderHook(({ items }) => usePullRequestStatuses(send, items, ["b1"], true), { initialProps: { items: sessions } });
+  hook.rerender({ items: [...sessions, { id: "s2", bridgeId: "b2", pullRequestUrl: url }] });
+  await act(async () => resolve(reply("in_progress")));
+  expect(hook.result.current.get(url)).toBeUndefined(); expect(send).toHaveBeenCalledTimes(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(59_999); }); expect(send).toHaveBeenCalledTimes(1);
+});
+it("does not attribute an offline owner's cache to another linked bridge", async () => {
+  const send = vi.fn((command: Command) => (command.payload as { bridgeId: string }).bridgeId === "b1" ? Promise.resolve(reply("in_progress")) : new Promise<CommandResponse>(() => {}));
+  const second = { id: "s2", bridgeId: "b2", pullRequestUrl: url };
+  const hook = renderHook(({ items, ready }) => usePullRequestStatuses(send, items, ready, true), { initialProps: { items: [...sessions, second], ready: ["b1", "b2"] } });
+  await flush(); hook.rerender({ items: [...sessions, second], ready: ["b2"] });
+  expect(hook.result.current.get(url)).toMatchObject({ state: "in_progress", stale: true });
+  hook.rerender({ items: [second], ready: ["b2"] }); expect(hook.result.current.get(url)).toBeUndefined();
 });

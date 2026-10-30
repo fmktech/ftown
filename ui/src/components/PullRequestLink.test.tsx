@@ -12,11 +12,20 @@ async function display(status?: Partial<PullRequestStatus>) {
   await act(async () => { await Promise.resolve(); await Promise.resolve(); });
 }
 it.each([
-  [undefined, "PR #42"], [{ state: "unknown", checkedAt: null }, "PR #42"], [{ state: "in_progress" }, "PR #42 · CI running"], [{ state: "failed" }, "PR #42 · CI failed"], [{ state: "passed" }, "PR #42 · CI passed"], [{ state: "merged" }, "PR #42 · Merged"], [{ state: "closed" }, "PR #42 · Closed"], [{ state: "unknown", reason: "no_checks" }, "PR #42 · No checks"], [{ state: "unknown", reason: "unavailable" }, "PR #42 · CI unavailable"],
-] as [Partial<PullRequestStatus> | undefined, string][])("renders matching badge, placeholder and header for %s", async (status, text) => {
+  [undefined, null], [{ state: "unknown", checkedAt: null }, null], [{ state: "in_progress" }, "CI running"], [{ state: "failed" }, "CI failed"], [{ state: "passed" }, "CI passed"], [{ state: "merged" }, "Merged"], [{ state: "closed" }, "Closed"], [{ state: "unknown", reason: "no_checks" }, "No checks"], [{ state: "unknown", reason: "unavailable" }, "CI unavailable"],
+] as [Partial<PullRequestStatus> | undefined, string | null][])("renders a compact icon and accessible status for %s", async (status, text) => {
   await display(status); const links = screen.getAllByRole("link");
-  for (const link of links) { expect(link.textContent).toBe(text); expect(link.getAttribute("href")).toBe(url); expect(link.getAttribute("target")).toBe("_blank"); expect(link.getAttribute("aria-label")).toContain("Owner/Repo"); }
-  const placeholder = document.querySelector("[data-pull-request-placeholder]"); expect(placeholder?.textContent).toBe(text); expect(placeholder?.getAttribute("aria-hidden")).toBe("true");
+  const placeholder = document.querySelector("[data-pull-request-placeholder]");
+  for (const link of links) {
+    expect(link.textContent).toBe("#42"); expect(link.getAttribute("href")).toBe(url); expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("aria-label")).toContain("Owner/Repo"); expect(link.getAttribute("title")).toBe(link.getAttribute("aria-label"));
+    if (text) { expect(link.getAttribute("aria-label")).toContain(text); expect(link.getAttribute("aria-label")).toContain("Checked"); }
+    const icon = link.querySelector("svg");
+    expect(Boolean(icon)).toBe(Boolean(text));
+    if (icon) { expect(icon.getAttribute("aria-hidden")).toBe("true"); expect(icon.getAttribute("width")).toBe("10"); expect(icon.getAttribute("height")).toBe("10"); expect(link.firstChild).toBe(icon); expect(icon.style.marginRight).toBe("4px"); }
+    expect(link.innerHTML).toBe(placeholder?.innerHTML);
+  }
+  expect(placeholder?.textContent).toBe("#42"); expect(placeholder?.getAttribute("aria-hidden")).toBe("true");
 });
 it("describes stale last-known state and checked time", async () => { await display({ state: "passed", stale: true, reason: "unavailable" }); expect(screen.getAllByRole("link")[0].getAttribute("title")).toContain("Last known CI passed; update unavailable"); expect(screen.getAllByRole("link")[0].getAttribute("aria-label")).toContain("Checked"); });
 it("rejects unsafe URLs", () => { render(<PullRequestLink url="https://evil.example/a/b/pull/1" badge/>); expect(screen.queryByRole("link")).toBeNull(); });
