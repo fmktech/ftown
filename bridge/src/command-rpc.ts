@@ -8,6 +8,8 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { toWireSession } from './session-wire.js';
+import { normalizePullRequestUrl } from './pull-request-url.js';
+import type { PullRequestStatusService } from './pull-request-status.js';
 import { WorkingDirMissingError } from './create-ftown-session.js';
 import { AUTOMATION_REMOVED_CODE, AUTOMATION_REMOVED_MESSAGE, AutomationRemovedError, RETIRED_AUTOMATION_COMMANDS } from './retired-automation.js';
 import type { SessionController } from './session-controller.js';
@@ -56,6 +58,7 @@ export interface CommandRpcDeps {
   security?: BridgeSecurityService;
   relayRequest?: (id: string, payload: Record<string, unknown>) => Promise<unknown>;
   sessionController: SessionController;
+  pullRequestStatuses?: PullRequestStatusService;
   attentionStore?: AttentionStore;
   updates?: BridgeUpdateCoordinator;
   updateEffects?: UpdateEffects;
@@ -85,6 +88,23 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
       if (deps.security && !verified) throw new Error('approval_required');
       if (deps.security && verified && command.type !== 'security_activate_mcp') await deps.security.revalidate(verified.principal);
       switch (command.type) {
+        case 'get_pull_request_statuses': {
+          if (!deps.security || !verified || payloadBridgeId !== bridgeId || !deps.pullRequestStatuses) throw new Error('approval_required');
+          const payload = command.payload as Record<string, unknown>;
+          const ids = payload.sessionIds;
+          if (Object.keys(payload).sort().join(',') !== 'bridgeId,sessionIds' || !Array.isArray(ids) || ids.length < 1 || ids.length > 100
+            || ids.some(id => typeof id !== 'string' || id.length > 200 || !/^[A-Za-z0-9_-]+$/.test(id)) || new Set(ids).size !== ids.length) throw new Error('Invalid status request');
+          const urls: string[] = [];
+          for (const id of ids as string[]) {
+            const session = await sessionController.get(id);
+            if (session?.bridgeId !== bridgeId || !session.pullRequestUrl) continue;
+            try { urls.push(normalizePullRequestUrl(session.pullRequestUrl)); } catch { /* Ignore invalid persisted URLs. */ }
+          }
+          const result = await deps.pullRequestStatuses.get(urls);
+          response = { requestId: command.requestId, success: true, data: { bridgeId, ...result } };
+          break;
+        }
+
         case 'session_preview_status':
         case 'session_preview_chunk': {
           const payload = command.payload;

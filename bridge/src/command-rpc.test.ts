@@ -188,3 +188,20 @@ test('legacy automation retry preserves retirement code in RPC response', async 
   assert.deepEqual(responses, [{ requestId: 'retry', success: false,
     error: 'Recurring loops and factory automation have been removed', data: { code: 'automation_removed' } }]);
 });
+
+test('PR status RPC requires verified security and targets only validated local session URLs', async () => {
+  const responses: CommandResponse[] = []; let lookups = 0; let requested: readonly string[] = [];
+  const security = { revalidate: async () => {} } as unknown as BridgeSecurityService;
+  const service = { get: async (urls: readonly string[]) => { requested = urls; return { statuses: [], nextRefreshAt: '2026-01-01T00:00:00.000Z' }; } } as unknown as import('./pull-request-status.js').PullRequestStatusService;
+  const sessionController = { get: async (id: string) => { lookups++; return id === 'good' ? { bridgeId: 'owner', pullRequestUrl: 'https://github.com/a/b/pull/1' } : id === 'foreign' ? { bridgeId: 'other', pullRequestUrl: 'https://github.com/a/b/pull/2' } : null; } } as unknown as SessionController;
+  const payload = { bridgeId: 'owner', sessionIds: ['good', 'foreign', 'missing'] };
+  const command: Command = { type: 'get_pull_request_statuses', requestId: 'one', payload };
+  const verified = { principal: {} } as VerifiedApplication;
+  const make = (configured?: BridgeSecurityService) => createCommandHandler({ bridgeId: 'owner', security: configured, sessionController, pullRequestStatuses: service, publishCommandResponse: async response => { responses.push(response); } });
+  await make()(command, verified); assert.equal(responses.at(-1)?.success, false);
+  await make(security)(command); assert.equal(responses.at(-1)?.success, false); assert.equal(lookups, 0);
+  await make(security)(command, verified); assert.equal(responses.at(-1)?.success, true); assert.deepEqual(requested, ['https://github.com/a/b/pull/1']);
+  for (const bad of [{ bridgeId: 'owner', sessionIds: [] }, { bridgeId: 'owner', sessionIds: ['good', 'good'] }, { bridgeId: 'owner', sessionIds: ['../bad'] }, { bridgeId: 'owner', sessionIds: ['good'], url: 'https://evil' }, { sessionIds: ['good'] }]) {
+    await make(security)({ ...command, payload: bad }, verified); assert.equal(responses.at(-1)?.success, false);
+  }
+});

@@ -1076,7 +1076,7 @@ export function SessionList({
         className="min-w-0"
         style={{
           display: "grid",
-          gridTemplateColumns: `minmax(0, 1fr) ${hasPullRequest ? 6 : 0}px auto ${hasCollapsedCount ? 6 : 0}px auto 8px auto`,
+          gridTemplateColumns: `minmax(96px, 1fr) ${hasPullRequest ? 6 : 0}px minmax(0, max-content) ${hasCollapsedCount ? 6 : 0}px auto 8px auto`,
           gridTemplateRows: "auto auto",
           borderBottom: "1px solid var(--border-subtle)",
           background: isSelected ? "var(--bg-elevated)" : "transparent",
@@ -1228,7 +1228,7 @@ export function SessionList({
             </span>
           )}
           </div>
-          <div style={{ gridColumn: 3, display: "flex", alignItems: "center" }}>
+          <div style={{ gridColumn: 3, display: "flex", minWidth: 0, alignItems: "center" }}>
             <PullRequestBadgePlaceholder url={session.pullRequestUrl} />
           </div>
           {treeProps?.isCollapsed && treeProps.descendantCount > 0 && (
@@ -1351,7 +1351,7 @@ export function SessionList({
         </div>
       </button>
       {hasPullRequest && (
-        <div style={{ gridColumn: 3, gridRow: 1, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none", paddingTop: headerTopPadding, paddingBottom: headerBottomMargin, fontFamily: "var(--font-mono)", opacity: isFinished ? 0.55 : 1 }}>
+        <div style={{ gridColumn: 3, gridRow: 1, display: "flex", minWidth: 0, alignItems: "center", justifyContent: "center", pointerEvents: "none", paddingTop: headerTopPadding, paddingBottom: headerBottomMargin, fontFamily: "var(--font-mono)", opacity: isFinished ? 0.55 : 1 }}>
           <PullRequestLink url={session.pullRequestUrl} badge />
         </div>
       )}

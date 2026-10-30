@@ -18,6 +18,7 @@ import { SecurityLockIcon } from "./SecurityLockIcon";
 import { usePendingApprovals } from "@/hooks/usePendingApprovals";
 import type { AccountSecurityClient, AccountSecuritySnapshot } from "@/lib/account-security-client";
 import { SessionList } from "./SessionList";
+import { PullRequestStatusProvider } from "./PullRequestStatusProvider";
 import { SessionWorkspace } from "./SessionWorkspace";
 import { Terminal, TerminalHandle } from "./Terminal";
 import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
@@ -580,6 +581,7 @@ PY`;
   }, []);
 
   return (
+    <PullRequestStatusProvider send={rpc.sendCommand} sessions={sessions.filter(s => s.id === selectedSessionId || (!hiddenSessionIds.has(s.id) && !hiddenBridgeIds.has(s.bridgeId)))} readyBridgeIds={readyBridges.map(b => b.bridgeId)} connected={connectionStatus === "connected"}>
     <div
       ref={rootRef}
       className="h-dvh flex flex-col"
@@ -1116,5 +1118,6 @@ PY`;
       />
 
     </div>
+    </PullRequestStatusProvider>
   );
 }

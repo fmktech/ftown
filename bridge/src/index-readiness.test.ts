@@ -91,11 +91,13 @@ async function startup(pointerFails = false, restart: 'none' | 'success' | 'fail
     const updates = {}; const updateEffects = {};
     const sessionController = {};
     const attentionStore = {};
+    const pullRequestStatuses = {};
     const publishRouter = { handleCommand() {} };
     const resurrection = { resurrectSessions: async () => {} };
     const applicationJson = (value: unknown) => value;
     const randomUUID = () => 'isolated-command';
-    const createCommandHandler = (deps: { publishCommandResponse: (response: unknown) => Promise<void> }) => async (data: { type: string }) => {
+    const createCommandHandler = (deps: { publishCommandResponse: (response: unknown) => Promise<void>; pullRequestStatuses: unknown }) => async (data: { type: string }) => {
+      if (deps.pullRequestStatuses !== pullRequestStatuses) throw new Error('Status service dependency not forwarded');
       handled.push(data.type);
       await deps.publishCommandResponse({ requestId: 'isolated-command', success: true, data: { invitation: 'inert' } });
     };
