@@ -163,6 +163,8 @@ it("keeps an inline browser editor separate from selection and preserves its dra
   const card = view.container.querySelector('[data-access-card="browser:self-browser"]')!;
   expect(card.querySelector("button button, button input")).toBeNull();
   const metadata = within(card as HTMLElement).getByText("Approved for your account"); expect(metadata.className).not.toContain("truncate");
+  const selectionButton = within(card as HTMLElement).getByRole("button", { name: /^Browser This browser/ });
+  expect(selectionButton.className).toContain("min-h-11"); expect(selectionButton.className).toContain("min-w-11"); expect(selectionButton.className).not.toContain("sm:min-h-8"); expect(selectionButton.className).not.toContain("sm:min-w-8");
   const pencil = screen.getByRole("button", { name: "Rename This browser" }); fireEvent.click(pencil);
   const input = screen.getByLabelText("Display name") as HTMLInputElement; fireEvent.change(input, { target: { value: "Draft" } });
   expect(select).not.toHaveBeenCalled();

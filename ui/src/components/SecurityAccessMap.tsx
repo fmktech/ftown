@@ -99,7 +99,7 @@ export function SecurityAccessMap({ scope = "account", browsers, bridges, accoun
                 {node.current && label !== "This browser" && <span className="block text-[10px] text-[var(--shell-claude)]">This browser</span>}
                 <span className="hidden break-words text-[10px] leading-4 text-[var(--text-muted)] sm:block">{node.accessText}</span></div>
               <button type="button" data-access-kind="browser" data-access-node={node.id} aria-pressed={active} aria-label={`Browser ${label}${node.current ? " (this browser)" : ""}: ${node.accessText}`}
-                className={`flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-1 rounded-md px-1 text-left hover:bg-[var(--bg-hover)] sm:min-h-8 sm:min-w-8 ${node.edge === "current" ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}`} onClick={() => onSelect({ kind: "browser", id: node.id })}>
+                className={`flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-1 rounded-md px-1 text-left hover:bg-[var(--bg-hover)] ${node.edge === "current" ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}`} onClick={() => onSelect({ kind: "browser", id: node.id })}>
                 <span className="hidden shrink-0 sm:block"><DeviceIcon browser /></span>
                 <SecurityLockIcon state={node.lockState} className={`shrink-0 ${node.edge === "current" ? "text-[var(--accent)]" : "text-[var(--text-muted)]"}`} />
               </button>

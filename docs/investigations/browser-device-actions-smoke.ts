@@ -7,6 +7,7 @@ import { createServer } from "node:http";
 import { readFile, mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 const root = process.cwd();
+const ciMode = process.argv.includes('--ci-height') ? 'height' : process.argv.includes('--ci-name') ? 'name' : null;
 const esbuild = createRequire(resolve(root, "bridge/package.json"))("esbuild");
 const uiRequire = createRequire(resolve(root, "ui/package.json"));
 const postcss = uiRequire("postcss"), tailwind = uiRequire("@tailwindcss/postcss");
@@ -39,13 +40,33 @@ await new Promise(resolveListen => server.listen(0, "127.0.0.1", resolveListen))
 const address = server.address(); let browser;
 try {
   browser = await chromium.launch({ headless: true }); await mkdir('/tmp/ftown-browser-device-actions', { recursive: true });
-  for (const [name, viewport] of [['desktop', { width: 1280, height: 900 }], ['mobile', { width: 390, height: 844 }]]) {
+  for (const [name, viewport] of (ciMode ? [['desktop', { width: 1280, height: 900 }]] : [['desktop', { width: 1280, height: 900 }], ['mobile', { width: 390, height: 844 }]])) {
     const context = await browser.newContext({ viewport });
     await context.route('**/*', route => route.request().url().startsWith(`http://127.0.0.1:${address.port}/`) ? route.continue() : route.abort());
     const page = await context.newPage(); page.on('pageerror', error => console.error(`${name} page error:`, error));
     try {
       await page.goto(`http://127.0.0.1:${address.port}/`);
       const card = page.locator('[data-access-card="browser:b"]');
+      if (!ciMode) {
+        const heights = await page.locator('[data-access-node]').evaluateAll(nodes => nodes.map(node => ({ id: node.getAttribute('data-access-node'), height: node.getBoundingClientRect().height })));
+        if (heights.some(node => node.height < 44)) throw new Error(`${name}: selection node height below 44: ${JSON.stringify(heights)}`);
+      }
+      if (ciMode === 'height') {
+        const heights = await page.locator('[data-access-node]').evaluateAll(nodes => nodes.map(node => ({ kind: node.getAttribute('data-access-kind'), id: node.getAttribute('data-access-node'), height: node.getBoundingClientRect().height })));
+        await page.screenshot({ path: '/tmp/ftown-browser-device-actions/ci-height.png', fullPage: true });
+        if (heights.some(node => node.height < 44)) throw new Error(`CI node height must be >=44: ${JSON.stringify(heights)}`);
+        continue;
+      }
+      if (ciMode === 'name') {
+        await card.getByRole('button', { name: 'Rename Phone' }).click();
+        await card.getByLabel('Display name').fill('Browser'); await card.getByRole('button', { name: 'Save', exact: true }).click();
+        await card.getByRole('button', { name: 'Rename Browser' }).waitFor({ state: 'visible' });
+        const selection = card.locator('[data-access-node="b"]');
+        const aria = await selection.getAttribute('aria-label');
+        await page.screenshot({ path: '/tmp/ftown-browser-device-actions/ci-name.png', fullPage: true });
+        if (!await card.getByText('Browser', { exact: true }).isVisible() || !aria?.startsWith('Browser Browser: Approved for your account')) throw new Error(`Renamed browser identity missing: aria=${JSON.stringify(aria)}, card=${JSON.stringify(await card.textContent())}`);
+        continue;
+      }
       const selector = card.getByRole('button', { name: /^Browser Phone:/ });
       const oldBox = await card.boundingBox(); const pencil = card.getByRole('button', { name: 'Rename Phone' });
       const nameBox = await card.getByText('Phone', { exact: true }).boundingBox(), pencilBox = await pencil.boundingBox();
@@ -57,6 +78,7 @@ try {
       await page.screenshot({ path: `/tmp/ftown-browser-device-actions/${name}-editing.png`, fullPage: true });
       await input.fill('Work phone'); await input.press('Enter');
       const renamed = card.getByRole('button', { name: 'Rename Work phone' }); await renamed.waitFor({ state: 'visible' });
+      if (!await card.getByText('Work phone', { exact: true }).isVisible() || !(await card.locator('[data-access-node="b"]').getAttribute('aria-label'))?.startsWith('Browser Work phone: Approved for your account')) throw new Error(`${name}: renamed card identity missing`);
       if (!await renamed.evaluate(el => el === document.activeElement)) throw new Error(`${name}: save did not restore pencil focus`);
       await card.getByRole('button', { name: /^Browser Work phone:/ }).click();
       const disconnect = card.getByRole('button', { name: 'Remove access for Work phone' });
