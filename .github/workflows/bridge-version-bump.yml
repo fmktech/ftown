@@ -5,7 +5,7 @@ on:
     paths:
       - 'bridge/**'
       - '.github/workflows/bridge-version-bump.yml'
-      - 'scripts/release/package-changes.mjs'
+      - 'scripts/release/**'
       - '.github/actions/run-ci/**'
       - 'scripts/ci/**'
 

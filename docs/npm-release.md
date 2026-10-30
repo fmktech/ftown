@@ -9,8 +9,13 @@ Every change to bridge runtime, shipped assets or build inputs needs a new versi
 and `bridge/package-lock.json`. Tests, agent docs and external release tooling
 do not require a package version or publication; the shared
 `scripts/release/package-changes.mjs` classifier gates both bump checks and
-automatic publication. Explicit workflow dispatch remains available for release
-recovery. The publish workflow on main checks both exact
+automatic publication. The PR bridge-version check also requires the proposed exact version to be
+absent from both npm package names at check time. It fails closed on registry
+errors. This is not an atomic reservation: concurrent PRs can pass before either
+version is published. Require current-base checks and serialize merges (for
+example, with a merge queue) to prevent both PRs from landing the same version.
+The post-merge immutable-version preflight remains the final safety check.
+Explicit workflow dispatch remains available for release recovery. The publish workflow on main checks both exact
 npm versions and the `bridge-vVERSION` tag before cutting the panel release.
 Only npm's structured E404 is treated as absence. Registry authentication,
 network and unexpected response errors stop the release.
@@ -58,6 +63,7 @@ From repository root, the internal helper provides these commands:
 ```bash
 npm --prefix bridge run build
 node --test scripts/release/*.test.mjs
+node scripts/release/publish-packages.mjs check-version
 node scripts/release/publish-packages.mjs preflight
 node scripts/release/publish-packages.mjs pack /absolute/path/to/artifacts
 ```

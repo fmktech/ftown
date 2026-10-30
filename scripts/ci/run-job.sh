@@ -30,11 +30,12 @@ case "$job" in
       echo "base bridge version: $base_version"; echo "head bridge version: $head_version"
       [[ "$base_version" != "$head_version" ]] || { echo "::error::This PR changes bridge package/build inputs but does not bump bridge/package.json version." >&2; exit 1; }
       [[ "$head_version" == "$lock_version" ]] || { echo "::error::bridge/package-lock.json root version does not match bridge/package.json" >&2; exit 1; }
+      node scripts/release/publish-packages.mjs check-version
     fi
     ;;
   centrifugo) bash scripts/ci/validate-centrifugo.sh ;;
   e2e)
-    node --test scripts/ci/boat-runner.test.mjs
+    node --test scripts/ci/boat-runner.test.mjs scripts/ci/bridge-version.test.mjs
     # Reject all inherited endpoint, credential and test-selector overrides before sourcing fixtures.
     for name in DATABASE_URL MIGRATION_DATABASE_URL PGHOST PGPORT PGUSER PGDATABASE PGPASSWORD PGOPTIONS PGSERVICE PGSERVICEFILE FTOWN_PUBLIC_URL FTOWN_MCP_PUBLIC_URL NEXT_PUBLIC_CENTRIFUGO_URL FTOWN_DATA_DIR FTOWN_MCP_CONFIG_JSON E2E_DIR E2E_BROWSER_HOME E2E_SECOND_BRIDGE_HOME E2E_MCP_BRIDGE_HOME E2E_MCP_SECOND_BRIDGE_HOME E2E_USER_EMAIL E2E_MCP_USER_EMAIL E2E_MCP_USER_PASSWORD NODE_EXTRA_CA_CERTS AUTH_SECRET CENTRIFUGO_API_KEY CENTRIFUGO_TOKEN_SECRET; do
       if printenv "$name" >/dev/null; then echo "Inherited override $name rejected" >&2; exit 1; fi
