@@ -136,3 +136,97 @@ it("does not attribute an offline owner's cache to another linked bridge", async
   expect(hook.result.current.get(url)).toMatchObject({ state: "in_progress", stale: true });
   hook.rerender({ items: [second], ready: ["b2"] }); expect(hook.result.current.get(url)).toBeUndefined();
 });
+
+const newUrl = "https://github.com/Owner/Repo/pull/2";
+const longDeadline = (response: CommandResponse) => { (response.data as { nextRefreshAt: string }).nextRefreshAt = new Date(Date.now() + 3_600_000).toISOString(); return response; };
+it.each(["replace", "add"] as const)("queries a %s PR after the one-minute minimum even when the prior settled batch was merged-only", async mode => {
+  const send = vi.fn(async () => longDeadline(reply("merged")));
+  const hook = renderHook(({ items }) => usePullRequestStatuses(send, items, ["b1"], true), { initialProps: { items: sessions } });
+  await flush(); expect(hook.result.current.get(url)?.state).toBe("merged"); expect(send).toHaveBeenCalledTimes(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  const newItem = { id: mode === "replace" ? "s1" : "s2", bridgeId: "b1", pullRequestUrl: newUrl };
+  hook.rerender({ items: mode === "replace" ? [newItem] : [...sessions, newItem] }); await flush();
+  expect(send).toHaveBeenCalledTimes(2);
+});
+it("queries a new linked PR after a settled merged batch and then honors its response deadline", async () => {
+  const send = vi.fn(async (command: Command) => {
+    const ids = (command.payload as { sessionIds: string[] }).sessionIds;
+    const response = longDeadline(reply(ids.includes("s2") ? "in_progress" : "merged"));
+    if (ids.includes("s2")) (response.data as { statuses: Array<{ url: string }> }).statuses[0].url = newUrl;
+    return response;
+  });
+  const hook = renderHook(({ items }) => usePullRequestStatuses(send, items, ["b1"], true), { initialProps: { items: sessions } });
+  await flush(); expect(hook.result.current.get(url)?.state).toBe("merged");
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  hook.rerender({ items: [...sessions, { id: "s2", bridgeId: "b1", pullRequestUrl: newUrl }] }); await flush();
+  expect(send).toHaveBeenCalledTimes(2); expect(hook.result.current.get(newUrl)?.state).toBe("in_progress");
+  await act(async () => { await vi.advanceTimersByTimeAsync(120_000); }); expect(send).toHaveBeenCalledTimes(2);
+});
+it("keeps an unchanged active batch on its longer server deadline while a fresh bridge queries immediately", async () => {
+  const send = vi.fn(async (command: Command) => {
+    const bridgeId = (command.payload as { bridgeId: string }).bridgeId;
+    const response = longDeadline(reply("in_progress")); (response.data as { bridgeId: string }).bridgeId = bridgeId;
+    if (bridgeId === "b2") (response.data as { statuses: Array<{ url: string }> }).statuses[0].url = newUrl;
+    return response;
+  });
+  const hook = renderHook(({ items, ready }) => usePullRequestStatuses(send, items, ready, true), { initialProps: { items: sessions, ready: ["b1"] } });
+  await flush(); await act(async () => { await vi.advanceTimersByTimeAsync(60_000); }); expect(send).toHaveBeenCalledTimes(1);
+  hook.rerender({ items: [...sessions, { id: "s2", bridgeId: "b2", pullRequestUrl: newUrl }], ready: ["b1", "b2"] }); await flush();
+  expect(send).toHaveBeenCalledTimes(2); expect((send.mock.calls[1][0].payload as { bridgeId: string }).bridgeId).toBe("b2");
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); }); expect(send).toHaveBeenCalledTimes(2);
+});
+
+it("waits for the hard one-minute floor when a new PR is linked early", async () => {
+  const send = vi.fn(async () => longDeadline(reply("merged")));
+  const hook = renderHook(({ items }) => usePullRequestStatuses(send, items, ["b1"], true), { initialProps: { items: sessions } });
+  await flush(); await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+  hook.rerender({ items: [...sessions, { id: "s2", bridgeId: "b1", pullRequestUrl: newUrl }] }); await flush();
+  await act(async () => { await vi.advanceTimersByTimeAsync(58_999); }); expect(send).toHaveBeenCalledTimes(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); }); expect(send).toHaveBeenCalledTimes(2);
+});
+it("queries new work at one minute even if the prior passed batch refreshes after five minutes", async () => {
+  const send = vi.fn(async () => { const result = reply("passed"); (result.data as { nextRefreshAt: string }).nextRefreshAt = new Date(Date.now() + 300_000).toISOString(); return result; });
+  const hook = renderHook(({ items }) => usePullRequestStatuses(send, items, ["b1"], true), { initialProps: { items: sessions } });
+  await flush(); await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  hook.rerender({ items: [...sessions, { id: "s2", bridgeId: "b1", pullRequestUrl: newUrl }] }); await flush(); expect(send).toHaveBeenCalledTimes(2);
+});
+it("preserves a five-minute failed-read cooldown when the PR changes", async () => {
+  const send = vi.fn().mockResolvedValueOnce(reply("in_progress")).mockRejectedValueOnce(new Error("offline")).mockResolvedValue(reply("in_progress"));
+  const hook = renderHook(({ items }) => usePullRequestStatuses(send, items, ["b1"], true), { initialProps: { items: sessions } });
+  await flush(); await act(async () => { await vi.advanceTimersByTimeAsync(60_000); }); expect(send).toHaveBeenCalledTimes(2);
+  hook.rerender({ items: [{ ...sessions[0], pullRequestUrl: newUrl }] }); await act(async () => { await vi.advanceTimersByTimeAsync(299_999); }); expect(send).toHaveBeenCalledTimes(2);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); }); expect(send).toHaveBeenCalledTimes(3);
+});
+it("retains new work while its bridge is unready and dispatches once it becomes ready", async () => {
+  const send = vi.fn(async () => reply("in_progress"));
+  const hook = renderHook(({ ready }) => usePullRequestStatuses(send, sessions, ready, true), { initialProps: { ready: [] as string[] } });
+  await act(async () => { await vi.advanceTimersByTimeAsync(120_000); }); expect(send).not.toHaveBeenCalled();
+  hook.rerender({ ready: ["b1"] }); await flush(); expect(send).toHaveBeenCalledTimes(1);
+});
+it("does not treat duplicate sessions or a readiness roundtrip as new work", async () => {
+  const send = vi.fn(async () => longDeadline(reply("passed")));
+  const hook = renderHook(({ items, ready }) => usePullRequestStatuses(send, items, ready, true), { initialProps: { items: sessions, ready: ["b1"] } });
+  await flush(); await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  hook.rerender({ items: [...sessions, { ...sessions[0], id: "s2" }], ready: ["b1"] });
+  hook.rerender({ items: [...sessions, { ...sessions[0], id: "s2" }], ready: [] });
+  hook.rerender({ items: [...sessions, { ...sessions[0], id: "s2" }], ready: ["b1"] }); await flush();
+  await act(async () => { await vi.advanceTimersByTimeAsync(120_000); }); expect(send).toHaveBeenCalledTimes(1);
+});
+it("consumes new work after an attempted unknown response", async () => {
+  const send = vi.fn().mockResolvedValueOnce(longDeadline(reply("merged"))).mockImplementation(async () => {
+    const result = longDeadline(reply("unknown")); const status = (result.data as { statuses: Array<{ url: string; checkedAt: string | null }> }).statuses[0]; status.url = newUrl; status.checkedAt = null; return result;
+  });
+  const hook = renderHook(({ items }) => usePullRequestStatuses(send, items, ["b1"], true), { initialProps: { items: sessions } });
+  await flush(); await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  hook.rerender({ items: [...sessions, { id: "s2", bridgeId: "b1", pullRequestUrl: newUrl }] }); await flush(); expect(send).toHaveBeenCalledTimes(2);
+  await act(async () => { await vi.advanceTimersByTimeAsync(120_000); }); expect(send).toHaveBeenCalledTimes(2);
+});
+it("keeps unattempted owners pending beyond a 100-session batch", async () => {
+  const many = Array.from({ length: 101 }, (_, i) => ({ id: `s${String(i).padStart(3, "0")}`, bridgeId: "b1", pullRequestUrl: `https://github.com/o/r/pull/${i + 1}` }));
+  const send = vi.fn(async (command: Command) => ({ requestId: command.requestId, success: true, data: { bridgeId: "b1", nextRefreshAt: new Date(Date.now() + 3_600_000).toISOString(), statuses: [] } }));
+  renderHook(() => usePullRequestStatuses(send, many, ["b1"], true)); await flush();
+  expect((send.mock.calls[0][0].payload as { sessionIds: string[] }).sessionIds).toHaveLength(100);
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+  expect(send).toHaveBeenCalledTimes(2); expect((send.mock.calls[1][0].payload as { sessionIds: string[] }).sessionIds).toContain("s100");
+  await act(async () => { await vi.advanceTimersByTimeAsync(120_000); }); expect(send).toHaveBeenCalledTimes(2);
+});
