@@ -48,6 +48,11 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
   expect(Buffer.byteLength(first)).toBeGreaterThan(98_304);
   expect(Buffer.byteLength(first)).toBe(Buffer.byteLength(second));
   let prohibitedRequests = 0;
+  const externalHeaders: Record<string, string>[] = [];
+  await context.route("https://preview.example.test/**", async route => {
+    externalHeaders.push(route.request().headers());
+    await route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><h1>External preview destination</h1>" });
+  });
   await context.route(`${UI_BASE_URL}/__e2e-preview-probe/**`, async (route) => {
     prohibitedRequests++;
     await route.fulfill({ status: 200, contentType: "text/plain", body: "intercepted forbidden preview request" });
@@ -69,7 +74,7 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
 
     const registration = await fixture.register(target, fileName);
     await expect(documentFrame(page, fileName).getByRole("heading", { name: `${marker} version 1`, exact: true })).toBeVisible();
-    await expect(iframe(page, fileName)).toHaveAttribute("sandbox", "allow-scripts");
+    await expect(iframe(page, fileName)).toHaveAttribute("sandbox", "allow-scripts allow-popups allow-popups-to-escape-sandbox");
     await expect(iframe(page, fileName)).toHaveAttribute("referrerpolicy", "no-referrer");
     expect(await documentFrame(page, fileName).locator("#unicode").evaluate((element) => element.textContent?.endsWith("😀 boundary ✓"))).toBe(true);
     expect(await documentFrame(page, fileName).locator("#data-image").evaluate((element) => element instanceof HTMLImageElement && element.complete && element.naturalWidth === 2)).toBe(true);
@@ -85,6 +90,43 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     const count = documentFrame(page, fileName).getByRole("button", { name: /^Count:/ });
     await count.click(); await expect(count).toHaveText("Count: 1");
     await iframe(page, fileName).evaluate((element, value) => element.setAttribute("data-preview-node", value), suffix);
+    const originalUrl = page.url();
+    for (const linkId of ["external-link", "dynamic-link"]) {
+      const popupPromise = context.waitForEvent("page");
+      await documentFrame(page, fileName).locator(`#${linkId}`).click();
+      const popup = await popupPromise;
+      await expect(popup.getByRole("heading", { name: "External preview destination" })).toBeVisible();
+      expect(new URL(popup.url()).hostname).toBe("preview.example.test");
+      expect(await popup.evaluate(() => window.opener)).toBeNull();
+      await popup.close();
+      expect(page.url()).toBe(originalUrl);
+      await expect(iframe(page, fileName)).toHaveAttribute("data-preview-node", suffix);
+      await expect(count).toHaveText("Count: 1");
+    }
+    expect(externalHeaders).toHaveLength(2);
+    for (const headers of externalHeaders) expect(headers.referer).toBeUndefined();
+    for (const linkId of ["relative-link", "javascript-link", "data-link", "file-link"]) {
+      await documentFrame(page, fileName).locator(`#${linkId}`).click();
+      expect(page.url()).toBe(originalUrl);
+      await expect(iframe(page, fileName)).toHaveAttribute("data-preview-node", suffix);
+      await expect(count).toHaveText("Count: 1");
+    }
+    expect(await documentFrame(page, fileName).locator("body").getAttribute("data-preview-javascript")).toBeNull();
+    await documentFrame(page, fileName).locator("#hash-link").click();
+    await expect.poll(() => documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.location.hash)).toBe("#inside");
+    await expect(iframe(page, fileName)).toHaveAttribute("data-preview-node", suffix);
+    await expect(count).toHaveText("Count: 1");
+    await iframe(page, fileName).evaluate((element, value) => {
+      element.setAttribute("data-preview-node", value);
+      // Test-local observation catches a transient hide/removal even if it
+      // resolves before Playwright's next assertion.
+      const observer = new MutationObserver(records => {
+        const removed = records.some(record => Array.from(record.removedNodes).some(node => node === element || node.contains(element)));
+        const blocked = records.some(record => Array.from(record.addedNodes).some(node => /Checking preview access|Reconnect to load preview/.test(node.textContent ?? "")));
+        if (removed || blocked || getComputedStyle(element).visibility === "hidden") element.setAttribute("data-preview-interrupted", "true");
+      });
+      observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ["style", "hidden", "class"] });
+    }, suffix);
     // The account client refreshes every 30s. Ignore an immediate focus-triggered
     // read so this observes the subsequent periodic account-history response.
     const interactedAt = Date.now();
@@ -98,6 +140,23 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
       { timeout: 15_000 }).toBeGreaterThan(afterTrustRefresh);
     await expect(iframe(page, fileName)).toBeVisible();
     await expect(iframe(page, fileName)).toHaveAttribute("data-preview-node", suffix);
+    await expect(iframe(page, fileName)).not.toHaveAttribute("data-preview-interrupted", "true");
+    await expect(previewRegion(page)).not.toContainText(/Checking preview access|Reconnect to load preview/);
+    await expect(count).toHaveText("Count: 1");
+    const cloudState = page.locator('[role="img"][aria-label^="Cloud "]').first();
+    try {
+      await context.setOffline(true);
+      await expect(cloudState).toHaveAttribute("aria-label", /^Cloud (connecting|disconnected|error)/, { timeout: 15_000 });
+      await expect(iframe(page, fileName)).toBeVisible();
+      await expect(iframe(page, fileName)).toHaveAttribute("data-preview-node", suffix);
+      await expect(count).toHaveText("Count: 1");
+    } finally { await context.setOffline(false); }
+    await expect(cloudState).toHaveAttribute("aria-label", /^Cloud connected/, { timeout: 30_000 });
+    const afterReconnect = transport.reads.filter(entry => entry.previewId === registration && entry.state === "unchanged").length;
+    await expect.poll(() => transport.reads.filter(entry => entry.previewId === registration && entry.state === "unchanged").length,
+      { timeout: 30_000 }).toBeGreaterThan(afterReconnect);
+    await expect(iframe(page, fileName)).toHaveAttribute("data-preview-node", suffix);
+    await expect(iframe(page, fileName)).not.toHaveAttribute("data-preview-interrupted", "true");
     await expect(count).toHaveText("Count: 1");
     const unchanged = transport.reads.filter((entry) => entry.previewId === registration && entry.state === "unchanged").length;
     await expect.poll(() => transport.reads.filter((entry) => entry.previewId === registration && entry.state === "unchanged").length).toBeGreaterThan(unchanged);
