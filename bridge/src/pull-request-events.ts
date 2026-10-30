@@ -98,11 +98,17 @@ export class PullRequestEventWatcher {
     // A committed message survives a failed wake; retry without depending on a fresh gh result.
     for (const [id, pending] of this.pendingWake) {
       let sessionForWake: Session | undefined;
-      await withSessionMutation(id, async () => {
-        if (!active()) return;
-        const session = await store.loadSession(id);
-        if (eligible(session, bridgeId) && canonical(session.pullRequestUrl)?.toLowerCase() === pending.key && session.pullRequestLinkId === pending.linkId) sessionForWake = session;
-      });
+      try {
+        await withSessionMutation(id, async () => {
+          if (!active()) return;
+          const session = await store.loadSession(id);
+          if (eligible(session, bridgeId) && canonical(session.pullRequestUrl)?.toLowerCase() === pending.key && session.pullRequestLinkId === pending.linkId) sessionForWake = session;
+        });
+      } catch {
+        // Keep the retry pending; other sessions and status groups can still progress.
+        console.error(`[PR events] Could not inspect session ${id}`);
+        continue;
+      }
       if (!active()) return;
       if (!sessionForWake) { this.pendingWake.delete(id); continue; }
       try { await notifyCommitted(sessionForWake, 'FTown PR updates'); this.pendingWake.delete(id); } catch { /* Retry on the next scan. */ }

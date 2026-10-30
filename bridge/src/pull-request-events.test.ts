@@ -149,3 +149,28 @@ test('legacy load and token-save failures retry without blocking healthy links o
   assert.equal(seen.size, 25); assert.equal(saveAttempts, 2); assert.equal(loadAttempts, 2); assert.equal(legacy.pullRequestLinkId, undefined);
   await watcher.stop();
 });
+
+test('failed pending-wake revalidation retains retry and does not block a later healthy group', async t => {
+  const log = t.mock.method(console, 'error', () => {});
+  const sessions = Array.from({ length: 26 }, (_, i) => session(i ? `ok${i}` : 'failed', url(i + 1)));
+  const committed = new Set<string>(); let phase = 1, loads = 0, wakeAttempts = 0;
+  const service = statusFixture(), get = service.getObservations.bind(service);
+  service.getObservations = async urls => { const result = await get(urls); return { ...result, observations: result.observations.map(value => phase === 2 && value.url === url(1) ? { ...value, stale: true } : value) }; };
+  const watcher = new PullRequestEventWatcher({ bridgeId: 'bridge', store: {
+    listSessions: async () => sessions,
+    loadSession: async id => {
+      if (id === 'failed' && phase === 2 && ++loads === 2) throw new Error('private revalidation details');
+      return sessions.find(value => value.id === id) ?? null;
+    },
+    saveSession: async () => {},
+  }, withSessionMutation: async (_id, fn) => fn(), statusService: service,
+  mailStore: { commitPullRequestObservation: async id => { committed.add(id); return { enqueued: true }; } },
+  notifyCommitted: async value => { if (value.id === 'failed' && ++wakeAttempts === 1) throw new Error('wake failed'); } });
+  await watcher.runOnce(); assert.equal(wakeAttempts, 1);
+  phase = 2; await watcher.runOnce();
+  assert.equal(committed.size, 26, 'healthy second group advanced despite retry failure');
+  assert.equal(wakeAttempts, 1); assert.ok(log.mock.calls.length > 0);
+  assert.doesNotMatch(JSON.stringify(log.mock.calls.map(call => call.arguments)), /private revalidation details/);
+  phase = 3; await watcher.runOnce(); assert.ok(wakeAttempts >= 2, 'the pending wake was retained for retry');
+  await watcher.stop();
+});

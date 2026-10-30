@@ -24,3 +24,15 @@ Three concrete starvation paths remain:
 3. The initial loop that reloads a candidate and lazily initializes its link ID is still not guarded per session. A persistent `loadSession` or `saveSession` failure for one legacy link aborts each scan before any status group can run. Isolate and log that session while continuing healthy ones, and retry it on later scans; test a failed initialization preceding a healthy candidate.
 
 No source, tests, services, runtime or Git actions were performed by R2. Report lease released.
+
+## R2 integrated review — W4 closure
+
+W4 fixes the three previously identified paths: watcher sorting and cursor seeking both use code-unit ordering; out-of-range GraphQL PR numbers are excluded from groups; legacy link initialization failures are isolated without mutating shared snapshots. Tests cover punctuation-mixed groups, 25 valid links beside an oversized one, and retried load/save errors beside healthy links. The merge against `254f6a6` retains the PR watcher changes while preserving main's parent-idle, pinned-inbox and UI polling changes; reported focused suite is 107/107 and build passed. Root owns the integrated runtime/full-suite gate.
+
+One remaining concrete exception-isolation path: the earlier `pendingWake` retry loop performs an unguarded `withSessionMutation`/`loadSession`. If an already queued ambiguous-commit wake encounters a persistent revalidation read error after enumeration, the scan aborts before processing healthy links or advancing the group on every pass. Catch and log per pending entry, retaining that entry for later retry while continuing other work; test the failing pending wake together with healthy groups. Separately, existing `SessionStore.listSessions()` itself parses session files before the watcher loop and can reject the entire enumeration on a malformed `session.json`; do not claim the candidate-loop handling isolates such preexisting enumeration corruption.
+
+Stop scope remains as approved: already-stopped admission leaves mail unread; an admitted in-flight at-most-once handoff may complete after stop and cannot guarantee actual recipient processing. No source/runtime/E2E/Git work was performed by R2; report lease released.
+
+### W5 final closure
+
+The pending-wake revalidation now catches and logs an individual failure, keeps that wake queued, and continues processing other groups. The regression covers a failed wake, revalidation error during a stale status, progress for 25 healthy peers, and a later successful retry. The other three W4 starvation fixes remain in place. Worker reports 23/23 focused watcher/status tests and build passing; root owns the final integrated runtime and full suite, which are in progress. The existing enumeration-wide failure for a corrupt `session.json` remains outside this task's scoped corruption model and must not be described as isolated. Review approved pending root's final gates. R2 did not perform source edits, test execution, runtime, or Git work; report lease released.

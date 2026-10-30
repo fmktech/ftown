@@ -1,13 +1,18 @@
-# Verification
+# Final verification
 
-Pending implementation. Root exclusively owns runtime/E2E execution and any service resources.
+Root-owned final runtime and full bridge regression passed after W5 and integration with main254f6a6. Independent review approved in review.md. Bridge version0.19.67; npm release check confirms both names available at that version. No deployment/installation or merge performed.
 
-Environment: task checkout /tmp/ftown-pr-events (canonical /private/tmp/ftown-pr-events), base7d0437a. Original dirty checkout is unchanged. Node24.22.1 available at /Users/fkesheh/.nvm/versions/node/v24.22.1/bin. Memory pressure query38% free and load~5 on this host did not demonstrate sustainedpressure; focused bridge-only runtime is appropriate locally. No database/deployment mutations are needed. Dependency locks match /tmp/ftown-pr-ci-status/bridge except packageversion; existing node_modules reused read-only.
+## Results
+- Node24.22.1 build passed (worker).
+- Final fullbridge suite:1150 total,1146 passed,4 existing skips,0 failures,13892ms. Command from bridge: `node --import tsx --test --test-concurrency=4 'src/**/*.test.ts'`. FTOWN_BRIDGE_POINTER,FTOWN_DATA_DIR,FTOWN_HOOK_PORT,FTOWN_HOOK_TOKEN,FTOWN_SESSION_ID unset for fixture isolation. Log /tmp/ftown-pr-events-final-tests.log.
+- Root `node --experimental-strip-types docs/investigations/pr-agent-events/runtime-smoke.ts`: PASS actual fixture-gh process/status service/watcher/controller/mail, authenticated encryptedHTTP parked longpoll, taskownedCLIharnessstatus, stoppedqueue/no wake, failure->pending->pass->merge, restartdedup, in-flightunlink and501 backgroundURLs under continuousforegroundchurn within shared quota. Final listener55862 closed and scratchcleanup completed. No realGitHub/userbridge/DB access.
+- `node scripts/release/publish-packages.mjs check-version`: both npm names available at0.19.67. No publication performed by this command.
+- Worker focusedtests/build/diffcheck history in implementation.md. Reviewer regressions cover mailbox/legacy/retry exception isolation, punctuationordering, unsupported PRnumber, malformed merge and atomic commit ambiguity.
 
-Required runtime fixture: private temporary home/data; loopback ephemeral listener and ghfixture only; explicitly no real GitHub calls, existing bridge token, productiondatabase or user session. Test current-head failure->pending->pass->merge mail with dashboardabsent, inbox drain, retry/restart/pruning dedup, unlink/deletion fences, stopped noautostart and CLI harness status against taskownedserver. Teardown all fixture processes/directories in finally.
+## Environment and limits
+Task checkout /tmp/ftown-pr-events; original dirty checkout untouched. LocalMac used after memorypressure38%free and load~5 did not show sustained pressure. Node_modules reused through tasklocal symlink from /tmp/ftown-pr-ci-status/bridge with matching dependencylock; excluded fromGit. No extra dependencies or testdatabase.
+An initial fullsuite had9 CLI failures due to inherited FTOWN pointer/data selectors. IsolatedthreeCLI files passed22/22 after unsetting those selectors; no applicationfix forenvironment, finalfullsuite clean.
 
-Final gates pending: implementation focusedunit/static evidence, independent code review, root runtime smoke, appropriate bridge regression suite, release classification/version/build checks, PR publication and automaticCI.
+Durability covers atomic inboxenqueue across processrestart, not hardwarepowerloss/arbitraryexternalcorruption or guaranteedagentprocessing. Delivery admitted while running may finishafterstop; no autostart. GitHub statuses are sampled aggregate rollups with sharedquota/backoff; unobserved transitions between polls are not promised. Existing registrywide malformed-session enumeration failure remains outside this change.
 
-## Root runtime evidence before W3
-Initial fixture actual gh process/status/controller/watcher/mail sequence passed. Extended fixture command ran with Node24.22.1 and FTOWN_BRIDGE_POINTER,FTOWN_DATA_DIR,FTOWN_HOOK_PORT,FTOWN_HOOK_TOKEN,FTOWN_SESSION_ID unset: PASS authenticated encryptedHTTP longpoll, taskownedCLIharnessstatus, stoppedqueue/no wake, failure->pending->pass->merge, restartdedup, in-flightunlink,501backgroundURLs under continuousforegroundchurn respecting <=60launches. Ephemeral listener50335 closed and scratch finally cleanup completed; no realGitHub/userbridge/DB.
-Initial fullbridge suite1139total:1126pass9fail4skip. All9 failures CLI fixtures overridden by inherited FTOWN_BRIDGE_POINTER/DATA_DIR; isolated22 CLI tests passed with FTOWN selectorsunset. No source change forenvironment. Final cleanenv regression pendingW3.
+PR/automaticCI result pending publication.
