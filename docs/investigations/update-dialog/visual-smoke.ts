@@ -86,7 +86,7 @@ try {
     const preview = group.getByRole("button", {name:"Open preview"}), stop = group.getByRole("button", {name:"Stop", exact:true}), relaunch = group.getByRole("button", {name:"Rerun"});
     for (const control of [preview, stop, relaunch]) {
       const box = await control.boundingBox(), expected = viewport.width >= 768 ? 32 : 44;
-      if (!box || box.width !== expected || box.height !== expected || await control.locator('svg[aria-hidden="true"]').count() !== 1 || (await control.textContent()).trim()) throw new Error(`invalid icon action geometry/content ${JSON.stringify(box)}`);
+      if (!box || box.width !== expected || box.height !== expected || await control.evaluate(el => getComputedStyle(el).minHeight) !== `${expected}px` || await control.locator('svg[aria-hidden="true"]').count() !== 1 || (await control.textContent()).trim()) throw new Error(`invalid icon action geometry/content ${JSON.stringify(box)}`);
     }
     await preview.hover(); await page.getByRole("tooltip", {name:"Open preview"}).waitFor({state:"visible"});
     await stop.focus(); await page.getByRole("tooltip", {name:"Stop session"}).waitFor({state:"visible"});

@@ -6,7 +6,7 @@ export function SessionHeaderActions({ hasPreview, previewOpen, running, relaunc
   hasPreview: boolean; previewOpen: boolean; running: boolean; relaunchLabel: string | null;
   onPreview: () => void; onStop: () => void; onRelaunch: () => void;
 }) {
-  const size = "flex h-11 w-11 items-center justify-center md:h-8 md:w-8";
+  const size = "flex h-11 min-h-11 w-11 items-center justify-center md:h-8 md:min-h-8 md:w-8";
   return <div role="group" aria-label="Selected session actions" className="flex items-center gap-2">
     {hasPreview && !previewOpen && <HeaderTooltip label="Open preview"><button type="button" className={`btn-ghost ${size}`} style={{ padding: 0 }} aria-label="Open preview" onClick={onPreview}>
       <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>

@@ -17,7 +17,7 @@ interface Options { client: MessageClient | null; userId: string; target: Target
 type Complete = { html: string; revision: string; totalBytes: number; key: string };
 interface Store {
   identity: string; client: MessageClient | null; runtime: MessageClient['securityRuntime']; userId: string; readable: boolean; subscriber?: SessionPreviewAuthoritySubscriber;
-  visible: boolean; documentVisible: boolean; securityGeneration: number; epoch: number; nonce: number;
+  visible: boolean; documentVisible: boolean; securityGeneration: number; epoch: number; nonce: number; manualRequested: number; manualApplied: number;
   complete: Complete | null; status: PreviewState; verifying: boolean; fingerprint: string | null;
 }
 
@@ -38,9 +38,10 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
   const [, redraw] = useState(0);
   const refreshRef = useRef<() => void>(() => {});
   const storeRef = useRef<Store>({ identity, client, runtime: client?.securityRuntime, userId, readable, subscriber: subscribeAuthority, visible, documentVisible, securityGeneration,
-    epoch: 0, nonce: 0, complete: null, status: { kind: 'loading' }, verifying: false, fingerprint: null });
+    epoch: 0, nonce: 0, manualRequested: 0, manualApplied: 0, complete: null, status: { kind: 'loading' }, verifying: false, fingerprint: null });
   const store = storeRef.current;
-  const clear = () => { store.epoch++; store.complete = null; store.verifying = false; store.fingerprint = null; store.status = { kind: 'loading' }; };
+  const cancelManual = () => { store.manualApplied = store.manualRequested; };
+  const clear = () => { cancelManual(); store.epoch++; store.complete = null; store.verifying = false; store.fingerprint = null; store.status = { kind: 'loading' }; };
   if (store.identity !== identity || store.client !== client || store.runtime !== client?.securityRuntime || store.userId !== userId || store.readable !== readable || store.subscriber !== subscribeAuthority) {
     clear(); store.identity = identity; store.client = client; store.runtime = client?.securityRuntime; store.userId = userId; store.readable = readable; store.subscriber = subscribeAuthority;
   }
@@ -84,7 +85,7 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
         if (recheck) fingerprint = null;
         const changed = !fingerprint || (store.fingerprint !== null && store.fingerprint !== fingerprint);
         if (changed) {
-          store.epoch++; store.complete = null; store.verifying = false; store.status = { kind: 'offline' }; store.fingerprint = fingerprint;
+          cancelManual(); store.epoch++; store.complete = null; store.verifying = false; store.status = { kind: 'offline' }; store.fingerprint = fingerprint;
         } else {
           store.fingerprint = fingerprint;
           if (notification) {
@@ -103,7 +104,7 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
   }, [client, client?.securityRuntime, userId, identity, target?.bridgeId, readable, subscribeAuthority, store]);
   useEffect(() => {
     if (!target || !visible || !client || !readable || !documentVisible || (client.securityRuntime && !store.fingerprint)) return;
-    let active = true; let busy = false; let pendingManual = false;
+    let active = true; let busy = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const isActive = () => active && store.epoch === epoch;
     const render = () => { if (isActive()) redraw(value => value + 1); };
@@ -116,7 +117,8 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
     const poll = async () => {
       if (!isActive() || busy) return;
       busy = true;
-      const manual = pendingManual; pendingManual = false;
+      const requested = store.manualRequested; const manual = requested > store.manualApplied;
+      let deferManual = false;
       try {
         let complete = store.complete;
         if (complete && manual) { store.status = { kind: 'ready', ...complete, updating: true, verifying: store.verifying }; render(); }
@@ -126,12 +128,12 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
         if (!isActive()) return;
         const status = parseStatus(raw, target.preview.id);
         if (status.state === 'unregistered' || status.state === 'unavailable') {
-          store.complete = null; store.verifying = false;
+          cancelManual(); store.complete = null; store.verifying = false;
           store.status = status.state === 'unregistered' ? { kind: 'unregistered' } : { kind: 'unavailable', reason: status.reason };
         } else if (status.state === 'unchanged') {
           if (!complete || complete.revision !== status.revision || complete.totalBytes !== status.totalBytes) throw new Error('Invalid unchanged response');
           if (manual) complete = { ...complete, key: `${identity}:${status.revision}:${++store.nonce}` };
-          store.complete = complete; store.verifying = false; store.status = { kind: 'ready', ...complete, updating: false, verifying: false };
+          store.complete = complete; if (manual) store.manualApplied = requested; store.verifying = false; store.status = { kind: 'ready', ...complete, updating: false, verifying: false };
         } else {
           if (complete) { store.status = { kind: 'ready', ...complete, updating: true, verifying: store.verifying }; render(); }
           const bytes = new Uint8Array(status.totalBytes);
@@ -140,8 +142,8 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
             const rawChunk = await command('session_preview_chunk', { ...base, revision: status.revision, offset });
             if (!isActive()) return;
             const chunk = parseChunk(rawChunk, target.preview.id, status.revision, status.totalBytes, offset);
-            if (chunk.state === 'stale_revision') { abandoned = true; break; }
-            if (chunk.state === 'unavailable') { store.complete = null; store.verifying = false; store.status = { kind: 'unavailable', reason: chunk.reason }; abandoned = true; break; }
+            if (chunk.state === 'stale_revision') { abandoned = true; deferManual = true; break; }
+            if (chunk.state === 'unavailable') { cancelManual(); store.complete = null; store.verifying = false; store.status = { kind: 'unavailable', reason: chunk.reason }; abandoned = true; break; }
             bytes.set(chunk.bytes, offset); offset += chunk.bytes.length;
             if (chunk.done) break;
           } while (offset < status.totalBytes);
@@ -149,18 +151,18 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
             const html = await verifyPreview(bytes, status.revision);
             if (!isActive()) return;
             complete = { html, revision: status.revision, totalBytes: status.totalBytes, key: `${identity}:${status.revision}:${++store.nonce}` };
-            store.complete = complete; store.verifying = false; store.status = { kind: 'ready', ...complete, updating: false, verifying: false };
+            store.complete = complete; if (manual) store.manualApplied = requested; store.verifying = false; store.status = { kind: 'ready', ...complete, updating: false, verifying: false };
           } else if (store.complete) store.status = { kind: 'ready', ...store.complete, updating: false, verifying: store.verifying };
         }
         render();
       } catch {
-        if (isActive()) { store.complete = null; store.verifying = false; store.status = { kind: 'error' }; render(); }
+        if (isActive()) { cancelManual(); store.complete = null; store.verifying = false; store.status = { kind: 'error' }; render(); }
       } finally {
         busy = false;
-        if (isActive()) { if (pendingManual) void poll(); else schedule(); }
+        if (isActive()) { if (!deferManual && store.manualRequested > store.manualApplied) void poll(); else schedule(); }
       }
     };
-    refreshRef.current = () => { pendingManual = true; if (timer) clearTimeout(timer); if (!busy) void poll(); };
+    refreshRef.current = () => { if (!isActive()) return; store.manualRequested++; if (timer) clearTimeout(timer); if (!busy) void poll(); };
     void poll();
     return () => { active = false; clearTimeout(timer); refreshRef.current = () => {}; };
   }, [client, userId, identity, target?.bridgeId, target?.sessionId, target?.preview.id, visible, readable, documentVisible, sendCommand, epoch, store]);

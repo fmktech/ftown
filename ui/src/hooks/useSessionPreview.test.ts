@@ -136,6 +136,105 @@ it('preserves the verified frame across an unchanged ready-to-ready security not
   await act(async () => { h.pending.shift()!({ requestId: 'current', success: true, data: { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
   expect(hook.result.current.state).toMatchObject({ kind: 'ready', key: state.key, verifying: false });
 });
+it('retains manual refresh across a benign authority notification', async () => {
+  const h = stablePreviewHarness(); const auth = authorityFixture();
+  const hook = renderHook(() => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand, subscribeAuthority: auth.subscribeAuthority }));
+  await act(async () => {});
+  const initial = hook.result.current.state; if (initial.kind !== 'ready') throw new Error('expected ready');
+  act(() => hook.result.current.refresh());
+  expect(h.pending).toHaveLength(1);
+  act(() => auth.notify());
+  expect(h.pending).toHaveLength(2);
+  const unchanged = { requestId: 'status', success: true, data: { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length } };
+  await act(async () => { h.pending.shift()!(unchanged); });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', key: initial.key, verifying: true });
+  await act(async () => { h.pending.shift()!(unchanged); });
+  const refreshed = hook.result.current.state; if (refreshed.kind !== 'ready') throw new Error('expected ready');
+  expect(refreshed.key).not.toBe(initial.key);
+  expect(refreshed.verifying).toBe(false);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect(h.pending).toHaveLength(1);
+  await act(async () => { h.pending.shift()!(unchanged); });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', key: refreshed.key, verifying: false });
+});
+it('coalesces newer refresh clicks into one subsequent poll', async () => {
+  const h = stablePreviewHarness();
+  const hook = renderHook(() => useSessionPreview({ client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand }));
+  await act(async () => {});
+  const initial = hook.result.current.state; if (initial.kind !== 'ready') throw new Error('expected ready');
+  act(() => { hook.result.current.refresh(); hook.result.current.refresh(); hook.result.current.refresh(); });
+  expect(h.pending).toHaveLength(1);
+  const unchanged = { requestId: 's', success: true, data: { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length } };
+  await act(async () => { h.pending.shift()!(unchanged); });
+  const first = hook.result.current.state; if (first.kind !== 'ready') throw new Error('expected ready');
+  expect(first.key).not.toBe(initial.key); expect(h.pending).toHaveLength(1);
+  await act(async () => { h.pending.shift()!(unchanged); });
+  const second = hook.result.current.state; if (second.kind !== 'ready') throw new Error('expected ready');
+  expect(second.key).not.toBe(first.key); expect(h.pending).toHaveLength(0);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  await act(async () => { h.pending.shift()!(unchanged); });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', key: second.key });
+});
+it('cancels pending refresh after batched authority loss and recovery', async () => {
+  const h = stablePreviewHarness(); const auth = authorityFixture();
+  const hook = renderHook(() => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand, subscribeAuthority: auth.subscribeAuthority }));
+  await act(async () => {});
+  act(() => hook.result.current.refresh());
+  const old = h.pending.shift()!;
+  act(() => { auth.account(false); auth.account(true); });
+  expect(hook.result.current.state.kind).toBe('loading');
+  await act(async () => { old({ requestId: 'old', success: true, data: { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  expect(hook.result.current.state.kind).toBe('loading');
+  await act(async () => { h.pending.shift()!({ requestId: 'new', success: true, data: { state: 'ready', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  const recovered = hook.result.current.state; if (recovered.kind !== 'ready') throw new Error('expected ready');
+  expect(h.pending).toHaveLength(0);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  await act(async () => { h.pending.shift()!({ requestId: 'auto', success: true, data: { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', key: recovered.key });
+});
+it('cancels queued refresh on failed response rather than retrying immediately', async () => {
+  const h = stablePreviewHarness();
+  const hook = renderHook(() => useSessionPreview({ client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand }));
+  await act(async () => {});
+  act(() => { hook.result.current.refresh(); hook.result.current.refresh(); });
+  await act(async () => { h.pending.shift()!({ requestId: 'failed', success: false }); });
+  expect(hook.result.current.state.kind).toBe('error'); expect(h.pending).toHaveLength(0);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect(h.pending).toHaveLength(1);
+  await act(async () => { h.pending.shift()!({ requestId: 'new', success: true, data: { state: 'ready', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  const recovered = hook.result.current.state; if (recovered.kind !== 'ready') throw new Error('expected ready');
+  expect(h.pending).toHaveLength(0);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  await act(async () => { h.pending.shift()!({ requestId: 'auto', success: true, data: { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', key: recovered.key });
+});
+it.each([
+  ['unregistered', { state: 'unregistered' }, 'unregistered'],
+  ['unavailable', { state: 'unavailable', previewId: id, reason: 'missing' }, 'unavailable'],
+  ['invalid', { state: 'unchanged', previewId: 'wrong', revision: '9'.repeat(64), totalBytes: 16 }, 'error'],
+] as const)('cancels queued refresh on %s status', async (_label, response, kind) => {
+  const h = stablePreviewHarness();
+  const hook = renderHook(() => useSessionPreview({ client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand }));
+  await act(async () => {});
+  act(() => { hook.result.current.refresh(); hook.result.current.refresh(); });
+  await act(async () => { h.pending.shift()!({ requestId: 's', success: true, data: response }); });
+  expect(hook.result.current.state.kind).toBe(kind); expect(h.pending).toHaveLength(0);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); }); expect(h.pending).toHaveLength(1);
+  await act(async () => { h.pending.shift()!({ requestId: 'new', success: true, data: { state: 'ready', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  expect(hook.result.current.state.kind).toBe('ready'); expect(h.pending).toHaveLength(0);
+});
+it('waits for the normal poll after a stale revision during manual refresh', async () => {
+  const h = stablePreviewHarness(); let stale = false;
+  const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => stale && command.type === 'session_preview_chunk'
+    ? Promise.resolve({ requestId: 'c', success: true, data: { state: 'stale_revision' } }) : h.sendCommand(command));
+  const hook = renderHook(() => useSessionPreview({ client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand }));
+  await act(async () => {}); stale = true;
+  act(() => hook.result.current.refresh());
+  await act(async () => { h.pending.shift()!({ requestId: 's', success: true, data: { state: 'ready', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  expect(h.pending).toHaveLength(0);
+  await act(async () => { await vi.advanceTimersByTimeAsync(999); }); expect(h.pending).toHaveLength(0);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1); }); expect(h.pending).toHaveLength(1);
+});
 it('latches account authority loss and recovery in one batch and ignores an old reply', async () => {
   const h = stablePreviewHarness(); const auth = authorityFixture();
   const hook = renderHook(() => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand, subscribeAuthority: auth.subscribeAuthority }));

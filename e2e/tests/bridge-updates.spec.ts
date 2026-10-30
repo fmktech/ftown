@@ -20,8 +20,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
     await actions.click(); await page.getByRole("menuitem", { name: "Updates…" }).click();
     const dialog = page.getByRole("dialog", { name: "Bridge updates" });
     await expect(dialog).toBeVisible();
-    const installedRow = dialog.locator("dl > div").filter({ has: dialog.getByText("Installed", { exact: true }) });
-    const latestRow = dialog.locator("dl > div").filter({ has: dialog.getByText("Latest", { exact: true }) });
+    const installedRow = dialog.locator("dl > div").filter({ has: page.getByText("Installed", { exact: true }) });
+    const latestRow = dialog.locator("dl > div").filter({ has: page.getByText("Latest", { exact: true }) });
     await expect(installedRow.locator("dd")).not.toHaveText("Unknown", { timeout: 30_000 });
     const installedText = await installedRow.locator("dd").textContent();
     const latestText = await latestRow.locator("dd").textContent();
