@@ -37,8 +37,8 @@ export async function createPreviewFixture() {
   const sessions = new Set<string>();
   return {
     directory, outside,
-    async create(name: string): Promise<string> {
-      const response = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name, workingDir: directory } });
+    async create(name: string, options?: { shellType: "codex"; command: string }): Promise<string> {
+      const response = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: options?.shellType ?? "shell", ...(options ? { command: options.command } : {}), name, workingDir: directory } });
       expect(response.status).toBe(201);
       if (!record(response.body) || !record(response.body.session) || typeof response.body.session.id !== "string") throw new Error("Created session fixture missing id");
       sessions.add(response.body.session.id);

@@ -8,7 +8,7 @@ import type { SecurityEvent, SecurityEventStatus, SecurityPage, SecurityPageQuer
 export const KNOWN_MCP_TOOLS = new Set([
   'sessions_create', 'sessions_get', 'sessions_update', 'sessions_stop', 'sessions_retry', 'sessions_remove', 'sessions_revive',
   'sessions_usage', 'sessions_running', 'chats_read', 'chats_search', 'messages_send', 'messages_read', 'terminal_input', 'terminal_resize',
-  'terminal_clear', 'whoami', 'attention_request', 'attention_inbox', 'attention_wait', 'attention_ack', 'attention_resolve',
+  'terminal_clear', 'whoami', 'preview_chat_reply', 'attention_request', 'attention_inbox', 'attention_wait', 'attention_ack', 'attention_resolve',
   'fleet_overview', 'machines_list', 'sessions_list', 'archive_list', 'messages_broadcast', 'sessions_wait', 'fleet_batch', 'chats_search_fleet',
 ]);
 export const READ_MCP_TOOLS = new Set([

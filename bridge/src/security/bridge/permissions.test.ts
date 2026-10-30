@@ -28,6 +28,16 @@ test('preview reads require read authority and registration cannot be tunneled t
   assert.throws(() => classifyHttp('PUT', '/api/sessions/session/preview?x=1'), { code: 'permission_denied' });
 });
 
+test('preview conversation reads require read and sends/replies require control', () => {
+  assert.equal(classifyCommand('preview_chat_list', { sessionId: 'session' }).permission, 'read');
+  for (const type of ['preview_chat_send', 'preview_chat_reply']) assert.equal(classifyCommand(type, { sessionId: 'session' }).permission, 'control');
+  assert.equal(classifyHttp('GET', '/api/sessions/session/preview-chat?cursor=session%3A0').permission, 'read');
+  assert.equal(classifyHttp('POST', '/api/sessions/session/preview-chat/reply').permission, 'control');
+  assert.equal(classifyCommand('mcp_request', { request: { method: 'POST', path: '/api/sessions/session/preview-chat/reply' } }).permission, 'control');
+  assert.throws(() => classifyHttp('POST', '/api/sessions/session/preview-chat/reply?x=1'), { code: 'permission_denied' });
+  assert.throws(() => classifyCommand('preview_chat_send', { sessionId: '../bad' }), { code: 'permission_denied' });
+});
+
 test('real read-only MCP principal cannot authorize the control update operation', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'ftown-update-policy-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -47,6 +57,9 @@ test('real read-only MCP principal cannot authorize the control update operation
   const principal = await policy.principal(mcp.id);
   await policy.revalidate(principal, classifyCommand('get_bridge_update').permission);
   await assert.rejects(policy.revalidate(principal, classifyCommand('update_bridge').permission), { code: 'permission_denied' });
+  await policy.revalidate(principal, classifyCommand('preview_chat_list', { sessionId: 'session' }).permission);
+  await assert.rejects(policy.revalidate(principal, classifyCommand('preview_chat_send', { sessionId: 'session' }).permission), { code: 'permission_denied' });
+  await assert.rejects(policy.revalidate(principal, classifyCommand('mcp_request', { request: { method: 'POST', path: '/api/sessions/session/preview-chat/reply' } }).permission), { code: 'permission_denied' });
 });
 
 test('actual operations determine permission and unknown methods/routes/frames deny by default', () => {

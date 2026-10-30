@@ -5,20 +5,25 @@ import type { MessageClient } from '@/lib/message-client';
 import type { BridgeRpc } from '@/hooks/useBridgeRpc';
 import type { Session } from '@/types';
 import { useSessionPreview, type SessionPreviewAuthoritySubscriber } from '@/hooks/useSessionPreview';
+import { usePreviewScroll } from '@/hooks/usePreviewScroll';
+import { usePreviewConversation } from '@/hooks/usePreviewConversation';
+import { PreviewConversation } from './PreviewConversation';
+import type { SessionActivity } from '@/hooks/useAllSessionEvents';
 import { clampPreviewRatio, previewDocument, previewRatioBounds } from '@/lib/session-preview';
 
 interface Props {
   session: Session | null; client: MessageClient | null; userId: string; readable: boolean;
   sendCommand: BridgeRpc['sendCommand']; subscribeAuthority?: SessionPreviewAuthoritySubscriber; securityGeneration: number; open: boolean; onClose: () => void;
   isDesktop: boolean; mobileTab: 'sessions' | 'terminal' | 'preview'; onMobileTab: (tab: 'terminal' | 'preview') => void;
-  onRefit: () => void; children: ReactNode;
+  onRefit: () => void; children: ReactNode; sessions?: Session[]; activity?: SessionActivity;
 }
 const messages = { missing: 'Preview file is missing', too_large: 'Preview exceeds the 1 MiB limit', invalid_utf8: 'Preview file is not valid UTF-8', invalid_file: 'Preview unavailable', unavailable: 'Preview unavailable' };
-export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children }: Props) {
+export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity }: Props) {
   const mainRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   const [ratio, setRatio] = useState(50);
   const [compactTab, setCompactTab] = useState<'terminal' | 'preview'>('preview');
+  const [conversationOpen, setConversationOpen] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [dragging, setDragging] = useState(false);
   const drag = useRef<{ id: number; startX: number; startRatio: number; cursor: string; select: string } | null>(null);
@@ -26,14 +31,17 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
   const compact = !isDesktop || width < 640;
   const view = isDesktop ? compactTab : mobileTab;
   const previewVisible = !!target && open && (expanded || !compact || view === 'preview');
-  const { state, refresh } = useSessionPreview({ client, userId, target, visible: previewVisible, readable, securityGeneration, sendCommand, subscribeAuthority });
+  const { state, refresh, getHardEpoch } = useSessionPreview({ client, userId, target, visible: previewVisible, readable, securityGeneration, sendCommand, subscribeAuthority });
+  const owner = target ? JSON.stringify([userId, target.bridgeId, target.sessionId, target.preview.id]) : '';
+  const scroll = usePreviewScroll(state.kind === 'ready' ? state : null, owner, getHardEpoch);
+  const conversation = usePreviewConversation({ client, userId, session, sessions: sessions.length ? sessions : session ? [session] : [], enabled: expanded && conversationOpen && open, readable, sendCommand, subscribeAuthority });
   useEffect(() => {
     const node = mainRef.current; if (!node) return;
     const observer = new ResizeObserver(entries => setWidth(entries[0]?.contentRect.width ?? 0));
     observer.observe(node); return () => observer.disconnect();
   }, []);
-  useEffect(() => { setCompactTab('preview'); setExpanded(false); }, [session?.bridgeId, session?.id, session?.preview?.id]);
-  useEffect(() => { if (!open) setExpanded(false); }, [open]);
+  useEffect(() => { setCompactTab('preview'); setExpanded(false); setConversationOpen(false); }, [session?.bridgeId, session?.id, session?.preview?.id]);
+  useEffect(() => { if (!open) { setExpanded(false); setConversationOpen(false); } }, [open]);
   useEffect(() => { onRefit(); }, [open, compact, view, expanded, width, onRefit]);
   const finish = () => {
     const current = drag.current; if (!current) return;
@@ -92,7 +100,8 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
           </button>
         </div>
         <div className="session-preview-content">
-          {state.kind === 'ready' ? <><iframe key={state.key} title={`HTML preview: ${target.preview.fileName}`} sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" referrerPolicy="no-referrer" srcDoc={previewDocument(state.html)} />{state.updating && <span className="session-preview-updating">Updating preview…</span>}</> : <div className="session-preview-message" role="status"><span>{state.kind === 'loading' ? 'Loading preview…' : state.kind === 'offline' ? 'Reconnect to load preview' : state.kind === 'unregistered' ? 'No preview registered' : state.kind === 'unavailable' ? messages[state.reason] : 'Preview unavailable'}</span>{state.kind !== 'loading' && state.kind !== 'unregistered' && <button type="button" className="btn-ghost" onClick={refresh}>Retry</button>}</div>}
+          {state.kind === 'ready' && scroll.display ? <><iframe ref={scroll.iframeRef} key={scroll.display.key} title={`HTML preview: ${target.preview.fileName}`} sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" referrerPolicy="no-referrer" srcDoc={previewDocument(scroll.display.html, scroll.display.documentId)} />{state.updating && <span className="session-preview-updating">Updating preview…</span>}</> : <div className="session-preview-message" role="status"><span>{state.kind === 'loading' || state.kind === 'ready' ? 'Loading preview…' : state.kind === 'offline' ? 'Reconnect to load preview' : state.kind === 'unregistered' ? 'No preview registered' : state.kind === 'unavailable' ? messages[state.reason] : 'Preview unavailable'}</span>{state.kind !== 'loading' && state.kind !== 'ready' && state.kind !== 'unregistered' && <button type="button" className="btn-ghost" onClick={refresh}>Retry</button>}</div>}
+          {expanded && session && <PreviewConversation session={session} activity={activity} open={conversationOpen} onOpen={() => setConversationOpen(true)} onClose={() => setConversationOpen(false)} conversation={conversation} />}
           {dragging && <div className="session-preview-drag-shield" />}
         </div>
       </section>}

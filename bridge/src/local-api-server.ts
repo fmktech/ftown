@@ -295,6 +295,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     this.startMailRecovery();
   }
 
+  enqueuePreviewChat(session: Session, text: string) {
+    return this.mail.acceptMail(session, { body: text, from: 'preview', fromName: 'Preview conversation' });
+  }
+
   setDependencies(
     store: SessionStore,
     runner: ProcessRunner,
@@ -693,6 +697,25 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     const sessionRunningMatch = path.match(/^\/api\/sessions\/([^/]+)\/running$/);
     const sessionUsageMatch = path.match(/^\/api\/sessions\/([^/]+)\/usage$/);
     const sessionPreviewMatch = path.match(/^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/preview$/);
+    const sessionChatMatch = path.match(/^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/preview-chat(?:\/(send|reply))?$/);
+
+    if (sessionChatMatch) {
+      const controller = this.getSessionController();
+      if (!controller) { jsonResponse(res, 503, { error: 'Conversation unavailable', code: 'unavailable' }); return; }
+      const [, sessionId, action] = sessionChatMatch;
+      let result;
+      if (!action && req.method === 'GET') {
+        if ([...url.searchParams.keys()].some(key => key !== 'cursor') || url.searchParams.getAll('cursor').length > 1) { jsonResponse(res, 400, { error: 'Invalid conversation request', code: 'invalid' }); return; }
+        result = await controller.listPreviewChat(sessionId, url.searchParams.get('cursor') ?? undefined);
+      } else if (action && req.method === 'POST' && !url.search) {
+        const body = await parseBody(req);
+        if (Object.keys(body).sort().join(',') !== 'id,text' || typeof body.id !== 'string' || typeof body.text !== 'string') { jsonResponse(res, 400, { error: 'Invalid conversation request', code: 'invalid' }); return; }
+        result = action === 'send' ? await controller.sendPreviewChat(sessionId, { id: body.id, text: body.text }) : await controller.replyPreviewChat(sessionId, { id: body.id, text: body.text });
+      } else { jsonResponse(res, 400, { error: 'Invalid conversation request', code: 'invalid' }); return; }
+      if (result.ok) { jsonResponse(res, 200, 'page' in result ? result.page : result.result); return; }
+      const status = { invalid: 400, too_large: 413, not_found: 404, not_running: 409, unsupported: 409, conflict: 409, capacity_exceeded: 429, unavailable: 503 }[result.code];
+      jsonResponse(res, status, { error: result.message, code: result.code }); return;
+    }
 
     if (sessionPreviewMatch && (req.method === 'PUT' || req.method === 'DELETE')) {
       const controller = this.getSessionController();

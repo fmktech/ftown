@@ -88,6 +88,25 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
       if (deps.security && !verified) throw new Error('approval_required');
       if (deps.security && verified && command.type !== 'security_activate_mcp') await deps.security.revalidate(verified.principal);
       switch (command.type) {
+        case 'preview_chat_list':
+        case 'preview_chat_send':
+        case 'preview_chat_reply': {
+          const payload: Record<string, unknown> = { ...command.payload };
+          const allowed = command.type === 'preview_chat_list' ? ['bridgeId', 'sessionId', 'cursor'] : ['bridgeId', 'sessionId', 'id', 'text'];
+          if (Object.keys(payload).some(key => !allowed.includes(key)) || payload.bridgeId !== bridgeId || typeof payload.sessionId !== 'string'
+            || !/^[A-Za-z0-9_-]{1,200}$/.test(payload.sessionId)
+            || (command.type === 'preview_chat_list' ? payload.cursor !== undefined && typeof payload.cursor !== 'string' : typeof payload.id !== 'string' || typeof payload.text !== 'string')) {
+            response = { requestId: command.requestId, success: false, error: 'Invalid conversation request', data: { code: 'invalid' } }; break;
+          }
+          const result = command.type === 'preview_chat_list'
+            ? await sessionController.listPreviewChat(payload.sessionId, typeof payload.cursor === 'string' ? payload.cursor : undefined)
+            : command.type === 'preview_chat_send'
+              ? await sessionController.sendPreviewChat(payload.sessionId, { id: String(payload.id), text: String(payload.text) })
+              : await sessionController.replyPreviewChat(payload.sessionId, { id: String(payload.id), text: String(payload.text) });
+          response = result.ok ? { requestId: command.requestId, success: true, data: 'page' in result ? result.page : result.result }
+            : { requestId: command.requestId, success: false, error: result.message, data: { code: result.code } };
+          break;
+        }
         case 'get_pull_request_statuses': {
           if (!deps.security || !verified || payloadBridgeId !== bridgeId || !deps.pullRequestStatuses) throw new Error('approval_required');
           const payload = command.payload as Record<string, unknown>;

@@ -1076,7 +1076,7 @@ PY`;
 
         {/* Terminal area */}
         <main aria-hidden={!isDesktop && mobileTab === "sessions"} className={`flex-1 flex-col min-h-0 min-w-0 ${mobileTab !== "sessions" ? "flex" : "hidden"} md:flex`}>
-          <SessionWorkspace session={selectedSession} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} subscribeAuthority={accountClient?.subscribe} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabSwitch} onRefit={refitPreviewTerminal}>
+          <SessionWorkspace session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} subscribeAuthority={accountClient?.subscribe} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabSwitch} onRefit={refitPreviewTerminal}>
           <Terminal
             ref={terminalRef}
             transport={transport}

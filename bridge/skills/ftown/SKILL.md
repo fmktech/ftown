@@ -45,6 +45,7 @@ ftown sessions pr https://github.com/owner/repo/pull/123
 ftown sessions pr --clear
 ftown sessions preview ./preview.html
 ftown sessions preview --clear
+ftown sessions preview-reply --message "The preview is ready."
 ftown harness mail send <session-id> --type task "review the API client"
 ftown harness mail read
 ftown env --help
@@ -62,6 +63,11 @@ and data images work; sibling assets and network access are unsupported. Publish
 updates by writing a temporary file and atomically renaming it into place. Use
 `--session-id <id>` for an explicit target or `--clear` to remove registration;
 clearing never deletes the file.
+
+Messages from the preview conversation arrive as ftown mail. Respond explicitly
+with `ftown sessions preview-reply --message "Your response"`; use
+`--message-file <path>` or `--message-file -` for multiline replies. Reuse the
+returned `--id` with the same text when retrying an uncertain outcome.
 
 ## Identity and reporting
 

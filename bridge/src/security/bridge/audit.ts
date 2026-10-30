@@ -10,7 +10,7 @@ import { AtomicSnapshot } from './snapshot.js';
 const DAY = 86_400_000;
 const knownTools = new Set(['sessions_create', 'sessions_get', 'sessions_update', 'sessions_stop', 'sessions_retry', 'sessions_remove',
   'sessions_revive', 'sessions_usage', 'sessions_running', 'chats_read', 'chats_search', 'messages_send', 'messages_read',
-  'terminal_input', 'terminal_resize', 'terminal_clear', 'whoami', 'attention_request', 'attention_inbox', 'attention_wait',
+  'terminal_input', 'terminal_resize', 'terminal_clear', 'whoami', 'preview_chat_reply', 'attention_request', 'attention_inbox', 'attention_wait',
   'attention_ack', 'attention_resolve', 'fleet_overview', 'machines_list', 'sessions_list', 'archive_list', 'messages_broadcast',
   'sessions_wait', 'fleet_batch', 'chats_search_fleet', 'unknown_tool', 'invalid_tool']);
 const safeCodes = new Set(['security_setup_required', 'storage_unavailable', 'upgrade_required', 'approval_required', 'endpoint_revoked',

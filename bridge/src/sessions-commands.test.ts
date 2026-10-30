@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { Readable } from 'node:stream';
 import { runSessions } from './sessions-commands.js';
 import { secureFixture } from './security/bridge/fixtures.test.js';
 
@@ -103,6 +104,30 @@ test('preview rejects missing or contradictory arguments and missing capability 
   assert.equal(requests.length, 1); assert.equal(requests[0].method, 'GET');
   assert.ok(output.some(line => line.includes('bridge_upgrade_required')));
 }, () => ({ capabilities: { sessionMetadata: { pullRequest: true } } })));
+
+test('preview reply uses self, stable IDs and bounded UTF-8 file input', async () => fixture(async (requests, output) => {
+  process.env.FTOWN_SESSION_ID = 'self-id';
+  const messageId = '12345678-1234-4234-8234-123456789abc';
+  assert.equal(await runSessions(['preview-reply', '--message', 'hello\nworld', '--id', messageId]), 0);
+  assert.ok(requests.at(-1)?.url.endsWith('/api/sessions/self-id/preview-chat/reply'));
+  assert.deepEqual(requests.at(-1)?.body, { id: messageId, text: 'hello\nworld' });
+  const file = join(process.env.HOME!, 'reply.txt'); writeFileSync(file, 'line one\nline two');
+  assert.equal(await runSessions(['preview-reply', '--message-file', file, '--session-id', 'other', '--id', messageId]), 0);
+  assert.deepEqual(requests.at(-1)?.body, { id: messageId, text: 'line one\nline two' });
+  assert.ok(requests.at(-1)?.url.endsWith('/api/sessions/other/preview-chat/reply'));
+  const stdinDescriptor = Object.getOwnPropertyDescriptor(process, 'stdin');
+  try {
+    Object.defineProperty(process, 'stdin', { configurable: true, value: Readable.from([Buffer.from('stdin\nreply')]) });
+    assert.equal(await runSessions(['preview-reply', '--message-file', '-', '--id', messageId]), 0);
+    assert.deepEqual(requests.at(-1)?.body, { id: messageId, text: 'stdin\nreply' });
+  } finally { if (stdinDescriptor) Object.defineProperty(process, 'stdin', stdinDescriptor); }
+  const before = requests.length;
+  assert.equal(await runSessions(['preview-reply', '--message', 'a', '--message-file', file]), 1);
+  writeFileSync(file, 'x'.repeat(4097));
+  assert.equal(await runSessions(['preview-reply', '--message-file', file]), 1);
+  assert.equal(requests.length, before);
+  assert.ok(output.some(line => line.includes('too large')));
+}, request => ({ sessionId: 'self-id', turn: { id: (request.body as { id: string }).id } })));
 
 test('attention uses trimmed self identity, probes support and returns the exact sanitized result', async () => fixture(async (requests, output) => {
   process.env.FTOWN_SESSION_ID = '  self-id  ';

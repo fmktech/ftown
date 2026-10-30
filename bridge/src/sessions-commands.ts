@@ -7,6 +7,10 @@ import { Command, CommanderError } from 'commander';
 import { normalizePullRequestUrl } from './pull-request-url.js';
 import { sanitizeAttentionText } from './attention-events.js';
 import { resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { open } from 'node:fs/promises';
+import { PREVIEW_CHAT_TEXT_BYTES } from './preview-chat-protocol.js';
+import { validateChatInput } from './preview-chat.js';
 import { api as request, loadPointer, listSessions, fetchInbox, sendMail } from './cli-client.js';
 import {
   MAIL_TYPES,
@@ -131,9 +135,9 @@ interface SessionsOptions {
   name?: string; command?: string; model?: string; parentId?: string; parent?: boolean;
   createWorkdir?: boolean; offset?: string; limit?: string; pattern?: string;
   children?: boolean; siblings?: boolean; keys?: boolean; type?: string; thread?: string;
-  peek?: boolean; all?: boolean; sessionId?: string; message?: string; title?: string; clear?: boolean;
+  peek?: boolean; all?: boolean; sessionId?: string; message?: string; messageFile?: string; id?: string; title?: string; clear?: boolean;
 }
-type SessionCommand = 'preview' | 'list' | 'create' | 'get' | 'screen' | 'grep' | 'keys' | 'tell'
+type SessionCommand = 'preview-reply' | 'preview' | 'list' | 'create' | 'get' | 'screen' | 'grep' | 'keys' | 'tell'
   | 'inbox' | 'mail' | 'running' | 'usage' | 'remove' | 'archive' | 'revive' | 'attention' | 'pr';
 
 function sessionProgram(): Command {
@@ -192,6 +196,10 @@ function sessionProgram(): Command {
     .option('--clear', 'Remove the preview registration')
     .option('--session-id <id>', 'Target session; defaults to FTOWN_SESSION_ID')
     .action((path: string | undefined, _opts, cmd: Command) => run('preview', path === undefined ? [] : [path], cmd));
+  command('preview-reply', 'Reply to this session’s preview conversation')
+    .option('--message <text>', 'Reply text').option('--message-file <path>', 'Read UTF-8 reply from a file or - for stdin')
+    .option('--session-id <id>', 'Target session; defaults to FTOWN_SESSION_ID').option('--id <uuid>', 'Stable ID for retry')
+    .action((_opts, cmd: Command) => run('preview-reply', [], cmd));
   return program;
 }
 
@@ -237,6 +245,34 @@ async function requireSessionCapability(id: string, feature: 'attention' | 'pull
 async function executeSessionCommand(cmd: SessionCommand, rest: string[], options: SessionsOptions): Promise<void> {
   const jsonOut = !options.plain;
     switch (cmd) {
+      case 'preview-reply': {
+        const id = selfSessionId(options.sessionId);
+        if ((options.message === undefined) === (options.messageFile === undefined)) throw new Error('Supply exactly one of --message or --message-file');
+        let text = options.message;
+        if (options.messageFile !== undefined) {
+          const chunks: Buffer[] = []; let size = 0;
+          if (options.messageFile === '-') {
+            for await (const part of process.stdin) { const chunk = Buffer.from(part); size += chunk.length; if (size > PREVIEW_CHAT_TEXT_BYTES) throw new Error('Reply is too large'); chunks.push(chunk); }
+          } else {
+            const file = await open(options.messageFile, 'r');
+            try {
+              const buffer = Buffer.alloc(PREVIEW_CHAT_TEXT_BYTES + 1);
+              while (size < buffer.length) { const read = await file.read(buffer, size, buffer.length - size, null); if (!read.bytesRead) break; size += read.bytesRead; }
+              if (size > PREVIEW_CHAT_TEXT_BYTES) throw new Error('Reply is too large'); chunks.push(buffer.subarray(0, size));
+            }
+            finally { await file.close(); }
+          }
+          try { text = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)); } catch { throw new Error('Reply must be UTF-8'); }
+        }
+        const messageId = options.id ?? randomUUID();
+        if (text === undefined) throw new Error('Missing reply text');
+        validateChatInput({ id: messageId, text });
+        try {
+          const { data } = await api('POST', `/api/sessions/${id}/preview-chat/reply`, { id: messageId, text });
+          console.log(jsonOut ? JSON.stringify(data, null, 2) : `preview reply recorded for ${id} (${messageId})`);
+        } catch { throw new Error(`Reply outcome may be uncertain; retry with --id ${messageId} and the same text`); }
+        break;
+      }
       case 'preview': {
         const id = selfSessionId(options.sessionId);
         const path = rest[0];

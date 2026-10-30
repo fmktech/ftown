@@ -6,6 +6,7 @@ import { PREVIEW_POLL_MS, type PreviewUnavailableReason, type SessionPreviewDesc
 import type { MessageClient } from '@/lib/message-client';
 import type { BridgeRpc } from '@/hooks/useBridgeRpc';
 import { parseChunk, parseStatus, verifyPreview } from '@/lib/session-preview';
+import { sessionAuthority } from '@/lib/session-authority';
 
 export type SessionPreviewAuthoritySubscriber = (listener: () => void) => () => void;
 type PreviewState =
@@ -17,7 +18,7 @@ interface Options { client: MessageClient | null; userId: string; target: Target
 type Complete = { html: string; revision: string; totalBytes: number; key: string };
 interface Store {
   identity: string; client: MessageClient | null; runtime: MessageClient['securityRuntime']; userId: string; readable: boolean; subscriber?: SessionPreviewAuthoritySubscriber;
-  visible: boolean; documentVisible: boolean; securityGeneration: number; epoch: number; nonce: number; manualRequested: number; manualApplied: number;
+  visible: boolean; documentVisible: boolean; securityGeneration: number; epoch: number; nonce: number; manualRequested: number; manualApplied: number; hardEpoch: number;
   complete: Complete | null; status: PreviewState; fingerprint: string | null;
 }
 
@@ -30,17 +31,6 @@ function isAuthorityDenial(value: unknown): boolean {
   return ['permission_denied', 'endpoint_revoked', 'key_changed', 'approval_required'].includes(value.code) || value.code.startsWith('account_');
 }
 
-/** Fingerprint all selected endpoint fields, browser identity and sorted permissions. */
-function authority(client: MessageClient, bridgeId: string): string | null {
-  const runtime = client.securityRuntime;
-  if (!runtime) return null;
-  const pin = runtime.bridge(bridgeId); const state = runtime.state(bridgeId);
-  if (!pin || !['ready', 'offline', 'connecting'].includes(state.status) || !pin.permissions.includes('read')) return null;
-  runtime.assertCanSend(bridgeId);
-  const endpoint = (value: typeof pin.endpoint) => [value.version, value.id, value.ownerId, value.kind, value.publicKey];
-  return JSON.stringify([endpoint(runtime.identity.endpoint), endpoint(pin.endpoint), [...pin.permissions].sort()]);
-}
-
 export function useSessionPreview({ client, userId, target, visible, readable, securityGeneration, sendCommand, subscribeAuthority }: Options) {
   const identity = target ? JSON.stringify([target.bridgeId, target.sessionId, target.preview.id]) : '';
   const [documentVisible, setDocumentVisible] = useState(() => typeof document === 'undefined' || document.visibilityState === 'visible');
@@ -48,9 +38,9 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
   const refreshRef = useRef<() => void>(() => {});
   const authorityCheckRef = useRef<() => void>(() => {});
   const storeRef = useRef<Store>({ identity, client, runtime: client?.securityRuntime, userId, readable, subscriber: subscribeAuthority, visible, documentVisible, securityGeneration,
-    epoch: 0, nonce: 0, manualRequested: 0, manualApplied: 0, complete: null, status: { kind: 'loading' }, fingerprint: null });
+    epoch: 0, nonce: 0, manualRequested: 0, manualApplied: 0, hardEpoch: 0, complete: null, status: { kind: 'loading' }, fingerprint: null });
   const store = storeRef.current;
-  const clear = () => { store.epoch++; store.manualApplied = store.manualRequested; store.complete = null; store.fingerprint = null; store.status = { kind: 'loading' }; };
+  const clear = () => { store.hardEpoch++; store.epoch++; store.manualApplied = store.manualRequested; store.complete = null; store.fingerprint = null; store.status = { kind: 'loading' }; };
   if (store.identity !== identity || store.client !== client || store.runtime !== client?.securityRuntime || store.userId !== userId || store.subscriber !== subscribeAuthority) {
     clear(); store.identity = identity; store.client = client; store.runtime = client?.securityRuntime; store.userId = userId; store.subscriber = subscribeAuthority;
   }
@@ -96,13 +86,13 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
       try {
         recheck = false;
         let fingerprint: string | null = null;
-        try { fingerprint = authority(client, target.bridgeId); } catch { fingerprint = null; }
+        try { fingerprint = sessionAuthority(client, target.bridgeId); } catch { fingerprint = null; }
         // A nested authority update means the snapshot was not stable. Fail closed.
         if (recheck) fingerprint = null;
         const changed = !fingerprint || (store.fingerprint !== null && store.fingerprint !== fingerprint);
         if (changed) {
           invalidated = true;
-          store.epoch++; store.manualApplied = store.manualRequested; store.complete = null; store.status = { kind: 'offline' }; store.fingerprint = fingerprint;
+          store.hardEpoch++; store.epoch++; store.manualApplied = store.manualRequested; store.complete = null; store.status = { kind: 'offline' }; store.fingerprint = fingerprint;
         } else {
           store.fingerprint = fingerprint;
           if (notification) {
@@ -130,10 +120,10 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
       if (!isActive()) return false;
       if (!client.securityRuntime) return true;
       let authorized = false;
-      try { authorized = !!store.fingerprint && authority(client, target.bridgeId) === store.fingerprint; } catch { authorized = false; }
+      try { authorized = !!store.fingerprint && sessionAuthority(client, target.bridgeId) === store.fingerprint; } catch { authorized = false; }
       if (!isActive()) return false;
       if (!authorized) {
-        store.epoch++; store.manualApplied = store.manualRequested; store.complete = null; store.fingerprint = null; store.status = { kind: 'offline' };
+        store.hardEpoch++; store.epoch++; store.manualApplied = store.manualRequested; store.complete = null; store.fingerprint = null; store.status = { kind: 'offline' };
         redraw(value => value + 1); return false;
       }
       return true;
@@ -162,7 +152,7 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
         if (!mayCommit()) return;
         const status = parseStatus(raw, target.preview.id);
         if (status.state === 'unregistered' || status.state === 'unavailable') {
-          store.complete = null;
+          store.hardEpoch++; store.complete = null;
           if (status.state === 'unregistered') store.manualApplied = manualVersion;
           store.status = status.state === 'unregistered' ? { kind: 'unregistered' } : { kind: 'unavailable', reason: status.reason };
         } else if (status.state === 'unchanged') {
@@ -178,7 +168,7 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
             if (!mayCommit()) return;
             const chunk = parseChunk(rawChunk, target.preview.id, status.revision, status.totalBytes, offset);
             if (chunk.state === 'stale_revision') { abandoned = true; break; }
-            if (chunk.state === 'unavailable') { store.complete = null; store.status = { kind: 'unavailable', reason: chunk.reason }; abandoned = true; break; }
+            if (chunk.state === 'unavailable') { store.hardEpoch++; store.complete = null; store.status = { kind: 'unavailable', reason: chunk.reason }; abandoned = true; break; }
             bytes.set(chunk.bytes, offset); offset += chunk.bytes.length;
             if (chunk.done) break;
           } while (offset < status.totalBytes);
@@ -195,13 +185,13 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
         if (isActive()) {
           let retain = false;
           if (isTransient(error) && store.complete && client.securityRuntime && store.fingerprint) {
-            try { retain = authority(client, target.bridgeId) === store.fingerprint; } catch { retain = false; }
+            try { retain = sessionAuthority(client, target.bridgeId) === store.fingerprint; } catch { retain = false; }
           }
           if (!isActive()) return;
           if (retain && store.complete) store.status = { kind: 'ready', ...store.complete, updating: false };
           else {
             if (isAuthorityDenial(error)) store.manualApplied = store.manualRequested;
-            store.complete = null; store.status = { kind: 'error' };
+            store.hardEpoch++; store.complete = null; store.status = { kind: 'error' };
           }
           render();
         }
@@ -216,6 +206,7 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
   }, [client, userId, identity, target?.bridgeId, target?.sessionId, target?.preview.id, visible, readable, documentVisible, sendCommand, epoch, store]);
   const refresh = useCallback(() => refreshRef.current(), []);
   const state: PreviewState = !target ? { kind: 'unregistered' } : !client || (!readable && !store.complete) ? { kind: 'offline' } : store.status;
-  return { state, refresh };
+  const getHardEpoch = useCallback(() => storeRef.current.hardEpoch, []);
+  return { state, refresh, getHardEpoch };
 }
 export type SessionPreviewView = ReturnType<typeof useSessionPreview>;

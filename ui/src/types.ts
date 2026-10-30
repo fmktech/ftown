@@ -1,3 +1,4 @@
+import type { PreviewChatListRequest, PreviewChatWriteRequest } from '../../bridge/src/preview-chat-protocol';
 import type { SessionPreviewDescriptor, SessionPreviewStatusRequest, SessionPreviewChunkRequest } from '../../bridge/src/preview-protocol';
 
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error' | 'disconnected';
@@ -101,6 +102,7 @@ import type { GetBridgeUpdatePayload, UpdateBridgePayload } from '../../bridge/s
 import type { GetPullRequestStatusesPayload } from '../../bridge/src/pull-request-status-protocol';
 
 export type CommandType =
+  | 'preview_chat_list' | 'preview_chat_send' | 'preview_chat_reply'
   | 'session_preview_status' | 'session_preview_chunk'
   | 'get_bridge_update' | 'update_bridge' | 'get_pull_request_statuses'
   | 'get_session_attention' | 'resolve_session_attention'
@@ -185,7 +187,7 @@ export interface BridgeExecPayload {
   bridgeId?: string;
 }
 
-export type CommandPayload = GetPullRequestStatusesPayload | SessionPreviewStatusRequest | SessionPreviewChunkRequest | GetBridgeUpdatePayload | UpdateBridgePayload | GetSessionAttentionPayload | ResolveSessionAttentionPayload | CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>;
+export type CommandPayload = PreviewChatListRequest | PreviewChatWriteRequest | GetPullRequestStatusesPayload | SessionPreviewStatusRequest | SessionPreviewChunkRequest | GetBridgeUpdatePayload | UpdateBridgePayload | GetSessionAttentionPayload | ResolveSessionAttentionPayload | CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>;
 
 export interface CommandResponse {
   requestId: string;

@@ -1,3 +1,4 @@
+import { PREVIEW_SCROLL_CHANNEL, PREVIEW_SCROLL_MAX, PREVIEW_SCROLL_REPORT_MS, PREVIEW_SCROLL_RESTORE_MS } from './preview-scroll-protocol';
 import { PREVIEW_CHUNK_BYTES, PREVIEW_MAX_BYTES, type SessionPreviewDescriptor, type SessionPreviewStatus, type PreviewUnavailableReason } from '../../../bridge/src/preview-protocol';
 
 const revisionPattern = /^[0-9a-f]{64}$/;
@@ -78,8 +79,52 @@ const PREVIEW_LINK_SCRIPT = String.raw`<script>(() => {
     } catch { /* Invalid URLs do not navigate. */ }
   }, true);
 })();</script>`;
-export function previewDocument(html: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}"><meta name="referrer" content="no-referrer">${PREVIEW_LINK_SCRIPT}</head><body>${html}</body></html>`;
+function previewScrollScript(documentId: string): string {
+  return `<script>(() => {
+    const channel = ${JSON.stringify(PREVIEW_SCROLL_CHANNEL)}, id = ${JSON.stringify(documentId)}, max = ${PREVIEW_SCROLL_MAX};
+    const apply = Reflect.apply, keys = Object.keys, finite = Number.isFinite, isArray = Array.isArray;
+    const min = Math.min, maxValue = Math.max, every = Array.prototype.every, includes = Array.prototype.includes;
+    const timeout = window.setTimeout.bind(window), interval = window.setInterval.bind(window), clear = window.clearInterval.bind(window);
+    const sourceGetter = Object.getOwnPropertyDescriptor(MessageEvent.prototype, 'source').get;
+    const dataGetter = Object.getOwnPropertyDescriptor(MessageEvent.prototype, 'data').get;
+    const parent = window.parent, post = parent.postMessage, scrollTo = window.scrollTo;
+    const descriptor = name => Object.getOwnPropertyDescriptor(window, name) || Object.getOwnPropertyDescriptor(Window.prototype, name);
+    const xGetter = descriptor('scrollX')?.get, yGetter = descriptor('scrollY')?.get;
+    const getPosition = () => ({ x: maxValue(0, min(max, xGetter ? apply(xGetter, window, []) : 0)), y: maxValue(0, min(max, yGetter ? apply(yGetter, window, []) : 0)) });
+    const send = value => apply(post, parent, [value, '*']);
+    let restored = false, requested = false, loaded = document.readyState === 'complete', userMoved = false, queued = false, desired = null;
+    const report = kind => send({ channel, documentId: id, kind, ...getPosition() });
+    const finish = () => {
+      if (restored || !requested) return;
+      if (!userMoved && desired) apply(scrollTo, window, [{ left: desired.x, top: desired.y, behavior: 'instant' }]);
+      restored = true; report('restored');
+    };
+    const ready = () => { if (!restored) send({ channel, documentId: id, kind: 'ready' }); };
+    document.addEventListener('DOMContentLoaded', ready, { once: true });
+    window.addEventListener('load', () => { loaded = true; ready(); finish(); }, { once: true });
+    const readyTimer = interval(ready, ${PREVIEW_SCROLL_REPORT_MS});
+    timeout(() => clear(readyTimer), ${PREVIEW_SCROLL_RESTORE_MS});
+    for (const kind of ['wheel', 'touchstart', 'pointerdown', 'keydown']) window.addEventListener(kind, event => { if (!restored && event.isTrusted) { userMoved = true; finish(); } }, { capture: true, passive: true });
+    window.addEventListener('scroll', () => {
+      if (!restored || queued) return;
+      queued = true; timeout(() => { queued = false; report('position'); }, ${PREVIEW_SCROLL_REPORT_MS});
+    }, { passive: true });
+    window.addEventListener('message', event => {
+      const source = apply(sourceGetter, event, []), data = apply(dataGetter, event, []);
+      if (source !== parent || !data || typeof data !== 'object' || isArray(data)) return;
+      const names = keys(data);
+      if (data.channel !== channel || data.documentId !== id) return;
+      if (data.kind === 'snapshot-request' && names.length === 4 && typeof data.requestId === 'string' && data.requestId.length <= 64 && apply(every, names, [name => apply(includes, ['channel','documentId','kind','requestId'], [name])])) {
+        send({ channel, documentId: id, kind: 'snapshot', requestId: data.requestId, ...getPosition() });
+      } else if (data.kind === 'restore' && !requested && names.length === 5 && apply(every, names, [name => apply(includes, ['channel','documentId','kind','x','y'], [name])]) && typeof data.x === 'number' && typeof data.y === 'number' && finite(data.x) && finite(data.y) && data.x >= 0 && data.y >= 0 && data.x <= max && data.y <= max) {
+        requested = true; desired = { x: data.x, y: data.y };
+        if (loaded) finish(); else timeout(finish, ${PREVIEW_SCROLL_RESTORE_MS});
+      }
+    });
+  })();</script>`;
+}
+export function previewDocument(html: string, documentId?: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}"><meta name="referrer" content="no-referrer">${PREVIEW_LINK_SCRIPT}${documentId ? previewScrollScript(documentId) : ""}</head><body>${html}</body></html>`;
 }
 export function previewRatioBounds(width: number): [number, number] {
   const usable = Math.max(1, width - 8);

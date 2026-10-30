@@ -43,8 +43,9 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
   const otherFileName = "other.html";
   const path = join(fixture.directory, fileName);
   const otherPath = join(fixture.directory, otherFileName);
-  const first = previewHtml(marker, 1, true);
-  const second = previewHtml(marker, 2, true);
+  const tall = (html: string) => html.replace("</body>", '<div style="height:2400px">Scroll fixture</div></body>');
+  const first = tall(previewHtml(marker, 1, true));
+  const second = tall(previewHtml(marker, 2, true));
   expect(Buffer.byteLength(first)).toBeGreaterThan(98_304);
   expect(Buffer.byteLength(first)).toBe(Buffer.byteLength(second));
   let prohibitedRequests = 0;
@@ -198,6 +199,10 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     if (!expandedMain || !expandedPreview) throw new Error("Expanded preview geometry unavailable");
     expect(Math.abs(expandedPreview.x - expandedMain.x)).toBeLessThanOrEqual(2);
     expect(Math.abs(expandedPreview.width - expandedMain.width)).toBeLessThanOrEqual(2);
+    await page.getByRole("button", { name: "Open conversation", exact: true }).click();
+    await page.getByRole("textbox", { name: "Message the agent" }).fill("Draft survives preview refresh");
+    await screenshot(page, info, "preview-expanded-conversation");
+    await page.getByRole("button", { name: "Collapse conversation", exact: true }).click();
     await screenshot(page, info, "preview-expanded");
     await expect(page.locator(`.xterm[data-preview-fixture-terminal="${suffix}"]`)).toHaveCount(1);
     await expect(page.locator(".xterm")).not.toBeVisible();
@@ -208,17 +213,30 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     await expect(page.locator(".xterm")).toBeVisible();
     await expect(iframe(page, fileName)).toHaveAttribute("data-preview-node", suffix);
     await expect(count).toHaveText("Count: 1");
+    await documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollTo(0, 600));
+    await expect.poll(() => documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollY)).toBeGreaterThan(500);
     await separator(page).focus();
     await atomicHtml(path, second);
-    await expect(documentFrame(page, fileName).getByRole("heading", { name: `${marker} version 2`, exact: true })).toBeVisible();
-    await expect(documentFrame(page, fileName).getByRole("button", { name: "Count: 0", exact: true })).toBeVisible();
+    await expect(documentFrame(page, fileName).getByRole("heading", { name: `${marker} version 2`, exact: true })).toHaveCount(1);
+    await expect.poll(() => documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollY)).toBeGreaterThan(500);
+    await expect(documentFrame(page, fileName).getByRole("button", { name: "Count: 0", exact: true })).toHaveCount(1);
     await expect(separator(page)).toBeFocused();
     await noHorizontalOverflow(page);
     await screenshot(page, info, "preview-desktop");
+    await page.getByRole("button", { name: "Expand preview", exact: true }).click();
+    await page.getByRole("button", { name: "Open conversation", exact: true }).click();
+    await expect(page.getByRole("textbox", { name: "Message the agent" })).toHaveValue("Draft survives preview refresh");
+    await page.getByRole("button", { name: "Collapse conversation", exact: true }).click();
+    await page.getByRole("button", { name: "Collapse preview", exact: true }).click();
 
     await documentFrame(page, fileName).getByRole("button", { name: "Count: 0", exact: true }).click();
+    await documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollTo(0, 600));
+    await expect.poll(() => documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollY)).toBeGreaterThan(500);
     await page.getByRole("button", { name: "Refresh preview", exact: true }).click();
-    await expect(documentFrame(page, fileName).getByRole("button", { name: "Count: 0", exact: true })).toBeVisible();
+    await expect(documentFrame(page, fileName).getByRole("button", { name: "Count: 0", exact: true })).toHaveCount(1);
+    await expect.poll(() => documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollY)).toBeGreaterThan(500);
+    await atomicHtml(path, previewHtml(marker, 2, true));
+    await expect.poll(() => documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollY)).toBeLessThan(600);
     await page.getByRole("button", { name: "Close preview", exact: true }).click();
     await expect(iframe(page, fileName)).not.toBeVisible();
     await atomicHtml(path, previewHtml(marker, 3, true));
@@ -239,6 +257,7 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     await fixture.register(other, otherFileName);
     await selectSession(page, otherName);
     await expect(documentFrame(page, otherFileName).getByRole("heading", { name: `OTHER_${suffix} version 1`, exact: true })).toBeVisible();
+    expect(await documentFrame(page, otherFileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollY)).toBe(0);
     await page.getByRole("button", { name: "Close preview", exact: true }).click();
     await selectSession(page, targetName);
     await expect(documentFrame(page, fileName).getByRole("heading", { name: `${marker} version 3`, exact: true })).toBeVisible();
@@ -320,6 +339,11 @@ test.describe("mobile preview", () => {
         expect(box!.width).toBeGreaterThanOrEqual(44);
       }
       await noHorizontalOverflow(page);
+      await page.getByRole("button", { name: "Expand preview", exact: true }).click();
+      await page.getByRole("button", { name: "Open conversation", exact: true }).click();
+      await screenshot(page, info, "preview-mobile-conversation");
+      await page.getByRole("button", { name: "Collapse conversation", exact: true }).click();
+      await page.getByRole("button", { name: "Collapse preview", exact: true }).click();
       await screenshot(page, info, "preview-mobile");
       await iframe(page, fileName).evaluate((element, value) => element.setAttribute("data-preview-node", value), suffix);
       const count = documentFrame(page, fileName).getByRole("button", { name: "Count: 0", exact: true });
