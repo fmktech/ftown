@@ -26,7 +26,7 @@ for (const mobile of [false, true]) {
       await waitForBridgeOnline(page);
       await page.getByRole("button", { name: new RegExp(priorName) }).click();
       await expect(page.locator("main").getByText(priorName, { exact: true })).toBeVisible();
-      if (mobile) await page.getByRole("button", { name: "Workspace", exact: true }).click();
+      if (mobile) await page.getByRole("tab", { name: "Workspace", exact: true }).click();
       const pagesBefore = page.context().pages();
       const urlBefore = page.url();
       await createShellSession(page, createdName);
@@ -34,7 +34,7 @@ for (const mobile of [false, true]) {
       // Deliberately never open/click the newly created sidebar row.
       await expect(page.locator("main").getByText(createdName, { exact: true })).toBeVisible();
       await expect(page.locator("main .xterm")).toBeVisible();
-      if (mobile) await expect(page.getByRole("button", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
+      if (mobile) await expect(page.getByRole("tab", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
       await runMarkerInTerminal(page, `AUTOSELECT${Date.now()}`);
       const inventory = await rows();
       const created = inventory.find(session => session.name === createdName);

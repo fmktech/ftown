@@ -471,7 +471,7 @@ describe('LocalApiServer explicit session attention and PR metadata', () => {
     const f = await sessionToolsFixture(t);
     const path = `/api/sessions/${f.sample.id}/attention`;
     const capabilities = await api(f.port, f.token, 'GET', `/api/sessions/${f.sample.id}`);
-    assert.deepEqual(capabilities.data.capabilities, { attention: { version: 1, request: true }, sessionMetadata: { pullRequest: true } });
+    assert.deepEqual(capabilities.data.capabilities, { attention: { version: 1, request: true }, sessionMetadata: { pullRequest: true, preview: true } });
     const body = { title: '  Review requested  ', message: '\x1b[31mApprove API_KEY=secret-value before proceeding\x1b[0m' };
     const first = await api(f.port, f.token, 'POST', path, body);
     assert.equal(first.status, 200);
@@ -541,7 +541,7 @@ describe('LocalApiServer explicit session attention and PR metadata', () => {
     const f = await sessionToolsFixture(t, false);
     const path = `/api/sessions/${f.sample.id}/attention`;
     const capabilities = await api(f.port, f.token, 'GET', `/api/sessions/${f.sample.id}`);
-    assert.deepEqual(capabilities.data.capabilities, { sessionMetadata: { pullRequest: true } });
+    assert.deepEqual(capabilities.data.capabilities, { sessionMetadata: { pullRequest: true, preview: true } });
     const unavailable = await api(f.port, f.token, 'POST', path, { message: 'valid' });
     assert.equal(unavailable.status, 503); assert.equal(unavailable.data.code, 'attention_not_ready');
     class BrokenStore extends AttentionStore {

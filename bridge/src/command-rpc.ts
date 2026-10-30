@@ -14,6 +14,8 @@ import type { SessionController } from './session-controller.js';
 import { AttentionError, type AttentionStore } from './attention-store.js';
 import { BridgeUpdateError, type BridgeUpdateCoordinator } from './bridge-update.js';
 import type { UpdateEffects } from './update-effects.js';
+import { validPreviewId, validRevision } from './session-preview.js';
+import { PREVIEW_CHUNK_BYTES } from './preview-protocol.js';
 
 import type {
   BridgeExecPayload,
@@ -83,6 +85,29 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
       if (deps.security && !verified) throw new Error('approval_required');
       if (deps.security && verified && command.type !== 'security_activate_mcp') await deps.security.revalidate(verified.principal);
       switch (command.type) {
+        case 'session_preview_status':
+        case 'session_preview_chunk': {
+          const payload = command.payload;
+          const keys = Object.keys(payload);
+          const common = ['bridgeId', 'sessionId', 'previewId'];
+          const allowed = command.type === 'session_preview_status' ? [...common, 'knownRevision'] : [...common, 'revision', 'offset'];
+          if (keys.some(key => !allowed.includes(key)) || !('bridgeId' in payload) || payload.bridgeId !== bridgeId
+            || !('sessionId' in payload) || typeof payload.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(payload.sessionId)
+            || !('previewId' in payload) || !validPreviewId(payload.previewId)
+            || (command.type === 'session_preview_status' && 'knownRevision' in payload && !validRevision(payload.knownRevision))
+            || (command.type === 'session_preview_chunk' && (!('revision' in payload) || !validRevision(payload.revision)
+              || !('offset' in payload) || typeof payload.offset !== 'number' || !Number.isSafeInteger(payload.offset)
+              || payload.offset < 0 || payload.offset % PREVIEW_CHUNK_BYTES !== 0))) {
+            response = { requestId: command.requestId, success: false, error: 'Invalid preview request', data: { code: 'invalid' } };
+            break;
+          }
+          const result = command.type === 'session_preview_status'
+            ? await sessionController.getPreviewStatus(payload.sessionId, payload.previewId, 'knownRevision' in payload && typeof payload.knownRevision === 'string' ? payload.knownRevision : undefined)
+            : await sessionController.getPreviewChunk(payload.sessionId, payload.previewId, 'revision' in payload && typeof payload.revision === 'string' ? payload.revision : '', 'offset' in payload && typeof payload.offset === 'number' ? payload.offset : -1);
+          response = result.ok ? { requestId: command.requestId, success: true, data: result.preview }
+            : { requestId: command.requestId, success: false, error: result.message, data: { code: result.code } };
+          break;
+        }
         case 'get_bridge_update':
         case 'update_bridge': {
           if (!verified || !deps.security || !deps.updates || !deps.updateEffects || payloadBridgeId !== bridgeId) throw new BridgeUpdateError('invalid_update_request', 'Update request unavailable');

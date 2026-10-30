@@ -381,3 +381,23 @@ body {
     display: flex !important;
   }
 }
+
+/* Session HTML preview */
+.session-workspace { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+.session-workspace-panes { display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
+.session-terminal-pane { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
+.session-terminal-pane[hidden], .session-preview-pane[hidden] { display: none; }
+.session-preview-pane { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--bg-surface); }
+.session-preview-toolbar { display: flex; align-items: center; gap: 8px; padding: 0 8px; min-height: 44px; border-bottom: 1px solid var(--border-subtle); }
+.session-preview-toolbar button { min-height: 44px; flex: none; }
+.session-preview-filename { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.session-preview-auto { color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+.session-preview-content { position: relative; flex: 1; min-height: 0; min-width: 0; }
+.session-preview-content iframe { display: block; width: 100%; height: 100%; border: 0; background: white; }
+.session-preview-message { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--text-muted); font-size: 13px; }
+.session-preview-message button { min-height: 44px; }
+.session-preview-updating { position: absolute; right: 8px; top: 8px; padding: 4px 8px; color: var(--text-muted); background: var(--bg-surface); font-size: 11px; }
+.session-preview-separator { flex: 0 0 8px; cursor: col-resize; touch-action: none; background: var(--border-subtle); }
+.session-preview-separator:hover, .session-preview-separator:focus-visible { background: var(--accent-dim); }
+.session-preview-drag-shield { position: absolute; inset: 0; cursor: col-resize; }
+.session-preview-tabs { display: flex; flex: none; border-bottom: 1px solid var(--border-muted); background: var(--bg-surface); }

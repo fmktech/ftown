@@ -116,7 +116,7 @@ export async function createAccountShell(page: Page, bridgeId: string, name: str
   await page.locator("#ns-shell-type").selectOption("shell"); await page.locator("#ns-bridge").selectOption(bridgeId);
   await page.getByPlaceholder("Optional name for this session").fill(name);
   await page.getByRole("button", { name: "Create Session", exact: true }).click();
-  const workspace = page.getByRole("button", { name: "Workspace", exact: true });
+  const workspace = page.getByRole("tab", { name: "Workspace", exact: true });
   if (await workspace.isVisible()) await workspace.click();
   await expect(page.getByRole("button", { name: new RegExp(name) })).toBeVisible({ timeout: 30000 });
 }

@@ -10,6 +10,6 @@ import type { Session } from './types.js';
  * for egress. The input is never mutated.
  */
 export function toWireSession(session: Session): Session {
-  const { env: _env, ...rest } = session;
+  const { env: _env, previewSource: _previewSource, ...rest } = session;
   return rest;
 }
