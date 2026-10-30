@@ -175,6 +175,11 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 1000, height: 900
         await scene.screenshot({ path: info.outputPath(`ai-playing-${item.kind}-${viewport.width}.png`) });
       }
     }
+    if (viewport.width === 1280) {
+      // A live desktop-to-mobile resize must preserve the public heading.
+      await page.setViewportSize({ width: 390, height: 844 });
+      await expect(page.getByRole("heading", { name: "Your fleet, in your MCP client." })).toBeVisible();
+    }
     expect(pageErrors).toEqual([]);
   });
 }

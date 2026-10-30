@@ -65,17 +65,3 @@ for (const storedTab of ["crons", "factory"]) {
     }
   });
 }
-
-test("landing page presents MCP fleet control and attention with current setup guidance", async ({ page }, testInfo) => {
-  await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Your fleet, in your MCP client." })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Keep questions in view" })).toBeVisible();
-  await expect(page.getByText("https://ftown-mcp.fly.dev/mcp", { exact: true })).toBeVisible();
-  await expect(page.getByRole("link", { name: "MCP setup & capabilities" })).toHaveAttribute("href", "https://github.com/fmktech/ftown/blob/main/docs/mcp.md");
-  await expect(page.locator("body")).not.toContainText(/Scheduled loops|Cron for agents|Per-loop controls/);
-  await expect(page.locator('meta[name="description"]')).toHaveAttribute("content", /MCP fleet control/);
-  await page.screenshot({ path: testInfo.outputPath("landing-desktop.png"), fullPage: true });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.getByRole("heading", { name: "Your fleet, in your MCP client." })).toBeVisible();
-  await page.screenshot({ path: testInfo.outputPath("landing-mobile.png"), fullPage: true });
-});

@@ -130,8 +130,8 @@ async function accessMapEvidence(page: Page, info: TestInfo, bridgeIds: string[]
   await page.setViewportSize({ width: 1280, height: 900 });
 }
 
-for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
-  test(`account trust: one computer confirmation, one device approval, future computers and durable two-tab pins (${viewport.width})`, async ({ browser }, info) => {
+test("account trust: desktop and mobile confirmation, future computers and durable two-tab pins", async ({ browser }, info) => {
+    const viewport = { width: 1280, height: 900 };
     test.setTimeout(300000);
     const user = makeUser(`account-${viewport.width}`); await registerUser(user.email, user.password);
     const contexts: BrowserContext[] = []; const bridges: AccountTestBridge[] = []; let primaryFailed = false;
@@ -145,18 +145,22 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       const initial = (await accountBrowserState(page))[0];
       expect(initial.hpkeExtractable).toBe(false); expect(initial.signingExtractable).toBe(false);
       expect(initial.trust?.checkpoint.devices).toHaveLength(1);
-      await navigationEvidence(page, info);
+      await test.step("responsive navigation", async () => { await navigationEvidence(page, info); });
       await openSecurityNavigation(page);
-      await expect(page.getByRole("tab", { name: "Access", exact: true })).toHaveAttribute("aria-selected", "true");
-      await expect(page.getByRole("heading", { name: "Your computers", exact: true })).toBeVisible();
-      await expect(page.locator(`[data-computer-access="${firstId}"]`)).toContainText("Shared with your approved browsers", { timeout: 60000 });
-      await noOverflow(page); await page.screenshot({ path: info.outputPath(`security-access-${viewport.width}.png`), fullPage: true });
-      await expect(page.getByRole("button", { name: /^Remove access for / })).toBeDisabled();
-      await expect(page.getByText(/last account administrator/)).toBeVisible(); await noOverflow(page);
-      await page.screenshot({ path: info.outputPath("account-first-device.png"), fullPage: true });
+      for (const size of [viewport, { width: 390, height: 844 }]) {
+        await page.setViewportSize(size);
+        await expect(page.getByRole("tab", { name: "Access", exact: true })).toHaveAttribute("aria-selected", "true");
+        await expect(page.getByRole("heading", { name: "Your computers", exact: true })).toBeVisible();
+        await expect(page.locator(`[data-computer-access="${firstId}"]`)).toContainText("Shared with your approved browsers", { timeout: 60000 });
+        await expect(page.getByRole("button", { name: /^Remove access for / })).toBeDisabled();
+        await expect(page.getByText(/last account administrator/)).toBeVisible(); await noOverflow(page);
+        await page.screenshot({ path: info.outputPath(`security-access-${size.width}.png`), fullPage: true });
+        await page.screenshot({ path: info.outputPath(`account-first-device-${size.width}.png`), fullPage: true });
+      }
       await page.getByRole("button", { name: "Close security" }).click();
       const second = await startAccountTestBridge(origin); bridges.push(second);
       const secondId = await approveAccountComputer(page, second);
+      await page.setViewportSize(viewport);
 
       const phoneContext = await browser.newContext({ baseURL: origin, ignoreHTTPSErrors: false, viewport: { width: 390, height: 844 } }); contexts.push(phoneContext);
       const directPorts = new Set([readBridgePointer(first.home).port, readBridgePointer(second.home).port].map(String));
@@ -210,34 +214,47 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       const invalid = await desktop.newPage(); await invalid.goto(tampered.href);
       await expect(invalid.getByRole("alert").filter({ hasText: /\S/ })).toBeVisible(); await invalid.close();
       await page.goto(privateLink); await expect(page).toHaveURL(`${origin}/devices/approve`);
-      await expect(page.getByLabel("Comparison code", { exact: true })).toHaveText(comparison!);
-      await noOverflow(page); await page.screenshot({ path: info.outputPath("account-device-confirmation.png"), fullPage: true });
-      // Simulate an ambiguous reply only after the real server commits the
-      // approval. The retry must deliver the same request without adding again.
-      const enrollmentRoute = (url: URL) => url.pathname === enrollmentPath;
-      let committedResponseDropped = false;
-      await page.route(enrollmentRoute, async route => {
-        if (route.request().method() === "POST" && !committedResponseDropped) {
-          const committed = await route.fetch();
-          if (!committed.ok()) { await route.fulfill({ response: committed }); return; }
-          committedResponseDropped = true;
-          await route.abort("connectionreset");
-        } else await route.continue();
+      for (const size of [viewport, { width: 390, height: 844 }]) {
+        await page.setViewportSize(size);
+        await expect(page.getByLabel("Comparison code", { exact: true })).toBeVisible();
+        await expect(page.getByLabel("Comparison code", { exact: true })).toHaveText(comparison!);
+        await expect(page.getByRole("button", { name: "Codes match — approve device", exact: true })).toBeVisible();
+        await noOverflow(page); await page.screenshot({ path: info.outputPath(`account-device-confirmation-${size.width}.png`), fullPage: true });
+      }
+      await page.setViewportSize(viewport);
+      await test.step("lost response approval and mobile retry", async () => {
+        // Simulate an ambiguous reply only after the real server commits the
+        // approval. The retry must deliver the same request without adding again.
+        const enrollmentRoute = (url: URL) => url.pathname === enrollmentPath;
+        let committedResponseDropped = false;
+        await page.route(enrollmentRoute, async route => {
+          if (route.request().method() === "POST" && !committedResponseDropped) {
+            const committed = await route.fetch();
+            if (!committed.ok()) { await route.fulfill({ response: committed }); return; }
+            committedResponseDropped = true;
+            await route.abort("connectionreset");
+          } else await route.continue();
+        });
+        const approve = page.getByRole("button", { name: "Codes match — approve device", exact: true });
+        await approve.click();
+        await expect.poll(() => committedResponseDropped, { timeout: 15000 }).toBe(true);
+        await expect(page.getByRole("alert").filter({ hasText: /\S/ })).toBeVisible();
+        await expect(approve).toBeEnabled();
+        const committedTrust = (await accountBrowserState(page))[0].trust!;
+        expect(committedTrust.checkpoint.devices.filter(device => device.endpoint.id === pendingIdentity.endpointId)).toHaveLength(1);
+        await page.setViewportSize({ width: 390, height: 844 });
+        await expect(page.getByRole("alert").filter({ hasText: /\S/ })).toBeVisible();
+        await expect(page.getByLabel("Comparison code", { exact: true })).toBeVisible();
+        await expect(page.getByLabel("Comparison code", { exact: true })).toHaveText(comparison!);
+        await expect(approve).toBeVisible(); await expect(approve).toBeEnabled(); await noOverflow(page);
+        await approve.click();
+        await expect(page.getByText(/Device approved\. It can now finish connecting/)).toBeVisible();
+        await expect(page.getByRole("alert").filter({ hasText: /\S/ })).toHaveCount(0);
+        const retriedTrust = (await accountBrowserState(page))[0].trust!;
+        expect(retriedTrust.checkpoint.revision).toBe(committedTrust.checkpoint.revision);
+        expect(retriedTrust.checkpoint.devices.filter(device => device.endpoint.id === pendingIdentity.endpointId)).toHaveLength(1);
+        await page.unroute(enrollmentRoute);
       });
-      const approve = page.getByRole("button", { name: "Codes match — approve device", exact: true });
-      await approve.click();
-      await expect.poll(() => committedResponseDropped, { timeout: 15000 }).toBe(true);
-      await expect(page.getByRole("alert").filter({ hasText: /\S/ })).toBeVisible();
-      await expect(approve).toBeEnabled();
-      const committedTrust = (await accountBrowserState(page))[0].trust!;
-      expect(committedTrust.checkpoint.devices.filter(device => device.endpoint.id === pendingIdentity.endpointId)).toHaveLength(1);
-      await approve.click();
-      await expect(page.getByText(/Device approved\. It can now finish connecting/)).toBeVisible();
-      await expect(page.getByRole("alert").filter({ hasText: /\S/ })).toHaveCount(0);
-      const retriedTrust = (await accountBrowserState(page))[0].trust!;
-      expect(retriedTrust.checkpoint.revision).toBe(committedTrust.checkpoint.revision);
-      expect(retriedTrust.checkpoint.devices.filter(device => device.endpoint.id === pendingIdentity.endpointId)).toHaveLength(1);
-      await page.unroute(enrollmentRoute);
       await expect(phone.locator(`[data-bridge-row="${firstId}"]`)).toBeVisible({ timeout: 60000 });
       await expect(phone.locator(`[data-bridge-row="${secondId}"]`)).toBeVisible({ timeout: 60000 });
       await expect(phone.getByRole("heading", { name: "Approve this device", exact: true })).toHaveCount(0);
@@ -246,19 +263,22 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       expect(phoneIdentity.hpkeExtractable).toBe(false); expect(phoneIdentity.signingExtractable).toBe(false);
       const existingNames = [firstId, secondId].map((_, index) => `ACCOUNT_PRIVATE_${viewport.width}_${index}_${Date.now()}`);
       for (const [index, bridgeId] of [firstId, secondId].entries()) await createAccountShell(phone, bridgeId, existingNames[index]);
-      // The user's mobile reconnect action must perform a real document reload
-      // and restore the same approved identity, bridges and running sessions.
-      await phone.getByRole("button", { name: "Open navigation menu", exact: true }).click();
-      await Promise.all([
-        phone.waitForEvent("load", { timeout: 30000 }),
-        phone.getByRole("navigation", { name: "Dashboard actions" }).getByRole("button", { name: "Reconnect and refresh", exact: true }).click(),
-      ]);
-      for (const bridgeId of [firstId, secondId]) await expect(phone.locator(`[data-bridge-row="${bridgeId}"]`)).toBeVisible({ timeout: 60000 });
-      expect((await accountBrowserState(phone))[0].endpointId).toBe(phoneIdentity.endpointId);
-      for (const name of existingNames) await expect(phone.getByRole("button", { name: new RegExp(name) })).toBeVisible({ timeout: 60000 });
+      await test.step("mobile reconnect", async () => {
+        // The user's mobile reconnect action must perform a real document reload
+        // and restore the same approved identity, bridges and running sessions.
+        await phone.getByRole("button", { name: "Open navigation menu", exact: true }).click();
+        await Promise.all([
+          phone.waitForEvent("load", { timeout: 30000 }),
+          phone.getByRole("navigation", { name: "Dashboard actions" }).getByRole("button", { name: "Reconnect and refresh", exact: true }).click(),
+        ]);
+        for (const bridgeId of [firstId, secondId]) await expect(phone.locator(`[data-bridge-row="${bridgeId}"]`)).toBeVisible({ timeout: 60000 });
+        expect((await accountBrowserState(phone))[0].endpointId).toBe(phoneIdentity.endpointId);
+        for (const name of existingNames) await expect(phone.getByRole("button", { name: new RegExp(name) })).toBeVisible({ timeout: 60000 });
+      });
 
+      await page.setViewportSize(viewport);
       await page.goto("/dashboard");
-      if (viewport.width >= 768) {
+      await test.step("desktop reconnect", async () => {
         await expect(page.locator(`[data-bridge-row="${firstId}"]`)).toBeVisible({ timeout: 60000 });
         await Promise.all([
           page.waitForEvent("load", { timeout: 30000 }),
@@ -267,7 +287,7 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
         for (const bridgeId of [firstId, secondId]) await expect(page.locator(`[data-bridge-row="${bridgeId}"]`)).toBeVisible({ timeout: 60000 });
         expect((await accountBrowserState(page))[0].endpointId).toBe(initial.endpointId);
         for (const name of existingNames) await expect(page.getByRole("button", { name: new RegExp(name) })).toBeVisible({ timeout: 60000 });
-      }
+      });
       const accountRead = await page.request.get(`${origin}/api/security/account`); expect(accountRead.ok()).toBe(true);
       const oldHistory: unknown = await accountRead.json();
       const staleTab = await desktop.newPage(); let release: () => void = () => {};
@@ -281,69 +301,83 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       });
       await staleTab.goto("/dashboard"); await expect.poll(() => delayedOnce, { timeout: 30000 }).toBe(true);
       try {
-        const third = await startAccountTestBridge(origin); bridges.push(third);
-        const thirdId = await approveAccountComputer(page, third); directPorts.add(String(readBridgePointer(third.home).port));
-        const advanced = (await accountBrowserState(page))[0];
-        expect(advanced.trust!.checkpoint.revision).toBeGreaterThan(phoneIdentity.trust!.checkpoint.revision);
-        release();
-        await expect(staleTab.getByRole("alert").filter({ hasText: /\S/ })).toContainText(/older than|rollback|trust|conflict/i, { timeout: 30000 });
-        const durable = (await accountBrowserState(page))[0];
-        expect(durable.trust!.checkpoint.head).toBe(advanced.trust!.checkpoint.head);
-        expect(durable.trust!.lastServerReadAt).toBeGreaterThanOrEqual(advanced.trust!.lastServerReadAt);
-        expect(durable.trust!.lastObservedAt).toBeGreaterThanOrEqual(advanced.trust!.lastObservedAt);
-        expect(durable.endpointId).toBe(initial.endpointId);
-        await expect(phone.locator(`[data-bridge-row="${thirdId}"]`)).toBeVisible({ timeout: 60000 });
-        const privateName = `ACCOUNT_FUTURE_PRIVATE_${Date.now()}`; await createAccountShell(phone, thirdId, privateName);
-        await openSession(phone, privateName);
-        const terminalTab = phone.getByRole("tab", { name: "Terminal", exact: true });
-        if (await terminalTab.isVisible()) await terminalTab.click();
-        const marker = `ACCOUNT_TERMINAL_PRIVATE_${Date.now()}`; await runMarkerInTerminal(phone, marker);
-        await expect(phone.locator("text=/^(P2P|Local|Cloud)$/").first()).toHaveText("Cloud", { timeout: 15000 });
-        expect(frames.some(frame => frame.includes("ftown_encrypted"))).toBe(true);
-        expect(frames.some(frame => frame.includes(privateName) || frame.includes(marker))).toBe(false);
-        if (viewport.width === 1280) {
-          // The private-link switch cancels locally even if the relay failed.
-          // Read the server inbox explicitly, then reject only this test-owned
-          // phone request if it is still active before creating the layout row.
-          const inboxResponse = await page.request.get(`${origin}/api/security/approvals`);
-          expect(inboxResponse.ok()).toBe(true);
-          const inbox = await inboxResponse.json() as { requests: { request: { requestId: string }; status: string }[] };
-          const phoneRequest = inbox.requests.find(item => item.request.requestId === phoneAutomaticRequestId);
-          if (phoneRequest && !["cancelled", "rejected", "expired", "conflict"].includes(phoneRequest.status)) {
-            expect(phoneRequest.status).not.toBe("approved");
-            await openSecurityNavigation(page);
-            const oldRow = page.locator(`[data-pending-request="${phoneAutomaticRequestId}"]`);
-            await expect(oldRow).toBeVisible();
-            await oldRow.getByRole("button", { name: "Reject", exact: true }).click();
-            await expect(oldRow).toHaveCount(0);
-            await page.getByRole("button", { name: "Close security" }).click();
+        await test.step("future computer, stale tab and cloud terminal privacy", async () => {
+          const third = await startAccountTestBridge(origin); bridges.push(third);
+          const thirdId = await approveAccountComputer(page, third); directPorts.add(String(readBridgePointer(third.home).port));
+          const advanced = (await accountBrowserState(page))[0];
+          expect(advanced.trust!.checkpoint.revision).toBeGreaterThan(phoneIdentity.trust!.checkpoint.revision);
+          release();
+          await expect(staleTab.getByRole("alert").filter({ hasText: /\S/ })).toContainText(/older than|rollback|trust|conflict/i, { timeout: 30000 });
+          const durable = (await accountBrowserState(page))[0];
+          expect(durable.trust!.checkpoint.head).toBe(advanced.trust!.checkpoint.head);
+          expect(durable.trust!.lastServerReadAt).toBeGreaterThanOrEqual(advanced.trust!.lastServerReadAt);
+          expect(durable.trust!.lastObservedAt).toBeGreaterThanOrEqual(advanced.trust!.lastObservedAt);
+          expect(durable.endpointId).toBe(initial.endpointId);
+          await expect(phone.locator(`[data-bridge-row="${thirdId}"]`)).toBeVisible({ timeout: 60000 });
+          const privateName = `ACCOUNT_FUTURE_PRIVATE_${Date.now()}`; await createAccountShell(phone, thirdId, privateName);
+          await openSession(phone, privateName);
+          const terminalTab = phone.getByRole("tab", { name: "Terminal", exact: true });
+          if (await terminalTab.isVisible()) await terminalTab.click();
+          const marker = `ACCOUNT_TERMINAL_PRIVATE_${Date.now()}`; await runMarkerInTerminal(phone, marker);
+          await expect(phone.locator("text=/^(P2P|Local|Cloud)$/").first()).toHaveText("Cloud", { timeout: 15000 });
+          expect(frames.some(frame => frame.includes("ftown_encrypted"))).toBe(true);
+          expect(frames.some(frame => frame.includes(privateName) || frame.includes(marker))).toBe(false);
+          {
+            // The private-link switch cancels locally even if the relay failed.
+            // Read the server inbox explicitly, then reject only this test-owned
+            // phone request if it is still active before creating the layout row.
+            const inboxResponse = await page.request.get(`${origin}/api/security/approvals`);
+            expect(inboxResponse.ok()).toBe(true);
+            const inbox = await inboxResponse.json() as { requests: { request: { requestId: string }; status: string }[] };
+            const phoneRequest = inbox.requests.find(item => item.request.requestId === phoneAutomaticRequestId);
+            if (phoneRequest && !["cancelled", "rejected", "expired", "conflict"].includes(phoneRequest.status)) {
+              expect(phoneRequest.status).not.toBe("approved");
+              await openSecurityNavigation(page);
+              const oldRow = page.locator(`[data-pending-request="${phoneAutomaticRequestId}"]`);
+              await expect(oldRow).toBeVisible();
+              await oldRow.getByRole("button", { name: "Reject", exact: true }).click();
+              await expect(oldRow).toHaveCount(0);
+              await page.getByRole("button", { name: "Close security" }).click();
+            }
+            // A fresh unapproved browser creates a real pending approval, keeping
+            // the inbox expanded during the responsive access-map measurements.
+            const pendingContext = await browser.newContext({ baseURL: origin, ignoreHTTPSErrors: false, viewport: { width: 390, height: 844 } }); contexts.push(pendingContext);
+            const pendingPage = await pendingContext.newPage(); await login(pendingPage, user.email, user.password, { pairBridge: false });
+            await expect(pendingPage.getByRole("heading", { name: "Waiting for device approval", exact: true })).toBeVisible();
+            await expect.poll(async () => (await pendingBrowserRequest(pendingPage))?.requestId ?? "", { timeout: 15000 }).not.toBe("");
+            const pendingRequestId = (await pendingBrowserRequest(pendingPage))!.requestId!;
+            expect((await accountBrowserState(pendingPage))[0].trust).toBeNull();
+            await test.step("responsive access map with pending approval", async () => { await accessMapEvidence(page, info, [firstId, secondId, thirdId], phoneIdentity.endpointId, pendingRequestId); });
           }
-          // A fresh unapproved browser creates a real pending approval, keeping
-          // the inbox expanded during the responsive access-map measurements.
-          const pendingContext = await browser.newContext({ baseURL: origin, ignoreHTTPSErrors: false, viewport: { width: 390, height: 844 } }); contexts.push(pendingContext);
-          const pendingPage = await pendingContext.newPage(); await login(pendingPage, user.email, user.password, { pairBridge: false });
-          await expect(pendingPage.getByRole("heading", { name: "Waiting for device approval", exact: true })).toBeVisible();
-          await expect.poll(async () => (await pendingBrowserRequest(pendingPage))?.requestId ?? "", { timeout: 15000 }).not.toBe("");
-          const pendingRequestId = (await pendingBrowserRequest(pendingPage))!.requestId!;
-          expect((await accountBrowserState(pendingPage))[0].trust).toBeNull();
-          await accessMapEvidence(page, info, [firstId, secondId, thirdId], phoneIdentity.endpointId, pendingRequestId);
-        }
+        });
       } finally { release(); await staleTab.close(); }
 
-      await devices(page); await noOverflow(page);
-      await expect(page.getByRole("list", { name: "Account devices", exact: true })).toContainText("Account test phone");
-      await page.screenshot({ path: info.outputPath("account-devices.png"), fullPage: true });
-      await page.getByRole("button", { name: /^Browser Account test phone:/ }).click();
-      await page.getByRole("button", { name: "Remove access for Account test phone", exact: true }).click();
-      await page.getByRole("button", { name: "Confirm remove access", exact: true }).click();
-      await expect(page.getByRole("list", { name: "Account devices", exact: true })).not.toContainText("Account test phone");
-      await expect(page.getByRole("button", { name: /^Remove access for / })).toBeDisabled();
-      await Promise.all(bridges.map(bridge => expect.poll(async () => {
-        const result = await bridgeSecurityCommand("security_devices", {}, bridge.home) as unknown as { devices: ApprovedEndpoint[] };
-        return result.devices.some(device => device.endpoint.id === phoneIdentity.endpointId);
-      }, { timeout: 60000, message: "Revoked account device must be removed from every task-owned bridge" }).toBe(false)));
-      await phone.reload(); await expect(phone.getByRole("alert").filter({ hasText: /\S/ })).toContainText(/revoked/i, { timeout: 30000 });
-      await expect(phone.getByRole("button", { name: "Create a new session", exact: true })).toHaveCount(0);
+      await test.step("mobile revoke", async () => {
+        await devices(page); await noOverflow(page);
+        await expect(page.getByRole("list", { name: "Account devices", exact: true })).toContainText("Account test phone");
+        await page.screenshot({ path: info.outputPath("account-devices.png"), fullPage: true });
+        await page.getByRole("button", { name: /^Browser Account test phone:/ }).click();
+        const remove = page.getByRole("button", { name: "Remove access for Account test phone", exact: true });
+        await expect(remove).toBeVisible(); await expect(remove).toBeEnabled();
+        await page.setViewportSize({ width: 390, height: 844 });
+        await remove.click();
+        const confirmRemove = page.getByRole("button", { name: "Confirm remove access", exact: true });
+        for (const size of [{ width: 390, height: 844 }, viewport]) {
+          await page.setViewportSize(size);
+          await expect(confirmRemove).toBeVisible(); await expect(confirmRemove).toBeEnabled(); await noOverflow(page);
+          await page.screenshot({ path: info.outputPath(`account-remove-confirmation-${size.width}.png`), fullPage: true });
+        }
+        await page.setViewportSize({ width: 390, height: 844 });
+        await confirmRemove.click();
+        await expect(page.getByRole("list", { name: "Account devices", exact: true })).not.toContainText("Account test phone");
+        await expect(page.getByRole("button", { name: /^Remove access for / })).toBeDisabled();
+        await Promise.all(bridges.map(bridge => expect.poll(async () => {
+          const result = await bridgeSecurityCommand("security_devices", {}, bridge.home) as unknown as { devices: ApprovedEndpoint[] };
+          return result.devices.some(device => device.endpoint.id === phoneIdentity.endpointId);
+        }, { timeout: 60000, message: "Revoked account device must be removed from every task-owned bridge" }).toBe(false)));
+        await phone.reload(); await expect(phone.getByRole("alert").filter({ hasText: /\S/ })).toContainText(/revoked/i, { timeout: 30000 });
+        await expect(phone.getByRole("button", { name: "Create a new session", exact: true })).toHaveCount(0);
+      });
     } catch (error) { primaryFailed = true; throw error; }
     finally {
       const failures: string[] = [];
@@ -352,4 +386,3 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       if (!primaryFailed && failures.length) throw new Error(`Isolated account fixture cleanup failed: ${failures.join(", ")}`);
     }
   });
-}
