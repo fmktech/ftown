@@ -267,16 +267,17 @@ for (const viewport of [
       await page.goto("/dashboard");
       await waitForBridgeOnline(page);
       await showWorkspace();
-      const region = page.getByRole("region", { name: "Needs attention", exact: true });
-      const shortcut = region.getByRole("button", { name: `${targetName}: ${title}. ${message}`, exact: true });
-      await expect(shortcut).toBeVisible();
-      await expect(region.getByRole("button", { name: new RegExp(otherName) })).toHaveCount(0);
+      const shortcut = page.getByRole("button", { name: /^Inbox, [1-9]\d* messages?$/ });
+      const region = page.getByRole("dialog", { name: "Inbox", exact: true });
+      const inboxEntry = region.locator(`[data-inbox-entry="${targetId}"]`);
+      const checkInbox = async () => { await shortcut.click(); await expect(inboxEntry.getByText(message, { exact: true })).toBeVisible(); await expect(region.getByText(otherName, { exact: true })).toHaveCount(0); await region.getByRole("button", { name: "Close", exact: true }).click(); };
+      await expect(shortcut).toBeVisible(); await checkInbox();
       await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
       await screenshot("restored-attention-with-pr");
       await page.reload();
       await waitForBridgeOnline(page);
       await showWorkspace();
-      await expect(shortcut).toBeVisible();
+      await expect(shortcut).toBeVisible(); await checkInbox();
       await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
       await originalRow(page, otherName).getByText(otherName, { exact: true }).click();
       await showWorkspace();
@@ -412,6 +413,7 @@ for (const viewport of [
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
       await screenshot("attention-with-associated-pr");
       await shortcut.click();
+      await inboxEntry.getByRole("button", { name: "Open session", exact: true }).click();
       await expect(replacementLink).toBeVisible();
       await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
       if (mobile) await expect(page.getByRole("tab", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
@@ -431,27 +433,21 @@ for (const viewport of [
       await expectBadgeGeometry(sessionRow(page, targetName));
       await screenshot("selected-thinking-pr-badge");
       await expect(shortcut).toBeVisible();
-      await expect(shortcut.getByText(message, { exact: true })).toBeVisible();
+      await checkInbox();
       await expect(originalRow(page, targetName).getByText(message, { exact: true })).toHaveCount(0);
       await originalRow(page, otherName).getByText(otherName, { exact: true }).click();
       await showWorkspace();
-      const dismissControl = region.getByRole("button", { name: `Dismiss attention for ${targetName}`, exact: true });
+      await shortcut.click();
+      const dismissControl = inboxEntry.getByRole("button", { name: "Dismiss", exact: true });
       const dismissBox = await dismissControl.boundingBox();
-      expect(dismissBox).not.toBeNull();
-      expect(dismissBox!.width).toBeGreaterThanOrEqual(44);
-      expect(dismissBox!.height).toBeGreaterThanOrEqual(44);
-      if (mobile) await dismissControl.tap();
-      else {
-        await shortcut.focus();
-        await page.keyboard.press("Tab");
-        await expect(dismissControl).toBeFocused();
-        await page.keyboard.press("Enter");
-      }
+      expect(dismissBox).not.toBeNull(); expect(dismissBox!.height).toBeGreaterThanOrEqual(44);
+      if (mobile) await dismissControl.tap(); else { await dismissControl.focus(); await page.keyboard.press("Enter"); }
+      await expect(inboxEntry).toHaveCount(0);
+      await region.getByRole("button", { name: "Close", exact: true }).click();
       await expect(page.locator("main").getByText(otherName, { exact: true })).toHaveCount(1);
       await expect(page.locator("main").getByRole("link", { name: /PR #/ })).toHaveCount(0);
       if (mobile) await expect(page.getByRole("tab", { name: "Workspace", exact: true })).toHaveClass(/mobile-tab-active/);
       await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
-      await expect(region.getByRole("button", { name: new RegExp(targetName) })).toHaveCount(0);
       const dismissed = await bridgeApiFetch("GET", `/api/sessions/${targetId}/attention?includeResolved=true`);
       expect(dismissed.status, JSON.stringify(dismissed.body)).toBe(200);
       const dismissedEvent = (dismissed.body as AttentionPage).events.find(event => event.id === attention.event.id);

@@ -23,7 +23,6 @@ interface SessionListProps {
   bridgeOrder: string[];
   selectedSessionId: string | null;
   onSelectSession: (sessionId: string) => void;
-  onDismissSessionAttention?: (sessionId: string) => void;
   onRenameSession?: (sessionId: string, name: string) => void;
   onStopSession?: (sessionId: string) => void;
   onRemoveSession?: (sessionId: string, onlyIfFinished?: boolean) => void;
@@ -496,7 +495,6 @@ export function SessionList({
   bridgeOrder,
   selectedSessionId,
   onSelectSession,
-  onDismissSessionAttention,
   onRenameSession,
   onStopSession,
   onRemoveSession,
@@ -558,13 +556,7 @@ export function SessionList({
     () => sessions.filter((session) => !hiddenSet.has(session.id) && !hiddenBridgeSet.has(session.bridgeId)),
     [hiddenBridgeSet, hiddenSet, sessions],
   );
-  const attentionSessions = useMemo(
-    () => visibleSessions.flatMap((session) => {
-      const attention = sessionActivity?.get(session.id)?.attention;
-      return attention ? [{ session, attention }] : [];
-    }).sort((a, b) => b.attention.receivedAt - a.attention.receivedAt),
-    [sessionActivity, visibleSessions],
-  );
+
   const hiddenSessions = useMemo(
     () => sessions.filter((session) => hiddenSet.has(session.id) && !hiddenBridgeSet.has(session.bridgeId)),
     [hiddenBridgeSet, hiddenSet, sessions],
@@ -1612,130 +1604,6 @@ export function SessionList({
 
   return (
     <div className="flex flex-col">
-      {!collapsed && attentionSessions.length > 0 && (
-        <section
-          aria-label="Needs attention"
-          style={{ padding: "6px 0", borderBottom: "1px solid var(--border-muted)" }}
-        >
-          <h2 style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "4px 12px 5px",
-            fontSize: 10,
-            fontWeight: 600,
-            color: "var(--text-muted)",
-          }}>
-            Needs attention
-            <span aria-hidden style={{ color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>
-              {attentionSessions.length}
-            </span>
-          </h2>
-          {attentionSessions.map(({ session, attention }) => {
-            const isSelected = session.id === selectedSessionId;
-            const displayName = session.name || session.prompt?.slice(0, 36) || "Session";
-            const requestLabel = `${displayName}: ${attention.title}. ${attention.message}`;
-            return (
-              <div key={session.id} data-attention-entry={session.id} className="flex min-w-0 items-center">
-                <button
-                  type="button"
-                  data-attention-open={session.id}
-                  aria-label={requestLabel}
-                  aria-current={isSelected ? "true" : undefined}
-                  title={requestLabel}
-                  onClick={() => onSelectSession(session.id)}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 7,
-                    flex: 1,
-                    minWidth: 0,
-                    minHeight: 44,
-                    padding: "7px 12px 7px 10px",
-                    border: "none",
-                    borderLeft: `2px solid ${isSelected ? "var(--accent)" : "transparent"}`,
-                    background: isSelected ? "var(--bg-elevated)" : "transparent",
-                    color: isSelected ? "var(--text-primary)" : "var(--text-secondary)",
-                    textAlign: "left",
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 11,
-                    cursor: "pointer",
-                  }}
-                  onMouseEnter={(e) => {
-                    if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)";
-                  }}
-                  onMouseLeave={(e) => {
-                    if (!isSelected) e.currentTarget.style.background = "transparent";
-                  }}
-                >
-                  <HarnessIcon harness={session.shellType} size={17} />
-                  <span style={{
-                    flex: 1,
-                    minWidth: 0,
-                  }}>
-                    <span style={{
-                      display: "block",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                      fontWeight: isSelected ? 600 : 400,
-                    }}>
-                      {displayName}
-                    </span>
-                    <span style={{
-                      display: "-webkit-box",
-                      WebkitLineClamp: 3,
-                      WebkitBoxOrient: "vertical",
-                      overflow: "hidden",
-                      whiteSpace: "normal",
-                      overflowWrap: "anywhere",
-                      marginTop: 3,
-                      fontSize: 11,
-                      lineHeight: 1.4,
-                      color: "var(--text-muted)",
-                    }}>
-                      {attention.message}
-                    </span>
-                  </span>
-                  <span aria-hidden style={{
-                    width: 5,
-                    height: 5,
-                    flexShrink: 0,
-                    borderRadius: "50%",
-                    background: "var(--status-pending)",
-                  }} />
-                  <span style={{
-                    flexShrink: 0,
-                    fontSize: 10,
-                    color: "var(--text-faint)",
-                    fontVariantNumeric: "tabular-nums",
-                  }}>
-                    {formatTimestamp(new Date(attention.receivedAt).toISOString())}
-                  </span>
-                </button>
-                {onDismissSessionAttention && (
-                  <button
-                    type="button"
-                    aria-label={`Dismiss attention for ${displayName}`}
-                    title={`Dismiss attention for ${displayName}`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onDismissSessionAttention(session.id);
-                    }}
-                    style={{
-                      display: "inline-flex", alignItems: "center", justifyContent: "center",
-                      minWidth: 44, minHeight: 44, flexShrink: 0,
-                      color: "var(--text-faint)", fontSize: 18, lineHeight: 1, cursor: "pointer",
-                    }}
-                  >
-                    ×
-                  </button>
-                )}
-              </div>
-            );
-          })}
-        </section>
-      )}
       {visibleBridgeIds.map((bridgeId) => renderBridgeFolder(bridgeId))}
 
       {hiddenBridgeIdsList.length > 0 && !collapsed && (

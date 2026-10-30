@@ -205,3 +205,57 @@ test('PR status RPC requires verified security and targets only validated local 
     await make(security)({ ...command, payload: bad }, verified); assert.equal(responses.at(-1)?.success, false);
   }
 });
+
+test('browser session mail requires control authority and queues only valid local running targets', async () => {
+  const { BridgeSecurityError } = await import('./security/bridge/errors.js');
+  const responses: CommandResponse[] = []; let sessionReads = 0; let enqueues = 0; let authorized = true;
+  const running = { id: 'session', bridgeId: 'bridge', status: 'running' } as Session;
+  const calls: Array<{ session: Session; message: string }> = [];
+  const security = { revalidate: async () => {}, policy: { revalidate: async (_principal: unknown, permission: string) => {
+    assert.equal(permission, 'control'); if (!authorized) throw new BridgeSecurityError('permission_denied');
+  } } } as unknown as BridgeSecurityService;
+  const verified = { principal: {} } as VerifiedApplication;
+  const sessionController = { get: async (id: string) => { sessionReads++; return id === 'session' ? running : id === 'stopped' ? { ...running, id, status: 'completed' } : id === 'foreign' ? { ...running, id, bridgeId: 'other' } : null; } } as unknown as SessionController;
+  const enqueueSessionMessage: NonNullable<CommandRpcDeps['enqueueSessionMessage']> = async (session, message) => { enqueues++; calls.push({ session, message }); return { ok: true, id: 'mail-1' }; };
+  const attentionStore = new Proxy({}, { get() { throw new Error('Reply must not resolve attention'); } }) as unknown as NonNullable<CommandRpcDeps['attentionStore']>;
+  const make = (override: Partial<CommandRpcDeps> = {}) => createCommandHandler({ bridgeId: 'bridge', security, sessionController, enqueueSessionMessage, attentionStore,
+    publishCommandResponse: async response => { responses.push(response); }, ...override });
+  const command = (payload: unknown): Command => ({ type: 'send_message', requestId: 'request', payload } as Command);
+  const payload = { bridgeId: 'bridge', sessionId: 'session', message: 'line one\nline two' };
+  await make({ security: undefined })(command(payload), verified); assert.equal(responses.at(-1)?.success, false);
+  await make()(command(payload)); assert.equal(responses.at(-1)?.success, false);
+  authorized = false; await make()(command(payload), verified); assert.equal((responses.at(-1)?.data as { code?: string } | undefined)?.code, 'permission_denied');
+  assert.equal(sessionReads, 0); assert.equal(enqueues, 0); authorized = true;
+  for (const invalid of [null, {}, { ...payload, message: '  ' }, { ...payload, message: 'x'.repeat(65_537) }, { ...payload, sessionId: '../x' }, { ...payload, sessionId: 'a'.repeat(201) }, { ...payload, from: 'spoof' }]) {
+    await make()(command(invalid), verified); assert.equal((responses.at(-1)?.data as { code?: string } | undefined)?.code, 'invalid_request');
+  }
+  assert.equal(sessionReads, 0); assert.equal(enqueues, 0);
+  for (const sessionId of ['missing', 'stopped', 'foreign']) {
+    await make()(command({ ...payload, sessionId }), verified); assert.equal((responses.at(-1)?.data as { code?: string } | undefined)?.code, 'session_unavailable');
+  }
+  const previous = responses.length; await make()(command({ ...payload, bridgeId: 'other' }), verified);
+  assert.equal(responses.length, previous); assert.equal(enqueues, 0);
+  await make()(command(payload), verified);
+  assert.deepEqual(responses.at(-1), { requestId: 'request', success: true, data: { sessionId: 'session', messageId: 'mail-1', status: 'queued' } });
+  assert.deepEqual(calls, [{ session: running, message: payload.message }]);
+  await make()(command({ ...payload, message: 'x'.repeat(65_536) }), verified);
+  assert.equal(responses.at(-1)?.success, true); assert.equal(calls[1].message.length, 65_536);
+});
+
+test('browser session mail reports readiness and uncertain enqueue failures without leaking errors', async () => {
+  const responses: CommandResponse[] = []; let calls = 0;
+  const session = { id: 'session', bridgeId: 'bridge', status: 'running' } as Session;
+  const security = { revalidate: async () => {}, policy: { revalidate: async () => {} } } as unknown as BridgeSecurityService;
+  const verified = { principal: {} } as VerifiedApplication;
+  const deps = { bridgeId: 'bridge', security, sessionController: { get: async () => session } as unknown as SessionController,
+    publishCommandResponse: async (response: CommandResponse) => { responses.push(response); } };
+  const command: Command = { type: 'send_message', requestId: 'r', payload: { bridgeId: 'bridge', sessionId: 'session', message: 'reply' } };
+  await createCommandHandler(deps)(command, verified); assert.equal((responses.at(-1)?.data as { code?: string } | undefined)?.code, 'mail_not_ready');
+  await createCommandHandler({ ...deps, enqueueSessionMessage: async () => ({ ok: false, error: 'Mail store not ready' }) })(command, verified);
+  assert.equal((responses.at(-1)?.data as { code?: string } | undefined)?.code, 'mail_not_ready');
+  await createCommandHandler({ ...deps, enqueueSessionMessage: async () => { calls++; throw new Error('private error after append'); } })(command, verified);
+  assert.equal(calls, 1); assert.equal((responses.at(-1)?.data as { code?: string } | undefined)?.code, 'enqueue_failed');
+  assert.match(responses.at(-1)?.error ?? '', /may have been queued/); assert.doesNotMatch(JSON.stringify(responses.at(-1)), /private error/);
+  await createCommandHandler({ ...deps, enqueueSessionMessage: async () => ({ ok: true, id: '' }) })(command, verified);
+  assert.equal((responses.at(-1)?.data as { code?: string } | undefined)?.code, 'enqueue_failed');
+});

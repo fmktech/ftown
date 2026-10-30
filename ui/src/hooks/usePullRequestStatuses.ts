@@ -20,6 +20,7 @@ const states = new Set(["in_progress", "failed", "passed", "merged", "closed", "
 const reasons = new Set(["no_checks", "unavailable", "rate_limited", "unauthenticated"]);
 const keyFor = (url: string) => parsePullRequestUrl(url)?.url.toLowerCase();
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+const ownerKey = (bridgeId: string, url: string) => JSON.stringify([bridgeId, url]);
 
 /** Linked owners retain provenance even when their bridge is temporarily offline. */
 function linkedCandidates(sessions: readonly Pick<Session, "id" | "bridgeId" | "pullRequestUrl">[]): Candidate[] {
@@ -51,6 +52,9 @@ export class PullRequestStatusesController {
   private inputKey = "";
   private values = new Map<string, { bridgeId: string; status: PullRequestStatus }>();
   private due = new Map<string, number>();
+  private notBefore = new Map<string, number>();
+  private linkedOwners = new Set<string>();
+  private pendingOwners = new Set<string>();
   private cursor = new Map<string, number>();
   private reads = new Set<string>();
   private generation = 0;
@@ -66,11 +70,14 @@ export class PullRequestStatusesController {
     const inputKey = JSON.stringify([candidates, linked]);
     if (inputKey !== this.inputKey) {
       this.inputKey = inputKey; this.candidates = candidates; this.generation++;
-      const owners = new Set(linked.map(c => JSON.stringify([c.bridgeId, c.url])));
-      const readyOwners = new Set(candidates.map(c => JSON.stringify([c.bridgeId, c.url])));
+      const owners = new Set(linked.map(c => ownerKey(c.bridgeId, c.url)));
+      for (const owner of owners) if (!this.linkedOwners.has(owner)) this.pendingOwners.add(owner);
+      for (const owner of this.pendingOwners) if (!owners.has(owner)) this.pendingOwners.delete(owner);
+      this.linkedOwners = owners;
+      const readyOwners = new Set(candidates.map(c => ownerKey(c.bridgeId, c.url)));
       let changed = false;
       for (const [url, value] of this.values) {
-        const owner = JSON.stringify([value.bridgeId, url]);
+        const owner = ownerKey(value.bridgeId, url);
         if (!owners.has(owner)) { this.values.delete(url); changed = true; }
         else if (!readyOwners.has(owner) && value.status.state !== "merged" && !value.status.stale) {
           this.values.set(url, { ...value, status: { ...value.status, stale: true, reason: value.status.reason ?? "unavailable" } }); changed = true;
@@ -109,7 +116,9 @@ export class PullRequestStatusesController {
     if (aged) this.changed();
     for (const bridge of bridges) {
       if (this.reads.has(bridge)) continue;
-      const due = this.due.get(bridge) ?? 0;
+      const hard = this.notBefore.get(bridge) ?? 0;
+      const hasPending = this.candidates.some(c => c.bridgeId === bridge && this.values.get(c.url)?.status.state !== "merged" && this.pendingOwners.has(ownerKey(c.bridgeId, c.url)));
+      const due = hasPending ? hard : Math.max(hard, this.due.get(bridge) ?? 0);
       if (due <= this.now()) void this.read(bridge);
       else next = Math.min(next, due);
     }
@@ -122,7 +131,8 @@ export class PullRequestStatusesController {
     const batch = [...available.slice(start), ...available.slice(0, start)].slice(0, 100);
     this.cursor.set(bridgeId, (start + batch.length) % available.length);
     this.reads.add(bridgeId);
-    const started = this.now(); this.due.set(bridgeId, started + minimumRefresh);
+    for (const candidate of batch) this.pendingOwners.delete(ownerKey(candidate.bridgeId, candidate.url));
+    const started = this.now(); this.notBefore.set(bridgeId, started + minimumRefresh); this.due.set(bridgeId, started + minimumRefresh);
     const generation = this.generation;
     const allowed = new Set(batch.map(c => c.url));
     try {
@@ -139,7 +149,9 @@ export class PullRequestStatusesController {
       this.changed();
     } catch {
       if (this.disposed || generation !== this.generation) return;
-      this.due.set(bridgeId, this.now() + failureCooldown);
+      const retry = this.now() + failureCooldown;
+      this.notBefore.set(bridgeId, Math.max(this.notBefore.get(bridgeId) ?? 0, retry));
+      this.due.set(bridgeId, retry);
       for (const url of allowed) {
         const existing = this.values.get(url);
         if (existing?.bridgeId === bridgeId) this.values.set(url, { bridgeId, status: { ...existing.status, stale: true, reason: "unavailable" } });

@@ -18,6 +18,7 @@ import { SecurityLockIcon } from "./SecurityLockIcon";
 import { usePendingApprovals } from "@/hooks/usePendingApprovals";
 import type { AccountSecurityClient, AccountSecuritySnapshot } from "@/lib/account-security-client";
 import { SessionList } from "./SessionList";
+import { SessionInbox, inboxEntries, noticeKey, queueSessionReply, type InboxEntry } from "./SessionInbox";
 import { PullRequestStatusProvider } from "./PullRequestStatusProvider";
 import { SessionWorkspace } from "./SessionWorkspace";
 import { Terminal, TerminalHandle } from "./Terminal";
@@ -84,6 +85,7 @@ export function deriveCurrentComputerIds({ localMode, connectionStatus, localBri
 export function Dashboard({ client, connectionStatus, connectionError, userId, token, centrifugoUrl, transport, onDisconnect, localMode = false, accountClient, accountState }: DashboardProps) {
   const connectCommand = buildBridgeCommand({ apiUrl: typeof window !== "undefined" ? window.location.origin : "" });
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [inboxOpen, setInboxOpen] = useState(false);
   const [showNewSession, setShowNewSession] = useState(false);
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
   const [showToken, setShowToken] = useState(false);
@@ -465,6 +467,19 @@ PY`;
       setMobileTab(session?.preview && (choice?.id !== session.preview.id || choice.open) ? "preview" : "terminal");
     }
   }, [sessions, previewChoices]);
+
+  const inboxReady = connectionStatus === "connected" ? new Set(readyBridges.map(bridge => bridge.bridgeId)) : new Set<string>();
+  const canReply = (bridgeId: string) => !!securityRuntime?.bridge(bridgeId)?.permissions.includes("control");
+  const inbox = inboxEntries(sessions, sessionActivity, bridges, hiddenSessionIds, hiddenBridgeIds, inboxReady, canReply);
+  const replyToInbox = async (entry: InboxEntry, message: string) => {
+    const current = sessions.find(session => session.id === entry.session.id && session.bridgeId === entry.session.bridgeId);
+    const notice = sessionActivity.get(entry.session.id)?.attention;
+    if (!current || !notice || noticeKey(current.id, notice) !== noticeKey(entry.session.id, entry.notice)) throw new Error("This message has changed. Review the latest notice.");
+    if (current.status !== "running") throw new Error("This session is no longer running. Open it to check.");
+    if (!inboxReady.has(current.bridgeId)) throw new Error("Reconnect this computer before replying.");
+    if (!canReply(current.bridgeId)) throw new Error("This browser does not have permission to reply to this session.");
+    await queueSessionReply(rpc.sendCommand, { ...entry, session: current }, message);
+  };
 
   const handleCreateSession = useCallback(
     async (prompt: string, options: CreateSessionOptions): Promise<void> => {
@@ -939,6 +954,8 @@ PY`;
             transition: sidebarResizeRef.current ? "none" : "width 0.2s ease",
           } as CSSProperties}
         >
+          <SessionInbox entries={inbox} collapsed={isDesktop && sidebarCollapsed} open={inboxOpen} onOpen={() => setInboxOpen(true)} onClose={() => setInboxOpen(false)}
+            onOpenSession={id => { setInboxOpen(false); handleSelectSession(id); }} onDismiss={entry => clearSessionAttention(entry.session.id, entry.notice)} onReply={replyToInbox} />
           <div
             className="shrink-0 hidden md:flex items-center"
             style={{
@@ -1029,7 +1046,6 @@ PY`;
               bridgeOrder={bridgeOrder}
               selectedSessionId={selectedSessionId}
               onSelectSession={handleSelectSession}
-              onDismissSessionAttention={clearSessionAttention}
               onRenameSession={renameSession}
               onStopSession={stopSession}
               onRemoveSession={handleRemoveSession}
