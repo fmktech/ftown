@@ -1,4 +1,4 @@
-import { expect, type BrowserContext, type Page } from "@playwright/test";
+import { expect, type BrowserContext, type Locator, type Page } from "@playwright/test";
 import { test } from "../helpers/fixtures";
 import { accountBrowserState, approveAccountComputer, createAccountShell, startAccountTestBridge, usePrivateApprovalLink, type AccountTestBridge } from "../helpers/account-pairing";
 import { bridgeSecurityCommand } from "../helpers/secure-browser";
@@ -16,11 +16,11 @@ async function access(page: Page) {
   await page.getByRole("tab", { name: "Access", exact: true }).click();
   await expect(page.getByRole("list", { name: "Account devices", exact: true })).toBeVisible();
 }
-async function rename(page: Page, button: string, name: string) {
-  await page.getByRole("button", { name: button, exact: true }).click();
-  await page.getByLabel("Display name", { exact: true }).fill(name);
-  await page.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(page.getByText("Display name saved.")).toBeVisible();
+async function rename(card: Locator, button: string, name: string) {
+  await card.getByRole("button", { name: button, exact: true }).click();
+  await card.getByLabel("Display name", { exact: true }).fill(name);
+  await card.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(card.getByText("Display name saved.")).toBeVisible();
 }
 
 test("account names synchronize between approved browsers without changing trust", async ({ browser }, info) => {
@@ -67,12 +67,15 @@ test("account names synchronize between approved browsers without changing trust
     const grantsBefore = await bridgeSecurityCommand("security_devices", {}, bridge.home);
     await access(page);
     await expect(page.locator(`[data-computer-access="${bridgeId}"]`)).toContainText("Shared with your approved browsers", { timeout: 60000 });
-    await page.locator(`[data-access-node="${phoneId}"]`).click();
-    await rename(page, "Rename Account test phone", "Browser");
-    await expect(page.locator(`[data-access-node="${phoneId}"]`)).toContainText("Browser");
+    const browserCard = page.locator(`[data-access-card="browser:${phoneId}"]`);
+    const browserSelection = page.locator(`[data-access-node="${phoneId}"]`);
+    await browserSelection.click();
+    await rename(browserCard, "Rename Account test phone", "Browser");
+    await expect(browserCard.getByText("Browser", { exact: true })).toBeVisible();
+    await expect(browserSelection).toHaveAccessibleName(/^Browser Browser: Approved for your account/);
     await page.locator(`[data-computer-access="${bridgeId}"]`).click();
     const computerLabel = await page.locator(`[data-computer-access="${bridgeId}"] span.font-semibold`).first().textContent();
-    expect(computerLabel).toBeTruthy(); await rename(page, `Rename ${computerLabel}`, "Office 💻");
+    expect(computerLabel).toBeTruthy(); await rename(page.locator(`[data-access-card="bridge:${bridgeId}"]`), `Rename ${computerLabel}`, "Office 💻");
     const helper = page.getByText("Display names appear across your signed-in browsers.", { exact: true });
     await page.setViewportSize({ width: 900, height: 760 });
     await expect(helper).toBeHidden();
@@ -101,7 +104,10 @@ test("account names synchronize between approved browsers without changing trust
       await page.screenshot({ path: info.outputPath(`display-names-${width}.png`), fullPage: true });
     }
     await phone.reload(); await access(phone);
-    await expect(phone.locator(`[data-access-node="${phoneId}"]`)).toContainText("Browser");
+    const phoneCard = phone.locator(`[data-access-card="browser:${phoneId}"]`);
+    const phoneSelection = phone.locator(`[data-access-node="${phoneId}"]`);
+    await expect(phoneCard.getByText("Browser", { exact: true })).toBeVisible();
+    await expect(phoneSelection).toHaveAccessibleName(/^Browser Browser \(this browser\): Approved for your account/);
     await expect(phone.locator(`[data-computer-access="${bridgeId}"]`)).toContainText("Office 💻");
     const foreign = makeUser("display-names-foreign"); await registerUser(foreign.email, foreign.password);
     const foreignContext = await browser.newContext({ baseURL: origin }); contexts.push(foreignContext);
@@ -114,8 +120,11 @@ test("account names synchronize between approved browsers without changing trust
     }
     await phone.locator(`[data-computer-access="${bridgeId}"]`).click(); await phone.getByRole("button", { name: "Reset name" }).click();
     await expect(phone.locator(`[data-computer-access="${bridgeId}"]`)).not.toContainText("Office 💻");
-    await phone.locator(`[data-access-node="${phoneId}"]`).click(); await phone.getByRole("button", { name: "Reset name" }).click();
-    await expect(phone.locator(`[data-access-node="${phoneId}"]`)).toContainText("Account test phone");
+    await phoneSelection.click();
+    await phoneCard.getByRole("button", { name: "Rename Browser", exact: true }).click();
+    await phoneCard.getByRole("button", { name: "Reset name", exact: true }).click();
+    await expect(phoneCard.getByText("Account test phone", { exact: true })).toBeVisible();
+    await expect(phoneSelection).toHaveAccessibleName(/^Browser Account test phone \(this browser\): Approved for your account/);
     expect(await (await page.request.get(`${origin}/api/security/account`)).json()).toEqual(trustBefore);
     expect(await bridgeSecurityCommand("security_devices", {}, bridge.home)).toEqual(grantsBefore);
   } catch (error) { primaryFailed = true; throw error; }

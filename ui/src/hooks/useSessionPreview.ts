@@ -163,7 +163,7 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
         const status = parseStatus(raw, target.preview.id);
         if (status.state === 'unregistered' || status.state === 'unavailable') {
           store.complete = null;
-          if (status.state === 'unregistered') store.manualApplied = store.manualRequested;
+          if (status.state === 'unregistered') store.manualApplied = manualVersion;
           store.status = status.state === 'unregistered' ? { kind: 'unregistered' } : { kind: 'unavailable', reason: status.reason };
         } else if (status.state === 'unchanged') {
           if (!complete || complete.revision !== status.revision || complete.totalBytes !== status.totalBytes) throw new Error('Invalid unchanged response');

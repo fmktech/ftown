@@ -53,3 +53,41 @@ it("shows the account-wide helper when editing and preserves the mobile action m
   fireEvent.click(screen.getByRole("button", { name: "Rename Desk" }));
   expect(helper.className).not.toContain("md:hidden");
 });
+
+it("edits inline, preserves a draft on label changes, and restores pencil focus", async () => {
+  const save = vi.fn().mockResolvedValue(true);
+  const props = { target: { kind: "browser" as const, id: "one" }, label: "Laptop", saving: false, error: null, setName: save, variant: "inline" as const };
+  const view = render(<DeviceDisplayNameEditor {...props} />);
+  const pencil = screen.getByRole("button", { name: "Rename Laptop" });
+  expect(pencil.querySelector('svg[aria-hidden="true"]')).toBeTruthy();
+  fireEvent.click(pencil); const input = screen.getByLabelText("Display name") as HTMLInputElement; expect(document.activeElement).toBe(input);
+  fireEvent.change(input, { target: { value: "  Office 💻  " } });
+  view.rerender(<DeviceDisplayNameEditor {...props} label="Updated remotely" />); expect(input.value).toBe("  Office 💻  ");
+  fireEvent.submit(input.closest("form")!); await waitFor(() => expect(save).toHaveBeenCalledWith({ kind: "browser", id: "one", name: "Office 💻" }));
+  const updated = await screen.findByRole("button", { name: "Rename Updated remotely" }); expect(document.activeElement).toBe(updated);
+  fireEvent.click(updated); fireEvent.keyDown(screen.getByLabelText("Display name"), { key: "Escape" }); expect(document.activeElement).toBe(screen.getByRole("button", { name: "Rename Updated remotely" }));
+});
+it("keeps inline reset in edit mode and retains failure and disabled feedback", async () => {
+  const save = vi.fn().mockResolvedValue(false);
+  const props = { target: { kind: "browser" as const, id: "one" }, label: "Desk", customName: "Desk", saving: false, error: "Save failed", setName: save, variant: "inline" as const };
+  const view = render(<DeviceDisplayNameEditor {...props} />);
+  expect(screen.queryByText("Save failed")).toBeNull(); expect(screen.queryByRole("button", { name: "Reset name" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Rename Desk" }));
+  fireEvent.click(screen.getByRole("button", { name: "Reset name" })); await waitFor(() => expect(save).toHaveBeenCalledWith({ kind: "browser", id: "one", name: null }));
+  expect(screen.getByLabelText("Display name")).toBeTruthy(); expect(screen.getByText("Save failed")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" })); expect(document.activeElement).toBe(screen.getByRole("button", { name: "Rename Desk" }));
+  view.rerender(<DeviceDisplayNameEditor {...props} disabledReason="Reconnect before renaming" />);
+  const disabled = screen.getByRole("button", { name: "Rename Desk" }) as HTMLButtonElement;
+  expect(disabled.disabled).toBe(true); expect(disabled.title).toBe("Reconnect before renaming");
+});
+
+it("explains and disables an inline save if eligibility is lost during editing", () => {
+  const save = vi.fn().mockResolvedValue(true);
+  const props = { target: { kind: "browser" as const, id: "one" }, label: "Desk", saving: false, error: null, setName: save, variant: "inline" as const };
+  const view = render(<DeviceDisplayNameEditor {...props} />); fireEvent.click(screen.getByRole("button", { name: "Rename Desk" }));
+  const input = screen.getByLabelText("Display name") as HTMLInputElement; fireEvent.change(input, { target: { value: "Draft" } });
+  view.rerender(<DeviceDisplayNameEditor {...props} disabledReason="Reconnect before renaming" />);
+  expect(input.disabled).toBe(true); expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true);
+  const reason = screen.getByText("Reconnect before renaming"); expect(reason.className).not.toContain("sr-only"); expect(input.getAttribute("aria-describedby")).toBe(reason.id);
+  fireEvent.submit(input.closest("form")!); expect(save).not.toHaveBeenCalled();
+});
