@@ -80,7 +80,7 @@ export function SessionInboxPage({ entries, open, onClose, onOpenSession, onDism
   useEffect(() => { if (open) heading.current?.focus(); }, [open]);
   return <section aria-label="Inbox" hidden={!open} className="min-h-0 min-w-0 flex-1 overflow-y-auto bg-[var(--bg-surface)] text-[var(--text-primary)]">
     <div className="mx-auto w-full max-w-3xl p-4 sm:p-6">
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-2"><h1 ref={heading} tabIndex={-1} className="text-lg font-semibold">Inbox</h1><button type="button" className="btn-ghost min-h-11" onClick={onClose}>Back to workspace</button></div>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2"><h1 ref={heading} tabIndex={-1} className="text-lg font-semibold">Inbox</h1><button type="button" aria-label="Back to workspace" title="Back to workspace" className="btn-ghost inline-flex h-11 w-11 items-center justify-center sm:h-8 sm:w-8 [@media(pointer:coarse)]:!h-11 [@media(pointer:coarse)]:!w-11" style={{ padding: 0 }} onClick={onClose}><svg aria-hidden="true" focusable="false" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5m7-7-7 7 7 7" /></svg></button></div>
       {entries.length ? <div className="space-y-3">{entries.map(entry => <InboxItem key={noticeKey(entry.session.id, entry.notice)} entry={entry} onOpenSession={onOpenSession} onDismiss={onDismiss} onReply={onReply} />)}</div> : <p className="text-sm text-[var(--text-muted)]">No messages.</p>}
     </div>
   </section>;
