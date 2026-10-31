@@ -6,6 +6,8 @@ import { expect, type Page } from "@playwright/test";
 import { E2E_DIR } from "./config";
 import { bridgeApiFetch, readBridgePointer } from "./bridge-api";
 import type { PendingBridgeStatus } from "../../bridge/src/security/pending-approval-protocol";
+import type { ApprovedEndpoint } from "../../bridge/src/security/protocol.js";
+import { bridgeSecurityCommand } from "./secure-browser";
 
 const execute = promisify(execFile);
 export interface AccountTestBridge { home: string; dataDir: string; child: ChildProcess; link(): Promise<string>; pendingStatus(): Promise<PendingBridgeStatus>; confirmPending(code: string): Promise<void>; rejectPending(): Promise<void>; stop(): Promise<void> }
@@ -121,9 +123,25 @@ export async function createAccountShell(page: Page, bridgeId: string, name: str
   await page.locator("#ns-bridge").selectOption(bridgeId);
   await page.getByPlaceholder("Optional name for this session").fill(name);
   await page.getByRole("button", { name: "Create Session", exact: true }).click();
+  // Success closes the dialog; a rejected request keeps it open with an alert. Surface the real reason, never retry (could duplicate a session).
+  const dialog = page.getByRole("dialog", { name: "New Session" });
+  const failure = dialog.getByRole("alert").filter({ hasText: /\S/ }).first();
+  await Promise.race([dialog.waitFor({ state: "hidden", timeout: 30000 }), failure.waitFor({ state: "visible", timeout: 30000 })]);
+  if (await failure.isVisible()) throw new Error(`Session creation failed: ${(await failure.innerText()).trim()}`);
   const workspace = page.getByRole("tab", { name: "Workspace", exact: true });
   if (await workspace.isVisible()) await workspace.click();
   await expect(page.getByRole("button", { name: new RegExp(name) })).toBeVisible({ timeout: 30000 });
+}
+
+/** Wait until a computer has adopted this browser's account trust, so it accepts the browser's encrypted commands. */
+export async function waitForComputerTrust(page: Page, bridgeHome: string, timeout = 90000): Promise<void> {
+  const endpointId = (await accountBrowserState(page))[0].endpointId;
+  await expect.poll(async () => {
+    try {
+      const result = await bridgeSecurityCommand("security_devices", {}, bridgeHome) as unknown as { devices: ApprovedEndpoint[] };
+      return result.devices.some(device => device.endpoint.id === endpointId && device.source === "account");
+    } catch { return false; }
+  }, { timeout, intervals: [250, 500, 1000], message: "Computer must adopt this browser's account trust before it accepts encrypted commands" }).toBe(true);
 }
 
 /** Read public IDs and actual native key flags, never extract a private key. */
