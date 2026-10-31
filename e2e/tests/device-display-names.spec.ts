@@ -61,8 +61,10 @@ test("account names synchronize between approved browsers without changing trust
     await page.goto("/dashboard"); await expect(page.locator(`[data-bridge-row="${bridgeId}"]`)).toBeVisible({ timeout: 60000 });
     const trustBefore = await (await page.request.get(`${origin}/api/security/account`)).json();
     await expect.poll(async () => {
-      const result = await bridgeSecurityCommand("security_devices", {}, bridge.home) as unknown as { devices: ApprovedEndpoint[] };
-      return result.devices.some(device => device.endpoint.id === phoneId && device.label === "Account test phone" && device.source === "account");
+      try {
+        const result = await bridgeSecurityCommand("security_devices", {}, bridge.home) as unknown as { devices: ApprovedEndpoint[] };
+        return result.devices.some(device => device.endpoint.id === phoneId && device.label === "Account test phone" && device.source === "account");
+      } catch (error) { return `transient: ${error instanceof Error ? error.message : String(error)}`; }
     }).toBe(true);
     const grantsBefore = await bridgeSecurityCommand("security_devices", {}, bridge.home);
     await access(page);
