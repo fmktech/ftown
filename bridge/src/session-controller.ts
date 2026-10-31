@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { AUTOMATION_REMOVED_CODE, AUTOMATION_REMOVED_MESSAGE, isRetiredAutomationSession } from './retired-automation.js';
 import {
   createFtownSession,
@@ -335,8 +336,11 @@ export class SessionController {
     // implementations return shared references rather than detached snapshots.
     if (input.name !== undefined) session.name = input.name;
     if (input.parent) session.parentSessionId = parentSessionId;
-    if (input.pullRequestUrl === null) delete session.pullRequestUrl;
-    else if (pullRequestUrl !== undefined) session.pullRequestUrl = pullRequestUrl;
+    if (input.pullRequestUrl === null) { delete session.pullRequestUrl; delete session.pullRequestLinkId; }
+    else if (pullRequestUrl !== undefined) {
+      if (session.pullRequestUrl?.toLowerCase() !== pullRequestUrl.toLowerCase() || !session.pullRequestLinkId) session.pullRequestLinkId = randomUUID();
+      session.pullRequestUrl = pullRequestUrl;
+    }
     session.updatedAt = new Date().toISOString();
     await this.deps.store.saveSession(session);
     await this.deps.publishSessionUpdate(session);

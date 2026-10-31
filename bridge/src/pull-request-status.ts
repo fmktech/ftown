@@ -7,7 +7,8 @@ const HOUR = 60 * MINUTE;
 const MAX_OUTPUT = 1024 * 1024;
 type RunnerResult = { stdout: string; stderr: string; exitCode: number };
 type Runner = (input: string) => Promise<RunnerResult>;
-type Entry = { url: string; state: PullRequestState; checkedAt: number | null; reason?: PullRequestStatusReason; lastAttempt: number; nextAttempt: number; used: number };
+export interface PullRequestObservation extends PullRequestStatus { headOid?: string; attempt: number }
+type Entry = { url: string; state: PullRequestState; checkedAt: number | null; reason?: PullRequestStatusReason; headOid?: string; attempt: number; lastAttempt: number; nextAttempt: number; used: number };
 
 /** Run a single bounded gh process; credentials stay in gh's environment. */
 export function runGh(input: string): Promise<RunnerResult> {
@@ -44,10 +45,11 @@ function ttl(state: PullRequestState): number {
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
-function stateOf(value: unknown): { state: PullRequestState; reason?: PullRequestStatusReason } {
+function stateOf(value: unknown): { state: PullRequestState; reason?: PullRequestStatusReason; headOid?: string } {
   const pr = record(value);
   if (!pr) return { state: 'unknown', reason: 'unavailable' };
-  if (pr.merged === true || pr.state === 'MERGED') return { state: 'merged' };
+  if (pr.merged === true || pr.state === 'MERGED') return pr.merged === true && pr.state === 'MERGED' ? { state: 'merged' } : { state: 'unknown', reason: 'unavailable' };
+  if (pr.merged !== false) return { state: 'unknown', reason: 'unavailable' };
   if (pr.state === 'CLOSED') return { state: 'closed' };
   if (pr.state !== 'OPEN' || typeof pr.headRefOid !== 'string' || !pr.headRefOid) return { state: 'unknown', reason: 'unavailable' };
   const nodes = record(pr.commits)?.nodes;
@@ -59,9 +61,9 @@ function stateOf(value: unknown): { state: PullRequestState; reason?: PullReques
   if (typeof count !== 'number' || !Number.isInteger(count) || count < 0) return { state: 'unknown', reason: 'unavailable' };
   if (count === 0) return { state: 'unknown', reason: 'no_checks' };
   switch (rollup.state) {
-    case 'FAILURE': case 'ERROR': return { state: 'failed' };
-    case 'PENDING': case 'EXPECTED': return { state: 'in_progress' };
-    case 'SUCCESS': return { state: 'passed' };
+    case 'FAILURE': case 'ERROR': return { state: 'failed', headOid: pr.headRefOid };
+    case 'PENDING': case 'EXPECTED': return { state: 'in_progress', headOid: pr.headRefOid };
+    case 'SUCCESS': return { state: 'passed', headOid: pr.headRefOid };
     default: return { state: 'unknown', reason: 'unavailable' };
   }
 }
@@ -103,45 +105,81 @@ export class PullRequestStatusService {
   private cooldown = 0;
   private flight: Promise<void> | undefined;
   private sequence = 0;
+  private attemptSequence = 0;
+  private background = new Set<string>();
+  private inFlight = new Set<string>();
   constructor(private readonly now: () => number = Date.now, private readonly runner: Runner = runGh) {}
 
-  async get(urls: readonly string[]): Promise<Pick<PullRequestStatusesResponse, 'statuses' | 'nextRefreshAt'>> {
-    const keys: string[] = [];
-    for (const value of urls) {
-      let url: string;
-      try { url = normalizePullRequestUrl(value); } catch { continue; }
-      if (Number(url.slice(url.lastIndexOf('/') + 1)) > 2_147_483_647) continue;
-      const key = url.toLowerCase();
-      if (keys.includes(key)) continue;
-      keys.push(key);
-      let entry = this.cache.get(key);
-      if (!entry) { entry = { url, state: 'unknown', checkedAt: null, lastAttempt: 0, nextAttempt: 0, used: 0 }; this.cache.set(key, entry); }
-      entry.used = ++this.sequence;
-    }
+  private entry(value: string): string | undefined {
+    let url: string;
+    try { url = normalizePullRequestUrl(value); } catch { return undefined; }
+    if (Number(url.slice(url.lastIndexOf('/') + 1)) > 2_147_483_647) return undefined;
+    const key = url.toLowerCase();
+    let entry = this.cache.get(key);
+    if (!entry) { entry = { url, state: 'unknown', checkedAt: null, attempt: 0, lastAttempt: 0, nextAttempt: 0, used: 0 }; this.cache.set(key, entry); }
+    entry.used = ++this.sequence;
+    return key;
+  }
+
+  private evict(): void {
     while (this.cache.size > 500) {
-      const oldest = [...this.cache.entries()].sort((a, b) => a[1].used - b[1].used)[0];
+      const oldest = [...this.cache.entries()].filter(([key]) => !this.background.has(key) && !this.inFlight.has(key)).sort((a, b) => a[1].used - b[1].used)[0];
+      if (!oldest) break;
       this.cache.delete(oldest[0]);
     }
+  }
+
+  setBackgroundUrls(urls: readonly string[]): void {
+    this.background.clear();
+    for (const url of urls) {
+      if (this.background.size >= 20) break;
+      const key = this.entry(url); if (key) this.background.add(key);
+    }
+    this.evict();
+  }
+
+  async get(urls: readonly string[]): Promise<Pick<PullRequestStatusesResponse, 'statuses' | 'nextRefreshAt'>> {
+    const { observations, nextRefreshAt } = await this.read(urls, true);
+    return { statuses: observations.map(({ headOid: _headOid, attempt: _attempt, ...status }) => status), nextRefreshAt };
+  }
+
+  async getObservations(urls: readonly string[]): Promise<{ observations: PullRequestObservation[]; nextRefreshAt: string }> {
+    return this.read(urls, false);
+  }
+
+  private async read(urls: readonly string[], foreground: boolean): Promise<{ observations: PullRequestObservation[]; nextRefreshAt: string }> {
+    const keys: string[] = [];
+    for (const value of urls) {
+      const key = this.entry(value);
+      if (key && !keys.includes(key)) keys.push(key);
+    }
+    this.evict();
     if (this.flight) await this.flight;
     else {
       const now = this.now();
       this.launches = this.launches.filter(time => time > now - HOUR);
       const allowed = Math.max(this.cooldown, (this.launches.at(-1) ?? -Infinity) + MINUTE, this.launches.length >= 60 ? this.launches[0] + HOUR : 0);
-      const due = keys.map(key => this.cache.get(key)).filter((entry): entry is Entry => !!entry && entry.state !== 'merged' && now >= entry.nextAttempt && (entry.checkedAt === null || now >= entry.checkedAt + ttl(entry.state)))
-        .sort((a, b) => a.lastAttempt - b.lastAttempt || a.used - b.used).slice(0, 20);
-      if (due.length && now >= allowed) {
+      const due = (key: string) => { const e = this.cache.get(key); return !!e && e.state !== 'merged' && now >= e.nextAttempt && (e.checkedAt === null || now >= e.checkedAt + ttl(e.state)); };
+      const sort = (a: Entry, b: Entry) => a.lastAttempt - b.lastAttempt || a.used - b.used;
+      const foregroundDue = (foreground ? keys : []).filter(due).map(key => this.cache.get(key)!).sort(sort);
+      const backgroundDue = [...this.background].filter(due).map(key => this.cache.get(key)!).sort(sort);
+      const selected: Entry[] = [];
+      const add = (entry: Entry | undefined) => { if (entry && !selected.includes(entry) && selected.length < 20) selected.push(entry); };
+      if (foregroundDue.length && backgroundDue.length) { add(foregroundDue[0]); add(backgroundDue[0]); }
+      for (const entry of [...new Set([...foregroundDue, ...backgroundDue])].sort(sort)) add(entry);
+      if (selected.length && now >= allowed) {
         this.launches.push(now);
-        for (const entry of due) entry.lastAttempt = now || 1;
-        this.flight = this.refresh(due, now).finally(() => { this.flight = undefined; });
+        for (const entry of selected) { entry.lastAttempt = now || 1; entry.attempt = ++this.attemptSequence; this.inFlight.add(entry.url.toLowerCase()); }
+        this.flight = this.refresh(selected, now).finally(() => { this.inFlight.clear(); this.flight = undefined; this.evict(); });
         await this.flight;
       }
     }
     const now = this.now();
     const entries = keys.map(key => this.cache.get(key)).filter((entry): entry is Entry => !!entry);
-    const statuses: PullRequestStatus[] = entries.map(entry => ({ url: entry.url, state: entry.state, checkedAt: entry.checkedAt === null ? null : new Date(entry.checkedAt).toISOString(), stale: entry.checkedAt === null || now >= entry.checkedAt + ttl(entry.state) || (entry.reason !== undefined && entry.reason !== 'no_checks'), ...(entry.reason ? { reason: entry.reason } : {}) }));
+    const observations: PullRequestObservation[] = entries.map(entry => ({ url: entry.url, state: entry.state, checkedAt: entry.checkedAt === null ? null : new Date(entry.checkedAt).toISOString(), stale: entry.checkedAt === null || now >= entry.checkedAt + ttl(entry.state) || (entry.reason !== undefined && entry.reason !== 'no_checks'), ...(entry.reason ? { reason: entry.reason } : {}), ...(entry.headOid ? { headOid: entry.headOid } : {}), attempt: entry.attempt }));
     const nextDue = entries.filter(entry => entry.state !== 'merged').map(entry => Math.max(entry.nextAttempt, entry.checkedAt === null ? 0 : entry.checkedAt + ttl(entry.state)));
     const next = nextDue.length ? Math.max(now + MINUTE, this.cooldown, (this.launches.at(-1) ?? -Infinity) + MINUTE, Math.min(...nextDue), this.launches.length >= 60 ? this.launches[0] + HOUR : 0) : now + HOUR;
-    return { statuses, nextRefreshAt: new Date(next).toISOString() };
+    return { observations, nextRefreshAt: new Date(next).toISOString() };
   }
 
   private async refresh(entries: Entry[], now: number): Promise<void> {
@@ -184,7 +222,7 @@ export class PullRequestStatusService {
         if (mapped.reason === 'unavailable') {
           entry.reason = 'unavailable'; entry.nextAttempt = now + 5 * MINUTE;
         } else {
-          entry.state = mapped.state; entry.reason = mapped.reason; entry.checkedAt = now; entry.nextAttempt = now + ttl(mapped.state);
+          entry.state = mapped.state; entry.reason = mapped.reason; entry.headOid = mapped.headOid; entry.checkedAt = now; entry.nextAttempt = now + ttl(mapped.state);
         }
       });
     } catch {

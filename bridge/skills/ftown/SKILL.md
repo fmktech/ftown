@@ -95,9 +95,17 @@ its occurrence count; after an uncertain result, inspect the existing request
 before retrying.
 
 Attach one GitHub pull request with `ftown sessions pr <URL>`; another URL
-replaces it and `--clear` removes it. This records a link without fetching GitHub
-or creating a PR. Both commands target trimmed `$FTOWN_SESSION_ID` unless you
-supply `--session-id <id>`; they never guess identity from the working directory.
+replaces it and `--clear` removes it. This records a link without creating a PR.
+While the bridge runs, linked agent sessions receive durable inbox mail when GitHub's observed current-head rollup
+checks fail or pass, or the PR merges. Link association enables this automatically;
+clearing the link stops future observations. The bridge uses local `gh` authentication
+and polling (typically one minute for pending and five minutes for completed checks),
+so rate limits, authentication, offline periods and changes between polls can delay or
+miss transitions. Durable enqueue does not guarantee an agent reads or processes mail.
+Mail for already-stopped agents stays queued without starting them;
+an already-admitted delivery can finish as a session stops. These facts do not
+authorize a merge or other action. Both commands target trimmed
+`$FTOWN_SESSION_ID` unless you supply `--session-id <id>`; they never guess identity from the working directory.
 Older bridges report `bridge_upgrade_required` before mutation.
 
 Remote MCP callers use `attention_request` with explicit `machine` and

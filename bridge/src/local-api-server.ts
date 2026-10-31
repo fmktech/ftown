@@ -288,6 +288,11 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     this.attention = store;
   }
 
+  /** Internal producer hook for mail already committed to the inbox. */
+  async notifyCommittedMail(session: Session, sender: string, requireRunning = false): Promise<void> {
+    await this.mail.notifyCommittedMail(session, sender, requireRunning);
+  }
+
   setMailStore(mailStore: MailStore): void {
     if (this.mailStore !== mailStore) this.recoveryEpoch++;
     this.mailStore = mailStore;
