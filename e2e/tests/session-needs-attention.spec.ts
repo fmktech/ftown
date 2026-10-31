@@ -16,9 +16,9 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       const suffix = Date.now().toString(36), firstName = `Review deployment ${suffix}`, secondName = `Approve API ${suffix}`, idleName = `Idle ${suffix}`;
       const ids: string[] = []; const mobile = viewport.name === "mobile";
       const workspace = async () => { if (mobile) await page.getByRole("tab", { name: "Workspace", exact: true }).click(); };
-      const inbox = page.getByRole("dialog", { name: "Inbox", exact: true });
+      const inbox = page.getByRole("region", { name: "Inbox", exact: true });
       const openInbox = async () => { await page.getByRole("button", { name: /^Inbox, / }).click(); await expect(inbox).toBeVisible(); };
-      const closeInbox = async () => inbox.getByRole("button", { name: "Close", exact: true }).click();
+      const closeInbox = async () => inbox.getByRole("button", { name: "Back to workspace", exact: true }).click();
       try {
         for (const name of [firstName, secondName, idleName]) {
           const response = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name } }); expect(response.status, JSON.stringify(response.body)).toBe(201);

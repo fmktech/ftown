@@ -268,9 +268,9 @@ for (const viewport of [
       await waitForBridgeOnline(page);
       await showWorkspace();
       const shortcut = page.getByRole("button", { name: /^Inbox, [1-9]\d* messages?$/ });
-      const region = page.getByRole("dialog", { name: "Inbox", exact: true });
+      const region = page.getByRole("region", { name: "Inbox", exact: true });
       const inboxEntry = region.locator(`[data-inbox-entry="${targetId}"]`);
-      const checkInbox = async () => { await shortcut.click(); await expect(inboxEntry.getByText(message, { exact: true })).toBeVisible(); await expect(region.getByText(otherName, { exact: true })).toHaveCount(0); await region.getByRole("button", { name: "Close", exact: true }).click(); };
+      const checkInbox = async () => { await shortcut.click(); await expect(inboxEntry.getByText(message, { exact: true })).toBeVisible(); await expect(region.getByText(otherName, { exact: true })).toHaveCount(0); await region.getByRole("button", { name: "Back to workspace", exact: true }).click(); };
       await expect(shortcut).toBeVisible(); await checkInbox();
       await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
       await screenshot("restored-attention-with-pr");
@@ -443,7 +443,7 @@ for (const viewport of [
       expect(dismissBox).not.toBeNull(); expect(dismissBox!.height).toBeGreaterThanOrEqual(44);
       if (mobile) await dismissControl.tap(); else { await dismissControl.focus(); await page.keyboard.press("Enter"); }
       await expect(inboxEntry).toHaveCount(0);
-      await region.getByRole("button", { name: "Close", exact: true }).click();
+      await region.getByRole("button", { name: "Back to workspace", exact: true }).click();
       await expect(page.locator("main").getByText(otherName, { exact: true })).toHaveCount(1);
       await expect(page.locator("main").getByRole("link", { name: /PR #/ })).toHaveCount(0);
       if (mobile) await expect(page.getByRole("tab", { name: "Workspace", exact: true })).toHaveClass(/mobile-tab-active/);
