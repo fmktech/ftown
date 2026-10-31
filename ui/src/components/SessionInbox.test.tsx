@@ -28,7 +28,8 @@ it("shows full text, sorted outstanding counts, and retains ordinary hidden filt
 it("works collapsed and empty, focuses the heading and restores focus on back", () => {
   render(<Fixture entries={[]} collapsed/>); const trigger = screen.getByRole("button", { name: "Inbox, 0 messages" }); trigger.focus(); fireEvent.click(trigger);
   expect(screen.getByText("No messages.")).toBeTruthy(); expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Inbox" })); expect(screen.queryByRole("dialog")).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "Back to workspace" })); expect(screen.queryByRole("region", { name: "Inbox" })).toBeNull(); expect(document.activeElement).toBe(trigger);
+  const back = screen.getByRole("button", { name: "Back to workspace" }); expect(back.textContent).toBe(""); expect(back.getAttribute("title")).toBe("Back to workspace");
+  fireEvent.click(back); expect(screen.queryByRole("region", { name: "Inbox" })).toBeNull(); expect(document.activeElement).toBe(trigger);
 });
 it("keeps the failed draft and sends once, then reports durable enqueue only", async () => {
   let resolve!: () => void; const sent = vi.fn().mockRejectedValueOnce(new Error("Reply may have been queued. Check the session before sending again.")).mockImplementationOnce(() => new Promise<void>(r => { resolve = r; }));
