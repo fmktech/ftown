@@ -6,9 +6,10 @@ import { readBridgePointer } from "../helpers/bridge-api";
 for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
   test(`bridge update menu displays real status at ${viewport.width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
+    await login(page, sharedEmail());
     await Promise.all([
       page.waitForResponse(response => new URL(response.url()).pathname === "/api/version" && response.ok()),
-      login(page, sharedEmail()),
+      page.reload(),
     ]);
     await waitForBridgeOnline(page);
     const bridgeId = readBridgePointer().bridgeId;
@@ -41,7 +42,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
     await expect(dialog.locator("code").first()).toHaveText(`npx ftown@${manualVersion} setup`);
     await expect(dialog.getByRole("button", { name: "Update and restart" })).toHaveCount(0);
     await expect(dialog.getByText(/Automatic updates aren’t available/)).toBeVisible();
-    await expect(page.getByRole("status").filter({ hasText: "App update available" })).toHaveCount(0);
+    await expect(page.getByRole("dialog", { name: "App update available", exact: true })).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath(`bridge-updates-${viewport.width}.png`) });
     await page.keyboard.press("Escape"); await expect(dialog).toBeHidden(); await expect(actions).toBeFocused();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -51,8 +52,11 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
 test("application build change requires an explicit reload", async ({ page }) => {
   await page.route("**/api/version", route => route.fulfill({ status: 200, contentType: "application/json", headers: { "Cache-Control": "no-store" }, body: JSON.stringify({ buildId: "e2e-distinct-build" }) }));
   await login(page, sharedEmail());
-  const notice = page.getByRole("status").filter({ hasText: "App update available" });
+  const notice = page.getByRole("dialog", { name: "App update available", exact: true });
   await expect(notice).toBeVisible();
   await expect(notice.getByText(/unsent dialog input may be lost/)).toBeVisible();
-  await notice.getByRole("button", { name: "Later" }).click(); await expect(notice).toBeHidden();
+  await expect(notice.getByRole("button", { name: "Reload", exact: true })).toBeEnabled();
+  const later = notice.getByRole("button", { name: "Later", exact: true });
+  await expect(later).toBeFocused();
+  await later.click(); await expect(notice).toBeHidden();
 });
