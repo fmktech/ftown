@@ -1,16 +1,18 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Command, Session } from "@/types";
-import { inboxEntries, queueSessionReply, SessionInbox, type InboxEntry } from "./SessionInbox";
+import { inboxEntries, queueSessionReply, SessionInboxPage, SessionInboxTrigger, type InboxEntry } from "./SessionInbox";
 const session = (id: string, extra: Partial<Session> = {}): Session => ({ id, bridgeId: "b", name: id, status: "running", createdAt: "2026-01-01", updatedAt: "2026-01-01", ...extra });
 const entry = (id: string, timestamp = 1): InboxEntry => ({ session: session(id), bridgeName: "Laptop", notice: { type: "agent_needs_input", title: "Review", message: "Full message\n" + "x".repeat(300), receivedAt: timestamp } });
 const base = { onOpenSession: vi.fn(), onDismiss: vi.fn(async () => {}), onReply: vi.fn(async () => {}) };
 function Fixture({ entries = [entry("first")], collapsed = false, actions = base }: { entries?: InboxEntry[]; collapsed?: boolean; actions?: { onOpenSession: (id: string) => void; onDismiss: (entry: InboxEntry) => Promise<void>; onReply: (entry: InboxEntry, message: string) => Promise<void> } }) {
-  const [open, setOpen] = useState(false); return <SessionInbox entries={entries} collapsed={collapsed} open={open} onOpen={() => setOpen(true)} onClose={() => setOpen(false)} {...actions}/>;
+  const [open, setOpen] = useState(false); const trigger = useRef<HTMLButtonElement>(null); const restore = useRef(false);
+  useEffect(() => { if (!open && restore.current) { restore.current = false; trigger.current?.focus(); } }, [open]);
+  return <><SessionInboxTrigger count={entries.length} collapsed={collapsed} open={open} onOpen={() => setOpen(true)} buttonRef={trigger}/><SessionInboxPage entries={entries} open={open} onClose={() => { restore.current = true; setOpen(false); }} {...actions}/></>;
 }
-beforeEach(() => { Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute("open", ""); } }); Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute("open"); } }); vi.clearAllMocks(); });
+beforeEach(() => { vi.clearAllMocks(); });
 afterEach(cleanup);
 it("shows full text, sorted outstanding counts, and retains ordinary hidden filters", () => {
   const rows = [session("older"), session("tie-first"), session("newest"), session("tie-second"), session("hidden"), session("hidden-bridge", { bridgeId: "other" })];
@@ -18,14 +20,15 @@ it("shows full text, sorted outstanding counts, and retains ordinary hidden filt
   const entries = inboxEntries(rows, notices, [], new Set(["hidden"]), new Set(["other"]), new Set(["b"]), () => true);
   expect(entries.map(item => item.session.id)).toEqual(["newest", "tie-first", "tie-second", "older"]);
   render(<Fixture entries={entries}/>); const trigger = screen.getByRole("button", { name: "Inbox, 4 messages" }); fireEvent.click(trigger);
-  const dialog = screen.getByRole("dialog", { name: "Inbox" }); const articles = within(dialog).getAllByRole("article");
+  const page = screen.getByRole("region", { name: "Inbox" }); const articles = within(page).getAllByRole("article");
   expect(articles.map(item => item.getAttribute("data-inbox-entry"))).toEqual(["newest", "tie-first", "tie-second", "older"]);
   expect(articles[0].querySelector(".whitespace-pre-wrap")?.textContent).toBe(entries[0].notice.message); expect(base.onDismiss).not.toHaveBeenCalled(); expect(base.onOpenSession).not.toHaveBeenCalled();
   fireEvent.click(within(articles[0]).getByRole("button", { name: "Open session" })); expect(base.onOpenSession).toHaveBeenCalledWith("newest");
 });
-it("works collapsed and empty, closes on Escape and restores focus", () => {
+it("works collapsed and empty, focuses the heading and restores focus on back", () => {
   render(<Fixture entries={[]} collapsed/>); const trigger = screen.getByRole("button", { name: "Inbox, 0 messages" }); trigger.focus(); fireEvent.click(trigger);
-  expect(screen.getByText("No messages.")).toBeTruthy(); fireEvent(screen.getByRole("dialog"), new Event("cancel", { cancelable: true })); expect(screen.queryByRole("dialog")).toBeNull(); expect(document.activeElement).toBe(trigger);
+  expect(screen.getByText("No messages.")).toBeTruthy(); expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Inbox" })); expect(screen.queryByRole("dialog")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Back to workspace" })); expect(screen.queryByRole("region", { name: "Inbox" })).toBeNull(); expect(document.activeElement).toBe(trigger);
 });
 it("keeps the failed draft and sends once, then reports durable enqueue only", async () => {
   let resolve!: () => void; const sent = vi.fn().mockRejectedValueOnce(new Error("Reply may have been queued. Check the session before sending again.")).mockImplementationOnce(() => new Promise<void>(r => { resolve = r; }));
@@ -63,7 +66,7 @@ it("keeps one pending reply and its draft across close and reopen", async () => 
   let finish!: () => void; const onReply = vi.fn(() => new Promise<void>(resolve => { finish = resolve; }));
   render(<Fixture actions={{ ...base, onReply }}/>); fireEvent.click(screen.getByRole("button", { name: /Inbox/ }));
   fireEvent.change(screen.getByLabelText("Reply to first"), { target: { value: "Pending draft" } }); fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
-  fireEvent.click(screen.getByRole("button", { name: "Close" })); expect(screen.queryByRole("dialog")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Back to workspace" })); expect(screen.queryByRole("region", { name: "Inbox" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: /Inbox/ }));
   expect((screen.getByLabelText("Reply to first") as HTMLTextAreaElement).value).toBe("Pending draft");
   expect((screen.getByRole("button", { name: "Sending…" }) as HTMLButtonElement).disabled).toBe(true); fireEvent.click(screen.getByRole("button", { name: "Sending…" })); expect(onReply).toHaveBeenCalledTimes(1);
@@ -73,7 +76,7 @@ it("keeps a failed reply and draft after it settles while the inbox is closed", 
   let fail!: (error: Error) => void; const onReply = vi.fn(() => new Promise<void>((_resolve, reject) => { fail = reject; }));
   render(<Fixture actions={{ ...base, onReply }}/>); fireEvent.click(screen.getByRole("button", { name: /Inbox/ }));
   fireEvent.change(screen.getByLabelText("Reply to first"), { target: { value: "Uncertain draft" } }); fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
-  fireEvent.click(screen.getByRole("button", { name: "Close" })); await act(async () => fail(new Error("Reply may have been queued.")));
+  fireEvent.click(screen.getByRole("button", { name: "Back to workspace" })); await act(async () => fail(new Error("Reply may have been queued.")));
   fireEvent.click(screen.getByRole("button", { name: /Inbox/ })); expect((screen.getByLabelText("Reply to first") as HTMLTextAreaElement).value).toBe("Uncertain draft");
   expect(screen.getByRole("alert").textContent).toContain("may have been queued"); expect(onReply).toHaveBeenCalledTimes(1);
 });

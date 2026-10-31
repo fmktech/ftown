@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import type { ManualInputNotice } from "@/lib/hook-events";
 import type { SessionActivity } from "@/hooks/useAllSessionEvents";
 import type { BridgeInfo } from "@/hooks/useBridges";
@@ -69,20 +69,19 @@ function InboxItem({ entry, onOpenSession, onDismiss, onReply }: { entry: InboxE
     {message && <p role="status" className="text-xs text-[var(--text-muted)]">{message}</p>}{error && <p role="alert" className="text-xs text-[var(--status-error)]">{error}</p>}
   </article>;
 }
-export function SessionInbox({ entries, collapsed, open, onOpen, onClose, onOpenSession, onDismiss, onReply }: { entries: readonly InboxEntry[]; collapsed: boolean; open: boolean; onOpen: () => void; onClose: () => void; onOpenSession: (id: string) => void; onDismiss: (entry: InboxEntry) => Promise<void>; onReply: (entry: InboxEntry, message: string) => Promise<void> }) {
-  const dialog = useRef<HTMLDialogElement>(null); const title = useId();
-  useEffect(() => {
-    if (!open) return;
-    const element = dialog.current; const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    element?.showModal(); return () => { if (element?.open) element.close(); previous?.focus(); };
-  }, [open]);
-  return <>
-    <button type="button" aria-label={`Inbox, ${entries.length} ${entries.length === 1 ? "message" : "messages"}`} title="Inbox" className={`flex min-h-11 w-full items-center gap-2 border-b border-[var(--border-muted)] px-3 text-left text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] ${collapsed ? "justify-center" : ""}`} onClick={onOpen}>
-      <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h16v16H4zM4 14h5l2 3h2l2-3h5"/></svg>{!collapsed && <span>Inbox</span>}<span aria-hidden="true" className="font-semibold tabular-nums">{entries.length}</span>
-    </button>
-    <dialog ref={dialog} aria-labelledby={title} onCancel={event => { event.preventDefault(); onClose(); }} onClick={event => { if (event.target !== event.currentTarget) return; const rect = event.currentTarget.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) onClose(); }} className="fixed inset-0 m-auto max-h-[90dvh] w-[calc(100%_-_24px)] max-w-lg overflow-y-auto rounded-xl border border-[var(--border-muted)] bg-[var(--bg-surface)] p-4 text-[var(--text-primary)] shadow-2xl backdrop:bg-black/70">
-      <div className="mb-3 flex items-center justify-between gap-2"><h2 id={title} className="text-base font-semibold">Inbox</h2><button type="button" className="btn-ghost min-h-11" onClick={onClose}>Close</button></div>
+export function SessionInboxTrigger({ count, collapsed, open, onOpen, buttonRef }: { count: number; collapsed: boolean; open: boolean; onOpen: () => void; buttonRef?: RefObject<HTMLButtonElement | null> }) {
+  return <button ref={buttonRef} type="button" aria-label={`Inbox, ${count} ${count === 1 ? "message" : "messages"}`} aria-pressed={open} title="Inbox" className={`flex min-h-11 w-full items-center gap-2 border-b border-[var(--border-muted)] px-3 text-left text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] ${collapsed ? "justify-center" : ""}`} onClick={onOpen}>
+    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h16v16H4zM4 14h5l2 3h2l2-3h5"/></svg>{!collapsed && <span>Inbox</span>}<span aria-hidden="true" className="font-semibold tabular-nums">{count}</span>
+  </button>;
+}
+
+export function SessionInboxPage({ entries, open, onClose, onOpenSession, onDismiss, onReply }: { entries: readonly InboxEntry[]; open: boolean; onClose: () => void; onOpenSession: (id: string) => void; onDismiss: (entry: InboxEntry) => Promise<void>; onReply: (entry: InboxEntry, message: string) => Promise<void> }) {
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => { if (open) heading.current?.focus(); }, [open]);
+  return <section aria-label="Inbox" hidden={!open} className="min-h-0 min-w-0 flex-1 overflow-y-auto bg-[var(--bg-surface)] text-[var(--text-primary)]">
+    <div className="mx-auto w-full max-w-3xl p-4 sm:p-6">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2"><h1 ref={heading} tabIndex={-1} className="text-lg font-semibold">Inbox</h1><button type="button" className="btn-ghost min-h-11" onClick={onClose}>Back to workspace</button></div>
       {entries.length ? <div className="space-y-3">{entries.map(entry => <InboxItem key={noticeKey(entry.session.id, entry.notice)} entry={entry} onOpenSession={onOpenSession} onDismiss={onDismiss} onReply={onReply} />)}</div> : <p className="text-sm text-[var(--text-muted)]">No messages.</p>}
-    </dialog>
-  </>;
+    </div>
+  </section>;
 }

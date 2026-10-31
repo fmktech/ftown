@@ -17,10 +17,14 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       const message = `Please review this full request.\n${"LongUnbrokenReference".repeat(25)}`;
       await execute(process.execPath, [join(E2E_DIR, "..", "bridge", "dist", "ftown-cli.js"), "sessions", "attention", "--title", "Review requested", "--message", message], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: id }, timeout: 30_000 });
       if (viewport.name === "mobile") await page.getByRole("tab", { name: "Workspace", exact: true }).click();
-      const trigger = page.getByRole("button", { name: /^Inbox, [1-9]\d* messages?$/ }); await expect(trigger).toBeVisible();
-      await trigger.click(); const dialog = page.getByRole("dialog", { name: "Inbox", exact: true }); const item = dialog.locator(`[data-inbox-entry="${id}"]`);
+      const trigger = page.getByRole("button", { name: /^Inbox, \d+ messages?$/ }); await expect(trigger).toBeVisible(); await expect(trigger).toHaveAccessibleName(/^Inbox, [1-9]\d* messages?$/);
+      await trigger.click(); const inbox = page.getByRole("region", { name: "Inbox", exact: true }); await expect(page.getByRole("heading", { name: "Inbox", exact: true })).toBeFocused(); await expect(page.getByRole("dialog", { name: "Inbox" })).toHaveCount(0); const item = inbox.locator(`[data-inbox-entry="${id}"]`);
       await expect(item.getByText("Review requested", { exact: true })).toBeVisible(); await expect(item.locator("p.whitespace-pre-wrap")).toHaveText(message);
-      expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      const openSession = item.getByRole("button", { name: "Open session" }); await openSession.focus(); await page.keyboard.press("Enter"); await expect(inbox).toBeHidden();
+      await expect(page.getByRole("region", { name: `Session workspace: ${name}` })).toBeFocused();
+      if (viewport.name === "mobile") { await expect(page.getByRole("tab", { name: "Terminal", exact: true })).toHaveAttribute("aria-selected", "true"); await page.getByRole("tab", { name: "Workspace", exact: true }).click(); }
+      await trigger.click(); await expect(item).toBeVisible();
+      expect(await inbox.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await page.screenshot({ path: info.outputPath(`session-inbox-${viewport.name}.png`), fullPage: true });
       const reply = `Queued browser reply ${Date.now().toString(36)}`; await item.getByLabel(`Reply to ${name}`).fill(reply); await item.getByRole("button", { name: "Send reply" }).click();
       await expect(item.getByRole("status")).toHaveText("Reply queued."); await expect(item).toBeVisible();
@@ -28,9 +32,9 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       const mail = await bridgeApiFetch("GET", `/api/sessions/${id}/inbox?peek=1&all=1`); expect(mail.status).toBe(200);
       const messages = (mail.body as { messages: Array<{ body: string; from: string; fromName?: string }> }).messages;
       expect(messages).toEqual(expect.arrayContaining([expect.objectContaining({ body: reply, from: "browser", fromName: "You" })]));
-      await item.getByRole("button", { name: "Dismiss" }).click(); await expect(item).toHaveCount(0); await dialog.getByRole("button", { name: "Close" }).click();
+      await item.getByRole("button", { name: "Dismiss" }).click(); await expect(item).toHaveCount(0); await inbox.getByRole("button", { name: "Back to workspace" }).click(); await expect(trigger).toBeFocused();
       await page.reload(); await waitForBridgeOnline(page); if (viewport.name === "mobile") await page.getByRole("tab", { name: "Workspace", exact: true }).click();
-      await page.getByRole("button", { name: /^Inbox, / }).click(); await expect(page.getByRole("dialog", { name: "Inbox" }).locator(`[data-inbox-entry="${id}"]`)).toHaveCount(0);
+      await page.getByRole("button", { name: /^Inbox, / }).click(); await expect(page.getByRole("region", { name: "Inbox" }).locator(`[data-inbox-entry="${id}"]`)).toHaveCount(0);
     } finally { if (id) await bridgeApiFetch("DELETE", `/api/sessions/${id}`).catch(() => undefined); }
   });
 }
