@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { setTimeout as delay } from "node:timers/promises";
@@ -146,6 +147,25 @@ export function createMcpServer(
     return { ...page, cursor: encodeCursor(t, page.cursor) };
   };
   const operations: Record<string, Operation> = {
+    preview_chat_reply: {
+      schema: z.object({ ...target, id: z.guid().optional(), text: z.string().min(1).max(4096) }).strict(),
+      description: "Post a tool-authored reply to a session's preview conversation. Supply a stable id when retrying; this does not attest agent identity.",
+      readOnly: false,
+      run: async ({ machine, sessionId, id, text }, signal) => {
+        const turnId = id ?? randomUUID();
+        await validateAccess([machine]);
+        let committed = false;
+        try {
+          const result = await req(machine, 'POST', path(sessionId, '/preview-chat/reply'), { id: turnId, text }, signal);
+          committed = true;
+          await validateAccess([machine]);
+          return result;
+        } catch (error) {
+          const detail = errorResult(error);
+          throw new FleetError(detail.code, `Preview reply may be uncertain; retry the same ID ${turnId} with the same text`, committed || detail.outcomeUnknown, 'status' in detail ? detail.status : undefined);
+        }
+      },
+    },
     sessions_create: {
       schema: z.object(create).strict(),
       description:

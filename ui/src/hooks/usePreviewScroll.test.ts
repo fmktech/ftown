@@ -1,0 +1,63 @@
+// @vitest-environment jsdom
+import { act, cleanup, renderHook } from '@testing-library/react';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { usePreviewScroll } from './usePreviewScroll';
+import { PREVIEW_SCROLL_CHANNEL as channel } from '@/lib/preview-scroll-protocol';
+beforeEach(() => vi.useFakeTimers());
+afterEach(() => { cleanup(); vi.useRealTimers(); });
+it('uses only the current opaque frame, snapshots before replacement and restores its coordinates', () => {
+  let epoch = 0; const getEpoch = () => epoch;
+  const hook = renderHook(({ candidate }) => usePreviewScroll(candidate, 'owner', getEpoch), { initialProps: { candidate: { html: 'one', key: '1' } } });
+  const frame = { postMessage: vi.fn() }; Object.defineProperty(hook.result.current.iframeRef, 'current', { configurable: true, value: { contentWindow: frame } });
+  const id = hook.result.current.display!.documentId;
+  const receive = (data: object, source: object = frame, origin = 'null') => act(() => window.dispatchEvent(new MessageEvent('message', { data, source: source as Window, origin })));
+  receive({ channel, documentId: id, kind: 'position', x: 5, y: 90 });
+  receive({ channel, documentId: id, kind: 'ready' }, {});
+  receive({ channel, documentId: id, kind: 'ready' }, frame, 'https://other.example');
+  expect(frame.postMessage).not.toHaveBeenCalled();
+  receive({ channel, documentId: id, kind: 'ready' });
+  expect(frame.postMessage).toHaveBeenLastCalledWith({ channel, documentId: id, kind: 'restore', x: 0, y: 0 }, '*');
+  receive({ channel, documentId: id, kind: 'restored', x: 0, y: 0 });
+  receive({ channel, documentId: id, kind: 'position', x: 4, y: 300, extra: true });
+  receive({ channel, documentId: id, kind: 'position', x: 4, y: 200 });
+  hook.rerender({ candidate: { html: 'two', key: '2' } });
+  expect(hook.result.current.display!.key).toBe('1');
+  const request = frame.postMessage.mock.calls.at(-1)![0];
+  receive({ channel, documentId: id, kind: 'snapshot', requestId: request.requestId, x: 5, y: 240 });
+  const next = hook.result.current.display!; expect(next.key).toBe('2');
+  receive({ channel, documentId: id, kind: 'position', x: 9, y: 999 });
+  receive({ channel, documentId: next.documentId, kind: 'ready' });
+  expect(frame.postMessage).toHaveBeenLastCalledWith({ channel, documentId: next.documentId, kind: 'restore', x: 5, y: 240 }, '*');
+  epoch++; hook.rerender({ candidate: { html: 'three', key: '3' } });
+  receive({ channel, documentId: next.documentId, kind: 'ready' });
+  expect(hook.result.current.display!.key).toBe('3');
+});
+it('commits the latest candidate after the bounded snapshot timeout', () => {
+  const getEpoch = () => 0; const hook = renderHook(({ key }) => usePreviewScroll({ html: key, key }, 'owner', getEpoch), { initialProps: { key: '1' } });
+  hook.rerender({ key: '2' }); hook.rerender({ key: '3' });
+  act(() => vi.advanceTimersByTime(100)); expect(hook.result.current.display!.key).toBe('3');
+});
+
+it('preserves the last restored position when a replacement frame snapshots before restoration', () => {
+ const getEpoch = () => 0;
+ const hook = renderHook(({ key }) => usePreviewScroll({ html: key, key }, 'owner', getEpoch), { initialProps: { key: 'a' } });
+ const frame = { postMessage: vi.fn() };
+ Object.defineProperty(hook.result.current.iframeRef, 'current', { configurable: true, value: { contentWindow: frame } });
+ const receive = (data: object) => act(() => window.dispatchEvent(new MessageEvent('message', { data, source: frame as unknown as Window, origin: 'null' })));
+ const a = hook.result.current.display!.documentId;
+ receive({ channel, documentId: a, kind: 'ready' });
+ receive({ channel, documentId: a, kind: 'restored', x: 0, y: 500 });
+ hook.rerender({ key: 'b' });
+ const first = frame.postMessage.mock.calls.at(-1)![0];
+ receive({ channel, documentId: a, kind: 'snapshot', requestId: first.requestId, x: 0, y: 500 });
+ const b = hook.result.current.display!.documentId;
+ receive({ channel, documentId: b, kind: 'ready' });
+ hook.rerender({ key: 'c' });
+ const second = frame.postMessage.mock.calls.at(-1)![0];
+ receive({ channel, documentId: b, kind: 'snapshot', requestId: second.requestId, x: 0, y: 0 });
+ expect(hook.result.current.display!.key).toBe('b');
+ act(() => vi.advanceTimersByTime(100));
+ const c = hook.result.current.display!; expect(c.key).toBe('c');
+ receive({ channel, documentId: c.documentId, kind: 'ready' });
+ expect(frame.postMessage).toHaveBeenLastCalledWith({ channel, documentId: c.documentId, kind: 'restore', x: 0, y: 500 }, '*');
+});

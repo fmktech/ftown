@@ -21,6 +21,7 @@ import { ProcessRunner } from './claude-runner.js';
 import { SessionStore } from './session-store.js';
 import { MailStore } from './mail-store.js';
 import { AttentionStore } from './attention-store.js';
+import { PreviewChatStore } from './preview-chat.js';
 import { BridgePushNotifier } from './push-notifier.js';
 import { LocalApiServer } from './local-api-server.js';
 import { BrowserAccess } from './browser-access.js';
@@ -850,6 +851,10 @@ program
     const sessionController = new SessionController({
       store,
       runner,
+      previewChat: new PreviewChatStore(id => store.sessionDir(id)),
+      previewChatBridgeId: bridgeId,
+      previewChatRunning: id => runner.isRunning(id),
+      enqueuePreviewChat: (session, text) => localApiServer.enqueuePreviewChat(session, text),
       publishSessionUpdate: (session) => centrifugo.publishSessionUpdate(userId, session),
       removeSession: (id, options) => removeFtownSession({ store, runner, centrifugo, userId }, id, options),
       sessionFactory: sessionFactoryDeps,

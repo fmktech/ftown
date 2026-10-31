@@ -87,7 +87,7 @@ export const requestSchema = z
     path: z
       .string()
       .regex(
-        /^\/api\/(?:archive|sessions(?:\/[a-zA-Z0-9_-]+(?:\/(?:screen|grep|keys|message|inbox|resize|usage|running|revive|stop|retry|attention(?:\/(?:ack|resolve))?))?)?)(?:\?[^#]*)?$/,
+        /^\/api\/(?:archive|sessions(?:\/[a-zA-Z0-9_-]+(?:\/(?:screen|grep|keys|message|inbox|resize|usage|running|revive|stop|retry|preview-chat\/reply|attention(?:\/(?:ack|resolve))?))?)?)(?:\?[^#]*)?$/,
       ),
     body: z.unknown().optional(),
     timeoutMs: z.number().int().min(1000).max(60000),

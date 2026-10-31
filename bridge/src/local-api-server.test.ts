@@ -23,6 +23,8 @@ import {
   workingDirMissingResponse,
 } from './local-api-server.js';
 import { SessionStore } from './session-store.js';
+import { SessionController } from './session-controller.js';
+import { PreviewChatStore } from './preview-chat.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { CreateFtownSessionDeps } from './create-ftown-session.js';
 import type { ProcessRunner } from './claude-runner.js';
@@ -454,6 +456,21 @@ async function sessionToolsFixture(t: { after: (fn: () => void) => void }, withA
 }
 
 describe('LocalApiServer explicit session attention and PR metadata', () => {
+  it('routes encrypted preview chat requests through the shared controller', async t => {
+    const f = await sessionToolsFixture(t); await f.store.saveSession({ ...f.sample, shellType: 'codex' });
+    let count = 0;
+    f.server.setSessionController(new SessionController({ store: f.store, runner: { stop: () => false }, previewChat: new PreviewChatStore(id => f.store.sessionDir(id)),
+      previewChatBridgeId: 'machine-a', previewChatRunning: () => true, enqueuePreviewChat: async () => { count++; return { ok: true, id: 'mail' }; },
+      publishSessionUpdate: async () => {}, removeSession: async () => null }));
+    const root = `/api/sessions/${f.sample.id}/preview-chat`; const id = '12345678-1234-4234-8234-123456789abc';
+    const one = await api(f.port, f.token, 'POST', `${root}/send`, { id, text: 'hello\nworld' });
+    assert.equal(one.status, 200); assert.equal((one.data.turn as { delivery: string }).delivery, 'queued');
+    assert.equal((await api(f.port, f.token, 'POST', `${root}/send`, { id, text: 'hello\nworld' })).status, 200); assert.equal(count, 1);
+    assert.equal((await api(f.port, f.token, 'POST', `${root}/send`, { id, text: 'different' })).status, 409);
+    assert.equal((await api(f.port, f.token, 'POST', `${root}/reply`, { id: '12345678-1234-4234-8234-123456789abd', text: 'reply' })).status, 200);
+    const page = await api(f.port, f.token, 'GET', root); assert.equal(page.status, 200); assert.equal((page.data.turns as unknown[]).length, 2);
+    assert.equal((await api(f.port, f.token, 'GET', `${root}?cursor=other%3A0`)).status, 400);
+  });
   it('stamps native notifications with committed identity and ignores caller-supplied ledger metadata', async t => {
     const f = await sessionToolsFixture(t);
     const response = await api(f.port, f.token, 'POST', '/hook', { ftown_session_id: f.sample.id, hook_event_name: 'Notification',

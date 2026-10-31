@@ -13,6 +13,10 @@ import { normalizePullRequestUrl } from './pull-request-url.js';
 import { currentPreview, preparePreview, PreviewError, previewChunk, previewStatus, SessionPreviewReader, validPreviewId, validRevision } from './session-preview.js';
 import type { SessionPreviewChunk, SessionPreviewSource, SessionPreviewStatus } from './preview-protocol.js';
 import { PREVIEW_CHUNK_BYTES } from './preview-protocol.js';
+import { PreviewChatError, PreviewChatStore, validateChatInput } from './preview-chat.js';
+import { PREVIEW_CHAT_AGENT_SHELLS } from './preview-chat-protocol.js';
+import type { PreviewChatErrorCode, PreviewChatInput, PreviewChatPage, PreviewChatWriteResult } from './preview-chat-protocol.js';
+import type { AcceptMailResult } from './mail-delivery.js';
 
 /**
  * Transport-agnostic session operations, defined ONCE and shared by the two
@@ -58,6 +62,10 @@ export interface SessionStoreLike {
 export interface SessionControllerDeps {
   store: SessionStoreLike;
   runner: { stop(sessionId: string): boolean };
+  previewChat?: PreviewChatStore;
+  previewChatBridgeId?: string;
+  previewChatRunning?(sessionId: string): boolean;
+  enqueuePreviewChat?(session: Session, text: string): Promise<AcceptMailResult>;
   publishSessionUpdate(session: Session): Promise<void>;
   /** removeFtownSession closed over its dep bundle. Returns the removed
    * session, or null when nothing was removed (unknown id, or the
@@ -130,6 +138,43 @@ export class SessionController {
 
   get(sessionId: string): Promise<Session | null> {
     return this.deps.store.loadSession(sessionId);
+  }
+
+  private async chat<T>(sessionId: string, task: (store: PreviewChatStore, session: Session) => Promise<T>): Promise<({ ok: true } & T) | { ok: false; code: PreviewChatErrorCode; message: string }> {
+    try {
+      return await this.withSessionMutation(sessionId, async () => {
+        if (!/^[A-Za-z0-9_-]{1,200}$/.test(sessionId)) throw new PreviewChatError('invalid', 'Invalid session');
+        const session = await this.deps.store.loadSession(sessionId);
+        if (!session) throw new PreviewChatError('not_found', 'Session not found');
+        if (!this.deps.previewChat || !this.deps.previewChatBridgeId) throw new PreviewChatError('unavailable', 'Conversation unavailable');
+        if (session.bridgeId !== this.deps.previewChatBridgeId) throw new PreviewChatError('not_found', 'Session not found');
+        return { ok: true as const, ...await task(this.deps.previewChat, session) };
+      });
+    } catch (error) {
+      return { ok: false, code: error instanceof PreviewChatError ? error.code : 'unavailable', message: error instanceof PreviewChatError ? error.message : 'Conversation unavailable' };
+    }
+  }
+  listPreviewChat(sessionId: string, cursor?: string): Promise<({ ok: true; page: PreviewChatPage }) | { ok: false; code: PreviewChatErrorCode; message: string }> {
+    return this.chat(sessionId, async store => ({ page: await store.list(sessionId, cursor) }));
+  }
+  sendPreviewChat(sessionId: string, input: PreviewChatInput): Promise<({ ok: true; result: PreviewChatWriteResult }) | { ok: false; code: PreviewChatErrorCode; message: string }> {
+    return this.chat(sessionId, async (store, session) => {
+      validateChatInput(input);
+      const existing = await store.find(sessionId, input, 'user');
+      if (existing) return { result: { sessionId, turn: existing } };
+      if (!session.shellType || !PREVIEW_CHAT_AGENT_SHELLS.some(type => type === session.shellType)) throw new PreviewChatError('unsupported', 'Conversation is unavailable for this session');
+      if (session.status !== 'running' || !this.deps.previewChatRunning?.(sessionId)) throw new PreviewChatError('not_running', 'Session is not running');
+      if (!this.deps.enqueuePreviewChat) throw new PreviewChatError('unavailable', 'Conversation unavailable');
+      const turn = await store.reserve(sessionId, input, 'user');
+      try {
+        const mail = await this.deps.enqueuePreviewChat(session, `${input.text}\n\nReply to the preview conversation with: ftown sessions preview-reply --message <your reply>`);
+        if (mail.ok) return { result: { sessionId, turn: await store.markQueued(sessionId, input.id) } };
+      } catch { /* Reservation prevents unsafe retry after uncertain delivery. */ }
+      return { result: { sessionId, turn } };
+    });
+  }
+  replyPreviewChat(sessionId: string, input: PreviewChatInput): Promise<({ ok: true; result: PreviewChatWriteResult }) | { ok: false; code: PreviewChatErrorCode; message: string }> {
+    return this.chat(sessionId, async store => ({ result: { sessionId, turn: await store.reserve(sessionId, input, 'agent') } }));
   }
 
   /**

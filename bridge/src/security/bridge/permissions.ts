@@ -27,6 +27,12 @@ export function classifyHttp(method: string, path: string): OperationPermission 
   if (method === 'GET' && url.pathname === '/api/archive') return result('read', 'archive_list');
   if (method === 'GET' && url.pathname === '/api/inbox/resolve') return result('read', 'inbox_resolve');
   if (method === 'GET' && url.pathname === '/api/browser/events') return result('read', 'local_events');
+  const chat = /^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/preview-chat(?:\/(send|reply))?$/.exec(url.pathname);
+  if (chat) {
+    if (!chat[2] && method === 'GET' && [...url.searchParams.keys()].every(key => key === 'cursor') && url.searchParams.getAll('cursor').length <= 1) return result('read', 'preview_chat_list', chat[1]);
+    if (chat[2] && method === 'POST' && !url.search) return result('control', `preview_chat_${chat[2]}`, chat[1]);
+    return deny();
+  }
   const preview = /^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/preview$/.exec(url.pathname);
   if (preview) return !url.search && (method === 'PUT' || method === 'DELETE') ? result('control', 'session_preview_register', preview[1]) : deny();
   if (url.pathname === '/api/loops' || /^\/api\/loops\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)?$/.test(url.pathname)) {
@@ -69,6 +75,7 @@ export function classifyCommand(command: string, payload?: ApplicationJson): Ope
     return classifyHttp(request.method, request.path);
   }
   if (command === 'session_preview_status' || command === 'session_preview_chunk') return sessionId && sessionId.length <= 200 ? result('read', command, sessionId) : deny();
+  if (command === 'preview_chat_list' || command === 'preview_chat_send' || command === 'preview_chat_reply') return sessionId && sessionId.length <= 200 ? result(command === 'preview_chat_list' ? 'read' : 'control', command, sessionId) : deny();
   if (readCommands.has(command)) return result('read', command, sessionId);
   if (controlCommands.has(command)) return result('control', command, sessionId);
   if (adminCommands.has(command)) return result('admin', command, sessionId);

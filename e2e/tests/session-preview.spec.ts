@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { symlink, unlink, writeFile } from "node:fs/promises";
-import { expect, type Page, type TestInfo } from "@playwright/test";
+import { expect, type CDPSession, type Page, type TestInfo } from "@playwright/test";
 import { test } from "../helpers/fixtures";
 import { login, sharedEmail, waitForBridgeOnline, runMarkerInTerminal } from "../helpers/app";
 import { bridgeApiFetch, readBridgePointer } from "../helpers/bridge-api";
@@ -34,6 +34,42 @@ async function noHorizontalOverflow(page: Page): Promise<void> {
 test("real CLI preview is encrypted, interactive, revision-consistent and isolated across sessions", async ({ page, context }, info) => {
   test.setTimeout(240_000);
   await page.setViewportSize({ width: 1440, height: 900 });
+  let cpuSession: CDPSession | undefined;
+  const cpuRate = process.env.FTOWN_PREVIEW_CPU_RATE;
+  if (cpuRate !== undefined) {
+    const rate = Number(cpuRate);
+    if (!/^(?:[2-9]|10)$/.test(cpuRate) || !Number.isInteger(rate)) throw new Error("FTOWN_PREVIEW_CPU_RATE must be an integer from 2 to 10");
+    cpuSession = await context.newCDPSession(page);
+    await cpuSession.send("Emulation.setCPUThrottlingRate", { rate });
+  }
+  // Passive, bounded handshake timeline; attach before fixture cleanup.
+  const scrollTrace: Array<Record<string, unknown>> = [];
+  const recordScroll = (entry: Record<string, unknown>) => { if (scrollTrace.length < 1000) scrollTrace.push(entry); };
+  await page.exposeBinding("__previewScrollTrace", ({ frame }, entry: Record<string, unknown>) => {
+    recordScroll({ ...entry, surface: frame === page.mainFrame() ? "parent" : "child" });
+  });
+  await page.addInitScript(() => {
+    type TraceWindow = Window & { __previewScrollTrace?: (entry: Record<string, unknown>) => Promise<void> };
+    const report = (entry: Record<string, unknown>) => { void (window as TraceWindow).__previewScrollTrace?.({ time: Date.now(), ...entry }); };
+    const topFrame = window === window.parent;
+    window.addEventListener("message", event => {
+      const value = event.data;
+      if (!value || typeof value !== "object" || value.channel !== "ftown-preview-scroll-v1") return;
+      const sourceValid = topFrame ? [...document.querySelectorAll("iframe")].some(element => element.contentWindow === event.source) : event.source === window.parent;
+      report({ kind: typeof value.kind === "string" ? value.kind : "invalid", sourceValid, origin: event.origin,
+        documentId: typeof value.documentId === "string" ? value.documentId.slice(0, 64) : null,
+        requestId: typeof value.requestId === "string" ? value.requestId.slice(0, 64) : null,
+        x: typeof value.x === "number" && Number.isFinite(value.x) ? value.x : null,
+        y: typeof value.y === "number" && Number.isFinite(value.y) ? value.y : null,
+        ...(topFrame ? {} : { readyState: document.readyState, height: document.documentElement?.scrollHeight ?? 0, viewport: window.innerHeight, currentY: window.scrollY }) });
+    });
+    if (!topFrame) {
+      window.addEventListener("scroll", () => report({ kind: "child-scroll", x: window.scrollX, y: window.scrollY }), { passive: true });
+      for (const kind of ["focus", "blur"] as const) window.addEventListener(kind, event => report({ kind: `child-${kind}`, y: window.scrollY, trusted: event.isTrusted }), { capture: true, passive: true });
+      document.addEventListener("DOMContentLoaded", () => report({ kind: "child-dom-content-loaded", height: document.documentElement?.scrollHeight ?? 0, viewport: window.innerHeight, currentY: window.scrollY }));
+      window.addEventListener("load", () => report({ kind: "child-load", height: document.documentElement?.scrollHeight ?? 0, viewport: window.innerHeight, currentY: window.scrollY }));
+    }
+  });
   const fixture = await createPreviewFixture();
   const suffix = `${info.workerIndex}-${Date.now().toString(36)}`;
   const marker = `PREVIEW_PRIVATE_${suffix}`;
@@ -43,8 +79,9 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
   const otherFileName = "other.html";
   const path = join(fixture.directory, fileName);
   const otherPath = join(fixture.directory, otherFileName);
-  const first = previewHtml(marker, 1, true);
-  const second = previewHtml(marker, 2, true);
+  const tall = (html: string) => html.replace("</body>", '<div style="height:2400px">Scroll fixture</div></body>');
+  const first = tall(previewHtml(marker, 1, true));
+  const second = tall(previewHtml(marker, 2, true));
   expect(Buffer.byteLength(first)).toBeGreaterThan(98_304);
   expect(Buffer.byteLength(first)).toBe(Buffer.byteLength(second));
   let prohibitedRequests = 0;
@@ -198,6 +235,10 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     if (!expandedMain || !expandedPreview) throw new Error("Expanded preview geometry unavailable");
     expect(Math.abs(expandedPreview.x - expandedMain.x)).toBeLessThanOrEqual(2);
     expect(Math.abs(expandedPreview.width - expandedMain.width)).toBeLessThanOrEqual(2);
+    await page.getByRole("button", { name: "Open conversation", exact: true }).click();
+    await page.getByRole("textbox", { name: "Message the agent" }).fill("Draft survives preview refresh");
+    await screenshot(page, info, "preview-expanded-conversation");
+    await page.getByRole("button", { name: "Collapse conversation", exact: true }).click();
     await screenshot(page, info, "preview-expanded");
     await expect(page.locator(`.xterm[data-preview-fixture-terminal="${suffix}"]`)).toHaveCount(1);
     await expect(page.locator(".xterm")).not.toBeVisible();
@@ -208,17 +249,34 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     await expect(page.locator(".xterm")).toBeVisible();
     await expect(iframe(page, fileName)).toHaveAttribute("data-preview-node", suffix);
     await expect(count).toHaveText("Count: 1");
+    recordScroll({ kind: "test-scroll-request", time: Date.now() });
+    await documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollTo(0, 600));
+    await expect.poll(() => documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollY)).toBeGreaterThan(500);
     await separator(page).focus();
+    recordScroll({ kind: "test-after-focus", time: Date.now() });
+    recordScroll({ kind: "test-update-request", time: Date.now() });
     await atomicHtml(path, second);
-    await expect(documentFrame(page, fileName).getByRole("heading", { name: `${marker} version 2`, exact: true })).toBeVisible();
-    await expect(documentFrame(page, fileName).getByRole("button", { name: "Count: 0", exact: true })).toBeVisible();
+    recordScroll({ kind: "test-update-complete", time: Date.now() });
+    await expect(documentFrame(page, fileName).getByRole("heading", { name: `${marker} version 2`, exact: true })).toHaveCount(1);
+    await expect.poll(() => documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollY)).toBeGreaterThan(500);
+    await expect(documentFrame(page, fileName).getByRole("button", { name: "Count: 0", exact: true })).toHaveCount(1);
     await expect(separator(page)).toBeFocused();
     await noHorizontalOverflow(page);
     await screenshot(page, info, "preview-desktop");
+    await page.getByRole("button", { name: "Expand preview", exact: true }).click();
+    await page.getByRole("button", { name: "Open conversation", exact: true }).click();
+    await expect(page.getByRole("textbox", { name: "Message the agent" })).toHaveValue("Draft survives preview refresh");
+    await page.getByRole("button", { name: "Collapse conversation", exact: true }).click();
+    await page.getByRole("button", { name: "Collapse preview", exact: true }).click();
 
     await documentFrame(page, fileName).getByRole("button", { name: "Count: 0", exact: true }).click();
+    await documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollTo(0, 600));
+    await expect.poll(() => documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollY)).toBeGreaterThan(500);
     await page.getByRole("button", { name: "Refresh preview", exact: true }).click();
-    await expect(documentFrame(page, fileName).getByRole("button", { name: "Count: 0", exact: true })).toBeVisible();
+    await expect(documentFrame(page, fileName).getByRole("button", { name: "Count: 0", exact: true })).toHaveCount(1);
+    await expect.poll(() => documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollY)).toBeGreaterThan(500);
+    await atomicHtml(path, previewHtml(marker, 2, true));
+    await expect.poll(() => documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollY)).toBeLessThan(600);
     await page.getByRole("button", { name: "Close preview", exact: true }).click();
     await expect(iframe(page, fileName)).not.toBeVisible();
     await atomicHtml(path, previewHtml(marker, 3, true));
@@ -239,6 +297,7 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     await fixture.register(other, otherFileName);
     await selectSession(page, otherName);
     await expect(documentFrame(page, otherFileName).getByRole("heading", { name: `OTHER_${suffix} version 1`, exact: true })).toBeVisible();
+    expect(await documentFrame(page, otherFileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollY)).toBe(0);
     await page.getByRole("button", { name: "Close preview", exact: true }).click();
     await selectSession(page, targetName);
     await expect(documentFrame(page, fileName).getByRole("heading", { name: `${marker} version 3`, exact: true })).toBeVisible();
@@ -286,8 +345,13 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     expect(JSON.stringify(archive.body).includes(target)).toBe(true);
     assertSanitized(archive.body, path);
     expect(prohibitedRequests).toBe(0);
+    await info.attach("preview-scroll-timeline", { body: Buffer.from(JSON.stringify(scrollTrace, null, 2)), contentType: "application/json" });
+  } catch (error) {
+    try { await info.attach("preview-scroll-timeline", { body: Buffer.from(JSON.stringify(scrollTrace, null, 2)), contentType: "application/json" }); } catch { /* Preserve the original test failure. */ }
+    throw error;
   } finally {
-    await fixture.cleanup();
+    try { if (cpuSession) { await cpuSession.send("Emulation.setCPUThrottlingRate", { rate: 1 }); await cpuSession.detach(); } }
+    finally { await fixture.cleanup(); }
   }
 });
 
@@ -320,6 +384,11 @@ test.describe("mobile preview", () => {
         expect(box!.width).toBeGreaterThanOrEqual(44);
       }
       await noHorizontalOverflow(page);
+      await page.getByRole("button", { name: "Expand preview", exact: true }).click();
+      await page.getByRole("button", { name: "Open conversation", exact: true }).click();
+      await screenshot(page, info, "preview-mobile-conversation");
+      await page.getByRole("button", { name: "Collapse conversation", exact: true }).click();
+      await page.getByRole("button", { name: "Collapse preview", exact: true }).click();
       await screenshot(page, info, "preview-mobile");
       await iframe(page, fileName).evaluate((element, value) => element.setAttribute("data-preview-node", value), suffix);
       const count = documentFrame(page, fileName).getByRole("button", { name: "Count: 0", exact: true });

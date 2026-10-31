@@ -67,6 +67,21 @@ network access are not. Write a temporary file and rename it over the registered
 file to publish a complete update. Closing the dashboard preview does not clear
 the registration; `--clear` removes the registration without deleting the file.
 
+Preview conversation input arrives through the session's existing ftown mail.
+Post a tool-authored reply with:
+
+```bash
+ftown sessions preview-reply --message "The preview is ready."
+ftown sessions preview-reply --message-file ./reply.txt
+printf 'First line\nSecond line\n' | ftown sessions preview-reply --message-file -
+```
+
+The target defaults to `FTOWN_SESSION_ID`; `--session-id` selects an explicit
+session. Replies are limited to 4096 UTF-8 bytes. Preserve the returned ID and
+pass it with `--id <uuid>` alongside the same text when retrying an uncertain
+result. An MCP controller can instead call `preview_chat_reply` with explicit
+machine and session ID. A queued message does not mean an agent has read it.
+
 ## Ask the human or associate a pull request
 
 ```bash
