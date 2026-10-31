@@ -202,14 +202,19 @@ echo "$@" > "${dir}/curl-args"
 while [ $# -gt 0 ]; do if [ "$1" = "-o" ]; then cp "${dir}/boat-src" "$2"; fi; shift; done
 `);
   chmodSync(join(bin, "curl"), 0o755);
-  const previousPath = process.env.PATH, previousError = console.error;
+  // main() archives the cwd repo; the sandbox copy has no .git, so run against a throwaway repo.
+  const repo = join(dir, "repo"); mkdirSync(repo);
+  const git = (...args) => execFileSync("git", args, { cwd: repo, stdio: "ignore", env: { PATH: process.env.PATH, HOME: dir, GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "CI Test", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "CI Test", GIT_COMMITTER_EMAIL: "t@example.invalid" } });
+  writeFileSync(join(repo, "f"), "x\n"); git("init"); git("add", "f"); git("commit", "-m", "init");
+  const previousPath = process.env.PATH, previousError = console.error, previousCwd = process.cwd();
+  process.chdir(repo);
   const logged = [];
   process.env.PATH = `${bin}:${previousPath}`;
   console.error = message => logged.push(String(message));
   const env = { INPUT_JOB: "centrifugo", CI_EVENT: "push", GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "1", BOAT_API_KEY: key };
   let error;
   try { await main({ env, retryDelaysMs: [1, 1], ...(timeoutMs && { timeoutMs }) }); } catch (e) { error = e; }
-  finally { process.env.PATH = previousPath; console.error = previousError; }
+  finally { process.chdir(previousCwd); process.env.PATH = previousPath; console.error = previousError; }
   const count = name => existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8").trim().split("\n").length : 0;
   const result = { error, logged, logins: count("login-count"), creates: count("new-count"), curlArgs: readFileSync(join(dir, "curl-args"), "utf8"), stdin: existsSync(join(dir, "stdin")) ? readFileSync(join(dir, "stdin"), "utf8") : "" };
   rmSync(dir, { recursive: true, force: true });
