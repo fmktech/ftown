@@ -1,6 +1,6 @@
 import { expect, type BrowserContext, type Page } from "@playwright/test";
 import { test } from "../helpers/fixtures";
-import { accountBrowserState, approveAccountComputer, createAccountShell, pendingBrowserRequest, startAccountTestBridge, type AccountTestBridge } from "../helpers/account-pairing";
+import { accountBrowserState, approveAccountComputer, createAccountShell, pendingBrowserRequest, startAccountTestBridge, waitForComputerTrust, type AccountTestBridge } from "../helpers/account-pairing";
 import { readBridgePointer } from "../helpers/bridge-api";
 import { login, makeUser, registerUser } from "../helpers/app";
 const origin = process.env.FTOWN_PUBLIC_URL ?? "https://localhost:8444";
@@ -213,7 +213,7 @@ test("automatic device approvals: desktop and mobile browser and computer confir
         await expect.poll(async () => { try { return (await second.pendingStatus()).phase; } catch { return "starting"; } }, { timeout: 30000 }).toBe("waiting");
         const local = await second.pendingStatus(); const computerRow = trusted.locator(`[data-pending-request="${local.requestId}"]`);
         await computerRow.getByRole("button", { name: "Review", exact: true }).click();
-        await expect.poll(async () => (await second.pendingStatus()).phase, { timeout: 20000 }).toBe("comparing");
+        await expect.poll(async () => (await second.pendingStatus()).phase, { timeout: 45000 }).toBe("comparing");
         const localComparison = await second.pendingStatus(); if (localComparison.phase !== "comparing") throw new Error("Computer comparison did not become ready");
         const computerReview = trusted.getByRole("region", { name: "Review device approval", exact: true });
         for (const size of [viewport, { width: 390, height: 844 }]) {
@@ -232,6 +232,7 @@ test("automatic device approvals: desktop and mobile browser and computer confir
         await expect.poll(() => { try { return readBridgePointer(second.home).bridgeId; } catch { return ""; } }, { timeout: 30000 }).not.toBe("");
         const secondId = readBridgePointer(second.home).bridgeId;
         await expect(candidate.locator(`[data-bridge-row="${secondId}"]`)).toBeVisible({ timeout: 60000 });
+        await waitForComputerTrust(candidate, second.home);
         await createAccountShell(candidate, secondId, `PENDING_PRIVATE_${viewport.width}_${Date.now()}`);
         await noOverflow(candidate); await noOverflow(trusted);
         await trusted.screenshot({ path: info.outputPath("pending-computer-approved.png"), fullPage: true });

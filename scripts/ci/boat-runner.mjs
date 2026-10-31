@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { chmod, cp, lstat, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
-import { resolve, join } from "node:path";
+import { basename, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const jobs = new Set(["e2e", "release-artifacts", "gitleaks", "bridge-version", "centrifugo"]);
@@ -137,8 +137,9 @@ function inputFromEnv(env) {
   };
 }
 
-async function main() {
-  const input = inputFromEnv(process.env);
+// `env`, `retryDelaysMs` and `timeoutMs` (default command timeout) are test seams; production uses the defaults.
+export async function main({ env = process.env, retryDelaysMs = [5000, 15000], timeoutMs = 120000 } = {}) {
+  const input = inputFromEnv(env);
   const root = process.cwd();
   const temp = await createPrivateControllerDir();
   const boat = join(temp, "boat");
@@ -148,7 +149,7 @@ async function main() {
   let removeSignals;
   // Reserve time inside the GitHub job deadline for sandbox deletion.
   const activeDeadline = Date.now() + (input.job === "e2e" ? 2620000 : 1110000);
-  const run = (program, args, { env = cliEnv, stdin, timeout = 120000, stream = true, onLine, cleanup = false } = {}) => new Promise((done, reject) => {
+  const run = (program, args, { env = cliEnv, stdin, timeout = timeoutMs, stream = true, onLine, cleanup = false } = {}) => new Promise((done, reject) => {
     if (interrupted && !cleanup) return reject(Object.assign(new Error("Cancelled"), { exitCode: 130 }));
     if (!cleanup) {
       timeout = Math.min(timeout, activeDeadline - Date.now());
@@ -173,16 +174,41 @@ async function main() {
       clearTimeout(timer); child = undefined;
       if (onLine && lines) consume(lines);
       if (parseError) return reject(parseError);
-      if (timedOut) return reject(Object.assign(new Error("Command timed out"), { exitCode: 124 }));
+      if (timedOut) return reject(Object.assign(new Error("Command timed out"), { exitCode: 124, stdout, stderr }));
       if (interrupted && !cleanup) return reject(Object.assign(new Error("Cancelled"), { exitCode: 130 }));
       done({ code: code ?? (signal ? 130 : 1), stdout, stderr });
     });
     active.stdin.end(stdin);
   });
+  const redact = text => input.key ? text.split(input.key).join("***") : text;
+  // Streamed calls already showed their output live; for quiet calls surface the tail of it in the error.
+  const describeFailure = (program, args, opts, message, output) => {
+    const label = program === boat ? args.find(arg => !arg.startsWith("-")) || "boat" : basename(program);
+    const detail = opts?.stream === false ? redact(output.stderr.trim() || output.stdout.trim()).slice(-2000).trim() : "";
+    return `${label}: ${message}${detail ? `\n${detail}` : ""}`;
+  };
   const checked = async (program, args, opts) => {
-    const result = await run(program, args, opts);
-    if (result.code !== 0) throw Object.assign(new Error(`Command failed (${result.code})`), { exitCode: result.code });
+    let result;
+    try { result = await run(program, args, opts); }
+    catch (error) {
+      if (error.exitCode === 124 && error.stderr !== undefined) error.message = describeFailure(program, args, opts, error.message, error);
+      throw error;
+    }
+    if (result.code !== 0) throw Object.assign(new Error(describeFailure(program, args, opts, `Command failed (${result.code})`, result)), { exitCode: result.code });
     return result;
+  };
+  // Retry only idempotent bootstrap calls (never cancellations or timeouts); sandbox creation and the remote job must never be retried.
+  const retrying = async (name, fn) => {
+    const attempts = retryDelaysMs.length + 1;
+    for (let attempt = 1; ; attempt++) {
+      try { return await fn(); }
+      catch (error) {
+        if (attempt >= attempts || interrupted || error.exitCode === 130 || error.exitCode === 124) throw error;
+        const delay = retryDelaysMs[attempt - 1];
+        console.error(`Boat ${name} attempt ${attempt}/${attempts} failed: ${redact(error.message)}; retrying in ${delay / 1000}s`);
+        await new Promise(done => setTimeout(done, delay));
+      }
+    }
   };
   const bc = (args, opts) => checked(boat, ["--no-update", ...args], opts);
   const io = {
@@ -199,10 +225,10 @@ async function main() {
       await checked("bash", ["scripts/ci/run-job.sh", i.job], { env, timeout: i.job === "e2e" ? 2100000 : 900000 });
     },
     prepare: async () => {
-      await checked("curl", ["--fail", "--location", "--retry", "3", "--connect-timeout", "15", "--max-time", "180", cliUrl, "-o", boat], { timeout: 190000 });
+      await checked("curl", ["--fail", "--silent", "--show-error", "--location", "--retry", "3", "--connect-timeout", "15", "--max-time", "180", cliUrl, "-o", boat], { timeout: 190000 });
       await chmod(boat, 0o700);
-      await bc(["--version"]);
-      await bc(["login", "--key-stdin"], { stdin: input.key + "\n", stream: false });
+      await retrying("version", () => bc(["--version"]));
+      await retrying("login", () => bc(["login", "--key-stdin"], { stdin: input.key + "\n", stream: false }));
       const revision = (await checked("git", ["rev-parse", "HEAD"], { stream: false })).stdout.trim();
       if (!shaPattern.test(revision)) throw new Error("Invalid source revision");
       input.revision = revision;
