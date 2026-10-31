@@ -18,7 +18,7 @@ import { SecurityLockIcon } from "./SecurityLockIcon";
 import { usePendingApprovals } from "@/hooks/usePendingApprovals";
 import type { AccountSecurityClient, AccountSecuritySnapshot } from "@/lib/account-security-client";
 import { SessionList } from "./SessionList";
-import { SessionInbox, inboxEntries, noticeKey, queueSessionReply, type InboxEntry } from "./SessionInbox";
+import { SessionInboxPage, SessionInboxTrigger, inboxEntries, noticeKey, queueSessionReply, type InboxEntry } from "./SessionInbox";
 import { PullRequestStatusProvider } from "./PullRequestStatusProvider";
 import { SessionWorkspace } from "./SessionWorkspace";
 import { Terminal, TerminalHandle } from "./Terminal";
@@ -112,6 +112,19 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     () => new Set()
   );
   const terminalRef = useRef<TerminalHandle>(null);
+  const inboxTriggerRef = useRef<HTMLButtonElement>(null);
+  const workspaceFocusRef = useRef<HTMLDivElement>(null);
+  const focusOpenedSessionRef = useRef(false);
+  const restoreInboxFocusRef = useRef(false);
+  useEffect(() => {
+    if (!inboxOpen && restoreInboxFocusRef.current) {
+      restoreInboxFocusRef.current = false;
+      inboxTriggerRef.current?.focus();
+    } else if (!inboxOpen && focusOpenedSessionRef.current) {
+      focusOpenedSessionRef.current = false;
+      workspaceFocusRef.current?.focus();
+    }
+  }, [inboxOpen]);
   const mobileControlRef = useRef<MobileControlBarHandle>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const userMenuRef = useRef<HTMLDivElement>(null);
@@ -460,6 +473,7 @@ PY`;
 
   const handleSelectSession = useCallback((id: string | null) => {
     setSelectedSessionId(id);
+    setInboxOpen(false);
     if (id) {
       const session = sessions.find(item => item.id === id);
       const key = session ? `${session.bridgeId}:${session.id}` : "";
@@ -506,6 +520,7 @@ PY`;
   }, [rawSessions, handleSelectSession]);
 
   const handleMobileTabSwitch = useCallback((tab: "sessions" | "terminal" | "preview") => {
+    setInboxOpen(false);
     setMobileTab(tab);
     if (tab === "terminal") {
       scheduleTerminalRenderAdjustment();
@@ -944,7 +959,8 @@ PY`;
         {/* Sidebar */}
         <aside
           id="dashboard-sidebar"
-          className={`dashboard-sidebar shrink-0 flex-col ${mobileTab === "sessions" ? "flex" : "hidden"} md:flex`}
+          aria-hidden={!isDesktop && inboxOpen}
+          className={`dashboard-sidebar shrink-0 flex-col ${mobileTab === "sessions" && !inboxOpen ? "flex" : "hidden"} md:flex`}
           style={{
             "--dashboard-sidebar-width": `${sidebarCollapsed ? 60 : sidebarWidth}px`,
             borderRight: "1px solid var(--border-subtle)",
@@ -954,8 +970,7 @@ PY`;
             transition: sidebarResizeRef.current ? "none" : "width 0.2s ease",
           } as CSSProperties}
         >
-          <SessionInbox entries={inbox} collapsed={isDesktop && sidebarCollapsed} open={inboxOpen} onOpen={() => setInboxOpen(true)} onClose={() => setInboxOpen(false)}
-            onOpenSession={id => { setInboxOpen(false); handleSelectSession(id); }} onDismiss={entry => clearSessionAttention(entry.session.id, entry.notice)} onReply={replyToInbox} />
+          <SessionInboxTrigger count={inbox.length} collapsed={isDesktop && sidebarCollapsed} open={inboxOpen} onOpen={() => setInboxOpen(true)} buttonRef={inboxTriggerRef} />
           <div
             className="shrink-0 hidden md:flex items-center"
             style={{
@@ -1091,7 +1106,10 @@ PY`;
         </aside>
 
         {/* Terminal area */}
-        <main aria-hidden={!isDesktop && mobileTab === "sessions"} className={`flex-1 flex-col min-h-0 min-w-0 ${mobileTab !== "sessions" ? "flex" : "hidden"} md:flex`}>
+        <main aria-hidden={!isDesktop && mobileTab === "sessions" && !inboxOpen} className={`flex-1 flex-col min-h-0 min-w-0 ${mobileTab !== "sessions" || inboxOpen ? "flex" : "hidden"} md:flex`}>
+          <SessionInboxPage entries={inbox} open={inboxOpen} onClose={() => { restoreInboxFocusRef.current = true; setInboxOpen(false); scheduleTerminalRenderAdjustment(); }}
+            onOpenSession={id => { focusOpenedSessionRef.current = true; handleSelectSession(id); setMobileTab("terminal"); scheduleTerminalRenderAdjustment(); }} onDismiss={entry => clearSessionAttention(entry.session.id, entry.notice)} onReply={replyToInbox} />
+          <div ref={workspaceFocusRef} role="region" aria-label={`Session workspace: ${selectedSession?.name || selectedSession?.prompt?.slice(0, 48) || "Session"}`} tabIndex={-1} className="min-h-0 min-w-0 flex-1 flex-col focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)]" style={{ display: inboxOpen ? "none" : "flex" }} aria-hidden={inboxOpen}>
           <SessionWorkspace session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} subscribeAuthority={accountClient?.subscribe} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabSwitch} onRefit={refitPreviewTerminal}>
           <Terminal
             ref={terminalRef}
@@ -1112,6 +1130,7 @@ PY`;
             <MobileControlBar ref={mobileControlRef} onSendInput={(data) => terminalRef.current?.sendInput(data)} />
           )}
           </SessionWorkspace>
+          </div>
         </main>
 
       </div>

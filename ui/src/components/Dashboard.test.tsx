@@ -210,6 +210,31 @@ describe("new-session navigation", () => {
   });
 });
 
+describe("full-page inbox navigation", () => {
+  it.each([true, false])("preserves the mounted workspace and restores focus on back (desktop=%s)", async desktop => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: desktop, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    const { container } = dashboard();
+    fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
+    const terminal = screen.getByTestId("terminal");
+    if (!desktop) fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+    const trigger = screen.getByRole("button", { name: "Inbox, 0 messages" });
+    trigger.focus(); fireEvent.click(trigger);
+    expect(screen.getByRole("heading", { name: "Inbox" })).toBe(document.activeElement);
+    expect(screen.queryByRole("dialog", { name: "Inbox" })).toBeNull();
+    expect(container.querySelector('[data-testid="terminal"]')).toBe(terminal);
+    expect(terminal.closest('[aria-hidden="true"]')).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Back to workspace" }));
+    expect(screen.queryByRole("region", { name: "Inbox" })).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    expect(container.querySelector('[data-testid="terminal"]')).toBe(terminal);
+    if (!desktop) expect(screen.getByRole("tab", { name: "Workspace" }).getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("tab", { name: "Terminal" }));
+    expect(screen.queryByRole("region", { name: "Inbox" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "Terminal" }).getAttribute("aria-selected")).toBe("true");
+  });
+});
+
 describe("attention navigation preserves the request", () => {
   it.each([true, false])("keeps notices when selecting sessions and only dismisses explicitly (desktop=%s)", async desktop => {
     window.matchMedia = vi.fn().mockReturnValue({ matches: desktop, addEventListener: vi.fn(), removeEventListener: vi.fn() });
@@ -225,7 +250,9 @@ describe("attention navigation preserves the request", () => {
       fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 message" }));
       expect(screen.getByText("Inspect the result before continuing")).toBeTruthy();
       expect(state.clearSessionAttention).not.toHaveBeenCalled();
-      fireEvent.click(screen.getByRole("button", { name: "Open session" }));
+      const openSession = screen.getByRole("button", { name: "Open session" }); openSession.focus(); expect(document.activeElement).toBe(openSession);
+      fireEvent.click(openSession);
+      expect(screen.getByRole("region", { name: "Session workspace: Regular shell" })).toBe(document.activeElement);
       expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
       fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
     }
