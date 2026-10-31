@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { artifactInspectionSource, createPrivateControllerDir, historyRestoreScript, orchestrate, parseArtifactInspection, parseExecFrame, parseExecResult, remoteEnvironment, validate } from "./boat-runner.mjs";
+import { artifactInspectionSource, createPrivateControllerDir, historyRestoreScript, main, orchestrate, parseArtifactInspection, parseExecFrame, parseExecResult, remoteEnvironment, validate } from "./boat-runner.mjs";
 
 const base = { job: "e2e", event: "pull_request", repository: "fmktech/ftown", headRepository: "fmktech/ftown", author: "alice", sender: "alice", actor: "alice", runId: "123", runAttempt: "1", key: "secret" };
 test("short private controller directory supports Boat's SSH socket with a long runner temp", async () => {
@@ -180,4 +180,86 @@ test("cancellation and upload failure clean up after created event", async () =>
     await assert.rejects(orchestrate({ ...base }, io), e => e === error);
     assert.deepEqual(calls.at(-1), ["cleanup", "bx_abc123"]);
   }
+});
+
+// Drives the real main() against a fake `curl` (installs a fake `boat`) so the actual run/checked/retry code is exercised.
+async function bootstrapRun({ loginFails = 0, loginStderr = "login rejected", key = "sk-test-secret", loginSleep = 0, timeoutMs } = {}) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "boat-bootstrap-test-")));
+  const bin = join(dir, "bin"); mkdirSync(bin);
+  const boat = `#!/bin/sh
+echo "$@" >> "${dir}/boat-calls"
+for a in "$@"; do case "$a" in -*) ;; *) sub="$a"; break;; esac; done
+case "$sub" in
+  login) cat > "${dir}/stdin"; [ ${loginSleep} -gt 0 ] && sleep ${loginSleep}; echo x >> "${dir}/login-count"; n=$(wc -l < "${dir}/login-count"); if [ "$n" -le ${loginFails} ]; then echo "${loginStderr}" >&2; exit 1; fi ;;
+  new) echo x >> "${dir}/new-count"; echo "new failed" >&2; exit 1 ;;
+  "") echo "boat 1.0.0" ;;
+esac
+`;
+  writeFileSync(join(dir, "boat-src"), boat);
+  // Fake curl records its args and copies the fake boat to the -o target.
+  writeFileSync(join(bin, "curl"), `#!/bin/sh
+echo "$@" > "${dir}/curl-args"
+while [ $# -gt 0 ]; do if [ "$1" = "-o" ]; then cp "${dir}/boat-src" "$2"; fi; shift; done
+`);
+  chmodSync(join(bin, "curl"), 0o755);
+  const previousPath = process.env.PATH, previousError = console.error;
+  const logged = [];
+  process.env.PATH = `${bin}:${previousPath}`;
+  console.error = message => logged.push(String(message));
+  const env = { INPUT_JOB: "centrifugo", CI_EVENT: "push", GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "1", BOAT_API_KEY: key };
+  let error;
+  try { await main({ env, retryDelaysMs: [1, 1], ...(timeoutMs && { timeoutMs }) }); } catch (e) { error = e; }
+  finally { process.env.PATH = previousPath; console.error = previousError; }
+  const count = name => existsSync(join(dir, name)) ? readFileSync(join(dir, name), "utf8").trim().split("\n").length : 0;
+  const result = { error, logged, logins: count("login-count"), creates: count("new-count"), curlArgs: readFileSync(join(dir, "curl-args"), "utf8"), stdin: existsSync(join(dir, "stdin")) ? readFileSync(join(dir, "stdin"), "utf8") : "" };
+  rmSync(dir, { recursive: true, force: true });
+  return result;
+}
+test("a failing quiet command reports its subcommand and stderr tail, never stdin", async () => {
+  const r = await bootstrapRun({ loginFails: 9, loginStderr: "invalid credentials from server" });
+  assert.match(r.error.message, /^login: Command failed \(1\)\ninvalid credentials from server/);
+  assert(!r.error.message.includes("--key-stdin"));
+});
+test("API key is redacted from failure messages and retry log lines", async () => {
+  const r = await bootstrapRun({ loginFails: 9, loginStderr: "bad key sk-test-secret rejected", key: "sk-test-secret" });
+  assert.match(r.error.message, /bad key \*\*\* rejected/);
+  assert(!r.error.message.includes("sk-test-secret"));
+  assert(r.logged.length > 0 && r.logged.every(line => !line.includes("sk-test-secret")));
+});
+test("a key straddling the 2000-char tail cut leaves no key fragment", async () => {
+  const key = "sk-test-secret";
+  const r = await bootstrapRun({ loginFails: 9, key, loginStderr: "A".repeat(1990) + key + "B".repeat(1995) });
+  assert(r.error.message.includes("***"));
+  for (let i = 0; i + 5 <= key.length; i++) assert(!r.error.message.includes(key.slice(i, i + 5)), key.slice(i, i + 5));
+});
+test("a login that times out is attempted exactly once", async () => {
+  const r = await bootstrapRun({ loginSleep: 10, timeoutMs: 1000 });
+  assert.equal(r.logins, 0);
+  assert.equal(r.logged.length, 0);
+  assert.match(r.error.message, /^login: Command timed out/);
+  assert.equal(r.error.exitCode, 124);
+});
+test("login failing once is retried and the run continues to sandbox creation", async () => {
+  const r = await bootstrapRun({ loginFails: 1 });
+  assert.equal(r.logins, 2);
+  assert.equal(r.creates, 1);
+  assert.deepEqual(r.logged, ["Boat login attempt 1/3 failed: login: Command failed (1)\nlogin rejected; retrying in 0.001s"]);
+  assert.match(r.error.message, /^new: Command failed/);
+});
+test("login failing three times throws after exactly three attempts", async () => {
+  const r = await bootstrapRun({ loginFails: 9 });
+  assert.equal(r.logins, 3);
+  assert.equal(r.logged.length, 2);
+  assert.equal(r.creates, 0);
+  assert.match(r.error.message, /^login: Command failed \(1\)/);
+});
+test("sandbox creation is not retried", async () => {
+  const r = await bootstrapRun();
+  assert.equal(r.creates, 1);
+  assert.equal(r.logged.length, 0);
+});
+test("CLI download is quiet but still reports errors", async () => {
+  const r = await bootstrapRun();
+  const args = r.curlArgs.split(" ");
+  for (const flag of ["--fail", "--silent", "--show-error", "--location"]) assert(args.includes(flag), flag);
 });
