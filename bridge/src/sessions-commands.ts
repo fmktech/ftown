@@ -9,6 +9,8 @@ import { sanitizeAttentionText } from './attention-events.js';
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { open } from 'node:fs/promises';
+import { formatAttentionAnswerText } from './attention-prompt.js';
+import { ATTENTION_ITEM_WAIT_MAX_SECONDS, type AttentionAnswer, type AttentionPrompt } from './attention-prompt-protocol.js';
 import { PREVIEW_CHAT_TEXT_BYTES } from './preview-chat-protocol.js';
 import { validateChatInput } from './preview-chat.js';
 import { api as request, loadPointer, listSessions, fetchInbox, sendMail } from './cli-client.js';
@@ -136,9 +138,10 @@ interface SessionsOptions {
   createWorkdir?: boolean; offset?: string; limit?: string; pattern?: string;
   children?: boolean; siblings?: boolean; keys?: boolean; type?: string; thread?: string;
   peek?: boolean; all?: boolean; sessionId?: string; message?: string; messageFile?: string; id?: string; title?: string; clear?: boolean;
+  option?: string[]; multi?: boolean; text?: boolean; questionsJson?: string; wait?: boolean; timeout?: string;
 }
 type SessionCommand = 'preview-reply' | 'preview' | 'list' | 'create' | 'get' | 'screen' | 'grep' | 'keys' | 'tell'
-  | 'inbox' | 'mail' | 'running' | 'usage' | 'remove' | 'archive' | 'revive' | 'attention' | 'pr';
+  | 'inbox' | 'mail' | 'running' | 'usage' | 'remove' | 'archive' | 'revive' | 'attention' | 'attention-status' | 'pr';
 
 function sessionProgram(): Command {
   const program = new Command().name('ftown sessions').description('List, create, read and drive ftown agent sessions');
@@ -186,8 +189,19 @@ function sessionProgram(): Command {
   command('attention', 'Request human input for this session')
     .requiredOption('--message <text>', 'What the user should review or answer (max 2000 characters)')
     .option('--title <text>', 'Short title (max 200 characters)')
+    .option('--option <label>', 'Answer option shown to the user (repeatable)', (value: string, previous: string[]) => [...previous, value], [] as string[])
+    .option('--multi', 'Let the user select several options (needs --option)')
+    .option('--no-text', 'Do not offer a free-text answer (needs --option)')
+    .option('--questions-json <json>', 'Structured questions: an array, or { "questions": [...] } (excludes --option/--multi/--no-text)')
+    .option('--wait', 'Block until the user answers; prints the answer on stdout (exit 0; 2 dismissed, 124 timeout)')
+    .option('--timeout <seconds>', 'With --wait: give up after this many seconds (1-86400, default 600)')
     .option('--session-id <id>', 'Target session; defaults to FTOWN_SESSION_ID')
     .action((_opts, cmd: Command) => run('attention', [], cmd));
+  command('attention-status <event-id>', 'Check or wait for the answer to an attention question (exit 0 answered, 2 dismissed, 3 pending, 124 timeout)')
+    .option('--wait', 'Block until the user answers')
+    .option('--timeout <seconds>', 'With --wait: give up after this many seconds (1-86400, default 600)')
+    .option('--session-id <id>', 'Target session; defaults to FTOWN_SESSION_ID')
+    .action((eventId: string, _opts, cmd: Command) => run('attention-status', [eventId], cmd));
   command('pr [url]', 'Attach or replace this session’s GitHub pull request')
     .option('--clear', 'Remove the current pull request association')
     .option('--session-id <id>', 'Target session; defaults to FTOWN_SESSION_ID')
@@ -213,8 +227,87 @@ export async function runSessions(argv: string[]): Promise<number> {
     await program.parseAsync(argv, { from: 'user' }); return 0;
   } catch (error) {
     if (error instanceof CommanderError) return error.exitCode;
+    if (error instanceof SessionExit) return error.code;
     console.error(`ftown sessions: ${error instanceof Error ? error.message : String(error)}`); return 1;
   }
+}
+
+/** Thrown after a command has already printed its result, to carry a non-zero exit code. */
+class SessionExit extends Error {
+  constructor(readonly code: number) { super(`exit ${code}`); }
+}
+
+/** Injectable so tests need not really sleep. */
+export const attentionClock = {
+  now: (): number => Date.now(),
+  sleep: (ms: number): Promise<void> => new Promise((done) => setTimeout(done, ms)),
+};
+
+const ATTENTION_DEFAULT_TIMEOUT_SECONDS = 600;
+const ATTENTION_MAX_TIMEOUT_SECONDS = 86400;
+const ATTENTION_POLL_RETRIES = 3;
+const ATTENTION_RETRY_BACKOFF_MS = 1000;
+
+interface WaitedAttentionItem { id: string; resolvedAt?: string; resolution?: string; prompt?: AttentionPrompt; answer?: AttentionAnswer }
+
+function parseAttentionTimeout(value: string | undefined): number {
+  if (value === undefined) return ATTENTION_DEFAULT_TIMEOUT_SECONDS;
+  if (!/^\d+$/.test(value.trim())) throw new Error(`--timeout must be a whole number of seconds between 1 and ${ATTENTION_MAX_TIMEOUT_SECONDS}`);
+  const seconds = Number(value);
+  if (seconds < 1 || seconds > ATTENTION_MAX_TIMEOUT_SECONDS) throw new Error(`--timeout must be between 1 and ${ATTENTION_MAX_TIMEOUT_SECONDS} seconds`);
+  return seconds;
+}
+
+function parseQuestionsJson(raw: string): unknown[] {
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { throw new Error('--questions-json is not valid JSON'); }
+  const questions = Array.isArray(parsed) ? parsed
+    : parsed && typeof parsed === 'object' ? (parsed as { questions?: unknown }).questions : undefined;
+  if (!Array.isArray(questions) || questions.length === 0) throw new Error('--questions-json must be a non-empty array of questions or { "questions": [...] }');
+  return questions;
+}
+
+/** Print the outcome of a resolved item and return its exit code, or undefined while still pending. */
+function reportAttentionItem(item: WaitedAttentionItem): number | undefined {
+  if (item.answer) {
+    console.log(item.prompt ? formatAttentionAnswerText(item.prompt, item.answer.answers) : JSON.stringify(item.answer.answers));
+    return 0;
+  }
+  if (item.resolvedAt) {
+    console.error(`Attention request ${item.id} was resolved (${item.resolution ?? 'unknown'}) without an answer.`);
+    return 2;
+  }
+  return undefined;
+}
+
+async function fetchAttentionItem(sessionId: string, eventId: string, waitSeconds?: number): Promise<WaitedAttentionItem> {
+  const query = waitSeconds === undefined ? '' : `?waitSeconds=${waitSeconds}`;
+  const { data } = await api('GET', `/api/sessions/${sessionId}/attention/${encodeURIComponent(eventId)}${query}`);
+  const event = (data as { event?: WaitedAttentionItem } | null)?.event;
+  if (!event || typeof event !== 'object') throw new Error('Invalid attention response');
+  return event;
+}
+
+async function waitForAttentionAnswer(sessionId: string, eventId: string, timeoutSeconds: number): Promise<void> {
+  console.error(`Waiting for an answer (attention ${eventId})...`);
+  const deadline = attentionClock.now() + timeoutSeconds * 1000;
+  let failures = 0;
+  while (attentionClock.now() < deadline) {
+    const remainingSeconds = Math.ceil((deadline - attentionClock.now()) / 1000);
+    const waitSeconds = Math.max(1, Math.min(ATTENTION_ITEM_WAIT_MAX_SECONDS, remainingSeconds));
+    let item: WaitedAttentionItem;
+    try { item = await fetchAttentionItem(sessionId, eventId, waitSeconds); failures = 0; }
+    catch (error) {
+      if (++failures > ATTENTION_POLL_RETRIES) throw error;
+      await attentionClock.sleep(ATTENTION_RETRY_BACKOFF_MS);
+      continue;
+    }
+    const code = reportAttentionItem(item);
+    if (code === 0) return;
+    if (code !== undefined) throw new SessionExit(code);
+  }
+  console.error(`Timed out waiting for an answer. Check later: ftown sessions attention-status ${eventId} --wait`);
+  throw new SessionExit(124);
 }
 
 function selfSessionId(explicit?: string): string {
@@ -233,13 +326,13 @@ function attentionText(value: string, field: string, maxLength: number): string 
   return text;
 }
 
-async function requireSessionCapability(id: string, feature: 'attention' | 'pullRequest' | 'preview'): Promise<void> {
+async function requireSessionCapability(id: string, feature: 'attention' | 'pullRequest' | 'preview', needsPrompt = false): Promise<void>  {
   const { data } = await api('GET', `/api/sessions/${id}`);
-  const capabilities = (data as { capabilities?: { attention?: { version?: number; request?: boolean }; sessionMetadata?: { pullRequest?: boolean; preview?: boolean } } } | null)?.capabilities;
+  const capabilities = (data as { capabilities?: { attention?: { version?: number; request?: boolean; prompt?: boolean }; sessionMetadata?: { pullRequest?: boolean; preview?: boolean } } } | null)?.capabilities;
   const supported = feature === 'attention'
-    ? capabilities?.attention?.version === 1 && capabilities.attention.request === true
+    ? capabilities?.attention?.version === 1 && capabilities.attention.request === true && (!needsPrompt || capabilities.attention.prompt === true)
     : feature === 'preview' ? capabilities?.sessionMetadata?.preview === true : capabilities?.sessionMetadata?.pullRequest === true;
-  if (!supported) throw new Error(`bridge_upgrade_required: Upgrade this bridge to support ${feature === 'attention' ? 'attention requests' : feature === 'preview' ? 'HTML previews' : 'pull request metadata'}`);
+  if (!supported) throw new Error(`bridge_upgrade_required: Upgrade this bridge to support ${feature === 'attention' ? (needsPrompt ? 'attention questions' : 'attention requests') : feature === 'preview' ? 'HTML previews' : 'pull request metadata'}`);
 }
 
 async function executeSessionCommand(cmd: SessionCommand, rest: string[], options: SessionsOptions): Promise<void> {
@@ -286,9 +379,43 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
         const id = selfSessionId(options.sessionId);
         const message = attentionText(options.message ?? '', '--message', 2000);
         const title = options.title === undefined ? undefined : attentionText(options.title, '--title', 200);
-        await requireSessionCapability(id, 'attention');
-        const { data } = await api('POST', `/api/sessions/${id}/attention`, { message, ...(title === undefined ? {} : { title }) });
+        const labels = options.option ?? [];
+        const noText = options.text === false;
+        if (options.questionsJson !== undefined && (labels.length > 0 || options.multi || noText)) {
+          throw new Error('--questions-json cannot be combined with --option, --multi or --no-text');
+        }
+        if ((options.multi || noText) && labels.length === 0) throw new Error('--multi and --no-text require at least one --option');
+        if (options.timeout !== undefined && !options.wait) throw new Error('--timeout requires --wait');
+        let questions: unknown[] | undefined;
+        if (options.questionsJson !== undefined) questions = parseQuestionsJson(options.questionsJson);
+        else if (labels.length > 0) {
+          questions = [{ question: message, options: labels.map((label) => attentionText(label, '--option', 80)), multiSelect: !!options.multi, allowText: !noText }];
+        }
+        if (options.wait && !questions) throw new Error('--wait requires --option or --questions-json');
+        const timeoutSeconds = options.wait ? parseAttentionTimeout(options.timeout) : 0;
+        await requireSessionCapability(id, 'attention', questions !== undefined);
+        const { data } = await api('POST', `/api/sessions/${id}/attention`, { message, ...(title === undefined ? {} : { title }), ...(questions === undefined ? {} : { questions }) });
+        const eventId = (data as { event?: { id?: unknown } } | null)?.event?.id;
+        if (options.wait) {
+          if (typeof eventId !== 'string') throw new Error('Invalid attention response');
+          await waitForAttentionAnswer(id, eventId, timeoutSeconds);
+          break;
+        }
         console.log(jsonOut ? JSON.stringify(data, null, 2) : `attention requested for ${id}`);
+        if (questions && typeof eventId === 'string') console.error(`Event id: ${eventId}. Check later: ftown sessions attention-status ${eventId} --wait`);
+        break;
+      }
+      case 'attention-status': {
+        const id = selfSessionId(options.sessionId);
+        const eventId = rest[0];
+        if (!eventId) throw new Error('Missing event-id');
+        if (options.timeout !== undefined && !options.wait) throw new Error('--timeout requires --wait');
+        const timeoutSeconds = options.wait ? parseAttentionTimeout(options.timeout) : 0;
+        const code = reportAttentionItem(await fetchAttentionItem(id, eventId));
+        if (code === 0) break;
+        if (code !== undefined) throw new SessionExit(code);
+        if (!options.wait) { console.log('Pending: no answer yet.'); throw new SessionExit(3); }
+        await waitForAttentionAnswer(id, eventId, timeoutSeconds);
         break;
       }
       case 'pr': {

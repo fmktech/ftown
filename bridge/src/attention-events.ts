@@ -1,5 +1,9 @@
+import { z } from 'zod';
+import { ATTENTION_PROMPT_LIMITS as L, type AttentionAnswer, type AttentionPrompt } from './attention-prompt-protocol.js';
+import { promptFromAskUserQuestionInput } from './attention-prompt.js';
+
 export type AttentionType = 'permission_prompt' | 'elicitation_dialog' | 'agent_needs_input' | 'ask_user';
-export type Resolution = 'manual' | 'user_prompt' | 'elicitation_complete' | 'session_end';
+export type Resolution = 'manual' | 'user_prompt' | 'elicitation_complete' | 'session_end' | 'answered' | 'tool_complete';
 export interface Activity {
   state: 'thinking' | 'tool_use' | 'idle' | 'unknown';
   lastActivityAt?: string;
@@ -16,11 +20,74 @@ export interface AttentionItem {
   acknowledgedAt?: string;
   resolvedAt?: string;
   resolution?: Resolution;
+  prompt?: AttentionPrompt;
+  answer?: AttentionAnswer;
 }
 export interface AttentionObservation {
   activity?: Activity['state'];
-  attention?: { type: AttentionType; title: string; message: string; sourceId?: string };
-  resolve?: Exclude<Resolution, 'manual'>;
+  attention?: { type: AttentionType; title: string; message: string; sourceId?: string; prompt?: AttentionPrompt };
+  resolve?: Exclude<Resolution, 'manual' | 'answered' | 'tool_complete'>;
+  /** Raw tool_use_id of an ask tool that finished; resolves the matching ask_user item. */
+  toolComplete?: string;
+}
+
+export const promptSchema = z.object({
+  channel: z.enum(['mail', 'hook']),
+  questions: z.array(z.object({
+    question: z.string().min(1).max(L.questionChars),
+    header: z.string().max(L.headerChars).optional(),
+    options: z.array(z.object({
+      label: z.string().min(1).max(L.optionLabelChars),
+      description: z.string().max(L.optionDescriptionChars).optional(),
+    }).strict()).max(L.options),
+    multiSelect: z.boolean(),
+    allowText: z.boolean(),
+  }).strict()).min(1).max(L.questions),
+}).strict();
+
+/** Secret redaction only (no cleaning, truncation or excerpting). */
+export function redactAttentionSecrets(value: string): string {
+  return value
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+\/-]+=*/gi, '$1[redacted]')
+    .replace(/\b((?:[A-Z_]*(?:API_KEY|AUTH_TOKEN|ACCESS_TOKEN|SECRET|PASSWORD)[A-Z_]*|authorization)\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]')
+    .replace(/\b(?:sk-(?:ant-)?[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{20,})\b/g, '[redacted]');
+}
+
+/**
+ * Redacts every prompt string, then re-checks limits, unique labels and the free-text rule.
+ * Never throws; the error names what to fix.
+ */
+export function normalizeAttentionPrompt(input: unknown): { ok: true; value: AttentionPrompt } | { ok: false; error: string } {
+  const shape = promptSchema.safeParse(input);
+  if (!shape.success) {
+    const issue = shape.error.issues[0];
+    return { ok: false, error: `Invalid prompt${issue ? ` at ${issue.path.join('.') || 'prompt'}: ${issue.message}` : ''}` };
+  }
+  const prompt = shape.data as AttentionPrompt;
+  const redacted: AttentionPrompt = {
+    channel: prompt.channel,
+    questions: prompt.questions.map((q) => ({
+      question: redactAttentionSecrets(q.question),
+      ...(q.header !== undefined ? { header: redactAttentionSecrets(q.header) } : {}),
+      options: q.options.map((o) => ({
+        label: redactAttentionSecrets(o.label),
+        ...(o.description !== undefined ? { description: redactAttentionSecrets(o.description) } : {}),
+      })),
+      multiSelect: q.multiSelect,
+      allowText: q.allowText,
+    })),
+  };
+  const parsed = promptSchema.safeParse(redacted);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    return { ok: false, error: `Invalid prompt${issue ? ` at ${issue.path.join('.') || 'prompt'}: ${issue.message}` : ''}` };
+  }
+  for (const [i, q] of parsed.data.questions.entries()) {
+    const labels = new Set(q.options.map((o) => o.label.toLowerCase()));
+    if (labels.size !== q.options.length) return { ok: false, error: `Invalid prompt at questions.${i}.options: labels must be unique` };
+    if (!q.options.length && (!q.allowText || q.multiSelect)) return { ok: false, error: `Invalid prompt at questions.${i}: a question without options must allow text and not be multi-select` };
+  }
+  return { ok: true, value: parsed.data as AttentionPrompt };
 }
 
 /** Only the selected human-facing excerpt crosses the API; never the hook payload. */
@@ -80,6 +147,14 @@ export function classifyAttentionHook(eventName: string, data: Record<string, un
       message: sanitizeAttentionText(question(data) ?? 'Open the session to respond.', 2000),
       ...(sourceId ? { sourceId: sourceId.slice(0, 200) } : {}),
     };
+    if (tool === 'askuserquestion') {
+      const raw = promptFromAskUserQuestionInput(data.tool_input ?? data.toolInput ?? data.input);
+      const checked = raw ? normalizeAttentionPrompt(raw) : undefined;
+      if (checked?.ok) observation.attention.prompt = checked.value;
+    }
+  }
+  if (['PostToolUse', 'postToolUse'].includes(eventName) && tool && askTools.has(tool) && sourceId) {
+    observation.toolComplete = sourceId.slice(0, 200);
   }
   return observation;
 }

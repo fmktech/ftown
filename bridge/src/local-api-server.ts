@@ -16,6 +16,8 @@ import type { SessionStore } from './session-store.js';
 import type { MailStore } from './mail-store.js';
 import { AttentionStore, AttentionError, type SubagentIdleSignal } from './attention-store.js';
 import { sanitizeAttentionText } from './attention-events.js';
+import { parseAttentionPrompt } from './attention-prompt.js';
+import { ATTENTION_ITEM_WAIT_MAX_SECONDS, type AttentionPrompt } from './attention-prompt-protocol.js';
 import type { Session } from './types.js';
 import { MailDeliveryService, sanitizeMessageText, parseNativeWakeRegistration, NativeWakeRegistrationError, type AcceptMailResult } from './mail-delivery.js';
 import type { ProcessRunner } from './claude-runner.js';
@@ -206,7 +208,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     for (const wake of this.localEventWaiters) wake();
   }
 
-  async dispatchSecure(message: VerifiedApplication): Promise<ApplicationJson> {
+  async dispatchSecure(message: VerifiedApplication, clientGone?: AbortSignal): Promise<ApplicationJson> {
     if (!this.security) throw new Error('Security is starting');
     const route = message.application.route;
     if (route.kind === 'command') {
@@ -247,10 +249,18 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     const response = new EventEmitter() as EventEmitter & { statusCode: number; destroyed: boolean; headersSent: boolean;
       writeHead: (status: number) => void; setHeader: () => void; end: (body?: string) => void };
     response.statusCode = 200; response.destroyed = false; response.headersSent = false;
+    // When the outer transport goes away before the inner response completes, surface it like a real socket close (once).
+    let responseEnded = false;
+    const onClientGone = () => {
+      if (responseEnded || response.destroyed) return;
+      response.destroyed = true; response.emit('close');
+    };
+    if (clientGone) { if (clientGone.aborted) onClientGone(); else clientGone.addEventListener('abort', onClientGone, { once: true }); }
     const completed = new Promise<ApplicationJson>((resolve, reject) => {
       response.writeHead = status => { response.statusCode = status; response.headersSent = true; };
       response.setHeader = () => undefined;
       response.end = text => {
+        responseEnded = true; clientGone?.removeEventListener('abort', onClientGone);
         try {
           const body: ApplicationJson = text ? JSON.parse(text) as ApplicationJson : null;
           if (Buffer.byteLength(text ?? '') > 300000) resolve({ status: 413, body: { error: 'response_too_large', code: 'response_too_large', outcomeUnknown: route.method !== 'GET' } });
@@ -479,11 +489,14 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           const envelope = packet.type === 'ftown_enrollment' ? packet.envelope : packet;
           const delivery = observeHttpDelivery(res, observer, envelope?.messageId ?? '');
           let result: SecureEnvelope;
+          // Propagate a mid-request client disconnect to the inner in-process request (long-polls must stop being "live").
+          const clientGone = new AbortController();
+          res.once('close', () => { if (!res.writableEnded) clientGone.abort(); });
           try { result = await executeSecurePacket(security, packet, { transport: events ? 'local-events' : 'local-http',
             channel: `${events ? 'local-events' : 'local-http'}:${security.bridgeId}`, bridgeId: security.bridgeId, pairId: null }, async message => {
               if (events && (message.application.route.kind !== 'http' || message.application.route.method !== 'GET'
                 || !message.application.route.path.startsWith('/api/browser/events?'))) throw new Error('Invalid event route');
-              return this.dispatchSecure(message);
+              return this.dispatchSecure(message, clientGone.signal);
             }, undefined, observer); } catch (error) { delivery(false); throw error; }
           delivery(true);
           if (!res.destroyed) jsonResponse(res, 200, result);
@@ -623,36 +636,75 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return;
     }
 
-    const attentionMatch = path.match(/^\/api\/sessions\/([a-zA-Z0-9_-]+)\/attention(?:\/(ack|resolve))?$/);
+    const attentionMatch = path.match(/^\/api\/sessions\/([a-zA-Z0-9_-]+)\/attention(?:\/([A-Za-z0-9_-]+))?$/);
     if (attentionMatch) {
       const id = attentionMatch[1];
       const session = await this.store.loadSession(id);
       if (!session) { jsonResponse(res, 404, { error: 'Session not found', code: 'unknown_session' }); return; }
       if (!this.attention) { jsonResponse(res, 503, { error: 'Attention store not ready', code: 'attention_not_ready' }); return; }
-      if (!attentionMatch[2] && req.method === 'POST') {
+      const attentionSub = attentionMatch[2];
+      const attentionAction = attentionSub === 'ack' || attentionSub === 'resolve' ? attentionSub : undefined;
+      if (attentionSub === 'ask') {
+        if (req.method !== 'POST') { jsonResponse(res, 405, { error: 'Method not allowed' }); return; }
         if (session.status !== 'running' && session.status !== 'pending') {
           jsonResponse(res, 409, { error: 'Session is not active', code: 'session_not_active' }); return;
         }
         const body = await parseBody(req);
         if (!body || typeof body !== 'object' || Array.isArray(body)
-          || Object.keys(body).some((key) => !['title', 'message'].includes(key))) throw new BadRequestError('Invalid attention arguments');
+          || Object.keys(body).some((key) => !['toolName', 'toolUseId', 'toolInput'].includes(key))) throw new BadRequestError('Invalid ask arguments');
+        if (typeof body.toolName !== 'string' || !body.toolName.trim() || body.toolName.length > 200) throw new BadRequestError('Invalid toolName');
+        if (typeof body.toolUseId !== 'string' || !body.toolUseId.trim() || body.toolUseId.length > 200) throw new BadRequestError('Invalid toolUseId');
+        const item = await this.attention.record(id, 'PreToolUse', { tool_name: body.toolName, tool_use_id: body.toolUseId, tool_input: body.toolInput });
+        jsonResponse(res, 200, { event: item && item.prompt ? item : null });
+        return;
+      }
+      if (attentionSub && !attentionAction) {
+        if (req.method !== 'GET') { jsonResponse(res, 405, { error: 'Method not allowed' }); return; }
+        if (!/^[A-Za-z0-9_-]{1,100}$/.test(attentionSub)) throw new BadRequestError('Invalid attention id');
+        const raw = url.searchParams.get('waitSeconds');
+        if (raw !== null && (!/^\d+$/.test(raw) || Number(raw) > ATTENTION_ITEM_WAIT_MAX_SECONDS)) throw new BadRequestError('Invalid waitSeconds');
+        const waitSeconds = raw === null ? 0 : Number(raw);
+        const controller = new AbortController();
+        const cancel = () => controller.abort();
+        res.on('close', cancel);
+        if (res.destroyed) controller.abort();
+        try {
+          const item = await this.attention.waitForItem(id, attentionSub, waitSeconds * 1000, controller.signal);
+          if (!res.destroyed) jsonResponse(res, 200, { event: item });
+        } finally { res.off('close', cancel); }
+        return;
+      }
+      if (!attentionSub && req.method === 'POST') {
+        if (session.status !== 'running' && session.status !== 'pending') {
+          jsonResponse(res, 409, { error: 'Session is not active', code: 'session_not_active' }); return;
+        }
+        const body = await parseBody(req);
+        if (!body || typeof body !== 'object' || Array.isArray(body)
+          || Object.keys(body).some((key) => !['title', 'message', 'questions'].includes(key))) throw new BadRequestError('Invalid attention arguments');
         if (typeof body.message !== 'string' || !body.message.trim() || body.message.trim().length > 2000) throw new BadRequestError('Invalid attention message');
         if (body.title !== undefined && (typeof body.title !== 'string' || !body.title.trim() || body.title.trim().length > 200)) throw new BadRequestError('Invalid attention title');
         const title = sanitizeAttentionText(typeof body.title === 'string' ? body.title : 'Session needs your input', 200);
         const message = sanitizeAttentionText(body.message, 2000);
         if (!title || !message) throw new BadRequestError('Attention text must not be empty');
-        const event = await this.attention.record(id, 'Notification', { notification_type: 'agent_needs_input', title, message });
+        let prompt: AttentionPrompt | undefined;
+        if (body.questions !== undefined) {
+          const parsed = parseAttentionPrompt(body.questions, 'mail');
+          if (!parsed.ok) { jsonResponse(res, 400, { error: parsed.error, code: 'invalid_prompt' }); return; }
+          prompt = parsed.value;
+        }
+        const event = await this.attention.record(id, 'Notification', { notification_type: 'agent_needs_input', title, message }, prompt ? { prompt } : undefined);
         if (!event) throw new AttentionError('attention_storage_error', 'Attention history could not be persisted', 500);
         // Durable commit precedes publication; the live stream carries only
         // the sanitized request and its exact committed record identifier.
         this.emit('event', { sessionId: id, eventName: 'Notification', source: 'api', data: {
           notification_type: 'agent_needs_input', title: event.title, message: event.message, notification_id: event.id,
           attentionId: event.id, attentionSequence: event.sequence, attentionCreatedAt: event.createdAt,
+          ...(event.prompt ? { attentionPrompt: event.prompt } : {}),
         } });
         jsonResponse(res, 200, { event });
         return;
       }
-      if (!attentionMatch[2] && req.method === 'GET') {
+      if (!attentionSub && req.method === 'GET') {
         const integer = (name: string, fallback: number, maximum: number) => {
           const raw = url.searchParams.get(name);
           if (raw === null) return fallback;
@@ -669,6 +721,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         const controller = new AbortController();
         const cancel = () => controller.abort();
         res.on('close', cancel);
+        if (res.destroyed) controller.abort();
         try {
           const page = waitSeconds ? await this.attention.wait(id, options, waitSeconds, controller.signal) : await this.attention.list(id, options);
           if (!res.destroyed) {
@@ -679,13 +732,13 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         } finally { res.off('close', cancel); }
         return;
       }
-      if (attentionMatch[2] && req.method === 'POST') {
+      if (attentionAction && req.method === 'POST') {
         const body = await parseBody(req);
         const ids = body.eventIds;
         if (!Array.isArray(ids) || !ids.length || ids.length > 100 || ids.some((id) => typeof id !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(id))) throw new BadRequestError('Invalid attention IDs');
-        if (Object.keys(body).some((key) => !['eventIds', ...(attentionMatch[2] === 'resolve' ? ['reason'] : [])].includes(key))) throw new BadRequestError('Unknown attention argument');
+        if (Object.keys(body).some((key) => !['eventIds', ...(attentionAction === 'resolve' ? ['reason'] : [])].includes(key))) throw new BadRequestError('Unknown attention argument');
         if (body.reason !== undefined && (typeof body.reason !== 'string' || body.reason.length > 500)) throw new BadRequestError('Invalid resolution reason');
-        jsonResponse(res, 200, { events: await this.attention.mutate(id, ids as string[], attentionMatch[2] as 'ack' | 'resolve', body.reason as string | undefined) });
+        jsonResponse(res, 200, { events: await this.attention.mutate(id, ids as string[], attentionAction, body.reason as string | undefined) });
         return;
       }
       jsonResponse(res, 405, { error: 'Method not allowed' }); return;
@@ -760,7 +813,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         return;
       }
       jsonResponse(res, 200, { session: toWireSession(session), capabilities: {
-        ...(this.attention ? { attention: { version: 1, request: true } } : {}),
+        ...(this.attention ? { attention: { version: 1, request: true, prompt: true } } : {}),
         sessionMetadata: { pullRequest: true, preview: true },
       } });
       return;
@@ -1193,6 +1246,12 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   async enqueueSessionMessage(session: Session, message: string): Promise<AcceptMailResult> {
     if (!this.mail.isReady()) return { ok: false, error: 'Mail store not ready' };
     return this.mail.acceptMail(session, { from: 'browser', fromName: 'You', type: 'message', body: message });
+  }
+
+  /** Queue arbitrary mail (e.g. an attention answer with a threadId) through the durable delivery path. */
+  async acceptSessionMail(session: Session, body: Record<string, unknown>): Promise<AcceptMailResult> {
+    if (!this.mail.isReady()) return { ok: false, error: 'Mail store not ready' };
+    return this.mail.acceptMail(session, body);
   }
 
   /** Best-effort child-idle signal through the ordinary durable mail path. */

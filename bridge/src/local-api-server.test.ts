@@ -1,4 +1,5 @@
-import { request as httpRequest } from 'node:http';
+import { request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http';
+import { Readable } from 'node:stream';
 import { loadOrCreateIdentity } from './security/bridge/identity.js';
 import { BridgeSecurityService } from './security/bridge/security.js';
 import { apiResponse } from './cli-client.js';
@@ -471,6 +472,112 @@ describe('LocalApiServer explicit session attention and PR metadata', () => {
     const page = await api(f.port, f.token, 'GET', root); assert.equal(page.status, 200); assert.equal((page.data.turns as unknown[]).length, 2);
     assert.equal((await api(f.port, f.token, 'GET', `${root}?cursor=other%3A0`)).status, 400);
   });
+  it('accepts structured questions on POST attention and rejects invalid ones', async t => {
+    const f = await sessionToolsFixture(t);
+    const path = `/api/sessions/${f.sample.id}/attention`;
+    const questions = [{ question: 'Which database?', options: ['Postgres', { label: 'SQLite', description: 'embedded' }], allowText: true }];
+    const ok = await api(f.port, f.token, 'POST', path, { message: 'Pick one', questions });
+    assert.equal(ok.status, 200);
+    const event = ok.data.event as AttentionItem;
+    assert.equal(event.prompt?.channel, 'mail');
+    assert.equal(event.prompt?.questions[0].options.length, 2);
+    const hook = f.events.find(e => e.data.attentionId === event.id);
+    assert.deepEqual(hook?.data.attentionPrompt, event.prompt);
+    const bad = await api(f.port, f.token, 'POST', path, { message: 'Pick one', questions: [{ question: '', options: [] }] });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.data.code, 'invalid_prompt');
+    assert.equal((await api(f.port, f.token, 'POST', path, { message: 'Pick one', questions: 'nope' })).status, 400);
+    const plain = await api(f.port, f.token, 'POST', path, { message: 'No questions here' });
+    assert.equal((plain.data.event as AttentionItem).prompt, undefined);
+    assert.equal(f.events.at(-1)?.data.attentionPrompt, undefined);
+  });
+  it('serves a single attention item and long-polls until it is answered', async t => {
+    const f = await sessionToolsFixture(t);
+    const path = `/api/sessions/${f.sample.id}/attention`;
+    const created = await api(f.port, f.token, 'POST', path, { message: 'Pick one', questions: [{ question: 'Which?', options: ['A', 'B'] }] });
+    const event = created.data.event as AttentionItem;
+    const got = await api(f.port, f.token, 'GET', `${path}/${event.id}`);
+    assert.equal(got.status, 200);
+    assert.equal((got.data.event as AttentionItem).id, event.id);
+    assert.equal((await api(f.port, f.token, 'GET', `${path}/missing-id`)).data.code, 'attention_not_found');
+    assert.equal((await api(f.port, f.token, 'GET', `${path}/missing-id`)).status, 404);
+    assert.equal((await api(f.port, f.token, 'GET', `${path}/${event.id}?waitSeconds=26`)).status, 400);
+    assert.equal((await api(f.port, f.token, 'GET', `${path}/${event.id}?waitSeconds=abc`)).status, 400);
+    assert.equal((await api(f.port, f.token, 'GET', '/api/sessions/nope/attention/abc')).status, 404);
+    const started = Date.now();
+    const waiting = api(f.port, f.token, 'GET', `${path}/${event.id}?waitSeconds=10`);
+    await new Promise(resolve => setTimeout(resolve, 150));
+    await f.attention.answer(f.sample.id, event.id, [{ selected: [1] }]);
+    const done = await waiting;
+    assert.equal(done.status, 200);
+    assert.ok(Date.now() - started < 5000, 'wait returned on answer, not at the deadline');
+    assert.equal((done.data.event as AttentionItem).resolution, 'answered');
+    assert.deepEqual((done.data.event as AttentionItem).answer?.answers, [{ selected: [1] }]);
+  });
+  it('rejects fractional/negative waitSeconds and drops the live waiter when the client disconnects', async t => {
+    const f = await sessionToolsFixture(t);
+    const path = `/api/sessions/${f.sample.id}/attention`;
+    const created = await api(f.port, f.token, 'POST', path, { message: 'Pick one', questions: [{ question: 'Which?', options: ['A', 'B'] }] });
+    const event = created.data.event as AttentionItem;
+    assert.equal((await api(f.port, f.token, 'GET', `${path}/${event.id}?waitSeconds=1.5`)).status, 400);
+    assert.equal((await api(f.port, f.token, 'GET', `${path}/${event.id}?waitSeconds=-1`)).status, 400);
+    assert.equal(f.attention.hasLiveWaiter(event.id), false);
+    const secure = secureFixtures.get(f.port);
+    assert.ok(secure);
+    const inner = f.server as unknown as { handleApiRoute: (...args: unknown[]) => Promise<void> };
+    const original = inner.handleApiRoute.bind(f.server);
+    const rejections: unknown[] = [];
+    inner.handleApiRoute = (...args: unknown[]) => original(...args).catch((error: unknown) => { rejections.push(error); throw error; });
+    const controller = new AbortController();
+    const pending = apiResponse(secure.pointer, 'GET', `${path}/${event.id}?waitSeconds=10`, undefined, undefined, controller.signal).then(() => undefined, (error: unknown) => error);
+    for (let i = 0; i < 50 && !f.attention.hasLiveWaiter(event.id); i++) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(f.attention.hasLiveWaiter(event.id), true, 'an in-flight long-poll counts as a live waiter');
+    controller.abort();
+    await pending;
+    for (let i = 0; i < 50 && f.attention.hasLiveWaiter(event.id); i++) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(f.attention.hasLiveWaiter(event.id), false, 'a disconnected long-poll must not keep the waiter live');
+    assert.ok(rejections.some(error => error instanceof AttentionError && error.code === 'cancelled'), 'the handler wait was cancelled');
+  });
+  it('does not leave a live waiter when the client is already gone before the long-poll attaches', async t => {
+    const f = await sessionToolsFixture(t);
+    const path = `/api/sessions/${f.sample.id}/attention`;
+    const created = await api(f.port, f.token, 'POST', path, { message: 'Pick one', questions: [{ question: 'Which?', options: ['A', 'B'] }] });
+    const event = created.data.event as AttentionItem;
+    const request = Readable.from([Buffer.from('{}')]) as unknown as IncomingMessage;
+    request.method = 'GET'; request.headers = {};
+    const response = new EventEmitter() as EventEmitter & { statusCode: number; destroyed: boolean; headersSent: boolean; writeHead: () => void; setHeader: () => void; end: () => void };
+    response.statusCode = 200; response.destroyed = true; response.headersSent = false;
+    response.writeHead = () => undefined; response.setHeader = () => undefined; response.end = () => undefined;
+    const target = new URL(`${path}/${event.id}?waitSeconds=10`, 'http://localhost');
+    request.url = target.pathname + target.search;
+    const handler = f.server as unknown as { handleApiRoute: (req: IncomingMessage, res: ServerResponse, path: string, url: URL) => Promise<void> };
+    const started = Date.now();
+    const outcome = await handler.handleApiRoute(request, response as unknown as ServerResponse, target.pathname, target).then(() => undefined, (error: unknown) => error);
+    assert.ok(outcome instanceof AttentionError && outcome.code === 'cancelled');
+    assert.ok(Date.now() - started < 2000, 'returned immediately instead of waiting');
+    assert.equal(f.attention.hasLiveWaiter(event.id), false);
+  });
+  it('records AskUserQuestion tool input through the ask endpoint without emitting a hook event', async t => {
+    const f = await sessionToolsFixture(t);
+    const path = `/api/sessions/${f.sample.id}/attention/ask`;
+    const toolInput = { questions: [{ question: 'Which lib?', header: 'Lib', multiSelect: false, options: [{ label: 'A', description: 'a' }, { label: 'B', description: 'b' }] }] };
+    const res = await api(f.port, f.token, 'POST', path, { toolName: 'AskUserQuestion', toolUseId: 'toolu_1', toolInput });
+    assert.equal(res.status, 200);
+    const event = res.data.event as AttentionItem;
+    assert.equal(event.prompt?.channel, 'hook');
+    assert.equal(event.prompt?.questions[0].options.length, 2);
+    assert.equal(f.events.length, 0);
+    const other = await api(f.port, f.token, 'POST', path, { toolName: 'Bash', toolUseId: 'toolu_2', toolInput: { command: 'ls' } });
+    assert.equal(other.status, 200);
+    assert.equal(other.data.event, null);
+    assert.equal((await api(f.port, f.token, 'POST', path, { toolName: '', toolUseId: 'x', toolInput })).status, 400);
+    assert.equal((await api(f.port, f.token, 'POST', path, { toolName: 'AskUserQuestion', toolInput })).status, 400);
+    assert.equal((await api(f.port, f.token, 'POST', path, { toolName: 'AskUserQuestion', toolUseId: 'x', toolInput, extra: 1 })).status, 400);
+    await f.store.saveSession({ ...f.sample, status: 'stopped' });
+    const inactive = await api(f.port, f.token, 'POST', path, { toolName: 'AskUserQuestion', toolUseId: 'x', toolInput });
+    assert.equal(inactive.status, 409);
+    assert.equal(inactive.data.code, 'session_not_active');
+  });
   it('stamps native notifications with committed identity and ignores caller-supplied ledger metadata', async t => {
     const f = await sessionToolsFixture(t);
     const response = await api(f.port, f.token, 'POST', '/hook', { ftown_session_id: f.sample.id, hook_event_name: 'Notification',
@@ -488,7 +595,7 @@ describe('LocalApiServer explicit session attention and PR metadata', () => {
     const f = await sessionToolsFixture(t);
     const path = `/api/sessions/${f.sample.id}/attention`;
     const capabilities = await api(f.port, f.token, 'GET', `/api/sessions/${f.sample.id}`);
-    assert.deepEqual(capabilities.data.capabilities, { attention: { version: 1, request: true }, sessionMetadata: { pullRequest: true, preview: true } });
+    assert.deepEqual(capabilities.data.capabilities, { attention: { version: 1, request: true, prompt: true }, sessionMetadata: { pullRequest: true, preview: true } });
     const body = { title: '  Review requested  ', message: '\x1b[31mApprove API_KEY=secret-value before proceeding\x1b[0m' };
     const first = await api(f.port, f.token, 'POST', path, body);
     assert.equal(first.status, 200);
@@ -721,6 +828,26 @@ it('queues browser session replies through the durable mail store without an HTT
   assert.equal(messages.length, 1);
   assert.deepEqual({ id: messages[0].id, to: messages[0].to, from: messages[0].from, fromName: messages[0].fromName, type: messages[0].type, body: messages[0].body },
     { id: result.id, to: 'session', from: 'browser', fromName: 'You', type: 'message', body: '  first line\nsecond line  ' });
+});
+
+it('acceptSessionMail delivers threaded mail and reports an unready mail store', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'ftown-accept-mail-'));
+  const server = new BaseLocalApiServer();
+  t.after(() => { server.stop(); rmSync(dir, { recursive: true, force: true }); });
+  const session: Session = { id: 'session', name: 'session', command: 'fake', shellType: 'pi', status: 'running', bridgeId: 'bridge', createdAt: '', updatedAt: '' };
+  const body = { from: 'browser', fromName: 'You', type: 'message', threadId: 'attention:abc', body: 'Answer' };
+  assert.deepEqual(await server.acceptSessionMail(session, body), { ok: false, error: 'Mail store not ready' });
+  const store = new SessionStore(dir); await store.saveSession(session);
+  const mail = new MailStore(id => store.sessionDir(id));
+  const runner = Object.assign(new EventEmitter(), { isRunning: () => true }) as unknown as ProcessRunner;
+  server.setDependencies(store, runner, {} as CentrifugoClient, 'user'); server.setMailStore(mail);
+  const result = await server.acceptSessionMail(session, body);
+  assert.equal(result.ok, true); if (!result.ok) throw new Error('expected durable mail');
+  const messages = await mail.listAll(session.id, 10);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].id, result.id);
+  assert.equal(messages[0].threadId, 'attention:abc');
+  assert.equal(messages[0].body, 'Answer');
 });
 
 it('child idle queues one ordinary durable parent message and rejects ineligible targets without a listener', async t => {

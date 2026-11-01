@@ -16,6 +16,8 @@ import type { SessionController } from './session-controller.js';
 import type { Session } from './types.js';
 import type { SessionMessageAccepted, SessionMessageErrorCode } from './session-inbox-protocol.js';
 import { AttentionError, type AttentionStore } from './attention-store.js';
+import { formatAttentionAnswerMail } from './attention-prompt.js';
+import type { AttentionAnswerDelivery } from './attention-prompt-protocol.js';
 import { BridgeUpdateError, type BridgeUpdateCoordinator } from './bridge-update.js';
 import type { UpdateEffects } from './update-effects.js';
 import { validPreviewId, validRevision } from './session-preview.js';
@@ -63,6 +65,8 @@ export interface CommandRpcDeps {
   pullRequestStatuses?: PullRequestStatusService;
   enqueueSessionMessage?: (session: Session, message: string) => Promise<{ ok: true; id: string } | { ok: false; error: string }>;
   attentionStore?: AttentionStore;
+  /** Durable mail path with full mail fields (threadId etc.); used for the answer_session_attention mail fallback. */
+  acceptSessionMail?: (session: Session, body: Record<string, unknown>) => Promise<{ ok: true; id: string } | { ok: false; error: string }>;
   updates?: BridgeUpdateCoordinator;
   updateEffects?: UpdateEffects;
   publishCommandResponse: (response: CommandResponse, verified?: VerifiedApplication) => Promise<void>;
@@ -237,6 +241,34 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             ? await deps.attentionStore.explicitSnapshot(payload.sessionId)
             : await deps.attentionStore.resolveExplicitThrough(payload.sessionId, payload.eventId as string);
           response = { requestId: command.requestId, success: true, data: { sessionId: payload.sessionId, ...snapshot } };
+          break;
+        }
+        case 'answer_session_attention': {
+          const payload = command.payload as Record<string, unknown>;
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).sort().join(',') !== 'answers,bridgeId,eventId,sessionId'
+            || payload.bridgeId !== bridgeId || typeof payload.sessionId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(payload.sessionId)
+            || typeof payload.eventId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(payload.eventId) || !Array.isArray(payload.answers)) throw new Error('Invalid attention answer');
+          const session = await sessionController.get(payload.sessionId);
+          if (!session || session.bridgeId !== bridgeId) throw new Error('Unknown session');
+          if (!deps.attentionStore) throw new AttentionError('attention_not_ready', 'Attention store is not ready', 503);
+          const { item, snapshot, waiterLive } = await deps.attentionStore.answer(payload.sessionId, payload.eventId, payload.answers);
+          let delivery: AttentionAnswerDelivery;
+          if (item.prompt?.channel === 'hook' || waiterLive) delivery = 'waiter';
+          else {
+            try {
+              if (!deps.acceptSessionMail || !item.prompt || !item.answer) throw new Error('Mail is not ready on this bridge');
+              const accepted = await deps.acceptSessionMail(session, {
+                from: 'browser', fromName: 'You', type: 'message', threadId: `attention:${payload.eventId}`,
+                body: formatAttentionAnswerMail({ attentionId: item.id, title: item.title || undefined, prompt: item.prompt, answers: item.answer.answers }),
+              });
+              if (!accepted.ok) throw new Error(accepted.error);
+              delivery = 'mail';
+            } catch (err) {
+              console.error('[Bridge] Failed to mail attention answer:', err instanceof Error ? err.message : err);
+              delivery = 'mail_failed';
+            }
+          }
+          response = { requestId: command.requestId, success: true, data: { sessionId: payload.sessionId, ...snapshot, delivery } };
           break;
         }
         case 'mcp_request': {
@@ -458,7 +490,9 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
-      response = err instanceof BridgeUpdateError
+      response = err instanceof AttentionError
+        ? { requestId: command.requestId, success: false, error: errorMessage, data: { code: err.code } }
+        : err instanceof BridgeUpdateError
         ? { requestId: command.requestId, success: false, error: 'Bridge update request could not be completed.', data: { code: err.code } }
         : err instanceof AutomationRemovedError
         ? { requestId: command.requestId, success: false, error: AUTOMATION_REMOVED_MESSAGE, data: { code: AUTOMATION_REMOVED_CODE } }

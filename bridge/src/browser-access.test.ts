@@ -27,6 +27,23 @@ test('browser attention RPC allows authenticated owner targets and rejects malfo
     assert.equal(commands.length, 2);
   } finally { await f.close(); }
 });
+test('browser answer_session_attention validates the exact payload shape', async () => {
+  const commands: Command[] = [];
+  const f = await fixture(async command => { commands.push(command); return { requestId: command.requestId, success: true, data: {} }; });
+  try {
+    const p = await f.pair();
+    const payload = { bridgeId: 'bridge-1', sessionId: 'session', eventId: 'event_1', answers: [{ selected: [0] }] };
+    const body = { requestId: 'answer', type: 'answer_session_attention', payload };
+    assert.equal((await f.call('commands', 'POST', body)).status, 401);
+    for (const bad of [{ ...payload, extra: 1 }, { ...payload, answers: 'x' }, { ...payload, eventId: 'a/b' }, { ...payload, eventId: 'e'.repeat(101) }, { ...payload, sessionId: '../s' }, { bridgeId: payload.bridgeId, sessionId: 'session', eventId: 'event' }]) {
+      assert.equal((await f.call('commands', 'POST', { ...body, payload: bad }, p.token)).status, 400);
+    }
+    assert.equal((await f.call('commands', 'POST', { ...body, payload: { ...payload, bridgeId: 'foreign' } }, p.token)).status, 403);
+    assert.equal(commands.length, 0);
+    assert.equal((await f.call('commands', 'POST', body, p.token)).body.success, true);
+    assert.equal(commands.length, 1);
+  } finally { await f.close(); }
+});
 async function fixture(execute: (c: Command) => Promise<CommandResponse> = async c => ({ requestId: c.requestId, success: true }), cloudNonce?: string) {
   const dataDir = mkdtempSync(join(tmpdir(), 'browser-access-'));
   let revoked = 0;

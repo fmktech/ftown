@@ -36,3 +36,18 @@ test('unrelated tools and Stop do not resolve questions; explicit continuation d
   assert.equal(classifyAttentionHook('Notification', { notification_type: 'elicitation_complete' }).resolve, 'elicitation_complete');
   assert.equal(classifyAttentionHook('SessionEnd', {}).resolve, 'session_end');
 });
+
+test('AskUserQuestion PreToolUse carries a hook prompt; PostToolUse reports the completed tool id', () => {
+  const input = { questions: [{ question: 'Pick', options: [{ label: 'A' }, { label: 'B' }] }] };
+  const pre = classifyAttentionHook('PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'tu9', tool_input: input });
+  assert.equal(pre.attention?.type, 'ask_user');
+  assert.equal(pre.attention?.prompt?.channel, 'hook');
+  assert.equal(pre.attention?.prompt?.questions[0].options.length, 2);
+  assert.equal(classifyAttentionHook('PreToolUse', { tool_name: 'request_user_input', tool_input: input }).attention?.prompt, undefined);
+  assert.equal(classifyAttentionHook('PreToolUse', { tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'x' }] } }).attention?.prompt, undefined);
+  const post = classifyAttentionHook('PostToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'tu9' });
+  assert.equal(post.toolComplete, 'tu9');
+  assert.equal(post.resolve, undefined);
+  assert.equal(classifyAttentionHook('PostToolUse', { tool_name: 'Bash', tool_use_id: 'tu9' }).toolComplete, undefined);
+  assert.equal(classifyAttentionHook('Notification', { notification_type: 'agent_needs_input', message: 'm', prompt: input }).attention?.prompt, undefined);
+});

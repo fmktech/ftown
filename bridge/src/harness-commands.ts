@@ -7,6 +7,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Command, CommanderError } from 'commander';
 import { api, loadPointer, bridgePointerPath, listSessions, resolveSessionId, fetchInbox, sendMail } from './cli-client.js';
+import { runAskHookCli } from './ask-question-hook.js';
 import { cleanTerminalLine, formatLogLines, isDisplayableLine } from './harness-format.js';
 import {
   MAIL_TYPES,
@@ -686,6 +687,13 @@ program
   .description('Claude Code hook: deliver pending mail (reads hook JSON from stdin)')
   .action(async () => {
     await cmdHookPump();
+  });
+
+program
+  .command('ask-hook')
+  .description('Claude Code PreToolUse hook: route AskUserQuestion to the dashboard (reads hook JSON from stdin)')
+  .action(async () => {
+    await runAskHookCli();
   });
 
 try {

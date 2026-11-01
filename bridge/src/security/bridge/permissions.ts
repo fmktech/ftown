@@ -5,7 +5,7 @@ export interface OperationPermission { permission: EndpointPermission; mutating:
 const session = /^[A-Za-z0-9_-]+$/;
 const readCommands = new Set(['get_pull_request_statuses', 'session_preview_status', 'session_preview_chunk', 'get_bridge_update', 'list_sessions', 'get_history', 'get_session_usage', 'get_sessions_usage', 'get_session_attention']);
 const controlCommands = new Set(['update_bridge', 'create_session', 'stop_session', 'retry_session', 'send_message', 'rename_session', 'remove_session',
-  'bridge_exec', 'clear_terminal', 'update_session_parent', 'resolve_session_attention']);
+  'bridge_exec', 'clear_terminal', 'update_session_parent', 'resolve_session_attention', 'answer_session_attention']);
 const adminCommands = new Set(['security_devices', 'security_invite', 'security_revoke', 'security_approve_mcp', 'security_activity', 'security_account_adopt']);
 const result = (permission: EndpointPermission, operation: string, sessionId: string | null = null): OperationPermission =>
   ({ permission, mutating: permission === 'control' || ['security_invite', 'security_revoke', 'security_approve_mcp', 'security_account_adopt'].includes(operation), operation, sessionId });
@@ -39,16 +39,18 @@ export function classifyHttp(method: string, path: string): OperationPermission 
     if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(method)) return deny();
     return { permission: method === 'GET' ? 'read' : 'control', mutating: false, operation: 'automation_removed', sessionId: null };
   }
-  const match = /^\/api\/sessions\/([A-Za-z0-9_-]+)(?:\/(screen|grep|keys|message|inbox|resize|usage|running|revive|stop|retry|attention)(?:\/(ack|resolve))?)?$/.exec(url.pathname);
+  const match = /^\/api\/sessions\/([A-Za-z0-9_-]+)(?:\/(screen|grep|keys|message|inbox|resize|usage|running|revive|stop|retry|attention)(?:\/(ack|resolve|ask)|\/([A-Za-z0-9_-]{1,100}))?)?$/.exec(url.pathname);
   if (!match) return deny();
-  const [, id, suffix, attentionAction] = match;
-  if (attentionAction && suffix !== 'attention') return deny();
+  const [, id, suffix, attentionAction, eventId] = match;
+  if ((attentionAction || eventId) && suffix !== 'attention') return deny();
   if (!suffix) {
     if (method === 'GET') return result('read', 'sessions_get', id);
     if (method === 'PATCH') return result('control', 'sessions_update', id);
     if (method === 'DELETE') return result('control', 'sessions_remove', id);
     return deny();
   }
+  // Single attention item read (long-poll). ack/resolve/ask are matched above and never reach here.
+  if (eventId) return method === 'GET' ? result('read', 'attention_get', id) : deny();
   if (suffix === 'inbox' && method === 'GET') {
     // Native wake registration mutates the delivery target even when peek=1.
     const peek = url.searchParams.getAll('peek');

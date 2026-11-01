@@ -168,7 +168,7 @@ export async function httpRequest(
           ? data.error.replaceAll(token, "[redacted]").slice(0, 1000)
           : "Bridge request rejected";
       throw new FleetError(
-        typeof data?.code === "string" && ["unknown_session", "invalid_cursor", "unknown_attention", "attention_storage_error", "cancelled", "attention_not_ready"].includes(data.code) ? data.code : "bridge_error",
+        typeof data?.code === "string" && ["unknown_session", "invalid_cursor", "unknown_attention", "attention_not_found", "attention_storage_error", "cancelled", "attention_not_ready"].includes(data.code) ? data.code : "bridge_error",
         `${detail} (HTTP ${res.status})`,
         request.method !== "GET" && res.status >= 500,
         res.status,
