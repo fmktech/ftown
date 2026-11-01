@@ -6,6 +6,7 @@ const HOOK_EVENTS = ['Notification', 'Stop', 'SessionEnd', 'PreToolUse', 'PostTo
 const MAIL_PUMP_EVENTS = ['Stop', 'UserPromptSubmit', 'SessionStart'] as const;
 
 import { isFtownNotifyCommand } from './install-notify-script.js';
+import { ASK_HOOK_TIMEOUT_SECONDS } from './attention-prompt-protocol.js';
 
 /** Matches `ftown-harness hook-pump` in both bare and absolute-path forms. */
 export function isFtownMailPumpCommand(command: string): boolean {
@@ -14,6 +15,15 @@ export function isFtownMailPumpCommand(command: string): boolean {
 
 function mailPumpCommand(): string {
   return `${join(homedir(), '.ftown', 'bin', 'ftown-harness')} hook-pump`;
+}
+
+/** Matches `ftown-harness ask-hook` in both bare and absolute-path forms. */
+export function isFtownAskHookCommand(command: string): boolean {
+  return command.includes('ftown-harness') && command.includes('ask-hook');
+}
+
+function askHookCommand(): string {
+  return `${join(homedir(), '.ftown', 'bin', 'ftown-harness')} ask-hook`;
 }
 
 interface HookCommandEntry {
@@ -40,6 +50,8 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 interface UpsertSpec {
   matches: (command: string) => boolean;
+  /** Matcher for a newly added entry; defaults to '' (all tools). */
+  matcher?: string;
   desired: HookCommandEntry;
   /** Returns true when an existing entry was modified. */
   repair: (entry: HookCommandEntry) => boolean;
@@ -55,21 +67,62 @@ function upsertHookEntry(
   const list: HookMatcherEntry[] = Array.isArray(existing) ? existing : [];
   hooks[event] = list;
 
-  for (const entry of list) {
+  if (spec.matcher === undefined) {
+    for (const entry of list) {
+      if (!isObject(entry)) continue;
+      const inner = entry.hooks;
+      if (!Array.isArray(inner)) continue;
+      for (const h of inner) {
+        if (isObject(h) && typeof h.command === 'string' && spec.matches(h.command)) {
+          if (spec.repair(h)) spec.counters.repaired++;
+          else spec.counters.kept++;
+          return;
+        }
+      }
+    }
+    list.push({ matcher: '', hooks: [{ ...spec.desired }] });
+    spec.counters.added++;
+    return;
+  }
+
+  // Matcher-aware: the entry must live in the group whose matcher is spec.matcher.
+  // Matches found in other groups are removed (user hooks in those groups are kept).
+  const target = spec.matcher;
+  let found = false;
+  let changed = false;
+  for (let gi = list.length - 1; gi >= 0; gi--) {
+    const entry = list[gi];
     if (!isObject(entry)) continue;
     const inner = entry.hooks;
     if (!Array.isArray(inner)) continue;
-    for (const h of inner) {
-      if (isObject(h) && typeof h.command === 'string' && spec.matches(h.command)) {
-        if (spec.repair(h)) spec.counters.repaired++;
-        else spec.counters.kept++;
-        return;
+    const inTarget = (entry.matcher ?? '') === target;
+    let removedHere = false;
+    for (let hi = inner.length - 1; hi >= 0; hi--) {
+      const h = inner[hi];
+      if (!isObject(h) || typeof h.command !== 'string' || !spec.matches(h.command)) continue;
+      if (inTarget && !found) {
+        found = true;
+        if (spec.repair(h)) changed = true;
+        continue;
       }
+      inner.splice(hi, 1);
+      removedHere = true;
+      changed = true;
     }
+    if (removedHere && inner.length === 0) list.splice(gi, 1);
   }
 
-  list.push({ matcher: '', hooks: [{ ...spec.desired }] });
-  spec.counters.added++;
+  if (!found) {
+    const group = list.find((e) => isObject(e) && (e.matcher ?? '') === target && Array.isArray(e.hooks));
+    if (group && Array.isArray(group.hooks)) group.hooks.push({ ...spec.desired });
+    else list.push({ matcher: target, hooks: [{ ...spec.desired }] });
+    if (changed) spec.counters.repaired++;
+    else spec.counters.added++;
+  } else if (changed) {
+    spec.counters.repaired++;
+  } else {
+    spec.counters.kept++;
+  }
 }
 
 export function installClaudeHooks(notifyScriptPath: string): boolean {
@@ -139,6 +192,21 @@ export function installClaudeHooks(notifyScriptPath: string): boolean {
       counters,
     });
   }
+
+  const askCommand = askHookCommand();
+  upsertHookEntry(hooks, 'PreToolUse', {
+    matches: isFtownAskHookCommand,
+    matcher: 'AskUserQuestion',
+    desired: { type: 'command', command: askCommand, timeout: ASK_HOOK_TIMEOUT_SECONDS },
+    repair: (h) => {
+      if (h.command === askCommand && h.timeout === ASK_HOOK_TIMEOUT_SECONDS && h.async === undefined) return false;
+      h.command = askCommand;
+      h.timeout = ASK_HOOK_TIMEOUT_SECONDS;
+      delete h.async;
+      return true;
+    },
+    counters,
+  });
 
   const serialized = JSON.stringify(parsed, null, 2) + '\n';
   const tmpPath = `${settingsPath}.tmp`;

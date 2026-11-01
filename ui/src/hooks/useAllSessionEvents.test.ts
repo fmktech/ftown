@@ -482,3 +482,277 @@ it("rejects an old ephemeral dismissal during account change and preserves the n
     expect(hook.result.current.sessionActivity.get("agent")?.attention).toEqual(captured);
   } finally { now.mockRestore(); }
 });
+
+describe("structured attention questions", () => {
+  const mailPrompt = { channel: "mail" as const, questions: [{ question: "Which?", options: [{ label: "A" }, { label: "B" }], multiSelect: false, allowText: false }] };
+  const hookPrompt = { ...mailPrompt, channel: "hook" as const };
+  const asked = { ...saved, id: "ask-1", type: "ask_user" as const, prompt: hookPrompt };
+  const answers = [{ selected: [1] }];
+  type AnyItem = Omit<typeof saved, "type"> & { type: string; prompt?: unknown };
+  const respond = (attention: AnyItem | null, extra: Record<string, unknown> = {}): CommandResponse => ({ requestId: "r", success: true,
+    data: { sessionId: "agent", attention, sequence: attention?.sequence ?? 1, ...extra } });
+  const askedEvent = { tool_name: "AskUserQuestion", tool_input: { questions: [{ question: "Which?", header: "Pick", multiSelect: false,
+    options: [{ label: "A", description: "a" }, { label: "B", description: "b" }] }] },
+    attentionId: "ask-1", attentionSequence: 1, attentionCreatedAt: saved.createdAt };
+
+  it("restores a prompted ask_user snapshot with its prompt and keeps the type", async () => {
+    const h = durableSetup(async () => respond(asked));
+    await settle();
+    expect(h.current()?.attention).toMatchObject({ type: "ask_user", attentionId: "ask-1", prompt: { channel: "hook" } });
+  });
+
+  it("an invalid prompt gives a null attention but keeps the watermark; later valid snapshots apply", async () => {
+    let item: AnyItem | null = { ...asked, prompt: { channel: "hook", questions: [] } };
+    const h = durableSetup(async () => respond(item));
+    await settle();
+    expect(h.current()?.attention).toBeUndefined();
+    item = { ...saved, id: "later", sequence: 2, prompt: mailPrompt };
+    act(() => h.reconnect());
+    await settle();
+    expect(h.current()?.attention).toMatchObject({ attentionId: "later", prompt: { channel: "mail" } });
+    expect(h.rpc.sendCommand.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it("accepts a persisted prompt with unknown extra keys", async () => {
+    const extra = { channel: "hook", future: 1, questions: [{ ...hookPrompt.questions[0], future: 1, options: [{ label: "A", future: 1 }, { label: "B" }] }] };
+    const h = durableSetup(async () => respond({ ...asked, prompt: extra }));
+    await settle();
+    expect(h.current()?.attention?.prompt?.questions[0].options).toEqual([{ label: "A" }, { label: "B" }]);
+  });
+
+  it.each([
+    ["ask_user with a mail prompt", { ...asked, prompt: mailPrompt }],
+    ["agent_needs_input with a hook prompt", { ...saved, prompt: hookPrompt }],
+  ])("treats a channel/type mismatch as an invalid prompt: %s", async (_name, item) => {
+    const h = durableSetup(async () => respond(item));
+    await settle();
+    if (item.type === "ask_user") expect(h.current()?.attention).toBeUndefined();
+    else {
+      expect(h.current()?.attention).toMatchObject({ type: "agent_needs_input", attentionId: saved.id });
+      expect(h.current()?.attention?.prompt).toBeUndefined();
+    }
+  });
+
+  it("keeps a plain request, without its prompt, when the persisted prompt is invalid", async () => {
+    const h = durableSetup(async () => respond({ ...saved, prompt: { channel: "mail", questions: [] } }));
+    await settle();
+    expect(h.current()?.attention).toMatchObject({ attentionId: saved.id });
+    expect(h.current()?.attention?.prompt).toBeUndefined();
+  });
+
+  it("keeps a stamped question through PostToolUse and UserPromptSubmit until a snapshot says otherwise", async () => {
+    let item: AnyItem | null = null;
+    let sequence = 0;
+    const h = durableSetup(async () => respond(item, item ? {} : { sequence }));
+    await settle();
+    item = asked; sequence = 1;
+    act(() => h.publish("PreToolUse", askedEvent));
+    expect(h.current()?.attention).toMatchObject({ type: "ask_user", attentionId: "ask-1", prompt: { channel: "hook" } });
+    const reads = () => h.rpc.sendCommand.mock.calls.length;
+    const beforeBash = reads();
+    await act(async () => { h.publish("PostToolUse", { tool_name: "Bash" }); await Promise.resolve(); });
+    await settle();
+    expect(reads()).toBe(beforeBash); // an unrelated tool completion sends no get_session_attention
+    expect(h.current()?.attention?.attentionId).toBe("ask-1");
+    const before = reads();
+    // The bridge has not resolved it yet: the re-read must keep the question visible.
+    await act(async () => { h.publish("PostToolUse", { tool_name: "AskUserQuestion" }); await Promise.resolve(); });
+    await settle();
+    expect(reads()).toBeGreaterThan(before);
+    expect(h.current()?.attention?.attentionId).toBe("ask-1");
+    item = null;
+    await act(async () => { h.publish("UserPromptSubmit"); await Promise.resolve(); });
+    await settle();
+    expect(h.current()?.attention).toBeUndefined();
+    act(() => h.publish("PreToolUse", askedEvent));
+    expect(h.current()?.attention).toBeUndefined(); // the canonical null snapshot fences the replay
+  });
+
+  it("a delayed UserPromptSubmit after a snapshot restored an ask_user keeps it visible", async () => {
+    const h = durableSetup(async () => respond(asked));
+    await settle();
+    await act(async () => { h.publish("UserPromptSubmit"); await Promise.resolve(); });
+    await settle();
+    expect(h.current()?.attention?.attentionId).toBe("ask-1");
+  });
+
+  it("a snapshot without the question clears it", async () => {
+    let item: AnyItem | null = asked;
+    const h = durableSetup(async () => respond(item));
+    await settle();
+    expect(h.current()?.attention?.attentionId).toBe("ask-1");
+    item = null;
+    act(() => h.reconnect());
+    await settle();
+    expect(h.current()?.attention).toBeUndefined();
+  });
+
+  it("answers, sends the frozen payload and applies the returned snapshot", async () => {
+    let item: AnyItem | null = { ...saved, prompt: mailPrompt };
+    const h = durableSetup(async command => {
+      if (command.type === "answer_session_attention") { item = null; return respond(null, { delivery: "waiter" }); }
+      return respond(item);
+    });
+    await settle();
+    const notice = h.current()!.attention!;
+    expect(notice.prompt?.channel).toBe("mail");
+    let result: unknown;
+    await act(async () => { result = await h.result.current.answerSessionAttention("agent", notice, answers); });
+    expect(result).toEqual({ ok: true, delivery: "waiter" });
+    expect(h.rpc.sendCommand).toHaveBeenCalledWith(expect.objectContaining({ type: "answer_session_attention",
+      payload: { bridgeId: "bridge", sessionId: "agent", eventId: saved.id, answers } }));
+    expect(h.current()?.attention).toBeUndefined();
+    act(() => h.publishSaved());
+    expect(h.current()?.attention).toBeUndefined();
+  });
+
+  it("does not send without an attentionId or a prompt", async () => {
+    const h = durableSetup(async () => respond({ ...saved, prompt: mailPrompt }));
+    await settle();
+    const notice = h.current()!.attention!;
+    const { prompt: _p, ...noPrompt } = notice;
+    const { attentionId: _a, ...noId } = notice;
+    for (const expected of [noPrompt, noId]) {
+      let result: unknown;
+      await act(async () => { result = await h.result.current.answerSessionAttention("agent", expected, answers); });
+      expect(result).toMatchObject({ ok: false, code: "attention_not_answerable" });
+    }
+    expect(h.rpc.sendCommand.mock.calls.filter(([c]) => c.type === "answer_session_attention")).toHaveLength(0);
+  });
+
+  it("returns bridge errors, keeps the notice, and maps old bridges", async () => {
+    let failure: CommandResponse = { requestId: "r", success: false, error: "Nope", data: { code: "invalid_answer" } };
+    const h = durableSetup(async command => command.type === "answer_session_attention" ? failure : respond({ ...saved, prompt: mailPrompt }));
+    await settle();
+    const notice = h.current()!.attention!;
+    let result: unknown;
+    await act(async () => { result = await h.result.current.answerSessionAttention("agent", notice, answers); });
+    expect(result).toEqual({ ok: false, code: "invalid_answer", message: "Nope" });
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    failure = { requestId: "r", success: false, error: "Unknown command type: answer_session_attention" };
+    await act(async () => { result = await h.result.current.answerSessionAttention("agent", notice, answers); });
+    expect(result).toMatchObject({ ok: false, message: "Update this computer's ftown bridge to answer questions." });
+    failure = { requestId: "r", success: false, error: "x", data: { code: "unknown_command" } };
+    await act(async () => { result = await h.result.current.answerSessionAttention("agent", notice, answers); });
+    expect(result).toMatchObject({ ok: false, code: "unknown_command", message: "Update this computer's ftown bridge to answer questions." });
+  });
+
+  it("rejects a success response with an invalid delivery without clearing", async () => {
+    const h = durableSetup(async command => command.type === "answer_session_attention"
+      ? respond(null, { delivery: "bogus" }) : respond({ ...saved, prompt: mailPrompt }));
+    await settle();
+    let result: unknown;
+    await act(async () => { result = await h.result.current.answerSessionAttention("agent", h.current()!.attention!, answers); });
+    expect(result).toMatchObject({ ok: false, code: "invalid_response" });
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+  });
+
+  it.each(["attention_already_resolved", "attention_not_found"])("re-reads the snapshot on %s", async code => {
+    let item: AnyItem | null = { ...saved, prompt: mailPrompt };
+    const h = durableSetup(async command => {
+      if (command.type === "answer_session_attention") { item = null; return { requestId: "r", success: false, error: "gone", data: { code } }; }
+      return respond(item);
+    });
+    await settle();
+    const reads = () => h.rpc.sendCommand.mock.calls.filter(([c]) => c.type === "get_session_attention").length;
+    const before = reads();
+    let result: unknown;
+    await act(async () => { result = await h.result.current.answerSessionAttention("agent", h.current()!.attention!, answers); });
+    await settle();
+    expect(result).toEqual({ ok: false, code, message: "gone" });
+    expect(reads()).toBeGreaterThan(before);
+    expect(h.current()?.attention).toBeUndefined();
+  });
+
+  it("answers a hook-channel ask_user", async () => {
+    let item: AnyItem | null = asked;
+    const h = durableSetup(async command => {
+      if (command.type === "answer_session_attention") { item = null; return respond(null, { delivery: "waiter" }); }
+      return respond(item);
+    });
+    await settle();
+    let result: unknown;
+    await act(async () => { result = await h.result.current.answerSessionAttention("agent", h.current()!.attention!, answers); });
+    expect(result).toEqual({ ok: true, delivery: "waiter" });
+    expect(h.current()?.attention).toBeUndefined();
+  });
+
+  it("a PostToolUse arriving before the answer response does not break the answer", async () => {
+    const write = deferred();
+    let item: AnyItem | null = asked;
+    const h = durableSetup(command => command.type === "answer_session_attention" ? write.promise : Promise.resolve(respond(item)));
+    await settle();
+    const notice = h.current()!.attention!;
+    let pending!: Promise<unknown>;
+    act(() => { pending = h.result.current.answerSessionAttention("agent", notice, answers); });
+    item = null;
+    await act(async () => { h.publish("PostToolUse", { tool_name: "AskUserQuestion" }); await Promise.resolve(); });
+    await settle();
+    expect(h.current()?.attention).toBeUndefined();
+    await act(async () => { write.resolve(respond(null, { delivery: "waiter" })); });
+    await expect(pending).resolves.toEqual({ ok: true, delivery: "waiter" });
+    expect(h.current()?.attention).toBeUndefined();
+  });
+
+  it("a stale in-flight snapshot cannot resurrect an answered question", async () => {
+    const stale = deferred();
+    let reads = 0;
+    const h = durableSetup(async command => {
+      if (command.type === "answer_session_attention") return respond(null, { delivery: "mail" });
+      return ++reads === 1 ? respond({ ...saved, prompt: mailPrompt }) : reads === 2 ? stale.promise : respond(null);
+    });
+    await settle();
+    const notice = h.current()!.attention!;
+    act(() => h.reconnect()); // second read, left pending
+    await settle();
+    await act(async () => { await h.result.current.answerSessionAttention("agent", notice, answers); });
+    await act(async () => { stale.resolve(respond({ ...saved, prompt: mailPrompt })); });
+    await settle();
+    expect(h.current()?.attention).toBeUndefined();
+  });
+
+  it("records the watermark and returns ok when the session switches mid-answer", async () => {
+    const write = deferred();
+    const h = durableSetup(command => command.type === "answer_session_attention" ? write.promise : Promise.resolve(respond({ ...saved, prompt: mailPrompt })));
+    await settle();
+    const notice = h.current()!.attention!;
+    let pending!: Promise<unknown>;
+    act(() => { pending = h.result.current.answerSessionAttention("agent", notice, answers); });
+    h.rerender({ client: durableClient().client, user: "user", rows: sessions });
+    await settle();
+    await act(async () => { write.resolve(respond(null, { delivery: "waiter" })); });
+    await expect(pending).resolves.toEqual({ ok: true, delivery: "waiter" });
+  });
+
+  it("re-reads the snapshot after a failed answer", async () => {
+    const h = durableSetup(async command => command.type === "answer_session_attention"
+      ? { requestId: "r", success: false, error: "no", data: { code: "answer_waiter_gone" } } : respond({ ...saved, prompt: mailPrompt }));
+    await settle();
+    const reads = () => h.rpc.sendCommand.mock.calls.filter(([c]) => c.type === "get_session_attention").length;
+    const before = reads();
+    await act(async () => { await h.result.current.answerSessionAttention("agent", h.current()!.attention!, answers); });
+    await settle();
+    expect(reads()).toBeGreaterThan(before);
+  });
+
+  it("retries a failed snapshot read once after two seconds while a stamped question is shown", async () => {
+    vi.useFakeTimers();
+    try {
+      let fail = false;
+      const h = durableSetup(async () => fail ? { requestId: "r", success: false, error: "offline" } : respond(asked));
+      await settle();
+      expect(h.current()?.attention?.attentionId).toBe("ask-1");
+      const reads = () => h.rpc.sendCommand.mock.calls.length;
+      fail = true;
+      act(() => h.reconnect());
+      await settle();
+      const afterFail = reads();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1900); });
+      expect(reads()).toBe(afterFail);
+      await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+      expect(reads()).toBe(afterFail + 1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      expect(reads()).toBe(afterFail + 1); // no loop
+    } finally { vi.useRealTimers(); }
+  });
+});

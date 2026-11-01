@@ -63,6 +63,100 @@ test('attention RPC requires owner targeting and persists read/resolve results',
   assert.equal((await new AttentionStore(id => join(dir, id)).explicitSnapshot('session')).attention, null);
 });
 
+test('answer_session_attention delivers via waiter, hook, or mail and maps errors', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'attention-answer-rpc-'));
+  await mkdir(join(dir, 'session'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const attentionStore = new AttentionStore(id => join(dir, id));
+  const question = { question: 'Pick', options: [{ label: 'A' }, { label: 'B' }], multiSelect: false, allowText: false };
+  const ask = async (channel: 'mail' | 'hook') => (await attentionStore.record('session', 'Notification', { notification_type: 'agent_needs_input', message: 'Q' }, { prompt: { channel, questions: [question] } }))!;
+  const responses: CommandResponse[] = [];
+  const mails: Record<string, unknown>[] = [];
+  let mailMode: 'ok' | 'fail' | 'throw' = 'ok';
+  const make = (extra: Partial<CommandRpcDeps> = {}) => createCommandHandler({ bridgeId: 'owner', attentionStore,
+    acceptSessionMail: async (_s, body) => { if (mailMode === 'throw') throw new Error('boom'); if (mailMode === 'fail') return { ok: false, error: 'nope' }; mails.push(body); return { ok: true, id: 'm1' }; },
+    sessionController: { get: async (id: string) => id === 'session' ? { id, bridgeId: 'owner' } : null } as unknown as SessionController,
+    publishCommandResponse: async response => { responses.push(response); }, ...extra });
+  const handler = make();
+  const send = (eventId: string, extra: Record<string, unknown> = {}) => handler({ type: 'answer_session_attention', requestId: 'r', payload: { bridgeId: 'owner', sessionId: 'session', eventId, answers: [{ selected: [1] }], ...extra } });
+  const code = () => (responses.at(-1)?.data as { code?: string }).code;
+
+  const mailEvent = await ask('mail');
+  await send(mailEvent.id);
+  assert.equal(responses.at(-1)?.success, true);
+  assert.equal((responses.at(-1)?.data as { delivery: string }).delivery, 'mail');
+  assert.equal(mails.length, 1);
+  assert.equal(mails[0]?.from, 'browser'); assert.equal(mails[0]?.fromName, 'You'); assert.equal(mails[0]?.type, 'message');
+  assert.equal(mails[0]?.threadId, `attention:${mailEvent.id}`); assert.match(String(mails[0]?.body), /B/);
+
+  await send(mailEvent.id); assert.equal(responses.at(-1)?.success, false); assert.equal(code(), 'attention_already_resolved');
+
+  const goneEvent = await ask('hook');
+  await send(goneEvent.id); assert.equal(responses.at(-1)?.success, false); assert.equal(code(), 'answer_waiter_gone');
+
+  const hookEvent = await ask('hook');
+  const waiting = attentionStore.waitForItem('session', hookEvent.id, 5000);
+  await send(hookEvent.id);
+  assert.equal((await waiting).resolution, 'answered');
+  assert.equal((responses.at(-1)?.data as { delivery: string }).delivery, 'waiter');
+  assert.equal(mails.length, 1);
+
+  mailMode = 'fail';
+  const failEvent = await ask('mail');
+  await send(failEvent.id);
+  assert.equal(responses.at(-1)?.success, true);
+  assert.equal((responses.at(-1)?.data as { delivery: string }).delivery, 'mail_failed');
+  mailMode = 'throw';
+  const throwEvent = await ask('mail');
+  await send(throwEvent.id);
+  assert.equal((responses.at(-1)?.data as { delivery: string }).delivery, 'mail_failed');
+
+  const invalidEvent = await ask('mail');
+  await send(invalidEvent.id, { answers: [{ selected: [9] }] }); assert.equal(responses.at(-1)?.success, false); assert.equal(code(), 'invalid_answer');
+  await send('missing'); assert.equal(code(), 'attention_not_found');
+  const plain = (await attentionStore.record('session', 'Notification', { notification_type: 'agent_needs_input', message: 'plain' }))!;
+  await send(plain.id); assert.equal(code(), 'attention_not_answerable');
+
+  const before = responses.length;
+  await handler({ type: 'answer_session_attention', requestId: 'foreign', payload: { bridgeId: 'foreign', sessionId: 'session', eventId: 'x', answers: [] } });
+  assert.equal(responses.length, before);
+  for (const bad of [{ extra: 1 }, { answers: 'x' }, { eventId: '../x' }, { sessionId: 'missing' }]) {
+    await send(invalidEvent.id, bad); assert.equal(responses.at(-1)?.success, false);
+  }
+});
+
+test('answer_session_attention: live waiter on mail channel skips mail; missing mail dep reports mail_failed but stores the answer', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'attention-answer-rpc2-'));
+  await mkdir(join(dir, 'session'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const attentionStore = new AttentionStore(id => join(dir, id));
+  const question = { question: 'Pick', options: [{ label: 'A' }, { label: 'B' }], multiSelect: false, allowText: false };
+  const ask = async () => (await attentionStore.record('session', 'Notification', { notification_type: 'agent_needs_input', message: 'Q' }, { prompt: { channel: 'mail', questions: [question] } }))!;
+  const responses: CommandResponse[] = [];
+  const mails: Record<string, unknown>[] = [];
+  const sessionController = { get: async (id: string) => id === 'session' ? { id, bridgeId: 'owner' } : null } as unknown as SessionController;
+  const withMail = createCommandHandler({ bridgeId: 'owner', attentionStore, sessionController,
+    acceptSessionMail: async (_s, body) => { mails.push(body); return { ok: true, id: 'm' }; }, publishCommandResponse: async r => { responses.push(r); } });
+  const noMail = createCommandHandler({ bridgeId: 'owner', attentionStore, sessionController, publishCommandResponse: async r => { responses.push(r); } });
+  const send = (h: typeof withMail, eventId: string) => h({ type: 'answer_session_attention', requestId: 'r', payload: { bridgeId: 'owner', sessionId: 'session', eventId, answers: [{ selected: [0] }] } });
+
+  const live = await ask();
+  const waiting = attentionStore.waitForItem('session', live.id, 5000);
+  await send(withMail, live.id);
+  assert.equal(responses.at(-1)?.success, true);
+  assert.equal((responses.at(-1)?.data as { delivery: string }).delivery, 'waiter');
+  assert.equal(mails.length, 0);
+  assert.equal((await waiting).resolution, 'answered');
+
+  const orphan = await ask();
+  await send(noMail, orphan.id);
+  assert.equal(responses.at(-1)?.success, true);
+  assert.equal((responses.at(-1)?.data as { delivery: string }).delivery, 'mail_failed');
+  const stored = (await attentionStore.explicitSnapshot('session')).attention;
+  assert.ok(stored === null || stored.id !== orphan.id);
+  assert.equal((await attentionStore.waitForItem('session', orphan.id, 0)).resolution, 'answered');
+});
+
 test('update_session_parent rejects a missing or invalid parentSessionId', async () => {
   const responses: CommandResponse[] = [];
   const session = {

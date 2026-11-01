@@ -4,7 +4,27 @@ import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { PushNotice } from './push-notifier.js';
-import { classifyAttentionHook, sanitizeAttentionText, type Activity, type AttentionItem, type Resolution } from './attention-events.js';
+import { classifyAttentionHook, normalizeAttentionPrompt, promptSchema, sanitizeAttentionText, type Activity, type AttentionItem, type Resolution } from './attention-events.js';
+import { ATTENTION_ITEM_WAIT_MAX_SECONDS, ATTENTION_PROMPT_LIMITS, ATTENTION_WAITER_TTL_MS, type AttentionPrompt } from './attention-prompt-protocol.js';
+import { validateAttentionAnswer } from './attention-prompt.js';
+
+const L = ATTENTION_PROMPT_LIMITS;
+/** JSON with object keys sorted, so equal prompts always hash alike. */
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>).filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+const answerSchema = z.object({
+  answers: z.array(z.object({
+    selected: z.array(z.number().int().nonnegative()).max(L.options),
+    text: z.string().max(L.answerTextChars).optional(),
+  }).strict()).min(1).max(L.questions),
+  answeredAt: z.string(),
+}).strict();
 
 const itemSchema = z.object({
   id: z.string(), sequence: z.number().int().positive(),
@@ -12,7 +32,8 @@ const itemSchema = z.object({
   title: z.string().max(200), message: z.string().max(2000),
   createdAt: z.string(), lastSeenAt: z.string(), occurrences: z.number().int().positive(),
   acknowledgedAt: z.string().optional(), resolvedAt: z.string().optional(),
-  resolution: z.enum(['manual', 'user_prompt', 'elicitation_complete', 'session_end']).optional(),
+  resolution: z.enum(['manual', 'user_prompt', 'elicitation_complete', 'session_end', 'answered', 'tool_complete']).optional(),
+  prompt: promptSchema.optional(), answer: answerSchema.optional(),
   fingerprint: z.string(), sourceId: z.string().optional(), reason: z.string().optional(),
 }).strict();
 const ledgerSchema = z.object({
@@ -29,6 +50,8 @@ export interface AttentionPage {
 }
 export interface AttentionReadOptions { cursor?: string; limit?: number; includeResolved?: boolean; actionableOnly?: boolean }
 export interface ExplicitAttentionSnapshot { attention: AttentionItem | null; sequence: number }
+export interface AttentionAnswerResult { item: AttentionItem; snapshot: ExplicitAttentionSnapshot; waiterLive: boolean }
+export interface AttentionRecordOptions { prompt?: AttentionPrompt }
 export class AttentionError extends Error {
   constructor(readonly code: string, message: string, readonly status = 400) { super(message); }
 }
@@ -53,6 +76,10 @@ interface IdleTimer { cycleId: string; timer: ReturnType<typeof setTimeout> }
 export class AttentionStore {
   private locks = new Map<string, Promise<unknown>>();
   private listeners = new Map<string, Set<() => void>>();
+  /** Per session: wake callbacks of item waiters, fired whenever any item is resolved. */
+  private itemWaiters = new Map<string, Set<() => void>>();
+  /** Per attention event id: active item long-polls and when the latest one started. */
+  private pollers = new Map<string, { active: number; lastPollAt: number }>();
   private idleTimers = new Map<string, IdleTimer>();
   private notificationsStopped = false;
   private notificationOptions: Required<Omit<AttentionNotificationOptions, 'onIdleCanceled' | 'onSubagentIdle'>> & Pick<AttentionNotificationOptions, 'onIdleCanceled' | 'onSubagentIdle'>;
@@ -61,6 +88,22 @@ export class AttentionStore {
     options: AttentionNotificationOptions = {}) {
     this.notificationOptions = { now: Date.now, schedule: setTimeout, cancel: clearTimeout,
       isSessionActive: async () => true, ...options };
+  }
+
+  private wakeItemWaiters(id: string): void {
+    for (const wake of Array.from(this.itemWaiters.get(id) ?? [])) wake();
+  }
+  private isExplicit(event: StoredItem): boolean {
+    return event.type === 'agent_needs_input' || (event.type === 'ask_user' && !!event.prompt);
+  }
+  hasLiveWaiter(eventId: string, now: number = this.notificationOptions.now()): boolean {
+    const poller = this.pollers.get(eventId);
+    if (!poller) return false;
+    return poller.active > 0 || now - poller.lastPollAt <= ATTENTION_WAITER_TTL_MS;
+  }
+
+  private activeWaits(eventId: string): number {
+    return this.pollers.get(eventId)?.active ?? 0;
   }
 
   private clearIdleTimer(id: string): void {
@@ -180,15 +223,26 @@ export class AttentionStore {
       return value;
     } catch { throw new AttentionError('invalid_cursor', 'Cursor is malformed or belongs to another session'); }
   }
-  private prune(ledger: Ledger) {
-    const resolved = ledger.events.filter((event) => event.resolvedAt).sort((a, b) => b.sequence - a.sequence);
+  /** `protect`: items resolved by the current operation; a waiter must still be able to read them. */
+  private prune(ledger: Ledger, protect: readonly string[] = []) {
+    const resolved = ledger.events.filter((event) => event.resolvedAt && !protect.includes(event.id)).sort((a, b) => b.sequence - a.sequence);
     const drop = new Set(resolved.slice(this.resolvedRetention).map((event) => event.id));
     for (const event of ledger.events) if (drop.has(event.id)) ledger.prunedThrough = Math.max(ledger.prunedThrough, event.sequence);
     ledger.events = ledger.events.filter((event) => !drop.has(event.id));
   }
-  async record(id: string, eventName: string, data: Record<string, unknown>): Promise<AttentionItem | undefined> {
+  async record(id: string, eventName: string, data: Record<string, unknown>, options: AttentionRecordOptions = {}): Promise<AttentionItem | undefined> {
+    return (await this.recordDetailed(id, eventName, data, options)).item;
+  }
+  /** Like record, but also reports whether the returned item was newly created (true) or deduped onto an existing one (false). */
+  async recordDetailed(id: string, eventName: string, data: Record<string, unknown>, options: AttentionRecordOptions = {}): Promise<{ item: AttentionItem | undefined; created: boolean }> {
+    let apiPrompt: AttentionPrompt | undefined;
+    if (options.prompt !== undefined) {
+      const checked = normalizeAttentionPrompt(options.prompt);
+      if (!checked.ok) throw new AttentionError('invalid_prompt', checked.error, 400);
+      apiPrompt = checked.value;
+    }
     const observation = classifyAttentionHook(eventName, data);
-    if (!observation.activity && !observation.attention && !observation.resolve) return;
+    if (!observation.activity && !observation.attention && !observation.resolve && !observation.toolComplete) return { item: undefined, created: false };
     const cancelIdle = observation.activity === 'thinking' || observation.activity === 'tool_use' || observation.resolve === 'session_end';
     if (cancelIdle) this.idleCanceled(id);
     return this.withLock(id, async () => {
@@ -200,28 +254,50 @@ export class AttentionStore {
         ledger.idleCycle = { id: randomUUID(), startedAt: timestamp, dueAt: new Date(this.notificationOptions.now() + SUBAGENT_IDLE_DELAY_MS).toISOString() };
       }
       if (observation.activity) ledger.activity = { state: observation.activity, lastActivityAt: timestamp };
+      let resolvedAny = false;
+      const resolvedIds: string[] = [];
       if (observation.resolve) for (const event of ledger.events) {
         if (event.resolvedAt || (observation.resolve === 'elicitation_complete' && event.type !== 'elicitation_dialog')) continue;
         event.resolvedAt = timestamp;
         event.resolution = observation.resolve;
+        resolvedAny = true; resolvedIds.push(event.id);
+      }
+      if (observation.toolComplete) {
+        const sourceId = createHash('sha256').update(observation.toolComplete).digest('hex');
+        for (const event of ledger.events) {
+          if (event.resolvedAt || event.type !== 'ask_user' || event.sourceId !== sourceId) continue;
+          event.resolvedAt = timestamp;
+          event.resolution = 'tool_complete';
+          resolvedAny = true; resolvedIds.push(event.id);
+        }
       }
       let created = false;
       let recorded: StoredItem | undefined;
       if (observation.attention) {
-        const { sourceId: rawSourceId, ...attention } = observation.attention;
+        const { sourceId: rawSourceId, prompt: hookPrompt, ...attention } = observation.attention;
         const sourceId = rawSourceId ? createHash('sha256').update(rawSourceId).digest('hex') : undefined;
-        const fingerprint = createHash('sha256').update(JSON.stringify(attention)).digest('hex');
-        const existing = ledger.events.find((event) => !event.resolvedAt && (sourceId ? event.sourceId === sourceId : event.fingerprint === fingerprint));
-        if (existing) { existing.lastSeenAt = timestamp; existing.occurrences++; recorded = existing; }
+        // Only a prompt the caller passed explicitly (agent_needs_input) or derived from AskUserQuestion's
+        // tool_input is stored; hook payload keys named prompt/attentionPrompt are never read.
+        const prompt = attention.type === 'agent_needs_input' ? apiPrompt : hookPrompt;
+        const fingerprintOf = (p?: AttentionPrompt) => createHash('sha256').update(p ? `${JSON.stringify(attention)}\u0000${canonical(p)}` : JSON.stringify(attention)).digest('hex');
+        const fingerprint = fingerprintOf(prompt);
+        // A tool_use_id names one AskUserQuestion call: a replayed hook must not reopen or duplicate a resolved one.
+        const existing = ledger.events.find((event) => sourceId
+          ? event.sourceId === sourceId && (!event.resolvedAt || (attention.type === 'ask_user' && event.type === 'ask_user'))
+          : !event.resolvedAt && event.fingerprint === fingerprint);
+        if (existing) {
+          existing.lastSeenAt = timestamp; existing.occurrences++; recorded = existing;
+          if (!existing.prompt && prompt) { existing.prompt = prompt; existing.fingerprint = fingerprintOf(prompt); }
+        }
         else {
           const attentionId = randomUUID();
           notifications.push({ kind: 'question', eventKey: `question:${attentionId}`, title: attention.title, message: attention.message, occurredAt: timestamp });
-          recorded = { ...attention, id: attentionId, sequence: ++ledger.sequence, createdAt: timestamp, lastSeenAt: timestamp, occurrences: 1, fingerprint, ...(sourceId ? { sourceId } : {}) };
+          recorded = { ...attention, id: attentionId, sequence: ++ledger.sequence, createdAt: timestamp, lastSeenAt: timestamp, occurrences: 1, fingerprint, ...(sourceId ? { sourceId } : {}), ...(prompt ? { prompt } : {}) };
           ledger.events.push(recorded);
           created = true;
         }
       }
-      this.prune(ledger);
+      this.prune(ledger, resolvedIds);
       await this.save(id, ledger);
       if (ledger.activity.state === 'idle' && ledger.idleCycle && !ledger.idleCycle.notifiedAt
         && !this.idleTimers.has(id)) this.scheduleIdle(id, ledger.idleCycle);
@@ -229,7 +305,8 @@ export class AttentionStore {
         try { if (!this.notificationsStopped) this.onNotification?.(id, notice); } catch { /* Optional delivery cannot fail a committed hook. */ }
       }
       if (created) for (const listener of this.listeners.get(id) ?? []) listener();
-      return recorded ? publicItem(recorded) : undefined;
+      if (resolvedAny) this.wakeItemWaiters(id);
+      return { item: recorded ? publicItem(recorded) : undefined, created };
     });
   }
   async list(id: string, options: AttentionReadOptions = {}): Promise<AttentionPage> {
@@ -248,7 +325,7 @@ export class AttentionStore {
     });
   }
   private latestExplicit(ledger: Ledger): AttentionItem | null {
-    const latest = ledger.events.filter(event => event.type === 'agent_needs_input' && !event.resolvedAt && !event.acknowledgedAt)
+    const latest = ledger.events.filter(event => this.isExplicit(event) && !event.resolvedAt && !event.acknowledgedAt)
       .reduce<StoredItem | undefined>((current, event) => !current || event.sequence > current.sequence ? event : current, undefined);
     return latest ? publicItem(latest) : null;
   }
@@ -262,18 +339,56 @@ export class AttentionStore {
   async resolveExplicitThrough(id: string, eventId: string): Promise<ExplicitAttentionSnapshot> {
     return this.withLock(id, async () => {
       const ledger = await this.load(id);
-      const displayed = ledger.events.find(event => event.id === eventId && event.type === 'agent_needs_input');
+      const displayed = ledger.events.find(event => event.id === eventId && this.isExplicit(event));
       if (!displayed) throw new AttentionError('unknown_attention', 'Unknown explicit attention request');
       const timestamp = new Date().toISOString();
+      const resolvedIds: string[] = [];
       for (const event of ledger.events) {
-        if (event.type === 'agent_needs_input' && event.sequence <= displayed.sequence && !event.resolvedAt) {
+        // Older plain requests are superseded; an older question still awaiting its own answer is not.
+        if (this.isExplicit(event) && event.sequence <= displayed.sequence && !event.resolvedAt && (event.id === displayed.id || !event.prompt)) {
           event.resolvedAt = timestamp;
           event.resolution = 'manual';
+          resolvedIds.push(event.id);
         }
       }
-      this.prune(ledger);
+      this.prune(ledger, resolvedIds);
       await this.save(id, ledger);
+      this.wakeItemWaiters(id);
       return { attention: this.latestExplicit(ledger), sequence: ledger.sequence };
+    });
+  }
+  /** Record the human's answer and resolve the item. The caller delivers it (waiter or mail). */
+  async answer(id: string, eventId: string, answers: unknown, now?: Date): Promise<AttentionAnswerResult> {
+    return this.withLock(id, async () => {
+      const ledger = await this.load(id);
+      const event = ledger.events.find(candidate => candidate.id === eventId);
+      if (!event) throw new AttentionError('attention_not_found', 'Unknown attention request', 404);
+      if (!event.prompt) throw new AttentionError('attention_not_answerable', 'This attention request has no question to answer', 409);
+      if (event.resolvedAt) throw new AttentionError('attention_already_resolved', 'This attention request is already resolved', 409);
+      const checked = validateAttentionAnswer(event.prompt, answers);
+      if (!checked.ok) throw new AttentionError('invalid_answer', checked.error, 400);
+      const at = now ?? new Date(this.notificationOptions.now());
+      // Mail answers fall back to mail when nobody is polling right now (a duplicate beats a lost answer);
+      // hook answers have no fallback, so a recent poll still counts.
+      const waiterLive = event.prompt.channel === 'mail' ? this.activeWaits(eventId) > 0 : this.hasLiveWaiter(eventId, at.getTime());
+      if (event.prompt.channel === 'hook' && !waiterLive) {
+        throw new AttentionError('answer_waiter_gone', 'The agent is no longer waiting for this answer', 409);
+      }
+      const timestamp = at.toISOString();
+      event.answer = { answers: checked.value, answeredAt: timestamp };
+      event.resolvedAt = timestamp;
+      event.resolution = 'answered';
+      const resolvedIds = [event.id];
+      for (const older of ledger.events) {
+        if (this.isExplicit(older) && older.sequence < event.sequence && !older.resolvedAt && !older.prompt) {
+          older.resolvedAt = timestamp; older.resolution = 'manual'; resolvedIds.push(older.id);
+        }
+      }
+      const item = publicItem(event);
+      this.prune(ledger, resolvedIds);
+      await this.save(id, ledger);
+      this.wakeItemWaiters(id);
+      return { item, snapshot: { attention: this.latestExplicit(ledger), sequence: ledger.sequence }, waiterLive };
     });
   }
   async mutate(id: string, ids: string[], operation: 'ack' | 'resolve', reason?: string): Promise<AttentionItem[]> {
@@ -293,8 +408,9 @@ export class AttentionStore {
         }
       }
       const output = result.map(publicItem);
-      this.prune(ledger);
+      this.prune(ledger, operation === 'resolve' ? wanted : []);
       await this.save(id, ledger);
+      if (operation === 'resolve') this.wakeItemWaiters(id);
       return output;
     });
   }
@@ -323,5 +439,59 @@ export class AttentionStore {
         } finally { if (timer) clearTimeout(timer); signal?.removeEventListener('abort', cancel); }
       }
     } finally { listeners.delete(listener); if (!listeners.size) this.listeners.delete(id); }
+  }
+  private async readItem(id: string, eventId: string): Promise<AttentionItem> {
+    return this.withLock(id, async () => {
+      const event = (await this.load(id)).events.find(candidate => candidate.id === eventId);
+      if (!event) throw new AttentionError('attention_not_found', 'Unknown attention request', 404);
+      return publicItem(event);
+    });
+  }
+  /** Long-poll one item: returns when it is resolved, at the deadline (current item), or rejects on abort. */
+  async waitForItem(id: string, eventId: string, waitMs: number, signal?: AbortSignal): Promise<AttentionItem> {
+    const ms = Number.isFinite(waitMs) ? Math.min(Math.max(waitMs, 0), ATTENTION_ITEM_WAIT_MAX_SECONDS * 1000) : 0;
+    // A zero-wait read is a status check, not a waiter: it never counts toward liveness.
+    if (ms <= 0) return this.readItem(id, eventId);
+    const deadline = Date.now() + ms;
+    // Install before the first read so a resolution cannot fall between read and listener setup.
+    let notify: (() => void) | undefined;
+    const waiters = this.itemWaiters.get(id) ?? new Set<() => void>();
+    const waiter = () => notify?.();
+    waiters.add(waiter); this.itemWaiters.set(id, waiters);
+    let poller: { active: number; lastPollAt: number } | undefined;
+    try {
+      while (true) {
+        if (signal?.aborted) throw new AttentionError('cancelled', 'Attention wait cancelled', 499);
+        let wake!: () => void;
+        const change = new Promise<void>((resolve) => { wake = resolve; });
+        notify = wake;
+        const item = await this.readItem(id, eventId);
+        if (item.resolvedAt || Date.now() >= deadline) return item;
+        if (!poller) {
+          // Only a confirmed, still-open item gets a liveness record.
+          const nowMs = this.notificationOptions.now();
+          for (const [key, entry] of this.pollers) if (!entry.active && nowMs - entry.lastPollAt > ATTENTION_WAITER_TTL_MS) this.pollers.delete(key);
+          poller = this.pollers.get(eventId) ?? { active: 0, lastPollAt: nowMs };
+          poller.active++; poller.lastPollAt = nowMs;
+          this.pollers.set(eventId, poller);
+        }
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const cancel = () => wake();
+        try {
+          const timeout = new Promise<void>((resolve) => { timer = setTimeout(resolve, Math.max(0, deadline - Date.now())); });
+          signal?.addEventListener('abort', cancel, { once: true });
+          if (signal?.aborted) wake();
+          await Promise.race([change, timeout]);
+        } finally { if (timer) clearTimeout(timer); signal?.removeEventListener('abort', cancel); }
+      }
+    } finally {
+      waiters.delete(waiter); if (!waiters.size) this.itemWaiters.delete(id);
+      if (poller) {
+        poller.active--;
+        // The TTL bridges the gap between polls, so it runs from the end of the latest one.
+        if (!signal?.aborted) poller.lastPollAt = this.notificationOptions.now();
+        if (signal?.aborted && poller.active === 0 && this.pollers.get(eventId) === poller) this.pollers.delete(eventId);
+      }
+    }
   }
 }

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { Readable } from 'node:stream';
-import { runSessions } from './sessions-commands.js';
+import { attentionClock, runSessions } from './sessions-commands.js';
 import { secureFixture } from './security/bridge/fixtures.test.js';
 
 interface Request { url: string; method: string; body?: unknown }
@@ -43,7 +43,7 @@ test('create --help describes options without opening transport or creating a se
 }));
 
 test('generated help and invalid command options finish before any transport access', async () => fixture(async (requests, output) => {
-  for (const command of ['list', 'create', 'get', 'screen', 'grep', 'keys', 'tell', 'inbox', 'mail', 'running', 'usage', 'remove', 'archive', 'revive', 'attention', 'pr']) {
+  for (const command of ['list', 'create', 'get', 'screen', 'grep', 'keys', 'tell', 'inbox', 'mail', 'running', 'usage', 'remove', 'archive', 'revive', 'attention', 'attention-status', 'pr']) {
     assert.equal(await runSessions([command, '--help']), 0, command);
   }
   assert.ok(output.some((line) => line.includes('Usage: ftown sessions create')));
@@ -191,3 +191,131 @@ test('new self-actions fail closed on old, false or mismatched capabilities befo
     }, () => ({ capabilities }));
   }
 });
+
+const promptCapabilities = { capabilities: { attention: { version: 1, request: true, prompt: true } } };
+const askedPrompt = { channel: 'mail', questions: [{ question: 'Which?', options: [{ label: 'Alpha' }, { label: 'Beta' }], multiSelect: false, allowText: true }] };
+const answeredItem = { id: 'evt-1', resolvedAt: 'now', resolution: 'answered', prompt: askedPrompt, answer: { answers: [{ selected: [1] }], answeredAt: 'now' } };
+
+async function withFakeClock(run: (sleeps: number[], advance: (ms: number) => void) => Promise<void>): Promise<void> {
+  const original = { ...attentionClock };
+  let now = 1_000_000; const sleeps: number[] = [];
+  attentionClock.now = () => now;
+  attentionClock.sleep = async (ms) => { sleeps.push(ms); now += ms; };
+  try { await run(sleeps, (ms) => { now += ms; }); } finally { Object.assign(attentionClock, original); }
+}
+
+test('attention builds questions from --option flags and prints the event id', async () => fixture(async (requests, output) => {
+  process.env.FTOWN_SESSION_ID = 'self-id';
+  assert.equal(await runSessions(['attention', '--message', 'Which?', '--option', 'Alpha', '--option', 'Beta', '--multi', '--no-text']), 0);
+  assert.deepEqual(requests[1].body, { message: 'Which?', questions: [{ question: 'Which?', options: ['Alpha', 'Beta'], multiSelect: true, allowText: false }] });
+  assert.ok(output.some((line) => line.includes('attention-status evt-1')));
+  assert.deepEqual(JSON.parse(output.find((line) => line.startsWith('{')) ?? ''), { event: { id: 'evt-1' } });
+  assert.equal(await runSessions(['attention', '--message', 'Which?', '--option', 'Alpha']), 0);
+  assert.deepEqual(requests.at(-1)?.body, { message: 'Which?', questions: [{ question: 'Which?', options: ['Alpha'], multiSelect: false, allowText: true }] });
+}, (request) => request.method === 'GET' ? promptCapabilities : { event: { id: 'evt-1' } }));
+
+test('attention --questions-json accepts an array or an object and passes it through', async () => fixture(async (requests) => {
+  process.env.FTOWN_SESSION_ID = 'self-id';
+  const questions = [{ question: 'Q?', options: ['a', 'b'] }];
+  assert.equal(await runSessions(['attention', '--message', 'Q', '--questions-json', JSON.stringify(questions)]), 0);
+  assert.deepEqual(requests.at(-1)?.body, { message: 'Q', questions });
+  assert.equal(await runSessions(['attention', '--message', 'Q', '--questions-json', JSON.stringify({ questions })]), 0);
+  assert.deepEqual(requests.at(-1)?.body, { message: 'Q', questions });
+}, (request) => request.method === 'GET' ? promptCapabilities : { event: { id: 'evt-1' } }));
+
+test('attention question flag validation fails before any transport access', async () => fixture(async (requests, output) => {
+  process.env.FTOWN_SESSION_ID = 'self-id';
+  const base = ['attention', '--message', 'Q'];
+  for (const extra of [['--multi'], ['--no-text'], ['--timeout', '5'], ['--wait'], ['--questions-json', '[]'], ['--questions-json', '{nope'],
+    ['--questions-json', '[{"question":"a"}]', '--option', 'x'], ['--questions-json', '[{"question":"a"}]', '--multi'],
+    ['--option', 'x', '--wait', '--timeout', '0'], ['--option', 'x', '--wait', '--timeout', '86401'], ['--option', 'x', '--wait', '--timeout', 'abc']]) {
+    assert.equal(await runSessions([...base, ...extra]), 1, extra.join(' '));
+  }
+  assert.equal(requests.length, 0);
+  assert.ok(output.some((line) => line.includes('--questions-json is not valid JSON')));
+}));
+
+test('attention with questions requires the prompt capability', async () => fixture(async (requests, output) => {
+  process.env.FTOWN_SESSION_ID = 'self-id';
+  assert.equal(await runSessions(['attention', '--message', 'Q', '--option', 'x']), 1);
+  assert.deepEqual(requests.map(({ method }) => method), ['GET']);
+  assert.ok(output.some((line) => line.includes('bridge_upgrade_required')));
+  assert.equal(await runSessions(['attention', '--message', 'plain']), 0);
+}, (request) => request.method === 'GET' ? newCapabilities : { event: { id: 'evt-1' } }));
+
+test('attention --wait polls until answered and prints the formatted answer', async () => withFakeClock(async () => {
+  let polls = 0;
+  await fixture(async (requests, output) => {
+    process.env.FTOWN_SESSION_ID = 'self-id';
+    assert.equal(await runSessions(['attention', '--message', 'Which?', '--option', 'Alpha', '--option', 'Beta', '--wait', '--timeout', '100']), 0);
+    const polled = requests.filter(({ url }) => url.includes('/attention/evt-1'));
+    assert.equal(polled.length, 2);
+    assert.ok(polled[0].url.endsWith('/api/sessions/self-id/attention/evt-1?waitSeconds=25'));
+    assert.ok(output.includes('Waiting for an answer (attention evt-1)...'));
+    assert.ok((output.at(-1) ?? '').includes('Beta'), output.at(-1));
+    assert.ok(!output.some((line) => line.includes('"event"')), 'POST response is not printed with --wait');
+  }, (request) => {
+    if (request.method === 'POST') return { event: { id: 'evt-1' } };
+    if (!request.url.includes('/attention/evt-1')) return promptCapabilities;
+    polls += 1;
+    return { event: polls < 2 ? { id: 'evt-1' } : answeredItem };
+  });
+}));
+
+test('attention --wait exits 2 when dismissed and 124 on timeout with a shrinking poll window', async () => withFakeClock(async (_sleeps, advance) => {
+  let dismissed = true;
+  await fixture(async (requests, output) => {
+    process.env.FTOWN_SESSION_ID = 'self-id';
+    assert.equal(await runSessions(['attention', '--message', 'Q', '--option', 'x', '--wait']), 2);
+    assert.ok(output.includes('Attention request evt-1 was resolved (manual) without an answer.'));
+    dismissed = false;
+    const before = requests.length;
+    assert.equal(await runSessions(['attention', '--message', 'Q', '--option', 'x', '--wait', '--timeout', '30']), 124);
+    const waits = requests.slice(before).filter(({ url }) => url.includes('waitSeconds')).map(({ url }) => new URL(url).searchParams.get('waitSeconds'));
+    assert.deepEqual(waits, ['25', '5']);
+    assert.ok(output.includes('Timed out waiting for an answer. Check later: ftown sessions attention-status evt-1 --wait'));
+  }, (request) => {
+    if (request.method === 'POST') return { event: { id: 'evt-1' } };
+    if (!request.url.includes('/attention/evt-1')) return promptCapabilities;
+    advance(25_000);
+    return { event: dismissed ? { id: 'evt-1', resolvedAt: 'now', resolution: 'manual' } : { id: 'evt-1' } };
+  });
+}));
+
+test('attention-status covers answered, dismissed, pending and --wait', async () => withFakeClock(async (_sleeps, advance) => {
+  let item: Record<string, unknown> = {};
+  await fixture(async (requests, output) => {
+    process.env.FTOWN_SESSION_ID = 'self-id';
+    item = { ...answeredItem, id: 'evt-9', answer: { answers: [{ selected: [0] }], answeredAt: 'now' } };
+    assert.equal(await runSessions(['attention-status', 'evt-9']), 0);
+    assert.ok((output.at(-1) ?? '').includes('Alpha'));
+    assert.ok(requests.at(-1)?.url.endsWith('/api/sessions/self-id/attention/evt-9'));
+    item = { id: 'evt-9', resolvedAt: 'now', resolution: 'session_end' };
+    assert.equal(await runSessions(['attention-status', 'evt-9', '--session-id', 'other']), 2);
+    assert.ok(requests.at(-1)?.url.endsWith('/api/sessions/other/attention/evt-9'));
+    item = { id: 'evt-9' };
+    assert.equal(await runSessions(['attention-status', 'evt-9']), 3);
+    assert.equal(output.at(-1), 'Pending: no answer yet.');
+    assert.equal(await runSessions(['attention-status', 'evt-9', '--wait', '--timeout', '1']), 124);
+    assert.equal(await runSessions(['attention-status', 'evt-9', '--timeout', '1']), 1);
+  }, () => { advance(25_000); return { event: item }; });
+}));
+
+test('attention --wait retries transient poll failures three times then fails', async () => withFakeClock(async (sleeps) => {
+  let failing = 0;
+  await fixture(async () => {
+    process.env.FTOWN_SESSION_ID = 'self-id';
+    failing = 2;
+    assert.equal(await runSessions(['attention-status', 'evt-1', '--wait']), 0);
+    assert.deepEqual(sleeps, [1000, 1000]);
+    failing = 99;
+    assert.equal(await runSessions(['attention-status', 'evt-1', '--wait']), 1);
+    assert.equal(sleeps.length, 5);
+  }, (request) => {
+    if (request.url.includes('waitSeconds')) {
+      if (failing > 0) { failing -= 1; throw new Error('boom'); }
+      return { event: answeredItem };
+    }
+    return { event: { id: 'evt-1' } };
+  });
+}));

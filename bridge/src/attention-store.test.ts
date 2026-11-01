@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/p
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
+import { ATTENTION_WAITER_TTL_MS, type AttentionPrompt } from './attention-prompt-protocol.js';
 import { AttentionStore, AttentionError, IDLE_NOTIFICATION_DELAY_MS, type AttentionNotificationOptions } from './attention-store.js';
 
 const notice = (message = 'Approve this command?', extra: Record<string, unknown> = {}) => ({ notification_type: 'permission_prompt', message, ...extra });
@@ -99,9 +100,9 @@ test('pagination never skips omitted events; pruning and ledger reset are visibl
   assert.deepEqual(second.events.map((event) => event.sequence), [3, 4]);
   const third = await store.list('s1', { cursor: second.cursor, limit: 2 });
   assert.deepEqual(third.events.map((event) => event.sequence), [5]);
-  await store.mutate('s1', first.events.map((event) => event.id), 'resolve');
+  for (const event of [...first.events, second.events[0]]) await store.mutate('s1', [event.id], 'resolve');
   assert.equal((await store.list('s1', { cursor: start.cursor })).cursorReset, true);
-  assert.equal((await store.list('s1')).openCount, 3);
+  assert.equal((await store.list('s1')).openCount, 2);
   await assert.rejects(store.list('s2', { cursor: first.cursor }), /another session/);
   await assert.rejects(store.list('s1', { cursor: 'garbage' }), /malformed/);
   await unlink(join(dir, 's1/attention.json'));
@@ -317,4 +318,397 @@ test('concurrent idle/resume/idle preserves newest timer and explicit cancellati
   await f.advance(120_000); assert.equal(f.signals[0].cycleId, cycle.id);
   await f.store.record('s1', 'UserPromptSubmit', {}); await Promise.all([f.store.record('s1', 'Stop', {}), f.store.cancelIdleNotification('s1')]);
   assert.equal(f.time.tasks.size, 0); assert.equal((await f.ledger()).idleCycle, undefined);
+});
+
+const mailPrompt = (): AttentionPrompt => ({ channel: 'mail', questions: [{ question: 'Which branch?', options: [{ label: 'main' }, { label: 'dev', description: 'staging' }], multiSelect: false, allowText: true }] });
+const hookPrompt = (): AttentionPrompt => ({ ...mailPrompt(), channel: 'hook' });
+const askInput = { questions: [{ question: 'Pick one', header: 'Choice', options: [{ label: 'A' }, { label: 'B' }], multiSelect: false }] };
+const needsInput = (message: string) => notice(message, { notification_type: 'agent_needs_input' });
+
+test('prompt is persisted, reloaded, part of the fingerprint and never taken from hook data', async t => {
+  const f = await fixture(t);
+  const a = (await f.store.record('s1', 'Notification', needsInput('Q'), { prompt: mailPrompt() }))!;
+  assert.deepEqual(a.prompt, mailPrompt());
+  assert.deepEqual((await new AttentionStore(f.resolve).list('s1')).events[0].prompt, mailPrompt());
+  const same = (await f.store.record('s1', 'Notification', needsInput('Q'), { prompt: mailPrompt() }))!;
+  assert.equal(same.id, a.id);
+  const other = mailPrompt(); other.questions[0].question = 'Other?';
+  const b = (await f.store.record('s1', 'Notification', needsInput('Q'), { prompt: other }))!;
+  assert.notEqual(b.id, a.id);
+  const c = (await f.store.record('s1', 'Notification', { ...needsInput('Hooked'), prompt: mailPrompt(), attentionPrompt: mailPrompt() }))!;
+  assert.equal(c.prompt, undefined);
+});
+
+test('recordDetailed reports created for a new item and deduped for a repeat, record stays unchanged', async t => {
+  const f = await fixture(t);
+  const ask = { tool_name: 'AskUserQuestion', tool_use_id: 'tuc', tool_input: askInput };
+  const first = await f.store.recordDetailed('s1', 'PreToolUse', ask);
+  assert.equal(first.created, true);
+  assert.equal(first.item?.occurrences, 1);
+  const again = await f.store.recordDetailed('s1', 'PreToolUse', ask);
+  assert.equal(again.created, false);
+  assert.equal(again.item?.id, first.item?.id);
+  assert.equal(again.item?.occurrences, 2);
+  const plain = await f.store.recordDetailed('s1', 'PreToolUse', { tool_name: 'Bash', tool_use_id: 'tub', tool_input: { command: 'ls' } });
+  assert.deepEqual(plain, { item: undefined, created: false });
+  const viaRecord = await f.store.record('s1', 'PreToolUse', ask);
+  assert.equal(viaRecord?.id, first.item?.id);
+  assert.equal(viaRecord?.occurrences, 3);
+});
+
+test('recordDetailed reports created false when deduping onto a resolved ask', async t => {
+  const f = await fixture(t);
+  const ask = { tool_name: 'AskUserQuestion', tool_use_id: 'tur', tool_input: askInput };
+  const first = await f.store.recordDetailed('s1', 'PreToolUse', ask);
+  assert.equal(first.created, true);
+  await f.store.record('s1', 'PostToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'tur' });
+  const again = await f.store.recordDetailed('s1', 'PreToolUse', ask);
+  assert.equal(again.created, false);
+  assert.equal(again.item?.id, first.item?.id);
+});
+
+test('AskUserQuestion PreToolUse stores a prompt, deduplicates by tool_use_id and fills a missing prompt', async t => {
+  const f = await fixture(t);
+  const first = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'tu1', tool_input: askInput }))!;
+  assert.equal(first.type, 'ask_user');
+  assert.equal(first.prompt?.channel, 'hook');
+  assert.deepEqual(first.prompt?.questions[0].options, [{ label: 'A' }, { label: 'B' }]);
+  const again = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'tu1', tool_input: askInput }))!;
+  assert.equal(again.id, first.id); assert.equal(again.occurrences, 2);
+  const noPrompt = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'tu2', tool_input: { questions: [{ question: 'free?' }] } }))!;
+  assert.equal(noPrompt.prompt, undefined);
+  const filled = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'tu2', tool_input: askInput }))!;
+  assert.equal(filled.id, noPrompt.id); assert.ok(filled.prompt);
+  const other = (await f.store.record('s1', 'PreToolUse', { tool_name: 'request_user_input', tool_use_id: 'tu3', tool_input: askInput }))!;
+  assert.equal(other.prompt, undefined);
+});
+
+test('PostToolUse of an ask tool resolves the matching ask_user item as tool_complete', async t => {
+  const f = await fixture(t);
+  const a = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'tu1', tool_input: askInput }))!;
+  const b = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'tu2', tool_input: askInput }))!;
+  assert.ok(await f.store.record('s1', 'PostToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'tu1' }) === undefined);
+  const events = (await f.store.list('s1', { includeResolved: true })).events;
+  assert.equal(events.find(e => e.id === a.id)?.resolution, 'tool_complete');
+  assert.equal(events.find(e => e.id === b.id)?.resolvedAt, undefined);
+  await f.store.record('s1', 'PostToolUse', { tool_name: 'Bash', tool_use_id: 'tu2' });
+  assert.equal((await f.store.list('s1')).events.length, 1);
+});
+
+test('explicit snapshot and dismissal include ask_user items with a prompt only', async t => {
+  const f = await fixture(t);
+  const noPrompt = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'x', tool_input: {} }))!;
+  assert.equal((await f.store.explicitSnapshot('s1')).attention, null);
+  await assert.rejects(f.store.resolveExplicitThrough('s1', noPrompt.id), /Unknown explicit/);
+  const older = (await f.store.record('s1', 'Notification', needsInput('Old')))!;
+  const asked = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'y', tool_input: askInput }))!;
+  assert.equal((await f.store.explicitSnapshot('s1')).attention?.id, asked.id);
+  await f.store.resolveExplicitThrough('s1', asked.id);
+  const events = (await f.store.list('s1', { includeResolved: true })).events;
+  assert.equal(events.find(e => e.id === older.id)?.resolution, 'manual');
+  assert.equal(events.find(e => e.id === asked.id)?.resolution, 'manual');
+  assert.equal(events.find(e => e.id === noPrompt.id)?.resolvedAt, undefined);
+});
+
+test('answer resolves, persists and returns the snapshot; every error is coded', async t => {
+  const f = await fixture(t);
+  const item = (await f.store.record('s1', 'Notification', needsInput('Q'), { prompt: mailPrompt() }))!;
+  const legacy = (await f.store.record('s1', 'Notification', notice('Legacy')))!;
+  const code = (e: unknown, status: number, c: string) => e instanceof AttentionError && e.status === status && e.code === c;
+  await assert.rejects(f.store.answer('s1', 'nope', [{ selected: [0] }]), (e) => code(e, 404, 'attention_not_found'));
+  await assert.rejects(f.store.answer('s1', legacy.id, [{ selected: [0] }]), (e) => code(e, 409, 'attention_not_answerable'));
+  await assert.rejects(f.store.answer('s1', item.id, [{ selected: [5] }]), (e) => code(e, 400, 'invalid_answer'));
+  await assert.rejects(f.store.answer('s1', item.id, 'x'), (e) => code(e, 400, 'invalid_answer'));
+  const when = new Date('2026-10-20T10:00:00.000Z');
+  const result = await f.store.answer('s1', item.id, [{ selected: [1], text: ' note ' }], when);
+  assert.equal(result.waiterLive, false);
+  assert.equal(result.item.resolution, 'answered');
+  assert.equal(result.item.resolvedAt, when.toISOString());
+  assert.deepEqual(result.item.answer, { answers: [{ selected: [1], text: 'note' }], answeredAt: when.toISOString() });
+  assert.equal(result.snapshot.attention, null);
+  const reloaded = (await new AttentionStore(f.resolve).list('s1', { includeResolved: true })).events.find(e => e.id === item.id);
+  assert.deepEqual(reloaded?.answer, result.item.answer);
+  await assert.rejects(f.store.answer('s1', item.id, [{ selected: [0] }]), (e) => code(e, 409, 'attention_already_resolved'));
+});
+
+test('hook-channel answers need a live waiter and report waiterLive', async t => {
+  const f = await fixture(t);
+  const item = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'h1', tool_input: askInput }))!;
+  await assert.rejects(f.store.answer('s1', item.id, [{ selected: [0] }]), (e) => e instanceof AttentionError && e.status === 409 && e.code === 'answer_waiter_gone');
+  const poll = f.store.waitForItem('s1', item.id, 5000);
+  await delay(20);
+  assert.equal(f.store.hasLiveWaiter(item.id), true);
+  const result = await f.store.answer('s1', item.id, [{ selected: [1] }]);
+  assert.equal(result.waiterLive, true);
+  assert.equal((await poll).resolution, 'answered');
+});
+
+test('waitForItem: immediate cases, deadline, unknown id, and wakes on every resolution path', async t => {
+  const f = await fixture(t);
+  await assert.rejects(f.store.waitForItem('s1', 'nope', 0), (e) => e instanceof AttentionError && e.status === 404 && e.code === 'attention_not_found');
+  const item = (await f.store.record('s1', 'Notification', needsInput('Q'), { prompt: mailPrompt() }))!;
+  assert.equal((await f.store.waitForItem('s1', item.id, 0)).resolvedAt, undefined);
+  const started = Date.now();
+  assert.equal((await f.store.waitForItem('s1', item.id, 60)).resolvedAt, undefined);
+  assert.ok(Date.now() - started >= 50);
+
+  await f.store.mutate('s1', [item.id], 'resolve');
+  const wakes: Array<[string, (id: string) => Promise<unknown>]> = [
+    ['manual', id => f.store.mutate('s1', [id], 'resolve')],
+    ['user_prompt', () => f.store.record('s1', 'UserPromptSubmit', {})],
+    ['session_end', () => f.store.record('s1', 'SessionEnd', {})],
+    ['manual', id => f.store.resolveExplicitThrough('s1', id)],
+    ['answered', id => f.store.answer('s1', id, [{ selected: [0] }])],
+  ];
+  for (const [i, [resolution, act]] of wakes.entries()) {
+    const fresh = (await f.store.record('s1', 'Notification', needsInput(`Q${i}`), { prompt: mailPrompt() }))!;
+    const poll = f.store.waitForItem('s1', fresh.id, 5000);
+    await delay(10);
+    await act(fresh.id);
+    assert.equal((await poll).resolution, resolution);
+  }
+  const elicit = (await f.store.record('s1', 'Notification', { notification_type: 'elicitation_dialog', message: 'E' }))!;
+  const poll = f.store.waitForItem('s1', elicit.id, 5000);
+  await delay(10);
+  await f.store.record('s1', 'Notification', { notification_type: 'elicitation_complete' });
+  assert.equal((await poll).resolution, 'elicitation_complete');
+  const ask = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'w1', tool_input: askInput }))!;
+  const poll2 = f.store.waitForItem('s1', ask.id, 5000);
+  await delay(10);
+  await f.store.record('s1', 'PostToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'w1' });
+  assert.equal((await poll2).resolution, 'tool_complete');
+});
+
+test('waitForItem sees a resolution committed right after its first read', async t => {
+  const f = await fixture(t);
+  const item = (await f.store.record('s1', 'Notification', needsInput('Q'), { prompt: mailPrompt() }))!;
+  const internals = f.store as unknown as { readItem: (id: string, eventId: string) => Promise<unknown> };
+  const original = internals.readItem.bind(f.store);
+  let injected = false;
+  internals.readItem = async (id, eventId) => {
+    const read = await original(id, eventId);
+    if (!injected) { injected = true; await f.store.mutate(id, [eventId], 'resolve'); }
+    return read; // stale: still open, so the waiter must be woken by the injected resolution
+  };
+  const started = Date.now();
+  const done = await f.store.waitForItem('s1', item.id, 5000);
+  assert.equal(done.resolution, 'manual');
+  assert.ok(Date.now() - started < 2000);
+});
+
+test('concurrent double answer: exactly one wins, the other is already_resolved', async t => {
+  const f = await fixture(t);
+  const item = (await f.store.record('s1', 'Notification', needsInput('Q'), { prompt: mailPrompt() }))!;
+  const results = await Promise.allSettled([
+    f.store.answer('s1', item.id, [{ selected: [0] }]),
+    f.store.answer('s1', item.id, [{ selected: [1] }]),
+  ]);
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+  const rejected = results.find(r => r.status === 'rejected') as PromiseRejectedResult;
+  assert.equal((rejected.reason as AttentionError).code, 'attention_already_resolved');
+});
+
+test('waitForItem leaves no waiter or liveness behind after deadline, abort, 404 or resolution', async t => {
+  const f = await fixture(t);
+  const item = (await f.store.record('s1', 'Notification', needsInput('Q'), { prompt: mailPrompt() }))!;
+  const internals = f.store as unknown as { itemWaiters: Map<string, Set<unknown>>; pollers: Map<string, unknown> };
+  await f.store.waitForItem('s1', item.id, 30);
+  assert.equal(internals.itemWaiters.size, 0);
+  assert.equal(f.store.hasLiveWaiter(item.id), true, 'TTL liveness remains after a deadline return');
+  await assert.rejects(f.store.waitForItem('s1', 'ghost', 30), /Unknown attention/);
+  assert.equal(internals.itemWaiters.size, 0);
+  assert.equal(f.store.hasLiveWaiter('ghost'), false);
+  assert.equal(internals.pollers.has('ghost'), false);
+  const ac = new AbortController();
+  const aborted = f.store.waitForItem('s1', item.id, 5000, ac.signal);
+  await delay(10); ac.abort();
+  await assert.rejects(aborted, /cancelled/);
+  assert.equal(internals.itemWaiters.size, 0);
+  assert.equal(f.store.hasLiveWaiter(item.id), false);
+  assert.equal((await f.store.waitForItem('s1', item.id, Number.NaN)).resolvedAt, undefined);
+  assert.equal((await f.store.waitForItem('s1', item.id, -5)).resolvedAt, undefined);
+});
+
+test('answer liveness: mail needs an active wait (no TTL), hook accepts a recent poll', async t => {
+  const f = await fixture(t);
+  const mail = (await f.store.record('s1', 'Notification', needsInput('M'), { prompt: mailPrompt() }))!;
+  await f.store.waitForItem('s1', mail.id, 30);
+  assert.equal(f.store.hasLiveWaiter(mail.id), true);
+  assert.equal((await f.store.answer('s1', mail.id, [{ selected: [0] }])).waiterLive, false);
+  const mail2 = (await f.store.record('s1', 'Notification', needsInput('M2'), { prompt: mailPrompt() }))!;
+  const poll = f.store.waitForItem('s1', mail2.id, 5000);
+  await delay(20);
+  assert.equal((await f.store.answer('s1', mail2.id, [{ selected: [0] }])).waiterLive, true);
+  await poll;
+  const hook = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'lv', tool_input: askInput }))!;
+  await f.store.waitForItem('s1', hook.id, 30);
+  assert.equal((await f.store.answer('s1', hook.id, [{ selected: [0] }])).waiterLive, true);
+});
+
+test('a replayed AskUserQuestion hook does not reopen or duplicate a resolved ask_user item', async t => {
+  const f = await fixture(t);
+  const first = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'r1', tool_input: askInput }))!;
+  await f.store.record('s1', 'PostToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'r1' });
+  const pushed: string[] = [];
+  const store = new AttentionStore(f.resolve, 500, (_s, n) => pushed.push(n.eventKey));
+  const again = (await store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'r1', tool_input: askInput }))!;
+  assert.equal(again.id, first.id); assert.equal(again.resolution, 'tool_complete'); assert.equal(again.occurrences, 2);
+  assert.equal((await store.list('s1', { includeResolved: true })).events.length, 1);
+  assert.equal(pushed.length, 0);
+  // Other kinds still open a fresh item after resolution.
+  const n1 = (await store.record('s1', 'Notification', notice('Same', { notification_id: 'n1' })))!;
+  await store.mutate('s1', [n1.id], 'resolve');
+  assert.notEqual((await store.record('s1', 'Notification', notice('Same', { notification_id: 'n1' })))!.id, n1.id);
+});
+
+test('dismissal and answers sweep only older plain requests, never older prompted ones', async t => {
+  const f = await fixture(t);
+  const plain = (await f.store.record('s1', 'Notification', needsInput('Plain')))!;
+  const askedMail = (await f.store.record('s1', 'Notification', needsInput('Prompted'), { prompt: mailPrompt() }))!;
+  const plain2 = (await f.store.record('s1', 'Notification', needsInput('Plain2')))!;
+  const target = (await f.store.record('s1', 'Notification', needsInput('Target'), { prompt: mailPrompt() }))!;
+  await f.store.resolveExplicitThrough('s1', target.id);
+  let events = (await f.store.list('s1', { includeResolved: true })).events;
+  for (const id of [plain.id, plain2.id, target.id]) assert.equal(events.find(e => e.id === id)?.resolution, 'manual');
+  assert.equal(events.find(e => e.id === askedMail.id)?.resolvedAt, undefined);
+
+  const g = await fixture(t);
+  const p1 = (await g.store.record('s1', 'Notification', needsInput('Plain')))!;
+  const older = (await g.store.record('s1', 'Notification', needsInput('Older'), { prompt: mailPrompt() }))!;
+  const answered = (await g.store.record('s1', 'Notification', needsInput('Answered'), { prompt: mailPrompt() }))!;
+  const result = await g.store.answer('s1', answered.id, [{ selected: [0] }]);
+  events = (await g.store.list('s1', { includeResolved: true })).events;
+  assert.equal(events.find(e => e.id === p1.id)?.resolution, 'manual');
+  assert.equal(events.find(e => e.id === older.id)?.resolvedAt, undefined);
+  assert.equal(result.snapshot.attention?.id, older.id);
+});
+
+test('items resolved by the current operation survive pruning', async t => {
+  const f = await fixture(t, 1);
+  const a = (await f.store.record('s1', 'Notification', needsInput('A'), { prompt: mailPrompt() }))!;
+  const b = (await f.store.record('s1', 'Notification', needsInput('B'), { prompt: mailPrompt() }))!;
+  await f.store.answer('s1', b.id, [{ selected: [0] }]);
+  const answeredFirst = await f.store.answer('s1', a.id, [{ selected: [0] }]);
+  assert.equal(answeredFirst.item.id, a.id);
+  const ids = (await f.store.list('s1', { includeResolved: true })).events.map(e => e.id);
+  assert.ok(ids.includes(a.id));
+  assert.equal((await f.store.waitForItem('s1', a.id, 0)).resolution, 'answered');
+});
+
+test('invalid prompts are rejected before touching disk; prompt strings are redacted', async t => {
+  const f = await fixture(t);
+  const before = await f.store.list('s1');
+  const bad = mailPrompt(); bad.questions[0].options = [{ label: 'x' }, { label: 'X' }];
+  await assert.rejects(f.store.record('s1', 'Notification', needsInput('Q'), { prompt: bad }), (e) => e instanceof AttentionError && e.code === 'invalid_prompt' && e.status === 400);
+  const long = mailPrompt(); long.questions[0].question = 'q'.repeat(501);
+  await assert.rejects(f.store.record('s1', 'Notification', needsInput('Q'), { prompt: long }), (e) => e instanceof AttentionError && e.code === 'invalid_prompt');
+  const extra = { channel: 'mail', questions: [], oops: 1 } as unknown as AttentionPrompt;
+  await assert.rejects(f.store.record('s1', 'Notification', needsInput('Q'), { prompt: extra }), (e) => e instanceof AttentionError && e.code === 'invalid_prompt');
+  assert.equal((await new AttentionStore(f.resolve).list('s1')).events.length, before.events.length);
+
+  const secret = mailPrompt();
+  secret.questions[0].question = 'Use API_KEY=topsecret or Bearer abc.def.ghi?';
+  secret.questions[0].options = [{ label: 'sk-ant-abcdefghijklmnop1', description: 'token ghp_abcdefghijklmnopqrstuvwx' }, { label: 'sk-ant-abcdefghijklmnop2' }];
+  await assert.rejects(f.store.record('s1', 'Notification', needsInput('S'), { prompt: secret }), (e) => e instanceof AttentionError && e.code === 'invalid_prompt', 'labels collide after redaction');
+  secret.questions[0].options[1] = { label: 'plain' };
+  const ok = (await f.store.record('s1', 'Notification', needsInput('S'), { prompt: secret }))!;
+  const raw = await readFile(join(f.dir, 's1/attention.json'), 'utf8');
+  for (const leak of ['topsecret', 'abc.def.ghi', 'abcdefghijklmnop1', 'ghp_abcdefghijklmnopqrstuvwx']) assert.ok(!raw.includes(leak), leak);
+  assert.ok(ok.prompt?.questions[0].question.includes('[redacted]'));
+
+  const hook = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'sec', tool_input: { questions: [{ question: 'Pick?', options: [{ label: 'Bearer abc.def' }, { label: 'ok' }] }] } }))!;
+  assert.equal(hook.prompt?.questions[0].options[0].label, 'Bearer [redacted]');
+  const collide = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'sec2', tool_input: { questions: [{ question: 'Pick?', options: [{ label: 'sk-ant-abcdefghijklmnop1' }, { label: 'sk-ant-abcdefghijklmnop2' }] }] } }))!;
+  assert.equal(collide.prompt, undefined);
+});
+
+test('dedup that adds a prompt refreshes the fingerprint; prompt key order does not matter', async t => {
+  const f = await fixture(t);
+  const a = (await f.store.record('s1', 'Notification', needsInput('Q'), { prompt: mailPrompt() }))!;
+  const reordered = JSON.parse(JSON.stringify(mailPrompt(), ['channel', 'questions', 'multiSelect', 'allowText', 'options', 'label', 'description', 'question', 'header'])) as AttentionPrompt;
+  assert.equal((await f.store.record('s1', 'Notification', needsInput('Q'), { prompt: reordered }))!.id, a.id);
+  const noPrompt = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'fp', tool_input: {} }))!;
+  const filled = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'fp', tool_input: askInput }))!;
+  assert.equal(filled.id, noPrompt.id);
+  const raw = JSON.parse(await readFile(join(f.dir, 's1/attention.json'), 'utf8')) as { events: Array<{ id: string; fingerprint: string }> };
+  const before = raw.events.find(e => e.id === noPrompt.id)!.fingerprint;
+  assert.equal(before.length, 64);
+});
+
+test('waitForItem abort rejects as cancelled and clears liveness when no waits remain', async t => {
+  const f = await fixture(t);
+  const item = (await f.store.record('s1', 'Notification', needsInput('Q'), { prompt: mailPrompt() }))!;
+  const one = new AbortController(); const two = new AbortController();
+  const a = f.store.waitForItem('s1', item.id, 5000, one.signal);
+  const b = f.store.waitForItem('s1', item.id, 5000, two.signal);
+  await delay(10);
+  one.abort();
+  await assert.rejects(a, (e) => e instanceof AttentionError && e.code === 'cancelled' && e.status === 499);
+  assert.equal(f.store.hasLiveWaiter(item.id), true);
+  two.abort();
+  await assert.rejects(b, (e) => e instanceof AttentionError && e.code === 'cancelled');
+  assert.equal(f.store.hasLiveWaiter(item.id), false);
+  await assert.rejects(f.store.waitForItem('s1', item.id, 5000, AbortSignal.abort()), /cancelled/);
+});
+
+test('liveness lasts ATTENTION_WAITER_TTL_MS after the latest poll started', async t => {
+  const f = await fixture(t);
+  let now = Date.parse('2026-10-18T12:00:00.000Z');
+  const store = new AttentionStore(f.resolve, 500, undefined, { now: () => now });
+  const item = (await store.record('s1', 'Notification', needsInput('Q'), { prompt: mailPrompt() }))!;
+  assert.equal(store.hasLiveWaiter(item.id), false);
+  await store.waitForItem('s1', item.id, 0);
+  assert.equal(store.hasLiveWaiter(item.id), false, 'a zero-wait read is not a waiter');
+  await store.waitForItem('s1', item.id, 30);
+  assert.equal(store.hasLiveWaiter(item.id), true);
+  assert.equal(store.hasLiveWaiter(item.id, now + ATTENTION_WAITER_TTL_MS), true);
+  assert.equal(store.hasLiveWaiter(item.id, now + ATTENTION_WAITER_TTL_MS + 1), false);
+  now += 30_000;
+  await store.waitForItem('s1', item.id, 30);
+  assert.equal(store.hasLiveWaiter(item.id, now + ATTENTION_WAITER_TTL_MS), true);
+  now += ATTENTION_WAITER_TTL_MS + 1;
+  assert.equal(store.hasLiveWaiter(item.id), false);
+  const hook = (await store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'ttl', tool_input: askInput }))!;
+  await assert.rejects(store.answer('s1', hook.id, [{ selected: [0] }]), /no longer waiting/);
+  await store.waitForItem('s1', hook.id, 30);
+  assert.equal((await store.answer('s1', hook.id, [{ selected: [0] }])).waiterLive, true);
+});
+
+test('ledgers written before prompts existed still load', async t => {
+  const f = await fixture(t);
+  const old = { version: 1, epoch: '7b2f3c1e-8f1a-4d57-9a53-0a5b0f6a2c11', sequence: 1, prunedThrough: 0, activity: { state: 'unknown' },
+    events: [{ id: 'e1', sequence: 1, type: 'agent_needs_input', title: 'T', message: 'M', createdAt: '2026-01-01T00:00:00.000Z', lastSeenAt: '2026-01-01T00:00:00.000Z', occurrences: 1, fingerprint: 'f', resolvedAt: '2026-01-02T00:00:00.000Z', resolution: 'user_prompt' }] };
+  await writeFile(join(f.dir, 's1/attention.json'), JSON.stringify(old));
+  const page = await f.store.list('s1', { includeResolved: true });
+  assert.equal(page.events[0].id, 'e1'); assert.equal(page.events[0].prompt, undefined);
+});
+
+test('liveness TTL runs from the end of the latest poll, not its start', async t => {
+  const f = await fixture(t);
+  let now = Date.parse('2026-10-18T12:00:00.000Z');
+  const store = new AttentionStore(f.resolve, 500, undefined, { now: () => now });
+  const hook = (await store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'end', tool_input: askInput }))!;
+  const poll = store.waitForItem('s1', hook.id, 50);
+  await delay(10);
+  now += 25_000; // the long-poll ran its full window
+  await poll;
+  const result = await store.answer('s1', hook.id, [{ selected: [0] }]);
+  assert.equal(result.waiterLive, true);
+
+  const second = (await store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'end2', tool_input: askInput }))!;
+  const poll2 = store.waitForItem('s1', second.id, 50);
+  await delay(10);
+  now += 25_000;
+  await poll2;
+  now += ATTENTION_WAITER_TTL_MS + 1;
+  await assert.rejects(store.answer('s1', second.id, [{ selected: [0] }]), (e) => e instanceof AttentionError && e.code === 'answer_waiter_gone');
+});
+
+test('malformed prompts of any shape give invalid_prompt, never a TypeError', async t => {
+  const f = await fixture(t);
+  for (const prompt of [{}, null, 'x', 5, { channel: 'mail' }, { channel: 'mail', questions: [{ question: 'q' }] },
+    { channel: 'mail', questions: [null] }, { channel: 'mail', questions: [{ question: 'q', options: 'a', multiSelect: false, allowText: true }] }]) {
+    await assert.rejects(f.store.record('s1', 'Notification', needsInput('Q'), { prompt: prompt as never }),
+      (e) => e instanceof AttentionError && e.code === 'invalid_prompt' && e.status === 400, JSON.stringify(prompt));
+  }
 });

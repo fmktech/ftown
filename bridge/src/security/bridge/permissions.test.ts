@@ -62,6 +62,22 @@ test('real read-only MCP principal cannot authorize the control update operation
   await assert.rejects(policy.revalidate(principal, classifyCommand('mcp_request', { request: { method: 'POST', path: '/api/sessions/session/preview-chat/reply' } }).permission), { code: 'permission_denied' });
 });
 
+test('attention item routes classify ask, single-item read and keep ack/resolve unchanged', () => {
+  assert.deepEqual(classifyHttp('POST', '/api/sessions/session/attention/ask'), { permission: 'control', mutating: true, operation: 'attention_ask', sessionId: 'session' });
+  assert.deepEqual(classifyHttp('GET', '/api/sessions/session/attention/event-1_2?waitSeconds=25'), { permission: 'read', mutating: false, operation: 'attention_get', sessionId: 'session' });
+  assert.equal(classifyHttp('POST', '/api/sessions/session/attention/ack').operation, 'attention_ack');
+  assert.equal(classifyHttp('POST', '/api/sessions/session/attention/resolve').operation, 'attention_resolve');
+  assert.equal(classifyHttp('POST', '/api/sessions/session/attention/ack').permission, 'control');
+  assert.equal(classifyHttp('POST', '/api/sessions/session/attention/resolve').permission, 'control');
+  for (const [method, path] of [
+    ['GET', '/api/sessions/session/attention/ack'], ['GET', '/api/sessions/session/attention/resolve'], ['GET', '/api/sessions/session/attention/ask'],
+    ['POST', '/api/sessions/session/attention/event-1'], ['DELETE', '/api/sessions/session/attention/event-1'],
+    ['GET', '/api/sessions/session/inbox/event-1'], ['GET', `/api/sessions/session/attention/${'e'.repeat(101)}`],
+    ['GET', '/api/sessions/session/attention/event-1/extra'],
+  ]) assert.throws(() => classifyHttp(method, path), { code: 'permission_denied' }, `${method} ${path}`);
+  assert.equal(classifyCommand('answer_session_attention', { sessionId: 'session' }).permission, 'control');
+});
+
 test('actual operations determine permission and unknown methods/routes/frames deny by default', () => {
   assert.equal(classifyCommand('get_bridge_update').permission, 'read');
   assert.equal(classifyCommand('get_pull_request_statuses').permission, 'read');

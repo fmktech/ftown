@@ -186,3 +186,95 @@ test('attention_request malformed success is outcome-unknown and revoked final a
   assert.equal((denied.structuredContent as { error: { code: string } }).error.code, 'forbidden');
   assert.equal((denied.structuredContent as { event?: unknown }).event, undefined);
 });
+
+const promptCaps = { session: { id: 's' }, capabilities: { attention: { version: 1, request: true, prompt: true } } };
+const noPromptCaps = { session: { id: 's' }, capabilities: { attention: { version: 1, request: true } } };
+const questions = [{ question: 'Which branch?', header: 'Branch', options: ['main', { label: 'dev', description: 'Development' }], multiSelect: false, allowText: true }];
+const answered = (): Record<string, unknown> => ({
+  ...item('event-9', 3), resolvedAt: '2026-10-16T00:01:00Z', resolution: 'answered',
+  prompt: { channel: 'mail', questions: [{ question: 'Which branch?', options: [{ label: 'main' }, { label: 'dev', description: 'Development' }], multiSelect: false, allowText: true }] },
+  answer: { answers: [{ selected: [1], text: 'thanks' }], answeredAt: '2026-10-16T00:01:00Z' },
+});
+
+test('attention_request forwards questions only when the bridge advertises prompt support', async (t) => {
+  const bodies: unknown[] = [];
+  const client = await connect(t, async (_m, method, _path, body) => {
+    if (method === 'GET') return promptCaps;
+    bodies.push(body); return { event: answered() };
+  });
+  const result = await client.callTool({ name: 'attention_request', arguments: { machine: 'a', sessionId: 's', message: 'Pick', questions } });
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(bodies, [{ message: 'Pick', questions }]);
+  const event = (result.structuredContent as { event: { answer: { answers: { selected: number[] }[] }; resolution: string } }).event;
+  assert.equal(event.resolution, 'answered');
+  assert.deepEqual(event.answer.answers[0].selected, [1]);
+
+  let posts = 0;
+  const old = await connect(t, async (_m, method) => { if (method === 'GET') return noPromptCaps; posts++; return { event: item() }; });
+  const denied = await old.callTool({ name: 'attention_request', arguments: { machine: 'a', sessionId: 's', message: 'Pick', questions } });
+  assert.equal(denied.isError, true);
+  assert.equal((denied.structuredContent as { error: { code: string } }).error.code, 'bridge_upgrade_required');
+  const plain = await old.callTool({ name: 'attention_request', arguments: { machine: 'a', sessionId: 's', message: 'Plain' } });
+  assert.equal(plain.isError, undefined);
+  assert.equal(posts, 1);
+});
+
+test('attention_request rejects malformed questions before contacting the bridge', async (t) => {
+  let calls = 0;
+  const client = await connect(t, async () => { calls++; return promptCaps; });
+  const bad = [
+    [],
+    Array.from({ length: 5 }, () => ({ question: 'q' })),
+    [{ question: 'q', options: Array.from({ length: 9 }, (_, i) => `o${i}`) }],
+    [{ question: 'q', extra: true }],
+  ];
+  for (const q of bad) {
+    const result = await client.callTool({ name: 'attention_request', arguments: { machine: 'a', sessionId: 's', message: 'Pick', questions: q } });
+    assert.equal(result.isError, true);
+  }
+  assert.equal(calls, 0);
+});
+
+test('attention_get returns one event, passes waitSeconds, and is gated on prompt support', async (t) => {
+  const seen: string[] = [];
+  const timeouts: Array<number | undefined> = [];
+  const client = await connect(t, async (_m, method, path, _body, _signal, timeout) => {
+    seen.push(`${method} ${path}`);
+    if (path.includes('/attention/')) timeouts.push(timeout);
+    return path.includes('/attention/') ? { event: answered() } : promptCaps;
+  });
+  const result = await client.callTool({ name: 'attention_get', arguments: { machine: 'a', sessionId: 's', eventId: 'event-9', waitSeconds: 20 } });
+  assert.equal(result.isError, undefined);
+  const data = result.structuredContent as { machine: string; sessionId: string; event: { id: string; answer: { answers: { text: string }[] } } };
+  assert.equal(data.machine, 'a'); assert.equal(data.sessionId, 's');
+  assert.equal(data.event.id, 'event-9'); assert.equal(data.event.answer.answers[0].text, 'thanks');
+  assert.ok(seen.includes('GET /api/sessions/s/attention/event-9?waitSeconds=20'));
+  assert.deepEqual(timeouts, [30_000]);
+
+  seen.length = 0;
+  await client.callTool({ name: 'attention_get', arguments: { machine: 'a', sessionId: 's', eventId: 'event-9' } });
+  assert.ok(seen.includes('GET /api/sessions/s/attention/event-9'));
+
+  const invalid = await client.callTool({ name: 'attention_get', arguments: { machine: 'a', sessionId: 's', eventId: 'event-9', waitSeconds: 26 } });
+  assert.equal(invalid.isError, true);
+  const badId = await client.callTool({ name: 'attention_get', arguments: { machine: 'a', sessionId: 's', eventId: '../x' } });
+  assert.equal(badId.isError, true);
+  const longId = await client.callTool({ name: 'attention_get', arguments: { machine: 'a', sessionId: 's', eventId: 'a'.repeat(101) } });
+  assert.equal(longId.isError, true);
+
+  const old = await connect(t, async (_m, _method, path) => path.includes('/attention/') ? { event: answered() } : noPromptCaps);
+  const denied = await old.callTool({ name: 'attention_get', arguments: { machine: 'a', sessionId: 's', eventId: 'event-9' } });
+  assert.equal(denied.isError, true);
+  assert.equal((denied.structuredContent as { error: { code: string } }).error.code, 'bridge_upgrade_required');
+});
+
+test('attention_get surfaces an unknown event and a malformed bridge response as errors', async (t) => {
+  const missing = await connect(t, async (_m, _method, path) => { if (path.includes('/attention/')) throw new FleetError('attention_not_found', 'not found', false, 404); return promptCaps; });
+  const r1 = await missing.callTool({ name: 'attention_get', arguments: { machine: 'a', sessionId: 's', eventId: 'nope' } });
+  assert.equal(r1.isError, true);
+  const err = (r1.structuredContent as { error: { code: string } }).error;
+  assert.equal(err.code, 'attention_not_found');
+  const malformed = await connect(t, async (_m, _method, path) => path.includes('/attention/') ? { event: { id: 'x' } } : promptCaps);
+  const r2 = await malformed.callTool({ name: 'attention_get', arguments: { machine: 'a', sessionId: 's', eventId: 'x' } });
+  assert.equal(r2.isError, true);
+});

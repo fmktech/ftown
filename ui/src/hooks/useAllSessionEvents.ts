@@ -3,11 +3,19 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import type { MessageClient, MessageSubscription } from "@/lib/message-client";
 import { Session } from "@/types";
-import { clearsManualInputNotice, hookEventToActivity, extractManualInputNotice, extractToolLabel, type ManualInputNotice } from "@/lib/hook-events";
+import { clearsManualInputNotice, isAskUserQuestionTool, parseLenientPrompt, hookEventToActivity, extractManualInputNotice, extractToolLabel, isDurableNotice, type ManualInputNotice } from "@/lib/hook-events";
+import type { AnswerSessionAttentionPayload, AttentionAnswerDelivery, AttentionAnswerEntry, AttentionPrompt } from "../../../bridge/src/attention-prompt-protocol";
 import { TokenUsage } from "./useSessionEvents";
 import type { BridgeRpc } from "./useBridgeRpc";
 import type { PersistedSessionAttention, SessionAttentionResponse } from "@/types";
 import { v4 as uuidv4 } from "uuid";
+
+const ANSWER_DELIVERIES: ReadonlySet<string> = new Set<AttentionAnswerDelivery>(["waiter", "mail", "mail_failed"]);
+
+/** Re-parse a persisted prompt; the channel must match the item type (request: mail, question: hook). */
+function persistedPrompt(value: unknown, type: string): AttentionPrompt | undefined {
+  return parseLenientPrompt(value, type === "ask_user" ? "hook" : "mail");
+}
 
 function snapshotResponse(value: unknown, sessionId: string): SessionAttentionResponse | null {
   if (!value || typeof value !== "object") return null;
@@ -16,17 +24,37 @@ function snapshotResponse(value: unknown, sessionId: string): SessionAttentionRe
   if (response.attention === null) return { sessionId, attention: null, sequence: response.sequence };
   if (!response.attention || typeof response.attention !== "object") return null;
   const item = response.attention as Record<string, unknown>;
-  if (item.type !== "agent_needs_input" || typeof item.id !== "string" || !/^[A-Za-z0-9_-]+$/.test(item.id)
+  if ((item.type !== "agent_needs_input" && item.type !== "ask_user") || typeof item.id !== "string" || !/^[A-Za-z0-9_-]+$/.test(item.id)
     || typeof item.sequence !== "number" || !Number.isSafeInteger(item.sequence) || item.sequence < 1
     || typeof item.title !== "string" || typeof item.message !== "string" || typeof item.createdAt !== "string"
     || !Number.isFinite(Date.parse(item.createdAt))) return null;
   if (item.sequence > response.sequence) return null;
-  return { sessionId, attention: item as unknown as PersistedSessionAttention, sequence: response.sequence };
+  const prompt = item.prompt === undefined ? undefined : persistedPrompt(item.prompt, item.type);
+  // A question the dashboard cannot answer has no place in the inbox. Keep the watermark.
+  // An invalid prompt on a plain request is dropped; the request itself stays readable.
+  if (item.type === "ask_user" && !prompt) return { sessionId, attention: null, sequence: response.sequence };
+  const attention = { ...item } as Record<string, unknown>;
+  delete attention.prompt;
+  if (prompt) attention.prompt = prompt;
+  return { sessionId, attention: attention as unknown as PersistedSessionAttention, sequence: response.sequence };
+}
+
+function answerResponse(value: unknown, sessionId: string): { snapshot: SessionAttentionResponse; delivery: AttentionAnswerDelivery } | null {
+  const snapshot = snapshotResponse(value, sessionId);
+  const delivery = (value as Record<string, unknown> | null)?.delivery;
+  if (!snapshot || typeof delivery !== "string" || !ANSWER_DELIVERIES.has(delivery)) return null;
+  return { snapshot, delivery: delivery as AttentionAnswerDelivery };
+}
+
+function sameNotice(a: ManualInputNotice | undefined, b: ManualInputNotice | undefined): boolean {
+  if (!a || !b || a.type !== b.type) return false;
+  if (a.attentionId || b.attentionId) return !!a.attentionId && a.attentionId === b.attentionId && a.attentionSequence === b.attentionSequence;
+  return a.receivedAt === b.receivedAt && a.title === b.title && a.message === b.message;
 }
 
 function restoredNotice(item: PersistedSessionAttention): ManualInputNotice {
-  return { type: "agent_needs_input", title: item.title, message: item.message, receivedAt: Date.parse(item.createdAt),
-    attentionId: item.id, attentionSequence: item.sequence };
+  return { type: item.type, title: item.title, message: item.message, receivedAt: Date.parse(item.createdAt),
+    attentionId: item.id, attentionSequence: item.sequence, ...(item.prompt ? { prompt: item.prompt } : {}) };
 }
 
 export interface SessionActivity {
@@ -52,7 +80,12 @@ export interface AllSessionEvents {
   /** Optimistically clear a session's activity (e.g. on a local ESC interrupt). */
   markSessionIdle: (sessionId: string) => void;
   clearSessionAttention: (sessionId: string, expected?: ManualInputNotice) => Promise<void>;
+  answerSessionAttention: (sessionId: string, expected: ManualInputNotice, answers: AttentionAnswerEntry[]) => Promise<AnswerSessionAttentionResult>;
 }
+
+export type AnswerSessionAttentionResult =
+  | { ok: true; delivery: AttentionAnswerDelivery }
+  | { ok: false; code: string; message: string };
 
 export function useAllSessionEvents(
   client: MessageClient | null,
@@ -71,6 +104,8 @@ export function useAllSessionEvents(
   const observations = useRef(new Map<string, number>());
   const reads = useRef(new Map<string, number>());
   const dismissedThrough = useRef(new Map<string, number>());
+  const retries = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const retried = useRef(new Set<string>());
   const canonical = useRef(new Map<string, { sequence: number; activeId: string | null }>());
   clientRef.current = client;
   userIdRef.current = userId;
@@ -86,10 +121,20 @@ export function useAllSessionEvents(
     const observation = observations.current.get(sessionId) ?? 0;
     const read = (reads.current.get(sessionId) ?? 0) + 1;
     reads.current.set(sessionId, read);
+    // A failed read while a durable question is on screen is retried once, so the
+    // inbox does not keep a question the bridge has already resolved.
+    const retryOnce = () => {
+      const shown = activityRef.current.get(sessionId)?.attention;
+      if (shown?.type !== "ask_user" || !isDurableNotice(shown) || retried.current.has(sessionId)) return;
+      retried.current.add(sessionId);
+      retries.current.set(sessionId, setTimeout(() => { retries.current.delete(sessionId); hydrate(sessionId); }, 2000));
+    };
     try {
       const response = await rpcRef.current.sendCommand({ type: "get_session_attention", requestId: uuidv4(),
         payload: { bridgeId: session.bridgeId, sessionId } });
-      if (!response.success || userIdRef.current !== user || clientRef.current !== owner.client
+      if (!response.success) { retryOnce(); return; }
+      retried.current.delete(sessionId);
+      if (userIdRef.current !== user || clientRef.current !== owner.client
         || subsRef.current.get(sessionId) !== owner || reads.current.get(sessionId) !== read
         || (observations.current.get(sessionId) ?? 0) !== observation
         || !sessionsRef.current.some(row => row.id === sessionId && row.bridgeId === session.bridgeId && row.status === "running")) return;
@@ -102,16 +147,16 @@ export function useAllSessionEvents(
         if (userIdRef.current !== user || clientRef.current !== owner.client || subsRef.current.get(sessionId) !== owner
           || (observations.current.get(sessionId) ?? 0) !== observation || reads.current.get(sessionId) !== read) return prev;
         const current = prev.get(sessionId) ?? { activity: "idle" as const };
-        if (current.attention && (current.attention.type !== "agent_needs_input" || !current.attention.attentionId)) return prev;
+        if (current.attention && !isDurableNotice(current.attention)) return prev;
         if ((current.attention?.attentionSequence ?? 0) > snapshot.sequence) return prev;
         const attention = snapshot.attention && snapshot.attention.sequence > (dismissedThrough.current.get(sessionId) ?? 0)
           ? restoredNotice(snapshot.attention) : undefined;
         return new Map(prev).set(sessionId, { ...current, attention });
       });
-    } catch { /* Older/offline bridges retain the existing live-only dashboard. */ }
+    } catch { retryOnce(); /* Older/offline bridges retain the existing live-only dashboard. */ }
   }, []);
 
-  const hydrate = useCallback((sessionId: string) => {
+  const hydrate: (sessionId: string) => void = useCallback((sessionId: string) => {
     const owner = subsRef.current.get(sessionId);
     if (!owner || owner.client !== clientRef.current || owner.user !== userIdRef.current) return;
     if (owner.inFlight) {
@@ -176,7 +221,7 @@ export function useAllSessionEvents(
         const known = canonical.current.get(sessionId);
         const olderExplicit = incomingSequence !== undefined && (incomingSequence <= (dismissedThrough.current.get(sessionId) ?? 0)
           || (known !== undefined && incomingSequence <= known.sequence && attention?.attentionId !== known.activeId)
-          || (current.attention?.type === "agent_needs_input" && incomingSequence < (current.attention.attentionSequence ?? 0)));
+          || (isDurableNotice(current.attention) && incomingSequence < (current.attention?.attentionSequence ?? 0)));
         const updated: SessionActivity = {
           ...current,
           ...(activity
@@ -203,7 +248,10 @@ export function useAllSessionEvents(
       });
       // Prompt hooks have already resolved the ledger. Learn its watermark
       // even if the first read was pending and no displayed ID was known yet.
-      if (msg.eventName === "UserPromptSubmit" || msg.eventName === "beforeSubmitPrompt") void hydrate(sessionId);
+      // A finished AskUserQuestion was resolved by the bridge; learn that from a snapshot.
+      if (msg.eventName === "UserPromptSubmit" || msg.eventName === "beforeSubmitPrompt"
+        || ((msg.eventName === "PostToolUse" || msg.eventName === "postToolUse" || msg.eventName === "postToolUseFailure")
+          && isAskUserQuestionTool(extractToolLabel(msg.eventName, msg.data)))) void hydrate(sessionId);
     };
 
     const existing = c.getSubscription(channel);
@@ -243,6 +291,8 @@ export function useAllSessionEvents(
     for (const sessionId of Array.from(subsRef.current.keys())) {
       unsubscribe(sessionId);
     }
+    for (const timer of retries.current.values()) clearTimeout(timer);
+    retries.current.clear(); retried.current.clear();
     observations.current.clear(); reads.current.clear(); dismissedThrough.current.clear(); canonical.current.clear();
     activityOwner.current = { client, user: userId };
     setActivityMap(new Map());
@@ -303,11 +353,6 @@ export function useAllSessionEvents(
   }, []);
 
   const clearSessionAttention = useCallback(async (sessionId: string, expected?: ManualInputNotice) => {
-    const sameNotice = (a: ManualInputNotice | undefined, b: ManualInputNotice | undefined) => {
-      if (!a || !b || a.type !== b.type) return false;
-      if (a.attentionId || b.attentionId) return !!a.attentionId && a.attentionId === b.attentionId && a.attentionSequence === b.attentionSequence;
-      return a.receivedAt === b.receivedAt && a.title === b.title && a.message === b.message;
-    };
     const currentNotice = activityRef.current.get(sessionId)?.attention;
     if (expected && !sameNotice(currentNotice, expected)) throw new Error("This message has changed. Review the latest notice.");
     const captured = expected ?? currentNotice;
@@ -318,7 +363,7 @@ export function useAllSessionEvents(
     const activeClient = clientRef.current;
     if (activityOwner.current.client !== activeClient || activityOwner.current.user !== user
       || owner && (owner.client !== activeClient || owner.user !== user)) throw new Error("The session changed before dismissal could start.");
-    if (captured.type === "agent_needs_input" && captured.attentionId) {
+    if (isDurableNotice(captured)) {
       if (!session || !owner || !rpcRef.current) throw new Error("The session is unavailable. Reconnect and try again.");
       observations.current.set(sessionId, (observations.current.get(sessionId) ?? 0) + 1);
       const observation = observations.current.get(sessionId);
@@ -354,6 +399,71 @@ export function useAllSessionEvents(
     });
   }, []);
 
+  const answerSessionAttention = useCallback(async (
+    sessionId: string, expected: ManualInputNotice, answers: AttentionAnswerEntry[],
+  ): Promise<AnswerSessionAttentionResult> => {
+    const fail = (code: string, message: string): AnswerSessionAttentionResult => ({ ok: false, code, message });
+    if (!expected.attentionId || !expected.prompt) return fail("attention_not_answerable", "This question cannot be answered here.");
+    const currentNotice = activityRef.current.get(sessionId)?.attention;
+    if (!sameNotice(currentNotice, expected)) return fail("attention_changed", "This message has changed. Review the latest notice.");
+    const session = sessionsRef.current.find(row => row.id === sessionId);
+    const owner = subsRef.current.get(sessionId);
+    const user = userIdRef.current;
+    const activeClient = clientRef.current;
+    if (!session || !owner || !rpcRef.current || owner.client !== activeClient || owner.user !== user
+      || activityOwner.current.client !== activeClient || activityOwner.current.user !== user) {
+      return fail("session_unavailable", "The session is unavailable. Reconnect and try again.");
+    }
+    const eventId = expected.attentionId;
+    const sequence = expected.attentionSequence ?? 0;
+    observations.current.set(sessionId, (observations.current.get(sessionId) ?? 0) + 1);
+    const observation = observations.current.get(sessionId);
+    const payload: AnswerSessionAttentionPayload = { bridgeId: session.bridgeId, sessionId, eventId, answers };
+    let response;
+    try { response = await rpcRef.current.sendCommand({ type: "answer_session_attention", requestId: uuidv4(), payload }); }
+    catch { hydrate(sessionId); return fail("rpc_failed", "Could not send the answer. Reconnect and try again."); }
+    if (response.success && (userIdRef.current !== user || clientRef.current !== owner.client || subsRef.current.get(sessionId) !== owner
+      || !sessionsRef.current.some(row => row.id === sessionId && row.bridgeId === session.bridgeId))) {
+      // The answer was delivered; only the local view moved on. Remember it so a replay stays hidden,
+      // but only for the user and client the request was sent for.
+      if (userIdRef.current === user && clientRef.current === owner.client) {
+        dismissedThrough.current.set(sessionId, Math.max(dismissedThrough.current.get(sessionId) ?? 0, sequence));
+      }
+      const delivered = answerResponse(response.data, sessionId);
+      return delivered ? { ok: true, delivery: delivered.delivery } : fail("invalid_response", "Could not confirm the answer. Try again.");
+    }
+    if (!response.success) {
+      const data = response.data && typeof response.data === "object" ? response.data as Record<string, unknown> : {};
+      const code = typeof data.code === "string" ? data.code : "command_failed";
+      const bridgeMessage = response.error || "Could not send the answer. Try again.";
+      if (code === "unknown_command" || code === "unsupported_command" || response.error === "Unknown command type: answer_session_attention") {
+        hydrate(sessionId);
+        return fail(code === "command_failed" ? "unsupported_command" : code, "Update this computer's ftown bridge to answer questions.");
+      }
+      if (code === "attention_already_resolved" || code === "attention_not_found") {
+        dismissedThrough.current.set(sessionId, Math.max(dismissedThrough.current.get(sessionId) ?? 0, sequence));
+      }
+      // The observation bump fenced any in-flight snapshot; read a fresh one.
+      hydrate(sessionId);
+      return fail(code, bridgeMessage);
+    }
+    const parsed = answerResponse(response.data, sessionId);
+    if (!parsed) { hydrate(sessionId); return fail("invalid_response", "Could not confirm the answer. Try again."); }
+    const { snapshot, delivery } = parsed;
+    dismissedThrough.current.set(sessionId, Math.max(dismissedThrough.current.get(sessionId) ?? 0, sequence));
+    if (observations.current.get(sessionId) !== observation) return { ok: true, delivery };
+    const known = canonical.current.get(sessionId);
+    if (!known || snapshot.sequence >= known.sequence) canonical.current.set(sessionId, { sequence: snapshot.sequence, activeId: snapshot.attention?.id ?? null });
+    observations.current.set(sessionId, (observations.current.get(sessionId) ?? 0) + 1);
+    setActivityMap(prev => {
+      if (userIdRef.current !== user || clientRef.current !== owner.client || subsRef.current.get(sessionId) !== owner) return prev;
+      const current = prev.get(sessionId);
+      if (!current || !sameNotice(current.attention, expected)) return prev;
+      return new Map(prev).set(sessionId, { ...current, attention: snapshot.attention ? restoredNotice(snapshot.attention) : undefined });
+    });
+    return { ok: true, delivery };
+  }, [hydrate]);
+
   // Status guard at the source: activity is only meaningful for live sessions.
   // A session that completed/errored/stopped keeps its last hook activity in
   // activityMap, but that state is stale — drop it so every consumer reads
@@ -370,5 +480,5 @@ export function useAllSessionEvents(
     return effective;
   }, [activityMap, sessions]);
 
-  return { sessionActivity, markSessionIdle, clearSessionAttention };
+  return { sessionActivity, markSessionIdle, clearSessionAttention, answerSessionAttention };
 }

@@ -9,11 +9,11 @@ export const KNOWN_MCP_TOOLS = new Set([
   'sessions_create', 'sessions_get', 'sessions_update', 'sessions_stop', 'sessions_retry', 'sessions_remove', 'sessions_revive',
   'sessions_usage', 'sessions_running', 'chats_read', 'chats_search', 'messages_send', 'messages_read', 'terminal_input', 'terminal_resize',
   'terminal_clear', 'whoami', 'preview_chat_reply', 'attention_request', 'attention_inbox', 'attention_wait', 'attention_ack', 'attention_resolve',
-  'fleet_overview', 'machines_list', 'sessions_list', 'archive_list', 'messages_broadcast', 'sessions_wait', 'fleet_batch', 'chats_search_fleet',
+  'attention_get', 'fleet_overview', 'machines_list', 'sessions_list', 'archive_list', 'messages_broadcast', 'sessions_wait', 'fleet_batch', 'chats_search_fleet',
 ]);
 export const READ_MCP_TOOLS = new Set([
   'sessions_get', 'sessions_usage', 'sessions_running', 'chats_read', 'chats_search', 'messages_read', 'whoami',
-  'attention_inbox', 'attention_wait', 'fleet_overview', 'machines_list', 'sessions_list', 'archive_list', 'sessions_wait', 'chats_search_fleet',
+  'attention_inbox', 'attention_wait', 'attention_get', 'fleet_overview', 'machines_list', 'sessions_list', 'archive_list', 'sessions_wait', 'chats_search_fleet',
 ]);
 const FIXED_TOOLS = new Set(['unknown_tool', 'invalid_tool', 'initialize', 'tools_list', 'resources_list', 'resources_read', 'protocol_request', 'protocol_notification']);
 const ERROR_CODES = new Set([

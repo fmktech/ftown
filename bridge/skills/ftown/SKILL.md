@@ -41,6 +41,8 @@ ftown sessions list
 ftown sessions create --prompt "Review the auth module" --workdir "$PWD" --parent
 ftown sessions screen <session-id> --limit 200
 ftown sessions attention --message "Please review the migration plan" --title "Review requested"
+ftown sessions attention --title "Pick a database" --message "Which database should I use?" --option Postgres --option SQLite --wait
+ftown sessions attention-status <event-id> --wait
 ftown sessions pr https://github.com/owner/repo/pull/123
 ftown sessions pr --clear
 ftown sessions preview ./preview.html
@@ -89,10 +91,27 @@ task needs it. Inspect peers with `ftown sessions list` and
 
 Use `ftown sessions attention --message "..."` when you need human input. It
 creates a durable attention record and uses the dashboard's existing notice flow;
-it does not answer a prompt or guarantee a push notification. Push remains opt-in
-and requires a supported hosted session. Repeating an unresolved request updates
-its occurrence count; after an uncertain result, inspect the existing request
-before retrying.
+a plain request does not answer a prompt or guarantee a push notification. Push
+remains opt-in and requires a supported hosted session. Repeating an unresolved
+request updates its occurrence count; after an uncertain result, inspect the
+existing request before retrying.
+
+### Questions with answers
+
+Add `--option <label>` (repeatable) to ask a question the human answers in the
+dashboard inbox. `--multi` allows several choices; `--no-text` disallows a
+free-text reply. Without options the question is free text. Add `--wait` to
+block until the answer arrives (`--timeout <s>`, default 600). A timeout does
+not cancel the question; check later with
+`ftown sessions attention-status <event-id> --wait`. The command prints the
+event ID.
+
+Delivery: a live waiter receives the answer; otherwise it arrives as ftown mail
+from "You" starting with `[ftown attention answer id=...]`.
+
+Claude Code `AskUserQuestion` calls inside an FTown session are answered from
+the same inbox, and the terminal picker appears only after "Answer in terminal"
+or an hour. Exit codes and waiting details: `references/sessions.md`.
 
 Attach one GitHub pull request with `ftown sessions pr <URL>`; another URL
 replaces it and `--clear` removes it. This records a link without creating a PR.
@@ -111,8 +130,12 @@ Older bridges report `bridge_upgrade_required` before mutation.
 Remote MCP callers use `attention_request` with explicit `machine` and
 `sessionId`, or `sessions_update` with `pullRequestUrl` (string to set, null to
 clear). Mutation tools require control access; remote callers have no automatic
-local self identity. Keep the returned attention event ID for existing inbox,
-acknowledge and resolve operations, which do not answer the agent's question.
+local self identity. To ask with options or free text, pass `questions` to
+`attention_request`, then poll `attention_get` (`eventId`, optional
+`waitSeconds` 0..25) until the event is resolved (`resolvedAt` set).
+`event.answer` holds the answer; a resolution without an answer means it was
+dismissed. Keep the returned attention event ID: the
+inbox, acknowledge and resolve operations never answer the agent's question.
 
 For tasks performed in an FTown session, associate the task's GitHub PR when
 created or updated, before the completion notice: use `ftown sessions pr <URL>`

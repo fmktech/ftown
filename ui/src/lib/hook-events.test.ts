@@ -143,3 +143,51 @@ describe("hookEventToActivity", () => {
     expect(hookEventToActivity("Stop")).toBe("idle");
   });
 });
+
+describe("structured prompts", () => {
+  const question = { question: "Which?", header: "Pick", multiSelect: false, options: [{ label: "A", description: "a" }, { label: "B", description: "b" }] };
+  const mailPrompt = { channel: "mail", questions: [{ question: "Which?", options: [{ label: "A" }], multiSelect: false, allowText: false }] };
+
+  it("takes a valid mail attentionPrompt from an explicit request", () => {
+    const notice = extractManualInputNotice("Notification", { notification_type: "agent_needs_input", message: "m", attentionPrompt: mailPrompt }, 1);
+    expect(notice?.prompt).toMatchObject({ channel: "mail", questions: [{ question: "Which?" }] });
+  });
+
+  it("ignores an invalid or non-request attentionPrompt", () => {
+    const base = { notification_type: "agent_needs_input", message: "m" };
+    expect(extractManualInputNotice("Notification", { ...base, attentionPrompt: { channel: "mail", questions: [] } }, 1)).not.toHaveProperty("prompt");
+    expect(extractManualInputNotice("Notification", { ...base, attentionPrompt: "x" }, 1)).not.toHaveProperty("prompt");
+    expect(extractManualInputNotice("Notification", { notification_type: "permission_prompt", attentionPrompt: mailPrompt }, 1)).not.toHaveProperty("prompt");
+  });
+
+  it("derives a hook prompt and stamp from AskUserQuestion", () => {
+    const notice = extractManualInputNotice("PreToolUse", { tool_name: "AskUserQuestion", tool_input: { questions: [question] },
+      attentionId: "a1", attentionSequence: 3, attentionCreatedAt: "2026-10-24T10:00:00Z" }, 9);
+    expect(notice).toMatchObject({ type: "ask_user", message: "Which?", attentionId: "a1", attentionSequence: 3,
+      receivedAt: Date.parse("2026-10-24T10:00:00Z"), prompt: { channel: "hook" } });
+  });
+
+  it("keeps the legacy notice when the question has no parseable prompt or no stamp", () => {
+    const legacy = extractManualInputNotice("PreToolUse", { tool_name: "AskUserQuestion", tool_input: { question: "Hi?" } }, 9);
+    expect(legacy).toEqual({ type: "ask_user", title: "Session is asking a question", message: "Hi?", receivedAt: 9 });
+    const unstamped = extractManualInputNotice("PreToolUse", { tool_name: "AskUserQuestion", tool_input: { questions: [question] } }, 9);
+    expect(unstamped).toMatchObject({ prompt: { channel: "hook" }, receivedAt: 9 });
+    expect(unstamped).not.toHaveProperty("attentionId");
+  });
+
+  it("never clears a stamped question locally; the bridge resolves it", () => {
+    const notice: ManualInputNotice = { type: "ask_user", title: "t", message: "m", receivedAt: 1, attentionId: "a1", attentionSequence: 1,
+      prompt: { channel: "hook", questions: [{ question: "Q", options: [{ label: "A" }], multiSelect: false, allowText: false }] } };
+    expect(clearsManualInputNotice("PostToolUse", { tool_name: "Bash" }, notice)).toBe(false);
+    expect(clearsManualInputNotice("PostToolUse", { tool_name: "AskUserQuestion" }, notice)).toBe(false);
+    expect(clearsManualInputNotice("UserPromptSubmit", {}, notice)).toBe(false);
+    expect(clearsManualInputNotice("PostToolUse", { tool_name: "Bash" }, { ...notice, prompt: undefined })).toBe(true);
+  });
+
+  it("accepts a mail attentionPrompt with unknown extra keys and rejects a hook-channel one", () => {
+    const extra = { channel: "mail", future: 1, questions: [{ question: "Q", future: true, options: [{ label: "A", future: 1 }], multiSelect: false, allowText: false }] };
+    const base = { notification_type: "agent_needs_input", message: "m" };
+    expect(extractManualInputNotice("Notification", { ...base, attentionPrompt: extra }, 1)?.prompt?.questions[0].options).toEqual([{ label: "A" }]);
+    expect(extractManualInputNotice("Notification", { ...base, attentionPrompt: { ...extra, channel: "hook" } }, 1)).not.toHaveProperty("prompt");
+  });
+});

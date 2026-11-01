@@ -88,6 +88,20 @@ machine and session ID. A queued message does not mean an agent has read it.
 # Request human input for this session (JSON {event} by default)
 ftown sessions attention --message "Please review the migration plan" --title "Review requested"
 
+# Ask a single-select question and block until the human answers (default timeout 600 s)
+ftown sessions attention --title "Pick a database" --message "Which database should I use?" \
+  --option Postgres --option SQLite --wait
+
+# Multi-select without free text
+ftown sessions attention --message "Which checks should run?" --option Lint --option Test --option Typecheck --multi --no-text
+
+# Several questions (array or {"questions": [...]})
+ftown sessions attention --message "Setup" --questions-json '[{"question":"Runtime?","options":["Node","Bun"]},{"question":"Notes?"}]'
+
+# Check a question later (one GET; --wait long-polls)
+ftown sessions attention-status <event-id>
+ftown sessions attention-status <event-id> --wait --timeout 300
+
 # Set or replace this session's single GitHub PR link (JSON {session})
 ftown sessions pr https://github.com/owner/repo/pull/123
 
@@ -113,6 +127,43 @@ Only creation triggers notification, and hosted push remains opt-in with existin
 session/harness eligibility. Do not automatically retry an uncertain mutation.
 Acknowledging/resolving an event never answers or approves a CLI prompt.
 
+### Questions and answers
+
+`--option <label>` is repeatable and builds one question whose message is the
+`--message` text, with those labels as choices. `--multi` allows several choices
+and `--no-text` disallows free text; without options the question is free text.
+`--questions-json` takes an array of questions or `{ "questions": [...] }`, where
+each question has `question`, optional `header`, `options` (strings or
+`{label, description?}`, at most 8), `multiSelect` and `allowText`. It cannot be
+combined with `--option`, `--multi` or `--no-text`. `--multi` and `--no-text`
+need `--option`; `--timeout` needs `--wait`; `--wait` needs questions. Questions
+require a bridge reporting `capabilities.attention.prompt === true`; otherwise
+the command fails before writing and asks you to update the bridge.
+
+`--wait` and `attention-status --wait` print `Waiting for an answer (attention <id>)...`
+to stderr and poll until the item is resolved or the deadline (`--timeout`
+`--timeout <s>`, 1..86400, default 600). Exit codes:
+
+| Exit | Meaning |
+|------|---------|
+| 0 | Answered; the formatted answer is printed to stdout |
+| 2 | Resolved without an answer (dismissed or otherwise closed) |
+| 3 | Still pending (`attention-status` without `--wait`) |
+| 124 | Timed out; check later with `attention-status <id> --wait` |
+| 1 | Error, including invalid flags or JSON and transient failures after retries |
+
+Without `--wait`, `attention` prints the event ID when questions are present, so
+the agent can check later with `attention-status`.
+
+Delivery: the human answers in the dashboard inbox. A live waiter (`--wait`,
+`attention-status --wait`, or MCP `attention_get` polling) receives the answer
+directly. If nobody is waiting, the answer is sent as ftown mail from "You"
+(`fromName` "You", thread `attention:<id>`) whose body starts with
+`[ftown attention answer id=<id>]`. Claude Code `AskUserQuestion` calls inside an
+FTown session follow the same path and are answered from the dashboard inbox.
+The terminal picker appears only if the human chooses "Answer in terminal" or
+after an hour.
+
 PR links accept only HTTPS GitHub `/owner/repo/pull/<positive-number>` URLs.
 Outer whitespace, query/fragment and a trailing slash are normalized; credentials,
 nondefault ports and other paths/hosts are rejected. No GitHub request is made.
@@ -122,10 +173,17 @@ its value. New sessions/children do not implicitly inherit a parent's PR.
 New commands probe the exact bridge capability before writing; update old bridges
 with the exact version setup command in their readiness hint. For remote MCP,
 `attention_request` requires explicit `{machine, sessionId, message, title?}` and
-returns `{machine, sessionId, event}`. `sessions_update` accepts `pullRequestUrl`
-(string or null), alongside existing name/parent fields. A mixed PR+name update
-rejects an old bridge before changing either field. Read-only MCP clients cannot
-see these mutation tools; control authorization and machine ownership still apply.
+returns `{machine, sessionId, event}`; it also accepts optional `questions` (1 to
+4 entries, shaped as above) when the bridge reports `prompt`. `attention_get`
+takes `{machine, sessionId, eventId, waitSeconds?}` (`waitSeconds` 0..25) and
+returns `{machine, sessionId, event}`. Poll it until the event is resolved
+(`resolvedAt` set): `event.answer` holds the answer, and a resolution without an
+answer means the question was dismissed.
+
+`sessions_update` accepts `pullRequestUrl` (string or null), alongside existing
+name/parent fields. A mixed PR+name update rejects an old bridge before changing
+either field. Read-only MCP clients cannot see these mutation tools; control
+authorization and machine ownership still apply.
 
 ## Messaging (mail)
 
@@ -246,7 +304,9 @@ The CLI wraps the loopback API. Raw access if needed:
 | GET | `/api/sessions` | List |
 | POST | `/api/sessions` | Create |
 | PATCH | `/api/sessions/:id` | Rename, move or associate a PR (`{ name?, parentSessionId?, pullRequestUrl? }`; `null` detaches/clears) |
-| POST | `/api/sessions/:id/attention` | Request human input (`{ message, title? }`) → `{ event }` |
+| POST | `/api/sessions/:id/attention` | Request human input (`{ message, title?, questions? }`) → `{ event }`; invalid `questions` → 400 `invalid_prompt` |
+| GET | `/api/sessions/:id/attention/:eventId` | Read one item (`?waitSeconds=0..25` long-polls until resolved) → `{ event }`; 404 `attention_not_found` |
+| POST | `/api/sessions/:id/attention/ask` | Harness hook: record an AskUserQuestion (`{ toolName, toolUseId, toolInput }`) → `{ event }` or `null` if not promptable |
 | GET | `/api/sessions/:id/screen` | Terminal lines |
 | POST | `/api/sessions/:id/grep` | Search |
 | POST | `/api/sessions/:id/keys` | Send keys |
