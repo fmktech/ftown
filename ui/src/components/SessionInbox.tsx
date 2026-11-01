@@ -81,10 +81,12 @@ function InboxItem({ entry, onOpenSession, onDismiss, onReply, onAnswer }: { ent
   async function answerInTerminal() { if (await dismiss()) onOpenSession(entry.session.id); }
   const prompt = entry.notice.attentionId ? entry.notice.prompt : undefined;
   const hookPrompt = prompt?.channel === "hook";
+  const normalizeText = (text?: string) => (text ?? "").trim().replace(/\s+/g, " ");
+  const messageDuplicatesQuestion = !!prompt && prompt.questions.length === 1 && normalizeText(entry.notice.message) === normalizeText(prompt.questions[0].question);
   return <article data-inbox-entry={entry.session.id} className="min-w-0 space-y-2 rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)] p-3">
     <div className="min-w-0"><h3 className="break-words text-sm font-semibold [overflow-wrap:anywhere]">{name}</h3><p className="break-words text-xs text-[var(--text-muted)] [overflow-wrap:anywhere]">{entry.bridgeName} · <time dateTime={new Date(entry.notice.receivedAt).toISOString()}>{new Date(entry.notice.receivedAt).toLocaleString()}</time></p></div>
     <p className="break-words text-sm font-semibold [overflow-wrap:anywhere]">{entry.notice.title}</p>
-    <p className="whitespace-pre-wrap text-sm [overflow-wrap:anywhere]">{entry.notice.message}</p>
+    {!messageDuplicatesQuestion && <p className="whitespace-pre-wrap text-sm [overflow-wrap:anywhere]">{entry.notice.message}</p>}
     <div className="flex flex-wrap gap-2"><button type="button" className="btn-ghost min-h-11" onClick={() => onOpenSession(entry.session.id)}>Open session</button>{!hookPrompt && <button type="button" className="btn-ghost min-h-11" disabled={dismissing} onClick={() => void dismiss()}>{dismissing ? "Dismissing…" : "Dismiss"}</button>}</div>
     {prompt ? <AttentionAnswerForm key={noticeKey(entry.session.id, entry.notice)} prompt={prompt} sessionName={name} disabledReason={entry.replyDisabledReason} onSubmit={answers => onAnswer(entry, answers)} onAnswerInTerminal={hookPrompt ? () => void answerInTerminal() : undefined} /> : <>
     <label className="flex min-w-0 flex-col gap-1 text-xs text-[var(--text-muted)]">Reply to {name}<textarea className="min-h-20 w-full min-w-0 rounded-md border border-[var(--border-muted)] bg-[var(--bg-surface)] p-2 text-sm text-[var(--text-primary)]" maxLength={65536} value={draft} onChange={event => { setDraft(event.target.value); setMessage(""); setError(""); }} disabled={sending || !!entry.replyDisabledReason} /></label>

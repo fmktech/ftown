@@ -143,6 +143,22 @@ it.each([["Answer delivered to first."], ["Answer saved, but mail delivery faile
     render(<Harness/>); fireEvent.click(screen.getByRole("button", { name: /Inbox/ }));
     fireEvent.click(screen.getByLabelText("Safe")); fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
     expect((await screen.findByText(message)).getAttribute("role")).toBe("status"); expect(screen.queryByRole("article")).toBeNull();
+    await act(async () => {}); // flush the passive effect that arms the 6 s timer before advancing the clock
     await act(async () => { vi.advanceTimersByTime(6100); }); expect(screen.queryByText(message)).toBeNull();
   } finally { vi.useRealTimers(); }
+});
+
+const withMessage = (message: string, question: string): InboxEntry => { const item = promptEntry("first", "mail"); item.notice = { ...item.notice, message, prompt: { channel: "mail", questions: [{ question, options: [{ label: "A" }, { label: "B" }], multiSelect: false, allowText: false }] } }; return item; };
+it("shows a prompted question once when the message equals its only question", () => {
+  render(<Fixture entries={[withMessage("Which deploy target should I use?", "Which deploy target should I use?")]}/>); fireEvent.click(screen.getByRole("button", { name: /Inbox/ }));
+  expect(within(document.querySelector("[data-inbox-entry='first']") as HTMLElement).getAllByText("Which deploy target should I use?")).toHaveLength(1);
+});
+it("shows both the message and the question when they differ", () => {
+  render(<Fixture entries={[withMessage("Deploy is blocked", "Which deploy target should I use?")]}/>); fireEvent.click(screen.getByRole("button", { name: /Inbox/ }));
+  const item = within(document.querySelector("[data-inbox-entry='first']") as HTMLElement);
+  expect(item.getByText("Deploy is blocked")).toBeTruthy(); expect(item.getByText("Which deploy target should I use?")).toBeTruthy();
+});
+it("treats whitespace and trim differences as equal when deduplicating", () => {
+  render(<Fixture entries={[withMessage("  Which deploy\n  target should   I use?\n", "Which deploy target should I use?")]}/>); fireEvent.click(screen.getByRole("button", { name: /Inbox/ }));
+  expect(within(document.querySelector("[data-inbox-entry='first']") as HTMLElement).getAllByText("Which deploy target should I use?")).toHaveLength(1);
 });

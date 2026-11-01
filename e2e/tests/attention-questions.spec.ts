@@ -164,8 +164,20 @@ test("AskUserQuestion hook blocks until the dashboard answers it", async ({ page
     const question = "Which database should the service use?";
     const toolInput = { questions: [{ question, header: "Database", multiSelect: false, options: [{ label: "Postgres", description: "Relational" }, { label: "SQLite", description: "Embedded" }] }] };
     // Same payload shape Claude Code sends to a PreToolUse command hook. Assumes the built bridge (bridge/dist) is present, as for the other CLI-driven specs.
-    const stdin = JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "AskUserQuestion", tool_use_id: `toolu_e2e_${Date.now().toString(36)}`, tool_input: toolInput });
+    const toolUseId = `toolu_e2e_${Date.now().toString(36)}`;
+    const stdin = JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "AskUserQuestion", tool_use_id: toolUseId, tool_input: toolInput });
     hook = startChild([HARNESS_CLI, "ask-hook"], id, stdin);
+    // POST /attention/ask stores the hook-channel item but by design emits no event, so wait until it is committed (the hook is then long-polling for the answer).
+    const deadline = Date.now() + 15_000; let committed = false;
+    while (!committed && Date.now() < deadline) {
+      const listed = await bridgeApiFetch("GET", `/api/sessions/${id}/attention`);
+      committed = listed.status === 200 && (listed.body as { events: Array<{ resolvedAt?: string; prompt?: { channel?: string } }> }).events.some(event => !event.resolvedAt && event.prompt?.channel === "hook");
+      if (!committed) { if (hook.output().stderr.includes("Error")) break; await new Promise(resolve => setTimeout(resolve, 250)); }
+    }
+    if (!committed) throw new Error(`ask-hook never stored an unresolved ask_user item within 15s\nstdout: ${hook.output().stdout}\nstderr: ${hook.output().stderr}`);
+    // Production also runs ftown's ordinary PreToolUse hook; it dedupes onto the same item by tool_use_id and publishes the event the dashboard renders.
+    const companion = await bridgeApiFetch("POST", "/hook", { body: { ftown_session_id: id, hook_event_name: "PreToolUse", tool_name: "AskUserQuestion", tool_use_id: toolUseId, tool_input: toolInput } });
+    expect(companion.status, JSON.stringify(companion.body)).toBeGreaterThanOrEqual(200); expect(companion.status).toBeLessThan(300);
     const { item } = await openInboxEntry(page, id, false, 45_000);
     await expect(item.getByText(question)).toBeVisible();
     await expect(item.getByRole("radio")).toHaveCount(2);
