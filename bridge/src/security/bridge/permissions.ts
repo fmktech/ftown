@@ -76,6 +76,7 @@ export function classifyCommand(command: string, payload?: ApplicationJson): Ope
     if (/^\/api\/sessions\/[A-Za-z0-9_-]{1,200}\/preview(?:\?|$)/.test(request.path)) return deny();
     return classifyHttp(request.method, request.path);
   }
+  if (command === 'get_pull_request_review' || command === 'get_pull_request_review_chunk') return sessionId && sessionId.length <= 200 ? result('read', command, sessionId) : deny();
   if (command === 'session_preview_status' || command === 'session_preview_chunk') return sessionId && sessionId.length <= 200 ? result('read', command, sessionId) : deny();
   if (command === 'preview_chat_list' || command === 'preview_chat_send' || command === 'preview_chat_reply') return sessionId && sessionId.length <= 200 ? result(command === 'preview_chat_list' ? 'read' : 'control', command, sessionId) : deny();
   if (readCommands.has(command)) return result('read', command, sessionId);

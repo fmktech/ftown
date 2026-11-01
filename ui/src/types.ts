@@ -26,6 +26,7 @@ export interface Session {
   command?: string;
   parentSessionId?: string;
   pullRequestUrl?: string;
+  pullRequestReviewGeneration?: string;
   runtime?: 'tmux' | 'direct';
   loopId?: string; // Read-only provenance on sessions created by retired recurring automation.
   usage?: SessionUsage;
@@ -108,7 +109,7 @@ export type { AnswerSessionAttentionPayload } from '../../bridge/src/attention-p
 export type CommandType =
   | 'preview_chat_list' | 'preview_chat_send' | 'preview_chat_reply'
   | 'session_preview_status' | 'session_preview_chunk'
-  | 'get_bridge_update' | 'update_bridge' | 'get_pull_request_statuses'
+  | 'get_bridge_update' | 'update_bridge' | 'get_pull_request_statuses' | 'get_pull_request_review' | 'get_pull_request_review_chunk'
   | 'get_session_attention' | 'resolve_session_attention' | 'answer_session_attention' | 'send_message'
   | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history'
   | 'retry_session' | 'rename_session' | 'remove_session' | 'bridge_exec'

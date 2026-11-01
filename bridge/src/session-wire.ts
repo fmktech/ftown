@@ -1,4 +1,9 @@
+import { createHash } from 'node:crypto';
 import type { Session } from './types.js';
+
+export function prReviewGeneration(linkId: string): string {
+  return createHash('sha256').update(`ftown-pr-review:${linkId}`, 'utf8').digest('hex');
+}
 
 /**
  * Returns a wire-safe shallow copy of a Session with `env` removed.
@@ -10,6 +15,6 @@ import type { Session } from './types.js';
  * for egress. The input is never mutated.
  */
 export function toWireSession(session: Session): Session {
-  const { env: _env, previewSource: _previewSource, pullRequestLinkId: _pullRequestLinkId, ...rest } = session;
-  return rest;
+  const { env: _env, previewSource: _previewSource, pullRequestLinkId, pullRequestReviewGeneration: _derived, ...rest } = session;
+  return { ...rest, ...(session.pullRequestUrl && pullRequestLinkId ? { pullRequestReviewGeneration: prReviewGeneration(pullRequestLinkId) } : {}) };
 }

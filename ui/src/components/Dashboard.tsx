@@ -23,6 +23,7 @@ import type { AttentionAnswerSubmitResult } from "./AttentionAnswerForm";
 import { SessionInboxPage, SessionInboxTrigger, inboxEntries, noticeKey, queueSessionReply, attentionAnswerSubmitResult, type InboxEntry } from "./SessionInbox";
 import { PullRequestStatusProvider } from "./PullRequestStatusProvider";
 import { SessionWorkspace } from "./SessionWorkspace";
+import { parsePullRequestUrl } from "@/lib/pull-request-url";
 import { Terminal, TerminalHandle } from "./Terminal";
 import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
 import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
@@ -92,7 +93,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
   const [showToken, setShowToken] = useState(false);
   const [tokenCopied, setTokenCopied] = useState(false);
-  const [mobileTab, setMobileTab] = useState<"sessions" | "terminal" | "preview">("sessions");
+  const [mobileTab, setMobileTab] = useState<"sessions" | "terminal" | "preview" | "review">("sessions");
   const [sidebarCollapsed, setSidebarCollapsed] = usePersistentState<boolean>("ftown:sidebarCollapsed", false);
   const [storedSidebarWidth, setStoredSidebarWidth] = usePersistentState<number>("ftown:sidebarWidth", DEFAULT_SIDEBAR_WIDTH);
   const sidebarWidth = clampSidebarWidth(storedSidebarWidth);
@@ -361,6 +362,17 @@ PY`;
   const selectedPreviewKey = selectedSession ? `${selectedSession.bridgeId}:${selectedSession.id}` : "";
   const choice = previewChoices[selectedPreviewKey];
   const previewOpen = !!selectedSession?.preview && (choice?.id !== selectedSession.preview.id || choice.open);
+  const reviewIdentity = selectedSession && parsePullRequestUrl(selectedSession.pullRequestUrl) ? JSON.stringify([selectedSession.bridgeId, selectedSession.id, selectedSession.pullRequestUrl, selectedSession.pullRequestReviewGeneration]) : "";
+  const [reviewChoice, setReviewChoice] = useState<{ identity: string; activation: number }>({ identity: "", activation: 0 });
+  const reviewOpen = !!reviewIdentity && reviewChoice.identity === reviewIdentity;
+  const openReview = useCallback(() => { if (!reviewIdentity) return; setReviewChoice(previous => ({ identity: reviewIdentity, activation: previous.activation + 1 })); setMobileTab("review"); }, [reviewIdentity]);
+  const closeReview = useCallback(() => {
+    setReviewChoice(previous => ({ ...previous, identity: "" }));
+    setMobileTab(current => current === "review" ? (previewOpen ? "preview" : "terminal") : current);
+    requestAnimationFrame(() => { const opener = Array.from(document.querySelectorAll<HTMLButtonElement>('[aria-label="Review pull request"]')).find(element => element.getClientRects().length); opener?.focus(); });
+  }, [previewOpen]);
+  useEffect(() => { setReviewChoice(previous => previous.identity && previous.identity !== reviewIdentity ? { ...previous, identity: "" } : previous); }, [reviewIdentity]);
+  useEffect(() => { if (!reviewOpen) setMobileTab(current => current === "review" ? (previewOpen ? "preview" : "terminal") : current); }, [reviewOpen, previewOpen]);
   const observedPreviews = useRef<Record<string, string>>({});
   useEffect(() => {
     const observed: Record<string, string> = {};
@@ -368,7 +380,7 @@ PY`;
       const key = `${session.bridgeId}:${session.id}`;
       observed[key] = session.preview.id;
       if (session.id === selectedSessionId && observedPreviews.current[key] !== session.preview.id) {
-        setMobileTab(current => current === "sessions" ? current : "preview");
+        setMobileTab(current => current === "sessions" || current === "review" ? current : "preview");
       }
     }
     observedPreviews.current = observed;
@@ -378,14 +390,14 @@ PY`;
       if (Object.keys(next).length === Object.keys(previous).length && Object.keys(next).every(key => next[key] === previous[key])) return previous;
       return next;
     });
-    if (!selectedSession?.preview) setMobileTab(current => current === "preview" ? "terminal" : current);
-  }, [sessions, selectedSessionId, selectedSession?.preview]);
+    if (!selectedSession?.preview) setMobileTab(current => current === "preview" ? (reviewOpen ? "review" : "terminal") : current);
+  }, [sessions, selectedSessionId, selectedSession?.preview, reviewOpen]);
   const setPreviewOpen = useCallback((open: boolean) => {
     if (!selectedSession?.preview) return;
     setPreviewChoices(previous => ({ ...previous, [selectedPreviewKey]: { id: selectedSession.preview!.id, open } }));
     if (open) setMobileTab(current => current === "sessions" ? current : "preview");
-    else setMobileTab(current => current === "preview" ? "terminal" : current);
-  }, [selectedSession, selectedPreviewKey]);
+    else setMobileTab(current => current === "preview" ? (reviewOpen ? "review" : "terminal") : current);
+  }, [selectedSession, selectedPreviewKey, reviewOpen]);
   const refitPreviewTerminal = useCallback(() => { terminalRef.current?.refit({ forceResize: true }); }, []);
   const sessionRelaunchLabel = selectedSession && !selectedSession.loopId
     ? getSessionRelaunchLabel(selectedSession.status)
@@ -435,7 +447,7 @@ PY`;
   const selectedTransportMode = selectedSessionId ? transport?.getMode(selectedSessionId) ?? "connecting" : null;
   const sessionHeaderActions = selectedSession ? <SessionHeaderActions hasPreview={Boolean(selectedSession.preview)} previewOpen={previewOpen}
     running={selectedSession.status === "running"} relaunchLabel={sessionRelaunchLabel ?? null}
-    onPreview={() => setPreviewOpen(true)} onStop={handleStopSession} onRelaunch={handleRelaunchSession} /> : null;
+    onPreview={() => setPreviewOpen(true)} onStop={handleStopSession} onRelaunch={handleRelaunchSession} hasReview={!!reviewIdentity} onReview={openReview} /> : null;
 
   // Claude's Stop hook does not fire on user interrupt, so a lone ESC leaves the
   // dashboard stuck on "thinking"/"tool_use". Optimistically clear it locally.
@@ -531,7 +543,7 @@ PY`;
     return () => navigator.serviceWorker?.removeEventListener("message", onNotification);
   }, [rawSessions, handleSelectSession]);
 
-  const handleMobileTabSwitch = useCallback((tab: "sessions" | "terminal" | "preview") => {
+  const handleMobileTabSwitch = useCallback((tab: "sessions" | "terminal" | "preview" | "review") => {
     setInboxOpen(false);
     setMobileTab(tab);
     if (tab === "terminal") {
@@ -964,6 +976,7 @@ PY`;
           Terminal
         </button>
         {selectedSession?.preview && previewOpen && <button className={`mobile-tab ${mobileTab === "preview" ? "mobile-tab-active" : ""}`} role="tab" tabIndex={mobileTab === "preview" ? 0 : -1} aria-selected={mobileTab === "preview"} aria-controls="session-preview-panel" onClick={() => handleMobileTabSwitch("preview")}>Preview</button>}
+        {reviewOpen && <button className={`mobile-tab ${mobileTab === "review" ? "mobile-tab-active" : ""}`} role="tab" tabIndex={mobileTab === "review" ? 0 : -1} aria-selected={mobileTab === "review"} aria-controls="session-review-panel" onClick={() => handleMobileTabSwitch("review")}>PR review</button>}
       </div>
 
       {/* ── Main Layout ── */}
@@ -1122,7 +1135,7 @@ PY`;
           <SessionInboxPage entries={inbox} open={inboxOpen} onClose={() => { restoreInboxFocusRef.current = true; setInboxOpen(false); scheduleTerminalRenderAdjustment(); }}
             onOpenSession={id => { focusOpenedSessionRef.current = true; handleSelectSession(id); setMobileTab("terminal"); scheduleTerminalRenderAdjustment(); }} onDismiss={entry => clearSessionAttention(entry.session.id, entry.notice)} onReply={replyToInbox} onAnswer={answerInbox} />
           <div ref={workspaceFocusRef} role="region" aria-label={`Session workspace: ${selectedSession?.name || selectedSession?.prompt?.slice(0, 48) || "Session"}`} tabIndex={-1} className="min-h-0 min-w-0 flex-1 flex-col focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)]" style={{ display: inboxOpen ? "none" : "flex" }} aria-hidden={inboxOpen}>
-          <SessionWorkspace session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} subscribeAuthority={accountClient?.subscribe} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabSwitch} onRefit={refitPreviewTerminal}>
+          <SessionWorkspace session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} subscribeAuthority={accountClient?.subscribe} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabSwitch} onRefit={refitPreviewTerminal} reviewOpen={reviewOpen} reviewActivation={reviewChoice.activation} onCloseReview={closeReview}>
           <Terminal
             ref={terminalRef}
             transport={transport}

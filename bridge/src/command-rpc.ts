@@ -7,9 +7,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
-import { toWireSession } from './session-wire.js';
+import { prReviewGeneration, toWireSession } from './session-wire.js';
 import { normalizePullRequestUrl } from './pull-request-url.js';
 import type { PullRequestStatusService } from './pull-request-status.js';
+import type { PrReviewService, PrReviewRequest, PrReviewChunkRequest } from './pull-request-review-protocol.js';
+import { PR_REVIEW_CHUNK_BYTES } from './pull-request-review-protocol.js';
 import { WorkingDirMissingError } from './create-ftown-session.js';
 import { AUTOMATION_REMOVED_CODE, AUTOMATION_REMOVED_MESSAGE, AutomationRemovedError, RETIRED_AUTOMATION_COMMANDS } from './retired-automation.js';
 import type { SessionController } from './session-controller.js';
@@ -63,6 +65,7 @@ export interface CommandRpcDeps {
   relayRequest?: (id: string, payload: Record<string, unknown>) => Promise<unknown>;
   sessionController: SessionController;
   pullRequestStatuses?: PullRequestStatusService;
+  pullRequestReview?: PrReviewService;
   enqueueSessionMessage?: (session: Session, message: string) => Promise<{ ok: true; id: string } | { ok: false; error: string }>;
   attentionStore?: AttentionStore;
   /** Durable mail path with full mail fields (threadId etc.); used for the answer_session_attention mail fallback. */
@@ -142,6 +145,31 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           } catch {
             response = failure('enqueue_failed', 'Reply may have been queued; check before sending again.');
           }
+          break;
+        }
+
+        case 'get_pull_request_review':
+        case 'get_pull_request_review_chunk': {
+          if (!deps.security || !verified || !deps.pullRequestReview || verified.principal.endpoint.kind !== 'browser') throw new BridgeSecurityError('permission_denied');
+          await deps.security.policy.revalidate(verified.principal, 'read');
+          const payload = command.payload as Record<string, unknown>;
+          const chunk = command.type === 'get_pull_request_review_chunk';
+          const expected = chunk ? 'bridgeId,linkGeneration,offset,revision,sessionId' : 'bridgeId,linkGeneration,sessionId';
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).sort().join(',') !== expected
+            || payload.bridgeId !== bridgeId || typeof payload.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(payload.sessionId)
+            || typeof payload.linkGeneration !== 'string' || !/^[a-f0-9]{64}$/.test(payload.linkGeneration)
+            || (chunk && (typeof payload.revision !== 'string' || !/^[a-f0-9]{64}$/.test(payload.revision)
+              || typeof payload.offset !== 'number' || !Number.isSafeInteger(payload.offset) || payload.offset < 0 || payload.offset % PR_REVIEW_CHUNK_BYTES !== 0))) {
+            response = { requestId: command.requestId, success: false, error: 'Invalid review request', data: { code: 'invalid' } }; break;
+          }
+          const result = chunk ? await deps.pullRequestReview.chunk(verified.principal, payload as unknown as PrReviewChunkRequest)
+            : await deps.pullRequestReview.get(verified.principal, payload as unknown as PrReviewRequest);
+          await deps.security.policy.revalidate(verified.principal, 'read');
+          const current = await sessionController.get(payload.sessionId as string).catch(() => null);
+          await deps.security.policy.revalidate(verified.principal, 'read');
+          const validLink = current?.bridgeId === bridgeId && !!current.pullRequestUrl && !!current.pullRequestLinkId
+            && prReviewGeneration(current.pullRequestLinkId) === payload.linkGeneration;
+          response = { requestId: command.requestId, success: true, data: validLink || (result.state !== 'ready' && result.state !== 'chunk') ? result : { state: 'unavailable', reason: 'stale' } };
           break;
         }
 
