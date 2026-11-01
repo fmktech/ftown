@@ -557,7 +557,7 @@ describe('LocalApiServer explicit session attention and PR metadata', () => {
     assert.ok(Date.now() - started < 2000, 'returned immediately instead of waiting');
     assert.equal(f.attention.hasLiveWaiter(event.id), false);
   });
-  it('records AskUserQuestion tool input through the ask endpoint without emitting a hook event', async t => {
+  it('records AskUserQuestion tool input through the ask endpoint and publishes one stamped event', async t => {
     const f = await sessionToolsFixture(t);
     const path = `/api/sessions/${f.sample.id}/attention/ask`;
     const toolInput = { questions: [{ question: 'Which lib?', header: 'Lib', multiSelect: false, options: [{ label: 'A', description: 'a' }, { label: 'B', description: 'b' }] }] };
@@ -566,10 +566,20 @@ describe('LocalApiServer explicit session attention and PR metadata', () => {
     const event = res.data.event as AttentionItem;
     assert.equal(event.prompt?.channel, 'hook');
     assert.equal(event.prompt?.questions[0].options.length, 2);
-    assert.equal(f.events.length, 0);
+    assert.equal(f.events.length, 1);
+    const ev = f.events[0];
+    assert.equal(ev.eventName, 'PreToolUse');
+    assert.equal(ev.data.hook_event_name, 'PreToolUse');
+    assert.equal(ev.data.tool_name, 'AskUserQuestion');
+    assert.equal(ev.data.tool_use_id, 'toolu_1');
+    assert.deepEqual(ev.data.tool_input, toolInput);
+    assert.equal(ev.data.attentionId, event.id);
+    assert.equal(ev.data.attentionSequence, event.sequence);
+    assert.equal(ev.data.attentionCreatedAt, event.createdAt);
     const other = await api(f.port, f.token, 'POST', path, { toolName: 'Bash', toolUseId: 'toolu_2', toolInput: { command: 'ls' } });
     assert.equal(other.status, 200);
     assert.equal(other.data.event, null);
+    assert.equal(f.events.length, 1, 'non-attention tools publish nothing');
     assert.equal((await api(f.port, f.token, 'POST', path, { toolName: '', toolUseId: 'x', toolInput })).status, 400);
     assert.equal((await api(f.port, f.token, 'POST', path, { toolName: 'AskUserQuestion', toolInput })).status, 400);
     assert.equal((await api(f.port, f.token, 'POST', path, { toolName: 'AskUserQuestion', toolUseId: 'x', toolInput, extra: 1 })).status, 400);
@@ -577,6 +587,76 @@ describe('LocalApiServer explicit session attention and PR metadata', () => {
     const inactive = await api(f.port, f.token, 'POST', path, { toolName: 'AskUserQuestion', toolUseId: 'x', toolInput });
     assert.equal(inactive.status, 409);
     assert.equal(inactive.data.code, 'session_not_active');
+  });
+  describe('ask endpoint and ordinary hook interplay', () => {
+    const toolInput = { questions: [{ question: 'Which lib?', header: 'Lib', multiSelect: false, options: [{ label: 'A', description: 'a' }, { label: 'B', description: 'b' }] }] };
+    const askBody = { toolName: 'AskUserQuestion', toolUseId: 'toolu_x', toolInput };
+    const hookBody = (id: string) => ({ ftown_session_id: id, ftown_session_source: 'env', hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion', tool_use_id: 'toolu_x', tool_input: toolInput });
+    it('repeating /ask for the same tool_use_id publishes nothing more', async t => {
+      const f = await sessionToolsFixture(t);
+      const path = `/api/sessions/${f.sample.id}/attention/ask`;
+      assert.equal((await api(f.port, f.token, 'POST', path, askBody)).status, 200);
+      assert.equal((await api(f.port, f.token, 'POST', path, askBody)).status, 200);
+      assert.equal(f.events.length, 1);
+      assert.equal((await f.attention.list(f.sample.id)).events.length, 1);
+    });
+    it('/hook first then /ask publishes only the hook event', async t => {
+      const f = await sessionToolsFixture(t);
+      assert.equal((await api(f.port, f.token, 'POST', '/hook', hookBody(f.sample.id))).status, 200);
+      assert.equal(f.events.length, 1);
+      const res = await api(f.port, f.token, 'POST', `/api/sessions/${f.sample.id}/attention/ask`, askBody);
+      assert.equal(res.status, 200);
+      assert.equal(f.events.length, 1);
+      const items = (await f.attention.list(f.sample.id)).events;
+      assert.equal(items.length, 1);
+      assert.equal(items[0].occurrences, 2);
+      assert.ok(items[0].id);
+      assert.equal(f.events[0].data.attentionId, items[0].id);
+      assert.equal(f.events[0].source, 'env');
+    });
+    it('/ask publishes with source api', async t => {
+      const f = await sessionToolsFixture(t);
+      assert.equal((await api(f.port, f.token, 'POST', `/api/sessions/${f.sample.id}/attention/ask`, askBody)).status, 200);
+      const items = (await f.attention.list(f.sample.id)).events;
+      assert.ok(items[0].id);
+      assert.equal(f.events[0].data.attentionId, items[0].id);
+      assert.equal(f.events[0].source, 'api');
+    });
+    it('/ask onto a resolved item publishes nothing', async t => {
+      const f = await sessionToolsFixture(t);
+      const path = `/api/sessions/${f.sample.id}/attention/ask`;
+      assert.equal((await api(f.port, f.token, 'POST', path, askBody)).status, 200);
+      assert.equal((await api(f.port, f.token, 'POST', '/hook', { ftown_session_id: f.sample.id, ftown_session_source: 'env', hook_event_name: 'PostToolUse', tool_name: 'AskUserQuestion', tool_use_id: 'toolu_x' })).status, 200);
+      const before = f.events.length;
+      assert.equal((await api(f.port, f.token, 'POST', path, askBody)).status, 200);
+      assert.equal(f.events.length, before);
+      const items = (await f.attention.list(f.sample.id, { includeResolved: true })).events;
+      assert.equal(items.length, 1);
+      assert.equal(items[0].resolution, 'tool_complete');
+    });
+    it('/ask does not mark the agent busy', async t => {
+      const f = await sessionToolsFixture(t);
+      const mail = (f.server as unknown as { mail: { markAgentBusy: (id: string) => void } }).mail;
+      const busy: string[] = [];
+      const original = mail.markAgentBusy.bind(mail);
+      mail.markAgentBusy = (id: string) => { busy.push(id); original(id); };
+      assert.equal((await api(f.port, f.token, 'POST', `/api/sessions/${f.sample.id}/attention/ask`, askBody)).status, 200);
+      assert.deepEqual(busy, []);
+      await api(f.port, f.token, 'POST', '/hook', hookBody(f.sample.id));
+      assert.deepEqual(busy, [f.sample.id], 'sanity: /hook does mark busy');
+    });
+    it('/ask first then /hook gives one item, two identically stamped events and occurrences 2', async t => {
+      const f = await sessionToolsFixture(t);
+      assert.equal((await api(f.port, f.token, 'POST', `/api/sessions/${f.sample.id}/attention/ask`, askBody)).status, 200);
+      assert.equal((await api(f.port, f.token, 'POST', '/hook', hookBody(f.sample.id))).status, 200);
+      const items = (await f.attention.list(f.sample.id)).events;
+      assert.equal(items.length, 1);
+      assert.equal(items[0].occurrences, 2);
+      assert.equal(f.events.length, 2);
+      assert.equal(f.events[0].data.attentionId, f.events[1].data.attentionId);
+      assert.equal(f.events[0].data.attentionSequence, f.events[1].data.attentionSequence);
+      assert.equal(f.events[0].data.attentionCreatedAt, f.events[1].data.attentionCreatedAt);
+    });
   });
   it('stamps native notifications with committed identity and ignores caller-supplied ledger metadata', async t => {
     const f = await sessionToolsFixture(t);

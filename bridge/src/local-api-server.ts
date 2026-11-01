@@ -654,7 +654,16 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           || Object.keys(body).some((key) => !['toolName', 'toolUseId', 'toolInput'].includes(key))) throw new BadRequestError('Invalid ask arguments');
         if (typeof body.toolName !== 'string' || !body.toolName.trim() || body.toolName.length > 200) throw new BadRequestError('Invalid toolName');
         if (typeof body.toolUseId !== 'string' || !body.toolUseId.trim() || body.toolUseId.length > 200) throw new BadRequestError('Invalid toolUseId');
-        const item = await this.attention.record(id, 'PreToolUse', { tool_name: body.toolName, tool_use_id: body.toolUseId, tool_input: body.toolInput });
+        const toolData = { tool_name: body.toolName, tool_use_id: body.toolUseId, tool_input: body.toolInput };
+        const { item, created } = await this.attention.recordDetailed(id, 'PreToolUse', toolData);
+        // When ftown's ordinary (async) PreToolUse hook is missing or late, this is the only signal the UI gets.
+        // Same stamped payload as /hook; deduped asks publish nothing, and the agent is not marked busy.
+        if (item && created) {
+          this.emit('event', { sessionId: id, eventName: 'PreToolUse', source: 'api', data: {
+            hook_event_name: 'PreToolUse', ...toolData,
+            attentionId: item.id, attentionSequence: item.sequence, attentionCreatedAt: item.createdAt,
+          } } as HookEvent);
+        }
         jsonResponse(res, 200, { event: item && item.prompt ? item : null });
         return;
       }

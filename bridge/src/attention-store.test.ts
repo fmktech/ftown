@@ -339,6 +339,34 @@ test('prompt is persisted, reloaded, part of the fingerprint and never taken fro
   assert.equal(c.prompt, undefined);
 });
 
+test('recordDetailed reports created for a new item and deduped for a repeat, record stays unchanged', async t => {
+  const f = await fixture(t);
+  const ask = { tool_name: 'AskUserQuestion', tool_use_id: 'tuc', tool_input: askInput };
+  const first = await f.store.recordDetailed('s1', 'PreToolUse', ask);
+  assert.equal(first.created, true);
+  assert.equal(first.item?.occurrences, 1);
+  const again = await f.store.recordDetailed('s1', 'PreToolUse', ask);
+  assert.equal(again.created, false);
+  assert.equal(again.item?.id, first.item?.id);
+  assert.equal(again.item?.occurrences, 2);
+  const plain = await f.store.recordDetailed('s1', 'PreToolUse', { tool_name: 'Bash', tool_use_id: 'tub', tool_input: { command: 'ls' } });
+  assert.deepEqual(plain, { item: undefined, created: false });
+  const viaRecord = await f.store.record('s1', 'PreToolUse', ask);
+  assert.equal(viaRecord?.id, first.item?.id);
+  assert.equal(viaRecord?.occurrences, 3);
+});
+
+test('recordDetailed reports created false when deduping onto a resolved ask', async t => {
+  const f = await fixture(t);
+  const ask = { tool_name: 'AskUserQuestion', tool_use_id: 'tur', tool_input: askInput };
+  const first = await f.store.recordDetailed('s1', 'PreToolUse', ask);
+  assert.equal(first.created, true);
+  await f.store.record('s1', 'PostToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'tur' });
+  const again = await f.store.recordDetailed('s1', 'PreToolUse', ask);
+  assert.equal(again.created, false);
+  assert.equal(again.item?.id, first.item?.id);
+});
+
 test('AskUserQuestion PreToolUse stores a prompt, deduplicates by tool_use_id and fills a missing prompt', async t => {
   const f = await fixture(t);
   const first = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'tu1', tool_input: askInput }))!;

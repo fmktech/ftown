@@ -231,6 +231,10 @@ export class AttentionStore {
     ledger.events = ledger.events.filter((event) => !drop.has(event.id));
   }
   async record(id: string, eventName: string, data: Record<string, unknown>, options: AttentionRecordOptions = {}): Promise<AttentionItem | undefined> {
+    return (await this.recordDetailed(id, eventName, data, options)).item;
+  }
+  /** Like record, but also reports whether the returned item was newly created (true) or deduped onto an existing one (false). */
+  async recordDetailed(id: string, eventName: string, data: Record<string, unknown>, options: AttentionRecordOptions = {}): Promise<{ item: AttentionItem | undefined; created: boolean }> {
     let apiPrompt: AttentionPrompt | undefined;
     if (options.prompt !== undefined) {
       const checked = normalizeAttentionPrompt(options.prompt);
@@ -238,7 +242,7 @@ export class AttentionStore {
       apiPrompt = checked.value;
     }
     const observation = classifyAttentionHook(eventName, data);
-    if (!observation.activity && !observation.attention && !observation.resolve && !observation.toolComplete) return;
+    if (!observation.activity && !observation.attention && !observation.resolve && !observation.toolComplete) return { item: undefined, created: false };
     const cancelIdle = observation.activity === 'thinking' || observation.activity === 'tool_use' || observation.resolve === 'session_end';
     if (cancelIdle) this.idleCanceled(id);
     return this.withLock(id, async () => {
@@ -302,7 +306,7 @@ export class AttentionStore {
       }
       if (created) for (const listener of this.listeners.get(id) ?? []) listener();
       if (resolvedAny) this.wakeItemWaiters(id);
-      return recorded ? publicItem(recorded) : undefined;
+      return { item: recorded ? publicItem(recorded) : undefined, created };
     });
   }
   async list(id: string, options: AttentionReadOptions = {}): Promise<AttentionPage> {
