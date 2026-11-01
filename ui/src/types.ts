@@ -102,12 +102,14 @@ import type { GetBridgeUpdatePayload, UpdateBridgePayload } from '../../bridge/s
 import type { GetPullRequestStatusesPayload } from '../../bridge/src/pull-request-status-protocol';
 import type { SendSessionMessagePayload } from '../../bridge/src/session-inbox-protocol';
 export type { SendSessionMessagePayload, SessionMessageAccepted, SessionMessageErrorCode } from '../../bridge/src/session-inbox-protocol';
+import type { AnswerSessionAttentionPayload, AttentionAnswerDelivery, AttentionPrompt } from '../../bridge/src/attention-prompt-protocol';
+export type { AnswerSessionAttentionPayload } from '../../bridge/src/attention-prompt-protocol';
 
 export type CommandType =
   | 'preview_chat_list' | 'preview_chat_send' | 'preview_chat_reply'
   | 'session_preview_status' | 'session_preview_chunk'
   | 'get_bridge_update' | 'update_bridge' | 'get_pull_request_statuses'
-  | 'get_session_attention' | 'resolve_session_attention' | 'send_message'
+  | 'get_session_attention' | 'resolve_session_attention' | 'answer_session_attention' | 'send_message'
   | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history'
   | 'retry_session' | 'rename_session' | 'remove_session' | 'bridge_exec'
   | 'update_session_parent'
@@ -122,9 +124,11 @@ export interface Command {
 export interface GetSessionAttentionPayload { bridgeId: string; sessionId: string }
 export interface ResolveSessionAttentionPayload extends GetSessionAttentionPayload { eventId: string }
 export interface PersistedSessionAttention {
-  id: string; sequence: number; type: 'agent_needs_input'; title: string; message: string; createdAt: string;
+  id: string; sequence: number; type: 'agent_needs_input' | 'ask_user'; title: string; message: string; createdAt: string;
+  prompt?: AttentionPrompt;
 }
 export interface SessionAttentionResponse { sessionId: string; attention: PersistedSessionAttention | null; sequence: number }
+export type AnswerSessionAttentionResponse = SessionAttentionResponse & { delivery: AttentionAnswerDelivery };
 
 export interface CreateSessionPayload {
   command?: string;
@@ -189,7 +193,7 @@ export interface BridgeExecPayload {
   bridgeId?: string;
 }
 
-export type CommandPayload = PreviewChatListRequest | PreviewChatWriteRequest | SendSessionMessagePayload | GetPullRequestStatusesPayload | SessionPreviewStatusRequest | SessionPreviewChunkRequest | GetBridgeUpdatePayload | UpdateBridgePayload | GetSessionAttentionPayload | ResolveSessionAttentionPayload | CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>;
+export type CommandPayload = PreviewChatListRequest | PreviewChatWriteRequest | SendSessionMessagePayload | GetPullRequestStatusesPayload | SessionPreviewStatusRequest | SessionPreviewChunkRequest | GetBridgeUpdatePayload | UpdateBridgePayload | GetSessionAttentionPayload | ResolveSessionAttentionPayload | AnswerSessionAttentionPayload | CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>;
 
 export interface CommandResponse {
   requestId: string;

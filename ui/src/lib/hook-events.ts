@@ -1,3 +1,6 @@
+import { parseAttentionPrompt, promptFromAskUserQuestionInput } from "../../../bridge/src/attention-prompt";
+import type { AttentionAnswerChannel, AttentionPrompt } from "../../../bridge/src/attention-prompt-protocol";
+
 export type HookActivity = "thinking" | "tool_use" | "idle";
 
 export interface ManualInputNotice {
@@ -7,6 +10,59 @@ export interface ManualInputNotice {
   receivedAt: number;
   attentionId?: string;
   attentionSequence?: number;
+  /** Structured question the human can answer from the dashboard. */
+  prompt?: AttentionPrompt;
+}
+
+/** Notices the bridge tracks durably: stamped explicit requests and stamped questions that carry a prompt. */
+export function isDurableNotice(notice: ManualInputNotice | undefined): boolean {
+  return !!notice && !!notice.attentionId
+    && (notice.type === "agent_needs_input" || (notice.type === "ask_user" && !!notice.prompt));
+}
+
+function validAttentionId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_-]+$/.test(value);
+}
+
+function validAttentionSequence(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+export function isAskUserQuestionTool(toolName: string | undefined): boolean {
+  return toolName?.replace(/[^a-z0-9]/gi, "").toLowerCase() === "askuserquestion";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function pick(source: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of keys) if (key in source) out[key] = source[key];
+  return out;
+}
+
+/**
+ * Validate a prompt received from the bridge. A newer bridge may add fields
+ * the strict parser rejects, so unknown keys are stripped first. The RAW
+ * channel must equal `expectedChannel`; anything else is invalid.
+ */
+export function parseLenientPrompt(raw: unknown, expectedChannel: AttentionAnswerChannel): AttentionPrompt | undefined {
+  if (!isRecord(raw) || raw.channel !== expectedChannel || !Array.isArray(raw.questions)) return undefined;
+  const questions = raw.questions.map((question) => {
+    if (!isRecord(question)) return question;
+    const stripped = pick(question, ["question", "header", "options", "multiSelect", "allowText"]);
+    if (Array.isArray(stripped.options)) {
+      stripped.options = stripped.options.map((option) => (isRecord(option) ? pick(option, ["label", "description"]) : option));
+    }
+    return stripped;
+  });
+  const parsed = parseAttentionPrompt(questions, expectedChannel);
+  return parsed.ok ? parsed.value : undefined;
+}
+
+function extractNotificationPrompt(data: Record<string, unknown>): AttentionPrompt | undefined {
+  return parseLenientPrompt(data.attentionPrompt, "mail");
 }
 
 const MANUAL_INPUT_NOTIFICATION_TYPES = new Set<ManualInputNotice["type"]>([
@@ -59,11 +115,16 @@ export function extractManualInputNotice(
     && MANUAL_INPUT_TOOL_NAMES.has(normalizedToolName)
   ) {
     const question = extractQuestion(data);
+    const prompt = isAskUserQuestionTool(toolName) ? promptFromAskUserQuestionInput(data.tool_input) : undefined;
+    const stamped = prompt && validAttentionId(data.attentionId) && validAttentionSequence(data.attentionSequence);
     return {
       type: "ask_user",
       title: "Session is asking a question",
       message: question ?? "Open the session to respond.",
-      receivedAt,
+      receivedAt: stamped && typeof data.attentionCreatedAt === "string" && Number.isFinite(Date.parse(data.attentionCreatedAt))
+        ? Date.parse(data.attentionCreatedAt) : receivedAt,
+      ...(prompt ? { prompt } : {}),
+      ...(stamped ? { attentionId: data.attentionId as string, attentionSequence: data.attentionSequence as number } : {}),
     };
   }
   if (eventName !== "Notification") return null;
@@ -71,6 +132,7 @@ export function extractManualInputNotice(
   if (typeof type !== "string" || !MANUAL_INPUT_NOTIFICATION_TYPES.has(type as ManualInputNotice["type"])) {
     return null;
   }
+  const prompt = type === "agent_needs_input" ? extractNotificationPrompt(data) : undefined;
   return {
     type: type as ManualInputNotice["type"],
     title: typeof data.title === "string" && data.title.trim() ? data.title : "Session needs your input",
@@ -82,6 +144,7 @@ export function extractManualInputNotice(
     ...(type === "agent_needs_input" && typeof data.attentionId === "string" && /^[A-Za-z0-9_-]+$/.test(data.attentionId)
       && typeof data.attentionSequence === "number" && Number.isSafeInteger(data.attentionSequence) && data.attentionSequence > 0
       ? { attentionId: data.attentionId, attentionSequence: data.attentionSequence } : {}),
+    ...(prompt ? { prompt } : {}),
   };
 }
 
@@ -91,6 +154,9 @@ export function clearsManualInputNotice(
   data: Record<string, unknown>,
   currentNotice?: ManualInputNotice,
 ): boolean {
+  // A stamped question is resolved by the bridge (user prompt / tool complete)
+  // before the event is published; only a snapshot re-read may clear it.
+  if (currentNotice?.type === "ask_user" && isDurableNotice(currentNotice)) return false;
   if (eventName === "UserPromptSubmit" || eventName === "beforeSubmitPrompt") return true;
   if (currentNotice?.type === "agent_needs_input") return false;
   if (eventName === "Notification") {

@@ -18,7 +18,9 @@ import { SecurityLockIcon } from "./SecurityLockIcon";
 import { usePendingApprovals } from "@/hooks/usePendingApprovals";
 import type { AccountSecurityClient, AccountSecuritySnapshot } from "@/lib/account-security-client";
 import { SessionList } from "./SessionList";
-import { SessionInboxPage, SessionInboxTrigger, inboxEntries, noticeKey, queueSessionReply, type InboxEntry } from "./SessionInbox";
+import type { AttentionAnswerEntry } from "../../../bridge/src/attention-prompt-protocol";
+import type { AttentionAnswerSubmitResult } from "./AttentionAnswerForm";
+import { SessionInboxPage, SessionInboxTrigger, inboxEntries, noticeKey, queueSessionReply, attentionAnswerSubmitResult, type InboxEntry } from "./SessionInbox";
 import { PullRequestStatusProvider } from "./PullRequestStatusProvider";
 import { SessionWorkspace } from "./SessionWorkspace";
 import { Terminal, TerminalHandle } from "./Terminal";
@@ -260,7 +262,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
       return next;
     });
   }, [bridges, rawSessions, setBridgeOrder]);
-  const { sessionActivity, markSessionIdle, clearSessionAttention } = useAllSessionEvents(client, rawSessions, userId, rpc);
+  const { sessionActivity, markSessionIdle, clearSessionAttention, answerSessionAttention } = useAllSessionEvents(client, rawSessions, userId, rpc);
   const installedHookBridges = useRef(new Set<string>());
 
   useEffect(() => {
@@ -493,6 +495,16 @@ PY`;
     if (!inboxReady.has(current.bridgeId)) throw new Error("Reconnect this computer before replying.");
     if (!canReply(current.bridgeId)) throw new Error("This browser does not have permission to reply to this session.");
     await queueSessionReply(rpc.sendCommand, { ...entry, session: current }, message);
+  };
+  const answerInbox = async (entry: InboxEntry, answers: AttentionAnswerEntry[]): Promise<AttentionAnswerSubmitResult> => {
+    const current = sessions.find(session => session.id === entry.session.id && session.bridgeId === entry.session.bridgeId);
+    const notice = sessionActivity.get(entry.session.id)?.attention;
+    if (!current || !notice || noticeKey(current.id, notice) !== noticeKey(entry.session.id, entry.notice)) return { ok: false, message: "This message has changed. Review the latest notice." };
+    if (current.status !== "running") return { ok: false, message: "This session is no longer running. Open it to check." };
+    if (!inboxReady.has(current.bridgeId)) return { ok: false, message: "Reconnect this computer before replying." };
+    if (!canReply(current.bridgeId)) return { ok: false, message: "This browser does not have permission to answer this session." };
+    const result = await answerSessionAttention(current.id, notice, answers);
+    return attentionAnswerSubmitResult(current.name || current.prompt?.slice(0, 36) || "Session", result);
   };
 
   const handleCreateSession = useCallback(
@@ -1108,7 +1120,7 @@ PY`;
         {/* Terminal area */}
         <main aria-hidden={!isDesktop && mobileTab === "sessions" && !inboxOpen} className={`flex-1 flex-col min-h-0 min-w-0 ${mobileTab !== "sessions" || inboxOpen ? "flex" : "hidden"} md:flex`}>
           <SessionInboxPage entries={inbox} open={inboxOpen} onClose={() => { restoreInboxFocusRef.current = true; setInboxOpen(false); scheduleTerminalRenderAdjustment(); }}
-            onOpenSession={id => { focusOpenedSessionRef.current = true; handleSelectSession(id); setMobileTab("terminal"); scheduleTerminalRenderAdjustment(); }} onDismiss={entry => clearSessionAttention(entry.session.id, entry.notice)} onReply={replyToInbox} />
+            onOpenSession={id => { focusOpenedSessionRef.current = true; handleSelectSession(id); setMobileTab("terminal"); scheduleTerminalRenderAdjustment(); }} onDismiss={entry => clearSessionAttention(entry.session.id, entry.notice)} onReply={replyToInbox} onAnswer={answerInbox} />
           <div ref={workspaceFocusRef} role="region" aria-label={`Session workspace: ${selectedSession?.name || selectedSession?.prompt?.slice(0, 48) || "Session"}`} tabIndex={-1} className="min-h-0 min-w-0 flex-1 flex-col focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)]" style={{ display: inboxOpen ? "none" : "flex" }} aria-hidden={inboxOpen}>
           <SessionWorkspace session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} subscribeAuthority={accountClient?.subscribe} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabSwitch} onRefit={refitPreviewTerminal}>
           <Terminal

@@ -21,6 +21,7 @@ const state = vi.hoisted(() => ({
   removeSession: vi.fn(),
   bridgeExec: vi.fn().mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 }),
   clearSessionAttention: vi.fn(),
+  answerSessionAttention: vi.fn(),
   rpcCommands: [] as string[],
 }));
 
@@ -36,7 +37,7 @@ vi.mock("@/hooks/useBridgeRpc", () => ({ useBridgeRpc: () => ({ bridgeExec: stat
 }) }));
 vi.mock("@/hooks/useBridges", () => ({ useBridges: () => ({ bridges: state.bridges, hasBridges: true, prepareLocalAccess: vi.fn() }) }));
 vi.mock("@/hooks/useAllSessionEvents", () => ({ useAllSessionEvents: () => ({
-  sessionActivity: state.activity, markSessionIdle: vi.fn(), clearSessionAttention: state.clearSessionAttention,
+  sessionActivity: state.activity, markSessionIdle: vi.fn(), clearSessionAttention: state.clearSessionAttention, answerSessionAttention: state.answerSessionAttention,
 }) }));
 vi.mock("./Terminal", () => ({ Terminal: ({ sessionId, headerActions }: { sessionId: string | null; headerActions?: ReactNode }) => <section aria-label="Terminal session header"><div data-testid="terminal">{sessionId}</div>{headerActions}</section> }));
 vi.mock("./MobileControlBar", () => ({ MobileControlBar: () => <div>Session controls</div> }));
@@ -262,6 +263,23 @@ describe("attention navigation preserves the request", () => {
   });
 });
 
+
+describe("inbox answers", () => {
+  it("submits a prompted answer through answerSessionAttention and maps the delivery", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    state.answerSessionAttention.mockResolvedValue({ ok: true, delivery: "waiter" });
+    dashboard();
+    const notice = { type: "agent_needs_input" as const, title: "Question", message: "Pick one", receivedAt: 10, attentionId: "att-1",
+      prompt: { channel: "mail" as const, questions: [{ question: "Which path?", options: [{ label: "Fast" }, { label: "Safe" }], multiSelect: false, allowText: false }] } };
+    state.activity = new Map([["ordinary", { activity: "idle", attention: notice }]]);
+    fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 message" }));
+    expect(screen.queryByRole("button", { name: "Send reply" })).toBeNull();
+    fireEvent.click(screen.getByLabelText("Safe")); fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
+    await waitFor(() => expect(state.answerSessionAttention).toHaveBeenCalledExactlyOnceWith("ordinary", notice, [{ selected: [1] }]));
+    expect((await screen.findAllByText("Answer delivered to Regular shell.")).length).toBeGreaterThan(0);
+  });
+});
 
 describe("reconnect and refresh", () => {
   it.each([
