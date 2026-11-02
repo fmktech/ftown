@@ -44,6 +44,7 @@ import { BridgeSecurityService, applicationJson } from './security/bridge/securi
 import type { ApplicationJson, EndpointIdentity, VerifiedApplication } from './security/protocol.js';
 import { createCommandHandler } from './command-rpc.js';
 import { PullRequestStatusService } from './pull-request-status.js';
+import { createPrReviewService } from './pull-request-review.js';
 import { PullRequestEventWatcher } from './pull-request-events.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { SessionResurrection, shouldResurrectStoredSession } from './session-resurrection.js';
@@ -868,6 +869,7 @@ program
 
     localApiServer.setSessionController(sessionController);
     const pullRequestStatuses = new PullRequestStatusService();
+    const pullRequestReview = createPrReviewService({ bridgeId, loadSession: id => sessionController.get(id), revalidate: principal => security.policy.revalidate(principal, 'read') });
     const pullRequestEvents = new PullRequestEventWatcher({ bridgeId, store,
       withSessionMutation: (id, task) => pump.withSessionWrite(id, task),
       statusService: pullRequestStatuses, mailStore,
@@ -994,7 +996,7 @@ program
         return { type: 'command_response', response: { requestId: route.requestId, success: true } };
       }
       let result: CommandResponse | undefined;
-      await createCommandHandler({ bridgeId, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses,
+      await createCommandHandler({ bridgeId, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses, pullRequestReview,
         enqueueSessionMessage: (session, message) => localApiServer.enqueueSessionMessage(session, message),
         acceptSessionMail: (session, body) => localApiServer.acceptSessionMail(session, body),
         publishCommandResponse: async response => { result = response; },

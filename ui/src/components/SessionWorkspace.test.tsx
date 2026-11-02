@@ -53,7 +53,7 @@ it('preserves iframe and terminal nodes through expansion and benign auth checks
     return new Promise(resolve => pending.push(resolve));
   });
   const session: Session = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '', preview: { id: '12345678-1234-4234-8234-123456789abc', fileName: 'demo.html' } };
-  const workspace = (readable: boolean) => <SessionWorkspace session={session} client={client} userId="user" readable={readable} sendCommand={sendCommand} subscribeAuthority={subscribeAuthority} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div data-testid="terminal-node">Terminal content</div></SessionWorkspace>;
+  const workspace = (readable: boolean, reviewOpen = false, isDesktop = true, mobileTab: "terminal" | "preview" | "review" = "preview") => <SessionWorkspace session={session} client={client} userId="user" readable={readable} sendCommand={sendCommand} subscribeAuthority={subscribeAuthority} securityGeneration={0} open onClose={vi.fn()} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={vi.fn()} onRefit={vi.fn()} reviewOpen={reviewOpen} reviewActivation={reviewOpen ? 1 : 0}><div data-testid="terminal-node">Terminal content</div></SessionWorkspace>;
   const { container, rerender } = render(workspace(true));
   const frame = await screen.findByTitle('HTML preview: demo.html');
   expect(frame.getAttribute('sandbox')).toBe('allow-scripts allow-popups allow-popups-to-escape-sandbox');
@@ -70,6 +70,22 @@ it('preserves iframe and terminal nodes through expansion and benign auth checks
   expect(screen.getByRole('button', { name: 'Expand preview' })).toBe(expand);
   expect(terminal.parentElement?.hidden).toBe(false); expect(terminal.parentElement?.getAttribute('style')).toBe(width);
   expect(screen.getByTitle('HTML preview: demo.html')).toBe(frame); expect(screen.getByTestId('terminal-node')).toBe(terminal);
+  rerender(workspace(true, true));
+  expect(screen.getByRole('tab', { name: 'PR review' }).getAttribute('aria-selected')).toBe('true');
+  expect(frame.isConnected).toBe(true); expect(screen.getByTestId('terminal-node')).toBe(terminal);
+  fireEvent.click(screen.getByRole('tab', { name: 'Preview' }));
+  expect(screen.getByTitle('HTML preview: demo.html')).toBe(frame);
+  fireEvent.keyDown(screen.getByRole('tablist', { name: 'Auxiliary view' }), { key: 'End' });
+  expect(screen.getByRole('tab', { name: 'PR review' }).getAttribute('aria-selected')).toBe('true');
+  fireEvent.click(screen.getByRole('tab', { name: 'Preview' }));
+  rerender(workspace(true, true, false, 'review'));
+  fireEvent.click(screen.getByRole('button', { name: 'Expand PR review' }));
+  rerender(workspace(true, true, false, 'terminal'));
+  expect(terminal.parentElement?.hidden).toBe(false);
+  expect(frame.isConnected).toBe(true); expect(screen.getByTestId('terminal-node')).toBe(terminal);
+  rerender(workspace(true, true, false, 'preview'));
+  expect(screen.getByTitle('HTML preview: demo.html')).toBe(frame);
+  rerender(workspace(true));
   act(() => listeners.forEach(listener => listener()));
   expect(frame.isConnected).toBe(true); expect(frame.style.visibility).not.toBe('hidden');
   expect(screen.queryByText('Checking preview access…')).toBeNull();
@@ -119,4 +135,132 @@ it('disconnects the old iframe when the timer detects changed permissions while 
     cleanup(); vi.useRealTimers();
     if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
   }
+});
+
+it("provides compact review navigation with roving keyboard selection", () => {
+  class TestResizeObserver implements ResizeObserver {
+    constructor(private callback: ResizeObserverCallback) {}
+    observe(target: Element) { this.callback([{ target, contentRect: DOMRect.fromRect({ width: 500 }), borderBoxSize: [], contentBoxSize: [], devicePixelContentBoxSize: [] }], this); }
+    unobserve() {} disconnect() {}
+  }
+  vi.stubGlobal("ResizeObserver", TestResizeObserver);
+  const session: Session = { id: "one", bridgeId: "bridge", name: "one", status: "running", createdAt: "", updatedAt: "", pullRequestUrl: "https://github.com/owner/repo/pull/1", preview: { id: "12345678-1234-4234-8234-123456789abc", fileName: "demo.html" } };
+  render(<SessionWorkspace session={session} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()} reviewOpen reviewActivation={1}><div>Terminal content</div></SessionWorkspace>);
+  const tabs = screen.getByRole("tablist", { name: "Session view" });
+  const review = screen.getByRole("tab", { name: "PR review" }); expect(review.getAttribute("aria-selected")).toBe("true");
+  fireEvent.keyDown(tabs, { key: "Home" }); expect(screen.getByRole("tab", { name: "Terminal" }).getAttribute("aria-selected")).toBe("true");
+  fireEvent.keyDown(tabs, { key: "ArrowRight" }); expect(screen.getByRole("tab", { name: "Preview" }).getAttribute("aria-selected")).toBe("true");
+  fireEvent.keyDown(tabs, { key: "End" }); expect(review.getAttribute("aria-selected")).toBe("true");
+});
+
+const reviewFixture: Session = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '', pullRequestUrl: 'https://github.com/owner/repo/pull/1', preview: { id: '12345678-1234-4234-8234-123456789abc', fileName: 'demo.html' } };
+function resizeTo(width: number) {
+  class TestResizeObserver implements ResizeObserver {
+    constructor(private callback: ResizeObserverCallback) {}
+    observe(target: Element) { this.callback([{ target, contentRect: DOMRect.fromRect({ width }), borderBoxSize: [], contentBoxSize: [], devicePixelContentBoxSize: [] }], this); }
+    unobserve() {} disconnect() {}
+  }
+  vi.stubGlobal('ResizeObserver', TestResizeObserver);
+}
+
+it.each([{ width: 900, name: 'wide' }, { width: 500, name: 'compact' }])('$name: closing the selected preview falls back to review, including when expanded', ({ width }) => {
+  resizeTo(width);
+  const onClose = vi.fn(); const sendCommand = vi.fn(); const onMobileTab = vi.fn(); const onRefit = vi.fn();
+  const workspace = (open: boolean) => <SessionWorkspace session={reviewFixture} client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open={open} onClose={onClose} isDesktop mobileTab="preview" onMobileTab={onMobileTab} onRefit={onRefit} reviewOpen reviewActivation={1}><div data-testid="stable-terminal">Terminal content</div></SessionWorkspace>;
+  const { rerender } = render(workspace(true));
+  const terminal = screen.getByTestId('stable-terminal');
+  fireEvent.click(screen.getByRole('tab', { name: 'Preview' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Close preview' })); expect(onClose).toHaveBeenCalledTimes(1);
+  rerender(workspace(false));
+  expect(screen.getByRole('tabpanel', { name: 'PR review' }).hidden).toBe(false);
+  expect(screen.getByTestId('stable-terminal')).toBe(terminal);
+  if (width < 640) expect(screen.getByRole('tab', { name: 'PR review' }).getAttribute('aria-selected')).toBe('true');
+  rerender(workspace(true));
+  fireEvent.click(screen.getByRole('tab', { name: 'Preview' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Expand preview' }));
+  expect(terminal.parentElement?.hidden).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: 'Close preview' }));
+  rerender(workspace(false));
+  expect(screen.getByRole('tabpanel', { name: 'PR review' }).hidden).toBe(false);
+  expect(screen.getByRole('button', { name: 'Expand PR review' })).toBeTruthy();
+  if (width >= 640) expect(terminal.parentElement?.hidden).toBe(false);
+});
+
+it.each([900, 500])('preview registration replacement or removal retains selected review at width %i', width => {
+  resizeTo(width);
+  const sendCommand = vi.fn(); const onMobileTab = vi.fn(); const onRefit = vi.fn();
+  const workspace = (session: Session) => <SessionWorkspace session={session} client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={onMobileTab} onRefit={onRefit} reviewOpen reviewActivation={1}><div data-testid="stable-terminal">Terminal</div></SessionWorkspace>;
+  const { rerender } = render(workspace(reviewFixture));
+  const terminal = screen.getByTestId('stable-terminal');
+  expect(screen.getByRole('tabpanel', { name: 'PR review' }).hidden).toBe(false);
+  rerender(workspace({ ...reviewFixture, preview: { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', fileName: 'new.html' } }));
+  expect(screen.getByRole('tabpanel', { name: 'PR review' }).hidden).toBe(false);
+  rerender(workspace({ ...reviewFixture, preview: undefined }));
+  expect(screen.getByRole('tabpanel', { name: 'PR review' }).hidden).toBe(false);
+  expect(screen.getByTestId('stable-terminal')).toBe(terminal);
+  if (width < 640) expect(screen.getByRole('tab', { name: 'PR review' }).getAttribute('aria-selected')).toBe('true');
+});
+
+it('mobile terminal selection collapses either expanded auxiliary view and preserves terminal identity', () => {
+  resizeTo(390);
+  const sendCommand = vi.fn(); const onMobileTab = vi.fn(); const onRefit = vi.fn();
+  const workspace = (mobileTab: 'terminal' | 'preview' | 'review', open = true) => <SessionWorkspace session={reviewFixture} client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open={open} onClose={vi.fn()} isDesktop={false} mobileTab={mobileTab} onMobileTab={onMobileTab} onRefit={onRefit} reviewOpen reviewActivation={1}><div data-testid="stable-terminal">Terminal</div></SessionWorkspace>;
+  const { rerender } = render(workspace('review'));
+  const terminal = screen.getByTestId('stable-terminal');
+  fireEvent.click(screen.getByRole('button', { name: 'Expand PR review' }));
+  expect(terminal.parentElement?.hidden).toBe(true);
+  rerender(workspace('terminal'));
+  expect(terminal.parentElement?.hidden).toBe(false);
+  rerender(workspace('review'));
+  expect(screen.getByRole('button', { name: 'Expand PR review' })).toBeTruthy();
+  rerender(workspace('preview'));
+  fireEvent.click(screen.getByRole('button', { name: 'Expand preview' }));
+  rerender(workspace('terminal'));
+  expect(terminal.parentElement?.hidden).toBe(false);
+  expect(screen.getByTestId('stable-terminal')).toBe(terminal);
+  rerender(workspace('preview'));
+  expect(screen.getByRole('button', { name: 'Expand preview' })).toBeTruthy();
+  rerender(workspace('preview', false));
+  expect(onMobileTab).toHaveBeenLastCalledWith('review');
+  expect(screen.getByRole('tabpanel', { name: 'PR review' }).hidden).toBe(false);
+});
+
+
+it.each([true, false])('closing an expanded review restores preview or terminal when preview open is %s', previewOpen => {
+  resizeTo(900);
+  const sendCommand = vi.fn(); const onMobileTab = vi.fn(); const onRefit = vi.fn();
+  const workspace = (reviewOpen: boolean) => <SessionWorkspace session={reviewFixture} client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open={previewOpen} onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={onMobileTab} onRefit={onRefit} reviewOpen={reviewOpen} reviewActivation={1}><div data-testid="stable-terminal">Terminal</div></SessionWorkspace>;
+  const { rerender } = render(workspace(true));
+  fireEvent.click(screen.getByRole('button', { name: 'Expand PR review' }));
+  rerender(workspace(false));
+  expect(screen.getByTestId('stable-terminal').parentElement?.hidden).toBe(false);
+  if (previewOpen) expect(screen.getByRole('region', { name: 'Session preview' }).hidden).toBe(false);
+});
+
+it('mobile closing an expanded preview and selecting review in the same update collapses the fallback', () => {
+  resizeTo(390);
+  const sendCommand = vi.fn(); const onMobileTab = vi.fn(); const onRefit = vi.fn(); const onClose = vi.fn();
+  const workspace = (open: boolean, mobileTab: 'preview' | 'review') => <SessionWorkspace session={reviewFixture} client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open={open} onClose={onClose} isDesktop={false} mobileTab={mobileTab} onMobileTab={onMobileTab} onRefit={onRefit} reviewOpen reviewActivation={1}><div data-testid="stable-terminal">Terminal</div></SessionWorkspace>;
+  const { rerender } = render(workspace(true, 'preview'));
+  const terminal = screen.getByTestId('stable-terminal');
+  fireEvent.click(screen.getByRole('button', { name: 'Expand preview' }));
+  expect(terminal.parentElement?.hidden).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: 'Close preview' }));
+  expect(onClose).toHaveBeenCalledTimes(1);
+  // Dashboard updates the mobile tab and open choice together on close.
+  rerender(workspace(false, 'review'));
+  expect(screen.getByRole('tabpanel', { name: 'PR review' }).hidden).toBe(false);
+  expect(screen.getByRole('button', { name: 'Expand PR review' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Collapse PR review' })).toBeNull();
+  expect(screen.getByTestId('stable-terminal')).toBe(terminal);
+});
+
+it('removing an inactive preview does not collapse an already expanded review', () => {
+  resizeTo(390);
+  const sendCommand = vi.fn(); const onMobileTab = vi.fn(); const onRefit = vi.fn();
+  const workspace = (open: boolean) => <SessionWorkspace session={reviewFixture} client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open={open} onClose={vi.fn()} isDesktop={false} mobileTab="review" onMobileTab={onMobileTab} onRefit={onRefit} reviewOpen reviewActivation={1}><div>Terminal</div></SessionWorkspace>;
+  const { rerender } = render(workspace(true));
+  fireEvent.click(screen.getByRole('button', { name: 'Expand PR review' }));
+  rerender(workspace(false));
+  expect(screen.getByRole('button', { name: 'Collapse PR review' })).toBeTruthy();
 });

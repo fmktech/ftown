@@ -99,12 +99,14 @@ async function startup(pointerFails = false, restart: 'none' | 'success' | 'fail
       startupSteps.push('restore');
     } };
     const pullRequestStatuses = {};
+    const pullRequestReview = {};
     const publishRouter = { handleCommand() {} };
     const resurrection = { resurrectSessions: async () => { startupSteps.push('resurrect'); } };
     const applicationJson = (value: unknown) => value;
     const randomUUID = () => 'isolated-command';
-    const createCommandHandler = (deps: { publishCommandResponse: (response: unknown) => Promise<void>; pullRequestStatuses: unknown }) => async (data: { type: string }) => {
+    const createCommandHandler = (deps: { publishCommandResponse: (response: unknown) => Promise<void>; pullRequestStatuses: unknown; pullRequestReview: unknown }) => async (data: { type: string }) => {
       if (deps.pullRequestStatuses !== pullRequestStatuses) throw new Error('Status service dependency not forwarded');
+      if (deps.pullRequestReview !== pullRequestReview) throw new Error('Review service dependency not forwarded');
       handled.push(data.type);
       await deps.publishCommandResponse({ requestId: 'isolated-command', success: true, data: { invitation: 'inert' } });
     };
