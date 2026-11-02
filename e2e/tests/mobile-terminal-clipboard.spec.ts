@@ -27,7 +27,11 @@ async function openMobileShell(page: Page, holder: { sid?: string }): Promise<vo
   const before = await sessionIdsFor(email);
   await createShellSession(page, name);
   holder.sid = await waitForNewSessionId(email, before);
+  // Creating a session switches the phone layout to the Terminal tab, which hides the
+  // session list. Return to the Workspace tab so the row can be selected.
+  await page.getByRole("tab", { name: "Workspace", exact: true }).tap();
   await openSession(page, name);
+  await expect(page.getByRole("tab", { name: "Terminal", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("button", { name: "Select terminal text to copy" })).toBeVisible({ timeout: 30_000 });
   await expect(page.locator(".xterm-rows").first()).toContainText(/[$%#>]/, { timeout: 30_000 });
 }
