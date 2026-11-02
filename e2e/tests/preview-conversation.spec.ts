@@ -15,7 +15,10 @@ async function select(page: Page, name: string) {
 }
 async function openChat(page: Page) {
  await page.getByRole("button", { name: "Expand preview", exact: true }).click();
+ await expect(page.getByRole("button", { name: "Collapse preview", exact: true })).toBeVisible();
+ await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
  await page.getByRole("button", { name: "Open conversation", exact: true }).click();
+ await expect(page.getByRole("region", { name: "Preview conversation", exact: true })).toBeVisible();
 }
 test("real encrypted conversation reaches a supported agent inbox and retains CLI replies", async ({ page }) => {
  test.setTimeout(150_000); await page.setViewportSize({ width: 1440, height: 900 });
