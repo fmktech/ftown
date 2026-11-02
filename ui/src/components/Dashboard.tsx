@@ -25,6 +25,7 @@ import { PullRequestStatusProvider } from "./PullRequestStatusProvider";
 import { SessionWorkspace } from "./SessionWorkspace";
 import { Terminal, TerminalHandle } from "./Terminal";
 import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
+import { TerminalCopySheet } from "./TerminalCopySheet";
 import { NewSessionModal, SessionDefaults } from "./NewSessionModal";
 import { CloudConnectionNotice } from "./CloudConnectionNotice";
 import { HeaderTooltip } from "./HeaderTooltip";
@@ -128,6 +129,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     }
   }, [inboxOpen]);
   const mobileControlRef = useRef<MobileControlBarHandle>(null);
+  const [copySheetText, setCopySheetText] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const userMenuRef = useRef<HTMLDivElement>(null);
   const navigationRef = useRef<HTMLElement>(null);
@@ -472,6 +474,15 @@ PY`;
     setSessionDefaults({ bridgeId });
     setShowNewSession(true);
   }, []);
+
+  useEffect(() => { setCopySheetText(null); }, [selectedSessionId]);
+  const handleMobilePaste = useCallback((text: string) => terminalRef.current?.paste(text), []);
+  const handleMobileSelectText = useCallback(() => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement) active.blur();
+    setCopySheetText(terminalRef.current?.getText({ maxLines: 2000 }) ?? "");
+  }, []);
+  const handleCopySheetClose = useCallback(() => setCopySheetText(null), []);
 
   const handleSelectSession = useCallback((id: string | null) => {
     setSelectedSessionId(id);
@@ -1139,7 +1150,7 @@ PY`;
             onInterrupt={handleTerminalInterrupt}
           />
           {selectedSessionId && (
-            <MobileControlBar ref={mobileControlRef} onSendInput={(data) => terminalRef.current?.sendInput(data)} />
+            <MobileControlBar ref={mobileControlRef} onSendInput={(data) => terminalRef.current?.sendInput(data)} onPaste={handleMobilePaste} onSelectText={handleMobileSelectText} />
           )}
           </SessionWorkspace>
           </div>
@@ -1162,6 +1173,8 @@ PY`;
         defaults={sessionDefaults}
         bridgeExec={bridgeExec}
       />
+      {/* Portals to document.body, but React events still bubble through this tree: keep it a direct child of the root, which has no handlers. */}
+      <TerminalCopySheet open={copySheetText !== null} text={copySheetText ?? ""} onClose={handleCopySheetClose} />
 
     </div>
     </PullRequestStatusProvider>
