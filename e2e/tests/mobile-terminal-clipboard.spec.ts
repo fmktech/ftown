@@ -27,6 +27,9 @@ async function openMobileShell(page: Page, holder: { sid?: string }): Promise<vo
   const before = await sessionIdsFor(email);
   await createShellSession(page, name);
   holder.sid = await waitForNewSessionId(email, before);
+  // The UI selects the new session (and flips to the Terminal tab) only when its create call
+  // resolves, which also closes the dialog. Wait for that before returning to Workspace.
+  await page.getByRole("dialog", { name: "New Session" }).waitFor({ state: "hidden", timeout: 30_000 });
   // Creating a session switches the phone layout to the Terminal tab, which hides the
   // session list. Return to the Workspace tab so the row can be selected.
   await page.getByRole("tab", { name: "Workspace", exact: true }).tap();
@@ -43,7 +46,7 @@ async function removeSessionQuietly(sid: string | undefined): Promise<void> {
 
 /** Type through the key bar's hidden input (xterm's textarea is readonly on touch). */
 async function typeViaKeyBar(page: Page, text: string): Promise<void> {
-  await page.getByLabel("Terminal input").evaluate((el) => (el as HTMLInputElement).focus());
+  await page.locator('input[aria-label="Terminal input"]').evaluate((el) => (el as HTMLInputElement).focus());
   await page.keyboard.type(text);
 }
 
