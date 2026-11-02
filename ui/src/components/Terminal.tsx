@@ -10,6 +10,7 @@ import { ShellType, SessionUsage } from "@/types";
 import { useTerminal } from "@/hooks/useTerminal";
 import { FallbackReason, TerminalTransportApi, TerminalTransportMode } from "@/lib/direct-transport/contract";
 import { formatTokens, formatUsage, formatUsageDetail } from "@/lib/format-usage";
+import { terminalBufferText } from "@/lib/terminal-text";
 import { HarnessIcon } from "./HarnessIcon";
 import { PullRequestLink } from "./PullRequestLink";
 import "@xterm/xterm/css/xterm.css";
@@ -17,6 +18,11 @@ import "@xterm/xterm/css/xterm.css";
 export interface TerminalHandle {
   sendInput: (data: string) => void;
   refit: (options?: { forceResize?: boolean }) => void;
+  /** Plain text of the terminal buffer (see terminalBufferText). "" before xterm is initialised. */
+  getText: (options?: { maxLines?: number }) => string;
+  /** Paste client text like xterm's own paste: normalises newlines, adds bracketed-paste markers when
+   *  the app enabled them, and reaches the PTY through the normal onData path. Empty string: no-op. */
+  paste: (text: string) => void;
 }
 
 interface TerminalProps {
@@ -193,6 +199,14 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     },
     refit(options) {
       fitAndSyncResize(options?.forceResize === true);
+    },
+    getText(options) {
+      const term = xtermRef.current;
+      return term ? terminalBufferText(term.buffer.active, options) : "";
+    },
+    paste(text: string) {
+      const term = xtermRef.current;
+      if (term && text) term.paste(text);
     },
   }), []);
 

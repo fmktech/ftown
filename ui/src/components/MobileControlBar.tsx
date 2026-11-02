@@ -1,13 +1,18 @@
 "use client";
 
-import { useRef, useState, useCallback, forwardRef, useImperativeHandle } from "react";
+import { useRef, useState, useCallback, useEffect, forwardRef, useImperativeHandle } from "react";
 
 export interface MobileControlBarHandle {
   focusInput: () => void;
 }
 
 interface MobileControlBarProps {
+  /** Typed input and key-button bytes. */
   onSendInput: (data: string) => void;
+  /** Client clipboard text to paste into the terminal (caller uses TerminalHandle.paste). */
+  onPaste: (text: string) => void;
+  /** Open the copy sheet (caller snapshots the terminal text). */
+  onSelectText: () => void;
 }
 
 // PgUp/PgDn reach the bridge tmux server, which scrolls history via copy-mode
@@ -60,9 +65,16 @@ const keyButtonStyle: React.CSSProperties = {
 };
 
 export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControlBarProps>(
-  function MobileControlBar({ onSendInput }, ref) {
+  function MobileControlBar({ onSendInput, onPaste, onSelectText }, ref) {
     const inputRef = useRef<HTMLInputElement>(null);
+    const pasteAreaRef = useRef<HTMLTextAreaElement>(null);
     const [pasteError, setPasteError] = useState("");
+    const [fallbackOpen, setFallbackOpen] = useState(false);
+    const [fallbackValue, setFallbackValue] = useState("");
+
+    useEffect(() => {
+      if (fallbackOpen) pasteAreaRef.current?.focus();
+    }, [fallbackOpen]);
 
     useImperativeHandle(ref, () => ({
       focusInput() {
@@ -106,18 +118,46 @@ export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControl
       inputRef.current?.focus();
     }, []);
 
-    const handlePaste = useCallback(async () => {
+    const handlePaste = useCallback(() => {
       setPasteError("");
-      try {
-        if (!navigator.clipboard?.readText) {
-          throw new Error("Clipboard access is unavailable");
-        }
-        const text = await navigator.clipboard.readText();
-        if (text) onSendInput(text);
-      } catch {
-        setPasteError("Paste was blocked. Open the keyboard and paste there instead.");
+      const readText = navigator.clipboard?.readText;
+      if (!readText) {
+        setFallbackOpen(true);
+        return;
       }
-    }, [onSendInput]);
+      // Called synchronously inside the tap handler: iOS requires the gesture.
+      let pending: Promise<string>;
+      try {
+        pending = navigator.clipboard.readText();
+      } catch {
+        setFallbackOpen(true);
+        return;
+      }
+      pending.then(
+        (text) => {
+          if (text) onPaste(text);
+          else setPasteError("Clipboard is empty.");
+        },
+        () => setFallbackOpen(true),
+      );
+    }, [onPaste]);
+
+    const handleNativePaste = useCallback((e: React.ClipboardEvent<HTMLInputElement>) => {
+      const text = e.clipboardData?.getData("text/plain");
+      if (!text) return;
+      e.preventDefault();
+      onPaste(text);
+    }, [onPaste]);
+
+    const closeFallback = useCallback(() => {
+      setFallbackOpen(false);
+      setFallbackValue("");
+    }, []);
+
+    const sendFallback = useCallback(() => {
+      if (fallbackValue) onPaste(fallbackValue);
+      closeFallback();
+    }, [fallbackValue, onPaste, closeFallback]);
 
     return (
       <div
@@ -141,6 +181,7 @@ export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControl
             enterKeyHint="send"
             onKeyDown={handleKeyDown}
             onInput={handleInput}
+            onPaste={handleNativePaste}
             style={{
               fontSize: 16,
               opacity: 0,
@@ -152,6 +193,52 @@ export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControl
             }}
           />
         </div>
+
+        {fallbackOpen && (
+          <div className="px-2 pt-2 flex flex-col gap-1">
+            <textarea
+              ref={pasteAreaRef}
+              aria-label="Text to paste"
+              placeholder="Long-press here and choose Paste"
+              rows={3}
+              value={fallbackValue}
+              onChange={(e) => setFallbackValue(e.target.value)}
+              onKeyDown={(e) => e.stopPropagation()}
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              style={{
+                width: "100%",
+                fontSize: 16,
+                fontFamily: "var(--font-mono)",
+                background: "var(--bg-elevated)",
+                border: "1px solid var(--border-muted)",
+                borderRadius: 6,
+                color: "var(--text-secondary)",
+                padding: 8,
+                resize: "none",
+              }}
+            />
+            <div className="flex items-center gap-1">
+              <button
+                className="mobile-ctrl-btn"
+                style={keyButtonStyle}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={(e) => { e.preventDefault(); closeFallback(); }}
+              >
+                Cancel
+              </button>
+              <button
+                className="mobile-ctrl-btn"
+                style={{ ...keyButtonStyle, background: "var(--accent)", border: "1px solid var(--accent)", color: "var(--bg-void)" }}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={(e) => { e.preventDefault(); sendFallback(); }}
+              >
+                Send
+              </button>
+            </div>
+          </div>
+        )}
 
         {pasteError && (
           <div
@@ -192,10 +279,24 @@ export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControl
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={(e) => {
                   e.preventDefault();
-                  void handlePaste();
+                  handlePaste();
                 }}
               >
                 Paste
+              </button>
+            )}
+            {rowIndex === 1 && (
+              <button
+                className="mobile-ctrl-btn"
+                aria-label="Select terminal text to copy"
+                style={keyButtonStyle}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={(e) => {
+                  e.preventDefault();
+                  onSelectText();
+                }}
+              >
+                Select
               </button>
             )}
             {row.map((btn) => (

@@ -23,6 +23,8 @@ const state = vi.hoisted(() => ({
   clearSessionAttention: vi.fn(),
   answerSessionAttention: vi.fn(),
   rpcCommands: [] as string[],
+  terminalGetText: vi.fn(() => "terminal output"),
+  terminalPaste: vi.fn(),
 }));
 
 vi.mock("@/hooks/usePendingApprovals", () => ({ usePendingApprovals: () => ({ client: null, snapshot: { inbox: state.pending } }) }));
@@ -39,8 +41,19 @@ vi.mock("@/hooks/useBridges", () => ({ useBridges: () => ({ bridges: state.bridg
 vi.mock("@/hooks/useAllSessionEvents", () => ({ useAllSessionEvents: () => ({
   sessionActivity: state.activity, markSessionIdle: vi.fn(), clearSessionAttention: state.clearSessionAttention, answerSessionAttention: state.answerSessionAttention,
 }) }));
-vi.mock("./Terminal", () => ({ Terminal: ({ sessionId, headerActions }: { sessionId: string | null; headerActions?: ReactNode }) => <section aria-label="Terminal session header"><div data-testid="terminal">{sessionId}</div>{headerActions}</section> }));
-vi.mock("./MobileControlBar", () => ({ MobileControlBar: () => <div>Session controls</div> }));
+vi.mock("./Terminal", async () => {
+  const { forwardRef, useImperativeHandle } = await import("react");
+  return { Terminal: forwardRef(function Terminal({ sessionId, headerActions }: { sessionId: string | null; headerActions?: ReactNode }, ref) {
+    useImperativeHandle(ref, () => ({ sendInput: vi.fn(), refit: vi.fn(), getText: state.terminalGetText, paste: state.terminalPaste }));
+    return <section aria-label="Terminal session header"><div data-testid="terminal">{sessionId}</div>{headerActions}</section>;
+  }) };
+});
+vi.mock("./MobileControlBar", async () => {
+  const { forwardRef } = await import("react");
+  return { MobileControlBar: forwardRef(function MobileControlBar({ onPaste, onSelectText }: { onPaste: (text: string) => void; onSelectText: () => void }, _ref) {
+    return <div>Session controls<button onClick={onSelectText}>Select</button><button onClick={() => onPaste("pasted\ntext")}>Paste</button></div>;
+  }) };
+});
 vi.mock("./NewSessionModal", () => ({ NewSessionModal: ({ isOpen, onSubmit, onClose }: {
   isOpen: boolean; onSubmit: (prompt: string, options: { shellType: "shell" }) => Promise<void>; onClose: () => void;
 }) => isOpen ? <div>New Session<button onClick={() => { void onSubmit("", { shellType: "shell" }).then(onClose).catch(() => {}); }}>Submit new session</button></div> : null }));
@@ -413,4 +426,28 @@ it("keeps terminal controls mounted when a compact desktop switches from preview
   expect(within(tabs).getByRole("tab", { name: "Preview" }).getAttribute("aria-selected")).toBe("true");
   fireEvent.click(within(tabs).getByRole("tab", { name: "Terminal" }));
   expect(within(screen.getByRole("tabpanel", { name: "Terminal" })).getByText("Session controls")).toBeTruthy();
+});
+
+describe("mobile copy and paste wiring", () => {
+  function openOrdinary() {
+    dashboard();
+    fireEvent.click(screen.getByRole("button", { name: /Regular shell/ }));
+  }
+
+  it("opens the copy sheet with a terminal snapshot and closes it", async () => {
+    openOrdinary();
+    expect(screen.queryByRole("dialog", { name: "Copy terminal text" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Select" }));
+    const dialog = await screen.findByRole("dialog", { name: "Copy terminal text" });
+    expect(state.terminalGetText).toHaveBeenCalledWith({ maxLines: 2000 });
+    expect(dialog.textContent).toContain("terminal output");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Copy terminal text" })).toBeNull());
+  });
+
+  it("routes the key-bar paste to the terminal handle", () => {
+    openOrdinary();
+    fireEvent.click(screen.getByRole("button", { name: "Paste" }));
+    expect(state.terminalPaste).toHaveBeenCalledWith("pasted\ntext");
+  });
 });
