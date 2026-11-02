@@ -34,10 +34,12 @@ function sessionRow(page: Page, name: string) {
 
 async function expectBadgeGeometry(row: Locator) {
   const metrics = await row.evaluate((element) => {
-    const link = element.querySelector<HTMLAnchorElement>("a[data-pull-request-badge]");
+    const hitTarget = element.querySelector<HTMLButtonElement>("button[data-pull-request-badge]");
+    const link = hitTarget?.querySelector<HTMLElement>("[data-pull-request-badge-visual]");
+    const menu = element.querySelector<HTMLElement>('[aria-label="Session actions"]');
     const placeholder = element.querySelector<HTMLElement>("[data-pull-request-placeholder]");
     const button = element.querySelector<HTMLButtonElement>('button[draggable="true"]');
-    if (!link || !placeholder || !button) throw new Error("Missing PR badge geometry elements");
+    if (!link || !hitTarget || !menu || !placeholder || !button) throw new Error("Missing PR badge geometry elements");
     const rect = (target: Element) => {
       const box = target.getBoundingClientRect();
       return { x: box.x, y: box.y, width: box.width, height: box.height };
@@ -47,7 +49,7 @@ async function expectBadgeGeometry(row: Locator) {
       return { fontSize: style.fontSize, borderWidth: style.borderWidth, borderColor: style.borderColor,
         borderRadius: style.borderRadius, padding: style.padding, color: style.color };
     };
-    return { link: rect(link), placeholder: rect(placeholder), row: rect(element), button: rect(button),
+    return { link: rect(link), hitTarget: rect(hitTarget), menu: rect(menu), touch: matchMedia("(max-width: 767px), (pointer: coarse)").matches, placeholder: rect(placeholder), row: rect(element), button: rect(button),
       linkStyle: css(link), placeholderStyle: css(placeholder), placeholderVisibility: getComputedStyle(placeholder).visibility };
   });
   for (const key of ["x", "y", "width", "height"] as const) {
@@ -59,6 +61,11 @@ async function expectBadgeGeometry(row: Locator) {
   expect(metrics.linkStyle.borderRadius).toBe("3px");
   expect(metrics.linkStyle.padding).toBe("1px 4px");
   expect(metrics.placeholderVisibility).toBe("hidden");
+  if (metrics.touch) {
+    expect(metrics.hitTarget.width).toBeGreaterThanOrEqual(44);
+    expect(metrics.hitTarget.height).toBeGreaterThanOrEqual(44);
+  }
+  expect(metrics.hitTarget.x + metrics.hitTarget.width).toBeLessThanOrEqual(metrics.menu.x);
   expect(metrics.link.x).toBeGreaterThanOrEqual(metrics.row.x);
   expect(metrics.link.x + metrics.link.width).toBeLessThanOrEqual(metrics.row.x + metrics.row.width);
   expect(metrics.link.y).toBeGreaterThanOrEqual(metrics.button.y);
@@ -219,8 +226,8 @@ for (const viewport of [
       await page.reload();
       await waitForBridgeOnline(page);
       await showWorkspace();
-      await expect(sessionRow(page, targetName).getByRole("link", { name: /^PR #123 in fmktech\/ftown(?:[:;])/ })).toBeVisible();
-      await expect(sessionRow(page, otherName).getByRole("link")).toHaveCount(0);
+      await expect(sessionRow(page, targetName).getByRole("button", { name: /^Review pull request: PR #123 in fmktech\/ftown(?:[:;])/ })).toBeVisible();
+      await expect(sessionRow(page, otherName).locator("[data-pull-request-badge]")).toHaveCount(0);
       await originalRow(page, targetName).getByText(targetName, { exact: true }).click();
       await expect(headerLink).toBeVisible();
 
@@ -232,14 +239,12 @@ for (const viewport of [
       await expect(replacementLink).toBeVisible();
       await expect(headerLink).toHaveCount(0);
       await showWorkspace();
-      const sidebarBadge = sessionRow(page, targetName).getByRole("link", { name: /^PR #456 in fmktech\/ftown(?:[:;])/ });
+      const sidebarBadge = sessionRow(page, targetName).getByRole("button", { name: /^Review pull request: PR #456 in fmktech\/ftown(?:[:;])/ });
       await expect(sidebarBadge).toBeVisible();
-      await expect(sidebarBadge).toHaveAttribute("href", prTwo);
-      await expect(sidebarBadge).toHaveAttribute("aria-label", /^PR #456 in fmktech\/ftown(?:[:;]).*https:\/\/github\.com\/fmktech\/ftown\/pull\/456$/);
-      await expect(sidebarBadge).toHaveAttribute("target", "_blank");
-      await expect(sidebarBadge).toHaveAttribute("rel", "noopener noreferrer");
+      await expect(sidebarBadge).toHaveAttribute("type", "button");
+      await expect(sidebarBadge).toHaveAttribute("aria-label", /^Review pull request: PR #456 in fmktech\/ftown(?:[:;]).*https:\/\/github\.com\/fmktech\/ftown\/pull\/456$/);
       await expect(originalRow(page, targetName).locator("a")).toHaveCount(0);
-      await expect(sessionRow(page, targetName).getByRole("link")).toHaveCount(1);
+      await expect(sessionRow(page, targetName).getByRole("button", { name: /^Review pull request: PR #456/ })).toHaveCount(1);
       await expect(originalRow(page, targetName)).toHaveAttribute("draggable", "true");
       await expectBadgeGeometry(sessionRow(page, targetName));
       await originalRow(page, otherName).getByText(otherName, { exact: true }).click();
@@ -323,10 +328,9 @@ for (const viewport of [
         await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
       }
 
-      // The native sibling link opens without selecting the requesting session
-      // or resolving its independent attention request.
+      // Both entry points select the requesting session and open its review
+      // without resolving the independent attention request.
       await expect(sidebarBadge).toBeVisible();
-      await expect(sessionRow(page, targetName).getByRole("link")).toHaveCount(1);
       await expectBadgeGeometry(sessionRow(page, targetName));
       const menuControl = originalRow(page, targetName).getByRole("button", { name: "Session actions", exact: true });
       const triggerBox = await menuControl.boundingBox();
@@ -343,31 +347,30 @@ for (const viewport of [
       await page.keyboard.press("Tab");
       await expect(sidebarBadge).toBeFocused();
       expect(await sidebarBadge.evaluate(element => getComputedStyle(element).boxShadow)).not.toBe("none");
-      const [badgeKeyboardDestination] = await Promise.all([context.waitForEvent("page"), page.keyboard.press("Enter")]);
-      await expect(badgeKeyboardDestination).toHaveURL(prTwo);
-      await expect(badgeKeyboardDestination).toHaveTitle("PR destination intercepted");
-      await badgeKeyboardDestination.close();
-      await expect(shortcut).toBeVisible();
-      await expect(page.locator("main").getByText(otherName, { exact: true })).toHaveCount(1);
-      if (mobile) await expect(page.getByRole("tab", { name: "Workspace", exact: true })).toHaveClass(/mobile-tab-active/);
-      const [badgePointerDestination] = await Promise.all([context.waitForEvent("page"), mobile ? sidebarBadge.tap() : sidebarBadge.click()]);
-      await expect(badgePointerDestination).toHaveURL(prTwo);
-      await expect(badgePointerDestination).toHaveTitle("PR destination intercepted");
-      await badgePointerDestination.close();
-      await expect(shortcut).toBeVisible();
-      await expect(page.locator("main").getByText(otherName, { exact: true })).toHaveCount(1);
-      if (mobile) await expect(page.getByRole("tab", { name: "Workspace", exact: true })).toHaveClass(/mobile-tab-active/);
+      await page.keyboard.press("Enter");
+      const reviewPanel = page.getByRole("tabpanel", { name: "PR review" });
+      await expect(reviewPanel).toBeVisible();
+      await expect(page.getByRole("region", { name: `Session workspace: ${targetName}` })).toBeVisible();
+      await expect(reviewPanel.getByRole("link", { name: "Open on GitHub" })).toHaveAttribute("href", prTwo);
+      if (mobile) await expect(page.getByRole("tab", { name: "PR review", exact: true })).toHaveAttribute("aria-selected", "true");
+      await showWorkspace();
+      await originalRow(page, otherName).getByText(otherName, { exact: true }).click();
+      await showWorkspace();
+      if (mobile) await sidebarBadge.tap(); else await sidebarBadge.click();
+      await expect(reviewPanel).toBeVisible();
+      await expect(page.getByRole("region", { name: `Session workspace: ${targetName}` })).toBeVisible();
+      await showWorkspace();
+      await originalRow(page, otherName).getByText(otherName, { exact: true }).click();
+      await showWorkspace();
       await screenshot("unselected-session-pr-badge");
 
       await menuControl.focus();
       await page.keyboard.press("Enter");
       const menu = page.getByRole("menu", { name: "Session actions", exact: true });
-      const prAction = menu.getByRole("menuitem", { name: `Open pull request: PR #456 in fmktech/ftown: ${prTwo}`, exact: true });
+      const prAction = menu.getByRole("menuitem", { name: "Review pull request", exact: true });
       await expect(menu).toBeVisible();
-      await expect(prAction).toHaveAttribute("href", prTwo);
-      await expect(prAction).toHaveAttribute("target", "_blank");
-      await expect(prAction).toHaveAttribute("rel", "noopener noreferrer");
-      await expect(menu.getByRole("menuitem").first()).toHaveAccessibleName(`Open pull request: PR #456 in fmktech/ftown: ${prTwo}`);
+      await expect(prAction).toHaveAttribute("type", "button");
+      await expect(menu.getByRole("menuitem").first()).toHaveAccessibleName("Review pull request");
       const menuBox = await menu.boundingBox();
       expect(menuBox).not.toBeNull();
       expect(menuBox!.x).toBeGreaterThanOrEqual(0);
@@ -387,28 +390,26 @@ for (const viewport of [
       await expect(menu).toBeFocused();
       await page.keyboard.press("Tab");
       await expect(prAction).toBeFocused();
-      expect(await prAction.evaluate(element => getComputedStyle(element).boxShadow)).not.toBe("none");
+      expect(await prAction.evaluate(element => getComputedStyle(element).outlineStyle)).not.toBe("none");
       await expect(shortcut).toBeVisible();
       await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
       await screenshot("attention-with-pr-menu");
-      const [keyboardDestination] = await Promise.all([context.waitForEvent("page"), page.keyboard.press("Enter")]);
-      await expect(keyboardDestination).toHaveURL(prTwo);
-      await expect(keyboardDestination).toHaveTitle("PR destination intercepted");
-      await keyboardDestination.close();
+      await page.keyboard.press("Enter");
       await expect(menu).toHaveCount(0);
-      if (mobile) await menuControl.tap();
-      else await menuControl.click();
+      await expect(reviewPanel).toBeVisible();
+      await expect(page.getByRole("region", { name: `Session workspace: ${targetName}` })).toBeVisible();
+      await showWorkspace();
+      await originalRow(page, otherName).getByText(otherName, { exact: true }).click();
+      await showWorkspace();
+      if (mobile) await menuControl.tap(); else await menuControl.click();
       await expect(prAction).toBeVisible();
-      const [pointerDestination] = await Promise.all([context.waitForEvent("page"), mobile ? prAction.tap() : prAction.click()]);
-      await expect(pointerDestination).toHaveURL(prTwo);
-      await expect(pointerDestination).toHaveTitle("PR destination intercepted");
-      await pointerDestination.close();
+      if (mobile) await prAction.tap(); else await prAction.click();
       await expect(menu).toHaveCount(0);
-      await expect(page.locator("main").getByText(otherName, { exact: true })).toHaveCount(1);
-      await expect(page.locator("main").getByRole("link", { name: /PR #/ })).toHaveCount(0);
+      await expect(reviewPanel).toBeVisible();
+      await expect(page.getByRole("region", { name: `Session workspace: ${targetName}` })).toBeVisible();
+      await showWorkspace();
       await expect(shortcut).toBeVisible();
       await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
-      if (mobile) await expect(page.getByRole("tab", { name: "Workspace", exact: true })).toHaveClass(/mobile-tab-active/);
       expect(await sessionRow(page, targetName).evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
       await screenshot("attention-with-associated-pr");
@@ -467,11 +468,11 @@ for (const viewport of [
       expect(cleared.session.id).toBe(targetId);
       expect(cleared.session).not.toHaveProperty("pullRequestUrl");
       await expect(originalRow(page, targetName).getByText(/PR #/)).toHaveCount(0);
-      await expect(sessionRow(page, targetName).getByRole("link")).toHaveCount(0);
+      await expect(sessionRow(page, targetName).locator("[data-pull-request-badge]")).toHaveCount(0);
       if (mobile) await menuControl.tap();
       else await menuControl.click();
       await expect(menu).toBeVisible();
-      await expect(menu.getByRole("menuitem", { name: /^Open pull request:/ })).toHaveCount(0);
+      await expect(menu.getByRole("menuitem", { name: "Review pull request" })).toHaveCount(0);
       await page.keyboard.press("Escape");
       await expect(menu).toHaveCount(0);
       await originalRow(page, targetName).getByText(targetName, { exact: true }).click();
@@ -481,7 +482,7 @@ for (const viewport of [
       await showWorkspace();
       await expect(originalRow(page, targetName)).toBeVisible();
       await expect(originalRow(page, targetName).getByText(/PR #/)).toHaveCount(0);
-      await expect(sessionRow(page, targetName).getByRole("link")).toHaveCount(0);
+      await expect(sessionRow(page, targetName).locator("[data-pull-request-badge]")).toHaveCount(0);
       await originalRow(page, targetName).getByText(targetName, { exact: true }).click();
       await expect(page.locator("main").getByRole("link", { name: /PR #/ })).toHaveCount(0);
     } finally {

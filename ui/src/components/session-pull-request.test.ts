@@ -123,6 +123,55 @@ describe("session PR destinations", () => {
     expect(onSelectSession).not.toHaveBeenCalled();
   });
 
+  it("opens the target session review from the badge and menu without opening a link", () => {
+    const onSelectSession = vi.fn();
+    const onReviewPullRequest = vi.fn();
+    const view = render(createElement(SessionList, {
+      sessions: [session, { ...session, id: "observer", name: "Observer", pullRequestUrl: undefined }],
+      bridges: [], bridgeOrder: ["bridge"], selectedSessionId: "observer", onSelectSession, onReviewPullRequest,
+      onStopSession: vi.fn(), onRemoveSession: vi.fn(),
+    }));
+    const row = view.container.querySelector<HTMLElement>('[data-session-row="target"]')!;
+    const badge = within(row).getByRole("button", { name: `Review pull request: ${description}` });
+    expect(badge.tagName).toBe("BUTTON");
+    expect(badge.getAttribute("type")).toBe("button");
+    expect(badge.getAttribute("title")).toBe(`Review pull request: ${description}`);
+    expect(badge.getAttribute("draggable")).toBe("false");
+    expect(badge.getAttribute("href")).toBeNull();
+    expect(badge.className).toContain("pr-review-badge-button");
+    expect(badge.querySelector("[data-pull-request-badge-visual]")?.textContent).toBe("#123");
+    badge.focus(); expect(document.activeElement).toBe(badge);
+    fireEvent.click(badge);
+    expect(onReviewPullRequest).toHaveBeenCalledExactlyOnceWith("target");
+    expect(onSelectSession).not.toHaveBeenCalled();
+    fireEvent.keyDown(within(row).getByRole("button", { name: "Session actions" }), { key: "Enter" });
+    const menu = screen.getByRole("menu", { name: "Session actions" });
+    const action = within(menu).getByRole("menuitem", { name: "Review pull request" });
+    expect(action.tagName).toBe("BUTTON");
+    expect(action.className).toContain("session-context-menu-item");
+    expect(action.getAttribute("href")).toBeNull();
+    fireEvent.click(action);
+    expect(onReviewPullRequest).toHaveBeenLastCalledWith("target");
+    expect(onReviewPullRequest).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(onSelectSession).not.toHaveBeenCalled();
+  });
+
+  it("updates and removes review actions when the linked PR changes", () => {
+    const onReviewPullRequest = vi.fn();
+    const props = { sessions: [session], bridges: [], bridgeOrder: ["bridge"], selectedSessionId: null,
+      onSelectSession: vi.fn(), onReviewPullRequest, onStopSession: vi.fn(), onRemoveSession: vi.fn() };
+    const view = render(createElement(SessionList, props));
+    expect(screen.getByRole("button", { name: /Review pull request: PR #123/ })).toBeTruthy();
+    view.rerender(createElement(SessionList, { ...props, sessions: [{ ...session, pullRequestUrl: "https://github.com/Org/repo/pull/456/?tab=files" }] }));
+    expect(screen.getByRole("button", { name: /Review pull request: PR #456/ })).toBeTruthy();
+    view.rerender(createElement(SessionList, { ...props, sessions: [{ ...session, pullRequestUrl: "https://github.com.evil.test/Org/repo/pull/123" }] }));
+    expect(screen.queryByRole("button", { name: /Review pull request: PR #/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Session actions" }));
+    expect(screen.queryByRole("menuitem", { name: "Review pull request" })).toBeNull();
+    expect(onReviewPullRequest).not.toHaveBeenCalled();
+  });
+
   it("uses replaced metadata and omits the PR action after clearing", () => {
     const props = {
       sessions: [session], bridges: [], bridgeOrder: ["bridge"], selectedSessionId: null,

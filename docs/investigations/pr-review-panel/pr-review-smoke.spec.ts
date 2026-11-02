@@ -168,5 +168,55 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       expect(outboundGithub).toEqual([]);
     } finally { await fixture.cleanup(); }
   });
+  test("sidebar badge and menu open the target session review", async ({ page }, info) => {
+    test.setTimeout(150_000);
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    const fixture = await createPreviewFixture();
+    const marker = `PR_REVIEW_ENTRY_${info.workerIndex}_${Date.now().toString(36)}`;
+    const targetName = `Target ${marker}`;
+    const otherName = `Other ${marker}`;
+    const popups: Page[] = [];
+    page.on("popup", popup => popups.push(popup));
+    try {
+      const target = await fixture.create(targetName);
+      await fixture.create(otherName);
+      const linked = await fixture.cli(target, ["pr", "https://github.com/owner/repo/pull/12"]);
+      expect(linked.code).toBe(0);
+      await login(page, sharedEmail());
+      await waitForBridgeOnline(page);
+      await selectSession(page, otherName);
+      if (viewport.name === "mobile") await page.getByRole("tab", { name: "Workspace", exact: true }).click();
+      const row = page.locator("[data-session-row]").filter({ has: page.getByText(targetName, { exact: true }) });
+      const badge = row.getByRole("button", { name: /Review pull request: PR #12/ });
+      await expect(badge).toBeVisible();
+      if (viewport.name === "mobile") {
+        const hit = await badge.boundingBox();
+        const menuButton = await row.getByRole("button", { name: "Session actions", exact: true }).boundingBox();
+        expect(hit).not.toBeNull(); expect(menuButton).not.toBeNull();
+        expect(hit!.width).toBeGreaterThanOrEqual(44); expect(hit!.height).toBeGreaterThanOrEqual(44);
+        expect(hit!.x + hit!.width).toBeLessThanOrEqual(menuButton!.x);
+      }
+      await badge.focus(); await page.keyboard.press("Enter");
+      await expect(review(page)).toBeVisible();
+      await expect(page.getByRole("region", { name: `Session workspace: ${targetName}` })).toBeVisible();
+      await expect(review(page).locator("h2")).toHaveText("<img src=x onerror=bad()>");
+      await expect(review(page).getByRole("link", { name: "Open on GitHub" })).toHaveAttribute("href", "https://github.com/owner/repo/pull/12");
+      if (viewport.name === "mobile") await expect(page.getByRole("tab", { name: "PR review", exact: true })).toHaveAttribute("aria-selected", "true");
+      await selectSession(page, otherName);
+      if (viewport.name === "mobile") await page.getByRole("tab", { name: "Workspace", exact: true }).click();
+      await row.getByRole("button", { name: "Session actions", exact: true }).click();
+      const menu = page.getByRole("menu", { name: "Session actions" });
+      await expect(menu).toBeVisible();
+      await menu.getByRole("menuitem", { name: "Review pull request", exact: true }).focus();
+      await page.keyboard.press("Enter");
+      await expect(menu).toHaveCount(0);
+      await expect(review(page)).toBeVisible();
+      await expect(page.getByRole("region", { name: `Session workspace: ${targetName}` })).toBeVisible();
+      await expect(review(page).locator("h2")).toHaveText("<img src=x onerror=bad()>");
+      if (viewport.name === "mobile") await expect(page.getByRole("tab", { name: "PR review", exact: true })).toHaveAttribute("aria-selected", "true");
+      expect(popups).toHaveLength(0);
+      await noPageOverflow(page);
+    } finally { await fixture.cleanup(); }
+  });
   });
 }

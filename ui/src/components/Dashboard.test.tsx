@@ -403,6 +403,44 @@ describe("navigation and selected-session actions", () => {
   });
 });
 
+describe("sidebar PR review navigation", () => {
+  it.each([true, false])("opens the target session review from badge and menu, including from inbox (desktop=%s)", async desktop => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: desktop, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    state.sessions = [session("ordinary", "Regular shell"), session("target", "Target review", {
+      pullRequestUrl: "https://github.com/Org/repo/pull/123", pullRequestReviewGeneration: "target-generation",
+      preview: { id: "12345678-1234-4234-8234-123456789abc", fileName: "demo.html" },
+    })];
+    const { container } = dashboard();
+    fireEvent.click(screen.getByRole("button", { name: /Regular shell/ }));
+    expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
+    if (!desktop) fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+    fireEvent.click(screen.getByRole("button", { name: "Inbox, 0 messages" }));
+    expect(screen.getByRole("region", { name: "Inbox" })).toBeTruthy();
+    if (!desktop) {
+      fireEvent.click(screen.getByRole("button", { name: "Back to workspace" }));
+      fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+    }
+    const target = container.querySelector<HTMLElement>('[data-session-row="target"]')!;
+    fireEvent.click(within(target).getByRole("button", { name: /Review pull request: PR #123/ }));
+    expect(screen.queryByRole("region", { name: "Inbox" })).toBeNull();
+    expect(screen.getByTestId("terminal").textContent).toBe("target");
+    await waitFor(() => expect(screen.getByRole("tabpanel", { name: "PR review" })).toBeTruthy());
+    if (!desktop) expect(screen.getByRole("tab", { name: "PR review" }).getAttribute("aria-selected")).toBe("true");
+    expect(within(screen.getByRole("tabpanel", { name: "PR review" })).getByRole("link", { name: "Open on GitHub" }).getAttribute("href")).toBe("https://github.com/Org/repo/pull/123");
+    if (desktop) fireEvent.click(within(screen.getByRole("tablist", { name: "Session view" })).getByRole("tab", { name: "Preview" }));
+    else {
+      fireEvent.click(screen.getByRole("tab", { name: "Preview" }));
+      fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+    }
+    fireEvent.click(within(target).getByRole("button", { name: "Session actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Review pull request" }));
+    expect(screen.queryByRole("menu")).toBeNull();
+    await waitFor(() => expect(screen.getByRole("tabpanel", { name: "PR review" })).toBeTruthy());
+    if (!desktop) expect(screen.getByRole("tab", { name: "PR review" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByTestId("terminal").textContent).toBe("target");
+  });
+});
+
 describe("device review navigation", () => {
   it.each([true, false])("shows the pending count and opens devices (desktop=%s)", async desktop => {
     window.matchMedia = vi.fn().mockReturnValue({ matches: desktop, addEventListener: vi.fn(), removeEventListener: vi.fn() });
