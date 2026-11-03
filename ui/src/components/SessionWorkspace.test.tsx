@@ -289,6 +289,8 @@ it('focuses the link confirmation once and keeps user focus across unrelated ren
     const { rerender } = render(workspace(0));
     await act(async () => {});
     const frame = screen.getByTitle('HTML preview: demo.html') as HTMLIFrameElement;
+    const expand = screen.getByRole('button', { name: 'Expand preview' });
+    expand.focus(); expect(document.activeElement).toBe(expand);
     act(() => { window.dispatchEvent(new MessageEvent('message', { data: { channel: 'ftown-preview-link-v1', kind: 'open-link', url: 'https://preview.example.test/x' }, source: frame.contentWindow, origin: 'null' })); });
     const prompt = screen.getByRole('dialog', { name: 'Open external link' });
     // Focused once on mount (non-activating container), not the Open button.
@@ -298,6 +300,10 @@ it('focuses the link confirmation once and keeps user focus across unrelated ren
     // An unrelated render must not move focus back to the dialog.
     rerender(workspace(1));
     expect(document.activeElement).toBe(open);
+    // Dismissing restores focus to the element focused before the prompt.
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Cancel' })); });
+    expect(screen.queryByRole('dialog', { name: 'Open external link' })).toBeNull();
+    expect(document.activeElement).toBe(expand);
   } finally {
     if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
   }

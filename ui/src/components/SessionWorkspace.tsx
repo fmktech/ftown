@@ -47,7 +47,19 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
   // Stable callback ref: focus the non-activating dialog once on mount only.
   // An inline ref would be re-created every render and re-focus the dialog on
   // unrelated renders (conversation polls, draft typing), stealing focus.
-  const focusLinkPrompt = useCallback((node: HTMLDivElement | null) => { if (node && document.activeElement !== node) node.focus(); }, []);
+  const previouslyFocused = useRef<HTMLElement | null>(null);
+  const focusLinkPrompt = useCallback((node: HTMLDivElement | null) => {
+    if (node) {
+      // Capture the element that had focus before the prompt, then focus the
+      // non-activating dialog. Restored when the prompt is dismissed.
+      previouslyFocused.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      if (document.activeElement !== node) node.focus();
+    } else {
+      const previous = previouslyFocused.current;
+      previouslyFocused.current = null;
+      if (previous && previous.isConnected) previous.focus();
+    }
+  }, []);
   const conversation = usePreviewConversation({ client, userId, session, sessions: sessions.length ? sessions : session ? [session] : [], enabled: activeExpanded && conversationOpen && open, readable, sendCommand, subscribeAuthority });
   useEffect(() => {
     const node = mainRef.current; if (!node) return;
