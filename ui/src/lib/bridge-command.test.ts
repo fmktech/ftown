@@ -3,7 +3,23 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildBridgeCommand } from './bridge-command';
+import { buildBridgeCommand, buildBridgeStartCommand } from './bridge-command';
+
+describe('bridge start command', () => {
+  it('starts the installed launcher at the given API origin', () => {
+    expect(buildBridgeStartCommand({ apiUrl: 'https://ftown.example:8443' })).toBe(
+      "ftown start --api-url 'https://ftown.example:8443'",
+    );
+  });
+  it('quotes shell metacharacters and embedded single quotes as one literal argument', () => {
+    expect(buildBridgeStartCommand({ apiUrl: "https://example/'$(touch /tmp/never); space" })).toBe(
+      "ftown start --api-url 'https://example/'\\''$(touch /tmp/never); space'",
+    );
+  });
+  it('starts Solo', () => {
+    expect(buildBridgeStartCommand({ solo: true })).toBe('ftown start --solo');
+  });
+});
 
 describe('canonical bridge command', () => {
   it('explicitly sets up and starts the latest canonical package at the current origin', () => {

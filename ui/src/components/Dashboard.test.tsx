@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "@/types";
 import type { SessionActivity } from "@/hooks/useAllSessionEvents";
 import { Dashboard } from "./Dashboard";
-import { buildBridgeCommand } from "@/lib/bridge-command";
+import { buildBridgeCommand, buildBridgeStartCommand } from "@/lib/bridge-command";
 import type { MessageClient } from "@/lib/message-client";
 import type { ReactNode } from "react";
 import { useBridgeUpdates } from "@/hooks/useBridgeUpdates";
@@ -163,26 +163,88 @@ describe("dashboard after recurring automation retirement", () => {
 });
 
 describe("bridge connection command", () => {
-  it("copies exactly the canonical command displayed for the current origin", async () => {
+  const setupCommand = () => buildBridgeCommand({ apiUrl: window.location.origin });
+  const startCommand = () => buildBridgeStartCommand({ apiUrl: window.location.origin });
+  const openPanel = () => fireEvent.click(screen.getByRole("button", { name: "Connect a bridge" }));
+
+  it("shows the setup and start commands as separate code blocks", () => {
+    dashboard();
+    openPanel();
+    const setup = screen.getByText(setupCommand());
+    const start = screen.getByText(startCommand());
+    expect(setup.tagName).toBe("CODE");
+    expect(start.tagName).toBe("CODE");
+    expect(setup.textContent).toBe(setupCommand());
+    expect(start.textContent).toBe(startCommand());
+    expect(setup).not.toBe(start);
+  });
+  it("labels both steps, the npx hint and the approval footer", () => {
+    dashboard();
+    openPanel();
+    expect(screen.getByText("Connect a bridge:")).toBeTruthy();
+    expect(screen.getByText("1. First time on this computer — install and start")).toBeTruthy();
+    expect(screen.getByText("Setup copies ftown into ~/.ftown and adds the ftown command to your PATH.")).toBeTruthy();
+    expect(screen.getByText("2. Every start after that")).toBeTruthy();
+    expect(screen.getByText("Use this instead of npx — the installed copy is what lets the bridge install updates from this dashboard. Open a new terminal if ftown isn't found.")).toBeTruthy();
+    expect(screen.getByText(/After the first start, approve the computer here:/)).toBeTruthy();
+    expect(screen.queryByText(/Run this on the machine/)).toBeNull();
+    expect(screen.getByRole("link", { name: "Approve a device" }).getAttribute("href")).toBe("/pair");
+    expect(screen.getByRole("link", { name: "Manage devices" }).getAttribute("href")).toBe("/devices");
+  });
+  it("copies exactly the setup command and marks only that button copied", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     dashboard();
-    fireEvent.click(screen.getByRole("button", { name: "Connect a bridge" }));
-    const command = buildBridgeCommand({ apiUrl: window.location.origin });
-    expect(screen.getByText(command).tagName).toBe("CODE");
-    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(command));
+    openPanel();
+    fireEvent.click(screen.getByRole("button", { name: "Copy setup command" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(setupCommand()));
+    expect(writeText).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Copy setup command" }).textContent).toBe("✓ Copied"));
+    expect(screen.getByRole("button", { name: "Copy start command" }).textContent).toBe("Copy");
   });
-  it("preserves clipboard fallback with the same displayed command", async () => {
+  it("copies exactly the start command and marks only that button copied", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    dashboard();
+    openPanel();
+    fireEvent.click(screen.getByRole("button", { name: "Copy start command" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(startCommand()));
+    expect(writeText).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Copy start command" }).textContent).toBe("✓ Copied"));
+    expect(screen.getByRole("button", { name: "Copy setup command" }).textContent).toBe("Copy");
+  });
+  it("keeps the latest copied state when an earlier reset timer is pending", async () => {
+    vi.useFakeTimers();
+    try {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+      dashboard();
+      openPanel();
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Copy setup command" })); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Copy start command" })); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(screen.getByRole("button", { name: "Copy start command" }).textContent).toBe("✓ Copied");
+      expect(screen.getByRole("button", { name: "Copy setup command" }).textContent).toBe("Copy");
+      await act(async () => { await vi.advanceTimersByTimeAsync(1100); });
+      expect(screen.getByRole("button", { name: "Copy start command" }).textContent).toBe("Copy");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it.each([
+    { button: "Copy setup command", expected: () => buildBridgeCommand({ apiUrl: window.location.origin }) },
+    { button: "Copy start command", expected: () => buildBridgeStartCommand({ apiUrl: window.location.origin }) },
+  ])("preserves clipboard fallback for $button with the displayed command", async ({ button, expected }) => {
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: vi.fn().mockRejectedValue(new Error("blocked")) } });
     const copy = vi.fn(() => true);
     Object.defineProperty(document, "execCommand", { configurable: true, value: copy });
     let copied = "";
     copy.mockImplementation(() => { copied = document.querySelector("textarea")?.value ?? ""; return true; });
     dashboard();
-    fireEvent.click(screen.getByRole("button", { name: "Connect a bridge" }));
-    const command = screen.getByText(buildBridgeCommand({ apiUrl: window.location.origin })).textContent;
-    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    openPanel();
+    const command = screen.getByText(expected()).textContent;
+    fireEvent.click(screen.getByRole("button", { name: button }));
     await waitFor(() => expect(copy).toHaveBeenCalledWith("copy"));
     expect(copied).toBe(command); expect(document.querySelector("textarea")).toBeNull();
   });
