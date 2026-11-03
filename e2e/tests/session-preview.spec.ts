@@ -290,6 +290,20 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     await expect(chatPrompt).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Collapse preview", exact: true })).toBeVisible();
     await expect(page.locator("#preview-conversation")).toBeVisible();
+    // An unsolicited iframe message must not arm the affirmative action: with
+    // the chat focused, an injected link request must not open a popup on Enter.
+    await page.getByRole("textbox", { name: "Message the agent" }).focus();
+    await documentFrame(page, fileName).locator("body").evaluate(() => {
+      window.parent.postMessage({ channel: "ftown-preview-link-v1", kind: "open-link", url: "https://preview.example.test/unsolicited" }, "*");
+    });
+    const injectedPrompt = page.getByRole("dialog", { name: "Open external link" });
+    await expect(injectedPrompt).toBeVisible();
+    await expect(injectedPrompt.getByRole("button", { name: "Open", exact: true })).not.toBeFocused();
+    const noPopup = context.waitForEvent("page", { timeout: 500 }).catch(() => null);
+    await page.keyboard.press("Enter");
+    expect(await noPopup).toBeNull();
+    await injectedPrompt.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(injectedPrompt).toHaveCount(0);
     await page.getByRole("textbox", { name: "Message the agent" }).fill("Draft survives preview refresh");
     await screenshot(page, info, "preview-expanded-conversation");
     await page.getByRole("button", { name: "Collapse conversation", exact: true }).click();
