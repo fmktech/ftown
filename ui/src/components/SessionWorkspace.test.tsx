@@ -304,6 +304,21 @@ it('focuses the link confirmation once and keeps user focus across unrelated ren
     act(() => { fireEvent.click(screen.getByRole('button', { name: 'Cancel' })); });
     expect(screen.queryByRole('dialog', { name: 'Open external link' })).toBeNull();
     expect(document.activeElement).toBe(expand);
+    const dispatchLink = () => act(() => { window.dispatchEvent(new MessageEvent('message', { data: { channel: 'ftown-preview-link-v1', kind: 'open-link', url: 'https://preview.example.test/y' }, source: frame.contentWindow, origin: 'null' })); });
+    // Escape dismissal also restores focus.
+    dispatchLink();
+    const escapePrompt = screen.getByRole('dialog', { name: 'Open external link' });
+    act(() => { fireEvent.keyDown(escapePrompt, { key: 'Escape' }); });
+    expect(screen.queryByRole('dialog', { name: 'Open external link' })).toBeNull();
+    expect(document.activeElement).toBe(expand);
+    // Confirming opens the frozen target and also restores focus.
+    const openSpy = vi.fn();
+    vi.stubGlobal('open', openSpy);
+    dispatchLink();
+    act(() => { fireEvent.click(screen.getByRole('button', { name: 'Open' })); });
+    expect(openSpy).toHaveBeenCalledWith('https://preview.example.test/y', '_blank', 'noopener,noreferrer');
+    expect(screen.queryByRole('dialog', { name: 'Open external link' })).toBeNull();
+    expect(document.activeElement).toBe(expand);
   } finally {
     if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
   }
