@@ -1,13 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { boundedMatchIndexes } from './bounded-regex.js';
+import {
+  boundedMatchIndexes,
+  GrepBusyError,
+  GREP_MAX_CONCURRENT,
+  GREP_MAX_QUEUE,
+} from './bounded-regex.js';
 
 test('boundedMatchIndexes returns matching line indexes case-insensitively', async () => {
   assert.deepEqual(await boundedMatchIndexes('foo', ['a foo b', 'bar', 'FOO']), [0, 2]);
 });
 
-test('boundedMatchIndexes throws on an invalid pattern', () => {
-  assert.throws(() => boundedMatchIndexes('(', ['x']), SyntaxError);
+test('boundedMatchIndexes rejects on an invalid pattern', async () => {
+  await assert.rejects(() => boundedMatchIndexes('(', ['x']), SyntaxError);
 });
 
 test('boundedMatchIndexes bounds catastrophic backtracking instead of stalling', async () => {
@@ -20,4 +25,20 @@ test('boundedMatchIndexes bounds catastrophic backtracking instead of stalling',
 test('boundedMatchIndexes bounds overlap-alternative backtracking', async () => {
   const result = await boundedMatchIndexes('(a|aa)+$', ['a'.repeat(40) + '!'], 300);
   assert.equal(result, null);
+});
+
+test('boundedMatchIndexes rejects overload once the worker pool and queue are saturated', async () => {
+  // A catastrophic pattern holds each worker until its budget expires, so the
+  // first GREP_MAX_CONCURRENT occupy slots and the next GREP_MAX_QUEUE wait.
+  const pattern = '(.|..)+X$';
+  const lines = ['ordinary terminal output without suffix!'];
+  const inflight: Promise<unknown>[] = [];
+  try {
+    for (let i = 0; i < GREP_MAX_CONCURRENT + GREP_MAX_QUEUE; i++) {
+      inflight.push(boundedMatchIndexes(pattern, lines, 100));
+    }
+    await assert.rejects(() => boundedMatchIndexes(pattern, lines, 100), GrepBusyError);
+  } finally {
+    await Promise.allSettled(inflight);
+  }
 });

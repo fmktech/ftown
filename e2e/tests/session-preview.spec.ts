@@ -111,7 +111,7 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
 
     const registration = await fixture.register(target, fileName);
     await expect(documentFrame(page, fileName).getByRole("heading", { name: `${marker} version 1`, exact: true })).toBeVisible();
-    await expect(iframe(page, fileName)).toHaveAttribute("sandbox", "allow-scripts allow-popups allow-popups-to-escape-sandbox");
+    await expect(iframe(page, fileName)).toHaveAttribute("sandbox", "allow-scripts");
     await expect(iframe(page, fileName)).toHaveAttribute("referrerpolicy", "no-referrer");
     expect(await documentFrame(page, fileName).locator("#unicode").evaluate((element) => element.textContent?.endsWith("😀 boundary ✓"))).toBe(true);
     expect(await documentFrame(page, fileName).locator("#data-image").evaluate((element) => element instanceof HTMLImageElement && element.complete && element.naturalWidth === 2)).toBe(true);
@@ -129,13 +129,19 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     await iframe(page, fileName).evaluate((element, value) => element.setAttribute("data-preview-node", value), suffix);
     const originalUrl = page.url();
     for (const linkId of ["external-link", "dynamic-link"]) {
-      const popupPromise = context.waitForEvent("page");
       await documentFrame(page, fileName).locator(`#${linkId}`).click();
+      // The sandbox cannot open windows; the parent asks the user to confirm.
+      const prompt = page.getByRole("dialog", { name: "Open external link" });
+      await expect(prompt).toBeVisible();
+      await expect(prompt).toContainText("preview.example.test");
+      const popupPromise = context.waitForEvent("page");
+      await prompt.getByRole("button", { name: "Open", exact: true }).click();
       const popup = await popupPromise;
       await expect(popup.getByRole("heading", { name: "External preview destination" })).toBeVisible();
       expect(new URL(popup.url()).hostname).toBe("preview.example.test");
       expect(await popup.evaluate(() => window.opener)).toBeNull();
       await popup.close();
+      await expect(prompt).toHaveCount(0);
       expect(page.url()).toBe(originalUrl);
       await expect(iframe(page, fileName)).toHaveAttribute("data-preview-node", suffix);
       await expect(count).toHaveText("Count: 1");

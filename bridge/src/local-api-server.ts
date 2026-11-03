@@ -9,7 +9,7 @@ import { executeSecurePacket } from './security/bridge/execute.js';
 import type { SecureExecutionObserver } from './security/bridge/execution-observer.js';
 import { observeHttpDelivery, scopedUpdateObserver } from './update-effects.js';
 import { nativeWake } from './security/bridge/native-wake.js';
-import { boundedMatchIndexes } from './bounded-regex.js';
+import { boundedMatchIndexes, GrepBusyError } from './bounded-regex.js';
 
 import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 
@@ -1067,7 +1067,11 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       let indexes: number[] | null;
       try {
         indexes = await boundedMatchIndexes(pattern, allLines);
-      } catch {
+      } catch (error) {
+        if (error instanceof GrepBusyError) {
+          jsonResponse(res, 429, { error: 'Too many concurrent searches' });
+          return;
+        }
         jsonResponse(res, 400, { error: 'Invalid regex pattern' });
         return;
       }

@@ -38,17 +38,16 @@ describe('preview protocol validation', () => {
     expect(html.indexOf('Content-Security-Policy')).toBeLessThan(html.indexOf('<base'));
     expect(html.indexOf('Content-Security-Policy')).toBeLessThan(html.indexOf('<script>'));
     expect(html.indexOf('<script>')).toBeLessThan(html.indexOf('<base'));
-    // External links are forwarded to the parent instead of opened in the iframe
-    // External links are blocked outright: no window.open and no host message
-    // channel from the untrusted preview (a message is not proof of a click).
+    // The preview forwards external-link requests to the parent, which confirms
+    // before opening; the frame itself never calls window.open.
+    expect(html).toContain('ftown-preview-link-v1');
     expect(html).not.toContain('window.open');
-    expect(html).not.toContain('ftown-preview-link');
     expect(html).toContain("connect-src 'none'");
     expect(previewRatioBounds(648)).toEqual([37.5, 62.5]);
     expect(clampPreviewRatio(0, 648)).toBe(37.5);
     expect(clampPreviewRatio(100, 648)).toBe(62.5);
   });
-  it('blocks external link navigation without opening a window or messaging the parent', () => {
+  it('forwards external link clicks to the parent for confirmation without opening a window', () => {
     class TestElement {
       constructor(public value: string) {}
       closest(selector: string) { expect(selector).toBe('a[href],area[href]'); return this; }
@@ -63,8 +62,9 @@ describe('preview protocol validation', () => {
     }
     class TestMouseEvent extends TestEvent { get button() { return this.buttonValue; } }
     let listener: ((event: TestMouseEvent) => void) | undefined;
-    const calls: string[] = [];
-    const contextWindow = { open: () => { calls.push('open'); }, parent: { postMessage: () => { calls.push('post'); } }, location: { hash: '' } };
+    const posted: unknown[][] = [];
+    const opened: unknown[][] = [];
+    const contextWindow = { open: (...args: unknown[]) => { opened.push(args); }, parent: { postMessage: (...args: unknown[]) => { posted.push(args); } }, location: { hash: '' } };
     const document = { addEventListener: (type: string, callback: (event: TestMouseEvent) => void, capture: boolean) => { expect(type).toBe('click'); expect(capture).toBe(true); listener = callback; } };
     const wrapped = previewDocument('<p>user markup</p>');
     const script = wrapped.match(/<script>([\s\S]*?)<\/script>/)?.[1];
@@ -78,11 +78,13 @@ describe('preview protocol validation', () => {
       listener(event); expect(event.prevented).toBe(true); expect(event.stopped).toBe(true);
     };
     click('https://example.test/path');
-    expect(calls).toEqual([]);
+    // The frame forwards the target and never opens a window itself.
+    expect(opened).toEqual([]);
+    expect(posted).toEqual([[{ channel: 'ftown-preview-link-v1', kind: 'open-link', url: 'https://example.test/path' }, '*']]);
     for (const blocked of ['/relative', 'javascript:alert(1)', 'data:text/html,x', 'file:///tmp/x', 'mailto:user@example.test']) click(blocked);
     click('https://example.test/other', false); click('https://example.test/other', true, 1);
-    expect(calls).toEqual([]);
-    click('#section'); expect(contextWindow.location.hash).toBe('#section'); expect(calls).toEqual([]);
+    expect(posted).toHaveLength(1);
+    click('#section'); expect(contextWindow.location.hash).toBe('#section'); expect(posted).toHaveLength(1);
   });
 
 });

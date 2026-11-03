@@ -15,6 +15,10 @@ export REGISTRATION_ENABLED="true"
 # Auth.js v5 does not trust the Host header under `next start` (prod) unless told to.
 # Vercel sets this automatically; we set it for the local/CI prod run.
 export AUTH_TRUST_HOST="true"
+# Test-only: the local/CI UI is fronted by the E2E fixtures' synthetic x-real-ip
+# source (see e2e/helpers/app.ts). Without this the UI would fail closed to the
+# shared "unknown" bucket. Production deployments leave this unset.
+export FTOWN_TRUSTED_PROXY="1"
 # host = localhost so neon() targets https://localhost/sql -> the neon-http-shim.
 export DATABASE_URL="postgresql://ftown:ftown@localhost/ftown" # gitleaks:allow
 # Trust the shim's self-signed cert (honoured by Node global fetch / undici).
