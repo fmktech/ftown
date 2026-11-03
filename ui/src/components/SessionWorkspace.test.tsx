@@ -56,7 +56,7 @@ it('preserves iframe and terminal nodes through expansion and benign auth checks
   const workspace = (readable: boolean, reviewOpen = false, isDesktop = true, mobileTab: "terminal" | "preview" | "review" = "preview") => <SessionWorkspace session={session} client={client} userId="user" readable={readable} sendCommand={sendCommand} subscribeAuthority={subscribeAuthority} securityGeneration={0} open onClose={vi.fn()} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={vi.fn()} onRefit={vi.fn()} reviewOpen={reviewOpen} reviewActivation={reviewOpen ? 1 : 0}><div data-testid="terminal-node">Terminal content</div></SessionWorkspace>;
   const { container, rerender } = render(workspace(true));
   const frame = await screen.findByTitle('HTML preview: demo.html');
-  expect(frame.getAttribute('sandbox')).toBe('allow-scripts allow-popups allow-popups-to-escape-sandbox');
+  expect(frame.getAttribute('sandbox')).toBe('allow-scripts');
   const terminal = screen.getByTestId('terminal-node');
   const separator = screen.getByRole('separator', { name: 'Resize terminal and preview' });
   fireEvent.keyDown(separator, { key: 'ArrowRight' });

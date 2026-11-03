@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import { PREVIEW_SCROLL_CHANNEL, PREVIEW_SCROLL_MAX, PREVIEW_SCROLL_SNAPSHOT_MS, type PreviewScrollPosition } from '@/lib/preview-scroll-protocol';
+import { PREVIEW_SCROLL_CHANNEL, PREVIEW_SCROLL_MAX, PREVIEW_SCROLL_SNAPSHOT_MS, PREVIEW_LINK_CHANNEL, type PreviewScrollPosition } from '@/lib/preview-scroll-protocol';
 
 interface Candidate { html: string; key: string }
 interface Display extends Candidate { documentId: string; owner: string; hardEpoch: number }
@@ -41,6 +41,18 @@ export function usePreviewScroll(candidate: Candidate | null, owner: string, get
       const current = displayRef.current;
       if (!current || current.hardEpoch !== getHardEpoch() || event.source !== iframeRef.current?.contentWindow || event.origin !== 'null' || !event.data || typeof event.data !== 'object' || Array.isArray(event.data)) return;
       const data = event.data as Record<string, unknown>;
+      if (data.channel === PREVIEW_LINK_CHANNEL) {
+        // The iframe is sandboxed without allow-popups, so untrusted HTML cannot
+        // open windows itself. It forwards http(s) link clicks here; we re-validate
+        // source+origin above and the scheme, then open with noopener/noreferrer.
+        if (data.kind !== 'open-link' || exact(data, ['channel', 'kind', 'url']) === false) return;
+        if (typeof data.url !== 'string' || data.url.length > 2048) return;
+        try {
+          const url = new URL(data.url);
+          if (url.protocol === 'http:' || url.protocol === 'https:') window.open(url.href, '_blank', 'noopener,noreferrer');
+        } catch { /* Invalid URLs are ignored. */ }
+        return;
+      }
       if (data.channel !== PREVIEW_SCROLL_CHANNEL || data.documentId !== current.documentId || typeof data.kind !== 'string') return;
       if (data.kind === 'ready' && !restored.current && exact(data, ['channel', 'documentId', 'kind'])) {
         iframeRef.current?.contentWindow?.postMessage({ channel: PREVIEW_SCROLL_CHANNEL, documentId: current.documentId, kind: 'restore', ...coords.current }, '*');

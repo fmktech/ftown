@@ -48,7 +48,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "userCode is required" }, { status: 400 });
   }
 
-  await denyPairingRequest(body.userCode);
+  await denyPairingRequest(body.userCode, email);
 
   return NextResponse.json({ ok: true });
 }

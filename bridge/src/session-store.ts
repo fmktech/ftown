@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, readdir, appendFile, rm, truncate, stat, open, rename } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir, appendFile, rm, truncate, stat, open, rename, chmod } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -67,7 +67,7 @@ export class SessionStore {
     await this.withSessionWrite(session.id, async () => {
       if (this.retiredSessionIds.has(session.id)) return;
       const dir = this.sessionDir(session.id);
-      await mkdir(dir, { recursive: true });
+      await mkdir(dir, { recursive: true, mode: 0o700 });
       const filePath = this.sessionFilePath(session.id);
       const tempFilePath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
 
@@ -75,7 +75,9 @@ export class SessionStore {
         // Publish only complete snapshots. Writing the live path in place lets a
         // concurrent API read observe the truncate/write window and JSON.parse an
         // incomplete document. A same-directory rename is atomic for readers.
-        await writeFile(tempFilePath, JSON.stringify(session, null, 2), 'utf-8');
+        // 0600: session.json carries the env map with provider tokens, the exact
+        // field toWireSession strips from the wire. Never world-readable.
+        await writeFile(tempFilePath, JSON.stringify(session, null, 2), { encoding: 'utf-8', mode: 0o600 });
         await rename(tempFilePath, filePath);
       } catch (error) {
         await rm(tempFilePath, { force: true }).catch(() => undefined);
@@ -116,9 +118,9 @@ export class SessionStore {
   async appendTerminalData(sessionId: string, data: string): Promise<void> {
     await this.withSessionWrite(sessionId, async () => {
       if (this.retiredSessionIds.has(sessionId)) return;
-      await mkdir(this.sessionDir(sessionId), { recursive: true });
+      await mkdir(this.sessionDir(sessionId), { recursive: true, mode: 0o700 });
       const filePath = this.terminalLogPath(sessionId);
-      await appendFile(filePath, data, 'utf-8');
+      await appendFile(filePath, data, { encoding: 'utf-8', mode: 0o600 });
       await this.trimTerminalLogIfNeeded(filePath);
     });
   }
@@ -163,7 +165,7 @@ export class SessionStore {
       // Rewrite via a temp file + atomic rename so a concurrent full-file reader
       // (loadTerminalLog runs outside the lock) never observes a partial file.
       const tmpPath = `${filePath}.trim-${process.pid}.tmp`;
-      await writeFile(tmpPath, Buffer.concat([marker, body]));
+      await writeFile(tmpPath, Buffer.concat([marker, body]), { mode: 0o600 });
       await rename(tmpPath, filePath);
     } catch (err) {
       console.error(`[SessionStore] Failed to trim terminal log ${filePath}:`, err);
@@ -180,10 +182,33 @@ export class SessionStore {
 
   /** Append a tombstone for a removed session to <dataDir>/archive.jsonl. */
   async archiveSession(session: Session): Promise<void> {
-    await mkdir(dirname(this.archivePath), { recursive: true });
+    await mkdir(dirname(this.archivePath), { recursive: true, mode: 0o700 });
     const record: ArchivedSession = { ...session, removedAt: new Date().toISOString() };
     // Tombstones retain session env (API keys); owner-only like session-registry.
     await appendFile(this.archivePath, `${JSON.stringify(record)}\n`, { encoding: 'utf-8', mode: 0o600 });
+  }
+
+  /**
+   * Tighten permissions on state created before write-time modes were added.
+   * session.json / terminal.log / inbox.jsonl can contain provider tokens and
+   * full terminal scrollback, so they must never be world-readable. Best-effort:
+   * a chmod failure (e.g. a file owned by another user) must not stop startup.
+   */
+  async hardenPermissions(): Promise<void> {
+    const tighten = async (path: string, mode: number): Promise<void> => {
+      try { await chmod(path, mode); } catch { /* best effort */ }
+    };
+    await tighten(this.sessionsDir, 0o700);
+    let entries: string[] = [];
+    try { entries = await readdir(this.sessionsDir); } catch { return; }
+    for (const id of entries) {
+      const dir = this.sessionDir(id);
+      await tighten(dir, 0o700);
+      await tighten(join(dir, 'session.json'), 0o600);
+      await tighten(join(dir, 'terminal.log'), 0o600);
+      await tighten(join(dir, 'inbox.jsonl'), 0o600);
+    }
+    await tighten(this.archivePath, 0o600);
   }
 
   /** All tombstones, newest last. Missing file and corrupt lines are tolerated. */

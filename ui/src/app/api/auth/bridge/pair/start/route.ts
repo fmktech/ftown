@@ -12,6 +12,22 @@ import type { AccountEnrollmentRequest } from '@security/account-protocol';
 
 export const runtime = "nodejs";
 
+/**
+ * Canonical origin for the pairing verification URI. Prefer an operator-provisioned
+ * public origin (exact origin, validated) so the Host header cannot influence the
+ * value returned to a pairing device; fall back to the request origin for local use.
+ */
+function pairingOrigin(request: Request): string {
+  const configured = process.env.FTOWN_PUBLIC_URL?.trim();
+  if (configured) {
+    try {
+      const url = new URL(configured);
+      if (configured === url.origin && (url.protocol === 'https:' || url.protocol === 'http:')) return url.origin;
+    } catch { /* fall through to request origin */ }
+  }
+  return new URL(request.url).origin;
+}
+
 interface PairStartRequestBody {
   bridgeId: string;
   hostname?: string;
@@ -81,7 +97,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         candidateToken: body.candidateToken, enrollment, bridgeId: body.bridgeId,
         hostname: body.hostname ?? null, platform: body.platform ?? null });
       return NextResponse.json({ deviceCode: created.pair.deviceCode, userCode: created.pair.userCode,
-        verificationUri: `${new URL(request.url).origin}/pair?code=${created.pair.userCode}`, intervalMs: 2000,
+        verificationUri: `${pairingOrigin(request)}/pair?code=${created.pair.userCode}`, intervalMs: 2000,
         expiresInMs: Math.max(0, Date.parse(created.state.request.expiresAt) - Date.now()) }, { headers: ACCOUNT_HEADERS });
     } catch (error) { return accountError(error); }
   }
@@ -137,7 +153,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   return NextResponse.json({
     deviceCode,
     userCode,
-    verificationUri: `${new URL(request.url).origin}/pair?code=${userCode}`,
+    verificationUri: `${pairingOrigin(request)}/pair?code=${userCode}`,
     intervalMs: PAIR_POLL_INTERVAL_MS,
     expiresInMs: Math.max(0, Date.parse(expiresAtIso) - Date.now()),
   });

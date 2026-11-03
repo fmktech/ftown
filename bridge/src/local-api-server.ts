@@ -148,6 +148,18 @@ function constantTimeEq(a: string, b: string): boolean {
   return timingSafeEqual(bufA, bufB);
 }
 
+/**
+ * Conservative ReDoS guard for the read-permission grep route. Rejects the
+ * common catastrophic-backtracking shapes — a repetition applied to a group that
+ * itself repeats (e.g. `(a+)+$`) and backreferences — before the pattern is
+ * compiled and run synchronously against the whole terminal log. Heuristic, not
+ * a proof, but it removes the easy event-loop stalls.
+ */
+function looksCatastrophic(pattern: string): boolean {
+  if (/\\[1-9]/.test(pattern)) return true;
+  return /\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d*,?\d*\})/.test(pattern);
+}
+
 function isLoopbackHost(hostHeader: string | undefined, expectedPort: number): boolean {
   if (!hostHeader) return false;
   const match = /^(127\.0\.0\.1|localhost|\[::1\])(?::([0-9]{1,5}))?$/.exec(hostHeader);
@@ -1058,6 +1070,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       try {
         if (pattern.length > 256) {
           jsonResponse(res, 400, { error: 'Pattern too long' });
+          return;
+        }
+        if (looksCatastrophic(pattern)) {
+          jsonResponse(res, 400, { error: 'Pattern too complex' });
           return;
         }
         regex = new RegExp(pattern, 'i');
