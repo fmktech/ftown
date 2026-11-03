@@ -174,6 +174,27 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
       await longPrompt.getByRole("button", { name: "Cancel" }).click();
       await expect(longPrompt).toHaveCount(0);
     }
+    {
+      // With the floating conversation open, the confirmation must paint above
+      // it: Open and Cancel must be visible and clickable, and Escape dismisses.
+      await page.getByRole("button", { name: "Open conversation", exact: true }).click();
+      await expect(page.locator("#preview-conversation")).toBeVisible();
+      await documentFrame(page, fileName).locator("#external-link").click();
+      const chatPrompt = page.getByRole("dialog", { name: "Open external link" });
+      await expect(chatPrompt).toBeVisible();
+      await expect(chatPrompt.getByRole("button", { name: "Open", exact: true })).toBeVisible();
+      const cancelButton = chatPrompt.getByRole("button", { name: "Cancel", exact: true });
+      await expect(cancelButton).toBeVisible();
+      // A plain click fails if the conversation overlay intercepts the pointer.
+      await cancelButton.click();
+      await expect(chatPrompt).toHaveCount(0);
+      // Keyboard: Escape dismisses the confirmation.
+      await documentFrame(page, fileName).locator("#external-link").click();
+      await expect(chatPrompt).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(chatPrompt).toHaveCount(0);
+      await page.getByRole("button", { name: "Collapse conversation", exact: true }).click();
+    }
     expect(externalHeaders).toHaveLength(2);
     for (const headers of externalHeaders) expect(headers.referer).toBeUndefined();
     for (const linkId of ["relative-link", "javascript-link", "data-link", "file-link"]) {
