@@ -1,4 +1,4 @@
-import { PREVIEW_SCROLL_CHANNEL, PREVIEW_SCROLL_MAX, PREVIEW_SCROLL_REPORT_MS, PREVIEW_SCROLL_RESTORE_MS, PREVIEW_LINK_CHANNEL } from './preview-scroll-protocol';
+import { PREVIEW_SCROLL_CHANNEL, PREVIEW_SCROLL_MAX, PREVIEW_SCROLL_REPORT_MS, PREVIEW_SCROLL_RESTORE_MS } from './preview-scroll-protocol';
 import { PREVIEW_CHUNK_BYTES, PREVIEW_MAX_BYTES, type SessionPreviewDescriptor, type SessionPreviewStatus, type PreviewUnavailableReason } from '../../../bridge/src/preview-protocol';
 
 const revisionPattern = /^[0-9a-f]{64}$/;
@@ -53,14 +53,6 @@ const PREVIEW_LINK_SCRIPT = String.raw`<script>(() => {
   const absolute = /^https?:\/\//i;
   const NativeURL = URL;
   const protocol = Object.getOwnPropertyDescriptor(URL.prototype, 'protocol').get;
-  const href = Object.getOwnPropertyDescriptor(URL.prototype, 'href').get;
-  // The sandbox has no allow-popups. Instead of window.open (which would require
-  // allow-popups + allow-popups-to-escape-sandbox and let untrusted HTML escape
-  // the sandbox), forward the validated http(s) target to the parent, which opens
-  // it with noopener/noreferrer. The parent re-checks source/origin and scheme.
-  const channel = ${JSON.stringify(PREVIEW_LINK_CHANNEL)};
-  const parent = window.parent;
-  const post = window.parent.postMessage;
   const location = window.location;
   document.addEventListener('click', event => {
     let link = null;
@@ -81,7 +73,11 @@ const PREVIEW_LINK_SCRIPT = String.raw`<script>(() => {
     try {
       const url = new NativeURL(raw);
       const scheme = apply(protocol, url, []);
-      if (scheme === 'http:' || scheme === 'https:') apply(post, parent, [{ channel, kind: 'open-link', url: apply(href, url, []) }, '*']);
+      // External links are intentionally not opened from the preview. A message
+      // from untrusted preview code is not proof of a trusted link click, and
+      // opening a window would reintroduce the popup-escape the sandbox removes.
+      // The click is still prevented so the frame does not self-navigate.
+      if (scheme === 'http:' || scheme === 'https:') return;
     } catch { /* Invalid URLs do not navigate. */ }
   }, true);
 })();</script>`;

@@ -1,25 +1,30 @@
 /**
  * Client-IP extraction for rate-limit keys.
  *
- * Trust model:
- *  - `fly-client-ip` is platform-injected (Fly strips client-supplied copies), so
- *    it is always trusted.
- *  - `x-real-ip` / `x-forwarded-for` are only trusted when the operator opts in
- *    with `FTOWN_TRUSTED_PROXY=1`, i.e. a reverse proxy is guaranteed to
- *    overwrite them. Otherwise they are attacker-controllable and keying on
- *    them lets an anonymous client rotate the rate-limit bucket freely.
- *  - With no trusted source the key is the constant "unknown": the limiter then
- *    applies globally (fail closed) rather than being bypassable per request.
- *    Self-hosted deployments behind a proxy should set FTOWN_TRUSTED_PROXY=1.
+ * Trust is derived from verified ingress, never from a header name alone:
+ *  - `fly-client-ip` is only honoured when actually running on Fly
+ *    (`FLY_APP_NAME`/`FLY_MACHINE_ID` set), where Fly strips client copies.
+ *  - `x-real-ip` / `x-forwarded-for` are only honoured when the platform or the
+ *    operator is known to overwrite them: Vercel (`VERCEL` set) replaces
+ *    externally supplied forwarding IPs, and self-hosted reverse proxies opt in
+ *    with `FTOWN_TRUSTED_PROXY=1`.
+ *  - Otherwise the key is the constant "unknown" (fail closed) rather than a
+ *    spoofable per-request value.
  */
+function onFly(): boolean {
+  return Boolean(process.env.FLY_APP_NAME || process.env.FLY_MACHINE_ID);
+}
+
 function trustsProxyHeaders(): boolean {
   const value = process.env.FTOWN_TRUSTED_PROXY;
-  return value === "1" || value?.toLowerCase() === "true";
+  return value === "1" || value?.toLowerCase() === "true" || Boolean(process.env.VERCEL);
 }
 
 export function clientIp(request: Request): string {
-  const fly = request.headers.get("fly-client-ip");
-  if (fly?.trim()) return fly.trim();
+  if (onFly()) {
+    const fly = request.headers.get("fly-client-ip");
+    if (fly?.trim()) return fly.trim();
+  }
 
   if (trustsProxyHeaders()) {
     const realIp = request.headers.get("x-real-ip");
