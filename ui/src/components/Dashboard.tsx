@@ -33,7 +33,7 @@ import { HeaderTooltip } from "./HeaderTooltip";
 import { SessionHeaderActions } from "./SessionHeaderActions";
 import { PushNotificationsControl, detachPushSubscription } from "./PushNotificationsControl";
 import { mergeBridgeOrder } from "@/lib/bridge-order";
-import { buildBridgeCommand } from "@/lib/bridge-command";
+import { buildBridgeCommand, buildBridgeStartCommand } from "@/lib/bridge-command";
 import { StatusDot } from "@/lib/StatusDot";
 import { usePersistentState, useHiddenSet } from "@/lib/use-persistent-state";
 import { deriveSessionReachabilityStatus } from "@/lib/session-reachability";
@@ -86,18 +86,32 @@ export function deriveCurrentComputerIds({ localMode, connectionStatus, localBri
   return current;
 }
 
+async function writeToClipboard(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+  }
+}
+
 function reviewIdentityFor(session: Session | null | undefined): string {
   return session && parsePullRequestUrl(session.pullRequestUrl) ? JSON.stringify([session.bridgeId, session.id, session.pullRequestUrl, session.pullRequestReviewGeneration]) : "";
 }
 
 export function Dashboard({ client, connectionStatus, connectionError, userId, token, centrifugoUrl, transport, onDisconnect, localMode = false, accountClient, accountState }: DashboardProps) {
   const connectCommand = buildBridgeCommand({ apiUrl: typeof window !== "undefined" ? window.location.origin : "" });
+  const startCommand = buildBridgeStartCommand({ apiUrl: typeof window !== "undefined" ? window.location.origin : "" });
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [inboxOpen, setInboxOpen] = useState(false);
   const [showNewSession, setShowNewSession] = useState(false);
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
   const [showToken, setShowToken] = useState(false);
-  const [tokenCopied, setTokenCopied] = useState(false);
+  const [copiedCommand, setCopiedCommand] = useState<"setup" | "start" | null>(null);
   const [mobileTab, setMobileTab] = useState<"sessions" | "terminal" | "preview" | "review">("sessions");
   const [sidebarCollapsed, setSidebarCollapsed] = usePersistentState<boolean>("ftown:sidebarCollapsed", false);
   const [storedSidebarWidth, setStoredSidebarWidth] = usePersistentState<number>("ftown:sidebarWidth", DEFAULT_SIDEBAR_WIDTH);
@@ -133,6 +147,18 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
       workspaceFocusRef.current?.focus();
     }
   }, [inboxOpen]);
+  const copiedResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (copiedResetRef.current) clearTimeout(copiedResetRef.current);
+  }, []);
+  const copyCommand = async (kind: "setup" | "start", text: string) => {
+    await writeToClipboard(text);
+    setCopiedCommand(kind);
+    if (copiedResetRef.current) clearTimeout(copiedResetRef.current);
+    copiedResetRef.current = setTimeout(() => setCopiedCommand(null), 2000);
+  };
+  const copiedStyle = (kind: "setup" | "start"): CSSProperties =>
+    copiedCommand === kind ? { color: "var(--accent)", borderColor: "var(--accent-dim)" } : {};
   const mobileControlRef = useRef<MobileControlBarHandle>(null);
   const [copySheetText, setCopySheetText] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -919,30 +945,20 @@ PY`;
             background: "var(--bg-surface)",
           }}
         >
+          <div className="mb-2" style={{ fontSize: 11, color: "var(--text-muted)" }}>
+            Connect a bridge:
+          </div>
           <div className="flex items-center justify-between mb-2">
             <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-              Connect a bridge:
+              1. First time on this computer — install and start
             </span>
             <button
               className="btn-ghost"
-              onClick={async () => {
-                const text = connectCommand;
-                try {
-                  await navigator.clipboard.writeText(text);
-                } catch {
-                  const ta = document.createElement("textarea");
-                  ta.value = text;
-                  document.body.appendChild(ta);
-                  ta.select();
-                  document.execCommand("copy");
-                  document.body.removeChild(ta);
-                }
-                setTokenCopied(true);
-                setTimeout(() => setTokenCopied(false), 2000);
-              }}
-              style={tokenCopied ? { color: "var(--accent)", borderColor: "var(--accent-dim)" } : {}}
+              aria-label="Copy setup command"
+              onClick={() => copyCommand("setup", connectCommand)}
+              style={copiedStyle("setup")}
             >
-              {tokenCopied ? "✓ Copied" : "Copy"}
+              {copiedCommand === "setup" ? "✓ Copied" : "Copy"}
             </button>
           </div>
           <code
@@ -961,7 +977,41 @@ PY`;
             {connectCommand}
           </code>
           <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 6 }}>
-            Run this on the machine, then approve it here:{" "}
+            Setup copies ftown into ~/.ftown and adds the ftown command to your PATH.
+          </div>
+          <div className="flex items-center justify-between mb-2" style={{ marginTop: 12 }}>
+            <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+              2. Every start after that
+            </span>
+            <button
+              className="btn-ghost"
+              aria-label="Copy start command"
+              onClick={() => copyCommand("start", startCommand)}
+              style={copiedStyle("start")}
+            >
+              {copiedCommand === "start" ? "✓ Copied" : "Copy"}
+            </button>
+          </div>
+          <code
+            style={{
+              display: "block",
+              fontSize: 11,
+              color: "var(--text-muted)",
+              background: "var(--bg-void)",
+              border: "1px solid var(--border-subtle)",
+              borderRadius: 4,
+              padding: "6px 10px",
+              fontFamily: "var(--font-mono)",
+              letterSpacing: "0.02em",
+            }}
+          >
+            {startCommand}
+          </code>
+          <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 6 }}>
+            Use this instead of npx — the installed copy is what lets the bridge install updates from this dashboard. Open a new terminal if ftown isn't found.
+          </div>
+          <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 6 }}>
+            After the first start, approve the computer here:{" "}
             <a href="/pair" style={{ color: "var(--accent)" }}>
               Approve a device
             </a>

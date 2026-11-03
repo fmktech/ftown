@@ -117,7 +117,7 @@ const STEPS = [
   {
     n: "1",
     title: "Run the bridge",
-    desc: "Run ftown setup once on your machine, then start ftown-bridge to register it with your dashboard.",
+    desc: "Run the setup command once to install ftown on your machine, then start it with ftown start. It registers with your dashboard and installs future updates from there.",
   },
   {
     n: "2",
