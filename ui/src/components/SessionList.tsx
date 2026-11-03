@@ -23,6 +23,7 @@ interface SessionListProps {
   bridgeOrder: string[];
   selectedSessionId: string | null;
   onSelectSession: (sessionId: string) => void;
+  onReviewPullRequest?: (sessionId: string) => void;
   onRenameSession?: (sessionId: string, name: string) => void;
   onStopSession?: (sessionId: string) => void;
   onRemoveSession?: (sessionId: string, onlyIfFinished?: boolean) => void;
@@ -330,10 +331,11 @@ function ContextMenuButton({
 }) {
   return (
     <button
+      type="button"
       role="menuitem"
       onClick={onClick}
       disabled={disabled}
-      className={largeOnMobile ? "min-h-11 text-sm md:min-h-0 md:text-[11px]" : undefined}
+      className={`${largeOnMobile ? "min-h-11 text-sm md:min-h-0 md:text-[11px]" : ""} session-context-menu-item`}
       style={{
         ...menuButtonStyle,
         fontSize: largeOnMobile ? undefined : menuButtonStyle.fontSize,
@@ -356,6 +358,7 @@ function ContextMenuButton({
 function SessionContextMenu({
   menu,
   onRename,
+  onReviewPullRequest,
   onStop,
   onRemove,
   onClone,
@@ -366,6 +369,7 @@ function SessionContextMenu({
 }: {
   menu: Extract<ContextMenuState, { kind: "session" }>;
   onRename: (session: Session) => void;
+  onReviewPullRequest?: (sessionId: string) => void;
   onStop: (sessionId: string) => void;
   onRemove: (sessionId: string) => void;
   onClone: (session: Session) => void;
@@ -391,7 +395,9 @@ function SessionContextMenu({
       className="w-[220px] max-w-[calc(100vw-16px)] md:w-auto md:max-w-none md:min-w-[120px]"
       style={{ ...contextMenuPanelStyle, minWidth: undefined, top: pos.top, left: pos.left, outline: "none" }}
     >
-      {pullRequest && (
+      {pullRequest && onReviewPullRequest ? (
+        <ContextMenuButton largeOnMobile label="Review pull request" color="var(--accent)" onClick={() => { onReviewPullRequest(menu.session.id); onClose(); }} />
+      ) : pullRequest && (
         <a
           role="menuitem"
           href={pullRequest.url}
@@ -495,6 +501,7 @@ export function SessionList({
   bridgeOrder,
   selectedSessionId,
   onSelectSession,
+  onReviewPullRequest,
   onRenameSession,
   onStopSession,
   onRemoveSession,
@@ -1344,7 +1351,7 @@ export function SessionList({
       </button>
       {hasPullRequest && (
         <div style={{ gridColumn: 3, gridRow: 1, display: "flex", minWidth: 0, alignItems: "center", justifyContent: "center", pointerEvents: "none", paddingTop: headerTopPadding, paddingBottom: headerBottomMargin, fontFamily: "var(--font-mono)", opacity: isFinished ? 0.55 : 1 }}>
-          <PullRequestLink url={session.pullRequestUrl} badge />
+          <PullRequestLink url={session.pullRequestUrl} badge onReview={onReviewPullRequest ? () => onReviewPullRequest(session.id) : undefined} />
         </div>
       )}
       </div>
@@ -1719,6 +1726,7 @@ export function SessionList({
         <SessionContextMenu
           menu={contextMenu}
           onRename={startEditing}
+          onReviewPullRequest={onReviewPullRequest}
           onStop={onStopSession}
           onRemove={onRemoveSession}
           onClone={onCloneSession ?? (() => {})}

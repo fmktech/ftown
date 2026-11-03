@@ -439,3 +439,29 @@ body {
 .pr-review-diff span { display:inline; }
 .pr-diff-add { color:var(--accent); }
 .pr-diff-delete { color:var(--status-error); }
+
+/* Reserve touch space around the compact sidebar PR badge without enlarging its visual treatment. */
+.pr-review-badge-reserve, .pr-review-badge-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+}
+.pr-review-badge-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  pointer-events: auto;
+}
+@media (max-width: 767px), (pointer: coarse) {
+  .pr-review-badge-reserve, .pr-review-badge-button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+.session-context-menu-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}

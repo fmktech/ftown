@@ -86,6 +86,10 @@ export function deriveCurrentComputerIds({ localMode, connectionStatus, localBri
   return current;
 }
 
+function reviewIdentityFor(session: Session | null | undefined): string {
+  return session && parsePullRequestUrl(session.pullRequestUrl) ? JSON.stringify([session.bridgeId, session.id, session.pullRequestUrl, session.pullRequestReviewGeneration]) : "";
+}
+
 export function Dashboard({ client, connectionStatus, connectionError, userId, token, centrifugoUrl, transport, onDisconnect, localMode = false, accountClient, accountState }: DashboardProps) {
   const connectCommand = buildBridgeCommand({ apiUrl: typeof window !== "undefined" ? window.location.origin : "" });
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -364,7 +368,7 @@ PY`;
   const selectedPreviewKey = selectedSession ? `${selectedSession.bridgeId}:${selectedSession.id}` : "";
   const choice = previewChoices[selectedPreviewKey];
   const previewOpen = !!selectedSession?.preview && (choice?.id !== selectedSession.preview.id || choice.open);
-  const reviewIdentity = selectedSession && parsePullRequestUrl(selectedSession.pullRequestUrl) ? JSON.stringify([selectedSession.bridgeId, selectedSession.id, selectedSession.pullRequestUrl, selectedSession.pullRequestReviewGeneration]) : "";
+  const reviewIdentity = reviewIdentityFor(selectedSession);
   const [reviewChoice, setReviewChoice] = useState<{ identity: string; activation: number }>({ identity: "", activation: 0 });
   const reviewOpen = !!reviewIdentity && reviewChoice.identity === reviewIdentity;
   const openReview = useCallback(() => { if (!reviewIdentity) return; setReviewChoice(previous => ({ identity: reviewIdentity, activation: previous.activation + 1 })); setMobileTab("review"); }, [reviewIdentity]);
@@ -506,6 +510,16 @@ PY`;
       setMobileTab(session?.preview && (choice?.id !== session.preview.id || choice.open) ? "preview" : "terminal");
     }
   }, [sessions, previewChoices]);
+
+  const handleReviewPullRequest = useCallback((id: string) => {
+    const target = sessions.find(session => session.id === id);
+    const identity = reviewIdentityFor(target);
+    if (!identity) return;
+    handleSelectSession(id);
+    setReviewChoice(previous => ({ identity, activation: previous.activation + 1 }));
+    setMobileTab("review");
+    requestAnimationFrame(() => workspaceFocusRef.current?.focus());
+  }, [sessions, handleSelectSession]);
 
   const inboxReady = connectionStatus === "connected" ? new Set(readyBridges.map(bridge => bridge.bridgeId)) : new Set<string>();
   const canReply = (bridgeId: string) => !!securityRuntime?.bridge(bridgeId)?.permissions.includes("control");
@@ -1097,6 +1111,7 @@ PY`;
               bridgeOrder={bridgeOrder}
               selectedSessionId={selectedSessionId}
               onSelectSession={handleSelectSession}
+              onReviewPullRequest={handleReviewPullRequest}
               onRenameSession={renameSession}
               onStopSession={stopSession}
               onRemoveSession={handleRemoveSession}
