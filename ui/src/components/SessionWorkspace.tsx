@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react';
 import type { MessageClient } from '@/lib/message-client';
 import type { BridgeRpc } from '@/hooks/useBridgeRpc';
 import type { Session } from '@/types';
@@ -44,6 +44,10 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
   const { state, refresh, getHardEpoch } = useSessionPreview({ client, userId, target, visible: previewVisible, readable, securityGeneration, sendCommand, subscribeAuthority });
   const owner = target ? JSON.stringify([userId, target.bridgeId, target.sessionId, target.preview.id]) : '';
   const scroll = usePreviewScroll(state.kind === 'ready' ? state : null, owner, getHardEpoch);
+  // Stable callback ref: focus the non-activating dialog once on mount only.
+  // An inline ref would be re-created every render and re-focus the dialog on
+  // unrelated renders (conversation polls, draft typing), stealing focus.
+  const focusLinkPrompt = useCallback((node: HTMLDivElement | null) => { if (node && document.activeElement !== node) node.focus(); }, []);
   const conversation = usePreviewConversation({ client, userId, session, sessions: sessions.length ? sessions : session ? [session] : [], enabled: activeExpanded && conversationOpen && open, readable, sendCommand, subscribeAuthority });
   useEffect(() => {
     const node = mainRef.current; if (!node) return;
@@ -136,7 +140,7 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
         </div>
         <div className="session-preview-content">
           {state.kind === 'ready' && scroll.display ? <><iframe ref={scroll.iframeRef} key={scroll.display.key} title={`HTML preview: ${target.preview.fileName}`} sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={previewDocument(scroll.display.html, scroll.display.documentId)} />{state.updating && <span className="session-preview-updating">Updating preview…</span>}</> : <div className="session-preview-message" role="status"><span>{state.kind === 'loading' || state.kind === 'ready' ? 'Loading preview…' : state.kind === 'offline' ? 'Reconnect to load preview' : state.kind === 'unregistered' ? 'No preview registered' : state.kind === 'unavailable' ? messages[state.reason] : 'Preview unavailable'}</span>{state.kind !== 'loading' && state.kind !== 'ready' && state.kind !== 'unregistered' && <button type="button" className="btn-ghost" onClick={refresh}>Retry</button>}</div>}
-          {scroll.linkPrompt && <div ref={node => { if (node && document.activeElement !== node) node.focus(); }} tabIndex={-1} className="session-preview-link-prompt" role="dialog" aria-label="Open external link" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); scroll.dismissLink(); } }}><div className="session-preview-link-scroll" tabIndex={0} role="group" aria-label="Destination URL"><span className="session-preview-link-host" title={scroll.linkPrompt}>{scroll.linkPrompt}</span></div><div className="session-preview-link-actions"><span>Open in a new tab?</span><button type="button" className="btn-ghost" onClick={scroll.confirmLink}>Open</button><button type="button" className="btn-ghost" onClick={scroll.dismissLink}>Cancel</button></div></div>}
+          {scroll.linkPrompt && <div ref={focusLinkPrompt} tabIndex={-1} className="session-preview-link-prompt" role="dialog" aria-label="Open external link" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); scroll.dismissLink(); } }}><div className="session-preview-link-scroll" tabIndex={0} role="group" aria-label="Destination URL"><span className="session-preview-link-host" title={scroll.linkPrompt}>{scroll.linkPrompt}</span></div><div className="session-preview-link-actions"><span>Open in a new tab?</span><button type="button" className="btn-ghost" onClick={scroll.confirmLink}>Open</button><button type="button" className="btn-ghost" onClick={scroll.dismissLink}>Cancel</button></div></div>}
           {activeExpanded && session && <PreviewConversation session={session} activity={activity} open={conversationOpen} onOpen={() => setConversationOpen(true)} onClose={() => setConversationOpen(false)} conversation={conversation} />}
           {dragging && <div className="session-preview-drag-shield" />}
         </div>

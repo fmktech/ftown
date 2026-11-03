@@ -264,3 +264,41 @@ it('removing an inactive preview does not collapse an already expanded review', 
   rerender(workspace(false));
   expect(screen.getByRole('button', { name: 'Collapse PR review' })).toBeTruthy();
 });
+
+it('focuses the link confirmation once and keeps user focus across unrelated renders', async () => {
+  const originalSubtle = Object.getOwnPropertyDescriptor(globalThis.crypto, 'subtle');
+  const revision = '9'.repeat(64); const html = '<p>preview</p>';
+  Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest: async () => Uint8Array.from({ length: 32 }, () => 0x99).buffer } });
+  class TestResizeObserver implements ResizeObserver {
+    constructor(private callback: ResizeObserverCallback) {}
+    observe(target: Element) { this.callback([{ target, contentRect: DOMRect.fromRect({ width: 900 }), borderBoxSize: [], contentBoxSize: [], devicePixelContentBoxSize: [] }], this); }
+    unobserve() {} disconnect() {}
+  }
+  vi.stubGlobal('ResizeObserver', TestResizeObserver);
+  const endpoint = { version: 1, id: 'bridge-key', ownerId: 'owner', kind: 'bridge', publicKey: 'key' };
+  const pin = { bridgeId: 'bridge', endpoint, permissions: ['read'] };
+  const runtime = { identity: { endpoint: { ...endpoint, kind: 'browser', id: 'browser' } }, bridge: () => pin, state: () => ({ status: 'ready' }), assertCanSend: () => {}, onChange: () => () => {} };
+  const client = { securityRuntime: runtime } as unknown as MessageClient;
+  const previewId = '12345678-1234-4234-8234-123456789abc';
+  const sendCommand = vi.fn(async (command: Command) => ({ requestId: 'x', success: true, data: command.type === 'session_preview_chunk'
+    ? { state: 'chunk', previewId, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true }
+    : { state: 'ready', previewId, revision, totalBytes: html.length } }));
+  const session: Session = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '', preview: { id: previewId, fileName: 'demo.html' } };
+  const workspace = (generation: number) => <SessionWorkspace session={session} client={client} userId="user" readable sendCommand={sendCommand} securityGeneration={generation} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>;
+  try {
+    const { rerender } = render(workspace(0));
+    await act(async () => {});
+    const frame = screen.getByTitle('HTML preview: demo.html') as HTMLIFrameElement;
+    act(() => { window.dispatchEvent(new MessageEvent('message', { data: { channel: 'ftown-preview-link-v1', kind: 'open-link', url: 'https://preview.example.test/x' }, source: frame.contentWindow, origin: 'null' })); });
+    const prompt = screen.getByRole('dialog', { name: 'Open external link' });
+    // Focused once on mount (non-activating container), not the Open button.
+    expect(document.activeElement).toBe(prompt);
+    const open = screen.getByRole('button', { name: 'Open' });
+    open.focus(); expect(document.activeElement).toBe(open);
+    // An unrelated render must not move focus back to the dialog.
+    rerender(workspace(1));
+    expect(document.activeElement).toBe(open);
+  } finally {
+    if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
+  }
+});
