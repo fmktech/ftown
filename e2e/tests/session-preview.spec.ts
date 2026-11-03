@@ -174,27 +174,6 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
       await longPrompt.getByRole("button", { name: "Cancel" }).click();
       await expect(longPrompt).toHaveCount(0);
     }
-    {
-      // With the floating conversation open, the confirmation must paint above
-      // it: Open and Cancel must be visible and clickable, and Escape dismisses.
-      await page.getByRole("button", { name: "Open conversation", exact: true }).click();
-      await expect(page.locator("#preview-conversation")).toBeVisible();
-      await documentFrame(page, fileName).locator("#external-link").click();
-      const chatPrompt = page.getByRole("dialog", { name: "Open external link" });
-      await expect(chatPrompt).toBeVisible();
-      await expect(chatPrompt.getByRole("button", { name: "Open", exact: true })).toBeVisible();
-      const cancelButton = chatPrompt.getByRole("button", { name: "Cancel", exact: true });
-      await expect(cancelButton).toBeVisible();
-      // A plain click fails if the conversation overlay intercepts the pointer.
-      await cancelButton.click();
-      await expect(chatPrompt).toHaveCount(0);
-      // Keyboard: Escape dismisses the confirmation.
-      await documentFrame(page, fileName).locator("#external-link").click();
-      await expect(chatPrompt).toBeVisible();
-      await page.keyboard.press("Escape");
-      await expect(chatPrompt).toHaveCount(0);
-      await page.getByRole("button", { name: "Collapse conversation", exact: true }).click();
-    }
     expect(externalHeaders).toHaveLength(2);
     for (const headers of externalHeaders) expect(headers.referer).toBeUndefined();
     for (const linkId of ["relative-link", "javascript-link", "data-link", "file-link"]) {
@@ -291,6 +270,26 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     expect(Math.abs(expandedPreview.x - expandedMain.x)).toBeLessThanOrEqual(2);
     expect(Math.abs(expandedPreview.width - expandedMain.width)).toBeLessThanOrEqual(2);
     await page.getByRole("button", { name: "Open conversation", exact: true }).click();
+    // The preview is expanded (the Collapse button was asserted focused just
+    // above) and the conversation is open. The link confirmation must paint
+    // above the chat: Open/Cancel visible and clickable, and Escape must dismiss
+    // only the confirmation without collapsing the preview.
+    await expect(page.locator("#preview-conversation")).toBeVisible();
+    await documentFrame(page, fileName).locator("#external-link").click();
+    const chatPrompt = page.getByRole("dialog", { name: "Open external link" });
+    await expect(chatPrompt).toBeVisible();
+    await expect(chatPrompt.getByRole("button", { name: "Open", exact: true })).toBeVisible();
+    const chatCancel = chatPrompt.getByRole("button", { name: "Cancel", exact: true });
+    await expect(chatCancel).toBeVisible();
+    // A plain pointer click fails if the conversation overlay intercepts it.
+    await chatCancel.click();
+    await expect(chatPrompt).toHaveCount(0);
+    await documentFrame(page, fileName).locator("#external-link").click();
+    await expect(chatPrompt).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(chatPrompt).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Collapse preview", exact: true })).toBeVisible();
+    await expect(page.locator("#preview-conversation")).toBeVisible();
     await page.getByRole("textbox", { name: "Message the agent" }).fill("Draft survives preview refresh");
     await screenshot(page, info, "preview-expanded-conversation");
     await page.getByRole("button", { name: "Collapse conversation", exact: true }).click();
