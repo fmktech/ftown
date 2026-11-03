@@ -134,6 +134,14 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
       const prompt = page.getByRole("dialog", { name: "Open external link" });
       await expect(prompt).toBeVisible();
       await expect(prompt).toContainText("preview.example.test");
+      const paneBox = await previewRegion(page).boundingBox();
+      const dialogBox = await prompt.boundingBox();
+      expect(paneBox).not.toBeNull(); expect(dialogBox).not.toBeNull();
+      // The confirmation must stay inside the preview pane so the destination
+      // and the Open/Cancel actions are both visible.
+      expect(dialogBox!.y).toBeGreaterThanOrEqual(paneBox!.y - 1);
+      expect(dialogBox!.y + dialogBox!.height).toBeLessThanOrEqual(paneBox!.y + paneBox!.height + 1);
+      await expect(prompt.getByRole("button", { name: "Open", exact: true })).toBeVisible();
       const popupPromise = context.waitForEvent("page");
       await prompt.getByRole("button", { name: "Open", exact: true }).click();
       const popup = await popupPromise;
@@ -145,6 +153,26 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
       expect(page.url()).toBe(originalUrl);
       await expect(iframe(page, fileName)).toHaveAttribute("data-preview-node", suffix);
       await expect(count).toHaveText("Count: 1");
+    }
+    {
+      // A very long but allowed URL must not push the scheme/host out of the
+      // pane: the destination scrolls inside the bounded dialog and Open stays
+      // reachable. Cancel here so no external request is made.
+      await documentFrame(page, fileName).locator("#long-link").click();
+      const longPrompt = page.getByRole("dialog", { name: "Open external link" });
+      await expect(longPrompt).toBeVisible();
+      await expect(longPrompt).toContainText("preview.example.test");
+      const paneBox = await previewRegion(page).boundingBox();
+      const dialogBox = await longPrompt.boundingBox();
+      expect(paneBox).not.toBeNull(); expect(dialogBox).not.toBeNull();
+      expect(dialogBox!.y).toBeGreaterThanOrEqual(paneBox!.y - 1);
+      expect(dialogBox!.y + dialogBox!.height).toBeLessThanOrEqual(paneBox!.y + paneBox!.height + 1);
+      const openButton = longPrompt.getByRole("button", { name: "Open", exact: true });
+      await expect(openButton).toBeVisible();
+      const openBox = await openButton.boundingBox();
+      expect(openBox!.y + openBox!.height).toBeLessThanOrEqual(paneBox!.y + paneBox!.height + 1);
+      await longPrompt.getByRole("button", { name: "Cancel" }).click();
+      await expect(longPrompt).toHaveCount(0);
     }
     expect(externalHeaders).toHaveLength(2);
     for (const headers of externalHeaders) expect(headers.referer).toBeUndefined();
