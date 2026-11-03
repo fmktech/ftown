@@ -291,6 +291,9 @@ async function collectClaudeUsage(
   workingDir: string,
   options: UsageCollectorOptions,
 ): Promise<SessionUsage | null> {
+  // The id is interpolated into a file path; reject anything outside a safe
+  // charset so a malformed id cannot traverse out of the projects directory.
+  if (!/^[A-Za-z0-9._-]{1,200}$/.test(claudeSessionId)) return null;
   const baseDir = options.claudeProjectsDir ?? join(homedir(), '.claude', 'projects');
   const filePath = join(baseDir, claudeProjectSlug(workingDir), `${claudeSessionId}.jsonl`);
   const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
