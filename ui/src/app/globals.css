@@ -426,19 +426,256 @@ body {
 .session-aux-pane { display:flex; flex:1; flex-direction:column; min-width:0; min-height:0; overflow:hidden; }
 .session-aux-pane[hidden], .session-review-pane[hidden] { display:none; }
 .session-review-pane { display:flex; flex:1; flex-direction:column; min-width:0; min-height:0; overflow:hidden; background:var(--bg-surface); }
-.pr-review-link { color:var(--accent); font-size:12px; padding:10px 4px; white-space:nowrap; }
-.pr-review-content { flex:1; min-height:0; min-width:0; overflow:auto; padding:16px; font-size:13px; line-height:1.5; overflow-wrap:anywhere; }
-.pr-review-content h2 { font-size:18px; font-weight:600; margin:0 0 8px; }
-.pr-review-content h3 { font-size:15px; font-weight:600; margin:20px 0 8px; }
-.pr-review-content h4 { font-size:12px; font-weight:600; margin:16px 0 4px; }
-.pr-review-content p { margin:6px 0; color:var(--text-muted); }
-.pr-review-body { white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; }
-.pr-review-files { display:flex; flex-direction:column; align-items:flex-start; gap:4px; }
-.pr-review-files a { color:var(--accent); }
-.pr-review-diff { max-width:100%; overflow:auto; white-space:pre; padding:10px; background:var(--bg-void); border:1px solid var(--border-subtle); font:12px/1.5 var(--font-mono); }
-.pr-review-diff span { display:inline; }
+.pr-review-root {
+  container-type: inline-size;
+  --pr-add-bg: rgba(0,255,136,.07); --pr-add-num-bg: rgba(0,255,136,.12); --pr-add-emph: rgba(0,255,136,.28);
+  --pr-del-bg: rgba(255,68,102,.08); --pr-del-num-bg: rgba(255,68,102,.14); --pr-del-emph: rgba(255,68,102,.32);
+  --pr-hunk-bg: rgba(100,149,237,.08); --pr-hunk-fg: #8fb3ff; --pr-merged: #a78bfa; --pr-renamed: #8fb3ff;
+  font-family: var(--font-sans); color: var(--text-primary); min-width: 0;
+}
+.pr-review-root :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; box-shadow: none; }
+.pr-review-sr-only { position:absolute; width:1px; height:1px; margin:-1px; padding:0; overflow:hidden; clip:rect(0,0,0,0); clip-path:inset(50%); white-space:nowrap; border:0; }
+
+/* Header */
+.pr-review-header { position:relative; flex:none; padding:10px 14px 8px; background:var(--bg-elevated); border-bottom:1px solid var(--border-muted); min-width:0; }
+.pr-review-header-top { display:flex; align-items:center; gap:8px; min-width:0; }
+.pr-review-title { flex:0 1 auto; min-width:0; margin:0; font:600 14px/1.3 var(--font-sans); color:var(--text-primary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pr-review-number { flex:none; font:12px var(--font-mono); color:var(--text-muted); }
+.pr-review-state { flex:none; font-size:11px; font-weight:600; line-height:1.4; padding:2px 8px; border-radius:999px; border:1px solid currentColor; }
+.pr-review-state.is-open { color:var(--accent); background:var(--accent-dim); }
+.pr-review-state.is-merged { color:var(--pr-merged); background:rgba(167,139,250,.12); }
+.pr-review-state.is-closed { color:var(--status-error); background:rgba(255,68,102,.1); }
+.pr-review-actions { display:flex; align-items:center; gap:2px; flex:none; margin-left:auto; }
+.pr-review-link { display:inline-flex; align-items:center; gap:4px; color:var(--accent); font-size:12px; line-height:1.4; padding:6px 8px; border-radius:var(--radius-sm); text-decoration:none; white-space:nowrap; }
+.pr-review-link:hover { background:var(--bg-hover); text-decoration:none; }
+.pr-review-icon { display:inline-flex; align-items:center; justify-content:center; flex:none; width:28px; height:28px; padding:0; font-size:15px; line-height:1; letter-spacing:normal; color:var(--text-secondary); background:transparent; border-color:transparent; border-radius:var(--radius-sm); }
+.pr-review-icon:hover { color:var(--text-primary); background:var(--bg-hover); border-color:transparent; }
+.pr-review-icon:disabled, .pr-review-button:disabled { opacity:.4; cursor:not-allowed; }
+.pr-review-glyph { display:inline-block; line-height:1; }
+.pr-review-glyph.is-spinning { animation:pr-review-spin .9s linear infinite; }
+@keyframes pr-review-spin { to { transform:rotate(360deg); } }
+.pr-review-meta { display:flex; flex-wrap:wrap; align-items:center; gap:4px 12px; margin-top:6px; font-size:12px; color:var(--text-muted); min-width:0; }
+.pr-review-meta-item { display:inline-flex; align-items:center; gap:6px; min-width:0; }
+.pr-review-author { color:var(--text-secondary); }
+.pr-review-branches { gap:4px; max-width:100%; }
+.pr-review-branch { display:inline-block; max-width:22ch; padding:1px 6px; font:11.5px var(--font-mono); color:var(--text-secondary); background:var(--bg-overlay); border:1px solid var(--border-muted); border-radius:var(--radius-sm); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:middle; }
+.pr-review-arrow { color:var(--text-faint); }
+.pr-review-dot { flex:none; width:7px; height:7px; border-radius:50%; background:var(--text-faint); }
+.pr-review-checks.is-passed .pr-review-dot { background:var(--accent); }
+.pr-review-checks.is-failed .pr-review-dot { background:var(--status-error); }
+.pr-review-checks.is-running .pr-review-dot { background:var(--status-pending); animation:pr-review-pulse 1.6s ease-in-out infinite; }
+.pr-review-checks.is-unknown .pr-review-dot { background:var(--text-faint); opacity:.6; }
+@keyframes pr-review-pulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+.pr-review-stat { gap:6px; }
+.pr-review-add { color:var(--accent); font-family:var(--font-mono); }
+.pr-review-del { color:var(--status-error); font-family:var(--font-mono); }
+.pr-review-bar { display:inline-flex; gap:2px; flex:none; }
+.pr-review-bar-seg { width:8px; height:8px; border-radius:2px; background:var(--border-strong); }
+.pr-review-bar-seg.is-add { background:var(--accent); }
+.pr-review-bar-seg.is-del { background:var(--status-error); }
+.pr-review-bar-seg.is-neutral { background:var(--border-strong); }
+.pr-review-fetched { color:var(--text-faint); }
+.pr-review-progress { position:absolute; left:0; right:0; bottom:0; height:2px; overflow:hidden; background:transparent; pointer-events:none; }
+.pr-review-progress::after { content:""; position:absolute; top:0; bottom:0; left:0; width:30%; background:var(--accent); animation:pr-review-slide 1.1s ease-in-out infinite; }
+@keyframes pr-review-slide { from { transform:translateX(-100%); } to { transform:translateX(340%); } }
+
+/* Banner and tabs */
+.pr-review-banner { display:flex; align-items:center; justify-content:space-between; gap:8px; flex:none; padding:6px 14px; font-size:12px; color:var(--status-pending); background:rgba(255,170,0,.08); border-bottom:1px solid rgba(255,170,0,.25); min-width:0; }
+.pr-review-banner-text { min-width:0; overflow-wrap:anywhere; }
+.pr-review-sections { display:flex; flex:none; padding:0 14px; background:var(--bg-elevated); border-bottom:1px solid var(--border-muted); overflow-x:auto; min-width:0; }
+.pr-review-section-tab { display:inline-flex; align-items:center; gap:6px; flex:none; padding:8px 10px; margin-bottom:-1px; font:500 12.5px var(--font-sans); color:var(--text-muted); background:transparent; border:0; border-bottom:2px solid transparent; cursor:pointer; white-space:nowrap; }
+.pr-review-section-tab:hover { color:var(--text-secondary); }
+.pr-review-section-tab[aria-selected="true"] { color:var(--text-primary); border-bottom-color:var(--accent); }
+.pr-review-count { padding:0 6px; font:11px/1.6 var(--font-mono); color:var(--text-secondary); background:var(--bg-overlay); border-radius:999px; }
+
+/* Layout */
+.pr-review-main, .pr-review-files, .pr-review-files-body { display:flex; flex-direction:column; flex:1; min-width:0; min-height:0; }
+.pr-review-files.is-wide .pr-review-files-body { flex-direction:row; }
+.pr-review-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; flex:none; padding:8px 14px; border-bottom:1px solid var(--border-muted); min-width:0; }
+.pr-review-filter { flex:1 1 160px; max-width:320px; min-width:0; height:28px; padding:0 8px; font:12.5px var(--font-sans); color:var(--text-primary); background:var(--bg-void); border:1px solid var(--border-default); border-radius:var(--radius-sm); }
+.pr-review-filter::placeholder { color:var(--text-faint); }
+.pr-review-filter:focus { border-color:var(--accent); }
+.pr-review-button { display:inline-flex; align-items:center; justify-content:center; flex:none; height:28px; padding:0 10px; font:500 12px var(--font-sans); letter-spacing:normal; color:var(--text-secondary); border-radius:var(--radius-sm); white-space:nowrap; }
+.pr-review-button:hover { color:var(--text-primary); background:var(--bg-hover); }
+.pr-review-button[aria-pressed="true"], .pr-review-files-toggle[aria-expanded="true"] { color:var(--accent); background:var(--accent-dim); border-color:var(--accent-glow); }
+.pr-review-viewed-progress { display:inline-flex; align-items:center; gap:8px; margin-left:auto; font:11.5px var(--font-mono); color:var(--text-muted); white-space:nowrap; }
+.pr-review-viewed-bar { display:inline-block; width:60px; height:4px; overflow:hidden; background:var(--bg-overlay); border-radius:2px; }
+.pr-review-viewed-fill { display:block; height:100%; background:var(--accent); border-radius:2px; }
+.pr-review-segmented { display:inline-flex; flex:none; border:1px solid var(--border-default); border-radius:var(--radius-sm); overflow:hidden; }
+.pr-review-segmented > button { height:26px; padding:0 10px; font:500 12px var(--font-sans); color:var(--text-muted); background:transparent; border:0; cursor:pointer; }
+.pr-review-segmented > button + button { border-left:1px solid var(--border-default); }
+.pr-review-segmented > button:hover { color:var(--text-primary); }
+.pr-review-segmented > button[aria-pressed="true"] { color:var(--text-primary); background:var(--bg-overlay); }
+.pr-review-sidebar { flex:none; width:264px; min-height:0; overflow:auto; padding:6px; border-right:1px solid var(--border-muted); }
+.pr-review-drawer { flex:none; max-height:40vh; overflow:auto; padding:6px; border-bottom:1px solid var(--border-muted); }
+/* No top padding: sticky file headers pin to the scrollport edge, so padding there would let code show above them. */
+.pr-review-diffs { display:flex; flex-direction:column; gap:12px; flex:1; min-width:0; min-height:0; overflow:auto; padding:0 14px 40px; }
+.pr-review-diffs > :first-child { margin-top:12px; }
+
+/* File list */
+.pr-review-filelist ul { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:1px; }
+.pr-review-filelist-item { display:grid; grid-template-columns:18px minmax(0,1fr) auto auto; align-items:center; gap:8px; width:100%; padding:5px 8px; font-size:12.5px; text-align:left; color:var(--text-secondary); background:transparent; border:0; border-radius:var(--radius-sm); cursor:pointer; }
+.pr-review-filelist-item:hover { background:var(--bg-hover); }
+.pr-review-filelist-item[aria-current="true"] { background:var(--bg-overlay); box-shadow:inset 2px 0 0 var(--accent); }
+/* .75, not lower: the 11px directory line must stay above 4.5:1 once dimmed. */
+.pr-review-filelist-item.is-viewed { opacity:.75; }
+.pr-review-status-letter { font:700 11px var(--font-mono); text-align:center; color:var(--status-pending); }
+.pr-review-status-letter.is-added { color:var(--accent); }
+.pr-review-status-letter.is-deleted { color:var(--status-error); }
+.pr-review-status-letter.is-modified { color:var(--status-pending); }
+.pr-review-status-letter.is-renamed, .pr-review-status-letter.is-copied { color:var(--pr-renamed); }
+.pr-review-filelist-name { display:flex; flex-direction:column; min-width:0; }
+.pr-review-filelist-base { color:var(--text-primary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pr-review-filelist-dir { font-size:11px; color:var(--text-faint); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pr-review-filelist-counts { display:inline-flex; gap:6px; font:11px var(--font-mono); }
+.pr-review-filelist-viewed { color:var(--accent); font-size:11px; }
+
+/* File card */
+.pr-review-file { flex:none; background:var(--bg-base); border:1px solid var(--border-muted); border-radius:var(--radius-md); min-width:0; }
+.pr-review-file.is-active { border-color:var(--border-strong); }
+.pr-review-file-header { position:sticky; top:0; z-index:2; display:flex; align-items:center; gap:8px; padding:6px 10px; background:var(--bg-elevated); border-radius:calc(var(--radius-md) - 1px) calc(var(--radius-md) - 1px) 0 0; border-bottom:1px solid var(--border-muted); min-width:0; }
+.pr-review-file.is-collapsed .pr-review-file-header { border-bottom-color:transparent; border-radius:calc(var(--radius-md) - 1px); }
+/* `overflow: clip` (unlike hidden/auto) creates no scroll container, so the sticky header still pins to
+   .pr-review-diffs; the card's rounded clip then squares the header's corners only while it is stuck. */
+@supports (overflow: clip) {
+  .pr-review-file { overflow:clip; }
+  .pr-review-file-header, .pr-review-file.is-collapsed .pr-review-file-header { border-radius:0; }
+}
+.pr-review-file-toggle { display:inline-flex; align-items:center; justify-content:center; flex:none; width:22px; height:22px; padding:0; color:var(--text-muted); background:transparent; border:0; border-radius:var(--radius-sm); cursor:pointer; }
+.pr-review-file-toggle:hover { color:var(--text-primary); background:var(--bg-hover); }
+.pr-review-chevron { font-size:14px; line-height:1; }
+.pr-review-file-status { flex:none; padding:1px 7px; font-size:10.5px; font-weight:600; line-height:1.5; border:1px solid color-mix(in srgb, currentColor 40%, transparent); border-radius:999px; color:var(--status-pending); background:rgba(255,170,0,.1); }
+.pr-review-file-status.is-added { color:var(--accent); background:var(--accent-dim); }
+.pr-review-file-status.is-deleted { color:var(--status-error); background:rgba(255,68,102,.1); }
+.pr-review-file-status.is-modified { color:var(--status-pending); background:rgba(255,170,0,.1); }
+.pr-review-file-status.is-renamed, .pr-review-file-status.is-copied { color:var(--pr-renamed); background:rgba(143,179,255,.1); }
+/* Path is a flex row so the directory (or old path) gives up its width before the file name does. */
+.pr-review-file-path { display:flex; align-items:baseline; flex:1 1 auto; min-width:0; margin:0; font:400 12.5px var(--font-mono); overflow:hidden; white-space:pre; }
+.pr-review-file-dir, .pr-review-file-old { flex:0 1000 auto; min-width:2ch; overflow:hidden; text-overflow:ellipsis; color:var(--text-muted); }
+.pr-review-file-base, .pr-review-file-new { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; color:var(--text-primary); }
+.pr-review-file.is-viewed .pr-review-file-base, .pr-review-file.is-viewed .pr-review-file-new { color:var(--text-secondary); }
+.pr-review-copy { flex:none; width:24px; height:24px; font-size:13px; }
+.pr-review-file-counts { display:inline-flex; align-items:center; gap:6px; flex:none; font:11.5px var(--font-mono); }
+.pr-review-viewed-toggle { display:inline-flex; align-items:center; gap:5px; flex:none; padding:2px 8px; font-size:11.5px; color:var(--text-muted); border:1px solid var(--border-default); border-radius:var(--radius-sm); cursor:pointer; user-select:none; }
+.pr-review-viewed-toggle:hover { color:var(--text-primary); background:var(--bg-hover); }
+.pr-review-viewed-toggle:has(input:checked) { color:var(--accent); background:var(--accent-dim); border-color:var(--accent-glow); }
+.pr-review-viewed-toggle input { margin:0; accent-color:var(--accent); }
+.pr-review-file-note { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0; padding:14px 16px; font-size:12.5px; color:var(--text-muted); }
+.pr-review-file-body { min-width:0; }
+
+/* Diff table */
+.pr-review-diff-scroll { overflow-x:auto; min-width:0; border-radius:0 0 calc(var(--radius-md) - 1px) calc(var(--radius-md) - 1px); }
+.pr-review-diff { border-collapse:separate; border-spacing:0; min-width:100%; font:12px/20px var(--font-mono); tab-size:4; color:var(--text-primary); }
+.pr-review-diff .pr-review-num { width:1%; min-width:44px; padding:0 10px; text-align:right; font-size:11px; color:var(--text-faint); background:var(--bg-surface); user-select:none; white-space:nowrap; vertical-align:top; }
+/* The sign hangs in the left padding so wrapped continuation lines align with the code, not the sign. */
+.pr-review-diff .pr-review-code { padding:0 12px 0 20px; white-space:pre; vertical-align:top; }
+/* Split always soft-wraps (as GitHub does): one table can't scroll its halves independently, and an
+   unwrapped left half pushes the new side out of view. `anywhere` lets auto layout keep the halves at 50%. */
+.pr-review-diff.is-split { width:100%; }
+.pr-review-diff.is-split .pr-review-code { width:50%; padding-left:10px; white-space:pre-wrap; overflow-wrap:anywhere; }
+.pr-review-diff.is-split .pr-review-hunk td { white-space:pre-wrap; overflow-wrap:anywhere; }
+.pr-review-sign { display:inline-block; width:20px; margin-left:-20px; text-align:center; color:var(--text-faint); user-select:none; }
+.pr-review-line.is-add .pr-review-sign { color:var(--accent); }
+.pr-review-line.is-del .pr-review-sign { color:var(--status-error); }
+.pr-review-line.is-add .pr-review-code { background:var(--pr-add-bg); }
+.pr-review-line.is-add .pr-review-num { background:var(--pr-add-num-bg); }
+.pr-review-line.is-del .pr-review-code { background:var(--pr-del-bg); }
+.pr-review-line.is-del .pr-review-num { background:var(--pr-del-num-bg); }
+.pr-review-diff .pr-review-num.is-add { background:var(--pr-add-num-bg); }
+.pr-review-diff .pr-review-num.is-del { background:var(--pr-del-num-bg); }
+.pr-review-diff .pr-review-code.is-add { background:var(--pr-add-bg); }
+.pr-review-diff .pr-review-code.is-del { background:var(--pr-del-bg); }
+.pr-review-emph { color:inherit; border-radius:2px; background:var(--pr-add-emph); }
+.pr-review-line.is-del .pr-review-emph, .pr-review-code.is-del .pr-review-emph { background:var(--pr-del-emph); }
+.pr-review-line.is-add .pr-review-emph, .pr-review-code.is-add .pr-review-emph { background:var(--pr-add-emph); }
+.pr-review-hunk td { padding:4px 12px; font-size:11.5px; line-height:1.5; color:var(--pr-hunk-fg); background:var(--pr-hunk-bg); border-top:1px solid var(--border-subtle); border-bottom:1px solid var(--border-subtle); white-space:pre; }
+.pr-review-eof { display:inline-block; margin-left:8px; color:var(--status-error); background:rgba(255,68,102,.14); border-radius:2px; padding:0 4px; font-size:11px; user-select:none; }
+.pr-review-diff.is-split .pr-review-code:nth-child(2) { border-right:1px solid var(--border-muted); }
+.pr-review-diff .pr-review-num.is-empty, .pr-review-diff .pr-review-code.is-empty { background:repeating-linear-gradient(135deg, transparent 0 5px, rgba(255,255,255,.035) 5px 6px), var(--bg-surface); }
+/* Auto layout, not `table-layout: fixed`: fixed layout sizes columns from the first row, which is the
+   colSpan hunk row, and splits the width into equal thirds. `anywhere` shrinks the code min-content instead. */
+.pr-review-files.is-wrapped .pr-review-diff { width:100%; }
+.pr-review-files.is-wrapped .pr-review-diff .pr-review-code { white-space:pre-wrap; overflow-wrap:anywhere; }
+.pr-review-files.is-wrapped .pr-review-diff .pr-review-hunk td { white-space:pre-wrap; overflow-wrap:anywhere; }
+
+/* Description, raw fallback, empty note */
+.pr-review-description { flex:1; min-height:0; overflow:auto; padding:16px 18px; }
+.pr-review-body { max-width:80ch; font:13.5px/1.6 var(--font-sans); white-space:pre-wrap; overflow-wrap:anywhere; color:var(--text-secondary); }
+.pr-review-raw-wrap { display:flex; flex-direction:column; flex:1; min-height:0; min-width:0; }
+.pr-review-raw-notice { flex:none; margin:0; padding:8px 14px; font-size:12px; color:var(--status-pending); border-bottom:1px solid var(--border-muted); }
+.pr-review-raw { flex:1; min-height:0; min-width:0; margin:0; padding:10px 14px; overflow:auto; font:12px/1.6 var(--font-mono); white-space:pre; background:var(--bg-void); color:var(--text-secondary); }
 .pr-diff-add { color:var(--accent); }
 .pr-diff-delete { color:var(--status-error); }
+.pr-diff-hunk { color:var(--pr-hunk-fg); }
+.pr-review-empty-note { margin:0; padding:24px 0; font-size:12.5px; color:var(--text-muted); text-align:center; }
+
+/* Status view */
+.pr-review-empty { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; flex:1; min-height:0; padding:32px 24px; text-align:center; }
+.pr-review-empty-glyph { display:inline-flex; align-items:center; justify-content:center; width:40px; height:40px; font-size:18px; color:var(--text-secondary); border:1px solid var(--border-default); border-radius:50%; }
+.pr-review-empty-title { max-width:42ch; margin:0; font-size:14px; font-weight:600; color:var(--text-primary); overflow-wrap:anywhere; }
+.pr-review-empty-detail { max-width:46ch; margin:0; font-size:12.5px; line-height:1.5; color:var(--text-muted); overflow-wrap:anywhere; }
+.pr-review-empty-detail code { padding:1px 5px; font:11.5px var(--font-mono); color:var(--text-secondary); background:var(--bg-overlay); border:1px solid var(--border-muted); border-radius:var(--radius-sm); }
+.pr-review-empty-actions { display:flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:8px; margin-top:4px; }
+.pr-review-skeleton { display:flex; flex-direction:column; gap:10px; flex:1; min-height:0; overflow:hidden; padding:16px 14px; }
+.pr-review-skeleton > * { flex:none; }
+.pr-review-skel-line { height:10px; border-radius:4px; background:linear-gradient(90deg, var(--bg-overlay) 0%, var(--bg-hover) 50%, var(--bg-overlay) 100%); background-size:200% 100%; animation:pr-review-shimmer 1.4s linear infinite; }
+.pr-review-skel-line.is-title { height:16px; width:55%; }
+.pr-review-skel-line.is-short { width:35%; }
+.pr-review-skel-card { display:flex; flex-direction:column; gap:8px; padding:12px; border:1px solid var(--border-muted); border-radius:var(--radius-md); }
+.pr-review-skel-card .pr-review-skel-line:nth-child(1) { width:70%; }
+.pr-review-skel-card .pr-review-skel-line:nth-child(2) { width:92%; }
+.pr-review-skel-card .pr-review-skel-line:nth-child(3) { width:48%; }
+.pr-review-skel-card .pr-review-skel-line:nth-child(4) { width:80%; }
+@keyframes pr-review-shimmer { from { background-position:200% 0; } to { background-position:-200% 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .pr-review-glyph.is-spinning, .pr-review-checks.is-running .pr-review-dot, .pr-review-skel-line { animation:none; }
+  .pr-review-progress::after { animation:none; width:100%; opacity:.5; }
+}
+@media (max-width: 767px), (pointer: coarse) {
+  .pr-review-icon { min-width:44px; min-height:44px; }
+  .pr-review-button { min-width:44px; min-height:44px; }
+  .pr-review-link, .pr-review-section-tab { min-height:44px; }
+  /* 16px stops iOS Safari from zooming the page when the filter is focused. */
+  .pr-review-filter { flex:1 1 100%; max-width:none; min-height:44px; font-size:16px; }
+  /* Full-size hit areas in the file header without inflating the sticky header's height. */
+  .pr-review-file-header .pr-review-copy { margin-block:-8px; }
+  .pr-review-file-toggle { min-width:44px; min-height:44px; margin:-11px; }
+  .pr-review-viewed-toggle { min-height:32px; padding:4px 10px; }
+}
+/* Narrow pane (480px side pane, phones). Placed after the media block so it wins the filter basis. */
+@container (max-width: 520px) {
+  .pr-review-header { padding:8px 10px; }
+  /* Ready header: state, number and actions on top; the title gets the full width (up to two lines). */
+  .pr-review-header-top:has(.pr-review-state) { display:grid; grid-template-columns:auto auto minmax(0,1fr) auto; grid-template-areas:"state number . actions" "title title title title"; gap:6px 8px; }
+  .pr-review-header-top:has(.pr-review-state) .pr-review-state { grid-area:state; }
+  .pr-review-header-top:has(.pr-review-state) .pr-review-number { grid-area:number; }
+  .pr-review-header-top:has(.pr-review-state) .pr-review-actions { grid-area:actions; }
+  .pr-review-header-top:has(.pr-review-state) .pr-review-title { grid-area:title; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; white-space:normal; overflow-wrap:anywhere; font-size:15px; line-height:1.35; }
+  .pr-review-banner { padding:6px 10px; }
+  .pr-review-sections { padding:0 10px; }
+  .pr-review-toolbar { padding:8px 10px; }
+  /* Row 1: files toggle + filter. Row 2: viewed progress left, Wrap / Collapse right. */
+  .pr-review-filter { flex:1 1 calc(100% - 120px); max-width:none; }
+  .pr-review-viewed-progress { margin-left:0; }
+  .pr-review-toolbar > .pr-review-button[aria-pressed] { margin-left:auto; }
+  .pr-review-diffs { padding:0 10px 32px; }
+  .pr-review-diffs > :first-child { margin-top:10px; }
+  .pr-review-description { padding:12px 10px; }
+  .pr-review-skeleton { padding:12px 10px; }
+  /* File header: chevron + path + copy, then status / counts / viewed indented under the path. */
+  .pr-review-file-header { display:grid; grid-template-columns:22px auto minmax(0,1fr) auto auto; grid-template-areas:"toggle path path path copy" ". status counts viewed viewed"; align-items:center; gap:4px 8px; padding:6px 8px; }
+  .pr-review-file-toggle { grid-area:toggle; }
+  .pr-review-file-path { grid-area:path; }
+  .pr-review-copy { grid-area:copy; justify-self:end; }
+  .pr-review-file-status { grid-area:status; justify-self:start; }
+  .pr-review-file-counts { grid-area:counts; }
+  .pr-review-viewed-toggle { grid-area:viewed; justify-self:end; }
+  .pr-review-diff .pr-review-num { min-width:36px; padding:0 6px; }
+}
+@container (max-width: 400px) {
+  .pr-review-viewed-bar { display:none; }
+}
 
 /* Reserve touch space around the compact sidebar PR badge without enlarging its visual treatment. */
 .pr-review-badge-reserve, .pr-review-badge-button {
