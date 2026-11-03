@@ -45,3 +45,12 @@ CLAUDE.md
 
 # solo panel packaging output
 ui/dist-package/
+
+# Security findings/reviews stay local — this repo is public. See AGENTS.md.
+.security-notes/
+docs/security-review*.md
+docs/*security-review*.md
+docs/**/security-review*.md
+docs/security-fixes-*/
+docs/investigations/security-*/
+docs/investigations/*security*.md
