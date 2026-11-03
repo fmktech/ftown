@@ -474,6 +474,7 @@ body {
   bottom: 12px;
   z-index: 5;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
@@ -483,4 +484,6 @@ body {
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
   font-size: 12px;
 }
-.session-preview-link-host { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45%; }
+/* Whole destination, including the decisive suffix: wrap rather than truncate,
+   so a long attacker-owned host cannot hide behind an end ellipsis. */
+.session-preview-link-host { flex: 1 1 100%; font-weight: 600; overflow-wrap: anywhere; word-break: break-all; }

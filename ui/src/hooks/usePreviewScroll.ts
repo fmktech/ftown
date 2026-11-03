@@ -16,26 +16,30 @@ export function usePreviewScroll(candidate: Candidate | null, owner: string, get
   // A pending external-link request from the untrusted preview. Never opened
   // directly: the user must confirm in the parent before a window is created.
   const [linkPrompt, setLinkPrompt] = useState<string | null>(null);
+  // The exact target the user is looking at. While a prompt is shown the frame
+  // cannot replace it, and confirm opens precisely this value — never React's
+  // possibly-replayed state updater, and never a newer queued request.
+  const linkPromptRef = useRef<string | null>(null);
+  const clearLinkPrompt = useCallback(() => { linkPromptRef.current = null; setLinkPrompt(null); }, []);
   const confirmLink = useCallback(() => {
-    setLinkPrompt(previous => {
-      if (previous) window.open(previous, '_blank', 'noopener,noreferrer');
-      return null;
-    });
+    const target = linkPromptRef.current;
+    linkPromptRef.current = null;
+    setLinkPrompt(null);
+    if (target) window.open(target, '_blank', 'noopener,noreferrer');
   }, []);
-  const dismissLink = useCallback(() => setLinkPrompt(null), []);
   const displayRef = useRef<Display | null>(null); const latest = useRef(candidate); latest.current = candidate;
   const coords = useRef<PreviewScrollPosition>({ x: 0, y: 0 }); const restored = useRef(false); const pending = useRef<Pending | null>(null);
   const hardEpoch = getHardEpoch();
   const discardPending = () => { if (pending.current) clearTimeout(pending.current.timer); pending.current = null; };
   const commit = (next: Candidate, nextOwner: string, generation: number) => {
     if (getHardEpoch() !== generation || latest.current?.key !== next.key) return;
-    discardPending(); restored.current = false; setLinkPrompt(null);
+    discardPending(); restored.current = false; clearLinkPrompt();
     const result: Display = { ...next, documentId: uuidv4(), owner: nextOwner, hardEpoch: generation };
     displayRef.current = result; setDisplay(result);
   };
   useEffect(() => {
     const current = displayRef.current;
-    if (!candidate || !owner) { discardPending(); displayRef.current = null; coords.current = { x: 0, y: 0 }; restored.current = false; setLinkPrompt(null); setDisplay(null); return; }
+    if (!candidate || !owner) { discardPending(); displayRef.current = null; coords.current = { x: 0, y: 0 }; restored.current = false; clearLinkPrompt(); setDisplay(null); return; }
     if (!current || current.owner !== owner || current.hardEpoch !== hardEpoch) {
       discardPending(); coords.current = { x: 0, y: 0 }; commit(candidate, owner, hardEpoch); return;
     }
@@ -56,9 +60,10 @@ export function usePreviewScroll(candidate: Candidate | null, owner: string, get
         // untrusted preview code is not proof of a trusted user click.
         if (data.kind !== 'open-link' || !exact(data, ['channel', 'kind', 'url'])) return;
         if (typeof data.url !== 'string' || data.url.length > 2048) return;
+        if (linkPromptRef.current !== null) return; // freeze the shown target
         try {
           const url = new URL(data.url);
-          if (url.protocol === 'http:' || url.protocol === 'https:') setLinkPrompt(url.href);
+          if (url.protocol === 'http:' || url.protocol === 'https:') { linkPromptRef.current = url.href; setLinkPrompt(url.href); }
         } catch { /* Invalid URLs are ignored. */ }
         return;
       }
@@ -77,5 +82,5 @@ export function usePreviewScroll(candidate: Candidate | null, owner: string, get
     };
     window.addEventListener('message', receive); return () => { window.removeEventListener('message', receive); discardPending(); };
   }, [getHardEpoch]);
-  return { iframeRef, display: candidate && display?.owner === owner && display.hardEpoch === hardEpoch ? display : null, linkPrompt, confirmLink, dismissLink };
+  return { iframeRef, display: candidate && display?.owner === owner && display.hardEpoch === hardEpoch ? display : null, linkPrompt, confirmLink, dismissLink: clearLinkPrompt };
 }

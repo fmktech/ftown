@@ -2,7 +2,7 @@
 import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { usePreviewScroll } from './usePreviewScroll';
-import { PREVIEW_SCROLL_CHANNEL as channel } from '@/lib/preview-scroll-protocol';
+import { PREVIEW_SCROLL_CHANNEL as channel, PREVIEW_LINK_CHANNEL } from '@/lib/preview-scroll-protocol';
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 it('uses only the current opaque frame, snapshots before replacement and restores its coordinates', () => {
@@ -60,4 +60,28 @@ it('preserves the last restored position when a replacement frame snapshots befo
  const c = hook.result.current.display!; expect(c.key).toBe('c');
  receive({ channel, documentId: c.documentId, kind: 'ready' });
  expect(frame.postMessage).toHaveBeenLastCalledWith({ channel, documentId: c.documentId, kind: 'restore', x: 0, y: 500 }, '*');
+});
+
+it('freezes the confirmed link target and opens it exactly once', () => {
+ const getEpoch = () => 0;
+ const hook = renderHook(({ key }) => usePreviewScroll({ html: key, key }, 'owner', getEpoch), { initialProps: { key: '1' } });
+ const frame = { postMessage: vi.fn() };
+ Object.defineProperty(hook.result.current.iframeRef, 'current', { configurable: true, value: { contentWindow: frame } });
+ const receiveLink = (url: string) => act(() => window.dispatchEvent(new MessageEvent('message', {
+   data: { channel: PREVIEW_LINK_CHANNEL, kind: 'open-link', url }, source: frame as unknown as Window, origin: 'null',
+ })));
+ const open = vi.fn();
+ vi.stubGlobal('open', open);
+ try {
+   receiveLink('https://trusted.example.test/');
+   expect(hook.result.current.linkPrompt).toBe('https://trusted.example.test/');
+   // A second frame request while the prompt is shown must not replace the target.
+   receiveLink('https://other.example.test/');
+   expect(hook.result.current.linkPrompt).toBe('https://trusted.example.test/');
+   // Confirmation opens the frozen target once, even under StrictMode.
+   act(() => hook.result.current.confirmLink());
+   expect(open).toHaveBeenCalledTimes(1);
+   expect(open).toHaveBeenCalledWith('https://trusted.example.test/', '_blank', 'noopener,noreferrer');
+   expect(hook.result.current.linkPrompt).toBeNull();
+ } finally { vi.unstubAllGlobals(); }
 });

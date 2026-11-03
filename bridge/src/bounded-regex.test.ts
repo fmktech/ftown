@@ -42,3 +42,19 @@ test('boundedMatchIndexes rejects overload once the worker pool and queue are sa
     await Promise.allSettled(inflight);
   }
 });
+
+function liveWorkers(): number {
+  const report = process.report?.getReport() as { workers?: unknown[] } | undefined;
+  return report?.workers?.length ?? 0;
+}
+
+test('boundedMatchIndexes releases pool slots only after workers exit', async () => {
+  // A pool slot must not be freed while a worker is still alive; otherwise
+  // concurrent capacity exceeds GREP_MAX_CONCURRENT. Before that fix, worker
+  // teardown lagged the resolved promises by several live workers.
+  const baseline = liveWorkers();
+  await Promise.all(
+    Array.from({ length: 20 }, (_value, index) => boundedMatchIndexes('hello', [`hello ${index}`, 'nope'], 5_000)),
+  );
+  assert.equal(liveWorkers(), baseline, 'workers must have exited before their slots were released');
+});

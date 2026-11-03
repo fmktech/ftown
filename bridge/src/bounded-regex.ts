@@ -57,30 +57,39 @@ const WORKER_SOURCE = `import('node:worker_threads').then(({ parentPort, workerD
 
 function runWorker(pattern: string, lines: string[], timeoutMs: number): Promise<number[] | null> {
   return new Promise(resolve => {
+    // Resolve only once the worker has actually exited, so a pool slot is never
+    // released while a terminating worker is still live.
     let settled = false;
+    let exited = false;
+    let outcome: number[] | null = null;
     let worker: Worker | undefined;
-    const finish = (value: number[] | null): void => {
+    let timer: NodeJS.Timeout | undefined;
+    const decide = (value: number[] | null): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      outcome = value;
+      if (timer) clearTimeout(timer);
+      if (exited) { resolve(outcome); return; }
       void worker?.terminate();
-      resolve(value);
     };
-    const timer = setTimeout(() => finish(null), timeoutMs);
+    const onExit = (): void => {
+      exited = true;
+      if (settled) resolve(outcome);
+      else decide(null);
+    };
+    timer = setTimeout(() => decide(null), timeoutMs);
     try {
       worker = new Worker(WORKER_SOURCE, { eval: true, workerData: { pattern, lines } });
     } catch {
-      settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       resolve(null);
       return;
     }
     worker.once('message', (message: { indexes?: unknown; invalid?: boolean }) => {
-      if (message?.invalid) return finish(null);
-      finish(Array.isArray(message?.indexes) ? (message.indexes as number[]) : []);
+      decide(message?.invalid ? null : (Array.isArray(message?.indexes) ? (message.indexes as number[]) : []));
     });
-    worker.once('error', () => finish(null));
-    worker.once('exit', () => finish(null));
+    worker.once('error', () => decide(null));
+    worker.once('exit', onExit);
   });
 }
 
