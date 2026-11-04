@@ -4,13 +4,13 @@ import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHand
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
-import { WebLinksAddon } from "@xterm/addon-web-links";
 import { TokenUsage } from "@/hooks/useSessionEvents";
 import { ShellType, SessionUsage } from "@/types";
 import { useTerminal } from "@/hooks/useTerminal";
 import { FallbackReason, TerminalTransportApi, TerminalTransportMode } from "@/lib/direct-transport/contract";
 import { formatTokens, formatUsage, formatUsageDetail } from "@/lib/format-usage";
 import { terminalBufferText } from "@/lib/terminal-text";
+import { findTerminalLinks } from "@/lib/terminal-links";
 import { HarnessIcon } from "./HarnessIcon";
 import { PullRequestLink } from "./PullRequestLink";
 import "@xterm/xterm/css/xterm.css";
@@ -257,9 +257,18 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     const unicode11Addon = new Unicode11Addon();
     term.loadAddon(fitAddon);
     term.loadAddon(unicode11Addon);
-    term.loadAddon(new WebLinksAddon((_event, uri) => {
-      window.open(uri, "_blank");
-    }));
+    const linkProviderDisposable = term.registerLinkProvider({
+      provideLinks(bufferLineNumber, callback) {
+        const links = findTerminalLinks(term.buffer.active, bufferLineNumber);
+        callback(links.length === 0 ? undefined : links.map((link) => ({
+          range: link.range,
+          text: link.url,
+          activate: () => {
+            window.open(link.url, "_blank");
+          },
+        })));
+      },
+    });
     term.open(containerRef.current);
     term.unicode.activeVersion = "11";
     fitAddon.fit();
@@ -376,6 +385,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
         resizeBounceTimerRef.current = null;
       }
       scrollDisposable.dispose();
+      linkProviderDisposable.dispose();
       resizeObserver.disconnect();
       term.dispose();
       xtermRef.current = null;
