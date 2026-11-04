@@ -120,49 +120,20 @@ export class TerminalManager {
     return { lines, totalLines, offset, limit };
   }
 
-  grep(
-    sessionId: string,
-    pattern: string,
-    offset = 0,
-    limit = 1000,
-    contextLines = 0,
-  ): GrepResult {
+  /**
+   * All buffered terminal lines, top to bottom. Callers match under a bounded
+   * regex budget (see bounded-regex.ts) rather than running a pattern here.
+   */
+  allLines(sessionId: string): string[] {
     const managed = this.terminals.get(sessionId);
-    if (!managed) {
-      return { matches: [], totalMatches: 0, offset, limit };
-    }
-
-    let regex: RegExp;
-    try {
-      regex = new RegExp(pattern, 'i');
-    } catch {
-      return { matches: [], totalMatches: 0, offset, limit };
-    }
-
+    if (!managed) return [];
     const totalLines = managed.terminal.buffer.active.length;
-    const lineTexts: string[] = [];
+    const lines: string[] = [];
     for (let i = 0; i < totalLines; i++) {
       const line = managed.terminal.buffer.active.getLine(i);
-      lineTexts.push(line ? line.translateToString(true) : '');
+      lines.push(line ? line.translateToString(true) : '');
     }
-
-    const matches: GrepMatch[] = [];
-    const ctx = Math.max(0, Math.min(10, contextLines));
-
-    for (let i = 0; i < lineTexts.length; i++) {
-      if (regex.test(lineTexts[i])) {
-        const entry: GrepMatch = { lineNumber: i + 1, text: lineTexts[i] };
-        if (ctx > 0) {
-          entry.before = lineTexts.slice(Math.max(0, i - ctx), i);
-          entry.after = lineTexts.slice(i + 1, Math.min(lineTexts.length, i + 1 + ctx));
-        }
-        matches.push(entry);
-      }
-    }
-
-    const totalMatches = matches.length;
-    const paginatedMatches = matches.slice(offset, offset + limit);
-    return { matches: paginatedMatches, totalMatches, offset, limit };
+    return lines;
   }
 
   replay(sessionId: string, rawLog: string): void {

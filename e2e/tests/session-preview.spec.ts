@@ -111,7 +111,7 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
 
     const registration = await fixture.register(target, fileName);
     await expect(documentFrame(page, fileName).getByRole("heading", { name: `${marker} version 1`, exact: true })).toBeVisible();
-    await expect(iframe(page, fileName)).toHaveAttribute("sandbox", "allow-scripts allow-popups allow-popups-to-escape-sandbox");
+    await expect(iframe(page, fileName)).toHaveAttribute("sandbox", "allow-scripts");
     await expect(iframe(page, fileName)).toHaveAttribute("referrerpolicy", "no-referrer");
     expect(await documentFrame(page, fileName).locator("#unicode").evaluate((element) => element.textContent?.endsWith("😀 boundary ✓"))).toBe(true);
     expect(await documentFrame(page, fileName).locator("#data-image").evaluate((element) => element instanceof HTMLImageElement && element.complete && element.naturalWidth === 2)).toBe(true);
@@ -129,16 +129,50 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     await iframe(page, fileName).evaluate((element, value) => element.setAttribute("data-preview-node", value), suffix);
     const originalUrl = page.url();
     for (const linkId of ["external-link", "dynamic-link"]) {
-      const popupPromise = context.waitForEvent("page");
       await documentFrame(page, fileName).locator(`#${linkId}`).click();
+      // The sandbox cannot open windows; the parent asks the user to confirm.
+      const prompt = page.getByRole("dialog", { name: "Open external link" });
+      await expect(prompt).toBeVisible();
+      await expect(prompt).toContainText("preview.example.test");
+      const paneBox = await previewRegion(page).boundingBox();
+      const dialogBox = await prompt.boundingBox();
+      expect(paneBox).not.toBeNull(); expect(dialogBox).not.toBeNull();
+      // The confirmation must stay inside the preview pane so the destination
+      // and the Open/Cancel actions are both visible.
+      expect(dialogBox!.y).toBeGreaterThanOrEqual(paneBox!.y - 1);
+      expect(dialogBox!.y + dialogBox!.height).toBeLessThanOrEqual(paneBox!.y + paneBox!.height + 1);
+      await expect(prompt.getByRole("button", { name: "Open", exact: true })).toBeVisible();
+      const popupPromise = context.waitForEvent("page");
+      await prompt.getByRole("button", { name: "Open", exact: true }).click();
       const popup = await popupPromise;
       await expect(popup.getByRole("heading", { name: "External preview destination" })).toBeVisible();
       expect(new URL(popup.url()).hostname).toBe("preview.example.test");
       expect(await popup.evaluate(() => window.opener)).toBeNull();
       await popup.close();
+      await expect(prompt).toHaveCount(0);
       expect(page.url()).toBe(originalUrl);
       await expect(iframe(page, fileName)).toHaveAttribute("data-preview-node", suffix);
       await expect(count).toHaveText("Count: 1");
+    }
+    {
+      // A very long but allowed URL must not push the scheme/host out of the
+      // pane: the destination scrolls inside the bounded dialog and Open stays
+      // reachable. Cancel here so no external request is made.
+      await documentFrame(page, fileName).locator("#long-link").click();
+      const longPrompt = page.getByRole("dialog", { name: "Open external link" });
+      await expect(longPrompt).toBeVisible();
+      await expect(longPrompt).toContainText("preview.example.test");
+      const paneBox = await previewRegion(page).boundingBox();
+      const dialogBox = await longPrompt.boundingBox();
+      expect(paneBox).not.toBeNull(); expect(dialogBox).not.toBeNull();
+      expect(dialogBox!.y).toBeGreaterThanOrEqual(paneBox!.y - 1);
+      expect(dialogBox!.y + dialogBox!.height).toBeLessThanOrEqual(paneBox!.y + paneBox!.height + 1);
+      const openButton = longPrompt.getByRole("button", { name: "Open", exact: true });
+      await expect(openButton).toBeVisible();
+      const openBox = await openButton.boundingBox();
+      expect(openBox!.y + openBox!.height).toBeLessThanOrEqual(paneBox!.y + paneBox!.height + 1);
+      await longPrompt.getByRole("button", { name: "Cancel" }).click();
+      await expect(longPrompt).toHaveCount(0);
     }
     expect(externalHeaders).toHaveLength(2);
     for (const headers of externalHeaders) expect(headers.referer).toBeUndefined();
@@ -236,6 +270,40 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     expect(Math.abs(expandedPreview.x - expandedMain.x)).toBeLessThanOrEqual(2);
     expect(Math.abs(expandedPreview.width - expandedMain.width)).toBeLessThanOrEqual(2);
     await page.getByRole("button", { name: "Open conversation", exact: true }).click();
+    // The preview is expanded (the Collapse button was asserted focused just
+    // above) and the conversation is open. The link confirmation must paint
+    // above the chat: Open/Cancel visible and clickable, and Escape must dismiss
+    // only the confirmation without collapsing the preview.
+    await expect(page.locator("#preview-conversation")).toBeVisible();
+    await documentFrame(page, fileName).locator("#external-link").click();
+    const chatPrompt = page.getByRole("dialog", { name: "Open external link" });
+    await expect(chatPrompt).toBeVisible();
+    await expect(chatPrompt.getByRole("button", { name: "Open", exact: true })).toBeVisible();
+    const chatCancel = chatPrompt.getByRole("button", { name: "Cancel", exact: true });
+    await expect(chatCancel).toBeVisible();
+    // A plain pointer click fails if the conversation overlay intercepts it.
+    await chatCancel.click();
+    await expect(chatPrompt).toHaveCount(0);
+    await documentFrame(page, fileName).locator("#external-link").click();
+    await expect(chatPrompt).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(chatPrompt).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Collapse preview", exact: true })).toBeVisible();
+    await expect(page.locator("#preview-conversation")).toBeVisible();
+    // An unsolicited iframe message must not arm the affirmative action: with
+    // the chat focused, an injected link request must not open a popup on Enter.
+    await page.getByRole("textbox", { name: "Message the agent" }).focus();
+    await documentFrame(page, fileName).locator("body").evaluate(() => {
+      window.parent.postMessage({ channel: "ftown-preview-link-v1", kind: "open-link", url: "https://preview.example.test/unsolicited" }, "*");
+    });
+    const injectedPrompt = page.getByRole("dialog", { name: "Open external link" });
+    await expect(injectedPrompt).toBeVisible();
+    await expect(injectedPrompt.getByRole("button", { name: "Open", exact: true })).not.toBeFocused();
+    const noPopup = context.waitForEvent("page", { timeout: 500 }).catch(() => null);
+    await page.keyboard.press("Enter");
+    expect(await noPopup).toBeNull();
+    await injectedPrompt.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(injectedPrompt).toHaveCount(0);
     await page.getByRole("textbox", { name: "Message the agent" }).fill("Draft survives preview refresh");
     await screenshot(page, info, "preview-expanded-conversation");
     await page.getByRole("button", { name: "Collapse conversation", exact: true }).click();

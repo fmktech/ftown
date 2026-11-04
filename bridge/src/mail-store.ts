@@ -122,7 +122,7 @@ export class MailStore {
   async append(msg: MailMessage): Promise<void> {
     await this.withLock(msg.to, async () => {
       const dir = this.resolveDir(msg.to);
-      await mkdir(dir, { recursive: true });
+      await mkdir(dir, { recursive: true, mode: 0o700 });
       await this.readInbox(msg.to);
       // Mail can carry task details; owner-only like the session registry.
       await appendFile(this.inboxPath(msg.to), `${JSON.stringify(msg)}\n`, {

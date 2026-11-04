@@ -9,6 +9,7 @@ import { executeSecurePacket } from './security/bridge/execute.js';
 import type { SecureExecutionObserver } from './security/bridge/execution-observer.js';
 import { observeHttpDelivery, scopedUpdateObserver } from './update-effects.js';
 import { nativeWake } from './security/bridge/native-wake.js';
+import { boundedMatchIndexes, GrepBusyError } from './bounded-regex.js';
 
 import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 
@@ -1054,43 +1055,42 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       const contextLines =
         typeof body.context === 'number' ? Math.max(0, Math.min(10, body.context)) : 0;
 
-      let regex: RegExp;
+      if (pattern.length > 256) {
+        jsonResponse(res, 400, { error: 'Pattern too long' });
+        return;
+      }
+
+      const allLines = this.terminalManager && this.terminalManager.has(sessionId)
+        ? this.terminalManager.allLines(sessionId)
+        : (await this.store.loadTerminalLog(sessionId)).split('\n');
+
+      let indexes: number[] | null;
       try {
-        if (pattern.length > 256) {
-          jsonResponse(res, 400, { error: 'Pattern too long' });
+        indexes = await boundedMatchIndexes(pattern, allLines);
+      } catch (error) {
+        if (error instanceof GrepBusyError) {
+          jsonResponse(res, 429, { error: 'Too many concurrent searches' });
           return;
         }
-        regex = new RegExp(pattern, 'i');
-      } catch {
         jsonResponse(res, 400, { error: 'Invalid regex pattern' });
         return;
       }
-
-      if (this.terminalManager && this.terminalManager.has(sessionId)) {
-        jsonResponse(
-          res,
-          200,
-          this.terminalManager.grep(sessionId, pattern, offset, limit, contextLines),
-        );
+      if (indexes === null) {
+        jsonResponse(res, 400, { error: 'Pattern too complex' });
         return;
       }
 
-      const log = await this.store.loadTerminalLog(sessionId);
-      const allLines = log.split('\n');
       const matches: { lineNumber: number; text: string; before?: string[]; after?: string[] }[] = [];
-
-      for (let i = 0; i < allLines.length; i++) {
-        if (regex.test(allLines[i])) {
-          const entry: { lineNumber: number; text: string; before?: string[]; after?: string[] } = {
-            lineNumber: i + 1,
-            text: allLines[i],
-          };
-          if (contextLines > 0) {
-            entry.before = allLines.slice(Math.max(0, i - contextLines), i);
-            entry.after = allLines.slice(i + 1, Math.min(allLines.length, i + 1 + contextLines));
-          }
-          matches.push(entry);
+      for (const i of indexes) {
+        const entry: { lineNumber: number; text: string; before?: string[]; after?: string[] } = {
+          lineNumber: i + 1,
+          text: allLines[i],
+        };
+        if (contextLines > 0) {
+          entry.before = allLines.slice(Math.max(0, i - contextLines), i);
+          entry.after = allLines.slice(i + 1, Math.min(allLines.length, i + 1 + contextLines));
         }
+        matches.push(entry);
       }
 
       const totalMatches = matches.length;

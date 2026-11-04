@@ -30,6 +30,9 @@ function stream(body: string): ReadableStream<Uint8Array> {
 beforeEach(() => {
   state.authenticated = true; state.registration = true;
   consume.mockReset().mockResolvedValue({ allowed: true }); query.mockReset(); revoke.mockReset();
+  // The rate-limit source is read from fly-client-ip; trust it in tests by
+  // declaring a Fly ingress (the header is otherwise fail-closed).
+  process.env.FLY_APP_NAME = 'test';
 });
 
 describe.each(routes.map((route, index) => [index, route] as const))("route %i", (_index, route) => {
