@@ -25,6 +25,7 @@ const state = vi.hoisted(() => ({
   rpcCommands: [] as string[],
   terminalGetText: vi.fn(() => "terminal output"),
   terminalPaste: vi.fn(),
+  terminalSendInput: vi.fn(),
 }));
 
 vi.mock("@/hooks/usePendingApprovals", () => ({ usePendingApprovals: () => ({ client: null, snapshot: { inbox: state.pending } }) }));
@@ -44,14 +45,14 @@ vi.mock("@/hooks/useAllSessionEvents", () => ({ useAllSessionEvents: () => ({
 vi.mock("./Terminal", async () => {
   const { forwardRef, useImperativeHandle } = await import("react");
   return { Terminal: forwardRef(function Terminal({ sessionId, headerActions }: { sessionId: string | null; headerActions?: ReactNode }, ref) {
-    useImperativeHandle(ref, () => ({ sendInput: vi.fn(), refit: vi.fn(), getText: state.terminalGetText, paste: state.terminalPaste }));
+    useImperativeHandle(ref, () => ({ sendInput: state.terminalSendInput, refit: vi.fn(), getText: state.terminalGetText, paste: state.terminalPaste }));
     return <section aria-label="Terminal session header"><div data-testid="terminal">{sessionId}</div>{headerActions}</section>;
   }) };
 });
 vi.mock("./MobileControlBar", async () => {
   const { forwardRef } = await import("react");
-  return { MobileControlBar: forwardRef(function MobileControlBar({ onPaste, onSelectText }: { onPaste: (text: string) => void; onSelectText: () => void }, _ref) {
-    return <div>Session controls<button onClick={onSelectText}>Select</button><button onClick={() => onPaste("pasted\ntext")}>Paste</button></div>;
+  return { MobileControlBar: forwardRef(function MobileControlBar({ onPaste, onSelectText, onHostPaste }: { onPaste: (text: string) => void; onSelectText: () => void; onHostPaste?: () => void }, _ref) {
+    return <div>Session controls<button onClick={onSelectText}>Select</button><button onClick={() => onPaste("pasted\ntext")}>Paste</button>{onHostPaste ? <button onClick={onHostPaste}>Host</button> : null}</div>;
   }) };
 });
 vi.mock("./NewSessionModal", () => ({ NewSessionModal: ({ isOpen, onSubmit, onClose }: {
@@ -549,5 +550,34 @@ describe("mobile copy and paste wiring", () => {
     openOrdinary();
     fireEvent.click(screen.getByRole("button", { name: "Paste" }));
     expect(state.terminalPaste).toHaveBeenCalledWith("pasted\ntext");
+  });
+
+  function openSession(id: string, name: string, fields: Partial<Session> = {}) {
+    state.sessions.push(session(id, name, fields));
+    dashboard();
+    fireEvent.click(screen.getByRole("button", { name: new RegExp(name) }));
+  }
+
+  it("sends Ctrl+V to the terminal once for a claude session's Host key", () => {
+    openSession("claude-agent", "Claude agent", { shellType: "claude" });
+    fireEvent.click(screen.getByRole("button", { name: "Host" }));
+    expect(state.terminalSendInput).toHaveBeenCalledTimes(1);
+    expect(state.terminalSendInput).toHaveBeenCalledWith("\x16");
+    expect(state.terminalPaste).not.toHaveBeenCalled();
+  });
+
+  it("shows the Host key for a zai session", () => {
+    openSession("zai-agent", "Zai agent", { shellType: "zai" });
+    expect(screen.getByRole("button", { name: "Host" })).toBeTruthy();
+  });
+
+  it("hides the Host key for a shell session", () => {
+    openOrdinary();
+    expect(screen.queryByRole("button", { name: "Host" })).toBeNull();
+  });
+
+  it("hides the Host key for a session without shellType", () => {
+    openSession("untyped", "Untyped session", { shellType: undefined });
+    expect(screen.queryByRole("button", { name: "Host" })).toBeNull();
   });
 });
