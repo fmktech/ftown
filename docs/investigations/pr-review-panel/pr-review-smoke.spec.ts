@@ -63,16 +63,23 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       await page.getByRole("button", { name: "Review pull request", exact: true }).click();
       await expect(review(page)).toBeVisible();
       await expect(review(page).locator("h2")).toHaveText("<img src=x onerror=bad()>");
+      await review(page).getByRole("tab", { name: "Description", exact: true }).click();
       await expect(review(page).locator(".pr-review-body")).toHaveText("<script>bad()</script>");
+      await review(page).getByRole("tab", { name: /^Files changed/ }).click();
       await expect(review(page).locator(".pr-review-diff")).toContainText("+<svg onload=bad()>");
-      for (const part of [review(page).locator("h2"), review(page).locator(".pr-review-body"), review(page).locator(".pr-review-diff")]) {
+      for (const part of [review(page).locator("h2"), review(page).locator(".pr-review-diff")]) {
         await expect(part.locator("img, script, svg")).toHaveCount(0);
       }
-      const fileLink = review(page).getByRole("navigation", { name: "Changed files" }).getByRole("link", { name: "example.txt" });
+      await review(page).getByRole("tab", { name: "Description", exact: true }).click();
+      await expect(review(page).locator(".pr-review-body").locator("img, script, svg")).toHaveCount(0);
+      await review(page).getByRole("tab", { name: /^Files changed/ }).click();
+      const filesToggle = review(page).getByRole("button", { name: /^Files \(\d+\)$/ });
+      if (await filesToggle.isVisible()) await filesToggle.click();
+      const fileLink = review(page).getByRole("navigation", { name: "Changed files" }).getByRole("button", { name: "example.txt" });
       await expect(fileLink).toBeVisible();
       await fileLink.click();
       await expect(review(page).locator("#pr-review-file-0")).toBeInViewport();
-      await expect(review(page).getByText(/Cached PR status · commit unverified/)).toBeVisible();
+      await expect(review(page).locator(".pr-review-checks")).toBeVisible();
       await expect.poll(async () => lines(await readFile(logPath, "utf8"), "metadata")).toBeGreaterThan(lines(before, "metadata"));
       await expect.poll(async () => lines(await readFile(logPath, "utf8"), "diff")).toBeGreaterThan(lines(before, "diff"));
       await noPageOverflow(page);
