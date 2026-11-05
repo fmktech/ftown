@@ -386,7 +386,7 @@ describe("POST /api/auth/bridge/pair/deny", () => {
     const res = await POST(jsonRequest(denyUrl, { userCode: "ABCD-1234" }));
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual({ ok: true });
-    expect(mockDeny).toHaveBeenCalledWith("ABCD-1234");
+    expect(mockDeny).toHaveBeenCalledWith("ABCD-1234", "user@example.com");
   });
 
   it("MED-4: rate-limited -> 429, does not deny", async () => {

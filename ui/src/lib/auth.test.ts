@@ -19,7 +19,7 @@ const login = (ip: string, password = "password") => state.authorize!(
   { email: "victim@example.com", password }, new Request("http://localhost", { headers: { "fly-client-ip": ip } })
 );
 
-beforeEach(() => { query.mockReset(); compare.mockReset(); consume.mockReset(); });
+beforeEach(() => { query.mockReset(); compare.mockReset(); consume.mockReset(); process.env.FLY_APP_NAME = 'test'; });
 
 it("charges every login to its source, including successes, and does not lock the victim email", async () => {
   const counts = new Map<string, number>();

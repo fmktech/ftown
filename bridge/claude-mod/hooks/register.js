@@ -1,6 +1,6 @@
 // This module intentionally submits only a pointer. Classic hooks and the mail
 // CLI remain the owners of message consumption; fetching here never drains mail.
-const WAKE = '[ftown mail] You have unread FTown mail. Run `ftown harness mail read` and handle the messages. Reply with `ftown harness mail send ...` where appropriate.';
+const WAKE = "FTown mail may be available. If this prompt's hooks supplied [ftown mail], process that mail without reading it again. Otherwise run `ftown harness mail read` once; if no mail is returned, no action is needed.";
 
 /** @param {import('claude-code').On} on */
 export function register(on) {
@@ -79,10 +79,12 @@ export function register(on) {
           if (response && (response.status === 400 || response.status === 409)) return;
         }
         if (!response?.ok || epoch !== generation || currentId !== await $.session.id()) return;
-        /** @type {{ messages?: Array<{ id?: unknown }> }} */
+        /** @type {{ messages?: Array<{ id?: unknown }>; busy?: unknown }} */
         let data;
         try { data = JSON.parse(response.text); } catch { return; }
         if (!Array.isArray(data.messages)) return;
+        // Mid-turn: the session's classic Stop hook delivers this mail, so a queued wake would find none.
+        if (data.busy === true) return;
         /** @type {Set<string>} */
         const found = new Set();
         for (const message of data.messages) {

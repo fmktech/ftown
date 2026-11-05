@@ -33,3 +33,12 @@ OpenCode uses its existing native client to submit the same wake instruction, wi
 Unit checks cover native selection, exact UUID/argv/stdin, definite rejection vs unknown, unsupported fallback, busy native queuing, stale/mismatched heartbeat, stop fencing, no PTY with healthy plugin, recovery after expiry, plugin rejection/retry/lifecycle and concurrent arrivals. Existing mail API/CLI tests remain passing. No assertion of exactly-once wake or work completion; mailbox read/disconnect behavior is unchanged.
 
 Root executes focused runtime/E2E against isolated HOME/workspace/processes, no production sessions or database. Verify packaged setup/copy, live local bridge mail send/read and required `ftown harness status`; validate Claude Mod with installed CLI and test native Codex/Muse where feasible. A client whose admission cannot be verified stays on fallback and is explicitly documented. Integration owner bumps bridge patch version, runs build and checks, commits only task files, pushes and opens PR. Root does not merge.
+
+## Amendment 2026-11-05: plugin wake defers while busy
+
+Source: `docs/investigations/2026-11-05-mail-wake-without-unread-mail.md`. Claude sessions also run the classic `hook-pump` on `UserPromptSubmit`/`Stop`, and it drains the inbox before the model runs the instructed read. That left the plugin's unconditional "You have unread FTown mail" prompt with `(no mail)`.
+
+- The `FtownNativeWake` heartbeat response is `{ messages, busy?: true }`. `busy` is present only while `MailDeliveryService.isAgentRecentlyBusy(sessionId)` holds, which is the same predicate the bridge's own nudge uses. Registration and `messages` are unchanged.
+- The Claude plugin ignores a `busy: true` response without changing its state. Mid-turn mail is delivered by the classic `Stop` hook, and the next idle poll wakes for anything still unread. This replaces "busy native queuing" for the plugin heartbeat path. A prompt that is already queued still cannot be cancelled.
+- The plugin's wake text is byte-identical to `MAIL_WAKE_TEXT`. It tells the model to process hook-supplied `[ftown mail]` without reading again, and otherwise to read once. `bridge/src/claude-mod.test.ts` asserts the parity.
+- Unchanged: the plugin still sends a pointer only, never a message body, and never consumes or marks mail delivered.

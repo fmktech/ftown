@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
+import { MailDeliveryService, MAIL_WAKE_TEXT } from './mail-delivery.js';
+import { MailStore } from './mail-store.js';
+import { nativeWake } from './security/bridge/native-wake.js';
+import type { Session } from './types.js';
 
 type Response = { ok: boolean; status: number; text: string };
 type Hook = (api: unknown, event: Record<string, unknown>, next: (event: Record<string, unknown>) => Promise<Record<string, unknown>>) => Promise<unknown>;
@@ -116,4 +122,172 @@ test('bridge restart recovers using current pointer; identity conflicts never su
   const conflict = fixture(); conflict.setFetch(async () => ({ ok: false, status: 409, text: '{}' }));
   await conflict.fire('session.start'); await conflict.tick();
   assert.equal(conflict.prompts.length, 0); assert.equal(conflict.requests.length, 1);
+});
+
+test('a busy poll is ignored without touching plugin state; the next non-busy poll decides', async () => {
+  const f = fixture();
+  f.setFetch(async () => ({ ok: true, status: 200, text: JSON.stringify({ messages: [{ id: 'one' }], busy: true }) }));
+  await f.fire('session.start'); await f.tick(); await f.tick();
+  assert.equal(f.prompts.length, 0, 'mid-turn: the Stop hook delivers this mail, so no wake is queued');
+  f.setFetch(async () => ({ ok: true, status: 200, text: JSON.stringify({ messages: [{ id: 'one' }] }) }));
+  await f.tick();
+  assert.equal(f.prompts.length, 1);
+  // The wake was admitted, so `one` is handled; busy and non-busy polls afterwards must not re-wake.
+  f.setFetch(async () => ({ ok: true, status: 200, text: JSON.stringify({ messages: [{ id: 'one' }], busy: true }) }));
+  await f.tick();
+  f.setFetch(async () => ({ ok: true, status: 200, text: JSON.stringify({ messages: [{ id: 'one' }] }) }));
+  await f.tick(); await f.tick();
+  assert.equal(f.prompts.length, 1, 'a busy poll must not clear the handled set');
+});
+
+test('the wake prompt is the bridge MAIL_WAKE_TEXT, not a directive to read mail', async () => {
+  const f = fixture(); f.setMessages([{ id: 'one' }]);
+  await f.fire('session.start'); await f.tick();
+  assert.equal(f.prompts.length, 1);
+  assert.equal(f.prompts[0], MAIL_WAKE_TEXT);
+  assert.doesNotMatch(f.prompts[0], /You have unread/);
+  assert.equal(f.prompts[0].startsWith('[ftown mail]'), false);
+});
+
+// Real register.js + real nativeWake + real MailStore/MailDeliveryService busy marking, with a fake Claude
+// that queues submitted prompts while mid-turn and runs the classic hook pump (drain on Stop/UserPromptSubmit).
+function wakeWorld(options: { pump: boolean }) {
+  const dir = mkdtempSync(join(tmpdir(), 'ftown-claude-mod-'));
+  const sessions: Record<string, Session> = {
+    orch: { id: 'orch', name: 'orch', command: 'claude', status: 'running', bridgeId: 'b', createdAt: '', updatedAt: '', shellType: 'claude', claudeSessionId: 'native-orch' },
+    worker: { id: 'worker', name: 'worker', command: 'claude', status: 'running', bridgeId: 'b', createdAt: '', updatedAt: '', shellType: 'claude', claudeSessionId: 'native-worker', parentSessionId: 'orch' },
+  };
+  const mailStore = new MailStore(id => join(dir, 'sessions', id));
+  const store = { loadSession: async (id: string) => sessions[id] ?? null, listSessions: async () => Object.values(sessions) };
+  const runner = { isRunning: () => true, write: () => true };
+  const mail = new MailDeliveryService({ store, mailStore, runner, setTimeout: () => ({}), clearTimeout: () => {} });
+  const orch = sessions.orch;
+  const drain = async () => {
+    const result = await mail.readMail(orch, { wait: 0, peek: false, all: false, limit: 50 });
+    return result.kind === 'immediate' ? result.messages : [];
+  };
+  const submitted: string[] = [];
+  const heartbeats: Array<{ ids: string[]; busy: boolean }> = [];
+  const modelReads: number[] = [];
+  const hookDrains: number[] = [];
+  let busy = false;
+  const queue: Array<(result: unknown) => void> = [];
+  const endTurn = async (): Promise<void> => {
+    if (options.pump) { const drained = await drain(); if (drained.length) hookDrains.push(drained.length); }
+    mail.markAgentIdle('orch'); busy = false;
+    const next = queue.shift();
+    if (next) { next({ text: 'accepted' }); await settle(); await runTurn(true); }
+  };
+  const runTurn = async (isWake: boolean): Promise<void> => {
+    busy = true; mail.markAgentBusy('orch');
+    if (options.pump) { const drained = await drain(); if (drained.length) hookDrains.push(drained.length); }
+    if (isWake) modelReads.push((await drain()).length); // the model obeys "run `ftown harness mail read`"
+    await endTurn();
+  };
+  const env: Record<string, string> = { FTOWN_SESSION_ID: 'orch', FTOWN_HOOK_PORT: '1', FTOWN_HOOK_TOKEN: 't', HOME: dir };
+  let tick: () => Promise<void> = async () => {};
+  const api = {
+    env: { get: async (name: string) => env[name] },
+    session: { id: async () => 'native-orch' },
+    clock: { every: (_ms: number, callback: () => Promise<void>) => { tick = callback; return { cancel() {} }; }, now: async () => 0 },
+    fs: { read: async (): Promise<string> => { throw new Error('no pointer'); } },
+    http: { fetch: async (_url: string, init: { body: string }) => {
+      try {
+        const result = await nativeWake(JSON.parse(init.body) as unknown, {
+          getSession: id => store.loadSession(id),
+          register: (session, registration) => mail.registerNativeWake(session, registration),
+          unread: id => mailStore.listUndelivered(id),
+          busy: id => mail.isAgentRecentlyBusy(id),
+        });
+        heartbeats.push({ ids: result.messages.map(message => message.id), busy: 'busy' in result && result.busy === true });
+        return { ok: true, status: 200, text: JSON.stringify(result) };
+      } catch { return { ok: false, status: 409, text: '{}' }; }
+    } },
+    prompt: { submit: ({ text }: { text: string }) => new Promise<unknown>(resolve => {
+      submitted.push(text);
+      if (busy) { queue.push(resolve); return; }
+      resolve({ text: 'accepted' });
+      void settle().then(() => runTurn(true));
+    }) },
+  };
+  const hooks = new Map<string, Hook>();
+  register((name, handler) => hooks.set(name, handler));
+  return {
+    submitted, heartbeats, modelReads, hookDrains, mail, mailStore, endTurn,
+    start: async () => { await hooks.get('session.start')?.(api, {}, async event => event); },
+    poll: async () => { await tick(); for (let i = 0; i < 20; i += 1) await settle(); },
+    send: async (from: 'orch' | 'worker', to: 'orch' | 'worker', body: string) => {
+      const result = await mail.acceptMail(sessions[to], { body, from, fromName: from });
+      assert.equal(result.ok, true);
+    },
+    beginTurn: () => { busy = true; mail.markAgentBusy('orch'); },
+    done: () => { mail.stop(); rmSync(dir, { recursive: true, force: true }); },
+  };
+}
+
+test('S2 regression: mail arriving mid-turn is delivered by the Stop pump and never produces a stale wake', async () => {
+  const w = wakeWorld({ pump: true });
+  try {
+    await w.start();
+    w.beginTurn();
+    await w.send('worker', 'orch', 'ack: picked up repair round 2');
+    await w.poll(); await w.poll();
+    assert.equal(w.submitted.length, 0, 'no wake may be queued while the session is mid-turn');
+    assert.equal(w.heartbeats.length, 2, 'the plugin polled both times');
+    assert.ok(w.heartbeats.every(h => h.busy && h.ids.length === 1), 'both polls saw the mail while the bridge reported busy');
+    await w.endTurn(); // Stop pump drains the inbox, then the session goes idle
+    assert.deepEqual(w.hookDrains, [1]);
+    await w.poll(); await w.poll();
+    assert.equal(w.submitted.length, 0, 'the drained mail must not wake the session afterwards');
+    assert.equal(w.heartbeats.length, 4, 'the plugin polled after the Stop pump');
+    assert.deepEqual(w.heartbeats.slice(2).map(h => h.busy), [false, false], 'post-Stop polls are non-busy');
+    assert.deepEqual(w.modelReads, []);
+  } finally { w.done(); }
+});
+
+test('wake liveness: idle mail with no pump wakes once and the consuming read returns the mail', async () => {
+  const w = wakeWorld({ pump: false });
+  try {
+    await w.start();
+    await w.send('worker', 'orch', 'hello');
+    await w.poll(); await w.poll(); await w.poll();
+    assert.equal(w.submitted.length, 1);
+    assert.deepEqual(w.modelReads, [1]);
+  } finally { w.done(); }
+});
+
+test('wake liveness: busy mail the Stop pump does not drain wakes exactly once after idle', async () => {
+  const w = wakeWorld({ pump: false });
+  try {
+    await w.start();
+    w.beginTurn();
+    await w.send('worker', 'orch', 'hello');
+    await w.poll(); await w.poll();
+    assert.equal(w.submitted.length, 0);
+    assert.equal(w.heartbeats.length, 2, 'the plugin polled both times');
+    assert.ok(w.heartbeats.every(h => h.busy && h.ids.length === 1), 'both polls saw the mail while the bridge reported busy');
+    await w.endTurn();
+    await w.poll(); await w.poll();
+    assert.equal(w.submitted.length, 1);
+    assert.deepEqual(w.modelReads, [1]);
+  } finally { w.done(); }
+});
+
+test('wake liveness: the session\'s own outgoing mail never wakes it, and a fresh later message does', async () => {
+  const w = wakeWorld({ pump: false });
+  try {
+    await w.start();
+    await w.send('orch', 'worker', 'task for worker');
+    await w.poll(); await w.poll();
+    assert.equal(w.submitted.length, 0);
+    assert.equal(w.heartbeats.length, 2, 'the plugin polled both times');
+    assert.ok(w.heartbeats.every(h => h.ids.length === 0 && !h.busy), 'the sender never sees its own outgoing mail as unread');
+    await w.send('worker', 'orch', 'first');
+    await w.poll(); await w.poll();
+    assert.equal(w.submitted.length, 1);
+    await w.send('worker', 'orch', 'second');
+    await w.poll(); await w.poll();
+    assert.equal(w.submitted.length, 2);
+    assert.deepEqual(w.modelReads, [1, 1]);
+  } finally { w.done(); }
 });

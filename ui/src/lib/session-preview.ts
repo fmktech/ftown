@@ -1,4 +1,4 @@
-import { PREVIEW_SCROLL_CHANNEL, PREVIEW_SCROLL_MAX, PREVIEW_SCROLL_REPORT_MS, PREVIEW_SCROLL_RESTORE_MS } from './preview-scroll-protocol';
+import { PREVIEW_SCROLL_CHANNEL, PREVIEW_SCROLL_MAX, PREVIEW_SCROLL_REPORT_MS, PREVIEW_SCROLL_RESTORE_MS, PREVIEW_LINK_CHANNEL } from './preview-scroll-protocol';
 import { PREVIEW_CHUNK_BYTES, PREVIEW_MAX_BYTES, type SessionPreviewDescriptor, type SessionPreviewStatus, type PreviewUnavailableReason } from '../../../bridge/src/preview-protocol';
 
 const revisionPattern = /^[0-9a-f]{64}$/;
@@ -54,7 +54,13 @@ const PREVIEW_LINK_SCRIPT = String.raw`<script>(() => {
   const NativeURL = URL;
   const protocol = Object.getOwnPropertyDescriptor(URL.prototype, 'protocol').get;
   const href = Object.getOwnPropertyDescriptor(URL.prototype, 'href').get;
-  const open = window.open;
+  // External links cannot be opened inside the sandbox (no allow-popups). The
+  // target is forwarded to the parent, which shows a user confirmation before
+  // opening anything — a message from untrusted preview code is not proof of a
+  // trusted click, so the parent must never open the URL directly.
+  const channel = ${JSON.stringify(PREVIEW_LINK_CHANNEL)};
+  const parent = window.parent;
+  const post = window.parent.postMessage;
   const location = window.location;
   document.addEventListener('click', event => {
     let link = null;
@@ -75,7 +81,7 @@ const PREVIEW_LINK_SCRIPT = String.raw`<script>(() => {
     try {
       const url = new NativeURL(raw);
       const scheme = apply(protocol, url, []);
-      if (scheme === 'http:' || scheme === 'https:') apply(open, window, [apply(href, url, []), '_blank', 'noopener,noreferrer']);
+      if (scheme === 'http:' || scheme === 'https:') apply(post, parent, [{ channel, kind: 'open-link', url: apply(href, url, []) }, '*']);
     } catch { /* Invalid URLs do not navigate. */ }
   }, true);
 })();</script>`;

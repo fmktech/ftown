@@ -137,13 +137,43 @@ test('native wake IPC returns unread IDs only, never consumes mail or accepts an
   const session = { id: 'ftown', claudeSessionId: 'native' } as Session;
   let leases = 0;
   const deps = { getSession: async () => session, register: () => { leases++; },
-    unread: async () => [{ id: 'opaque', body: 'PRIVATE MAIL' }] };
+    unread: async () => [{ id: 'opaque', body: 'PRIVATE MAIL' }], busy: () => false };
   const payload = { hook_event_name: 'FtownNativeWake', ftown_session_id: 'ftown', session_id: 'native', adapter: 'claude-mod' };
   assert.deepEqual(await nativeWake(payload, deps), { messages: [{ id: 'opaque' }] });
   assert.equal(leases, 1);
   await nativeWake({ ...payload, registerWake: false }, deps); assert.equal(leases, 1);
   await assert.rejects(nativeWake({ ...payload, session_id: 'other-native' }, deps), { code: 'wrong_context' });
   await assert.rejects(nativeWake({ ...payload, path: '/api/sessions', consume: true }, deps));
+});
+
+test('native wake reports a mid-turn session as busy and still renews its lease', async () => {
+  const session = { id: 'ftown', claudeSessionId: 'native' } as Session;
+  let leases = 0;
+  const deps = { getSession: async () => session, register: () => { leases++; },
+    unread: async () => [{ id: 'opaque', body: 'PRIVATE MAIL' }], busy: () => true };
+  const payload = { hook_event_name: 'FtownNativeWake', ftown_session_id: 'ftown', session_id: 'native', adapter: 'claude-mod' };
+  assert.deepEqual(await nativeWake(payload, deps), { messages: [{ id: 'opaque' }], busy: true });
+  assert.equal(leases, 1);
+});
+
+test('native wake omits the busy key when the session is idle', async () => {
+  const session = { id: 'ftown', claudeSessionId: 'native' } as Session;
+  const deps = { getSession: async () => session, register: () => {},
+    unread: async () => [{ id: 'opaque', body: 'PRIVATE MAIL' }], busy: () => false };
+  const payload = { hook_event_name: 'FtownNativeWake', ftown_session_id: 'ftown', session_id: 'native', adapter: 'claude-mod' };
+  const result = await nativeWake(payload, deps);
+  assert.deepEqual(result, { messages: [{ id: 'opaque' }] });
+  assert.equal('busy' in result, false);
+});
+
+test('native wake asks busy about the FTown session id, not the native id', async () => {
+  const session = { id: 'ftown', claudeSessionId: 'native' } as Session;
+  const asked: string[] = [];
+  const deps = { getSession: async () => session, register: () => {},
+    unread: async () => [], busy: (id: string) => { asked.push(id); return false; } };
+  const payload = { hook_event_name: 'FtownNativeWake', ftown_session_id: 'ftown', session_id: 'native', adapter: 'claude-mod' };
+  await nativeWake(payload, deps);
+  assert.deepEqual(asked, ['ftown']);
 });
 
 test('read-only MCP authorization follows actual operation semantics and bridge audit records denial without args', async t => {

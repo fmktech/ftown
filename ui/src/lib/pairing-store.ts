@@ -144,17 +144,20 @@ export async function approvePairingRequest(
 }
 
 /**
- * Atomically flips pending -> denied.
+ * Atomically flips pending -> denied. Scoped so an authenticated account can
+ * only deny a request that is still unowned or was already approved by itself —
+ * never a pairing another account has claimed.
  */
-export async function denyPairingRequest(userCode: string): Promise<boolean> {
+export async function denyPairingRequest(userCode: string, approverSub?: string): Promise<boolean> {
   const sql = getDb();
   const rows = (await sql.query(
     `UPDATE pairing_requests
      SET status = 'denied'
      WHERE user_code = $1 AND status = 'pending' AND expires_at > NOW()
+     AND (sub IS NULL OR sub = $2)
      AND NOT EXISTS(SELECT 1 FROM security_pending_approvals a WHERE a.pair_device_code=pairing_requests.device_code)
      RETURNING device_code`,
-    [userCode]
+    [userCode, approverSub ?? null]
   )) as { device_code: string }[];
   return rows.length === 1;
 }

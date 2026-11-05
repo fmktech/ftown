@@ -519,6 +519,8 @@ PY`;
 
   useEffect(() => { setCopySheetText(null); }, [selectedSessionId]);
   const handleMobilePaste = useCallback((text: string) => terminalRef.current?.paste(text), []);
+  const hostPasteAvailable = selectedSession?.shellType === "claude" || selectedSession?.shellType === "zai";
+  const handleHostPaste = useCallback(() => terminalRef.current?.sendInput("\x16"), []);
   const handleMobileSelectText = useCallback(() => {
     const active = document.activeElement;
     if (active instanceof HTMLElement) active.blur();
@@ -1228,7 +1230,7 @@ PY`;
             onInterrupt={handleTerminalInterrupt}
           />
           {selectedSessionId && (
-            <MobileControlBar ref={mobileControlRef} onSendInput={(data) => terminalRef.current?.sendInput(data)} onPaste={handleMobilePaste} onSelectText={handleMobileSelectText} />
+            <MobileControlBar ref={mobileControlRef} onSendInput={(data) => terminalRef.current?.sendInput(data)} onPaste={handleMobilePaste} onHostPaste={hostPasteAvailable ? handleHostPaste : undefined} onSelectText={handleMobileSelectText} />
           )}
           </SessionWorkspace>
           </div>

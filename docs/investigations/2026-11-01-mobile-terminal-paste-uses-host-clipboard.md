@@ -314,6 +314,8 @@ The user-visible fix is mostly on the **copy** side, which belongs to the other 
 3. `ui/src/components/Dashboard.tsx:1142`: wire `onPaste={(text) => terminalRef.current?.paste(text)}`.
 4. Follow-up, root clause (no owner or contract): add a short "terminal clipboard contract" section to the terminal docs. It should say the viewer's clipboard is the source for paste and the target for copy on every device, and that ftown never forwards keys that make the agent read the host clipboard. Coordinate it with the copy fix.
 
+   Contract exception: the key bar's **Host** key (Claude Code sessions only) deliberately sends Ctrl+V (`\x16`), so the user can choose to paste the host clipboard, image or text, into Claude Code. **Paste** remains the viewer's clipboard, and the empty-paste guard is unchanged: an empty paste still sends nothing.
+
 **Regression tests** (each fails on 67efb45 and passes after the fix):
 - `ui/src/components/MobileControlBar.test.tsx` (new, jsdom):
   - (a) Stub `readText` to return `"a\nb"`, tap Paste, then Send. Expect `onPaste("a\nb")` once, and `onSendInput` never receives `"a\nb"` or `"\x16"`. *Before*: `onSendInput("a\nb")` raw, with no sheet and no `onPaste` (P1).

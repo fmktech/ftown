@@ -126,4 +126,66 @@ describe("MobileControlBar", () => {
     fireEvent.click(screen.getByLabelText("Paste clipboard into terminal"));
     expect(screen.getByLabelText("Text to paste")).toBeTruthy();
   });
+
+  it("Paste key title is the phone-clipboard default", () => {
+    setup();
+    expect(screen.getByLabelText("Paste clipboard into terminal").getAttribute("title")).toBe(
+      "Paste this phone's clipboard into the terminal",
+    );
+  });
+
+  it("no Host key when onHostPaste is not passed", () => {
+    setup();
+    expect(screen.queryByLabelText("Paste from host clipboard")).toBeNull();
+  });
+
+  it("Host key renders right after the Paste key with the host title", () => {
+    setupWithHost();
+    const paste = screen.getByLabelText("Paste clipboard into terminal");
+    const host = screen.getByLabelText("Paste from host clipboard");
+    expect(host.textContent).toBe("Host");
+    expect(host.getAttribute("title")).toBe(
+      "Paste the host computer's clipboard (Claude Code reads it on Ctrl+V)",
+    );
+    expect(paste.nextElementSibling).toBe(host);
+    expect(host.parentElement).toBe(paste.parentElement);
+  });
+
+  it("Host click calls onHostPaste once and nothing else", () => {
+    setClipboard({ readText: vi.fn().mockResolvedValue("phone text") });
+    const { onSendInput, onPaste, onHostPaste } = setupWithHost();
+    fireEvent.click(screen.getByLabelText("Paste from host clipboard"));
+    expect(onHostPaste).toHaveBeenCalledTimes(1);
+    expect((navigator.clipboard as unknown as { readText: ReturnType<typeof vi.fn> }).readText).not.toHaveBeenCalled();
+    expect(onPaste).not.toHaveBeenCalled();
+    expect(onSendInput).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("Text to paste")).toBeNull();
+  });
+
+  it("Host touchEnd calls onHostPaste once and nothing else", () => {
+    setClipboard({ readText: vi.fn().mockResolvedValue("phone text") });
+    const { onSendInput, onPaste, onHostPaste } = setupWithHost();
+    fireEvent.touchEnd(screen.getByLabelText("Paste from host clipboard"));
+    expect(onHostPaste).toHaveBeenCalledTimes(1);
+    expect((navigator.clipboard as unknown as { readText: ReturnType<typeof vi.fn> }).readText).not.toHaveBeenCalled();
+    expect(onPaste).not.toHaveBeenCalled();
+    expect(onSendInput).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("Text to paste")).toBeNull();
+  });
 });
+
+function setupWithHost() {
+  const onSendInput = vi.fn();
+  const onPaste = vi.fn();
+  const onSelectText = vi.fn();
+  const onHostPaste = vi.fn();
+  render(
+    <MobileControlBar
+      onSendInput={onSendInput}
+      onPaste={onPaste}
+      onSelectText={onSelectText}
+      onHostPaste={onHostPaste}
+    />,
+  );
+  return { onSendInput, onPaste, onSelectText, onHostPaste };
+}

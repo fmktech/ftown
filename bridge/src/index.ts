@@ -5,7 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { resolve, dirname, join } from 'node:path';
 import { hostname as osHostname, networkInterfaces, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, realpathSync, chmodSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import { cleanup as ndcCleanup } from 'node-datachannel';
@@ -183,7 +183,10 @@ program
       (opts.bridgeId && opts.bridgeId !== updateRestart.bridgeId))) throw new Error('Update restart identity mismatch');
     const bridgeId = opts.bridgeId ?? persistedBridgeId ?? uuidv4();
     try {
-      mkdirSync(dataDir, { recursive: true });
+      mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+      // Tighten a pre-existing dir created before the explicit mode (fresh
+      // installs would otherwise inherit the process umask, often 0755).
+      chmodSync(dataDir, 0o700);
       writeFileSync(bridgeIdPath, `${bridgeId}\n`, { mode: 0o600 });
     } catch (err) {
       console.error('[Bridge] Failed to persist bridge id:', err instanceof Error ? err.message : String(err));
@@ -611,6 +614,8 @@ program
     }
 
     const store = new SessionStore(dataDir);
+    // Migrate pre-existing session.json/terminal.log/inbox.jsonl off 0644.
+    void store.hardenPermissions();
     // Sessions left in a live state by a previous bridge are handled by
     // resurrectSessions() once Centrifugo is connected (tmux reattach,
     // resume respawn, or marked as error).

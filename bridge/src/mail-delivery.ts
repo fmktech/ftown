@@ -490,7 +490,8 @@ export class MailDeliveryService {
     this.nudgeTimers.set(sessionId, timer);
   }
 
-  private isAgentRecentlyBusy(sessionId: string): boolean {
+  /** True while the agent is mid-turn (hook activity since the last Stop), up to AGENT_BUSY_STALE_MS. */
+  isAgentRecentlyBusy(sessionId: string): boolean {
     const busySince = this.agentBusySince.get(sessionId);
     return busySince !== undefined && this.now() - busySince < AGENT_BUSY_STALE_MS;
   }

@@ -98,7 +98,7 @@ test('Playwright lanes share browser security settings and reject an unowned bro
     assert.throws(() => playwrightConfig(invalid), /E2E_BROWSER_HOME must be the canonical/);
   }
 });
-const { clientIp } = helper('ui/src/lib/client-ip.ts', {});
+const { clientIp } = helper('ui/src/lib/client-ip.ts', {}, { process: { env: { FTOWN_TRUSTED_PROXY: '1' } } });
 function registrar(origin = 'http://localhost:3000') {
   const attempts = new Map(); const requests = [];
   const { registerUser } = helper('e2e/helpers/app.ts', {
