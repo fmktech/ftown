@@ -13,6 +13,8 @@ interface MobileControlBarProps {
   onPaste: (text: string) => void;
   /** Open the copy sheet (caller snapshots the terminal text). */
   onSelectText: () => void;
+  /** Present only for Claude Code sessions: send Ctrl+V so the agent pastes the host's clipboard (image or text). */
+  onHostPaste?: () => void;
 }
 
 // PgUp/PgDn reach the bridge tmux server, which scrolls history via copy-mode
@@ -65,7 +67,7 @@ const keyButtonStyle: React.CSSProperties = {
 };
 
 export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControlBarProps>(
-  function MobileControlBar({ onSendInput, onPaste, onSelectText }, ref) {
+  function MobileControlBar({ onSendInput, onPaste, onSelectText, onHostPaste }, ref) {
     const inputRef = useRef<HTMLInputElement>(null);
     const pasteAreaRef = useRef<HTMLTextAreaElement>(null);
     const [pasteError, setPasteError] = useState("");
@@ -274,7 +276,7 @@ export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControl
               <button
                 className="mobile-ctrl-btn"
                 aria-label="Paste clipboard into terminal"
-                title={pasteError || "Paste clipboard into terminal"}
+                title={pasteError || "Paste this phone's clipboard into the terminal"}
                 style={keyButtonStyle}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={(e) => {
@@ -283,6 +285,26 @@ export const MobileControlBar = forwardRef<MobileControlBarHandle, MobileControl
                 }}
               >
                 Paste
+              </button>
+            )}
+            {rowIndex === 1 && onHostPaste && (
+              <button
+                type="button"
+                className="mobile-ctrl-btn"
+                aria-label="Paste from host clipboard"
+                title="Paste the host computer's clipboard (Claude Code reads it on Ctrl+V)"
+                style={keyButtonStyle}
+                onMouseDown={(e) => e.preventDefault()}
+                onTouchEnd={(e) => {
+                  e.preventDefault();
+                  onHostPaste();
+                }}
+                onClick={(e) => {
+                  e.preventDefault();
+                  onHostPaste();
+                }}
+              >
+                Host
               </button>
             )}
             {rowIndex === 1 && (
