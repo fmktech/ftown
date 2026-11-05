@@ -92,3 +92,105 @@ test('terminal keys reject foreign publishers, missing identity and plaintext be
   subscription.emit('publication', { info: { user: email }, data: resize });
   await settle(() => sizes.length === 1); assert.deepEqual(inputs, ['safe']); assert.deepEqual(sizes, [120]);
 });
+
+// ---- Pipelined outbound publish and command-rejected log ----
+
+/**
+ * Client with a stubbed seal/authorize step (cheap and deterministic regardless of machine load) and a
+ * fake transport whose publish() resolves after `state.replyMs`. Real sealing is covered by the tests above.
+ */
+async function publishFixture(t: { after(fn: () => Promise<void>): void }, recipientCount: number) {
+  const directory = await mkdtemp(join(tmpdir(), 'centri-pipeline-'));
+  const secure = await secureFixture(directory, async () => new Response('{}'));
+  const sealedTags: string[] = [];
+  const security = secure.security;
+  security.sealPublication = async (_channel, application) => {
+    sealedTags.push(JSON.stringify((application as { data: unknown }).data));
+    const id = randomUUID();
+    const packets: unknown[] = Array.from({ length: recipientCount }, (_, k) => ({ type: 'ftown_encrypted', recipientId: `recipient-${k}`, messageId: `${id}/${k}` }));
+    packets.splice(1, 0, { type: 'ftown_enrollment', recipientId: 'not-encrypted', messageId: `${id}/enroll` });
+    return packets as never;
+  };
+  const principalCalls: string[] = [];
+  security.policy.principal = async (recipientId: string) => { principalCalls.push(recipientId); return {} as never; };
+  const published: { channel: string; recipientId: string; messageId: string }[] = [];
+  const principalCallsAtPublish: number[] = [];
+  let calls = 0;
+  const state = { inFlight: 0, maxInFlight: 0, replyMs: (_call: number) => 50 };
+  const transport = Object.assign(new EventEmitter(), { state: 'connected',
+    publish: async (channel: string, data: { recipientId?: string; messageId?: string }) => {
+      const call = calls++; principalCallsAtPublish.push(principalCalls.length);
+      published.push({ channel, recipientId: String(data.recipientId), messageId: String(data.messageId) });
+      state.inFlight++; state.maxInFlight = Math.max(state.maxInFlight, state.inFlight);
+      try { await new Promise(resolve => setTimeout(resolve, state.replyMs(call))); } finally { state.inFlight--; }
+    },
+    newSubscription: () => Object.assign(new EventEmitter(), { state: 'unsubscribed', subscribe() {}, unsubscribe() {} }) });
+  const client = new CentrifugoClient('ws://127.0.0.1:1/unused', '', async () => '');
+  Object.defineProperty(client, 'client', { value: transport }); client.setSecurity(security);
+  t.after(async () => { await security.close(); await rm(directory, { recursive: true, force: true }); });
+  return { client, published, state, sealedTags, recipientCount, principalCalls, principalCallsAtPublish };
+}
+
+const settleLong = async (condition: () => boolean) => { for (let count = 0; count < 3000 && !condition(); count++) await new Promise(resolve => setTimeout(resolve, 5)); };
+
+function captureWarnings(t: { after(fn: () => Promise<void>): void }) {
+  const lines: string[] = []; const original = console.warn;
+  console.warn = (...args: unknown[]) => { lines.push(args.map(String).join(' ')); };
+  t.after(async () => { console.warn = original; });
+  return lines;
+}
+
+test('300 publications at ~200/s with a 50 ms reply never hit the capacity warning and all packets are published', async t => {
+  // Old chain: one packet in flight => ~1/(3 x 50 ms) = ~7 pub/s, so the 100-slot queue overflowed.
+  const total = 300; const warnings = captureWarnings(t);
+  const f = await publishFixture(t, 3); const recipients = f.recipientCount;
+  for (let i = 0; i < total; i++) {
+    void f.client.publishTerminalData(email, 'session', `chunk-${i}`);
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  await settleLong(() => f.published.length >= total * recipients);
+  assert.deepEqual(warnings.filter(line => line.includes('Encrypted publication capacity reached')), []);
+  assert.equal(f.published.length, total * recipients);
+  assert.ok(f.state.maxInFlight > 1, `expected pipelined publishes, max in flight was ${f.state.maxInFlight}`);
+});
+
+test('packets reach the transport in publication order even when replies arrive in reverse', async t => {
+  captureWarnings(t); const total = 20; // below the old 100-slot cap, so old code must pass this too
+  const f = await publishFixture(t, 3); const recipients = f.recipientCount;
+  f.state.replyMs = call => Math.max(5, 300 - call * 5); // later packets reply first
+  for (let i = 0; i < total; i++) void f.client.publishTerminalData(email, 'session', `tag-${i}`);
+  await settleLong(() => f.published.length >= total * recipients);
+  assert.equal(f.published.length, total * recipients);
+  assert.deepEqual(f.sealedTags, Array.from({ length: total }, (_, i) => JSON.stringify({ type: 'output', data: `tag-${i}` })));
+  // Publications in enqueue order, recipients in sealed order within each.
+  assert.deepEqual(f.published.map(p => p.recipientId), f.published.map((_, n) => `recipient-${n % recipients}`));
+  const publicationIds = f.published.map(p => p.messageId.split('/')[0]);
+  for (let i = 0; i < total; i++) assert.equal(new Set(publicationIds.slice(i * recipients, (i + 1) * recipients)).size, 1);
+  assert.equal(new Set(publicationIds).size, total);
+});
+
+test('only encrypted packets are published, each authorized once before its publication is sent', async t => {
+  captureWarnings(t); const total = 10;
+  const f = await publishFixture(t, 3); const recipients = f.recipientCount;
+  for (let i = 0; i < total; i++) void f.client.publishTerminalData(email, 'session', `tag-${i}`);
+  await settleLong(() => f.published.length >= total * recipients);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(f.published.length, total * recipients);
+  assert.ok(f.published.every(p => p.recipientId !== 'not-encrypted' && !p.messageId.endsWith('/enroll')));
+  assert.deepEqual(f.principalCalls, f.published.map(p => p.recipientId));
+  f.published.forEach((_, n) => assert.ok(f.principalCallsAtPublish[n] >= (Math.floor(n / recipients) + 1) * recipients,
+    `publish ${n} sent after only ${f.principalCallsAtPublish[n]} principal calls`));
+});
+
+test('a rejected command response is logged with its code and message', async t => {
+  const warnings = captureWarnings(t);
+  const f = await fixture(t);
+  f.transport.publish = async () => { throw { code: 108, message: 'not available' }; };
+  const channel = `commands:rpc#${email}`; const requestId = randomUUID();
+  f.client.subscribeSecureCommands(email, async () => ({}));
+  const encrypted = await f.packet(channel, { type: 'application', route: { kind: 'command', requestId, command: 'list_sessions', sessionId: null },
+    data: { type: 'list_sessions', requestId, payload: { bridgeId: 'bridge' } }, mcp: null });
+  f.subscriptions.get(channel)!.emit('publication', { info: { user: email }, data: encrypted });
+  await settle(() => warnings.some(line => line.includes('Encrypted command rejected')));
+  assert.ok(warnings.some(line => line.includes('Encrypted command rejected: 108: not available')), warnings.join('\n'));
+});

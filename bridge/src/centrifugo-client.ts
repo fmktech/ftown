@@ -5,6 +5,9 @@ import type { SecureExecutionObserver } from './security/bridge/execution-observ
 import { scopedUpdateObserver } from './update-effects.js';
 import type { ApplicationJson, SecureEnvelope, VerifiedApplication } from './security/protocol.js';
 import WebSocket from 'ws';
+import { createOutboundPipeline } from './outbound-pipeline.js';
+import { COMMAND_REJECTED_WARNING, describeError } from './outbound-pipeline-types.js';
+import type { OutboundPacket } from './outbound-pipeline-types.js';
 
 import type { Subscription, PublicationContext } from 'centrifuge';
 import { hostname } from 'node:os';
@@ -84,8 +87,7 @@ export class CentrifugoClient {
   private readonly onReconnect?: () => void | Promise<void>;
   private hasConnected = false;
   private security: BridgeSecurityService | null = null;
-  private outbound: Promise<void> = Promise.resolve();
-  private outboundQueued = 0;
+  private readonly outbound = createOutboundPipeline({ logger: console });
   private inbound: Promise<void> = Promise.resolve();
   private readonly terminalInbound = new Map<string, Promise<void>>();
   private secureCommandSubscription: Subscription | null = null;
@@ -165,19 +167,24 @@ export class CentrifugoClient {
     // not delay their acknowledgement or make a successful mutation look failed.
     // Disconnected updates are reconciled by the existing reconnect snapshot.
     if (!this.disabled && this.client.state === 'connected' && this.security) {
-      if (this.outboundQueued >= 100) { console.warn('[Centrifugo] Encrypted publication capacity reached'); return Promise.resolve(); }
-      this.outboundQueued++;
       const security = this.security;
-      const run = this.outbound.then(async () => {
-        const packets = await security.sealPublication(channel, { type: 'application', route: { kind: 'publication' },
-          data: applicationJson(data), mcp: null });
-        for (const packet of packets) {
-          if (packet.type !== 'ftown_encrypted') continue;
-          await security.policy.principal(packet.recipientId);
-          await this.client.publish(channel, packet);
-        }
+      this.outbound.enqueue({
+        label: `${channel.split(':')[0]}/${typeof data.type === 'string' ? data.type : 'unknown'}`,
+        prepare: async () => {
+          const packets = await security.sealPublication(channel, { type: 'application', route: { kind: 'publication' },
+            data: applicationJson(data), mcp: null });
+          const out: OutboundPacket[] = [];
+          for (const packet of packets) {
+            if (packet.type !== 'ftown_encrypted') continue;
+            await security.policy.principal(packet.recipientId);
+            out.push({
+              bytes: Buffer.byteLength(JSON.stringify(packet)),
+              send: () => this.client.publish(channel, packet).then(() => undefined),
+            });
+          }
+          return out;
+        },
       });
-      this.outbound = run.catch(() => { console.error('[Centrifugo] Encrypted publication failed'); }).finally(() => { this.outboundQueued--; });
       return Promise.resolve();
     }
     return Promise.resolve();
@@ -332,7 +339,7 @@ export class CentrifugoClient {
         await this.client.publish(channel, response);
         if (envelope) scoped?.delivered(envelope.messageId);
         } catch (error) { if (envelope) scoped?.failed(envelope.messageId); throw error; }
-      })().catch(() => { console.warn('[Centrifugo] Encrypted command rejected'); });
+      })().catch((error: unknown) => { console.warn(`${COMMAND_REJECTED_WARNING}: ${describeError(error)}`); });
     });
     sub.subscribe(); this.subscriptions.set(channel, sub);
   }
