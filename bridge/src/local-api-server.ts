@@ -1360,7 +1360,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         try {
           const result = await nativeWake(payload, { getSession: id => this.store!.loadSession(id),
             register: (session, registration) => this.mail.registerNativeWake(session, registration),
-            unread: id => this.mailStore!.listUndelivered(id) });
+            unread: id => this.mailStore!.listUndelivered(id),
+            busy: id => this.mail.isAgentRecentlyBusy(id) });
           jsonResponse(res, 200, result);
         } catch { jsonResponse(res, 409, { error: 'invalid_native_target' }); }
         return;
