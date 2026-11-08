@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuthMode } from "@/lib/auth-mode";
+import { securityNudges } from "@/lib/security-nudge-bus";
 import { useCentrifugo } from "@/hooks/useCentrifugo";
 import { useBrowserIdentity } from "@/hooks/useBrowserIdentity";
 import type { ApprovedBridge, EndpointIdentity } from "@security/protocol";
@@ -79,9 +80,10 @@ function EncryptedDashboardClient({ identity, pins, accountClient, accountState,
     resource.leases++;
     return () => { resource.leases--; queueMicrotask(() => { if (resource.leases === 0) resource.runtime.dispose(); }); };
   }, [resource]);
-  const { client, status, error, transport } = useCentrifugo(props.token, props.centrifugoUrl, props.userId, {
+  const { client, rawClient, status, error, transport } = useCentrifugo(props.token, props.centrifugoUrl, props.userId, {
     securityRuntime: resource.runtime, tokenRefresher: props.tokenRefresher, onUnauthorized: props.onUnauthorized,
   });
+  useEffect(() => rawClient ? securityNudges.attach(rawClient, props.userId) : undefined, [rawClient, props.userId]);
   const handleDisconnect = useCallback(() => { resource.runtime.dispose(); signOut(); }, [resource, signOut]);
   return <Dashboard client={client} connectionStatus={status} connectionError={error} userId={props.userId}
     token={props.token} centrifugoUrl={props.centrifugoUrl} transport={transport} onDisconnect={handleDisconnect} accountClient={accountClient} accountState={accountState} />;

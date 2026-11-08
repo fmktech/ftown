@@ -269,7 +269,7 @@ it("calls the browser fetch capability with its global receiver for account read
   };
   vi.stubGlobal("fetch", nativeLikeFetch);
   // Omit the injected fetcher to exercise the production default capability.
-  const client = new AccountSecurityClient(owner, undefined, installation.storage);
+  const client = new AccountSecurityClient(owner, undefined, installation.storage, { publish: vi.fn() });
   expect((await client.refresh()).status).toBe("unapproved");
   const link = await client.requestDevice("Native receiver test");
   expect(link.request.kind).toBe("browser");
@@ -433,4 +433,71 @@ it("a reloaded client with a durable pin cannot acquire authority from HTTP 429"
   expect(() => browser.client.assertBridgeAccess("throttle-startup")).toThrowError(expect.objectContaining({ code: "account_approval_required" }));
   expect((await browser.client.refresh()).status).toBe("ready");
   expect(() => browser.client.assertBridgeAccess("throttle-startup")).not.toThrow();
+});
+
+const posts = (f: Awaited<ReturnType<typeof fixture>>) => f.calls.filter(call => call.body !== undefined).length;
+const withNudges = (browser: { storage: typeof accountStorage }, f: Awaited<ReturnType<typeof fixture>>) => {
+  const nudges = { publish: vi.fn() };
+  return { nudges, client: new AccountSecurityClient(owner, f.fetcher, browser.storage, nudges) };
+};
+
+it("publishes one account nudge per successful genesis or append POST, and none for reads", async () => {
+  const f = await fixture(false); const browser = await f.installation(false); const { nudges, client } = withNudges(browser, f);
+  await client.refresh(); expect(nudges.publish).not.toHaveBeenCalled();
+  const computer = await generateAccountBridgeCandidate("nudge-computer");
+  await client.approve(await createAccountEnrollment(computer, "Computer", null, "nudge-computer"), true);
+  expect(posts(f)).toBe(2);
+  expect(nudges.publish).toHaveBeenCalledTimes(2); expect(nudges.publish).toHaveBeenCalledWith("account");
+});
+
+it("publishes an account nudge after creating and after approving an enrollment, never on a failed POST", async () => {
+  const f = await fixture(); const trusted = await f.installation(true);
+  const candidate = await f.installation(false, await generateEndpoint(owner, "browser"), await generateAccountSigningIdentity());
+  const requester = withNudges(candidate, f);
+  const link = await requester.client.requestDevice("Phone");
+  expect(requester.nudges.publish).toHaveBeenCalledTimes(1); expect(requester.nudges.publish).toHaveBeenCalledWith("account");
+  const approver = withNudges(trusted, f);
+  await approver.client.approveDevice(link);
+  expect(approver.nudges.publish).toHaveBeenCalledTimes(posts(f) - 1);
+  expect(approver.nudges.publish.mock.calls.every(call => call[0] === "account")).toBe(true);
+  expect(approver.nudges.publish.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+  const failing = withNudges(await f.installation(false, await generateEndpoint(owner, "browser"), await generateAccountSigningIdentity()), f);
+  vi.mocked(f.fetcher).mockResolvedValueOnce(response({ error: { code: "account_trust_conflict" } }, 409));
+  await expect(failing.client.requestDevice("Tablet")).rejects.toBeTruthy();
+  expect(failing.nudges.publish).not.toHaveBeenCalled();
+});
+
+it("a rejected account append (conflict or server error) never publishes", async () => {
+  const f = await fixture(); const browser = await f.installation(true); const { nudges, client } = withNudges(browser, f);
+  await client.refresh();
+  const computer = await generateAccountBridgeCandidate("nudge-fail");
+  const link = await createAccountEnrollment(computer, "Computer", null, "nudge-fail");
+  const implementation = vi.mocked(f.fetcher).getMockImplementation()!;
+  vi.mocked(f.fetcher).mockImplementation(async (input, init) =>
+    String(input) === "/api/security/account" && init?.body ? response({ error: { code: "account_trust_conflict" } }, 409) : implementation(input, init));
+  await expect(client.approve(link)).rejects.toMatchObject({ code: "account_trust_conflict" });
+  vi.mocked(f.fetcher).mockImplementation(async (input, init) =>
+    String(input) === "/api/security/account" && init?.body ? response({}, 500) : implementation(input, init));
+  await expect(client.approve(link)).rejects.toBeTruthy();
+  expect(nudges.publish).not.toHaveBeenCalled();
+});
+
+it("refreshFresh makes one GET when idle, and collapses calls during an in-flight read into one follow-up GET, without publishing", async () => {
+  const f = await fixture(); const browser = await f.installation(true); const { nudges, client } = withNudges(browser, f);
+  await client.refreshFresh(); expect(f.calls).toHaveLength(1);
+  let release: (value: Response) => void = () => {};
+  vi.mocked(f.fetcher).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+  const inflight = client.refresh(); await vi.waitFor(() => expect(vi.mocked(f.fetcher)).toHaveBeenCalledTimes(2));
+  const fresh = [1, 2, 3, 4, 5].map(() => client.refreshFresh());
+  expect(vi.mocked(f.fetcher)).toHaveBeenCalledTimes(2);
+  release(response({ history: f.history() })); await inflight; await Promise.all(fresh);
+  expect(vi.mocked(f.fetcher)).toHaveBeenCalledTimes(3); expect(f.calls.every(call => call.body === undefined)).toBe(true);
+  expect(nudges.publish).not.toHaveBeenCalled();
+});
+
+it("refreshFresh never rejects when the in-flight and follow-up reads fail", async () => {
+  const f = await fixture(); const browser = await f.installation(true); const { client } = withNudges(browser, f);
+  vi.mocked(f.fetcher).mockRejectedValue(new Error("down"));
+  await expect(Promise.all([client.refresh(), client.refreshFresh()])).resolves.toBeTruthy();
 });

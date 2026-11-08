@@ -10,7 +10,9 @@ import { AccountSecurityClient, accountStorage } from "./account-security-client
 import { sameAccountTrustPin } from "./browser-identity";
 import { sameCandidateCompletion } from "./pending-approval-storage";
 import { PendingApprovalClient } from "./pending-approval-client";
+import { securityNudges } from "./security-nudge-bus";
 import type { PendingApprovalStorage, PendingCandidateRecord, PendingReviewerRecord } from "./pending-approval-storage";
+vi.mock("./security-nudge-bus", () => ({ securityNudges: { publish: vi.fn(), attached: false, on: vi.fn(), attach: vi.fn() } }));
 const owner = "00000000-0000-4000-8000-000000000001";
 beforeEach(() => { vi.stubGlobal("crypto", webcrypto); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -321,4 +323,112 @@ it("a fresh sibling cannot call cleaned-up committed approval cancelled during a
   await account.refresh(); await sibling.ensureCandidate();
   expect(account.snapshot().status).toBe("ready"); expect(sibling.snapshot().candidate.status).toBe("approved");
   expect(f.states.size).toBe(1);
+});
+
+const spyNudges = () => ({ publish: vi.fn() });
+
+it("publishes an approvals nudge exactly once per successful mutating POST and never for reads", async () => {
+  const f = await fixture(); const candidate = await f.installation(false); const reviewer = await f.installation(true);
+  const nudges = spyNudges(); const defaults = vi.mocked(securityNudges.publish).mock.calls.length;
+  const candidateClient = new PendingApprovalClient(candidate.account, f.fetcher, candidate.local.storage, { nudges });
+  const reviewerClient = new PendingApprovalClient(reviewer.account, f.fetcher, reviewer.local.storage, { nudges });
+  const base = 0;
+  await candidateClient.ensureCandidate(); // create
+  expect(nudges.publish).toHaveBeenCalledTimes(1); expect(nudges.publish).toHaveBeenLastCalledWith("approvals");
+  await reviewerClient.refreshInbox(); expect(nudges.publish).toHaveBeenCalledTimes(1); // GET inbox
+  const id = candidateClient.snapshot().candidate.requestId!;
+  await reviewerClient.review(id); // reviewer review command
+  expect(nudges.publish.mock.calls.length).toBeGreaterThan(1);
+  await candidateClient.ensureCandidate(); await reviewerClient.pollReview(); await candidateClient.ensureCandidate();
+  await candidateClient.confirmCandidate(); await reviewerClient.confirmReview(); await candidateClient.ensureCandidate();
+  const mutating = 1 + vi.mocked(f.fetcher).mock.calls.filter(([input, init]) => init?.method === "POST" && String(input).startsWith("/api/security/approvals") && !("request" in JSON.parse(String(init.body)))).length; // one create; re-sent creates are polls
+  expect(mutating).toBeGreaterThan(base); expect(nudges.publish.mock.calls.filter(call => call[0] === "approvals")).toHaveLength(mutating);
+  expect(nudges.publish.mock.calls.filter(call => call[0] !== "approvals")).toEqual([["account"]]);
+  expect(vi.mocked(securityNudges.publish).mock.calls.length).toBe(defaults);
+});
+
+it("publishes a nudge for candidate cancel and reviewer reject commands", async () => {
+  const f = await comparing(); const nudges = spyNudges();
+  const cancelling = new PendingApprovalClient(f.candidate.account, f.fetcher, f.candidate.local.storage, { nudges });
+  await cancelling.cancelCandidate(); expect(nudges.publish).toHaveBeenCalledWith("approvals");
+  const before = nudges.publish.mock.calls.length;
+  const rejecting = new PendingApprovalClient(f.reviewer.account, f.fetcher, f.reviewer.local.storage, { nudges });
+  await rejecting.reject(f.id); expect(nudges.publish.mock.calls.length).toBeGreaterThan(before);
+});
+
+it("never publishes when the mutating request fails", async () => {
+  const f = await fixture(); const candidate = await f.installation(false); const nudges = spyNudges();
+  let posts = 0;
+  const failing = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method === "POST" && String(input).startsWith("/api/security/approvals")) {
+      if (posts++ % 2 === 0) throw new TypeError("offline");
+      return new Response(JSON.stringify({ error: { code: "account_trust_conflict" } }), { status: 409 });
+    }
+    return f.fetcher(input, init);
+  });
+  const client = new PendingApprovalClient(candidate.account, failing as unknown as typeof fetch, candidate.local.storage, { nudges });
+  await client.ensureCandidate(); await client.ensureCandidate();
+  expect(posts).toBeGreaterThan(1);
+  expect(nudges.publish).not.toHaveBeenCalled();
+});
+
+it("drops expired inbox entries locally with no fetch and clears its timer on dispose", async () => {
+  const f = await fixture(); const candidate = await f.installation(false); const reviewer = await f.installation(true);
+  await candidate.client.ensureCandidate(); const expiresAt = Date.parse([...f.states.values()][0].request.expiresAt);
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] }); vi.setSystemTime(Date.now());
+  try {
+    const client = new PendingApprovalClient(reviewer.account, f.fetcher, reviewer.local.storage, { nudges: spyNudges() });
+    await client.refreshInbox(); expect(client.snapshot().inbox).toHaveLength(1);
+    const calls = vi.mocked(f.fetcher).mock.calls.length; const seen = vi.fn(); client.subscribe(seen);
+    await vi.advanceTimersByTimeAsync(expiresAt - 1 - Date.now());
+    expect(client.snapshot().inbox).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(2);
+    expect(client.snapshot().inbox).toHaveLength(0); expect(seen).toHaveBeenCalled();
+    expect(vi.mocked(f.fetcher).mock.calls.length).toBe(calls);
+    client.dispose(); expect(vi.getTimerCount()).toBe(0);
+  } finally { vi.useRealTimers(); }
+});
+
+it("dispose clears a pending expiry timer", async () => {
+  const f = await fixture(); const candidate = await f.installation(false); const reviewer = await f.installation(true);
+  await candidate.client.ensureCandidate(); vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] }); vi.setSystemTime(Date.now());
+  try {
+    const client = new PendingApprovalClient(reviewer.account, f.fetcher, reviewer.local.storage, { nudges: spyNudges() });
+    await client.refreshInbox(); expect(client.snapshot().inbox).toHaveLength(1);
+    const withTimer = vi.getTimerCount(); client.dispose(); expect(vi.getTimerCount()).toBeLessThan(withTimer);
+  } finally { vi.useRealTimers(); }
+});
+
+it("candidate polling with no state change publishes nothing over a minute", async () => {
+  const f = await fixture(); const candidate = await f.installation(false); const nudges = spyNudges();
+  const client = new PendingApprovalClient(candidate.account, f.fetcher, candidate.local.storage, { nudges });
+  await client.ensureCandidate(); expect(nudges.publish).toHaveBeenCalledTimes(1); // create
+  const reviewer = await f.installation(true); await reviewer.client.review(client.snapshot().candidate.requestId!); await client.ensureCandidate(); // hello
+  nudges.publish.mockClear(); const reads = f.candidateCommands.length;
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  try { for (let i = 0; i < 30; i++) { await client.ensureCandidate(); await vi.advanceTimersByTimeAsync(2000); } } finally { vi.useRealTimers(); }
+  expect(vi.mocked(f.fetcher).mock.calls.filter(([, init]) => init?.method === "POST").length).toBeGreaterThan(reads + 25); // polls really are POSTs
+  expect(f.candidateCommands).toHaveLength(reads);
+  expect(nudges.publish).not.toHaveBeenCalled();
+});
+
+it("publishes one account nudge when the candidate commits trust, and none on later polls", async () => {
+  const f = await comparing(); const nudges = spyNudges();
+  const client = new PendingApprovalClient(f.candidate.account, f.fetcher, f.candidate.local.storage, { nudges });
+  await client.ensureCandidate(); await client.confirmCandidate(); await f.reviewer.client.confirmReview(); nudges.publish.mockClear();
+  await client.ensureCandidate(); expect(client.snapshot().candidate.status).toBe("approved");
+  expect(nudges.publish.mock.calls.filter(call => call[0] === "account")).toHaveLength(1);
+  nudges.publish.mockClear(); for (let i = 0; i < 5; i++) await client.ensureCandidate();
+  await new PendingApprovalClient(f.candidate.account, f.fetcher, f.candidate.local.storage, { nudges }).ensureCandidate();
+  expect(nudges.publish).not.toHaveBeenCalled();
+});
+
+it("refreshInboxFresh makes one GET when idle and collapses calls during an in-flight read into one follow-up", async () => {
+  const f = await fixture(); const reviewer = await f.installation(true); const nudges = spyNudges();
+  const client = new PendingApprovalClient(reviewer.account, f.fetcher, reviewer.local.storage, { nudges });
+  const gets = () => vi.mocked(f.fetcher).mock.calls.filter(([input, init]) => String(input) === "/api/security/approvals" && init?.method === "GET").length;
+  const base = gets(); await client.refreshInboxFresh(); expect(gets() - base).toBe(1);
+  const inflight = client.refreshInbox(); const calls = Array.from({ length: 5 }, () => client.refreshInboxFresh());
+  await Promise.all([inflight, ...calls]); expect(gets() - base).toBe(3);
+  expect(nudges.publish).not.toHaveBeenCalled();
 });

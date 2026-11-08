@@ -81,6 +81,8 @@ async function fetchCentrifugoToken(): Promise<string> {
 
 interface UseCentrifugoResult {
   client: MessageClient | null;
+  /** The exact Centrifuge instance backing `client`; null exactly when `client` is. */
+  rawClient: Centrifuge | null;
   status: ConnectionStatus;
   error: string | null;
   /** One HybridTerminalTransport per live connection; null while disconnected. */
@@ -254,6 +256,7 @@ export function useCentrifugo(
 
   return {
     client: secureClientRef.current,
+    rawClient: secureClientRef.current ? clientRef.current : null,
     status,
     error,
     transport,

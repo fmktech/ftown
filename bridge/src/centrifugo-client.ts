@@ -1,5 +1,6 @@
 import { Centrifuge } from 'centrifuge';
 import { BridgeSecurityService, applicationJson } from './security/bridge/security.js';
+import { parseSecurityNudge, securityNudgeChannel, type SecurityNudgeScope } from './security/security-nudge.js';
 import { executeSecurePacket } from './security/bridge/execute.js';
 import type { SecureExecutionObserver } from './security/bridge/execution-observer.js';
 import { scopedUpdateObserver } from './update-effects.js';
@@ -96,6 +97,10 @@ export class CentrifugoClient {
   setSecurity(security: BridgeSecurityService): void { this.security = security; }
   private readonly disabled: boolean;
   private readonly localListeners = new Set<(channel: string, data: unknown) => void>();
+  private readonly nudgeListeners = new Set<(scope: SecurityNudgeScope) => void>();
+  private readonly nudgeHealthListeners = new Set<(healthy: boolean) => void>();
+  private nudgeHealthy = false;
+  private nudgeClientDown: (() => void) | null = null;
 
   constructor(
     url: string,
@@ -394,6 +399,65 @@ export class CentrifugoClient {
       console.error(`[Centrifugo] Bridges channel error:`, ctx.error);
     });
 
+    sub.subscribe();
+    this.subscriptions.set(channel, sub);
+    this.joinSecurityNudgeChannel(userId);
+  }
+
+  onSecurityNudge(listener: (scope: SecurityNudgeScope) => void): () => void {
+    this.nudgeListeners.add(listener);
+    return () => { this.nudgeListeners.delete(listener); };
+  }
+
+  get securityNudgeHealthy(): boolean { return this.nudgeHealthy; }
+
+  onSecurityNudgeHealth(listener: (healthy: boolean) => void): () => void {
+    this.nudgeHealthListeners.add(listener);
+    return () => { this.nudgeHealthListeners.delete(listener); };
+  }
+
+  private setNudgeHealth(healthy: boolean): void {
+    this.nudgeHealthy = healthy;
+    for (const listener of [...this.nudgeHealthListeners]) {
+      try { listener(healthy); } catch (err) { console.error('[Centrifugo] Security nudge health listener failed:', err); }
+    }
+  }
+
+  private emitSecurityNudge(scope: SecurityNudgeScope): void {
+    for (const listener of [...this.nudgeListeners]) {
+      try { listener(scope); } catch (err) { console.error('[Centrifugo] Security nudge listener failed:', err); }
+    }
+  }
+
+  // Raw subscription: the nudge is unsealed and content-free, so it bypasses the
+  // secure-envelope path. Only the owner's own clients may trigger a refresh.
+  private joinSecurityNudgeChannel(userId: string): void {
+    const channel = securityNudgeChannel(userId);
+    const existing = this.subscriptions.get(channel);
+    if (existing) { existing.unsubscribe(); this.client.removeSubscription(existing); }
+    if (this.nudgeClientDown) { this.client.off('disconnected', this.nudgeClientDown); this.client.off('connecting', this.nudgeClientDown); }
+    const sub = this.client.newSubscription(channel);
+    this.setNudgeHealth(false);
+    // Terminal subscribe errors and server unsubscribes surface only as
+    // 'unsubscribed' in centrifuge-js, with no retry, so push is trusted only while subscribed.
+    const down = () => this.setNudgeHealth(false);
+    this.nudgeClientDown = down;
+    this.client.on('disconnected', down);
+    this.client.on('connecting', down);
+    sub.on('unsubscribed', (ctx) => {
+      console.warn(`[Centrifugo] Security nudge channel unsubscribed (code ${ctx.code}): ${ctx.reason ?? ''}`);
+      down();
+    });
+    sub.on('subscribing', down);
+    // Every (re)subscribe may follow missed nudges, so resync unconditionally.
+    sub.on('subscribed', () => { this.setNudgeHealth(true); this.emitSecurityNudge('account'); });
+    sub.on('publication', (ctx) => {
+      if (!isOwnerPublication(ctx, userId)) return;
+      if (parseSecurityNudge(ctx.data) === 'account') this.emitSecurityNudge('account');
+    });
+    sub.on('error', (ctx) => {
+      console.error(`[Centrifugo] Security nudge channel error:`, ctx.error);
+    });
     sub.subscribe();
     this.subscriptions.set(channel, sub);
   }
