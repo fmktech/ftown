@@ -406,7 +406,8 @@ describe("usePullRequestReview stability and caching", () => {
     const { result } = mount(baseProps(client, s.send));
     await waitFor(() => expect(result.current.state.kind).toBe("offline"));
     act(() => rotate());
-    await waitFor(() => expect(result.current.state.kind).toBe("ready"));
+    // Recovery can wait for the hook's 1000 ms authority poll (AUTHORITY_CHECK_MS) == waitFor's default timeout.
+    await waitFor(() => expect(result.current.state.kind).toBe("ready"), { timeout: 4000 });
     expect(gets(s.send)).toBe(2); expect(result.current.state).toEqual(readyOf(one));
   });
 
