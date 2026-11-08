@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { AccountSecurityClient, type AccountSecuritySnapshot } from "@/lib/account-security-client";
-import { ACCOUNT_TRUST_LIMITS } from "@security/account-crypto";
+import { securityNudges } from "@/lib/security-nudge-bus";
 
 const checking: AccountSecuritySnapshot = { status: "checking", identity: null, signing: null, trust: null, legacyBridges: [], historyExists: false, code: null, offline: false };
 const noop = () => () => {};
@@ -13,12 +13,14 @@ export function useAccountSecurity(ownerId: string | null) {
     if (!resource) return;
     resource.leases++;
     const refresh = () => { void resource.client.refresh(); };
-    refresh(); const timer = setInterval(refresh, ACCOUNT_TRUST_LIMITS.refreshIntervalMs);
-    window.addEventListener("focus", refresh);
+    refresh(); const unsubscribe = securityNudges.on("account", () => { void resource.client.refreshFresh(); });
+    // Without a bus (no dashboard Centrifugo client) nothing would ever nudge us, so fall back to refreshing when the tab returns.
+    const visible = () => { if (document.visibilityState === "visible" && !securityNudges.attached) refresh(); };
+    document.addEventListener("visibilitychange", visible);
     const flush = () => { void resource.client.flushObservation().catch(() => {}); };
     window.addEventListener("pagehide", flush);
     return () => {
-      clearInterval(timer); window.removeEventListener("focus", refresh); window.removeEventListener("pagehide", flush); resource.leases--;
+      unsubscribe(); document.removeEventListener("visibilitychange", visible); window.removeEventListener("pagehide", flush); resource.leases--;
       queueMicrotask(() => { if (!resource.leases) resource.client.dispose(); });
     };
   }, [resource]);

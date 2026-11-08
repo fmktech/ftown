@@ -4,6 +4,7 @@ import { AccountTrustError, ACCOUNT_TRUST_LIMITS, createAccountEnrollment, creat
 import type { AccountEnrollmentBundle, AccountEnrollmentLink, AccountEnrollmentRequest, AccountEnrollmentStatus, AccountErrorCode,
   AccountHistory, AccountOperation, AccountSigningIdentity, StoredAccountTrust, VerifiedAccountTrust } from "@security/account-protocol";
 import type { ApprovedBridge, EndpointIdentity, SecurityCommand, SecurityCommandResults } from "@security/protocol";
+import { securityNudges, type SecurityNudgeBus } from "./security-nudge-bus";
 import { loadAccountSigningIdentity, loadBrowserIdentity, persistAccountTrust, readAccountEnrollment, readAccountTrust,
   readPinnedBridges, storeAccountEnrollment, clearAccountEnrollment, prepareAccountTrust } from "./browser-identity";
 
@@ -87,7 +88,7 @@ export class AccountSecurityClient {
     try { return await this.storage.persistAccountTrust(...args); }
     catch (error) { this.block(error); throw error; }
   }
-  constructor(readonly ownerId: string, private fetcher: typeof fetch = fetch, private storage = accountStorage) {}
+  constructor(readonly ownerId: string, private fetcher: typeof fetch = fetch, private storage = accountStorage, private nudges: Pick<SecurityNudgeBus, "publish"> = securityNudges) {}
   snapshot = (): AccountSecuritySnapshot => this.value;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(value: AccountSecuritySnapshot): void { if (!this.closed) { this.value = value; for (const listener of this.listeners) listener(); } }
@@ -130,6 +131,7 @@ export class AccountSecurityClient {
       throw new AccountTrustError(typeof error.code === "string" && codes.includes(error.code) ? error.code as AccountErrorCode
         : response.status === 409 ? "account_trust_conflict" : response.status === 410 ? "account_enrollment_expired" : "account_approval_required");
     }
+    if (body !== undefined) this.nudges.publish("account");
     return value;
   }
   private async history(): Promise<AccountHistory | null> {
@@ -147,6 +149,15 @@ export class AccountSecurityClient {
     if (this.refreshing) return this.refreshing;
     const work = this.read(); this.refreshing = work;
     void work.finally(() => { if (this.refreshing === work) this.refreshing = null; }).catch(() => {});
+    return work;
+  };
+  private followUp: Promise<void> | null = null;
+  /** Like refresh(), but never joins a read that began before this call: waits for it, then runs one new read. */
+  refreshFresh = (): Promise<void> => {
+    if (!this.refreshing) return this.refresh().then(() => {}, () => {});
+    if (this.followUp) return this.followUp;
+    const work = this.refreshing.then(() => {}, () => {}).then(() => { this.followUp = null; return this.refresh(); }).then(() => {}, () => {});
+    this.followUp = work;
     return work;
   };
   private async read(): Promise<AccountSecuritySnapshot> {

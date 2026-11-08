@@ -172,6 +172,9 @@ function wakeWorld(options: { pump: boolean }) {
   const hookDrains: number[] = [];
   let busy = false;
   const queue: Array<(result: unknown) => void> = [];
+  // Wake turns drain via real filesystem I/O (threadpool), so fixed setImmediate rounds can finish before they do
+  // on a slower FS; poll() awaits these explicitly instead.
+  const turns = new Set<Promise<void>>();
   const endTurn = async (): Promise<void> => {
     if (options.pump) { const drained = await drain(); if (drained.length) hookDrains.push(drained.length); }
     mail.markAgentIdle('orch'); busy = false;
@@ -207,7 +210,8 @@ function wakeWorld(options: { pump: boolean }) {
       submitted.push(text);
       if (busy) { queue.push(resolve); return; }
       resolve({ text: 'accepted' });
-      void settle().then(() => runTurn(true));
+      const turn = settle().then(() => runTurn(true));
+      turns.add(turn); void turn.finally(() => turns.delete(turn));
     }) },
   };
   const hooks = new Map<string, Hook>();
@@ -215,7 +219,11 @@ function wakeWorld(options: { pump: boolean }) {
   return {
     submitted, heartbeats, modelReads, hookDrains, mail, mailStore, endTurn,
     start: async () => { await hooks.get('session.start')?.(api, {}, async event => event); },
-    poll: async () => { await tick(); for (let i = 0; i < 20; i += 1) await settle(); },
+    poll: async () => {
+      await tick();
+      for (let i = 0; i < 20; i += 1) await settle();
+      while (turns.size) await Promise.all([...turns]);
+    },
     send: async (from: 'orch' | 'worker', to: 'orch' | 'worker', body: string) => {
       const result = await mail.acceptMail(sessions[to], { body, from, fromName: from });
       assert.equal(result.ok, true);

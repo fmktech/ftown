@@ -688,18 +688,22 @@ test('liveness TTL runs from the end of the latest poll, not its start', async t
   let now = Date.parse('2026-10-18T12:00:00.000Z');
   const store = new AttentionStore(f.resolve, 500, undefined, { now: () => now });
   const hook = (await store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'end', tool_input: askInput }))!;
-  const poll = store.waitForItem('s1', hook.id, 50);
-  await delay(10);
-  now += 25_000; // the long-poll ran its full window
-  await poll;
+  // waitForItem's window is measured with Date.now()/setTimeout; fake both so a slow fs read cannot expire the
+  // window before the poll registers (the old real-time 50 ms window made this flaky on loaded CI).
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+  const runPoll = async (eventId: string) => {
+    const poll = store.waitForItem('s1', eventId, 50);
+    while (!store.hasLiveWaiter(eventId)) await new Promise<void>(resolve => setImmediate(resolve)); // poller registered
+    now += 25_000; // the long-poll ran its full window
+    t.mock.timers.tick(50);
+    await poll;
+  };
+  await runPoll(hook.id);
   const result = await store.answer('s1', hook.id, [{ selected: [0] }]);
   assert.equal(result.waiterLive, true);
 
   const second = (await store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'end2', tool_input: askInput }))!;
-  const poll2 = store.waitForItem('s1', second.id, 50);
-  await delay(10);
-  now += 25_000;
-  await poll2;
+  await runPoll(second.id);
   now += ATTENTION_WAITER_TTL_MS + 1;
   await assert.rejects(store.answer('s1', second.id, [{ selected: [0] }]), (e) => e instanceof AttentionError && e.code === 'answer_waiter_gone');
 });

@@ -3,6 +3,7 @@ import { PENDING_APPROVAL_LIMITS, createPendingOffer, createPendingHello, openPe
 import type { AccountHead, AccountHistory, SignedAccountTransition } from "@security/account-protocol";
 import type { PendingApprovalState, PendingApprovalSummary, PendingCandidateCommand, PendingReviewerAction, PendingReviewerCommand } from "@security/pending-approval-protocol";
 import type { AccountSecurityClient, AccountSecuritySnapshot } from "./account-security-client";
+import { securityNudges, type SecurityNudgeBus } from "./security-nudge-bus";
 import { pendingApprovalStorage, type PendingApprovalStorage, type PendingCandidateRecord, type PendingReviewerRecord } from "./pending-approval-storage";
 
 export type PendingView = {
@@ -20,6 +21,12 @@ const equal = (left: unknown, right: unknown): boolean => {
   return canonical(left) === canonical(right);
 };
 const accountHead = (state: NonNullable<AccountSecuritySnapshot["trust"]>): AccountHead => ({ rootId: state.checkpoint.rootId, head: state.checkpoint.head, revision: state.checkpoint.revision });
+/** Candidate `read` and the re-sent create are POSTs that only poll; every other command (hello/confirm/cancel, review/reveal/reject/finish/renew) and create changes state. */
+const changesState = (body: unknown): boolean => {
+  if (!object(body) || "request" in body) return false; // create is published by its caller: the same POST re-polls
+  const action = object(body.action) ? body.action : object(body.payload) && object(body.payload.action) ? body.payload.action : null;
+  return action ? action.type !== "read" : true;
+};
 function randomToken(): string { return btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, ""); }
 function errorCode(error: unknown): string { return object(error) && typeof error.code === "string" ? error.code : "account_storage_unavailable"; }
 
@@ -28,14 +35,28 @@ export class PendingApprovalClient {
   private value: PendingSnapshot = { candidate: empty(), inbox: [], inboxError: null, inboxLoading: true, review: null };
   private listeners = new Set<() => void>();
   private abort = new AbortController(); private closed = false;
-  private candidateWork: Promise<void> | null = null; private reviewWork: Promise<void> | null = null; private inboxWork: Promise<void> | null = null;
+  private candidateWork: Promise<void> | null = null; private reviewWork: Promise<void> | null = null; private inboxWork: Promise<void> | null = null; private inboxFollowUp: Promise<void> | null = null;
   private candidateAction: Promise<void> | null = null; private reviewerAction: Promise<void> | null = null;
   private selected: string | null = null; private selection = 0;
-  constructor(readonly account: AccountSecurityClient, private fetcher: typeof fetch = fetch, private storage: PendingApprovalStorage = pendingApprovalStorage) {}
+  private rawInbox: PendingApprovalSummary[] = []; private expiryTimer: ReturnType<typeof setTimeout> | null = null;
+  private nudges: Pick<SecurityNudgeBus, "publish">;
+  constructor(readonly account: AccountSecurityClient, private fetcher: typeof fetch = fetch, private storage: PendingApprovalStorage = pendingApprovalStorage, options: { nudges?: Pick<SecurityNudgeBus, "publish"> } = {}) { this.nudges = options.nudges ?? securityNudges; }
   snapshot = () => this.value;
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private active(): void { if (this.closed) throw new AccountTrustError("account_approval_required"); }
-  private update(update: Partial<PendingSnapshot>): void { if (!this.closed) { this.value = { ...this.value, ...update }; for (const listener of this.listeners) listener(); } }
+  /** Expiry is judged locally so a stale inbox never needs a refetch. */
+  private liveInbox(): PendingApprovalSummary[] { const now = Date.now(); return this.rawInbox.filter(entry => Date.parse(entry.request.expiresAt) > now); }
+  private armExpiry(): void {
+    if (this.expiryTimer) clearTimeout(this.expiryTimer); this.expiryTimer = null;
+    const now = Date.now(); const next = Math.min(...this.rawInbox.map(entry => Date.parse(entry.request.expiresAt)).filter(at => at > now));
+    if (!Number.isFinite(next)) return;
+    this.expiryTimer = setTimeout(() => { this.expiryTimer = null; this.update({ inbox: this.rawInbox }); }, Math.min(next - now, 2 ** 31 - 1));
+  }
+  private update(update: Partial<PendingSnapshot>): void {
+    if (this.closed) return;
+    if (update.inbox) { this.rawInbox = update.inbox; update = { ...update, inbox: this.liveInbox() }; this.armExpiry(); }
+    this.value = { ...this.value, ...update }; for (const listener of this.listeners) listener();
+  }
   private async json(path: string, body?: unknown, limit: number = PENDING_APPROVAL_LIMITS.maxWireBytes): Promise<unknown> {
     this.active(); const controller = new AbortController(); let interrupt = () => {};
     const interrupted = new Promise<never>((_resolve, reject) => { interrupt = () => { controller.abort(); reject(new AccountTrustError("account_storage_unavailable")); }; });
@@ -56,6 +77,7 @@ export class PendingApprovalClient {
         const code = error && typeof error.code === "string" ? error.code : response.status === 409 ? "account_trust_conflict" : response.status === 410 ? "account_enrollment_expired" : response.status >= 500 ? "account_storage_unavailable" : "account_approval_required";
         throw { code };
       }
+      if (body !== undefined && path.startsWith("/api/security/approvals") && changesState(body)) this.nudges.publish("approvals");
       return value;
     };
     try { return await Promise.race([read(), interrupted]); }
@@ -148,7 +170,12 @@ export class PendingApprovalClient {
     if (record.outbound) {
       state = await this.state(await this.candidateSend(record, `/api/security/approvals/${request.requestId}/candidate`, record.outbound), request, record.state);
       record = await this.saveCandidate(record, { ...record, outbound: undefined, state });
-    } else state = await this.state(await this.candidateSend(record, "/api/security/approvals", { request, candidateToken: record.candidateToken }), request, record.state);
+    } else {
+      // This idempotent create doubles as the 2 s poll once the server state is known; only the first call creates.
+      const raw = await this.candidateSend(record, "/api/security/approvals", { request, candidateToken: record.candidateToken });
+      if (!record.state) this.nudges.publish("approvals");
+      state = await this.state(raw, request, record.state);
+    }
     record = await this.saveCandidate(record, { ...record, state });
     if (terminal(state.status)) { record = await this.saveCandidate(record, { ...record, phase: state.status as "cancelled" }); this.update({ candidate: { ...empty(), requestId: request.requestId, label: request.label, status: state.status as "cancelled" } }); return; }
     const base: PendingView = { ...empty(), status: "waiting", requestId: request.requestId, label: request.label };
@@ -193,6 +220,7 @@ export class PendingApprovalClient {
         this.active(); return this.storage.completeCandidate(record!, previous, trust);
       }); this.active();
       if (!committed) { await this.reloadCandidateOutcome(key); return; }
+      this.nudges.publish("account"); // second, independent publisher: bridges must re-read trust before this device's hello
       this.update({ candidate: { ...comparing, status: "approved", error: null } });
       return;
     }
@@ -257,6 +285,13 @@ export class PendingApprovalClient {
     if (this.inboxWork) return this.inboxWork;
     const work = this.readInbox().catch(error => this.update({ inboxError: errorCode(error), inboxLoading: false })); this.inboxWork = work;
     void work.finally(() => { if (this.inboxWork === work) this.inboxWork = null; }); return work;
+  };
+  /** A nudge during an in-flight read must not join that stale read: wait for it, then run one new read for all callers. */
+  refreshInboxFresh = (): Promise<void> => {
+    const inflight = this.inboxWork; if (!inflight) return this.refreshInbox();
+    if (this.inboxFollowUp) return this.inboxFollowUp;
+    const followUp = inflight.then(() => { this.inboxFollowUp = null; return this.refreshInbox(); }).catch(() => { this.inboxFollowUp = null; });
+    this.inboxFollowUp = followUp; return followUp;
   };
   private async readInbox(): Promise<void> {
     if (this.value.inboxError === "account_approval_required") await this.trusted();
@@ -448,5 +483,5 @@ export class PendingApprovalClient {
     if (this.selected === requestId) this.update({ review: { ...empty(), requestId, status: "rejected" } });
     await this.refreshInbox();
   }
-  dispose(): void { this.closed = true; this.selection++; this.abort.abort(); this.listeners.clear(); }
+  dispose(): void { this.closed = true; if (this.expiryTimer) clearTimeout(this.expiryTimer); this.expiryTimer = null; this.selection++; this.abort.abort(); this.listeners.clear(); }
 }

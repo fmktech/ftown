@@ -107,7 +107,9 @@ it('approval rejects public owner/request/candidate/sender/context substitution 
 it('approval writes are conditioned on request, previous bundle and the current verified policy head', async () => {
   const f = await fixture();
   const query = vi.fn().mockResolvedValueOnce([{ request: f.link.request, bundle: null }]).mockResolvedValueOnce([f.dbRow]).mockResolvedValueOnce([{ request_id: f.link.request.requestId }]);
-  const result = await new AccountTrustStore(query, () => f.now).approveEnrollment(owner, f.link.request.requestId, { requestId: f.link.request.requestId, bundle: f.bundle });
+  const first = new AccountTrustStore(query, () => f.now);
+  const result = await first.approveEnrollment(owner, f.link.request.requestId, { requestId: f.link.request.requestId, bundle: f.bundle });
+  expect(first.changed).toBe(true);
   expect(result.status).toBe('approved');
   expect(query.mock.calls[2][0]).toContain('bundle IS NOT DISTINCT FROM $5::jsonb');
   expect(query.mock.calls[2][1].slice(5)).toEqual([f.checkpoint.rootId, f.checkpoint.revision, f.checkpoint.head]);
@@ -118,10 +120,31 @@ it('same-approver resealing works after response expiry within request TTL; owne
   const f = await fixture();
   const next = await sealAccountApproval(f.admin, f.link, f.approvedHistory, f.now + 120001);
   const query = vi.fn().mockResolvedValueOnce([{ request: f.link.request, bundle: f.bundle }]).mockResolvedValueOnce([f.dbRow]).mockResolvedValueOnce([f.dbRow]).mockResolvedValueOnce([{ request_id: f.link.request.requestId }]);
-  await expect(new AccountTrustStore(query, () => f.now + 120001).approveEnrollment(owner, f.link.request.requestId, { requestId: f.link.request.requestId, bundle: next })).resolves.toMatchObject({ status: 'approved', bundle: next });
+  const resealing = new AccountTrustStore(query, () => f.now + 120001);
+  await expect(resealing.approveEnrollment(owner, f.link.request.requestId, { requestId: f.link.request.requestId, bundle: next })).resolves.toMatchObject({ status: 'approved', bundle: next });
+  expect(resealing.changed).toBe(false);
   const missing = vi.fn().mockResolvedValue([]);
   await expect(new AccountTrustStore(missing, () => f.now).enrollment(other, f.link.request.requestId)).rejects.toMatchObject({ code: 'account_enrollment_invalid' });
   expect(missing.mock.calls[0][1]).toEqual([other, f.link.request.requestId]);
   const expired = vi.fn().mockResolvedValue([{ request: f.link.request, bundle: null }]);
   await expect(new AccountTrustStore(expired, () => f.now + 300000).enrollment(owner, f.link.request.requestId)).rejects.toMatchObject({ code: 'account_enrollment_expired' });
+});
+
+it('reports changed only when this call wrote: new history, new enrollment; never a replay or a conflict', async () => {
+  const f = await fixture();
+  const previous = { root_id: f.first.rootId, revision: 0, head: f.first.head, history: f.history };
+  const written = new AccountTrustStore(vi.fn().mockResolvedValueOnce([previous]).mockResolvedValueOnce([{ owner_id: owner }]), () => f.now);
+  expect(written.changed).toBe(false);
+  await written.append(owner, { expectedHead: accountHead(f.first), record: f.addition });
+  expect(written.changed).toBe(true);
+  const raced = new AccountTrustStore(vi.fn().mockResolvedValueOnce([previous]).mockResolvedValueOnce([]), () => f.now);
+  await expect(raced.append(owner, { expectedHead: accountHead(f.first), record: f.addition })).rejects.toBeDefined();
+  expect(raced.changed).toBe(false);
+  const created = new AccountTrustStore(vi.fn().mockResolvedValueOnce([]).mockResolvedValueOnce([{ request: f.link.request, bundle: null }]), () => f.now);
+  await created.createEnrollment(owner, f.link.request);
+  expect(created.changed).toBe(true);
+  const replay = new AccountTrustStore(vi.fn().mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockResolvedValueOnce([{ request: f.link.request, bundle: null }])
+    .mockResolvedValueOnce([{ request: f.link.request, bundle: null }]), () => f.now);
+  await replay.createEnrollment(owner, f.link.request);
+  expect(replay.changed).toBe(false);
 });

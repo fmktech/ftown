@@ -659,6 +659,8 @@ program
       },
     });
     centrifugo.setSecurity(security);
+    centrifugo.onSecurityNudge(scope => { if (scope === 'account') security.requestAccountRefresh(); });
+    centrifugo.onSecurityNudgeHealth(healthy => security.setAccountPushHealthy(healthy));
     centrifugo.onLocalPublication((channel, data) => localApiServer.recordPublication(channel, data));
     // Direct transport (WebRTC DataChannel) data plane. Peers attach per session;
     // terminal output/screen fan out to them directly, and to Centrifugo only when

@@ -12,6 +12,7 @@ import { endpointSchema } from './metadata.js';
 import { ACCOUNT_TRUST_LIMITS, AccountTrustError } from '../account-crypto.js';
 import type { AccountHead, AccountHistory, VerifiedAccountTrust } from '../account-protocol.js';
 import { AccountReadUnavailable } from './account-client.js';
+import { ACCOUNT_SAFETY_REFRESH_MS, SECURITY_NUDGE_MIN_SPACING_MS, createCoalescedTrigger, type CoalescedTrigger } from '../security-nudge.js';
 
 const token = z.string().regex(/^[A-Za-z0-9_-]{1,200}$/);
 const actionSchema = z.object({ actionId: token, parentActionId: token.nullable(), clientId: token, grantId: token,
@@ -43,8 +44,12 @@ export class BridgeSecurityService implements BridgeSecurity {
   private readonly admissions = new Map<string, string>();
   private readonly verified = new WeakSet<VerifiedApplication>();
   private closed = false;
-  private accountTimer: ReturnType<typeof setInterval> | null = null;
+  private accountTimer: ReturnType<typeof setTimeout> | null = null;
+  private accountTimerDue = 0;
+  private accountPushHealthy = false;
+  private accountReadOk = true;
   private accountRefresh: Promise<void> | null = null;
+  private accountTrigger: CoalescedTrigger | null = null;
   private readonly accountAbort = new AbortController();
   constructor(readonly identity: EndpointIdentity, readonly bridgeId: string, dataDir: string, readonly options: BridgeSecurityOptions) {
     this.endpoint = identity.endpoint; this.now = options.now ?? Date.now;
@@ -259,11 +264,38 @@ export class BridgeSecurityService implements BridgeSecurity {
   /** Called once at startup; legacy/Solo stores never adopt an unsigned server directory. */
   async startAccount(trust?: VerifiedAccountTrust): Promise<void> {
     if (trust) await this.policy.pinBootstrap(trust);
-    await this.refreshAccount().catch(() => undefined);
-    if (!this.closed && !this.accountTimer && this.options.readAccountHistory) {
-      this.accountTimer = setInterval(() => { void this.refreshAccount().catch(() => undefined); }, ACCOUNT_TRUST_LIMITS.refreshIntervalMs);
-      this.accountTimer.unref();
+    this.accountReadOk = await this.refreshAccount().then(() => true, () => false);
+    if (!this.closed && !this.accountTimer && this.options.readAccountHistory) this.scheduleAccountRead();
+  }
+  /** Safety read: 1 h only while push is healthy and the last read succeeded, else the 30 s cadence. */
+  private scheduleAccountRead(delay = this.accountPushHealthy && this.accountReadOk ? ACCOUNT_SAFETY_REFRESH_MS : ACCOUNT_TRUST_LIMITS.refreshIntervalMs): void {
+    if (this.closed || !this.options.readAccountHistory) return;
+    if (this.accountTimer) clearTimeout(this.accountTimer);
+    this.accountTimerDue = performance.now() + delay; // monotonic: wall-clock steps and sleep must not skew the pull-in
+    this.accountTimer = setTimeout(() => { this.accountTimer = null; void this.trackedAccountRead(); }, delay);
+    this.accountTimer.unref();
+  }
+  private async trackedAccountRead(): Promise<void> {
+    try { await this.refreshAccount(); this.accountReadOk = true; } catch { this.accountReadOk = false; }
+    this.scheduleAccountRead();
+  }
+  /** Push (nudge subscription) health; losing it pulls the next safety read in to the 30 s cadence. */
+  setAccountPushHealthy(healthy: boolean): void {
+    const lost = this.accountPushHealthy && !healthy;
+    this.accountPushHealthy = healthy;
+    if (lost && this.accountTimer && this.accountTimerDue - performance.now() > ACCOUNT_TRUST_LIMITS.refreshIntervalMs) {
+      this.scheduleAccountRead(ACCOUNT_TRUST_LIMITS.refreshIntervalMs);
     }
+  }
+  /** Push-driven re-read (account nudge); bursts coalesce into at most one trailing read. */
+  requestAccountRefresh(): void {
+    if (this.closed || !this.options.readAccountHistory) return;
+    this.accountTrigger ??= createCoalescedTrigger(async () => {
+      // An in-flight read may predate the change, so it never satisfies a request.
+      await this.accountRefresh?.catch(() => undefined);
+      if (!this.closed) await this.trackedAccountRead();
+    }, SECURITY_NUDGE_MIN_SPACING_MS);
+    this.accountTrigger.request();
   }
   private accountFailure(error: unknown): BridgeSecurityError {
     return error instanceof BridgeSecurityError ? error : new BridgeSecurityError(error instanceof AccountTrustError ? error.code : 'invalid_account_trust');
@@ -311,7 +343,8 @@ export class BridgeSecurityService implements BridgeSecurity {
   onRevoked(listener: (endpointId: string) => void): () => void { this.revoked.add(listener); return () => this.revoked.delete(listener); }
   async close(): Promise<void> {
     this.closed = true; this.accountAbort.abort();
-    if (this.accountTimer) clearInterval(this.accountTimer);
+    this.accountTrigger?.dispose(); this.accountTrigger = null;
+    if (this.accountTimer) clearTimeout(this.accountTimer);
     this.accountTimer = null;
     await this.accountRefresh?.catch(() => undefined);
     this.revoked.clear(); this.replay.clear(); await this.audit.close(); await this.policy.close();

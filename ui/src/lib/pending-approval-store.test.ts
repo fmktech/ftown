@@ -69,8 +69,10 @@ it('real signatures, HPKE and both confirmations produce prospective atomic fina
   await review({ type: 'reveal', offerHash: f.offerHash, helloHash: await core.pendingHelloHash(f.hello.hello), reveal: f.reveal });
   state = await store.candidate(f.link.request.requestId, { candidateToken, action: { type: 'confirm', expectedRevision: state.revision, confirmation: f.confirmation } });
   const beforeFinal = structuredClone(db.row);
+  const nonFinal = store.change; expect(nonFinal).toMatchObject({ account: false });
   const command = await review({ type: 'finish', offerHash: f.offerHash, transition: f.transition, result: f.result });
-  expect(state.status).toBe('approved'); expect(db.history.transitions).toHaveLength(1);
+  expect(state.status).toBe('approved');
+  expect(store.change).toMatchObject({ account: true }); expect(db.history.transitions).toHaveLength(1);
   const finalWrite = db.query.mock.calls.find(([text, params]) => text.startsWith('WITH locked') && params[14] === true)!;
   expect(finalWrite[0]).toContain('integrity_guard'); expect(finalWrite[0]).toContain('FOR UPDATE OF h');
   expect(finalWrite[0]).toContain('refresh_predecessor=CASE WHEN $15::boolean');
@@ -319,4 +321,30 @@ it('does not retry a cryptographically invalid history on fresh preflight', asyn
   await expect(db.store.deliver('private-code', 23456)).rejects.toHaveProperty('code');
   expect(db.atomic).toHaveBeenCalledOnce();
   expect(db.query.mock.calls.filter(([text]) => text.startsWith('SELECT root_id'))).toHaveLength(2);
+});
+it('reports a change only for a real write: new browser/bridge rows and new candidate revisions, never replays, reads or failures', async () => {
+  const f = await fixture(); const db = database(f); const candidateToken = credential();
+  const fresh = () => new PendingApprovalStore(db.query, () => f.now);
+  const create = fresh(); await create.createBrowser(owner, { request: f.link.request, candidateToken });
+  expect(create.change).toEqual({ target: expect.any(String), account: false });
+  const replay = fresh(); await replay.createBrowser(owner, { request: f.link.request, candidateToken });
+  expect(replay.change).toBeNull();
+  const failed = fresh(); await expect(failed.createBrowser(owner, { request: f.link.request, candidateToken: credential() })).rejects.toBeDefined();
+  expect(failed.change).toBeNull();
+  const read = fresh(); await read.candidate(f.link.request.requestId, { candidateToken, action: { type: 'read' } });
+  expect(read.change).toBeNull();
+  const cancel = { candidateToken, action: { type: 'cancel', expectedRevision: 0 } };
+  const first = fresh(); await first.candidate(f.link.request.requestId, cancel);
+  expect(first.change).toEqual({ target: create.change!.target, account: false });
+  const again = fresh(); await again.candidate(f.link.request.requestId, cancel);
+  expect(again.change).toBeNull();
+
+  const bridge = await account.generateAccountBridgeCandidate('fixture-bridge'); const link = await account.createAccountEnrollment(bridge, 'Computer', null, 'fixture-bridge', f.now);
+  if (link.request.kind !== 'bridge') throw new Error('fixture');
+  const input = { approvalMethod: 'pending-v1' as const, accountHint: ' Owner@Ftown.test ', candidateToken: credential(), enrollment: link.request, bridgeId: 'fixture-bridge', hostname: 'Computer', platform: 'linux' };
+  const bridgeDb = database(f); const fresh2 = () => new PendingApprovalStore(bridgeDb.query, () => f.now);
+  const start = fresh2(); await start.startBridge(input);
+  expect(start.change).toEqual({ target: 'owner@ftown.test', account: false });
+  const retry = fresh2(); await retry.startBridge(input);
+  expect(retry.change).toBeNull();
 });

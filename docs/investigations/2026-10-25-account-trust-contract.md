@@ -77,3 +77,34 @@ The initial interactive TTY may deliberately show the full pairing fragment URL 
 ## v1.2 trusted local API exception
 
 Authenticated account reads require the operator-configured HTTPS API origin, with redirects disabled. As in existing development/Solo boundaries, exact HTTP hosts localhost,127.0.0.1 and[::1] are allowed for local development. No other HTTP hostname or DNS-derived loopback exception; reject URL credentials/query/fragment. Never derive read authority from server-provided/forwarded URL metadata. A valid authenticated local read qualifies as connectivity freshness in this local-only configuration. Root E2E uses isolated internal localhost3000 and trusted browser TLS8444.
+
+## v1.3 push-driven refresh (2026-11-08)
+
+This version replaces the fixed 30-second refresh, described earlier in this document, with push-driven refresh. The investigation behind it is `docs/investigations/2026-11-08-vercel-function-events-flood-from-approval-polling.md`.
+
+**The nudge.** A client that successfully mutates the account or the approvals publishes `{"type":"ftown_security_changed","version":1,"scope":"approvals"|"account"}` on `bridges:security#<owner>`.
+- The nudge carries no content.
+- Receivers accept only publications whose `info.user` is the owner, and then perform the same authenticated account read as before.
+- The nudge grants nothing and never substitutes for that read.
+
+**Who publishes `account`.**
+- the approver, after its account append;
+- the candidate, after it completes enrollment.
+
+With two independent publishers, a single lost nudge cannot delay a newly approved device's first hello.
+
+**When a bridge reads:**
+- on every nudge;
+- on every (re)subscribe of the nudge channel;
+- on a safety timer whose interval depends on state:
+  - **1 hour** while the nudge subscription is `subscribed` and the last read succeeded;
+  - **30 seconds** otherwise: while unsubscribed, disconnected or in a Centrifugo outage, and after any failed read.
+
+**Freshness under honest delivery:**
+- immediate on the healthy path;
+- at most 30 seconds whenever push or reads are degraded;
+- up to 1 hour only if every publisher fails to publish while the bridge stays healthily subscribed.
+
+The 24-hour offline grace and the restart refresh rule are unchanged.
+
+**Browsers** no longer poll the account or the approvals inbox. They read on mount, on nudge and on resubscribe. Without an attached Centrifugo client, they also read on `visibilitychange`.

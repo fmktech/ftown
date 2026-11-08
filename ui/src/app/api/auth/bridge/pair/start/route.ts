@@ -1,4 +1,5 @@
 import { PendingApprovalStore } from '@/lib/pending-approval-store';
+import { nudgePendingChange } from '@/lib/server-security-nudge';
 import { accountError, ACCOUNT_HEADERS } from '@/app/api/security/account/_shared';
 import { NextRequest, NextResponse } from "next/server";
 
@@ -93,9 +94,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ error: 'Invalid pending pairing' }, { status: 400, headers: ACCOUNT_HEADERS });
     }
     try {
-      const created = await new PendingApprovalStore().startBridge({ approvalMethod: 'pending-v1', accountHint: body.accountHint,
+      const store = new PendingApprovalStore();
+      const created = await store.startBridge({ approvalMethod: 'pending-v1', accountHint: body.accountHint,
         candidateToken: body.candidateToken, enrollment, bridgeId: body.bridgeId,
         hostname: body.hostname ?? null, platform: body.platform ?? null });
+      nudgePendingChange(store);
       return NextResponse.json({ deviceCode: created.pair.deviceCode, userCode: created.pair.userCode,
         verificationUri: `${pairingOrigin(request)}/pair?code=${created.pair.userCode}`, intervalMs: 2000,
         expiresInMs: Math.max(0, Date.parse(created.state.request.expiresAt) - Date.now()) }, { headers: ACCOUNT_HEADERS });

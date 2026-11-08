@@ -87,6 +87,8 @@ export interface PendingPairStartInput extends PendingPairingStart { bridgeId: s
 /** Public relay state only. Authority comes from signed history and endpoint verification. */
 export class PendingApprovalStore {
   private readonly accounts: AccountTrustStore;
+  /** Set only when this call wrote a new row or revision; replays, reads and failures leave it null. `account` marks a written account history. */
+  change: { target: string; account: boolean } | null = null;
   constructor(private readonly query: AccountQuery = (text, params) => getDb().query(text, params), private readonly now = Date.now) { this.accounts = new AccountTrustStore(query, now); }
   private async row(id: string): Promise<PendingRow> {
     token(id);
@@ -174,7 +176,7 @@ export class PendingApprovalStore {
         SELECT inserted.*,1 / CASE WHEN (SELECT COUNT(*) FROM paired)=CASE WHEN $9::text IS NULL THEN 0 ELSE 1 END THEN 1 ELSE 0 END AS integrity_guard FROM inserted`,
       [request.requestId, target, ownerId, credentialHash, createDigest, JSON.stringify(request), JSON.stringify(state), request.expiresAt,
         pair?.deviceCode ?? null, pair ? JSON.stringify(pair) : null, pair?.userCode ?? null, pair?.bridgeId ?? null, pair?.hostname ?? null, pair?.platform ?? null]);
-      if (rows.length === 1) return rows[0] as PendingRow;
+      if (rows.length === 1) { this.change = { target, account: false }; return rows[0] as PendingRow; }
       const replay = await find(); if (replay) return replay;
     }
     throw new AccountTrustError('account_capacity_exceeded');
@@ -311,7 +313,7 @@ export class PendingApprovalStore {
         (SELECT COUNT(*) FROM ready r JOIN pair b ON b.device_code=r.pair_device_code WHERE ($15::boolean OR $16::boolean) AND b.status<>'consumed') AS eb)
       SELECT 1 / CASE WHEN (r=0 AND h=0 AND p=0 AND b=0) OR (r=1 AND h=CASE WHEN $14::boolean THEN 1 ELSE 0 END AND p=1 AND b=eb) THEN 1 ELSE 0 END AS integrity_guard,
         (SELECT state FROM pw) AS state FROM counts`, params);
-    if (rows.length === 1 && rows[0].state) return parsePendingState(rows[0].state, this.now());
+    if (rows.length === 1 && rows[0].state) { this.change = { target: row.target_sub, account: !!append }; return parsePendingState(rows[0].state, this.now()); }
     const latest = await this.row(row.request_id);
     if (latest.operations[operationDigest]) return this.state(latest);
     return conflict();
