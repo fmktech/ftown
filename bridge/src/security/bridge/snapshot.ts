@@ -26,7 +26,7 @@ export class AtomicSnapshot<T> {
     try {
       handle = await open(this.file, 'r');
       const fstat = await handle.stat({ bigint: true });
-      if (fstat.size > 64n * 1024n * 1024n) throw new Error('Oversize snapshot');
+      if (Number(fstat.size) > 64 * 1024 * 1024) throw new Error('Oversize snapshot');
       const value = this.schema.parse(JSON.parse(await handle.readFile('utf8')));
       const newest = Math.max(Number(fstat.mtimeMs), Number(fstat.ctimeMs));
       this.cache = Date.now() - newest >= RACY_WINDOW_MS ? { identity: identityOf(fstat), value } : null;
