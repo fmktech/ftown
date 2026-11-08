@@ -124,7 +124,6 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [showNavigation, setShowNavigation] = useState(false);
   const [showSecurity, setShowSecurity] = useState(false);
   const [updateBridgeId, setUpdateBridgeId] = useState<string | null>(null);
-  const [securityView, setSecurityView] = useState<"activity" | "devices">("devices");
   const pending = usePendingApprovals(accountClient, "reviewer");
   const pendingCount = pending.snapshot.inbox.filter(item => !["approved", "rejected", "cancelled", "expired", "conflict"].includes(item.status)).length;
   const [securityBridgeId, setSecurityBridgeId] = useState<string | undefined>(undefined);
@@ -272,7 +271,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     return client.executeSecurity(command);
   }, [client]);
   const closeNavigation = useCallback((restoreFocus = false) => { setShowNavigation(false); if (restoreFocus) navigationButtonRef.current?.focus(); }, []);
-  const openSecurity = useCallback((bridgeId?: string) => { if (showNavigation) closeNavigation(true); setSecurityView("devices"); setSecurityBridgeId(bridgeId); setShowSecurity(true); }, [showNavigation, closeNavigation]);
+  const openSecurity = useCallback((bridgeId?: string) => { if (showNavigation) closeNavigation(true); setSecurityBridgeId(bridgeId); setShowSecurity(true); }, [showNavigation, closeNavigation]);
   useEffect(() => {
     if (!showNavigation) return;
     const outside = (event: globalThis.PointerEvent) => { if (!navigationRef.current?.contains(event.target as Node) && !navigationButtonRef.current?.contains(event.target as Node)) closeNavigation(true); };
@@ -806,7 +805,7 @@ PY`;
           <nav id="dashboard-navigation" ref={navigationRef} aria-label="Dashboard actions" hidden={!isDesktop && !showNavigation}
             className={`${isDesktop || showNavigation ? "flex" : "hidden"} absolute right-2 top-full z-50 mt-1 max-h-[calc(100dvh_-_60px)] w-[min(288px,calc(100vw_-_16px))] flex-col gap-2 overflow-y-auto rounded-md border border-[var(--border-muted)] bg-[var(--bg-surface)] p-3 shadow-xl md:static md:mt-0 md:w-auto md:max-h-none md:flex-row md:items-center md:overflow-visible md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none`}>
             {accountState?.status === "ready" && <HeaderTooltip label={pendingCount ? `Review ${pendingCount} pending device approvals` : "Review device approvals"} className="flex">
-              <button type="button" className="btn-ghost relative flex min-h-11 items-center gap-2 text-left md:h-8 md:min-h-8 md:w-8 md:justify-center" style={{ padding: "4px 6px", color: pendingCount ? "var(--accent)" : undefined }} aria-label={pendingCount ? `Review ${pendingCount} pending device approvals` : "Review device approvals"} onClick={() => { if (showNavigation) closeNavigation(true); setSecurityView("devices"); setShowSecurity(true); }}>
+              <button type="button" className="btn-ghost relative flex min-h-11 items-center gap-2 text-left md:h-8 md:min-h-8 md:w-8 md:justify-center" style={{ padding: "4px 6px", color: pendingCount ? "var(--accent)" : undefined }} aria-label={pendingCount ? `Review ${pendingCount} pending device approvals` : "Review device approvals"} onClick={() => { if (showNavigation) closeNavigation(true); setShowSecurity(true); }}>
                 <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M14 3H5v18h14v-9M9 8h5M9 12h3M9 16h3M15 7l2 2 4-4" /></svg>
                 <span className="md:sr-only">Review approvals{pendingCount ? ` (${pendingCount})` : ""}</span>
                 {pendingCount > 0 && <span aria-hidden="true" className="hidden md:flex absolute -right-1 -top-1 min-w-4 h-4 items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[9px] font-bold text-[var(--bg-void)]">{pendingCount}</span>}
@@ -1241,8 +1240,8 @@ PY`;
       <SecurityPanel open={showSecurity} onClose={() => setShowSecurity(false)} bridges={securityBridges}
         currentEndpointId={securityRuntime?.identity.endpoint.id ?? null} currentComputerIds={currentComputerIds} execute={executeSecurity}
         accountClient={accountClient} accountState={accountState}
-        pendingClient={pending.client ?? undefined} pendingState={pending.snapshot} initialView={securityView}
-        initialBridgeId={securityBridgeId} gatewayAvailable={!localMode && !securityRuntime?.ownerId.startsWith("solo:")} />
+        pendingClient={pending.client ?? undefined} pendingState={pending.snapshot}
+        initialBridgeId={securityBridgeId} />
       {updateBridgeId && <BridgeUpdatesDialog open name={bridges.find(bridge => bridge.bridgeId === updateBridgeId)?.hostname ?? updateBridgeId}
         view={updates.get(updateBridgeId)} onClose={() => setUpdateBridgeId(null)} onCheck={() => void updates.check(updateBridgeId, true)} onUpdate={() => void updates.update(updateBridgeId)} />}
       <NewSessionModal

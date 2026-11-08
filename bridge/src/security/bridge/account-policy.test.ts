@@ -54,9 +54,6 @@ test('production device list projects trusted grant sources before and after ado
   const f = await fixture(t);
   const cli = await generateEndpoint(ownerId, 'local-cli');
   await f.security.policy.provisionLocalEndpoint(cli.endpoint);
-  const mcp = await generateEndpoint(ownerId, 'mcp');
-  await f.security.approveMcp(await f.actor(), { requestId: 'source-consent', grantId: 'source-grant', endpoint: mcp.endpoint,
-    permissions: ['read'], expiresAt: new Date(f.time() + 300000).toISOString(), activeExpiresAt: new Date(f.time() + day).toISOString() });
   const file = join(f.directory, 'security', 'policy.json');
   // Historical grants may predate provenance metadata; absence remains the legacy contract.
   const legacyState = JSON.parse(await readFile(file, 'utf8'));
@@ -66,7 +63,7 @@ test('production device list projects trusted grant sources before and after ado
   const beforeRead = await readFile(file, 'utf8');
   const before = await listAsCli();
   assert.equal(before.find(item => item.endpoint.id === cli.endpoint.id)!.source, 'local');
-  for (const id of [f.first.endpoint.id, f.second.endpoint.id, mcp.endpoint.id]) {
+  for (const id of [f.first.endpoint.id, f.second.endpoint.id]) {
     assert.equal(Object.hasOwn(before.find(item => item.endpoint.id === id)!, 'source'), false);
   }
   assert.equal(await readFile(file, 'utf8'), beforeRead);
@@ -75,7 +72,6 @@ test('production device list projects trusted grant sources before and after ado
   const after = await listAsCli();
   assert.equal(after.find(item => item.endpoint.id === f.first.endpoint.id)!.source, 'account');
   assert.equal(after.find(item => item.endpoint.id === cli.endpoint.id)!.source, 'local');
-  assert.equal(Object.hasOwn(after.find(item => item.endpoint.id === mcp.endpoint.id)!, 'source'), false);
   assert.ok(!after.some(item => item.endpoint.id === f.second.endpoint.id));
   const asAccountBrowser = await f.security.listDevices(await f.actor());
   assert.equal(asAccountBrowser.find(item => item.endpoint.id === f.first.endpoint.id)!.source, 'account');
@@ -85,9 +81,8 @@ test('production device list projects trusted grant sources before and after ado
     invitationSecret: invitation.secret, label: 'Local recovery' });
   assert.equal((await listAsCli()).find(item => item.endpoint.id === f.second.endpoint.id)!.source, 'local');
   const persisted = await readFile(file, 'utf8');
-  const records = JSON.parse(persisted) as { devices: object[]; mcp: Array<{ approved: object }> };
+  const records = JSON.parse(persisted) as { devices: object[] };
   assert.ok(records.devices.every(item => !Object.hasOwn(item, 'source')));
-  assert.ok(records.mcp.every(item => !Object.hasOwn(item.approved, 'source')));
 
   const reloaded = new BridgeSecurityService(f.bridge, 'bridge', f.directory, f.options);
   try {
@@ -95,7 +90,6 @@ test('production device list projects trusted grant sources before and after ado
     assert.equal(devices.find(item => item.endpoint.id === f.first.endpoint.id)!.source, 'account');
     assert.equal(devices.find(item => item.endpoint.id === f.second.endpoint.id)!.source, 'local');
     assert.equal(devices.find(item => item.endpoint.id === cli.endpoint.id)!.source, 'local');
-    assert.equal(Object.hasOwn(devices.find(item => item.endpoint.id === mcp.endpoint.id)!, 'source'), false);
     assert.equal(await readFile(file, 'utf8'), persisted);
   } finally { await reloaded.close(); }
 });
@@ -193,15 +187,11 @@ test('offline grace is running-process bounded by wall and monotonic clocks, inc
   await assert.rejects(f.actor(), { code: 'account_offline_expired' });
 });
 
-test('learned device revocation closes its peers and invalidates queued work while fixed MCP/local authority survives', async t => {
+test('learned device revocation closes its peers and invalidates queued work while fixed local authority survives', async t => {
   const f = await fixture(t);
   await f.append({ type: 'add_device', device: { endpoint: f.second.endpoint, signingPublicKey: f.secondSigning.publicKey,
     label: 'Second', approvedAt: new Date(f.time()).toISOString() } });
   const cli = await generateEndpoint(ownerId, 'local-cli'); await f.security.policy.provisionLocalEndpoint(cli.endpoint);
-  const mcp = await generateEndpoint(ownerId, 'mcp');
-  await f.security.policy.approveMcp(await f.actor(), { requestId: 'consent', grantId: 'grant', endpoint: mcp.endpoint, permissions: ['read'],
-    expiresAt: new Date(f.time() + 300000).toISOString(), activeExpiresAt: new Date(f.time() + 3 * day).toISOString() });
-  await f.security.policy.activateMcp(await f.security.policy.principal(mcp.endpoint.id, true), 'grant');
   await f.security.adoptAccount(await f.actor(), f.head());
   const queued = await f.actor(); const closed: string[] = []; f.security.onRevoked(id => closed.push(id));
   await f.append({ type: 'revoke_device', endpointId: f.first.endpoint.id }, f.second, f.secondSigning);
@@ -210,10 +200,9 @@ test('learned device revocation closes its peers and invalidates queued work whi
   await assert.rejects(f.security.revalidate(queued), { code: 'endpoint_revoked' });
   await assert.rejects(f.actor(), { code: 'account_device_revoked' });
   assert.ok(!(await f.security.policy.recipients()).some(item => item.endpoint.id === f.first.endpoint.id));
-  await f.security.policy.revalidate(await f.security.policy.principal(mcp.endpoint.id), 'read');
+  await f.security.policy.revalidate(await f.security.policy.principal(cli.endpoint.id), 'admin');
   f.move(2 * day); f.failReads(new AccountReadUnavailable()); await assert.rejects(f.security.refreshAccount());
   await f.security.policy.revalidate(await f.security.policy.principal(cli.endpoint.id), 'admin');
-  await f.security.policy.revalidate(await f.security.policy.principal(mcp.endpoint.id), 'read');
 });
 
 test('invalid received trust closes account access immediately; a valid same-root read recovers without repinning', async t => {

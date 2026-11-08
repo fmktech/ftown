@@ -52,16 +52,6 @@ CREATE TABLE pairing_requests (
 
 CREATE INDEX idx_pairing_user_code ON pairing_requests(user_code);
 
--- MCP OAuth state is shared across gateway replicas. Token/code keys are SHA-256 hashes.
-CREATE TABLE IF NOT EXISTS mcp_oauth_records (
-  kind TEXT NOT NULL CHECK (kind IN ('client', 'pending', 'code', 'grant', 'access', 'refresh')),
-  key TEXT NOT NULL,
-  data JSONB NOT NULL,
-  expires_at TIMESTAMPTZ NOT NULL,
-  PRIMARY KEY (kind, key)
-);
-CREATE INDEX IF NOT EXISTS mcp_oauth_records_expiry ON mcp_oauth_records(expires_at);
-
 -- Additive Web Push state. Apply before enabling VAPID; no existing data changes.
 CREATE TABLE IF NOT EXISTS push_subscriptions (
   endpoint_hash TEXT PRIMARY KEY,
@@ -107,39 +97,6 @@ CREATE TABLE IF NOT EXISTS security_endpoint_directory (
 );
 CREATE INDEX IF NOT EXISTS security_endpoint_directory_owner_bridge
   ON security_endpoint_directory(owner_id, bridge_id);
-
--- The wrapping key remains outside PostgreSQL. envelope authenticates all
--- lookup fields and contains only nonce/ciphertext/key ID + public context.
-CREATE TABLE IF NOT EXISTS mcp_endpoint_identities (
-  owner_id TEXT NOT NULL,
-  request_id TEXT NOT NULL UNIQUE,
-  grant_id TEXT NOT NULL UNIQUE,
-  endpoint_id TEXT NOT NULL,
-  envelope JSONB NOT NULL,
-  expires_at TIMESTAMPTZ NOT NULL,
-  PRIMARY KEY(owner_id, grant_id)
-);
-CREATE INDEX IF NOT EXISTS mcp_endpoint_identities_expiry ON mcp_endpoint_identities(expires_at);
-
-CREATE TABLE IF NOT EXISTS mcp_gateway_runs (
-  run_id UUID PRIMARY KEY,
-  lease_expires_at TIMESTAMPTZ NOT NULL
-);
-CREATE TABLE IF NOT EXISTS mcp_security_events (
-  owner_id TEXT NOT NULL,
-  id UUID NOT NULL,
-  action_id UUID NOT NULL,
-  parent_action_id UUID,
-  bridge_id TEXT,
-  started_at TIMESTAMPTZ NOT NULL,
-  event JSONB NOT NULL,
-  run_id UUID NOT NULL,
-  PRIMARY KEY(owner_id, id)
-);
-CREATE INDEX IF NOT EXISTS mcp_security_events_owner_newest
-  ON mcp_security_events(owner_id, started_at DESC, id DESC);
-CREATE INDEX IF NOT EXISTS mcp_security_events_owner_bridge_newest
-  ON mcp_security_events(owner_id, bridge_id, started_at DESC, id DESC);
 
 -- Signed public account history is a delivery log, never a trust authority.
 CREATE TABLE IF NOT EXISTS security_account_history (

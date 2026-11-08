@@ -1,5 +1,5 @@
 import { exec } from 'node:child_process';
-import type { McpApproval, SecurityPageQuery, VerifiedApplication } from './security/protocol.js';
+import type { VerifiedApplication } from './security/protocol.js';
 import type { BridgeSecurityService } from './security/bridge/security.js';
 import { BridgeSecurityError } from './security/bridge/errors.js';
 import { appendFileSync, mkdirSync } from 'node:fs';
@@ -62,7 +62,6 @@ interface ExecError {
 export interface CommandRpcDeps {
   bridgeId: string;
   security?: BridgeSecurityService;
-  relayRequest?: (id: string, payload: Record<string, unknown>) => Promise<unknown>;
   sessionController: SessionController;
   pullRequestStatuses?: PullRequestStatusService;
   pullRequestReview?: PrReviewService;
@@ -97,7 +96,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
     try {
       if (RETIRED_AUTOMATION_COMMANDS.has(command.type)) throw new AutomationRemovedError();
       if (deps.security && !verified) throw new Error('approval_required');
-      if (deps.security && verified && command.type !== 'security_activate_mcp') await deps.security.revalidate(verified.principal);
+      if (deps.security && verified) await deps.security.revalidate(verified.principal);
       switch (command.type) {
         case 'preview_chat_list':
         case 'preview_chat_send':
@@ -232,10 +231,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
         case 'security_devices':
         case 'security_invite':
         case 'security_revoke':
-        case 'security_approve_mcp':
-        case 'security_activate_mcp':
-        case 'security_account_adopt':
-        case 'security_activity': {
+        case 'security_account_adopt': {
           if (!deps.security || !verified || payloadBridgeId !== bridgeId) throw new Error('approval_required');
           const payload = command.payload as Record<string, unknown>;
           let result: unknown;
@@ -244,14 +240,10 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           else if (command.type === 'security_revoke') {
             if (typeof payload.endpointId !== 'string') throw new Error('invalid_envelope');
             await deps.security.revokeEndpoint(verified.principal, payload.endpointId); result = { endpointId: payload.endpointId, revoked: true };
-          } else if (command.type === 'security_account_adopt') {
+          } else {
             if (Object.keys(payload).some(key => key !== 'bridgeId' && key !== 'head')) throw new Error('invalid_envelope');
             result = { head: await deps.security.adoptAccount(verified.principal, payload.head as import('./security/account-protocol.js').AccountHead) };
-          } else if (command.type === 'security_approve_mcp') result = await deps.security.approveMcp(verified.principal, payload.approval as McpApproval);
-          else if (command.type === 'security_activate_mcp') {
-            if (typeof payload.grantId !== 'string') throw new Error('invalid_envelope');
-            result = await deps.security.activateMcp(verified.principal, payload.grantId);
-          } else { await deps.security.policy.revalidate(verified.principal, 'admin'); result = await deps.security.audit.list((payload.page ?? {}) as SecurityPageQuery); }
+          }
           response = { requestId: command.requestId, success: true, data: result as Record<string, unknown> };
           break;
         }
@@ -297,12 +289,6 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             }
           }
           response = { requestId: command.requestId, success: true, data: { sessionId: payload.sessionId, ...snapshot, delivery } };
-          break;
-        }
-        case 'mcp_request': {
-          if (payloadBridgeId !== bridgeId || !deps.relayRequest) throw new Error('MCP relay unavailable or missing target');
-          const data = await deps.relayRequest(command.requestId, command.payload as Record<string, unknown>);
-          response = { requestId: command.requestId, success: true, data: data as Record<string, unknown> };
           break;
         }
         case 'create_session': {

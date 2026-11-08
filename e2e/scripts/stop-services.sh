@@ -14,7 +14,7 @@ import { pathToFileURL } from 'node:url';
 const dir=process.env.E2E_DIR,repo=resolve(dir,'..');
 const {apiResponse}=await import(pathToFileURL(join(repo,'bridge/dist/cli-client.js')).href);
 let failed=false;
-for(const [name,homeName]of [['bridge','.bridge-home'],['bridge-2','.bridge-home-2'],['mcp-bridge','.mcp-bridge-home'],['mcp-bridge-2','.mcp-bridge-home-2']]){
+for(const [name,homeName]of [['bridge','.bridge-home'],['bridge-2','.bridge-home-2']]){
   const pidFile=join(dir,`.${name}.pid`),home=join(dir,homeName),pointerFile=join(home,'.ftown/bridge.json');
   if(!existsSync(pidFile)||!existsSync(pointerFile))continue;
   try{
@@ -37,7 +37,7 @@ for(const [name,homeName]of [['bridge','.bridge-home'],['bridge-2','.bridge-home
 }
 if(failed)process.exitCode=1;
 JS
-for name in mcp mcp-tls mcp-bridge-2 mcp-bridge bridge-2 bridge ui; do
+for name in tls bridge-2 bridge ui; do
   f="$E2E_DIR/.$name.pid"
   if [ -f "$f" ]; then
     pid="$(cat "$f")"
@@ -47,11 +47,11 @@ for name in mcp mcp-tls mcp-bridge-2 mcp-bridge bridge-2 bridge ui; do
 const fs=require('node:fs'),path=require('node:path'),cp=require('node:child_process');const [pid,name,repo]=process.argv.slice(2);
 try{
  const args=process.platform==='linux'?fs.readFileSync(`/proc/${pid}/cmdline`,'utf8').split('\0'):cp.execFileSync('ps',['-p',pid,'-o','command='],{encoding:'utf8'}).trim().split(' ');
- const expected=name==='ui'?path.join(repo,'ui/node_modules/next/dist/bin/next'):name==='mcp'?path.join(repo,'bridge/dist/mcp-cli.js'):name==='mcp-tls'?path.join(repo,'e2e/scripts/mcp-tls-proxy.mjs'):path.join(repo,'bridge/dist/index.js');
+ const expected=name==='ui'?path.join(repo,'ui/node_modules/next/dist/bin/next'):name==='tls'?path.join(repo,'e2e/scripts/tls-proxy.mjs'):path.join(repo,'bridge/dist/index.js');
  const titledUi=process.platform==='linux'&&name==='ui'&&args.join(' ').includes('next-server')&&fs.realpathSync(`/proc/${pid}/cwd`)===path.join(repo,'ui');
  if(!args.includes(expected)&&!titledUi)throw Error('unowned process');
  if(process.platform==='linux'&&name.includes('bridge')){
-  const homes={bridge:'.bridge-home','bridge-2':'.bridge-home-2','mcp-bridge':'.mcp-bridge-home','mcp-bridge-2':'.mcp-bridge-home-2'};
+  const homes={bridge:'.bridge-home','bridge-2':'.bridge-home-2'};
   const vars=fs.readFileSync(`/proc/${pid}/environ`,'utf8').split('\0');if(!vars.includes(`HOME=${path.join(repo,'e2e',homes[name])}`))throw Error('unowned home');
  }
 }catch{process.exitCode=1;}
@@ -73,11 +73,11 @@ if [ "$cleanup_status" -eq 0 ]; then
 node <<'JS' || cleanup_status=1
 const fs=require('node:fs'),path=require('node:path');const dir=process.env.E2E_DIR;
 if(path.resolve(dir)!==fs.realpathSync(dir))throw Error('Noncanonical test directory');
-for(const [name,pid]of [['.bridge-home','bridge'],['.bridge-home-2','bridge-2'],['.mcp-bridge-home','mcp-bridge'],['.mcp-bridge-home-2','mcp-bridge-2']]){
+for(const [name,pid]of [['.bridge-home','bridge'],['.bridge-home-2','bridge-2']]){
  const home=path.join(dir,name);if(fs.existsSync(path.join(dir,`.${pid}.pid`)))throw Error('Bridge PID record remains');
  if(fs.existsSync(home)){if(fs.lstatSync(home).isSymbolicLink()||!fs.lstatSync(home).isDirectory())throw Error('Unsafe test home');fs.rmSync(home,{recursive:true,force:true});}
 }
-for(const file of ['.run-email','.run-mcp-email'])fs.rmSync(path.join(dir,file),{force:true});
+fs.rmSync(path.join(dir,'.run-email'),{force:true});
 JS
 else echo "[stop] preserving scratch homes for root verification after cleanup failure"; fi
 echo "[stop] done (docker infra left running; use 'docker compose down -v' in e2e/ to remove)"

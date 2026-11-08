@@ -92,16 +92,6 @@ function ZapIcon() {
   );
 }
 
-function McpIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
-      <rect x="8" y="8" width="8" height="8" rx="2" />
-      <path d="M12 3v5M3 12h5M16 12h5M12 16v5" />
-      <circle cx="12" cy="3" r="1" /><circle cx="3" cy="12" r="1" /><circle cx="21" cy="12" r="1" /><circle cx="12" cy="21" r="1" />
-    </svg>
-  );
-}
-
 const SUPPORTED_AGENTS = [
   { name: "Claude Code", detail: "Anthropic + API providers" },
   { name: "Cursor Agent", detail: "agent CLI" },
@@ -196,11 +186,6 @@ const FEATURES = [
     icon: <LockIcon />,
     title: "Terminal data stays on your network",
     desc: "On localhost or LAN, terminal I/O pairs peer-to-peer and never touches the cloud. Centrifugo only relays it while a remote viewer is actively watching.",
-  },
-  {
-    icon: <McpIcon />,
-    title: "MCP fleet control",
-    desc: "Connect your MCP client over HTTPS with OAuth to inspect computers, launch and control sessions, exchange mail, and check attention requests.",
   },
 ] as const;
 
@@ -314,7 +299,7 @@ export default async function LandingPage() {
             <p className="font-[family-name:var(--font-sans)] text-sm sm:text-base text-[var(--text-secondary)] leading-relaxed max-w-[70ch] mb-6">
               Stream your coding agents and shells from your machines to a browser on your
               desktop or phone. Self-hosted, with no SSH or port forwarding. Terminals stay
-              local or P2P whenever possible, and MCP connects your existing agent workflow.
+              local or P2P whenever possible.
             </p>
 
             <CtaButtons />
@@ -517,53 +502,6 @@ export default async function LandingPage() {
             ))}
           </div>
         </div>
-
-        {/* MCP */}
-        <section aria-labelledby="mcp-heading" className="mt-14 sm:mt-20 w-full max-w-[960px] rounded-[var(--radius-lg)] bg-[var(--bg-surface)] border border-[var(--border-muted)] p-6 sm:p-8">
-          <div className="flex flex-col lg:flex-row gap-8 lg:gap-10">
-            <div className="flex-1 min-w-0">
-              <div className="text-[11px] font-semibold tracking-[0.08em] uppercase text-[var(--accent)] mb-3">
-                FTown MCP
-              </div>
-              <h2 id="mcp-heading" className="font-[family-name:var(--font-sans)] text-2xl sm:text-3xl font-semibold tracking-tight text-[var(--text-primary)] mb-4">
-                Your fleet, in your MCP client.
-              </h2>
-              <p className="font-[family-name:var(--font-sans)] text-[13px] sm:text-sm text-[var(--text-secondary)] leading-relaxed mb-5 max-w-[52ch]">
-                Give your agent a view across your computers. Inspect sessions and retained
-                terminal history, launch work, send durable mail, and control terminals
-                through the same FTown fleet.
-              </p>
-              <div className="border-l-2 border-[var(--accent-dim)] pl-4">
-                <h3 className="text-[13px] font-semibold text-[var(--text-primary)] mb-1">Keep questions in view</h3>
-                <p className="font-[family-name:var(--font-sans)] text-[13px] text-[var(--text-secondary)] leading-relaxed">
-                  Supported agent input requests stay in a durable attention inbox.
-                  Your client can check the backlog or wait for new requests, then
-                  pick up where it left off after reconnecting.
-                </p>
-              </div>
-            </div>
-            <div className="lg:w-[310px] shrink-0 rounded-[var(--radius-md)] border border-[var(--border-muted)] bg-[var(--bg-elevated)] p-5">
-              <div className="flex items-center gap-2 text-[var(--accent)] mb-4">
-                <McpIcon />
-                <h3 className="text-[11px] font-semibold tracking-[0.08em] uppercase">Connect over HTTPS</h3>
-              </div>
-              <p className="font-[family-name:var(--font-sans)] text-[13px] text-[var(--text-secondary)] leading-relaxed mb-3">
-                Add a remote MCP server, sign in with FTown, and choose which
-                computers it can access.
-              </p>
-              <code className="block break-all rounded-[var(--radius-sm)] border border-[var(--border-subtle)] bg-[var(--bg-void)] px-3 py-3 text-[12px] text-[var(--text-primary)] select-all">
-                https://ftown-mcp.fly.dev/mcp
-              </code>
-              <a href="https://github.com/fmktech/ftown/blob/main/docs/mcp.md" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 text-[12px] text-[var(--accent)] hover:underline mt-4">
-                MCP setup &amp; capabilities <span aria-hidden="true">↗</span>
-              </a>
-              <p className="font-[family-name:var(--font-sans)] text-[11px] text-[var(--text-muted)] leading-relaxed mt-4">
-                Attention updates use inbox checks or bounded waits. Your client
-                stays in control of when it listens.
-              </p>
-            </div>
-          </div>
-        </section>
 
         {/* Closing CTA */}
         <div className="mt-16 sm:mt-24 w-full max-w-[720px] text-center rounded-[var(--radius-lg)] bg-[var(--bg-surface)] border border-[var(--border-muted)] px-6 sm:px-8 py-10 shadow-[var(--shadow-glow-accent)]">

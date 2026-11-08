@@ -142,7 +142,7 @@ test('public key decoding verifies canonical point format and fingerprint bindin
 });
 
 test('imported persistent identities preserve their pinned public identity and become non-extractable', async () => {
-  const persistent = await generateEndpoint(ownerId, 'mcp', true);
+  const persistent = await generateEndpoint(ownerId, 'local-cli', true);
   const jwk = await crypto.subtle.exportKey('jwk', persistent.keyPair.privateKey);
   const imported = await importEndpoint(persistent.endpoint, jwk);
   assert.deepEqual(imported.endpoint, persistent.endpoint);
@@ -151,7 +151,7 @@ test('imported persistent identities preserve their pinned public identity and b
   const h = makeHeader(imported, bridge);
   const packet = await seal(imported, bridge.endpoint, h, encode.encode('restored'));
   assert.equal(decode.decode(await open(bridge, imported.endpoint, packet, context(h))), 'restored');
-  const other = await generateEndpoint(ownerId, 'mcp', true);
+  const other = await generateEndpoint(ownerId, 'local-cli', true);
   const otherJwk = await crypto.subtle.exportKey('jwk', other.keyPair.privateKey);
   await assert.rejects(importEndpoint(persistent.endpoint, otherJwk), safeError);
   await assert.rejects(importEndpoint(persistent.endpoint, { ...jwk, d: otherJwk.d }), safeError);

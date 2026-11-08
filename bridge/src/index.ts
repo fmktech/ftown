@@ -32,7 +32,6 @@ import { assertSetupReady } from './setup-state.js';
 import { canonicalNotifyPath } from './install-notify-script.js';
 import { unregisterSession, configureSessionRegistryHome } from './session-registry.js';
 import { createFtownSession, type CreateFtownSessionDeps } from './create-ftown-session.js';
-import { createRelayHandler } from './mcp/relay-handler.js';
 import { loadOrCreateIdentity, readBoundBridgeIdentity } from './security/bridge/identity.js';
 import { bindPendingBridgeIdentity, prepareBridgeEnrollment, preparePendingBridgeEnrollment, previousPendingBridgeAttempt,
   savePairingVerificationUrl, type PendingBridgeEnrollment } from './security/bridge/pending-enrollment.js';
@@ -578,7 +577,6 @@ program
       readAccountHistory: !solo && !opts.local ? signal => readAccountHistory(opts.apiUrl, currentBridgeToken, signal) : undefined,
     });
     await security.policy.provisionLocalEndpoint(localIdentity.endpoint);
-    await security.audit.initialize();
     await security.startAccount(accountBootstrap);
     if (!solo && !opts.local) {
       const registration = await fetch(`${opts.apiUrl.replace(/\/$/, '')}/api/security/endpoints`, { method: 'PUT',

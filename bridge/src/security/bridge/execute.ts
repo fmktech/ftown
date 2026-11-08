@@ -12,8 +12,7 @@ export async function executeSecurePacket(security: BridgeSecurityService, packe
   try {
     verified = await (admission ? admission(() => security.acceptApplication(packet, route)) : security.acceptApplication(packet, route));
     observer?.admitted(verified);
-    const activation = verified.application.route.kind === 'command' && verified.application.route.command === 'security_activate_mcp';
-    if (!activation) await security.revalidate(verified.principal);
+    await security.revalidate(verified.principal);
     const selfRevocation = await security.revokeSelfWithReceipt(verified, route);
     if (selfRevocation) return selfRevocation;
     dispatchStarted = true;
@@ -23,8 +22,6 @@ export async function executeSecurePacket(security: BridgeSecurityService, packe
     const body = result?.body && typeof result.body === 'object' && !Array.isArray(result.body) ? result.body : null;
     const failedHttp = typeof result?.status === 'number' && result.status >= 400;
     const unknown = body?.outcomeUnknown === true;
-    await security.complete(verified, unknown ? 'unknown' : failedHttp || response?.success === false ? 'rejected' : 'succeeded',
-      failedHttp ? typeof body?.code === 'string' ? body.code : 'bridge_error' : response?.success === false ? 'bridge_error' : null);
     const sealing = security.sealTo(packet.senderId, { type: 'application', route: { kind: 'response', requestId: packet.messageId }, data, mcp: null }, route);
     if (!observer) return sealing;
     const sealed = await sealing;
@@ -38,7 +35,6 @@ export async function executeSecurePacket(security: BridgeSecurityService, packe
       || (!['permission_denied', 'epoch_changed', 'expired', 'replayed', 'capacity_exceeded', 'audit_unavailable', 'invalid_account_trust'].includes(error.code)
         && !error.code.startsWith('account_')))) throw error;
     const code = error instanceof BridgeSecurityError ? error.code : dispatchStarted ? 'outcome_unknown' : 'permission_denied';
-    if (verified) await security.complete(verified, dispatchStarted ? 'unknown' : 'rejected', code).catch(() => undefined);
     return security.sealTo(packet.senderId, { type: 'application', route: { kind: 'response', requestId: packet.messageId },
       data: { status: dispatchStarted ? 500 : 403, body: { error: code, code, outcomeUnknown: dispatchStarted } }, mcp: null }, route);
   }

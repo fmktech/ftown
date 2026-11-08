@@ -32,22 +32,17 @@ export function EncryptionDiagram() {
         </div>
         <Endpoint title="Your bridge" trusted>Encryption key and pinned signed account history stay in its local data directory. It cannot sign account device approvals. Decrypted sessions, terminal history, and mail are processed here.</Endpoint>
       </div>
-      <div className="grid gap-3 md:grid-cols-[1fr_1.2fr_1fr]">
-        <Endpoint title="AI / MCP client">Standard HTTPS + OAuth to the hosted MCP gateway. The client and its AI provider can see the requests and results you give them.</Endpoint>
-        <Endpoint title="Hosted MCP gateway" trusted>Trusted plaintext endpoint for tools and results. Its distinct grant key uses authenticated encryption at rest in PostgreSQL; the wrapping secret is stored separately by the service.</Endpoint>
-        <div className="flex flex-col justify-center gap-2 rounded-lg border border-[var(--border-muted)] p-4 text-center text-xs"><span className="font-semibold text-[var(--accent)]">Application encryption ↔ Bridge</span><span className="leading-relaxed text-[var(--text-muted)]">Browser-approved grant, pinned bridge key, read or control permission. No model PIN.</span></div>
-      </div>
       <div className="grid gap-3 sm:grid-cols-2">
         <Endpoint title="Account, directory & notifications">HTTPS carries signed public device/computer history. The service orders and delivers updates; a directory alone cannot approve keys. IDs, hostname, online state, sizes and timing remain visible. Push carries a generic notice.</Endpoint>
         <Endpoint title="Local agents & model providers">The bridge decrypts before dispatching to local agents and tools. Their files, terminal data, and external model-provider connections have their own storage and trust boundaries. Local hook ingestion is an explicit plaintext exception.</Endpoint>
       </div>
       <figcaption className="space-y-2 border-t border-[var(--border-subtle)] pt-4 text-xs leading-relaxed text-[var(--text-faint)]">
-        <p>Application encryption: HPKE Auth with P-256, HKDF-SHA256 and AES-256-GCM. Account history uses separate ECDSA P-256 signatures and pinned continuity. Security → Activity shows gateway attempts and independent bridge evidence.</p>
+        <p>Application encryption: HPKE Auth with P-256, HKDF-SHA256 and AES-256-GCM. Account history uses separate ECDSA P-256 signatures and pinned continuity.</p>
         <p>Saved browser requests resume on reload. Requests expire after five minutes; lost temporary verification state requires an explicit fresh attempt, including after a bridge process restart. A lost approval reply can resume the exact committed operation. Local recovery restores one computer, not lost account signing keys.</p>
         <p>Automatic approval uses a new FTown code-comparison protocol, not an externally audited protocol. Checking both devices provides approximately 48-bit protection per attempt; ignoring a mismatch defeats that check. The explicit private-link fallback uses a separate 256-bit secret and is never selected silently.</p>
         <p>Connected computers refresh account trust every 30 seconds. Account access pauses after 24 hours without a valid refresh; this is not a guaranteed revocation deadline against a service withholding updates. Existing bridge approvals require explicit migration; Solo and local recovery remain independent.</p>
         <p>Browser crypto requires HTTPS or trustworthy localhost, including Solo. Plain LAN HTTP cannot unlock encrypted controls. Minimal health/discovery and local hook ingestion remain outside application framing.</p>
-        <p>Endpoint software and an unlocked browser remain trusted. This does not provide anonymity, hardware-backed key protection, forward secrecy, or a zero-knowledge hosted MCP service.</p>
+        <p>Endpoint software and an unlocked browser remain trusted. This does not provide anonymity, hardware-backed key protection, forward secrecy, or a zero-knowledge hosted service.</p>
       </figcaption>
     </figure>
   </section>;

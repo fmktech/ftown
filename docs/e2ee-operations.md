@@ -1,83 +1,40 @@
-# Encrypted endpoints and MCP operations
+# Encrypted endpoints operations
 
-The hosted MCP process is a trusted plaintext endpoint. Standard MCP clients use
-HTTPS/OAuth; bridge-facing content uses pinned, locally approved HPKE endpoints.
-The public endpoint directory provides discovery metadata and grants no access.
+Bridge-facing content uses pinned, locally approved HPKE endpoints. The public
+endpoint directory provides discovery metadata and grants no access.
 
 Apply `ui/migrations/0006_endpoint_security.sql` before starting the upgraded
-gateway or UI. This additive migration creates empty security tables and indexes;
-it does not rewrite existing users, bridge credentials or OAuth records. DDL uses
-five-second lock and thirty-second statement limits. Grants from before the
-encrypted-endpoint release require fresh consent; existing encrypted MCP grants
-remain usable. An upgraded bridge requires explicit device enrollment.
+UI. This additive migration creates empty security tables and indexes; it does
+not rewrite existing users or bridge credentials. DDL uses five-second lock and
+thirty-second statement limits. An upgraded bridge requires explicit device
+enrollment.
 
 Set the UI's server-only `FTOWN_PUBLIC_URL` to its exact canonical public HTTPS
 origin, for example `https://ftown.ia.br`: no trailing slash, path, credentials,
-query or fragment. Cookie-authenticated account, pairing, consent, browser-directory and push
-mutations accept a single canonical `Origin` matching either the existing request
-URL's origin or this operator-configured public origin. This supports TLS proxies
-where Next reconstructs an internal listener origin; `Host` and forwarded headers
-cannot add trusted origins. If the setting is absent, only the request origin is
-accepted. A present but malformed or empty value fails closed even for that
-request origin. Canonical HTTP loopback origins are permitted for local mutation
-checks; MCP's public login and gateway origins still require HTTPS.
+query or fragment. Cookie-authenticated account, pairing, browser-directory and
+push mutations accept a single canonical `Origin` matching either the existing
+request URL's origin or this operator-configured public origin. This supports TLS
+proxies where Next reconstructs an internal listener origin; `Host` and forwarded
+headers cannot add trusted origins. If the setting is absent, only the request
+origin is accepted. A present but malformed or empty value fails closed even for
+that request origin. Canonical HTTP loopback origins are permitted for local
+mutation checks.
 
-Every configured MCP `fleet.machines[].id`, including local and HTTP adapters,
-must equal that machine's actual authenticated `bridgeId`; use `label` for a human
-alias. Read the ID from the bridge's security information or its private local
-pointer. The matching `access[].machines` entries must use the same ID. Legacy
-aliases are not silently mapped or approved: they do not match account ownership
-or a bridge pin and require a configuration upgrade before fresh consent. Legacy
-SSH/`--proxy` adapters return `upgrade_required` and never send application data.
-
-Provision the gateway wrapping key **once**, independently of the deployment
-runtime bundle. This command generates a random 32-byte key and sends it directly
-to Fly's secret import standard input; never save the output as an artifact:
-
-```sh
-node --input-type=module -e 'import {randomBytes} from "node:crypto"; process.stdout.write("FTOWN_MCP_KEY_ENCRYPTION_SECRET="+randomBytes(32).toString("base64url")+"\nFTOWN_MCP_KEY_ENCRYPTION_KEY_ID=v1\n")' | fly secrets import --app ftown-mcp
-```
-
-Normal deployments verify the two secret names already exist and preserve their
-values. The wrapping key does not enter PostgreSQL, the UI, source, logs or the
-generated runtime bundle. It must be backed up in the operator's existing secret
-manager. Missing/wrong keys fail closed; the service never regenerates a key to
-make unreadable identities appear to work. Key rotation requires explicitly
-rewrapping existing rows before changing the active key ID; this release does
-not silently rotate or discard identities.
-
-Private MCP identity, pinned bridge keys and approved permissions are encrypted
-together with AES-256-GCM. Authenticated context binds version, account, consent
-request, immutable grant, endpoint, expiry and wrapping-key ID. Pending consent
-keys are stable across retries, and approved active expiry is fixed at consent.
-Bridge approvals expire pending activation and never acquire browser admin power.
-
-Gateway security history records all authenticated protocol/tool attempts and
-batch children without raw arguments/results. Bridge history is independent
-evidence of received operations. A timeout or incomplete record is an unknown
-outcome, not proof that a mutation did not execute. Rows are bounded to 10,000 per
-owner, with admission rejected when live in-flight rows exhaust capacity. A
-thirty-second process lease heartbeat reconciles expired owners and removes old
-finished records in batches of 1,000, including inactive accounts. Thirty-day
-retention is the logical read boundary; a backlog larger than one cleanup batch
-is removed over subsequent ticks. Live started rows are retained until their
-process lease expires or their result is saved.
-
-Rollback retains additive tables and the original wrapping key. An old client or
-bridge does not regain plaintext access: restore connectivity by fixing forward
-and explicitly approving supported endpoints. Lost browser keys require another
-trusted account device to approve a replacement, or explicit local bridge
-recovery; account password reset cannot recover keys.
+Rollback retains additive tables. An old client or bridge does not regain
+plaintext access: restore connectivity by fixing forward and explicitly approving
+supported endpoints. Lost browser keys require another trusted account device to
+approve a replacement, or explicit local bridge recovery; account password reset
+cannot recover keys.
 
 ## Account trust rollout (0.19.54)
 
 Apply `ui/migrations/0007_account_trust.sql` before the upgraded UI. It adds two
 empty public history/enrollment tables, indexes and nullable JSONB columns on
-`pairing_requests`; existing users, credentials, pairings and MCP grants are not
-rewritten. The nullable additions take a brief exclusive metadata lock, bounded
-by the migration's five-second lock and thirty-second statement limits. Deploy
-schema first. Rolling the app back leaves new trust records intact; fix forward
-instead of deleting established trust history.
+`pairing_requests`; existing users, credentials and pairings are not rewritten.
+The nullable additions take a brief exclusive metadata lock, bounded by the
+migration's five-second lock and thirty-second statement limits. Deploy schema
+first. Rolling the app back leaves new trust records intact; fix forward instead
+of deleting established trust history.
 
 A browser keeps separate nonextractable HPKE and signing keys. First bridge
 approval or explicit migration pins the account root; storing self-signed public
@@ -90,11 +47,8 @@ request is still valid. Server checks public bindings; candidates independently
 verify the secret HMAC, encrypted head and full signed history.
 
 An adopted bridge removes legacy browser grants and outstanding invitations
-atomically. Local CLI recovery and already-approved fixed-expiry MCP grants
-remain separate. Account revocation applies when learned, without cascading to
-independently approved devices or previous MCP grants. MCP still requires all
-selected bridges online for its existing exact-bridge receipts; future bridges
-require new consent.
+atomically. Local CLI recovery remains separate. Account revocation applies when
+learned, without cascading to independently approved devices.
 
 History is bounded to 1,024 transitions and 2 MiB; active rosters to 128 browsers
 and 128 bridges. Browser enrollment rows have a hard 128-slot cap per account.

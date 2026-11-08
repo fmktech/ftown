@@ -37,27 +37,27 @@ case "$job" in
   e2e)
     node --test scripts/ci/boat-runner.test.mjs scripts/ci/bridge-version.test.mjs
     # Reject all inherited endpoint, credential and test-selector overrides before sourcing fixtures.
-    for name in DATABASE_URL MIGRATION_DATABASE_URL PGHOST PGPORT PGUSER PGDATABASE PGPASSWORD PGOPTIONS PGSERVICE PGSERVICEFILE FTOWN_PUBLIC_URL FTOWN_MCP_PUBLIC_URL NEXT_PUBLIC_CENTRIFUGO_URL FTOWN_DATA_DIR FTOWN_MCP_CONFIG_JSON E2E_DIR E2E_BROWSER_HOME E2E_SECOND_BRIDGE_HOME E2E_MCP_BRIDGE_HOME E2E_MCP_SECOND_BRIDGE_HOME E2E_USER_EMAIL E2E_MCP_USER_EMAIL E2E_MCP_USER_PASSWORD NODE_EXTRA_CA_CERTS AUTH_SECRET CENTRIFUGO_API_KEY CENTRIFUGO_TOKEN_SECRET; do
+    for name in DATABASE_URL MIGRATION_DATABASE_URL PGHOST PGPORT PGUSER PGDATABASE PGPASSWORD PGOPTIONS PGSERVICE PGSERVICEFILE FTOWN_PUBLIC_URL NEXT_PUBLIC_CENTRIFUGO_URL FTOWN_DATA_DIR E2E_DIR E2E_BROWSER_HOME E2E_SECOND_BRIDGE_HOME E2E_USER_EMAIL NODE_EXTRA_CA_CERTS AUTH_SECRET CENTRIFUGO_API_KEY CENTRIFUGO_TOKEN_SECRET; do
       if printenv "$name" >/dev/null; then echo "Inherited override $name rejected" >&2; exit 1; fi
     done
     export E2E_DIR="$root/e2e"
     set -a; source "$E2E_DIR/env.sh"; set +a
-    [[ $DATABASE_URL == postgresql://ftown:ftown@localhost/ftown && $FTOWN_PUBLIC_URL == https://localhost:8444 && $FTOWN_MCP_PUBLIC_URL == https://localhost:8443 && $NEXT_PUBLIC_CENTRIFUGO_URL == ws://localhost:8000/connection/websocket ]] || { echo "Unsafe test endpoint" >&2; exit 1; }
+    [[ $DATABASE_URL == postgresql://ftown:ftown@localhost/ftown && $FTOWN_PUBLIC_URL == https://localhost:8444 && $NEXT_PUBLIC_CENTRIFUGO_URL == ws://localhost:8000/connection/websocket ]] || { echo "Unsafe test endpoint" >&2; exit 1; }
     node <<'JS'
 const fs = require('node:fs'), path = require('node:path'), net = require('node:net');
 const dir = process.env.E2E_DIR;
 if (path.resolve(dir) !== fs.realpathSync(dir)) throw Error('Noncanonical e2e directory');
-for (const [key, leaf] of [['E2E_BROWSER_HOME','.browser-home'], ['E2E_SECOND_BRIDGE_HOME','.bridge-home-2'], ['E2E_MCP_BRIDGE_HOME','.mcp-bridge-home'], ['E2E_MCP_SECOND_BRIDGE_HOME','.mcp-bridge-home-2']]) {
+for (const [key, leaf] of [['E2E_BROWSER_HOME','.browser-home'], ['E2E_SECOND_BRIDGE_HOME','.bridge-home-2']]) {
   if (process.env[key] !== path.join(dir, leaf)) throw Error('Invalid scratch home');
 }
-for (const leaf of ['.bridge-home','.bridge-home-2','.mcp-bridge-home','.mcp-bridge-home-2','.browser-home']) {
+for (const leaf of ['.bridge-home','.bridge-home-2','.browser-home']) {
   const p = path.join(dir, leaf);
   if (fs.existsSync(p) && (!fs.lstatSync(p).isDirectory() || fs.lstatSync(p).isSymbolicLink())) throw Error('Unsafe scratch home');
 }
-for (const name of ['ui','bridge','bridge-2','mcp-bridge','mcp-bridge-2','mcp','mcp-tls']) {
+for (const name of ['ui','bridge','bridge-2','tls']) {
   if (fs.existsSync(path.join(dir, `.${name}.pid`))) throw Error('Existing PID record');
 }
-Promise.all([5432,8000,3000,8080,8443,8444].map(port => new Promise((ok, fail) => {
+Promise.all([5432,8000,3000,8444].map(port => new Promise((ok, fail) => {
   const server = net.createServer();
   server.once('error', error => { console.error(`CI port ${port} bind failed: ${error.code || 'unknown'}`); fail(error); });
   server.listen(port, '127.0.0.1', () => server.close(error => error ? fail(error) : ok()));
@@ -97,7 +97,6 @@ JS
     timeout 120s node bridge/scripts/centrifugo-security-smoke.mjs
     (cd "$E2E_DIR" && npx playwright install --with-deps --no-shell chromium)
     services_started=1; bash "$E2E_DIR/scripts/start-services.sh"
-    timeout 120s node e2e/scripts/mcp-body-parser-smoke.ts
     export E2E_USER_EMAIL; E2E_USER_EMAIL=$(cat "$E2E_DIR/.run-email")
     (cd "$E2E_DIR" && npx playwright test)
     ;;

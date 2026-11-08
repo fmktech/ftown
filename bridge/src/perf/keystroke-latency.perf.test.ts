@@ -105,13 +105,6 @@ async function buildSecurity(dir: string) {
   const cli = await generateEndpoint(owner, 'local-cli');
   await security.policy.provisionLocalEndpoint(cli.endpoint);
   await security.adoptAccount(await security.policy.principal(browsers[0].endpoint.id), { rootId: checkpoint.rootId, revision: checkpoint.revision, head: checkpoint.head });
-  for (let i = 0; i < 2; i++) {
-    const mcp = await generateEndpoint(owner, 'mcp');
-    await security.policy.approveMcp(await security.policy.principal(browsers[0].endpoint.id), {
-      requestId: `req-${i}`, grantId: `grant-${i}`, endpoint: mcp.endpoint, permissions: ['read'],
-      expiresAt: new Date(Date.now() + 290_000).toISOString(), activeExpiresAt: new Date(Date.now() + 86_400_000).toISOString(),
-    });
-  }
   const recipients = await security.policy.recipients();
   return { security, bridge, browser: browsers[0], recipients };
 }

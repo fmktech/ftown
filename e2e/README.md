@@ -46,7 +46,6 @@ npm run setup-db          # create users + login_attempts tables
 npx playwright install chromium
 bash scripts/start-services.sh   # starts UI (next start) + bridge (scratch HOME); records PIDs
 export E2E_USER_EMAIL="$(cat .run-email)"
-export E2E_MCP_USER_EMAIL="$(cat .run-mcp-email)"
 npx playwright test
 ```
 
@@ -86,17 +85,10 @@ lifecycle and executes browser runs; use the setup and cleanup steps on this
 page. Each repeated full run needs a fresh task-local database and environment
 because virgin bridge pairing consumes a real per-IP quota.
 
-The original account uses `e2e/.bridge-home` and `.bridge-home-2`. MCP account
-migration uses a separate run-scoped `E2E_MCP_USER_EMAIL`, recorded in
-`.run-mcp-email`, and `E2E_MCP_USER_PASSWORD` (default `e2e-password-123`). Its
-`E2E_MCP_BRIDGE_HOME` and `E2E_MCP_SECOND_BRIDGE_HOME` must be the exact absolute
-`e2e/.mcp-bridge-home` and `.mcp-bridge-home-2` paths. These two bridges start with
-auth-only bootstrap credentials, then the MCP test explicitly migrates only this
-account. The shared original account and grants remain unchanged. The gateway
-registry authorizes both immutable account UUIDs, each with only its two exact
-bridge IDs. All four bridges use isolated HOME and data directories; the real
-`~/.ftown` is never used. Preflight rejects unexpected homes, selectors, PID
-records or occupied application ports before any reset or service startup.
+The account uses `e2e/.bridge-home` and `.bridge-home-2`, two isolated HOME and
+data directories; the real `~/.ftown` is never used. Preflight rejects unexpected
+homes, selectors, PID records or occupied application ports before any reset or
+service startup.
 
 The root-only database acceptance harness runs independently in a temporary
 schema on the same isolated PostgreSQL. After resource preflight and sourcing
@@ -128,11 +120,10 @@ npm run infra:down              # docker compose down -v (drops the throwaway po
 rm -rf certs *.log
 ```
 
-Teardown removes all four guarded scratch homes, run-email files and browser
-trust home after successful cleanup. Dedicated MCP PIDs are `.mcp-bridge.pid`
-and `.mcp-bridge-2.pid`; logs are `mcp-bridge.log` and `mcp-bridge-2.log`.
+Teardown removes both guarded scratch homes, run-email files and browser
+trust home after successful cleanup.
 Failed session/process identity verification preserves the scratch homes and
-returns failure for root inspection. The two registered DB accounts remain in
+returns failure for root inspection. The registered DB account remains in
 the throwaway PostgreSQL; `infra:down` removes them with the volume.
 
 ## Note on the direct path (Test A) behind a full-tunnel VPN
