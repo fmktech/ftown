@@ -250,12 +250,10 @@ test("real browser pairing persists its non-extractable key; cloud terminal fram
     await expect(page.getByRole("dialog", { name: "Security", exact: true })).toBeVisible();
     await page.setViewportSize({ width: 1280, height: 900 });
     await waitForSecurityLayout(page, 1280);
-    await expect(page.getByRole("tab", { name: "Access", exact: true })).toHaveAttribute("aria-selected", "true");
     await expect(page.getByRole("heading", { name: "Your computers", exact: true })).toBeVisible();
     await page.screenshot({ path: info.outputPath("security-access-desktop.png"), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await waitForSecurityLayout(page, 390);
-    await page.getByRole("tab", { name: "Access", exact: true }).click();
     await page.screenshot({ path: info.outputPath("security-access-mobile.png"), fullPage: true });
     await page.getByLabel("Security computer", { exact: true }).selectOption(pointer.bridgeId);
     await openSeparateApprovals(page, pointer.bridgeId);
@@ -283,7 +281,6 @@ test("two isolated browser installations approve two independent bridges and ret
     const picker = phone.getByLabel("Security computer", { exact: true });
     await expect(picker.locator(`option[value="${readBridgePointer().bridgeId}"]`)).toHaveCount(1);
     await expect(picker.locator(`option[value="${readBridgePointer(secondHome).bridgeId}"]`)).toHaveCount(1);
-    await phone.getByRole("tab", { name: "Access", exact: true }).click();
     await picker.selectOption(readBridgePointer(secondHome).bridgeId);
     await openSeparateApprovals(phone, readBridgePointer(secondHome).bridgeId);
     await expect(phone.getByRole("list", { name: "Approved devices" })).toContainText("E2E phone");
@@ -310,7 +307,6 @@ test("an approved browser uses encrypted local HTTP control and event polling", 
     page.on("request", request => { if (new URL(request.url()).pathname.startsWith("/api/security/account")) accountRequests.push(request.method()); });
     await openSecurity(page);
     await expect(page.getByRole("dialog", { name: "Security", exact: true })).toBeVisible();
-    await page.getByRole("tab", { name: "Access", exact: true }).click();
     await page.getByLabel("Security computer", { exact: true }).selectOption(pointer.bridgeId);
     await openSeparateApprovals(page, pointer.bridgeId);
     await expect(page.getByRole("list", { name: "Approved devices" })).toContainText("This browser");

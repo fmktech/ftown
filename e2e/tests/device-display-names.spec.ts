@@ -13,7 +13,6 @@ async function access(page: Page) {
     await menu.click();
   }
   await page.getByRole("button", { name: "Open security", exact: true }).click();
-  await page.getByRole("tab", { name: "Access", exact: true }).click();
   await expect(page.getByRole("list", { name: "Account devices", exact: true })).toBeVisible();
 }
 async function rename(card: Locator, button: string, name: string) {
