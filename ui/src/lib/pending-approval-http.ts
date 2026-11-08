@@ -4,6 +4,7 @@ import { isTrustedBrowserOrigin } from '@/lib/request-origin';
 import { boundedSecurityJson } from '@/lib/security-store';
 import { accountError, accountRateLimit, ACCOUNT_HEADERS } from '@/app/api/security/account/_shared';
 import { PendingApprovalStore } from '@/lib/pending-approval-store';
+import { nudgePendingChange } from '@/lib/server-security-nudge';
 import { checkRateLimit, recordAttempt } from '@/lib/login-rate-limit';
 import { clientIp } from '@/lib/client-ip';
 import { PENDING_APPROVAL_LIMITS } from '@security/pending-approval-crypto';
@@ -27,7 +28,10 @@ export async function pendingInbox(request: Request): Promise<NextResponse> {
 export async function pendingCreate(request: Request): Promise<NextResponse> {
   try {
     const owner = await browser(request, true);
-    return NextResponse.json(await new PendingApprovalStore().createBrowser(owner, await boundedSecurityJson(request, PENDING_APPROVAL_LIMITS.maxWireBytes)), { headers: ACCOUNT_HEADERS });
+    const store = new PendingApprovalStore();
+    const state = await store.createBrowser(owner, await boundedSecurityJson(request, PENDING_APPROVAL_LIMITS.maxWireBytes));
+    nudgePendingChange(store);
+    return NextResponse.json(state, { headers: ACCOUNT_HEADERS });
   } catch (error) { return failure(error); }
 }
 export async function pendingRead(request: Request, id: string): Promise<NextResponse> {
@@ -37,7 +41,10 @@ export async function pendingRead(request: Request, id: string): Promise<NextRes
 export async function pendingReview(request: Request, id: string): Promise<NextResponse> {
   try {
     const owner = await browser(request, true);
-    return NextResponse.json(await new PendingApprovalStore().reviewer(owner, id, await boundedSecurityJson(request, PENDING_APPROVAL_LIMITS.maxWireBytes)), { headers: ACCOUNT_HEADERS });
+    const store = new PendingApprovalStore();
+    const state = await store.reviewer(owner, id, await boundedSecurityJson(request, PENDING_APPROVAL_LIMITS.maxWireBytes));
+    nudgePendingChange(store);
+    return NextResponse.json(state, { headers: ACCOUNT_HEADERS });
   } catch (error) { return failure(error); }
 }
 export async function pendingCandidate(request: Request, id: string): Promise<NextResponse> {
@@ -47,6 +54,9 @@ export async function pendingCandidate(request: Request, id: string): Promise<Ne
     const key = clientIp(request);
     if (!(await checkRateLimit('pending-candidate', key)).allowed) throw new BrowserFailure(429, 'rate_limited');
     await recordAttempt('pending-candidate', key, { maxAttempts: 600, lockoutMs: 60000 });
-    return NextResponse.json(await new PendingApprovalStore().candidate(id, await boundedSecurityJson(request, PENDING_APPROVAL_LIMITS.maxWireBytes)), { headers: ACCOUNT_HEADERS });
+    const store = new PendingApprovalStore();
+    const state = await store.candidate(id, await boundedSecurityJson(request, PENDING_APPROVAL_LIMITS.maxWireBytes));
+    nudgePendingChange(store);
+    return NextResponse.json(state, { headers: ACCOUNT_HEADERS });
   } catch (error) { return failure(error); }
 }

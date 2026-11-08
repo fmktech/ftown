@@ -31,6 +31,8 @@ const sameHead = (a: AccountHead, b: AccountHead) => a.rootId === b.rootId && a.
 
 /** Stores public, signed delivery material only; database presence never establishes a trust pin. */
 export class AccountTrustStore {
+  /** True only when this call wrote account state (new history row, new enrollment, first approval); replays and failures leave it false. */
+  changed = false;
   constructor(private readonly query: AccountQuery = (text, params) => getDb().query(text, params), private readonly now = Date.now) {}
   async readVerified(ownerId: string): Promise<VerifiedAccountRow | null> {
     const rows = await this.query('SELECT root_id,revision,head,history FROM security_account_history WHERE owner_id=$1', [ownerId]);
@@ -57,6 +59,7 @@ export class AccountTrustStore {
       : await this.query(`INSERT INTO security_account_history(owner_id,root_id,revision,head,history) VALUES($1,$2,$3,$4,$5::jsonb)
         ON CONFLICT(owner_id) DO NOTHING RETURNING owner_id`, [ownerId, next.rootId, next.revision, next.head, JSON.stringify(history)]);
     if (rows.length !== 1) return reject('account_trust_conflict');
+    this.changed = true;
     return history;
   }
   async createEnrollment(ownerId: string, input: unknown): Promise<AccountEnrollmentStatus> {
@@ -70,7 +73,7 @@ export class AccountTrustStore {
       SELECT $1,$2,$3::jsonb,$4,s FROM generate_series(0,127) AS s
       WHERE NOT EXISTS(SELECT 1 FROM security_account_enrollments e WHERE e.owner_id=$1 AND e.slot=s)
       ORDER BY s LIMIT 1 ON CONFLICT DO NOTHING RETURNING request,bundle`, [ownerId, request.requestId, JSON.stringify(request), request.expiresAt]);
-    if (inserted.length === 1) return { request, status: 'pending', bundle: null };
+    if (inserted.length === 1) { this.changed = true; return { request, status: 'pending', bundle: null }; }
     const existing = await this.query('SELECT request,bundle FROM security_account_enrollments WHERE owner_id=$1 AND request_id=$2', [ownerId, request.requestId]);
     if (existing.length === 1) {
       const stored = await parseAccountEnrollmentRequest(existing[0].request, this.now());
@@ -108,6 +111,7 @@ export class AccountTrustStore {
       AND EXISTS(SELECT 1 FROM security_account_history h WHERE h.owner_id=$1 AND h.root_id=$6 AND h.revision=$7 AND h.head=$8)
       RETURNING request_id`, [ownerId, requestId, JSON.stringify(verified.bundle), JSON.stringify(verified.request), old === null ? null : JSON.stringify(old), verified.head.rootId, verified.head.revision, verified.head.head]);
     if (written.length !== 1) return reject('account_trust_conflict');
+    this.changed = old === null;
     return { request: verified.request, status: 'approved', bundle: verified.bundle };
   }
   /** Public metadata validation only. The candidate MUST verify encrypted head/HMAC itself. */

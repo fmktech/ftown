@@ -5,6 +5,7 @@ import { test } from "../helpers/fixtures";
 import { login, sharedEmail, waitForBridgeOnline, runMarkerInTerminal } from "../helpers/app";
 import { bridgeApiFetch, readBridgePointer } from "../helpers/bridge-api";
 import { UI_BASE_URL } from "../helpers/config";
+import { publishSecurityNudge } from "../helpers/security-nudge";
 import { assertSanitized, atomicHtml, createPreviewFixture, observePreviewTransport, previewHtml, sessionRecord } from "../helpers/session-preview";
 
 const iframe = (page: Page, fileName: string) => page.locator(`iframe[title="HTML preview: ${fileName}"]`);
@@ -198,14 +199,12 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
       });
       observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ["style", "hidden", "class"] });
     }, suffix);
-    // The account client refreshes every 30s. Ignore an immediate focus-triggered
-    // read so this observes the subsequent periodic account-history response.
-    const interactedAt = Date.now();
-    await page.waitForResponse(response => {
-      const url = new URL(response.url());
-      return Date.now() - interactedAt >= 20_000 && url.pathname === "/api/security/account"
-        && response.request().method() === "GET" && response.status() === 200;
-    }, { timeout: 60_000 });
+    // The account client no longer polls; it refreshes only on an owner nudge.
+    // Publish a real account nudge and observe the resulting account read.
+    const accountRead = page.waitForResponse(response => new URL(response.url()).pathname === "/api/security/account"
+      && response.request().method() === "GET" && response.status() === 200, { timeout: 30_000 });
+    await publishSecurityNudge(page, sharedEmail(), "account");
+    await accountRead;
     const afterTrustRefresh = transport.reads.filter(entry => entry.previewId === registration && entry.state === "unchanged").length;
     await expect.poll(() => transport.reads.filter(entry => entry.previewId === registration && entry.state === "unchanged").length,
       { timeout: 15_000 }).toBeGreaterThan(afterTrustRefresh);

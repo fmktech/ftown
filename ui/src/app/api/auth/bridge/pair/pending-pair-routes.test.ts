@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({ get: vi.fn(), lookup: vi.fn(), create: vi.fn()
 vi.mock('@/lib/auth', () => ({ auth: async () => ({ user: { id: '349f8d2e-38e4-4d59-888d-687dcfa19e39', email: 'owner@ftown.test' } }) }));
 vi.mock('@/lib/pairing-store', () => ({ getByDeviceCode: mocks.get, getByUserCode: mocks.lookup, approvePairingRequest: mocks.approve, consumePairingRequest: mocks.consume, createPairingRequest: vi.fn(), deleteExpiredRequests: vi.fn() }));
 vi.mock('@/lib/bridge-refresh', () => ({ upsertBridgeRefresh: mocks.upsert, getBridgeRefreshOwner: vi.fn(), getOwnerIdForSub: vi.fn() }));
-vi.mock('@/lib/pending-approval-store', () => ({ PendingApprovalStore: class { startBridge = mocks.create; deliver = mocks.deliver; } }));
+vi.mock('@/lib/pending-approval-store', () => ({ PENDING_NORMALIZED_EMAIL_SQL: 'norm(email)', PendingApprovalStore: class { startBridge = mocks.create; deliver = mocks.deliver; } }));
 vi.mock('@/lib/login-rate-limit', () => ({ checkRateLimit: async () => ({ allowed: true }), recordAttempt: vi.fn() }));
 import { POST as poll } from './poll/route';
 import { POST as approve } from './approve/route';
