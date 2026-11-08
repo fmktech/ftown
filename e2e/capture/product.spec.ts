@@ -193,7 +193,6 @@ test("capture real isolated workspace, phone and access panel", async ({ browser
     await desktop.setViewportSize({ width: 1280, height: 900 });
     await desktop.getByRole("button", { name: "Open security", exact: true }).click();
     const dialog = desktop.getByRole("dialog", { name: "Security", exact: true });
-    await expect(dialog.getByRole("tab", { name: "Access", exact: true })).toHaveAttribute("aria-selected", "true");
     await expect(dialog.getByRole("heading", { name: "Your computers", exact: true })).toBeVisible();
     await expect(dialog.locator(`[data-computer-access="${bridgeId}"]`)).toContainText("Shared with your approved browsers", { timeout: 60_000 });
     await expect(dialog.locator(`[data-access-edge="bridge:${bridgeId}"]`)).toHaveAttribute("data-certainty", "current");

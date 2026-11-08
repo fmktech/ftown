@@ -5,7 +5,7 @@ import { z } from 'zod';
 export const boundedId = z.string().regex(/^[A-Za-z0-9_-]{1,200}$/);
 export const endpointSchema = z.object({
   version: z.literal(1), id: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
-  ownerId: z.string().min(1).max(200), kind: z.enum(['bridge', 'browser', 'mcp', 'local-cli']),
+  ownerId: z.string().min(1).max(200), kind: z.enum(['bridge', 'browser', 'local-cli']),
   publicKey: z.string().regex(/^[A-Za-z0-9_-]{87}$/),
 }).strict().superRefine((endpoint, context) => {
   const raw = Buffer.from(endpoint.publicKey, 'base64url');

@@ -14,28 +14,28 @@ const route = { transport: 'cloud', channel: 'commands:rpc#owner', bridgeId: 'br
 const response = (success: boolean): ApplicationJson => ({ type: 'command_response', response: { requestId: 'id', success, data: { bridgeId: 'bridge', operation: { id: 'op', targetVersion: '1.2.3' } } } });
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
 
-test('audit and awaited sealing precede the delivery signal and start', async () => {
+test('awaited sealing precedes the delivery signal and start', async () => {
   const events: string[] = []; const effects = new UpdateEffects(new UpdateAdmission());
   const security = { acceptApplication: async () => verified, revalidate: async () => {}, revokeSelfWithReceipt: async () => null,
-    complete: async () => { events.push('audit'); }, sealTo: async () => { await tick(); events.push('seal'); return packet; } } as unknown as BridgeSecurityService;
+    sealTo: async () => { await tick(); events.push('seal'); return packet; } } as unknown as BridgeSecurityService;
   await executeSecurePacket(security, packet, route, async message => { effects.attachTicket(message, new UpdateResponseTicket(() => events.push('start'), () => events.push('cancel'))); return response(true); }, undefined, effects);
-  assert.deepEqual(events, ['audit', 'seal']); effects.delivered('id'); await tick(); assert.deepEqual(events, ['audit', 'seal', 'start']);
+  assert.deepEqual(events, ['seal']); effects.delivered('id'); await tick(); assert.deepEqual(events, ['seal', 'start']);
 });
 
 test('failed business response and asynchronous seal rejection cancel tickets', async () => {
   for (const sealReject of [false, true]) {
     let seals = 0, starts = 0, cancels = 0; const effects = new UpdateEffects(new UpdateAdmission());
     const security = { acceptApplication: async () => verified, revalidate: async () => {}, revokeSelfWithReceipt: async () => null,
-      complete: async () => {}, sealTo: async () => { if (sealReject && ++seals === 1) { await tick(); throw new Error('seal failed'); } return packet; } } as unknown as BridgeSecurityService;
+      sealTo: async () => { if (sealReject && ++seals === 1) { await tick(); throw new Error('seal failed'); } return packet; } } as unknown as BridgeSecurityService;
     await executeSecurePacket(security, packet, route, async message => { effects.attachTicket(message, new UpdateResponseTicket(() => { starts++; }, () => { cancels++; })); return response(sealReject); }, undefined, effects);
     effects.delivered('id'); await tick(); assert.equal(starts, 0); assert.equal(cancels, 1);
   }
 });
 
 test('without an observer an asynchronous seal rejection retains original propagation', async () => {
-  let audits = 0, seals = 0;
+  let seals = 0;
   const security = { acceptApplication: async () => verified, revalidate: async () => {}, revokeSelfWithReceipt: async () => null,
-    complete: async () => { audits++; }, sealTo: async () => { seals++; await tick(); throw new Error('original seal failure'); } } as unknown as BridgeSecurityService;
+    sealTo: async () => { seals++; await tick(); throw new Error('original seal failure'); } } as unknown as BridgeSecurityService;
   await assert.rejects(executeSecurePacket(security, packet, route, async () => response(true)), /original seal failure/);
-  assert.equal(audits, 1); assert.equal(seals, 1);
+  assert.equal(seals, 1);
 });

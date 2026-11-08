@@ -127,24 +127,20 @@ authorize a merge or other action. Both commands target trimmed
 `$FTOWN_SESSION_ID` unless you supply `--session-id <id>`; they never guess identity from the working directory.
 Older bridges report `bridge_upgrade_required` before mutation.
 
-Remote MCP callers use `attention_request` with explicit `machine` and
-`sessionId`, or `sessions_update` with `pullRequestUrl` (string to set, null to
-clear). Mutation tools require control access; remote callers have no automatic
-local self identity. To ask with options or free text, pass `questions` to
-`attention_request`, then poll `attention_get` (`eventId`, optional
-`waitSeconds` 0..25) until the event is resolved (`resolvedAt` set).
-`event.answer` holds the answer; a resolution without an answer means it was
-dismissed. Keep the returned attention event ID: the
-inbox, acknowledge and resolve operations never answer the agent's question.
+To ask with options or free text, use `ftown sessions attention --option ...` or
+`--questions-json`, then check the returned event ID with `ftown sessions
+attention-status <event-id>` until it is resolved. `event.answer` holds the
+answer; a resolution without an answer means it was dismissed. The inbox,
+acknowledge and resolve operations never answer the agent's question.
 
 For tasks performed in an FTown session, associate the task's GitHub PR when
-created or updated, before the completion notice: use `ftown sessions pr <URL>`
-or MCP `sessions_update.pullRequestUrl`. Omit this step for tasks without a PR;
-never invent a PR or guess a session identity.
+created or updated, before the completion notice: use `ftown sessions pr <URL>`.
+Omit this step for tasks without a PR; never invent a PR or guess a session
+identity.
 
 Once the task is complete, request user attention **once per completed task**,
 before the final handoff, using `ftown sessions attention --title 'Work complete'
---message "<truthful outcome, checks and PR summary>"` or MCP `attention_request`.
+--message "<truthful outcome, checks and PR summary>"`.
 Do not send a completion notice every turn; retain the uncertain-result guidance
 above. Children must still report their result to the parent as assigned; user
 attention does not replace that reporting. See the completion example in

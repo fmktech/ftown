@@ -79,8 +79,7 @@ printf 'First line\nSecond line\n' | ftown sessions preview-reply --message-file
 The target defaults to `FTOWN_SESSION_ID`; `--session-id` selects an explicit
 session. Replies are limited to 4096 UTF-8 bytes. Preserve the returned ID and
 pass it with `--id <uuid>` alongside the same text when retrying an uncertain
-result. An MCP controller can instead call `preview_chat_reply` with explicit
-machine and session ID. A queued message does not mean an agent has read it.
+result. A queued message does not mean an agent has read it.
 
 ## Ask the human or associate a pull request
 
@@ -156,7 +155,7 @@ Without `--wait`, `attention` prints the event ID when questions are present, so
 the agent can check later with `attention-status`.
 
 Delivery: the human answers in the dashboard inbox. A live waiter (`--wait`,
-`attention-status --wait`, or MCP `attention_get` polling) receives the answer
+or `attention-status --wait`) receives the answer
 directly. If nobody is waiting, the answer is sent as ftown mail from "You"
 (`fromName` "You", thread `attention:<id>`) whose body starts with
 `[ftown attention answer id=<id>]`. Claude Code `AskUserQuestion` calls inside an
@@ -171,19 +170,7 @@ Attaching/replacing/clearing is metadata-only; omitting it on an update preserve
 its value. New sessions/children do not implicitly inherit a parent's PR.
 
 New commands probe the exact bridge capability before writing; update old bridges
-with the exact version setup command in their readiness hint. For remote MCP,
-`attention_request` requires explicit `{machine, sessionId, message, title?}` and
-returns `{machine, sessionId, event}`; it also accepts optional `questions` (1 to
-4 entries, shaped as above) when the bridge reports `prompt`. `attention_get`
-takes `{machine, sessionId, eventId, waitSeconds?}` (`waitSeconds` 0..25) and
-returns `{machine, sessionId, event}`. Poll it until the event is resolved
-(`resolvedAt` set): `event.answer` holds the answer, and a resolution without an
-answer means the question was dismissed.
-
-`sessions_update` accepts `pullRequestUrl` (string or null), alongside existing
-name/parent fields. A mixed PR+name update rejects an old bridge before changing
-either field. Read-only MCP clients cannot see these mutation tools; control
-authorization and machine ownership still apply.
+with the exact version setup command in their readiness hint.
 
 ## Messaging (mail)
 
@@ -265,10 +252,7 @@ ftown sessions attention --title 'Work complete' \
 ```
 
 For tasks without a PR, omit the PR command and PR summary. Use the verified
-`FTOWN_SESSION_ID` or explicit `--session-id`; never guess a target. MCP callers
-instead use `sessions_update` with `pullRequestUrl` when applicable, then
-`attention_request` with title `Work complete` and the same truthful summary,
-always supplying explicit `machine` and `sessionId`.
+`FTOWN_SESSION_ID` or explicit `--session-id`; never guess a target.
 
 Send one completion request per completed task, not repeated per-turn notices.
 Logical duplicate coalescing does not justify retries after an uncertain outcome;

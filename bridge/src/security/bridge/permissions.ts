@@ -6,9 +6,9 @@ const session = /^[A-Za-z0-9_-]+$/;
 const readCommands = new Set(['get_pull_request_statuses', 'session_preview_status', 'session_preview_chunk', 'get_bridge_update', 'list_sessions', 'get_history', 'get_session_usage', 'get_sessions_usage', 'get_session_attention']);
 const controlCommands = new Set(['update_bridge', 'create_session', 'stop_session', 'retry_session', 'send_message', 'rename_session', 'remove_session',
   'bridge_exec', 'clear_terminal', 'update_session_parent', 'resolve_session_attention', 'answer_session_attention']);
-const adminCommands = new Set(['security_devices', 'security_invite', 'security_revoke', 'security_approve_mcp', 'security_activity', 'security_account_adopt']);
+const adminCommands = new Set(['security_devices', 'security_invite', 'security_revoke', 'security_account_adopt']);
 const result = (permission: EndpointPermission, operation: string, sessionId: string | null = null): OperationPermission =>
-  ({ permission, mutating: permission === 'control' || ['security_invite', 'security_revoke', 'security_approve_mcp', 'security_account_adopt'].includes(operation), operation, sessionId });
+  ({ permission, mutating: permission === 'control' || ['security_invite', 'security_revoke', 'security_account_adopt'].includes(operation), operation, sessionId });
 const deny = (): never => { throw new BridgeSecurityError('permission_denied'); };
 const object = (value: ApplicationJson | undefined): { [key: string]: ApplicationJson } | undefined =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? value : undefined;
@@ -70,12 +70,6 @@ export function classifyHttp(method: string, path: string): OperationPermission 
 export function classifyCommand(command: string, payload?: ApplicationJson): OperationPermission {
   const body = object(payload);
   const sessionId = typeof body?.sessionId === 'string' && session.test(body.sessionId) ? body.sessionId : null;
-  if (command === 'mcp_request') {
-    const request = object(body?.request);
-    if (typeof request?.method !== 'string' || typeof request.path !== 'string') return deny();
-    if (/^\/api\/sessions\/[A-Za-z0-9_-]{1,200}\/preview(?:\?|$)/.test(request.path)) return deny();
-    return classifyHttp(request.method, request.path);
-  }
   if (command === 'get_pull_request_review' || command === 'get_pull_request_review_chunk') return sessionId && sessionId.length <= 200 ? result('read', command, sessionId) : deny();
   if (command === 'session_preview_status' || command === 'session_preview_chunk') return sessionId && sessionId.length <= 200 ? result('read', command, sessionId) : deny();
   if (command === 'preview_chat_list' || command === 'preview_chat_send' || command === 'preview_chat_reply') return sessionId && sessionId.length <= 200 ? result(command === 'preview_chat_list' ? 'read' : 'control', command, sessionId) : deny();
@@ -84,7 +78,7 @@ export function classifyCommand(command: string, payload?: ApplicationJson): Ope
   if (adminCommands.has(command)) return result('admin', command, sessionId);
   if (command === 'terminal_watch' || command === 'terminal_unwatch' || command === 'webrtc_offer'
     || command === 'webrtc_answer' || command === 'webrtc_ice' || command === 'webrtc_close') return result('read', command, sessionId);
-  // Activation has a separate exact-pending-grant check; it is never granted by a generic permission.
+  // Unknown commands are denied by default.
   return deny();
 }
 

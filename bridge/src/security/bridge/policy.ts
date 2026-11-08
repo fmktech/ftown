@@ -3,7 +3,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { ApprovedEndpoint, BridgeInvitation, EndpointPermission, EndpointPublic, EnrollmentMessage, InvitationOptions,
-  LocalRecoveryAuthority, McpApproval, McpApprovalReceipt, VerifiedPrincipal } from '../protocol.js';
+  LocalRecoveryAuthority, VerifiedPrincipal } from '../protocol.js';
 import { BridgeSecurityError } from './errors.js';
 import { approvedSchema, boundedId, displayLabel, endpointSchema, permissionSchema } from './metadata.js';
 import { AtomicSnapshot } from './snapshot.js';
@@ -13,31 +13,47 @@ import { AccountConnectivity, storedAccountSchema } from './account-state.js';
 import type { SecurityErrorCode } from '../protocol.js';
 
 const FIVE_MINUTES = 300_000;
-const THIRTY_DAYS = 30 * 86_400_000;
 const MAX_ENDPOINTS = 1000;
 const digest = (secret: string) => createHash('sha256').update(secret).digest('hex');
 const invitationSchema = z.object({ id: z.string().guid(), secretHash: z.string().regex(/^[a-f0-9]{64}$/),
   label: z.string().max(100), permissions: z.array(permissionSchema).max(3), expiresAt: legacyDateTimeSchema,
   consumedBy: z.string().nullable(), provenance: z.enum(['legacy', 'local-recovery']).default('legacy') }).strict();
-const pendingSchema = z.object({ approved: approvedSchema, approvalId: z.string().guid(), requestId: boundedId,
-  expiresAt: legacyDateTimeSchema, activeExpiresAt: legacyDateTimeSchema, active: z.boolean() }).strict();
-const policySchema = z.object({ version: z.literal(1), ownerId: z.string(), bridgeId: z.string(), bridgeEndpointId: z.string(),
+/** Pre-removal policy files carry `mcp: []`, mcp devices and mcp provenance; the strict schema would reject them and brick the bridge. */
+export function migrateLegacyPolicy(raw: unknown): unknown {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return raw;
+  const { mcp: _mcp, ...rest } = raw as Record<string, unknown>;
+  const isMcpDevice = (device: unknown) => typeof device === 'object' && device !== null
+    && (device as { endpoint?: { kind?: unknown } }).endpoint?.kind === 'mcp';
+  const dropped = new Set<string>();
+  if (Array.isArray(rest.devices)) {
+    for (const device of rest.devices) {
+      if (isMcpDevice(device)) dropped.add(String((device as { endpoint: { id?: unknown } }).endpoint.id));
+    }
+    rest.devices = rest.devices.filter(device => !isMcpDevice(device));
+  }
+  const provenance = rest.provenance;
+  if (typeof provenance === 'object' && provenance !== null && !Array.isArray(provenance)) {
+    rest.provenance = Object.fromEntries(Object.entries(provenance)
+      .filter(([id, value]) => !dropped.has(id) && value !== 'mcp'));
+  }
+  return rest;
+}
+const policySchema = z.preprocess(migrateLegacyPolicy, z.object({ version: z.literal(1), ownerId: z.string(), bridgeId: z.string(), bridgeEndpointId: z.string(),
   generation: z.number().int().nonnegative(), devices: z.array(approvedSchema).max(MAX_ENDPOINTS),
-  invitations: z.array(invitationSchema).max(256), mcp: z.array(pendingSchema).max(MAX_ENDPOINTS),
+  invitations: z.array(invitationSchema).max(256),
+  // Frozen: earlier releases require this key, so a downgrade must still parse what we write.
+  mcp: z.array(z.never()).max(0).default([]),
   account: storedAccountSchema.nullable().default(null),
-  provenance: z.record(z.string(), z.enum(['legacy', 'local-recovery', 'account', 'local-cli', 'mcp'])).default({}),
+  provenance: z.record(z.string(), z.enum(['legacy', 'local-recovery', 'account', 'local-cli'])).default({}),
 }).strict().superRefine((state, context) => {
   if (new Set(state.devices.map(device => device.endpoint.id)).size !== state.devices.length
-    || new Set(state.mcp.map(item => item.approved.grantId)).size !== state.mcp.length
     || state.devices.some(device => device.endpoint.ownerId !== state.ownerId
-      || (device.endpoint.kind === 'mcp') !== (device.grantId !== null)
-      || new Set(device.permissions).size !== device.permissions.length)
-    || state.mcp.some(item => !state.devices.some(device => JSON.stringify(device) === JSON.stringify(item.approved)))) {
+      || device.grantId !== null
+      || new Set(device.permissions).size !== device.permissions.length)) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'Invalid policy relationship' });
   }
-});
+}));
 type Policy = z.infer<typeof policySchema>;
-type Pending = Policy['mcp'][number];
 
 /** Identity comparison matters: request JSON cannot manufacture this recovery capability. */
 export const LOCAL_RECOVERY_AUTHORITY: LocalRecoveryAuthority = Object.freeze({ source: 'os-local-recovery' });
@@ -64,7 +80,7 @@ export class BridgePolicyStore {
       throw new BridgeSecurityError('wrong_context');
     }
   }
-  private active(state: Policy, endpointId: string, pendingAllowed = false): ApprovedEndpoint {
+  private active(state: Policy, endpointId: string): ApprovedEndpoint {
     this.check(state);
     const account = state.account;
     const member = account?.checkpoint.devices.find(item => item.endpoint.id === endpointId);
@@ -75,16 +91,11 @@ export class BridgePolicyStore {
     } else if (account?.checkpoint.revokedDeviceIds.includes(endpointId)) throw new BridgeSecurityError('account_device_revoked');
     const record = state.devices.find(device => device.endpoint.id === endpointId);
     if (!record) throw new BridgeSecurityError('approval_required');
-    const pending = state.mcp.find(item => item.approved.endpoint.id === endpointId);
-    if (pending && !pending.active && (!pendingAllowed || Date.parse(pending.expiresAt) <= this.now())) {
-      throw new BridgeSecurityError(Date.parse(pending.expiresAt) <= this.now() ? 'expired' : 'approval_required');
-    }
     if (record.expiresAt && Date.parse(record.expiresAt) <= this.now()) throw new BridgeSecurityError('expired');
     return record;
   }
   private principalFrom(state: Policy, record: ApprovedEndpoint): VerifiedPrincipal {
-    const pending = state.mcp.find(item => item.approved.endpoint.id === record.endpoint.id);
-    return { endpoint: record.endpoint, bridgeId: this.bridgeId, permissions: pending && !pending.active ? [] : record.permissions,
+    return { endpoint: record.endpoint, bridgeId: this.bridgeId, permissions: record.permissions,
       policyGeneration: state.generation, grantId: record.grantId };
   }
   private authorize(state: Policy, actor: VerifiedPrincipal, permission: EndpointPermission): ApprovedEndpoint {
@@ -96,8 +107,8 @@ export class BridgePolicyStore {
     }
     return record;
   }
-  async principal(endpointId: string, allowPendingHello = false): Promise<VerifiedPrincipal> {
-    return this.snapshot.read(state => this.principalFrom(state, this.active(state, endpointId, allowPendingHello)));
+  async principal(endpointId: string): Promise<VerifiedPrincipal> {
+    return this.snapshot.read(state => this.principalFrom(state, this.active(state, endpointId)));
   }
   async revalidate(actor: VerifiedPrincipal, permission?: EndpointPermission): Promise<void> {
     await this.snapshot.read(state => {
@@ -178,63 +189,12 @@ export class BridgePolicyStore {
       });
     });
   }
-  async approveMcp(actor: VerifiedPrincipal, approval: McpApproval): Promise<McpApprovalReceipt> {
-    let endpoint: EndpointPublic;
-    try { endpoint = endpointSchema.parse(approval.endpoint); boundedId.parse(approval.requestId); boundedId.parse(approval.grantId); }
-    catch { throw new BridgeSecurityError('wrong_context'); }
-    const expires = Date.parse(approval.expiresAt);
-    const activeExpires = Date.parse(approval.activeExpiresAt);
-    if (endpoint.kind !== 'mcp' || endpoint.ownerId !== this.bridge.ownerId
-      || !Number.isFinite(expires) || expires <= this.now() || expires > this.now() + FIVE_MINUTES
-      || !Number.isFinite(activeExpires) || activeExpires <= expires || activeExpires > this.now() + THIRTY_DAYS
-      || !approval.permissions.includes('read') || approval.permissions.some(permission => permission !== 'read' && permission !== 'control')
-      || new Set(approval.permissions).size !== approval.permissions.length) throw new BridgeSecurityError('wrong_context');
-    return this.snapshot.transact(state => {
-      this.authorize(state, actor, 'admin');
-      const expired = new Set(state.mcp.filter(item => Date.parse(item.active ? item.activeExpiresAt : item.expiresAt) <= this.now())
-        .map(item => item.approved.endpoint.id));
-      state.devices = state.devices.filter(device => !expired.has(device.endpoint.id));
-      state.mcp = state.mcp.filter(item => !expired.has(item.approved.endpoint.id));
-      const existing = state.mcp.find(item => item.approved.endpoint.id === endpoint.id || item.approved.grantId === approval.grantId);
-      let pending: Pending;
-      if (existing) {
-        if (existing.approved.endpoint.id !== endpoint.id || existing.approved.grantId !== approval.grantId
-          || existing.requestId !== approval.requestId || existing.expiresAt !== approval.expiresAt
-          || existing.activeExpiresAt !== approval.activeExpiresAt
-          || JSON.stringify(existing.approved.permissions) !== JSON.stringify(approval.permissions)) throw new BridgeSecurityError('wrong_context');
-        pending = existing;
-      } else {
-        if (state.devices.some(device => device.endpoint.id === endpoint.id)) throw new BridgeSecurityError('wrong_context');
-        if (state.devices.length >= MAX_ENDPOINTS) throw new BridgeSecurityError('capacity_exceeded');
-        const approved: ApprovedEndpoint = { endpoint, label: 'MCP client', permissions: [...approval.permissions],
-          approvedAt: new Date(this.now()).toISOString(), grantId: approval.grantId, expiresAt: approval.activeExpiresAt };
-        pending = { approved, approvalId: randomUUID(), requestId: approval.requestId, expiresAt: approval.expiresAt,
-          activeExpiresAt: approval.activeExpiresAt, active: false };
-        state.devices.push(approved); state.mcp.push(pending); state.generation++;
-      }
-      return { type: 'mcp-approval', approvalId: pending.approvalId, requestId: pending.requestId, ownerId: this.bridge.ownerId,
-        grantId: approval.grantId, candidateEndpointId: endpoint.id, bridgeId: this.bridgeId, bridge: this.bridge,
-        permissions: [...approval.permissions], expiresAt: pending.expiresAt, activeExpiresAt: pending.activeExpiresAt };
-    });
-  }
-  async activateMcp(actor: VerifiedPrincipal, grantId: string): Promise<{ grantId: string; expiresAt: string }> {
-    return this.snapshot.transact(state => {
-      const record = this.active(state, actor.endpoint.id, true);
-      if (actor.policyGeneration !== state.generation) throw new BridgeSecurityError('endpoint_revoked');
-      const pending = state.mcp.find(item => item.approved.endpoint.id === actor.endpoint.id);
-      if (actor.bridgeId !== this.bridgeId || actor.endpoint.publicKey !== record.endpoint.publicKey || actor.endpoint.kind !== 'mcp'
-        || !pending || record.grantId !== grantId || actor.grantId !== grantId) throw new BridgeSecurityError('permission_denied');
-      if (!pending.active) { pending.active = true; state.generation++; }
-      return { grantId, expiresAt: pending.activeExpiresAt };
-    });
-  }
   async revoke(actor: VerifiedPrincipal, endpointId: string): Promise<void> {
     await this.snapshot.transact(state => {
       this.authorize(state, actor, 'admin');
       if (state.account?.checkpoint.devices.some(item => item.endpoint.id === endpointId)) throw new BridgeSecurityError('account_approval_required');
       state.devices = state.devices.filter(device => device.endpoint.id !== endpointId);
       delete state.provenance[endpointId];
-      state.mcp = state.mcp.filter(item => item.approved.endpoint.id !== endpointId);
       state.generation++;
     });
   }

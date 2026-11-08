@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -176,28 +176,6 @@ test('native wake asks busy about the FTown session id, not the native id', asyn
   assert.deepEqual(asked, ['ftown']);
 });
 
-test('read-only MCP authorization follows actual operation semantics and bridge audit records denial without args', async t => {
-  const f = await fixture(t); const mcp = await generateEndpoint(owner, 'mcp');
-  await f.security.policy.approveMcp(await f.security.policy.principal(f.client.endpoint.id), { requestId: 'consent', grantId: 'grant',
-    endpoint: mcp.endpoint, permissions: ['read'], expiresAt: new Date(Date.now() + 300000).toISOString(),
-    activeExpiresAt: new Date(Date.now() + 86400000).toISOString() });
-  await f.security.activateMcp(await f.security.policy.principal(mcp.endpoint.id, true), 'grant');
-  const context = { actionId: 'action-search', parentActionId: null, clientId: 'client', grantId: 'grant', tool: 'chats_search', operation: 'claimed_read' };
-  let dispatches = 0;
-  const search = await f.packet({ type: 'application', route: { kind: 'http', method: 'POST', path: '/api/sessions/session/grep', requestId: randomUUID() },
-    data: { body: { pattern: 'PRIVATE SEARCH CONTENT' } }, mcp: context }, f.route, mcp);
-  await executeSecurePacket(f.security, search, f.route, async () => { dispatches++; return { status: 200, body: {} }; });
-  const consumingRead = await f.packet({ type: 'application', route: { kind: 'http', method: 'GET', path: '/api/sessions/session/inbox', requestId: randomUUID() },
-    data: {}, mcp: { ...context, actionId: 'action-consume', tool: 'messages_read' } }, f.route, mcp);
-  await executeSecurePacket(f.security, consumingRead, f.route, async () => { dispatches++; return { status: 200, body: {} }; });
-  assert.equal(dispatches, 1);
-  const evidence = await f.security.audit.list();
-  assert.deepEqual(evidence.events.map(event => [event.actionId, event.status, event.mutating]),
-    [['action-consume', 'rejected', true], ['action-search', 'succeeded', false]]);
-  assert.ok(!JSON.stringify(evidence).includes('PRIVATE SEARCH CONTENT'));
-  assert.equal(evidence.events[1].operation, 'history_search');
-});
-
 test('local event pages advance past oversized events and signal a resync without truncating payloads', async t => {
   const f = await fixture(t);
   const server = new LocalApiServer();
@@ -251,63 +229,12 @@ test('encrypted local POST bodies parse as bytes and preserve validation and att
   server.stop();
 });
 
-test('direct read permission cannot execute input disguised under command or HTTP routes; terminal scopes remain enforced', async t => {
-  const f = await fixture(t);
-  const mcp = await generateEndpoint(owner, 'mcp');
-  await f.security.policy.approveMcp(await f.security.policy.principal(f.client.endpoint.id), { requestId: 'direct-consent', grantId: 'direct-grant',
-    endpoint: mcp.endpoint, permissions: ['read'], expiresAt: new Date(Date.now() + 300000).toISOString(),
-    activeExpiresAt: new Date(Date.now() + 86400000).toISOString() });
-  await f.security.activateMcp(await f.security.policy.principal(mcp.endpoint.id, true), 'direct-grant');
-  const context = { actionId: 'action', parentActionId: null, clientId: 'client', grantId: 'direct-grant', tool: 'sessions_list', operation: null };
-  const deliveries: DirectMessage[] = [];
-  let closures = 0;
-  const peer = async (sender: EndpointIdentity) => {
-    const route: InboundTransportContext = { transport: 'webrtc', bridgeId: 'bridge', pairId: randomUUID(), channel: '' };
-    route.channel = `direct:webrtc:bridge:${route.pairId}`;
-    let authorized = 0;
-    const channel = new EncryptedPeerChannel(f.security, route, () => {}, frame => deliveries.push(frame), () => { authorized++; }, () => { closures++; });
-    t.after(async () => channel.close());
-    const hello = await seal(sender, f.identity.endpoint, { type: 'ftown_encrypted', version: 1, senderId: sender.endpoint.id,
-      recipientId: f.identity.endpoint.id, ownerId: owner, bridgeId: 'bridge', channel: route.channel, purpose: 'hello', messageId: randomUUID(),
-      createdAt: Date.now(), expiresAt: Date.now() + 60000, receiverEpoch: null }, new TextEncoder().encode(JSON.stringify({ type: 'hello', challenge: randomUUID() })));
-    await channel.receive(JSON.stringify(hello)); assert.equal(authorized, 1);
-    return { channel, route, send: async (app: SecureApplication) => channel.receive(JSON.stringify(await f.packet(app, route, sender))) };
-  };
-  for (const kind of ['command', 'http'] as const) {
-    const p = await peer(mcp); const requestId = randomUUID();
-    await p.send({ type: 'application', route: kind === 'command' ? { kind, requestId, command: 'list_sessions', sessionId: null }
-      : { kind, requestId, method: 'GET', path: '/api/sessions' },
-      data: { type: 'list_sessions', requestId, payload: { bridgeId: 'bridge' }, kind: 'input', sessionId: 'victim', data: 'PRIVATE-MARKER' },
-      mcp: { ...context, actionId: `cross-${kind}` } });
-  }
-  assert.deepEqual(deliveries, []); assert.equal(closures, 2);
-  const readPeer = await peer(mcp);
-  await readPeer.send({ type: 'application', route: { kind: 'terminal', sessionId: 'victim', frameType: 'attach', pairId: readPeer.route.pairId },
-    data: { kind: 'attach', sessionId: 'victim' }, mcp: { ...context, actionId: 'read-attach' } });
-  assert.deepEqual(deliveries, [{ kind: 'attach', sessionId: 'victim' }]);
-  await readPeer.send({ type: 'application', route: { kind: 'terminal', sessionId: 'victim', frameType: 'input', pairId: readPeer.route.pairId },
-    data: { kind: 'input', sessionId: 'victim', data: 'PRIVATE-MARKER' }, mcp: { ...context, actionId: 'read-input' } });
-  assert.equal(deliveries.length, 1); assert.equal(closures, 3);
-  const controlPeer = await peer(f.client);
-  await controlPeer.send({ type: 'application', route: { kind: 'terminal', sessionId: 'victim', frameType: 'input', pairId: controlPeer.route.pairId },
-    data: { kind: 'input', sessionId: 'victim', data: 'authorized' }, mcp: null });
-  assert.deepEqual(deliveries[1], { kind: 'input', sessionId: 'victim', data: 'authorized' });
-  const evidence = await f.security.audit.list();
-  assert.equal(evidence.events.filter(event => event.status === 'rejected').length, 3);
-  assert.ok(!JSON.stringify(evidence).includes('PRIVATE-MARKER'));
-});
-
-test('self-revocation releases only its fixed correlated receipt after durable removal and completion', async t => {
+test('self-revocation releases only its fixed correlated receipt after durable removal', async t => {
   const f = await fixture(t); const requestId = randomUUID();
   const application: SecureApplication = { type: 'application', route: { kind: 'command', command: 'security_revoke', requestId, sessionId: null },
     data: { type: 'security_revoke', requestId, payload: { bridgeId: 'bridge', endpointId: f.client.endpoint.id } }, mcp: null };
   let closures = 0;
   f.security.onRevoked(id => { assert.equal(id, f.client.endpoint.id); closures++; });
-  const complete = f.security.complete.bind(f.security);
-  t.mock.method(f.security, 'complete', async (...args: Parameters<typeof complete>) => {
-    await assert.rejects(f.security.policy.principal(f.client.endpoint.id), { code: 'approval_required' });
-    return complete(...args);
-  });
   const request = await f.packet(application);
   const response = await executeSecurePacket(f.security, request, f.route, async () => { throw new Error('Self-revoke must not dispatch arbitrary results'); });
   assert.equal(response.messageId, requestId); assert.equal(closures, 1);
@@ -334,11 +261,68 @@ test('failed self-revocation commit never returns a success receipt and leaves e
   assert.equal((await f.security.policy.principal(f.client.endpoint.id)).endpoint.id, f.client.endpoint.id);
 });
 
-test('self-revocation completion failure withholds the prepared receipt after policy removal', async t => {
-  const f = await fixture(t); const requestId = randomUUID();
-  const application: SecureApplication = { type: 'application', route: { kind: 'command', command: 'security_revoke', requestId, sessionId: null },
-    data: { type: 'security_revoke', requestId, payload: { bridgeId: 'bridge', endpointId: f.client.endpoint.id } }, mcp: null };
-  t.mock.method(f.security, 'complete', async () => { throw new Error('Required completion failed'); });
-  await assert.rejects(executeSecurePacket(f.security, await f.packet(application), f.route, async () => null), { code: 'approval_required' });
-  await assert.rejects(f.security.policy.principal(f.client.endpoint.id), { code: 'approval_required' });
+test('an application carrying an MCP action context is never dispatched', async t => {
+  const f = await fixture(t); let dispatches = 0;
+  const context = { actionId: 'a', parentActionId: null, clientId: 'c', grantId: 'g', tool: 'sessions_list', operation: null };
+  const request = await f.packet({ type: 'application', route: { kind: 'http', method: 'GET', path: '/api/sessions', requestId: randomUUID() },
+    data: {}, mcp: context } as unknown as SecureApplication);
+  await assert.rejects(executeSecurePacket(f.security, request, f.route, async () => { dispatches++; return { status: 200, body: {} }; }), { name: 'ZodError' });
+  assert.equal(dispatches, 0);
+  const control = await f.packet({ type: 'application', route: { kind: 'http', method: 'GET', path: '/api/sessions', requestId: randomUUID() },
+    data: {}, mcp: null });
+  await executeSecurePacket(f.security, control, f.route, async () => { dispatches++; return { status: 200, body: {} }; });
+  assert.equal(dispatches, 1);
+});
+
+test('direct peers reject non-terminal routes and read-only peers cannot deliver input; control input is delivered', async t => {
+  const f = await fixture(t);
+  const browser = await generateEndpoint(owner, 'browser');
+  const invite = await f.security.policy.createInvitation(await f.security.policy.principal(f.client.endpoint.id), { label: 'browser' });
+  await f.security.policy.consumeInvitation({ type: 'enroll', candidate: browser.endpoint, invitationId: invite.invitationId, invitationSecret: invite.secret, label: 'browser' });
+  await f.security.close();
+  const file = join(f.dir, 'security', 'policy.json');
+  const state = JSON.parse(await readFile(file, 'utf8')) as { devices: Array<{ endpoint: { id: string }; permissions: string[] }> };
+  state.devices.find(device => device.endpoint.id === browser.endpoint.id)!.permissions = ['read'];
+  await writeFile(file, JSON.stringify(state));
+  const security = new BridgeSecurityService(f.identity, 'bridge', f.dir, { relayUserId: 'owner@example.test' });
+  t.after(() => security.close());
+  const deliveries: DirectMessage[] = [];
+  let closures = 0;
+  const peer = async (sender: EndpointIdentity) => {
+    const route: InboundTransportContext = { transport: 'webrtc', bridgeId: 'bridge', pairId: randomUUID(), channel: '' };
+    route.channel = `direct:webrtc:bridge:${route.pairId}`;
+    let authorized = 0;
+    const channel = new EncryptedPeerChannel(security, route, () => {}, frame => deliveries.push(frame), () => { authorized++; }, () => { closures++; });
+    t.after(async () => channel.close());
+    const hello = await seal(sender, f.identity.endpoint, { type: 'ftown_encrypted', version: 1, senderId: sender.endpoint.id,
+      recipientId: f.identity.endpoint.id, ownerId: owner, bridgeId: 'bridge', channel: route.channel, purpose: 'hello', messageId: randomUUID(),
+      createdAt: Date.now(), expiresAt: Date.now() + 60000, receiverEpoch: null }, new TextEncoder().encode(JSON.stringify({ type: 'hello', challenge: randomUUID() })));
+    await channel.receive(JSON.stringify(hello)); assert.equal(authorized, 1);
+    const send = async (app: SecureApplication) => {
+      const id = app.route.kind === 'http' || app.route.kind === 'command' ? app.route.requestId : randomUUID();
+      const packet = await seal(sender, f.identity.endpoint, { type: 'ftown_encrypted', version: 1, senderId: sender.endpoint.id, recipientId: f.identity.endpoint.id,
+        ownerId: owner, bridgeId: 'bridge', channel: route.channel, purpose: 'application', messageId: id, createdAt: Date.now(),
+        expiresAt: Date.now() + 60000, receiverEpoch: security.receiverEpoch }, new TextEncoder().encode(JSON.stringify(app)));
+      return channel.receive(JSON.stringify(packet));
+    };
+    return { route, send };
+  };
+  for (const kind of ['command', 'http'] as const) {
+    const p = await peer(f.client); const requestId = randomUUID();
+    await p.send({ type: 'application', route: kind === 'command' ? { kind, requestId, command: 'list_sessions', sessionId: null }
+      : { kind, requestId, method: 'GET', path: '/api/sessions' },
+      data: kind === 'command' ? { type: 'list_sessions', requestId, payload: { bridgeId: 'bridge' } } : {}, mcp: null });
+  }
+  assert.deepEqual(deliveries, []); assert.equal(closures, 2);
+  const reader = await peer(browser);
+  await reader.send({ type: 'application', route: { kind: 'terminal', sessionId: 'victim', frameType: 'attach', pairId: reader.route.pairId },
+    data: { kind: 'attach', sessionId: 'victim' }, mcp: null });
+  assert.deepEqual(deliveries, [{ kind: 'attach', sessionId: 'victim' }]);
+  await reader.send({ type: 'application', route: { kind: 'terminal', sessionId: 'victim', frameType: 'input', pairId: reader.route.pairId },
+    data: { kind: 'input', sessionId: 'victim', data: 'PRIVATE-MARKER' }, mcp: null });
+  assert.equal(deliveries.length, 1); assert.equal(closures, 3);
+  const controller = await peer(f.client);
+  await controller.send({ type: 'application', route: { kind: 'terminal', sessionId: 'victim', frameType: 'input', pairId: controller.route.pairId },
+    data: { kind: 'input', sessionId: 'victim', data: 'authorized' }, mcp: null });
+  assert.deepEqual(deliveries[1], { kind: 'input', sessionId: 'victim', data: 'authorized' });
 });

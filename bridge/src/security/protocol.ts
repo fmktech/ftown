@@ -10,9 +10,9 @@ import type { AccountErrorCode, AccountHead } from './account-protocol.js';
 
 /** Existing application JSON is intentionally open; domain handlers validate it. */
 export type ApplicationJson = null | boolean | number | string | ApplicationJson[] | { [key: string]: ApplicationJson };
-export type EndpointKind = 'bridge' | 'browser' | 'mcp' | 'local-cli';
+export type EndpointKind = 'bridge' | 'browser' | 'local-cli';
 export type EndpointPermission = 'read' | 'control' | 'admin';
-export type EnvelopePurpose = 'application' | 'hello' | 'welcome' | 'enroll' | 'enrolled' | 'mcp-approval';
+export type EnvelopePurpose = 'application' | 'hello' | 'welcome' | 'enroll' | 'enrolled';
 export type SecureTransport = 'cloud' | 'local-http' | 'local-events' | 'loopback-ws' | 'webrtc';
 
 export interface EndpointPublic {
@@ -113,7 +113,7 @@ export interface ApprovedEndpoint {
   label: string;
   permissions: EndpointPermission[];
   approvedAt: string;
-  /** Null for browser/local CLI; immutable OAuth grant for MCP. */
+  /** Always null; retained for wire compatibility. */
   grantId: string | null;
   /** Null means no time expiry; revocation remains enforced. */
   expiresAt: string | null;
@@ -158,15 +158,6 @@ export interface EnrollmentReceipt {
   receiverEpoch: string;
 }
 
-export interface McpActionContext {
-  actionId: string;
-  parentActionId: string | null;
-  clientId: string;
-  grantId: string;
-  tool: string;
-  operation: string | null;
-}
-
 /** Constructed only after cryptographic and locally stored-policy validation. */
 export interface VerifiedPrincipal {
   endpoint: EndpointPublic;
@@ -188,8 +179,8 @@ export interface SecureApplication {
   route: ApplicationRoute;
   /** Existing domain JSON; independently schema-validated before dispatch. */
   data: ApplicationJson;
-  /** Only approved MCP endpoint kind may supply this non-authorizing context. */
-  mcp: McpActionContext | null;
+  /** Frozen legacy field: always null, still sent because older UIs reject frames without it. */
+  mcp: null;
 }
 
 export interface InboundTransportContext {
@@ -206,84 +197,11 @@ export interface VerifiedApplication {
   application: SecureApplication;
 }
 
-export interface McpApproval {
-  requestId: string;
-  grantId: string;
-  endpoint: EndpointPublic;
-  permissions: ('read' | 'control')[];
-  /** Pending approval expires unless activated by the approved MCP identity. */
-  expiresAt: string;
-  /** Fixed maximum active lifetime approved by browser, at most 30 days. */
-  activeExpiresAt: string;
-}
-
-export interface McpApprovalReceipt {
-  type: 'mcp-approval';
-  approvalId: string;
-  requestId: string;
-  ownerId: string;
-  grantId: string;
-  candidateEndpointId: string;
-  bridgeId: string;
-  bridge: EndpointPublic;
-  permissions: ('read' | 'control')[];
-  expiresAt: string;
-  activeExpiresAt: string;
-}
-
-export interface McpBridgeApproval {
-  bridgeId: string;
-  bridge: EndpointPublic;
-  receipt: SecureEnvelope;
-}
-
-export interface SecurityPageQuery {
-  /** Absent means newest page; cursor is opaque, versioned and owner-bound. */
-  cursor?: string;
-  bridgeId?: string;
-  limit?: number;
-}
-
-export type SecurityEventStatus = 'started' | 'succeeded' | 'rejected' | 'failed' | 'unknown';
-export interface SecurityEvent {
-  version: 1;
-  id: string;
-  actionId: string;
-  parentActionId: string | null;
-  ownerId: string;
-  source: 'gateway' | 'bridge';
-  bridgeId: string | null;
-  clientId: string | null;
-  grantId: string | null;
-  endpointId: string | null;
-  tool: string;
-  operation: string | null;
-  sessionId: string | null;
-  startedAt: string;
-  finishedAt: string | null;
-  status: SecurityEventStatus;
-  errorCode: string | null;
-  mutating: boolean;
-}
-
-export interface SecurityPage {
-  events: SecurityEvent[];
-  nextCursor: string | null;
-  retentionDays: 30;
-  maxEvents: 10000;
-  oldestAvailableAt: string | null;
-  truncated: boolean;
-  reset: boolean;
-}
-
 /** Commands use existing requestId/bridgeId command-RPC envelope. */
 export type SecurityCommand =
   | { type: 'security_devices'; bridgeId: string }
   | { type: 'security_invite'; bridgeId: string; label: string }
   | { type: 'security_revoke'; bridgeId: string; endpointId: string }
-  | { type: 'security_approve_mcp'; bridgeId: string; approval: McpApproval }
-  | { type: 'security_activate_mcp'; bridgeId: string; grantId: string }
-  | { type: 'security_activity'; bridgeId: string; page: SecurityPageQuery }
   | { type: 'security_account_adopt'; bridgeId: string; head: AccountHead };
 
 export interface SecurityCommandResults {
@@ -291,9 +209,6 @@ export interface SecurityCommandResults {
   security_devices: { devices: ApprovedEndpoint[] };
   security_invite: BridgeInvitation;
   security_revoke: { endpointId: string; revoked: true };
-  security_approve_mcp: McpBridgeApproval;
-  security_activate_mcp: { grantId: string; expiresAt: string };
-  security_activity: SecurityPage;
 }
 
 export type BridgeSecurityStatus = 'unpaired' | 'connecting' | 'ready' | 'offline' | 'revoked' | 'key_changed' | 'upgrade_required';
@@ -312,15 +227,6 @@ export interface EndpointDirectoryEntry {
 export interface EndpointDirectory {
   ownerId: string;
   endpoints: EndpointDirectoryEntry[];
-}
-
-export interface McpConsentSecurity {
-  requestId: string;
-  grantId: string;
-  endpoint: EndpointPublic;
-  expiresAt: string;
-  activeExpiresAt: string;
-  permissions: ('read' | 'control')[];
 }
 
 export interface BridgeSecurityInfo {
@@ -355,30 +261,8 @@ export interface BridgeSecurity {
   sealPublication(channel: string, application: SecureApplication): Promise<(SecureEnvelope | SecurePublication)[]>;
   createInvitation(actor: VerifiedPrincipal | LocalRecoveryAuthority, options: InvitationOptions): Promise<BridgeInvitation>;
   listDevices(actor: VerifiedPrincipal): Promise<ApprovedEndpoint[]>;
-  approveMcp(actor: VerifiedPrincipal, approval: McpApproval): Promise<McpBridgeApproval>;
-  activateMcp(actor: VerifiedPrincipal, grantId: string): Promise<{ grantId: string; expiresAt: string }>;
   revokeEndpoint(actor: VerifiedPrincipal, endpointId: string): Promise<void>;
   adoptAccount(actor: VerifiedPrincipal, head: AccountHead): Promise<AccountHead>;
   onRevoked(listener: (endpointId: string) => void): () => void;
   close(): Promise<void>;
-}
-
-/** One provisioned secret; config parsing belongs only to gateway bootstrap. */
-export interface McpKeyEncryptionConfig {
-  keyId: string;
-  key: Uint8Array;
-}
-
-export interface SecurityLimits {
-  maxEnvelopeBytes: 450000;
-  maxApplicationAgeMs: 120000;
-  maxFutureSkewMs: 30000;
-  invitationLifetimeMs: 300000;
-  maxConsentBridges: 64;
-  maxConsentBodyBytes: 524288;
-  maxActiveMcpGrantMs: 2592000000;
-  retentionDays: 30;
-  maxAuditEvents: 10000;
-  defaultPageSize: 50;
-  maxPageSize: 100;
 }

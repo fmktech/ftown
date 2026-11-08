@@ -22,7 +22,6 @@ export class EncryptedPeerChannel {
       if (packet.purpose === 'hello') {
         if (this.endpointId && this.endpointId !== packet.senderId) throw new Error('Wrong peer');
         const response = await this.security.handleHandshake(packet, this.route);
-        // A pending MCP hello is harmless but cannot open an application data channel.
         await this.security.policy.principal(packet.senderId);
         this.endpointId = packet.senderId;
         this.wireSend(JSON.stringify(response)); this.authorized();
@@ -33,7 +32,6 @@ export class EncryptedPeerChannel {
       if (verified.application.route.kind !== 'terminal') throw new Error('Invalid direct application route');
       await this.security.revalidate(verified.principal);
       this.deliver(verified.application.data as unknown as DirectMessage);
-      await this.security.complete(verified, 'succeeded');
     }).catch(() => { this.teardown(); });
     return this.inbound;
   }

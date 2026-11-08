@@ -38,7 +38,7 @@ for dir in "$REPO" "$REPO/ui" "$REPO/bridge" "$E2E_DIR"; do
   done
 done
 shopt -u nullglob
-for name in .capture-run.lock .bridge-home .bridge-home-2 .mcp-bridge-home .mcp-bridge-home-2 .browser-home .run-email .run-mcp-email certs .ui.pid .bridge.pid .bridge-2.pid .mcp-bridge.pid .mcp-bridge-2.pid .mcp.pid .mcp-tls.pid ui.log bridge.log bridge-2.log mcp-bridge.log mcp-bridge-2.log mcp.log mcp-tls.log; do
+for name in .capture-run.lock .bridge-home .bridge-home-2 .browser-home .run-email certs .ui.pid .bridge.pid .bridge-2.pid .tls.pid ui.log bridge.log bridge-2.log tls.log; do
   [[ ! -e "$E2E_DIR/$name" && ! -L "$E2E_DIR/$name" ]] || fail "pre-existing E2E resource: $name"
 done
 
@@ -93,7 +93,7 @@ const {execFileSync}=require("node:child_process");
     if(fields.length<5||fields[0]!=="LISTEN"||!match)throw Error("invalid ss output");
     if(Number(match[1])===443)throw Error("port 443 is in use");
   }
-  for(const port of [5432,8000,3000,8080,8443,8444])for(const host of ["0.0.0.0","::"]){await new Promise((resolve,reject)=>{const s=net.createServer();s.once("error",reject);s.listen({port,host,ipv6Only:host==="::",exclusive:true},()=>s.close(e=>e?reject(e):resolve()));});}
+  for(const port of [5432,8000,3000,8444])for(const host of ["0.0.0.0","::"]){await new Promise((resolve,reject)=>{const s=net.createServer();s.once("error",reject);s.listen({port,host,ipv6Only:host==="::",exclusive:true},()=>s.close(e=>e?reject(e):resolve()));});}
 })().catch(()=>process.exit(1));
 JS
 
@@ -118,7 +118,7 @@ cleanup() {
       if [[ -d "$E2E_DIR/certs" && ! -L "$E2E_DIR/certs" ]]; then rm -rf -- "$E2E_DIR/certs" || cleanup_failed=1
       elif [[ -e "$E2E_DIR/certs" || -L "$E2E_DIR/certs" ]]; then cleanup_failed=1; fi
     fi
-    for name in ui.log bridge.log bridge-2.log mcp-bridge.log mcp-bridge-2.log mcp.log mcp-tls.log; do
+    for name in ui.log bridge.log bridge-2.log tls.log; do
       if [[ -L "$E2E_DIR/$name" || ( -e "$E2E_DIR/$name" && ! -f "$E2E_DIR/$name" ) ]]; then cleanup_failed=1
       elif [[ -f "$E2E_DIR/$name" ]]; then rm -- "$E2E_DIR/$name" || cleanup_failed=1; fi
     done
@@ -154,7 +154,7 @@ export BRIDGE_HOME="$E2E_DIR/.bridge-home"
 node <<'JS' || fail "generated local selectors or scratch homes differ from the capture contract"
 const assert=require("node:assert/strict"),path=require("node:path"),fs=require("node:fs"),e=process.env,d=e.E2E_DIR;
 assert.equal(fs.realpathSync(d),d);assert.equal(e.DATABASE_URL,"postgresql://ftown:ftown@localhost/ftown");
-for(const [k,v] of Object.entries({FTOWN_PUBLIC_URL:"https://localhost:8444",FTOWN_MCP_PUBLIC_URL:"https://localhost:8443",NEXT_PUBLIC_CENTRIFUGO_URL:"ws://localhost:8000/connection/websocket",NODE_EXTRA_CA_CERTS:path.join(d,"certs/cert.pem"),BRIDGE_HOME:path.join(d,".bridge-home"),E2E_SECOND_BRIDGE_HOME:path.join(d,".bridge-home-2"),E2E_MCP_BRIDGE_HOME:path.join(d,".mcp-bridge-home"),E2E_MCP_SECOND_BRIDGE_HOME:path.join(d,".mcp-bridge-home-2"),E2E_BROWSER_HOME:path.join(d,".browser-home")}))assert.equal(e[k],v);
+for(const [k,v] of Object.entries({FTOWN_PUBLIC_URL:"https://localhost:8444",NEXT_PUBLIC_CENTRIFUGO_URL:"ws://localhost:8000/connection/websocket",NODE_EXTRA_CA_CERTS:path.join(d,"certs/cert.pem"),BRIDGE_HOME:path.join(d,".bridge-home"),E2E_SECOND_BRIDGE_HOME:path.join(d,".bridge-home-2"),E2E_BROWSER_HOME:path.join(d,".browser-home")}))assert.equal(e[k],v);
 for(const k of Object.keys(e))if(k.startsWith("PG")||k.startsWith("POSTGRES")||k.startsWith("MIGRAT"))throw Error("unexpected database selector");
 JS
 
@@ -177,8 +177,7 @@ printf 'build\n' > "$LOCK/stage"
 printf 'services\n' > "$LOCK/stage"; services=1
 bash "$E2E_DIR/scripts/start-services.sh"
 E2E_USER_EMAIL="$(cat "$E2E_DIR/.run-email")"
-E2E_MCP_USER_EMAIL="$(cat "$E2E_DIR/.run-mcp-email")"
-export E2E_USER_EMAIL E2E_MCP_USER_EMAIL
+export E2E_USER_EMAIL
 printf 'capture\n' > "$LOCK/stage"
 (cd "$E2E_DIR" && npx playwright test --config capture/playwright.config.ts)
 printf "[capture] capture complete; staging retained at %s\n" "$FTOWN_CAPTURE_DIR"

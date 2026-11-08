@@ -14,7 +14,6 @@ async function openSecurityNavigation(page: Page) {
 }
 async function devices(page: Page) {
   await openSecurityNavigation(page);
-  await page.getByRole("tab", { name: "Access", exact: true }).click();
   await expect(page.getByRole("list", { name: "Account devices", exact: true })).toBeVisible();
 }
 async function navigationEvidence(page: Page, info: TestInfo) {
@@ -72,7 +71,7 @@ async function waitForSecurityLayout(page: Page, width: number) {
 async function accessMapEvidence(page: Page, info: TestInfo, bridgeIds: string[], otherBrowserId: string, pendingRequestId: string) {
   await openSecurityNavigation(page);
   const dialog = page.getByRole("dialog", { name: "Security", exact: true });
-  await expect(dialog.getByRole("tab", { name: "Access", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(dialog.getByRole("heading", { name: "Your computers", exact: true })).toBeVisible();
   for (const bridgeId of bridgeIds) {
     await expect(dialog.locator(`[data-computer-access="${bridgeId}"]`)).toContainText("Shared with your approved browsers", { timeout: 60000 });
     await expect(dialog.locator(`[data-access-edge="bridge:${bridgeId}"]`)).toHaveAttribute("data-certainty", "current");
@@ -149,7 +148,6 @@ test("account trust: desktop and mobile confirmation, future computers and durab
       await openSecurityNavigation(page);
       for (const size of [viewport, { width: 390, height: 844 }]) {
         await page.setViewportSize(size);
-        await expect(page.getByRole("tab", { name: "Access", exact: true })).toHaveAttribute("aria-selected", "true");
         await expect(page.getByRole("heading", { name: "Your computers", exact: true })).toBeVisible();
         await expect(page.locator(`[data-computer-access="${firstId}"]`)).toContainText("Shared with your approved browsers", { timeout: 60000 });
         await expect(page.getByRole("button", { name: /^Remove access for / })).toBeDisabled();

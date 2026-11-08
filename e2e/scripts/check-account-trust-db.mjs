@@ -123,11 +123,9 @@ try {
   await query('INSERT INTO bridge_refresh(bridge_id,sub,current_jti,hostname,last_seen) VALUES($1,$2,$3,$4,NOW())', ['legacy-bridge', email, randomUUID(), 'Legacy']);
   await query(`INSERT INTO pairing_requests(device_code,user_code,bridge_id,hostname,platform,expires_at)
     VALUES($1,$2,$3,$4,$5,NOW()+INTERVAL '10 minutes')`, [legacyCode, 'LEGA-0001', 'legacy-bridge', 'Legacy', 'linux']);
-  await query(`INSERT INTO mcp_oauth_records(kind,key,data,expires_at) VALUES('client',$1,$2::jsonb,NOW()+INTERVAL '10 minutes'),('grant',$3,$4::jsonb,NOW()+INTERVAL '10 minutes')`,
-    [randomCode(), JSON.stringify({ fixture: 'client', owner }), randomCode(), JSON.stringify({ fixture: 'grant', owner })]);
   const digest = async client => {
     const result = [];
-    for (const table of ['users', 'bridge_refresh', 'pairing_requests', 'mcp_oauth_records']) {
+    for (const table of ['users', 'bridge_refresh', 'pairing_requests']) {
       const rows = await client.query(`SELECT COUNT(*)::int AS count,md5(COALESCE(string_agg((to_jsonb(t)-'enrollment'-'account_approval')::text,'' ORDER BY (to_jsonb(t)-'enrollment'-'account_approval')::text),'')) AS digest FROM ${table} t`);
       result.push(rows.rows[0]);
     }

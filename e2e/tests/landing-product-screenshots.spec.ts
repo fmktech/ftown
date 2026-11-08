@@ -135,12 +135,8 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 1000, height: 900
     }
 
     await expect(page.getByRole("region", { name: "Follow the data, know the endpoints." })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Your fleet, in your MCP client." })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Keep questions in view" })).toBeVisible();
-    await expect(page.getByText("https://ftown-mcp.fly.dev/mcp", { exact: true })).toBeVisible();
-    await expect(page.getByRole("link", { name: "MCP setup & capabilities" })).toHaveAttribute("href", "https://github.com/fmktech/ftown/blob/main/docs/mcp.md");
     await expect(page.locator("body")).not.toContainText(/Scheduled loops|Cron for agents|Per-loop controls/);
-    await expect(page.locator('meta[name="description"]')).toHaveAttribute("content", /MCP fleet control/);
+    await expect(page.locator('meta[name="description"]')).toHaveAttribute("content", /local-first terminals/);
     await expect(page.getByRole("link", { name: "Read the Solo guide →" })).toHaveAttribute("href", "https://github.com/fmktech/ftown/blob/main/docs/solo.md");
     await expect(page.locator("#solo code").first()).not.toBeEmpty();
     await selfHost.click();
@@ -178,7 +174,7 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 1000, height: 900
     if (viewport.width === 1280) {
       // A live desktop-to-mobile resize must preserve the public heading.
       await page.setViewportSize({ width: 390, height: 844 });
-      await expect(page.getByRole("heading", { name: "Your fleet, in your MCP client." })).toBeVisible();
+      await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
     }
     expect(pageErrors).toEqual([]);
   });

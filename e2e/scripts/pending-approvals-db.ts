@@ -156,10 +156,9 @@ try {
   await accounts.append(owner, { expectedHead: null, record: genesis });
   const oldBrowser = await generateEndpoint(owner, 'browser'); const oldSigning = await core.generateAccountSigningIdentity();
   await accounts.createEnrollment(owner, (await core.createAccountEnrollment(oldBrowser, 'Legacy request', oldSigning, null)).request);
-  await query("INSERT INTO mcp_oauth_records(kind,key,data,expires_at) VALUES('client',$1,$2::jsonb,NOW()+INTERVAL '10 minutes')", [randomCode(), JSON.stringify({ fixture: true })]);
   const legacyDigest = async () => {
     const output = [];
-    for (const table of ['users', 'bridge_refresh', 'pairing_requests', 'security_account_history', 'security_account_enrollments', 'mcp_oauth_records']) {
+    for (const table of ['users', 'bridge_refresh', 'pairing_requests', 'security_account_history', 'security_account_enrollments']) {
       output.push((await query(`SELECT COUNT(*)::int AS count,md5(COALESCE(string_agg(to_jsonb(t)::text,'' ORDER BY to_jsonb(t)::text),'')) AS digest FROM ${table} t`))[0]);
     }
     return output;

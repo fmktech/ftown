@@ -382,8 +382,6 @@ export function safeAccountReturnTo(value: string | null): string | null {
     && url.searchParams.getAll("request").length === 1 && /^[A-Za-z0-9_-]{43}$/.test(url.searchParams.get("request")!))) return url.pathname + url.search;
   if (url.pathname === "/pair" && [...url.searchParams.keys()].every(key => key === "code") && url.searchParams.getAll("code").length <= 1
     && (!url.searchParams.has("code") || /^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(url.searchParams.get("code")!))) return url.pathname + url.search;
-  if (url.pathname === "/mcp/consent" && [...url.searchParams.keys()].every(key => key === "request") && url.searchParams.getAll("request").length === 1
-    && /^[A-Za-z0-9_-]{1,256}$/.test(url.searchParams.get("request")!)) return url.pathname + url.search;
   return null;
 }
 /** Synchronous capture precedes auth requests, redirects and telemetry. Secret stays per tab. */

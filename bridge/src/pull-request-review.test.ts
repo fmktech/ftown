@@ -73,7 +73,7 @@ test('link and authorization fences prevent old results during fetch or chunk', 
 
 test('untrusted inputs and upstream errors fail closed without exposing raw error text', async () => {
   const x = make(); const p = principal();
-  assert.equal((await x.service.get({ ...p, endpoint: { ...p.endpoint, kind: 'mcp' } }, request())).state, 'unavailable');
+  assert.equal((await x.service.get({ ...p, endpoint: { ...p.endpoint, kind: 'local-cli' } }, request())).state, 'unavailable');
   assert.equal((await x.service.get({ ...p, permissions: [] }, request())).state, 'unavailable');
   assert.equal((await x.service.get({ ...p, bridgeId: 'else' }, request())).state, 'unavailable');
   x.setSession({ ...fixture(), pullRequestUrl: 'https://github.com/example/repo/pull/3;touch' }); assert.deepEqual(await x.service.get(p, request()), { state: 'unavailable', reason: 'unavailable' });
@@ -98,7 +98,7 @@ test('coalesces same request and rejects a third active fetch without queuing', 
   release(); const results = await Promise.all([a, same, second]); assert(results.every(x => x.state === 'ready')); assert.equal(calls, 6);
 });
 
-test('review commands classify as session-scoped reads and adapter denies MCP and extra fields', async () => {
+test('review commands classify as session-scoped reads and adapter denies non-browser endpoints and extra fields', async () => {
   assert.deepEqual(classifyCommand('get_pull_request_review', { sessionId: 'session' }), { permission: 'read', mutating: false, operation: 'get_pull_request_review', sessionId: 'session' });
   assert.throws(() => classifyCommand('get_pull_request_review', {}));
   const responses: CommandResponse[] = []; let calls = 0;
@@ -108,7 +108,7 @@ test('review commands classify as session-scoped reads and adapter denies MCP an
   const command: Command = { type: 'get_pull_request_review', requestId: 'id', payload: request() };
   await handler(command, { principal: principal() } as VerifiedApplication); assert.equal(responses.at(-1)?.success, true); assert.equal(calls, 1);
   await handler({ ...command, payload: { ...request(), url } }, { principal: principal() } as VerifiedApplication); assert.equal(responses.at(-1)?.success, false); assert.equal(calls, 1);
-  await handler(command, { principal: { ...principal(), endpoint: { ...principal().endpoint, kind: 'mcp' } } } as VerifiedApplication); assert.equal(responses.at(-1)?.success, false); assert.equal(calls, 1);
+  await handler(command, { principal: { ...principal(), endpoint: { ...principal().endpoint, kind: 'local-cli' } } } as VerifiedApplication); assert.equal(responses.at(-1)?.success, false); assert.equal(calls, 1);
   await handler(command); assert.equal(responses.at(-1)?.success, false); assert.equal(calls, 1);
 });
 

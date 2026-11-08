@@ -1,8 +1,7 @@
 import { createHash } from 'node:crypto';
 import { getDb } from '@/lib/db';
 import { importPublicKey } from '@security/crypto';
-import type { EndpointDirectory, EndpointDirectoryEntry, SecurityPage, SecurityPageQuery } from '@security/protocol';
-import { listSecurityPage } from '../../../bridge/src/mcp/security-events';
+import type { EndpointDirectory, EndpointDirectoryEntry } from '@security/protocol';
 
 type Query = (text: string, params: unknown[]) => Promise<Record<string, unknown>[]>;
 export class SecurityStoreError extends Error { constructor(readonly code: string, readonly status: number) { super(code); } }
@@ -52,5 +51,4 @@ export class SecurityStore {
     if (endpoints.some(entry => entry.endpoint.ownerId !== ownerId)) throw new SecurityStoreError('storage_unavailable', 503);
     return { ownerId, endpoints };
   }
-  activity(ownerId: string, query?: SecurityPageQuery): Promise<SecurityPage> { return listSecurityPage(this.query, ownerId, query); }
 }

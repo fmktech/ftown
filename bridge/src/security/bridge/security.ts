@@ -2,10 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { open, seal, parseSecureEnvelope } from '../crypto.js';
 import type { ApplicationJson, ApplicationRoute, ApprovedEndpoint, BridgeInvitation, BridgeSecurity, EndpointIdentity, EnrollmentPacket,
-  InboundTransportContext, InvitationOptions, LocalRecoveryAuthority, McpActionContext, McpApproval, McpBridgeApproval,
+  InboundTransportContext, InvitationOptions, LocalRecoveryAuthority,
   SecureApplication, SecureEnvelope, SecurePublication, VerifiedApplication, VerifiedPrincipal } from '../protocol.js';
 import { BridgePolicyStore, type PolicyOptions } from './policy.js';
-import { BridgeAuditStore } from './audit.js';
 import { BridgeSecurityError } from './errors.js';
 import { classifyCommand, classifyHttp, classifyTerminal, type OperationPermission } from './permissions.js';
 import { endpointSchema } from './metadata.js';
@@ -15,8 +14,6 @@ import { AccountReadUnavailable } from './account-client.js';
 import { ACCOUNT_SAFETY_REFRESH_MS, SECURITY_NUDGE_MIN_SPACING_MS, createCoalescedTrigger, type CoalescedTrigger } from '../security-nudge.js';
 
 const token = z.string().regex(/^[A-Za-z0-9_-]{1,200}$/);
-const actionSchema = z.object({ actionId: token, parentActionId: token.nullable(), clientId: token, grantId: token,
-  tool: z.string().max(200), operation: z.string().max(200).nullable() }).strict();
 const routeSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('command'), requestId: token, command: z.string().min(1).max(100), sessionId: token.nullable() }).strict(),
   z.object({ kind: z.literal('http'), requestId: token, method: z.enum(['GET', 'POST', 'PATCH', 'PUT', 'DELETE']), path: z.string().max(16384) }).strict(),
@@ -37,11 +34,9 @@ export class BridgeSecurityService implements BridgeSecurity {
   readonly endpoint;
   readonly receiverEpoch = randomUUID();
   readonly policy: BridgePolicyStore;
-  readonly audit: BridgeAuditStore;
   private readonly now: () => number;
   private readonly replay = new Map<string, number>();
   private readonly revoked = new Set<(endpointId: string) => void>();
-  private readonly admissions = new Map<string, string>();
   private readonly verified = new WeakSet<VerifiedApplication>();
   private closed = false;
   private accountTimer: ReturnType<typeof setTimeout> | null = null;
@@ -54,7 +49,6 @@ export class BridgeSecurityService implements BridgeSecurity {
   constructor(readonly identity: EndpointIdentity, readonly bridgeId: string, dataDir: string, readonly options: BridgeSecurityOptions) {
     this.endpoint = identity.endpoint; this.now = options.now ?? Date.now;
     this.policy = new BridgePolicyStore(dataDir, bridgeId, this.endpoint, options);
-    this.audit = new BridgeAuditStore(dataDir, this.endpoint.ownerId, bridgeId, options);
   }
   private context(route: InboundTransportContext): void {
     if (this.closed || route.bridgeId !== this.bridgeId) throw new BridgeSecurityError('wrong_context');
@@ -111,16 +105,15 @@ export class BridgeSecurityService implements BridgeSecurity {
     const envelope = parseSecureEnvelope(packet);
     if (envelope.purpose !== 'hello') throw new BridgeSecurityError('wrong_context');
     this.freshness(envelope, false);
-    const principal = await this.policy.principal(envelope.senderId, true);
+    const principal = await this.policy.principal(envelope.senderId);
     const hello = z.object({ type: z.literal('hello'), challenge: token }).strict().parse(await this.decode(principal.endpoint, envelope, route));
     const welcome = await this.reply(principal.endpoint, 'welcome', { type: 'welcome', challenge: hello.challenge, receiverEpoch: this.receiverEpoch }, route, envelope.messageId);
-    // Pending MCP identities may hello but cannot acquire ordinary application permissions.
-    const current = await this.policy.principal(principal.endpoint.id, true);
+    const current = await this.policy.principal(principal.endpoint.id);
     if (current.endpoint.publicKey !== principal.endpoint.publicKey) throw new BridgeSecurityError('wrong_context');
     return welcome;
   }
   private parseApplication(value: unknown): SecureApplication {
-    const parsed = z.object({ type: z.literal('application'), route: routeSchema, data: z.unknown().optional(), mcp: actionSchema.nullable() }).strict().parse(value);
+    const parsed = z.object({ type: z.literal('application'), route: routeSchema, data: z.unknown().optional(), mcp: z.null() }).strict().parse(value);
     return { ...parsed, data: applicationJson(parsed.data) };
   }
   private requirement(application: SecureApplication, transport: InboundTransportContext): OperationPermission {
@@ -155,22 +148,10 @@ export class BridgeSecurityService implements BridgeSecurity {
     }
     throw new BridgeSecurityError('permission_denied');
   }
-  private async admission(envelope: SecureEnvelope, principal: VerifiedPrincipal, app: SecureApplication, operation: OperationPermission): Promise<void> {
-    if (principal.endpoint.kind !== 'mcp') {
-      if (app.mcp !== null) throw new BridgeSecurityError('permission_denied');
-      return;
-    }
-    const context: McpActionContext | null = app.mcp;
-    if (!context || context.grantId !== principal.grantId) throw new BridgeSecurityError('wrong_context');
-    const admitted = await this.audit.admit({ admissionId: envelope.messageId, ...context, endpointId: principal.endpoint.id,
-      operation: operation.operation, sessionId: operation.sessionId, mutating: operation.mutating });
-    if (!admitted.isNew) throw new BridgeSecurityError('replayed');
-    this.admissions.set(`${envelope.senderId}:${envelope.messageId}`, admitted.event.id);
-  }
   async acceptApplication(packet: SecureEnvelope, route: InboundTransportContext): Promise<VerifiedApplication> {
     const envelope = parseSecureEnvelope(packet);
     if (envelope.purpose !== 'application') throw new BridgeSecurityError('wrong_context');
-    const principal = await this.policy.principal(envelope.senderId, true);
+    const principal = await this.policy.principal(envelope.senderId);
     const app = this.parseApplication(await this.decode(principal.endpoint, envelope, route));
     if (app.route.kind === 'http') {
       const data = object(app.data);
@@ -178,26 +159,8 @@ export class BridgeSecurityService implements BridgeSecurity {
         || typeof data.callerSessionId !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(data.callerSessionId))) throw new BridgeSecurityError('permission_denied');
     }
     this.freshness(envelope, true); this.claim(envelope);
-    // Pending identities can do precisely this one bound operation; never generic application work.
-    if (app.route.kind === 'command' && app.route.command === 'security_activate_mcp') {
-      const data = object(app.data); const payload = object(data.payload ?? null);
-      if (data.type !== app.route.command || data.requestId !== app.route.requestId || payload.bridgeId !== this.bridgeId
-        || payload.grantId !== principal.grantId || principal.endpoint.kind !== 'mcp') throw new BridgeSecurityError('permission_denied');
-      const message = { principal, envelope, application: app };
-      this.verified.add(message); return message;
-    }
-    let operation: OperationPermission;
-    try { operation = this.requirement(app, route); }
-    catch (error) {
-      if (principal.endpoint.kind === 'mcp' && app.mcp) {
-        await this.admission(envelope, principal, app, { permission: 'control', mutating: true, operation: 'invalid_operation', sessionId: null });
-        await this.complete({ principal, envelope, application: app }, 'rejected', 'permission_denied');
-      }
-      throw error;
-    }
-    await this.admission(envelope, principal, app, operation);
-    try { await this.policy.revalidate(principal, operation.permission); }
-    catch (error) { await this.complete({ principal, envelope, application: app }, 'rejected', 'permission_denied'); throw error; }
+    const operation = this.requirement(app, route);
+    await this.policy.revalidate(principal, operation.permission);
     const message = { principal, envelope, application: app };
     this.verified.add(message); return message;
   }
@@ -218,18 +181,10 @@ export class BridgeSecurityService implements BridgeSecurity {
       route: { kind: 'response', requestId: application.route.requestId }, mcp: null,
       data: { type: 'command_response', response: { requestId: application.route.requestId, success: true,
         data: { endpointId: message.principal.endpoint.id, revoked: true } } } }, route, application.route.requestId);
-    // No sealed value leaves this method before both persistence steps have succeeded.
+    // No sealed value leaves this method before the durable self-removal has succeeded.
     await this.revokeEndpoint(message.principal, message.principal.endpoint.id);
-    await this.complete(message, 'succeeded');
     this.verified.delete(message);
     return receipt;
-  }
-  async complete(message: VerifiedApplication, status: 'succeeded' | 'rejected' | 'failed' | 'unknown', errorCode: string | null = null): Promise<void> {
-    const key = `${message.envelope.senderId}:${message.envelope.messageId}`;
-    const admission = this.admissions.get(key);
-    if (!admission) return;
-    try { await this.audit.finish(admission, status, errorCode); this.admissions.delete(key); }
-    catch { throw new BridgeSecurityError('outcome_unknown'); }
   }
   async sealTo(recipientId: string, application: SecureApplication, route: InboundTransportContext): Promise<SecureEnvelope> {
     const principal = await this.policy.principal(recipientId);
@@ -250,13 +205,6 @@ export class BridgeSecurityService implements BridgeSecurity {
   }
   createInvitation(actor: VerifiedPrincipal | LocalRecoveryAuthority, options: InvitationOptions): Promise<BridgeInvitation> { return this.policy.createInvitation(actor, options); }
   listDevices(actor: VerifiedPrincipal): Promise<ApprovedEndpoint[]> { return this.policy.list(actor); }
-  async approveMcp(actor: VerifiedPrincipal, approval: McpApproval): Promise<McpBridgeApproval> {
-    const receipt = await this.policy.approveMcp(actor, approval);
-    const envelope = await this.reply(approval.endpoint, 'mcp-approval', receipt, { transport: 'cloud', channel: `mcp-approval:${this.bridgeId}:${approval.requestId}`,
-      bridgeId: this.bridgeId, pairId: null });
-    return { bridgeId: this.bridgeId, bridge: this.endpoint, receipt: envelope };
-  }
-  activateMcp(actor: VerifiedPrincipal, grantId: string): Promise<{ grantId: string; expiresAt: string }> { return this.policy.activateMcp(actor, grantId); }
   async revokeEndpoint(actor: VerifiedPrincipal, endpointId: string): Promise<void> {
     await this.policy.revoke(actor, endpointId);
     for (const listener of this.revoked) listener(endpointId);
@@ -347,6 +295,6 @@ export class BridgeSecurityService implements BridgeSecurity {
     if (this.accountTimer) clearTimeout(this.accountTimer);
     this.accountTimer = null;
     await this.accountRefresh?.catch(() => undefined);
-    this.revoked.clear(); this.replay.clear(); await this.audit.close(); await this.policy.close();
+    this.revoked.clear(); this.replay.clear(); await this.policy.close();
   }
 }

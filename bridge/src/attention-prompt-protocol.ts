@@ -1,6 +1,6 @@
 /**
  * Structured questions an attention request can carry, and the human's answer.
- * Shared by the bridge, the ftown CLI, MCP, the harness hook and the UI, so it
+ * Shared by the bridge, the ftown CLI, the harness hook and the UI, so it
  * must stay free of Node built-ins and runtime dependencies.
  */
 
@@ -68,7 +68,7 @@ export interface AttentionAnswer {
   answeredAt: string;
 }
 
-/** What callers send as `questions` (local API, MCP, CLI --questions-json). */
+/** What callers send as `questions` (local API, CLI --questions-json). */
 export interface AttentionPromptQuestionInput {
   question: string;
   header?: string;

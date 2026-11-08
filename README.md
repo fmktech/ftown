@@ -1,6 +1,6 @@
 # ftown
 
-A remote CLI agent orchestrator that lets you manage and stream **Claude Code, Cursor Agent, Codex, Grok, Muse Code, Pi, Kimi Code, opencode,** and shell sessions through a web dashboard. Terminal streaming climbs a transport ladder — local loopback, then WebRTC P2P, then Centrifugo — so output stays on your machine or network whenever possible, and automatically upgrades back to a direct connection once it can. The FTown MCP gateway lets connected assistants inspect and control sessions across your authorized computers and follow durable requests for human input.
+A remote CLI agent orchestrator that lets you manage and stream **Claude Code, Cursor Agent, Codex, Grok, Muse Code, Pi, Kimi Code, opencode,** and shell sessions through a web dashboard. Terminal streaming climbs a transport ladder — local loopback, then WebRTC P2P, then Centrifugo — so output stays on your machine or network whenever possible, and automatically upgrades back to a direct connection once it can.
 
 ## Demo
 
@@ -19,22 +19,14 @@ flowchart TB
   Browser["Browser / PWA<br/>Separate non-extractable HPKE + ECDSA keys<br/>Pinned signed account history"]
   Relay["Centrifugo relay<br/>Opaque application content<br/>Visible routing metadata"]
   Bridge["Bridge: trusted plaintext endpoint<br/>Local identity + approved-device policy<br/>Sessions, terminal history and mail"]
-  Client["AI / MCP client + its provider"]
-  Gateway["Hosted MCP: trusted plaintext endpoint<br/>Distinct encrypted grant identity"]
-  Database["PostgreSQL<br/>Encrypted MCP private keys + bound pins<br/>Account, OAuth and audit records"]
-  Secret["Separately provisioned service wrapping secret"]
-  Account["Account login / OAuth consent<br/>Pending requests + signed public roster<br/>Service orders and delivers updates"]
+  Account["Account login / approval<br/>Pending requests + signed public roster<br/>Service orders and delivers updates"]
   Push["Push provider<br/>Generic notice + opaque routing references"]
   Agent["Local agents, tools and files"]
   Provider["External model providers"]
   Browser <-->|"HPKE Auth application encryption"| Relay
   Relay <-->|"HPKE Auth application encryption"| Bridge
   Browser <-->|"Same application encryption over local HTTP/WS or WebRTC"| Bridge
-  Client <-->|"HTTPS + OAuth: gateway sees tool calls/results"| Gateway
-  Gateway <-->|"HPKE Auth application encryption"| Bridge
-  Gateway <-->|"Authenticated ciphertext for private keys"| Database
-  Secret -->|"AES-256-GCM wrapping; not stored in DB"| Gateway
-  Browser <-->|"HTTPS: account/approval/consent metadata"| Account
+  Browser <-->|"HTTPS: account/approval metadata"| Account
   Bridge <-->|"HTTPS: pending requests + signed public history"| Account
   Bridge -->|"Generic notification only"| Push
   Push --> Browser
@@ -48,8 +40,8 @@ flowchart TB
 
 ## Encryption and device trust
 
-Application content is encrypted between approved Browser/PWA, bridge, and MCP
-gateway endpoints using HPKE Auth (P-256, HKDF-SHA256, AES-256-GCM). Commands,
+Application content is encrypted between approved Browser/PWA and bridge
+endpoints using HPKE Auth (P-256, HKDF-SHA256, AES-256-GCM). Commands,
 terminal I/O and history, session names and paths, mail, prompts/results,
 attention text, PR details, and WebRTC SDP/ICE use authenticated encryption on
 every transport. Direct transport failure can select another encrypted route;
@@ -109,7 +101,7 @@ cannot recover lost signing keys.
 Existing bridge approvals remain independent until an administrator chooses
 **Security → Devices → Use account device approvals** for that computer. Adoption
 replaces its legacy browser grants and outstanding invitations, preserving local
-CLI recovery and existing MCP grants. Solo remains independent. A local
+CLI recovery. Solo remains independent. A local
 `ftown security invite` recovery link accesses one computer; it cannot reset or
 sign account trust. Losing every account signing key requires explicit recovery
 of each existing computer, with no automatic root reset.
@@ -122,30 +114,19 @@ pinned account history successfully before using account-derived access. During
 that process, later outages allow at most 24 hours from the last valid read,
 checked against both wall-clock highwaters and elapsed monotonic time.
 
-The hosted MCP gateway is a trusted plaintext endpoint for standard HTTPS/OAuth
-clients. Each OAuth grant gets a distinct bridge-facing identity, approved by
-an administrator browser for selected bridges and read/control scopes. Its
-private key and bridge pins are authenticated ciphertext in PostgreSQL, wrapped
-with a separate service secret. Standard MCP clients need no model PIN. Local
-agents and external model providers remain separate trusted endpoints.
-
 Open **Security → Devices** to inspect the account roster and revoke a device
 across account computers. The last account administrator cannot be revoked;
-approve another device first. **Security → Activity** shows retained MCP gateway attempts
-and independent bridge execution records. Gateway history remains available
-while a bridge is offline. An unknown outcome or timeout does not prove that
-an operation was not executed. Logs retain up to 30 days and 10,000 events per
-store; raw arguments, results, commands and tokens are excluded.
+approve another device first.
 
 Routing metadata remains visible: account/bridge/session identifiers, hostname,
-online state, endpoint keys, sizes and timing. Login, OAuth consent, public-key
+online state, endpoint keys, sizes and timing. Login, public-key
 directory and device metadata use HTTPS. Push notifications contain only a
 generic notice and opaque routing references. Minimal health/discovery and
 local hook ingestion are explicit plaintext exceptions. The bridge decrypts
 before dispatching local tools; this protocol does not encrypt their files or
 replace their provider security. Endpoint software and same-origin browser code
-remain trusted. No anonymity, forward secrecy, hardware-backed key protection,
-or zero-knowledge hosted MCP is claimed. See [operational setup](docs/e2ee-operations.md).
+remain trusted. No anonymity, forward secrecy, or hardware-backed key protection
+is claimed. See [operational setup](docs/e2ee-operations.md).
 
 Automatic approval uses FTown's committed verification-code protocol over HPKE;
 it is not externally audited or compatible with another messenger's pairing
@@ -318,36 +299,6 @@ feature rollout blocked if migration fails. The old app tolerates the additive
 schema; the new app requires the pending table, including for legacy pairing.
 Vercel deployment and the migration workflow run concurrently, so an automatic
 app deployment does not wait for migration success.
-
-## Agent control over MCP
-
-Connect an assistant to the remote Streamable HTTP MCP server at
-`https://ftown-mcp.fly.dev/mcp` (or your own deployed gateway URL). Use the
-client's OAuth connection flow, sign in to FTown and select the computers and
-read/control access to authorize. The client needs Streamable HTTP, public OAuth
-with S256 PKCE and resource indicators; there is no local stdio command or bridge
-token to paste into it. Computers must be paired and registered in the gateway.
-Self-hosted setup and configuration are in the [MCP guide](docs/mcp.md).
-
-- **Fleet and sessions:** discover authorized computers, inspect current sessions,
-  create tasks, rename/reparent, stop/retry, archive/revive, read token usage and
-  search retained terminal history. Keep both the machine and session ID.
-- **Mail and terminals:** send durable threaded messages or broadcasts, observe
-  inboxes without consuming agent mail, and send exact terminal input or resize
-  requests when authorized.
-- **Durable attention:** `attention_inbox` reads supported human-input requests;
-  `attention_wait` waits across selected sessions with reconnect cursors.
-  `attention_ack` acknowledges delivery and `attention_resolve` updates the record;
-  neither answers or approves the source prompt.
-
-Upgrade each bridge for durable attention capture. Supported hooks write requests
-to its local ledger before acknowledging them, so captured requests survive
-restarts and gateway outages. Capture depends on the harness's supported hooks;
-terminal text and idle state do not establish a request. A bounded
-`attention_wait` can emit standard progress notifications when the client supplies
-`_meta.progressToken`. Clients must call inbox/wait again or reconnect with their
-cursors; this does not promise unsolicited wake-up of an inactive assistant.
-See [identity and attention details](docs/mcp.md#identity-and-durable-attention).
 
 ## Configuration
 
@@ -650,6 +601,10 @@ Factory and recurring interval/cron automation was retired in bridge 0.19.38.
 Saved definitions, run histories and project files are preserved but inactive.
 Read the [retirement and rollback notes](docs/automation-sunset.md) before upgrading
 or downgrading bridges.
+
+MCP removed (2026-11): the hosted MCP gateway and its OAuth grants are gone, and
+migration `0010_drop_mcp.sql` drops its four tables. Use the `ftown sessions`
+CLI commands for sessions, mail and human-input requests.
 
 ## Development
 

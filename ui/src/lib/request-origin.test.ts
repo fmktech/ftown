@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { isTrustedBrowserOrigin } from './request-origin';
 
-const internal = 'https://localhost:3000/api/mcp/consent';
+const internal = 'https://localhost:3000/api/security/account';
 const publicOrigin = 'https://localhost:8444';
 const request = (origin: string | null, forwarded: Record<string, string> = {}) => new Request(internal, {
   headers: { ...(origin === null ? {} : { origin }), ...forwarded },

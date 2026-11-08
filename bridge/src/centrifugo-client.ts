@@ -301,7 +301,6 @@ export class CentrifugoClient {
         if (msg.kind === 'input' && typeof msg.data === 'string') onInput(sessionId, msg.data);
         if (msg.kind === 'resize' && Number.isInteger(msg.cols) && Number.isInteger(msg.rows)) onResize(sessionId, msg.cols!, msg.rows!);
         if (msg.kind === 'init') onInit?.(sessionId);
-        await security.complete(verified, 'succeeded');
       }).catch(() => { console.warn('[Centrifugo] Encrypted terminal input rejected'); });
       this.terminalInbound.set(channel, terminalRun);
     });

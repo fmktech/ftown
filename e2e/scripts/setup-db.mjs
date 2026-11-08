@@ -21,12 +21,12 @@ const client = new Client({
 if (!["localhost", "127.0.0.1", "::1"].includes(process.env.PGHOST ?? "localhost")) throw new Error('E2E setup requires its isolated loopback PostgreSQL instance');
 
 const PUSH_DDL = await (await import("node:fs/promises")).readFile(new URL("../../ui/migrations/0005_web_push.sql", import.meta.url), "utf8");
-const OAUTH_DDL = await (await import("node:fs/promises")).readFile(new URL("../../ui/migrations/0004_mcp_oauth.sql", import.meta.url), "utf8");
 const SECURITY_DDL = await (await import("node:fs/promises")).readFile(new URL("../../ui/migrations/0006_endpoint_security.sql", import.meta.url), "utf8");
 const ACCOUNT_DDL = await (await import("node:fs/promises")).readFile(new URL("../../ui/migrations/0007_account_trust.sql", import.meta.url), "utf8");
 
 const PENDING_DDL = await (await import("node:fs/promises")).readFile(new URL("../../ui/migrations/0008_pending_approvals.sql", import.meta.url), "utf8");
 const DISPLAY_NAMES_DDL = await (await import("node:fs/promises")).readFile(new URL("../../ui/migrations/0009_device_display_names.sql", import.meta.url), "utf8");
+const DROP_MCP_DDL = await (await import("node:fs/promises")).readFile(new URL("../../ui/migrations/0010_drop_mcp.sql", import.meta.url), "utf8");
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS users (
@@ -78,14 +78,14 @@ try {
   await client.query(PUSH_DDL);
   await client.query('BEGIN');
   try {
-    await client.query(OAUTH_DDL);
     await client.query(SECURITY_DDL);
     await client.query(ACCOUNT_DDL);
     await client.query(PENDING_DDL);
     await client.query(DISPLAY_NAMES_DDL);
+    await client.query(DROP_MCP_DDL);
     await client.query('COMMIT');
   } catch (error) { await client.query('ROLLBACK'); throw error; }
 } finally { await client.end(); }
 console.log(
-  "[setup-db] schema ready (auth, push, MCP OAuth, encrypted endpoints, account trust, pending approvals and security history)",
+  "[setup-db] schema ready (auth, push, encrypted endpoints, account trust, pending approvals and security history)",
 );

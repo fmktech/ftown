@@ -219,7 +219,7 @@ function object(value: unknown): value is Record<string, unknown> { return !!val
 export async function validatePublicEndpoint(value: unknown): Promise<EndpointPublic> {
   if (!object(value) || Object.keys(value).sort().join(",") !== "id,kind,ownerId,publicKey,version"
     || value.version !== 1 || typeof value.ownerId !== "string" || typeof value.id !== "string" || typeof value.publicKey !== "string"
-    || !["bridge", "browser", "mcp", "local-cli"].includes(String(value.kind))) throw new SecurityError("invitation_invalid", "Invalid endpoint identity");
+    || !["bridge", "browser", "local-cli"].includes(String(value.kind))) throw new SecurityError("invitation_invalid", "Invalid endpoint identity");
   const publicKey = await importPublicKey(value.publicKey);
   const raw = await crypto.subtle.exportKey("raw", publicKey);
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", raw));

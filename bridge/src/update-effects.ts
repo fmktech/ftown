@@ -14,7 +14,7 @@ export class UpdateEffects implements SecureExecutionObserver {
   admitted(message: VerifiedApplication): void {
     const route = message.application.route;
     const body = message.application.data;
-    const permission = route.kind === 'command' ? (route.command === 'security_activate_mcp' ? { mutating: true } : classifyCommand(route.command, record(body) ? body.payload as ApplicationJson : undefined))
+    const permission = route.kind === 'command' ? (classifyCommand(route.command, record(body) ? body.payload as ApplicationJson : undefined))
       : route.kind === 'http' ? classifyHttp(route.method, route.path)
       : route.kind === 'terminal' ? classifyTerminal(route.frameType) : null;
     const key = message.envelope.messageId;

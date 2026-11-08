@@ -2,7 +2,6 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import type { BridgeInvitation, BridgeSecurityState, SecurityCommand, SecurityCommandResults } from "@security/protocol";
-import { SecurityActivity } from "./SecurityActivity";
 import { SecurityDevices } from "./SecurityDevices";
 import type { AccountSecurityClient, AccountSecuritySnapshot } from "@/lib/account-security-client";
 import type { PendingApprovalClient, PendingSnapshot } from "@/lib/pending-approval-client";
@@ -23,13 +22,11 @@ export interface SecurityPanelProps {
   currentComputerIds?: ReadonlySet<string>;
   execute: SecurityCommandExecutor;
   initialBridgeId?: string;
-  gatewayAvailable?: boolean;
   onInvitation?: (invitation: BridgeInvitation) => void;
   accountClient?: AccountSecurityClient;
   accountState?: AccountSecuritySnapshot;
   pendingClient?: PendingApprovalClient;
   pendingState?: PendingSnapshot;
-  initialView?: "activity" | "devices";
 }
 
 export function securityStateLabel(state: BridgeSecurityState["status"]): string {
@@ -66,8 +63,7 @@ export function securityErrorMessage(error: unknown): string {
 }
 
 export function SecurityPanel({ open, onClose, bridges, currentEndpointId, currentComputerIds, execute, initialBridgeId,
-  gatewayAvailable = true, onInvitation, accountClient, accountState, pendingClient, pendingState, initialView = "devices" }: SecurityPanelProps) {
-  const [view, setView] = useState<"activity" | "devices">("devices");
+  onInvitation, accountClient, accountState, pendingClient, pendingState }: SecurityPanelProps) {
   const [bridgeId, setBridgeId] = useState(initialBridgeId ?? "");
   const dialogRef = useRef<HTMLDialogElement>(null);
   const titleId = useId();
@@ -75,12 +71,11 @@ export function SecurityPanel({ open, onClose, bridges, currentEndpointId, curre
   useEffect(() => {
     if (!open) return;
     setBridgeId(initialBridgeId ?? "");
-    setView(initialView);
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const dialog = dialogRef.current;
     dialog?.showModal();
     return () => { dialog?.close(); previous?.focus(); };
-  }, [open, initialBridgeId, initialView]);
+  }, [open, initialBridgeId]);
 
   if (!open) return null;
   const selected = bridges.find(bridge => bridge.bridgeId === bridgeId);
@@ -90,21 +85,8 @@ export function SecurityPanel({ open, onClose, bridges, currentEndpointId, curre
     <div className="flex max-h-[min(92dvh,920px)] flex-col" onClick={event => event.stopPropagation()}>
       <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--border-muted)] px-3 py-1.5 sm:px-4">
         <h2 id={titleId} className="shrink-0 text-base font-semibold">Security</h2>
-        <div role="tablist" aria-label="Security views" className="flex min-w-0 flex-1 gap-1">
-          {(["devices", "activity"] as const).map(tab => <button key={tab} type="button" role="tab"
-            aria-selected={view === tab} aria-controls={`${titleId}-${tab}`} id={`${titleId}-tab-${tab}`}
-            tabIndex={view === tab ? 0 : -1}
-            onKeyDown={event => {
-              if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-              event.preventDefault();
-              const next = event.key === "Home" ? "devices" : event.key === "End" ? "activity" : tab === "activity" ? "devices" : "activity";
-              setView(next); document.getElementById(`${titleId}-tab-${next}`)?.focus();
-            }}
-            className={`${view === tab ? "btn-accent" : "btn-ghost"} min-h-11 sm:min-h-8`} onClick={() => setView(tab)}>
-            {tab === "activity" ? "Activity" : "Access"}
-          </button>)}
-        </div>
-        {(view === "activity" || !accountClient || !accountState?.trust && !!accountState?.legacyBridges.length) && <label className="order-last flex w-full min-w-0 items-center gap-2 text-xs text-[var(--text-muted)] sm:order-none sm:w-auto">Computer
+        <div className="min-w-0 flex-1" />
+        {(!accountClient || !accountState?.trust && !!accountState?.legacyBridges.length) && <label className="order-last flex w-full min-w-0 items-center gap-2 text-xs text-[var(--text-muted)] sm:order-none sm:w-auto">Computer
           <select aria-label="Security computer" value={bridgeId} onChange={event => setBridgeId(event.target.value)}
             className="min-h-11 min-w-0 flex-1 rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)] px-2 text-sm text-[var(--text-primary)] sm:min-h-8 sm:max-w-56">
             <option value="">All computers</option>
@@ -115,9 +97,8 @@ export function SecurityPanel({ open, onClose, bridges, currentEndpointId, curre
       </header>
       <div data-security-content className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4">
         {selected && <p className="mb-2 text-xs text-[var(--text-muted)]">{selected.label}: {securityStateLabel(selected.security.status)}</p>}
-        <section role="tabpanel" id={`${titleId}-${view}`} aria-labelledby={`${titleId}-tab-${view}`}>
-          {view === "activity" ? <SecurityActivity bridgeId={bridgeId} selectedBridge={selected} execute={execute} gatewayAvailable={gatewayAvailable} />
-            : <SecurityDevices bridge={selected} bridges={bridges} currentEndpointId={currentEndpointId} currentComputerIds={currentComputerIds} execute={execute} onInvitation={onInvitation} accountClient={accountClient} accountState={accountState} pendingClient={pendingClient} pendingState={pendingState} />}
+        <section>
+          <SecurityDevices bridge={selected} bridges={bridges} currentEndpointId={currentEndpointId} currentComputerIds={currentComputerIds} execute={execute} onInvitation={onInvitation} accountClient={accountClient} accountState={accountState} pendingClient={pendingClient} pendingState={pendingState} />
         </section>
       </div>
     </div>

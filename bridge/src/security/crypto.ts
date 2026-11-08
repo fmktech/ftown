@@ -9,8 +9,8 @@ export const MAX_ENVELOPE_BYTES = 450_000;
 const MAX_RECIPIENTS = 100;
 const encoder = new TextEncoder();
 const domain = encoder.encode('ftown/e2ee/v1');
-const kinds: readonly EndpointKind[] = ['bridge', 'browser', 'mcp', 'local-cli'];
-const purposes: readonly EnvelopePurpose[] = ['application', 'hello', 'welcome', 'enroll', 'enrolled', 'mcp-approval'];
+const kinds: readonly EndpointKind[] = ['bridge', 'browser', 'local-cli'];
+const purposes: readonly EnvelopePurpose[] = ['application', 'hello', 'welcome', 'enroll', 'enrolled'];
 const fields = [
   'type', 'version', 'senderId', 'recipientId', 'ownerId', 'bridgeId', 'channel',
   'purpose', 'messageId', 'createdAt', 'expiresAt', 'receiverEpoch', 'enc', 'ciphertext',
