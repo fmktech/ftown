@@ -1,27 +1,45 @@
+import { statSync, type BigIntStats } from 'node:fs';
 import { mkdir, open, rename, rm } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
 import { BridgeSecurityError } from './errors.js';
 
-/** One process owns each instance directory. Never publish in-memory state before durable replacement. */
+const RACY_WINDOW_MS = 50;
+const identityOf = (s: BigIntStats): string => `${s.dev}:${s.ino}:${s.size}:${s.mtimeNs}:${s.ctimeNs}`;
+
+/** Writers replace the file atomically; reads are served from an identity-validated cache. Never publish in-memory state before durable replacement. */
 export class AtomicSnapshot<T> {
   private tail: Promise<unknown> = Promise.resolve();
+  private cache: { identity: string; value: T } | null = null;
   constructor(private readonly file: string, private readonly schema: z.ZodType<T>, private readonly initial: () => NoInfer<T>) {}
 
   private async load(): Promise<T> {
+    let stat: BigIntStats;
+    try { stat = statSync(this.file, { bigint: true }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') { this.cache = null; return this.initial(); }
+      throw new BridgeSecurityError('storage_unavailable');
+    }
+    if (this.cache?.identity === identityOf(stat)) return structuredClone(this.cache.value);
     let handle;
     try {
       handle = await open(this.file, 'r');
-      if ((await handle.stat()).size > 64 * 1024 * 1024) throw new Error('Oversize snapshot');
-      return this.schema.parse(JSON.parse(await handle.readFile('utf8')));
+      const fstat = await handle.stat({ bigint: true });
+      if (fstat.size > 64n * 1024n * 1024n) throw new Error('Oversize snapshot');
+      const value = this.schema.parse(JSON.parse(await handle.readFile('utf8')));
+      const newest = Math.max(Number(fstat.mtimeMs), Number(fstat.ctimeMs));
+      this.cache = Date.now() - newest >= RACY_WINDOW_MS ? { identity: identityOf(fstat), value } : null;
+      return structuredClone(value);
     } catch (error) {
+      this.cache = null;
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return this.initial();
       throw new BridgeSecurityError('storage_unavailable');
     } finally { await handle?.close(); }
   }
 
   private async save(value: T): Promise<void> {
+    this.cache = null;
     const directory = dirname(this.file);
     const temporary = `${this.file}.${randomUUID()}.tmp`;
     try {

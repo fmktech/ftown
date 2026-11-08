@@ -44,6 +44,8 @@ class FakeDataChannel implements DirectDataChannel {
   public failSend = false;
   pairId = 'pair-1';
   private decodeQueue: Promise<void> = Promise.resolve();
+  /** Waits for the peer's queued outbound seals; inbound receive no longer does. */
+  flushOutbound: () => Promise<void> = async () => {};
   private open = true;
   private messageCb?: (msg: string | Buffer | ArrayBuffer) => void;
   private closedCb?: () => void;
@@ -93,6 +95,7 @@ class FakeDataChannel implements DirectDataChannel {
       bridgeId: OUR_BRIDGE_ID, channel, purpose: hello ? 'hello' : 'application', messageId: randomUUID(), createdAt: Date.now(),
       expiresAt: Date.now() + 60000, receiverEpoch: hello ? null : secure.security.receiverEpoch }, new TextEncoder().encode(JSON.stringify(body)));
     await this.messageCb?.(JSON.stringify(hello && frame.protocolVersion !== DIRECT_PROTOCOL_VERSION ? { ...packet, version: 2 } : packet));
+    await this.flushOutbound();
     await this.decodeQueue;
   }
   async flush(): Promise<void> { await this.decodeQueue; }
@@ -168,6 +171,7 @@ function makeManager(
   const peerConnectionFactory: PeerConnectionFactory = (_peerName, _config) => {
     const pc = new FakePeerConnection();
     pc.dataChannel.pairId = _peerName.slice('ftown-'.length);
+    pc.dataChannel.flushOutbound = () => manager.drain();
     configurePc?.(pc, peers.length);
     peers.push(pc);
     return pc;

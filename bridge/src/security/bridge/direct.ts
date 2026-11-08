@@ -3,7 +3,7 @@ import type { InboundTransportContext } from '../protocol.js';
 import { parseSecureEnvelope } from '../crypto.js';
 import { BridgeSecurityService, applicationJson } from './security.js';
 
-/** Serial crypto at the peer boundary; application frames never escape as plaintext. */
+/** Serial crypto per direction at the peer boundary; application frames never escape as plaintext. */
 export class EncryptedPeerChannel {
   private inbound: Promise<void> = Promise.resolve();
   private outbound: Promise<void> = Promise.resolve();
@@ -34,7 +34,6 @@ export class EncryptedPeerChannel {
       await this.security.revalidate(verified.principal);
       this.deliver(verified.application.data as unknown as DirectMessage);
       await this.security.complete(verified, 'succeeded');
-      await this.outbound;
     }).catch(() => { this.teardown(); });
     return this.inbound;
   }

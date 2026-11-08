@@ -1,9 +1,10 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, appendFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { JsonlFoldCache } from './jsonl-fold-cache.js';
 import { claudeProjectSlug, collectSessionUsage } from './usage-collector.js';
 
 let root: string;
@@ -798,5 +799,241 @@ describe('collectSessionUsage — extractor routing', () => {
 
   it('returns null for sessions with no structured source (shell/cursor)', async () => {
     assert.equal(await collectSessionUsage({ shellType: 'shell' }), null);
+  });
+});
+
+describe('collectSessionUsage — incremental folding across polls', () => {
+  const withoutCollectedAt = <T extends { collectedAt?: string } | null>(usage: T) => {
+    if (!usage) return usage;
+    const { collectedAt: _collectedAt, ...rest } = usage;
+    return rest;
+  };
+
+  it('claude: appended lines (repeat id, second model) match a fresh-cache collect and read only the delta', async () => {
+    const workingDir = '/tmp/incr.claude';
+    const sessionId = 'incr-claude';
+    const claudeProjectsDir = join(root, 'incr-claude');
+    const dir = join(claudeProjectsDir, claudeProjectSlug(workingDir));
+    await mkdir(dir, { recursive: true });
+    const file = join(dir, `${sessionId}.jsonl`);
+    await writeFile(file, [
+      claudeLine('m1', 'claude-sonnet-5', { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 30, cache_creation_input_tokens: 40 }),
+      claudeLine('m2', 'claude-sonnet-5', { input_tokens: 1, output_tokens: 2 }),
+    ].join('\n') + '\n');
+
+    const foldCache = new JsonlFoldCache();
+    const ref = { shellType: 'claude' as const, claudeSessionId: sessionId, workingDir };
+    const first = await collectSessionUsage(ref, { claudeProjectsDir, foldCache });
+    assert.equal(first?.inputTokens, 11);
+
+    const appended = [
+      claudeLine('m2', 'claude-sonnet-5', { input_tokens: 1, output_tokens: 2 }),
+      claudeLine('m3', 'claude-haiku-4-5', { input_tokens: 100, output_tokens: 200 }),
+      claudeLine('m4', 'claude-sonnet-5', { input_tokens: 5, output_tokens: 6 }),
+    ].join('\n') + '\n';
+    await appendFile(file, appended);
+
+    const before = foldCache.stats().bytesRead;
+    const second = await collectSessionUsage(ref, { claudeProjectsDir, foldCache });
+    const delta = foldCache.stats().bytesRead - before;
+    assert.ok(delta <= Buffer.byteLength(appended) + 64, `read ${delta} bytes`);
+
+    const fresh = await collectSessionUsage(ref, { claudeProjectsDir, foldCache: new JsonlFoldCache() });
+    assert.deepEqual(withoutCollectedAt(second), withoutCollectedAt(fresh));
+    assert.equal(second?.inputTokens, 10 + 1 + 100 + 5);
+    assert.deepEqual(second?.models, ['claude-sonnet-5', 'claude-haiku-4-5']);
+
+    // The result never aliases cache state: mutating it does not leak into the next poll.
+    second!.perModel![0]!.inputTokens = 999_999;
+    second!.models.push('bogus');
+    const third = await collectSessionUsage(ref, { claudeProjectsDir, foldCache });
+    assert.deepEqual(withoutCollectedAt(third), withoutCollectedAt(fresh));
+  });
+
+  it('claude: a half-written line is excluded, then counted once when completed', async () => {
+    const workingDir = '/tmp/incr.half';
+    const sessionId = 'incr-half';
+    const claudeProjectsDir = join(root, 'incr-half');
+    const dir = join(claudeProjectsDir, claudeProjectSlug(workingDir));
+    await mkdir(dir, { recursive: true });
+    const file = join(dir, `${sessionId}.jsonl`);
+    const whole = claudeLine('m1', 'claude-sonnet-5', { input_tokens: 10, output_tokens: 1 });
+    const tail = claudeLine('m2', 'claude-sonnet-5', { input_tokens: 7, output_tokens: 3 });
+    const cut = Math.floor(tail.length / 2);
+    await writeFile(file, whole + '\n' + tail.slice(0, cut));
+
+    const foldCache = new JsonlFoldCache();
+    const ref = { shellType: 'claude' as const, claudeSessionId: sessionId, workingDir };
+    const partial = await collectSessionUsage(ref, { claudeProjectsDir, foldCache });
+    assert.equal(partial?.inputTokens, 10);
+
+    await appendFile(file, tail.slice(cut) + '\n');
+    const done = await collectSessionUsage(ref, { claudeProjectsDir, foldCache });
+    assert.equal(done?.inputTokens, 17);
+    assert.equal(done?.outputTokens, 4);
+    const again = await collectSessionUsage(ref, { claudeProjectsDir, foldCache });
+    assert.equal(again?.inputTokens, 17);
+  });
+
+  it('codex: appended token_count updates totals and appended turn_context adds a model', async () => {
+    const codexSessionId = '019d2b5c-0000-7863-9688-d9be287e46a6';
+    const codexSessionsDir = join(root, 'incr-codex');
+    const dir = join(codexSessionsDir, '2026', '07', '02');
+    await mkdir(dir, { recursive: true });
+    const file = join(dir, `rollout-2026-07-02T10-00-00-${codexSessionId}.jsonl`);
+    const tokenCount = (input: number, cached: number, output: number) => JSON.stringify({
+      type: 'event_msg',
+      payload: { type: 'token_count', info: { total_token_usage: { input_tokens: input, cached_input_tokens: cached, output_tokens: output } } },
+    });
+    await writeFile(file, [
+      JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-5.4' } }),
+      tokenCount(100, 50, 5),
+    ].join('\n') + '\n');
+
+    const foldCache = new JsonlFoldCache();
+    const ref = { shellType: 'codex' as const, codexSessionId };
+    const first = await collectSessionUsage(ref, { codexSessionsDir, foldCache });
+    assert.equal(first?.totalTokens, 105);
+    assert.deepEqual(first?.models, ['gpt-5.4']);
+
+    await appendFile(file, [
+      JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-5.4-mini' } }),
+      JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-5.4' } }),
+      tokenCount(1000, 400, 30),
+    ].join('\n') + '\n');
+
+    const second = await collectSessionUsage(ref, { codexSessionsDir, foldCache });
+    const fresh = await collectSessionUsage(ref, { codexSessionsDir, foldCache: new JsonlFoldCache() });
+    assert.deepEqual(withoutCollectedAt(second), withoutCollectedAt(fresh));
+    assert.equal(second?.inputTokens, 600);
+    assert.equal(second?.cacheReadTokens, 400);
+    assert.equal(second?.outputTokens, 30);
+    assert.deepEqual(second?.models, ['gpt-5.4', 'gpt-5.4-mini']);
+    // The first result's models array was a copy, not the live fold state.
+    assert.deepEqual(first?.models, ['gpt-5.4']);
+  });
+
+  it('kimi: two agents, appending to one wire.jsonl matches a fresh-cache result', async () => {
+    const workingDir = '/Users/x/projects/incr-kimi';
+    const kimiCodeDir = join(root, 'incr-kimi');
+    const sessionDir = join(kimiCodeDir, 'sessions', 'wd_incr_1', 'session_incr');
+    await mkdir(kimiCodeDir, { recursive: true });
+    await writeFile(
+      join(kimiCodeDir, 'session_index.jsonl'),
+      JSON.stringify({ sessionId: 'session_incr', sessionDir, workDir: workingDir }) + '\n',
+    );
+    const rec = (model: string, n: number) =>
+      kimiUsageRecord(model, { inputOther: n, output: n * 2, inputCacheRead: n * 3, inputCacheCreation: n * 4 });
+    await writeKimiSession({
+      kimiCodeDir,
+      sessionDir,
+      workDir: workingDir,
+      createdAt: '2026-07-17T12:00:05.000Z',
+      wireByAgent: {
+        main: [rec('kimi-code/k3', 1)],
+        'agent-0': [rec('kimi-code/k2', 2), rec('kimi-code/k3', 3)],
+      },
+    });
+
+    const foldCache = new JsonlFoldCache();
+    const ref = { shellType: 'kimi-code' as const, workingDir, createdAt: '2026-07-17T12:00:00.000Z' };
+    const first = await collectSessionUsage(ref, { kimiCodeDir, foldCache });
+    assert.equal(first?.inputTokens, 6);
+
+    await appendFile(join(sessionDir, 'agents', 'agent-0', 'wire.jsonl'), rec('kimi-code/k3', 10) + '\n' + rec('kimi-code/k1', 5) + '\n');
+    const second = await collectSessionUsage(ref, { kimiCodeDir, foldCache });
+    const fresh = await collectSessionUsage(ref, { kimiCodeDir, foldCache: new JsonlFoldCache() });
+    assert.deepEqual(withoutCollectedAt(second), withoutCollectedAt(fresh));
+    assert.equal(second?.inputTokens, 1 + 2 + 3 + 10 + 5);
+    assert.deepEqual(second?.models, ['kimi-code/k2', 'kimi-code/k3', 'kimi-code/k1']);
+    // Repeated polls never double count merged sums.
+    const third = await collectSessionUsage(ref, { kimiCodeDir, foldCache });
+    assert.deepEqual(withoutCollectedAt(third), withoutCollectedAt(fresh));
+  });
+
+  it('kimi: an agent dir without wire.jsonl is skipped; with none at all the result is null', async () => {
+    const workingDir = '/Users/x/projects/kimi-nowire';
+    const kimiCodeDir = join(root, 'kimi-nowire');
+    const sessionDir = join(kimiCodeDir, 'sessions', 'wd_nw_1', 'session_nw');
+    await mkdir(kimiCodeDir, { recursive: true });
+    await writeFile(
+      join(kimiCodeDir, 'session_index.jsonl'),
+      JSON.stringify({ sessionId: 'session_nw', sessionDir, workDir: workingDir }) + '\n',
+    );
+    await writeKimiSession({
+      kimiCodeDir,
+      sessionDir,
+      workDir: workingDir,
+      createdAt: '2026-07-17T12:00:05.000Z',
+      wireByAgent: {
+        main: [kimiUsageRecord('kimi-code/k3', { inputOther: 7, output: 3, inputCacheRead: 0, inputCacheCreation: 0 })],
+      },
+    });
+    await mkdir(join(sessionDir, 'agents', 'agent-empty'), { recursive: true });
+
+    const ref = { shellType: 'kimi-code' as const, workingDir, createdAt: '2026-07-17T12:00:00.000Z' };
+    const usage = await collectSessionUsage(ref, { kimiCodeDir, foldCache: new JsonlFoldCache() });
+    assert.equal(usage?.inputTokens, 7);
+    assert.equal(usage?.outputTokens, 3);
+    assert.deepEqual(usage?.models, ['kimi-code/k3']);
+
+    await rm(join(sessionDir, 'agents', 'main'), { recursive: true });
+    const none = await collectSessionUsage(ref, { kimiCodeDir, foldCache: new JsonlFoldCache() });
+    assert.equal(none, null);
+  });
+
+  it('muse: appended model_completed lines match a fresh-cache result', async () => {
+    const workingDir = '/Users/x/projects/incr-muse';
+    const museSessionsDir = join(root, 'incr-muse');
+    const completed = (model: string, input: number, cacheRead: number) => museCompletedLine(model, {
+      input_tokens: input, output_tokens: 5, cache_write_tokens: 1, cache_read_tokens: cacheRead,
+    }, museUs('2026-09-20T12:00:03.000Z'));
+    await writeMuseSession(museSessionsDir, 'sess-incr', [
+      museMetaLine(workingDir, museUs('2026-09-20T12:00:01.000Z')),
+      completed('muse-a', 100, 40),
+    ]);
+
+    const foldCache = new JsonlFoldCache();
+    const ref = { shellType: 'muse' as never, workingDir, createdAt: '2026-09-20T12:00:00.000Z' };
+    const first = await collectSessionUsage(ref, { museSessionsDir, foldCache });
+    assert.equal(first?.inputTokens, 60);
+
+    await appendFile(
+      join(museSessionsDir, '2026', '09', '20', 'sess-incr', 'session.jsonl'),
+      completed('muse-a', 50, 10) + '\n' + completed('muse-b', 20, 0) + '\n',
+    );
+    const second = await collectSessionUsage(ref, { museSessionsDir, foldCache });
+    const fresh = await collectSessionUsage(ref, { museSessionsDir, foldCache: new JsonlFoldCache() });
+    assert.deepEqual(withoutCollectedAt(second), withoutCollectedAt(fresh));
+    assert.equal(second?.inputTokens, 60 + 40 + 20);
+    assert.deepEqual(second?.models, ['muse-a', 'muse-b']);
+  });
+
+  it('pi: appended assistant messages match a fresh-cache result', async () => {
+    const workingDir = '/Users/x/projects/pi-incr';
+    const piSessionsDir = join(root, 'incr-pi');
+    const dir = join(piSessionsDir, '--Users-x-projects-pi-incr--');
+    await mkdir(dir, { recursive: true });
+    const file = join(dir, '2026-08-08T10-00-01-000Z_pi.jsonl');
+    const assistant = (provider: string, model: string, input: number) => JSON.stringify({
+      type: 'message',
+      message: { role: 'assistant', provider, model, usage: { input, output: 2, cacheRead: 3, cacheWrite: 4 } },
+    });
+    await writeFile(file, [
+      JSON.stringify({ type: 'session', version: 3, timestamp: '2026-08-08T10:00:01.000Z', cwd: workingDir }),
+      assistant('anthropic', 'claude-sonnet-4', 10),
+    ].join('\n') + '\n');
+
+    const foldCache = new JsonlFoldCache();
+    const ref = { shellType: 'pi' as const, workingDir, createdAt: '2026-08-08T10:00:00.000Z' };
+    const first = await collectSessionUsage(ref, { piSessionsDir, foldCache });
+    assert.equal(first?.inputTokens, 10);
+
+    await appendFile(file, assistant('openai', 'gpt-5', 7) + '\n' + assistant('anthropic', 'claude-sonnet-4', 1) + '\n');
+    const second = await collectSessionUsage(ref, { piSessionsDir, foldCache });
+    const fresh = await collectSessionUsage(ref, { piSessionsDir, foldCache: new JsonlFoldCache() });
+    assert.deepEqual(withoutCollectedAt(second), withoutCollectedAt(fresh));
+    assert.equal(second?.inputTokens, 18);
+    assert.deepEqual(second?.models, ['anthropic/claude-sonnet-4', 'openai/gpt-5']);
   });
 });
