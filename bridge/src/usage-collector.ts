@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 
+import { defaultJsonlFoldCache, type JsonlFold, type JsonlFoldCache } from './jsonl-fold-cache.js';
 import type { ModelUsage, Session, SessionUsage } from './types.js';
 
 /**
@@ -53,9 +54,56 @@ export interface UsageCollectorOptions {
   museSessionsDir?: string;
   /** Cap on wall-clock read time per collection. Default 15s. */
   timeoutMs?: number;
+  /** Incremental read cache. Default: defaultJsonlFoldCache (shared process-wide). Tests inject a fresh one. */
+  foldCache?: JsonlFoldCache;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
+
+interface ModelSums {
+  // Keyed by model id; Map preserves first-appearance order.
+  byModel: Map<string, ModelUsage>;
+  counted: number;
+}
+
+function newModelSums(): ModelSums {
+  return { byModel: new Map(), counted: 0 };
+}
+
+function modelAcc(state: ModelSums, model: string): ModelUsage {
+  let acc = state.byModel.get(model);
+  if (!acc) {
+    acc = { model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    state.byModel.set(model, acc);
+  }
+  return acc;
+}
+
+/** Builds the SessionUsage for per-model sums; copies, so the result never aliases fold state. */
+function usageFromModels(
+  byModel: ReadonlyMap<string, ModelUsage>,
+  harness: SessionUsage['harness'],
+): SessionUsage {
+  const perModel = [...byModel.values()].map((m) => ({ ...m }));
+  const sum = (pick: (m: ModelUsage) => number): number =>
+    perModel.reduce((acc, m) => acc + pick(m), 0);
+  const inputTokens = sum((m) => m.inputTokens);
+  const outputTokens = sum((m) => m.outputTokens);
+  const cacheReadTokens = sum((m) => m.cacheReadTokens);
+  const cacheWriteTokens = sum((m) => m.cacheWriteTokens);
+
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+    models: perModel.map((m) => m.model),
+    perModel,
+    harness,
+    collectedAt: new Date().toISOString(),
+  };
+}
 
 /**
  * Claude Code project-directory slug: every non-alphanumeric character of the
@@ -189,50 +237,35 @@ async function collectPiUsage(
   const filePath = await containedPiSessionFile(baseDir, candidatePath);
   if (!filePath) return null;
 
-  let counted = 0;
-  const byModel = new Map<string, ModelUsage>();
-  for await (const raw of jsonlLines(filePath, deadline)) {
+  const usage = await (options.foldCache ?? defaultJsonlFoldCache).fold(
+    filePath,
+    piUsageFold,
+    options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    (state) => (state.counted === 0 ? null : usageFromModels(state.byModel, 'pi')),
+  );
+  return usage ?? null;
+}
+
+const piUsageFold: JsonlFold<ModelSums> = {
+  kind: 'pi-usage-v1',
+  init: newModelSums,
+  step(state, raw) {
     const entry = raw as PiUsageLine;
     const message = entry?.type === 'message' ? entry.message : undefined;
     const usage = message?.role === 'assistant' ? message.usage : undefined;
-    if (!message || !usage || typeof message.model !== 'string' || !message.model) continue;
+    if (!message || !usage || typeof message.model !== 'string' || !message.model) return;
     const model = typeof message.provider === 'string' && message.provider
       ? `${message.provider}/${message.model}`
       : message.model;
 
-    let acc = byModel.get(model);
-    if (!acc) {
-      acc = { model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
-      byModel.set(model, acc);
-    }
+    const acc = modelAcc(state, model);
     acc.inputTokens += safeTokenCount(usage.input);
     acc.outputTokens += safeTokenCount(usage.output);
     acc.cacheReadTokens += safeTokenCount(usage.cacheRead);
     acc.cacheWriteTokens += safeTokenCount(usage.cacheWrite);
-    counted += 1;
-  }
-  if (counted === 0) return null;
-
-  const perModel = [...byModel.values()];
-  const sum = (pick: (model: ModelUsage) => number): number =>
-    perModel.reduce((total, model) => total + pick(model), 0);
-  const inputTokens = sum((model) => model.inputTokens);
-  const outputTokens = sum((model) => model.outputTokens);
-  const cacheReadTokens = sum((model) => model.cacheReadTokens);
-  const cacheWriteTokens = sum((model) => model.cacheWriteTokens);
-
-  return {
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheWriteTokens,
-    totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
-    models: perModel.map((model) => model.model),
-    perModel,
-    harness: 'pi',
-    collectedAt: new Date().toISOString(),
-  };
-}
+    state.counted += 1;
+  },
+};
 
 function safeTokenCount(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
@@ -296,66 +329,50 @@ async function collectClaudeUsage(
   if (!/^[A-Za-z0-9._-]{1,200}$/.test(claudeSessionId)) return null;
   const baseDir = options.claudeProjectsDir ?? join(homedir(), '.claude', 'projects');
   const filePath = join(baseDir, claudeProjectSlug(workingDir), `${claudeSessionId}.jsonl`);
-  const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 
-  let counted = 0;
-  // Keyed by model id; Map preserves first-appearance order.
-  const byModel = new Map<string, ModelUsage>();
+  const usage = await (options.foldCache ?? defaultJsonlFoldCache).fold(
+    filePath,
+    claudeUsageFold,
+    options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    (state) => (state.counted === 0 ? null : usageFromModels(state.byModel, 'claude')),
+  );
+  return usage ?? null;
+}
+
+interface ClaudeSums extends ModelSums {
   // An assistant message spans MULTIPLE jsonl lines (one per content block),
   // each repeating the same message.id and identical usage — count each
   // message id exactly once or sums double/triple.
-  const seenMessageIds = new Set<string>();
+  seenMessageIds: Set<string>;
+}
 
-  for await (const raw of jsonlLines(filePath, deadline)) {
+const claudeUsageFold: JsonlFold<ClaudeSums> = {
+  kind: 'claude-usage-v1',
+  init: () => ({ ...newModelSums(), seenMessageIds: new Set() }),
+  step(state, raw) {
     const entry = raw as ClaudeUsageLine;
-    if (entry?.type !== 'assistant') continue;
+    if (entry?.type !== 'assistant') return;
     const message = entry.message;
     const usage = message?.usage;
-    if (!message || !usage) continue;
+    if (!message || !usage) return;
     const model = message.model ?? '';
     // '<synthetic>' rows are harness-injected placeholders with zero usage.
-    if (!model || model === '<synthetic>') continue;
+    if (!model || model === '<synthetic>') return;
     const id = message.id;
     if (id) {
-      if (seenMessageIds.has(id)) continue;
-      seenMessageIds.add(id);
+      if (state.seenMessageIds.has(id)) return;
+      state.seenMessageIds.add(id);
     }
 
     // Models can vary mid-session — attribute tokens per message's model.
-    let acc = byModel.get(model);
-    if (!acc) {
-      acc = { model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
-      byModel.set(model, acc);
-    }
+    const acc = modelAcc(state, model);
     acc.inputTokens += usage.input_tokens ?? 0;
     acc.outputTokens += usage.output_tokens ?? 0;
     acc.cacheReadTokens += usage.cache_read_input_tokens ?? 0;
     acc.cacheWriteTokens += usage.cache_creation_input_tokens ?? 0;
-    counted += 1;
-  }
-
-  if (counted === 0) return null;
-
-  const perModel = [...byModel.values()];
-  const sum = (pick: (m: ModelUsage) => number): number =>
-    perModel.reduce((acc, m) => acc + pick(m), 0);
-  const inputTokens = sum((m) => m.inputTokens);
-  const outputTokens = sum((m) => m.outputTokens);
-  const cacheReadTokens = sum((m) => m.cacheReadTokens);
-  const cacheWriteTokens = sum((m) => m.cacheWriteTokens);
-
-  return {
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheWriteTokens,
-    totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
-    models: perModel.map((m) => m.model),
-    perModel,
-    harness: 'claude',
-    collectedAt: new Date().toISOString(),
-  };
-}
+    state.counted += 1;
+  },
+};
 
 interface CodexRolloutLine {
   type?: string;
@@ -413,42 +430,22 @@ async function collectCodexUsage(
   const baseDir = options.codexSessionsDir ?? join(homedir(), '.codex', 'sessions');
   const filePath = await findCodexRollout(baseDir, codexSessionId);
   if (!filePath) return null;
-  const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 
-  const models: string[] = [];
-  let lastTotals: { input: number; cached: number; output: number } | null = null;
-
-  for await (const raw of jsonlLines(filePath, deadline)) {
-    const entry = raw as CodexRolloutLine;
-    const payload = entry?.payload;
-    if (!payload) continue;
-    if (entry.type === 'turn_context' && payload.model) {
-      if (!models.includes(payload.model)) models.push(payload.model);
-      continue;
-    }
-    // token_count events carry cumulative totals — the LAST one wins. Some
-    // token_count events have info: null (rate-limit-only updates); skip them.
-    if (payload.type === 'token_count') {
-      const totals = payload.info?.total_token_usage;
-      if (totals) {
-        lastTotals = {
-          input: totals.input_tokens ?? 0,
-          cached: totals.cached_input_tokens ?? 0,
-          output: totals.output_tokens ?? 0,
-        };
-      }
-    }
-  }
-
-  if (!lastTotals) return null;
+  const totals = await (options.foldCache ?? defaultJsonlFoldCache).fold(
+    filePath,
+    codexUsageFold,
+    options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    (state) => (state.lastTotals ? { models: [...state.models], ...state.lastTotals } : null),
+  );
+  if (!totals) return null;
 
   // Codex counts cached tokens INSIDE input_tokens (input 11276 / cached 9088 /
   // total 11305 = 11276 + 29 in real rollouts) — split them so totalTokens
   // (sum of the four) matches codex's own total_tokens. output_tokens already
   // includes reasoning tokens. Codex reports no cache writes.
-  const cacheReadTokens = Math.min(lastTotals.cached, lastTotals.input);
-  const inputTokens = lastTotals.input - cacheReadTokens;
-  const outputTokens = lastTotals.output;
+  const cacheReadTokens = Math.min(totals.cached, totals.input);
+  const inputTokens = totals.input - cacheReadTokens;
+  const outputTokens = totals.output;
   const cacheWriteTokens = 0;
 
   // Codex rollouts carry only cumulative totals — there is no per-model
@@ -459,11 +456,42 @@ async function collectCodexUsage(
     cacheReadTokens,
     cacheWriteTokens,
     totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
-    models,
+    models: totals.models,
     harness: 'codex',
     collectedAt: new Date().toISOString(),
   };
 }
+
+interface CodexSums {
+  models: string[];
+  lastTotals: { input: number; cached: number; output: number } | null;
+}
+
+const codexUsageFold: JsonlFold<CodexSums> = {
+  kind: 'codex-usage-v1',
+  init: () => ({ models: [], lastTotals: null }),
+  step(state, raw) {
+    const entry = raw as CodexRolloutLine;
+    const payload = entry?.payload;
+    if (!payload) return;
+    if (entry.type === 'turn_context' && payload.model) {
+      if (!state.models.includes(payload.model)) state.models.push(payload.model);
+      return;
+    }
+    // token_count events carry cumulative totals — the LAST one wins. Some
+    // token_count events have info: null (rate-limit-only updates); skip them.
+    if (payload.type === 'token_count') {
+      const totals = payload.info?.total_token_usage;
+      if (totals) {
+        state.lastTotals = {
+          input: totals.input_tokens ?? 0,
+          cached: totals.cached_input_tokens ?? 0,
+          output: totals.output_tokens ?? 0,
+        };
+      }
+    }
+  },
+};
 
 interface KimiIndexLine {
   sessionId?: string;
@@ -565,56 +593,61 @@ async function collectKimiCodeUsage(
     return null;
   }
 
+  const cache = options.foldCache ?? defaultJsonlFoldCache;
   let counted = 0;
   // Keyed by model id; Map preserves first-appearance order across agents.
   const byModel = new Map<string, ModelUsage>();
 
   for (const agent of agentNames) {
     const wirePath = join(agentsDir, agent, 'wire.jsonl');
-    for await (const raw of jsonlLines(wirePath, deadline)) {
-      const entry = raw as KimiUsageRecord;
-      if (entry?.type !== 'usage.record') continue;
-      const usage = entry.usage;
-      if (!usage) continue;
-      const model = entry.model ?? '';
-      if (!model) continue;
-
-      let acc = byModel.get(model);
+    const sums = await cache.fold(
+      wirePath,
+      kimiUsageFold,
+      options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      (state): ModelSums => ({
+        byModel: new Map([...state.byModel].map(([k, m]) => [k, { ...m }])),
+        counted: state.counted,
+      }),
+    );
+    if (!sums) continue;
+    counted += sums.counted;
+    for (const m of sums.byModel.values()) {
+      const acc = byModel.get(m.model);
       if (!acc) {
-        acc = { model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
-        byModel.set(model, acc);
+        byModel.set(m.model, m);
+        continue;
       }
-      // Per-turn incremental records — SUM across all of them.
-      acc.inputTokens += usage.inputOther ?? 0;
-      acc.outputTokens += usage.output ?? 0;
-      acc.cacheReadTokens += usage.inputCacheRead ?? 0;
-      acc.cacheWriteTokens += usage.inputCacheCreation ?? 0;
-      counted += 1;
+      acc.inputTokens += m.inputTokens;
+      acc.outputTokens += m.outputTokens;
+      acc.cacheReadTokens += m.cacheReadTokens;
+      acc.cacheWriteTokens += m.cacheWriteTokens;
     }
   }
 
   if (counted === 0) return null;
-
-  const perModel = [...byModel.values()];
-  const sum = (pick: (m: ModelUsage) => number): number =>
-    perModel.reduce((acc, m) => acc + pick(m), 0);
-  const inputTokens = sum((m) => m.inputTokens);
-  const outputTokens = sum((m) => m.outputTokens);
-  const cacheReadTokens = sum((m) => m.cacheReadTokens);
-  const cacheWriteTokens = sum((m) => m.cacheWriteTokens);
-
-  return {
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheWriteTokens,
-    totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
-    models: perModel.map((m) => m.model),
-    perModel,
-    harness: 'kimi-code',
-    collectedAt: new Date().toISOString(),
-  };
+  return usageFromModels(byModel, 'kimi-code');
 }
+
+const kimiUsageFold: JsonlFold<ModelSums> = {
+  kind: 'kimi-usage-v1',
+  init: newModelSums,
+  step(state, raw) {
+    const entry = raw as KimiUsageRecord;
+    if (entry?.type !== 'usage.record') return;
+    const usage = entry.usage;
+    if (!usage) return;
+    const model = entry.model ?? '';
+    if (!model) return;
+
+    const acc = modelAcc(state, model);
+    // Per-turn incremental records — SUM across all of them.
+    acc.inputTokens += usage.inputOther ?? 0;
+    acc.outputTokens += usage.output ?? 0;
+    acc.cacheReadTokens += usage.inputCacheRead ?? 0;
+    acc.cacheWriteTokens += usage.inputCacheCreation ?? 0;
+    state.counted += 1;
+  },
+};
 
 interface MuseEnvelope {
   payload_type?: string;
@@ -781,8 +814,7 @@ async function collectMuseUsageById(
     ?? join(homedir(), '.local', 'share', 'muse', 'sessions');
   const filePath = await findMuseSessionFileById(baseDir, museSessionId);
   if (!filePath) return null;
-  const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  return sumMuseSessionFile(filePath, deadline);
+  return sumMuseSessionFile(filePath, options);
 }
 
 async function collectMuseUsage(
@@ -796,31 +828,35 @@ async function collectMuseUsage(
 
   const filePath = await resolveMuseSessionFile(baseDir, workingDir, sessionCreatedAt, deadline);
   if (!filePath) return null;
-  return sumMuseSessionFile(filePath, deadline);
+  return sumMuseSessionFile(filePath, options);
 }
 
 async function sumMuseSessionFile(
   filePath: string,
-  deadline: number,
+  options: UsageCollectorOptions,
 ): Promise<SessionUsage | null> {
-  let counted = 0;
-  // Keyed by model id; Map preserves first-appearance order.
-  const byModel = new Map<string, ModelUsage>();
+  const usage = await (options.foldCache ?? defaultJsonlFoldCache).fold(
+    filePath,
+    museUsageFold,
+    options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    (state) => (state.counted === 0 ? null : usageFromModels(state.byModel, 'muse')),
+  );
+  return usage ?? null;
+}
 
-  for await (const raw of jsonlLines(filePath, deadline)) {
+const museUsageFold: JsonlFold<ModelSums> = {
+  kind: 'muse-usage-v1',
+  init: newModelSums,
+  step(state, raw) {
     const entry = raw as MuseEnvelope;
-    if (entry?.payload_type !== 'runtime.session') continue;
+    if (entry?.payload_type !== 'runtime.session') return;
     const event = entry.payload?.kind === 'run' ? entry.payload.event : undefined;
-    if (event?.kind !== 'model_completed') continue;
+    if (event?.kind !== 'model_completed') return;
     const usage = event.usage;
     const model = event.model ?? '';
-    if (!usage || !model) continue;
+    if (!usage || !model) return;
 
-    let acc = byModel.get(model);
-    if (!acc) {
-      acc = { model, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
-      byModel.set(model, acc);
-    }
+    const acc = modelAcc(state, model);
     // Per-call records — SUM across all of them. Verified against real logs:
     // input_tokens INCLUDES cached tokens (cached(n) ≈ input(n-1)), so split
     // them codex-style; cached_tokens duplicates cache_read_tokens (ignored);
@@ -831,28 +867,6 @@ async function sumMuseSessionFile(
     acc.outputTokens += safeTokenCount(usage.output_tokens);
     acc.cacheReadTokens += cacheRead;
     acc.cacheWriteTokens += safeTokenCount(usage.cache_write_tokens);
-    counted += 1;
-  }
-
-  if (counted === 0) return null;
-
-  const perModel = [...byModel.values()];
-  const sum = (pick: (m: ModelUsage) => number): number =>
-    perModel.reduce((acc, m) => acc + pick(m), 0);
-  const inputTokens = sum((m) => m.inputTokens);
-  const outputTokens = sum((m) => m.outputTokens);
-  const cacheReadTokens = sum((m) => m.cacheReadTokens);
-  const cacheWriteTokens = sum((m) => m.cacheWriteTokens);
-
-  return {
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheWriteTokens,
-    totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
-    models: perModel.map((m) => m.model),
-    perModel,
-    harness: 'muse',
-    collectedAt: new Date().toISOString(),
-  };
-}
+    state.counted += 1;
+  },
+};
