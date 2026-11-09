@@ -501,3 +501,27 @@ it("refreshFresh never rejects when the in-flight and follow-up reads fail", asy
   vi.mocked(f.fetcher).mockRejectedValue(new Error("down"));
   await expect(Promise.all([client.refresh(), client.refreshFresh()])).resolves.toBeTruthy();
 });
+
+it("revokeBridge posts a signed revoke_bridge transition and refuses a bridge outside the roster without posting", async () => {
+  const f = await fixture(); const browser = await f.installation(true); await browser.client.refresh();
+  await expect(browser.client.revokeBridge("ghost-computer")).rejects.toBeTruthy();
+  expect(posts(f)).toBe(0);
+  const computer = await generateAccountBridgeCandidate("doomed-computer");
+  await browser.client.approve(await createAccountEnrollment(computer, "Doomed", null, "doomed-computer"));
+  const before = posts(f);
+  await browser.client.revokeBridge("doomed-computer");
+  expect(posts(f)).toBe(before + 1);
+  const record = (f.calls.filter(call => call.body !== undefined).at(-1)!.body as { record: { payload: { operation: unknown } } }).record;
+  expect(record.payload.operation).toEqual({ type: "revoke_bridge", bridgeId: "doomed-computer" });
+  expect(browser.stored()!.checkpoint.revokedBridgeIds).toContain("doomed-computer");
+});
+
+it("add_bridge approval of a revoked bridge id fails with account_bridge_revoked before any fetch", async () => {
+  const f = await fixture(); const browser = await f.installation(true); await browser.client.refresh();
+  const computer = await generateAccountBridgeCandidate("doomed-computer");
+  const link = await createAccountEnrollment(computer, "Doomed", null, "doomed-computer");
+  await browser.client.approve(link); await browser.client.revokeBridge("doomed-computer");
+  vi.mocked(f.fetcher).mockClear(); const callsBefore = f.calls.length;
+  await expect(browser.client.approve(link)).rejects.toMatchObject({ code: "account_bridge_revoked" });
+  expect(f.fetcher).not.toHaveBeenCalled(); expect(f.calls).toHaveLength(callsBefore);
+});

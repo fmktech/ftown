@@ -1,5 +1,6 @@
 import { legacyDateTimeSchema } from '../../zod-compat.js';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { ApprovedEndpoint, BridgeInvitation, EndpointPermission, EndpointPublic, EnrollmentMessage, InvitationOptions,
@@ -8,7 +9,7 @@ import { BridgeSecurityError } from './errors.js';
 import { approvedSchema, boundedId, displayLabel, endpointSchema, permissionSchema } from './metadata.js';
 import { AtomicSnapshot } from './snapshot.js';
 import { verifyAccountHistory } from '../account-crypto.js';
-import type { AccountHead, AccountHistory, StoredAccountTrust, VerifiedAccountTrust } from '../account-protocol.js';
+import type { AccountCheckpoint, AccountHead, AccountHistory, StoredAccountTrust, VerifiedAccountTrust } from '../account-protocol.js';
 import { AccountConnectivity, storedAccountSchema } from './account-state.js';
 import type { SecurityErrorCode } from '../protocol.js';
 
@@ -54,6 +55,16 @@ const policySchema = z.preprocess(migrateLegacyPolicy, z.object({ version: z.lit
   }
 }));
 type Policy = z.infer<typeof policySchema>;
+
+/** Reads <securityDir>/policy.json without locking or writing; returns the pinned account checkpoint, or null when the file, the account section or parsing is absent/invalid. */
+export function readPinnedAccountCheckpoint(securityDir: string): AccountCheckpoint | null {
+  try {
+    const file = join(securityDir, 'policy.json');
+    if (statSync(file).size > 64 * 1024 * 1024) return null; // the store refuses the same oversize file
+    const parsed = policySchema.safeParse(JSON.parse(readFileSync(file, 'utf8')));
+    return parsed.success ? parsed.data.account?.checkpoint ?? null : null;
+  } catch { return null; }
+}
 
 /** Identity comparison matters: request JSON cannot manufacture this recovery capability. */
 export const LOCAL_RECOVERY_AUTHORITY: LocalRecoveryAuthority = Object.freeze({ source: 'os-local-recovery' });

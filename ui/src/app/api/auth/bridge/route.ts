@@ -5,6 +5,7 @@ import jwt from "jsonwebtoken";
 import { parseLocalAdvert } from "./local-advert";
 import { getRequiredSecret } from "@/lib/secrets";
 import { setBridgeRefreshJti, getOwnerIdForSub } from "@/lib/bridge-refresh";
+import { bridgeRevocationForOwner } from "@/lib/bridge-revocation";
 import { boundedSecurityJson, SecurityStoreError } from "@/lib/security-store";
 import { isValidBridgeLabel } from "@/lib/bridge-label";
 
@@ -77,6 +78,19 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   let ownerId: string;
   try { ownerId = await getOwnerIdForSub(decoded.sub); }
   catch { return NextResponse.json({ error: 'Bridge account is unavailable' }, { status: 401 }); }
+
+  let revocation: Awaited<ReturnType<typeof bridgeRevocationForOwner>>;
+  try { revocation = await bridgeRevocationForOwner(ownerId, body.bridgeId); }
+  catch (err) {
+    console.error(
+      "[auth/bridge] revocation check failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+    return NextResponse.json({ error: "account_unavailable" }, { status: 503 });
+  }
+  if (revocation.revoked) {
+    return NextResponse.json({ error: "bridge_revoked" }, { status: 403 });
+  }
 
   const centrifugoToken = jwt.sign(
     {

@@ -142,3 +142,65 @@ This version changes the v1.3 safety timer for a bridge whose push or reads are 
 - The cooldown starts at 15 s and doubles up to 10 minutes, jittered ±20%.
 - During the cooldown, refresh is rejected locally without a request, which neutralizes centrifuge-js's fixed 5–10 s retry loop.
 - A `401` remains terminal.
+
+## v1.5 signed bridge revocation and automatic identity reset (2026-11-09)
+
+This version gives `revoke_bridge` a producer. The server now derives its refusals from the signed history instead of deciding them itself.
+
+**Producer**
+- In the Security panel, "Remove computer" signs `revoke_bridge {bridgeId}` with this browser's device key.
+- Any roster device may sign it, as with `revoke_device`.
+- `/devices` no longer offers its token-only revoke for account members. Legacy bridges keep it.
+- Both `add_bridge` producers refuse a bridgeId listed in `revokedBridgeIds` before signing, with `account_bridge_revoked`.
+
+**Server derives, never decides**
+- **Token tombstone.** After an append of `revoke_bridge`, the server tombstones `bridge_refresh` (`current_jti='revoked'`) on a best-effort basis, before the nudge. A failure is logged and never fails the append.
+- **Refusals.** The refresh, bootstrap-exchange and pairing-poll routes refuse a bridgeId listed in the stored, verified history's `revokedBridgeIds`.
+  - They fail closed with `503 account_unavailable` when the history cannot be verified.
+  - Pairing poll checks before consuming, and again after the pending-v1 delivery.
+- **Evidence.** The refusal on refresh, and on the bridge's own account read, returns `401 {error:"bridge_revoked", history}`.
+  - `history` is cut right after the first `revoke_bridge` for that bridgeId.
+  - A holder of the old credential learns nothing appended after the revocation.
+- **Cost guards.**
+  - Refresh compares the stored jti, which must be the presented jti or `revoked`, before verifying the history.
+  - The account-read evidence path is rate-limited per owner (`bridge_revoked_evidence`).
+
+**Bridge acceptance rule.** A bridge resets its identity only in one of two cases:
+- its own verified pinned checkpoint already lists its bridgeId in `revokedBridgeIds`; or
+- evidence verifies against its pinned checkpoint (`verifyAccountHistory(evidence, pinned)`, which rejects rollback and forks below the pin) AND lists its own bridgeId.
+
+What it never does:
+- It never resets on a bare 401, a network error, or mere absence from the roster.
+- Evidence that does not verify counts as a failed read, with the v1.4 backoff. It never blocks the account.
+
+**Reset**
+- **Marker.** The reset is crash-safe and driven by the marker `security/identity-reset.json`.
+- **Deleted:**
+  - the refresh token;
+  - the account enrollment and pending-approval state;
+  - the local CLI identity;
+  - the remembered browsers;
+  - `policy.json`;
+  - the bridge endpoint identity.
+- **Order.** The new bridgeId is written last, after the deletions are durable. Sessions, transcripts and `local-api-port` are kept.
+- **Restart.** The process then re-executes itself, with the same PID and terminal, into **fragment-link pairing only**.
+  - It never uses pending-v1, so a removed or stolen machine cannot make an approval request appear in the account without someone acting on that machine.
+  - It makes one pairing attempt of about 10 minutes, then exits.
+- **Manual reset.** `ftown start --new-identity` runs the same reset by hand. It is for legacy bridges that have no signed revocation, for an unreachable server, or for a deliberate rotation.
+
+**Bounds**
+| Party | When the revocation takes effect |
+|---|---|
+| Online bridge | Within seconds of the nudge (account-read evidence) |
+| Offline bridge | At its next successful read or refresh |
+| Browsers | At their next account read; enforcement is unchanged |
+
+- **Relay credential.** A revoked bridge's current Centrifugo JWT stays valid until it expires, at most 24 hours. Browsers refuse it end to end, so the exposure is relay metadata only. Closing that window is roadmap 2.1.
+
+**Accepted windows**
+- **Legacy pairing.** A revocation that lands between the poll's check and its `bridge_refresh` upsert can yield one connection token of at most 24 hours. Refresh is still refused, and browsers still refuse the bridge.
+- **Bootstrap exchange.** It takes the bridgeId from the request body. This is pre-existing behavior and is retired with legacy pairing (roadmap 1.2).
+
+**Threat note**
+- A malicious server cannot force a reset without a roster-device signature on a chain that extends the bridge's pin.
+- A compromised roster device can force one, exactly as it can `revoke_device` today. All devices remain admin-equivalent.

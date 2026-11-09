@@ -324,6 +324,7 @@ export class PendingApprovalClient {
   private reviewActive(generation: number): void { this.active(); if (generation !== this.selection) throw new PendingCasRace(); }
   private showReview(view: PendingView, generation: number): void { if (generation === this.selection) this.update({ review: view }); }
   private async command(record: PendingReviewerRecord, state: PendingApprovalState, action: PendingReviewerAction, generation?: number): Promise<PendingReviewerRecord> {
+    this.assertBridgeNotRevoked(state.request);
     if ((await this.storage.readReviewer(record.key))?.revision !== record.revision) throw new PendingCasRace();
     const trusted = await this.trusted(); if (generation !== undefined) this.reviewActive(generation);
     if ((await this.storage.readReviewer(record.key))?.revision !== record.revision) throw new PendingCasRace();
@@ -346,7 +347,12 @@ export class PendingApprovalClient {
       || action.type === "reject" && state.status !== "rejected") throw new AccountTrustError("account_enrollment_invalid");
     return { record: await this.saveReviewer(record, { ...record, outbound: undefined, state }), state };
   }
+  /** A revoked bridge id can never be re-added; refuse before any signing or network call. */
+  private assertBridgeNotRevoked(request: PendingApprovalState["request"] | undefined): void {
+    if (request?.kind === "bridge" && this.account.snapshot().trust?.checkpoint.revokedBridgeIds.includes(request.bridgeId)) throw new AccountTrustError("account_bridge_revoked");
+  }
   private async reviewStep(requestId: string, generation: number): Promise<void> {
+    this.assertBridgeNotRevoked(this.value.inbox.find(item => item.request.requestId === requestId)?.request);
     if (this.value.review && terminal(this.value.review.status) && !this.value.review.recovering) return;
     if (this.value.review?.error === "account_approval_required") await this.trusted();
     const key = this.reviewerKey(requestId); let record = await this.storage.readReviewer(key); this.reviewActive(generation);
@@ -412,6 +418,7 @@ export class PendingApprovalClient {
       const existing = request.kind === "browser" ? trusted.trust.checkpoint.devices.some(device => device.endpoint.id === request.candidate.id)
         : trusted.trust.checkpoint.bridges.some(bridge => bridge.bridgeId === request.bridgeId);
       if (!existing) {
+        this.assertBridgeNotRevoked(request);
         const approvedAt = new Date().toISOString();
         transition = await signAccountTransition(trusted.trust.checkpoint, trusted.identity.endpoint.id, trusted.signing, request.kind === "browser"
           ? { type: "add_device", device: { endpoint: request.candidate, signingPublicKey: request.signingPublicKey, label: request.label, approvedAt } }

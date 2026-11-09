@@ -5,6 +5,7 @@ import type { AccountSecurityClient } from "@/lib/account-security-client";
 import type { PendingApprovalClient, PendingSnapshot, PendingView } from "@/lib/pending-approval-client";
 import { usePendingApprovals } from "@/hooks/usePendingApprovals";
 import { PendingDeviceInbox, PendingDeviceWaiting } from "./PendingDeviceApprovals";
+import { REMOVED_PAIRING_HINT } from "@/lib/removed-pairing-hint";
 vi.mock("@/hooks/usePendingApprovals", () => ({ usePendingApprovals: vi.fn() }));
 const view: PendingView = { status: "waiting", requestId: "request", label: "Phone", code: null, localConfirmed: false, peerConfirmed: false, error: null };
 const account = {} as AccountSecurityClient;
@@ -81,4 +82,21 @@ it("saved approval without fresh verification explains reconnect/revoke and offe
   expect(screen.queryByRole("button", { name: "Cancel request" })).toBeNull(); expect(screen.queryByRole("button", { name: "Start a new request" })).toBeNull();
   expect(screen.queryByText(/This device is approved\./)).toBeNull(); expect(screen.queryByRole("button", { name: "Use a private approval link" })).toBeNull();
   expect(screen.getByRole("button", { name: "Check approval" })).toBeTruthy();
+});
+const bridgeRequest = { request: { requestId: "request", kind: "bridge", label: "Laptop", expiresAt: new Date(Date.now() + 60_000).toISOString() }, status: "pending" } as unknown as PendingSnapshot["inbox"][number];
+async function approveFailure(code: string, kind: "bridge" | "browser") {
+  const f = fixture(); f.snapshot.inbox = [{ ...bridgeRequest, request: { ...bridgeRequest.request, kind } } as PendingSnapshot["inbox"][number]];
+  f.snapshot.review = { ...view, status: "comparing", code: "1234-5678-9ABC" };
+  f.calls.confirmReview.mockRejectedValue({ code });
+  render(<PendingDeviceInbox client={f.client} snapshot={f.snapshot} />);
+  fireEvent.click(screen.getByRole("button", { name: "Codes match — approve device" }));
+  return (await screen.findByRole("alert")).textContent ?? "";
+}
+it("approving a removed computer shows the removal hint instead of the generic text", async () => {
+  const text = await approveFailure("account_bridge_revoked", "bridge");
+  expect(text).toBe(REMOVED_PAIRING_HINT);
+});
+it("the removal hint is not shown for a browser approval or for other error codes", async () => {
+  expect(await approveFailure("account_bridge_revoked", "browser")).toBe("This computer was removed from account trust."); cleanup();
+  expect(await approveFailure("account_trust_conflict", "bridge")).toBe("Account devices changed. Refresh and review this action again.");
 });

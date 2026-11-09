@@ -4,9 +4,10 @@ import jwt from "jsonwebtoken";
 
 import { parseLocalAdvert } from "../local-advert";
 import { getRequiredSecret } from "@/lib/secrets";
-import { rotateBridgeRefreshJti, getOwnerIdForSub } from "@/lib/bridge-refresh";
+import { rotateBridgeRefreshJti, getOwnerIdForSub, getBridgeRefreshJti } from "@/lib/bridge-refresh";
 import { boundedSecurityJson, SecurityStoreError } from "@/lib/security-store";
 import { isValidBridgeLabel } from "@/lib/bridge-label";
+import { bridgeRevocationForOwner } from "@/lib/bridge-revocation";
 
 interface BridgeRefreshRequestBody {
   refreshToken: string;
@@ -97,6 +98,33 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   let ownerId: string;
   try { ownerId = await getOwnerIdForSub(decoded.sub); }
   catch { return NextResponse.json({ error: 'Bridge account is unavailable' }, { status: 401 }); }
+  // Cheap gate before the expensive history verification: a stale, rotated-out
+  // token must not cost a full signature verification. 'revoked' falls through
+  // so the signed evidence is still returned.
+  try {
+    const currentJti = await getBridgeRefreshJti(body.bridgeId, decoded.sub);
+    if (currentJti !== decoded.jti && currentJti !== "revoked") {
+      return NextResponse.json(
+        { error: "Refresh token has been rotated or revoked" },
+        { status: 401 }
+      );
+    }
+  } catch (err) {
+    console.error("[auth/bridge/refresh] jti read failed:", err instanceof Error ? err.message : String(err));
+    return NextResponse.json({ error: "account_unavailable" }, { status: 503 });
+  }
+
+  // Fail closed: a revoked bridge must not rotate or receive tokens, and an
+  // unreadable account history must not be treated as "not revoked".
+  try {
+    const revocation = await bridgeRevocationForOwner(ownerId, decoded.bridgeId);
+    if (revocation.revoked) {
+      return NextResponse.json({ error: "bridge_revoked", history: revocation.evidence }, { status: 401 });
+    }
+  } catch (err) {
+    console.error("[auth/bridge/refresh] revocation check failed:", err instanceof Error ? err.message : String(err));
+    return NextResponse.json({ error: "account_unavailable" }, { status: 503 });
+  }
   const rotated = await rotateBridgeRefreshJti(body.bridgeId, decoded.sub, decoded.jti, nextJti);
   if (!rotated) {
     return NextResponse.json(

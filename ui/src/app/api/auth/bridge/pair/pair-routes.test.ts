@@ -34,6 +34,10 @@ vi.mock("@/lib/bridge-refresh", () => ({
   getOwnerIdForSub: vi.fn(async () => '349f8d2e-38e4-4d59-888d-687dcfa19e39'),
 }));
 
+vi.mock("@/lib/bridge-revocation", () => ({
+  bridgeRevocationForOwner: vi.fn(),
+}));
+
 vi.mock("@/lib/auth", () => ({
   auth: vi.fn(),
 }));
@@ -57,6 +61,7 @@ import {
   consumePairingRequest,
 } from "@/lib/pairing-store";
 import { upsertBridgeRefresh, getBridgeRefreshOwner } from "@/lib/bridge-refresh";
+import { bridgeRevocationForOwner } from "@/lib/bridge-revocation";
 import { auth } from "@/lib/auth";
 import { checkRateLimit } from "@/lib/login-rate-limit";
 
@@ -68,6 +73,7 @@ const mockDeny = vi.mocked(denyPairingRequest);
 const mockConsume = vi.mocked(consumePairingRequest);
 const mockUpsertBridgeRefresh = vi.mocked(upsertBridgeRefresh);
 const mockGetBridgeRefreshOwner = vi.mocked(getBridgeRefreshOwner);
+const mockRevocation = vi.mocked(bridgeRevocationForOwner);
 const mockAuth = vi.mocked(auth);
 const mockCheckRateLimit = vi.mocked(checkRateLimit);
 
@@ -104,6 +110,8 @@ beforeEach(() => {
   // Default: bridge is unclaimed and the owner-scoped upsert succeeds.
   mockGetBridgeRefreshOwner.mockResolvedValue(null);
   mockUpsertBridgeRefresh.mockResolvedValue(true);
+  mockRevocation.mockReset();
+  mockRevocation.mockResolvedValue({ revoked: false });
 });
 
 describe("POST /api/auth/bridge/pair/start", () => {
@@ -279,6 +287,42 @@ describe("POST /api/auth/bridge/pair/poll", () => {
     const res = await POST(jsonRequest(pollUrl, { deviceCode: "fixed-device-code" }));
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual({ status: "denied" });
+  });
+
+  it("approved for a signed-revoked bridge -> {status:'denied'}, nothing consumed or issued", async () => {
+    const approvedRow = row({ status: "approved", sub: "user@example.com", refreshJti: "jti-123", bridgeId: "bridge-1", hostname: "host-1" });
+    mockGetByDeviceCode.mockResolvedValueOnce(approvedRow);
+    mockRevocation.mockResolvedValueOnce({ revoked: true, evidence: { genesis: {}, transitions: [] } as never });
+    const signSpy = vi.spyOn(jwt, "sign");
+
+    const { POST } = await import("./poll/route");
+    const res = await POST(jsonRequest(pollUrl, { deviceCode: "fixed-device-code" }));
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ status: "denied" });
+    expect(mockRevocation).toHaveBeenCalledWith("349f8d2e-38e4-4d59-888d-687dcfa19e39", "bridge-1");
+    expect(mockConsume).not.toHaveBeenCalled();
+    expect(mockUpsertBridgeRefresh).not.toHaveBeenCalled();
+    expect(signSpy).not.toHaveBeenCalled();
+    signSpy.mockRestore();
+  });
+
+  it("approved but revocation check throws -> 503 account_unavailable, nothing consumed or issued", async () => {
+    const approvedRow = row({ status: "approved", sub: "user@example.com", refreshJti: "jti-123", bridgeId: "bridge-1", hostname: "host-1" });
+    mockGetByDeviceCode.mockResolvedValueOnce(approvedRow);
+    mockRevocation.mockRejectedValueOnce(new Error("db down"));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const signSpy = vi.spyOn(jwt, "sign");
+
+    const { POST } = await import("./poll/route");
+    const res = await POST(jsonRequest(pollUrl, { deviceCode: "fixed-device-code" }));
+    expect(res.status).toBe(503);
+    await expect(res.json()).resolves.toEqual({ error: "account_unavailable" });
+    expect(errSpy).toHaveBeenCalled();
+    expect(mockConsume).not.toHaveBeenCalled();
+    expect(mockUpsertBridgeRefresh).not.toHaveBeenCalled();
+    expect(signSpy).not.toHaveBeenCalled();
+    signSpy.mockRestore();
+    errSpy.mockRestore();
   });
 
   it("approved but consume races to null -> {status:'consumed'}", async () => {

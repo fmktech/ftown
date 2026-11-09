@@ -8,6 +8,7 @@ import { captureAccountLink, clearAccountLink, readAccountSession, safeAccountRe
 import { useAccountSecurity } from "@/hooks/useAccountSecurity";
 import { DeviceApproval } from "@/components/DeviceApproval";
 import { securityErrorMessage } from "@/components/SecurityPanel";
+import { pairingErrorMessage } from "@/lib/removed-pairing-hint";
 
 interface PendingDevice extends AccountPairingLookup { bridgeId: string; hostname: string; platform: string; createdAt: string }
 function normalize(raw: string): string { const value = raw.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8); return value.length > 4 ? `${value.slice(0, 4)}-${value.slice(4)}` : value; }
@@ -70,7 +71,7 @@ export function PairClient({ userEmail, ownerId, onConnected }: { userEmail: str
       if (!response.ok) throw { code: response.status === 409 ? "account_trust_conflict" : "account_enrollment_invalid" };
       clearAccountLink(); setPhase(decision === "approve" ? "approved" : "denied");
       if (decision === "approve") { if (onConnected) onConnected(); else window.location.assign("/dashboard"); }
-    } catch (failure) { setError(securityErrorMessage(failure)); }
+    } catch (failure) { setError(pairingErrorMessage(failure, securityErrorMessage)); }
     finally { setBusy(false); }
   }
   const returnTo = typeof window !== "undefined" ? safeAccountReturnTo(window.location.pathname + window.location.search) ?? "/pair" : "/pair";

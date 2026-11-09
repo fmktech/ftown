@@ -1,6 +1,7 @@
 import { parseAccountHistory, ACCOUNT_TRUST_LIMITS } from '../account-crypto.js';
 import type { AccountHistory } from '../account-protocol.js';
 import { BridgeSecurityError } from './errors.js';
+import { AccountBridgeRevoked, parseBridgeRevokedBody } from './revocation.js';
 
 /** Network/auth availability is distinct from a received invalid trust history. */
 export class AccountReadUnavailable extends Error {
@@ -26,6 +27,13 @@ export async function readAccountHistory(apiUrl: string, token: string, signal?:
     response = await fetchImpl(url, { method: 'GET', headers: { Authorization: `Bearer ${token}` },
       redirect: 'manual', cache: 'no-store', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000) });
   } catch { throw new AccountReadUnavailable(); }
+  if (response.status === 401) {
+    let body: string;
+    try { body = await response.text(); } catch { throw new AccountReadUnavailable(); }
+    const evidence = parseBridgeRevokedBody(body);
+    if (evidence) throw new AccountBridgeRevoked(evidence);
+    throw new AccountReadUnavailable();
+  }
   if (!response.ok) throw new AccountReadUnavailable();
   const maxBytes = ACCOUNT_TRUST_LIMITS.maxHistoryBytes + 1024;
   const declared = response.headers.get('content-length');

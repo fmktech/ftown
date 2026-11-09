@@ -243,10 +243,15 @@ export class AccountSecurityClient {
     this.update({ ...this.value, status: own ? "ready" : "error", trust: own ? trust : null, historyExists: true, code: own ? null : "account_device_revoked", offline: false });
     return trust;
   }
+  /** A revoked bridge id can never be re-added; refuse before any signing or network call. */
+  private assertAddable(request: AccountEnrollmentLink["request"]): void {
+    if (request.kind === "bridge" && this.value.trust?.checkpoint.revokedBridgeIds.includes(request.bridgeId)) throw new AccountTrustError("account_bridge_revoked");
+  }
   async approve(linkValue: AccountEnrollmentLink, initialBridge = false): Promise<AccountEnrollmentBundle> {
     const link = await parseAccountEnrollmentLink(linkValue);
+    this.assertAddable(link.request);
     if (link.request.kind === "browser" && link.request.candidate.ownerId !== this.ownerId) throw new AccountTrustError("account_enrollment_invalid");
-    await this.refresh(); this.active();
+    await this.refresh(); this.active(); this.assertAddable(link.request);
     let trust = initialBridge && link.request.kind === "bridge" ? await this.establish() : this.value.trust;
     if (!trust || this.value.status !== "ready") throw new AccountTrustError("account_approval_required");
     const request = link.request;
@@ -336,6 +341,7 @@ export class AccountSecurityClient {
     return true;
   }
   async revoke(endpointId: string): Promise<void> { await this.append({ type: "revoke_device", endpointId }); }
+  async revokeBridge(bridgeId: string): Promise<void> { await this.append({ type: "revoke_bridge", bridgeId }); }
   async migrate(bridge: ApprovedBridge, execute: ExecuteSecurity): Promise<void> {
     await this.keys(); this.active();
     const pin = this.value.legacyBridges.find(item => item.bridgeId === bridge.bridgeId && item.endpoint.id === bridge.endpoint.id);
