@@ -108,3 +108,37 @@ With two independent publishers, a single lost nudge cannot delay a newly approv
 The 24-hour offline grace and the restart refresh rule are unchanged.
 
 **Browsers** no longer poll the account or the approvals inbox. They read on mount, on nudge and on resubscribe. Without an attached Centrifugo client, they also read on `visibilitychange`.
+
+## v1.4 degraded cadence and failure backoff (2026-11-09)
+
+This version changes the v1.3 safety timer for a bridge whose push or reads are degraded.
+
+| State | Next safety read |
+|---|---|
+| Subscribed, last read succeeded | **1 hour** (unchanged) |
+| Push degraded (unsubscribed, disconnected, Centrifugo outage), last read succeeded | **10 minutes**, previously 30 seconds |
+| Last read failed | **Exponential backoff:** 60 s, doubling with each consecutive failure up to 30 minutes, jittered ±20%. The first successful read resets it. |
+
+**Unchanged:** nudge and resubscribe reads stay immediate and are never gated by the backoff.
+
+**Why fast retries are unnecessary.** The server is the account's only sequencer. While the whole server is down, no transition can be appended.
+- When the server returns, the first append publishes a nudge, which reads immediately.
+- A local network recovery resubscribes, which also reads immediately.
+
+**Freshness under honest delivery:**
+- immediate on the healthy path;
+- at most 10 minutes while push is degraded and reads succeed;
+- up to 1 hour if every publisher fails while the bridge stays healthily subscribed.
+
+**Partial outage.** Account reads can fail while appends still succeed, for example when only the GET route errors.
+- In that case, a transition whose nudge-triggered read failed is observed at the next backoff read.
+- That is at most 30 minutes, plus 20% jitter, so about 36 minutes. It stays within the 1-hour bound above.
+
+**Offline grace.** The 24-hour offline grace and the restart refresh rule are unchanged. Consider an API outage that lasts nearly 24 hours while Centrifugo stays connected.
+- The grace can lapse before the next backoff read.
+- The bridge then fails closed until that read, which comes at most about 36 minutes after the API recovers.
+
+**Token refresh backoff.** The bridge's Centrifugo token refresh (`/api/auth/bridge/refresh`) also backs off after transient failures.
+- The cooldown starts at 15 s and doubles up to 10 minutes, jittered ±20%.
+- During the cooldown, refresh is rejected locally without a request, which neutralizes centrifuge-js's fixed 5–10 s retry loop.
+- A `401` remains terminal.

@@ -605,7 +605,10 @@ program
           info: { bridgeId, hostname: osHostname() },
         });
       }
-      console.log('[Bridge] Refreshing Centrifugo token...');
+      // centrifuge-js polls every 5-10 s during a cooldown; stay quiet.
+      if (tokenRefresher!.cooldownRemainingMs() <= 0) {
+        console.log('[Bridge] Refreshing Centrifugo token...');
+      }
       const token = await tokenRefresher!.getToken();
       console.log('[Bridge] Token refreshed successfully');
       return token;

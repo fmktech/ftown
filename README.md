@@ -91,7 +91,7 @@ device membership; a bridge's encryption key cannot approve other devices.
 A signed account roster and pinned
 history establish device/computer trust; an unsigned directory cannot grant
 access or replace a known root. The service still orders and delivers history.
-Connected computers refresh every 30 seconds, with account access paused after
+Connected computers refresh on push nudges (fallback every 10 minutes if push is down), with account access paused after
 24 hours without a valid authenticated refresh. This connectivity allowance is
 not a guaranteed revocation deadline against a service withholding updates.
 Clearing site storage requires new device approval. Browser storage does not
