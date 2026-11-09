@@ -44,16 +44,14 @@ test.describe("device pairing", () => {
 
       await page.goto("/devices");
       await expect(page.getByRole("listitem")).toHaveCount(1);
-      // The immutable bridge ID prefix stays stable as Active changes to
-      // Revoked, so revocation cannot invalidate this locator mid-assertion.
       const deviceRow = page.getByRole("listitem").filter({ hasText: bridgeId.slice(0, 12) });
       await expect(deviceRow).toBeVisible();
       await expect(deviceRow.getByText("Active", { exact: true })).toBeVisible();
-      page.once("dialog", dialog => void dialog.accept());
-      await deviceRow.getByRole("button", { name: "Revoke", exact: true }).click();
-      await expect(deviceRow.getByText("Revoked", { exact: true })).toBeVisible();
-      await page.reload();
-      await expect(deviceRow.getByText("Revoked", { exact: true })).toBeVisible();
+      // A computer paired into the account is removed by a signed revocation
+      // in the Security panel (bridge-revocation.spec.ts), not from here.
+      await expect(deviceRow.getByText("This computer belongs to your account. Remove it from the Security panel in the dashboard.")).toBeVisible();
+      await expect(deviceRow.getByRole("link", { name: "Open dashboard" })).toHaveAttribute("href", "/dashboard");
+      await expect(deviceRow.getByRole("button", { name: "Revoke", exact: true })).toHaveCount(0);
     } catch (error) {
       primaryFailed = true;
       throw error;
