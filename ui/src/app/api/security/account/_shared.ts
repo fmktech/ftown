@@ -6,11 +6,13 @@ import { getRequiredSecret } from '@/lib/secrets';
 import { isTrustedBrowserOrigin } from '@/lib/request-origin';
 import { boundedSecurityJson, SecurityStoreError } from '@/lib/security-store';
 import { AccountTrustError } from '@security/account-crypto';
-import type { AccountApiError } from '@security/account-protocol';
+import type { AccountApiError, AccountHistory } from '@security/account-protocol';
+import { bridgeRevocationForOwner } from '@/lib/bridge-revocation';
 import { AccountStoreError } from '@/lib/account-trust-store';
 
 export const ACCOUNT_HEADERS = { 'Cache-Control': 'no-store' };
 class AuthenticationError extends Error { constructor(readonly status: number, readonly code: string, readonly retryAfter?: number) { super(code); } }
+class BridgeRevokedError extends Error { constructor(readonly evidence: AccountHistory) { super('bridge_revoked'); } }
 export async function accountOwner(request: Request, mutation = false): Promise<string> {
   if (mutation && !isTrustedBrowserOrigin(request)) throw new AuthenticationError(403, 'forbidden_origin');
   const authorization = request.headers.get('authorization');
@@ -23,6 +25,24 @@ export async function accountOwner(request: Request, mutation = false): Promise<
       || typeof claims.info.bridgeId !== 'string' || typeof claims.info.ownerId !== 'string') throw new AuthenticationError(403, 'forbidden');
     const rows = await getDb().query(`SELECT u.id::text AS owner_id FROM users u JOIN bridge_refresh b ON b.sub=u.email
       WHERE b.bridge_id=$1 AND b.sub=$2 AND b.current_jti<>'revoked'`, [claims.info.bridgeId, claims.sub]);
+    if (rows.length === 0) {
+      // Valid JWT but no live refresh row: a signed revocation turns the 403 into evidence the bridge can verify.
+      let revocation;
+      try {
+        // Bounds the full-history verification a holder of a still-valid bridge JWT can force.
+        try { await accountRateLimit(claims.info.ownerId, 'bridge_revoked_evidence', 120); }
+        catch (error) {
+          if (error instanceof AuthenticationError) throw error;
+          console.error('[security/account] bridge revocation rate limit failed', error);
+          throw new AuthenticationError(403, 'forbidden');
+        }
+        revocation = await bridgeRevocationForOwner(claims.info.ownerId, claims.info.bridgeId);
+      } catch (error) {
+        if (error instanceof AuthenticationError) throw error;
+        console.error('[security/account] bridge revocation lookup failed', error);
+      }
+      if (revocation?.revoked) throw new BridgeRevokedError(revocation.evidence);
+    }
     if (rows.length !== 1 || rows[0].owner_id !== claims.info.ownerId) throw new AuthenticationError(403, 'forbidden');
     return claims.info.ownerId;
   }
@@ -54,6 +74,7 @@ export async function accountBody(request: Request, maxBytes: number): Promise<u
   return boundedSecurityJson(request, maxBytes);
 }
 export function accountError(error: unknown): NextResponse {
+  if (error instanceof BridgeRevokedError) return NextResponse.json({ error: 'bridge_revoked', history: error.evidence }, { status: 401, headers: ACCOUNT_HEADERS });
   if (error instanceof AuthenticationError) return NextResponse.json({ error: error.code }, { status: error.status,
     headers: { ...ACCOUNT_HEADERS, ...(error.retryAfter === undefined ? {} : { 'Retry-After': String(error.retryAfter) }) } });
   const failure = error instanceof AccountTrustError ? error : new AccountTrustError('account_storage_unavailable');

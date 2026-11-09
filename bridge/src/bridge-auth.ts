@@ -1,6 +1,7 @@
 import { hostname as osHostname } from 'node:os';
 import { UnauthorizedError } from 'centrifuge';
 import type { AccountEnrollmentBundle, AccountHistory } from './security/account-protocol.js';
+import { parseBridgeRevokedBody } from './security/bridge/revocation.js';
 
 /** Loopback advert embedded in the Centrifugo connection JWT `info` claim (L2). */
 export interface BridgeLocalAdvert {
@@ -16,6 +17,17 @@ export interface BridgeAuthResponse {
   userId: string;
   accountApproval?: AccountEnrollmentBundle;
   accountHistory?: AccountHistory;
+}
+
+/** A 401 refresh that carries signed revocation evidence; still terminal for centrifuge-js. */
+export class BridgeRevokedError extends UnauthorizedError {
+  readonly evidence: AccountHistory;
+
+  constructor(evidence: AccountHistory) {
+    super('Bridge revoked');
+    this.name = 'BridgeRevokedError';
+    this.evidence = evidence;
+  }
 }
 
 export async function fetchBridgeToken(
@@ -74,11 +86,14 @@ export async function refreshBridgeToken(
 
   if (!res.ok) {
     const body = await res.text();
-    const message = `Token refresh failed (${res.status}): ${body}`;
+    // Capped: a malformed or oversized 401 body must not flood the logged error message.
+    const message = `Token refresh failed (${res.status}): ${body.slice(0, 200)}`;
     // A rejected bridge credential cannot become valid through retrying.
     // centrifuge-js only stops its token retry loop for UnauthorizedError;
     // ordinary errors are treated as transient and retried indefinitely.
     if (res.status === 401) {
+      const evidence = parseBridgeRevokedBody(body);
+      if (evidence !== null) throw new BridgeRevokedError(evidence);
       throw new UnauthorizedError(message);
     }
     throw new Error(message);

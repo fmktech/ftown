@@ -4,11 +4,15 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 
+export const DEVICES_ACCOUNT_NOTE =
+  "This computer belongs to your account. Remove it from the Security panel in the dashboard.";
+
 interface Device {
   bridgeId: string;
   hostname: string | null;
   lastSeen: string | null;
   revoked: boolean;
+  accountMember?: boolean;
 }
 
 interface DevicesResponse {
@@ -210,7 +214,19 @@ export function DevicesClient() {
                       </p>
                     </div>
 
-                    {!device.revoked && (
+                    {!device.revoked && device.accountMember === true && (
+                      <div className="min-w-0 sm:max-w-xs text-xs text-[var(--text-muted)]">
+                        <p>{DEVICES_ACCOUNT_NOTE}</p>
+                        <Link
+                          href="/dashboard"
+                          className="mt-1 inline-block text-[var(--accent)] hover:underline"
+                        >
+                          Open dashboard
+                        </Link>
+                      </div>
+                    )}
+
+                    {!device.revoked && device.accountMember !== true && (
                       <button
                         type="button"
                         onClick={() => handleRevoke(device)}

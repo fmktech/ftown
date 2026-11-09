@@ -184,6 +184,8 @@ function BridgeDevices({ bridge, currentEndpointId, currentComputerIds, execute,
   </div>;
 }
 
+const REMOVE_CONFIRM = (label: string) => `Remove ${label} from your account? It loses access immediately. To use it again, pair it as a new computer.`;
+
 function AccountDevices({ client, initial, bridges, selected, execute, pendingClient, pendingState, currentComputerIds }: { currentComputerIds?: ReadonlySet<string>; client: AccountSecurityClient; initial: AccountSecuritySnapshot; bridges: SecurityBridge[]; selected?: SecurityBridge; execute: SecurityCommandExecutor; pendingClient?: PendingApprovalClient; pendingState?: PendingSnapshot }) {
   const state = useSyncExternalStore(client.subscribe, client.snapshot, () => initial);
   const pending = usePendingApprovals(client, pendingClient ? "passive" : "reviewer", pendingClient);
@@ -230,6 +232,12 @@ function AccountDevices({ client, initial, bridges, selected, execute, pendingCl
   async function revoke(endpointId: string) {
     setBusy(endpointId); setError(null);
     try { await client.revoke(endpointId); setConfirm(null); }
+    catch (failure) { setError(securityErrorMessage(failure)); }
+    finally { setBusy(null); }
+  }
+  async function removeComputer(bridgeId: string) {
+    setBusy(bridgeId); setError(null);
+    try { await client.revokeBridge(bridgeId); setConfirm(null); }
     catch (failure) { setError(securityErrorMessage(failure)); }
     finally { setBusy(null); }
   }
@@ -308,6 +316,10 @@ function AccountDevices({ client, initial, bridges, selected, execute, pendingCl
           {confirmed && selectedComputer.node.edge !== "current" && <p className="text-xs text-[var(--text-muted)]">Reconnect and refresh access to verify sharing on this computer.</p>}
           {confirmed && <details className="text-xs"><summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2">Computer details</summary><p>Your approved account browsers can use this computer after access is verified.</p>{computer.security.endpoint && <p className="break-all font-mono">Fingerprint: {computer.security.endpoint.id}</p>}</details>}
           {pin && !confirmed && !ready && <p className="text-xs text-[var(--text-muted)]">Connect this computer to share it.</p>}
+          {inRoster && <div className="space-y-2">
+            <button type="button" aria-label={`Remove computer ${selectedComputer.node.label}`} className="btn-danger inline-flex min-h-11 items-center gap-1 sm:min-h-8" disabled={!!busy || state.offline || state.status !== "ready" || !!state.trust?.checkpoint.revokedBridgeIds.includes(computer.bridgeId)} onClick={() => setConfirm(`computer:${computer.bridgeId}`)}>Remove computer</button>
+            {confirm === `computer:${computer.bridgeId}` && <div role="group" aria-label="Confirm computer removal" className="space-y-3 rounded-md border border-[var(--border-muted)] p-3"><p className="text-sm">{REMOVE_CONFIRM(selectedComputer.node.label)}</p><div className="flex flex-wrap gap-2"><button className="btn-danger min-h-11 sm:min-h-8" disabled={!!busy || state.offline || state.status !== "ready"} onClick={() => void removeComputer(computer.bridgeId)}>Confirm remove computer</button><button className="btn-ghost min-h-11 sm:min-h-8" onClick={() => setConfirm(null)}>Cancel</button></div></div>}
+          </div>}
           {pin && ready && !confirmed && <details className="text-xs" onToggle={event => { const open = event.currentTarget.open; setExpandedComputers(previous => previous[key] === open ? previous : { ...previous, [key]: open }); }}><summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2">Separate approvals and recovery</summary>{expandedComputers[key] && <SecurityDevices bridge={computer} currentEndpointId={state.identity?.endpoint.id ?? null} execute={execute} />}</details>}
         </div>;
       })()}

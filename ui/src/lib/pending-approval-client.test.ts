@@ -2,8 +2,8 @@
 import { webcrypto } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { generateEndpoint } from "@security/crypto";
-import { createAccountEnrollment, createAccountGenesis, generateAccountSigningIdentity, signAccountTransition, verifyAccountHistory } from "@security/account-crypto";
-import { createPendingOffer, pendingOfferHash, verifyPendingAction } from "@security/pending-approval-crypto";
+import { createAccountEnrollment, createAccountGenesis, generateAccountBridgeCandidate, generateAccountSigningIdentity, signAccountTransition, verifyAccountHistory } from "@security/account-crypto";
+import { createPendingConfirmation, createPendingHello, createPendingOffer, pendingOfferHash, verifyPendingAction } from "@security/pending-approval-crypto";
 import type { AccountHistory, StoredAccountTrust } from "@security/account-protocol";
 import type { PendingApprovalState, PendingBrowserCreate, PendingCandidateCommand, PendingReviewerCommand } from "@security/pending-approval-protocol";
 import { AccountSecurityClient, accountStorage } from "./account-security-client";
@@ -431,4 +431,49 @@ it("refreshInboxFresh makes one GET when idle and collapses calls during an in-f
   const inflight = client.refreshInbox(); const calls = Array.from({ length: 5 }, () => client.refreshInboxFresh());
   await Promise.all([inflight, ...calls]); expect(gets() - base).toBe(3);
   expect(nudges.publish).not.toHaveBeenCalled();
+});
+
+it("a pending add_bridge request for a revoked bridge id is refused with account_bridge_revoked and no fetch", async () => {
+  const f = await fixture(); const reviewer = await f.installation(true);
+  const computer = await generateAccountBridgeCandidate("doomed-computer");
+  const checkpoint = await verifyAccountHistory(f.history(), null);
+  const add = await signAccountTransition(checkpoint, reviewer.identity.endpoint.id, reviewer.signing, { type: "add_bridge", bridge: { bridgeId: "doomed-computer", endpoint: { ...computer.endpoint, ownerId: owner }, label: "Doomed", approvedAt: new Date().toISOString() } });
+  const mid = { ...f.history(), transitions: [add] };
+  const revoke = await signAccountTransition(await verifyAccountHistory(mid, null), reviewer.identity.endpoint.id, reviewer.signing, { type: "revoke_bridge", bridgeId: "doomed-computer" });
+  f.setHistory({ ...mid, transitions: [add, revoke] }); await reviewer.account.refresh();
+  expect(reviewer.account.snapshot().trust!.checkpoint.revokedBridgeIds).toContain("doomed-computer");
+  const link = await createAccountEnrollment(computer, "Doomed", null, "doomed-computer");
+  f.states.set(link.request.requestId, { request: link.request, revision: 0, status: "pending" });
+  await reviewer.client.refreshInbox();
+  vi.mocked(f.fetcher).mockClear();
+  await reviewer.client.review(link.request.requestId);
+  expect(reviewer.client.snapshot().review!.error).toBe("account_bridge_revoked");
+  expect(f.fetcher).not.toHaveBeenCalled(); expect(f.commands).toHaveLength(0);
+});
+
+it("the finish step refuses to sign add_bridge when fresh trust revokes the bridge id, with no POST", async () => {
+  const f = await fixture(); const reviewer = await f.installation(true);
+  const computer = await generateAccountBridgeCandidate("doomed-computer");
+  const link = await createAccountEnrollment(computer, "Doomed", null, "doomed-computer"); const id = link.request.requestId;
+  f.states.set(id, { request: link.request, revision: 0, status: "pending" });
+  await reviewer.client.refreshInbox(); await reviewer.client.review(id);
+  const offered = f.states.get(id)!; expect(offered.status).toBe("offered");
+  const offer = (offered as Extract<PendingApprovalState, { offer: unknown }>).offer;
+  const hello = await createPendingHello(computer, offer);
+  f.states.set(id, { ...offered, revision: offered.revision + 1, status: "submitted", hello: hello.hello } as PendingApprovalState);
+  await reviewer.client.pollReview();
+  const comparing = f.states.get(id)!; expect(comparing.status).toBe("comparing");
+  await reviewer.client.confirmReview();
+  const offerHash = await pendingOfferHash(offer);
+  const confirmation = await createPendingConfirmation(offer, hello.secret, (comparing as Extract<PendingApprovalState, { reveal: unknown }>).reveal, offerHash);
+  f.states.set(id, { ...comparing, revision: comparing.revision + 1, status: "confirmed", confirmation } as PendingApprovalState);
+  // Fresh trust read inside trusted() now reports the bridge revoked (same head, so the anchor check still passes).
+  const refresh = reviewer.account.refresh.bind(reviewer.account); const snapshot = reviewer.account.snapshot.bind(reviewer.account); let revoked = false;
+  vi.spyOn(reviewer.account, "refresh").mockImplementation(async () => { const result = await refresh(); revoked = true; return result; });
+  vi.spyOn(reviewer.account, "snapshot").mockImplementation(() => { const value = snapshot(); return revoked && value.trust ? { ...value, trust: { ...value.trust, checkpoint: { ...value.trust.checkpoint, revokedBridgeIds: ["doomed-computer"] } } } : value; });
+  vi.mocked(f.fetcher).mockClear(); const commandsBefore = f.commands.length;
+  await reviewer.client.pollReview();
+  expect(reviewer.client.snapshot().review!.error).toBe("account_bridge_revoked");
+  expect(f.commands).toHaveLength(commandsBefore); expect(f.history().transitions).toHaveLength(0);
+  expect(vi.mocked(f.fetcher).mock.calls.filter(([, init]) => init?.body !== undefined)).toHaveLength(0);
 });

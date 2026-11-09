@@ -9,6 +9,7 @@ vi.mock('@/lib/db', () => ({ getDb: () => ({ query: mocks.query }) }));
 vi.mock('@/lib/pairing-store', () => ({ createPairingRequest: mocks.create, deleteExpiredRequests: vi.fn(), getByDeviceCode: mocks.get, getByUserCode: mocks.lookup,
   approvePairingRequest: mocks.approve, consumePairingRequest: mocks.consume }));
 vi.mock('@/lib/bridge-refresh', () => ({ getBridgeRefreshOwner: mocks.refreshOwner, upsertBridgeRefresh: mocks.upsert, getOwnerIdForSub: async () => '349f8d2e-38e4-4d59-888d-687dcfa19e39' }));
+vi.mock('@/lib/bridge-revocation', () => ({ bridgeRevocationForOwner: async () => ({ revoked: false }) }));
 vi.mock('@/lib/login-rate-limit', () => ({ checkRateLimit: async () => ({ allowed: true }), recordAttempt: vi.fn() }));
 import { POST as start } from './start/route';
 import { POST as lookup } from './lookup/route';

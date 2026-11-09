@@ -40,6 +40,7 @@ import type { PendingBridgeDecision, PendingPairingVerified } from './security/p
 import { readAccountHistory } from './security/bridge/account-client.js';
 import { openAccountApproval } from './security/account-crypto.js';
 import { BridgeSecurityService, applicationJson } from './security/bridge/security.js';
+import { readPinnedAccountCheckpoint } from './security/bridge/policy.js';
 import type { ApplicationJson, EndpointIdentity, VerifiedApplication } from './security/protocol.js';
 import { createCommandHandler } from './command-rpc.js';
 import { PullRequestStatusService } from './pull-request-status.js';
@@ -51,7 +52,10 @@ import { TerminalPump } from './terminal-pump.js';
 import { collectSessionUsage } from './usage-collector.js';
 import { AgentSessionIdPersister } from './session-ids.js';
 import { HookUsagePersister } from './hook-usage.js';
-import { fetchBridgeToken, refreshBridgeToken, type BridgeAuthResponse } from './bridge-auth.js';
+import { BridgeRevokedError, fetchBridgeToken, refreshBridgeToken, type BridgeAuthResponse } from './bridge-auth.js';
+import { beginIdentityReset, completePendingIdentityReset } from './identity-reset.js';
+import { createRevokedRestart } from './revoked-restart.js';
+import { bridgeMode, canReexecAfterRevocation, handlesRevocation, restartForPinnedRevocation, restartForRefreshError } from './revocation-gating.js';
 import { RotatingTokenRefresher } from './rotating-token-refresher.js';
 import { resolveDefaultDataDir, resolveFtownHome } from './ftown-home.js';
 import { SessionController } from './session-controller.js';
@@ -75,6 +79,7 @@ import { BridgeUpdateCoordinator } from './bridge-update.js';
 import { resolveStableRelease, prepareRelease, discardPreparedRelease } from './update-release.js';
 import { assertUpdateReservationAllowed, readUpdateRestartContext, reportUpdateReady, reserveUpdate,
   prepareHandoff, readUpdateReceipt, writeUpdateReceipt } from './update-handoff.js';
+import type { UpdateRestartContext } from './update-runtime-contract.js';
 
 /** Bridge package version — doubles as the default panel bundle version. */
 const BRIDGE_VERSION = JSON.parse(
@@ -129,10 +134,12 @@ program
   .option('--api-url <url>', 'ftown UI API URL', DEFAULT_API_URL)
   .option('--data-dir <path>', 'Directory for session data (default: ~/.ftown/data)')
   .option('--bridge-id <id>', 'Bridge instance ID (default: persisted per data dir)')
-  .action(async (opts: { allowUpdates?: boolean; local?: boolean; solo?: boolean; port?: string; rotateKey?: boolean; token?: string; account?: string; bootstrap?: boolean; apiUrl: string; dataDir?: string; bridgeId?: string }) => {
+  .option('--new-identity', 'Forget this computer’s account identity and credentials, then pair it again as a new computer with a private link (sessions are kept)')
+  .action(async (opts: { allowUpdates?: boolean; local?: boolean; solo?: boolean; port?: string; rotateKey?: boolean; token?: string; account?: string; bootstrap?: boolean; apiUrl: string; dataDir?: string; bridgeId?: string; newIdentity?: boolean }) => {
     if (opts.local && opts.solo) program.error('--local and --solo cannot be combined');
     if (opts.account !== undefined && opts.bootstrap) program.error('--account and --bootstrap cannot be combined');
     if ((opts.local || opts.solo) && (opts.account !== undefined || opts.bootstrap)) program.error('--account and --bootstrap require cloud mode');
+    if ((opts.local || opts.solo) && opts.newIdentity) program.error('--new-identity requires cloud mode');
     const apiUrl = new URL(opts.apiUrl);
     const isLocalHost =
       apiUrl.hostname === 'localhost' ||
@@ -147,17 +154,42 @@ program
       );
     }
 
-    // Restart context is authenticated by the private helper channel before any mutation.
-    assertUpdateReservationAllowed(homedir());
-    const updateRestart = readUpdateRestartContext();
-    if (updateRestart && (updateRestart.targetVersion !== BRIDGE_VERSION || opts.token || opts.account || opts.bootstrap || opts.solo))
-      throw new Error('Invalid update restart context');
     // Explicit setup must finish before any migration, identity, network or auth side effect.
     assertSetupReady(BRIDGE_VERSION);
 
     // Read-only default resolution; explicit setup owns legacy data migration.
     const defaultDataDir = resolveDefaultDataDir();
     const dataDir = opts.dataDir ? resolve(opts.dataDir) : defaultDataDir;
+    // No bridge starts, and no identity is reset, while an update holds the reservation.
+    assertUpdateReservationAllowed(homedir());
+    if (opts.newIdentity) beginIdentityReset(dataDir, 'manual');
+    // Also finishes a reset that a revoked restart or a crash left pending.
+    const identityReset = completePendingIdentityReset(dataDir);
+    let updateRestart: UpdateRestartContext | null = null;
+    if (identityReset) {
+      console.log(`[Bridge] New identity for this computer: ${identityReset.oldBridgeId ?? 'unknown'} -> ${identityReset.newBridgeId}`);
+      if (opts.bridgeId !== undefined) {
+        console.warn('[Bridge] Ignoring --bridge-id: this computer has a new identity.');
+        opts.bridgeId = undefined;
+      }
+      // A reset bridge is a fresh install; an update context names the identity it just discarded.
+      try {
+        if (readUpdateRestartContext()) console.warn('[Bridge] Ignoring the update restart context: this computer has a new identity.');
+      } catch (err) {
+        console.warn('[Bridge] Ignoring an invalid update restart context after the identity reset:', err instanceof Error ? err.message : String(err));
+      }
+      if (!opts.local && !opts.solo) {
+        if (opts.token !== undefined || opts.account !== undefined) console.warn('[Bridge] Ignoring --token and --account: a new identity pairs with a private link.');
+        opts.token = undefined;
+        opts.account = undefined;
+        opts.bootstrap = true;
+      }
+    } else {
+      // Restart context is authenticated by the private helper channel before any mutation.
+      updateRestart = readUpdateRestartContext();
+      if (updateRestart && (updateRestart.targetVersion !== BRIDGE_VERSION || opts.token || opts.account || opts.bootstrap || opts.solo))
+        throw new Error('Invalid update restart context');
+    }
     // Every child/local CLI must resolve this exact instance, including custom --data-dir bridges.
     process.env.FTOWN_DATA_DIR = dataDir;
     // Instance-scoped ".ftown home" for pointer and registry files. The DEFAULT
@@ -189,6 +221,23 @@ program
       writeFileSync(bridgeIdPath, `${bridgeId}\n`, { mode: 0o600 });
     } catch (err) {
       console.error('[Bridge] Failed to persist bridge id:', err instanceof Error ? err.message : String(err));
+    }
+
+    // Signed revocation of this bridgeId restarts the process as a fresh install, at most once.
+    // The re-exec keeps this PID, so whatever startup has acquired so far is released first.
+    let releaseForRestart: () => Promise<void> = async () => {};
+    // Mirrors the update coordinator's receipts; an active operation holds the reservation under this PID.
+    let updatePhase: string | null = null;
+    const revokedRestart = createRevokedRestart({
+      dataDir, scriptPath: process.argv[1], argv: process.argv.slice(2),
+      shutdown: () => releaseForRestart(), log: message => console.log(message), exit: code => process.exit(code),
+      canReexec: () => canReexecAfterRevocation({ updateRestart: updateRestart !== null, updatePhase }),
+    });
+    const securityDir = join(dataDir, 'security');
+    const runMode = bridgeMode(opts);
+    if (restartForPinnedRevocation(runMode, readPinnedAccountCheckpoint(securityDir), bridgeId)) {
+      await revokedRestart();
+      return;
     }
 
     // L4: --rotate-key short-circuits BEFORE any listener binds (exit 0,
@@ -228,6 +277,7 @@ program
     if (updateRestart && !preferredLocalPort) throw new Error('Update restart endpoint is missing');
     const hookPort = await localApiServer.start(preferredLocalPort);
     if (updateRestart && hookPort !== preferredLocalPort) { localApiServer.stop(); throw new Error('Update restart endpoint is unavailable'); }
+    releaseForRestart = async () => { localApiServer.stop(); };
     writeFileSync(localPortPath, `${hookPort}\n`, { mode: 0o600 });
     console.log(`[Bridge] Local API server started on port ${hookPort}`);
     const localNonce = randomBytes(16).toString('hex');
@@ -511,6 +561,11 @@ program
       try {
         auth = await refreshBridgeToken(opts.apiUrl, persistedRefreshToken, bridgeId, local);
       } catch (err) {
+        // Only a refusal whose signed history verifies against our own pin resets; anything else keeps today's path.
+        if (await restartForRefreshError({ mode: runMode, error: err, pinned: readPinnedAccountCheckpoint(securityDir), bridgeId })) {
+          await revokedRestart();
+          return;
+        }
         if (updateRestart) throw new Error('Update restart authentication failed');
         console.warn(
           '[Bridge] Stored refresh token rejected, falling back to bootstrap token / pairing:',
@@ -576,8 +631,16 @@ program
       localOrigin: `http://127.0.0.1:${hookPort}`,
       readAccountHistory: !solo && !opts.local ? signal => readAccountHistory(opts.apiUrl, currentBridgeToken, signal) : undefined,
     });
+    releaseForRestart = async () => { localApiServer.stop(); await security.close(); };
+    let bridgeRevoked = false;
+    if (handlesRevocation(runMode)) security.onBridgeRevoked(() => { bridgeRevoked = true; void revokedRestart(); });
     await security.policy.provisionLocalEndpoint(localIdentity.endpoint);
     await security.startAccount(accountBootstrap);
+    // The startup read may prove the revocation; stop here instead of registering a revoked endpoint.
+    if (bridgeRevoked) {
+      await revokedRestart();
+      return;
+    }
     if (!solo && !opts.local) {
       const registration = await fetch(`${opts.apiUrl.replace(/\/$/, '')}/api/security/endpoints`, { method: 'PUT',
         headers: { Authorization: `Bearer ${currentBridgeToken}`, 'Content-Type': 'application/json' },
@@ -609,7 +672,18 @@ program
       if (tokenRefresher!.cooldownRemainingMs() <= 0) {
         console.log('[Bridge] Refreshing Centrifugo token...');
       }
-      const token = await tokenRefresher!.getToken();
+      let token: string;
+      try {
+        token = await tokenRefresher!.getToken();
+      } catch (err) {
+        // The refusal is unverified; the security service checks it against the pinned account state.
+        if (err instanceof BridgeRevokedError) {
+          security.confirmRevocationEvidence(err.evidence).catch((confirmErr: unknown) => {
+            console.error('[Bridge] Failed to verify revocation evidence:', confirmErr instanceof Error ? confirmErr.message : String(confirmErr));
+          });
+        }
+        throw err;
+      }
       console.log('[Bridge] Token refreshed successfully');
       return token;
     }
@@ -905,8 +979,8 @@ program
       discard: discardPreparedRelease,
       reserve: operationId => reserveUpdate(updateHome, operationId),
       prepareHandoff, readReceipt: () => readUpdateReceipt(stagingRoot),
-      writeReceipt: receipt => writeUpdateReceipt(stagingRoot, receipt),
-      shutdown: () => shutdown(), admission: updateAdmission,
+      writeReceipt: receipt => { updatePhase = receipt.operation.phase; return writeUpdateReceipt(stagingRoot, receipt); },
+      shutdown: () => shutdownAndExit(), admission: updateAdmission,
     });
 
 
@@ -1061,36 +1135,48 @@ program
       })();
     }, 2000);
 
-    let shuttingDown = false;
-    const shutdown = async (): Promise<void> => {
-      if (shuttingDown) return;
-      shuttingDown = true;
-      console.log('\n[Bridge] Shutting down...');
-      await pullRequestEvents.stop();
-      attentionStore.stopNotifications();
-      stopPushSessionObserver();
-      pushNotifier?.stop();
-      // Solo L2 ordering: stop accepting first, then children (panel before
-      // hub), then the rest of the bridge teardown.
-      if (solo) {
-        void solo.front.close().catch(() => {});
-        solo.panel.stop();
-        solo.hub.stop();
-      }
-      localApiServer.stop();
-      runner.stopAll();
-      loopbackServer.closeAll();
-      directPeers.closeAll();
-      watchRegistry.dispose();
-      // node-datachannel module-level cleanup — avoids the native crash-on-exit race.
-      try { ndcCleanup(); } catch { /* native lib already torn down */ }
-      centrifugo.disconnect();
-      try { await security.close(); process.exit(0); }
-      catch { console.error('[Bridge] Failed to persist security shutdown state.'); process.exit(1); }
+    // Leaves tmux sessions running and the process alive; a revoked restart re-executes this same PID
+    // afterwards, so the local port, pointer, relay connection and timers must all be released here.
+    let shutdownRun: Promise<void> | undefined;
+    function shutdown(): Promise<void> {
+      shutdownRun ??= (async () => {
+        console.log('\n[Bridge] Shutting down...');
+        try {
+          await pullRequestEvents.stop();
+          attentionStore.stopNotifications();
+          stopPushSessionObserver();
+          pushNotifier?.stop();
+          // Solo L2 ordering: stop accepting first, then children (panel before
+          // hub), then the rest of the bridge teardown.
+          if (solo) {
+            void solo.front.close().catch(() => {});
+            solo.panel.stop();
+            solo.hub.stop();
+          }
+        } finally {
+          // The port and the pointer would outlive a same-PID re-exec, so no earlier failure may skip them.
+          try { localApiServer.stop(); } finally { cleanupPointer(); }
+        }
+        runner.stopAll();
+        loopbackServer.closeAll();
+        directPeers.closeAll();
+        watchRegistry.dispose();
+        // node-datachannel module-level cleanup — avoids the native crash-on-exit race.
+        try { ndcCleanup(); } catch { /* native lib already torn down */ }
+        centrifugo.disconnect();
+        try { await security.close(); }
+        catch (err) { console.error('[Bridge] Failed to persist security shutdown state.'); throw err; }
+      })();
+      return shutdownRun;
+    }
+    const shutdownAndExit = async (): Promise<void> => {
+      try { await shutdown(); } catch { process.exit(1); }
+      process.exit(0);
     };
+    releaseForRestart = shutdown;
 
-    process.on('SIGINT', shutdown);
-    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', () => { void shutdownAndExit(); });
+    process.on('SIGTERM', () => { void shutdownAndExit(); });
   });
 
 registerLocalBrowserCommands(program);

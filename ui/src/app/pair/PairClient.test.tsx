@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createAccountEnrollment, encodeAccountEnrollmentLink, generateAccountBridgeCandidate } from "@security/account-crypto";
 import { PairClient } from "./PairClient";
+import { REMOVED_PAIRING_HINT } from "@/lib/removed-pairing-hint";
 const mocks = vi.hoisted(() => ({ approve: vi.fn(), snapshot: { status: "unapproved", historyExists: false, bootstrapRecoverable: false, offline: false, code: null } }));
 vi.mock("next/navigation", () => ({ useSearchParams: () => new URLSearchParams(window.location.search) }));
 vi.mock("@/hooks/useAccountSecurity", () => ({ useAccountSecurity: () => ({ client: { approve: mocks.approve }, snapshot: mocks.snapshot }) }));
@@ -54,4 +55,20 @@ it("an old lookup without cryptographic enrollment cannot silently downgrade", a
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ bridgeId: "old", hostname: "Old", platform: "test", enrollment: null }))));
   render(<PairClient userEmail="owner@example.test" ownerId={owner} />);
   await screen.findByText(/Upgrade and restart/); expect(screen.queryByRole("button", { name: "Codes match — connect computer" })).toBeNull(); expect(mocks.approve).not.toHaveBeenCalled();
+});
+async function failApproval(code: string) {
+  const candidate = await generateAccountBridgeCandidate("one"); const link = await createAccountEnrollment(candidate, "Computer", null, "one");
+  window.history.replaceState(null, "", `/pair?code=ABCD-EFGH#account=${encodeAccountEnrollmentLink(link)}`);
+  mocks.approve.mockRejectedValue({ code });
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ bridgeId: "one", hostname: "Laptop", platform: "test", createdAt: new Date().toISOString(), enrollment: link.request }))));
+  render(<PairClient userEmail="owner@example.test" ownerId={owner} />);
+  const button = await screen.findByRole("button", { name: "Codes match — connect computer" });
+  await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false)); fireEvent.click(button);
+  return (await screen.findByRole("alert")).textContent ?? "";
+}
+it("pairing a removed computer shows the removal hint", async () => {
+  expect(await failApproval("account_bridge_revoked")).toBe(REMOVED_PAIRING_HINT);
+});
+it("pairing failures with other codes keep the generic message", async () => {
+  expect(await failApproval("account_trust_conflict")).toBe("Account devices changed. Refresh and review this action again.");
 });

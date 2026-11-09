@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApprovedEndpoint, BridgeInvitation } from "@security/protocol";
-import { SecurityPanel, type SecurityBridge, type SecurityCommandExecutor } from "./SecurityPanel";
+import { SecurityPanel, securityErrorMessage, type SecurityBridge, type SecurityCommandExecutor } from "./SecurityPanel";
 import { SecurityDevices } from "./SecurityDevices";
 import type { AccountSecurityClient, AccountSecuritySnapshot } from "@/lib/account-security-client";
 import { EncryptionDiagram } from "./EncryptionDiagram";
@@ -252,6 +252,49 @@ describe("Account devices", () => {
     expect(screen.getByText(/offline computers apply it when they reconnect/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Confirm remove access" }));
     await waitFor(() => expect(f.revoke).toHaveBeenCalledWith("1")); expect(execute).not.toHaveBeenCalled();
+  });
+  describe("Remove computer", () => {
+    const CONFIRM = "Remove My laptop from your account? It loses access immediately. To use it again, pair it as a new computer.";
+    function rosterFixture(opts: { offline?: boolean; status?: AccountSecuritySnapshot["status"]; revoked?: boolean; inRoster?: boolean } = {}) {
+      const f = accountFixture(2, opts.offline);
+      const endpoint = { ...device("bridge-key", "").endpoint, kind: "bridge" as const };
+      if (opts.inRoster !== false) f.state.trust!.checkpoint.bridges = [{ bridgeId: bridge.bridgeId, endpoint, label: "Computer", approvedAt: "2026-10-25T00:00:00Z" }];
+      if (opts.revoked) f.state.trust!.checkpoint.revokedBridgeIds = [bridge.bridgeId];
+      if (opts.status) f.state.status = opts.status;
+      const revokeBridge = vi.fn().mockResolvedValue(undefined);
+      (f.client as unknown as { revokeBridge: typeof revokeBridge }).revokeBridge = revokeBridge;
+      const execute = mockExecutor().mockRejectedValue({ code: "bridge_offline" });
+      render(<SecurityDevices currentEndpointId="0" bridges={[bridge]} execute={execute} accountClient={f.client} accountState={f.state} />);
+      fireEvent.click(screen.getByRole("button", { name: /^Computer My laptop:/ }));
+      return { ...f, revokeBridge };
+    }
+    const removeButton = () => screen.getByRole("button", { name: "Remove computer My laptop" }) as HTMLButtonElement;
+    it("shows the button for a roster computer and not for a legacy one", () => {
+      rosterFixture(); expect(removeButton().disabled).toBe(false); cleanup();
+      rosterFixture({ inRoster: false }); expect(screen.queryByRole("button", { name: /^Remove computer/ })).toBeNull();
+    });
+    it("shows the exact confirm text and calls revokeBridge once only after confirming", async () => {
+      const f = rosterFixture();
+      fireEvent.click(removeButton()); expect(screen.getByText(CONFIRM)).toBeTruthy(); expect(f.revokeBridge).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Confirm remove computer" }));
+      await waitFor(() => expect(f.revokeBridge).toHaveBeenCalledExactlyOnceWith(bridge.bridgeId));
+      await waitFor(() => expect(screen.queryByRole("group", { name: "Confirm computer removal" })).toBeNull());
+    });
+    it("does not call revokeBridge when cancelled", () => {
+      const f = rosterFixture();
+      fireEvent.click(removeButton()); fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(f.revokeBridge).not.toHaveBeenCalled(); expect(screen.queryByText(CONFIRM)).toBeNull();
+    });
+    it("is disabled when offline, not ready, or already revoked", () => {
+      rosterFixture({ offline: true }); expect(removeButton().disabled).toBe(true); cleanup();
+      rosterFixture({ status: "checking" }); expect(removeButton().disabled).toBe(true); cleanup();
+      rosterFixture({ revoked: true }); expect(removeButton().disabled).toBe(true);
+    });
+    it("shows the mapped error when revokeBridge rejects", async () => {
+      const f = rosterFixture(); f.revokeBridge.mockRejectedValue({ code: "account_device_revoked" });
+      fireEvent.click(removeButton()); fireEvent.click(screen.getByRole("button", { name: "Confirm remove computer" }));
+      await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(securityErrorMessage({ code: "account_device_revoked" })));
+    });
   });
   it("keeps roster-only computers unlinked and reveals sharing only after selecting the computer", async () => {
     const f = accountFixture(2);

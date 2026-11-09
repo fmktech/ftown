@@ -320,6 +320,9 @@ launchers, `~/.ftown/notify.sh`, and updates the unified skill
 under `~/.ftown/skills/ftown/` (linked into ~/.agents/skills and
 ~/.claude/skills).
 
+A computer removed from the account resets its own identity, keeps its tmux sessions, and shows a new
+pairing link; `ftown start --new-identity` does the same by hand.
+
 ### Automatic PR result mail
 
 A PR linked to an agent session is monitored by the running bridge using the local

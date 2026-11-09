@@ -9,8 +9,9 @@ import { BridgeSecurityError } from './errors.js';
 import { classifyCommand, classifyHttp, classifyTerminal, type OperationPermission } from './permissions.js';
 import { endpointSchema } from './metadata.js';
 import { ACCOUNT_TRUST_LIMITS, AccountTrustError } from '../account-crypto.js';
-import type { AccountHead, AccountHistory, VerifiedAccountTrust } from '../account-protocol.js';
+import type { AccountCheckpoint, AccountHead, AccountHistory, VerifiedAccountTrust } from '../account-protocol.js';
 import { AccountReadUnavailable } from './account-client.js';
+import { AccountBridgeRevoked, confirmOwnRevocation, isOwnBridgeRevoked } from './revocation.js';
 import { ACCOUNT_SAFETY_REFRESH_MS, SECURITY_NUDGE_MIN_SPACING_MS, createCoalescedTrigger, type CoalescedTrigger } from '../security-nudge.js';
 
 const token = z.string().regex(/^[A-Za-z0-9_-]{1,200}$/);
@@ -41,6 +42,9 @@ export class BridgeSecurityService implements BridgeSecurity {
   private readonly now: () => number;
   private readonly replay = new Map<string, number>();
   private readonly revoked = new Set<(endpointId: string) => void>();
+  private readonly bridgeRevokedListeners = new Set<() => void>();
+  private readonly bridgeRevokedNotified = new WeakSet<() => void>();
+  private bridgeRevokedEmitted = false;
   private readonly verified = new WeakSet<VerifiedApplication>();
   private closed = false;
   private accountTimer: ReturnType<typeof setTimeout> | null = null;
@@ -215,6 +219,8 @@ export class BridgeSecurityService implements BridgeSecurity {
   }
   /** Called once at startup; legacy/Solo stores never adopt an unsigned server directory. */
   async startAccount(trust?: VerifiedAccountTrust): Promise<void> {
+    // A pin that already tombstones this bridge is signed proof on its own; no read can undo it.
+    if (isOwnBridgeRevoked(await this.pinnedCheckpoint(), this.bridgeId)) { this.emitBridgeRevoked(); return; }
     if (trust) await this.policy.pinBootstrap(trust);
     this.recordAccountRead(await this.refreshAccount().then(() => true, () => false));
     if (!this.closed && !this.accountTimer && this.options.readAccountHistory) this.scheduleAccountRead();
@@ -232,7 +238,7 @@ export class BridgeSecurityService implements BridgeSecurity {
   }
   /** Safety read: 1 h while push is healthy and the last read succeeded, else the 10 min cadence; failed reads back off from 60 s to 30 min. */
   private scheduleAccountRead(delay = this.nextAccountReadDelay()): void {
-    if (this.closed || !this.options.readAccountHistory) return;
+    if (this.closed || this.bridgeRevokedEmitted || !this.options.readAccountHistory) return;
     if (this.accountTimer) clearTimeout(this.accountTimer);
     this.accountTimerDue = performance.now() + delay; // monotonic: wall-clock steps and sleep must not skew the pull-in
     this.accountTimer = setTimeout(() => { this.accountTimer = null; void this.trackedAccountRead(); }, delay);
@@ -252,7 +258,7 @@ export class BridgeSecurityService implements BridgeSecurity {
   }
   /** Push-driven re-read (account nudge); bursts coalesce into at most one trailing read. */
   requestAccountRefresh(): void {
-    if (this.closed || !this.options.readAccountHistory) return;
+    if (this.closed || this.bridgeRevokedEmitted || !this.options.readAccountHistory) return;
     this.accountTrigger ??= createCoalescedTrigger(async () => {
       // An in-flight read may predate the change, so it never satisfies a request.
       await this.accountRefresh?.catch(() => undefined);
@@ -266,19 +272,57 @@ export class BridgeSecurityService implements BridgeSecurity {
   private emitRevoked(endpointIds: string[]): void {
     for (const id of endpointIds) for (const listener of this.revoked) listener(id);
   }
+  private async pinnedCheckpoint(): Promise<AccountCheckpoint | null> {
+    try { return (await this.policy.accountTrust())?.checkpoint ?? null; } catch { return null; }
+  }
+  /** A refused fetched history is still evidence, but only against the pin as it stands now: adoption is not serialized
+   *  with reads, and a fork from an older pin must never confirm. Pins only move forward by verified extension. */
+  private async adoptFetched<T>(fetched: AccountHistory, adopt: () => Promise<T>): Promise<T> {
+    let adopted: T;
+    try { adopted = await adopt(); } catch (error) {
+      if (!this.bridgeRevokedEmitted) await this.confirmRevocationEvidence(fetched);
+      throw error;
+    }
+    if (!this.bridgeRevokedEmitted && isOwnBridgeRevoked(await this.pinnedCheckpoint(), this.bridgeId)) this.emitBridgeRevoked();
+    return adopted;
+  }
+  async confirmRevocationEvidence(evidence: AccountHistory): Promise<boolean> {
+    const confirmed = await confirmOwnRevocation({ evidence, pinned: await this.pinnedCheckpoint(), bridgeId: this.bridgeId, now: this.now() });
+    if (confirmed) this.emitBridgeRevoked();
+    return confirmed;
+  }
+  private emitBridgeRevoked(): void {
+    if (this.bridgeRevokedEmitted) return;
+    this.bridgeRevokedEmitted = true;
+    if (this.accountTimer) clearTimeout(this.accountTimer);
+    this.accountTimer = null;
+    this.accountTrigger?.dispose(); this.accountTrigger = null;
+    for (const listener of Array.from(this.bridgeRevokedListeners)) this.notifyBridgeRevoked(listener);
+  }
+  private notifyBridgeRevoked(listener: () => void): void {
+    if (this.bridgeRevokedNotified.has(listener)) return;
+    this.bridgeRevokedNotified.add(listener);
+    const failed = (error: unknown) => console.error('[Security] bridgeRevoked listener failed:', error);
+    try {
+      const result: unknown = listener();
+      if (result instanceof Promise) result.catch(failed);
+    } catch (error) { failed(error); }
+  }
   async refreshAccount(): Promise<void> {
     if (this.accountRefresh) return this.accountRefresh;
     const run = async (): Promise<void> => {
-      if (this.closed || !await this.policy.accountTrust()) return;
+      if (this.closed || this.bridgeRevokedEmitted || !await this.policy.accountTrust()) return;
       try {
         if (!this.options.readAccountHistory) throw new AccountReadUnavailable();
         const history = await this.options.readAccountHistory(this.accountAbort.signal);
         if (!history) throw new BridgeSecurityError('account_trust_rollback');
         if (this.closed) return;
-        const result = await this.policy.applyAccountRead(history);
+        const result = await this.adoptFetched(history, () => this.policy.applyAccountRead(history));
         this.emitRevoked(result.revoked);
       } catch (error) {
-        if (!(error instanceof AccountReadUnavailable)) this.policy.blockAccount(this.accountFailure(error).code);
+        // Unverified revocation evidence is only an unavailable read: a forged refusal must neither reset nor block.
+        if (error instanceof AccountBridgeRevoked) await this.confirmRevocationEvidence(error.evidence);
+        else if (!(error instanceof AccountReadUnavailable)) this.policy.blockAccount(this.accountFailure(error).code);
         if (!await this.policy.accountAvailable()) this.emitRevoked(await this.policy.accountEndpointIds());
         throw error;
       }
@@ -289,27 +333,38 @@ export class BridgeSecurityService implements BridgeSecurity {
   async adoptAccount(actor: VerifiedPrincipal, head: AccountHead): Promise<AccountHead> {
     await this.policy.revalidate(actor, 'admin');
     if (actor.endpoint.kind !== 'browser' || !this.options.readAccountHistory) throw new BridgeSecurityError('account_approval_required');
+    if (this.bridgeRevokedEmitted) throw new BridgeSecurityError('account_bridge_revoked');
     try {
       const parsedHead = z.object({ rootId: z.string().regex(/^[A-Za-z0-9_-]{43}$/), head: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
         revision: z.number().int().min(0).max(ACCOUNT_TRUST_LIMITS.maxTransitions) }).strict().parse(head);
       const history = await this.options.readAccountHistory(this.accountAbort.signal);
       if (!history) throw new BridgeSecurityError('account_approval_required');
       if (this.closed) throw new BridgeSecurityError('account_storage_unavailable');
-      const result = await this.policy.applyAccountRead(history, { actor, head: parsedHead });
+      const result = await this.adoptFetched(history, () => this.policy.applyAccountRead(history, { actor, head: parsedHead }));
       this.emitRevoked(result.revoked);
       return result.head;
     } catch (error) {
       if (error instanceof AccountReadUnavailable) throw new BridgeSecurityError('account_storage_unavailable');
+      if (error instanceof AccountBridgeRevoked) {
+        throw new BridgeSecurityError(await this.confirmRevocationEvidence(error.evidence) ? 'account_bridge_revoked' : 'account_storage_unavailable');
+      }
       throw this.accountFailure(error);
     }
   }
   onRevoked(listener: (endpointId: string) => void): () => void { this.revoked.add(listener); return () => this.revoked.delete(listener); }
+  /** Fires at most once per instance, only on signed proof that this bridge was revoked. */
+  onBridgeRevoked(listener: () => void): () => void {
+    this.bridgeRevokedListeners.add(listener);
+    // Startup may emit before the caller subscribes; a late listener still hears it, asynchronously.
+    if (this.bridgeRevokedEmitted) queueMicrotask(() => { if (this.bridgeRevokedListeners.has(listener)) this.notifyBridgeRevoked(listener); });
+    return () => { this.bridgeRevokedListeners.delete(listener); };
+  }
   async close(): Promise<void> {
     this.closed = true; this.accountAbort.abort();
     this.accountTrigger?.dispose(); this.accountTrigger = null;
     if (this.accountTimer) clearTimeout(this.accountTimer);
     this.accountTimer = null;
     await this.accountRefresh?.catch(() => undefined);
-    this.revoked.clear(); this.replay.clear(); await this.policy.close();
+    this.revoked.clear(); this.bridgeRevokedListeners.clear(); this.replay.clear(); await this.policy.close();
   }
 }

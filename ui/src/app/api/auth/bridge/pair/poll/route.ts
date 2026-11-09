@@ -6,6 +6,7 @@ import jwt from "jsonwebtoken";
 import { parseLocalAdvert } from "../../local-advert";
 import { getByDeviceCode, consumePairingRequest } from "@/lib/pairing-store";
 import { upsertBridgeRefresh, getOwnerIdForSub } from "@/lib/bridge-refresh";
+import { bridgeRevocationForOwner } from '@/lib/bridge-revocation';
 import { getRequiredSecret } from "@/lib/secrets";
 import { checkRateLimit, recordAttempt, type RateLimitConfig } from "@/lib/login-rate-limit";
 import { boundedSecurityJson } from '@/lib/security-store';
@@ -86,6 +87,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       const delivery = await new PendingApprovalStore().deliver(body.deviceCode, advert.localPort);
       if ('status' in delivery) return NextResponse.json(delivery, { headers: ACCOUNT_HEADERS });
       const { snapshot } = delivery;
+      // Defense in depth: deliver() already validates roster membership, which a signed-revoked bridge fails.
+      // This stops a revoked bridge's credentials from reaching the wire even if that check is ever loosened.
+      try {
+        if ((await bridgeRevocationForOwner(snapshot.ownerId, snapshot.bridgeId)).revoked) return NextResponse.json({ status: 'denied' } satisfies PairPollResponse, { headers: ACCOUNT_HEADERS });
+      } catch (error) {
+        console.error('bridge revocation check failed', error);
+        return NextResponse.json({ error: 'account_unavailable' }, { status: 503, headers: ACCOUNT_HEADERS });
+      }
       return NextResponse.json({ status: 'approved', ownerId: snapshot.ownerId,
         token: jwt.sign(snapshot.connection, secret, { algorithm: 'HS256' }),
         refreshToken: jwt.sign(snapshot.refresh, secret, { algorithm: 'HS256' }),
@@ -119,6 +128,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   let ownerId: string;
   try { ownerId = await getOwnerIdForSub(row.sub); }
   catch { return NextResponse.json({ error: 'Bridge account is unavailable' }, { status: 401 }); }
+  // Signed revocation wins over an approval that is still waiting to be delivered.
+  try {
+    if ((await bridgeRevocationForOwner(ownerId, row.bridgeId)).revoked) return NextResponse.json({ status: 'denied' } satisfies PairPollResponse);
+  } catch (error) {
+    console.error('bridge revocation check failed', error);
+    return NextResponse.json({ error: 'account_unavailable' }, { status: 503 });
+  }
   let account: PairingAccountBinding | undefined;
   let accountHistory: AccountHistory | undefined;
   if (row.enrollment) {

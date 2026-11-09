@@ -22,6 +22,9 @@ import type { PendingApprovalState, PendingBridgeDecision, PendingBridgePairingC
 import { isDeepStrictEqual } from 'node:util';
 import { matchesPendingBridgeDecision } from './security/bridge/pending-approval.js';
 
+/** Servers deny a revoked bridgeId, and trusted browsers refuse to approve it; only a new identity pairs again. */
+export const REMOVED_COMPUTER_HINT = 'If this computer was removed from your account before, run `ftown start --new-identity`.';
+
 export interface RunPairingOptions {
   apiUrl: string;
   bridgeId: string;
@@ -158,6 +161,7 @@ export async function runPairing(opts: RunPairingOptions): Promise<PairingResult
 
   for (;;) {
     if (Date.now() >= deadline) {
+      log(REMOVED_COMPUTER_HINT);
       throw new Error('Pairing timed out');
     }
 
@@ -189,8 +193,10 @@ export async function runPairing(opts: RunPairingOptions): Promise<PairingResult
         await sleepImpl(intervalMs * 2);
         break;
       case 'denied':
+        log(REMOVED_COMPUTER_HINT);
         throw new Error('Pairing denied');
       case 'expired':
+        log(REMOVED_COMPUTER_HINT);
         throw new Error('Pairing request expired before approval');
       case 'consumed':
         throw new Error('Pairing code was already consumed');
@@ -408,11 +414,14 @@ async function runPendingPairing(opts: RunPairingOptions, ctx: PendingBridgePair
       }
     }
   } catch (error) {
+    let finalPhase: PendingBridgeStatus['phase'] = localStatus.phase;
     if (!['approved', 'rejected', 'cancelled', 'expired', 'conflict'].includes(localStatus.phase)) {
       const phase = error instanceof AccountTrustError && error.code === 'account_enrollment_expired' ? 'expired'
         : error instanceof AccountTrustError && error.code === 'account_trust_conflict' ? 'conflict' : 'cancelled';
+      finalPhase = phase;
       await ctx.onLocalStatus({ ...localStatus, phase, comparisonCode: null }).catch(() => undefined);
     }
+    if (['rejected', 'expired'].includes(finalPhase)) (opts.log ?? console.log)(REMOVED_COMPUTER_HINT);
     throw error;
   } finally { clearTimeout(timer); decisionController.abort(); expiry.abort(); packet = undefined; }
 }

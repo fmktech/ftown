@@ -129,6 +129,17 @@ export async function getBridgeRefreshOwner(bridgeId: string): Promise<string | 
   return rows.length === 1 ? rows[0].sub : null;
 }
 
+/** Current refresh jti for a registration (or the 'revoked' tombstone); null when none. */
+export async function getBridgeRefreshJti(bridgeId: string, sub: string): Promise<string | null> {
+  const sql = getDb();
+  const rows = (await sql.query(
+    `SELECT current_jti FROM bridge_refresh WHERE bridge_id = $1 AND sub = $2`,
+    [bridgeId, sub]
+  )) as { current_jti: string | null }[];
+
+  return rows.length === 1 ? rows[0].current_jti : null;
+}
+
 /**
  * List the caller's paired devices (P6). `revoked` reflects the tombstone
  * sentinel jti value set by revokeDevice.
@@ -164,6 +175,23 @@ export async function revokeDevice(sub: string, bridgeId: string): Promise<boole
      WHERE bridge_id = $2 AND sub = $3
      RETURNING bridge_id`,
     [REVOKED_JTI, bridgeId, sub]
+  )) as { bridge_id: string }[];
+
+  return rows.length === 1;
+}
+
+/**
+ * Derived tombstone after a signed revoke_bridge: same sentinel as revokeDevice,
+ * resolved by account owner id. Best-effort mirror of the signed record, never its authority.
+ */
+export async function revokeBridgeRefreshForOwner(ownerId: string, bridgeId: string): Promise<boolean> {
+  const sql = getDb();
+  const rows = (await sql.query(
+    `UPDATE bridge_refresh
+     SET current_jti = $1, updated_at = NOW()
+     WHERE bridge_id = $2 AND sub = (SELECT email FROM users WHERE id = $3)
+     RETURNING bridge_id`,
+    [REVOKED_JTI, bridgeId, ownerId]
   )) as { bridge_id: string }[];
 
   return rows.length === 1;
