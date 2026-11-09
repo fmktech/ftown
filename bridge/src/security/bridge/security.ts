@@ -28,7 +28,11 @@ export const applicationJson = (value: unknown): ApplicationJson => JSON.parse(J
 export interface BridgeSecurityOptions extends PolicyOptions {
   relayUserId: string; browserOrigin?: string;
   readAccountHistory?: (signal?: AbortSignal) => Promise<AccountHistory | null>;
+  /** Jitter source for account-read retry backoff; defaults to Math.random. */
+  random?: () => number;
 }
+const ACCOUNT_READ_RETRY_BASE_MS = 60_000;
+const ACCOUNT_READ_RETRY_MAX_MS = 1_800_000;
 
 export class BridgeSecurityService implements BridgeSecurity {
   readonly endpoint;
@@ -42,7 +46,7 @@ export class BridgeSecurityService implements BridgeSecurity {
   private accountTimer: ReturnType<typeof setTimeout> | null = null;
   private accountTimerDue = 0;
   private accountPushHealthy = false;
-  private accountReadOk = true;
+  private accountReadFailures = 0;
   private accountRefresh: Promise<void> | null = null;
   private accountTrigger: CoalescedTrigger | null = null;
   private readonly accountAbort = new AbortController();
@@ -212,11 +216,22 @@ export class BridgeSecurityService implements BridgeSecurity {
   /** Called once at startup; legacy/Solo stores never adopt an unsigned server directory. */
   async startAccount(trust?: VerifiedAccountTrust): Promise<void> {
     if (trust) await this.policy.pinBootstrap(trust);
-    this.accountReadOk = await this.refreshAccount().then(() => true, () => false);
+    this.recordAccountRead(await this.refreshAccount().then(() => true, () => false));
     if (!this.closed && !this.accountTimer && this.options.readAccountHistory) this.scheduleAccountRead();
   }
-  /** Safety read: 1 h only while push is healthy and the last read succeeded, else the 30 s cadence. */
-  private scheduleAccountRead(delay = this.accountPushHealthy && this.accountReadOk ? ACCOUNT_SAFETY_REFRESH_MS : ACCOUNT_TRUST_LIMITS.refreshIntervalMs): void {
+  private recordAccountRead(ok: boolean): void {
+    this.accountReadFailures = ok ? 0 : this.accountReadFailures + 1;
+  }
+  /** After failures the server is the only writer of account state, so retrying fast buys nothing: back off with jitter. */
+  private nextAccountReadDelay(): number {
+    if (this.accountReadFailures > 0) {
+      const base = Math.min(ACCOUNT_READ_RETRY_BASE_MS * 2 ** (this.accountReadFailures - 1), ACCOUNT_READ_RETRY_MAX_MS);
+      return base * (0.8 + 0.4 * (this.options.random ?? Math.random)());
+    }
+    return this.accountPushHealthy ? ACCOUNT_SAFETY_REFRESH_MS : ACCOUNT_TRUST_LIMITS.refreshIntervalMs;
+  }
+  /** Safety read: 1 h while push is healthy and the last read succeeded, else the 10 min cadence; failed reads back off from 60 s to 30 min. */
+  private scheduleAccountRead(delay = this.nextAccountReadDelay()): void {
     if (this.closed || !this.options.readAccountHistory) return;
     if (this.accountTimer) clearTimeout(this.accountTimer);
     this.accountTimerDue = performance.now() + delay; // monotonic: wall-clock steps and sleep must not skew the pull-in
@@ -224,10 +239,10 @@ export class BridgeSecurityService implements BridgeSecurity {
     this.accountTimer.unref();
   }
   private async trackedAccountRead(): Promise<void> {
-    try { await this.refreshAccount(); this.accountReadOk = true; } catch { this.accountReadOk = false; }
+    try { await this.refreshAccount(); this.recordAccountRead(true); } catch { this.recordAccountRead(false); }
     this.scheduleAccountRead();
   }
-  /** Push (nudge subscription) health; losing it pulls the next safety read in to the 30 s cadence. */
+  /** Push (nudge subscription) health; losing it pulls the next safety read in to the 10 min cadence. */
   setAccountPushHealthy(healthy: boolean): void {
     const lost = this.accountPushHealthy && !healthy;
     this.accountPushHealthy = healthy;

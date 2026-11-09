@@ -9,7 +9,7 @@ import type {
 
 export const ACCOUNT_TRUST_LIMITS = Object.freeze({
   maxHistoryBytes: 2097152, maxTransitions: 1024, maxDevices: 128, maxBridges: 128,
-  enrollmentLifetimeMs: 300000, refreshIntervalMs: 30000, offlineGraceMs: 86400000,
+  enrollmentLifetimeMs: 300000, refreshIntervalMs: 600000, offlineGraceMs: 86400000,
   maxFutureSkewMs: 30000, maxLabelLength: 200,
 } satisfies AccountTrustLimits);
 

@@ -14,7 +14,7 @@ import { AccountReadUnavailable } from './account-client.js';
 const ownerId = '7bac2a7f-c58e-4845-856f-8283fb07ad96';
 const minute = 60_000;
 
-async function fixture(t: { after(fn: () => Promise<void>): void }, withReader = true) {
+async function fixture(t: { after(fn: () => Promise<void>): void }, withReader = true, random: () => number = () => 0.5) {
   const directory = await mkdtemp(join(tmpdir(), 'ftown-account-refresh-'));
   const bridge = await generateEndpoint(ownerId, 'bridge');
   const first = await generateEndpoint(ownerId, 'browser');
@@ -34,7 +34,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, withReader =
     if (state.fail) throw new AccountReadUnavailable();
     return history;
   };
-  const security = new BridgeSecurityService(bridge, 'bridge', directory, { relayUserId: 'owner@example.test', now: () => Date.now(),
+  const security = new BridgeSecurityService(bridge, 'bridge', directory, { relayUserId: 'owner@example.test', now: () => Date.now(), random,
     ...(withReader ? { readAccountHistory } : {}) });
   t.after(async () => { mock.timers.reset(); await security.close(); await rm(directory, { recursive: true, force: true }); });
   const invite = await security.policy.createInvitation(LOCAL_RECOVERY_AUTHORITY, { label: 'Legacy' });
@@ -58,19 +58,20 @@ async function settle(security: BridgeSecurityService) {
 }
 const spy = { scheduled: 0, fired: 0 };
 
-async function started(t: { after(fn: () => Promise<void>): void }, opts: { reader?: boolean; healthy?: boolean } = {}) {
-  const { reader = true, healthy = true } = opts;
-  const f = await fixture(t, reader);
+async function started(t: { after(fn: () => Promise<void>): void }, opts: { reader?: boolean; healthy?: boolean; failStartup?: boolean; random?: () => number } = {}) {
+  const { reader = true, healthy = true, failStartup = false, random } = opts;
+  const f = await fixture(t, reader, random);
   if (reader) await f.adopt();
   mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'], now: Date.now() });
   const mocked = globalThis.setTimeout;
   globalThis.setTimeout = ((fn: () => void, ms?: number) => { spy.scheduled++; return mocked(() => { spy.fired++; fn(); }, ms); }) as typeof setTimeout;
+  if (failStartup) f.state.fail = true;
   if (reader) { f.security.setAccountPushHealthy(healthy); await f.security.startAccount(); }
   f.state.reads = 0; f.state.times = []; f.state.t0 = Date.now(); spy.scheduled = 0; spy.fired = 0;
   const advance = async (ms: number) => { mock.timers.tick(ms); await settle(f.security); };
   return { ...f, advance, times: () => f.state.times.slice() };
 }
-const s30 = 30_000, h1 = 60 * minute;
+const m10 = 600_000, h1 = 60 * minute;
 
 test('healthy push and successful reads: safety reads are 1 h apart (59/60 min regression)', async t => {
   const f = await started(t);
@@ -80,29 +81,129 @@ test('healthy push and successful reads: safety reads are 1 h apart (59/60 min r
   await f.advance(minute); assert.deepEqual(f.times(), [h1, 2 * h1]);
 });
 
-test('unhealthy push keeps the 30 s cadence', async t => {
+test('unhealthy push keeps the 10 min cadence', async t => {
   const f = await started(t, { healthy: false });
-  await f.advance(29_000); assert.deepEqual(f.times(), []);
-  await f.advance(1000); assert.deepEqual(f.times(), [s30]);
-  await f.advance(s30); assert.deepEqual(f.times(), [s30, 2 * s30]);
+  await f.advance(599_000); assert.deepEqual(f.times(), []);
+  await f.advance(1000); assert.deepEqual(f.times(), [m10]);
+  await f.advance(m10); assert.deepEqual(f.times(), [m10, 2 * m10]);
 });
 
-test('a failed read is retried in 30 s even when push is healthy', async t => {
+test('a failed read is retried in 60 s even when push is healthy', async t => {
   const f = await started(t);
   f.state.fail = true;
   await f.advance(h1); assert.deepEqual(f.times(), [h1]);
   f.state.fail = false;
-  await f.advance(29_000); assert.deepEqual(f.times(), [h1]);
-  await f.advance(1000); assert.deepEqual(f.times(), [h1, h1 + s30]);
+  await f.advance(59_000); assert.deepEqual(f.times(), [h1]);
+  await f.advance(1000); assert.deepEqual(f.times(), [h1, h1 + minute]);
   await f.advance(59 * minute); assert.equal(f.state.reads, 2);
-  await f.advance(minute); assert.deepEqual(f.times(), [h1, h1 + s30, 2 * h1 + s30]);
+  await f.advance(minute); assert.deepEqual(f.times(), [h1, h1 + minute, 2 * h1 + minute]);
 });
 
-test('losing push health pulls the next read within 30 s', async t => {
+test('consecutive failed safety reads back off 60 s to 30 min and then stay at 30 min', async t => {
+  const f = await started(t);
+  f.state.fail = true;
+  await f.advance(h1); assert.equal(f.state.reads, 1);
+  for (const [i, delay] of [60, 120, 240, 480, 960, 1800, 1800].entries()) {
+    await f.advance(delay * 1000 - 1); assert.equal(f.state.reads, i + 1, `no read before ${delay} s`);
+    await f.advance(1); assert.equal(f.state.reads, i + 2, `one read at ${delay} s`);
+  }
+});
+
+test('a success after failures resets the backoff: 1 h with healthy push', async t => {
+  const f = await started(t);
+  f.state.fail = true;
+  await f.advance(h1); await f.advance(minute); await f.advance(2 * minute);
+  assert.equal(f.state.reads, 3);
+  f.state.fail = false;
+  await f.advance(4 * minute); assert.equal(f.state.reads, 4);
+  await f.advance(h1 - 1000); assert.equal(f.state.reads, 4);
+  await f.advance(1000); assert.equal(f.state.reads, 5);
+});
+
+test('a success after failures resets the backoff: 10 min with unhealthy push', async t => {
+  const f = await started(t, { healthy: false });
+  f.state.fail = true;
+  await f.advance(m10); await f.advance(minute);
+  assert.equal(f.state.reads, 2);
+  f.state.fail = false;
+  await f.advance(2 * minute); assert.equal(f.state.reads, 3);
+  await f.advance(m10 - 1000); assert.equal(f.state.reads, 3);
+  await f.advance(1000); assert.equal(f.state.reads, 4);
+});
+
+test('a nudge-triggered failure counts toward the backoff and a later nudge success resets it', async t => {
+  const f = await started(t);
+  f.state.fail = true;
+  f.security.requestAccountRefresh(); await settle(f.security);
+  assert.equal(f.state.reads, 1);
+  await f.advance(1000);
+  f.security.requestAccountRefresh(); await settle(f.security);
+  assert.equal(f.state.reads, 2);
+  await f.advance(120_000 - 1); assert.equal(f.state.reads, 2);
+  await f.advance(1); assert.equal(f.state.reads, 3);
+  f.state.fail = false;
+  await f.advance(1000);
+  f.security.requestAccountRefresh(); await settle(f.security);
+  assert.equal(f.state.reads, 4);
+  await f.advance(h1 - 1000); assert.equal(f.state.reads, 4);
+  await f.advance(1000); assert.equal(f.state.reads, 5);
+});
+
+test('a startup read failure counts as the first failure', async t => {
+  const f = await started(t, { failStartup: true });
+  await f.advance(59_000); assert.equal(f.state.reads, 0);
+  await f.advance(1000); assert.equal(f.state.reads, 1);
+  await f.advance(120_000 - 1); assert.equal(f.state.reads, 1);
+  await f.advance(1); assert.equal(f.state.reads, 2);
+});
+
+test('push loss pulls a later backoff timer in to 10 min', async t => {
+  const f = await started(t);
+  f.state.fail = true;
+  await f.advance(h1);
+  for (const delay of [60, 120, 240, 480]) await f.advance(delay * 1000);
+  assert.equal(f.state.reads, 5);
+  f.security.setAccountPushHealthy(false);
+  await f.advance(m10 - 1000); assert.equal(f.state.reads, 5);
+  await f.advance(1000); assert.equal(f.state.reads, 6);
+});
+
+test('push loss does not push an earlier backoff timer out', async t => {
+  const f = await started(t);
+  f.state.fail = true;
+  await f.advance(h1); assert.equal(f.state.reads, 1);
+  f.security.setAccountPushHealthy(false);
+  await f.advance(60_000); assert.equal(f.state.reads, 2);
+});
+
+test('retry delay is jittered 0.8x to 1.2x: lower bound', async t => {
+  const f = await started(t, { random: () => 0 });
+  f.state.fail = true;
+  await f.advance(h1); assert.equal(f.state.reads, 1);
+  await f.advance(47_900); assert.equal(f.state.reads, 1);
+  await f.advance(100); assert.equal(f.state.reads, 2);
+});
+
+test('retry delay is jittered 0.8x to 1.2x: upper bound', async t => {
+  const f = await started(t, { random: () => 0.999999 });
+  f.state.fail = true;
+  await f.advance(h1); assert.equal(f.state.reads, 1);
+  await f.advance(71_900); assert.equal(f.state.reads, 1);
+  await f.advance(100); assert.equal(f.state.reads, 2);
+});
+
+test('outage simulation: 6 h of failing reads with healthy push stays at 15 reads or fewer', async t => {
+  const f = await started(t);
+  f.state.fail = true;
+  for (let elapsed = 0; elapsed < 6 * h1; elapsed += 30_000) await f.advance(30_000);
+  assert.equal(f.state.reads, 14);
+});
+
+test('losing push health pulls the next read within 10 min', async t => {
   const f = await started(t);
   await f.advance(10 * minute); assert.deepEqual(f.times(), []);
   f.security.setAccountPushHealthy(false);
-  await f.advance(s30); assert.deepEqual(f.times(), [10 * minute + s30]);
+  await f.advance(m10); assert.deepEqual(f.times(), [10 * minute + m10]);
 });
 
 test('a request during an in-flight nudge read causes exactly one fresh read after it settles', async t => {
@@ -122,11 +223,11 @@ test('a nudge during an in-flight timer-initiated read gets its own fresh read',
   const f = await started(t, { healthy: false });
   const gate = f.hold();
   const first = f.entered();
-  mock.timers.tick(s30); await first;
+  mock.timers.tick(m10); await first;
   assert.equal(f.state.reads, 1);
   f.security.requestAccountRefresh();
   gate.release(); await settle(f.security);
-  assert.deepEqual(f.times(), [s30, s30]);
+  assert.deepEqual(f.times(), [m10, m10]);
   assert.equal(f.state.reads, 2);
 });
 
@@ -152,7 +253,7 @@ test('a read settling after close does not schedule another safety timer', async
   const f = await started(t, { healthy: false });
   const gate = f.hold();
   const first = f.entered();
-  mock.timers.tick(s30); await first;
+  mock.timers.tick(m10); await first;
   const before = spy.scheduled;
   const closing = f.security.close();
   gate.release(); await closing; await settle(f.security);
