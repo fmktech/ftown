@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { accountIdOf, applyRevocations, ledgerChallenge, ledgerHead, ledgerLastIssuedAt, nextTransition, verifyLedger } from '@security/ledger/ledger';
-import type { Ledger, LedgerAuthority, LedgerCheckpoint, LedgerDevice, LedgerGenesis, LedgerOperation, LedgerTransition, Signed } from '@security/ledger/protocol';
-import { createSoftPasskey } from '@security/ledger/testing';
+import { accountIdOf, applyRevocations, ledgerChallenge, ledgerHead, ledgerLastIssuedAt, nextTransition, resolutionPlan, resolveForkTransition, verifyLedger } from '@security/ledger/ledger';
+import type { Ledger, LedgerAuthority, LedgerCheckpoint, LedgerDevice, LedgerGenesis, LedgerOperation, LedgerTransition, PasskeySignature, Signed } from '@security/ledger/protocol';
+import { createSoftPasskey, rawToDerSignature } from '@security/ledger/testing';
+import { derToRawSignature } from '@security/ledger/webauthn';
 import type { SoftPasskey } from '@security/ledger/testing';
 import { CREATION_MAX_BYTES, CREATION_MAX_RECORDS } from './ledger-limits';
 import { checkpointMac, checkpointMacValid } from './checkpoint-mac';
-import type { OfferLimits } from './account-ledger-store';
+import type { OfferLimits, OfferResult } from './account-ledger-store';
 
 /** One joined accounts + account_ledger row. The map key is accounts.account_id (PRIMARY KEY); accounts.handle is UNIQUE. */
 interface Row { account_id: string; handle: string; revision: number; head: string; ledger: unknown; sticky: unknown; version: number;
@@ -126,6 +127,8 @@ vi.mock('next-auth/providers/credentials', () => ({ default: (config: unknown) =
 const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 /** The heal log lines written since the last reset. */
 const heals = (): string[] => warn.mock.calls.map(call => String(call[0])).filter(line => line.startsWith('[ledger] checkpoint healed'));
+/** The divergent-adoption log lines written since the last reset. */
+const adoptions = (): string[] => warn.mock.calls.map(call => String(call[0])).filter(line => line.includes('adopted an owner-chosen history'));
 const { accountCount, offerLedger, readLedger, readTrustedCheckpoint } = await import('./account-ledger-store');
 const OPEN: OfferLimits = { admitCreation: async () => true, admitAccountWrite: async () => true };
 const offer = (candidate: unknown, limits: OfferLimits = OPEN) => offerLedger(candidate, limits);
@@ -169,6 +172,49 @@ async function addDevice(chain: Chain, passkey: SoftPasskey, label: string): Pro
   const device = await newDevice(chain.accountId, label);
   return { chain: await append(chain, passkey, { type: 'add_device', device }), device };
 }
+/** The owner's choice through the production builder: `chosen` plus a resolve_fork that discards `other` (its tip), signed by `passkey`,
+ *  issued after every record of both branches. Throws resolution_incomplete unless `chosen` already carries other's removals (resolveCarrying). */
+async function resolve(chosen: Chain, other: Chain, passkey: SoftPasskey): Promise<Chain> {
+  const payload = await resolveForkTransition(chosen.ledger, other.ledger, passkey.credentialId, Math.max(chosen.issuedAt, other.issuedAt) + 1000);
+  const record = await signed(passkey, payload);
+  return { ledger: { genesis: chosen.ledger.genesis, transitions: [...chosen.ledger.transitions, record] }, accountId: chosen.accountId, head: await ledgerHead(payload), issuedAt: payload.issuedAt };
+}
+/** The owner's full resolution: `chosen` plus resolutionPlan's carry (other's removals and passkeys, signed as ordinary records), then resolve. */
+async function resolveCarrying(chosen: Chain, other: Chain, passkey: SoftPasskey): Promise<{ chain: Chain; carried: Chain }> {
+  let carried = chosen;
+  for (const operation of (await resolutionPlan(chosen.ledger, other.ledger)).carry) carried = await append(carried, passkey, operation);
+  return { chain: await resolve(carried, other, passkey), carried };
+}
+/** The resolve_fork that resolveForkTransition builds for (carried, other), appended to `bare` (which lacks the carried records). */
+async function resolveWithoutCarry(bare: Chain, carried: Chain, other: Chain, passkey: SoftPasskey): Promise<Chain> {
+  const { operation } = await resolveForkTransition(carried.ledger, other.ledger, passkey.credentialId, Math.max(carried.issuedAt, other.issuedAt) + 1000);
+  return append(bare, passkey, operation);
+}
+const P256_ORDER = BigInt('0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551');
+/** The other valid encoding of the same ECDSA signature (s -> n - s): payload, head and validity unchanged, bytes different. No key needed. */
+function malleate(signature: PasskeySignature): PasskeySignature {
+  const raw = derToRawSignature(new Uint8Array(Buffer.from(signature.signature, 'base64url')));
+  const s = BigInt(`0x${Buffer.from(raw.subarray(32)).toString('hex')}`);
+  const flipped = new Uint8Array(64);
+  flipped.set(raw.subarray(0, 32), 0);
+  flipped.set(Buffer.from((P256_ORDER - s).toString(16).padStart(64, '0'), 'hex'), 32);
+  return { ...signature, signature: b64(rawToDerSignature(flipped)) };
+}
+/** `ledger` with the genesis and its first `length` records re-encoded. */
+const reencoded = (ledger: Ledger, length: number): Ledger => ({
+  genesis: { payload: ledger.genesis.payload, signature: malleate(ledger.genesis.signature) },
+  transitions: ledger.transitions.map((record, index) => (index < length ? { payload: record.payload, signature: malleate(record.signature) } : record)),
+});
+/** ECDSA verifications (one per passkey assertion checked) while `run` executes. */
+async function signatureChecks<T>(run: () => Promise<T>): Promise<[T, number]> {
+  const spy = vi.spyOn(crypto.subtle, 'verify');
+  try {
+    const result = await run();
+    return [result, spy.mock.calls.length];
+  } finally {
+    spy.mockRestore();
+  }
+}
 /** A creatable chain: a new genesis plus one add_device. */
 async function fresh(over: Partial<LedgerGenesis> = {}): Promise<{ passkey: SoftPasskey; chain: Chain }> {
   const passkey = await newPasskey();
@@ -209,6 +255,8 @@ async function registered() {
 const row = (accountId: string): Row => db.rows.get(accountId) as Row;
 const ids = (list: Array<{ endpoint: { id: string } }> | undefined) => (list ?? []).map(item => item.endpoint.id);
 const refused = (reason: string) => ({ decision: 'reject', stored: null, discarded: 0, reason });
+/** [decision, reason] of an offer; reason undefined when the result carries none. */
+const verdict = (result: OfferResult): [string, string | undefined] => [result.decision, 'reason' in result ? result.reason : undefined];
 /** Spy limits that record how many signature verifications had happened when each was consulted. */
 function budget(allowCreation: boolean, allowWrite = true) {
   const verifiedBefore: number[] = [];
@@ -498,38 +546,44 @@ describe('account write budget (admitAccountWrite)', () => {
     expect(row(base.accountId).head).toBe(base.head);
   });
 
-  it('a kept chain that only adds sticky revocations is a write and spends it', async () => {
+  it('a valid diverged chain carrying revocations is not a write: 409 diverged, nothing spent, nothing recorded', async () => {
     const { passkey, base, d1 } = await registered();
     const { chain: s1 } = await addDevice(base, passkey, 'S1');
     const { chain: stored } = await addDevice(s1, passkey, 'S2');
     await offer(stored.ledger);
-    const losing = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
+    const before = plain(row(base.accountId));
+    const other = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
     const { limits, admitAccountWrite } = budget(true);
-    expect((await offer(losing.ledger, limits)).decision).toBe('keep');
-    expect(admitAccountWrite).toHaveBeenCalledTimes(1);
-    expect((row(base.accountId).sticky as StickyIds).deviceIds).toEqual([d1.endpoint.id]);
+    expect(await offer(other.ledger, limits)).toMatchObject({ decision: 'reject', reason: 'diverged', discarded: 0 });
+    expect(admitAccountWrite).not.toHaveBeenCalled();
+    expect(row(base.accountId)).toEqual(before);
   });
 
-  it('junk and losing candidates for an account never spend its budget', async () => {
-    const { passkey, base } = await registered();
+  it('junk, older, identical and diverged candidates for an account never spend its budget', async () => {
+    const { passkey, d1, base } = await registered();
     const { chain: longer } = await addDevice(base, passkey, 'D2');
     const { chain: longest } = await addDevice(longer, passkey, 'D3');
     await offer(longest.ledger);
     db.updates = 0;
-    const { chain: losingFork } = await addDevice(base, passkey, 'F1');
+    const { chain: fork } = await addDevice(base, passkey, 'F1');
+    const { chain: forkLonger } = await addDevice(fork, passkey, 'F2');
+    const { chain: forkLongest } = await addDevice(forkLonger, passkey, 'F3');
+    const revoking = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
     const stranger = await newPasskey();
     const strangerSigned = { genesis: longest.ledger.genesis, transitions: [...longest.ledger.transitions,
       await signed(stranger, nextTransition(await verifyLedger(longest.ledger), passkey.credentialId, { type: 'add_device', device: await newDevice(base.accountId, 'X') }, longest.issuedAt + 1000, ledgerLastIssuedAt(longest.ledger)))] };
     const { limits, admitAccountWrite } = budget(true);
-    const candidates: Array<[string, unknown, string]> = [
-      ['tampered extension', tamper(longest, 2), 'reject'],
-      ['extension signed by a stranger', strangerSigned, 'reject'],
-      ['tampered fork', tamper(losingFork, 1), 'reject'],
-      ['shorter prefix', longer.ledger, 'keep'],
-      ['identical chain', longest.ledger, 'keep'],
-      ['losing valid fork without revocations', losingFork.ledger, 'keep'],
+    const candidates: Array<[string, unknown, [string, string | undefined]]> = [
+      ['tampered extension', tamper(longest, 2), ['reject', undefined]],
+      ['extension signed by a stranger', strangerSigned, ['reject', undefined]],
+      ['tampered fork', tamper(fork, 1), ['reject', undefined]],
+      ['shorter prefix', longer.ledger, ['keep', undefined]],
+      ['identical chain', longest.ledger, ['keep', undefined]],
+      ['shorter valid diverged chain', fork.ledger, ['reject', 'diverged']],
+      ['LONGER valid diverged chain', forkLongest.ledger, ['reject', 'diverged']],
+      ['diverged chain with a revocation', revoking.ledger, ['reject', 'diverged']],
     ];
-    for (const [name, candidate, decision] of candidates) expect((await offer(candidate, limits)).decision, name).toBe(decision);
+    for (const [name, candidate, expected] of candidates) expect(verdict(await offer(candidate, limits)), name).toEqual(expected);
     expect(admitAccountWrite).not.toHaveBeenCalled();
     expect(db.updates).toBe(0);
     expect(row(base.accountId).head).toBe(longest.head);
@@ -537,14 +591,14 @@ describe('account write budget (admitAccountWrite)', () => {
 
   it('an over-limit sticky set is rejected before the budget is consulted', async () => {
     const { passkey, base, d1 } = await registered();
-    const { chain: f1 } = await addDevice(base, passkey, 'F1');
-    const { chain: f2 } = await addDevice(f1, passkey, 'F2');
-    await offer(f2.ledger);
-    db.rows.set(base.accountId, await sealed(f2, { deviceIds: Array.from({ length: 8192 }, () => randomB64(32)), bridgeIds: [] }, row(base.accountId).version));
-    const losing = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
+    db.rows.set(base.accountId, await sealed(base, { deviceIds: Array.from({ length: 8192 }, () => randomB64(32)), bridgeIds: [] }, row(base.accountId).version));
+    const before = plain(row(base.accountId));
+    // A valid extension whose revocation would be the 8193rd sticky id.
+    const revoking = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
     const { limits, admitAccountWrite } = budget(true);
-    expect((await offer(losing.ledger, limits)).decision).toBe('reject');
+    expect(await offer(revoking.ledger, limits)).toMatchObject({ decision: 'reject', discarded: 0 });
     expect(admitAccountWrite).not.toHaveBeenCalled();
+    expect(row(base.accountId)).toEqual(before);
   });
 
   it('is consumed at most once when a lost write race is re-run', async () => {
@@ -573,7 +627,7 @@ describe('expectHead (a browser re-offering its chain)', () => {
     expect(db.rows.has(chain.accountId)).toBe(false);
   });
 
-  it('a stored head other than expectHead is head_changed with the stored chain: no fork choice, no budget, no write', async () => {
+  it('a stored head other than expectHead is head_changed with the stored chain: no chooseLedger, no budget, no write', async () => {
     const { passkey, base } = await registered();
     const { chain: longer } = await addDevice(base, passkey, 'D2');
     const { chain: stale } = await addDevice(base, passkey, 'F1');
@@ -590,15 +644,19 @@ describe('expectHead (a browser re-offering its chain)', () => {
     expect(row(base.accountId).head).toBe(base.head);
   });
 
-  it('the stored head equal to expectHead is an ordinary offer: fork choice, budget and write as without it', async () => {
+  it('the stored head equal to expectHead is an ordinary offer: chooseLedger, budget and write as without it', async () => {
     const { passkey, base } = await registered();
     const { chain: longer } = await addDevice(base, passkey, 'D2');
+    const { chain: fork } = await addDevice(base, passkey, 'F1');
+    const { chain: forkLonger } = await addDevice(fork, passkey, 'F2');
     const { limits, admitAccountWrite } = budget(false, true);
     expect(await offerLedger(longer.ledger, limits, { expectHead: base.head })).toMatchObject({ decision: 'adopt', discarded: 0 });
     expect(admitAccountWrite).toHaveBeenCalledExactlyOnceWith(base.accountId);
     expect(row(base.accountId).head).toBe(longer.head);
-    // A losing (shorter) chain against the head it names is kept, spending nothing.
+    // A chain the stored one extends (behind), against the head it names, is kept, spending nothing.
     expect((await offerLedger(base.ledger, limits, { expectHead: longer.head })).decision).toBe('keep');
+    // A longer diverged chain against the right head is still refused as diverged, spending nothing.
+    expect(await offerLedger(forkLonger.ledger, limits, { expectHead: longer.head })).toMatchObject({ decision: 'reject', reason: 'diverged' });
     expect(admitAccountWrite).toHaveBeenCalledTimes(1);
     expect(row(base.accountId).head).toBe(longer.head);
   });
@@ -677,45 +735,61 @@ describe('sealed checkpoint', () => {
     expect(await readTrustedCheckpoint(base.accountId)).toEqual(await trustedOf(base.ledger));
   });
 
-  it('adopt and a sticky-only keep write chain, sticky, head, revision, checkpoint and MAC in one statement', async () => {
+  it('both kinds of adopt (ahead, owner-chosen) write chain, sticky, head, revision, checkpoint and MAC in one statement; a refusal writes nothing', async () => {
     const { passkey, base, d1 } = await registered();
     const { chain: s1 } = await addDevice(base, passkey, 'S1');
     const { chain: s2 } = await addDevice(s1, passkey, 'S2');
+    const all = ['revision', 'head', 'ledger', 'sticky', 'checkpoint', 'checkpoint_mac', 'version'];
     expect((await offer(s2.ledger)).decision).toBe('adopt');
     expect(db.sets).toHaveLength(1);
-    expect(db.sets[0]).toEqual(expect.arrayContaining(['revision', 'head', 'ledger', 'sticky', 'checkpoint', 'checkpoint_mac', 'version']));
+    expect(db.sets[0]).toEqual(expect.arrayContaining(all));
     expect(JSON.parse(row(base.accountId).checkpoint as string)).toEqual(await rawOf(s2.ledger));
     expect(macValid(row(base.accountId))).toBe(true);
-    const losing = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
-    expect((await offer(losing.ledger)).decision).toBe('keep');
+    const other = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
+    expect(await offer(other.ledger)).toMatchObject({ decision: 'reject', reason: 'diverged' });
+    expect(db.sets).toHaveLength(1);
+    const chosen = await resolve(other, s2, passkey);
+    expect(await offer(chosen.ledger)).toMatchObject({ decision: 'adopt', discarded: 2 });
     expect(db.sets).toHaveLength(2);
-    expect(db.sets[1]).toEqual(expect.arrayContaining(['sticky', 'checkpoint', 'checkpoint_mac', 'version']));
-    expect(JSON.parse(row(base.accountId).checkpoint as string)).toEqual(await rawOf(s2.ledger));
+    expect(db.sets[1]).toEqual(expect.arrayContaining(all));
+    expect(row(base.accountId).ledger).toEqual(plain(chosen.ledger));
+    expect([row(base.accountId).revision, row(base.accountId).head]).toEqual([3, chosen.head]);
+    expect(JSON.parse(row(base.accountId).checkpoint as string)).toEqual(await rawOf(chosen.ledger));
     expect(macValid(row(base.accountId))).toBe(true);
     const trusted = await readTrustedCheckpoint(base.accountId);
-    expect(trusted).toEqual(await trustedOf(s2.ledger, { deviceIds: [d1.endpoint.id], bridgeIds: [] }));
+    expect(trusted).toEqual(await trustedOf(chosen.ledger, { deviceIds: [d1.endpoint.id], bridgeIds: [] }));
     expect(ids(trusted?.devices)).not.toContain(d1.endpoint.id);
-    expect(trusted?.revokedDeviceIds).toContain(d1.endpoint.id);
     expect(db.heals).toBe(0);
   });
 
-  it('fork choice never verifies the stored chain: the sealed RAW checkpoint is its cache, with or without sticky ids', async () => {
+  it('chooseLedger never verifies the stored chain: the sealed RAW checkpoint is its cache, with or without sticky ids', async () => {
     const { passkey, base, d1 } = await registered();
     const { chain: longer } = await addDevice(base, passkey, 'D2');
+    const { chain: other } = await addDevice(base, passkey, 'O1');
     const raw = await rawOf(base.ledger);
+    const cache = { head: base.head, checkpoint: raw };
     for (const sticky of [NONE, { deviceIds: [d1.endpoint.id], bridgeIds: [] }]) {
-      db.rows.set(base.accountId, await sealed(base, sticky));
+      const start = await sealed(base, sticky);
+      db.rows.set(base.accountId, start);
       verifySpy.calls = 0; verifySpy.caches = [];
       expect((await offer(base.ledger)).decision).toBe('keep');
       expect((await offer(longer.ledger)).decision).toBe('adopt');
+      db.rows.set(base.accountId, start);
+      expect(await offer(other.ledger)).toMatchObject({ decision: 'adopt' });
       expect(verifySpy.calls).toBe(0);
       // Never the trusted checkpoint (sticky applied): with a sticky id it would no longer describe the chain.
-      expect(plain(verifySpy.caches)).toEqual([{ head: base.head, checkpoint: raw }, { head: base.head, checkpoint: raw }]);
+      expect(plain(verifySpy.caches)).toEqual([cache, cache, cache]);
     }
+    db.rows.set(base.accountId, await sealed(longer));
+    const longerCache = { head: longer.head, checkpoint: await rawOf(longer.ledger) };
+    verifySpy.calls = 0; verifySpy.caches = [];
+    expect(await offer(other.ledger)).toMatchObject({ decision: 'reject', reason: 'diverged' });
+    expect(verifySpy.calls).toBe(0);
+    expect(plain(verifySpy.caches)).toEqual([longerCache]);
     expect(db.heals).toBe(0);
   });
 
-  it('a stored chain vouched for by its sealed checkpoint is not re-checked: a signature altered in the column does not break fork choice', async () => {
+  it('a stored chain vouched for by its sealed checkpoint is not re-checked: a signature altered in the column does not break chooseLedger', async () => {
     const { passkey, base } = await registered();
     const { chain: longer } = await addDevice(base, passkey, 'D2');
     const transition = base.ledger.transitions[0];
@@ -743,7 +817,7 @@ describe('sealed checkpoint', () => {
     }
   });
 
-  it('an older instance advanced the chain without the checkpoint: healed, not corrupt, and offers still reach fork choice', async () => {
+  it('an older instance advanced the chain without the checkpoint: healed, not corrupt, and offers still reach chooseLedger', async () => {
     const { passkey, base } = await registered();
     const { chain: longer } = await addDevice(base, passkey, 'D2');
     const { chain: longest } = await addDevice(longer, passkey, 'D3');
@@ -783,12 +857,11 @@ describe('sealed checkpoint', () => {
     const { passkey, base, d1 } = await registered();
     const { chain: withD2, device: d2 } = await addDevice(base, passkey, 'D2');
     const revoked = await append(withD2, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
-    const { chain: ahead } = await addDevice(revoked, passkey, 'D3');
-    expect((await offer(ahead.ledger)).decision).toBe('adopt');
-    // d2 revoked only on a (shorter, losing) fork: a sticky id the stored chain does not contain.
-    const losing = await append(withD2, passkey, { type: 'revoke_device', endpointId: d2.endpoint.id });
-    expect((await offer(losing.ledger)).decision).toBe('keep');
-    expect((row(base.accountId).sticky as StickyIds).deviceIds.sort()).toEqual([d1.endpoint.id, d2.endpoint.id].sort());
+    const { chain: stored } = await addDevice(revoked, passkey, 'D3');
+    expect((await offer(stored.ledger)).decision).toBe('adopt');
+    // d2: a sticky id the stored chain lacks, as a row written by older code holds (a fork lost before resolutions had to carry removals).
+    db.rows.set(base.accountId, await sealed(stored, { deviceIds: [d1.endpoint.id, d2.endpoint.id], bridgeIds: [] }, row(base.accountId).version));
+    expect(ids((await readTrustedCheckpoint(base.accountId))?.devices)).not.toContain(d2.endpoint.id);
     db.rows.set(base.accountId, { ...row(base.accountId), sticky: { deviceIds: [], bridgeIds: [] } });
     verifySpy.calls = 0;
     const trusted = await readTrustedCheckpoint(base.accountId);
@@ -799,7 +872,7 @@ describe('sealed checkpoint', () => {
     // The chain's own revocation is in the raw checkpoint, so it holds whatever the sticky column says.
     expect(ids(trusted?.devices)).not.toContain(d1.endpoint.id);
     expect(trusted?.revokedDeviceIds).toContain(d1.endpoint.id);
-    // Known limit: the sticky set is not passkey-signed, so a losing-fork-only revocation is lost with the edit.
+    // Known limit: the sticky set is not passkey-signed, so a sticky-only revocation is lost with the edit.
     expect(ids(trusted?.devices)).toContain(d2.endpoint.id);
   });
 
@@ -855,11 +928,11 @@ describe('sealed checkpoint', () => {
     expect(JSON.parse(row(base.accountId).checkpoint as string)).toEqual(await rawOf(longer.ledger));
   });
 
-  it('the heal UPDATE is version guarded: a concurrent sticky-only write is never overwritten', async () => {
+  it('the heal UPDATE is version guarded: a concurrent write with the same head is never overwritten', async () => {
     const { base, d1 } = await registered();
     db.rows.set(base.accountId, { ...row(base.accountId), checkpoint: null, checkpoint_mac: null });
     const writer = await sealed(base, { deviceIds: [d1.endpoint.id], bridgeIds: [] }, row(base.accountId).version + 1);
-    // Lands between the heal's read and its UPDATE: same head and revision, new sticky set and version.
+    // Lands between the heal's read and its UPDATE: same head and revision, another sticky set and version.
     db.races = [() => { db.rows.set(base.accountId, writer); }];
     const trusted = await readTrustedCheckpoint(base.accountId);
     expect(db.heals).toBe(1);
@@ -913,38 +986,53 @@ describe('replica rule', () => {
     const { chain: longer } = await addDevice(base, passkey, 'D2');
     await offer(longer.ledger);
     db.writes = 0;
+    const { limits, admitAccountWrite } = budget(true);
     for (const shorter of [base, g]) {
-      const result = await offer(shorter.ledger);
-      expect(result.decision).toBe('keep');
+      const result = await offer(shorter.ledger, limits);
+      expect(result).toMatchObject({ decision: 'keep', discarded: 0 });
+      expect(result.stored?.ledger).toEqual(longer.ledger);
       expect(result.stored?.trusted.head).toBe(longer.head);
     }
     expect(row(base.accountId).head).toBe(longer.head);
     expect(db.writes).toBe(0);
+    expect(db.sets).toHaveLength(1);
+    expect(admitAccountWrite).not.toHaveBeenCalled();
   });
 
-  it('a fork follows the order: the longer branch wins and reports discarded records', async () => {
+  it('a LONGER diverged chain is not adopted and the stored chain is byte-identical afterwards', async () => {
     const { passkey, base } = await registered();
     const { chain: short } = await addDevice(base, passkey, 'S1');
     const { chain: longA } = await addDevice(base, passkey, 'L1');
-    const { chain: long } = await addDevice(longA, passkey, 'L2');
-    await offer(short.ledger);
-    const won = await offer(long.ledger);
-    expect(won).toMatchObject({ decision: 'adopt', discarded: 1 });
-    expect(row(base.accountId).head).toBe(long.head);
-    expect((await offer(short.ledger)).decision).toBe('keep');
-    expect(row(base.accountId).head).toBe(long.head);
+    const { chain: longB } = await addDevice(longA, passkey, 'L2');
+    const { chain: long } = await addDevice(longB, passkey, 'L3');
+    expect((await offer(short.ledger)).decision).toBe('adopt');
+    const before = JSON.stringify(row(base.accountId));
+    db.writes = 0; db.sets = [];
+    const { limits, admitAccountWrite } = budget(true);
+    const result = await offer(long.ledger, limits);
+    expect(result).toEqual({ decision: 'reject', stored: expect.anything(), discarded: 0, reason: 'diverged' });
+    expect(result.stored?.ledger).toEqual(short.ledger);
+    expect(result.stored?.trusted).toEqual(await trustedOf(short.ledger));
+    expect(JSON.stringify(row(base.accountId))).toBe(before);
+    expect([db.writes, db.sets.length, db.heals]).toEqual([0, 0, 0]);
+    expect(admitAccountWrite).not.toHaveBeenCalled();
+    // The shorter stored chain still extends normally.
+    const { chain: next } = await addDevice(short, passkey, 'S2');
+    expect((await offer(next.ledger)).decision).toBe('adopt');
+    expect(row(base.accountId).head).toBe(next.head);
   });
 
-  it('equal-length forks: the lexicographically smaller head wins, whichever arrives first', async () => {
-    const { passkey, base } = await registered();
-    const { chain: a } = await addDevice(base, passkey, 'A');
-    const { chain: b } = await addDevice(base, passkey, 'B');
-    const [small, large] = a.head < b.head ? [a, b] : [b, a];
-    await offer(large.ledger);
-    expect((await offer(small.ledger)).decision).toBe('adopt');
-    expect(row(base.accountId).head).toBe(small.head);
-    expect((await offer(large.ledger)).decision).toBe('keep');
-    expect(row(base.accountId).head).toBe(small.head);
+  it('equal-length forks: whichever was written first stays, whatever its head; the other is diverged', async () => {
+    for (const order of ['smaller first', 'larger first']) {
+      const { passkey, base } = await registered();
+      const { chain: a } = await addDevice(base, passkey, 'A');
+      const { chain: b } = await addDevice(base, passkey, 'B');
+      const [small, large] = a.head < b.head ? [a, b] : [b, a];
+      const [first, second] = order === 'smaller first' ? [small, large] : [large, small];
+      expect((await offer(first.ledger)).decision, order).toBe('adopt');
+      expect(await offer(second.ledger), order).toMatchObject({ decision: 'reject', reason: 'diverged' });
+      expect(row(base.accountId).head, order).toBe(first.head);
+    }
   });
 
   it('an invalid fork is rejected with the stored chain and does not write', async () => {
@@ -962,25 +1050,30 @@ describe('replica rule', () => {
 });
 
 describe('sticky revocations', () => {
-  it('accumulate from a LOSING candidate, and trusted excludes them while the stored chain keeps them', async () => {
+  it('a diverged chain with more revocations is not adopted and sticky is unchanged', async () => {
     const { passkey, base, d1 } = await registered();
-    const { chain: s1 } = await addDevice(base, passkey, 'S1');
-    const { chain: stored } = await addDevice(s1, passkey, 'S2');
-    await offer(stored.ledger);
-    const losing = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
-    const result = await offer(losing.ledger);
-    expect(result.decision).toBe('keep');
-    expect(result.stored?.sticky.deviceIds).toEqual([d1.endpoint.id]);
-    expect(row(base.accountId).sticky).toEqual({ deviceIds: [d1.endpoint.id], bridgeIds: [] });
-    expect(row(base.accountId).head).toBe(stored.head);
-    expect(ids((JSON.parse(row(base.accountId).checkpoint as string) as LedgerCheckpoint).devices)).toContain(d1.endpoint.id);
+    const { chain: withD2, device: d2 } = await addDevice(base, passkey, 'D2');
+    const { chain: stored } = await addDevice(withD2, passkey, 'S1');
+    expect((await offer(stored.ledger)).decision).toBe('adopt');
+    const before = plain(row(base.accountId));
+    expect(before.sticky).toEqual(NONE);
+    // Longer, and revoking both devices the stored chain trusts: still another history.
+    const revokeOne = await append(withD2, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
+    const revokeBoth = await append(revokeOne, passkey, { type: 'revoke_device', endpointId: d2.endpoint.id });
+    const { limits, admitAccountWrite } = budget(true);
+    const result = await offer(revokeBoth.ledger, limits);
+    expect(result).toMatchObject({ decision: 'reject', reason: 'diverged', discarded: 0 });
+    expect(result.stored?.sticky).toEqual(NONE);
+    expect(row(base.accountId)).toEqual(before);
+    expect(admitAccountWrite).not.toHaveBeenCalled();
+    // Both devices stay trusted: the server records nothing from a history it refuses.
     for (const trusted of [(await readLedger({ accountId: base.accountId }))?.trusted, await readTrustedCheckpoint(base.accountId)]) {
-      expect(ids(trusted?.devices)).not.toContain(d1.endpoint.id);
-      expect(trusted?.revokedDeviceIds).toContain(d1.endpoint.id);
+      expect(trusted).toEqual(await trustedOf(stored.ledger));
+      expect(ids(trusted?.devices)).toEqual(expect.arrayContaining([d1.endpoint.id, d2.endpoint.id]));
     }
   });
 
-  it('accumulate from the winner and survive a longer fork that lacks the revocation', async () => {
+  it("accumulate from an adopted chain; a longer fork that lacks the revocation is refused, an owner-chosen one must carry it", async () => {
     const { passkey, base, d1 } = await registered();
     const revoked = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
     const adopted = await offer(revoked.ledger);
@@ -988,33 +1081,281 @@ describe('sticky revocations', () => {
     expect(adopted.stored?.sticky.deviceIds).toEqual([d1.endpoint.id]);
     const { chain: f1 } = await addDevice(base, passkey, 'F1');
     const { chain: f2 } = await addDevice(f1, passkey, 'F2');
-    const fork = await offer(f2.ledger);
-    expect(fork.decision).toBe('adopt');
-    expect(ids((await verifyLedger(fork.stored!.ledger)).devices)).toContain(d1.endpoint.id);
+    expect(await offer(f2.ledger)).toMatchObject({ decision: 'reject', reason: 'diverged' });
+    expect(row(base.accountId).head).toBe(revoked.head);
+    const { chain: chosen, carried } = await resolveCarrying(f2, revoked, passkey);
+    expect(carried.ledger.transitions).toHaveLength(f2.ledger.transitions.length + 1);
+    // Without the carried removal the resolution is refused: it would discard a removal.
+    expect(await offer((await resolveWithoutCarry(f2, carried, revoked, passkey)).ledger)).toMatchObject({ decision: 'reject', reason: 'diverged' });
+    expect(row(base.accountId).head).toBe(revoked.head);
+    const fork = await offer(chosen.ledger);
+    expect(fork).toMatchObject({ decision: 'adopt', discarded: 1 });
+    // The adopted chain itself revokes d1.
+    const raw = await verifyLedger(fork.stored!.ledger);
+    expect(ids(raw.devices)).not.toContain(d1.endpoint.id);
+    expect(raw.revokedDeviceIds).toContain(d1.endpoint.id);
     expect(ids(fork.stored?.trusted.devices)).not.toContain(d1.endpoint.id);
     expect(fork.stored?.sticky.deviceIds).toEqual([d1.endpoint.id]);
     expect(ids((await readTrustedCheckpoint(base.accountId))?.devices)).not.toContain(d1.endpoint.id);
   });
 
-  it('bridge revocations from a losing chain are sticky too: removed from bridges and listed in revokedBridgeIds', async () => {
+  it('a bridge removal on the discarded branch must be carried: without it 409 diverged; carried, the adopted chain itself revokes the bridge', async () => {
     const { passkey, base } = await registered();
     const bridgeEndpoint = (await newDevice(base.accountId, 'b')).endpoint;
     const device = await newDevice(base.accountId, 'b');
     const bridge = { bridgeId: 'bridge-1', endpoint: { ...bridgeEndpoint, kind: 'bridge' as const }, authPublicKey: device.authPublicKey, label: 'Bridge', approvedAt: T0 };
     const withBridge = await append(base, passkey, { type: 'add_bridge', bridge });
-    const { chain: ahead1 } = await addDevice(withBridge, passkey, 'X');
-    const { chain: ahead } = await addDevice(ahead1, passkey, 'Y');
-    await offer(ahead.ledger);
-    expect((await readTrustedCheckpoint(base.accountId))?.bridges.map(item => item.bridgeId)).toEqual(['bridge-1']);
-    const losing = await append(withBridge, passkey, { type: 'revoke_bridge', bridgeId: 'bridge-1' });
-    expect((await offer(losing.ledger)).decision).toBe('keep');
+    const removed = await append(withBridge, passkey, { type: 'revoke_bridge', bridgeId: 'bridge-1' });
+    expect((await offer(removed.ledger)).decision).toBe('adopt');
+    const { chain: x } = await addDevice(withBridge, passkey, 'X');
+    const { chain: other } = await addDevice(x, passkey, 'Y');
+    expect(await offer(other.ledger)).toMatchObject({ decision: 'reject', reason: 'diverged' });
+    expect((await readTrustedCheckpoint(base.accountId))?.bridges).toHaveLength(0);
+    const { chain: chosen, carried } = await resolveCarrying(other, removed, passkey);
+    const before = JSON.stringify(row(base.accountId));
+    expect(await offer((await resolveWithoutCarry(other, carried, removed, passkey)).ledger)).toMatchObject({ decision: 'reject', reason: 'diverged' });
+    expect(JSON.stringify(row(base.accountId))).toBe(before);
+    expect(await offer(chosen.ledger)).toMatchObject({ decision: 'adopt', discarded: 1 });
     const read = await readLedger({ accountId: base.accountId });
+    expect(read?.ledger).toEqual(chosen.ledger);
     expect(read?.sticky.bridgeIds).toEqual(['bridge-1']);
     for (const trusted of [read?.trusted, await readTrustedCheckpoint(base.accountId)]) {
       expect(trusted?.bridges).toHaveLength(0);
       expect(trusted?.revokedBridgeIds).toEqual(['bridge-1']);
     }
-    expect((JSON.parse(row(base.accountId).checkpoint as string) as LedgerCheckpoint).bridges).toHaveLength(1);
+    const stored = JSON.parse(row(base.accountId).checkpoint as string) as LedgerCheckpoint;
+    expect(stored.bridges).toHaveLength(0);
+    expect(stored.revokedBridgeIds).toEqual(['bridge-1']);
+  });
+});
+
+describe('append-only decision table', () => {
+  it('every relation and validity gets exactly one answer; only an adopt writes or spends the account budget', async () => {
+    const { passkey, g, base } = await registered();
+    const { chain: s1 } = await addDevice(base, passkey, 'S1');
+    // The server's chain: D1, S1, S2 (revisions 1 to 3).
+    const { chain: stored } = await addDevice(s1, passkey, 'S2');
+    const { chain: ahead } = await addDevice(stored, passkey, 'A1');
+    // Another history: forks after S1 (revision 2).
+    const { chain: other } = await addDevice(s1, passkey, 'O1');
+    const { chain: otherLonger } = await addDevice(other, passkey, 'O2');
+    const chosen = await resolve(other, stored, passkey);
+    // [name, candidate, [decision, reason], written, discarded]
+    const cases: Array<[string, Ledger, [string, string | undefined], boolean, number]> = [
+      ['same', stored.ledger, ['keep', undefined], false, 0],
+      ['behind', s1.ledger, ['keep', undefined], false, 0],
+      ['behind (genesis only)', g.ledger, ['keep', undefined], false, 0],
+      ['ahead, valid', ahead.ledger, ['adopt', undefined], true, 0],
+      ['ahead, invalid new record', tamper(ahead, 3), ['reject', undefined], false, 0],
+      ['diverged, invalid after the fork', tamper(otherLonger, 3), ['reject', undefined], false, 0],
+      ['diverged, valid, no resolve_fork', otherLonger.ledger, ['reject', 'diverged'], false, 0],
+      ['diverged, valid, applicable resolve_fork', chosen.ledger, ['adopt', undefined], true, 1],
+    ];
+    for (const [name, candidate, expected, written, discarded] of cases) {
+      db.rows.set(base.accountId, await sealed(stored, NONE, 5));
+      const before = JSON.stringify(row(base.accountId));
+      db.writes = 0;
+      const { limits, admitAccountWrite } = budget(false);
+      const result = await offer(candidate, limits);
+      expect(verdict(result), name).toEqual(expected);
+      expect(result.discarded, name).toBe(discarded);
+      expect(result.stored?.ledger, name).toEqual(written ? candidate : stored.ledger);
+      expect(admitAccountWrite, name).toHaveBeenCalledTimes(written ? 1 : 0);
+      expect(db.writes, name).toBe(written ? 1 : 0);
+      if (written) expect(row(base.accountId).ledger, name).toEqual(plain(candidate));
+      else expect(JSON.stringify(row(base.accountId)), name).toBe(before);
+    }
+  });
+});
+
+describe('owner-chosen history (resolve_fork)', () => {
+  it('divergent adoption with resolve_fork writes the chain (the removals carried into it), logs once, consumes the account budget once; without them it stays diverged', async () => {
+    const { passkey, base, d1 } = await registered();
+    const { chain: withD2, device: d2 } = await addDevice(base, passkey, 'D2');
+    const revokeD1 = await append(withD2, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
+    // The server's branch after the fork (revision 2): revoke d1, revoke d2.
+    const serverBranch = await append(revokeD1, passkey, { type: 'revoke_device', endpointId: d2.endpoint.id });
+    expect((await offer(serverBranch.ledger)).decision).toBe('adopt');
+    const { chain: o1, device: o } = await addDevice(withD2, passkey, 'O1');
+    const { chain: chosen, carried } = await resolveCarrying(o1, serverBranch, passkey);
+    expect(carried.ledger.transitions.slice(o1.ledger.transitions.length).map(record => record.payload.operation))
+      .toEqual([{ type: 'revoke_device', endpointId: d1.endpoint.id }, { type: 'revoke_device', endpointId: d2.endpoint.id }]);
+    warn.mockClear();
+    const { limits, admitAccountWrite } = budget(false);
+    // The same resolution without the carried removals would discard them: refused, nothing written, spent or logged.
+    const before = JSON.stringify(row(base.accountId));
+    expect(verdict(await offer((await resolveWithoutCarry(o1, carried, serverBranch, passkey)).ledger, limits))).toEqual(['reject', 'diverged']);
+    expect(JSON.stringify(row(base.accountId))).toBe(before);
+    expect(admitAccountWrite).not.toHaveBeenCalled();
+    expect(adoptions()).toEqual([]);
+    const result = await offer(chosen.ledger, limits);
+    expect(result).toMatchObject({ decision: 'adopt', discarded: 2 });
+    expect(result.stored?.ledger).toEqual(chosen.ledger);
+    expect(row(base.accountId).ledger).toEqual(plain(chosen.ledger));
+    expect([row(base.accountId).revision, row(base.accountId).head]).toEqual([6, chosen.head]);
+    expect([...(row(base.accountId).sticky as StickyIds).deviceIds].sort()).toEqual([d1.endpoint.id, d2.endpoint.id].sort());
+    expect(JSON.parse(row(base.accountId).checkpoint as string)).toEqual(await rawOf(chosen.ledger));
+    expect(macValid(row(base.accountId))).toBe(true);
+    for (const trusted of [result.stored?.trusted, await readTrustedCheckpoint(base.accountId)]) {
+      expect(ids(trusted?.devices)).toEqual([o.endpoint.id]);
+      expect([...(trusted?.revokedDeviceIds ?? [])].sort()).toEqual([d1.endpoint.id, d2.endpoint.id].sort());
+    }
+    // The adopted chain itself revokes both devices (nothing rests on the sticky set).
+    const raw = JSON.parse(row(base.accountId).checkpoint as string) as LedgerCheckpoint;
+    expect(ids(raw.devices)).toEqual([o.endpoint.id]);
+    expect([...raw.revokedDeviceIds].sort()).toEqual([d1.endpoint.id, d2.endpoint.id].sort());
+    expect(admitAccountWrite).toHaveBeenCalledExactlyOnceWith(base.accountId);
+    expect(adoptions()).toEqual([`[ledger] account ${base.accountId.slice(0, 8)} adopted an owner-chosen history: fork at revision 2, discarded 2 records`]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    // Offered again it is the stored chain: kept, no second log, no second spend.
+    expect((await offer(chosen.ledger, limits)).decision).toBe('keep');
+    expect(adoptions()).toHaveLength(1);
+    expect(admitAccountWrite).toHaveBeenCalledTimes(1);
+  });
+
+  it('a resolve_fork naming an earlier common record than the fork point is 409 diverged, nothing written', async () => {
+    const { passkey, base } = await registered();
+    const { chain: s1 } = await addDevice(base, passkey, 'S1');
+    const { chain: s2 } = await addDevice(s1, passkey, 'S2');
+    // The server: D1, S1, S2. The fork point is revision 1 (D1).
+    expect((await offer(s2.ledger)).decision).toBe('adopt');
+    const { chain: o1 } = await addDevice(base, passkey, 'O1');
+    // The production resolution with forkHead moved to the genesis: shared by both chains, but not the last record they share. It still
+    // names S1 as the discarded branch's first record and S2 as its tip, so the chain itself is valid.
+    const { operation } = await resolveForkTransition(o1.ledger, s2.ledger, passkey.credentialId, Math.max(o1.issuedAt, s2.issuedAt) + 1000);
+    expect(operation).toMatchObject({ type: 'resolve_fork', forkHead: base.head, discardedFirst: s1.head, discardedHead: s2.head, discardedRevision: 3 });
+    const early = await append(o1, passkey, { ...operation, forkHead: base.accountId } as LedgerOperation);
+    expect((await verifyLedger(early.ledger)).head).toBe(early.head);
+    const before = JSON.stringify(row(base.accountId));
+    warn.mockClear();
+    const { limits, admitAccountWrite } = budget(true);
+    expect(verdict(await offer(early.ledger, limits))).toEqual(['reject', 'diverged']);
+    expect(JSON.stringify(row(base.accountId))).toBe(before);
+    expect(admitAccountWrite).not.toHaveBeenCalled();
+    expect(adoptions()).toEqual([]);
+    // Control: the same choice naming the true fork point is adopted.
+    expect(await offer((await resolve(o1, s2, passkey)).ledger, limits)).toMatchObject({ decision: 'adopt', discarded: 2 });
+  });
+
+  it('opposite resolutions do not flip-flop: B over A, signed without seeing A over B, stays diverged', async () => {
+    const { passkey, base } = await registered();
+    const { chain: a } = await addDevice(base, passkey, 'A');
+    const { chain: b } = await addDevice(base, passkey, 'B');
+    expect((await offer(b.ledger)).decision).toBe('adopt');
+    const aOverB = await resolve(a, b, passkey);
+    // Another browser chooses the other way, never having seen aOverB.
+    const bOverA = await resolve(b, a, passkey);
+    expect(await offer(aOverB.ledger)).toMatchObject({ decision: 'adopt', discarded: 1 });
+    const before = JSON.stringify(row(base.accountId));
+    const { limits, admitAccountWrite } = budget(true);
+    expect(verdict(await offer(bOverA.ledger, limits))).toEqual(['reject', 'diverged']);
+    expect(JSON.stringify(row(base.accountId))).toBe(before);
+    expect(admitAccountWrite).not.toHaveBeenCalled();
+    expect((await offer(aOverB.ledger, limits)).decision).toBe('keep');
+    // A choice made after seeing aOverB (it discards aOverB's tip) does override it.
+    const informed = await resolve(b, aOverB, passkey);
+    expect(await offer(informed.ledger, limits)).toMatchObject({ decision: 'adopt', discarded: 2 });
+    expect(row(base.accountId).head).toBe(informed.head);
+    expect(admitAccountWrite).toHaveBeenCalledTimes(1);
+    expect(adoptions()).toHaveLength(2);
+  });
+
+  it('a creation chain carrying a resolve_fork is admitted like any chain; the history it discarded is refused afterwards', async () => {
+    const passkey = await newPasskey();
+    const g = await genesis(passkey);
+    const { chain: a } = await addDevice(g, passkey, 'A');
+    const { chain: b } = await addDevice(g, passkey, 'B');
+    const chosen = await resolve(a, b, passkey);
+    expect(await offer(chosen.ledger)).toMatchObject({ decision: 'created', discarded: 0 });
+    expect(row(g.accountId).head).toBe(chosen.head);
+    expect(verdict(await offer(b.ledger))).toEqual(['reject', 'diverged']);
+    expect(adoptions()).toEqual([]);
+  });
+});
+
+describe('verification cost (the sealed raw checkpoint is the cache)', () => {
+  it('an ahead offer checks only the new records; the stored chain is never re-verified', async () => {
+    const { passkey, base } = await registered();
+    const { chain: s1 } = await addDevice(base, passkey, 'S1');
+    const { chain: s2 } = await addDevice(s1, passkey, 'S2');
+    expect((await offer(s2.ledger)).decision).toBe('adopt');
+    const { chain: n1 } = await addDevice(s2, passkey, 'N1');
+    const { chain: n2 } = await addDevice(n1, passkey, 'N2');
+    verifySpy.calls = 0;
+    const [result, checks] = await signatureChecks(() => offer(n2.ledger));
+    expect(result.decision).toBe('adopt');
+    expect(checks).toBe(2);
+    expect(verifySpy.calls).toBe(0);
+    expect(db.heals).toBe(0);
+  });
+
+  it("a diverged offer checks only the candidate's records after the fork, adopted or not; same and behind check nothing", async () => {
+    const { passkey, base } = await registered();
+    const { chain: s1 } = await addDevice(base, passkey, 'S1');
+    const { chain: s2 } = await addDevice(s1, passkey, 'S2');
+    const { chain: s3 } = await addDevice(s2, passkey, 'S3');
+    // The server: D1, S1, S2, S3. The other history forks after S1 (revision 2).
+    expect((await offer(s3.ledger)).decision).toBe('adopt');
+    const { chain: o1 } = await addDevice(s1, passkey, 'O1');
+    const { chain: o2 } = await addDevice(o1, passkey, 'O2');
+    const chosen = await resolve(o2, s3, passkey);
+    verifySpy.calls = 0;
+    const cases: Array<[string, Ledger, string, number]> = [
+      ['same', s3.ledger, 'keep', 0],
+      ['behind', s1.ledger, 'keep', 0],
+      ['diverged', o2.ledger, 'reject', 2],
+      ['diverged with resolve_fork', chosen.ledger, 'adopt', 3],
+    ];
+    for (const [name, candidate, decision, expected] of cases) {
+      const [result, checks] = await signatureChecks(() => offer(candidate));
+      expect(result.decision, name).toBe(decision);
+      expect(checks, name).toBe(expected);
+    }
+    expect(verifySpy.calls).toBe(0);
+    expect(db.heals).toBe(0);
+  });
+
+  it('an ahead chain whose shared prefix has re-encoded (high-S) signatures is adopted with the STORED prefix bytes; one signature checked', async () => {
+    const { passkey, base } = await registered();
+    const { chain: s1 } = await addDevice(base, passkey, 'S1');
+    const { chain: s2 } = await addDevice(s1, passkey, 'S2');
+    expect((await offer(s2.ledger)).decision).toBe('adopt');
+    const storedBefore = plain(row(base.accountId).ledger) as Ledger;
+    const { chain: next } = await addDevice(s2, passkey, 'N1');
+    // Genesis and the 3 shared records re-encoded (anyone can do it, no key): same payloads and heads, other valid bytes. N1 as signed.
+    const offered = reencoded(next.ledger, 3);
+    expect(offered.genesis.signature).not.toEqual(next.ledger.genesis.signature);
+    expect(offered.transitions[2].signature).not.toEqual(next.ledger.transitions[2].signature);
+    expect((await verifyLedger(offered)).head).toBe(next.head);
+    verifySpy.calls = 0;
+    const [result, checks] = await signatureChecks(() => offer(offered));
+    expect(result).toMatchObject({ decision: 'adopt', discarded: 0 });
+    expect(checks).toBe(1);
+    expect(verifySpy.calls).toBe(0);
+    // Written, answered and published (the route sends stored.ledger): the stored prefix byte-for-byte plus the verified new record.
+    const expected = { genesis: storedBefore.genesis, transitions: [...storedBefore.transitions, offered.transitions[3]] };
+    expect(row(base.accountId).ledger).toEqual(expected);
+    expect(result.stored?.ledger).toEqual(expected);
+    expect(JSON.stringify(row(base.accountId).ledger)).not.toBe(JSON.stringify(plain(offered)));
+    expect([row(base.accountId).revision, row(base.accountId).head]).toEqual([4, next.head]);
+    expect(macValid(row(base.accountId))).toBe(true);
+    expect((await readLedger({ accountId: base.accountId }))?.ledger).toEqual(expected);
+  });
+
+  it('an owner-chosen history offered with a re-encoded shared prefix is stored with the STORED prefix bytes', async () => {
+    const { passkey, base } = await registered();
+    const { chain: s1 } = await addDevice(base, passkey, 'S1');
+    expect((await offer(s1.ledger)).decision).toBe('adopt');
+    const storedBefore = plain(row(base.accountId).ledger) as Ledger;
+    const { chain: o1 } = await addDevice(base, passkey, 'O1');
+    // Genesis and the shared record (D1) re-encoded; O1 and the resolve_fork as signed.
+    const offered = reencoded((await resolve(o1, s1, passkey)).ledger, 1);
+    const [result, checks] = await signatureChecks(() => offer(offered));
+    expect(result).toMatchObject({ decision: 'adopt', discarded: 1 });
+    expect(checks).toBe(2);
+    const expected = { genesis: storedBefore.genesis, transitions: [storedBefore.transitions[0], ...offered.transitions.slice(1)] };
+    expect(row(base.accountId).ledger).toEqual(expected);
+    expect(result.stored?.ledger).toEqual(expected);
   });
 });
 
@@ -1088,36 +1429,75 @@ describe('concurrency', () => {
     expect(db.writes).toBe(0);
     expect(row(base.accountId).head).toBe(two.head);
   });
+
+  it('two different valid extensions of one head offered concurrently: exactly one is written, the other is 409 diverged', async () => {
+    const { passkey, base, d1 } = await registered();
+    const a = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
+    const { chain: b } = await addDevice(base, passkey, 'B');
+    const { limits, admitAccountWrite } = budget(true);
+    let inner: Awaited<ReturnType<typeof offer>> | null = null;
+    // b is offered and written between a's read of `base` and a's guarded UPDATE.
+    db.races = [async () => { inner = await offer(b.ledger, limits); }];
+    const outer = await offer(a.ledger, limits);
+    expect(inner).toMatchObject({ decision: 'adopt', discarded: 0 });
+    // a's UPDATE matched nothing; the retry round re-read b and re-ran chooseLedger: a is now diverged by one record.
+    expect(outer).toMatchObject({ decision: 'reject', reason: 'diverged', discarded: 0 });
+    expect(outer.stored?.ledger).toEqual(b.ledger);
+    expect(row(base.accountId).ledger).toEqual(plain(b.ledger));
+    expect(row(base.accountId).sticky).toEqual(NONE);
+    expect(db.updates).toBe(2);
+    expect(db.writes).toBe(1);
+    // One unit per offer: a's was spent before it lost the guarded UPDATE (no refund), never a second time on the retry.
+    expect(admitAccountWrite).toHaveBeenCalledTimes(2);
+    expect(macValid(row(base.accountId))).toBe(true);
+  });
+
+  it('the same extension offered concurrently: one adopt writes it, the other is kept', async () => {
+    const { passkey, base } = await registered();
+    const { chain: next } = await addDevice(base, passkey, 'D2');
+    let inner: Awaited<ReturnType<typeof offer>> | null = null;
+    db.races = [async () => { inner = await offer(next.ledger); }];
+    const outer = await offer(next.ledger);
+    expect(inner).toMatchObject({ decision: 'adopt' });
+    expect(outer).toMatchObject({ decision: 'keep', discarded: 0 });
+    expect(outer.stored?.ledger).toEqual(next.ledger);
+    expect(db.writes).toBe(1);
+    expect(row(base.accountId).head).toBe(next.head);
+  });
+
+  it('concurrent creations of one genesis with different first records: one is created, the other is diverged', async () => {
+    const passkey = await newPasskey();
+    const g = await genesis(passkey);
+    const { chain: a } = await addDevice(g, passkey, 'A');
+    const { chain: b } = await addDevice(g, passkey, 'B');
+    let inner: Awaited<ReturnType<typeof offer>> | null = null;
+    db.races = [async () => { inner = await offer(b.ledger); }];
+    const outer = await offer(a.ledger);
+    expect(inner).toMatchObject({ decision: 'created' });
+    expect(outer).toMatchObject({ decision: 'reject', reason: 'diverged' });
+    expect(outer.stored?.ledger).toEqual(b.ledger);
+    expect(row(g.accountId).ledger).toEqual(plain(b.ledger));
+    expect(db.writes).toBe(1);
+  });
 });
 
 describe('write safety', () => {
-  it('two concurrent keeps adding different sticky ids both survive via the retry', async () => {
+  it('an over-limit sticky set is rejected before any write, also when the removal carried by an owner-chosen history pushes it over', async () => {
     const { passkey, base, d1 } = await registered();
-    const { chain: m, device: d2 } = await addDevice(base, passkey, 'D2');
-    const { chain: s1 } = await addDevice(m, passkey, 'S1');
-    const { chain: stored } = await addDevice(s1, passkey, 'S2');
-    await offer(stored.ledger);
-    const a = await append(m, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
-    const b = await append(m, passkey, { type: 'revoke_device', endpointId: d2.endpoint.id });
-    db.races = [async () => { expect((await offer(b.ledger)).decision).toBe('keep'); }];
-    expect((await offer(a.ledger)).decision).toBe('keep');
-    expect([...(row(base.accountId).sticky as StickyIds).deviceIds].sort()).toEqual([d1.endpoint.id, d2.endpoint.id].sort());
-    expect(row(base.accountId).head).toBe(stored.head);
-    expect(row(base.accountId).version).toBe(3);
-    expect(macValid(row(base.accountId))).toBe(true);
-    expect(db.heals).toBe(0);
-  });
-
-  it('an over-limit sticky set is rejected before any write', async () => {
-    const { passkey, base, d1 } = await registered();
-    const { chain: longer } = await addDevice(base, passkey, 'D2');
-    await offer(longer.ledger);
-    db.writes = 0;
+    const revoked = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
+    expect((await offer(revoked.ledger)).decision).toBe('adopt');
+    // 8192 sticky ids (the limit), d1 not among them: the adopted chain's own (carried) revocation would be the 8193rd.
     const flood = Array.from({ length: 8192 }, () => randomB64(32));
-    db.rows.set(base.accountId, await sealed(longer, { deviceIds: flood, bridgeIds: [] }, row(base.accountId).version));
-    const losing = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
-    expect((await offer(losing.ledger)).decision).toBe('reject');
+    db.rows.set(base.accountId, await sealed(revoked, { deviceIds: flood, bridgeIds: [] }, row(base.accountId).version));
+    const before = plain(row(base.accountId));
+    db.writes = 0;
+    const { chain: other } = await addDevice(base, passkey, 'O1');
+    const { limits, admitAccountWrite } = budget(true);
+    // Rejected as unwritable (no reason), not as diverged: the chain itself was adoptable.
+    expect(verdict(await offer((await resolveCarrying(other, revoked, passkey)).chain.ledger, limits))).toEqual(['reject', undefined]);
     expect(db.writes).toBe(0);
+    expect(admitAccountWrite).not.toHaveBeenCalled();
+    expect(row(base.accountId)).toEqual(before);
   });
 });
 
@@ -1227,7 +1607,7 @@ describe('chain column tied to the seal', () => {
       sticky: { deviceIds: [], bridgeIds: [] }, checkpoint: null, checkpoint_mac: null });
     expect(ids((await readTrustedCheckpoint(base.accountId))?.devices)).toContain(d1.endpoint.id);
     expect(heals()).toEqual([`[ledger] checkpoint healed: account ${base.accountId.slice(0, 8)} reason absent revision 1->1`]);
-    // The owner's next write (any offer of the current chain, e.g. from a client that kept it) moves the server forward again.
+    // Any offer of a chain that extends the rolled-back one (a client's next write or re-offer) moves the server forward again.
     expect((await offer(revoked.ledger)).decision).toBe('adopt');
     expect(ids((await readTrustedCheckpoint(base.accountId))?.devices)).not.toContain(d1.endpoint.id);
   });
@@ -1271,11 +1651,9 @@ describe('heal observability', () => {
 describe('stored representation', () => {
   it('sticky comes back from jsonb with its keys reordered (bridgeIds first): the MAC still holds, no heal', async () => {
     const { passkey, base, d1 } = await registered();
-    const losing = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
-    const { chain: s1 } = await addDevice(base, passkey, 'S1');
-    const { chain: s2 } = await addDevice(s1, passkey, 'S2');
-    await offer(s2.ledger);
-    await offer(losing.ledger);
+    const revoking = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
+    const { chain: s1 } = await addDevice(revoking, passkey, 'S1');
+    await offer(s1.ledger);
     expect((row(base.accountId).sticky as StickyIds).deviceIds).toEqual([d1.endpoint.id]);
     db.heals = 0; db.reads = [];
     const trusted = await readTrustedCheckpoint(base.accountId);
