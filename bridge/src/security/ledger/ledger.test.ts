@@ -10,7 +10,7 @@ import {
   LedgerError, accountIdOf, applyRevocations, authorityConsentChallenge, chooseLedger, ledgerChallenge, ledgerHead, ledgerLastIssuedAt, ledgerRevocations, nextTransition,
   parseLedger, signInChallenge, verifyLedger,
 } from './ledger.js';
-import type { LedgerCache, LedgerChoice, LedgerDiscarded, LedgerErrorCode, LedgerRelation } from './ledger.js';
+import type { LedgerCache, LedgerChoice, LedgerDiscarded, LedgerErrorCode, LedgerRelation, LedgerSeen } from './ledger.js';
 import { createSoftPasskey } from './testing.js';
 import type { SoftPasskey } from './testing.js';
 
@@ -107,9 +107,20 @@ async function forest() {
   return { a, base, A, B, C, D, R, S };
 }
 const NONE: LedgerDiscarded = { records: [], deviceIds: [], bridgeIds: [] };
+const UNSEEN: LedgerSeen = { deviceIds: [], bridgeIds: [] };
 /** `ledger` is the chain the caller must store afterwards: local on keep/reject. */
-function verdict(decision: LedgerChoice['decision'], relation: LedgerRelation | null, checkpoint: LedgerCheckpoint, ledger: Ledger): LedgerChoice {
-  return { decision, relation, checkpoint, discarded: NONE, ledger };
+function verdict(decision: LedgerChoice['decision'], relation: LedgerRelation | null, checkpoint: LedgerCheckpoint, ledger: Ledger, seen: LedgerSeen = UNSEEN): LedgerChoice {
+  return { decision, relation, checkpoint, discarded: NONE, ledger, seen };
+}
+/** Reference for LedgerSeen when every record after the fork (revision 2, the fixture's base) is signed by a prefix authority. */
+function removalsAfterBase(chain: Chain): LedgerSeen {
+  const seen: LedgerSeen = { deviceIds: [], bridgeIds: [] };
+  for (const record of chain.ledger.transitions.slice(2)) {
+    const operation = record.payload.operation;
+    if (operation.type === 'revoke_device') seen.deviceIds.push(operation.endpointId);
+    if (operation.type === 'revoke_bridge') seen.bridgeIds.push(operation.bridgeId);
+  }
+  return seen;
 }
 /** The append-only reference: a replica adopts only a chain whose records start with exactly its own records (by payload). */
 function extendsChain(current: Ledger, candidate: Ledger): boolean {
@@ -754,7 +765,7 @@ test('APPEND-ONLY: a LONGER diverged chain is NEVER adopted (the old tie-break a
   // Nothing is discarded and nothing becomes sticky: the local revocation is still in the chain the replica holds.
   assert.deepEqual(localCheckpoint.revokedBridgeIds, ['studio']);
   // The other side keeps its own too: neither replica replaces what it holds.
-  assert.deepEqual(await chooseLedger(longer.ledger, local.ledger, NOW), verdict('keep', 'diverged', await verifyLedger(longer.ledger, NOW), longer.ledger), 'shorter fork');
+  assert.deepEqual(await chooseLedger(longer.ledger, local.ledger, NOW), verdict('keep', 'diverged', await verifyLedger(longer.ledger, NOW), longer.ledger, { deviceIds: [], bridgeIds: ['studio'] }), 'shorter fork, its removal is seen');
   assert.deepEqual(await chooseLedger(longer.ledger, base.ledger, NOW), verdict('keep', 'behind', await verifyLedger(longer.ledger, NOW), longer.ledger), 'prefix');
 });
 
@@ -763,14 +774,14 @@ test('APPEND-ONLY: a diverged chain with MORE revocations, or of equal length, i
   for (const [plain, revoking] of [[A, R], [B, R], [A, S], [R, S], [S, R], [A, B], [B, A]]) {
     // Each pair in both directions: no length, revocation count or head order decides.
     for (const [local, candidate] of [[plain, revoking], [revoking, plain]]) {
-      const kept = verdict('keep', 'diverged', await verifyLedger(local.ledger, NOW), local.ledger);
+      const kept = verdict('keep', 'diverged', await verifyLedger(local.ledger, NOW), local.ledger, removalsAfterBase(candidate));
       assert.deepEqual(await chooseLedger(local.ledger, candidate.ledger, NOW), kept);
       assert.deepEqual(await chooseLedger(local.ledger, candidate.ledger, NOW, await cacheFor(local.ledger)), kept, 'cache');
     }
   }
   // A revocation deeper in a longer branch does not win either.
   const deep = await append(await append(base, a, { type: 'revoke_bridge', bridgeId: 'studio' }), a, { type: 'add_device', device: await newDevice(base.accountId, 'Late') });
-  assert.deepEqual(await chooseLedger(A.ledger, deep.ledger, NOW), verdict('keep', 'diverged', await verifyLedger(A.ledger, NOW), A.ledger));
+  assert.deepEqual(await chooseLedger(A.ledger, deep.ledger, NOW), verdict('keep', 'diverged', await verifyLedger(A.ledger, NOW), A.ledger, { deviceIds: [], bridgeIds: ['studio'] }));
 });
 
 test('chooseLedger: a diverged candidate is verified; an invalid one is rejected, never kept as a valid other history', async () => {

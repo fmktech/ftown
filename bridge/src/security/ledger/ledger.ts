@@ -31,10 +31,19 @@ export interface LedgerDiscarded { records: Signed<LedgerTransition>[]; deviceId
  *  local's own prefix records byte-for-byte followed by the candidate's verified records after the fork point; the parsed candidate on a first
  *  bind. `checkpoint` is the RAW checkpoint of that chain. `relation` is null only when there is none: no local chain (first bind), or a
  *  candidate that is malformed or of another account. 'keep' + 'diverged' = a VALID different history (alert the owner); 'reject' = an invalid
- *  candidate (ignore it). */
+ *  candidate (ignore it). `seen`: see LedgerSeen. */
 export interface LedgerChoice {
   decision: 'adopt' | 'keep' | 'reject'; relation: LedgerRelation | null; checkpoint: LedgerCheckpoint; discarded: LedgerDiscarded; ledger: Ledger;
+  seen: LedgerSeen;
 }
+/** Removals found on a VALID diverged chain that chooseLedger kept out ('keep' + 'diverged'): the device endpoint ids / bridgeIds revoked by
+ *  the candidate's records after the fork point whose signer was already an authority at the fork point, de-duplicated, in chain order.
+ *  Empty for every other verdict. Callers add them to their STICKY set (local enforcement only); they never enter a chain. A bridge that
+ *  finds its own bridgeId here must not treat it as its own removal (status only). No attack surface: chooseLedger just verified those
+ *  records; authorities are add-only, so whoever signed such a removal could equally append it to our own chain; and a resolution must
+ *  carry every removal of the branch it discards, so enforcing them early agrees with every state the two chains can converge to. Records
+ *  signed by an authority added only on the candidate's branch contribute nothing. */
+export interface LedgerSeen { deviceIds: string[]; bridgeIds: string[] }
 /** resolutionPlan: the fork point, and the operations to append to the chosen chain, in order, before its resolve_fork. */
 export interface LedgerResolutionPlan { fork: LedgerForkPoint; carry: LedgerOperation[] }
 /** A checkpoint that verifyLedger or chooseLedger returned for the local chain whose last head is `head`. */
@@ -568,10 +577,26 @@ function discardedBy(mine: Indexed, fork: number, adopted: LedgerCheckpoint): Le
   }
   return { records, deviceIds, bridgeIds };
 }
+/** LedgerSeen of a VERIFIED diverged candidate: revocations after `fork` signed by an authority of the shared prefix (joined at or before `fork`). */
+function seenIn(mine: Indexed, theirs: Indexed, fork: number): LedgerSeen {
+  const authorities = trailOf(mine, fork).joined.map(item => item.credentialId);
+  const seen: LedgerSeen = { deviceIds: [], bridgeIds: [] };
+  for (const record of theirs.ledger.transitions.slice(fork)) {
+    const { operation, credentialId } = record.payload;
+    if (authorities.indexOf(credentialId) === -1) continue;
+    if (operation.type === 'revoke_device' && seen.deviceIds.indexOf(operation.endpointId) === -1) seen.deviceIds.push(operation.endpointId);
+    if (operation.type === 'revoke_bridge' && seen.bridgeIds.indexOf(operation.bridgeId) === -1) seen.bridgeIds.push(operation.bridgeId);
+  }
+  return seen;
+}
 function choice(
   decision: LedgerChoice['decision'], relation: LedgerRelation | null, checkpoint: LedgerCheckpoint, ledger: Ledger, discarded?: LedgerDiscarded,
+  seen?: LedgerSeen,
 ): LedgerChoice {
-  return { decision, relation, checkpoint: copyOf(checkpoint), discarded: discarded ?? { records: [], deviceIds: [], bridgeIds: [] }, ledger };
+  return {
+    decision, relation, checkpoint: copyOf(checkpoint), discarded: discarded ?? { records: [], deviceIds: [], bridgeIds: [] }, ledger,
+    seen: seen ?? { deviceIds: [], bridgeIds: [] },
+  };
 }
 
 /** SHA-256(UTF-8(LEDGER_DOMAIN + canonical(payload))): the WebAuthn challenge, and the record's head. */
@@ -688,7 +713,7 @@ export function relateHead(local: readonly string[], other: { revision: number; 
  * - 'ahead': only the records after local's head are verified, on top of local's state -> 'adopt', or 'reject' if any is invalid.
  * - 'diverged': the candidate's records after the fork point are verified on top of the shared prefix -> 'reject' if invalid. It is
  *   'adopt'ed only under the owner-signed resolve_fork rule of resolves(); `discarded.records` then lists local's records after the fork.
- *   Otherwise 'keep': a valid different history is never adopted, whatever its length or content.
+ *   Otherwise 'keep': a valid different history is never adopted, whatever its length or content; `seen` lists its removals to enforce locally.
  * The candidate's copy of the shared prefix is never verified and never stored: its heads equal local's, so its payloads and state do, and
  * only the candidate's records after the fork point (after local's tip when 'ahead') are checked. Store `choice.ledger`, which keeps local's
  * prefix records byte-for-byte; re-encoded prefix signatures therefore cost nothing and are dropped. `cache` is the checkpoint of the
@@ -732,7 +757,7 @@ export async function chooseLedger(local: Ledger | null, candidate: Ledger, now:
   if (relation === 'ahead') return choice('adopt', relation, verified, adopted);
   return resolves(mine, theirs, fork, verified)
     ? choice('adopt', relation, verified, adopted, discardedBy(mine, fork, verified))
-    : choice('keep', relation, base, mine.ledger);
+    : choice('keep', relation, base, mine.ledger, undefined, seenIn(mine, theirs, fork));
 }
 
 /** describeFork(local, other): where the two chains part and each side's payloads after that point, for showing two histories side by side.

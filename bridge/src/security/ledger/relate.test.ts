@@ -10,7 +10,7 @@ import {
   LedgerError, accountIdOf, authorityConsentChallenge, chooseLedger, describeFork, forkPoint, ledgerChallenge, ledgerHead, ledgerHeads,
   ledgerLastIssuedAt, nextTransition, parseLedger, relate, relateHead, resolutionPlan, resolveForkTransition, verifyLedger,
 } from './ledger.js';
-import type { LedgerCache, LedgerChoice, LedgerDiscarded, LedgerErrorCode, LedgerRelation } from './ledger.js';
+import type { LedgerCache, LedgerChoice, LedgerDiscarded, LedgerErrorCode, LedgerRelation, LedgerSeen } from './ledger.js';
 import { createSoftPasskey, rawToDerSignature } from './testing.js';
 import type { SoftPasskey, SoftPasskeySignOptions } from './testing.js';
 import { derToRawSignature } from './webauthn.js';
@@ -105,15 +105,16 @@ async function cacheFor(chain: Chain): Promise<LedgerCache> {
   return { head: checkpoint.head, checkpoint };
 }
 const NONE: LedgerDiscarded = { records: [], deviceIds: [], bridgeIds: [] };
+const UNSEEN: LedgerSeen = { deviceIds: [], bridgeIds: [] };
 /** The verdict with nothing discarded, where `holds` is the chain the caller stores afterwards. */
-async function verdict(decision: LedgerChoice['decision'], relation: LedgerRelation | null, holds: Chain): Promise<LedgerChoice> {
-  return { decision, relation, checkpoint: await checkpointOf(holds), discarded: NONE, ledger: holds.ledger };
+async function verdict(decision: LedgerChoice['decision'], relation: LedgerRelation | null, holds: Chain, seen: LedgerSeen = UNSEEN): Promise<LedgerChoice> {
+  return { decision, relation, checkpoint: await checkpointOf(holds), discarded: NONE, ledger: holds.ledger, seen };
 }
 /** The verdict of a divergent adoption of `candidate` by a replica holding `local`, forked at `fork`. */
 async function resolved(local: Chain, candidate: Chain, fork: number): Promise<LedgerChoice> {
   return {
     decision: 'adopt', relation: 'diverged', checkpoint: await checkpointOf(candidate), ledger: candidate.ledger,
-    discarded: { records: local.ledger.transitions.slice(fork), deviceIds: [], bridgeIds: [] },
+    discarded: { records: local.ledger.transitions.slice(fork), deviceIds: [], bridgeIds: [] }, seen: UNSEEN,
   };
 }
 /** chooseLedger with and without a vouching cache must agree; returns the verdict. */
@@ -491,13 +492,14 @@ test('divergent adoption never discards a revocation or a passkey: missing ones 
   assert.equal((await checkpointOf(await raw(other, a, resolution))).revision, 4, 'a valid chain');
   assert.deepEqual(await choose(local, await raw(other, a, resolution)), keep, 'neither carried');
   const onlyRevocation = await append(other, a, { type: 'revoke_bridge', bridgeId: 'studio' });
-  assert.deepEqual(await choose(local, await raw(onlyRevocation, a, resolution)), keep, 'passkey missing');
+  const studioSeen = await verdict('keep', 'diverged', local, { deviceIds: [], bridgeIds: ['studio'] });
+  assert.deepEqual(await choose(local, await raw(onlyRevocation, a, resolution)), studioSeen, 'passkey missing (its removal is enforced locally)');
   const onlyPasskey = await append(other, a, local.ledger.transitions[3].payload.operation);
   assert.deepEqual(await choose(local, await raw(onlyPasskey, a, resolution)), keep, 'revocation missing');
   // The same credentialId under another key is not the passkey local's branch added.
   const impostorKey = await newPasskey();
   const impostor = await append(onlyRevocation, a, await addAuthority(impostorKey, base.accountId, onlyRevocation.issuedAt, { credentialId: b.credentialId, publicKey: impostorKey.publicKey }));
-  assert.deepEqual(await choose(local, await raw(impostor, a, resolution)), keep, 'same credentialId, other key');
+  assert.deepEqual(await choose(local, await raw(impostor, a, resolution)), studioSeen, 'same credentialId, other key');
   // Through the builders (carry, then resolve): adopted, and the revocation and the passkey are in the adopted chain.
   const chosen = await resolve(other, local, a);
   assert.deepEqual(chosen.ledger.transitions.slice(3).map(record => record.payload.operation.type), ['revoke_bridge', 'add_authority', 'resolve_fork']);
@@ -508,11 +510,49 @@ test('divergent adoption never discards a revocation or a passkey: missing ones 
   assert.ok(result.checkpoint.authorities.some(item => item.credentialId === b.credentialId && item.publicKey === b.publicKey));
   // The replica holding the chosen branch's prefix sees a plain extension; after adoption the old branch is only a different history.
   assert.deepEqual(await choose(other, chosen), await verdict('adopt', 'ahead', chosen));
-  assert.deepEqual(await choose(chosen, local), await verdict('keep', 'diverged', chosen));
+  assert.deepEqual(await choose(chosen, local), await verdict('keep', 'diverged', chosen, { deviceIds: [], bridgeIds: ['studio'] }));
   // The other way round: `other` made no security-relevant record, so keeping local's history carries nothing.
   assert.deepEqual((await resolutionPlan(local.ledger, other.ledger)).carry, []);
   const kept = await resolve(local, other, a);
   assert.deepEqual(await choose(other, kept), await resolved(other, kept, 2));
+});
+
+test('seen: removals on a valid diverged branch signed by an authority of the shared prefix are reported for local enforcement, never adopted', async () => {
+  const { a, base, device } = await world();
+  const b = await newPasskey();
+  const local = await addDevice(base, a, 'Local');
+  const ghost = randomHead();
+  let other = await append(base, a, { type: 'revoke_device', endpointId: device.endpoint.id });
+  other = await addDevice(other, a, 'Between');
+  other = await append(other, a, { type: 'revoke_bridge', bridgeId: 'studio' });
+  other = await append(other, a, { type: 'revoke_device', endpointId: ghost });
+  const result = await choose(local, other);
+  assert.deepEqual(result, await verdict('keep', 'diverged', local, { deviceIds: [device.endpoint.id, ghost], bridgeIds: ['studio'] }), 'chain order; a tombstone counts');
+  assert.ok(result.checkpoint.devices.some(item => item.endpoint.id === device.endpoint.id), 'local enforcement only: the chain is unchanged');
+  assert.ok(result.checkpoint.bridges.some(item => item.bridgeId === 'studio'));
+  // Signed by an authority added only on the candidate's branch: nothing.
+  const withB = await append(base, a, await addAuthority(b, base.accountId, base.issuedAt));
+  const foreign = await append(await append(withB, b, { type: 'revoke_device', endpointId: device.endpoint.id }), b, { type: 'revoke_bridge', bridgeId: 'studio' });
+  assert.deepEqual(await choose(local, foreign), await verdict('keep', 'diverged', local), 'post-fork authority');
+  const mixed = await append(await append(withB, b, { type: 'revoke_device', endpointId: device.endpoint.id }), a, { type: 'revoke_bridge', bridgeId: 'studio' });
+  assert.deepEqual(await choose(local, mixed), await verdict('keep', 'diverged', local, { deviceIds: [], bridgeIds: ['studio'] }), 'only the prefix authority\'s removal');
+  // An authority added in the shared prefix counts.
+  const sharedB = await append(base, a, await addAuthority(b, base.accountId, base.issuedAt));
+  const sharedLocal = await addDevice(sharedB, a, 'Local');
+  const sharedOther = await append(sharedB, b, { type: 'revoke_device', endpointId: device.endpoint.id });
+  assert.deepEqual(await choose(sharedLocal, sharedOther), await verdict('keep', 'diverged', sharedLocal, { deviceIds: [device.endpoint.id], bridgeIds: [] }));
+  // Invalid after the fork: rejected, and nothing reported, not even the valid removals before the bad record.
+  const invalid = await raw(other, a, await deviceOp(base.accountId, 'Bad'), { uv: false });
+  assert.deepEqual(await choose(local, invalid), await verdict('reject', 'diverged', local));
+  // Every other verdict reports nothing.
+  const revoking = await append(base, a, { type: 'revoke_device', endpointId: device.endpoint.id });
+  assert.deepEqual(await choose(base, revoking), await verdict('adopt', 'ahead', revoking), 'ahead');
+  assert.deepEqual(await choose(revoking, base), await verdict('keep', 'behind', revoking), 'behind');
+  assert.deepEqual(await choose(other, other), await verdict('keep', 'same', other), 'same');
+  assert.deepEqual((await chooseLedger(null, other.ledger, NOW)).seen, UNSEEN, 'first bind');
+  assert.deepEqual((await choose(local, (await world()).base)).seen, UNSEEN, 'another account');
+  const chosen = await resolve(other, local, a);
+  assert.deepEqual(await choose(local, chosen), await resolved(local, chosen, 2), 'an applicable resolution: adopted, nothing seen');
 });
 
 test('P2: a compromised pre-fork authority cannot rewind the account with one record; carrying what matters leaves only benign records to discard', async () => {
