@@ -68,12 +68,38 @@ export interface LedgerClientSnapshot {
   signer: string | null;
   /** Which multi-gesture flow is half done. */
   pending: LedgerClientPending;
+  /*
+   * Server agreement. Every field below is set on every published snapshot; they are optional only for hand-built snapshots (the SSR
+   * placeholder, test fixtures).
+   */
   /**
-   * Ids revoked in the local chain but not in the last server chain seen, while the server is known to be behind (a refused or
-   * failed revocation, a rolled-back server): the server still accepts them until a re-offer lands. Empty when the server holds the
-   * local chain or its state is unknown. Always set on published snapshots; optional only for hand-built ones (SSR placeholder, tests).
+   * What the server holds for the bound account, as last confirmed (a read or a POST answer in this page, else the state persisted
+   * with the replica): 'current' = the local chain; 'behind' = a chain the local one outranks; 'unknown' = nothing confirmed (never
+   * read in this profile, the account gone from the server, or its last answer refused) or unbound.
+   */
+  serverState?: "unknown" | "current" | "behind";
+  /**
+   * Ids revoked in the local chain but not in the confirmed server chain, while serverState is 'behind' (a refused or failed
+   * revocation, a rolled-back server): the server still accepts them until a re-offer lands. Empty otherwise.
    */
   unsaved?: { deviceIds: string[]; bridgeIds: string[] };
+  /**
+   * Behind, but the server's chain revokes ids the local chain still lists (they are in localOnly): sending the local chain would
+   * drop those removals, so nothing is sent automatically. Signing those removals again here clears it.
+   */
+  conflict?: boolean;
+  /** When the next automatic re-offer is scheduled (epoch ms), or null when none is. */
+  retryAt?: number | null;
+  /**
+   * The deadline of the server's last Retry-After (epoch ms) since the server last took the chain: retryNow() sends nothing before it.
+   * It is not re-published when it passes, so compare it with the clock; null when there is none.
+   */
+  retryNotBefore?: number | null;
+  /**
+   * This browser may send its chain at all: bound, not creating an account, its own keys a trusted device or revoked by its own chain.
+   * False when its own removal came only from another chain (it cannot write; another browser of the account must act).
+   */
+  canReoffer?: boolean;
   error?: string;
 }
 
@@ -250,8 +276,11 @@ export class LedgerClient {
    * behind()), and only when that exchange was sent after the one recorded before (`serverSeq`, from `exchangeSeq`). Null: unknown.
    * `reoffering`: the one queued or running re-offer, `reofferRunning` while its body runs; `reofferAgain`: a trigger arrived
    * meanwhile; `reofferForced`: retryNow() asked for one attempt past the pair window and the backoff. `reofferPair`: the last pair
-   * sent and when. `retryAt`: when a pending retry is due (0: none), kept by the one `retryTimer`. `warnedStep`: the largest backoff
-   * step already warned about. `exclusiveActive`: exclusive() tasks running now.
+   * sent and when. `notBefore`: the backoff, the earliest time for the next unforced attempt (0: none). `retryTimer` and
+   * `retryTimerAt`: the one scheduled automatic attempt. `retryAfterUntil`: a server Retry-After, honoured even by retryNow().
+   * `warnedStep`: the largest backoff step already warned about. `exclusiveActive`: exclusive() tasks running now. `peeked`: this
+   * browser's stored keys read by the re-offer when this page has not loaded them. On load `server` starts from the replica's
+   * persisted confirmed state, so a reload still knows which removals the server lacks.
    */
   private server: ServerView | null = null;
   private exchangeSeq = 0;
@@ -263,8 +292,11 @@ export class LedgerClient {
   private exclusiveActive = 0;
   private reofferPair: { local: string; server: string; at: number } | null = null;
   private reofferFailures = 0;
-  private retryAt = 0;
+  private notBefore = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private retryTimerAt: number | null = null;
+  private retryAfterUntil = 0;
+  private peeked: { accountId: string; endpoint: EndpointPublic; authPublicKey: string } | null = null;
   private warnedStep = 0;
   private disposed = false;
 
@@ -290,6 +322,12 @@ export class LedgerClient {
       this.loading = (async () => {
         requireSecureContext();
         await this.deps.replica.load();
+        // Until a read in this page replaces it: what the server held at the last answer this profile confirmed.
+        const raw = this.deps.replica.raw();
+        const confirmed = this.deps.replica.confirmed();
+        if (this.server === null && this.serverSeq === 0 && raw !== null && confirmed !== null) {
+          this.server = { accountId: raw.checkpoint.accountId, head: confirmed.head, revokedDeviceIds: confirmed.revokedDeviceIds, revokedBridgeIds: confirmed.revokedBridgeIds };
+        }
         this.publish();
       })().catch(error => {
         this.loading = null;
@@ -756,8 +794,10 @@ export class LedgerClient {
 
   /**
    * "Retry now": a fresh read, then one re-offer attempt that skips the 30 s pair window and the backoff wait once. Serialized with
-   * every other flow like any re-offer, never prompts, and still sends only a chain that outranks the server's, from a trusted
-   * device. Calls while one is pending share it. Resolves when that run is done; never throws.
+   * every other flow like any re-offer, never prompts, and still sends only a chain that outranks the server's and drops none of its
+   * removals, from a browser that may re-offer. A pending server Retry-After (snapshot.retryNotBefore) is honoured: the call then
+   * resolves without any request, and the automatic retry runs when it ends. Calls while one is pending share it. Resolves when that
+   * run is done; never throws.
    */
   retryNow(): Promise<void> {
     if (this.disposed) return Promise.resolve();
@@ -936,7 +976,7 @@ export class LedgerClient {
       throw new StoreError(response.status === 429 || response.status >= 500 ? "server_unavailable" : "ledger_rejected", response.retryAfterMs);
     }
     if (!wasBound && await this.offerToReplica(chain, { bind: true, expectAccountId: accountId }) !== "adopt") throw new StoreError("ledger_rejected");
-    await this.serverChain(value.ledger, accountId, seq);
+    await this.serverChain(value.ledger, accountId, seq, true);
     return value;
   }
 
@@ -948,10 +988,11 @@ export class LedgerClient {
 
   /**
    * A chain the server answered with in exchange `seq`: offered to the replica (adopted only if it wins, its revocations made sticky),
-   * then recorded with its head and revocation ids unless a later-sent exchange was recorded already, then published; see `server`
-   * and behind(). Queues a re-offer when the server is behind the local chain.
+   * then recorded with its head and revocation ids unless a later-sent exchange was recorded already (and persisted with the replica
+   * as the confirmed server state), then published; see `server` and behind(). Queues a re-offer when the server is behind the local
+   * chain. `posted`: the 200/201 answer to a POST, the only "current" that resets the backoff (see settleReoffer).
    */
-  private async serverChain(candidate: unknown, accountId: string, seq: number): Promise<void> {
+  private async serverChain(candidate: unknown, accountId: string, seq: number, posted = false): Promise<void> {
     // Published once below, after the server state is recorded, so no snapshot pairs the new chain with the old server state.
     const { decision } = await this.deps.replica.offer(candidate, { expectAccountId: accountId });
     let view: ServerView | null = null;
@@ -963,16 +1004,24 @@ export class LedgerClient {
         view = null;
       }
     }
-    // Synchronous from here: no other answer can be recorded between the order check and the write.
+    // Synchronous from here: no other answer can be recorded between the order check and the write (the persisting write is queued
+    // in the same order, so the last one stored is the last one recorded).
+    let persisted: Promise<void> | null = null;
     if (seq > this.serverSeq) {
       this.serverSeq = seq;
       const raw = this.deps.replica.raw();
       this.server = view !== null && raw !== null && raw.checkpoint.accountId === accountId ? view : null;
+      // A chain the replica refused is not a confirmed state: the last confirmed one stays stored.
+      if (this.server !== null) persisted = this.persistServer(this.server);
     }
+    if (persisted !== null) await persisted;
     this.publish();
     // Every trigger lands here; only a server behind the local chain needs a run (one queued behind whatever holds the queue now).
     if (this.behind()) void this.kick();
-    else if (this.converged()) this.settleReoffer();
+    else if (this.converged()) {
+      if (posted) this.settleReoffer();
+      else this.stopTimer();
+    }
   }
 
   /** The server answered exchange `seq` without the account: its state is unknown from now on (nothing is re-offered to it). */
@@ -980,7 +1029,14 @@ export class LedgerClient {
     if (seq <= this.serverSeq) return;
     this.serverSeq = seq;
     this.server = null;
+    void this.persistServer(null);
     this.publish();
+  }
+
+  /** Stores the confirmed server state with the replica (null: none); a failed write only loses what a reload would know. */
+  private persistServer(view: ServerView | null): Promise<void> {
+    const confirmed = view === null ? null : { version: 1 as const, head: view.head, revokedDeviceIds: view.revokedDeviceIds, revokedBridgeIds: view.revokedBridgeIds };
+    return this.deps.replica.noteConfirmed(confirmed).catch(() => undefined);
   }
 
   /** The head of a chain: its last record's, or its genesis' (the accountId) when it has none. Throws on a malformed chain. */
@@ -1056,40 +1112,27 @@ export class LedgerClient {
 
   /**
    * One decision, and at most two POSTs of the local chain (the second only after a head_changed answer). Never throws.
-   * 1. On what is known (skipped once by retryNow): send nothing unless the server is behind, this browser may re-offer, and neither
-   *    the pair window nor a pending retry blocks; a blocked attempt arms the timer for when it is due, so a behind server is never
-   *    left without one.
+   * 1. On what is known: send nothing unless the server is behind, pushing would drop no removal the server has (conflict()), this
+   *    browser may re-offer, and neither the pair window nor the backoff blocks (retryNow skips those two once, never a server
+   *    Retry-After); a blocked attempt arms the timer for when it is due, so a behind server is never left without one.
    * 2. A fresh read through refreshNow (fork choice, sticky revocations, the server state recorded). 404: the account is gone, stop
    *    and reset the backoff. Any other failure backs off.
-   * 3. On the fresh state: stop when the server is no longer behind or this browser may not re-offer (it may just have learnt its
-   *    own revocation); else POST with expectHead. A rejection that carried the server's chain (fork choice ran on it): stop when no
-   *    longer behind; after head_changed, one immediate re-evaluation; otherwise back off.
+   * 3. On the fresh state, the same checks again, the pair window and backoff for the pair that read returned included; then POST
+   *    with expectHead. A rejection that carried the server's chain (fork choice ran on it): stop when no longer behind or in
+   *    conflict; after head_changed, one immediate re-evaluation; otherwise back off. account_unknown backs off too (the counter is
+   *    reset only by a read's 404 and by a POST the server took).
    */
   private async reofferOnce(): Promise<void> {
     const forced = this.reofferForced;
     this.reofferForced = false;
     const known = this.deps.replica.raw();
     if (known === null) {
-      this.cancelRetry();
+      this.stopTimer();
       return;
     }
-    if (!forced) {
-      if (!this.behind()) {
-        this.settleOrCancel();
-        return;
-      }
-      if (!await this.mayReoffer(known.checkpoint.accountId)) {
-        this.cancelRetry();
-        return;
-      }
-      const due = this.dueAt();
-      if (this.now() < due) {
-        this.arm(due);
-        return;
-      }
-    } else if (!await this.mayReoffer(known.checkpoint.accountId)) {
-      return;
-    }
+    // A server Retry-After holds even for retryNow(): nothing is sent before it (the timer is due no sooner).
+    if (forced && this.retryAfterPending()) return;
+    if (!await this.mayAttempt(known.checkpoint.accountId, !forced)) return;
     try {
       await this.refreshNow();
     } catch (error) {
@@ -1103,27 +1146,21 @@ export class LedgerClient {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const raw = this.deps.replica.raw();
       const server = this.server;
-      if (raw === null || server === null || !this.behind()) {
-        this.settleOrCancel();
-        return;
-      }
-      if (!await this.mayReoffer(raw.checkpoint.accountId)) {
-        this.cancelRetry();
-        return;
-      }
+      if (raw === null || server === null || !await this.mayAttempt(raw.checkpoint.accountId, !forced || attempt > 0)) return;
       this.reofferPair = { local: raw.checkpoint.head, server: server.head, at: this.now() };
       try {
         // The bound account's own chain, nothing else: public by design, already signed, so no prompt.
         await this.store(raw.ledger, raw.checkpoint.accountId, true, false, server.head);
       } catch (error) {
-        if (code(error) === "account_unknown") {
-          this.settleReoffer();
-          return;
-        }
         if (error instanceof StoreError && error.answered) {
           // The answer's chain went through serverChain(): fork choice ran on it and its revocations are recorded.
+          if (this.conflict()) {
+            this.stopTimer();
+            return;
+          }
           if (!this.behind()) {
-            this.settleOrCancel();
+            // Nothing left to send (the server's chain won, or it claims ours), yet it refused: that still counts for the backoff.
+            this.reofferFailed(error.message, undefined, false);
             return;
           }
           if (error.message === "head_changed" && attempt === 0) continue;
@@ -1140,7 +1177,24 @@ export class LedgerClient {
     }
   }
 
-  /** When the next attempt for the current (local, server) pair may run: the later of the pair window and a pending retry. */
+  /**
+   * The checks before any request and again before the POST: behind, no conflict, this browser may re-offer, and (when `paced`)
+   * due for the current pair. Stops the timer when there is nothing to do, re-arms it when the attempt is only early.
+   */
+  private async mayAttempt(accountId: string, paced: boolean): Promise<boolean> {
+    if (!this.behind() || this.conflict() || !await this.mayReoffer(accountId)) {
+      this.stopTimer();
+      return false;
+    }
+    const due = this.dueAt();
+    if (paced && this.now() < due) {
+      this.arm(due);
+      return false;
+    }
+    return true;
+  }
+
+  /** When the next attempt for the current (local, server) pair may run: the later of the pair window and the backoff. */
   private dueAt(): number {
     const raw = this.deps.replica.raw();
     const server = this.server;
@@ -1148,9 +1202,27 @@ export class LedgerClient {
     const pair = this.reofferPair;
     const repeatAt = raw !== null && server !== null && pair !== null && pair.local === raw.checkpoint.head && pair.server === server.head && now >= pair.at
       ? pair.at + REOFFER_PAIR_MS : 0;
-    // A retry time far beyond any delay this client sets means the clock went back: it is due.
-    const retryAt = this.retryAt - now > MAX_RETRY_AFTER_MS ? 0 : this.retryAt;
-    return Math.max(retryAt, repeatAt);
+    // A time far beyond any delay this client sets means the clock went back: it is due.
+    const notBefore = this.notBefore - now > MAX_RETRY_AFTER_MS ? 0 : this.notBefore;
+    return Math.max(notBefore, repeatAt);
+  }
+  /** True while a server Retry-After has not elapsed (a clock gone back far past it does not count). */
+  private retryAfterPending(): boolean {
+    const left = this.retryAfterUntil - this.now();
+    return left > 0 && left <= MAX_RETRY_AFTER_MS;
+  }
+
+  /**
+   * True iff the server is behind and its chain revokes a device or computer the local RAW chain still lists: pushing the local chain
+   * would drop that removal from the chain the server serves. Needs the owner (the id is in localOnly: sign its removal again here),
+   * so no automatic re-offer is sent. A removal of an id the local chain never had is no conflict (pushing cannot make it trusted).
+   */
+  private conflict(): boolean {
+    const raw = this.deps.replica.raw();
+    if (raw === null || !this.behind()) return false;
+    const server = this.server as ServerView;
+    return server.revokedDeviceIds.some(id => raw.checkpoint.devices.some(item => item.endpoint.id === id))
+      || server.revokedBridgeIds.some(id => raw.checkpoint.bridges.some(item => item.bridgeId === id));
   }
 
   /** The current pair was just answered with a refusal (a user write): the re-offer waits out the pair window before sending it. */
@@ -1171,26 +1243,41 @@ export class LedgerClient {
     };
   }
 
-  /**
-   * Never for an unbound or signed-out client, during an account creation, or for a browser whose own keys are not a trusted device
-   * of the account (revoked, replaced, or not enrolled), checked on the keys as stored even when this page has not loaded them yet.
-   */
+  /** Reads this browser's stored keys when this page has not loaded them (read only: the snapshot status keeps using this.device). */
   private async mayReoffer(accountId: string): Promise<boolean> {
-    if (this.disposed || this.creation !== null || (this.enrollment !== null && this.enrollment.creating) || this.value.status !== "ready") return false;
-    const trusted = this.deps.replica.trusted();
-    if (trusted === null || trusted.accountId !== accountId) return false;
-    try {
-      let device = this.device;
-      if (device === null || device.accountId !== accountId) {
-        // Read only: this.device (and so the snapshot status) changes only in the flows that load the device themselves.
+    if (this.ownKeys(accountId) === null) {
+      try {
         const identity = await this.deps.endpoint(accountId);
         if (identity.endpoint.ownerId !== accountId || identity.endpoint.kind !== "browser") return false;
-        device = { accountId, endpoint: identity.endpoint, authPublicKey: (await this.deps.deviceKey()).publicKey };
+        this.peeked = { accountId, endpoint: identity.endpoint, authPublicKey: (await this.deps.deviceKey()).publicKey };
+      } catch {
+        return false;
       }
-      return membership(trusted, device.endpoint, device.authPublicKey) === "member";
-    } catch {
-      return false;
+      // snapshot.canReoffer now knows the keys.
+      this.publish();
     }
+    return this.canReoffer(this.value.status);
+  }
+  private ownKeys(accountId: string): { endpoint: EndpointPublic; authPublicKey: string } | null {
+    if (this.device !== null && this.device.accountId === accountId) return this.device;
+    return this.peeked !== null && this.peeked.accountId === accountId ? this.peeked : null;
+  }
+  /**
+   * Whether this browser may send its chain at all: bound, signed in (status ready or device_revoked), not creating an account, and
+   * its own keys either a trusted device or revoked by the local RAW chain itself (a self-removal: delivering that chain is the point).
+   * Never when its keys are revoked only by the sticky set (a removal learnt from another chain), replaced, or not enrolled. Keys not
+   * read yet count by the status; the run reads them before sending.
+   */
+  private canReoffer(status: LedgerClientSnapshot["status"]): boolean {
+    if (this.disposed || this.creation !== null || (this.enrollment !== null && this.enrollment.creating)) return false;
+    if (status !== "ready" && status !== "device_revoked") return false;
+    const raw = this.deps.replica.raw();
+    const trusted = this.deps.replica.trusted();
+    if (raw === null || trusted === null || trusted.accountId !== raw.checkpoint.accountId) return false;
+    const own = this.ownKeys(raw.checkpoint.accountId);
+    if (own === null) return status === "ready";
+    if (membership(trusted, own.endpoint, own.authPublicKey) === "member") return true;
+    return raw.checkpoint.revokedDeviceIds.indexOf(own.endpoint.id) !== -1;
   }
 
   /**
@@ -1200,21 +1287,29 @@ export class LedgerClient {
   private storeLater(error: unknown): void {
     if (this.disposed || TRANSIENT_STORE_ERRORS.indexOf(code(error)) === -1) return;
     const retryAfter = error instanceof StoreError ? error.retryAfterMs : undefined;
+    this.noteRetryAfter(retryAfter);
     const delay = Math.max(retryAfter ?? 0, this.jittered(this.backoffStep(Math.max(1, this.reofferFailures))));
-    this.retryAt = Math.max(this.retryAt, this.now() + delay);
-    this.arm(this.retryAt);
+    this.notBefore = Math.max(this.notBefore, this.now() + delay);
+    this.arm(this.notBefore);
   }
 
-  private reofferFailed(reason: string, retryAfterMs: number | undefined): void {
+  /** One more failure: the backoff grows; `schedule`: also arm the timer (false when nothing is left to send right now). */
+  private reofferFailed(reason: string, retryAfterMs: number | undefined, schedule = true): void {
     this.reofferFailures += 1;
+    this.noteRetryAfter(retryAfterMs);
     const step = this.backoffStep(this.reofferFailures);
     const delay = Math.max(retryAfterMs ?? 0, this.jittered(step));
-    this.retryAt = this.now() + delay;
+    this.notBefore = this.now() + delay;
     if (step > this.warnedStep) {
       this.warnedStep = step;
       console.warn(`[ledger] the server's copy of the account ledger is behind; sending it failed (${reason}), next try in ${Math.round(delay / 1000)} s`);
     }
-    this.arm(this.retryAt);
+    if (schedule) this.arm(this.notBefore);
+    else this.stopTimer();
+  }
+  /** Published with the timer that arm() sets right after. */
+  private noteRetryAfter(retryAfterMs: number | undefined): void {
+    if (retryAfterMs !== undefined && retryAfterMs > 0) this.retryAfterUntil = Math.max(this.retryAfterUntil, this.now() + retryAfterMs);
   }
 
   /** 30 s for the first failure, doubling, at most 10 min. */
@@ -1226,36 +1321,51 @@ export class LedgerClient {
     return Math.round(ms * (1 - BACKOFF_JITTER + 2 * BACKOFF_JITTER * unit));
   }
 
-  /** The one retry timer, due at `at`. */
+  /** The one retry timer, due at `at` (published as snapshot.retryAt). */
   private arm(at: number): void {
     if (this.retryTimer !== null) clearTimeout(this.retryTimer);
     this.retryTimer = null;
-    if (this.disposed) return;
+    if (this.disposed) {
+      this.setRetryTimerAt(null);
+      return;
+    }
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
+      this.setRetryTimerAt(null);
       void this.kick();
     }, Math.max(0, at - this.now()));
+    this.setRetryTimerAt(at);
   }
-  private cancelRetry(): void {
-    this.retryAt = 0;
+  /** No automatic attempt scheduled; the backoff (notBefore) still holds for the next trigger. */
+  private stopTimer(): void {
     if (this.retryTimer !== null) clearTimeout(this.retryTimer);
     this.retryTimer = null;
+    this.setRetryTimerAt(null);
   }
-  /** The server holds the local chain, or the account is gone from it: no retry pending, the backoff starts over. */
+  private setRetryTimerAt(at: number | null): void {
+    if (this.retryTimerAt === at) return;
+    this.retryTimerAt = at;
+    this.publish();
+  }
+  /**
+   * The server took a POST and holds the local chain, or a read found the account gone: nothing pending, the backoff and any
+   * Retry-After start over. (A read that finds the server current only stops the timer: a server answering "current" to some reads
+   * and "behind" to others cannot reset the backoff.)
+   */
   private settleReoffer(): void {
-    this.cancelRetry();
+    this.stopTimer();
+    const published = this.retryAfterUntil !== 0;
+    this.notBefore = 0;
+    this.retryAfterUntil = 0;
     this.reofferFailures = 0;
     this.warnedStep = 0;
-  }
-  /** Not behind: settled when the server holds the local chain, else (state unknown) only the pending retry is dropped. */
-  private settleOrCancel(): void {
-    if (this.converged()) this.settleReoffer();
-    else this.cancelRetry();
+    if (published) this.publish();
   }
   /** Sign-out, a device rotation or dispose(): forget everything the re-offer knew. A run already queued finds nothing to send. */
   private resetReoffer(): void {
     this.settleReoffer();
     this.server = null;
+    this.peeked = null;
     this.reofferPair = null;
     this.reofferAgain = false;
     this.reofferForced = false;
@@ -1469,7 +1579,12 @@ export class LedgerClient {
     const ids = raw === null ? null : raw.checkpoint.authorities.map(item => item.credentialId);
     const signer = ids === null ? this.credentialId
       : this.credentialId !== null && ids.indexOf(this.credentialId) !== -1 ? this.credentialId : ids.length === 1 ? ids[0] : null;
-    this.update({ status, checkpoint: trusted, discarded: this.deps.replica.discarded(), localOnly, signer, pending, unsaved: this.unsavedIds() });
+    const serverState = this.behind() ? "behind" : this.converged() ? "current" : "unknown";
+    this.update({
+      status, checkpoint: trusted, discarded: this.deps.replica.discarded(), localOnly, signer, pending,
+      serverState, unsaved: this.unsavedIds(), conflict: this.conflict(), retryAt: this.retryTimerAt,
+      retryNotBefore: this.retryAfterUntil > 0 ? this.retryAfterUntil : null, canReoffer: this.canReoffer(status),
+    });
   }
 
   private update(value: LedgerClientSnapshot): void {

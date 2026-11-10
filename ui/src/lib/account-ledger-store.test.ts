@@ -618,6 +618,26 @@ describe('expectHead (a browser re-offering its chain)', () => {
     expect(db.writes).toBe(0);
   });
 
+  it('a row that must be re-sealed first is healed, then compared: the healed head equal to expectHead proceeds, another is head_changed', async () => {
+    const { passkey, base } = await registered();
+    const { chain: longer } = await addDevice(base, passkey, 'D2');
+    const { chain: longest } = await addDevice(longer, passkey, 'D3');
+    // A row from before the checkpoint columns, holding `longer`.
+    db.rows.set(base.accountId, { ...(await sealed(longer)), checkpoint: null, checkpoint_mac: null });
+    const { limits, admitAccountWrite } = budget(true);
+    expect(await offerLedger(longest.ledger, limits, { expectHead: base.head })).toMatchObject({ decision: 'reject', reason: 'head_changed' });
+    expect(db.heals).toBe(1);
+    expect(macValid(row(base.accountId))).toBe(true);
+    expect(admitAccountWrite).not.toHaveBeenCalled();
+    expect(row(base.accountId).head).toBe(longer.head);
+    db.rows.set(base.accountId, { ...row(base.accountId), checkpoint: null, checkpoint_mac: null });
+    expect(await offerLedger(longest.ledger, limits, { expectHead: longer.head })).toMatchObject({ decision: 'adopt' });
+    expect(db.heals).toBe(2);
+    expect(admitAccountWrite).toHaveBeenCalledTimes(1);
+    expect(row(base.accountId).head).toBe(longest.head);
+    expect(macValid(row(base.accountId))).toBe(true);
+  });
+
   it('refuses an expectHead that is not a string', async () => {
     const { base } = await registered();
     await expect(offerLedger(base.ledger, OPEN, { expectHead: 5 as unknown as string })).rejects.toThrow(TypeError);

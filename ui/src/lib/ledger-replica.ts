@@ -26,7 +26,15 @@ export interface ReplicaRecord {
   sticky: StickyRevocations;
   /** Records to show the owner for re-signing; pruned once their effect is in `checkpoint`. */
   discarded: Signed<LedgerTransition>[];
+  /** The last server state the client confirmed for this account (see ConfirmedServer). Absent: none known. */
+  confirmed?: ConfirmedServer;
 }
+/**
+ * What the server held at the last answer the client recorded (a read or a POST answer, after fork choice): its chain's head and every
+ * id that chain revokes. Kept with the chain so a reload still knows which local removals the server lacks. Versioned; a missing or
+ * unreadable value is simply "unknown", never corruption.
+ */
+export interface ConfirmedServer { version: 1; head: string; revokedDeviceIds: string[]; revokedBridgeIds: string[] }
 /** What an account keeps after clear(): its sticky set (and serial), never its chain. */
 export interface RetainedRecord { version: 1; accountId: string; serial: number; ledger: null; checkpoint: null; sticky: StickyRevocations }
 export interface LedgerReplicaStorage {
@@ -118,6 +126,23 @@ async function mergeDiscarded(checkpoint: LedgerCheckpoint, previous: readonly S
   }
   return result.slice(-MAX_DISCARDED);
 }
+/** A stored ConfirmedServer, or undefined when absent or not readable (tolerated: it only feeds a display and a hint). */
+function confirmedOf(value: unknown): ConfirmedServer | undefined {
+  if (!isPlain(value) || value.version !== 1 || typeof value.head !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value.head)) return undefined;
+  const ids = (list: unknown): string[] | null => Array.isArray(list) && list.every(id => typeof id === "string") ? (list as string[]).slice() : null;
+  const deviceIds = ids(value.revokedDeviceIds);
+  const bridgeIds = ids(value.revokedBridgeIds);
+  if (deviceIds === null || bridgeIds === null) return undefined;
+  return { version: 1, head: value.head, revokedDeviceIds: deviceIds, revokedBridgeIds: bridgeIds };
+}
+function sameConfirmed(left: ConfirmedServer | undefined, right: ConfirmedServer | undefined): boolean {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+/** `record` with `confirmed` set, or without the member when there is none. */
+function withConfirmed(record: ReplicaRecord, confirmed: ConfirmedServer | undefined): ReplicaRecord {
+  const { confirmed: _previous, ...rest } = record;
+  return confirmed === undefined ? rest : { ...rest, confirmed };
+}
 function sameRecords(left: readonly Signed<LedgerTransition>[], right: readonly Signed<LedgerTransition>[]): boolean {
   return left.length === right.length && JSON.stringify(left) === JSON.stringify(right);
 }
@@ -137,7 +162,7 @@ async function verifiedRecord(value: unknown, accountId: string, now: number): P
     // Shape only (no linkage): discarded records come from abandoned forks.
     const discarded = stored.discarded === undefined ? [] : parseLedger({ genesis: ledger.genesis, transitions: stored.discarded }).transitions;
     const trusted = applyRevocations(checkpoint, sticky);
-    return { record: { version: 1, accountId, serial, ledger, checkpoint, sticky, discarded }, trusted };
+    return { record: withConfirmed({ version: 1, accountId, serial, ledger, checkpoint, sticky, discarded }, confirmedOf(stored.confirmed)), trusted };
   } catch {
     throw corrupt();
   }
@@ -210,6 +235,26 @@ export class LedgerReplica {
     return this.rewrite(async () => []);
   }
 
+  /** The last server state the client confirmed for the bound account (persisted with it), or null when none is known or unbound. */
+  confirmed(): ConfirmedServer | null {
+    const confirmed = this.state?.confirmed;
+    return confirmed === undefined ? null : { ...confirmed, revokedDeviceIds: confirmed.revokedDeviceIds.slice(), revokedBridgeIds: confirmed.revokedBridgeIds.slice() };
+  }
+
+  /** Records (compare-and-set, no write when unchanged) the server state the client just confirmed; null forgets it. No-op unbound. */
+  noteConfirmed(value: ConfirmedServer | null): Promise<void> {
+    const next = value === null ? undefined : confirmedOf(value);
+    return this.serialized(async () => {
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+        const current = this.state;
+        if (current === null || sameConfirmed(current.confirmed, next)) return;
+        if (await this.store(withConfirmed({ ...current, serial: current.serial + 1 }, next), current.serial)) return;
+        await this.reload();
+      }
+      throw new Error("ledger_replica_conflict");
+    });
+  }
+
   /** Unbinds and drops the chain. The account's sticky set is kept: binding to it again still distrusts every id it ever revoked. */
   clear(): Promise<void> {
     return this.serialized(async () => {
@@ -263,10 +308,10 @@ export class LedgerReplica {
     const grew = sticky.deviceIds.length !== previous.deviceIds.length || sticky.bridgeIds.length !== previous.bridgeIds.length;
     if (choice.decision === "keep" && !grew) return { choice, expectedSerial: current.serial, record: null };
     const record: ReplicaRecord = choice.decision === "adopt"
-      ? {
+      ? withConfirmed({
         version: 1, accountId: current.accountId, serial: current.serial + 1, ledger, checkpoint: choice.checkpoint, sticky,
         discarded: await mergeDiscarded(choice.checkpoint, current.discarded, choice.discarded),
-      }
+      }, current.confirmed)
       : { ...current, serial: current.serial + 1, sticky };
     return { choice, expectedSerial: current.serial, record };
   }
