@@ -4,15 +4,13 @@ import { open, seal, parseSecureEnvelope } from '../crypto.js';
 import type { ApplicationJson, ApplicationRoute, ApprovedEndpoint, BridgeInvitation, BridgeSecurity, EndpointIdentity, EnrollmentPacket,
   InboundTransportContext, InvitationOptions, LocalRecoveryAuthority,
   SecureApplication, SecureEnvelope, SecurePublication, VerifiedApplication, VerifiedPrincipal } from '../protocol.js';
-import { BridgePolicyStore, type PolicyOptions } from './policy.js';
+import { BridgePolicyStore, type LedgerOwnStatus, type PolicyOptions } from './policy.js';
 import { BridgeSecurityError } from './errors.js';
 import { classifyCommand, classifyHttp, classifyTerminal, type OperationPermission } from './permissions.js';
 import { endpointSchema } from './metadata.js';
-import { ACCOUNT_TRUST_LIMITS, AccountTrustError } from '../account-crypto.js';
-import type { AccountCheckpoint, AccountHead, AccountHistory, VerifiedAccountTrust } from '../account-protocol.js';
-import { AccountReadUnavailable } from './account-client.js';
-import { AccountBridgeRevoked, confirmOwnRevocation, isOwnBridgeRevoked } from './revocation.js';
-import { ACCOUNT_SAFETY_REFRESH_MS, SECURITY_NUDGE_MIN_SPACING_MS, createCoalescedTrigger, type CoalescedTrigger } from '../security-nudge.js';
+import { accountIdOf, ledgerHead, parseLedger } from '../ledger/ledger.js';
+import type { LedgerCheckpoint } from '../ledger/protocol.js';
+import type { BridgeLedgerState, BridgeLedgerStore, LedgerSource } from './ledger-store.js';
 
 const token = z.string().regex(/^[A-Za-z0-9_-]{1,200}$/);
 const routeSchema = z.discriminatedUnion('kind', [
@@ -26,16 +24,45 @@ const object = (value: ApplicationJson): Record<string, ApplicationJson> => {
   return value;
 };
 export const applicationJson = (value: unknown): ApplicationJson => JSON.parse(JSON.stringify(value)) as ApplicationJson;
+/** Account mode: the local ledger replica is the only source of browser authority. */
+export interface BridgeLedgerOptions {
+  store: BridgeLedgerStore;
+  /** Must equal the service's bridgeId. */
+  bridgeId: string;
+  /** This bridge's auth key (raw P-256, base64url) as listed in its add_bridge. */
+  authPublicKey: string;
+  /** The server's copy of the ledger (GET /api/account/ledger), read by startLedger and refreshLedger. Bound it with a timeout. */
+  fetchLedger: () => Promise<unknown>;
+  /** Wall clock for offline grace and server contact; defaults to the policy clock. */
+  now?: () => number;
+  /** Monotonic clock for the in-process grace bound; defaults to performance.now(). */
+  monotonic?: () => number;
+}
 export interface BridgeSecurityOptions extends PolicyOptions {
   relayUserId: string; browserOrigin?: string;
-  readAccountHistory?: (signal?: AbortSignal) => Promise<AccountHistory | null>;
-  /** Jitter source for account-read retry backoff; defaults to Math.random. */
-  random?: () => number;
+  /** Absent for Solo and --local: their devices come only from invitations and the local CLI. */
+  ledger?: BridgeLedgerOptions;
 }
-const ACCOUNT_READ_RETRY_BASE_MS = 60_000;
-const ACCOUNT_READ_RETRY_MAX_MS = 1_800_000;
+export interface LedgerStatus { accountId: string | null; revision: number | null; head: string | null; own: LedgerOwnStatus }
+type OfferDecision = 'adopt' | 'keep' | 'reject';
+/** One offer per source waits behind the one in flight; a newer candidate replaces it and its callers share the newer decision. */
+interface PendingOffer { candidate: unknown; waiters: ((decision: OfferDecision) => void)[] }
+/** (length, head) of verified chains already evaluated: a chain's payloads are hash-linked, so an equal pair is an equal chain. */
+const EVALUATED_LIMIT = 16;
+/** onApprovalRequired: at most one emission per endpoint per spacing, and at most this many endpoints tracked at once. */
+const APPROVAL_SPACING_MS = 2000;
+const APPROVAL_TRACKED_LIMIT = 1024;
+const reason = (error: unknown): string => error instanceof Error ? error.message : String(error);
+async function chainKey(candidate: unknown): Promise<string | null> {
+  try {
+    const ledger = parseLedger(candidate);
+    const last = ledger.transitions[ledger.transitions.length - 1];
+    return `${ledger.transitions.length}:${last === undefined ? await accountIdOf(ledger.genesis.payload) : await ledgerHead(last.payload)}`;
+  } catch { return null; }
+}
 
-export class BridgeSecurityService implements BridgeSecurity {
+// adoptAccount is v1 (removed from this service); the shared interface drops it in the v1 cleanup.
+export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount'> {
   readonly endpoint;
   readonly receiverEpoch = randomUUID();
   readonly policy: BridgePolicyStore;
@@ -47,16 +74,28 @@ export class BridgeSecurityService implements BridgeSecurity {
   private bridgeRevokedEmitted = false;
   private readonly verified = new WeakSet<VerifiedApplication>();
   private closed = false;
-  private accountTimer: ReturnType<typeof setTimeout> | null = null;
-  private accountTimerDue = 0;
-  private accountPushHealthy = false;
-  private accountReadFailures = 0;
-  private accountRefresh: Promise<void> | null = null;
-  private accountTrigger: CoalescedTrigger | null = null;
-  private readonly accountAbort = new AbortController();
+  private readonly ledgerNow: () => number;
+  /** Ledger offers and their projections run one at a time, so the policy never sees an older view after a newer one. */
+  private ledgerTail: Promise<unknown> = Promise.resolve();
+  private status: LedgerStatus = { accountId: null, revision: null, head: null, own: 'unpaired' };
+  private readonly ledgerMonotonic: () => number;
+  /** The trusted view of the last projection (null: none yet, or another account's). */
+  private trustedView: LedgerCheckpoint | null = null;
+  private readonly approvalListeners = new Set<(endpointId: string) => void>();
+  private readonly approvalEmitted = new Map<string, number>();
+  private readonly pendingOffers = new Map<LedgerSource, PendingOffer>();
+  private readonly evaluated = new Set<string>();
+  private refreshing: Promise<void> | null = null;
+  private refreshQueued: Promise<void> | null = null;
   constructor(readonly identity: EndpointIdentity, readonly bridgeId: string, dataDir: string, readonly options: BridgeSecurityOptions) {
     this.endpoint = identity.endpoint; this.now = options.now ?? Date.now;
+    this.ledgerNow = options.ledger?.now ?? this.now;
+    this.ledgerMonotonic = options.ledger?.monotonic ?? (() => performance.now());
     this.policy = new BridgePolicyStore(dataDir, bridgeId, this.endpoint, options);
+    if (options.ledger) {
+      if (options.ledger.bridgeId !== bridgeId) throw new BridgeSecurityError('wrong_context');
+      this.policy.enableLedger(this.ledgerNow, this.ledgerMonotonic);
+    }
   }
   private context(route: InboundTransportContext): void {
     if (this.closed || route.bridgeId !== this.bridgeId) throw new BridgeSecurityError('wrong_context');
@@ -113,7 +152,7 @@ export class BridgeSecurityService implements BridgeSecurity {
     const envelope = parseSecureEnvelope(packet);
     if (envelope.purpose !== 'hello') throw new BridgeSecurityError('wrong_context');
     this.freshness(envelope, false);
-    const principal = await this.policy.principal(envelope.senderId);
+    const principal = await this.senderPrincipal(envelope.senderId);
     const hello = z.object({ type: z.literal('hello'), challenge: token }).strict().parse(await this.decode(principal.endpoint, envelope, route));
     const welcome = await this.reply(principal.endpoint, 'welcome', { type: 'welcome', challenge: hello.challenge, receiverEpoch: this.receiverEpoch }, route, envelope.messageId);
     const current = await this.policy.principal(principal.endpoint.id);
@@ -159,7 +198,7 @@ export class BridgeSecurityService implements BridgeSecurity {
   async acceptApplication(packet: SecureEnvelope, route: InboundTransportContext): Promise<VerifiedApplication> {
     const envelope = parseSecureEnvelope(packet);
     if (envelope.purpose !== 'application') throw new BridgeSecurityError('wrong_context');
-    const principal = await this.policy.principal(envelope.senderId);
+    const principal = await this.senderPrincipal(envelope.senderId);
     const app = this.parseApplication(await this.decode(principal.endpoint, envelope, route));
     if (app.route.kind === 'http') {
       const data = object(app.data);
@@ -206,7 +245,7 @@ export class BridgeSecurityService implements BridgeSecurity {
     const packets: SecureEnvelope[] = [];
     for (const recipient of recipients) {
       try { packets.push(await this.sealTo(recipient.endpoint.id, application, { transport: 'cloud', channel, bridgeId: this.bridgeId, pairId: null })); }
-      catch (error) { if (!(error instanceof BridgeSecurityError) || (!['endpoint_revoked', 'approval_required', 'expired', 'invalid_account_trust'].includes(error.code)
+      catch (error) { if (!(error instanceof BridgeSecurityError) || (!['endpoint_revoked', 'approval_required', 'expired'].includes(error.code)
         && !error.code.startsWith('account_'))) throw error; }
     }
     return packets;
@@ -217,86 +256,153 @@ export class BridgeSecurityService implements BridgeSecurity {
     await this.policy.revoke(actor, endpointId);
     for (const listener of this.revoked) listener(endpointId);
   }
-  /** Called once at startup; legacy/Solo stores never adopt an unsigned server directory. */
-  async startAccount(trust?: VerifiedAccountTrust): Promise<void> {
-    // A pin that already tombstones this bridge is signed proof on its own; no read can undo it.
-    if (isOwnBridgeRevoked(await this.pinnedCheckpoint(), this.bridgeId)) { this.emitBridgeRevoked(); return; }
-    if (trust) await this.policy.pinBootstrap(trust);
-    this.recordAccountRead(await this.refreshAccount().then(() => true, () => false));
-    if (!this.closed && !this.accountTimer && this.options.readAccountHistory) this.scheduleAccountRead();
+  /**
+   * Account mode only (no-op without a ledger). Loads the replica, projects it and checks this bridge's own status; a stored chain that
+   * already revokes this bridge is signed proof on its own, so it emits and nothing is fetched. Otherwise offers the server's ledger
+   * once; a fetch failure is logged, not fatal, and a successful read that is not rejected counts as server contact.
+   * Throws when the local replica cannot be read (corrupted, another account's, or unreadable; it is never reset) or the policy
+   * cannot be written.
+   */
+  async startLedger(): Promise<void> {
+    const ledger = this.options.ledger;
+    if (!ledger) return;
+    const own = await this.ledgerTask(async () => {
+      if (this.closed) return null;
+      const state = await ledger.store.read();
+      return state === null ? this.project(null, null) : this.projectState(state);
+    });
+    if (own === null || own === 'revoked' || this.closed) return;
+    await this.refreshLedger();
   }
-  private recordAccountRead(ok: boolean): void {
-    this.accountReadFailures = ok ? 0 : this.accountReadFailures + 1;
-  }
-  /** After failures the server is the only writer of account state, so retrying fast buys nothing: back off with jitter. */
-  private nextAccountReadDelay(): number {
-    if (this.accountReadFailures > 0) {
-      const base = Math.min(ACCOUNT_READ_RETRY_BASE_MS * 2 ** (this.accountReadFailures - 1), ACCOUNT_READ_RETRY_MAX_MS);
-      return base * (0.8 + 0.4 * (this.options.random ?? Math.random)());
+  /**
+   * Reads the server's ledger and offers it ('server'). A result that is not 'reject' counts as server contact; a fetch failure is
+   * logged, never thrown. Single in flight: calls during a read share one trailing read, so a change announced mid-read is not missed.
+   * The wiring calls it on every relay (re)subscribe and on a `ledger_head` that differs from ledgerStatus().head.
+   */
+  refreshLedger(): Promise<void> {
+    if (!this.options.ledger || this.closed) return Promise.resolve();
+    if (this.refreshing) {
+      this.refreshQueued ??= this.refreshing.then(() => { this.refreshQueued = null; return this.refreshLedger(); });
+      return this.refreshQueued;
     }
-    return this.accountPushHealthy ? ACCOUNT_SAFETY_REFRESH_MS : ACCOUNT_TRUST_LIMITS.refreshIntervalMs;
+    this.refreshing = this.refreshOnce().finally(() => { this.refreshing = null; });
+    return this.refreshing;
   }
-  /** Safety read: 1 h while push is healthy and the last read succeeded, else the 10 min cadence; failed reads back off from 60 s to 30 min. */
-  private scheduleAccountRead(delay = this.nextAccountReadDelay()): void {
-    if (this.closed || this.bridgeRevokedEmitted || !this.options.readAccountHistory) return;
-    if (this.accountTimer) clearTimeout(this.accountTimer);
-    this.accountTimerDue = performance.now() + delay; // monotonic: wall-clock steps and sleep must not skew the pull-in
-    this.accountTimer = setTimeout(() => { this.accountTimer = null; void this.trackedAccountRead(); }, delay);
-    this.accountTimer.unref();
+  private async refreshOnce(): Promise<void> {
+    const ledger = this.options.ledger!;
+    let fetched: unknown;
+    try { fetched = await ledger.fetchLedger(); }
+    catch (error) {
+      console.warn('[Security] Account ledger read failed:', reason(error));
+      return;
+    }
+    if (await this.offerLedger(fetched, 'server') !== 'reject') this.noteServerContact();
   }
-  private async trackedAccountRead(): Promise<void> {
-    try { await this.refreshAccount(); this.recordAccountRead(true); } catch { this.recordAccountRead(false); }
-    this.scheduleAccountRead();
+  /**
+   * Offers an untrusted chain (the relay, a relay-token response, a server read) to the replica, then projects the result and checks
+   * this bridge's own status. Never throws: an invalid candidate, a closed service and a local storage failure all return 'reject'.
+   * Per source at most one offer waits behind the one in flight; a newer one replaces it, and the replaced caller gets the newer
+   * decision. A verified chain already evaluated (same length and head) is answered 'keep' before any signature check. Offers never
+   * count as server contact: refreshLedger and noteServerContact decide that.
+   */
+  offerLedger(candidate: unknown, source: LedgerSource): Promise<OfferDecision> {
+    if (!this.options.ledger || this.closed) return Promise.resolve('reject');
+    return new Promise(resolve => {
+      const waiting = this.pendingOffers.get(source);
+      if (waiting) {
+        waiting.candidate = candidate;
+        waiting.waiters.push(resolve);
+        return;
+      }
+      const pending: PendingOffer = { candidate, waiters: [resolve] };
+      this.pendingOffers.set(source, pending);
+      void this.ledgerTask(async () => {
+        if (this.pendingOffers.get(source) === pending) this.pendingOffers.delete(source);
+        return this.evaluate(pending.candidate, source);
+      }).catch((): OfferDecision => 'reject').then(decision => { for (const waiter of pending.waiters) waiter(decision); });
+    });
   }
-  /** Push (nudge subscription) health; losing it pulls the next safety read in to the 10 min cadence. */
-  setAccountPushHealthy(healthy: boolean): void {
-    const lost = this.accountPushHealthy && !healthy;
-    this.accountPushHealthy = healthy;
-    if (lost && this.accountTimer && this.accountTimerDue - performance.now() > ACCOUNT_TRUST_LIMITS.refreshIntervalMs) {
-      this.scheduleAccountRead(ACCOUNT_TRUST_LIMITS.refreshIntervalMs);
+  private async evaluate(candidate: unknown, source: LedgerSource): Promise<OfferDecision> {
+    const ledger = this.options.ledger!;
+    if (this.closed) return 'reject';
+    const key = await chainKey(candidate);
+    if (key !== null && this.evaluated.has(key)) {
+      this.remember(key);
+      return 'keep';
+    }
+    let result;
+    try { result = await ledger.store.offer(candidate, source); }
+    catch (error) {
+      console.error('[Security] Account ledger offer failed:', reason(error));
+      return 'reject';
+    }
+    if (result.decision === 'reject' || result.state === null) return 'reject';
+    try {
+      await this.projectState(result.state);
+      // Only a chain that verified and was fully applied is remembered; a rejected one never is (it may carry forged signatures).
+      if (key !== null) this.remember(key);
+    } catch (error) { console.error('[Security] Account ledger projection failed:', reason(error)); }
+    return result.decision;
+  }
+  private remember(key: string): void {
+    this.evaluated.delete(key);
+    this.evaluated.add(key);
+    for (const oldest of this.evaluated) {
+      if (this.evaluated.size <= EVALUATED_LIMIT) break;
+      this.evaluated.delete(oldest);
     }
   }
-  /** Push-driven re-read (account nudge); bursts coalesce into at most one trailing read. */
-  requestAccountRefresh(): void {
-    if (this.closed || this.bridgeRevokedEmitted || !this.options.readAccountHistory) return;
-    this.accountTrigger ??= createCoalescedTrigger(async () => {
-      // An in-flight read may predate the change, so it never satisfies a request.
-      await this.accountRefresh?.catch(() => undefined);
-      if (!this.closed) await this.trackedAccountRead();
-    }, SECURITY_NUDGE_MIN_SPACING_MS);
-    this.accountTrigger.request();
+  /** A successful server contact (the token provider calls this after a relay-token response): re-anchors offline grace at now and
+   *  persists it (the replica's lastServerReadAt and the clock high-water). An invalid time is ignored. */
+  noteServerContact(now?: number): void {
+    const ledger = this.options.ledger;
+    if (!ledger || this.closed) return;
+    const at = this.policy.noteServerRead(now ?? this.ledgerNow());
+    if (at === null) return;
+    const failed = (error: unknown) => console.error('[Security] Recording server contact failed:', reason(error));
+    ledger.store.markServerRead(at).catch(failed);
+    this.policy.persistLedgerClock().catch(failed);
   }
-  private accountFailure(error: unknown): BridgeSecurityError {
-    return error instanceof BridgeSecurityError ? error : new BridgeSecurityError(error instanceof AccountTrustError ? error.code : 'invalid_account_trust');
+  ledgerStatus(): LedgerStatus { return { ...this.status }; }
+  private ledgerTask<T>(run: () => Promise<T>): Promise<T> {
+    const next = this.ledgerTail.then(run);
+    this.ledgerTail = next.catch(() => undefined);
+    return next;
+  }
+  private ownOf(trusted: LedgerCheckpoint | null): LedgerOwnStatus {
+    if (trusted === null) return 'unpaired';
+    if (trusted.accountId !== this.endpoint.ownerId) return 'absent';
+    if (trusted.revokedBridgeIds.includes(this.bridgeId)) return 'revoked';
+    const own = trusted.bridges.find(item => item.bridgeId === this.bridgeId);
+    return own !== undefined && own.authPublicKey === this.options.ledger?.authPublicKey && own.endpoint.id === this.endpoint.id
+      && own.endpoint.publicKey === this.endpoint.publicKey ? 'active' : 'absent';
+  }
+  /** `trusted` is always the store's applyRevocations output, never its raw checkpoint. Own status acts before the policy write, so
+   *  neither the revocation nor its emission waits on (or is lost to) a policy storage failure. */
+  private async projectState(state: BridgeLedgerState): Promise<LedgerOwnStatus> {
+    const own = await this.project(state.trusted, state.lastServerReadAt);
+    // The stored chain itself is known: a relay echo of it is answered without verification.
+    this.remember(`${state.ledger.transitions.length}:${state.checkpoint.head}`);
+    return own;
+  }
+  private async project(trusted: LedgerCheckpoint | null, lastServerReadAt: number | null): Promise<LedgerOwnStatus> {
+    const own = this.ownOf(trusted);
+    this.trustedView = trusted !== null && trusted.accountId === this.endpoint.ownerId ? trusted : null;
+    const projection = this.policy.projectLedger({ trusted, own, lastServerReadAt });
+    const previous = this.status.own;
+    this.status = { accountId: trusted?.accountId ?? null, revision: trusted?.revision ?? null, head: trusted?.head ?? null, own };
+    if (own === 'revoked') this.emitBridgeRevoked();
+    // Not listed is not a signed revocation: fail closed and say so, but never reset the identity on it.
+    else if (own === 'absent' && previous !== 'absent') console.warn('[Security] This bridge is not in its account ledger; account devices are refused.');
+    this.emitRevoked(await projection);
+    return own;
   }
   private emitRevoked(endpointIds: string[]): void {
     for (const id of endpointIds) for (const listener of this.revoked) listener(id);
   }
-  private async pinnedCheckpoint(): Promise<AccountCheckpoint | null> {
-    try { return (await this.policy.accountTrust())?.checkpoint ?? null; } catch { return null; }
-  }
-  /** A refused fetched history is still evidence, but only against the pin as it stands now: adoption is not serialized
-   *  with reads, and a fork from an older pin must never confirm. Pins only move forward by verified extension. */
-  private async adoptFetched<T>(fetched: AccountHistory, adopt: () => Promise<T>): Promise<T> {
-    let adopted: T;
-    try { adopted = await adopt(); } catch (error) {
-      if (!this.bridgeRevokedEmitted) await this.confirmRevocationEvidence(fetched);
-      throw error;
-    }
-    if (!this.bridgeRevokedEmitted && isOwnBridgeRevoked(await this.pinnedCheckpoint(), this.bridgeId)) this.emitBridgeRevoked();
-    return adopted;
-  }
-  async confirmRevocationEvidence(evidence: AccountHistory): Promise<boolean> {
-    const confirmed = await confirmOwnRevocation({ evidence, pinned: await this.pinnedCheckpoint(), bridgeId: this.bridgeId, now: this.now() });
-    if (confirmed) this.emitBridgeRevoked();
-    return confirmed;
-  }
   private emitBridgeRevoked(): void {
     if (this.bridgeRevokedEmitted) return;
     this.bridgeRevokedEmitted = true;
-    if (this.accountTimer) clearTimeout(this.accountTimer);
-    this.accountTimer = null;
-    this.accountTrigger?.dispose(); this.accountTrigger = null;
     for (const listener of Array.from(this.bridgeRevokedListeners)) this.notifyBridgeRevoked(listener);
   }
   private notifyBridgeRevoked(listener: () => void): void {
@@ -308,50 +414,42 @@ export class BridgeSecurityService implements BridgeSecurity {
       if (result instanceof Promise) result.catch(failed);
     } catch (error) { failed(error); }
   }
-  async refreshAccount(): Promise<void> {
-    if (this.accountRefresh) return this.accountRefresh;
-    const run = async (): Promise<void> => {
-      if (this.closed || this.bridgeRevokedEmitted || !await this.policy.accountTrust()) return;
-      try {
-        if (!this.options.readAccountHistory) throw new AccountReadUnavailable();
-        const history = await this.options.readAccountHistory(this.accountAbort.signal);
-        if (!history) throw new BridgeSecurityError('account_trust_rollback');
-        if (this.closed) return;
-        const result = await this.adoptFetched(history, () => this.policy.applyAccountRead(history));
-        this.emitRevoked(result.revoked);
-      } catch (error) {
-        // Unverified revocation evidence is only an unavailable read: a forged refusal must neither reset nor block.
-        if (error instanceof AccountBridgeRevoked) await this.confirmRevocationEvidence(error.evidence);
-        else if (!(error instanceof AccountReadUnavailable)) this.policy.blockAccount(this.accountFailure(error).code);
-        if (!await this.policy.accountAvailable()) this.emitRevoked(await this.policy.accountEndpointIds());
-        throw error;
-      }
-    };
-    this.accountRefresh = run().finally(() => { this.accountRefresh = null; });
-    return this.accountRefresh;
+  onRevoked(listener: (endpointId: string) => void): () => void { this.revoked.add(listener); return () => this.revoked.delete(listener); }
+  /**
+   * Account mode only: fires when a request (hello or application) is refused with approval_required for an endpoint the trusted
+   * ledger does not know, e.g. a browser whose add_device this replica has not seen yet (the wiring refreshes the ledger). Never for
+   * a revoked endpoint, never in Solo/local, never for the provisioned local CLI. At most once per endpoint per 2 s; listener errors
+   * are logged; the refusal itself is unchanged.
+   */
+  onApprovalRequired(listener: (endpointId: string) => void): () => void {
+    this.approvalListeners.add(listener);
+    return () => { this.approvalListeners.delete(listener); };
   }
-  async adoptAccount(actor: VerifiedPrincipal, head: AccountHead): Promise<AccountHead> {
-    await this.policy.revalidate(actor, 'admin');
-    if (actor.endpoint.kind !== 'browser' || !this.options.readAccountHistory) throw new BridgeSecurityError('account_approval_required');
-    if (this.bridgeRevokedEmitted) throw new BridgeSecurityError('account_bridge_revoked');
-    try {
-      const parsedHead = z.object({ rootId: z.string().regex(/^[A-Za-z0-9_-]{43}$/), head: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
-        revision: z.number().int().min(0).max(ACCOUNT_TRUST_LIMITS.maxTransitions) }).strict().parse(head);
-      const history = await this.options.readAccountHistory(this.accountAbort.signal);
-      if (!history) throw new BridgeSecurityError('account_approval_required');
-      if (this.closed) throw new BridgeSecurityError('account_storage_unavailable');
-      const result = await this.adoptFetched(history, () => this.policy.applyAccountRead(history, { actor, head: parsedHead }));
-      this.emitRevoked(result.revoked);
-      return result.head;
-    } catch (error) {
-      if (error instanceof AccountReadUnavailable) throw new BridgeSecurityError('account_storage_unavailable');
-      if (error instanceof AccountBridgeRevoked) {
-        throw new BridgeSecurityError(await this.confirmRevocationEvidence(error.evidence) ? 'account_bridge_revoked' : 'account_storage_unavailable');
-      }
-      throw this.accountFailure(error);
+  private async senderPrincipal(endpointId: string): Promise<VerifiedPrincipal> {
+    try { return await this.policy.principal(endpointId); }
+    catch (error) {
+      if (error instanceof BridgeSecurityError && error.code === 'approval_required') this.noteApprovalRequired(endpointId);
+      throw error;
     }
   }
-  onRevoked(listener: (endpointId: string) => void): () => void { this.revoked.add(listener); return () => this.revoked.delete(listener); }
+  private noteApprovalRequired(endpointId: string): void {
+    if (!this.options.ledger || this.closed || this.approvalListeners.size === 0) return;
+    const trusted = this.trustedView;
+    if (trusted !== null && (trusted.revokedDeviceIds.includes(endpointId) || trusted.devices.some(item => item.endpoint.id === endpointId))) return;
+    const at = this.ledgerMonotonic();
+    for (const [id, emittedAt] of this.approvalEmitted) {
+      if (!(at - emittedAt < APPROVAL_SPACING_MS && at >= emittedAt)) this.approvalEmitted.delete(id);
+    }
+    if (this.approvalEmitted.has(endpointId) || this.approvalEmitted.size >= APPROVAL_TRACKED_LIMIT) return;
+    this.approvalEmitted.set(endpointId, at);
+    const failed = (error: unknown) => console.error('[Security] approvalRequired listener failed:', error);
+    for (const listener of Array.from(this.approvalListeners)) {
+      try {
+        const result: unknown = listener(endpointId);
+        if (result instanceof Promise) result.catch(failed);
+      } catch (error) { failed(error); }
+    }
+  }
   /** Fires at most once per instance, only on signed proof that this bridge was revoked. */
   onBridgeRevoked(listener: () => void): () => void {
     this.bridgeRevokedListeners.add(listener);
@@ -360,11 +458,9 @@ export class BridgeSecurityService implements BridgeSecurity {
     return () => { this.bridgeRevokedListeners.delete(listener); };
   }
   async close(): Promise<void> {
-    this.closed = true; this.accountAbort.abort();
-    this.accountTrigger?.dispose(); this.accountTrigger = null;
-    if (this.accountTimer) clearTimeout(this.accountTimer);
-    this.accountTimer = null;
-    await this.accountRefresh?.catch(() => undefined);
-    this.revoked.clear(); this.bridgeRevokedListeners.clear(); this.replay.clear(); await this.policy.close();
+    this.closed = true;
+    await this.ledgerTail.catch(() => undefined);
+    this.revoked.clear(); this.bridgeRevokedListeners.clear(); this.approvalListeners.clear(); this.approvalEmitted.clear(); this.replay.clear();
+    await this.policy.close();
   }
 }

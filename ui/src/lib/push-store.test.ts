@@ -24,3 +24,13 @@ it("uses the same durable event row for cycle retry and a new row for a later id
  const inserts=query.mock.calls.filter(([text])=>String(text).includes("WITH created"));
  expect(inserts.map(([,params])=>(params as unknown[])[4])).toEqual([event.eventKey,event.eventKey,"idle:00000000-0000-4000-8000-000000000002"]);
 });
+
+it("keys every statement by account_id, never by sub",async()=>{
+ const query=vi.fn().mockResolvedValue([{endpoint_hash:"h",payload:{sessionId:"s",sessionName:"A",kind:"idle",eventKey:"idle",title:"t",message:"m",occurredAt:new Date().toISOString()}}]);
+ const store=new PushStore(query);
+ await store.subscribe("acct",{endpoint:"https://fcm.googleapis.com/x",keys:{p256dh:"x",auth:"y"}});
+ await store.unsubscribe("acct","https://fcm.googleapis.com/x");
+ await store.ingest("acct","bridge",{sessionId:"s",sessionName:"A",kind:"idle",eventKey:"idle",title:"t",message:"m",occurredAt:new Date().toISOString()});
+ await store.claim("acct","id");await store.remaining("acct","id");
+ for(const [sql] of query.mock.calls){expect(String(sql)).toContain("account_id");expect(String(sql)).not.toMatch(/\b(s|e)?\.?sub\b/);}
+});

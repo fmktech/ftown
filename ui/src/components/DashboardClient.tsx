@@ -1,17 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuthMode } from "@/lib/auth-mode";
-import { securityNudges } from "@/lib/security-nudge-bus";
 import { useCentrifugo } from "@/hooks/useCentrifugo";
-import { useBrowserIdentity } from "@/hooks/useBrowserIdentity";
+import { useAccountIdentity, useBrowserIdentity } from "@/hooks/useBrowserIdentity";
 import type { ApprovedBridge, EndpointIdentity } from "@security/protocol";
+import type { LedgerClient } from "@/lib/ledger-client";
 import { SecureEndpointRuntime } from "@/lib/secure-endpoint-runtime";
 import { Dashboard } from "@/components/Dashboard";
-import { DeviceApproval } from "./DeviceApproval";
-import { PushNotificationsControl, detachPushSubscription } from "./PushNotificationsControl";
+import { detachPushSubscription } from "./PushNotificationsControl";
 import { securityErrorMessage } from "./SecurityPanel";
-import type { AccountSecurityClient, AccountSecuritySnapshot } from "@/lib/account-security-client";
 
 interface DashboardClientProps {
   ownerId: string;
@@ -34,57 +32,63 @@ export function BrowserSecurityUnavailable({ code }: { code: string }) {
   </section></main>;
 }
 
-export function DashboardClient(props: DashboardClientProps) {
-  const state = useBrowserIdentity(props.ownerId);
-  if (state.status === "checking") return <main className="flex min-h-dvh items-center justify-center p-4"><p role="status" className="text-sm text-[var(--text-muted)]">Opening this browser's encryption identity…</p></main>;
-  if (state.status === "error") return <BrowserSecurityUnavailable code={state.code} />;
-  if (state.account?.status === "unapproved" && !state.bridges.length && state.accountClient) return <AccountApprovalShell ownerId={props.ownerId} email={props.userId} client={state.accountClient} />;
-  return <EncryptedDashboardClient {...props} identity={state.identity} pins={state.bridges} accountClient={state.accountClient} accountState={state.account} />;
+function OpeningIdentity() {
+  return <main className="flex min-h-dvh items-center justify-center p-4"><p role="status" className="text-sm text-[var(--text-muted)]">Opening this browser's encryption identity…</p></main>;
 }
 
-/** Authenticated account actions do not require encrypted session authority. */
-function AccountApprovalShell({ ownerId, email, client }: { ownerId: string; email: string; client: AccountSecurityClient }) {
+/** Solo owners (`solo:<bridgeId>`) keep invitation pins; every other owner is a passkey-ledger account. */
+export function DashboardClient(props: DashboardClientProps) {
+  return props.ownerId.startsWith("solo:") ? <SoloDashboardClient {...props} /> : <AccountDashboardClient {...props} />;
+}
+
+/** Solo: unchanged invitation-based trust (this browser's identity plus the bridge pins its invitations stored). */
+function SoloDashboardClient(props: DashboardClientProps) {
+  const state = useBrowserIdentity(props.ownerId);
+  if (state.status === "checking") return <OpeningIdentity />;
+  if (state.status === "error") return <BrowserSecurityUnavailable code={state.code} />;
+  return <EncryptedDashboardClient {...props} identity={state.identity} pins={state.bridges} />;
+}
+
+/** Account: this browser's endpoint for the accountId, trusted only while the ledger lists it; bridges come from the ledger alone. */
+function AccountDashboardClient(props: DashboardClientProps) {
+  const state = useAccountIdentity(props.ownerId);
+  if (state.status === "checking") return <OpeningIdentity />;
+  if (state.status === "error") return <BrowserSecurityUnavailable code={state.code} />;
+  if (state.status !== "ready") return <AccountAccessEnded removed={state.status === "removed"} />;
+  return <EncryptedDashboardClient {...props} identity={state.identity} ledger={state.ledger} accountId={props.userId} />;
+}
+
+/** This browser is not (or no longer) a trusted device of the signed-in account: no encrypted resources exist on this screen. */
+function AccountAccessEnded({ removed }: { removed: boolean }) {
   const { signOut } = useAuthMode();
-  const [showAccount, setShowAccount] = useState(false);
-  const [disconnecting, setDisconnecting] = useState(false);
-  const accountButton = useRef<HTMLButtonElement>(null);
-  function disconnect() {
-    if (disconnecting) return;
-    setDisconnecting(true);
+  const [leaving, setLeaving] = useState(false);
+  function signInAgain() {
+    if (leaving) return;
+    setLeaving(true);
     void detachPushSubscription().catch(() => {}).finally(signOut);
   }
-  return <main className="min-h-dvh p-4 sm:p-8">
-    <header className="mx-auto mb-4 flex w-full max-w-5xl items-center justify-between gap-3 border-b border-[var(--border-muted)] pb-3">
-      <span className="font-semibold">FTown</span>
-      <div className="relative min-w-0" onKeyDown={event => {
-        if (event.key === "Escape") { setShowAccount(false); accountButton.current?.focus(); }
-      }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setShowAccount(false); }}>
-        <button ref={accountButton} type="button" title={email} aria-expanded={showAccount} aria-controls="pending-account-actions"
-          className="btn-ghost min-h-11 min-w-11 max-w-[65vw] truncate px-3 text-sm sm:max-w-sm" onClick={() => setShowAccount(value => !value)}>{email}</button>
-        {showAccount && <div id="pending-account-actions" role="group" aria-label="Account actions"
-          className="absolute right-0 z-10 mt-1 min-w-40 rounded-lg border border-[var(--border-muted)] bg-[var(--bg-elevated)] p-1 shadow-lg">
-          <button type="button" className="btn-ghost min-h-11 w-full px-3 text-left text-sm" disabled={disconnecting} onClick={disconnect}>{disconnecting ? "Disconnecting…" : "Disconnect"}</button>
-        </div>}
-      </div>
-    </header>
-    <div className="mx-auto mb-4 flex w-full max-w-5xl justify-end [&_button]:!min-h-11"><PushNotificationsControl accountId={email} /></div>
-    <DeviceApproval ownerId={ownerId} email={email} client={client} />
-  </main>;
+  return <main className="flex min-h-dvh items-center justify-center p-4"><section className="max-w-md space-y-4 rounded-xl border border-[var(--border-muted)] bg-[var(--bg-surface)] p-6">
+    <h1 className="text-xl font-semibold">{removed ? "This browser was removed" : "Sign in again"}</h1>
+    <p role="alert" className="text-sm text-[var(--text-secondary)]">{removed
+      ? "This browser was removed from your account, so it can no longer open encrypted sessions. Sign in with your passkey to add it again."
+      : "This browser does not hold your account's keys. Sign in with your passkey to continue."}</p>
+    <button type="button" className="btn-ghost min-h-11" disabled={leaving} onClick={signInAgain}>{leaving ? "Signing out…" : "Sign in again"}</button>
+  </section></main>;
 }
 
-function EncryptedDashboardClient({ identity, pins, accountClient, accountState, ...props }: DashboardClientProps & { identity: EndpointIdentity; pins: ApprovedBridge[]; accountClient?: AccountSecurityClient; accountState?: AccountSecuritySnapshot }) {
+function EncryptedDashboardClient({ identity, pins, ledger, accountId, ...props }: DashboardClientProps & { identity: EndpointIdentity; pins?: ApprovedBridge[]; ledger?: LedgerClient; accountId?: string }) {
   const { signOut } = useAuthMode();
-  const resource = useMemo(() => ({ runtime: new SecureEndpointRuntime(identity, pins, accountClient?.assertBridgeAccess), leases: 0 }), [identity, accountClient]);
-  useEffect(() => { resource.runtime.replacePins(pins); }, [resource, pins]);
+  // Account: the ledger is the only bridge authority. Solo: invitation pins, refreshed below.
+  const resource = useMemo(() => ({ runtime: new SecureEndpointRuntime(identity, ledger ? { ledger } : pins ?? []), leases: 0 }), [identity, ledger]);
+  useEffect(() => { if (!ledger) resource.runtime.replacePins(pins ?? []); }, [resource, pins, ledger]);
   useEffect(() => {
     resource.leases++;
     return () => { resource.leases--; queueMicrotask(() => { if (resource.leases === 0) resource.runtime.dispose(); }); };
   }, [resource]);
-  const { client, rawClient, status, error, transport } = useCentrifugo(props.token, props.centrifugoUrl, props.userId, {
-    securityRuntime: resource.runtime, tokenRefresher: props.tokenRefresher, onUnauthorized: props.onUnauthorized,
+  const { client, status, error, transport } = useCentrifugo(props.token, props.centrifugoUrl, props.userId, {
+    securityRuntime: resource.runtime, tokenRefresher: props.tokenRefresher, onUnauthorized: props.onUnauthorized, ledger,
   });
-  useEffect(() => rawClient ? securityNudges.attach(rawClient, props.userId) : undefined, [rawClient, props.userId]);
   const handleDisconnect = useCallback(() => { resource.runtime.dispose(); signOut(); }, [resource, signOut]);
   return <Dashboard client={client} connectionStatus={status} connectionError={error} userId={props.userId}
-    token={props.token} centrifugoUrl={props.centrifugoUrl} transport={transport} onDisconnect={handleDisconnect} accountClient={accountClient} accountState={accountState} />;
+    token={props.token} centrifugoUrl={props.centrifugoUrl} transport={transport} onDisconnect={handleDisconnect} accountId={accountId ?? null} />;
 }

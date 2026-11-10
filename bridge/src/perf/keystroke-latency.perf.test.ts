@@ -7,8 +7,6 @@ import { join } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import { generateEndpoint, seal } from '../security/crypto.js';
-import { createAccountGenesis, generateAccountSigningIdentity, signAccountTransition, verifyAccountHistory } from '../security/account-crypto.js';
-import type { AccountSigningIdentity } from '../security/account-protocol.js';
 import type { EndpointIdentity } from '../security/protocol.js';
 import { BridgeSecurityService, applicationJson } from '../security/bridge/security.js';
 import { LOCAL_RECOVERY_AUTHORITY } from '../security/bridge/policy.js';
@@ -69,42 +67,19 @@ async function writeTranscript(file: string, sessionId: string, cwd: string): Pr
   return n;
 }
 
-// R = 8 recipients (7 account browsers + local-cli), same fixture shape as the A3 bench.
+// R = 8 recipients (7 browsers + local-cli), same recipient count as the A3 bench. Browsers enroll through the OS-local invitation
+// path (no account ledger), which seals and accepts exactly like account devices once approved.
 async function buildSecurity(dir: string) {
   const bridge = await generateEndpoint(owner, 'bridge');
   const browsers: EndpointIdentity[] = [];
-  const signings: AccountSigningIdentity[] = [];
-  for (let i = 0; i < RECIPIENT_BROWSERS; i++) { browsers.push(await generateEndpoint(owner, 'browser')); signings.push(await generateAccountSigningIdentity()); }
-  let wall = Date.now() - 3_600_000;
-  let history = { genesis: await createAccountGenesis(owner, browsers[0].endpoint, signings[0], 'Browser 0', wall), transitions: [] as Awaited<ReturnType<typeof signAccountTransition>>[] };
-  let checkpoint = await verifyAccountHistory(history, null, wall);
-  const append = async (op: Parameters<typeof signAccountTransition>[3]): Promise<void> => {
-    wall += 1000;
-    const record = await signAccountTransition(checkpoint, browsers[0].endpoint.id, signings[0], op, wall);
-    history = { ...history, transitions: [...history.transitions, record] };
-    checkpoint = await verifyAccountHistory(history, checkpoint, wall);
-  };
-  const iso = (): string => new Date(wall).toISOString();
-  await append({ type: 'add_bridge', bridge: { bridgeId: 'bridge', endpoint: bridge.endpoint, label: 'This Mac', approvedAt: iso() } });
-  for (const b of ['bridge-2', 'bridge-3']) {
-    const other = await generateEndpoint(owner, 'bridge');
-    await append({ type: 'add_bridge', bridge: { bridgeId: b, endpoint: other.endpoint, label: b, approvedAt: iso() } });
+  for (let i = 0; i < RECIPIENT_BROWSERS; i++) browsers.push(await generateEndpoint(owner, 'browser'));
+  const security = new BridgeSecurityService(bridge, 'bridge', dir, { relayUserId: 'owner@example.test' });
+  for (const [i, browser] of browsers.entries()) {
+    const invite = await security.policy.createInvitation(LOCAL_RECOVERY_AUTHORITY, { label: `Browser ${i}` });
+    await security.policy.consumeInvitation({ type: 'enroll', candidate: browser.endpoint, invitationId: invite.invitationId, invitationSecret: invite.secret, label: `Browser ${i}` });
   }
-  for (let i = 1; i < RECIPIENT_BROWSERS; i++) {
-    await append({ type: 'add_device', device: { endpoint: browsers[i].endpoint, signingPublicKey: signings[i].publicKey, label: `Browser ${i}`, approvedAt: iso() } });
-  }
-  for (let i = 0; i < 2; i++) {
-    const gone = await generateEndpoint(owner, 'browser');
-    const gs = await generateAccountSigningIdentity();
-    await append({ type: 'add_device', device: { endpoint: gone.endpoint, signingPublicKey: gs.publicKey, label: `Old ${i}`, approvedAt: iso() } });
-    await append({ type: 'revoke_device', endpointId: gone.endpoint.id });
-  }
-  const security = new BridgeSecurityService(bridge, 'bridge', dir, { relayUserId: 'owner@example.test', readAccountHistory: async () => history });
-  const invite = await security.policy.createInvitation(LOCAL_RECOVERY_AUTHORITY, { label: 'Legacy' });
-  await security.policy.consumeInvitation({ type: 'enroll', candidate: browsers[0].endpoint, invitationId: invite.invitationId, invitationSecret: invite.secret, label: 'Legacy' });
   const cli = await generateEndpoint(owner, 'local-cli');
   await security.policy.provisionLocalEndpoint(cli.endpoint);
-  await security.adoptAccount(await security.policy.principal(browsers[0].endpoint.id), { rootId: checkpoint.rootId, revision: checkpoint.revision, head: checkpoint.head });
   const recipients = await security.policy.recipients();
   return { security, bridge, browser: browsers[0], recipients };
 }

@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import type { MessageClient, MessageSubscription } from "@/lib/message-client";
+import { sessionChannel } from "@security/ledger/channels";
 import { hookEventToActivity } from "@/lib/hook-events";
 
 export interface TokenUsage {
@@ -41,7 +42,9 @@ export function useSessionEvents(
       return;
     }
 
-    const channel = `events:${sessionId}#${userId}`;
+    let channel: string;
+    // A session id that cannot name a channel is never subscribed.
+    try { channel = sessionChannel("events", sessionId, userId); } catch { return; }
 
     const existing = client.getSubscription(channel);
     if (existing) {

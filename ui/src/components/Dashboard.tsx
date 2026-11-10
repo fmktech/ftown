@@ -15,8 +15,6 @@ import { useAllSessionEvents } from "@/hooks/useAllSessionEvents";
 import type { SecurityCommand, SecurityCommandResults } from "@security/protocol";
 import { SecurityPanel, type SecurityBridge } from "./SecurityPanel";
 import { SecurityLockIcon } from "./SecurityLockIcon";
-import { usePendingApprovals } from "@/hooks/usePendingApprovals";
-import type { AccountSecurityClient, AccountSecuritySnapshot } from "@/lib/account-security-client";
 import { SessionList } from "./SessionList";
 import type { AttentionAnswerEntry } from "../../../bridge/src/attention-prompt-protocol";
 import type { AttentionAnswerSubmitResult } from "./AttentionAnswerForm";
@@ -68,8 +66,11 @@ interface DashboardProps {
   transport: TerminalTransportApi | null;
   onDisconnect: () => void;
   localMode?: boolean;
-  accountClient?: AccountSecurityClient;
-  accountState?: AccountSecuritySnapshot;
+  /**
+   * Set only by the account (passkey ledger) dashboard: the signed-in accountId. Solo (userId "solo") and local ("local") leave it
+   * unset, so their Security panel keeps the invitation flow.
+   */
+  accountId?: string | null;
 }
 
 /** Only validated same-machine paths identify the browser's current computer. */
@@ -103,7 +104,7 @@ function reviewIdentityFor(session: Session | null | undefined): string {
   return session && parsePullRequestUrl(session.pullRequestUrl) ? JSON.stringify([session.bridgeId, session.id, session.pullRequestUrl, session.pullRequestReviewGeneration]) : "";
 }
 
-export function Dashboard({ client, connectionStatus, connectionError, userId, token, centrifugoUrl, transport, onDisconnect, localMode = false, accountClient, accountState }: DashboardProps) {
+export function Dashboard({ client, connectionStatus, connectionError, userId, token, centrifugoUrl, transport, onDisconnect, localMode = false, accountId = null }: DashboardProps) {
   const connectCommand = buildBridgeCommand({ apiUrl: typeof window !== "undefined" ? window.location.origin : "" });
   const startCommand = buildBridgeStartCommand({ apiUrl: typeof window !== "undefined" ? window.location.origin : "" });
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -124,8 +125,6 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [showNavigation, setShowNavigation] = useState(false);
   const [showSecurity, setShowSecurity] = useState(false);
   const [updateBridgeId, setUpdateBridgeId] = useState<string | null>(null);
-  const pending = usePendingApprovals(accountClient, "reviewer");
-  const pendingCount = pending.snapshot.inbox.filter(item => !["approved", "rejected", "cancelled", "expired", "conflict"].includes(item.status)).length;
   const [securityBridgeId, setSecurityBridgeId] = useState<string | undefined>(undefined);
   const [securityGeneration, setSecurityGeneration] = useState(0);
   const [localityGeneration, setLocalityGeneration] = useState(0);
@@ -804,20 +803,13 @@ PY`;
           </HeaderTooltip>
           <nav id="dashboard-navigation" ref={navigationRef} aria-label="Dashboard actions" hidden={!isDesktop && !showNavigation}
             className={`${isDesktop || showNavigation ? "flex" : "hidden"} absolute right-2 top-full z-50 mt-1 max-h-[calc(100dvh_-_60px)] w-[min(288px,calc(100vw_-_16px))] flex-col gap-2 overflow-y-auto rounded-md border border-[var(--border-muted)] bg-[var(--bg-surface)] p-3 shadow-xl md:static md:mt-0 md:w-auto md:max-h-none md:flex-row md:items-center md:overflow-visible md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none`}>
-            {accountState?.status === "ready" && <HeaderTooltip label={pendingCount ? `Review ${pendingCount} pending device approvals` : "Review device approvals"} className="flex">
-              <button type="button" className="btn-ghost relative flex min-h-11 items-center gap-2 text-left md:h-8 md:min-h-8 md:w-8 md:justify-center" style={{ padding: "4px 6px", color: pendingCount ? "var(--accent)" : undefined }} aria-label={pendingCount ? `Review ${pendingCount} pending device approvals` : "Review device approvals"} onClick={() => { if (showNavigation) closeNavigation(true); setShowSecurity(true); }}>
-                <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M14 3H5v18h14v-9M9 8h5M9 12h3M9 16h3M15 7l2 2 4-4" /></svg>
-                <span className="md:sr-only">Review approvals{pendingCount ? ` (${pendingCount})` : ""}</span>
-                {pendingCount > 0 && <span aria-hidden="true" className="hidden md:flex absolute -right-1 -top-1 min-w-4 h-4 items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[9px] font-bold text-[var(--bg-void)]">{pendingCount}</span>}
-              </button>
-            </HeaderTooltip>}
             <button type="button" className="btn-ghost flex min-h-11 items-center gap-2 text-left md:hidden" aria-label="Reconnect and refresh" title="Reconnect and refresh (reload this page)" onClick={() => window.location.reload()}>
               <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M1 1v5h5" /><path d="M3.51 10a5 5 0 1 0 .49-5.38L1 6" /></svg>
               <span>Reconnect and refresh</span>
             </button>
             <PushNotificationsControl localMode={localMode} accountId={userId} presentation="responsive" />
-            <HeaderTooltip label={`Security: computer and browser access${pendingCount ? `; ${pendingCount} requests` : ""}`} className="flex"><button type="button" className="btn-ghost flex min-h-11 items-center gap-2 md:min-h-8 md:w-8 md:justify-center" style={{ padding: "4px 6px" }} aria-label="Open security" onClick={() => openSecurity()}><SecurityLockIcon state="unknown" /><span className="md:sr-only">Security{pendingCount > 0 ? ` (${pendingCount})` : ""}</span></button></HeaderTooltip>
-            <HeaderTooltip label={localMode ? "Switch to cloud" : "Switch to this computer"} className="flex"><a href={localMode ? "/dashboard" : "/local"} style={{ padding: "4px 6px" }} aria-label={localMode ? "Use Cloud" : "Use This computer"} onClick={localMode ? () => closeNavigation() : event => { event.preventDefault(); closeNavigation(); void prepareLocalAccess().then(() => { window.location.href = "/local"; }); }} className="btn-ghost flex min-h-11 items-center gap-2 md:min-h-8 md:w-8 md:justify-center"><NavigationIcon kind="switch" /><span className="md:sr-only">{localMode ? "Cloud" : "This computer"}</span></a></HeaderTooltip>
+            <HeaderTooltip label="Security: computer and browser access" className="flex"><button type="button" className="btn-ghost flex min-h-11 items-center gap-2 md:min-h-8 md:w-8 md:justify-center" style={{ padding: "4px 6px" }} aria-label="Open security" onClick={() => openSecurity()}><SecurityLockIcon state="unknown" /><span className="md:sr-only">Security</span></button></HeaderTooltip>
+            {!accountId && <HeaderTooltip label={localMode ? "Switch to cloud" : "Switch to this computer"} className="flex"><a href={localMode ? "/dashboard" : "/local"} style={{ padding: "4px 6px" }} aria-label={localMode ? "Use Cloud" : "Use This computer"} onClick={localMode ? () => closeNavigation() : event => { event.preventDefault(); closeNavigation(); void prepareLocalAccess().then(() => { window.location.href = "/local"; }); }} className="btn-ghost flex min-h-11 items-center gap-2 md:min-h-8 md:w-8 md:justify-center"><NavigationIcon kind="switch" /><span className="md:sr-only">{localMode ? "Cloud" : "This computer"}</span></a></HeaderTooltip>}
             <p className="text-xs text-[var(--text-muted)] md:hidden">{localMode ? `This computer: ${connectionStatus}` : `Cloud: ${connectionStatus}`} · Selected terminal: {selectedTransportMode === "local" ? "Local" : selectedTransportMode === "direct" ? "P2P" : selectedTransportMode === "centrifugo" ? "Cloud" : "none / connecting"}{connectionError ? ` · ${connectionError}` : ""}</p>
             <HeaderTooltip label="FTown on GitHub" className="hidden md:flex">          <a
             href="https://github.com/fmktech/ftown"
@@ -1016,10 +1008,6 @@ PY`;
             <a href="/pair" style={{ color: "var(--accent)" }}>
               Approve a device
             </a>
-            {" · "}
-            <a href="/devices" style={{ color: "var(--accent)" }}>
-              Manage devices
-            </a>
           </div>
         </div>
       )}
@@ -1212,7 +1200,7 @@ PY`;
           <SessionInboxPage entries={inbox} open={inboxOpen} onClose={() => { restoreInboxFocusRef.current = true; setInboxOpen(false); scheduleTerminalRenderAdjustment(); }}
             onOpenSession={id => { focusOpenedSessionRef.current = true; handleSelectSession(id); setMobileTab("terminal"); scheduleTerminalRenderAdjustment(); }} onDismiss={entry => clearSessionAttention(entry.session.id, entry.notice)} onReply={replyToInbox} onAnswer={answerInbox} />
           <div ref={workspaceFocusRef} role="region" aria-label={`Session workspace: ${selectedSession?.name || selectedSession?.prompt?.slice(0, 48) || "Session"}`} tabIndex={-1} className="min-h-0 min-w-0 flex-1 flex-col focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)]" style={{ display: inboxOpen ? "none" : "flex" }} aria-hidden={inboxOpen}>
-          <SessionWorkspace session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} subscribeAuthority={accountClient?.subscribe} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabSwitch} onRefit={refitPreviewTerminal} reviewOpen={reviewOpen} reviewActivation={reviewChoice.activation} onCloseReview={closeReview}>
+          <SessionWorkspace session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabSwitch} onRefit={refitPreviewTerminal} reviewOpen={reviewOpen} reviewActivation={reviewChoice.activation} onCloseReview={closeReview}>
           <Terminal
             ref={terminalRef}
             transport={transport}
@@ -1239,8 +1227,7 @@ PY`;
 
       <SecurityPanel open={showSecurity} onClose={() => setShowSecurity(false)} bridges={securityBridges}
         currentEndpointId={securityRuntime?.identity.endpoint.id ?? null} currentComputerIds={currentComputerIds} execute={executeSecurity}
-        accountClient={accountClient} accountState={accountState}
-        pendingClient={pending.client ?? undefined} pendingState={pending.snapshot}
+        accountId={localMode ? null : accountId}
         initialBridgeId={securityBridgeId} />
       {updateBridgeId && <BridgeUpdatesDialog open name={bridges.find(bridge => bridge.bridgeId === updateBridgeId)?.hostname ?? updateBridgeId}
         view={updates.get(updateBridgeId)} onClose={() => setUpdateBridgeId(null)} onCheck={() => void updates.check(updateBridgeId, true)} onUpdate={() => void updates.update(updateBridgeId)} />}

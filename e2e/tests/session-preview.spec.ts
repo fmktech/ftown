@@ -2,10 +2,10 @@ import { join } from "node:path";
 import { symlink, unlink, writeFile } from "node:fs/promises";
 import { expect, type CDPSession, type Page, type TestInfo } from "@playwright/test";
 import { test } from "../helpers/fixtures";
-import { login, sharedEmail, waitForBridgeOnline, runMarkerInTerminal } from "../helpers/app";
+import { login, sharedAccountId, waitForBridgeOnline, runMarkerInTerminal } from "../helpers/app";
 import { bridgeApiFetch, readBridgePointer } from "../helpers/bridge-api";
 import { UI_BASE_URL } from "../helpers/config";
-import { publishSecurityNudge } from "../helpers/security-nudge";
+import { publishLedgerHeadNotice } from "../helpers/security-nudge";
 import { assertSanitized, atomicHtml, createPreviewFixture, observePreviewTransport, previewHtml, sessionRecord } from "../helpers/session-preview";
 
 const iframe = (page: Page, fileName: string) => page.locator(`iframe[title="HTML preview: ${fileName}"]`);
@@ -103,7 +103,7 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     await atomicHtml(otherPath, previewHtml(`OTHER_${suffix}`, 1));
     const target = await fixture.create(targetName);
     const other = await fixture.create(otherName);
-    await login(page, sharedEmail());
+    await login(page);
     await waitForBridgeOnline(page);
     await selectSession(page, targetName);
     await expect(separator(page)).toHaveCount(0);
@@ -199,11 +199,11 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
       });
       observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ["style", "hidden", "class"] });
     }, suffix);
-    // The account client no longer polls; it refreshes only on an owner nudge.
-    // Publish a real account nudge and observe the resulting account read.
-    const accountRead = page.waitForResponse(response => new URL(response.url()).pathname === "/api/security/account"
+    // The ledger client does not poll; it re-reads the ledger when the relay announces a new head.
+    // Announce one and observe the resulting ledger read: that trust refresh must not interrupt the preview.
+    const accountRead = page.waitForResponse(response => new URL(response.url()).pathname === "/api/account/ledger"
       && response.request().method() === "GET" && response.status() === 200, { timeout: 30_000 });
-    await publishSecurityNudge(page, sharedEmail(), "account");
+    await publishLedgerHeadNotice(page, sharedAccountId());
     await accountRead;
     const afterTrustRefresh = transport.reads.filter(entry => entry.previewId === registration && entry.state === "unchanged").length;
     await expect.poll(() => transport.reads.filter(entry => entry.previewId === registration && entry.state === "unchanged").length,
@@ -434,7 +434,7 @@ test.describe("mobile preview", () => {
     try {
       await atomicHtml(join(fixture.directory, fileName), previewHtml(`MOBILE_${suffix}`, 1));
       const session = await fixture.create(name);
-      await login(page, sharedEmail());
+      await login(page);
       await waitForBridgeOnline(page);
       await selectSession(page, name);
       await page.locator(".xterm").evaluate((element, value) => element.setAttribute("data-preview-fixture-terminal", value), suffix);

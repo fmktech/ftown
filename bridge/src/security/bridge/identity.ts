@@ -6,13 +6,12 @@ import type { EndpointIdentity, EndpointKind } from '../protocol.js';
 import { endpointSchema } from './metadata.js';
 import { AtomicSnapshot } from './snapshot.js';
 import { BridgeSecurityError } from './errors.js';
-import { verifiedAccountSchema } from './account-state.js';
-import type { VerifiedAccountTrust } from '../account-protocol.js';
 
+/** Solo, --local and local-CLI endpoint keys (`<kind>-identity.json`); account bridges keep theirs in ledger-identity.json. */
 export const identityRecordSchema = z.object({ version: z.literal(1), endpoint: endpointSchema, privateKey: z.object({
   kty: z.literal('EC'), crv: z.literal('P-256'), x: z.string(), y: z.string(), d: z.string(),
   key_ops: z.array(z.string()).optional(), ext: z.boolean().optional(),
-}).strict(), accountBootstrap: verifiedAccountSchema.optional() }).strict();
+}).strict() }).strict();
 
 /** OS-local persisted keys; corruption/wrong owner never silently generates a replacement identity. */
 export async function loadOrCreateIdentity(dataDir: string, ownerId: string, kind: 'bridge' | 'local-cli'): Promise<EndpointIdentity> {
@@ -39,7 +38,7 @@ export async function loadLocalIdentity(dataDir: string, ownerId: string): Promi
 }
 
 /** Absence alone permits virgin onboarding; corruption must never generate a new key/root. */
-export async function readBoundBridgeIdentity(dataDir: string): Promise<{ identity: EndpointIdentity; bootstrap?: VerifiedAccountTrust } | null> {
+export async function readBoundBridgeIdentity(dataDir: string): Promise<{ identity: EndpointIdentity } | null> {
   let raw: string;
   try { raw = await readFile(join(dataDir, 'security', 'bridge-identity.json'), 'utf8'); }
   catch (error) {
@@ -49,6 +48,6 @@ export async function readBoundBridgeIdentity(dataDir: string): Promise<{ identi
   try {
     const record = identityRecordSchema.parse(JSON.parse(raw));
     if (record.endpoint.kind !== 'bridge') throw new BridgeSecurityError('wrong_context');
-    return { identity: await importEndpoint(record.endpoint, record.privateKey, false), bootstrap: record.accountBootstrap };
+    return { identity: await importEndpoint(record.endpoint, record.privateKey, false) };
   } catch { throw new BridgeSecurityError('key_unavailable'); }
 }

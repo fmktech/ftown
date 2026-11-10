@@ -37,7 +37,7 @@ case "$job" in
   e2e)
     node --test scripts/ci/boat-runner.test.mjs scripts/ci/bridge-version.test.mjs
     # Reject all inherited endpoint, credential and test-selector overrides before sourcing fixtures.
-    for name in DATABASE_URL MIGRATION_DATABASE_URL PGHOST PGPORT PGUSER PGDATABASE PGPASSWORD PGOPTIONS PGSERVICE PGSERVICEFILE FTOWN_PUBLIC_URL NEXT_PUBLIC_CENTRIFUGO_URL FTOWN_DATA_DIR E2E_DIR E2E_BROWSER_HOME E2E_SECOND_BRIDGE_HOME E2E_USER_EMAIL NODE_EXTRA_CA_CERTS AUTH_SECRET CENTRIFUGO_API_KEY CENTRIFUGO_TOKEN_SECRET; do
+    for name in DATABASE_URL MIGRATION_DATABASE_URL PGHOST PGPORT PGUSER PGDATABASE PGPASSWORD PGOPTIONS PGSERVICE PGSERVICEFILE FTOWN_PUBLIC_URL NEXT_PUBLIC_CENTRIFUGO_URL FTOWN_DATA_DIR FTOWN_BOOTSTRAP_SECRET E2E_DIR E2E_BROWSER_HOME E2E_SECOND_BRIDGE_HOME E2E_PUBLIC_URL E2E_UI_PORT E2E_TLS_PORT NODE_EXTRA_CA_CERTS AUTH_SECRET CENTRIFUGO_API_KEY CENTRIFUGO_TOKEN_SECRET; do
       if printenv "$name" >/dev/null; then echo "Inherited override $name rejected" >&2; exit 1; fi
     done
     export E2E_DIR="$root/e2e"
@@ -93,11 +93,10 @@ JS
     (cd ui && npm ci && npm test && node --test ../e2e/scripts/ci-fixtures.test.mjs && npm run build)
     (cd bridge && npm ci && npm run build && npm test && node --test ../scripts/release/*.test.mjs)
     MIGRATION_DATABASE_URL="$DATABASE_URL" timeout 120s node e2e/scripts/rate-limit-db.ts
-    E2E_USER_EMAIL="e2e-db-pending+${GITHUB_RUN_ID:-0}-${GITHUB_RUN_ATTEMPT:-0}@ftown.test" node e2e/scripts/pending-approvals-db.ts
     timeout 120s node bridge/scripts/centrifugo-security-smoke.mjs
     (cd "$E2E_DIR" && npx playwright install --with-deps --no-shell chromium)
     services_started=1; bash "$E2E_DIR/scripts/start-services.sh"
-    export E2E_USER_EMAIL; E2E_USER_EMAIL=$(cat "$E2E_DIR/.run-email")
+    # The `setup` project creates the server's one passkey account and pairs both bridges first.
     (cd "$E2E_DIR" && npx playwright test)
     ;;
 esac

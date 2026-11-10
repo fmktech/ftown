@@ -1,12 +1,12 @@
 import { expect } from "@playwright/test";
 import { test } from "../helpers/fixtures";
-import { login, sharedEmail, waitForBridgeOnline } from "../helpers/app";
+import { login, sharedAccountId, waitForBridgeOnline } from "../helpers/app";
 import { readBridgePointer } from "../helpers/bridge-api";
 
 for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
   test(`bridge update menu displays real status at ${viewport.width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
-    await login(page, sharedEmail());
+    await login(page);
     await Promise.all([
       page.waitForResponse(response => new URL(response.url()).pathname === "/api/version" && response.ok()),
       page.reload(),
@@ -51,7 +51,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
 
 test("application build change requires an explicit reload", async ({ page }) => {
   await page.route("**/api/version", route => route.fulfill({ status: 200, contentType: "application/json", headers: { "Cache-Control": "no-store" }, body: JSON.stringify({ buildId: "e2e-distinct-build" }) }));
-  await login(page, sharedEmail());
+  await login(page);
   const notice = page.getByRole("dialog", { name: "App update available", exact: true });
   await expect(notice).toBeVisible();
   await expect(notice.getByText(/unsent dialog input may be lost/)).toBeVisible();

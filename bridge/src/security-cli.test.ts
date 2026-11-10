@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { invitationLink, runSecurity } from './security-cli.js';
-import type { BridgeInvitation } from './security/protocol.js';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { waitForPendingBridgeDecision, writePendingBridgeStatus } from './security/bridge/pending-approval.js';
+import { join } from 'node:path';
+import { ACCOUNT_MANAGED_INVITE_MESSAGE, invitationLink, runSecurity, securityRefusalMessage } from './security-cli.js';
+import { SecurityCommandError, securityCommand, securityCommandError } from './cli-client.js';
+import type { BridgeInvitation } from './security/protocol.js';
 
 test('invitation URLs carry the full invitation only in the dedicated connect fragment', () => {
   const invitation = { version: 1, secret: 'SECRET', ownerId: 'owner', bridgeId: 'bridge' } as BridgeInvitation;
@@ -20,22 +20,49 @@ test('security help lists recovery commands without accessing a bridge or printi
   process.stdout.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stdout.write;
   try { assert.equal(await runSecurity(['--help']), 0); }
   finally { process.stdout.write = previous; }
-  for (const command of ['invite', 'devices', 'revoke', 'proxy', 'pair-status', 'pair-confirm', 'pair-reject']) assert.ok(output.includes(command));
+  for (const command of ['invite', 'devices', 'revoke', 'proxy']) assert.ok(output.includes(command));
+  // Account computers pair by a passkey link printed by `ftown start`; the v1 approval commands are gone.
+  for (const command of ['pair-status', 'pair-confirm', 'pair-reject', 'pair-link']) assert.ok(!output.includes(command), command);
   assert.ok(!output.includes('#invite='));
 });
-test('explicit CLI status/confirm/reject use the selected instance with no listener or pointer', async t => {
-  const dir = await mkdtemp(join(tmpdir(), 'ftown-pair-cli-')); t.after(() => rm(dir, { recursive: true, force: true }));
-  const value = Buffer.alloc(32).toString('base64url');
-  const state = { version: 1 as const, requestId: value, processNonce: value, expiresAt: new Date(Date.now() + 60000).toISOString(),
-    phase: 'comparing' as const, offerHash: value, comparisonCode: '1234-5678-ABCD' };
-  await writePendingBridgeStatus(dir, state);
-  const previous = process.stdout.write; let output = '';
-  process.stdout.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stdout.write;
+
+test('an account bridge refuses `invite` with the account_managed reason, without contacting the bridge', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ftown-security-cli-'));
+  const previous = console.error; const errors: string[] = [];
+  console.error = (...args: unknown[]) => { errors.push(args.map(String).join(' ')); };
   try {
-    assert.equal(await runSecurity(['--data-dir', dir, 'pair-status']), 0); assert.deepEqual(JSON.parse(output.trim()), state);
-    assert.equal(await runSecurity(['--data-dir', dir, 'pair-confirm', state.comparisonCode]), 0);
-    assert.equal((await waitForPendingBridgeDecision(dir, state, AbortSignal.timeout(1000))).decision, 'confirm');
-    assert.equal(await runSecurity(['--data-dir', dir, 'pair-reject']), 0);
-    assert.equal((await waitForPendingBridgeDecision(dir, state, AbortSignal.timeout(1000))).decision, 'reject');
-  } finally { process.stdout.write = previous; }
+    writeFileSync(join(dir, 'bridge.json'), JSON.stringify({ port: 1, token: 'local-token', bridgeId: 'b', ownerId: 'A'.repeat(43) }));
+    assert.equal(await runSecurity(['--data-dir', dir, 'invite']), 1);
+    assert.deepEqual(errors, [ACCOUNT_MANAGED_INVITE_MESSAGE]);
+    assert.match(ACCOUNT_MANAGED_INVITE_MESSAGE, /account_managed/);
+  } finally { console.error = previous; rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("security commands surface the bridge's typed refusal instead of a generic failure", () => {
+  const managed = securityCommandError({ requestId: 'r', success: false, error: 'Bridge security: account_managed', data: { code: 'account_managed' } });
+  assert.ok(managed instanceof SecurityCommandError);
+  assert.equal(managed.code, 'account_managed');
+  assert.equal(managed.message, 'Bridge security: account_managed');
+  assert.match(securityRefusalMessage(managed), /account_managed/);
+
+  const other = securityCommandError({ success: false, error: 'Bridge security: permission_denied\u0007', data: { code: 'permission_denied' } });
+  assert.equal(other.message, 'Bridge security: permission_denied');
+  assert.equal(securityRefusalMessage(other), 'The bridge refused this security command: Bridge security: permission_denied');
+
+  const coded = securityCommandError({ success: false, data: { code: 'approval_required' } });
+  assert.equal(coded.message, 'Encrypted security command failed (approval_required)');
+  const untyped = securityCommandError({ success: false, error: 'x'.repeat(400), data: { code: 'Not A Code!' } });
+  assert.equal(untyped.code, null);
+  assert.equal(untyped.message.length, 300);
+});
+
+test('securityCommand throws the typed refusal for every security command', async () => {
+  for (const type of ['security_invite', 'security_devices', 'security_revoke'] as const) {
+    const send = async () => ({ response: { requestId: 'r', success: false, error: 'Bridge security: account_managed', data: { code: 'account_managed' } } });
+    const error = await securityCommand({ port: 1, token: 't', bridgeId: 'b' }, type, {}, send as never).then(() => assert.fail('should reject'), (e: unknown) => e);
+    assert.ok(error instanceof SecurityCommandError, type);
+    assert.equal(error.code, 'account_managed');
+  }
+  const ok = async () => ({ response: { requestId: 'r', success: true, data: { devices: [] } } });
+  assert.deepEqual(await securityCommand({ port: 1, token: 't', bridgeId: 'b' }, 'security_devices', {}, ok as never), { devices: [] });
 });

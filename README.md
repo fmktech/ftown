@@ -48,75 +48,48 @@ every transport. Direct transport failure can select another encrypted route;
 it cannot enable plaintext fallback. Older clients and bridges require upgrade
 and explicit pairing.
 
-On an account with an approved device, normal onboarding needs no copied link:
+Your account is rooted in a passkey (for example in iCloud Keychain) and a
+signed account ledger: the list of your passkeys, browsers and computers. Only
+your passkey can change that list, and each change asks for Touch ID or your
+device's other unlock prompt. The ftown server stores and relays the ledger but
+cannot add or remove anything: every browser and computer checks it from its
+first entry.
 
-1. Sign in on a new browser or phone. It creates one request and shows **Waiting
-   for approval**. For a new computer, start the bridge with
-   `ftown start --account you@example.com`; the email routes its request and
-   grants no access.
-2. On an approved browser, open **Security → Devices → Pending approvals** and
-   choose **Review** for the device you recognize. Review alone grants no access.
-3. Compare the verification code displayed on both actual devices. Confirm the
-   match locally on each, then approve in the trusted browser. Only verified
-   approval enables encrypted access. A browser approval covers all current and
-   future account computers; each new computer is approved once.
+**Create the account.** On the ftown site, open **First time setup**, create the
+passkey and name this browser. The server accepts only one account.
 
-Reject an unexpected request. If the codes differ, cancel and begin a fresh
-attempt; do not keep approving until one works. A bridge can show its local code
-with `ftown security pair-status`; use `ftown security pair-confirm <code>` on
-that computer to confirm it, or `ftown security pair-reject` to cancel.
-Background services log instructions rather than codes or private links.
+**Sign in on another browser.** Choose **Sign in with passkey**; the passkey
+adds that browser to the ledger. A browser that is already in the ledger signs
+in with its own key, without a prompt.
 
-The very first account device still needs explicit bootstrap: start the first
-computer with `ftown start --bootstrap`, open its private `/pair` link and compare
-the code. That confirmation enrolls the first browser and computer together.
-**Use a private approval link** remains an explicit browser fallback; an
-established account still requires an approved browser to confirm it. Retrieve a
-background bootstrap link explicitly with `ftown security pair-link`. Fragment
-secrets stay in the browser tab, never ordinary query parameters or operational
-logs. Automatic approval never silently switches to this fallback.
+**Pair a computer.**
 
-Requests expire after five minutes. Browser reload resumes the same saved
-request and verification state; a lost reply retries the exact committed
-operation without adding membership twice. Expired delivery may require reopening
-the trusted approval view while the request is still valid. Rejection, mismatch,
-expiry, competing history, or loss of the temporary verification state requires
-an explicit fresh attempt while preserving long-term device keys. A bridge
-process restart loses that temporary state; it cannot silently reuse the old
-comparison with a new secret.
+1. Run `ftown start` on the computer. It prints a private `/pair` link and a
+   6-digit code. The link works once and expires after 10 minutes.
+2. Open the link on a signed-in device that has your passkey, type the 6-digit
+   code shown in the computer's terminal (the page never shows it), and approve
+   with your passkey. A wrong code blocks the approval.
+3. The computer checks the ledger, then prints the account fingerprint and the
+   name of the passkey that approved it. Restarts reuse this pairing.
 
-Each browser installation stores separate non-extractable HPKE encryption and
-ECDSA signing private keys in IndexedDB. Only an approved browser signs account
-device membership; a bridge's encryption key cannot approve other devices.
-A signed account roster and pinned
-history establish device/computer trust; an unsigned directory cannot grant
-access or replace a known root. The service still orders and delivers history.
-Connected computers refresh on push nudges (fallback every 10 minutes if push is down), with account access paused after
-24 hours without a valid authenticated refresh. This connectivity allowance is
-not a guaranteed revocation deadline against a service withholding updates.
-Clearing site storage requires new device approval. Browser storage does not
-promise hardware protection or an encrypted browser profile; password resets
-cannot recover lost signing keys.
+If the link expires or is not approved, run `ftown start` again. A computer
+still holding account data from an earlier ftown version clears it once and
+pairs again.
 
-Existing bridge approvals remain independent until an administrator chooses
-**Security → Devices → Use account device approvals** for that computer. Adoption
-replaces its legacy browser grants and outstanding invitations, preserving local
-CLI recovery. Solo remains independent. A local
-`ftown security invite` recovery link accesses one computer; it cannot reset or
-sign account trust. Losing every account signing key requires explicit recovery
-of each existing computer, with no automatic root reset.
+**Remove a browser or computer** in **Security**; each removal asks for your
+passkey. A removed computer loses access at once, keeps its tmux sessions,
+resets its own identity and prints a new pairing link.
+`ftown start --new-identity` does the same by hand. A computer that cannot reach
+the server for 24 hours pauses access from your browsers until it reconnects.
 
-The hosted `/dashboard` uses account trust on every transport, including local
-HTTP, loopback WebSocket, and WebRTC. The standalone `/local` page remains the
-independent per-bridge legacy/local-recovery mode; it does not enroll account
-devices or replace account approvals. Each new browser process must refresh its
-pinned account history successfully before using account-derived access. During
-that process, later outages allow at most 24 hours from the last valid read,
-checked against both wall-clock highwaters and elapsed monotonic time.
+**Lost passkey.** Add a second passkey in **Security** so one loss is not
+final. If every passkey is lost, the account cannot be recovered: create a new
+account, then run `ftown start --new-identity` on each computer to pair it with
+the new account.
 
-Open **Security → Devices** to inspect the account roster and revoke a device
-across account computers. The last account administrator cannot be revoked;
-approve another device first.
+Each browser keeps its keys in its own storage (IndexedDB); clearing site data
+means signing in with the passkey again. `--local` and `--solo` bridges never
+use an account: they pair browsers with `ftown security invite` links instead.
 
 Routing metadata remains visible: account/bridge/session identifiers, hostname,
 online state, endpoint keys, sizes and timing. Login, public-key
@@ -127,13 +100,6 @@ before dispatching local tools; this protocol does not encrypt their files or
 replace their provider security. Endpoint software and same-origin browser code
 remain trusted. No anonymity, forward secrecy, or hardware-backed key protection
 is claimed. See [operational setup](docs/e2ee-operations.md).
-
-Automatic approval uses FTown's committed verification-code protocol over HPKE;
-it is not externally audited or compatible with another messenger's pairing
-protocol. Its code comparison gives approximately 48-bit protection per attempt
-when users check both devices. A matching code alone, login, or a server-reported
-approved status cannot unlock access. This comparison does not inherit the
-256-bit out-of-band assurance of the explicit private-link fallback.
 
 ## Features
 
@@ -237,27 +203,21 @@ npm install
 npm run build
 ```
 
-For an account that already has an approved browser, start a new computer using
-that account's email:
+Start a new computer and pair it with your passkey:
 
 ```bash
 npx ftown setup
-npx ftown start --account you@example.com --api-url http://localhost:3000
+npx ftown start --api-url http://localhost:3000
 ```
 
-Review it in **Security → Devices → Pending approvals**, compare both local
-codes and confirm on both devices. Use HTTPS or trustworthy localhost for the
-browser. With no approved browser yet, explicitly choose
-`npx ftown start --bootstrap --api-url http://localhost:3000` and follow its
-first-computer private-link setup instead.
+Open the printed `/pair` link on a signed-in device that has your passkey, type
+the 6-digit code from the terminal and approve. Use HTTPS or trustworthy
+localhost for the browser: passkeys need a secure context.
 
-Completed pairing stores a 30-day rotating refresh token under the bridge data
-directory (`~/.ftown/data/refresh-token`, `0600`); normal restarts reuse it.
-The explicit legacy `--token <bootstrap-jwt>` path remains available. **Generate
-bridge token** in the dashboard obtains its short-lived token from the
-session-gated `POST /api/auth/bridge/bootstrap` (audience
-`ftown:bridge-bootstrap`). This authenticates the computer but does not grant
-account encryption authority; use its independent approval or explicit migration.
+Pairing stores only the computer's own keys and its copy of the signed account
+ledger under the bridge data directory (`~/.ftown/data/security/`, `0600`).
+Each hour the bridge proves its key to obtain a one-hour relay token; there is
+no refresh token or bootstrap token.
 
 Run setup from the package entrypoint before first start. For an upgrade, use
 the exact new package version shown by the startup readiness hint:
@@ -386,11 +346,11 @@ npm start  # Runs on port 3000
 
 ```bash
 npx ftown setup
-npx ftown start --token <jwt> --api-url http://192.168.1.100:3000
+npx ftown start --api-url http://192.168.1.100:3000
 ```
 
-Get the token via **Generate bridge token** in the dashboard at
-`http://192.168.1.100:3000` (see Quick Start above).
+Open the printed `/pair` link on a device that has your passkey and type the
+6-digit code from the terminal (see Quick Start above).
 
 ---
 
@@ -571,12 +531,11 @@ On any machine where you want to run Claude or Cursor Agent sessions:
 
 ```bash
 npx ftown setup
-npx ftown start --account you@example.com --api-url https://your-domain.vercel.app
+npx ftown start --api-url https://your-domain.vercel.app
 ```
 
-Review the new computer from an approved account browser, compare its local
-verification code and confirm on both devices. Use explicit `--bootstrap` only
-for first-account/private-link setup; an account routing email is not approval.
+Open the printed `/pair` link on a device that has your passkey, type the
+6-digit code shown in the terminal and approve with the passkey.
 
 ## Upgrade notes
 
@@ -616,7 +575,7 @@ docker run -p 8000:8000 -v $(pwd)/centrifugo/config.json:/centrifugo/config.json
 cd ui && npm run dev
 
 # Terminal 3: Bridge
-cd bridge && npm run dev -- --token <jwt> --api-url http://localhost:3000
+cd bridge && npm run dev -- --api-url http://localhost:3000
 ```
 
 ## License

@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Centrifuge } from 'centrifuge';
 import type { EndpointIdentity, SecureApplication, SecureEnvelope } from '@security/protocol';
 import { generateEndpoint, open, seal } from '@security/crypto';
-import { SecureEndpointRuntime } from './secure-endpoint-runtime';
-import { SecureMessageClient } from './secure-message-client';
+import type { LedgerCheckpoint } from '@security/ledger/protocol';
+import { SecureEndpointRuntime, type LedgerBridgeAuthority } from './secure-endpoint-runtime';
+import { SecureMessageClient, type ReadyRetryPolicy } from './secure-message-client';
 
 const ownerId = '00000000-0000-4000-8000-000000000001';
 const userId = 'owner@example.test';
@@ -21,24 +22,39 @@ class RawClient {
   getSubscription(channel: string) { return this.subscriptions.get(channel) ?? null; }
   newSubscription(channel: string) { const sub = new RawSubscription(); this.subscriptions.set(channel, sub); return sub; }
 }
-async function establish(runtime: SecureEndpointRuntime, bridgeId: string, bridge: EndpointIdentity) {
+async function establish(runtime: SecureEndpointRuntime, bridgeId: string, bridge: EndpointIdentity, owner = ownerId) {
   await runtime.handshake(bridgeId, channel, async packet => {
     const envelope = packet as SecureEnvelope;
     const hello = JSON.parse(new TextDecoder().decode(await open(bridge, runtime.identity.endpoint, envelope,
-      { ownerId, bridgeId, channel, recipientId: bridge.endpoint.id, purpose: 'hello' })));
+      { ownerId: owner, bridgeId, channel, recipientId: bridge.endpoint.id, purpose: 'hello' })));
     const now = Date.now();
     const reply = await seal(bridge, runtime.identity.endpoint, { ...envelope, senderId: bridge.endpoint.id, recipientId: runtime.identity.endpoint.id,
       purpose: 'welcome', createdAt: now, expiresAt: now + 120000 }, new TextEncoder().encode(JSON.stringify({ type: 'welcome', challenge: hello.challenge, receiverEpoch: `boot-${bridgeId}` })));
     await runtime.receive(reply, channel);
   });
 }
-async function setup(authority?: (bridgeId: string) => void) {
+async function setup() {
   const browser = await generateEndpoint(ownerId, 'browser'); const a = await generateEndpoint(ownerId, 'bridge'); const b = await generateEndpoint(ownerId, 'bridge');
-  const runtime = new SecureEndpointRuntime(browser, [{ bridgeId: 'bridge-a', endpoint: a.endpoint, permissions: ['read', 'control', 'admin'] }, { bridgeId: 'bridge-b', endpoint: b.endpoint, permissions: ['read', 'control', 'admin'] }], authority);
+  const runtime = new SecureEndpointRuntime(browser, [{ bridgeId: 'bridge-a', endpoint: a.endpoint, permissions: ['read', 'control', 'admin'] }, { bridgeId: 'bridge-b', endpoint: b.endpoint, permissions: ['read', 'control', 'admin'] }]);
   await establish(runtime, 'bridge-a', a); await establish(runtime, 'bridge-b', b);
   const raw = new RawClient(); const client = new SecureMessageClient(raw as unknown as Centrifuge, userId, runtime);
   client.observe('bridge-a', { type: 'application', route: { kind: 'publication' }, data: { type: 'session_update', session: { id: 'session-one', bridgeId: 'bridge-a' } }, mcp: null });
   return { browser, a, b, runtime, raw, client };
+}
+
+/** Account mode: a ledger authority that trusts this browser and 'bridge-a' with exactly its endpoint while `allowed()` holds. */
+async function ledgerSetup(allowed: () => boolean) {
+  const accountId = 'a'.repeat(43);
+  const browser = await generateEndpoint(accountId, 'browser'); const a = await generateEndpoint(accountId, 'bridge');
+  const checkpoint: LedgerCheckpoint = { version: 2, accountId, revision: 2, head: 'h'.repeat(43), authorities: [],
+    devices: [{ endpoint: browser.endpoint, authPublicKey: 'device-key', label: 'Laptop', approvedAt: 0 }],
+    bridges: [{ bridgeId: 'bridge-a', endpoint: a.endpoint, authPublicKey: 'bridge-key', label: 'Desk', approvedAt: 0 }], revokedDeviceIds: [], revokedBridgeIds: [] };
+  const ledger: LedgerBridgeAuthority = { snapshot: () => ({ status: 'ready', checkpoint }), subscribe: () => () => {},
+    assertBridgeAccess: (bridgeId, endpointId) => { if (!allowed() || bridgeId !== 'bridge-a' || endpointId !== a.endpoint.id) throw new Error('account_bridge_revoked'); } };
+  const runtime = new SecureEndpointRuntime(browser, { ledger });
+  await establish(runtime, 'bridge-a', a, accountId);
+  const raw = new RawClient(); const client = new SecureMessageClient(raw as unknown as Centrifuge, userId, runtime);
+  return { runtime, raw, client };
 }
 
 describe('secure broker adapter', () => {
@@ -206,16 +222,87 @@ describe('secure broker adapter', () => {
     await expect(pending).resolves.toMatchObject({ requestId: 'stop-one', success: true });
     client.dispose(); runtime.dispose();
   });
-  it('rechecks account authority immediately before raw publication after awaited encryption', async () => {
+  it('rechecks the account ledger immediately before raw publication after awaited encryption', async () => {
     let approved = true;
-    const f = await setup(id => { if (id === 'bridge-a' && !approved) throw new Error('Account authority expired'); });
+    const f = await ledgerSetup(() => approved);
     const original = f.runtime.sealApplication.bind(f.runtime);
     vi.spyOn(f.runtime, 'sealApplication').mockImplementation(async (...args) => {
       const packet = await original(...args); approved = false; return packet;
     });
-    await expect(f.client.publish(channel, { type: 'stop_session', requestId: 'expired-after-encrypt', payload: { bridgeId: 'bridge-a' } })).rejects.toThrow('Account authority expired');
+    await expect(f.client.publish(channel, { type: 'stop_session', requestId: 'expired-after-encrypt', payload: { bridgeId: 'bridge-a' } })).rejects.toMatchObject({ code: 'endpoint_revoked' });
     expect(f.raw.publish).not.toHaveBeenCalled();
     approved = true; f.client.dispose(); f.runtime.dispose();
   });
 
+});
+
+// ---- Account mode: a trusted computer that has not applied the newest ledger yet silently drops this browser's hello. ----
+const FAST: ReadyRetryPolicy = { delaysMs: [5, 10, 20, 40], everyMs: 50, windowMs: 400, helloTimeoutMs: 30 };
+async function waitingComputer(options: { knows: () => boolean; revoked?: () => boolean }) {
+  const accountId = 'a'.repeat(43);
+  const browser = await generateEndpoint(accountId, 'browser'); const a = await generateEndpoint(accountId, 'bridge');
+  const checkpoint: LedgerCheckpoint = { version: 2, accountId, revision: 2, head: 'h'.repeat(43), authorities: [],
+    devices: [{ endpoint: browser.endpoint, authPublicKey: 'device-key', label: 'Laptop', approvedAt: 0 }],
+    bridges: [{ bridgeId: 'bridge-a', endpoint: a.endpoint, authPublicKey: 'bridge-key', label: 'Desk', approvedAt: 0 }], revokedDeviceIds: [], revokedBridgeIds: [] };
+  const listeners = new Set<() => void>();
+  const ledger: LedgerBridgeAuthority = { snapshot: () => ({ status: 'ready', checkpoint }), subscribe: listener => { listeners.add(listener); return () => listeners.delete(listener); },
+    assertBridgeAccess: (bridgeId, endpointId) => { if (options.revoked?.() || bridgeId !== 'bridge-a' || endpointId !== a.endpoint.id) throw new Error('account_bridge_revoked'); } };
+  const runtime = new SecureEndpointRuntime(browser, { ledger });
+  const raw = new RawClient(); raw.state = 'connected';
+  let hellos = 0;
+  raw.publish.mockImplementation(async (_channel: string, packet: unknown) => {
+    const envelope = packet as SecureEnvelope;
+    if (envelope.purpose !== 'hello') return;
+    hellos++;
+    if (!options.knows()) return; // an unknown endpoint gets no answer at all
+    const hello = JSON.parse(new TextDecoder().decode(await open(a, browser.endpoint, envelope,
+      { ownerId: accountId, bridgeId: 'bridge-a', channel: envelope.channel, recipientId: a.endpoint.id, purpose: 'hello' })));
+    const now = Date.now();
+    await runtime.receive(await seal(a, browser.endpoint, { ...envelope, senderId: a.endpoint.id, recipientId: browser.endpoint.id, purpose: 'welcome', createdAt: now,
+      expiresAt: now + 120000 }, new TextEncoder().encode(JSON.stringify({ type: 'welcome', challenge: hello.challenge, receiverEpoch: 'boot-a' }))), envelope.channel);
+  });
+  const handshake = vi.spyOn(runtime, 'handshake');
+  const client = new SecureMessageClient(raw as unknown as Centrifuge, userId, runtime, { retry: FAST });
+  const ledgerChanged = () => { for (const listener of [...listeners]) listener(); };
+  return { runtime, raw, client, handshake, hellos: () => hellos, ledgerChanged };
+}
+const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+describe('account computer readiness after a new browser enrolls', () => {
+  it('retries a trusted computer that answered nothing until it applies the ledger, then re-lists sessions', async () => {
+    let knows = false;
+    const f = await waitingComputer({ knows: () => knows });
+    const subscribed = vi.fn(); f.client.getSubscription(channel)?.on('subscribed', subscribed);
+    await expect(f.client.ensureReady('bridge-a')).rejects.toMatchObject({ code: 'bridge_offline' });
+    expect(f.runtime.state('bridge-a').status).toBe('offline');
+    await vi.waitFor(() => expect(f.hellos()).toBeGreaterThanOrEqual(2));
+    knows = true;
+    await vi.waitFor(() => expect(f.runtime.state('bridge-a').status).toBe('ready'), { timeout: 2000 });
+    await vi.waitFor(() => expect(subscribed).toHaveBeenCalled());
+    const settled = f.hellos(); await pause(150); expect(f.hellos()).toBe(settled);
+    f.client.dispose(); f.runtime.dispose();
+  });
+
+  it('gives up after the window (the computer stays offline), and a ledger change re-evaluates it', async () => {
+    let knows = false;
+    const f = await waitingComputer({ knows: () => knows });
+    await expect(f.client.ensureReady('bridge-a')).rejects.toBeTruthy();
+    await pause(FAST.windowMs + 300);
+    const spent = f.hellos(); expect(spent).toBeGreaterThan(4);
+    await pause(200); expect(f.hellos()).toBe(spent); expect(f.runtime.state('bridge-a').status).toBe('offline');
+    knows = true; f.ledgerChanged();
+    await vi.waitFor(() => expect(f.runtime.state('bridge-a').status).toBe('ready'), { timeout: 2000 });
+    f.client.dispose(); f.runtime.dispose();
+  });
+
+  it('never retries a computer whose access was revoked', async () => {
+    let revoked = false;
+    const f = await waitingComputer({ knows: () => false, revoked: () => revoked });
+    await expect(f.client.ensureReady('bridge-a')).rejects.toBeTruthy();
+    revoked = true;
+    await pause(200);
+    expect(f.handshake).toHaveBeenCalledTimes(2); // the first retry meets the revocation and stops
+    await expect(f.handshake.mock.results[1].value).rejects.toMatchObject({ code: 'endpoint_revoked' });
+    f.client.dispose(); f.runtime.dispose();
+  });
 });

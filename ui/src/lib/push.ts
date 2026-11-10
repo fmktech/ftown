@@ -1,10 +1,9 @@
 import { createHash, createECDH, ECDH } from "node:crypto";
 import { request as httpsRequest } from "node:https";
-import jwt from "jsonwebtoken";
 import webpush from "web-push";
 import { isValidBridgeLabel } from "@/lib/bridge-label";
-import { getDb } from "@/lib/db";
-import { getRequiredSecret } from "@/lib/secrets";
+import { UnauthorizedError } from "@/lib/ledger-auth";
+import { requireBridge } from "@/lib/relay-auth";
 import { isTrustedBrowserOrigin } from '@/lib/request-origin';
 
 export class PushError extends Error {
@@ -93,16 +92,14 @@ export async function boundedJson(request: Request): Promise<unknown> {
   } catch (error) { if (error instanceof PushError) throw error; throw new PushError("invalid_json", 400); }
 }
 export async function bridgePushIdentity(request: Request): Promise<{ owner: string; bridgeId: string }> {
-  const authorization = request.headers.get("authorization");
-  if (!authorization?.startsWith("Bearer ")) throw new PushError("unauthorized", 401);
-  let decoded: unknown;
-  try { decoded = jwt.verify(authorization.slice(7), getRequiredSecret("CENTRIFUGO_TOKEN_SECRET"), { audience: "ftown:centrifugo", algorithms: ["HS256"] }); }
-  catch { throw new PushError("unauthorized", 401); }
-  if (!record(decoded) || typeof decoded.sub !== "string" || !record(decoded.info)
-    || !isValidBridgeLabel(decoded.info.bridgeId)) throw new PushError("unauthorized", 401);
-  const rows = await getDb().query("SELECT bridge_id FROM bridge_refresh WHERE bridge_id = $1 AND sub = $2 AND current_jti <> 'revoked'", [decoded.info.bridgeId, decoded.sub]);
-  if (rows.length !== 1) throw new PushError("forbidden_bridge", 403);
-  return { owner: decoded.sub, bridgeId: decoded.info.bridgeId };
+  let identity: { accountId: string; bridgeId: string };
+  try { identity = await requireBridge(request); }
+  catch (error) {
+    if (error instanceof UnauthorizedError) throw new PushError("unauthorized", 401);
+    throw error;
+  }
+  if (!isValidBridgeLabel(identity.bridgeId)) throw new PushError("unauthorized", 401);
+  return { owner: identity.accountId, bridgeId: identity.bridgeId };
 }
 /** Encrypt via web-push; bound the complete HTTPS request and never follow redirects. */
 export async function sendBrowserPush(subscription: BrowserSubscription, payload: string, config: PushConfig): Promise<number> {

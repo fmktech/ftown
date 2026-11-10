@@ -320,8 +320,9 @@ launchers, `~/.ftown/notify.sh`, and updates the unified skill
 under `~/.ftown/skills/ftown/` (linked into ~/.agents/skills and
 ~/.claude/skills).
 
-A computer removed from the account resets its own identity, keeps its tmux sessions, and shows a new
-pairing link; `ftown start --new-identity` does the same by hand.
+An unpaired `ftown start` prints a `/pair` link and a 6-digit code: open the link on a device with the
+account passkey and type the code. A computer removed from the account resets its own identity, keeps its
+tmux sessions, and shows a new pairing link; `ftown start --new-identity` does the same by hand.
 
 ### Automatic PR result mail
 

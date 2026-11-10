@@ -1,10 +1,27 @@
 import { Command, CommanderError } from 'commander';
 import { readLocalPointer } from './local-pair-cli.js';
-import { apiResponse, securityCommand } from './cli-client.js';
+import { SecurityCommandError, apiResponse, securityCommand } from './cli-client.js';
 import type { BridgeInvitation } from './security/protocol.js';
-import { pendingPairingLink } from './security/bridge/pending-enrollment.js';
-import { resolveDefaultDataDir } from './ftown-home.js';
-import { readPendingBridgeStatus, submitPendingBridgeDecision } from './security/bridge/pending-approval.js';
+
+/** Printed instead of an invitation by an account bridge: its browsers come only from the passkey ledger (account_managed). */
+export const ACCOUNT_MANAGED_INVITE_MESSAGE = 'This computer belongs to your ftown account (account_managed): browsers sign in with your passkey and '
+  + 'appear in Security, so invitations are only for --local and --solo bridges.';
+
+/** A refusal whose own message is the explanation (not the generic "is the bridge running" line). */
+class SecurityCliRefusal extends Error {}
+
+/** The line printed for a security command the bridge refused: its typed code, explained when known. */
+export function securityRefusalMessage(error: SecurityCommandError): string {
+  if (error.code === 'account_managed') {
+    return 'This computer belongs to your ftown account (account_managed): its browsers come from your passkey ledger; add or remove them in Security.';
+  }
+  return `The bridge refused this security command: ${error.message}`;
+}
+
+/** An account bridge's pointer names its accountId as owner; Solo and --local name `solo:<bridgeId>`. */
+function accountManaged(ownerId: string | undefined): boolean {
+  return typeof ownerId === 'string' && ownerId.length > 0 && !ownerId.startsWith('solo:');
+}
 
 export function invitationLink(invitation: BridgeInvitation, apiUrl = 'https://ftown.ia.br'): string {
   const url = new URL('/connect', apiUrl);
@@ -16,22 +33,11 @@ export async function runSecurity(argv: string[]): Promise<number> {
   const program = new Command().name('ftown security').description('Manage this bridge’s encrypted endpoint trust')
     .option('--data-dir <path>', 'Bridge instance data directory').exitOverride();
   const pointer = () => readLocalPointer(program.opts().dataDir as string | undefined);
-  const dataDirectory = () => program.opts().dataDir as string | undefined ?? resolveDefaultDataDir();
-  program.command('pair-status').description('Display this computer’s local pending approval status and comparison code')
-    .action(async () => { console.log(JSON.stringify(await readPendingBridgeStatus(dataDirectory()))); });
-  program.command('pair-confirm <code>').description('Confirm the code matches your trusted browser (XXXX-XXXX-XXXX)')
-    .action(async code => { await submitPendingBridgeDecision(dataDirectory(), 'confirm', String(code)); console.log('Local comparison confirmed; waiting for trusted-device approval.'); });
-  program.command('pair-reject').description('Reject this computer’s current approval attempt')
-    .action(async () => { await submitPendingBridgeDecision(dataDirectory(), 'reject'); console.log('Local rejection recorded.'); });
-  program.command('pair-link').description('Display the current private first-computer approval link (explicit local output only)')
-    .action(async () => {
-      const dataDir = program.opts().dataDir as string | undefined;
-      console.log(await pendingPairingLink(dataDir ?? resolveDefaultDataDir()));
-    });
   program.command('invite').description('Create a one-use browser invitation (secret is printed only on this explicit request)')
     .option('--label <label>', 'Device label', 'Browser')
     .action(async options => {
       const current = pointer();
+      if (accountManaged(current.ownerId)) throw new SecurityCliRefusal(ACCOUNT_MANAGED_INVITE_MESSAGE);
       const invite = await securityCommand(current, 'security_invite', { label: String(options.label) }) as unknown as BridgeInvitation;
       console.log(invitationLink(invite, current.apiUrl));
     });
@@ -62,6 +68,8 @@ export async function runSecurity(argv: string[]): Promise<number> {
   try { await program.parseAsync(['node', 'ftown-security', ...argv]); return 0; }
   catch (error) {
     if (error instanceof CommanderError) return error.code === 'commander.helpDisplayed' ? 0 : error.exitCode;
+    if (error instanceof SecurityCliRefusal) { console.error(error.message); return 1; }
+    if (error instanceof SecurityCommandError) { console.error(securityRefusalMessage(error)); return 1; }
     console.error('Encrypted local security operation failed. Check that the bridge is running and setup is current.'); return 1;
   }
 }

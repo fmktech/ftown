@@ -230,19 +230,17 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
         }
         case 'security_devices':
         case 'security_invite':
-        case 'security_revoke':
-        case 'security_account_adopt': {
+        case 'security_revoke': {
+          // Account membership changes only through the passkey ledger: in account mode the policy refuses invitations and the
+          // removal of ledger devices with account_managed.
           if (!deps.security || !verified || payloadBridgeId !== bridgeId) throw new Error('approval_required');
           const payload = command.payload as Record<string, unknown>;
           let result: unknown;
           if (command.type === 'security_devices') result = { devices: await deps.security.listDevices(verified.principal) };
           else if (command.type === 'security_invite') result = await deps.security.createInvitation(verified.principal, { label: typeof payload.label === 'string' ? payload.label : '' });
-          else if (command.type === 'security_revoke') {
+          else {
             if (typeof payload.endpointId !== 'string') throw new Error('invalid_envelope');
             await deps.security.revokeEndpoint(verified.principal, payload.endpointId); result = { endpointId: payload.endpointId, revoked: true };
-          } else {
-            if (Object.keys(payload).some(key => key !== 'bridgeId' && key !== 'head')) throw new Error('invalid_envelope');
-            result = { head: await deps.security.adoptAccount(verified.principal, payload.head as import('./security/account-protocol.js').AccountHead) };
           }
           response = { requestId: command.requestId, success: true, data: result as Record<string, unknown> };
           break;

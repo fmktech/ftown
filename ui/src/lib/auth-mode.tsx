@@ -3,6 +3,7 @@
 import { createContext, useContext, useMemo } from "react";
 import type { ReactNode } from "react";
 import { signOut } from "next-auth/react";
+import { markSignedOut } from "@/lib/signed-out-flag";
 import { usePathname } from "next/navigation";
 import { Analytics } from "@vercel/analytics/next";
 
@@ -29,8 +30,14 @@ export interface AuthModeValue {
 
 const AuthModeContext = createContext<AuthModeValue | null>(null);
 
-function hostedSignOut(): void {
-  void signOut({ callbackUrl: "/login" });
+/** Independent of any server-provided URL (Auth.js may only know the internal origin): relative navigation only. */
+export async function hostedSignOut(): Promise<void> {
+  markSignedOut();
+  try {
+    await signOut({ redirect: false });
+  } finally {
+    window.location.assign("/login");
+  }
 }
 
 async function hostedRefreshHubToken(): Promise<string> {
@@ -90,5 +97,5 @@ export function useSoloRequired(): AuthModeValue {
 /** Invitation fragments are captured on a telemetry-free route. */
 export function InvitationSafeAnalytics() {
   const pathname = usePathname();
-  return pathname === "/connect" || pathname === "/pair" || pathname === "/devices/approve" ? null : <Analytics />;
+  return pathname === "/connect" || pathname === "/pair" ? null : <Analytics />;
 }

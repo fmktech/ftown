@@ -1,18 +1,10 @@
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
-CREATE TABLE users (
-  id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  email      TEXT        NOT NULL UNIQUE,
-  password_hash TEXT     NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+-- Fresh-install schema, equivalent to applying migrations/0001..0011 (passkey ledger).
+-- Fresh installs apply this file; existing databases use ui/scripts/migrate.mjs.
 
-CREATE INDEX idx_users_email ON users(email);
-
--- Scope-keyed rate limiter shared by login (scope 'login', key = email) and
--- registration (scope 'register', key = client IP). UNLOGGED: counters are
--- throwaway, so skip WAL for cheap upserts on the hot path (truncated on crash
--- recovery, not replicated — acceptable for this data).
+-- Generic scope-keyed rate limiter (e.g. push, nonce and pair routes). UNLOGGED:
+-- counters are throwaway, so skip WAL (truncated on crash recovery, not replicated).
 CREATE UNLOGGED TABLE rate_limit_attempts (
   scope        TEXT        NOT NULL,
   key          TEXT        NOT NULL,
@@ -22,50 +14,70 @@ CREATE UNLOGGED TABLE rate_limit_attempts (
   PRIMARY KEY (scope, key)
 );
 
--- Per-bridge refresh-token rotation state: the current accepted jti. A refresh
--- token is only honored when its jti matches, and each use rotates it.
--- hostname/last_seen (added by 0002_device_pairing.sql) back the devices list.
-CREATE TABLE bridge_refresh (
-  bridge_id   TEXT        PRIMARY KEY,
-  sub         TEXT        NOT NULL,
-  current_jti TEXT        NOT NULL,
-  hostname    TEXT,
-  last_seen   TIMESTAMPTZ,
-  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE IF NOT EXISTS accounts (
+  account_id TEXT PRIMARY KEY,
+  handle TEXT NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS account_ledger (
+  account_id TEXT PRIMARY KEY REFERENCES accounts(account_id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL,
+  head TEXT NOT NULL,
+  ledger JSONB NOT NULL,
+  sticky JSONB NOT NULL DEFAULT '{"deviceIds":[],"bridgeIds":[]}',
+  version INTEGER NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE account_ledger ADD COLUMN IF NOT EXISTS sticky JSONB NOT NULL DEFAULT '{"deviceIds":[],"bridgeIds":[]}';
+ALTER TABLE account_ledger ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 0;
+CREATE UNIQUE INDEX IF NOT EXISTS accounts_singleton ON accounts ((true));
+CREATE TABLE IF NOT EXISTS auth_nonces (
+  nonce_hash TEXT PRIMARY KEY,
+  purpose TEXT NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS auth_nonces_expiry ON auth_nonces(expires_at);
+CREATE TABLE IF NOT EXISTS pair_mailbox (
+  request_id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+  sealed TEXT NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pair_mailbox_expiry ON pair_mailbox(expires_at);
+
+CREATE TABLE IF NOT EXISTS security_endpoint_directory (
+  account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+  endpoint_id TEXT NOT NULL,
+  bridge_id TEXT,
+  entry JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY(account_id, endpoint_id)
+);
+CREATE INDEX IF NOT EXISTS security_endpoint_directory_account_bridge
+  ON security_endpoint_directory(account_id, bridge_id);
+
+CREATE TABLE IF NOT EXISTS security_device_display_names (
+  account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('browser', 'bridge')),
+  target_id TEXT NOT NULL,
+  display_name TEXT NOT NULL CHECK (char_length(display_name) BETWEEN 1 AND 80),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY(account_id, kind, target_id)
 );
 
--- Device pairing (bridge onboarding): OAuth-device-authorization-style flow.
--- See docs/plans/device-pairing-contract.md.
-CREATE TABLE pairing_requests (
-  device_code   TEXT        PRIMARY KEY,
-  user_code     TEXT        NOT NULL UNIQUE,
-  bridge_id     TEXT        NOT NULL,
-  hostname      TEXT,
-  platform      TEXT,
-  status        TEXT        NOT NULL DEFAULT 'pending',
-  sub           TEXT,
-  refresh_jti   TEXT,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  expires_at    TIMESTAMPTZ NOT NULL,
-  approved_at   TIMESTAMPTZ
-);
-
-CREATE INDEX idx_pairing_user_code ON pairing_requests(user_code);
-
--- Additive Web Push state. Apply before enabling VAPID; no existing data changes.
 CREATE TABLE IF NOT EXISTS push_subscriptions (
   endpoint_hash TEXT PRIMARY KEY,
-  sub TEXT NOT NULL,
+  account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
   endpoint TEXT NOT NULL,
   p256dh TEXT NOT NULL,
   auth TEXT NOT NULL,
   slot SMALLINT NOT NULL CHECK (slot BETWEEN 1 AND 10),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE(sub,slot)
+  UNIQUE(account_id, slot)
 );
 CREATE TABLE IF NOT EXISTS push_events (
   id TEXT PRIMARY KEY,
-  sub TEXT NOT NULL,
+  account_id TEXT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
   bridge_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
   event_key TEXT NOT NULL,
@@ -73,7 +85,7 @@ CREATE TABLE IF NOT EXISTS push_events (
   payload JSONB NOT NULL,
   occurred_at TIMESTAMPTZ NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE(sub,bridge_id,session_id,event_key)
+  UNIQUE(account_id, bridge_id, session_id, event_key)
 );
 CREATE TABLE IF NOT EXISTS push_deliveries (
   event_id TEXT NOT NULL REFERENCES push_events(id) ON DELETE CASCADE,
@@ -81,79 +93,6 @@ CREATE TABLE IF NOT EXISTS push_deliveries (
   sent_at TIMESTAMPTZ,
   lease_token TEXT,
   lease_until TIMESTAMPTZ,
-  PRIMARY KEY(event_id,endpoint_hash)
+  PRIMARY KEY(event_id, endpoint_hash)
 );
 
--- Additive security state only. Existing user/OAuth/bridge rows are untouched.
--- The migrator runs each file transactionally; bound waiting for DDL locks.
-
-CREATE TABLE IF NOT EXISTS security_endpoint_directory (
-  owner_id TEXT NOT NULL,
-  endpoint_id TEXT NOT NULL,
-  bridge_id TEXT,
-  entry JSONB NOT NULL,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  PRIMARY KEY(owner_id, endpoint_id)
-);
-CREATE INDEX IF NOT EXISTS security_endpoint_directory_owner_bridge
-  ON security_endpoint_directory(owner_id, bridge_id);
-
--- Signed public account history is a delivery log, never a trust authority.
-CREATE TABLE IF NOT EXISTS security_account_history (
-  owner_id TEXT PRIMARY KEY,
-  root_id TEXT NOT NULL,
-  revision INTEGER NOT NULL CHECK (revision BETWEEN 0 AND 1024),
-  head TEXT NOT NULL,
-  history JSONB NOT NULL,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE TABLE IF NOT EXISTS security_account_enrollments (
-  owner_id TEXT NOT NULL,
-  request_id TEXT NOT NULL UNIQUE,
-  request JSONB NOT NULL,
-  bundle JSONB,
-  expires_at TIMESTAMPTZ NOT NULL,
-  approved_at TIMESTAMPTZ,
-  slot SMALLINT NOT NULL CHECK (slot BETWEEN 0 AND 127),
-  PRIMARY KEY(owner_id,request_id),
-  UNIQUE(owner_id,slot)
-);
-CREATE INDEX IF NOT EXISTS security_account_enrollments_expiry ON security_account_enrollments(expires_at);
-ALTER TABLE pairing_requests ADD COLUMN IF NOT EXISTS enrollment JSONB;
-ALTER TABLE pairing_requests ADD COLUMN IF NOT EXISTS account_approval JSONB;
-
--- Pending approvals (0008): public handshake plus hashed request credential.
-CREATE TABLE IF NOT EXISTS security_pending_approvals (
-  request_id TEXT PRIMARY KEY,
-  target_sub TEXT NOT NULL,
-  owner_id TEXT,
-  candidate_token_hash TEXT NOT NULL,
-  create_digest TEXT NOT NULL,
-  request JSONB NOT NULL,
-  state JSONB NOT NULL,
-  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
-  operations JSONB NOT NULL DEFAULT '{}'::jsonb,
-  final_head JSONB,
-  pair_device_code TEXT UNIQUE,
-  pair_metadata JSONB,
-  credential_snapshot JSONB,
-  refresh_predecessor JSONB,
-  expires_at TIMESTAMPTZ NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  target_slot INTEGER NOT NULL CHECK (target_slot BETWEEN 0 AND 127),
-  global_slot INTEGER NOT NULL UNIQUE CHECK (global_slot BETWEEN 0 AND 4095),
-  UNIQUE (target_sub, target_slot)
-);
-CREATE INDEX IF NOT EXISTS security_pending_approvals_target_idx ON security_pending_approvals(target_sub, expires_at);
-CREATE INDEX IF NOT EXISTS security_pending_approvals_expiry_idx ON security_pending_approvals(expires_at);
-
--- Account-owned cosmetic display overrides; never used for trust decisions.
-CREATE TABLE IF NOT EXISTS security_device_display_names (
-  owner_id TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('browser', 'bridge')),
-  target_id TEXT NOT NULL,
-  display_name TEXT NOT NULL CHECK (char_length(display_name) BETWEEN 1 AND 80),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  PRIMARY KEY(owner_id, kind, target_id)
-);

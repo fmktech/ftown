@@ -194,3 +194,61 @@ test('a rejected command response is logged with its code and message', async t 
   await settle(() => warnings.some(line => line.includes('Encrypted command rejected')));
   assert.ok(warnings.some(line => line.includes('Encrypted command rejected: 108: not available')), warnings.join('\n'));
 });
+
+function ledgerFixture(onLedgerMessage: (m: unknown) => void) {
+  const subscriptions = new Map<string, EventEmitter>();
+  const transport = Object.assign(new EventEmitter(), { state: 'connected', removeSubscription: () => {}, newSubscription: (channel: string) => {
+    const sub = Object.assign(new EventEmitter(), { subscribe() {}, unsubscribe() {} }); subscriptions.set(channel, sub); return sub;
+  } });
+  const client = new CentrifugoClient('ws://127.0.0.1:1/unused', '', async () => '', { onLedgerMessage });
+  Object.defineProperty(client, 'client', { value: transport });
+  return { client, subscriptions };
+}
+
+test('account ids and Solo id build channel names; ledger channel only in account mode', () => {
+  const got: unknown[] = [];
+  const account = ledgerFixture(m => got.push(m));
+  account.client.joinBridgesChannel('acct_123', 'bridge');
+  assert.deepEqual([...account.subscriptions.keys()].sort(), ['bridges:ledger#acct_123', 'bridges:presence#acct_123']);
+  const solo = new CentrifugoClient('ws://127.0.0.1:1/unused', '', async () => '');
+  const subs: string[] = [];
+  Object.defineProperty(solo, 'client', { value: Object.assign(new EventEmitter(), { state: 'connected', newSubscription: (c: string) => { subs.push(c); return Object.assign(new EventEmitter(), { subscribe() {}, unsubscribe() {} }); } }) });
+  solo.joinBridgesChannel('solo', 'bridge');
+  assert.deepEqual(subs, ['bridges:presence#solo']);
+});
+
+test('ledger messages dispatch only when owner-published and strictly shaped', () => {
+  const got: unknown[] = [];
+  const f = ledgerFixture(m => got.push(m));
+  f.client.joinBridgesChannel('acct_1', 'bridge');
+  const sub = f.subscriptions.get('bridges:ledger#acct_1')!;
+  const owner = { user: 'acct_1' };
+  sub.emit('publication', { info: owner, data: { type: 'ledger', ledger: { genesis: {} } } });
+  sub.emit('publication', { info: owner, data: { type: 'ledger_head', head: 'abc', revision: 3 } });
+  assert.equal(got.length, 2);
+  const bad: unknown[] = [null, 'x', [], {}, { type: 'ledger' }, { type: 'ledger', ledger: null }, { type: 'ledger', ledger: {}, extra: 1 },
+    { type: 'ledger_head', head: '', revision: 1 }, { type: 'ledger_head', head: 'a', revision: -1 }, { type: 'ledger_head', head: 'a', revision: 1.5 },
+    { type: 'ledger_head', head: 1, revision: 1 }, { type: 'ledger_head', head: 'a', revision: 1, x: 1 }, { type: 'other' }];
+  for (const data of bad) sub.emit('publication', { info: owner, data });
+  sub.emit('publication', { info: { user: 'someone' }, data: { type: 'ledger_head', head: 'abc', revision: 3 } });
+  sub.emit('publication', { data: { type: 'ledger_head', head: 'abc', revision: 3 } });
+  assert.equal(got.length, 2);
+});
+
+test('onLedgerSubscribed fires on each (re)subscribe, errors are contained, and Solo registers nothing', () => {
+  let calls = 0;
+  const subscriptions = new Map<string, EventEmitter>();
+  const transport = Object.assign(new EventEmitter(), { state: 'connected', removeSubscription: () => {}, newSubscription: (channel: string) => {
+    const sub = Object.assign(new EventEmitter(), { subscribe() {}, unsubscribe() {} }); subscriptions.set(channel, sub); return sub;
+  } });
+  const client = new CentrifugoClient('ws://127.0.0.1:1/unused', '', async () => '', { onLedgerMessage: () => {}, onLedgerSubscribed: () => { calls++; throw new Error('boom'); } });
+  Object.defineProperty(client, 'client', { value: transport });
+  client.joinBridgesChannel('acct_1', 'bridge');
+  const sub = subscriptions.get('bridges:ledger#acct_1')!;
+  sub.emit('subscribed'); assert.equal(calls, 1);
+  sub.emit('subscribing'); sub.emit('subscribed'); assert.equal(calls, 2);
+  const solo = ledgerFixture(() => {});
+  const bare = new CentrifugoClient('ws://127.0.0.1:1/unused', '', async () => '', { onLedgerSubscribed: () => { calls++; } });
+  Object.defineProperty(bare, 'client', { value: Object.assign(new EventEmitter(), { state: 'connected', newSubscription: (c: string) => { assert.ok(!c.startsWith('bridges:ledger')); return Object.assign(new EventEmitter(), { subscribe() {}, unsubscribe() {} }); } }) });
+  bare.joinBridgesChannel('solo', 'bridge'); assert.equal(calls, 2); void solo;
+});

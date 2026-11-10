@@ -1,6 +1,6 @@
 import { expect, type Page } from "@playwright/test";
 import { test } from "../helpers/fixtures";
-import { login, sharedEmail, waitForBridgeOnline, runMarkerInTerminal } from "../helpers/app";
+import { login, sharedAccountId, waitForBridgeOnline, runMarkerInTerminal } from "../helpers/app";
 import { bridgeApiFetch } from "../helpers/bridge-api";
 
 async function postHook(sessionId: string, hookEvent: string, data: Record<string, string> = {}) {
@@ -12,7 +12,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
   test.describe(`${viewport.name} attention controls`, () => {
     test.use({ hasTouch: viewport.name === "mobile" });
     test(`manual notices retain originals and navigate on ${viewport.name}`, async ({ page }, info) => {
-      test.setTimeout(180_000); await page.setViewportSize({ width: viewport.width, height: viewport.height }); await login(page, sharedEmail()); await waitForBridgeOnline(page);
+      test.setTimeout(180_000); await page.setViewportSize({ width: viewport.width, height: viewport.height }); await login(page); await waitForBridgeOnline(page);
       const suffix = Date.now().toString(36), firstName = `Review deployment ${suffix}`, secondName = `Approve API ${suffix}`, idleName = `Idle ${suffix}`;
       const ids: string[] = []; const mobile = viewport.name === "mobile";
       const workspace = async () => { if (mobile) await page.getByRole("tab", { name: "Workspace", exact: true }).click(); };

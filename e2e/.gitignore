@@ -8,3 +8,6 @@ test-results/
 *.log
 .run-email
 .*.pid
+.run-account.json
+.*.tmux
+.isolated-bridges/

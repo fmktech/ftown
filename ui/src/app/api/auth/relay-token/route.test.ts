@@ -1,0 +1,199 @@
+import jwt from 'jsonwebtoken';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { generateAuthKey, signAuthProof, type AuthProof } from '@security/ledger/proof';
+import type { LedgerCheckpoint } from '@security/ledger/protocol';
+
+const calls: string[] = [];
+const consumeNonce = vi.fn();
+const readLedger = vi.fn();
+const consumeRateLimit = vi.fn();
+vi.mock('@/lib/auth-nonce-store', () => ({ consumeNonce: (...a: unknown[]) => { calls.push('nonce'); return consumeNonce(...a); } }));
+vi.mock('@/lib/account-ledger-store', () => ({ readLedger: (...a: unknown[]) => { calls.push('ledger'); return readLedger(...a); } }));
+vi.mock('@/lib/login-rate-limit', () => ({ consumeRateLimit: (...a: unknown[]) => consumeRateLimit(...a) }));
+vi.mock('@/lib/client-ip', () => ({ clientIp: () => '1.2.3.4' }));
+vi.mock('next-auth/providers/credentials', () => ({ default: (config: unknown) => config }));
+
+import { POST } from './route';
+
+const SECRET = 's'.repeat(40);
+const ORIGIN = 'https://ftown.example';
+const ACCOUNT = 'A'.repeat(43);
+const DEVICE_ID = 'D'.repeat(43);
+const BRIDGE_ID = 'B'.repeat(43);
+const NONCE = 'n'.repeat(43);
+const HEAD = 'H'.repeat(43);
+const LEDGER = { marker: 'ledger' };
+
+const endpoint = (id: string, kind: 'browser' | 'bridge') => ({ version: 1 as const, id, ownerId: ACCOUNT, kind, publicKey: 'p' });
+const checkpoint = (over: Partial<LedgerCheckpoint>): LedgerCheckpoint => ({ version: 2, accountId: ACCOUNT, revision: 1, head: HEAD, authorities: [],
+  devices: [], bridges: [], revokedDeviceIds: [], revokedBridgeIds: [], revokedCredentialIds: [], ...over } as LedgerCheckpoint);
+
+let deviceKey: CryptoKey; let bridgeKey: CryptoKey;
+let trusted: LedgerCheckpoint;
+const store = (raw: LedgerCheckpoint, t: LedgerCheckpoint) => ({ ledger: LEDGER, checkpoint: raw, trusted: t, sticky: { deviceIds: [], bridgeIds: [] } });
+
+async function proof(over: Partial<Omit<AuthProof, 'signature'>> = {}, key?: CryptoKey): Promise<AuthProof> {
+  return signAuthProof(key ?? bridgeKey, { accountId: ACCOUNT, kind: 'bridge', keyId: BRIDGE_ID, nonce: NONCE, purpose: 'relay', audience: ORIGIN, ...over });
+}
+const req = (body: unknown) => new Request('https://x.example/api/auth/relay-token', { method: 'POST', headers: { 'content-type': 'application/json' }, body: typeof body === 'string' ? body : JSON.stringify(body) });
+const bridgeBody = async (extra: Record<string, unknown> = {}, over: Partial<Omit<AuthProof, 'signature'>> = {}) =>
+  ({ proof: await proof(over), head: HEAD, hostname: 'my-host', ...extra });
+
+beforeEach(async () => {
+  calls.length = 0;
+  vi.stubEnv('FTOWN_PUBLIC_URL', ORIGIN);
+  vi.stubEnv('CENTRIFUGO_TOKEN_SECRET', SECRET);
+  vi.stubEnv('NEXT_PUBLIC_CENTRIFUGO_URL', 'wss://relay.example/connection/websocket');
+  consumeNonce.mockReset().mockResolvedValue(true);
+  consumeRateLimit.mockReset().mockResolvedValue({ allowed: true });
+  const d = await generateAuthKey(true); const b = await generateAuthKey(true);
+  deviceKey = d.privateKey; bridgeKey = b.privateKey;
+  trusted = checkpoint({
+    devices: [{ endpoint: endpoint(DEVICE_ID, 'browser'), authPublicKey: d.publicKey, label: 'd', approvedAt: 1 }],
+    bridges: [{ bridgeId: BRIDGE_ID, endpoint: endpoint(BRIDGE_ID, 'bridge'), authPublicKey: b.publicKey, label: 'b', approvedAt: 1 }],
+  });
+  readLedger.mockReset().mockResolvedValue(store(trusted, trusted));
+});
+
+describe('POST /api/auth/relay-token', () => {
+  it('issues a bridge token with the info claim and 1 h lifetime', async () => {
+    const res = await POST(req(await bridgeBody({ localPort: 4242 })));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('Cache-Control')).toBe('no-store');
+    const json = await res.json();
+    expect(json.ledger).toBeUndefined();
+    const claims = jwt.verify(json.token, SECRET, { audience: 'ftown:centrifugo' }) as jwt.JwtPayload;
+    expect(claims.sub).toBe(ACCOUNT);
+    expect(claims.exp! - claims.iat!).toBe(3600);
+    expect(json.expiresAt).toBe(claims.exp! * 1000);
+    expect(claims.info).toMatchObject({ bridgeId: BRIDGE_ID, ownerId: ACCOUNT, hostname: 'my-host', localPort: 4242 });
+    expect(typeof claims.info.connectedAt).toBe('string');
+    expect(consumeNonce).toHaveBeenCalledWith(NONCE, 'relay');
+  });
+  it('accepts the exact body {proof, head} for a bridge, omitting hostname and localPort from info', async () => {
+    const res = await POST(req({ proof: await proof(), head: HEAD }));
+    expect(res.status).toBe(200);
+    const info = (jwt.decode((await res.json()).token) as jwt.JwtPayload).info;
+    expect(info).toMatchObject({ bridgeId: BRIDGE_ID, ownerId: ACCOUNT });
+    expect(info.hostname).toBeUndefined();
+    expect(info.localPort).toBeUndefined();
+  });
+  it('accepts {proof, head, hostname, localPort}', async () => {
+    const res = await POST(req({ proof: await proof(), head: HEAD, hostname: 'h1', localPort: 80 }));
+    expect(res.status).toBe(200);
+    expect((jwt.decode((await res.json()).token) as jwt.JwtPayload).info).toMatchObject({ hostname: 'h1', localPort: 80 });
+  });
+  it('issues a device token without info', async () => {
+    const p = await proof({ kind: 'device', keyId: DEVICE_ID }, deviceKey);
+    const res = await POST(req({ proof: p, head: HEAD }));
+    expect(res.status).toBe(200);
+    const claims = jwt.decode((await res.json()).token) as jwt.JwtPayload;
+    expect(claims.sub).toBe(ACCOUNT);
+    expect(claims.exp! - claims.iat!).toBe(3600);
+    expect(claims.info).toBeUndefined();
+  });
+  it('includes the ledger only when the head differs', async () => {
+    expect((await (await POST(req(await bridgeBody()))).json()).ledger).toBeUndefined();
+    const res = await POST(req(await bridgeBody({ head: 'other' })));
+    expect((await res.json()).ledger).toEqual(LEDGER);
+    const res2 = await POST(req(await bridgeBody({ head: undefined })));
+    expect((await res2.json()).ledger).toEqual(LEDGER);
+  });
+  it('returns centrifugoUrl for bridge and device proofs', async () => {
+    expect((await (await POST(req(await bridgeBody()))).json()).centrifugoUrl).toBe('wss://relay.example/connection/websocket');
+    const p = await proof({ kind: 'device', keyId: DEVICE_ID }, deviceKey);
+    expect((await (await POST(req({ proof: p, head: 'other' }))).json()).centrifugoUrl).toBe('wss://relay.example/connection/websocket');
+  });
+  it('503s (logged) when the relay URL is not configured', async () => {
+    vi.stubEnv('NEXT_PUBLIC_CENTRIFUGO_URL', '');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect((await POST(req(await bridgeBody()))).status).toBe(503);
+    expect(log).toHaveBeenCalled();
+    log.mockRestore();
+  });
+  it('rejects a reused nonce without reading the ledger', async () => {
+    consumeNonce.mockResolvedValue(false);
+    const res = await POST(req(await bridgeBody()));
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: 'unauthorized' });
+    expect(readLedger).not.toHaveBeenCalled();
+  });
+  it('consumes the nonce before reading the ledger', async () => {
+    await POST(req(await bridgeBody()));
+    expect(calls).toEqual(['nonce', 'ledger']);
+  });
+  it('consumes the nonce even when verification fails', async () => {
+    const res = await POST(req(await bridgeBody({}, { audience: 'https://evil.example' })));
+    expect(res.status).toBe(401);
+    expect(consumeNonce).toHaveBeenCalledTimes(1);
+  });
+  it('rejects a wrong audience, a session-purpose proof and a malformed proof', async () => {
+    expect((await POST(req(await bridgeBody({}, { audience: 'https://evil.example' })))).status).toBe(401);
+    expect((await POST(req(await bridgeBody({}, { purpose: 'session' })))).status).toBe(401);
+    expect(consumeNonce).not.toHaveBeenCalledWith(NONCE, 'session');
+    expect((await POST(req({ proof: { nope: 1 }, head: HEAD }))).status).toBe(401);
+  });
+  it('rejects a bad signature with a plain 401 and no ledger', async () => {
+    const wrongKey = (await generateAuthKey(true)).privateKey;
+    const res = await POST(req({ proof: await proof({}, wrongKey), head: HEAD, hostname: 'h' }));
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: 'unauthorized' });
+  });
+  it('returns key_revoked with the ledger as evidence for a revoked bridge', async () => {
+    const t = checkpoint({ ...trusted, bridges: [], revokedBridgeIds: [BRIDGE_ID] });
+    readLedger.mockResolvedValue(store(t, t));
+    const res = await POST(req(await bridgeBody()));
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: 'key_revoked', ledger: LEDGER });
+  });
+  it('returns key_revoked for a sticky-revoked bridge (raw checkpoint still lists it)', async () => {
+    const t = checkpoint({ ...trusted, bridges: [], revokedBridgeIds: [BRIDGE_ID] });
+    readLedger.mockResolvedValue({ ...store(trusted, t), sticky: { deviceIds: [], bridgeIds: [BRIDGE_ID] } });
+    const res = await POST(req(await bridgeBody()));
+    expect(res.status).toBe(401);
+    expect((await res.json()).error).toBe('key_revoked');
+  });
+  it('returns key_revoked for a revoked device', async () => {
+    const t = checkpoint({ ...trusted, devices: [], revokedDeviceIds: [DEVICE_ID] });
+    readLedger.mockResolvedValue(store(t, t));
+    const res = await POST(req({ proof: await proof({ kind: 'device', keyId: DEVICE_ID }, deviceKey), head: HEAD }));
+    expect((await res.json()).error).toBe('key_revoked');
+  });
+  it('gives a plain 401 with no ledger for an unknown key or account', async () => {
+    const unknown = 'U'.repeat(43);
+    const res = await POST(req(await bridgeBody({}, { keyId: unknown })));
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: 'unauthorized' });
+    readLedger.mockResolvedValue(null);
+    expect((await POST(req(await bridgeBody()))).status).toBe(401);
+  });
+  it('validates a present bridge hostname and localPort before consuming the nonce', async () => {
+    expect((await POST(req(await bridgeBody({ hostname: '' })))).status).toBe(400);
+    expect((await POST(req(await bridgeBody({ localPort: 70000 })))).status).toBe(400);
+    expect(consumeNonce).not.toHaveBeenCalled();
+  });
+  it('rejects malformed and oversized bodies', async () => {
+    expect((await POST(req('{nope'))).status).toBe(400);
+    expect((await POST(req(JSON.stringify({ pad: 'x'.repeat(17000) })))).status).toBe(413);
+    const noType = new Request('https://x.example/api/auth/relay-token', { method: 'POST', body: '{}' });
+    expect((await POST(noType)).status).toBe(400);
+    expect((await POST(req('[]'))).status).toBe(400);
+  });
+  it('rate limits by IP before any work, and by account+key on success', async () => {
+    consumeRateLimit.mockResolvedValueOnce({ allowed: false, retryAfterMs: 5000 });
+    const res = await POST(req(await bridgeBody()));
+    expect(res.status).toBe(429);
+    expect(res.headers.get('Retry-After')).toBe('5');
+    expect(consumeNonce).not.toHaveBeenCalled();
+    consumeRateLimit.mockReset().mockResolvedValueOnce({ allowed: true }).mockResolvedValueOnce({ allowed: false, retryAfterMs: 1000 });
+    expect((await POST(req(await bridgeBody()))).status).toBe(429);
+    expect(consumeRateLimit).toHaveBeenCalledWith('relay-token-key', `${ACCOUNT}:${BRIDGE_ID}`, { maxAttempts: 30, lockoutMs: 600000 });
+  });
+  it('503s when storage fails', async () => {
+    readLedger.mockRejectedValue(new Error('account_ledger_corrupt'));
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect((await POST(req(await bridgeBody()))).status).toBe(503);
+    expect(log).toHaveBeenCalled();
+    log.mockRestore();
+  });
+});

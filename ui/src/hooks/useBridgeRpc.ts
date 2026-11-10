@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { Command, CommandResponse, BridgeExecPayload } from "@/types";
 import type { MessagePublishOptions } from "@/lib/message-client";
+import { accountChannel } from "@security/ledger/channels";
 
 /** How long a request/response RPC waits before rejecting. */
 const RPC_TIMEOUT_MS = 30_000;
@@ -217,7 +218,7 @@ export function useBridgeRpc(client: CentrifugoClientLike | null, userId: string
   useEffect(() => {
     if (!client || !userId) return;
 
-    const commandsChannel = `commands:rpc#${userId}`;
+    const commandsChannel = accountChannel("commands:rpc", userId);
 
     // commandsChannel is shared: useCentrifugo may already have created (and
     // attached an inbound-signal listener to) this Subscription before this

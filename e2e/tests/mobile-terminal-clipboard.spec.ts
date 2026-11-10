@@ -1,6 +1,6 @@
 import { expect, type Page } from "@playwright/test";
 import { test } from "../helpers/fixtures";
-import { createShellSession, login, openSession, sharedEmail, waitForBridgeOnline } from "../helpers/app";
+import { createShellSession, login, openSession, sharedAccountId, waitForBridgeOnline } from "../helpers/app";
 import { bridgeApiFetch } from "../helpers/bridge-api";
 import { sessionIdsFor, waitForNewSessionId } from "../helpers/centrifugo";
 import { UI_BASE_URL } from "../helpers/config";
@@ -20,13 +20,13 @@ import { UI_BASE_URL } from "../helpers/config";
 test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
 
 async function openMobileShell(page: Page, holder: { sid?: string }): Promise<void> {
-  const email = sharedEmail();
-  await login(page, email);
+  const accountId = sharedAccountId();
+  await login(page);
   await waitForBridgeOnline(page);
   const name = `mobile-clip-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-  const before = await sessionIdsFor(email);
+  const before = await sessionIdsFor(accountId);
   await createShellSession(page, name);
-  holder.sid = await waitForNewSessionId(email, before);
+  holder.sid = await waitForNewSessionId(accountId, before);
   // The UI selects the new session (and flips to the Terminal tab) only when its create call
   // resolves, which also closes the dialog. Wait for that before returning to Workspace.
   await page.getByRole("dialog", { name: "New Session" }).waitFor({ state: "hidden", timeout: 30_000 });

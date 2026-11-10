@@ -29,7 +29,11 @@ export const CENTRIFUGO_WS_URL =
   process.env.NEXT_PUBLIC_CENTRIFUGO_URL ??
   "ws://127.0.0.1:8000/connection/websocket";
 
-export const UI_BASE_URL = process.env.UI_BASE_URL ?? "http://localhost:3000";
+/**
+ * The ONE origin of the run (env.sh: FTOWN_PUBLIC_URL). The browser loads it, the
+ * passkey is bound to it (rpId localhost) and the bridges use it as --api-url.
+ */
+export const UI_BASE_URL = process.env.UI_BASE_URL ?? process.env.FTOWN_PUBLIC_URL ?? "https://localhost:8444";
 
 /** The e2e directory (this file lives in e2e/helpers/). */
 export const E2E_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -37,11 +41,9 @@ export const E2E_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 /**
  * The bridge's scratch HOME. start-services.sh launches the bridge with HOME
  * overridden to e2e/.bridge-home so it never touches the real ~/.ftown; its
- * self-advert pointer, transcript dirs, data dir and refresh token all live
+ * self-advert pointer, transcript dirs, data dir and ledger identity all live
  * under here.
  */
 export const BRIDGE_HOME = process.env.E2E_BRIDGE_HOME ?? join(E2E_DIR, ".bridge-home");
 
 export const TOKEN_AUDIENCE = "ftown:centrifugo";
-// F1: /api/auth/bridge now requires a distinct bootstrap audience.
-export const BRIDGE_BOOTSTRAP_AUDIENCE = "ftown:bridge-bootstrap";

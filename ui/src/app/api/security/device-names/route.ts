@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server';
-import { auth } from '@/lib/auth';
+import { requireAccount, UnauthorizedError } from '@/lib/ledger-auth';
+import { consumeRateLimit } from '@/lib/login-rate-limit';
 import { isTrustedBrowserOrigin } from '@/lib/request-origin';
 import { boundedSecurityJson, SecurityStoreError } from '@/lib/security-store';
-import { accountRateLimit } from '@/app/api/security/account/_shared';
 import { DeviceDisplayNameStore, DeviceNameStoreError, parseDeviceNameRequest } from '@/lib/device-display-name-store';
 import type { DeviceNameErrorCode, DeviceNameErrorResponse } from '@/lib/device-display-name-contract';
 
@@ -23,9 +23,12 @@ function fail(error: unknown): NextResponse<DeviceNameErrorResponse> {
 }
 async function owner(request: Request, mutation: boolean): Promise<string> {
   if (mutation && !isTrustedBrowserOrigin(request)) throw new DeviceNameStoreError('forbidden_origin');
-  const session = await auth();
-  if (!session?.user?.id) throw new DeviceNameStoreError('unauthorized');
-  return session.user.id;
+  try { return (await requireAccount()).accountId; }
+  catch (error) { if (error instanceof UnauthorizedError) throw new DeviceNameStoreError('unauthorized'); throw error; }
+}
+async function accountRateLimit(accountId: string, scope: string, maxAttempts: number): Promise<void> {
+  const result = await consumeRateLimit(scope, accountId, { maxAttempts, lockoutMs: 60_000 });
+  if (!result.allowed) throw Object.assign(new Error('rate_limited'), { retryAfter: Math.ceil((result.retryAfterMs ?? 60_000) / 1000) });
 }
 export async function GET(request: Request): Promise<NextResponse> {
   try {

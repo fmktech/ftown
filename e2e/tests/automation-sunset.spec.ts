@@ -1,6 +1,6 @@
 import { expect } from "@playwright/test";
 import { test } from "../helpers/fixtures";
-import { createShellSession, login, openSession, runMarkerInTerminal, sharedEmail, waitForBridgeOnline } from "../helpers/app";
+import { createShellSession, login, openSession, runMarkerInTerminal, sharedAccountId, waitForBridgeOnline } from "../helpers/app";
 import { bridgeApiFetch } from "../helpers/bridge-api";
 import { sessionIdsFor, waitForNewSessionId } from "../helpers/centrifugo";
 
@@ -33,18 +33,18 @@ for (const storedTab of ["crons", "factory"]) {
       sentFrames.push(typeof payload === "string" ? payload : payload.toString());
     }));
     await page.addInitScript((tab) => localStorage.setItem("ftown:sidebarTab", tab), storedTab);
-    await login(page, sharedEmail());
+    await login(page);
     await waitForBridgeOnline(page);
 
     const name = `sunset-session-${storedTab}-${Date.now()}`;
-    const before = await sessionIdsFor(sharedEmail());
+    const before = await sessionIdsFor(sharedAccountId());
     let sessionId: string | undefined;
     try {
       await expect(page.getByRole("tablist", { name: "Sidebar sections" })).toHaveCount(0);
       await expect(page.getByTitle("Create a new loop")).toHaveCount(0);
       await expect(page.getByRole("button", { name: /New Factory|Create Factory/ })).toHaveCount(0);
       await createShellSession(page, name);
-      sessionId = await waitForNewSessionId(sharedEmail(), before);
+      sessionId = await waitForNewSessionId(sharedAccountId(), before);
       await openSession(page, name);
       await runMarkerInTerminal(page, `SUNSET${Date.now()}`);
       await page.screenshot({ path: testInfo.outputPath("desktop.png"), fullPage: true });

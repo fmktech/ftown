@@ -1,17 +1,24 @@
 import { NextResponse } from "next/server";
-import jwt from "jsonwebtoken";
-import { auth } from "@/lib/auth";
-import { getRequiredSecret } from "@/lib/secrets";
+import { requireAccount } from "@/lib/ledger-auth";
+import { signRelayToken } from "@/lib/relay-jwt";
 
-export async function POST(): Promise<NextResponse> {
-  const session = await auth();
-  if (!session?.user?.email) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+export const runtime = "nodejs";
+
+async function mint(): Promise<NextResponse> {
+  let accountId: string;
+  try {
+    ({ accountId } = await requireAccount());
+  } catch (err) {
+    if ((err as { status?: number } | null)?.status === 401) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    console.error("[auth/token] session check failed:", err instanceof Error ? err.message : String(err));
+    return NextResponse.json({ error: "Server error" }, { status: 500 });
   }
 
-  let secret: string;
+  let minted: { token: string; expiresAt: number };
   try {
-    secret = getRequiredSecret("CENTRIFUGO_TOKEN_SECRET");
+    minted = signRelayToken({ accountId });
   } catch (err) {
     console.error(
       "[auth/token] secret misconfiguration:",
@@ -20,10 +27,15 @@ export async function POST(): Promise<NextResponse> {
     return NextResponse.json({ error: "Server misconfiguration" }, { status: 500 });
   }
 
-  const token = jwt.sign({ sub: session.user.email }, secret, { audience: "ftown:centrifugo", expiresIn: "24h" });
-
-  return NextResponse.json({
-    token,
-    centrifugoUrl: process.env.NEXT_PUBLIC_CENTRIFUGO_URL,
-  });
+  return NextResponse.json(
+    {
+      token: minted.token,
+      centrifugoUrl: process.env.NEXT_PUBLIC_CENTRIFUGO_URL,
+      accountId,
+      expiresAt: minted.expiresAt,
+    },
+    { headers: { "Cache-Control": "no-store" } },
+  );
 }
+
+export const POST = mint;

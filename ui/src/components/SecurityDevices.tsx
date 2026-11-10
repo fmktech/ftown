@@ -1,17 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { ApprovedEndpoint, BridgeInvitation } from "@security/protocol";
+import { LEDGER_LIMITS, type LedgerBridge, type LedgerCheckpoint, type LedgerDevice, type LedgerOperation, type LedgerTransition, type Signed } from "@security/ledger/protocol";
 import { securityErrorMessage, type SecurityBridge, type SecurityCommandExecutor } from "./SecurityPanel";
-import type { AccountSecurityClient, AccountSecuritySnapshot } from "@/lib/account-security-client";
-import { DeviceApproval } from "./DeviceApproval";
 import { SecurityAccessMap, accessBrowserLabel, type SecurityAccessBrowserNode, type SecurityAccessBridgeNode, type SecurityAccessSelection } from "./SecurityAccessMap";
 import type { SecurityLockState } from "./SecurityLockIcon";
-import type { PendingApprovalClient, PendingSnapshot } from "@/lib/pending-approval-client";
-import { usePendingApprovals } from "@/hooks/usePendingApprovals";
-import { PendingDeviceInbox } from "./PendingDeviceApprovals";
 import { useDeviceDisplayNames } from "@/hooks/useDeviceDisplayNames";
 import { DeviceDisplayNameEditor } from "./DeviceDisplayNameEditor";
+import { securityErrorCode, useAccountSecurity, type AccountSecurity } from "@/hooks/useAccountSecurity";
+import type { LedgerClient, LedgerClientSnapshot } from "@/lib/ledger-client";
 
 interface Props {
   bridge?: SecurityBridge;
@@ -20,10 +18,8 @@ interface Props {
   execute: SecurityCommandExecutor;
   onInvitation?: (invitation: BridgeInvitation) => void;
   bridges?: SecurityBridge[];
-  accountClient?: AccountSecurityClient;
-  accountState?: AccountSecuritySnapshot;
-  pendingClient?: PendingApprovalClient;
-  pendingState?: PendingSnapshot;
+  /** Account mode: the signed-in accountId; the view then comes from the passkey ledger. Solo/local leave it unset. */
+  accountId?: string | null;
 }
 
 function ComputerApprovalRecovery() {
@@ -31,7 +27,7 @@ function ComputerApprovalRecovery() {
 }
 
 export function SecurityDevices(props: Props) {
-  if (props.accountClient && props.accountState) return <AccountDevices currentComputerIds={props.currentComputerIds} client={props.accountClient} initial={props.accountState} bridges={props.bridges ?? []} selected={props.bridge} execute={props.execute} pendingClient={props.pendingClient} pendingState={props.pendingState} />;
+  if (props.accountId) return <LedgerDevices accountId={props.accountId} bridges={props.bridges ?? []} selected={props.bridge} currentEndpointId={props.currentEndpointId} currentComputerIds={props.currentComputerIds} />;
   const bridge = props.bridge ?? props.bridges?.find(item => props.currentComputerIds?.has(item.bridgeId));
   return <BridgeDevices {...props} bridge={bridge} initialBridgeSelected={!!props.bridge} />;
 }
@@ -184,160 +180,366 @@ function BridgeDevices({ bridge, currentEndpointId, currentComputerIds, execute,
   </div>;
 }
 
-const REMOVE_CONFIRM = (label: string) => `Remove ${label} from your account? It loses access immediately. To use it again, pair it as a new computer.`;
 
-function AccountDevices({ client, initial, bridges, selected, execute, pendingClient, pendingState, currentComputerIds }: { currentComputerIds?: ReadonlySet<string>; client: AccountSecurityClient; initial: AccountSecuritySnapshot; bridges: SecurityBridge[]; selected?: SecurityBridge; execute: SecurityCommandExecutor; pendingClient?: PendingApprovalClient; pendingState?: PendingSnapshot }) {
-  const state = useSyncExternalStore(client.subscribe, client.snapshot, () => initial);
-  const pending = usePendingApprovals(client, pendingClient ? "passive" : "reviewer", pendingClient);
-  const displayNames = useDeviceDisplayNames(client.ownerId);
-  useEffect(() => () => { pending.client?.dismissReview(); }, [pending.client]);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [confirm, setConfirm] = useState<string | null>(null);
-  const [refreshRound, setRefreshRound] = useState(0);
-  const [selection, setSelection] = useState<{ scope: string; node: SecurityAccessSelection } | null>(null);
-  const [expandedComputers, setExpandedComputers] = useState<Record<string, boolean>>({});
-  const [confirmedComputers, setConfirmedComputers] = useState<Record<string, boolean>>({});
-  const [failedChecks, setFailedChecks] = useState<Record<string, boolean>>({});
-  const [checkingComputers, setCheckingComputers] = useState<Record<string, boolean>>({});
-  const probeGeneration = useRef(0);
-  const probeVersions = useRef(new Map<string, number>());
-  const context = `${client.ownerId}:${state.identity?.endpoint.id ?? ""}`;
-  const currentContext = useRef(context); currentContext.current = context;
-  useEffect(() => { setBusy(null); setError(null); setConfirm(null); }, [client, context]);
-  const roster = state.trust?.checkpoint.bridges ?? [];
-  const computers = new Map(bridges.map(computer => [computer.bridgeId, computer]));
-  for (const computer of roster) if (!computers.has(computer.bridgeId)) computers.set(computer.bridgeId, { bridgeId: computer.bridgeId, label: computer.label || "Computer", security: { bridgeId: computer.bridgeId, status: "offline", endpoint: computer.endpoint } });
-  for (const pin of state.legacyBridges) if (!computers.has(pin.bridgeId)) computers.set(pin.bridgeId, { bridgeId: pin.bridgeId, label: "Computer", security: { bridgeId: pin.bridgeId, status: "offline", endpoint: pin.endpoint } });
-  const proofKey = (computer: SecurityBridge) => `${context}:${computer.bridgeId}:${computer.security.endpoint?.id ?? state.legacyBridges.find(pin => pin.bridgeId === computer.bridgeId)?.endpoint.id ?? ""}`;
-  const probeTargets = JSON.stringify([...computers.values()].filter(computer => computer.security.status === "ready").map(computer => [computer.bridgeId, proofKey(computer)]));
-  useEffect(() => {
-    const generation = ++probeGeneration.current;
-    if (state.status !== "ready" || state.offline) return;
-    const targets = JSON.parse(probeTargets) as [string, string][];
-    for (const [bridgeId, key] of targets) {
-      const version = (probeVersions.current.get(key) ?? 0) + 1;
-      probeVersions.current.set(key, version);
-      setCheckingComputers(previous => ({ ...previous, [key]: true }));
-      void execute({ type: "security_devices", bridgeId }).then(result => {
-        if (generation !== probeGeneration.current || probeVersions.current.get(key) !== version) return;
-        const account = result.devices.some(device => device.endpoint.id === state.identity?.endpoint.id && device.source === "account");
-        setCheckingComputers(previous => ({ ...previous, [key]: false }));
-        setConfirmedComputers(previous => ({ ...previous, [key]: account }));
-        setFailedChecks(previous => ({ ...previous, [key]: false }));
-      }).catch(() => { if (generation === probeGeneration.current && probeVersions.current.get(key) === version) { setCheckingComputers(previous => ({ ...previous, [key]: false })); setFailedChecks(previous => ({ ...previous, [key]: true })); } });
+// ---- Account mode: the passkey ledger. ----
+
+const REMOVE_CONFIRM = (label: string) => `Remove ${label} from your account? It loses access immediately. To use it again, pair it as a new computer.`;
+const REMOVE_BROWSER_CONFIRM = (label: string) => `Remove ${label} from your account? It loses access to your computers immediately. To use it again, sign in on it with your passkey.`;
+const REMOVE_THIS_BROWSER_CONFIRM = "Remove this browser from your account? It loses access to your computers immediately. To use it again, sign in here with your passkey.";
+const ACCOUNT_MISMATCH = "This browser holds a different account than the one you are signed in to. Sign in again with your passkey.";
+const LOCAL_ONLY = "Removed on this browser only — not yet applied to your account";
+
+/**
+ * Signed entries this page has seen per ledger client. The snapshot's checkpoint drops an entry once this browser revoked it locally;
+ * a local-only removal still needs its signed name and fingerprint on screen.
+ */
+const seenEntries = new WeakMap<LedgerClient, { devices: Map<string, LedgerDevice>; bridges: Map<string, LedgerBridge> }>();
+function rememberEntries(client: LedgerClient | null, checkpoint: LedgerCheckpoint | null): void {
+  if (!client || !checkpoint) return;
+  const seen = seenEntries.get(client) ?? { devices: new Map<string, LedgerDevice>(), bridges: new Map<string, LedgerBridge>() };
+  for (const item of checkpoint.devices) seen.devices.set(item.endpoint.id, item);
+  for (const item of checkpoint.bridges) seen.bridges.set(item.bridgeId, item);
+  seenEntries.set(client, seen);
+}
+
+/** The ledger's own (passkey-signed) name and a short fingerprint, so a server-side display name cannot disguise the target. */
+function SignedIdentity({ label, id }: { label: string | null; id: string }) {
+  return <p data-signed-identity className="break-words text-xs text-[var(--text-muted)] [overflow-wrap:anywhere]">Signed name: {label ? `“${label}”` : "not known on this browser"} · ID {id.slice(0, 8)}</p>;
+}
+
+function TrashIcon() {
+  return <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M4 7h16M10 11v6m4-6v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>;
+}
+
+const browserName = (label: string, self: boolean) => self && /^(this device|this browser|browser)$/i.test(label.trim()) ? "This browser" : !self && /^this (device|browser)$/i.test(label.trim()) ? "Browser" : label || "Browser";
+const recordKey = (record: Signed<LedgerTransition>) => `${record.payload.revision}:${record.payload.previousHead}:${record.payload.issuedAt}:${record.payload.credentialId}`;
+const shortId = (id: string) => id.slice(-6);
+
+/**
+ * A ledger write: one click, at most one passkey prompt. While the account has several passkeys and this page does not know which
+ * one this device holds, the same place offers "Choose passkey" (its own click and prompt) instead of the write.
+ */
+function PasskeyActionButton({ security, actionKey, label, busyLabel, ariaLabel, className, disabled, action, onDone }: {
+  security: AccountSecurity; actionKey: string; label: string; busyLabel: string; ariaLabel?: string; className: string; disabled?: boolean;
+  action: (client: LedgerClient) => Promise<void>; onDone?: () => void;
+}) {
+  if (security.needsSigner) return <button type="button" className="btn-accent min-h-11 sm:min-h-8" disabled={!!security.busy || disabled}
+    onClick={() => void security.chooseSigner()}>{security.busy === "signer" ? "Waiting for passkey…" : "Choose passkey"}</button>;
+  return <button type="button" aria-label={ariaLabel} className={`${className} min-h-11 sm:min-h-8`} disabled={!!security.busy || disabled}
+    onClick={() => void security.run(actionKey, action, { signs: true }).then(done => { if (done) onDone?.(); })}>{security.busy === actionKey ? busyLabel : label}</button>;
+}
+
+function SignerHint({ security }: { security: AccountSecurity }) {
+  if (!security.needsSigner) return null;
+  return <p className="text-xs text-[var(--text-muted)]">Your account has {security.snapshot.checkpoint?.authorities.length ?? 0} passkeys. Choose the passkey on this device first, then confirm.</p>;
+}
+
+/** The fork notice: local records dropped because a longer chain won. Each can be signed again (one prompt each). */
+function DiscardedChanges({ security, canWrite, describe }: { security: AccountSecurity; canWrite: boolean; describe: (operation: LedgerOperation) => string }) {
+  const { client, snapshot } = security;
+  const [resolved, setResolved] = useState<Record<string, string>>({});
+  const trusted = snapshot.checkpoint;
+  const entries = snapshot.discarded;
+  /** Why an addition can no longer be signed again (it is present, or its target was removed since); null when it can. */
+  const settled = (operation: LedgerOperation): string | null => {
+    if (!trusted) return null;
+    if (operation.type === "add_device") {
+      const id = operation.device.endpoint.id;
+      return trusted.devices.some(item => item.endpoint.id === id) ? "Already in your account" : trusted.revokedDeviceIds.includes(id) ? "Removed since; it cannot be added again" : null;
     }
-    return () => { if (generation === probeGeneration.current) probeGeneration.current++; };
-  }, [client, execute, probeTargets, refreshRound, state.status, state.offline, state.identity?.endpoint.id]);
-  async function revoke(endpointId: string) {
-    setBusy(endpointId); setError(null);
-    try { await client.revoke(endpointId); setConfirm(null); }
-    catch (failure) { setError(securityErrorMessage(failure)); }
-    finally { setBusy(null); }
-  }
-  async function removeComputer(bridgeId: string) {
-    setBusy(bridgeId); setError(null);
-    try { await client.revokeBridge(bridgeId); setConfirm(null); }
-    catch (failure) { setError(securityErrorMessage(failure)); }
-    finally { setBusy(null); }
-  }
-  async function migrate(computer: SecurityBridge) {
-    const pin = state.legacyBridges.find(bridge => bridge.bridgeId === computer.bridgeId); if (!pin) return;
-    const actionContext = context; const key = proofKey(computer);
-    probeVersions.current.set(key, (probeVersions.current.get(key) ?? 0) + 1);
-    setBusy(computer.bridgeId); setError(null);
-    try {
-      await client.migrate(pin, execute);
-      if (currentContext.current === actionContext) { probeVersions.current.set(key, (probeVersions.current.get(key) ?? 0) + 1); setCheckingComputers(previous => ({ ...previous, [key]: false })); setConfirmedComputers(previous => ({ ...previous, [key]: true })); setFailedChecks(previous => ({ ...previous, [key]: false })); }
-    } catch (failure) { if (currentContext.current === actionContext) setError(`${securityErrorMessage(failure)} Sharing is not confirmed. Try again when the computer is connected.`); }
-    finally { if (currentContext.current === actionContext) { probeVersions.current.set(key, (probeVersions.current.get(key) ?? 0) + 1); setCheckingComputers(previous => ({ ...previous, [key]: false })); setBusy(null); } }
-  }
-  const devices = [...(state.trust?.checkpoint.devices ?? [])].sort((a, b) => Number(b.endpoint.id === state.identity?.endpoint.id) - Number(a.endpoint.id === state.identity?.endpoint.id));
-  const inbox = pendingState ?? pending.snapshot;
-  const needsReview = !!inbox.review || !!inbox.inboxError || inbox.inbox.some(item => !["rejected", "cancelled", "expired", "conflict"].includes(item.status));
-  const browserName = (label: string, self: boolean) => self && /^(this device|this browser|browser)$/i.test(label.trim()) ? "This browser" : !self && /^this (device|browser)$/i.test(label.trim()) ? "Browser" : label || "Browser";
-  const accountCurrent = state.status === "ready" && !!state.trust && !state.offline;
-  const accountHistorical = state.status === "ready" && !!state.trust && state.offline;
+    if (operation.type === "add_bridge") {
+      const id = operation.bridge.bridgeId;
+      return trusted.bridges.some(item => item.bridgeId === id) ? "Already in your account" : trusted.revokedBridgeIds.includes(id) ? "Removed since; pair it as a new computer" : null;
+    }
+    if (operation.type === "add_authority") return trusted.authorities.some(item => item.credentialId === operation.authority.credentialId) ? "Already in your account" : null;
+    return null;
+  };
+  const handled = entries.filter(entry => recordKey(entry) in resolved || settled(entry.payload.operation) !== null).length;
+  const signedHere = entries.some(entry => recordKey(entry) in resolved);
+  useEffect(() => {
+    if (entries.length && signedHere && handled === entries.length) client.dismissDiscarded();
+  }, [client, entries.length, handled, signedHere]);
+  if (!entries.length) return null;
+  return <section aria-label="Changes not kept" className="space-y-2 rounded-md border border-[var(--status-pending)] p-3">
+    <h3 className="text-sm font-semibold">Some account changes were not kept</h3>
+    <p className="text-xs leading-relaxed text-[var(--text-muted)]">These changes were signed on this browser but are not part of your account, because another change was saved first or they never reached the server. Sign them again to apply them.</p>
+    <SignerHint security={security} />
+    <ul aria-label="Changes to sign again" className="space-y-2">
+      {entries.map(entry => {
+        const key = recordKey(entry); const operation = entry.payload.operation; const text = describe(operation);
+        const note = resolved[key] ?? settled(operation);
+        let outcome = "Signed again";
+        return <li key={key} className="flex flex-wrap items-center justify-between gap-2">
+          <span className="min-w-0 break-words text-sm [overflow-wrap:anywhere]">{text}</span>
+          {note !== null ? <span className="text-xs text-[var(--text-muted)]">{note}</span>
+            : <PasskeyActionButton security={security} actionKey={`discarded:${key}`} label="Sign again" busyLabel="Waiting for passkey…" ariaLabel={`Sign again: ${text}`}
+              className="btn-accent" disabled={!canWrite} action={async ledger => {
+                try { await ledger.append(operation); }
+                catch (failure) {
+                  // The winning chain already removed it: nothing left to sign.
+                  if ((operation.type === "revoke_device" || operation.type === "revoke_bridge") && securityErrorCode(failure) === "ledger_revoked") { outcome = "Already removed"; return; }
+                  throw failure;
+                }
+              }} onDone={() => setResolved(previous => ({ ...previous, [key]: outcome }))} />}
+        </li>;
+      })}
+    </ul>
+    <button type="button" className="btn-ghost min-h-11 sm:min-h-8" disabled={!!security.busy} onClick={() => client.dismissDiscarded()}>Dismiss</button>
+  </section>;
+}
+
+/** Account passkeys and the three-gesture "add another passkey" flow (create, consent, approve). */
+function PasskeysSection({ security, canWrite }: { security: AccountSecurity; canWrite: boolean }) {
+  const { snapshot, busy } = security;
+  const titleId = useId();
+  const [label, setLabel] = useState("");
+  /** The client has no reset for a half-done add-passkey flow: Cancel hides that step here until a new start (a reload discards it). */
+  const [abandoned, setAbandoned] = useState<LedgerClientSnapshot["pending"] | null>(null);
+  useEffect(() => { if (snapshot.pending === "none") setAbandoned(null); }, [snapshot.pending]);
+  const step = abandoned !== null && snapshot.pending === abandoned ? "none" : snapshot.pending;
+  const authorities = snapshot.checkpoint?.authorities ?? [];
+  const full = authorities.length >= LEDGER_LIMITS.maxAuthorities;
+  const start = () => void security.run("passkey:create", client => client.addAuthorityStart({ label: label.trim() || "Passkey" })).then(done => { if (done) setAbandoned(null); });
+  const restart = <div className="flex flex-wrap gap-2">
+    <button type="button" className="btn-ghost min-h-11 sm:min-h-8" disabled={!!busy || !canWrite} onClick={start}>{busy === "passkey:create" ? "Waiting for passkey…" : "Start over"}</button>
+    <button type="button" className="btn-ghost min-h-11 sm:min-h-8" disabled={!!busy} onClick={() => { security.clearError(); setAbandoned(snapshot.pending); }}>Cancel</button></div>;
+  return <section aria-labelledby={titleId} className="space-y-3 border-t border-[var(--border-subtle)] pt-3">
+    <h3 id={titleId} className="text-sm font-semibold">Passkeys</h3>
+    <p className="text-xs leading-relaxed text-[var(--text-muted)]">Your passkeys sign every change to your account: adding or removing browsers, computers and passkeys. Each change asks for one passkey confirmation.</p>
+    {authorities.length > 0 ? <ul aria-label="Account passkeys" className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+      {authorities.map(authority => <li key={authority.credentialId} className="min-w-0 rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)] p-2">
+        <p className="break-words text-sm font-semibold [overflow-wrap:anywhere]">{authority.label || "Passkey"}</p>
+        <p className="text-xs text-[var(--text-muted)]">Added {new Date(authority.addedAt).toLocaleString()}</p>
+        <details className="text-xs"><summary className="min-h-11 cursor-pointer py-3 sm:min-h-8 sm:py-2">Passkey details</summary><p className="break-all font-mono text-[11px] text-[var(--text-faint)]">Credential ID: {authority.credentialId}</p></details>
+      </li>)}
+    </ul> : <p className="text-xs text-[var(--text-muted)]">Sign in with your passkey to see your account's passkeys.</p>}
+    {security.needsSigner && <div role="group" aria-label="Choose passkey" className="space-y-2 rounded-md border border-[var(--border-muted)] p-3">
+      <p className="text-xs text-[var(--text-muted)]">Your account has {authorities.length} passkeys. Before changing your account, choose the passkey on this device.</p>
+      <button type="button" className="btn-accent min-h-11 sm:min-h-8" disabled={!!busy || !canWrite} onClick={() => void security.chooseSigner()}>{busy === "signer" ? "Waiting for passkey…" : "Choose passkey"}</button>
+    </div>}
+    {canWrite && <div role="group" aria-label="Add another passkey" className="space-y-2 rounded-md border border-[var(--border-muted)] p-3">
+      <h4 className="text-xs font-semibold">Add another passkey</h4>
+      <p className="text-xs leading-relaxed text-[var(--text-muted)]">A second passkey, such as a security key, keeps your account usable if you lose this one. It takes three steps, each with one passkey prompt.</p>
+      {full ? <p className="text-xs text-[var(--text-muted)]">Your account has the maximum of {LEDGER_LIMITS.maxAuthorities} passkeys.</p>
+        : step === "authority_created" ? <>
+          <p className="text-xs">Step 2 of 3: confirm that the new passkey joins this account.</p>
+          <button type="button" className="btn-accent min-h-11 sm:min-h-8" disabled={!!busy} onClick={() => void security.run("passkey:consent", client => client.addAuthorityConsent())}>{busy === "passkey:consent" ? "Waiting for passkey…" : "Confirm new passkey"}</button>
+          {restart}
+        </> : step === "authority_consented" ? <>
+          <p className="text-xs">Step 3 of 3: approve the new passkey with a passkey already in your account.</p>
+          <SignerHint security={security} />
+          <PasskeyActionButton security={security} actionKey="passkey:approve" label="Approve new passkey" busyLabel="Waiting for passkey…" className="btn-accent" action={client => client.addAuthorityFinish()} onDone={() => setLabel("")} />
+          {restart}
+        </> : <>
+          {abandoned !== null && <p role="status" className="text-xs text-[var(--text-muted)]">Adding the passkey was cancelled. Reloading this page discards the unfinished passkey; you can also delete it from your authenticator.</p>}
+          <label className="flex flex-col gap-1 text-xs text-[var(--text-muted)]">New passkey name
+            <input value={label} onChange={event => setLabel(event.target.value)} maxLength={80} placeholder="e.g. Security key"
+              className="min-h-11 rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)] px-3 text-sm text-[var(--text-primary)] sm:min-h-8" />
+          </label>
+          <p className="text-xs">Step 1 of 3: create the new passkey.</p>
+          <button type="button" className="btn-accent min-h-11 sm:min-h-8" disabled={!!busy} onClick={start}>{busy === "passkey:create" ? "Waiting for passkey…" : "Create passkey"}</button>
+        </>}
+    </div>}
+  </section>;
+}
+
+function LedgerDevices({ accountId, bridges, selected, currentEndpointId, currentComputerIds }: {
+  accountId: string; bridges: SecurityBridge[]; selected?: SecurityBridge; currentEndpointId: string | null; currentComputerIds?: ReadonlySet<string>;
+}) {
+  const security = useAccountSecurity();
+  const { snapshot, busy } = security;
+  const displayNames = useDeviceDisplayNames(accountId);
+  const [selection, setSelection] = useState<{ scope: string; node: SecurityAccessSelection } | null>(null);
+  const [confirm, setConfirm] = useState<string | null>(null);
+  const context = `${accountId}:${currentEndpointId ?? ""}`;
+  useEffect(() => { setConfirm(null); }, [context]);
+  const mismatch = !!snapshot.checkpoint && snapshot.checkpoint.accountId !== accountId;
+  const trusted = mismatch ? null : snapshot.checkpoint;
+  const revokedHere = snapshot.status === "device_revoked";
+  /** The verified chain (sticky revocations applied) is on screen; this browser's own membership is reported separately. */
+  const verified = !!trusted && (snapshot.status === "ready" || revokedHere);
+  const accountReady = !!trusted && snapshot.status === "ready";
+  /** Passkey-signed changes only from a browser that is itself in the account (never in device_revoked). */
+  const canWrite = accountReady;
   const displayName = (kind: "browser" | "bridge", id: string) => displayNames.names.find(item => item.kind === kind && item.id === id)?.name;
-  const browserNodes: SecurityAccessBrowserNode[] = devices.map(device => ({ id: device.endpoint.id,
-    label: displayName("browser", device.endpoint.id) ?? browserName(device.label, device.endpoint.id === state.identity?.endpoint.id), customLabel: displayName("browser", device.endpoint.id) !== undefined, current: device.endpoint.id === state.identity?.endpoint.id,
-    accessText: accountCurrent ? "Approved for your account" : accountHistorical ? "Last verified · offline" : device.endpoint.id === state.identity?.endpoint.id && state.code === "account_device_revoked" ? "Access revoked" : "Access paused",
-    lockState: accountCurrent ? "secured" : accountHistorical ? "unknown" : "approval_needed", edge: accountCurrent ? "current" : accountHistorical ? "historical" : "none" }));
-  if (state.identity && !browserNodes.some(node => node.id === state.identity!.endpoint.id)) browserNodes.unshift({ id: state.identity.endpoint.id,
-    label: "This browser", current: true, accessText: state.status === "checking" ? "Checking access…" : state.status === "error" ? state.code === "account_device_revoked" ? "Access revoked" : "Access paused" : "Account approval needed", lockState: state.status === "checking" ? "unknown" : "approval_needed", edge: "none" });
-  const computerViews = [...computers.values()].map(computer => {
-    const key = proofKey(computer); const confirmed = confirmedComputers[key] === true;
-    const ready = computer.security.status === "ready";
-    const blocked = ["revoked", "key_changed"].includes(computer.security.status) || state.status === "error" || !!state.trust?.checkpoint.revokedBridgeIds.includes(computer.bridgeId);
-    const pin = state.legacyBridges.find(item => item.bridgeId === computer.bridgeId);
-    const inRoster = roster.some(item => item.bridgeId === computer.bridgeId);
-    const shared = confirmed && !blocked && !checkingComputers[key] && !failedChecks[key] && state.status === "ready" && !state.offline;
-    const verifying = !confirmed && !failedChecks[key] && (checkingComputers[key] || computer.security.status === "connecting" || inRoster && confirmedComputers[key] !== false);
-    const access = blocked ? "Access needs attention" : verifying ? "Checking access…" : checkingComputers[key] && ready && !state.offline ? "Checking sharing…" : confirmed ? failedChecks[key] && ready ? "Previously shared · check access" : shared && ready ? "Shared with your approved browsers" : "Previously shared · reconnect to verify" : inRoster ? failedChecks[key] ? "Setup needs attention" : "Finishing setup" : pin ? "Only separately approved browsers" : "Approval needed";
-    const connection = ready ? "Connected" : computer.security.status === "connecting" ? "Connecting…" : computer.security.status === "offline" ? "Offline" : "Not connected";
-    const current = accountCurrent && shared && ready;
-    const historical = !!state.trust && confirmed && !blocked && !checkingComputers[key] && !failedChecks[key] && state.status === "ready" && (state.offline || computer.security.status === "offline");
-    const lockState: SecurityLockState = current ? "secured" : blocked || ["unpaired", "revoked", "key_changed", "upgrade_required"].includes(computer.security.status) ? "approval_needed"
-      : ["offline", "connecting"].includes(computer.security.status) || verifying || failedChecks[key] || confirmed ? "unknown" : "approval_needed";
-    const node: SecurityAccessBridgeNode = { current: currentComputerIds?.has(computer.bridgeId) ?? false, id: computer.bridgeId, label: displayName("bridge", computer.bridgeId) ?? (computer.label || "Computer"), accessText: access, connectionText: connection,
-      lockState, edge: current ? "current" : historical ? "historical" : "none" };
-    return { computer, key, confirmed, ready, blocked, pin, inRoster, verifying, node };
+  // Revoked on this browser only: still in the account for the server, the computers and the other browsers.
+  const localDevices = trusted ? snapshot.localOnly.deviceIds : [];
+  const localBridges = trusted ? snapshot.localOnly.bridgeIds : [];
+  useEffect(() => { rememberEntries(security.client, trusted); }, [security.client, trusted]);
+  const seen = security.client ? seenEntries.get(security.client) : undefined;
+  const discardedOperations = snapshot.discarded.map(record => record.payload.operation);
+  /** The signed ledger entry of a browser: current checkpoint, else seen earlier in this page, else a dropped add record. */
+  const signedDevice = (id: string): LedgerDevice | undefined => trusted?.devices.find(item => item.endpoint.id === id) ?? seen?.devices.get(id)
+    ?? discardedOperations.reduce<LedgerDevice | undefined>((found, item) => found ?? (item.type === "add_device" && item.device.endpoint.id === id ? item.device : undefined), undefined);
+  const signedBridge = (id: string): LedgerBridge | undefined => trusted?.bridges.find(item => item.bridgeId === id) ?? seen?.bridges.get(id)
+    ?? discardedOperations.reduce<LedgerBridge | undefined>((found, item) => found ?? (item.type === "add_bridge" && item.bridge.bridgeId === id ? item.bridge : undefined), undefined);
+
+  const devices = [...(trusted?.devices ?? [])].sort((a, b) => Number(b.endpoint.id === currentEndpointId) - Number(a.endpoint.id === currentEndpointId));
+  const browserNodes: SecurityAccessBrowserNode[] = devices.map(device => {
+    const current = device.endpoint.id === currentEndpointId; const custom = displayName("browser", device.endpoint.id);
+    return { id: device.endpoint.id, label: custom ?? browserName(device.label, current), customLabel: custom !== undefined, current,
+      accessText: current && revokedHere ? "Access revoked" : verified ? "In your account" : "Access paused",
+      lockState: verified && !(current && revokedHere) ? "secured" : "approval_needed", edge: verified && !(current && revokedHere) ? "current" : "none" };
   });
+  for (const id of localDevices) {
+    if (browserNodes.some(node => node.id === id)) continue;
+    const custom = displayName("browser", id); const current = id === currentEndpointId;
+    browserNodes.push({ id, label: custom ?? browserName(signedDevice(id)?.label ?? "", current), customLabel: custom !== undefined, current,
+      accessText: LOCAL_ONLY, lockState: "approval_needed", edge: "none" });
+  }
+  if (currentEndpointId && !browserNodes.some(node => node.id === currentEndpointId)) browserNodes.unshift({ id: currentEndpointId, label: "This browser", current: true,
+    accessText: revokedHere || trusted?.revokedDeviceIds.includes(currentEndpointId) ? "Removed from your account" : trusted ? "Not in your account" : "Not signed in",
+    lockState: "approval_needed", edge: "none" });
+
+  const roster = trusted?.bridges ?? [];
+  const computers = new Map(bridges.map(computer => [computer.bridgeId, computer]));
+  for (const entry of roster) if (!computers.has(entry.bridgeId)) computers.set(entry.bridgeId, { bridgeId: entry.bridgeId, label: entry.label || "Computer", security: { bridgeId: entry.bridgeId, status: "offline", endpoint: entry.endpoint } });
+  for (const id of localBridges) if (!computers.has(id)) {
+    const signed = signedBridge(id);
+    computers.set(id, { bridgeId: id, label: signed?.label || "Computer", security: { bridgeId: id, status: "offline", endpoint: signed?.endpoint ?? null } });
+  }
+  const computerViews = [...computers.values()].map(computer => {
+    const entry = roster.find(item => item.bridgeId === computer.bridgeId);
+    const localOnly = localBridges.includes(computer.bridgeId);
+    const revoked = !localOnly && !!trusted?.revokedBridgeIds.includes(computer.bridgeId);
+    const status = computer.security.status;
+    const keyMismatch = !!entry && !!computer.security.endpoint && computer.security.endpoint.id !== entry.endpoint.id;
+    const inAccount = !!entry && !revoked && !keyMismatch && status !== "revoked" && status !== "key_changed";
+    const edge: SecurityAccessBridgeNode["edge"] = verified && inAccount ? status === "ready" ? "current" : status === "offline" || status === "connecting" ? "historical" : "none" : "none";
+    const access = localOnly ? LOCAL_ONLY : revoked ? "Removed from your account" : !entry ? "Not in your account" : !inAccount ? "Key changed · check this computer"
+      : status === "upgrade_required" ? "Update FTown on this computer" : !verified ? "Access paused" : status === "ready" ? "In your account"
+      : status === "unpaired" ? "Waiting for this computer to update" : "In your account · reconnect to verify";
+    const connection = status === "ready" ? "Connected" : status === "connecting" ? "Connecting…" : status === "offline" ? "Offline" : "Not connected";
+    const lockState: SecurityLockState = edge === "current" ? "secured" : !inAccount || status === "unpaired" || status === "upgrade_required" ? "approval_needed" : "unknown";
+    const node: SecurityAccessBridgeNode = { current: currentComputerIds?.has(computer.bridgeId) ?? false, id: computer.bridgeId,
+      label: displayName("bridge", computer.bridgeId) ?? (computer.label || entry?.label || "Computer"), accessText: access, connectionText: connection, lockState, edge };
+    return { computer, entry, revoked, localOnly, inAccount, node };
+  });
+
   const scope = `${context}:${selected?.bridgeId ?? ""}`;
   const validSelection = (node: SecurityAccessSelection) => node.kind === "browser" ? browserNodes.some(item => item.id === node.id) : computerViews.some(item => item.node.id === node.id);
+  const currentBrowser = browserNodes.find(node => node.current);
   const fallback: SecurityAccessSelection | null = selected && computerViews.some(item => item.node.id === selected.bridgeId) ? { kind: "bridge", id: selected.bridgeId }
-    : browserNodes.find(node => node.current) ? { kind: "browser", id: browserNodes.find(node => node.current)!.id }
-    : browserNodes[0] ? { kind: "browser", id: browserNodes[0].id } : computerViews[0] ? { kind: "bridge", id: computerViews[0].node.id } : null;
+    : currentBrowser ? { kind: "browser", id: currentBrowser.id } : browserNodes[0] ? { kind: "browser", id: browserNodes[0].id }
+    : computerViews[0] ? { kind: "bridge", id: computerViews[0].node.id } : null;
   const active = selection?.scope === scope && validSelection(selection.node) ? selection.node : fallback;
   const selectedBrowser = active?.kind === "browser" ? browserNodes.find(node => node.id === active.id) : undefined;
   const selectedDevice = selectedBrowser ? devices.find(device => device.endpoint.id === selectedBrowser.id) : undefined;
   const selectedComputer = active?.kind === "bridge" ? computerViews.find(item => item.node.id === active.id) : undefined;
   const selectedBrowserLabel = selectedBrowser ? accessBrowserLabel(selectedBrowser, browserNodes) : "Browser";
   const nameDisabledReason = (kind: "browser" | "bridge", id: string, available: boolean) =>
-    !accountCurrent || !available ? "Reconnect and verify access before renaming." : displayNames.loading ? "Loading display names…" : displayNames.error && !displayNames.eligible.length ? "Display names are unavailable. Refresh access to try again." : !displayNames.eligible.some(item => item.kind === kind && item.id === id) ? "Renaming is unavailable for this device." : undefined;
+    !accountReady || !available ? "Reconnect and verify access before renaming." : displayNames.loading ? "Loading display names…" : displayNames.error && !displayNames.eligible.length ? "Display names are unavailable. Refresh access to try again." : !displayNames.eligible.some(item => item.kind === kind && item.id === id) ? "Renaming is unavailable for this device." : undefined;
+
+  /** Plain-language summary of a signed operation, for the discarded-changes notice. */
+  const describe = (operation: LedgerOperation): string => {
+    switch (operation.type) {
+      case "add_device": return `Add browser “${operation.device.label || "Browser"}”`;
+      case "add_bridge": return `Add computer “${operation.bridge.label || "Computer"}”`;
+      case "add_authority": return `Add passkey “${operation.authority.label || "Passkey"}”`;
+      case "revoke_device": {
+        const id = operation.endpointId;
+        const name = displayName("browser", id) ?? signedDevice(id)?.label;
+        return `Remove browser “${name || `Browser · ${shortId(id)}`}”`;
+      }
+      case "revoke_bridge": {
+        const id = operation.bridgeId;
+        const name = displayName("bridge", id) ?? computers.get(id)?.label ?? signedBridge(id)?.label;
+        return `Remove computer “${name || `Computer · ${shortId(id)}`}”`;
+      }
+    }
+  };
+
+  const accountProblem = mismatch ? ACCOUNT_MISMATCH : snapshot.status === "error" ? securityErrorMessage({ code: snapshot.error ?? "" }) : null;
+  const message = security.error ? securityErrorMessage({ code: security.error }) : accountProblem;
   const selectedDetails = active && <section aria-label="Selected access details" className="space-y-2">
-      {selectedBrowser && <>
-        <div className="flex flex-wrap items-center gap-2">
-          {selectedDevice && <button type="button" className="btn-danger inline-flex min-h-11 items-center gap-1 sm:min-h-8" title="Remove this browser’s access" aria-label={`Remove access for ${selectedBrowserLabel}`} disabled={!!busy || state.offline || devices.length === 1} onClick={() => setConfirm(selectedBrowser.id)}><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M4 7h16M10 11v6m4-6v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>Disconnect</button>}</div>
-        {state.offline && <p role="status" className="text-xs text-[var(--text-muted)]">Showing verified stored account trust. Reconnect before removing access.</p>}
-        <details className="text-xs"><summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2">Browser details</summary><p className="mb-2">Account-approved browsers can control shared computers and approve other browsers.</p>{selectedDevice && <><p>Original name: {selectedDevice.label || "Browser"}</p><p>Approved {new Date(selectedDevice.approvedAt).toLocaleString()}.</p></>}<p className="break-all font-mono">Fingerprint: {selectedBrowser.id}</p></details>
-        {confirm === selectedBrowser.id && selectedDevice && <div role="group" aria-label="Confirm account device revocation" className="space-y-3 rounded-md border border-[var(--border-muted)] p-3"><p className="text-sm">Remove this browser from all shared computers? Connected computers stop its access after receiving the update; offline computers apply it when they reconnect. Other browsers keep their access.</p><div className="flex flex-wrap gap-2"><button className="btn-danger min-h-11 sm:min-h-8" disabled={!!busy} onClick={() => void revoke(selectedBrowser.id)}>Confirm remove access</button><button className="btn-ghost min-h-11 sm:min-h-8" onClick={() => setConfirm(null)}>Cancel</button></div></div>}
-        {devices.length === 1 && <p className="text-xs text-[var(--text-muted)]">This is the last account administrator. Approve another browser before removing its access.</p>}
-      </>}
-      {selectedComputer && (() => {
-        const { computer, key, confirmed, pin, ready, blocked, inRoster, verifying } = selectedComputer;
-        return <div data-computer-details={computer.bridgeId} data-account-migration={pin && !confirmed ? computer.bridgeId : undefined} className="space-y-2">
-          <DeviceDisplayNameEditor key={`${context}:bridge:${computer.bridgeId}`} target={{ kind: "bridge", id: computer.bridgeId }} label={selectedComputer.node.label} customName={displayName("bridge", computer.bridgeId)} disabledReason={nameDisabledReason("bridge", computer.bridgeId, ready && !blocked)} saving={displayNames.saving} error={displayNames.error} setName={displayNames.setName} />
-          <details className="text-xs"><summary className="min-h-11 cursor-pointer py-3">Original computer name and fingerprint</summary><p className="break-words">Original name: {computer.label || "Computer"}</p>{computer.security.endpoint && <p className="break-all font-mono">Fingerprint: {computer.security.endpoint.id}</p>}</details>
-          {pin && !confirmed && <><p className="text-xs leading-relaxed text-[var(--text-muted)]">Sharing lets your account-approved browsers control this computer. It replaces separate browser approvals and old invitations; browsers outside your account approvals lose access.</p>
-            <button className="btn-accent min-h-11 sm:min-h-8 w-full sm:w-auto" disabled={!!busy || !ready || blocked || state.offline || state.status === "unapproved" && state.historyExists} onClick={() => void migrate(computer)}>{busy === computer.bridgeId ? "Sharing computer…" : "Share with my other browsers"}</button></>}
-          {!pin && !confirmed && !blocked && <p className="text-xs text-[var(--text-muted)]">{failedChecks[key] ? "Could not verify access. Reconnect this computer, then refresh access." : verifying ? ready ? "Checking how access is set up…" : "Waiting for this computer to connect." : inRoster ? "Finish sharing from a browser already approved on this computer." : "Approve this computer from its setup request, or use its local invitation."}</p>}
-          {!confirmed && !inRoster && state.status !== "error" && !state.trust?.checkpoint.revokedBridgeIds.includes(computer.bridgeId) && computer.security.status !== "upgrade_required" && (pin || ["unpaired", "revoked", "key_changed"].includes(computer.security.status)) && <details className="text-xs" open={!ready}><summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2">Approve a browser on this computer</summary><ComputerApprovalRecovery /></details>}
-          {confirmed && selectedComputer.node.edge !== "current" && <p className="text-xs text-[var(--text-muted)]">Reconnect and refresh access to verify sharing on this computer.</p>}
-          {confirmed && <details className="text-xs"><summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2">Computer details</summary><p>Your approved account browsers can use this computer after access is verified.</p>{computer.security.endpoint && <p className="break-all font-mono">Fingerprint: {computer.security.endpoint.id}</p>}</details>}
-          {pin && !confirmed && !ready && <p className="text-xs text-[var(--text-muted)]">Connect this computer to share it.</p>}
-          {inRoster && <div className="space-y-2">
-            <button type="button" aria-label={`Remove computer ${selectedComputer.node.label}`} className="btn-danger inline-flex min-h-11 items-center gap-1 sm:min-h-8" disabled={!!busy || state.offline || state.status !== "ready" || !!state.trust?.checkpoint.revokedBridgeIds.includes(computer.bridgeId)} onClick={() => setConfirm(`computer:${computer.bridgeId}`)}>Remove computer</button>
-            {confirm === `computer:${computer.bridgeId}` && <div role="group" aria-label="Confirm computer removal" className="space-y-3 rounded-md border border-[var(--border-muted)] p-3"><p className="text-sm">{REMOVE_CONFIRM(selectedComputer.node.label)}</p><div className="flex flex-wrap gap-2"><button className="btn-danger min-h-11 sm:min-h-8" disabled={!!busy || state.offline || state.status !== "ready"} onClick={() => void removeComputer(computer.bridgeId)}>Confirm remove computer</button><button className="btn-ghost min-h-11 sm:min-h-8" onClick={() => setConfirm(null)}>Cancel</button></div></div>}
+    {selectedBrowser && <>
+      {selectedDevice && <div className="flex flex-wrap items-center gap-2">
+        <button type="button" className="btn-danger inline-flex min-h-11 items-center gap-1 sm:min-h-8" title="Remove this browser from your account" aria-label={`Remove browser ${selectedBrowserLabel}`}
+          disabled={!!busy || !canWrite} onClick={() => setConfirm(`browser:${selectedBrowser.id}`)}><TrashIcon />Remove</button></div>}
+      {confirm === `browser:${selectedBrowser.id}` && selectedDevice && <div role="group" aria-label="Confirm browser removal" className="space-y-3 rounded-md border border-[var(--border-muted)] p-3">
+        <p className="text-sm">{selectedBrowser.current ? REMOVE_THIS_BROWSER_CONFIRM : REMOVE_BROWSER_CONFIRM(selectedBrowserLabel)}</p>
+        <SignedIdentity label={selectedDevice.label} id={selectedBrowser.id} />
+        <SignerHint security={security} />
+        <div className="flex flex-wrap gap-2">
+          <PasskeyActionButton security={security} actionKey={`browser:${selectedBrowser.id}`} label="Confirm remove browser" busyLabel="Waiting for passkey…" className="btn-danger"
+            disabled={!canWrite} action={client => client.revokeDevice(selectedBrowser.id)} onDone={() => setConfirm(null)} />
+          <button type="button" className="btn-ghost min-h-11 sm:min-h-8" onClick={() => setConfirm(null)}>Cancel</button></div>
+      </div>}
+      {!selectedDevice && localDevices.includes(selectedBrowser.id) && <div role="group" aria-label="Removal not applied" className="space-y-2 rounded-md border border-[var(--status-pending)] p-3">
+        <p className="text-sm">{LOCAL_ONLY}.</p>
+        <p className="text-xs leading-relaxed text-[var(--text-muted)]">Your computers, the server and your other browsers still trust this browser. Sign the removal again to apply it.</p>
+        <SignedIdentity label={signedDevice(selectedBrowser.id)?.label ?? null} id={selectedBrowser.id} />
+        <SignerHint security={security} />
+        <PasskeyActionButton security={security} actionKey={`browser:${selectedBrowser.id}`} label="Sign removal again" busyLabel="Waiting for passkey…" className="btn-danger"
+          disabled={!canWrite} action={client => client.revokeDevice(selectedBrowser.id)} />
+      </div>}
+      {!selectedDevice && selectedBrowser.current && !localDevices.includes(selectedBrowser.id) && <p className="text-xs text-[var(--text-muted)]">{revokedHere || trusted?.revokedDeviceIds.includes(selectedBrowser.id) ? "This browser was removed from your account." : "This browser is not in your account."} <a href="/login" className="underline">Sign in with your passkey</a> to add it.</p>}
+      <details className="text-xs"><summary className="min-h-11 cursor-pointer py-3 sm:min-h-8 sm:py-2">Browser details</summary>
+        <p className="mb-2">Browsers in your account can use your computers. Only your passkeys can add or remove them.</p>
+        {selectedDevice && <><p>Original name: {selectedDevice.label || "Browser"}</p><p>Added {new Date(selectedDevice.approvedAt).toLocaleString()}.</p></>}
+        <p className="break-all font-mono">Fingerprint: {selectedBrowser.id}</p></details>
+    </>}
+    {selectedComputer && (() => {
+      const { computer, entry, revoked, localOnly, inAccount, node } = selectedComputer;
+      return <div data-computer-details={computer.bridgeId} className="space-y-2">
+        <DeviceDisplayNameEditor key={`${context}:bridge:${computer.bridgeId}`} target={{ kind: "bridge", id: computer.bridgeId }} label={node.label} customName={displayName("bridge", computer.bridgeId)}
+          disabledReason={nameDisabledReason("bridge", computer.bridgeId, inAccount)} saving={displayNames.saving} error={displayNames.error} setName={displayNames.setName} />
+        <details className="text-xs"><summary className="min-h-11 cursor-pointer py-3">Original computer name and fingerprint</summary>
+          <p className="break-words">Original name: {entry?.label || computer.label || "Computer"}</p>
+          {entry && <p>Added {new Date(entry.approvedAt).toLocaleString()}.</p>}
+          {(entry?.endpoint ?? computer.security.endpoint) && <p className="break-all font-mono">Fingerprint: {(entry?.endpoint ?? computer.security.endpoint)?.id}</p>}</details>
+        {entry && !revoked && <div className="space-y-2">
+          <button type="button" aria-label={`Remove computer ${node.label}`} className="btn-danger inline-flex min-h-11 items-center gap-1 sm:min-h-8" disabled={!!busy || !canWrite}
+            onClick={() => setConfirm(`computer:${computer.bridgeId}`)}><TrashIcon />Remove computer</button>
+          {confirm === `computer:${computer.bridgeId}` && <div role="group" aria-label="Confirm computer removal" className="space-y-3 rounded-md border border-[var(--border-muted)] p-3">
+            <p className="text-sm">{REMOVE_CONFIRM(node.label)}</p>
+            <SignedIdentity label={entry.label} id={computer.bridgeId} />
+            <SignerHint security={security} />
+            <div className="flex flex-wrap gap-2">
+              <PasskeyActionButton security={security} actionKey={`computer:${computer.bridgeId}`} label="Confirm remove computer" busyLabel="Waiting for passkey…" className="btn-danger"
+                disabled={!canWrite} action={client => client.revokeBridge(computer.bridgeId)} onDone={() => setConfirm(null)} />
+              <button type="button" className="btn-ghost min-h-11 sm:min-h-8" onClick={() => setConfirm(null)}>Cancel</button></div>
           </div>}
-          {pin && ready && !confirmed && <details className="text-xs" onToggle={event => { const open = event.currentTarget.open; setExpandedComputers(previous => previous[key] === open ? previous : { ...previous, [key]: open }); }}><summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2">Separate approvals and recovery</summary>{expandedComputers[key] && <SecurityDevices bridge={computer} currentEndpointId={state.identity?.endpoint.id ?? null} execute={execute} />}</details>}
-        </div>;
-      })()}
-    </section>;
+        </div>}
+        {localOnly && <div role="group" aria-label="Removal not applied" className="space-y-2 rounded-md border border-[var(--status-pending)] p-3">
+          <p className="text-sm">{LOCAL_ONLY}.</p>
+          <p className="text-xs leading-relaxed text-[var(--text-muted)]">The server, your other browsers and the computer itself still trust it. Sign the removal again to apply it.</p>
+          <SignedIdentity label={signedBridge(computer.bridgeId)?.label ?? null} id={computer.bridgeId} />
+          <SignerHint security={security} />
+          <PasskeyActionButton security={security} actionKey={`computer:${computer.bridgeId}`} label="Sign removal again" busyLabel="Waiting for passkey…" className="btn-danger"
+            disabled={!canWrite} action={client => client.revokeBridge(computer.bridgeId)} />
+        </div>}
+        {revoked && <p className="text-xs text-[var(--text-muted)]">This computer was removed from your account. To use it again, pair it as a new computer.</p>}
+        {!entry && !revoked && !localOnly && <p className="text-xs leading-relaxed text-[var(--text-muted)]">This computer is not in your account. To add it, run <code>ftown start</code> on it and open the pairing link it prints.</p>}
+      </div>;
+    })()}
+  </section>;
+
   return <div className="space-y-3">
+    {revokedHere && <div role="alert" className="space-y-2 rounded-md border border-[var(--status-error)] p-3">
+      <p className="text-sm font-semibold">This browser was removed from your account.</p>
+      <p className="text-xs leading-relaxed text-[var(--text-muted)]">It can no longer reach your computers, and passkey changes are turned off here. To use it again, set it up with new keys and sign in with your passkey.</p>
+      <a href="/login" className="btn-accent inline-flex min-h-11 items-center sm:min-h-8">Set up this browser again</a>
+    </div>}
+    {localDevices.length + localBridges.length > 0 && <section aria-label="Removals not applied" className="rounded-md border border-[var(--status-pending)] p-3 text-xs leading-relaxed">
+      <p className="font-semibold">{localDevices.length + localBridges.length === 1 ? "1 removal is" : `${localDevices.length + localBridges.length} removals are`} saved on this browser only.</p>
+      <p className="text-[var(--text-muted)]">Your account still includes {localDevices.length + localBridges.length === 1 ? "it" : "them"}. Select each item marked “{LOCAL_ONLY}” and sign its removal again.</p>
+    </section>}
+    <DiscardedChanges security={security} canWrite={canWrite} describe={describe} />
     <SecurityAccessMap browsers={browserNodes} bridges={computerViews.map(item => item.node)}
-      account={{ statusText: accountCurrent ? "Verified" : accountHistorical ? "Offline approval" : state.status === "checking" ? "Checking" : state.status === "error" ? "Access paused" : "Account approval needed", lockState: accountCurrent ? "secured" : accountHistorical || state.status === "checking" ? "unknown" : "approval_needed" }}
+      account={{ statusText: mismatch ? "Different account" : accountReady ? "Verified" : revokedHere ? "This browser was removed" : snapshot.status === "error" ? "Access paused" : "Not signed in",
+        lockState: accountReady ? "secured" : snapshot.status === "error" ? "unknown" : "approval_needed" }}
       selected={active} onSelect={node => { setSelection({ scope, node }); setConfirm(null); }} selectedDetails={selectedDetails}
       renderBrowserName={(node, label) => devices.some(device => device.endpoint.id === node.id)
         ? <DeviceDisplayNameEditor key={`${context}:browser:${node.id}`} variant="inline" target={{ kind: "browser", id: node.id }} label={label} customName={displayName("browser", node.id)} disabledReason={nameDisabledReason("browser", node.id, true)} saving={displayNames.saving} error={displayNames.error} setName={displayNames.setName} />
         : <span className="block break-words text-[10px] font-semibold sm:text-xs [overflow-wrap:anywhere]">{label}</span>}
       toolbar={<div className="flex flex-wrap items-start gap-2">
-        <button className="btn-ghost min-h-11 sm:min-h-8 text-xs" disabled={!!busy} onClick={() => { setRefreshRound(value => value + 1); displayNames.refresh(); void client.refresh(); }}>Refresh access</button>
-        {state.status === "ready" && pending.client && !needsReview && <details className="min-w-0 text-xs open:w-full"><summary className="min-h-11 sm:min-h-8 cursor-pointer rounded-md border border-[var(--border-muted)] px-2 py-3 sm:py-2">Add / review</summary><p className="my-2 text-xs text-[var(--text-muted)]">Sign in on the new browser, then review its request here and compare the code on both devices.</p><PendingDeviceInbox client={pending.client} snapshot={inbox} offline={state.offline} /></details>}
-        {(error || state.status === "error") && <p role="alert" className="w-full text-sm text-[var(--status-error)]">{error ?? securityErrorMessage({ code: state.code })}</p>}
-        {state.status === "ready" && pending.client && needsReview && <div className="w-full"><PendingDeviceInbox client={pending.client} snapshot={inbox} offline={state.offline} /></div>}
+        <button type="button" className="btn-ghost min-h-11 text-xs sm:min-h-8" disabled={!!busy} onClick={() => { displayNames.refresh(); void security.run("refresh", client => client.refresh()); }}>{busy === "refresh" ? "Refreshing…" : "Refresh access"}</button>
+        {message && <p role="alert" className="w-full text-sm text-[var(--status-error)]">{message}</p>}
+        {snapshot.status === "signed_out" && !mismatch && <p role="status" className="w-full text-xs text-[var(--text-muted)]">Sign in with your passkey to manage your account.</p>}
       </div>} />
-    {state.status === "unapproved" && state.historyExists && <DeviceApproval ownerId={client.ownerId} email="your account" client={client} />}
-    <details className="text-xs text-[var(--text-muted)]"><summary className="min-h-11 sm:min-h-8 cursor-pointer py-3 sm:py-2">Recovery and security details</summary><p>Clearing browser storage loses its private key. Password resets cannot recover it. Keep an approved browser and local CLI access available. If every account signing key is lost, each computer needs explicit account-trust recovery. Local recovery cannot reset account approvals.</p></details>
+    <PasskeysSection security={security} canWrite={canWrite} />
+    <details className="text-xs text-[var(--text-muted)]"><summary className="min-h-11 cursor-pointer py-3 sm:min-h-8 sm:py-2">Recovery and security details</summary>
+      <p>Only your passkeys can change your account. Removing a browser or computer takes effect as soon as your computers receive the signed change; offline computers apply it when they reconnect. Clearing this browser's storage removes its keys; sign in again with your passkey to add it back. If you lose every passkey, create a new account and run <code>ftown start --new-identity</code> on each computer.</p></details>
   </div>;
 }

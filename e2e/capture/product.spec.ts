@@ -4,8 +4,9 @@ import { createHash } from "node:crypto";
 import { mkdir, realpath, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { test } from "../helpers/fixtures";
-import { login, makeUser, registerUser } from "../helpers/app";
-import { approveAccountComputer, startAccountTestBridge, usePrivateApprovalLink, type AccountTestBridge } from "../helpers/account-pairing";
+import { login } from "../helpers/app";
+import { startIsolatedBridge, type IsolatedBridge } from "../helpers/ledger-bridge";
+import { approvePairLink } from "../helpers/passkey";
 import { bridgeApiFetch } from "../helpers/bridge-api";
 import { E2E_DIR } from "../helpers/config";
 import { recordScenes, recordVideo, type Video } from "./record-video";
@@ -130,11 +131,9 @@ const holdResult = (startedAt: number) => hold(Math.max(2500, 12_000 - (performa
 
 test("capture real isolated workspace, phone and access panel", async ({ browser }) => {
   const directory = await outputDirectory();
-  const user = makeUser("demo");
-  await registerUser(user.email, user.password);
   const contexts: BrowserContext[] = [];
   const sessions: string[] = [];
-  let bridge: AccountTestBridge | undefined;
+  let bridge: IsolatedBridge | undefined;
   let demoOwned = false;
   let primaryError: unknown;
   let hasPrimaryError = false;
@@ -144,26 +143,19 @@ test("capture real isolated workspace, phone and access panel", async ({ browser
     const desktopContext = await browser.newContext({ baseURL: origin, viewport: { width: 1280, height: 800 }, deviceScaleFactor: 2 });
     contexts.push(desktopContext);
     const desktop = await desktopContext.newPage();
-    await login(desktop, user.email, user.password, { pairBridge: false });
-    bridge = await startAccountTestBridge(origin);
-    const bridgeId = await approveAccountComputer(desktop, bridge);
+    await login(desktop);
+    bridge = await startIsolatedBridge();
+    const pairing = await bridge.pairing();
+    await approvePairLink(desktop, pairing.link, pairing.code);
+    await desktop.goto("/dashboard");
+    await expect.poll(() => bridge!.bridgeIdFile(), { timeout: 60_000 }).not.toBeNull();
+    const bridgeId = bridge.bridgeIdFile()!;
     await expect(desktop.locator(`[data-bridge-row="${bridgeId}"]`)).toContainText("demo-workstation");
 
     const phoneContext = await browser.newContext({ baseURL: origin, viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true });
     contexts.push(phoneContext);
     const phone = await phoneContext.newPage();
-    await login(phone, user.email, user.password, { pairBridge: false });
-    await usePrivateApprovalLink(phone);
-    await phone.getByRole("textbox", { name: "Device name", exact: true }).fill("Demo phone");
-    await phone.getByRole("button", { name: "Create approval link", exact: true }).click();
-    const privateLink = await phone.getByRole("textbox", { name: "Private approval link", exact: true }).inputValue();
-    const comparison = await phone.getByLabel("Comparison code", { exact: true }).textContent();
-    try { await desktop.goto(privateLink); } catch { throw new Error("Private device approval navigation failed"); }
-    await expect(desktop).toHaveURL(`${origin}/devices/approve`);
-    const desktopCode = await desktop.getByLabel("Comparison code", { exact: true }).textContent();
-    expect(Boolean(comparison && desktopCode && comparison === desktopCode)).toBe(true);
-    await desktop.getByRole("button", { name: "Codes match — approve device", exact: true }).click();
-    await expect(desktop.getByText(/Device approved\. It can now finish connecting/)).toBeVisible({ timeout: 45_000 });
+    await login(phone);
     await expect(phone.locator(`[data-bridge-row="${bridgeId}"]`)).toBeVisible({ timeout: 60_000 });
     await desktop.goto("/dashboard");
     await expect(desktop.locator(`[data-bridge-row="${bridgeId}"]`)).toBeVisible({ timeout: 45_000 });

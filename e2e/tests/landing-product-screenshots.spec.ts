@@ -1,5 +1,6 @@
-import { expect, test, type Page } from "@playwright/test";
-import { registerAndLogin } from "../helpers/app";
+import { expect, type Page } from "@playwright/test";
+import { test } from "../helpers/fixtures";
+import { login } from "../helpers/app";
 
 const captures = [
   {
@@ -47,7 +48,7 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 1000, height: 900
       expect(box!.height).toBeGreaterThanOrEqual(44);
     }
     await expect(page.getByRole("link", { name: "Sign In" })).toHaveAttribute("href", "/login");
-    await expect(page.getByRole("link", { name: "Try Hosted" }).first()).toHaveAttribute("href", "/register");
+    await expect(page.getByRole("link", { name: "Try Hosted" }).first()).toHaveAttribute("href", "/login");
     const selfHost = page.getByRole("link", { name: "Self-host (Open Source)" }).first();
     await expect(selfHost).toHaveAttribute("href", "#solo");
     const hero = page.getByAltText(captures[0].alt);
@@ -181,7 +182,7 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 1000, height: 900
 }
 
 test("authenticated visitors still redirect from the public landing page", async ({ page }) => {
-  await registerAndLogin(page);
+  await login(page);
   await page.goto("/");
   await expect(page).toHaveURL(/\/dashboard$/);
 });
