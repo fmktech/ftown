@@ -189,7 +189,7 @@ test('projection makes the account devices exactly the trusted roster and emits 
   h.serve(async () => w.withPhone.ledger);
   await h.security.startLedger();
   assert.equal(h.fetches.count, 1);
-  assert.deepEqual(h.security.ledgerStatus(), { accountId: w.accountId, revision: 3, head: await chainHead(w.withPhone), own: 'active', divergence: null, serverBehind: false });
+  assert.deepEqual(h.security.ledgerStatus(), { accountId: w.accountId, revision: 3, head: await chainHead(w.withPhone), own: 'active', divergence: null, serverBehind: false, announcements: { accepted: 0, dropped: 0 } });
   assert.deepEqual(await h.ids(), ids(w.cli, w.laptop, w.phone));
   const listed = await h.security.listDevices(await h.cli());
   assert.deepEqual(listed.filter(device => device.source === 'account').map(device => device.endpoint.id).sort(), ids(w.laptop, w.phone));
@@ -378,7 +378,7 @@ test('absent (not listed, or listed with other keys, or another account) fails c
   h.serve(async () => w.foreign.ledger);
   await h.security.startLedger();
   assert.equal(h.fired.count, 0);
-  assert.deepEqual(h.security.ledgerStatus(), { accountId: null, revision: null, head: null, own: 'unpaired', divergence: null, serverBehind: false });
+  assert.deepEqual(h.security.ledgerStatus(), { accountId: null, revision: null, head: null, own: 'unpaired', divergence: null, serverBehind: false, announcements: { accepted: 0, dropped: 0 } });
 });
 
 test('offline grace: a lapsed or missing server contact fails closed until noteServerContact renews it', async t => {
@@ -601,7 +601,7 @@ test('an invalid candidate is rejected with no state change; without a ledger ev
   await solo.startLedger();
   assert.equal(await solo.offerLedger(w.withPhone.ledger, 'relay'), 'reject');
   solo.noteServerContact(START);
-  assert.deepEqual(solo.ledgerStatus(), { accountId: null, revision: null, head: null, own: 'unpaired', divergence: null, serverBehind: false });
+  assert.deepEqual(solo.ledgerStatus(), { accountId: null, revision: null, head: null, own: 'unpaired', divergence: null, serverBehind: false, announcements: { accepted: 0, dropped: 0 } });
   await solo.refreshLedger();
   await solo.policy.provisionLocalEndpoint(w.cli.endpoint);
   const cli = await solo.policy.principal(w.cli.endpoint.id);
@@ -784,6 +784,7 @@ test('ledgerStatus: divergence (the server first, heads cut to 8 characters) and
     accountId: w.accountId, revision: 4, head: await chainHead(w.longer), own: 'active',
     divergence: { source: 'server', otherHead: (await chainHead(w.deskFork)).slice(0, 8), otherRevision: 4, ourRevision: 4, firstSeen: START + 5000 },
     serverBehind: false,
+    announcements: { accepted: 0, dropped: 0 },
   });
   // The server agrees again: its entry is cleared, the relay's remains.
   h.serve(async () => w.longer.ledger);

@@ -5,11 +5,13 @@ import { join } from 'node:path';
 import { before, describe, it } from 'node:test';
 import { UnauthorizedError } from 'centrifuge';
 import {
-  HttpStatusError, MISSING_RELAY_URL_MESSAGE, RELAY_LEDGER_MAX_SPACING_MS, UNKNOWN_ENDPOINT_REFRESH_SPACING_MS, createAccountRelay, subscribeApprovalRequired, createLedgerServer, httpStatusOf, isRefusal,
+  HEAD_ANNOUNCE_SPACING_MS, HEAD_ANNOUNCE_WARN_SPACING_MS, HttpStatusError, MISSING_RELAY_URL_MESSAGE, RELAY_LEDGER_MAX_SPACING_MS, UNKNOWN_ENDPOINT_REFRESH_SPACING_MS, createAccountRelay, subscribeApprovalRequired, createLedgerServer, httpStatusOf, isRefusal,
   parseRelayUrl, parseRetryAfter, readSavedRelayUrl, registerBridgeEndpoint, relayTokenFailureMessage, saveRelayUrl, type AccountRelayDeps, type AccountRelaySecurity,
 } from './ledger-relay.js';
 import type { LedgerHeadRelation, LedgerRelation } from './security/ledger/ledger.js';
 import { generateAuthKey } from './security/ledger/proof.js';
+import { HEAD_ANNOUNCE_MAX_AGE_MS, verifyHeadAnnouncement, type HeadAnnouncement } from './security/ledger/announce.js';
+import type { LedgerCheckpoint } from './security/ledger/protocol.js';
 import type { ServerLedgerRead } from './security/bridge/security.js';
 import type { EndpointPublic } from './security/protocol.js';
 
@@ -45,7 +47,11 @@ function fakeSecurity(initialHead: string | null = 'local-head') {
   const log: string[] = [];
   /** noteServerHead calls, kept apart from `log`. */
   const heads: string[] = [];
-  const state = { head: initialHead, own: 'active', serverBehind: false };
+  const state = { head: initialHead, revision: initialHead === null ? null : 3 as number | null, own: 'active', serverBehind: false };
+  const headListeners = new Set<() => void>();
+  /** judgeHeadAnnouncement calls (keyIds), kept apart from `log`. */
+  const judged: string[] = [];
+  let judgement: (announcement: HeadAnnouncement) => Promise<LedgerHeadRelation | null> = async () => 'same';
   let offerResult: () => Promise<'adopt' | 'keep' | 'reject'> = async () => 'keep';
   let relation: LedgerRelation | null = 'same';
   let serverRead: () => ServerLedgerRead = () => ({ kind: 'read', outcome: { decision: 'keep', relation: 'same', head: state.head, revision: 3 } });
@@ -63,10 +69,15 @@ function fakeSecurity(initialHead: string | null = 'local-head') {
     noteServerHead: server => { heads.push(`${server.head}@${server.revision}`); return headRelation; },
     noteServerContact: () => { log.push('contact'); },
     refreshLedger: async () => { log.push('refresh'); refreshEffect(); await refreshGate; },
-    ledgerStatus: () => ({ head: state.head, own: state.own, serverBehind: state.serverBehind }),
+    ledgerStatus: () => ({ head: state.head, revision: state.revision, own: state.own, serverBehind: state.serverBehind }),
+    judgeHeadAnnouncement: async announcement => { judged.push(announcement.keyId); return judgement(announcement); },
+    onLedgerHead: listener => { headListeners.add(listener); return () => { headListeners.delete(listener); }; },
   };
   return {
-    security, log, heads, state,
+    security, log, heads, state, judged, headListeners,
+    /** What an adopt does in the real service: a new head, then the head listeners. */
+    adopt: (head: string, revision: number) => { state.head = head; state.revision = revision; for (const listener of Array.from(headListeners)) listener(); },
+    setJudge: (fn: (announcement: HeadAnnouncement) => Promise<LedgerHeadRelation | null>) => { judgement = fn; },
     setOffer: (fn: () => Promise<'adopt' | 'keep' | 'reject'>) => { offerResult = fn; },
     setRelation: (value: LedgerRelation | null) => { relation = value; },
     setServerRead: (fn: () => ServerLedgerRead) => { serverRead = fn; },
@@ -508,6 +519,198 @@ describe('createAccountRelay: relay ledger channel (spaced, latest wins)', () =>
     r.onLedgerMessage(offer(3));
     await settle();
     assert.deepEqual(sec.log, ['offer:relay:{"n":1}']);
+  });
+});
+
+describe('createAccountRelay: head announcements (CONTRACT §13)', () => {
+  const head = (n: number): string => Buffer.alloc(32, n).toString('base64url');
+  const NOW = 1_750_000_000_000;
+  async function announcing(publish: 'none' | 'ok' | 'fail' = 'ok') {
+    const sec = fakeSecurity(head(1));
+    const timers = fakeTimers();
+    const logs: string[] = [];
+    const key = await generateAuthKey(false);
+    const fetcher = fakeFetch({ 'POST /api/account/ledger': [{ status: 200, body: {} }] });
+    const r = createAccountRelay({
+      apiUrl: API, accountId: ACCOUNT, bridgeId: 'studio', authPrivateKey: key.privateKey, security: sec.security, store: { read: async () => STORED },
+      server: createLedgerServer({ apiUrl: API, fetchImpl: fetcher.impl }), hostname: () => 'h', localPort: () => undefined, fetchImpl: fetcher.impl,
+      now: () => timers.clock.t, wallClock: () => NOW + timers.clock.t, schedule: timers.schedule, log: line => logs.push(line),
+    });
+    const published: HeadAnnouncement[] = [];
+    if (publish !== 'none') {
+      r.setLedgerPublisher(async announcement => {
+        published.push(announcement);
+        if (publish === 'fail') throw new Error('Ledger channel not subscribed');
+      });
+    }
+    // The checkpoint a receiver would hold: this bridge as a member with its auth key.
+    const checkpoint = { version: 2, accountId: ACCOUNT, revision: 3, head: head(1), authorities: [], devices: [],
+      bridges: [{ bridgeId: 'studio', endpoint: {} as never, authPublicKey: key.publicKey, label: 'Studio', approvedAt: 1 }],
+      revokedDeviceIds: [], revokedBridgeIds: [] } satisfies LedgerCheckpoint;
+    return { r, sec, timers, logs, published, fetcher, checkpoint };
+  }
+  /** Signing is real WebCrypto work: wait until `done` holds (bounded). */
+  async function until(done: () => boolean): Promise<void> {
+    for (let i = 0; i < 200 && !done(); i++) await new Promise(resolve => setTimeout(resolve, 1));
+  }
+  /** A received announcement (shape only: the fake security judges it). */
+  const received = (keyId: string, n: number, kind: 'device' | 'bridge' = 'device'): { type: 'head_announcement'; announcement: HeadAnnouncement } => ({
+    type: 'head_announcement',
+    announcement: { type: 'ledger_head', version: 1, accountId: ACCOUNT, kind, keyId, head: head(n), revision: n, at: NOW, signature: 'A'.repeat(86) },
+  });
+
+  it('announces a signed head when the ledger channel subscribes; callers never wait for it', async () => {
+    const { r, published, timers, checkpoint } = await announcing();
+    assert.equal(r.onLedgerSubscribed(), undefined);
+    await until(() => published.length === 1);
+    assert.equal(published.length, 1);
+    const [announcement] = published;
+    assert.deepEqual({ ...announcement, signature: '' }, {
+      type: 'ledger_head', version: 1, accountId: ACCOUNT, kind: 'bridge', keyId: 'studio', head: head(1), revision: 3, at: NOW + timers.clock.t, signature: '',
+    });
+    assert.equal(await verifyHeadAnnouncement(checkpoint, announcement, NOW + timers.clock.t), true, 'signed with the bridge auth key');
+    assert.equal(await verifyHeadAnnouncement(checkpoint, announcement, NOW + timers.clock.t + HEAD_ANNOUNCE_MAX_AGE_MS + 1), false);
+  });
+
+  it('announces after every adopt, at most once per 5 s, coalescing to the latest head', async () => {
+    const { r, sec, published, timers } = await announcing();
+    r.onLedgerSubscribed();
+    await until(() => published.length === 1);
+    sec.adopt(head(2), 4);
+    sec.adopt(head(3), 5);
+    sec.adopt(head(4), 6);
+    await settle();
+    assert.equal(published.length, 1, 'the next waits for the spacing');
+    const announceTimers = timers.live().filter(timer => timer.at - timers.clock.t === HEAD_ANNOUNCE_SPACING_MS);
+    assert.equal(announceTimers.length, 1, 'one pending announcement, not three');
+    while (timers.live().length > 0) { timers.fire(); await settle(); }
+    await until(() => published.length === 2);
+    assert.deepEqual(published.map(item => [item.head, item.revision]), [[head(1), 3], [head(4), 6]]);
+    // A quiet 5 s later the next adopt is announced at once.
+    timers.clock.t += HEAD_ANNOUNCE_SPACING_MS;
+    sec.adopt(head(5), 7);
+    await until(() => published.length === 3);
+    assert.deepEqual(published.map(item => item.revision), [3, 6, 7]);
+  });
+
+  it('only an active member announces: nothing while revoked, absent, unpaired or without a head', async () => {
+    for (const own of ['revoked', 'absent', 'unpaired']) {
+      const { r, sec, published, timers } = await announcing();
+      sec.state.own = own;
+      r.onLedgerSubscribed();
+      sec.adopt(head(2), 4);
+      while (timers.live().length > 0) { timers.fire(); await settle(); }
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assert.deepEqual(published, [], own);
+    }
+    const { r, sec, published } = await announcing();
+    sec.state.head = null; sec.state.revision = null;
+    r.onLedgerSubscribed();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(published, []);
+  });
+
+  it('without a publisher announcing is a silent no-op; once set, the next adopt is announced', async () => {
+    const { r, sec, published, timers, logs } = await announcing('none');
+    r.onLedgerSubscribed();
+    sec.adopt(head(2), 4);
+    await settle();
+    assert.deepEqual(timers.live().filter(timer => timer.at - timers.clock.t === HEAD_ANNOUNCE_SPACING_MS), []);
+    assert.deepEqual(logs, []);
+    r.setLedgerPublisher(async announcement => { published.push(announcement); });
+    sec.adopt(head(3), 5);
+    await until(() => published.length === 1);
+    assert.deepEqual(published.map(item => item.revision), [5]);
+  });
+
+  it('a failed publish is ignored (best effort) and logged at most once a minute', async () => {
+    const { r, sec, published, timers, logs } = await announcing('fail');
+    r.onLedgerSubscribed();
+    await until(() => logs.length === 1);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0], /Could not announce the ledger head: Ledger channel not subscribed/);
+    for (let i = 0; i < 5; i++) {
+      timers.clock.t += HEAD_ANNOUNCE_SPACING_MS;
+      sec.adopt(head(10 + i), 10 + i);
+      await until(() => published.length === 2 + i);
+    }
+    assert.equal(published.length, 6);
+    assert.equal(logs.length, 1, 'no second line within the minute');
+    timers.clock.t += HEAD_ANNOUNCE_WARN_SPACING_MS;
+    sec.adopt(head(20), 20);
+    await until(() => logs.length === 2);
+    assert.equal(logs.length, 2);
+  });
+
+  it('stop cancels a pending announcement and unsubscribes from the head signal', async () => {
+    const { r, sec, published, timers } = await announcing();
+    r.onLedgerSubscribed();
+    await until(() => published.length === 1);
+    sec.adopt(head(2), 4);
+    r.stop();
+    assert.deepEqual(timers.live(), []);
+    assert.equal(sec.headListeners.size, 0);
+    r.onLedgerSubscribed();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(published.length, 1);
+  });
+
+  it('a verified announcement with an unknown head queues exactly one paced server read; same and behind do nothing', async () => {
+    const { r, sec, fetcher, timers } = await announcing();
+    sec.setJudge(async () => 'same');
+    r.onLedgerMessage(received('laptop'.padEnd(43, 'A'), 3));
+    sec.setJudge(async () => 'behind');
+    r.onLedgerMessage(received('laptop'.padEnd(43, 'A'), 2));
+    await settle();
+    assert.deepEqual(sec.log, []);
+    sec.setJudge(async () => 'unknown');
+    r.onLedgerMessage(received('laptop'.padEnd(43, 'A'), 9));
+    await settle();
+    assert.deepEqual(sec.log, ['refresh']);
+    assert.deepEqual(sec.judged.length, 3);
+    // An announcement never leads to a POST, nor to any request of the relay's own.
+    assert.deepEqual(fetcher.calls, []);
+    while (timers.live().length > 0) { timers.fire(); await settle(); }
+    assert.deepEqual(sec.log, ['refresh']);
+  });
+
+  it('a burst of unknown heads from a member is bounded by the relay spacing: one read now, one for the rest', async () => {
+    const { r, sec, timers, fetcher } = await announcing();
+    sec.setJudge(async () => 'unknown');
+    for (let n = 0; n < 200; n++) r.onLedgerMessage(received('laptop'.padEnd(43, 'A'), 10 + n));
+    await settle();
+    assert.equal(sec.judged.length, 200, 'one judgement (one signature check) per message');
+    assert.deepEqual(sec.log, ['refresh']);
+    timers.fire();
+    await settle();
+    assert.deepEqual(sec.log, ['refresh', 'refresh'], 'the rest were coalesced into one trailing read');
+    assert.deepEqual(timers.live().filter(timer => timer.at > timers.clock.t), []);
+    assert.deepEqual(fetcher.calls, []);
+  });
+
+  it('dropped announcements and our own echo cause nothing; our own is not even judged', async () => {
+    const { r, sec, timers } = await announcing();
+    sec.setJudge(async () => null);
+    r.onLedgerMessage(received('laptop'.padEnd(43, 'A'), 9));
+    r.onLedgerMessage(received('studio', 9, 'bridge'));
+    sec.setJudge(async () => { throw new Error('boom'); });
+    r.onLedgerMessage(received('other-bridge', 9, 'bridge'));
+    await settle();
+    assert.deepEqual(sec.judged, ['laptop'.padEnd(43, 'A'), 'other-bridge']);
+    assert.deepEqual(sec.log, []);
+    assert.deepEqual(timers.live(), []);
+  });
+
+  it('the unsigned ledger_head notice keeps its behaviour beside announcements', async () => {
+    const { r, sec } = await announcing();
+    r.onLedgerMessage({ type: 'ledger_head', head: head(1), revision: 3 });
+    await settle();
+    assert.deepEqual(sec.log, []);
+    assert.deepEqual(sec.judged, []);
+    r.onLedgerMessage({ type: 'ledger_head', head: head(2), revision: 4 });
+    await settle();
+    assert.deepEqual(sec.log, ['refresh']);
+    assert.deepEqual(sec.judged, []);
   });
 });
 

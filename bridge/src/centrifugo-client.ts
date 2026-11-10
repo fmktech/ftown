@@ -1,6 +1,7 @@
 import { Centrifuge } from 'centrifuge';
 import { BridgeSecurityService, applicationJson } from './security/bridge/security.js';
 import { accountChannel, sessionChannel } from './security/ledger/channels.js';
+import { parseHeadAnnouncement, type HeadAnnouncement } from './security/ledger/announce.js';
 import { executeSecurePacket } from './security/bridge/execute.js';
 import type { SecureExecutionObserver } from './security/bridge/execution-observer.js';
 import { scopedUpdateObserver } from './update-effects.js';
@@ -33,9 +34,12 @@ const MAX_PUBLISH_BYTES = 300_000;
 
 export type LedgerMessage =
   | { type: 'ledger'; ledger: unknown }
-  | { type: 'ledger_head'; head: string; revision: number };
+  | { type: 'ledger_head'; head: string; revision: number }
+  /** A member's signed head announcement (CONTRACT §13), shape-checked only: the receiver verifies it against its trusted checkpoint. */
+  | { type: 'head_announcement'; announcement: HeadAnnouncement };
 
-/** Strict shape check for `bridges:ledger` publications; anything else is ignored. */
+/** Strict shape check for `bridges:ledger` publications; anything else is ignored. A `ledger_head` with exactly {type, head, revision} is
+ *  the unsigned notice; any other `ledger_head` must be a well-formed signed announcement (parseHeadAnnouncement). */
 export function parseLedgerMessage(data: unknown): LedgerMessage | null {
   if (typeof data !== 'object' || data === null || Array.isArray(data)) return null;
   const record = data as Record<string, unknown>;
@@ -45,7 +49,11 @@ export function parseLedgerMessage(data: unknown): LedgerMessage | null {
     return { type: 'ledger', ledger: record.ledger };
   }
   if (record.type === 'ledger_head') {
-    if (keys.length !== 3 || !keys.includes('head') || !keys.includes('revision')) return null;
+    if (keys.length !== 3) {
+      const announcement = parseHeadAnnouncement(record);
+      return announcement === null ? null : { type: 'head_announcement', announcement };
+    }
+    if (!keys.includes('head') || !keys.includes('revision')) return null;
     const { head, revision } = record;
     if (typeof head !== 'string' || head.length === 0) return null;
     if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) return null;
@@ -449,6 +457,20 @@ export class CentrifugoClient {
     });
     sub.subscribe();
     this.subscriptions.set(channel, sub);
+  }
+
+  /**
+   * Publishes this bridge's signed head announcement on the account's ledger channel, as a raw (self-authenticating) publication on the
+   * connection that holds the ledger subscription. Rejects unless that subscription is subscribed on a connected client, or when the value is
+   * not a well-formed announcement of `userId`'s account. Not mirrored to local publication listeners.
+   */
+  async publishLedgerAnnouncement(userId: string, announcement: HeadAnnouncement): Promise<void> {
+    const channel = accountChannel('bridges:ledger', userId);
+    const sub = this.subscriptions.get(channel);
+    if (this.disabled || !sub || sub.state !== 'subscribed' || this.client.state !== 'connected') throw new Error('Ledger channel not subscribed');
+    const parsed = parseHeadAnnouncement(announcement);
+    if (parsed === null || parsed.accountId !== userId) throw new Error('Invalid head announcement');
+    await this.client.publish(channel, parsed);
   }
 
   async publishTerminalScreen(userId: string, sessionId: string, raw: string): Promise<void> {

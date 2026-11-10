@@ -5,6 +5,9 @@
  * - the relay's ledger messages and (re)subscriptions, spaced so a relay publisher cannot force back-to-back reads and verifies;
  * - the re-offer of this bridge's chain when a server read shows the server behind it (ledger-reoffer.ts): relay input only ever leads to
  *   a paced read, never to a POST, and a refused relay token (plain 401) only to a read that may then re-offer;
+ * - signed head announcements (security/ledger/announce.ts, CONTRACT §10/§13): this bridge announces its head after the ledger channel
+ *   subscribes and after every adopt (at most one per HEAD_ANNOUNCE_SPACING_MS, latest head, best effort); a received one is verified against
+ *   the trusted checkpoint and, when its head is unknown here, only queues the same paced server read as a ledger notice;
  * - the last relay URL the server named (security/relay-url.json), for an offline start.
  * Nothing here decides trust: every ledger goes to security.offerLedgerResult / refreshLedger / readServerLedger, which verify it.
  */
@@ -14,6 +17,7 @@ import { join } from 'node:path';
 import { UnauthorizedError } from 'centrifuge';
 import type { LedgerMessage } from './centrifugo-client.js';
 import type { LedgerHeadRelation } from './security/ledger/ledger.js';
+import { signHeadAnnouncement, type HeadAnnouncement } from './security/ledger/announce.js';
 import type { LedgerOfferOutcome, ServerLedgerRead } from './security/bridge/security.js';
 import type { EndpointPublic } from './security/protocol.js';
 import { createLedgerReoffer, type LedgerPostAnswer } from './ledger-reoffer.js';
@@ -30,6 +34,10 @@ export const RELAY_LEDGER_MIN_SPACING_MS = 1_000;
 export const RELAY_LEDGER_MAX_SPACING_MS = 60_000;
 /** Refreshes pulled by requests from endpoints the replica does not list run at most this often (single-flight, trailing). */
 export const UNKNOWN_ENDPOINT_REFRESH_SPACING_MS = 2_000;
+/** This bridge announces its head at most this often; a pending announcement is replaced by the latest head, never queued. */
+export const HEAD_ANNOUNCE_SPACING_MS = 5_000;
+/** A failed announcement (best effort) is logged at most this often. */
+export const HEAD_ANNOUNCE_WARN_SPACING_MS = 60_000;
 
 export interface LedgerServer {
   /** GET /api/account/ledger?accountId=… (public read): the `ledger` field, unverified. Throws on any failure (HttpStatusError for a
@@ -221,7 +229,12 @@ export interface AccountRelaySecurity {
   noteServerContact(now?: number): void;
   /** Coalesced GET of the server ledger, offered as 'server'. */
   refreshLedger(): Promise<void>;
-  ledgerStatus(): { head: string | null; own: string; serverBehind: boolean };
+  ledgerStatus(): { head: string | null; revision: number | null; own: string; serverBehind: boolean };
+  /** A parsed head announcement (owner publication): its relation to the stored chain when it verifies against the trusted checkpoint,
+   *  else null (own, invalid, unknown or revoked member, stale). At most one signature check. */
+  judgeHeadAnnouncement(announcement: HeadAnnouncement): Promise<LedgerHeadRelation | null>;
+  /** Fires after the stored head or this bridge's own status changes (every adopt). Returns the unsubscribe. */
+  onLedgerHead(listener: () => void): () => void;
 }
 
 export interface AccountRelayDeps {
@@ -244,8 +257,10 @@ export interface AccountRelayDeps {
   /** Reconnects the relay after it was refused (centrifugo.connect()). */
   reconnect?: () => void;
   fetchImpl?: typeof fetch;
-  /** Monotonic clock (token reuse, cooldown, relay spacing, re-offer pacing); injectable for tests. */
+  /** Monotonic clock (token reuse, cooldown, relay spacing, re-offer and announcement pacing); injectable for tests. */
   now?: () => number;
+  /** Wall clock (ms since the epoch) for the `at` of this bridge's head announcements; defaults to Date.now. */
+  wallClock?: () => number;
   /** [0, 1): token cooldown and re-offer jitter. */
   random?: () => number;
   /** Timer for relay spacing; returns a cancel function. Defaults to an unref'd setTimeout. */
@@ -262,8 +277,10 @@ export interface AccountRelay {
   relayUrl(): string | null;
   /** CentrifugoClient onLedgerMessage. */
   onLedgerMessage(message: LedgerMessage): void;
-  /** CentrifugoClient onLedgerSubscribed: every (re)subscribe may have missed records. */
+  /** CentrifugoClient onLedgerSubscribed: every (re)subscribe may have missed records; it also announces this bridge's head. */
   onLedgerSubscribed(): void;
+  /** How head announcements reach the ledger channel (CentrifugoClient.publishLedgerAnnouncement); until set, announcing is a no-op. */
+  setLedgerPublisher(publish: ((announcement: HeadAnnouncement) => Promise<void>) | null): void;
   /**
    * A request from an endpoint the trusted replica does not list (approval_required, not a revoked one): a browser may have enrolled
    * moments ago. Pulls the server ledger outside the relay spacing, at most once per UNKNOWN_ENDPOINT_REFRESH_SPACING_MS, single-flight,
@@ -492,6 +509,64 @@ export function createAccountRelay(deps: AccountRelayDeps): AccountRelay {
       });
   };
 
+  // This bridge's head announcements: best effort, never awaited by a caller, at most one per HEAD_ANNOUNCE_SPACING_MS. A request while one
+  // is pending only marks it wanted; the head is read when it is signed, so the latest head is the one announced.
+  const wallClock = deps.wallClock ?? Date.now;
+  let publisher: ((announcement: HeadAnnouncement) => Promise<void>) | null = null;
+  let announceWanted = false;
+  let announcing = false;
+  let announceCancel: (() => void) | null = null;
+  let lastAnnounceAt = Number.NEGATIVE_INFINITY;
+  let lastAnnounceWarnAt = Number.NEGATIVE_INFINITY;
+
+  const sendAnnouncement = async (): Promise<void> => {
+    const publish = publisher;
+    const status = deps.security.ledgerStatus();
+    // Only an active member of its own chain speaks for it (not unpaired, absent or revoked).
+    if (publish === null || status.own !== 'active' || status.head === null || status.revision === null) return;
+    try {
+      const announcement = await signHeadAnnouncement(deps.authPrivateKey, {
+        accountId: deps.accountId, kind: 'bridge', keyId: deps.bridgeId, head: status.head, revision: status.revision, at: Math.floor(wallClock()),
+      });
+      if (!stopped) await publish(announcement);
+    } catch (error) {
+      const at = monotonic();
+      if (at - lastAnnounceWarnAt >= HEAD_ANNOUNCE_WARN_SPACING_MS) {
+        lastAnnounceWarnAt = at;
+        log(`[Bridge] Could not announce the ledger head: ${messageOf(error)}`);
+      }
+    }
+  };
+  const pumpAnnounce = (): void => {
+    if (stopped || !announceWanted || announcing || announceCancel !== null) return;
+    const wait = lastAnnounceAt + HEAD_ANNOUNCE_SPACING_MS - monotonic();
+    if (wait > 0) {
+      announceCancel = schedule(() => { announceCancel = null; pumpAnnounce(); }, wait);
+      return;
+    }
+    announceWanted = false;
+    announcing = true;
+    lastAnnounceAt = monotonic();
+    void sendAnnouncement().finally(() => { announcing = false; pumpAnnounce(); });
+  };
+  const announce = (): void => {
+    // Not wired to a relay client (yet): nothing to announce on, nothing scheduled.
+    if (stopped || publisher === null) return;
+    announceWanted = true;
+    pumpAnnounce();
+  };
+  // Every adopt (and an own-status change, e.g. paired again) is announced.
+  const stopHeadListener = deps.security.onLedgerHead(announce);
+
+  // A received announcement: the owner filter and the strict shape ran in the client. Verified against the trusted checkpoint (one signature
+  // check); an unknown head only queues the paced server read. An announcement is never proof: no POST, nothing fetched from its sender.
+  const judge = async (announcement: HeadAnnouncement): Promise<void> => {
+    if (stopped || (announcement.kind === 'bridge' && announcement.keyId === deps.bridgeId)) return;
+    let relation: LedgerHeadRelation | null;
+    try { relation = await deps.security.judgeHeadAnnouncement(announcement); } catch { return; }
+    if (relation === 'unknown') submit({ kind: 'refresh', head: announcement.head });
+  };
+
   // The startup read (security.startLedger) may already have shown the server behind.
   afterServerRead();
 
@@ -507,9 +582,14 @@ export function createAccountRelay(deps: AccountRelayDeps): AccountRelay {
     relayUrl: () => override ?? learnedRelayUrl ?? savedRelayUrl,
     onLedgerMessage(message) {
       if (message.type === 'ledger') submit({ kind: 'offer', ledger: message.ledger });
+      else if (message.type === 'head_announcement') void judge(message.announcement);
       else if (message.head !== head()) submit({ kind: 'refresh', head: message.head });
     },
-    onLedgerSubscribed: () => submit({ kind: 'refresh', head: null }),
+    onLedgerSubscribed: () => {
+      submit({ kind: 'refresh', head: null });
+      announce();
+    },
+    setLedgerPublisher(publish) { publisher = publish; },
     onUnknownEndpoint: refreshForUnknown,
     stop() {
       stopped = true;
@@ -519,6 +599,10 @@ export function createAccountRelay(deps: AccountRelayDeps): AccountRelay {
       cancelTimer = null;
       unknownCancel?.();
       unknownCancel = null;
+      announceWanted = false;
+      announceCancel?.();
+      announceCancel = null;
+      stopHeadListener();
     },
   };
 }
