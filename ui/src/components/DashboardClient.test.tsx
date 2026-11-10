@@ -78,7 +78,7 @@ it('a browser removed from the ledger gets no encrypted resources, and Sign in a
 
 describe('own removal not yet saved by the server', () => {
   const revoked = { ...ready, checkpoint: { ...checkpoint, devices: [], revokedDeviceIds: [endpoint.id] } };
-  const unsavedSnap = (extra: Partial<LedgerClientSnapshot> = {}): LedgerClientSnapshot => ({ ...revoked, unsaved: { deviceIds: [endpoint.id], bridgeIds: [] }, serverState: 'behind', canReoffer: true, conflict: false, ...extra });
+  const unsavedSnap = (extra: Partial<LedgerClientSnapshot> = {}): LedgerClientSnapshot => ({ ...revoked, unsaved: { deviceIds: [endpoint.id], bridgeIds: [] }, serverState: 'behind', canReoffer: true, ...extra });
   const TEXT = "This browser's removal is not saved to the server yet. It can still connect. Retrying…";
   it('says it is still removing, offers Retry now and no Sign in again; nothing encrypted is mounted', async () => {
     mocks.useLedger.mockReturnValue({ client: ledger, snapshot: unsavedSnap() });
@@ -118,6 +118,15 @@ describe('own removal not yet saved by the server', () => {
     mocks.useLedger.mockReturnValue({ client: ledger, snapshot: { ...revoked, serverState: 'current' } });
     rerender(<DashboardClient {...account} />);
     expect(await screen.findByRole('button', { name: 'Sign in again' })).toBeTruthy();
+  });
+  it('a pending removal of this browser (signed, not accepted by the server) keeps it a member: the encrypted dashboard stays', async () => {
+    // Not in the chain until the server accepts it: status stays ready and the checkpoint still lists this browser.
+    mocks.useLedger.mockReturnValue({ client: ledger, snapshot: { ...ready, pendingWrite: { operation: 'revoke_device', deviceId: endpoint.id, since: 0 },
+      unsaved: { deviceIds: [endpoint.id], bridgeIds: [] }, serverState: 'current' } });
+    render(<DashboardClient {...account} />);
+    expect(await screen.findByRole('region', { name: 'Encrypted dashboard' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Removing this browser…' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'This browser was removed' })).toBeNull();
   });
   it('another browser unsaved removal does not change this browser removed screen', async () => {
     mocks.useLedger.mockReturnValue({ client: ledger, snapshot: { ...revoked, serverState: 'behind', unsaved: { deviceIds: ['other'], bridgeIds: [] } } });

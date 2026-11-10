@@ -1,18 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateEndpoint } from "@security/crypto";
 import {
-  accountIdOf, applyRevocations, authorityConsentChallenge, chooseLedger, ledgerChallenge, ledgerHead, ledgerLastIssuedAt, ledgerRevocations, nextTransition, verifyLedger,
+  accountIdOf, applyRevocations, authorityConsentChallenge, chooseLedger, ledgerChallenge, ledgerHead, ledgerLastIssuedAt, ledgerRevocations, nextTransition,
+  resolutionPlan, resolveForkTransition, verifyLedger,
 } from "@security/ledger/ledger";
 import { confirmPairedLedger, createBridgePairRequest, encodePairLink, openPairApproval, PAIR_FRAGMENT_PREFIX, pairComparisonCode } from "@security/ledger/pairing";
 import { generateAuthKey, parseAuthProof, verifyAuthProof } from "@security/ledger/proof";
 import type { Ledger, LedgerBridge, LedgerDevice, LedgerGenesis, LedgerOperation, LedgerTransition, PasskeySignature, Signed } from "@security/ledger/protocol";
+import { LEDGER_LIMITS } from "@security/ledger/protocol";
 import { createSoftPasskey } from "@security/ledger/testing";
 import type { SoftPasskey } from "@security/ledger/testing";
 import type { EndpointIdentity } from "@security/protocol";
 import { LedgerClient, sanitizeLabel } from "./ledger-client";
 import type { AttemptStorage, LedgerClientDeps } from "./ledger-client";
 import { LedgerReplica, memoryReplicaStorage } from "./ledger-replica";
-import type { LedgerReplicaStorage } from "./ledger-replica";
+import type { LedgerReplicaStorage, ReplicaRecord } from "./ledger-replica";
 import type * as PasskeyModule from "./passkey";
 
 /*
@@ -174,15 +176,20 @@ class FakeServer {
       this.ledgers.set(accountId, wire(candidate as Ledger));
       return json({ decision: "created", ledger: this.ledgers.get(accountId), discarded: 0 }, 201);
     }
+    // The server is a replica like any other: the one acceptance rule, nothing rewritten.
     const choice = await chooseLedger(stored, candidate as Ledger);
     if (choice.decision === "reject") return json({ error: "ledger_rejected", ledger: stored }, 409);
-    const revoked = ledgerRevocations(candidate as Ledger);
-    const before = this.stickies.get(accountId) ?? { deviceIds: [], bridgeIds: [] };
-    this.stickies.set(accountId, {
-      deviceIds: [...new Set([...before.deviceIds, ...revoked.deviceIds])], bridgeIds: [...new Set([...before.bridgeIds, ...revoked.bridgeIds])],
-    });
-    if (choice.decision === "adopt") this.ledgers.set(accountId, wire(candidate as Ledger));
-    return json({ decision: choice.decision, ledger: this.ledgers.get(accountId), discarded: choice.discarded.length });
+    if (choice.decision === "keep" && choice.relation === "diverged") return json({ error: "diverged", ledger: stored }, 409);
+    if (choice.decision === "adopt") {
+      const revoked = ledgerRevocations(candidate as Ledger);
+      const before = this.stickies.get(accountId) ?? { deviceIds: [], bridgeIds: [] };
+      this.stickies.set(accountId, {
+        deviceIds: [...new Set([...before.deviceIds, ...revoked.deviceIds, ...choice.discarded.deviceIds])],
+        bridgeIds: [...new Set([...before.bridgeIds, ...revoked.bridgeIds, ...choice.discarded.bridgeIds])],
+      });
+      this.ledgers.set(accountId, wire(candidate as Ledger));
+    }
+    return json({ decision: choice.decision, ledger: this.ledgers.get(accountId), discarded: choice.discarded.records.length });
   };
 
   signIn = async (proofJson: string): Promise<boolean> => {
@@ -330,16 +337,26 @@ function current(server: FakeServer): Ledger {
   if (server.ledger === null) throw new Error("no ledger");
   return server.ledger;
 }
-/** Makes `ids` sticky-revoked in `a`'s replica via a losing branch that revokes them, while the winning chain keeps them. */
-async function stickyRevoke(server: FakeServer, authenticator: FakeAuthenticator, a: Browser, accountId: string, operations: LedgerOperation[]): Promise<void> {
-  const base = current(server);
-  let losing = base;
-  for (const operation of operations) losing = await signed(losing, authenticator, operation);
-  const winning = await addDevices(base, authenticator, accountId, operations.length + 1);
-  await server.offer(winning);
-  await a.client.refresh({ force: true });
-  await a.client.offer({ type: "ledger", ledger: losing });
-  expect(a.replica.raw()?.checkpoint.head).toBe((await verifyLedger(winning)).head);
+/**
+ * Sticky-only revocations now exist only in replicas of older code (a lost fork); nothing creates new ones. `a`'s stored record gets
+ * `ids` in its sticky set (the chain still lists them, or never did), and the page reloads: returns the reloaded page.
+ */
+async function stickyRevoke(server: FakeServer, authenticator: FakeAuthenticator, a: Browser, accountId: string, ids: { deviceIds?: string[]; bridgeIds?: string[] }): Promise<Browser> {
+  a.client.dispose();
+  const stored = await a.storage.read(accountId) as ReplicaRecord;
+  const sticky = { deviceIds: [...stored.sticky.deviceIds, ...(ids.deviceIds ?? [])], bridgeIds: [...stored.sticky.bridgeIds, ...(ids.bridgeIds ?? [])] };
+  expect(await a.storage.commit({ ...stored, version: 1 as unknown as 2, serial: stored.serial + 1, sticky }, stored.serial)).toBe(true);
+  const page = await browser(server, authenticator, { storage: a.storage, identity: a });
+  await page.client.load();
+  return page;
+}
+/** `chosen` + the operations the plan carries from `other` + the owner's resolve_fork discarding `other`, signed with the first passkey. */
+async function resolving(chosen: Ledger, other: Ledger, authenticator: FakeAuthenticator): Promise<Ledger> {
+  let chain = chosen;
+  for (const operation of (await resolutionPlan(chosen, other)).carry) chain = await signed(chain, authenticator, operation);
+  const key = authenticator.keys[0].soft;
+  const payload = await resolveForkTransition(chain, other, key.credentialId, Date.now());
+  return { genesis: chain.genesis, transitions: [...chain.transitions, { payload, signature: await key.sign(await ledgerChallenge(payload)) }] };
 }
 function memoryAttempts(): AttemptStorage {
   const values = new Map<string, string>();
@@ -538,7 +555,7 @@ describe("LedgerClient account creation", () => {
     expect(server.sessions).toHaveLength(1);
   });
 
-  it("reports rate_limited (not done) for a 429 on an existing account's write and keeps the signed record locally", async () => {
+  it("reports rate_limited (not done) for a 429 on an existing account's write and keeps the signed record pending, not in the chain", async () => {
     const server = new FakeServer();
     const authenticator = new FakeAuthenticator();
     let limited = false;
@@ -546,17 +563,24 @@ describe("LedgerClient account creation", () => {
       if (limited && init?.method === "POST" && new URL(String(input)).pathname === "/api/account/ledger") return json({ error: "rate_limited" }, 429);
       return server.fetch(input, init);
     }) as typeof fetch;
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const a = await browser(server, authenticator, { deps: { fetchImpl } });
     await a.client.createAccount({ passkeyLabel: "Mac", deviceLabel: "Laptop", userName: "owner" });
     const accountId = a.client.snapshot().checkpoint?.accountId ?? "";
     limited = true;
     await expect(a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "b1") })).rejects.toThrow("rate_limited");
-    // Kept exactly like after a transient failure: in the local chain, not on the server.
-    expect(a.replica.raw()?.ledger.transitions).toHaveLength(2);
+    // Pending: neither in the local chain nor on the server.
+    expect(a.replica.raw()?.ledger.transitions).toHaveLength(1);
     expect(server.ledger?.transitions).toHaveLength(1);
+    expect(a.client.snapshot().pendingWrite).toMatchObject({ operation: "add_bridge", bridgeId: "b1" });
     limited = false;
+    // One change at a time: the next one waits for this one.
+    await expect(a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "b2") })).rejects.toThrow("write_pending");
+    await a.client.retryNow();
+    expect(server.ledger?.transitions).toHaveLength(2);
     await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "b2") });
     expect(server.ledger?.transitions).toHaveLength(3);
+    expect(authenticator.names()).toEqual(["create", "sign", "sign", "sign", "sign"]);
   });
 
   it("lets two browsers create two different accounts on one server, each bound to its own", async () => {
@@ -783,7 +807,7 @@ describe("LedgerClient sign-in", () => {
     await a.client.offer(foreign);
     await a.client.offer({ type: "ledger", ledger: foreign });
     expect(a.replica.raw()?.checkpoint.head).toBe(head);
-    expect(await a.replica.offer(foreign)).toEqual({ decision: "reject", discarded: [] });
+    expect(await a.replica.offer(foreign)).toEqual({ decision: "reject", relation: null, discarded: [] });
 
     authenticator.pick = 1;
     authenticator.ignoreAllowList = true;
@@ -879,10 +903,10 @@ describe("LedgerClient revoked browser", () => {
     expect(b.client.snapshot().status).toBe("ready");
   });
 
-  it("uses the sticky set for membership: a device revoked on a losing branch neither signs in nor re-enrolls", async () => {
-    const { server, authenticator, a, accountId } = await owner();
-    const laptop = (await a.endpoint(accountId)).endpoint.id;
-    await stickyRevoke(server, authenticator, a, accountId, [{ type: "revoke_device", endpointId: laptop }]);
+  it("uses the sticky set for membership: a device revoked only on this browser (older replica) neither signs in nor re-enrolls", async () => {
+    const { server, authenticator, a: first, accountId } = await owner();
+    const laptop = (await first.endpoint(accountId)).endpoint.id;
+    const a = await stickyRevoke(server, authenticator, first, accountId, { deviceIds: [laptop] });
     expect(a.replica.raw()?.checkpoint.devices.map(item => item.endpoint.id)).toContain(laptop);
     const proofs = server.proofs.length;
     expect(await a.client.signInKnownDevice()).toBe(false);
@@ -919,18 +943,26 @@ describe("LedgerClient writes", () => {
     expect(a.replica.raw()?.checkpoint.head).toBe(after.head);
   });
 
-  it("keeps a revocation the server silently dropped, locally and sticky", async () => {
+  it("a revocation the server answers 200 without: ledger_not_stored, kept pending (not applied here), and sent again", async () => {
     const { server, a, accountId } = await owner();
     const studio = await testBridge(accountId, "studio");
     await a.client.append({ type: "add_bridge", bridge: studio });
+    const original = server.offer;
     server.offer = async () => json({ decision: "keep", ledger: server.ledger, discarded: 0 });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
     await expect(a.client.revokeBridge("studio")).rejects.toThrow("ledger_not_stored");
+    // Nothing is applied before the server holds it: the computer is still trusted, the removal is shown as not saved.
+    expect(() => a.client.assertBridgeAccess("studio", studio.endpoint.id)).not.toThrow();
+    expect(a.replica.raw()?.checkpoint.revokedBridgeIds).toEqual([]);
+    expect(a.client.snapshot()).toMatchObject({ pendingWrite: { operation: "revoke_bridge", bridgeId: "studio" }, unsaved: { deviceIds: [], bridgeIds: ["studio"] }, discarded: [] });
+    server.offer = original;
+    await a.client.retryNow();
+    expect((await verifyLedger(current(server))).revokedBridgeIds).toEqual(["studio"]);
     expect(() => a.client.assertBridgeAccess("studio", studio.endpoint.id)).toThrow("account_bridge_revoked");
-    expect(a.replica.raw()?.checkpoint.revokedBridgeIds).toEqual(["studio"]);
-    expect(a.client.snapshot().discarded).toEqual([]);
+    expect(a.client.snapshot()).toMatchObject({ pendingWrite: null, unsaved: { deviceIds: [], bridgeIds: [] } });
   });
 
-  it("reports ledger_append_lost and lists the record when a longer chain displaced it", async () => {
+  it("a write answered with a longer chain that lacks it: write_conflict, the chain adopted, the record kept only to sign again", async () => {
     const { server, authenticator, a, accountId } = await owner();
     const base = current(server);
     const fork = await addDevices(base, authenticator, accountId, 2);
@@ -939,13 +971,17 @@ describe("LedgerClient writes", () => {
       await original(fork);
       return json({ decision: "keep", ledger: server.ledger, discarded: 0 });
     };
-    await expect(a.client.revokeDevice((await a.endpoint(accountId)).endpoint.id)).rejects.toThrow("ledger_append_lost");
+    const laptop = (await a.endpoint(accountId)).endpoint.id;
+    await expect(a.client.revokeDevice(laptop)).rejects.toThrow("write_conflict");
     const discarded = a.client.snapshot().discarded;
     expect(discarded).toHaveLength(1);
     expect(discarded[0].payload.operation.type).toBe("revoke_device");
     expect(a.replica.raw()?.checkpoint.head).toBe((await verifyLedger(fork)).head);
-    // The revocation it signed stays sticky even though its record lost.
-    expect(a.client.snapshot().status).toBe("device_revoked");
+    // Never applied: this browser was not removed, and its record is in no chain.
+    expect(a.client.snapshot()).toMatchObject({ status: "ready", pendingWrite: null, lastConflict: { operation: "revoke_device", deviceId: laptop, reason: "write_conflict" } });
+    expect(a.replica.sticky()).toEqual({ deviceIds: [], bridgeIds: [] });
+    // Never signed again by itself.
+    expect(authenticator.names()).toEqual(["create", "sign", "sign", "sign"]);
   });
 
   it("adds an authority in three gestures with the new passkey's consent", async () => {
@@ -1052,9 +1088,8 @@ describe("LedgerClient bridge pairing", () => {
   });
 
   it("refuses to re-pair a bridge id that a seen (sticky) revocation removed", async () => {
-    const { server, authenticator, a, accountId } = await owner();
-    const old = await testBridge(accountId, "studio");
-    await stickyRevoke(server, authenticator, a, accountId, [{ type: "add_bridge", bridge: old }, { type: "revoke_bridge", bridgeId: "studio" }]);
+    const { server, authenticator, a: first, accountId } = await owner();
+    const a = await stickyRevoke(server, authenticator, first, accountId, { bridgeIds: ["studio"] });
     expect(a.replica.raw()?.checkpoint.bridges).toEqual([]);
     const { fragment, code } = await pairing("studio");
     const length = current(server).transitions.length;
@@ -1066,36 +1101,54 @@ describe("LedgerClient bridge pairing", () => {
 });
 
 describe("LedgerClient replication", () => {
-  it("surfaces the local records a longer fork discarded", async () => {
+  it("a LONGER valid different history on the server is never adopted: local byte-identical, divergence published, nothing sent", async () => {
     const { server, authenticator, a, accountId } = await owner();
     const base = current(server);
     await a.client.append({ type: "add_device", device: await testDevice(accountId) });
-    const mine = current(server).transitions[1];
+    const local = JSON.stringify(a.replica.raw());
+    // A rolled-back server that a browser without history then wrote to, twice.
     const fork = await addDevices(base, authenticator, accountId, 2);
-    expect((await server.offer(fork)).status).toBe(200);
+    server.ledgers.set(accountId, wire(fork));
+    const posts = server.posts.length;
+    authenticator.calls = [];
     await a.client.refresh({ force: true });
-    expect(a.client.snapshot().discarded).toEqual([mine]);
-    expect(a.client.snapshot().checkpoint?.head).toBe((await verifyLedger(fork)).head);
-    await a.client.dismissDiscarded();
-    expect(a.client.snapshot().discarded).toEqual([]);
+    expect(JSON.stringify(a.replica.raw())).toBe(local);
+    const divergence = a.client.snapshot().divergence;
+    expect(divergence).toMatchObject({ source: "server", other: fork, fork: { relation: "diverged", fork: { revision: 1 } },
+      mine: { carry: [], canKeep: true, reason: null }, theirs: { carry: [], canKeep: true, reason: null } });
+    expect(divergence?.fork.mine).toHaveLength(1);
+    expect(divergence?.fork.theirs).toHaveLength(2);
+    expect(a.client.snapshot()).toMatchObject({ status: "ready", serverState: "unknown", discarded: [], retryAt: null });
+    // Writes are refused before any prompt; reads and relay hints send nothing.
+    await expect(a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "b1") })).rejects.toThrow("ledger_diverged");
+    await a.client.noteHead("q".repeat(43), 9);
+    await a.client.retryNow();
+    expect(server.posts).toHaveLength(posts);
+    expect(authenticator.calls).toEqual([]);
+    expect(current(server)).toEqual(fork);
+    // Persisted: a reload still holds both histories.
+    const reloaded = await browser(server, authenticator, { storage: a.storage, identity: a });
+    await reloaded.client.load();
+    expect(reloaded.client.snapshot().divergence?.other).toEqual(fork);
   });
 
-  it("keeps a revocation seen on a losing branch: assertBridgeAccess uses the sticky set", async () => {
-    const { server, authenticator, a, accountId } = await owner();
+  it("keeps a revocation seen only on this browser (older replica): assertBridgeAccess uses the sticky set", async () => {
+    const { server, authenticator, a: first, accountId } = await owner();
     const studio = await testBridge(accountId, "studio");
-    await a.client.append({ type: "add_bridge", bridge: studio });
-    expect(() => a.client.assertBridgeAccess("studio", studio.endpoint.id)).not.toThrow();
-    await stickyRevoke(server, authenticator, a, accountId, [{ type: "revoke_bridge", bridgeId: "studio" }]);
+    await first.client.append({ type: "add_bridge", bridge: studio });
+    expect(() => first.client.assertBridgeAccess("studio", studio.endpoint.id)).not.toThrow();
+    const a = await stickyRevoke(server, authenticator, first, accountId, { bridgeIds: ["studio"] });
     expect(a.replica.raw()?.checkpoint.bridges.map(item => item.bridgeId)).toEqual(["studio"]);
     expect(() => a.client.assertBridgeAccess("studio", studio.endpoint.id)).toThrow("account_bridge_revoked");
     expect(a.client.snapshot().checkpoint?.bridges).toEqual([]);
+    expect(a.client.snapshot().localOnly).toEqual({ deviceIds: [], bridgeIds: ["studio"] });
   });
 
   it("forget() keeps the account's sticky revocations for the next sign-in", async () => {
-    const { server, authenticator, a, accountId } = await owner();
+    const { server, authenticator, a: first, accountId } = await owner();
     const studio = await testBridge(accountId, "studio");
-    await a.client.append({ type: "add_bridge", bridge: studio });
-    await stickyRevoke(server, authenticator, a, accountId, [{ type: "revoke_bridge", bridgeId: "studio" }]);
+    await first.client.append({ type: "add_bridge", bridge: studio });
+    const a = await stickyRevoke(server, authenticator, first, accountId, { bridgeIds: ["studio"] });
     await a.client.forget();
     expect(a.client.snapshot()).toMatchObject({ status: "signed_out", checkpoint: null });
     await a.client.signInNewDevice({ deviceLabel: "Laptop" });
@@ -1154,8 +1207,8 @@ describe("LedgerClient replication", () => {
   });
 });
 
-describe("LedgerClient local-only removals and discarded records", () => {
-  it("a removal displaced by a longer chain stays local-only, persists as discarded, and can be signed again", async () => {
+describe("LedgerClient dropped changes and discarded records", () => {
+  it("a removal overtaken by another change persists as discarded (never applied, never local-only) and can be signed again", async () => {
     const { server, authenticator, a, accountId } = await owner();
     const studio = await testBridge(accountId, "studio");
     await a.client.append({ type: "add_bridge", bridge: studio });
@@ -1165,30 +1218,30 @@ describe("LedgerClient local-only removals and discarded records", () => {
       await original(fork);
       return json({ decision: "keep", ledger: server.ledger, discarded: 0 });
     };
-    await expect(a.client.revokeBridge("studio")).rejects.toThrow("ledger_append_lost");
+    await expect(a.client.revokeBridge("studio")).rejects.toThrow("write_conflict");
     server.offer = original;
     const lost = a.client.snapshot();
-    expect(lost.localOnly).toEqual({ deviceIds: [], bridgeIds: ["studio"] });
+    expect(lost.localOnly).toEqual({ deviceIds: [], bridgeIds: [] });
     expect(lost.discarded.map(item => item.payload.operation)).toEqual([{ type: "revoke_bridge", bridgeId: "studio" }]);
-    expect(a.replica.raw()?.checkpoint.bridges.map(item => item.bridgeId)).toEqual(["studio"]);
-    expect(() => a.client.assertBridgeAccess("studio", studio.endpoint.id)).toThrow("account_bridge_revoked");
+    expect(a.replica.raw()?.checkpoint.head).toBe(await headOf(fork));
+    expect(() => a.client.assertBridgeAccess("studio", studio.endpoint.id)).not.toThrow();
 
-    // Persisted: a reloaded page still shows both.
+    // Persisted: a reloaded page still lists it.
     const reloaded = await browser(server, authenticator, { storage: a.storage });
     await reloaded.client.load();
     expect(reloaded.client.snapshot().discarded).toEqual(lost.discarded);
-    expect(reloaded.client.snapshot().localOnly.bridgeIds).toEqual(["studio"]);
+    reloaded.client.dispose();
 
-    // The local-only id is still on the RAW chain, so the removal can be signed again; its discarded entry then disappears.
+    // Confirmed again on the new head; its discarded entry then disappears (its effect is in the chain).
     await a.client.revokeBridge("studio");
-    expect(a.client.snapshot().localOnly).toEqual({ deviceIds: [], bridgeIds: [] });
     expect(a.client.snapshot().discarded).toEqual([]);
+    expect(a.client.snapshot().lastConflict).toBeNull();
     expect((await verifyLedger(current(server))).revokedBridgeIds).toEqual(["studio"]);
     await expect(a.client.revokeBridge("studio")).rejects.toThrow("bridge_not_found");
     await expect(a.client.revokeDevice("x".repeat(43))).rejects.toThrow("device_not_found");
   });
 
-  it("an own record that lost to a chain pushed while the prompt was open is kept as discarded", async () => {
+  it("an own record overtaken by a chain pushed while the prompt was open is never sent: write_conflict, kept as discarded", async () => {
     const { server, authenticator, a, accountId } = await owner();
     const other = await testDevice(accountId);
     await a.client.append({ type: "add_device", device: other });
@@ -1199,12 +1252,12 @@ describe("LedgerClient local-only removals and discarded records", () => {
       await server.offer(fork);
       await a.client.offer({ type: "ledger", ledger: fork });
     };
-    await expect(a.client.revokeDevice(other.endpoint.id)).rejects.toThrow("ledger_append_lost");
+    await expect(a.client.revokeDevice(other.endpoint.id)).rejects.toThrow("write_conflict");
     expect(server.posts).toHaveLength(posts);
     expect(a.client.snapshot().discarded.map(item => item.payload.operation)).toEqual([{ type: "revoke_device", endpointId: other.endpoint.id }]);
-    expect(a.client.snapshot().localOnly.deviceIds).toEqual([other.endpoint.id]);
+    expect(a.client.snapshot()).toMatchObject({ localOnly: { deviceIds: [], bridgeIds: [] }, pendingWrite: null, lastConflict: { deviceId: other.endpoint.id, reason: "write_conflict" } });
     await a.client.dismissDiscarded();
-    expect(a.client.snapshot().discarded).toEqual([]);
+    expect(a.client.snapshot()).toMatchObject({ discarded: [], lastConflict: null });
     const reloaded = await browser(server, authenticator, { storage: a.storage });
     await reloaded.client.load();
     expect(reloaded.client.snapshot().discarded).toEqual([]);
@@ -1298,8 +1351,8 @@ describe("LedgerClient re-offer", () => {
     const posts = server.posts.length;
     fakeTime();
     authenticator.calls = [];
-    // A user write sends only its chain; a re-offer also names the server head it just read.
-    expect(Object.keys(server.posts[posts - 1])).toEqual(["ledger"]);
+    // Every bound POST, a user write's included, names the server head it just read.
+    expect(Object.keys(server.posts[posts - 1]).sort()).toEqual(["expectHead", "ledger"]);
     await a.client.refresh({ force: true });
     expect(server.posts).toHaveLength(posts + 1);
     expect(server.posts[posts]).toEqual({ ledger: full, expectHead: await headOf(old) });
@@ -1396,26 +1449,28 @@ describe("LedgerClient re-offer", () => {
     expect(authenticator.names()).toEqual(["sign"]);
     expect(server.posts).toHaveLength(posts + 1);
     expect(current(server).transitions).toHaveLength(2);
-    expect(page.replica.raw()?.checkpoint.revokedDeviceIds).toEqual([phone]);
-    // Not a fork-lost removal (localOnly): one the server does not have yet.
+    // Not in the chain until the server takes it: pending, shown as a removal the server does not have yet.
+    expect(page.replica.raw()?.checkpoint.revokedDeviceIds).toEqual([]);
     expect(page.client.snapshot().localOnly).toEqual({ deviceIds: [], bridgeIds: [] });
     expect(page.client.snapshot().unsaved).toEqual({ deviceIds: [phone], bridgeIds: [] });
+    expect(page.client.snapshot().pendingWrite).toMatchObject({ operation: "revoke_device", deviceId: phone });
     expect(postsAt(server, start, start)).toEqual([0]);
     await advance(due - 1);
     expect(postsAt(server, start, start)).toEqual([0]);
     await advance(1);
     expect(postsAt(server, start, start)).toEqual([0, due]);
     expect((await verifyLedger(current(server))).revokedDeviceIds).toEqual([phone]);
+    expect(page.replica.raw()?.checkpoint.revokedDeviceIds).toEqual([phone]);
     await page.client.refresh({ force: true });
     expect(server.posts).toHaveLength(posts + 2);
     expect(server.posts[posts + 1].ledger).toEqual(page.replica.raw()?.ledger);
-    expect(page.client.snapshot().unsaved).toEqual({ deviceIds: [], bridgeIds: [] });
+    expect(page.client.snapshot()).toMatchObject({ pendingWrite: null, unsaved: { deviceIds: [], bridgeIds: [] } });
     await advance(3_600_000);
     expect(server.posts).toHaveLength(posts + 2);
     expect(authenticator.names()).toEqual(["sign"]);
   });
 
-  it("unsaved lists a refused revocation only while the server is known to be behind; retryNow() sends it once, without a prompt", async () => {
+  it("unsaved lists a pending revocation (persisted for every page of the profile); retryNow() sends it once, without a prompt", async () => {
     const { server, authenticator, a, page, phone } = await withPhone();
     let refuse = true;
     // No Retry-After: retryNow() may skip the backoff (a Retry-After it would honour, see S5).
@@ -1423,20 +1478,21 @@ describe("LedgerClient re-offer", () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     fakeTime();
     await expect(page.client.revokeDevice(phone)).rejects.toThrow("rate_limited");
-    expect(page.client.snapshot()).toMatchObject({ serverState: "behind", unsaved: { deviceIds: [phone], bridgeIds: [] }, conflict: false, canReoffer: true });
+    // The server still holds the local chain: it is current; the revocation is the pending write.
+    expect(page.client.snapshot()).toMatchObject({ serverState: "current", unsaved: { deviceIds: [phone], bridgeIds: [] }, canReoffer: true });
     expect(page.client.snapshot().retryAt).toBe(Date.now() + 24_000);
     expect(page.client.snapshot().retryNotBefore).toBeNull();
-    // Another page of the profile, before any read: the confirmed server state persisted with the chain already tells.
-    const other = await browser(server, authenticator, { storage: a.storage, identity: a, deps: { random: () => 0 } });
+    // Another page of the profile, before any read: the pending write is persisted with the chain (its own first read is held back here).
+    const other = await browser(server, authenticator, { storage: a.storage, identity: a, deps: { random: () => 0, fetchImpl: (async () => new Promise<Response>(() => undefined)) as typeof fetch } });
     await other.client.load();
-    expect(other.replica.raw()?.checkpoint.revokedDeviceIds).toEqual([phone]);
-    expect(other.client.snapshot()).toMatchObject({ serverState: "behind", unsaved: { deviceIds: [phone], bridgeIds: [] } });
-    // A profile with the same chain but no confirmed server state: unknown, and unknown is not "unsaved".
+    expect(other.replica.raw()?.checkpoint.revokedDeviceIds).toEqual([]);
+    expect(other.client.snapshot()).toMatchObject({ pendingWrite: { operation: "revoke_device", deviceId: phone }, unsaved: { deviceIds: [phone], bridgeIds: [] } });
+    // Another profile with the same chain: no pending write there, nothing unsaved.
     const unread = await browser(server, authenticator, { storage: memoryReplicaStorage(), identity: a });
     const chain = page.replica.raw()?.ledger;
     expect((await unread.replica.offer(chain, { bind: true, expectAccountId: (await verifyLedger(current(server))).accountId })).decision).toBe("adopt");
     await unread.client.load();
-    expect(unread.client.snapshot()).toMatchObject({ serverState: "unknown", unsaved: { deviceIds: [], bridgeIds: [] }, retryAt: null });
+    expect(unread.client.snapshot()).toMatchObject({ serverState: "unknown", pendingWrite: null, unsaved: { deviceIds: [], bridgeIds: [] }, retryAt: null });
     other.client.dispose();
     unread.client.dispose();
     // retryNow(): past the 600 s Retry-After, one fresh read and one POST.
@@ -1570,64 +1626,45 @@ describe("LedgerClient re-offer", () => {
     await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "b2") });
     return { server, authenticator, a, accountId, local: current(server), base };
   }
-  /** Two forks of `base`, one add_bridge each, no revocation: equal length, so the smaller head wins. Ordered [winner, loser]. */
-  async function tiePair(base: Ledger, authenticator: FakeAuthenticator, accountId: string): Promise<[Ledger, Ledger]> {
-    const one = await signed(base, authenticator, { type: "add_bridge", bridge: await testBridge(accountId, "fork-1") });
-    const two = await signed(base, authenticator, { type: "add_bridge", bridge: await testBridge(accountId, "fork-2") });
-    return await headOf(one) < await headOf(two) ? [one, two] : [two, one];
-  }
-
-  it("adopts a winning fork the server holds (more revocations, or the smaller head on a tie) and sends nothing", async () => {
+  it("a diverged server chain is never adopted, whatever it holds (more removals, longer, or equal length), and nothing is sent", async () => {
     const { server, authenticator, a, accountId, local, base } = await twoBridges();
     const revoking = await signed(base, authenticator, { type: "revoke_bridge", bridgeId: "b1" });
-    const [winner, loser] = await tiePair(base, authenticator, accountId);
+    const longer = await addDevices(base, authenticator, accountId, 3);
+    const twin = await signed(base, authenticator, { type: "add_bridge", bridge: await testBridge(accountId, "fork-1") });
     const posts = server.posts.length;
     fakeTime();
     authenticator.calls = [];
-    for (const [mine, fork] of [[local, revoking], [loser, winner]] as const) {
-      // A trusted device (a's keys) bound to a revision-3 chain without revocation, facing a server that holds the winning fork.
+    for (const fork of [revoking, longer, twin]) {
+      // A trusted device (a's keys) bound to the revision-3 chain, facing a server that holds a different history.
       const page = await browser(server, authenticator, { storage: memoryReplicaStorage(), identity: a });
-      expect((await page.replica.offer(mine, { bind: true, expectAccountId: accountId })).decision).toBe("adopt");
+      expect((await page.replica.offer(local, { bind: true, expectAccountId: accountId })).decision).toBe("adopt");
       server.ledgers.set(accountId, wire(fork));
       const seen = revisions(page);
       await page.client.refresh({ force: true });
-      expect(page.client.snapshot().status).toBe("ready");
-      expect(page.replica.raw()?.checkpoint.head).toBe(await headOf(fork));
+      expect(page.client.snapshot()).toMatchObject({ status: "ready", divergence: { source: "server", other: fork } });
+      expect(page.replica.raw()?.ledger).toEqual(local);
       expect(seen.every(revision => revision === 3)).toBe(true);
       expect(server.posts).toHaveLength(posts);
-      expect(await headOf(current(server))).toBe(await headOf(fork));
+      expect(current(server)).toEqual(wire(fork));
+      page.client.dispose();
     }
     expect(authenticator.calls).toEqual([]);
   });
 
-  it("re-offers an equal-length local chain that wins the tie-break against the server's fork", async () => {
-    const { server, authenticator, a, accountId, base } = await twoBridges();
-    const [winner, loser] = await tiePair(base, authenticator, accountId);
-    const page = await browser(server, authenticator, { storage: memoryReplicaStorage(), identity: a });
-    expect((await page.replica.offer(winner, { bind: true, expectAccountId: accountId })).decision).toBe("adopt");
-    server.ledgers.set(accountId, wire(loser));
-    const posts = server.posts.length;
-    fakeTime();
-    authenticator.calls = [];
-    await page.client.refresh({ force: true });
-    expect(server.posts).toHaveLength(posts + 1);
-    expect(await headOf(current(server))).toBe(await headOf(winner));
-    expect(page.replica.raw()?.checkpoint.head).toBe(await headOf(winner));
-    expect(authenticator.calls).toEqual([]);
-  });
-
-  it("adopts a winning chain a 409 answers with, and sends nothing more", async () => {
-    const { server, authenticator, a, accountId, base } = await twoBridges();
-    const winning = await signed(base, authenticator, { type: "revoke_bridge", bridgeId: "b1" });
+  it("a re-offer answered 409 diverged enters the divergence state and sends nothing more", async () => {
+    const { server, authenticator, a, accountId, local, base } = await twoBridges();
+    const other = await signed(base, authenticator, { type: "revoke_bridge", bridgeId: "b1" });
     rollBack(server, accountId, 2);
-    server.postHook = () => json({ error: "ledger_rejected", ledger: winning }, 409);
+    // The server's row changed after the re-offer's fresh read: another browser with no history wrote to the rolled-back row.
+    server.postHook = () => { server.ledgers.set(accountId, wire(other)); return json({ error: "diverged", ledger: other }, 409); };
     const posts = server.posts.length;
     authenticator.calls = [];
     fakeTime();
     await a.client.refresh({ force: true });
     expect(server.posts).toHaveLength(posts + 1);
-    expect(a.replica.raw()?.checkpoint.head).toBe(await headOf(winning));
-    expect(a.client.snapshot().discarded.map(item => item.payload.operation.type)).toEqual(["add_bridge"]);
+    expect(a.replica.raw()?.ledger).toEqual(local);
+    expect(a.client.snapshot()).toMatchObject({ divergence: { source: "server", other }, retryAt: null });
+    expect(a.client.snapshot().discarded).toEqual([]);
     await advance(3_600_000);
     expect(server.posts).toHaveLength(posts + 1);
     expect(authenticator.calls).toEqual([]);
@@ -1673,14 +1710,20 @@ describe("LedgerClient re-offer", () => {
     }
   });
 
-  it("never re-offers for a browser whose own removal it knows only from another chain (sticky): it cannot write", async () => {
-    const { server, a, b, phone } = await phoneAhead();
-    await a.client.revokeDevice(phone);
+  it("never re-offers for a browser whose own removal is only in its sticky set (older replica): it cannot write", async () => {
+    const { server, authenticator, accountId } = await owner();
+    const first = await browser(server, authenticator);
+    await first.client.signInNewDevice({ deviceLabel: "Phone" });
+    const phone = (await first.endpoint(accountId)).endpoint.id;
+    await first.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "x") });
+    const b = await stickyRevoke(server, authenticator, first, accountId, { deviceIds: [phone] });
+    // The server is rolled back: b's chain is ahead of it, but b's own keys are revoked by its sticky set only.
+    rollBack(server, accountId, 2);
+    fakeTime();
     const posts = server.posts.length;
-    // A forced read: b keeps its longer chain, the revocation becomes sticky only.
-    await b.client.refresh({ force: true });
+    expect(await b.client.signInKnownDevice()).toBe(false);
     expect(b.replica.raw()?.checkpoint.revokedDeviceIds).toEqual([]);
-    expect(b.client.snapshot()).toMatchObject({ status: "device_revoked", canReoffer: false, retryAt: null });
+    expect(b.client.snapshot()).toMatchObject({ status: "device_revoked", canReoffer: false, retryAt: null, serverState: "behind" });
     await b.client.retryNow();
     await advance(3_600_000);
     expect(server.posts).toHaveLength(posts);
@@ -1795,50 +1838,52 @@ describe("LedgerClient re-offer", () => {
     expect(authenticator.calls).toEqual([]);
   });
 
-  /** A phone whose two own writes were refused (Retry-After 120 s): its chain is two records ahead of the server's. */
-  async function phoneAhead(): Promise<{ server: FakeServer; authenticator: FakeAuthenticator; a: Browser; b: Browser; accountId: string; phone: string; base: Ledger }> {
+  /** A phone whose own write was refused (Retry-After 120 s): its signed add_bridge is pending, its chain still the server's. */
+  async function phonePending(): Promise<{ server: FakeServer; authenticator: FakeAuthenticator; a: Browser; b: Browser; accountId: string; phone: string; base: Ledger }> {
     const { server, authenticator, a, accountId } = await owner();
     const b = await browser(server, authenticator);
     await b.client.signInNewDevice({ deviceLabel: "Phone" });
     const phone = (await b.endpoint(accountId)).endpoint.id;
     const base = current(server);
-    let refusals = 2;
+    let refusals = 1;
     server.postHook = () => (refusals-- > 0 ? rateLimited(120) : null);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     fakeTime();
     await expect(b.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "x") })).rejects.toThrow("rate_limited");
-    await expect(b.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "y") })).rejects.toThrow("rate_limited");
-    expect(b.replica.raw()?.checkpoint.revision).toBe(4);
+    expect(b.replica.raw()?.ledger).toEqual(base);
+    expect(b.client.snapshot().pendingWrite).toMatchObject({ operation: "add_bridge", bridgeId: "x" });
     return { server, authenticator, a, b, accountId, phone, base };
   }
 
-  it("a phone revoked elsewhere while its own writes were refused learns it at the fresh read and sends nothing", async () => {
-    const { server, a, b, phone } = await phoneAhead();
+  it("a phone revoked elsewhere while its own write was pending learns it at the fresh read: write_conflict, nothing sent", async () => {
+    const { server, authenticator, a, b, phone } = await phonePending();
     await a.client.revokeDevice(phone);
     const revoked = current(server);
     const posts = server.posts.length;
+    const signs = authenticator.names().length;
     await advance(150_000);
-    expect(b.client.snapshot().status).toBe("device_revoked");
+    expect(b.client.snapshot()).toMatchObject({ status: "device_revoked", pendingWrite: null, lastConflict: { operation: "add_bridge", bridgeId: "x", reason: "write_conflict" } });
     expect(server.posts).toHaveLength(posts);
     expect(current(server)).toEqual(revoked);
-    expect((await verifyLedger(current(server))).revokedDeviceIds).toEqual([phone]);
-    // The phone keeps its own (longer) chain, and the revocation as sticky.
-    expect(b.replica.raw()?.checkpoint.revision).toBe(4);
-    expect(b.replica.sticky()?.deviceIds).toEqual([phone]);
+    // The phone holds the server's chain (its own revocation included); its record is in no chain, kept only to sign again.
+    expect(b.replica.raw()?.ledger).toEqual(revoked);
+    expect(b.client.snapshot().discarded.map(item => item.payload.operation.type)).toEqual(["add_bridge"]);
+    expect(authenticator.names()).toHaveLength(signs);
   });
 
-  it("a revocation landing between the fresh read and the POST: head_changed, the phone learns it and stops", async () => {
-    const { server, authenticator, b, accountId, phone, base } = await phoneAhead();
+  it("a revocation landing between the fresh read and the POST: head_changed, the phone adopts it, drops its record and stops", async () => {
+    const { server, authenticator, b, accountId, phone, base } = await phonePending();
     const revoking = await signed(base, authenticator, { type: "revoke_device", endpointId: phone });
     let gets = 0;
     server.afterGet = () => { gets += 1; if (gets === 1) server.ledgers.set(accountId, wire(revoking)); };
     const posts = server.posts.length;
     await advance(150_000);
-    expect(b.client.snapshot().status).toBe("device_revoked");
+    expect(b.client.snapshot()).toMatchObject({ status: "device_revoked", pendingWrite: null, lastConflict: { reason: "write_conflict" } });
     // One POST, against the head it read; refused, and not sent again.
     expect(server.posts).toHaveLength(posts + 1);
     expect(server.posts[posts]).toMatchObject({ expectHead: await headOf(base) });
     expect(current(server)).toEqual(wire(revoking));
+    expect(b.replica.raw()?.ledger).toEqual(wire(revoking));
     await advance(3_600_000);
     expect(server.posts).toHaveLength(posts + 1);
   });
@@ -1928,44 +1973,7 @@ describe("LedgerClient re-offer", () => {
     expect(done).toBe(true);
   });
 
-  it("S1: sends nothing that would drop another device's removal the server has (conflict), until it is signed again here", async () => {
-    const { server, authenticator, a, accountId } = await owner();
-    const b = await browser(server, authenticator);
-    await b.client.signInNewDevice({ deviceLabel: "Phone" });
-    const c = await browser(server, authenticator);
-    await c.client.signInNewDevice({ deviceLabel: "Tablet" });
-    const tablet = (await c.endpoint(accountId)).endpoint.id;
-    await a.client.refresh({ force: true });
-    await b.client.refresh({ force: true });
-    let refusals = 2;
-    server.postHook = () => (refusals-- > 0 ? rateLimited(120) : null);
-    vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    fakeTime();
-    await expect(b.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "x") })).rejects.toThrow("rate_limited");
-    await expect(b.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "y") })).rejects.toThrow("rate_limited");
-    await a.client.revokeDevice(tablet);
-    const posts = server.posts.length;
-    authenticator.calls = [];
-    // b's retry: the fresh read shows the server's chain revoking the tablet, which b's longer chain still lists.
-    await advance(150_000);
-    expect(b.client.snapshot().conflict).toBe(true);
-    expect(server.posts).toHaveLength(posts);
-    expect((await verifyLedger(current(server))).revokedDeviceIds).toEqual([tablet]);
-    expect(b.client.snapshot()).toMatchObject({ serverState: "behind", retryAt: null, canReoffer: true, status: "ready" });
-    expect(b.client.snapshot().localOnly.deviceIds).toEqual([tablet]);
-    await b.client.retryNow();
-    await advance(3_600_000);
-    expect(server.posts).toHaveLength(posts);
-    // The owner signs that removal again on this browser: a user write on top of b's chain, which keeps x and y.
-    await b.client.revokeDevice(tablet);
-    expect(authenticator.names()).toEqual(["sign"]);
-    const served = await verifyLedger(current(server));
-    expect(served.revokedDeviceIds).toEqual([tablet]);
-    expect(served.bridges.map(item => item.bridgeId).sort()).toEqual(["x", "y"]);
-    expect(b.client.snapshot()).toMatchObject({ conflict: false, serverState: "current", localOnly: { deviceIds: [], bridgeIds: [] } });
-  });
-
-  it("S2: a browser's own refused removal is sent again (not before Retry-After, retryNow included) and the server stops listing it", async () => {
+  it("S2: a browser's own refused removal stays pending (still a member) and is sent again (not before Retry-After, retryNow included)", async () => {
     const { server, authenticator, accountId } = await owner();
     const b = await browser(server, authenticator);
     await b.client.signInNewDevice({ deviceLabel: "Phone" });
@@ -1975,7 +1983,11 @@ describe("LedgerClient re-offer", () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const start = fakeTime();
     await expect(b.client.revokeDevice(phone)).rejects.toThrow("rate_limited");
-    expect(b.client.snapshot()).toMatchObject({ status: "device_revoked", canReoffer: true, serverState: "behind", unsaved: { deviceIds: [phone], bridgeIds: [] } });
+    // Not accepted, so not applied: this browser is still a member until the server holds its removal.
+    expect(b.client.snapshot()).toMatchObject({
+      status: "ready", canReoffer: true, serverState: "current", pendingWrite: { operation: "revoke_device", deviceId: phone }, unsaved: { deviceIds: [phone], bridgeIds: [] },
+    });
+    expect(b.client.snapshot().checkpoint?.devices.some(item => item.endpoint.id === phone)).toBe(true);
     const posts = server.posts.length;
     authenticator.calls = [];
     await b.client.retryNow();
@@ -1983,8 +1995,11 @@ describe("LedgerClient re-offer", () => {
     // max(Retry-After 60 s, the 30 s floor without jitter).
     await advance(59_999);
     expect(postsAt(server, start, start)).toEqual([0]);
+    expect(b.client.snapshot().status).toBe("ready");
     await advance(1);
     expect(postsAt(server, start, start)).toEqual([0, 60_000]);
+    // Accepted: now it is removed here too.
+    expect(b.client.snapshot()).toMatchObject({ status: "device_revoked", pendingWrite: null });
     expect((await verifyLedger(current(server))).revokedDeviceIds).toEqual([phone]);
     expect(server.posts).toHaveLength(posts + 1);
     expect((await verifyLedger(current(server))).devices.some(item => item.endpoint.id === phone)).toBe(false);
@@ -2069,22 +2084,33 @@ describe("LedgerClient re-offer", () => {
     expect(sent[1].head).toBe(await headOf(s1));
   });
 
-  it("S4: after a reload with the server down, a removal the server never took is still unsaved (persisted confirmed state)", async () => {
+  it("S4: after a reload with the server down, a removal the server never took is still pending and unsaved, then delivered without a prompt", async () => {
     const { server, authenticator, a, accountId } = await owner();
     await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "studio") });
     fakeTime();
     server.postHook = () => new Response(JSON.stringify({ error: "ledger_unavailable" }), { status: 503 });
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     await expect(a.client.revokeBridge("studio")).rejects.toThrow("server_unavailable");
-    expect(a.client.snapshot()).toMatchObject({ serverState: "behind", unsaved: { deviceIds: [], bridgeIds: ["studio"] } });
+    expect(a.client.snapshot()).toMatchObject({ serverState: "current", pendingWrite: { operation: "revoke_bridge", bridgeId: "studio" }, unsaved: { deviceIds: [], bridgeIds: ["studio"] } });
     a.client.dispose();
-    const down = (async () => new Response(JSON.stringify({ error: "ledger_unavailable" }), { status: 503 })) as typeof fetch;
-    const page = await browser(server, authenticator, { storage: a.storage, identity: a, deps: { fetchImpl: down } });
+    let up = false;
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => (up ? server.fetch(input, init)
+      : new Response(JSON.stringify({ error: "ledger_unavailable" }), { status: 503 }))) as typeof fetch;
+    const page = await browser(server, authenticator, { storage: a.storage, identity: a, deps: { fetchImpl } });
     await page.client.load();
-    expect(page.client.snapshot()).toMatchObject({ serverState: "behind", unsaved: { deviceIds: [], bridgeIds: ["studio"] } });
+    expect(page.client.snapshot()).toMatchObject({ pendingWrite: { operation: "revoke_bridge", bridgeId: "studio" }, unsaved: { deviceIds: [], bridgeIds: ["studio"] } });
     await expect(page.client.refresh({ force: true })).rejects.toThrow("server_unavailable");
-    expect(page.client.snapshot()).toMatchObject({ serverState: "behind", unsaved: { deviceIds: [], bridgeIds: ["studio"] } });
+    expect(page.client.snapshot()).toMatchObject({ unsaved: { deviceIds: [], bridgeIds: ["studio"] } });
     expect((await verifyLedger(current(server))).revokedBridgeIds).toEqual([]);
+    expect(page.replica.raw()?.checkpoint.revokedBridgeIds).toEqual([]);
+    // The server comes back: the signed record (persisted, not re-signed) is delivered by the retry.
+    server.postHook = null;
+    up = true;
+    authenticator.calls = [];
+    await advance(600_000);
+    expect((await verifyLedger(current(server))).revokedBridgeIds).toEqual(["studio"]);
+    expect(page.client.snapshot()).toMatchObject({ pendingWrite: null, unsaved: { deviceIds: [], bridgeIds: [] }, serverState: "current" });
+    expect(authenticator.calls).toEqual([]);
   });
 
   it("a profile with no confirmed server state is 'unknown' while reads fail, and 'current' after the first read, which persists", async () => {
@@ -2096,7 +2122,7 @@ describe("LedgerClient re-offer", () => {
     expect((await page.replica.offer(a.replica.raw()?.ledger, { bind: true, expectAccountId: accountId })).decision).toBe("adopt");
     fakeTime();
     await page.client.load();
-    expect(page.client.snapshot()).toMatchObject({ serverState: "unknown", unsaved: { deviceIds: [], bridgeIds: [] }, conflict: false, retryAt: null });
+    expect(page.client.snapshot()).toMatchObject({ serverState: "unknown", unsaved: { deviceIds: [], bridgeIds: [] }, retryAt: null });
     await expect(page.client.refresh({ force: true })).rejects.toThrow("server_unavailable");
     expect(page.client.snapshot().serverState).toBe("unknown");
     down = false;
@@ -2168,6 +2194,379 @@ describe("LedgerClient re-offer", () => {
     expect(prompted).toBeLessThanOrEqual(20_000 + 2 * 10_000);
     // The write's own POST: signed at once, answered by this server 10 s later (head_changed, so it is refused).
     expect(settled).toBe(prompted + 10_000);
+  });
+});
+
+describe("LedgerClient server-sequenced writes", () => {
+  it("a write is in the replica only after the server accepted it: the record is persisted as pending (hidden) during the POST", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    const base = current(server);
+    const seen: { head: string | undefined; pending: boolean; shown: unknown }[] = [];
+    server.postHook = () => {
+      seen.push({ head: a.replica.raw()?.checkpoint.head, pending: a.replica.pendingWrite() !== null, shown: a.client.snapshot().pendingWrite });
+      return null;
+    };
+    authenticator.calls = [];
+    await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "b1") });
+    expect(seen).toEqual([{ head: await headOf(base), pending: true, shown: null }]);
+    expect(a.replica.raw()?.ledger).toEqual(current(server));
+    expect(current(server).transitions).toHaveLength(2);
+    expect(server.posts.at(-1)).toMatchObject({ expectHead: await headOf(base) });
+    expect(a.client.snapshot()).toMatchObject({ pendingWrite: null, unsaved: { deviceIds: [], bridgeIds: [] }, serverState: "current", lastConflict: null });
+    expect(a.replica.pendingWrite()).toBeNull();
+    expect(authenticator.names()).toEqual(["sign"]);
+  });
+
+  it("a write lost on the network: replica unchanged, pending persisted, delivered after a reload without a second passkey", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    const base = current(server);
+    let offline = true;
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (offline && init?.method === "POST" && new URL(String(input)).pathname === "/api/account/ledger") throw new TypeError("offline");
+      return server.fetch(input, init);
+    }) as typeof fetch;
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const page = await browser(server, authenticator, { storage: a.storage, identity: a, deps: { fetchImpl } });
+    authenticator.calls = [];
+    await expect(page.client.revokeDevice((await a.endpoint(accountId)).endpoint.id)).rejects.toThrow("network_unavailable");
+    expect(page.replica.raw()?.ledger).toEqual(base);
+    expect(current(server)).toEqual(base);
+    expect(page.client.snapshot()).toMatchObject({ status: "ready", pendingWrite: { operation: "revoke_device" } });
+    page.client.dispose();
+    // A reload: the persisted record is sent by the first run (it reads the server first), with no prompt.
+    offline = false;
+    const reloaded = await browser(server, authenticator, { storage: a.storage, identity: a, deps: { fetchImpl } });
+    await reloaded.client.load();
+    await quiet();
+    expect((await verifyLedger(current(server))).revokedDeviceIds).toHaveLength(1);
+    expect(reloaded.replica.raw()?.ledger).toEqual(current(server));
+    expect(reloaded.client.snapshot().pendingWrite).toBeNull();
+    expect(authenticator.names()).toEqual(["sign"]);
+  });
+
+  it("a write the server stored but whose answer was lost is found delivered at the next read, and not sent again", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    let lose = true;
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await server.fetch(input, init);
+      if (lose && init?.method === "POST" && new URL(String(input)).pathname === "/api/account/ledger") {
+        lose = false;
+        throw new TypeError("connection reset");
+      }
+      return response;
+    }) as typeof fetch;
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const page = await browser(server, authenticator, { storage: a.storage, identity: a, deps: { fetchImpl } });
+    fakeTime();
+    await expect(page.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "b1") })).rejects.toThrow("network_unavailable");
+    const posts = server.posts.length;
+    await page.client.refresh({ force: true });
+    expect(page.client.snapshot().pendingWrite).toBeNull();
+    expect(page.replica.raw()?.ledger).toEqual(current(server));
+    await advance(3_600_000);
+    expect(server.posts).toHaveLength(posts);
+    expect(authenticator.names().filter(name => name === "sign")).toHaveLength(3);
+  });
+
+  it("two browsers sign on the same head: the first is stored, the second gets write_conflict and its record is in no chain", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    const b = await browser(server, authenticator);
+    await b.client.signInNewDevice({ deviceLabel: "Phone" });
+    await a.client.refresh({ force: true });
+    const head = current(server);
+    // a's prompt is open while b signs and stores its change.
+    authenticator.beforeSign = async () => {
+      authenticator.beforeSign = null;
+      await b.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "from-b") });
+    };
+    authenticator.calls = [];
+    await expect(a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "from-a") })).rejects.toThrow("write_conflict");
+    const served = current(server);
+    expect(served.transitions).toHaveLength(head.transitions.length + 1);
+    expect(served.transitions.at(-1)?.payload.operation).toMatchObject({ type: "add_bridge", bridge: { bridgeId: "from-b" } });
+    // a adopted the server's chain; its own record is in neither chain, only kept to sign again; nothing re-signed by itself.
+    expect(a.replica.raw()?.ledger).toEqual(served);
+    expect(JSON.stringify(served)).not.toContain("from-a");
+    expect(a.client.snapshot()).toMatchObject({ pendingWrite: null, lastConflict: { operation: "add_bridge", bridgeId: "from-a", reason: "write_conflict" } });
+    expect(a.client.snapshot().discarded.map(item => item.payload.operation.type)).toEqual(["add_bridge"]);
+    expect(authenticator.names()).toEqual(["sign", "sign"]);
+    // Confirmed again: one more prompt, on the new head.
+    await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "from-a") });
+    expect(current(server).transitions).toHaveLength(head.transitions.length + 2);
+    expect(a.client.snapshot()).toMatchObject({ discarded: [], lastConflict: null });
+  });
+
+  it("a pending write whose head the server moved past is dropped as write_conflict at the retry; the replica becomes the server's chain", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    let refusals = 1;
+    server.postHook = () => (refusals-- > 0 ? rateLimited(30) : null);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    fakeTime();
+    await expect(a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "mine") })).rejects.toThrow("rate_limited");
+    // Another browser of the owner wrote meanwhile.
+    await server.offer(await addDevices(current(server), authenticator, accountId, 1));
+    const moved = current(server);
+    const posts = server.posts.length;
+    const signs = authenticator.names().length;
+    await advance(60_000);
+    expect(server.posts).toHaveLength(posts);
+    expect(a.replica.raw()?.ledger).toEqual(moved);
+    expect(a.client.snapshot()).toMatchObject({ pendingWrite: null, lastConflict: { bridgeId: "mine", reason: "write_conflict" }, retryAt: null });
+    expect(authenticator.names()).toHaveLength(signs);
+  });
+
+  it("refuses a second change while one is pending (write_pending, before any prompt); a definitive refusal drops it to discarded", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    server.postHook = () => rateLimited(600);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    fakeTime();
+    await expect(a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "b1") })).rejects.toThrow("rate_limited");
+    authenticator.calls = [];
+    await expect(a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "b2") })).rejects.toThrow("write_pending");
+    await expect(a.client.revokeDevice((await a.endpoint(accountId)).endpoint.id)).rejects.toThrow("write_pending");
+    expect(authenticator.calls).toEqual([]);
+    // The server refuses the record for good (too large): dropped, kept to sign again, writes open again.
+    server.postHook = () => new Response(JSON.stringify({ error: "ledger_limit" }), { status: 413 });
+    await advance(600_000);
+    expect(a.client.snapshot()).toMatchObject({ pendingWrite: null, lastConflict: { bridgeId: "b1", reason: "ledger_limit" } });
+    expect(a.client.snapshot().discarded.map(item => item.payload.operation.type)).toEqual(["add_bridge"]);
+    server.postHook = null;
+    await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "b2") });
+    expect((await verifyLedger(current(server))).bridges.map(item => item.bridgeId)).toEqual(["b2"]);
+  });
+
+  it("beforeSign runs after the fresh read and before the prompt; a longer chain it learns is built on in the same POST", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    const base = current(server);
+    // A computer of the account holds a record the server lost (a rollback): the agreement step learns it before signing.
+    const peer = await addDevices(base, authenticator, accountId, 1);
+    const order: string[] = [];
+    let learnt: unknown = null;
+    const page = await browser(server, authenticator, {
+      storage: a.storage, identity: a,
+      deps: {
+        beforeSign: async head => {
+          order.push(`hook:${head.revision}:${head.head === await headOf(base)}:${authenticator.names().length}`);
+          learnt = await page.client.learnChain(peer, "peer");
+        },
+      },
+    });
+    const posts = server.posts.length;
+    authenticator.calls = [];
+    server.requests = [];
+    await page.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "b1") });
+    expect(order).toEqual(["hook:1:true:0"]);
+    expect(learnt).toBe("ahead");
+    expect(server.requests[0]).toBe("GET /api/account/ledger");
+    // One POST: the learnt record and the new one, on the server head read before.
+    expect(server.posts).toHaveLength(posts + 1);
+    expect(server.posts[posts]).toMatchObject({ expectHead: await headOf(base) });
+    expect(current(server).transitions.slice(0, 2)).toEqual(peer.transitions);
+    expect(current(server).transitions).toHaveLength(3);
+    expect(page.replica.raw()?.ledger).toEqual(current(server));
+    expect(authenticator.names()).toEqual(["sign"]);
+  });
+});
+
+describe("LedgerClient divergence", () => {
+  /** a's chain and the server's diverge after `base`: a holds base + mine, the server base + theirs (a rollback, then a history-less writer). */
+  async function split(mine: (accountId: string) => Promise<LedgerOperation[]>, theirs: (accountId: string) => Promise<LedgerOperation[]>, prepare?: (accountId: string) => Promise<LedgerOperation[]>) {
+    const { server, authenticator, a, accountId } = await owner();
+    for (const operation of prepare === undefined ? [] : await prepare(accountId)) await a.client.append(operation);
+    const base = current(server);
+    for (const operation of await mine(accountId)) await a.client.append(operation);
+    const local = current(server);
+    let other = base;
+    for (const operation of await theirs(accountId)) other = await signed(other, authenticator, operation);
+    server.ledgers.set(accountId, wire(other));
+    await a.client.refresh({ force: true });
+    expect(a.client.snapshot().divergence?.other).toEqual(other);
+    expect(a.replica.raw()?.ledger).toEqual(local);
+    return { server, authenticator, a, accountId, base, local, other };
+  }
+  const signs = (authenticator: FakeAuthenticator): number => authenticator.names().filter(name => name === "sign").length;
+
+  it("resolveDivergence('mine'), nothing to carry: one prompt, one POST; replica == server == mine + resolution", async () => {
+    const { server, authenticator, a, local, other } = await split(
+      async accountId => [{ type: "add_bridge", bridge: await testBridge(accountId, "mine") }],
+      async accountId => [{ type: "add_device", device: await testDevice(accountId) }],
+    );
+    expect(a.client.snapshot().divergence).toMatchObject({ mine: { carry: [], canKeep: true }, theirs: { carry: [], canKeep: true } });
+    const posts = server.posts.length;
+    authenticator.calls = [];
+    await a.client.resolveDivergence("mine");
+    expect(signs(authenticator)).toBe(1);
+    expect(server.posts).toHaveLength(posts + 1);
+    const chain = current(server);
+    expect(chain.transitions.slice(0, -1)).toEqual(local.transitions);
+    expect(chain.transitions.at(-1)?.payload.operation).toMatchObject({ type: "resolve_fork", discardedHead: await headOf(other) });
+    expect(a.replica.raw()?.ledger).toEqual(chain);
+    expect(a.client.snapshot()).toMatchObject({ divergence: null, serverState: "current" });
+    await a.client.append({ type: "add_bridge", bridge: await testBridge(a.replica.raw()?.checkpoint.accountId ?? "", "after") });
+    expect(current(server).transitions).toHaveLength(chain.transitions.length + 1);
+  });
+
+  it("resolveDivergence('theirs') carries this branch's removal onto the other one: 2 prompts; nothing adopted before the server took it", async () => {
+    const { server, authenticator, a, other } = await split(
+      async () => [{ type: "revoke_bridge", bridgeId: "studio" }],
+      async accountId => [{ type: "add_device", device: await testDevice(accountId) }, { type: "add_device", device: await testDevice(accountId) }],
+      async accountId => [{ type: "add_bridge", bridge: await testBridge(accountId, "studio") }],
+    );
+    const view = a.client.snapshot().divergence;
+    expect(view?.theirs).toEqual({ carry: [{ type: "revoke_bridge", bridgeId: "studio" }], canKeep: true, reason: null });
+    expect(view?.mine.carry).toEqual([]);
+    const local = a.replica.raw()?.ledger;
+    // The server is down at the POST: nothing kept or adopted, the divergence stays; a restart signs everything again.
+    server.postHook = () => new Response(JSON.stringify({ error: "ledger_unavailable" }), { status: 503 });
+    authenticator.calls = [];
+    await expect(a.client.resolveDivergence("theirs")).rejects.toThrow("server_unavailable");
+    expect(signs(authenticator)).toBe(2);
+    expect(a.replica.raw()?.ledger).toEqual(local);
+    expect(a.client.snapshot().divergence?.other).toEqual(other);
+    expect(current(server)).toEqual(other);
+    server.postHook = null;
+    authenticator.calls = [];
+    await a.client.resolveDivergence("theirs");
+    expect(signs(authenticator)).toBe(2);
+    const chain = current(server);
+    expect(chain.transitions.slice(0, other.transitions.length)).toEqual(other.transitions);
+    expect(chain.transitions.slice(other.transitions.length).map(item => item.payload.operation.type)).toEqual(["revoke_bridge", "resolve_fork"]);
+    expect(a.replica.raw()?.ledger).toEqual(chain);
+    // The removal is part of the kept history, not a browser-only one.
+    expect(a.client.snapshot()).toMatchObject({ divergence: null, localOnly: { deviceIds: [], bridgeIds: [] } });
+    expect(a.replica.raw()?.checkpoint.revokedBridgeIds).toEqual(["studio"]);
+  });
+
+  it("carries several records (removals and a passkey with its original consent, no consent prompt); a cancel midway sends nothing", async () => {
+    const extra = await createSoftPasskey({ rpId: RP_ID, origin: ORIGIN });
+    let phone = "";
+    const { server, authenticator, a, other } = await split(
+      async accountId => [{ type: "add_bridge", bridge: await testBridge(accountId, "mine") }],
+      async accountId => [
+        { type: "revoke_device", endpointId: phone }, { type: "revoke_bridge", bridgeId: "studio" },
+        {
+          type: "add_authority", authority: { credentialId: extra.credentialId, publicKey: extra.publicKey, label: "YubiKey", addedAt: Date.now() - 500 },
+          consent: await extra.sign(await authorityConsentChallenge(accountId, { credentialId: extra.credentialId, publicKey: extra.publicKey })),
+        },
+      ],
+      async accountId => {
+        const device = await testDevice(accountId);
+        phone = device.endpoint.id;
+        return [{ type: "add_device", device }, { type: "add_bridge", bridge: await testBridge(accountId, "studio") }];
+      },
+    );
+    const carry = a.client.snapshot().divergence?.mine.carry ?? [];
+    expect(carry.map(item => item.type)).toEqual(["revoke_device", "revoke_bridge", "add_authority"]);
+    expect(a.client.snapshot().divergence?.mine.canKeep).toBe(true);
+    const local = a.replica.raw()?.ledger;
+    const posts = server.posts.length;
+    // The owner cancels the second prompt: nothing sent or stored; the divergence is unchanged.
+    let prompt = 0;
+    authenticator.beforeSign = async () => { prompt += 1; if (prompt === 2) throw new Error("passkey_cancelled"); };
+    authenticator.calls = [];
+    await expect(a.client.resolveDivergence("mine")).rejects.toThrow("passkey_cancelled");
+    expect(server.posts).toHaveLength(posts);
+    expect(a.replica.raw()?.ledger).toEqual(local);
+    expect(a.client.snapshot().divergence?.other).toEqual(other);
+    // From scratch: 3 carried records + the resolution = 4 prompts, and no consent prompt for the carried passkey.
+    authenticator.beforeSign = null;
+    authenticator.calls = [];
+    await a.client.resolveDivergence("mine");
+    expect(authenticator.names()).toEqual(["sign", "sign", "sign", "sign"]);
+    expect(server.posts).toHaveLength(posts + 1);
+    const checkpoint = await verifyLedger(current(server));
+    expect(checkpoint.revokedDeviceIds).toEqual([phone]);
+    expect(checkpoint.revokedBridgeIds).toEqual(["studio"]);
+    expect(checkpoint.authorities.map(item => item.credentialId)).toContain(extra.credentialId);
+    expect(checkpoint.bridges.map(item => item.bridgeId)).toEqual(["mine"]);
+    expect(a.replica.raw()?.ledger).toEqual(current(server));
+    expect(a.client.snapshot().divergence).toBeNull();
+  });
+
+  it("a side that cannot carry the other's records says so (canKeep false) and is refused before any prompt", async () => {
+    const extras = await Promise.all(Array.from({ length: LEDGER_LIMITS.maxAuthorities }, () => createSoftPasskey({ rpId: RP_ID, origin: ORIGIN })));
+    const authority = async (accountId: string, key: SoftPasskey): Promise<LedgerOperation> => ({
+      type: "add_authority", authority: { credentialId: key.credentialId, publicKey: key.publicKey, label: "Key", addedAt: Date.now() - 500 },
+      consent: await key.sign(await authorityConsentChallenge(accountId, { credentialId: key.credentialId, publicKey: key.publicKey })),
+    });
+    const half = LEDGER_LIMITS.maxAuthorities / 2;
+    const { server, authenticator, a } = await split(
+      async accountId => Promise.all(extras.slice(0, half).map(key => authority(accountId, key))),
+      async accountId => Promise.all(extras.slice(half).map(key => authority(accountId, key))),
+    );
+    const view = a.client.snapshot().divergence;
+    expect(view?.mine).toMatchObject({ canKeep: false, reason: "ledger_limit" });
+    expect(view?.theirs).toMatchObject({ canKeep: false, reason: "ledger_limit" });
+    const posts = server.posts.length;
+    authenticator.calls = [];
+    await expect(a.client.resolveDivergence("mine")).rejects.toThrow("ledger_limit");
+    expect(authenticator.calls).toEqual([]);
+    expect(server.posts).toHaveLength(posts);
+  });
+
+  it("the other side moved before the resolution landed: resolution_outdated, the divergence shows the newer chain, nothing adopted", async () => {
+    const { server, authenticator, a, accountId, local, other } = await split(
+      async accountId => [{ type: "add_bridge", bridge: await testBridge(accountId, "mine") }],
+      async accountId => [{ type: "add_device", device: await testDevice(accountId) }],
+    );
+    const newer = await signed(other, authenticator, { type: "add_bridge", bridge: await testBridge(accountId, "theirs-2") });
+    server.postHook = () => { server.ledgers.set(accountId, wire(newer)); return json({ error: "diverged", ledger: newer }, 409); };
+    await expect(a.client.resolveDivergence("mine")).rejects.toThrow("resolution_outdated");
+    expect(a.replica.raw()?.ledger).toEqual(local);
+    expect(a.client.snapshot().divergence?.other).toEqual(newer);
+    server.postHook = null;
+    await a.client.resolveDivergence("mine");
+    expect(a.client.snapshot().divergence).toBeNull();
+    expect(a.replica.raw()?.ledger).toEqual(current(server));
+  });
+
+  it("a diverged relay push raises the divergence (relay), sends nothing; an invalid chain from anywhere is ignored with one warning", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    const base = current(server);
+    await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "mine") });
+    const local = JSON.stringify(a.replica.raw());
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const forged = wire(await addDevices(base, authenticator, accountId, 2));
+    forged.transitions[1].signature = forged.transitions[0].signature;
+    const posts = server.posts.length;
+    await a.client.offer({ type: "ledger", ledger: forged });
+    await a.client.offer({ type: "ledger", ledger: forged });
+    expect(await a.client.learnChain(forged, "peer")).toBe("invalid");
+    expect(a.client.snapshot().divergence).toBeNull();
+    expect(warn.mock.calls.map(call => call[0])).toEqual(["[ledger] ignored an invalid chain from relay", "[ledger] ignored an invalid chain from peer"]);
+    const other = await addDevices(base, authenticator, accountId, 3);
+    await a.client.offer({ type: "ledger", ledger: other });
+    await quiet();
+    expect(JSON.stringify(a.replica.raw())).toBe(local);
+    expect(a.client.snapshot()).toMatchObject({ divergence: { source: "relay", other } });
+    await expect(a.client.revokeBridge("mine")).rejects.toThrow("ledger_diverged");
+    expect(server.posts).toHaveLength(posts);
+    // A server rolled back meanwhile is not re-offered to while diverged.
+    rollBack(server, accountId, 1);
+    await a.client.refresh({ force: true });
+    await a.client.retryNow();
+    expect(server.posts).toHaveLength(posts);
+  });
+
+  it("learnChain: ahead is adopted and brought to the server; behind and same change nothing; diverged raises the divergence (peer)", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    const base = current(server);
+    const ahead = await addDevices(base, authenticator, accountId, 1);
+    const posts = server.posts.length;
+    expect(await a.client.learnChain(ahead, "peer")).toBe("ahead");
+    await quiet();
+    expect(a.replica.raw()?.ledger).toEqual(ahead);
+    expect(current(server)).toEqual(ahead);
+    expect(server.posts).toHaveLength(posts + 1);
+    expect(await a.client.learnChain(base, "peer")).toBe("behind");
+    expect(await a.client.learnChain(ahead, "peer")).toBe("same");
+    await quiet();
+    expect(server.posts).toHaveLength(posts + 1);
+    const other = await addDevices(base, authenticator, accountId, 2);
+    expect(await a.client.learnChain(other, "peer")).toBe("diverged");
+    expect(a.client.snapshot()).toMatchObject({ divergence: { source: "peer", other } });
+    expect(a.replica.raw()?.ledger).toEqual(ahead);
+    expect(server.posts).toHaveLength(posts + 1);
   });
 });
 
