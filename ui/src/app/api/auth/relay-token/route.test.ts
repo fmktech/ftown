@@ -158,28 +158,45 @@ describe('POST /api/auth/relay-token', () => {
     expect(await res.json()).toEqual({ error: 'unauthorized' });
     expect(readChain).not.toHaveBeenCalled();
   });
-  // A chain that recorded both members, so a revoked member's auth key is found in its add record.
-  const chainWith = () => ({
+  // A chain that recorded both members, so a revoked member's auth key is found in its add record; `revokes` adds the chain's own removal.
+  const chainWith = (revokes: Array<'device' | 'bridge'> = ['device', 'bridge']) => ({
     ledger: { genesis: {}, transitions: [
       { payload: { operation: { type: 'add_device', device: trusted.devices[0] } } },
       { payload: { operation: { type: 'add_bridge', bridge: trusted.bridges[0] } } },
+      ...(revokes.includes('device') ? [{ payload: { operation: { type: 'revoke_device', endpointId: DEVICE_ID } } }] : []),
+      ...(revokes.includes('bridge') ? [{ payload: { operation: { type: 'revoke_bridge', bridgeId: BRIDGE_ID } } }] : []),
     ] },
     trusted, sticky: { deviceIds: [], bridgeIds: [] },
   });
   const revokeBridge = () => { readTrusted.mockResolvedValue(checkpoint({ ...trusted, bridges: [], revokedBridgeIds: [BRIDGE_ID] })); readChain.mockResolvedValue(chainWith()); };
-  it('returns key_revoked with the ledger as evidence for a revoked bridge that signed the proof', async () => {
+  it('returns key_revoked with the ledger as evidence for a bridge the stored chain revokes, that signed the proof', async () => {
     revokeBridge();
     const res = await POST(req(await bridgeBody()));
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ error: 'key_revoked', ledger: chainWith().ledger });
     expect(consumeNonce).toHaveBeenCalledTimes(1);
   });
-  it('returns key_revoked for a revoked device that signed the proof', async () => {
+  it('returns key_revoked for a device the stored chain revokes, that signed the proof', async () => {
     readTrusted.mockResolvedValue(checkpoint({ ...trusted, devices: [], revokedDeviceIds: [DEVICE_ID] }));
     readChain.mockResolvedValue(chainWith());
     const res = await POST(req({ proof: await proof({ kind: 'device', keyId: DEVICE_ID }, deviceKey), head: HEAD }));
     expect((await res.json()).error).toBe('key_revoked');
     expect(consumeNonce).toHaveBeenCalledTimes(1);
+  });
+  it('gives a plain 401 without the ledger, and no token, to a member revoked only through the sticky set (a removal seen on a diverged history)', async () => {
+    // The trusted checkpoint refuses both members (sticky applied); the stored chain still lists them and revokes neither.
+    const stickyOnly = { ...chainWith([]), sticky: { deviceIds: [DEVICE_ID], bridgeIds: [BRIDGE_ID] } };
+    readTrusted.mockResolvedValue(checkpoint({ ...trusted, devices: [], bridges: [], revokedDeviceIds: [DEVICE_ID], revokedBridgeIds: [BRIDGE_ID] }));
+    readChain.mockResolvedValue(stickyOnly);
+    for (const body of [await bridgeBody(), { proof: await proof({ kind: 'device', keyId: DEVICE_ID }, deviceKey), head: HEAD }]) {
+      const res = await POST(req(body));
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: 'unauthorized' });
+    }
+    // The other kind's removal in the chain is no evidence for this key.
+    readChain.mockResolvedValue({ ...chainWith(['device']), sticky: { deviceIds: [], bridgeIds: [BRIDGE_ID] } });
+    expect(await (await POST(req(await bridgeBody()))).json()).toEqual({ error: 'unauthorized' });
+    expect(consumeRateLimit).not.toHaveBeenCalledWith('relay-token-key', expect.anything(), expect.anything());
   });
   it('gives a plain 401 without the ledger when a revoked key id is claimed but another key signed', async () => {
     revokeBridge();
@@ -199,7 +216,7 @@ describe('POST /api/auth/relay-token', () => {
   });
   it('gives a plain 401 when the chain has no add record for the revoked id', async () => {
     revokeBridge();
-    readChain.mockResolvedValue({ ...chainWith(), ledger: { genesis: {}, transitions: [] } });
+    readChain.mockResolvedValue({ ...chainWith(), ledger: { genesis: {}, transitions: chainWith().ledger.transitions.slice(2) } });
     const res = await POST(req(await bridgeBody()));
     expect(await res.json()).toEqual({ error: 'unauthorized' });
   });

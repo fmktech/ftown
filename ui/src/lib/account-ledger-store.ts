@@ -23,10 +23,12 @@ import type { Ledger, LedgerCheckpoint, LedgerGenesis, LedgerTransition } from '
  * history carrying an applicable owner-signed resolve_fork, the one owner-authorized replacement (it must already carry every removal
  * and passkey of the discarded branch). What is written is choice.ledger: the stored prefix byte-for-byte plus the candidate's verified
  * suffix, never the candidate's own copy of the prefix. The same chain or a prefix of it is kept and nothing is written. A VALID chain
- * that diverges without such a resolve_fork is refused as 'diverged' whatever its length or content, and nothing from it is recorded,
- * its revocations included. An invalid chain is rejected. Sticky ids are revocations kept enforced although the stored chain does not
- * carry them: rows written by older code may hold some, and any id chooseLedger reports as discarded is added (it reports none since
- * resolutions must carry removals). Every write also merges the stored chain's own revocations, which its raw checkpoint enforces anyway.
+ * that diverges without such a resolve_fork is refused as 'diverged' whatever its length or content, and none of its records is stored;
+ * only its removals signed by an authority that existed at the fork point (chooseLedger's `seen`) are enforced here, through the sticky
+ * set (a sticky-only write, idempotent, outside the account write budget). An invalid chain is rejected. Sticky ids are revocations
+ * kept enforced although the stored chain does not carry them: those seen on a diverged chain, those rows written by older code hold,
+ * and any id chooseLedger reports as discarded (none since resolutions must carry removals). Every write also merges the stored chain's
+ * own revocations, which its raw checkpoint enforces anyway.
  * Residual risk, accepted: a database-only writer can roll an account back to ANY signed prefix of its chain (no old snapshot needed),
  * with the sticky set edited to match, and the heal re-seals that state, reviving keys revoked later. It can never make the server
  * authorize a key that no passkey-signed chain of the account lists. This was equally possible before the checkpoint existed (reads
@@ -52,8 +54,8 @@ export type CreationRejection = 'invalid_ledger' | 'registration_closed' | 'crea
 export type OfferResult =
   | { decision: 'created' | 'adopt' | 'keep'; stored: StoredLedger; discarded: number }
   /** Existing account: nothing was written and the stored chain is returned. No reason: the candidate is invalid (or would push the
-   *  sticky set over its limit). reason diverged: a VALID other history with no applicable resolve_fork; never adopted, and nothing
-   *  from it is recorded. reason rate_limited: the write was refused by admitAccountWrite. reason head_changed: the stored head is not
+   *  sticky set over its limit). reason diverged: a VALID other history with no applicable resolve_fork; never adopted, none of its
+   *  records stored; its removals by a fork-point authority may have joined the sticky set (`stored` reflects it). reason rate_limited: the write was refused by admitAccountWrite. reason head_changed: the stored head is not
    *  options.expectHead; nothing was chosen or written. */
   | { decision: 'reject'; stored: StoredLedger; discarded: number; reason?: 'rate_limited' | 'head_changed' | 'diverged' }
   /** No account was created or touched. reason account_unknown: options.expectHead was given and no account exists. */
@@ -64,7 +66,8 @@ export interface OfferOptions { expectHead?: string }
 export interface OfferLimits {
   /** Only when the candidate would create an account, after it fully verified and before the soft cap and the insert. */
   admitCreation: () => Promise<boolean>;
-  /** Only for an existing account, when the verified candidate is adopted (the only real row write), before the write. */
+  /** Only for an existing account, when the verified candidate is adopted (the only chain write), before the write. Never for the
+   *  sticky-only write that enforces removals seen on a diverged chain. */
   admitAccountWrite: (accountId: string) => Promise<boolean>;
 }
 export type LedgerQuery = (text: string, params: unknown[]) => Promise<Record<string, unknown>[]>;
@@ -76,6 +79,8 @@ const unionSticky = (a: Sticky, b: Sticky): Sticky => ({ deviceIds: union(a.devi
 const EMPTY: Sticky = { deviceIds: [], bridgeIds: [] };
 /** Heal rounds before a row that keeps changing under us is reported as a conflict. */
 const HEAL_ATTEMPTS = 3;
+/** Accounts whose sticky set was too full to enforce removals seen on a diverged chain (logged once per process). */
+const stickyFull = new Set<string>();
 
 function parseSticky(value: unknown): Sticky {
   const record = typeof value === 'string' ? JSON.parse(value) as unknown : value;
@@ -278,11 +283,35 @@ async function replicate(candidate: Ledger, accountId: string, row: Row, admitAc
   // Invalid (a bad record after the shared prefix, or malformed): refused with the stored chain; nothing written or spent.
   if (choice.decision === 'reject') return answer({ decision: 'reject', stored, discarded: 0 });
   if (choice.decision === 'keep') {
-    // A VALID other history without an applicable resolve_fork: never adopted, whatever its length or content, and nothing from it is
-    // recorded (not its revocations either). The client shows the owner both histories.
-    if (choice.relation === 'diverged') return answer({ decision: 'reject', stored, discarded: 0, reason: 'diverged' });
     // same / behind: the stored chain already holds every record of the candidate.
-    return answer({ decision: 'keep', stored, discarded: 0 });
+    if (choice.relation !== 'diverged') return answer({ decision: 'keep', stored, discarded: 0 });
+    // A VALID other history without an applicable resolve_fork: never adopted, whatever its length or content; the client shows the owner
+    // both histories. Its removals signed by an authority that existed at the fork point (choice.seen) are enforced HERE ONLY, through the
+    // sticky set: the chain, head, revision and raw checkpoint stay as they are, and nothing is appended to any chain.
+    const refused = (current: StoredLedger): Attempt => answer({ decision: 'reject', stored: current, discarded: 0, reason: 'diverged' });
+    const sticky = unionSticky(stored.sticky, choice.seen);
+    const added = sticky.deviceIds.length + sticky.bridgeIds.length - stored.sticky.deviceIds.length - stored.sticky.bridgeIds.length;
+    // Idempotent: a replay of a chain whose removals are already enforced writes nothing.
+    if (added === 0) return refused(stored);
+    let built: StoredLedger;
+    try { built = build(stored.ledger, raw, sticky); } catch {
+      // Over the sticky limit: nothing is written (the answer is the same 409), logged once per account and process.
+      if (!stickyFull.has(accountId)) {
+        stickyFull.add(accountId);
+        console.warn(`[ledger] account ${accountId.slice(0, 8)} cannot enforce ${added} removal(s) seen on a different history: sticky set full`);
+      }
+      return refused(stored);
+    }
+    // Not an account chain write: no admitAccountWrite. A third party replaying a public diverged chain cannot spend the account's budget;
+    // this is bounded by the route's per-IP limit and by idempotence (each write adds at least one id, up to the sticky limit).
+    const seal = sealed(accountId, raw, sticky);
+    // Only sticky and its seal (the MAC covers sticky; the checkpoint text is the same raw checkpoint), guarded like every write.
+    const rows = await query(`UPDATE account_ledger SET sticky=$2::jsonb,checkpoint=$3,checkpoint_mac=$4,version=version+1,updated_at=NOW()
+      WHERE account_id=$1 AND version=$5 AND revision=$6 AND head=$7 RETURNING account_id`,
+    [accountId, JSON.stringify(sticky), seal.text, seal.mac, version, raw.revision, raw.head]);
+    if (rows.length !== 1) return { done: false };
+    console.warn(`[ledger] account ${accountId.slice(0, 8)} enforces ${added} removal(s) seen on a different history`);
+    return refused(built);
   }
   // adopt: the candidate strictly extends the stored chain ('ahead'), or it is a valid other history ('diverged') carrying an
   // applicable owner-signed resolve_fork (and already every removal and passkey of the discarded branch), the only case in which the
@@ -291,7 +320,8 @@ async function replicate(candidate: Ledger, accountId: string, row: Row, admitAc
   // candidate's verified suffix (the candidate's copy of the prefix, possibly with re-encoded signature bytes, was never verified).
   const next = choice.ledger;
   const divergent = choice.relation === 'diverged';
-  let sticky = unionSticky(stored.sticky, ledgerRevocations(next));
+  // choice.seen is empty on an adopt; merged anyway, as after every chooseLedger call.
+  let sticky = unionSticky(unionSticky(stored.sticky, ledgerRevocations(next)), choice.seen);
   if (divergent) sticky = unionSticky(sticky, { deviceIds: choice.discarded.deviceIds, bridgeIds: choice.discarded.bridgeIds });
   // Built BEFORE writing: an over-limit sticky set is rejected here and can never be persisted.
   let built: StoredLedger;
@@ -328,7 +358,8 @@ const once = (gate: Gate): Gate => {
  *  - ahead and valid: adopt choice.ledger (stored prefix + verified new records); the sticky set gains its revocations;
  *  - diverged and valid with an applicable owner-signed resolve_fork that carries the discarded branch's removals and passkeys: adopt
  *    choice.ledger (the one replacement of the stored chain); the sticky set also gains any revocation reported discarded; logged once;
- *  - diverged and valid otherwise: reject, reason diverged, nothing written, spent or recorded (sticky included);
+ *  - diverged and valid otherwise: reject, reason diverged; no chain write, no budget; its removals signed by a fork-point authority
+ *    (choice.seen) that the sticky set lacks are added by a sticky-only write (logged; none when nothing is new or the set is full);
  *  - invalid: reject (no reason), nothing written or spent.
  *  Every refusal returns the stored chain. An adopt first passes limits.admitAccountWrite (else reject, reason rate_limited, nothing
  *  written). Optimistic concurrency on (version, revision, head): a lost race is re-read and chooseLedger re-run once against the new

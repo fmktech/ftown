@@ -41,6 +41,15 @@ function revokedMemberView(trusted: LedgerCheckpoint, ledger: Ledger, proof: Aut
   return null;
 }
 
+/** True iff the stored chain itself holds a revocation of the proof's key. A key revoked only through the sticky set (a removal seen on a
+ *  diverged history, never part of the stored chain) has none: the chain sent back would not prove the removal to its holder. */
+function chainRevokes(ledger: Ledger, proof: AuthProof): boolean {
+  return (ledger.transitions ?? []).some(({ payload }) => {
+    const op = payload?.operation;
+    return proof.kind === 'device' ? op?.type === 'revoke_device' && op.endpointId === proof.keyId : op?.type === 'revoke_bridge' && op.bridgeId === proof.keyId;
+  });
+}
+
 export async function POST(request: Request): Promise<NextResponse> {
   try {
     const ipLimit = await consumeRateLimit('relay-token-ip', rateLimitKeyIp(request), IP_LIMIT);
@@ -77,7 +86,10 @@ export async function POST(request: Request): Promise<NextResponse> {
       const revokedList = proof.kind === 'device' ? trusted.revokedDeviceIds : trusted.revokedBridgeIds;
       if (!revokedList.includes(proof.keyId)) return unauthorized();
       const ledger = await chain();
-      const view = ledger ? revokedMemberView(trusted, ledger, proof) : null;
+      // Revoked only through the sticky set: refused, but a plain 401 without a chain. The stored chain holds no evidence of the removal,
+      // so a holder must not be told key_revoked (it could not confirm it and would retry with the same answer, or wrongly reset).
+      if (!ledger || !chainRevokes(ledger, proof)) return unauthorized();
+      const view = revokedMemberView(trusted, ledger, proof);
       if (!ledger || !view || !(await verifyAuthProof(view, proof, expect))) return unauthorized();
       return fail(401, { error: 'key_revoked', ledger });
     }
