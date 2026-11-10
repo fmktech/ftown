@@ -81,7 +81,7 @@ function fromB64url(value: string): Uint8Array<ArrayBuffer> {
   return bytes;
 }
 /** Server rejection reasons of an account creation (POST /api/account/ledger without a stored account), surfaced as client codes of the same name. */
-const CREATION_REASONS = ["registration_closed", "creation_too_large", "invalid_ledger", "origin_mismatch", "server_full", "handle_taken", "rate_limited"];
+const CREATION_REASONS = ["registration_closed", "creation_too_large", "invalid_ledger", "origin_mismatch", "server_full", "handle_taken", "rate_limited", "server_misconfigured"];
 function canonicalOrigin(value: unknown): string {
   try { return typeof value === "string" ? new URL(value).origin : ""; } catch { return ""; }
 }
@@ -785,6 +785,8 @@ export class LedgerClient {
       throw new Error("ledger_rejected");
     }
     if (response.status === 413) throw new Error("ledger_limit");
+    // A per-account write limit: the signed record is already in the local chain (kept like after any transient failure) and is re-sent later.
+    if (response.status === 429 && value.error === "rate_limited") throw new Error("rate_limited");
     if (response.status !== 200 && response.status !== 201) throw new Error(response.status === 429 || response.status >= 500 ? "server_unavailable" : "ledger_rejected");
     if (!wasBound && await this.offerToReplica(chain, { bind: true, expectAccountId: accountId }) !== "adopt") throw new Error("ledger_rejected");
     await this.offerToReplica(value.ledger, { expectAccountId: accountId });

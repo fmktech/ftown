@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { issueNonce } from '@/lib/auth-nonce-store';
-import { clientIp } from '@/lib/client-ip';
+import { rateLimitKeyIp } from '@/lib/client-ip';
 import { consumeRateLimit, type RateLimitConfig } from '@/lib/login-rate-limit';
 
 export const runtime = 'nodejs';
@@ -28,7 +28,7 @@ async function boundedJson(request: Request): Promise<unknown> {
 
 export async function POST(request: Request): Promise<NextResponse> {
   try {
-    const limit = await consumeRateLimit('auth-nonce', clientIp(request), NONCE_RATE_LIMIT);
+    const limit = await consumeRateLimit('auth-nonce', rateLimitKeyIp(request), NONCE_RATE_LIMIT);
     if (!limit.allowed) {
       return NextResponse.json({ error: 'rate_limited' }, { status: 429, headers: { ...headers, 'Retry-After': String(Math.ceil((limit.retryAfterMs ?? 60000) / 1000)) } });
     }

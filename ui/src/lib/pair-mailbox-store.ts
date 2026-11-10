@@ -19,8 +19,9 @@ export async function putPairApproval(requestId: string, accountId: string, seal
   await db.query('DELETE FROM pair_mailbox WHERE account_id = $1 AND expires_at <= NOW()', [accountId]);
   // One statement: the insert only happens while the account holds fewer than the cap of unexpired rows, or when
   // the caller already owns this request_id (an overwrite never adds a row). Concurrent PUTs of one account each
-  // see the count from their own snapshot, so the cap can be exceeded by at most (in-flight PUTs - 1); the
-  // pair-write rate limit bounds in-flight work further.
+  // see the count from their own snapshot, so the cap can be exceeded by at most (in-flight PUTs - 1). The
+  // pair-write limit (fixed window, not a concurrency limit) allows at most 30 inserts per 10-minute window per
+  // account and rows live 10 minutes, so the table stays near the cap.
   const rows = await db.query(
     `INSERT INTO pair_mailbox (request_id, account_id, sealed, expires_at)
      SELECT $1, $2, $3, $4::timestamptz

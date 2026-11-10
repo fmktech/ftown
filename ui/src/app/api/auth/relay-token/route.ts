@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { consumeNonce } from '@/lib/auth-nonce-store';
 import { readLedger, readTrustedCheckpoint } from '@/lib/account-ledger-store';
-import { clientIp } from '@/lib/client-ip';
+import { rateLimitKeyIp } from '@/lib/client-ip';
 import { consumeRateLimit, type RateLimitConfig } from '@/lib/login-rate-limit';
 import { publicOrigin } from '@/lib/ledger-auth';
 import { signRelayToken } from '@/lib/relay-jwt';
@@ -22,7 +22,7 @@ const unauthorized = () => fail(401, { error: 'unauthorized' });
 
 export async function POST(request: Request): Promise<NextResponse> {
   try {
-    const ipLimit = await consumeRateLimit('relay-token-ip', clientIp(request), IP_LIMIT);
+    const ipLimit = await consumeRateLimit('relay-token-ip', rateLimitKeyIp(request), IP_LIMIT);
     if (!ipLimit.allowed) return fail(429, { error: 'rate_limited' }, { 'Retry-After': String(Math.ceil((ipLimit.retryAfterMs ?? 60000) / 1000)) });
 
     let body: unknown;

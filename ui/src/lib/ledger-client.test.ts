@@ -342,7 +342,7 @@ describe("LedgerClient account creation", () => {
 
   it.each([
     ["registration_closed", 403], ["creation_too_large", 413], ["invalid_ledger", 400], ["origin_mismatch", 400],
-    ["server_full", 503], ["handle_taken", 409], ["rate_limited", 429],
+    ["server_full", 503], ["handle_taken", 409], ["rate_limited", 429], ["server_misconfigured", 503],
   ] as const)("maps the server reason %s of a creation to the client code of the same name and keeps the pending creation", async (reason, status) => {
     const server = new FakeServer();
     server.creationRefusal = { status, body: { error: reason } };
@@ -382,6 +382,47 @@ describe("LedgerClient account creation", () => {
     await expect(a.client.retryCreateAccount()).rejects.toThrow("ledger_limit");
     server.creationRefusal = { status: 409, body: { error: "handle_taken" } };
     await expect(a.client.retryCreateAccount()).rejects.toThrow("handle_taken");
+  });
+
+  it("treats a 200 keep answer to the creating POST (the loser of a concurrent identical creation) as success", async () => {
+    const server = new FakeServer();
+    let first = true;
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await server.fetch(input, init);
+      if (first && init?.method === "POST" && new URL(String(input)).pathname === "/api/account/ledger") {
+        first = false;
+        const stored = await response.json() as { ledger: Ledger };
+        return json({ decision: "keep", ledger: stored.ledger, discarded: 0 }, 200);
+      }
+      return response;
+    }) as typeof fetch;
+    const authenticator = new FakeAuthenticator();
+    const a = await browser(server, authenticator, { deps: { fetchImpl } });
+    await a.client.createAccount({ passkeyLabel: "Mac", deviceLabel: "Laptop", userName: "owner" });
+    expect(a.client.snapshot()).toMatchObject({ status: "ready", pending: "none" });
+    expect(a.replica.raw()).not.toBeNull();
+    expect(server.sessions).toHaveLength(1);
+  });
+
+  it("reports rate_limited (not done) for a 429 on an existing account's write and keeps the signed record locally", async () => {
+    const server = new FakeServer();
+    const authenticator = new FakeAuthenticator();
+    let limited = false;
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (limited && init?.method === "POST" && new URL(String(input)).pathname === "/api/account/ledger") return json({ error: "rate_limited" }, 429);
+      return server.fetch(input, init);
+    }) as typeof fetch;
+    const a = await browser(server, authenticator, { deps: { fetchImpl } });
+    await a.client.createAccount({ passkeyLabel: "Mac", deviceLabel: "Laptop", userName: "owner" });
+    const accountId = a.client.snapshot().checkpoint?.accountId ?? "";
+    limited = true;
+    await expect(a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "b1") })).rejects.toThrow("rate_limited");
+    // Kept exactly like after a transient failure: in the local chain, not on the server.
+    expect(a.replica.raw()?.ledger.transitions).toHaveLength(2);
+    expect(server.ledger?.transitions).toHaveLength(1);
+    limited = false;
+    await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "b2") });
+    expect(server.ledger?.transitions).toHaveLength(3);
   });
 
   it("lets two browsers create two different accounts on one server, each bound to its own", async () => {

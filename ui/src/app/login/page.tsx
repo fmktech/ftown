@@ -27,6 +27,7 @@ const MESSAGES: Record<string, string> = {
   passkey_already_registered: "This passkey is already registered. Sign in with it instead.",
   registration_closed: "Account creation is closed on this server.",
   server_full: "This server is not accepting new accounts right now.",
+  server_misconfigured: "This server is not configured for account creation.",
   rate_limited: "Too many attempts. Try again later.",
   invalid_account_name: "Enter an account name of up to 64 characters.",
   creation_too_large: CREATION_FAILED,
@@ -48,7 +49,7 @@ function messageFor(code: string): string {
 }
 
 /** Rejections of the creating POST that a retry of the same signed account can outlive (nothing about the account itself is wrong). */
-const RETRYABLE = ["registration_closed", "server_full", "rate_limited", "network_unavailable", "server_unavailable"];
+const RETRYABLE = ["registration_closed", "server_full", "rate_limited", "server_misconfigured", "network_unavailable", "server_unavailable"];
 /** The signed account can never be accepted as is: only a discard (and a new passkey) gets the user forward. */
 const FATAL_CREATION = ["creation_too_large", "invalid_ledger", "origin_mismatch", "handle_taken"];
 

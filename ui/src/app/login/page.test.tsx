@@ -83,7 +83,7 @@ it("shows plain messages for known errors", async () => {
     ["passkey_cancelled", /cancelled/], ["secure_context_required", /secure connection/],
     ["passkey_already_registered", /already registered/], ["registration_closed", /closed on this server/],
     ["server_full", /not accepting new accounts right now/], ["rate_limited", /Too many attempts\. Try again later\./],
-    ["invalid_account_name", /account name of up to 64 characters/], ["handle_taken", /could not be created\. Discard this setup/],
+    ["server_misconfigured", /This server is not configured for account creation\.$/], ["invalid_account_name", /account name of up to 64 characters/], ["handle_taken", /could not be created\. Discard this setup/],
     ["ledger_other_account", /already belongs to an account\. Sign in with its passkey, or reset this browser in Security first\./],
   ] as const) {
     m.client.identifyAccount.mockRejectedValue(new Error(code));
@@ -179,7 +179,7 @@ it("refuses account creation when the public URL is not configured", () => {
   expect(screen.queryByRole("button", { name: "1. Create passkey" })).toBeNull();
 });
 
-for (const code of ["registration_closed", "server_full", "rate_limited", "network_unavailable", "server_unavailable"]) {
+for (const code of ["registration_closed", "server_full", "rate_limited", "server_misconfigured", "network_unavailable", "server_unavailable"]) {
   it(`retries a creation refused with ${code} without creating a second passkey`, async () => {
     m.client.createAccountStart.mockResolvedValue(undefined);
     m.client.enrollThisDevice.mockRejectedValue(new Error(code));

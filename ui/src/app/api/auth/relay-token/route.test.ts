@@ -15,7 +15,11 @@ vi.mock('@/lib/account-ledger-store', () => ({
   readLedger: (...a: unknown[]) => { calls.push('chain'); return readChain(...a); },
 }));
 vi.mock('@/lib/login-rate-limit', () => ({ consumeRateLimit: (...a: unknown[]) => consumeRateLimit(...a) }));
-vi.mock('@/lib/client-ip', () => ({ clientIp: () => '1.2.3.4' }));
+const ipState = vi.hoisted(() => ({ ip: '1.2.3.4' }));
+vi.mock('@/lib/client-ip', async importOriginal => {
+  const actual = await importOriginal<typeof import('@/lib/client-ip')>();
+  return { ...actual, clientIp: () => ipState.ip, rateLimitKeyIp: () => actual.rateLimitKey(ipState.ip) };
+});
 vi.mock('next-auth/providers/credentials', () => ({ default: (config: unknown) => config }));
 
 import { POST } from './route';
@@ -211,5 +215,24 @@ describe('POST /api/auth/relay-token', () => {
     expect((await POST(req(await bridgeBody()))).status).toBe(503);
     expect(log).toHaveBeenCalled();
     log.mockRestore();
+  });
+});
+
+describe('relay-token-ip limiter key', () => {
+  const keyFor = async (ip: string) => {
+    ipState.ip = ip;
+    consumeRateLimit.mockClear();
+    await POST(req({}));
+    return consumeRateLimit.mock.calls.find(c => c[0] === 'relay-token-ip')![1];
+  };
+  it('shares one key across addresses of the same IPv6 /64, separates other /64s, leaves IPv4 unchanged', async () => {
+    const a = await keyFor('2001:db8:1:2::1');
+    const b = await keyFor('2001:db8:1:2:ffff:aaaa:bbbb:cccc');
+    const c = await keyFor('2001:db8:1:3::1');
+    expect(a).toBe(b);
+    expect(c).not.toBe(a);
+    expect(await keyFor('1.2.3.4')).toBe('1.2.3.4');
+    expect(await keyFor('unknown')).toBe('unknown');
+    ipState.ip = '1.2.3.4';
   });
 });
