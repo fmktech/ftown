@@ -16,7 +16,7 @@ export default defineConfig({
   reporter: [["list"]],
   use: { ...base.use, ...chromium.use, trace: "off", video: "off", screenshot: "off" },
   projects: [
-    // The server's one account (passkey) and the paired shared bridges come from the suite's setup project.
+    // The shared account A (passkey) and the paired shared bridges come from the suite's setup project.
     { name: "setup", testDir: "../tests", testMatch: /account\.setup\.ts$/, use: chromium.use },
     { name: "capture", testMatch: "product.spec.ts", dependencies: ["setup"] },
   ],

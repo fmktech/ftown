@@ -161,12 +161,13 @@ is expected.
 - AWS remains healthy and its DNS targets are recorded for rollback.
 - Production `REGISTRATION_ENABLED` is absent or `false`; use `true` only for a
   controlled onboarding window, then disable it again.
-- The production database contains only the intended account; disabling future
-  registration does not remove accounts created earlier.
+- The production database contains only the intended accounts; disabling future
+  registration does not remove accounts created earlier. (Since 2026-11-10 a
+  server can hold many accounts; see `docs/runbooks/multi-account-operations.md`.)
 
 The current channel model permits authenticated browser clients to publish to
 several user-scoped namespaces. Production registration is therefore
-fail-closed for today's single-user operation, but this is not a tenant-isolation
+fail-closed for a controlled onboarding window, but this is not a tenant-isolation
 boundary. Add server-enforced publisher ownership checks before intentionally
 inviting untrusted additional users; the Fly migration itself does not fix that
 application-level authorization gap.

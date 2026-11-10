@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { BRIDGE_HOME, UI_BASE_URL } from "../helpers/config";
 import { waitForBridgePresence } from "../helpers/centrifugo";
-import { readBridgePointer } from "../helpers/bridge-api";
+import { tryReadBridgePointer } from "../helpers/bridge-api";
 import { parsePairingOutput, readSharedBridgeLog } from "../helpers/ledger-bridge";
 import {
   RUN_ACCOUNT_FILE, approvePairLink, createAccountViaUi, readRunAccount, signIn, virtualAuthenticator, writeRunAccount,
@@ -27,9 +27,11 @@ function paired(home: string): boolean {
 }
 
 /**
- * The run's ONE account, created through the real /login first-time setup with
- * a virtual-authenticator passkey, and both shared bridges paired through the
- * real /pair page with the 6-digit code each printed. Idempotent.
+ * The suite's shared account A (the default of every spec), created through the
+ * real /login "Create an account" form with a virtual-authenticator passkey and
+ * no secret, and both shared bridges paired to it through the real /pair page
+ * with the 6-digit code each printed. Idempotent. Specs that need another,
+ * unrelated account create their own (helpers/second-account.ts).
  */
 setup("account created with a passkey and both shared bridges paired", async ({ page }) => {
   setup.setTimeout(240_000);
@@ -40,7 +42,7 @@ setup("account created with a passkey and both shared bridges paired", async ({ 
     return;
   }
   if (!account) {
-    const accountId = await createAccountViaUi(page);
+    const accountId = await createAccountViaUi(page, { accountName: "E2E account A", passkey: "E2E passkey", browser: "E2E setup browser" });
     const credentials = await (await virtualAuthenticator(page)).credentials();
     expect(credentials).toHaveLength(1);
     expect(credentials[0].isResidentCredential).toBe(true);
@@ -59,6 +61,6 @@ setup("account created with a passkey and both shared bridges paired", async ({ 
 
   await waitForBridgePresence(account.accountId, { min: 2, timeoutMs: 60_000 });
   await expect.poll(() => {
-    try { readBridgePointer(BRIDGE_HOME); readBridgePointer(SECOND_BRIDGE_HOME); return true; } catch { return false; }
+    try { return tryReadBridgePointer(BRIDGE_HOME) !== null && tryReadBridgePointer(SECOND_BRIDGE_HOME) !== null; } catch { return false; }
   }, { timeout: 30_000 }).toBe(true);
 });

@@ -85,7 +85,7 @@ There is no `revoke_authority` and no `revokedCredentialIds`. A passkey that was
 
 Consequences:
 - A lost passkey is not an incident by itself when another authority exists; keep at least two (recommended: a second passkey or a hardware key).
-- A compromised passkey (an attacker can sign) cannot be removed. The response is: create a new account with a new passkey, then on every computer run `ftown start --new-identity` and pair it again with the new account. Because the server hosts at most one account (section 8, `accounts_singleton`), the new account can only be created after the old account row is deleted from the database (the other account tables reference it with `ON DELETE CASCADE`); no shipped command does this, so it is a manual SQL step: confirm before use.
+- A compromised passkey (an attacker can sign) cannot be removed. The response is: create a new account with a new passkey, then on every computer run `ftown start --new-identity` and pair it again with the new account. Because the server hosts at most one account (section 8, `accounts_singleton`), the new account can only be created after the old account row is deleted from the database (the other account tables reference it with `ON DELETE CASCADE`); no shipped command does this, so it is a manual SQL step: confirm before use. [Superseded in part: a server may now host many accounts; see the amendment at the end.]
 - If every passkey is lost, the account is unrecoverable; same recovery as above.
 
 ## 6. Fork choice and sticky revocations
@@ -121,11 +121,11 @@ Sticky revocations:
 
 ## 8. Server contract (`ui/`)
 
-Environment (see the runbook for values): `FTOWN_PUBLIC_URL` (required in production; canonical origin, https or loopback http; a present empty or malformed value fails closed), `FTOWN_RP_ID` (optional, defaults to the hostname of the public origin), `NEXT_PUBLIC_FTOWN_PUBLIC_URL` and `NEXT_PUBLIC_FTOWN_RP_ID` (browser side, inlined at build time), `FTOWN_BOOTSTRAP_SECRET` (at least 32 characters), `REGISTRATION_ENABLED`, `CENTRIFUGO_TOKEN_SECRET`, `AUTH_SECRET` (each at least 32 characters, not containing `change-me`), `NEXT_PUBLIC_CENTRIFUGO_URL`, `DATABASE_URL`.
+Environment (see the runbook for values): `FTOWN_PUBLIC_URL` (required in production; canonical origin, https or loopback http; a present empty or malformed value fails closed), `FTOWN_RP_ID` (optional, defaults to the hostname of the public origin), `NEXT_PUBLIC_FTOWN_PUBLIC_URL` and `NEXT_PUBLIC_FTOWN_RP_ID` (browser side, inlined at build time), `FTOWN_BOOTSTRAP_SECRET` (at least 32 characters), `REGISTRATION_ENABLED`, `CENTRIFUGO_TOKEN_SECRET`, `AUTH_SECRET` (each at least 32 characters, not containing `change-me`), `NEXT_PUBLIC_CENTRIFUGO_URL`, `DATABASE_URL`. [Superseded in part: `FTOWN_BOOTSTRAP_SECRET` no longer exists; see the amendment at the end.]
 
 Database (migration `ui/migrations/0011_passkey_ledger.sql`, one transaction, applied by `ui/scripts/migrate.mjs`):
 - Created: `accounts(account_id PK, handle UNIQUE, created_at)`, `account_ledger(account_id PK FK, revision, head, ledger jsonb, sticky jsonb, version, updated_at)`, `auth_nonces(nonce_hash PK, purpose, expires_at)`, `pair_mailbox(request_id PK, account_id FK, sealed, expires_at)`.
-- Single-account rule: unique index `accounts_singleton ON accounts ((true))` — at most one row can exist.
+- Single-account rule: unique index `accounts_singleton ON accounts ((true))` — at most one row can exist. [Superseded: removed by migration 0012; see "Amendment 2026-11-10: many accounts per server" at the end.]
 - Dropped and recreated keyed by `account_id` (rows not migrated, only while the old identity column still exists): `security_endpoint_directory`, `security_device_display_names`, `push_subscriptions`, `push_events`, `push_deliveries`.
 - Dropped: `security_pending_approvals`, `security_account_enrollments`, `security_account_history`, `pairing_requests`, `bridge_refresh`, `users`. Rate-limit rows with scope `login` and `register` are deleted; the table is kept.
 
@@ -136,7 +136,7 @@ Routes (all responses `Cache-Control: no-store` where stated in code):
 | Route | Auth | Behaviour |
 |---|---|---|
 | `POST /api/auth/nonce` | none | Body `{purpose:'session'|'relay'}` (max 256 bytes). 200 `{nonce, expiresAt}`; 32 random bytes, stored only as SHA-256, valid 60 s, single use. 400 invalid purpose; 429 after 120 per minute per IP (`auth-nonce`); 503 on failure. |
-| `POST /api/account/ledger` | none (the ledger is self-authenticating) | Body `{ledger, bootstrap?}`, capped at 2,621,440 bytes (413), 30 per minute per IP (`ledger-write`, 429). Runs `offerLedger`. 201 `{decision:'created', ledger, discarded}` on account creation; 200 `{decision:'adopt'|'keep', ledger, discarded}`; 409 `{error:'ledger_rejected', ledger}` for a rejected chain of an existing account; 403 `{error:'registration_closed'}` when a reject comes with no stored account (this includes a ledger that does not parse; closed registration, wrong or missing bootstrap secret, an account already exists, bad origin/rpId, no `add_device`); 400 bad body; 503 on store error. After `created`/`adopt`, publishes to the relay (section 10). |
+| `POST /api/account/ledger` | none (the ledger is self-authenticating) | Body `{ledger, bootstrap?}`, capped at 2,621,440 bytes (413), 30 per minute per IP (`ledger-write`, 429). Runs `offerLedger`. 201 `{decision:'created', ledger, discarded}` on account creation; 200 `{decision:'adopt'|'keep', ledger, discarded}`; 409 `{error:'ledger_rejected', ledger}` for a rejected chain of an existing account; 403 `{error:'registration_closed'}` when a reject comes with no stored account (this includes a ledger that does not parse; closed registration, wrong or missing bootstrap secret, an account already exists, bad origin/rpId, no `add_device`); 400 bad body; 503 on store error. After `created`/`adopt`, publishes to the relay (section 10). | [Superseded: no `bootstrap` field; see the amendment at the end.]
 | `GET /api/account/ledger?accountId=` or `?handle=` | none; public by design | Exactly one parameter, 43 base64url characters. 200 `{ledger}`; 404 `{error:'not_found'}`; 400; 429 after 120 per minute per IP (`ledger-read`); 503 for a corrupt row or store failure. The ledger holds only public keys, labels, origins and timestamps. |
 | `POST /api/auth/relay-token` | proof | Body `{proof, head, hostname?, localPort?}` (max 16 KiB). See section 9. |
 | `POST /api/auth/token` | NextAuth session | Mints the browser relay token; 200 `{token, centrifugoUrl, accountId, expiresAt}`; 401 without a trusted session. Note: the method is POST. |
@@ -147,7 +147,7 @@ Routes (all responses `Cache-Control: no-store` where stated in code):
 
 `requireAccount()` re-reads the ledger on every call and requires the session's device to be in `stored.trusted.devices`; a session JWT therefore does not outlive a device removal on the server.
 
-Account creation (the only path that creates a row): `offerLedger` with no stored account accepts a candidate only if all hold, checked cheapest first before any signature work: `REGISTRATION_ENABLED === 'true'` (unset means enabled outside production, disabled in production); `bootstrap` equals `FTOWN_BOOTSTRAP_SECRET` (at least 32 characters, SHA-256 + timing-safe comparison); no account exists; the chain contains at least one `add_device`; genesis `origins` is exactly `[publicOrigin()]` and `rpId` equals `FTOWN_RP_ID` or the public hostname; the chain verifies. The insert is one statement guarded by `NOT EXISTS (SELECT 1 FROM accounts)` plus the singleton index; a concurrent second genesis gets a reject. The browser additionally refuses creation unless `location.origin` equals `NEXT_PUBLIC_FTOWN_PUBLIC_URL` (`origin_mismatch`).
+Account creation (the only path that creates a row): `offerLedger` with no stored account accepts a candidate only if all hold, checked cheapest first before any signature work: `REGISTRATION_ENABLED === 'true'` (unset means enabled outside production, disabled in production); `bootstrap` equals `FTOWN_BOOTSTRAP_SECRET` (at least 32 characters, SHA-256 + timing-safe comparison); no account exists; the chain contains at least one `add_device`; genesis `origins` is exactly `[publicOrigin()]` and `rpId` equals `FTOWN_RP_ID` or the public hostname; the chain verifies. The insert is one statement guarded by `NOT EXISTS (SELECT 1 FROM accounts)` plus the singleton index; a concurrent second genesis gets a reject. The browser additionally refuses creation unless `location.origin` equals `NEXT_PUBLIC_FTOWN_PUBLIC_URL` (`origin_mismatch`). [Superseded: no bootstrap secret and no single-account condition; see the amendment at the end for the current order.]
 
 Existing account: `chooseLedger` with the stored checkpoint as cache; optimistic concurrency on `(version, revision, head)`, one retry, then `account_ledger_conflict` (503). `readLedger` re-verifies the stored chain (memoised by hash) and cross-checks the denormalised columns; a row that does not verify is corruption (503), never "absent".
 
@@ -178,13 +178,13 @@ Replication has no polling:
 - Bridge: every relay-token response carries a newer ledger if the head differs (token-renewal piggyback); a ledger message is offered as source `relay`; every (re)subscribe triggers a refresh read of `GET /api/account/ledger?accountId=`. Relay-triggered work runs at most one at a time, at least 1 s apart, doubling up to 60 s while it changes nothing (an adopted ledger resets it); only the newest pending item is kept. Requests from an endpoint the replica does not list (`approval_required`, not a revoked one) pull a refresh at most every 2 s, single-flight with one trailing refresh.
 - Every candidate, whatever its source, goes through `chooseLedger`; nothing here decides trust.
 
-The `bridges` Centrifugo namespace allows client publishing (`allow_publish_for_client: true`, `centrifugo/config.prod.json`). Any connection of the account, and anyone holding a valid relay token for it, can publish to the ledger channel; this is accepted because a publication is only a hint or a self-authenticating chain (section 14). No relay-side rate limit for that channel was found in the config; the receivers' throttles above are the bound.
+The `bridges` Centrifugo namespace allows client publishing (`allow_publish_for_client: true`, `centrifugo/config.prod.json`). Any connection of the account, and anyone holding a valid relay token for it, can publish to the ledger channel; this is accepted because a publication is only a hint or a self-authenticating chain (section 14). No relay-side rate limit for that channel was found in the config; the receivers' throttles above are the bound. [Amendment 2026-11-10 lists this publish gap as a blocker before opening registration to strangers.]
 
 ## 11. Browser flows
 
 Implemented in `ui/src/lib/ledger-client.ts` (`LedgerClient`), `ledger-replica.ts`, `passkey.ts`, `device-auth-key.ts`, pages `ui/src/app/login`, `ui/src/app/pair`, and the Security panel (`SecurityDevices.tsx`).
 
-- Create account (`/login`, "First time setup"; needs `NEXT_PUBLIC_FTOWN_PUBLIC_URL`; `origin_mismatch` otherwise). Three buttons, three gestures: 1 create passkey (new 32-byte handle); 2 sign the genesis (nothing is sent yet); 3 add this browser — signs `add_device`, then one POST `{ledger, bootstrap}` with the genesis and the first device, then signs in. The setup secret is held in memory only, sent with the creating POST and dropped when it returns; a refused POST can be retried with the same signed chain without another prompt ("Retry with this secret"). A pending creation can be discarded.
+- Create account (`/login`, "First time setup"; needs `NEXT_PUBLIC_FTOWN_PUBLIC_URL`; `origin_mismatch` otherwise). Three buttons, three gestures: 1 create passkey (new 32-byte handle); 2 sign the genesis (nothing is sent yet); 3 add this browser — signs `add_device`, then one POST `{ledger, bootstrap}` with the genesis and the first device, then signs in. The setup secret is held in memory only, sent with the creating POST and dropped when it returns; a refused POST can be retried with the same signed chain without another prompt ("Retry with this secret"). A pending creation can be discarded. [Superseded: the section is now "Create an account", with no setup secret; see the amendment at the end.]
 - Sign in, known browser: no passkey prompt. If the replica lists this browser's endpoint and auth key, it refreshes the ledger (soft failures tolerated), requests a `session` nonce, signs a proof, and calls NextAuth `signIn('ledger', {proof})`. `/login` does this on load unless the signed-out flag is set.
 - Sign in, new browser: gesture 1 `identifyPasskey` (assertion over a local nonce only to learn the user handle); `GET /api/account/ledger?handle=`; verify; the passkey must be an authority and `genesis.handle` must match. Gesture 2 signs `add_device` for this browser, POSTs the chain, then signs in. A browser already listed signs in after gesture 1 only.
 - Sign out: clears the NextAuth session, detaches the push subscription, sets a signed-out flag so `/login` does not sign straight back in. The browser stays a member of the account. To stop a browser signing in at all, remove it in Security.
@@ -277,6 +277,68 @@ Accepted:
 6. Pairing code grinding. An attacker who observes the owner's genuine link can search for a request with the same 6-digit code (about 10^6 hashes) and present a different bridge; the typed code and the passkey approval are the only barrier, links expire in 10 minutes (the mailbox entry is not deleted when read, so an approval can be read again until it expires), and the code is typed, not shown on the page. The attacker still needs the owner to open the attacker's link.
 7. Public ledger read. `GET /api/account/ledger` needs no authentication; it reveals public keys, labels, origins and timestamps for anyone who knows the (256-bit) accountId or handle, at 120 reads per minute per IP.
 8. Withholding and staleness. A server (or relay) can delay or withhold records; a replica never rolls back once it has seen a longer chain, but a replica that never saw a revocation cannot enforce it.
-9. Single account per server (database-enforced); one operator.
+9. Single account per server (database-enforced); one operator. [Superseded: see the amendment at the end.]
 
 Not verified: behaviour with a real iCloud Keychain / hardware-key authenticator end to end; Centrifugo-side disconnection of a revoked key; exact `consumeRateLimit` windowing; capabilities of each kept `/api/security/*` and `/api/push/*` route beyond the auth helpers.
+
+
+## Amendment 2026-11-10: many accounts per server
+
+The text above describes the first release: one account per server, created with a setup secret. Where it conflicts with this section, this section wins. The ledger, proofs, channels, relay token, pairing protocol and everything under `bridge/` are unchanged.
+
+### Removed
+
+- The bootstrap secret: env `FTOWN_BOOTSTRAP_SECRET`, the `bootstrap` field of `POST /api/account/ledger` (a stray field is ignored), and the "Setup secret" field on `/login`.
+- The singleton: unique index `accounts_singleton` (dropped by `ui/migrations/0012_multi_account.sql`) and the "no account exists yet" admission condition. `accounts.handle` stays unique.
+
+### Genesis admission
+
+Applies when the server holds no account for the chain's `accountId`. The first failing check answers; the checks run in this order.
+
+| # | Check | `error` | HTTP |
+|---|---|---|---|
+| 1 | `REGISTRATION_ENABLED` allows creation (in production only the exact value `true`) | `registration_closed` | 403 |
+| 2 | at most 16 records including genesis, at most 131072 bytes serialized | `creation_too_large` | 413 |
+| 3 | at least one `add_device` | `invalid_ledger` | 400 |
+| 4 | genesis `origins` is exactly `[publicOrigin()]` and `rpId` equals the server RP ID | `origin_mismatch` | 400 |
+| 5 | creation budget (per IP per hour, then global per day) | `rate_limited` | 429 |
+| 6 | the chain parses and verifies from genesis | `invalid_ledger` | 400 |
+| 7 | account count below the soft cap | `server_full` | 503 |
+| 8 | insert; another account already holds the handle | `handle_taken` | 409 |
+
+A chain that does not parse is `invalid_ledger` (400) before check 1. Checks 1 to 4 are cheap and spend no budget. The budget is spent only after them and before signature verification, so a malformed or closed-registration request cannot drain it. Two identical creations racing is not an error: the loser is re-read and treated as a replica offer. The cap is soft: count and insert are separate statements, so concurrent creations can overshoot it by a few.
+
+### Creation limits
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `FTOWN_MAX_ACCOUNTS` | 1000 | Soft cap on accounts on the server. |
+| `FTOWN_ACCOUNT_CREATE_PER_IP_HOUR` | 5 | Creation attempts per client IP per hour (scope `account-create-ip`). |
+| `FTOWN_ACCOUNT_CREATE_GLOBAL_DAY` | 200 | Creation attempts per day across all clients (scope `account-create-global`, one key). |
+
+Each value must be a plain positive integer. Anything else (unset, empty, 0, negative, decimal, exponent, too large) falls back to the default, so a typo never disables a limit. An attempt counts when it reaches check 5, whether or not it later succeeds. Over budget answers 429 `rate_limited` with a `Retry-After` header. The existing `ledger-write` limit (30 per minute per IP) and the 2,621,440-byte body cap still apply first. Offers for an existing account are not subject to these limits or to the creation size rule.
+
+### Per-account limits
+
+- Pairing mailbox, `PUT /api/pair/[requestId]`: 30 writes per 10 minutes per account (`pair-write`, 429 `rate_limited`), and at most 20 unexpired rows per account (429 `pair_mailbox_full`). Each write first deletes that account's expired rows. Rows live 10 minutes.
+- Session relay token, `POST /api/auth/token`: 120 per minute per account (`relay-token-session`, 429 `rate_limited`).
+
+### Account name
+
+`/login` asks for an "Account name" (required, at most 64 characters after sanitising). It is used only as the WebAuthn `userName`, so passkeys of different accounts can be told apart in the operating system picker. It is not stored in the ledger and is never sent to the server.
+
+### What stays the same
+
+The ledger format and `accountId = hash(genesis)`; the bridge and its pairing client; channel names (`...#<accountId>`); authorities are add-only; one account per browser profile (a browser that already belongs to an account must sign in to it or be reset in Security).
+
+### Known gaps
+
+Registration is open to anyone with a passkey when `REGISTRATION_ENABLED=true`. The following are not closed.
+
+a. Relay client publish is not limited per user in Centrifugo. A foreign account can publish ciphertext or noise into another account's channels. Receivers drop it, but it is a flooding and history-poisoning vector. Close it before opening registration to strangers.
+b. Centrifugo connection limits are global and shared by all accounts.
+c. Without a trusted proxy (`FTOWN_TRUSTED_PROXY`, Vercel or Fly), `clientIp()` returns the constant `unknown`. Per-IP limits are then shared by everyone, and the global daily cap becomes the effective creation limit.
+d. Pairing: anyone who obtains a pairing link and its 6-digit code within the 10-minute lifetime can pair that computer into their own account. The terminal prints which account it paired with ("Paired with account ..."); check it.
+e. A rejected creation can leave an orphan passkey in the user's authenticator.
+f. There is no account deletion and no cleanup of abandoned accounts.
+g. A push endpoint already registered to one account cannot be claimed by another (409 `subscription_limit_or_conflict`).

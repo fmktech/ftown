@@ -8,10 +8,10 @@ import { E2E_DIR, UI_BASE_URL } from "./helpers/config";
 // Defence in depth (env.sh already does this): specs spawn the ftown CLI with
 // `{ ...process.env, HOME: <test bridge home> }`, so an inherited production
 // bridge's FTOWN_* / tmux variables (a run started inside an ftown session) must
-// never reach them. FTOWN_PUBLIC_URL / FTOWN_BOOTSTRAP_SECRET / FTOWN_TRUSTED_PROXY
-// are the harness's own settings and are kept.
+// never reach them. FTOWN_PUBLIC_URL / FTOWN_TRUSTED_PROXY are the harness's own
+// settings and are kept (the UI's creation limits only matter to the UI process).
 for (const name of Object.keys(process.env)) {
-  if ((name.startsWith("FTOWN_") && !["FTOWN_PUBLIC_URL", "FTOWN_BOOTSTRAP_SECRET", "FTOWN_TRUSTED_PROXY"].includes(name))
+  if ((name.startsWith("FTOWN_") && !["FTOWN_PUBLIC_URL", "FTOWN_TRUSTED_PROXY"].includes(name))
     || name === "TMUX" || name === "TMUX_PANE" || name === "TMUX_TMPDIR") delete process.env[name];
 }
 
@@ -70,11 +70,13 @@ const chromiumUse: NonNullable<PlaywrightTestConfig["use"]> = {
 /**
  * Services (UI, TLS terminator, the two shared bridges) are started OUTSIDE
  * Playwright by scripts/start-services.sh, with scratch HOMEs and recorded PIDs
- * for precise teardown. The server holds exactly ONE account: the `setup`
- * project creates it through /login (virtual-authenticator passkey), exports
- * the passkey to e2e/.run-account.json and pairs both shared bridges through
- * /pair. Every spec then signs in its own browser contexts with that passkey.
- * Specs share the account and the bridges, so they run serially.
+ * for precise teardown. The server holds many accounts; the suite's default is
+ * the shared account A: the `setup` project creates it through /login
+ * (virtual-authenticator passkey), exports the passkey to e2e/.run-account.json
+ * and pairs both shared bridges through /pair. Every spec then signs in its own
+ * browser contexts with that passkey; specs that need an unrelated account B
+ * create one (helpers/second-account.ts). Specs share account A and the
+ * bridges, so they run serially.
  */
 export default defineConfig({
   testDir: "./tests",

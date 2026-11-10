@@ -6,8 +6,8 @@
 # TMUX* variable dropped, so it NEVER touches the real ~/.ftown or tmux server.
 #
 # The bridges start UNPAIRED: each prints a /pair#req=… link and a 6-digit code
-# into its log and waits (10 min) for approval. The one account of this server
-# is created, and both bridges are paired, by the Playwright `setup` project
+# into its log and waits (10 min) for approval. The suite's shared account A is
+# created, and both bridges are paired to it, by the Playwright `setup` project
 # (tests/account.setup.ts) through the real /login and /pair pages.
 #
 # Writes PID files: e2e/.ui.pid, .tls.pid, .bridge.pid, .bridge-2.pid
@@ -38,7 +38,10 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
   // The one public origin: the TLS terminator (CI) or the UI itself on loopback http.
   assert.ok([`https://localhost:${tls}`,`http://localhost:${ui}`].includes(process.env.FTOWN_PUBLIC_URL));
   assert.equal(process.env.NEXT_PUBLIC_FTOWN_PUBLIC_URL,process.env.FTOWN_PUBLIC_URL);
-  assert.ok((process.env.FTOWN_BOOTSTRAP_SECRET??'').length>=32);
+  // Open registration with creation budgets far above the suite's needs (every test source shares the global key).
+  assert.equal(process.env.REGISTRATION_ENABLED,'true');
+  assert.ok(process.env.FTOWN_BOOTSTRAP_SECRET===undefined);
+  for(const key of ['FTOWN_ACCOUNT_CREATE_PER_IP_HOUR','FTOWN_ACCOUNT_CREATE_GLOBAL_DAY'])assert.ok(/^[0-9]+$/.test(process.env[key]??'')&&Number(process.env[key])>=10000);
   assert.equal(process.env.NEXT_PUBLIC_CENTRIFUGO_URL,'ws://localhost:8000/connection/websocket');
   for(const name of ['ui','bridge','bridge-2','tls'])assert.ok(!fs.existsSync(path.join(dir,`.${name}.pid`)));
   await Promise.all([ui,tls].map(port=>new Promise((resolve,reject)=>{const server=net.createServer();server.once('error',reject);server.listen(port,'127.0.0.1',()=>server.close(error=>error?reject(error):resolve()));})));

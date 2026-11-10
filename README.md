@@ -55,8 +55,10 @@ device's other unlock prompt. The ftown server stores and relays the ledger but
 cannot add or remove anything: every browser and computer checks it from its
 first entry.
 
-**Create the account.** On the ftown site, open **First time setup**, create the
-passkey and name this browser. The server accepts only one account.
+**Create the account.** On the ftown site, open **Create an account**, enter an
+account name, create the passkey and name this browser. Then add a second
+passkey: the passkey is the only key to the account. A server can hold many
+accounts; the operator controls creation with `REGISTRATION_ENABLED`.
 
 **Sign in on another browser.** Choose **Sign in with passkey**; the passkey
 adds that browser to the ledger. A browser that is already in the ledger signs

@@ -7,12 +7,14 @@ import { E2E_DIR, UI_BASE_URL } from "./config";
 /**
  * Passkeys in Playwright: Chrome's virtual authenticator over CDP.
  *
- * The server holds exactly ONE account. The Playwright `setup` project
- * (tests/account.setup.ts) creates it through the real /login page with a
+ * The server holds many independent accounts. The suite's default is the
+ * shared account A: the Playwright `setup` project (tests/account.setup.ts)
+ * creates it through the real /login "Create an account" form with a
  * virtual-authenticator passkey, then exports that credential to
  * e2e/.run-account.json. Every other browser context models "the same synced
  * passkey on another device": it imports the credential into its own virtual
  * authenticator and signs in as a NEW browser (identify + add this browser).
+ * Specs that need a second, unrelated account B use helpers/second-account.ts.
  */
 
 /** A credential as returned by WebAuthn.getCredentials (privateKey: base64 PKCS#8; userHandle: base64). */
@@ -23,6 +25,9 @@ export interface VirtualCredential {
   privateKey: string;
   userHandle?: string;
   signCount: number;
+  /** The WebAuthn user.name the credential was created with (the "Account name" on /login). */
+  userName?: string;
+  userDisplayName?: string;
 }
 
 export interface RunAccount {
@@ -33,7 +38,6 @@ export interface RunAccount {
 
 export const RUN_ACCOUNT_FILE = join(E2E_DIR, ".run-account.json");
 export const RP_ID = process.env.NEXT_PUBLIC_FTOWN_RP_ID ?? new URL(UI_BASE_URL).hostname;
-export const BOOTSTRAP_SECRET = process.env.FTOWN_BOOTSTRAP_SECRET ?? "";
 
 export function readRunAccount(): RunAccount {
   if (!existsSync(RUN_ACCOUNT_FILE)) throw new Error("e2e/.run-account.json is missing: run the Playwright 'setup' project first");
@@ -47,7 +51,7 @@ export function writeRunAccount(account: RunAccount): void {
   writeFileSync(RUN_ACCOUNT_FILE, JSON.stringify(account, null, 2), { mode: 0o600 });
 }
 
-/** The run's account id: the channel suffix (`…#<accountId>`) and the relay token `sub`. */
+/** The shared account A's id: the channel suffix (`…#<accountId>`) and the relay token `sub`. */
 export function sharedAccountId(): string {
   return process.env.E2E_ACCOUNT_ID ?? readRunAccount().accountId;
 }
@@ -129,18 +133,36 @@ export async function isolateClientSource(context: BrowserContext): Promise<void
   await installed;
 }
 
+export interface AccountLabels {
+  /** "Account name": the passkey's WebAuthn user name (never stored in the ledger). */
+  accountName: string;
+  /** "Passkey label": the genesis authority's label. */
+  passkey: string;
+  /** "This browser label": the first device's label. */
+  browser: string;
+}
+
+/** Fill the collapsed "Create an account" form on /login (the page must already be there). */
+export async function fillCreateAccountForm(page: Page, labels: AccountLabels): Promise<void> {
+  const details = page.locator("details").filter({ has: page.getByText("Create an account", { exact: true }) });
+  if (!await details.evaluate(element => (element as HTMLDetailsElement).open)) await page.getByText("Create an account", { exact: true }).click();
+  await page.locator("#account-name").fill(labels.accountName);
+  await page.locator("#passkey-label").fill(labels.passkey);
+  await page.locator("#create-device-label").fill(labels.browser);
+}
+
 /**
- * First-time setup through the real /login page: passkey + genesis + this
- * browser, with the bootstrap secret. Returns the accountId (from the session).
+ * Create a NEW account through the real /login "Create an account" form: passkey (gesture 1) + signed genesis (gesture 2)
+ * + this browser (gesture 3). `page` needs its own empty virtual authenticator (one per context). Returns the accountId
+ * (from the session).
  */
-export async function createAccountViaUi(page: Page, labels: { passkey: string; browser: string } = { passkey: "E2E passkey", browser: "E2E setup browser" }): Promise<string> {
+export async function createAccountViaUi(page: Page, labels: Partial<AccountLabels> = {}): Promise<string> {
   await isolateClientSource(page.context());
   await virtualAuthenticator(page);
   await page.goto("/login");
-  await page.getByText("First time setup", { exact: true }).click();
-  await page.locator("#passkey-label").fill(labels.passkey);
-  await page.locator("#create-device-label").fill(labels.browser);
-  await page.locator("#bootstrap").fill(BOOTSTRAP_SECRET);
+  await fillCreateAccountForm(page, {
+    accountName: labels.accountName ?? "E2E account A", passkey: labels.passkey ?? "E2E passkey", browser: labels.browser ?? "E2E setup browser",
+  });
   await page.getByRole("button", { name: "1. Create passkey" }).click();
   const sign = page.getByRole("button", { name: "2. Sign the account" });
   await expect(sign).toBeEnabled();
@@ -162,7 +184,7 @@ export async function sessionAccountId(page: Page): Promise<string> {
 }
 
 /** Races a step against the /login error alert so a product error fails fast with its message. */
-async function failOnLoginError<T>(page: Page, step: Promise<T>): Promise<T> {
+export async function failOnLoginError<T>(page: Page, step: Promise<T>): Promise<T> {
   const alert = page.locator("#login-error");
   let done = false;
   const failure = (async () => {
@@ -183,13 +205,14 @@ async function failOnLoginError<T>(page: Page, step: Promise<T>): Promise<T> {
 }
 
 /**
- * Sign `page` in with the run account's passkey and land on /dashboard.
+ * Sign `page` in with an account's passkey (default: the shared account A) and land on /dashboard.
  * A browser this context already enrolled signs in silently (device-key proof on
  * mount); a new one runs identify (passkey #1) + add this browser (passkey #2).
  */
 export async function signIn(page: Page, options: { browserLabel?: string; account?: RunAccount } = {}): Promise<{ enrolled: string | null }> {
+  const account = options.account ?? readRunAccount();
   await isolateClientSource(page.context());
-  await withAccountPasskey(page, options.account);
+  await withAccountPasskey(page, account);
   await page.goto("/login");
   const signInButton = page.getByRole("button", { name: "Sign in with passkey" });
   const addButton = page.getByRole("button", { name: "Add this browser" });
@@ -207,24 +230,28 @@ export async function signIn(page: Page, options: { browserLabel?: string; accou
   await page.locator("#device-label").fill(options.browserLabel ?? `E2E browser ${randomBytes(3).toString("hex")}`);
   await addButton.click();
   await failOnLoginError(page, page.waitForURL("**/dashboard", { timeout: 30_000 }));
-  const endpointId = await browserEndpointId(page, (options.account ?? readRunAccount()).accountId);
-  trackEnrolledBrowser(endpointId);
+  const endpointId = await browserEndpointId(page, account.accountId);
+  trackEnrolledBrowser(account, endpointId);
   return { enrolled: endpointId };
 }
 
-const enrolled = new Map<string, Set<string>>();
-function trackEnrolledBrowser(endpointId: string): void {
+/** Browsers a test enrolled, per account. */
+export interface EnrolledBrowsers { account: RunAccount; endpointIds: string[] }
+const enrolled = new Map<string, Map<string, EnrolledBrowsers>>();
+function trackEnrolledBrowser(account: RunAccount, endpointId: string): void {
   let testId: string;
   try { testId = test.info().testId; } catch { return; }
-  const owned = enrolled.get(testId) ?? new Set<string>();
-  owned.add(endpointId);
+  const owned = enrolled.get(testId) ?? new Map<string, EnrolledBrowsers>();
+  const entry = owned.get(account.accountId) ?? { account, endpointIds: [] };
+  if (!entry.endpointIds.includes(endpointId)) entry.endpointIds.push(endpointId);
+  owned.set(account.accountId, entry);
   enrolled.set(testId, owned);
 }
-/** Browsers (ledger devices) this test enrolled through signIn(); the suite fixture revokes them afterwards. */
-export function takeEnrolledBrowsers(testId: string): string[] {
+/** Browsers (ledger devices) this test enrolled through signIn(), grouped by account; the suite fixture revokes them afterwards. */
+export function takeEnrolledBrowsers(testId: string): EnrolledBrowsers[] {
   const owned = enrolled.get(testId);
   enrolled.delete(testId);
-  return owned ? [...owned] : [];
+  return owned ? [...owned.values()] : [];
 }
 
 /** The browser's endpoint id for the account (its ledger device id), from IndexedDB; asserts the key is non-extractable. */
@@ -242,9 +269,9 @@ export async function browserEndpointId(page: Page, accountId: string = sharedAc
   }, accountId);
 }
 
-/** Approve a bridge's /pair link: type its 6-digit code and approve with the passkey. */
-export async function approvePairLink(page: Page, link: string, code: string): Promise<void> {
-  await withAccountPasskey(page);
+/** Approve a bridge's /pair link for `account` (default: the shared account A): type its 6-digit code and approve with the passkey. */
+export async function approvePairLink(page: Page, link: string, code: string, account: RunAccount = readRunAccount()): Promise<void> {
+  await withAccountPasskey(page, account);
   // A fragment-only change on an already-open /pair is a same-document navigation the page does not re-read.
   if (new URL(page.url() === "about:blank" ? "about:blank" : page.url()).pathname === "/pair") await page.goto("about:blank");
   await page.goto(link);

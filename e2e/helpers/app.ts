@@ -6,7 +6,7 @@ import { sharedAccountId, signIn } from "./passkey";
 export { sharedAccountId };
 
 /**
- * Sign `page` in to the run's one account with its synced passkey and land on
+ * Sign `page` in to the shared account A with its synced passkey and land on
  * /dashboard. A fresh browser context enrols itself (passkey identify + "Add
  * this browser"); a context that already enrolled signs in with its device key.
  */
@@ -41,13 +41,13 @@ export async function waitForBridgeOnline(page: Page): Promise<void> {
 
 /**
  * Open the New Session modal, choose a plain zsh shell (so no claude binary / API
- * key is needed), name it, and submit.
+ * key is needed) on `bridgeId` (default: the shared bridge e2e/.bridge-home), name it, and submit.
  */
-export async function createShellSession(page: Page, name: string): Promise<void> {
+export async function createShellSession(page: Page, name: string, bridgeId: string = readBridgePointer().bridgeId): Promise<void> {
   await page.getByRole("button", { name: "Create a new session", exact: true }).click();
   await expect(page.getByText("New Session", { exact: true })).toBeVisible();
   await page.locator("#ns-shell-type").selectOption("shell");
-  await page.locator("#ns-bridge").selectOption(readBridgePointer().bridgeId);
+  await page.locator("#ns-bridge").selectOption(bridgeId);
   await page.locator('input[placeholder="Optional name for this session"]').fill(name);
   await page.getByRole("button", { name: "Create Session" }).click();
 }

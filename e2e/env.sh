@@ -26,11 +26,16 @@ export CENTRIFUGO_TOKEN_SECRET="e2e-centrifugo-token-secret-0123456789abcdef"
 export CENTRIFUGO_API_KEY="e2e-centrifugo-api-key-0123456789abcdef"
 export NEXT_PUBLIC_CENTRIFUGO_URL="ws://localhost:8000/connection/websocket"
 export AUTH_SECRET="e2e-auth-secret-not-for-production" # gitleaks:allow
-# One account per server, created in the browser with a passkey. Account
-# creation is fail-closed unless registration is open AND the creator presents
-# this setup secret (>= 32 chars). Test-only value.
+# Many independent accounts per server, each created in the browser with a
+# passkey (no setup secret). Creation is open only while REGISTRATION_ENABLED is
+# "true", and is rate-limited per client IP per hour and globally per day. The
+# suite creates the shared account A, several second accounts B and throwaway
+# genesis chains; locally and in CI the global key is shared by every run and
+# test sources are synthetic, so both creation budgets are raised far above the
+# suite's needs (the production defaults are 5/IP/hour and 200/day).
 export REGISTRATION_ENABLED="true"
-export FTOWN_BOOTSTRAP_SECRET="e2e-bootstrap-secret-0123456789abcdef-not-for-production" # gitleaks:allow
+export FTOWN_ACCOUNT_CREATE_PER_IP_HOUR="100000"
+export FTOWN_ACCOUNT_CREATE_GLOBAL_DAY="100000"
 # Auth.js v5 does not trust the Host header under `next start` (prod) unless told to.
 # Vercel sets this automatically; we set it for the local/CI prod run.
 export AUTH_TRUST_HOST="true"

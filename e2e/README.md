@@ -17,38 +17,57 @@ attention, mail, push, usage and the admission/IDOR guards.
   breaks client-side `terminal:*` publishes — see repo findings).
 - `env.sh` — shared dev env (CI-local placeholders; nothing sensitive).
 - `scripts/` — `gen-certs.sh`, `setup-db.mjs`, `start-services.sh`, `stop-services.sh`, `tls-proxy.mjs`.
-- `helpers/` — `passkey.ts` (Chrome virtual authenticator, sign-in, /pair approval),
-  `ledger-admin.ts` (Node-side passkey signer, ledger reads, key proofs), `ledger-bridge.ts`
+- `helpers/` — `passkey.ts` (Chrome virtual authenticator, account creation, sign-in, /pair
+  approval), `second-account.ts` (a real second account B), `ledger-admin.ts` (Node-side
+  passkey signer, ledger reads, key proofs, creation chains), `ledger-bridge.ts`
   (test-owned unpaired bridges), app/Centrifugo/bridge-API helpers.
-- `tests/account.setup.ts` — the `setup` project: creates the server's ONE account and pairs
-  the two shared bridges. `tests/*.spec.ts` — the suite.
+- `tests/account.setup.ts` — the `setup` project: creates the shared account A and pairs
+  the two shared bridges to it. `tests/*.spec.ts` — the suite.
 
-## The one account
+## Accounts A and B
 
-The server holds exactly ONE account (`accounts_singleton`), created with a
-passkey plus `FTOWN_BOOTSTRAP_SECRET`. The suite therefore shares one account:
+The server holds many independent accounts. Anyone with a passkey can create
+one on `/login` ("Create an account": account name, passkey label, browser
+label; no setup secret) while `REGISTRATION_ENABLED=true`. `env.sh` raises the
+account-creation budgets (`FTOWN_ACCOUNT_CREATE_PER_IP_HOUR`,
+`FTOWN_ACCOUNT_CREATE_GLOBAL_DAY`) far above the suite's needs: every test
+source is synthetic and the global key is shared by the whole run.
+
+**Account A — the shared default.** Almost every spec uses it:
 
 1. `scripts/start-services.sh` starts the UI and two UNPAIRED shared bridges
    (`.bridge-home`, `.bridge-home-2`); each prints a `/pair#req=…` link and a
    6-digit code into `bridge.log` / `bridge-2.log` and waits 10 minutes.
 2. The Playwright `setup` project (`tests/account.setup.ts`, a dependency of the
-   `chromium` project) creates the account through the real `/login` first-time
-   setup with a Chrome virtual authenticator (CDP `WebAuthn.*`, ctap2, internal,
-   resident key, UV), exports the passkey to `e2e/.run-account.json` (mode 0600,
+   `chromium` project) creates account A through the real `/login` form with a
+   Chrome virtual authenticator (CDP `WebAuthn.*`, ctap2, internal, resident
+   key, UV), exports the passkey to `e2e/.run-account.json` (mode 0600,
    throwaway account) and approves both bridges on `/pair` by typing their codes.
    It is idempotent: a rerun against the same stack reuses the account.
 3. Every spec signs its browser contexts in with that passkey ("the same synced
    passkey on another device": the credential is imported into the context's own
    virtual authenticator), i.e. passkey identify + "Add this browser". The
    `test` fixture (`helpers/fixtures.ts`) revokes every browser a test enrolled,
-   so the ledger stays under its 128-browser limit.
+   so A's ledger stays under its 128-browser limit.
 
-A database can hold only one account, so **every fresh stack needs an empty
-database** (`node scripts/setup-db.mjs --reset`, or `docker compose down -v`).
-Specs share the account and the bridges and run serially (`workers: 1`).
+**Account B — a real second account, on demand.** `createSecondAccount(browser)`
+(`helpers/second-account.ts`) creates an unrelated account through the same
+`/login` form in its OWN browser context with its OWN virtual authenticator
+(its own passkey) and first device; `pairBridge()` starts an isolated bridge
+and pairs it to B through B's own `/pair` approval. Every credential B uses
+(session, relay token, device key, bridge key, passkey) is B's own; nothing is
+minted. `close()` stops only the bridge process it spawned and closes the
+context. `tests/account-isolation.spec.ts` uses A and B to prove that B can
+neither see nor touch anything of A (dashboard, HTTP routes, ledger, relay
+subscribe/publish, browser binding). Throwaway accounts stay in the database.
+
+Specs share account A and the bridges and run serially (`workers: 1`). A fresh
+stack should start from an empty database (`node scripts/setup-db.mjs --reset`,
+or `docker compose down -v`): `.run-account.json` must name an account the
+server holds.
 
 `setup-db.mjs` models a production upgrade: v1 base tables, then
-`ui/migrations/0005…0011` each in its own transaction (like `ui/scripts/migrate.mjs`),
+`ui/migrations/0005…` each in its own transaction (like `ui/scripts/migrate.mjs`),
 a second run of `0011` (idempotency), and a load of `ui/schema.sql` into a scratch
 schema (fresh install).
 
