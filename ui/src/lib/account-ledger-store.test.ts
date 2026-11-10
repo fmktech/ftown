@@ -28,6 +28,13 @@ vi.mock('@security/ledger/ledger', async importOriginal => {
 });
 vi.mock('@/lib/registration', () => ({ isRegistrationEnabled: () => db.registration }));
 const violation = (constraint: string): Error => Object.assign(new Error(`duplicate key value violates unique constraint "${constraint}"`), { code: '23505', constraint });
+/** jsonb's key order (shorter keys first, then bytewise), recursively: what Postgres hands back for a jsonb column. */
+const jsonbOrder = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(jsonbOrder);
+  if (!value || typeof value !== 'object') return value;
+  const keys = Object.keys(value).sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0));
+  return Object.fromEntries(keys.map(key => [key, jsonbOrder((value as Record<string, unknown>)[key])]));
+};
 /** A parameter as Postgres stores it: `$n::jsonb` is parsed JSON, a plain `$n` is the text as given. */
 const valueOf = (token: string, params: unknown[]): unknown => {
   const match = /^\$(\d+)(::jsonb)?$/.exec(token);
@@ -43,9 +50,23 @@ vi.mock('@/lib/db', () => ({
       const sql = text.replace(/\s+/g, ' ').trim();
       if (sql.startsWith('SELECT COUNT')) return [{ count: db.rows.size }];
       if (sql.startsWith('SELECT')) {
-        db.reads.push(sql.includes('JOIN accounts') ? 'chain' : 'checkpoint');
+        const chain = sql.includes('JOIN accounts');
+        db.reads.push(chain ? 'chain' : 'checkpoint');
         const found = [...db.rows.values()].filter(row => (sql.includes('a.handle=$1') ? row.handle : row.account_id) === params[0]);
-        return found.map(row => ({ ...row }));
+        return found.map(row => {
+          const out: Record<string, unknown> = { ...row, ledger: jsonbOrder(row.ledger), sticky: jsonbOrder(row.sticky),
+            checkpoint: row.checkpoint !== null && typeof row.checkpoint === 'object' ? jsonbOrder(row.checkpoint) : row.checkpoint };
+          if (chain) return out;
+          // The small read selects no chain, only its length and last payload, as the SQL text says.
+          const ledger = row.ledger as { genesis?: { payload?: unknown }; transitions?: Array<{ payload?: unknown }> } | null;
+          const transitions = ledger?.transitions;
+          if (sql.includes('jsonb_array_length')) {
+            out.transition_count = Array.isArray(transitions) ? transitions.length : null;
+            out.last_payload = jsonbOrder((Array.isArray(transitions) ? transitions[transitions.length - 1]?.payload : undefined) ?? ledger?.genesis?.payload ?? null);
+          }
+          delete out.ledger; delete out.handle;
+          return out;
+        });
       }
       const insert = /^WITH a AS \(INSERT INTO accounts\(account_id,handle\) VALUES \(\$1,\$2\)(.*?)RETURNING account_id\) INSERT INTO account_ledger\((.+?)\) SELECT (.+?) FROM a RETURNING account_id$/.exec(sql);
       if (insert) {
@@ -101,6 +122,10 @@ vi.mock('@/lib/db', () => ({
 
 const SECRET = 'store-test-auth-secret-0123456789abcdefghij';
 vi.stubEnv('AUTH_SECRET', SECRET);
+vi.mock('next-auth/providers/credentials', () => ({ default: (config: unknown) => config }));
+const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+/** The heal log lines written since the last reset. */
+const heals = (): string[] => warn.mock.calls.map(call => String(call[0])).filter(line => line.startsWith('[ledger] checkpoint healed'));
 const { accountCount, offerLedger, readLedger, readTrustedCheckpoint } = await import('./account-ledger-store');
 const OPEN: OfferLimits = { admitCreation: async () => true, admitAccountWrite: async () => true };
 const offer = (candidate: unknown, limits: OfferLimits = OPEN) => offerLedger(candidate, limits);
@@ -198,6 +223,7 @@ beforeEach(() => {
   db.rows.clear(); db.orphans.clear(); db.writes = 0; db.inserts = 0; db.updates = 0; db.heals = 0; db.reads = []; db.sets = []; db.races = [];
   db.registration = true; verifySpy.calls = 0; verifySpy.caches = [];
   vi.stubEnv('AUTH_SECRET', SECRET);
+  warn.mockClear();
   delete process.env.FTOWN_MAX_ACCOUNTS;
 });
 afterEach(() => { vi.unstubAllEnvs(); });
@@ -909,7 +935,7 @@ describe('sticky revocations', () => {
 });
 
 describe('reads', () => {
-  it('throw on a corrupt chain row; checkpoint damage alone is healed instead', async () => {
+  it('throw on a corrupt chain row; checkpoint or revision/head damage is healed from the chain instead', async () => {
     const { passkey, base } = await registered();
     const good = { ...row(base.accountId) };
     const { chain: other } = await fresh();
@@ -917,11 +943,12 @@ describe('reads', () => {
     const otherRow = await sealed(other);
     // [name, patch, full read, checkpoint read]: 'corrupt' throws, 'ok' returns base's trusted checkpoint (healing if needed).
     const cases: Array<[string, Partial<Row>, 'corrupt' | 'ok', 'corrupt' | 'ok']> = [
-      ['revision', { revision: 5 }, 'corrupt', 'corrupt'],
-      ['head', { head: 'A'.repeat(43) }, 'corrupt', 'corrupt'],
+      // The revision and head columns follow the chain column: a disagreement is healed from the (verified) chain.
+      ['revision', { revision: 5 }, 'ok', 'ok'],
+      ['head', { head: 'A'.repeat(43) }, 'ok', 'ok'],
       ['handle', { handle: randomB64(32) }, 'corrupt', 'ok'],
-      ['shape', { ledger: { nope: true } }, 'corrupt', 'ok'],
-      ['chain of another account', { ledger: plain(other.ledger) }, 'corrupt', 'ok'],
+      ['shape', { ledger: { nope: true } }, 'corrupt', 'corrupt'],
+      ['chain of another account', { ledger: plain(other.ledger) }, 'corrupt', 'corrupt'],
       ['sticky', { sticky: { deviceIds: [1], bridgeIds: [] } }, 'corrupt', 'corrupt'],
       ['version', { version: 'x' as unknown as number }, 'corrupt', 'corrupt'],
       ['checkpoint shape', { checkpoint: '{"nope":true}' }, 'ok', 'ok'],
@@ -940,6 +967,11 @@ describe('reads', () => {
       }
       db.rows.set(base.accountId, { ...good, ...patch });
       if (full === 'corrupt') await expect(offer(base.ledger), name).rejects.toThrow('account_ledger_corrupt');
+      if (full === 'ok') {
+        // An offer heals too, and the row converges back to exactly what a correct writer stored.
+        expect((await offer(base.ledger)).decision, name).toBe('keep');
+        expect(row(base.accountId), name).toEqual(good);
+      }
     }
     db.rows.set(base.accountId, good);
     expect((await readLedger({ accountId: base.accountId }))?.trusted.head).toBe(base.head);
@@ -1045,5 +1077,209 @@ describe('creation binds origin and rpId', () => {
     const { chain: longer } = await addDevice(base, passkey, 'D2');
     expect((await offer(longer.ledger)).decision).toBe('adopt');
     process.env.FTOWN_PUBLIC_URL = origin;
+  });
+});
+
+describe('chain column tied to the seal', () => {
+  it("reviewer PoC: an old snapshot's sealed columns over the CURRENT chain: auth follows the chain, full reads and offers work", async () => {
+    const { passkey, base, d1 } = await registered();
+    const snapshot = { ...row(base.accountId) };
+    const revoked = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
+    expect((await offer(revoked.ledger)).decision).toBe('adopt');
+    const current = row(base.accountId);
+    // The old snapshot's revision/head/sticky/checkpoint/MAC (a valid seal of the OLD state) put back over the current chain.
+    db.rows.set(base.accountId, { ...snapshot, ledger: current.ledger, version: current.version });
+    const expected = await trustedOf(revoked.ledger, current.sticky as StickyIds);
+    const trusted = await readTrustedCheckpoint(base.accountId);
+    expect(ids(trusted?.devices)).not.toContain(d1.endpoint.id);
+    expect(trusted?.revokedDeviceIds).toContain(d1.endpoint.id);
+    expect([row(base.accountId).revision, row(base.accountId).head]).toEqual([2, revoked.head]);
+    expect(macValid(row(base.accountId))).toBe(true);
+    expect(heals()).toEqual([`[ledger] checkpoint healed: account ${base.accountId.slice(0, 8)} reason chain_mismatch revision 1->2`]);
+    expect((await readLedger({ accountId: base.accountId }))?.trusted.head).toBe(revoked.head);
+    const { chain: next } = await addDevice(revoked, passkey, 'D3');
+    expect((await offer(next.ledger)).decision).toBe('adopt');
+    expect(trusted).toEqual({ ...expected, revokedDeviceIds: trusted?.revokedDeviceIds });
+  });
+
+  it('an equal-length fork in the chain column under a valid seal of the other fork: both reads follow the column', async () => {
+    const { passkey, base } = await registered();
+    const { chain: a } = await addDevice(base, passkey, 'A');
+    const { chain: b } = await addDevice(base, passkey, 'B');
+    for (const read of [() => readTrustedCheckpoint(base.accountId), async () => (await readLedger({ accountId: base.accountId }))?.trusted]) {
+      db.rows.set(base.accountId, { ...(await sealed(a)), ledger: plain(b.ledger) });
+      const expected = await trustedOf(b.ledger);
+      expect(await read()).toEqual(expected);
+      expect(row(base.accountId).head).toBe(b.head);
+    }
+    expect(heals()).toEqual(Array(2).fill(`[ledger] checkpoint healed: account ${base.accountId.slice(0, 8)} reason chain_mismatch revision 2->2`));
+  });
+
+  it('a chain column whose tip is the sealed head but whose length is not (a duplicated record) is never trusted: corrupt', async () => {
+    const { base } = await registered();
+    const doubled = { genesis: base.ledger.genesis, transitions: [base.ledger.transitions[0], base.ledger.transitions[0]] };
+    for (const read of [() => readTrustedCheckpoint(base.accountId), () => readLedger({ accountId: base.accountId })]) {
+      db.rows.set(base.accountId, { ...(await sealed(base)), ledger: plain(doubled) });
+      await expect(read()).rejects.toThrow('account_ledger_corrupt');
+    }
+  });
+
+  it('a genesis-only chain: revision 0, and its tip is the genesis head (the accountId)', async () => {
+    const passkey = await newPasskey();
+    const g = await genesis(passkey);
+    db.rows.set(g.accountId, await sealed(g));
+    verifySpy.calls = 0;
+    expect(await readTrustedCheckpoint(g.accountId)).toEqual(await trustedOf(g.ledger));
+    expect(db.heals).toBe(0);
+  });
+
+  it('DOCUMENTED RESIDUAL RISK: a database-only writer can roll an account back to a signed prefix; the heal re-seals it (logged)', async () => {
+    const { passkey, base, d1 } = await registered();
+    const revoked = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
+    expect((await offer(revoked.ledger)).decision).toBe('adopt');
+    expect(ids((await readTrustedCheckpoint(base.accountId))?.devices)).not.toContain(d1.endpoint.id);
+    // Truncate the chain to the signed prefix before the revocation, clear sticky, NULL the seal: no old snapshot needed.
+    db.rows.set(base.accountId, { ...row(base.accountId), ledger: plain(base.ledger), revision: 1, head: base.head,
+      sticky: { deviceIds: [], bridgeIds: [] }, checkpoint: null, checkpoint_mac: null });
+    expect(ids((await readTrustedCheckpoint(base.accountId))?.devices)).toContain(d1.endpoint.id);
+    expect(heals()).toEqual([`[ledger] checkpoint healed: account ${base.accountId.slice(0, 8)} reason absent revision 1->1`]);
+    // The owner's next write (any offer of the current chain, e.g. from a client that kept it) moves the server forward again.
+    expect((await offer(revoked.ledger)).decision).toBe('adopt');
+    expect(ids((await readTrustedCheckpoint(base.accountId))?.devices)).not.toContain(d1.endpoint.id);
+  });
+});
+
+describe('heal observability', () => {
+  it('each heal logs one line: constant text, account prefix, reason category and old->new revision', async () => {
+    const { passkey, base } = await registered();
+    const { chain: longer } = await addDevice(base, passkey, 'D2');
+    const prefix = base.accountId.slice(0, 8);
+    const cases: Array<[string, () => Promise<Row>, string]> = [
+      ['absent', async () => ({ ...(await sealed(base)), checkpoint: null, checkpoint_mac: null }), 'absent revision 1->1'],
+      ['mac_mismatch', async () => ({ ...(await sealed(base)), checkpoint_mac: '0'.repeat(64) }), 'mac_mismatch revision 1->1'],
+      ['stale_head', async () => {
+        const old = await sealed(base);
+        return { ...old, ledger: plain(longer.ledger), revision: 2, head: longer.head };
+      }, 'stale_head revision 2->2'],
+      ['chain_mismatch', async () => ({ ...(await sealed(base)), ledger: plain(longer.ledger) }), 'chain_mismatch revision 1->2'],
+    ];
+    for (const [name, make, tail] of cases) {
+      db.rows.set(base.accountId, await make());
+      warn.mockClear();
+      await readTrustedCheckpoint(base.accountId);
+      await readTrustedCheckpoint(base.accountId);
+      expect(heals(), name).toEqual([`[ledger] checkpoint healed: account ${prefix} reason ${tail}`]);
+      expect(warn, name).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('the log line never carries checkpoint contents, MACs or the secret', async () => {
+    const { base } = await registered();
+    const good = row(base.accountId);
+    db.rows.set(base.accountId, { ...good, checkpoint_mac: 'f'.repeat(64) });
+    await readTrustedCheckpoint(base.accountId);
+    const line = heals()[0];
+    expect(line).toMatch(/^\[ledger\] checkpoint healed: account [A-Za-z0-9_-]{8} reason mac_mismatch revision \d+->\d+$/);
+    for (const secret of [SECRET, 'f'.repeat(64), good.checkpoint_mac as string, base.accountId]) expect(line).not.toContain(secret);
+  });
+});
+
+describe('stored representation', () => {
+  it('sticky comes back from jsonb with its keys reordered (bridgeIds first): the MAC still holds, no heal', async () => {
+    const { passkey, base, d1 } = await registered();
+    const losing = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
+    const { chain: s1 } = await addDevice(base, passkey, 'S1');
+    const { chain: s2 } = await addDevice(s1, passkey, 'S2');
+    await offer(s2.ledger);
+    await offer(losing.ledger);
+    expect((row(base.accountId).sticky as StickyIds).deviceIds).toEqual([d1.endpoint.id]);
+    db.heals = 0; db.reads = [];
+    const trusted = await readTrustedCheckpoint(base.accountId);
+    expect(ids(trusted?.devices)).not.toContain(d1.endpoint.id);
+    expect(db.heals).toBe(0);
+    expect(heals()).toEqual([]);
+    expect(Object.keys(jsonbOrder(row(base.accountId).sticky) as object)).toEqual(['bridgeIds', 'deviceIds']);
+  });
+
+  it('a checkpoint column left as jsonb by an earlier draft of 0012 is never trusted, and stops healing once 0012 made it text', async () => {
+    const { base } = await registered();
+    const good = row(base.accountId);
+    const oldTrusted = await trustedOf(base.ledger);
+    // Before the conversion: jsonb values come back as objects. With or without a MAC they are healed, never trusted.
+    for (const [mac, reason] of [[null, 'absent'], [good.checkpoint_mac, 'mac_mismatch']] as const) {
+      db.rows.set(base.accountId, { ...good, checkpoint: oldTrusted as unknown as string, checkpoint_mac: mac });
+      warn.mockClear();
+      expect(await readTrustedCheckpoint(base.accountId)).toEqual(oldTrusted);
+      expect(heals()[0]).toContain(`reason ${reason}`);
+    }
+    // After `ALTER COLUMN checkpoint TYPE TEXT USING checkpoint::text`: the old value is jsonb text, with no MAC. One heal, then none.
+    db.rows.set(base.accountId, { ...good, checkpoint: JSON.stringify(jsonbOrder(oldTrusted)), checkpoint_mac: null });
+    warn.mockClear();
+    for (let index = 0; index < 3; index += 1) expect(await readTrustedCheckpoint(base.accountId)).toEqual(oldTrusted);
+    expect(heals()).toHaveLength(1);
+    expect(typeof row(base.accountId).checkpoint).toBe('string');
+    expect(macValid(row(base.accountId))).toBe(true);
+  });
+});
+
+describe('AUTH_SECRET unusable: fail closed', () => {
+  const CENTRIFUGO = 'store-test-centrifugo-secret-0123456789abcdef';
+  async function withBridge() {
+    const { passkey, base, d1 } = await registered();
+    const endpoint = { ...(await newDevice(base.accountId, 'b')).endpoint, kind: 'bridge' as const };
+    const bridge = { bridgeId: 'bridge-1', endpoint, authPublicKey: (await newDevice(base.accountId, 'k')).authPublicKey, label: 'Bridge', approvedAt: T0 };
+    const chain = await append(base, passkey, { type: 'add_bridge', bridge });
+    expect((await offer(chain.ledger)).decision).toBe('adopt');
+    return { base, d1, chain };
+  }
+
+  it('the store throws before reading, healing or writing anything', async () => {
+    const { base } = await registered();
+    const { chain } = await fresh();
+    for (const value of [undefined, 'short', 'change-me-change-me-change-me-change-me']) {
+      for (const sealedRow of [true, false]) {
+        vi.stubEnv('AUTH_SECRET', SECRET);
+        db.rows.set(base.accountId, sealedRow ? await sealed(base) : { ...(await sealed(base)), checkpoint: null, checkpoint_mac: null });
+        const before = { ...row(base.accountId) };
+        vi.stubEnv('AUTH_SECRET', value);
+        db.reads = []; db.heals = 0; db.writes = 0; db.inserts = 0; verifySpy.calls = 0;
+        const { limits, admitCreation, admitAccountWrite } = budget(true);
+        await expect(readTrustedCheckpoint(base.accountId)).rejects.toThrow(/AUTH_SECRET/);
+        await expect(readLedger({ accountId: base.accountId })).rejects.toThrow(/AUTH_SECRET/);
+        await expect(offerLedger(base.ledger, limits)).rejects.toThrow(/AUTH_SECRET/);
+        await expect(offerLedger(chain.ledger, limits)).rejects.toThrow(/AUTH_SECRET/);
+        expect([db.reads, db.heals, db.writes, db.inserts, verifySpy.calls]).toEqual([[], 0, 0, 0, 0]);
+        expect(admitCreation).not.toHaveBeenCalled();
+        expect(admitAccountWrite).not.toHaveBeenCalled();
+        expect(row(base.accountId)).toEqual(before);
+      }
+    }
+    expect(heals()).toEqual([]);
+  });
+
+  it('requireAccount, authorizeLedgerProof and requireBridge do not authorize, heal or write', async () => {
+    const { requireAccount, authorizeLedgerProof } = await import('./ledger-auth');
+    const { requireBridge } = await import('./relay-auth');
+    const jwt = (await import('jsonwebtoken')).default;
+    const { base, d1 } = await withBridge();
+    vi.stubEnv('CENTRIFUGO_TOKEN_SECRET', CENTRIFUGO);
+    const session = async () => ({ user: { id: base.accountId, endpointId: d1.endpoint.id } });
+    const token = jwt.sign({ sub: base.accountId, info: { bridgeId: 'bridge-1', ownerId: base.accountId } }, CENTRIFUGO, { algorithm: 'HS256', audience: 'ftown:centrifugo', expiresIn: 60 });
+    const bridgeRequest = () => new Request('https://app.test/x', { headers: { authorization: `Bearer ${token}` } });
+    // Control: with the secret, both are authorized.
+    expect((await requireAccount(session)).endpointId).toBe(d1.endpoint.id);
+    expect((await requireBridge(bridgeRequest())).bridgeId).toBe('bridge-1');
+    for (const sealedRow of [true, false]) {
+      if (!sealedRow) db.rows.set(base.accountId, { ...row(base.accountId), checkpoint: null, checkpoint_mac: null });
+      const before = { ...row(base.accountId) };
+      vi.stubEnv('AUTH_SECRET', undefined);
+      db.reads = []; db.heals = 0; db.writes = 0; verifySpy.calls = 0;
+      await expect(requireAccount(session)).rejects.toThrow(/AUTH_SECRET/);
+      await expect(requireBridge(bridgeRequest())).rejects.toThrow(/AUTH_SECRET/);
+      expect(await authorizeLedgerProof({ nope: true })).toBeNull();
+      expect([db.reads, db.heals, db.writes, verifySpy.calls]).toEqual([[], 0, 0, 0]);
+      expect(row(base.accountId)).toEqual(before);
+      vi.stubEnv('AUTH_SECRET', SECRET);
+    }
   });
 });

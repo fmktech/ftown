@@ -12,3 +12,7 @@ DROP INDEX IF EXISTS accounts_singleton;
 -- an older instance, tampering) the server re-verifies the chain and rewrites them.
 ALTER TABLE account_ledger ADD COLUMN IF NOT EXISTS checkpoint TEXT;
 ALTER TABLE account_ledger ADD COLUMN IF NOT EXISTS checkpoint_mac TEXT;
+-- An environment that ran an earlier draft of this migration has checkpoint as
+-- JSONB (holding an unsealed checkpoint): make it TEXT. A no-op on TEXT. Those
+-- old values have no MAC, so the server heals each such row once on first read.
+ALTER TABLE account_ledger ALTER COLUMN checkpoint TYPE TEXT USING checkpoint::text;

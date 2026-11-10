@@ -1,6 +1,6 @@
 import { createHash, createHmac } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { canonicalSticky, checkpointMac, checkpointMacValid, type CheckpointMacInput } from './checkpoint-mac';
+import { canonicalSticky, checkpointMac, checkpointMacValid, requireCheckpointKey, type CheckpointMacInput } from './checkpoint-mac';
 
 const SECRET = 'checkpoint-mac-test-secret-0123456789abcdef';
 beforeEach(() => { vi.stubEnv('AUTH_SECRET', SECRET); });
@@ -86,6 +86,16 @@ describe('checkpointMacValid', () => {
     const flipped = (mac[0] === '0' ? '1' : '0') + mac.slice(1);
     for (const value of [flipped, mac.toUpperCase(), mac.slice(0, 63), `${mac}0`, '', null, undefined, 5, { mac }]) {
       expect(checkpointMacValid(input, value), String(value)).toBe(false);
+    }
+  });
+});
+
+describe('requireCheckpointKey', () => {
+  it('passes with a usable AUTH_SECRET and throws (naming the variable only) for a missing, short or placeholder one', () => {
+    expect(() => requireCheckpointKey()).not.toThrow();
+    for (const value of [undefined, 'short', 'change-me-change-me-change-me-change-me']) {
+      vi.stubEnv('AUTH_SECRET', value);
+      expect(() => requireCheckpointKey()).toThrow(/AUTH_SECRET/);
     }
   });
 });
