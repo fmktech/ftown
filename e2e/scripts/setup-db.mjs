@@ -3,15 +3,15 @@
 //
 // It models a PRODUCTION upgrade, not a fresh install: it first creates the
 // pre-migration v1 base tables (users, bridge_refresh, pairing_requests, …),
-// then applies ui/migrations/0005…0011 in order, each in its own transaction
-// exactly like ui/scripts/migrate.mjs does, and finally re-applies 0011 to
-// prove it is idempotent. Separately it loads ui/schema.sql (the fresh-install
+// then applies ui/migrations/0005…0012 in order, each in its own transaction
+// exactly like ui/scripts/migrate.mjs does, and finally re-applies 0011 and 0012 to
+// prove they are idempotent. Separately it loads ui/schema.sql (the fresh-install
 // definition) into a scratch schema and drops it, so both paths are executed
 // against a real PostgreSQL.
 //
 //   node scripts/setup-db.mjs           # idempotent setup
-//   node scripts/setup-db.mjs --reset   # DROP the public schema first (one account per server:
-//                                       # every full run needs an empty database)
+//   node scripts/setup-db.mjs --reset   # DROP the public schema first (each full run needs an empty database;
+//                                       # a stale DB keeps old accounts)
 import pg from "pg";
 import { readFile } from "node:fs/promises";
 
@@ -36,6 +36,7 @@ const MIGRATIONS = [
   "0009_device_display_names.sql",
   "0010_drop_mcp.sql",
   "0011_passkey_ledger.sql",
+  "0012_multi_account.sql",
 ];
 
 // v1 base tables that predate the numbered migrations in this harness (as in the old setup).
@@ -107,6 +108,7 @@ try {
   }
   // Re-running the passkey migration must be a no-op (it is documented idempotent).
   await inTransaction("0011_passkey_ledger.sql (re-run)", await read("migrations/0011_passkey_ledger.sql"));
+  await inTransaction("0012_multi_account.sql (re-run)", await read("migrations/0012_multi_account.sql"));
   const legacy = await client.query("SELECT to_regclass('public.users') AS users, to_regclass('public.bridge_refresh') AS refresh");
   if (legacy.rows[0].users !== null || legacy.rows[0].refresh !== null) throw new Error("[setup-db] 0011 left v1 tables behind");
 
@@ -115,6 +117,14 @@ try {
   await client.query("DROP SCHEMA IF EXISTS e2e_fresh_install CASCADE; CREATE SCHEMA e2e_fresh_install;");
   try {
     await inTransaction("schema.sql (fresh install)", `SET LOCAL search_path TO e2e_fresh_install, public;\n${schemaSql}`);
+    // schema.sql must define the same indexes as the migrated database (catches a left-over
+    // accounts_singleton on either side: the server holds many accounts).
+    const indexes = async (schema) =>
+      (await client.query("SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND tablename = 'accounts' ORDER BY indexname", [schema])).rows.map((r) => r.indexname);
+    const migrated = await indexes("public");
+    const fresh = await indexes("e2e_fresh_install");
+    if (migrated.includes("accounts_singleton") || fresh.includes("accounts_singleton")) throw new Error("[setup-db] accounts_singleton still exists");
+    if (JSON.stringify(migrated) !== JSON.stringify(fresh)) throw new Error(`[setup-db] accounts indexes differ: migrated=${migrated} fresh=${fresh}`);
   } finally {
     await client.query("DROP SCHEMA IF EXISTS e2e_fresh_install CASCADE");
   }

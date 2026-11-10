@@ -1,10 +1,9 @@
 import { expect } from "@playwright/test";
 import { test } from "../helpers/fixtures";
-import jwt from "jsonwebtoken";
-import { randomBytes } from "node:crypto";
 import { login, sharedAccountId } from "../helpers/app";
 import { bridgeApiFetch, readBridgePointer } from "../helpers/bridge-api";
-import { UI_BASE_URL, CENTRIFUGO_TOKEN_SECRET, TOKEN_AUDIENCE } from "../helpers/config";
+import { UI_BASE_URL, TOKEN_AUDIENCE } from "../helpers/config";
+import { createSecondAccount } from "../helpers/second-account";
 
 /**
  * Defensive authZ regression suite. Every test asserts that a guard RETURNS THE
@@ -14,12 +13,13 @@ import { UI_BASE_URL, CENTRIFUGO_TOKEN_SECRET, TOKEN_AUDIENCE } from "../helpers
  *  hostile Origin 403 on public security routes, plaintext business calls 426,
  *  approved encrypted call 200.
  *
- *  GROUP 2 - the Next.js UI API routes of the single-account product. There is
- *  one account per server, so cross-user IDOR cases (B revoking/listing A's
- *  devices) no longer exist and were dropped; /api/bridges/devices/** was
- *  deleted from the product (asserted 404 below). What remains: the relay-token
- *  sub is the session accountId (body input ignored), unauthenticated callers and
- *  foreign-tenant relay JWTs are refused on token / security routes.
+ *  GROUP 2 - the Next.js UI API routes on a multi-account server:
+ *  the relay-token sub is the session accountId (body input ignored),
+ *  unauthenticated callers are refused, /api/bridges/devices/** no longer
+ *  exists (404), and a REAL second account's relay token is no credential for
+ *  the session-only security routes. Cross-account IDOR on every
+ *  account-scoped route with B's session (endpoint directory, device names,
+ *  push, pair mailbox, relay tokens, ledger) lives in account-isolation.spec.ts.
  */
 
 /** Decode a JWT payload (base64url) WITHOUT verifying — we only inspect claims. */
@@ -108,19 +108,22 @@ test.describe("GROUP 2 - UI API route authZ", () => {
     }
   });
 
-  test("/api/security/endpoints and /device-names refuse unauthenticated and foreign-tenant callers", async ({ browser }) => {
-    const foreignSub = randomBytes(32).toString("base64url");
-    const foreignJwt = jwt.sign({ sub: foreignSub }, CENTRIFUGO_TOKEN_SECRET, { algorithm: "HS256", audience: TOKEN_AUDIENCE, expiresIn: 600 });
+  test("/api/security/endpoints and /device-names refuse unauthenticated callers and a real second account's relay token", async ({ browser }) => {
+    // B is a real, unrelated account on this server; its relay token comes from B's own session.
+    const second = await createSecondAccount(browser);
     const anon = await browser.newContext();
     try {
+      const relayToken = await second.relayToken();
+      expect(relayToken.split(".")).toHaveLength(3);
       for (const path of ["/api/security/endpoints", "/api/security/device-names"]) {
         const none = await anon.request.get(`${UI_BASE_URL}${path}`);
         expect(none.status(), `anonymous GET ${path}`).toBe(401);
-        const foreign = await anon.request.get(`${UI_BASE_URL}${path}`, { headers: { Authorization: `Bearer ${foreignJwt}` } });
-        expect(foreign.status(), `foreign-tenant relay JWT on GET ${path}`).toBe(401);
+        const bearer = await anon.request.get(`${UI_BASE_URL}${path}`, { headers: { Authorization: `Bearer ${relayToken}` } });
+        expect(bearer.status(), `account B's relay token as a bearer on GET ${path}`).toBe(401);
       }
     } finally {
       await anon.close();
+      await second.close();
     }
   });
 });

@@ -81,7 +81,10 @@ it("runs one ceremony per click: identify, then add this browser", async () => {
 it("shows plain messages for known errors", async () => {
   for (const [code, text] of [
     ["passkey_cancelled", /cancelled/], ["secure_context_required", /secure connection/],
-    ["passkey_already_registered", /already registered/], ["registration_closed", /closed/],
+    ["passkey_already_registered", /already registered/], ["registration_closed", /closed on this server/],
+    ["server_full", /not accepting new accounts right now/], ["rate_limited", /Too many attempts\. Try again later\./],
+    ["server_misconfigured", /This server is not configured for account creation\.$/], ["invalid_account_name", /account name of up to 64 characters/], ["handle_taken", /could not be created\. Discard this setup/],
+    ["ledger_other_account", /already belongs to an account\. Sign in with its passkey, or reset this browser in Security first\./],
   ] as const) {
     m.client.identifyAccount.mockRejectedValue(new Error(code));
     render(<LoginPage />);
@@ -99,26 +102,52 @@ it("offers to reset a revoked browser", async () => {
   await waitFor(() => expect(m.client.rotateDeviceIdentity).toHaveBeenCalledOnce());
 });
 
-it("creates an account in three separate clicks with a password-type bootstrap field", async () => {
+const nameField = () => screen.getByLabelText("Account name") as HTMLInputElement;
+const createPasskey = () => screen.getByRole("button", { name: "1. Create passkey" }) as HTMLButtonElement;
+
+it("creates an account in three separate clicks with the account name as the passkey user name and no secret field", async () => {
   m.client.createAccountStart.mockResolvedValue(undefined);
   m.client.createAccountFinish.mockResolvedValue(undefined);
   m.client.enrollThisDevice.mockResolvedValue(undefined);
   const view = render(<LoginPage />);
-  const secret = screen.getByLabelText("Setup secret") as HTMLInputElement;
-  expect(secret.type).toBe("password");
-  fireEvent.change(secret, { target: { value: "s3cret" } });
-  fireEvent.click(screen.getByRole("button", { name: "1. Create passkey" }));
-  await waitFor(() => expect(m.client.createAccountStart).toHaveBeenCalledWith({ passkeyLabel: "My passkey", userName: "My passkey" }));
+  expect(screen.getByText("Create an account")).toBeTruthy();
+  expect(screen.queryByText("First time setup")).toBeNull();
+  expect(screen.getByText("Create a new account with a passkey. The passkey is the only key to the account: add a second one right after.")).toBeTruthy();
+  expect(screen.queryByLabelText("Setup secret")).toBeNull();
+  expect(document.querySelector('input[type="password"]')).toBeNull();
+  expect(screen.getByLabelText("Passkey label")).toBeTruthy();
+  expect(screen.getByLabelText("This browser label")).toBeTruthy();
+  expect(nameField().required).toBe(true);
+  fireEvent.change(nameField(), { target: { value: "  Alice Quokka  " } });
+  fireEvent.click(createPasskey());
+  await waitFor(() => expect(m.client.createAccountStart).toHaveBeenCalledWith({ passkeyLabel: "My passkey", userName: "Alice Quokka" }));
   expect((screen.getByRole("button", { name: "2. Sign the account" }) as HTMLButtonElement).disabled).toBe(true);
   m.snapshot = { ...m.snapshot, pending: "passkey_created" };
   view.rerender(<LoginPage />);
   fireEvent.click(screen.getByRole("button", { name: "2. Sign the account" }));
-  await waitFor(() => expect(m.client.createAccountFinish).toHaveBeenCalledWith({ bootstrap: "s3cret" }));
-  expect((screen.getByLabelText("Setup secret") as HTMLInputElement).value).toBe("");
+  await waitFor(() => expect(m.client.createAccountFinish).toHaveBeenCalledWith());
   m.snapshot = { ...m.snapshot, pending: "enrollment_ready" };
   view.rerender(<LoginPage />);
   fireEvent.click(screen.getByRole("button", { name: "3. Add this browser" }));
   await waitFor(() => expect(m.push).toHaveBeenCalledWith("/dashboard"));
+});
+
+it("requires a trimmed account name of at most 64 characters before a passkey is created", () => {
+  render(<LoginPage />);
+  expect(createPasskey().disabled).toBe(true);
+  fireEvent.change(nameField(), { target: { value: "   " } });
+  expect(createPasskey().disabled).toBe(true);
+  fireEvent.change(nameField(), { target: { value: "x".repeat(65) } });
+  expect(createPasskey().disabled).toBe(true);
+  expect(nameField().getAttribute("aria-invalid")).toBe("true");
+  expect(screen.getByText("Use at most 64 characters.")).toBeTruthy();
+  fireEvent.change(nameField(), { target: { value: "x".repeat(64) } });
+  expect(createPasskey().disabled).toBe(false);
+  expect(nameField().getAttribute("aria-invalid")).toBe("false");
+  fireEvent.change(nameField(), { target: { value: ` ${"x".repeat(64)} ` } });
+  expect(createPasskey().disabled).toBe(false);
+  fireEvent.click(createPasskey());
+  expect(m.client.createAccountStart).toHaveBeenCalledWith({ passkeyLabel: "My passkey", userName: "x".repeat(64) });
 });
 
 it("rejects bypass returnTo values and navigates only to the resolved path", async () => {
@@ -150,29 +179,51 @@ it("refuses account creation when the public URL is not configured", () => {
   expect(screen.queryByRole("button", { name: "1. Create passkey" })).toBeNull();
 });
 
-it("retries a rejected setup secret without creating a second passkey", async () => {
-  m.client.createAccountStart.mockResolvedValue(undefined);
-  m.client.enrollThisDevice.mockRejectedValue(new Error("invalid_bootstrap"));
-  m.client.retryCreateAccount.mockResolvedValue(undefined);
-  const view = render(<LoginPage />);
-  fireEvent.click(screen.getByRole("button", { name: "1. Create passkey" }));
-  await waitFor(() => expect(m.client.createAccountStart).toHaveBeenCalledOnce());
-  m.snapshot = { ...m.snapshot, pending: "enrollment_ready" };
-  view.rerender(<LoginPage />);
-  fireEvent.click(screen.getByRole("button", { name: "3. Add this browser" }));
-  expect((await screen.findByRole("alert")).textContent).toMatch(/setup secret is wrong/);
-  fireEvent.change(screen.getByLabelText("Setup secret"), { target: { value: "right" } });
-  fireEvent.click(await screen.findByRole("button", { name: "3. Retry with this secret" }));
-  await waitFor(() => expect(m.client.retryCreateAccount).toHaveBeenCalledWith({ bootstrap: "right" }));
-  await waitFor(() => expect(m.push).toHaveBeenCalledWith("/dashboard"));
-  expect(m.client.createAccountStart).toHaveBeenCalledOnce();
-});
+for (const code of ["registration_closed", "server_full", "rate_limited", "server_misconfigured", "network_unavailable", "server_unavailable"]) {
+  it(`retries a creation refused with ${code} without creating a second passkey`, async () => {
+    m.client.createAccountStart.mockResolvedValue(undefined);
+    m.client.enrollThisDevice.mockRejectedValue(new Error(code));
+    m.client.retryCreateAccount.mockResolvedValue(undefined);
+    const view = render(<LoginPage />);
+    fireEvent.change(nameField(), { target: { value: "Alice" } });
+    fireEvent.click(createPasskey());
+    await waitFor(() => expect(m.client.createAccountStart).toHaveBeenCalledOnce());
+    m.snapshot = { ...m.snapshot, pending: "enrollment_ready" };
+    view.rerender(<LoginPage />);
+    fireEvent.click(screen.getByRole("button", { name: "3. Add this browser" }));
+    await screen.findByRole("alert");
+    fireEvent.click(await screen.findByRole("button", { name: "3. Retry" }));
+    await waitFor(() => expect(m.client.retryCreateAccount).toHaveBeenCalledWith());
+    await waitFor(() => expect(m.push).toHaveBeenCalledWith("/dashboard"));
+    expect(m.client.createAccountStart).toHaveBeenCalledOnce();
+  });
+}
+
+for (const code of ["creation_too_large", "invalid_ledger", "origin_mismatch", "handle_taken"]) {
+  it(`does not offer a retry for ${code}, only a discard`, async () => {
+    m.client.createAccountStart.mockResolvedValue(undefined);
+    m.client.enrollThisDevice.mockRejectedValue(new Error(code));
+    const view = render(<LoginPage />);
+    fireEvent.change(nameField(), { target: { value: "Alice" } });
+    fireEvent.click(createPasskey());
+    await waitFor(() => expect(m.client.createAccountStart).toHaveBeenCalledOnce());
+    m.snapshot = { ...m.snapshot, pending: "enrollment_ready" };
+    view.rerender(<LoginPage />);
+    fireEvent.click(screen.getByRole("button", { name: "3. Add this browser" }));
+    await screen.findByRole("alert");
+    expect(screen.queryByRole("button", { name: "3. Retry" })).toBeNull();
+    expect((screen.getByRole("button", { name: "3. Add this browser" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((await screen.findByRole("alert")).textContent).toMatch(code === "origin_mismatch" ? /does not match the server/ : /could not be created\. Discard this setup/);
+    expect(screen.getByRole("button", { name: "Discard this setup and create a new passkey" })).toBeTruthy();
+  });
+}
 
 it("offers an explicit discard that forgets the half-made setup", async () => {
   m.client.createAccountStart.mockResolvedValue(undefined);
   m.client.forget.mockResolvedValue(undefined);
   const view = render(<LoginPage />);
-  fireEvent.click(screen.getByRole("button", { name: "1. Create passkey" }));
+  fireEvent.change(nameField(), { target: { value: "Alice" } });
+  fireEvent.click(createPasskey());
   await waitFor(() => expect(m.client.createAccountStart).toHaveBeenCalled());
   m.snapshot = { ...m.snapshot, pending: "passkey_created" };
   view.rerender(<LoginPage />);
@@ -185,4 +236,34 @@ it("keeps an encoded backslash as a same-origin path", async () => {
   window.history.replaceState(null, "", `/login?returnTo=${encodeURIComponent("/%5Cevil.com")}`);
   render(<LoginPage />);
   await waitFor(() => expect(m.push).toHaveBeenCalledWith("/%5Cevil.com"));
+});
+
+for (const code of ["ledger_other_account", "passkey_cancelled"]) {
+  it(`keeps the sign-in button next to the message when the first step fails with ${code}`, async () => {
+    m.client.createAccountStart.mockRejectedValue(new Error(code));
+    render(<LoginPage />);
+    fireEvent.change(nameField(), { target: { value: "Alice" } });
+    fireEvent.click(createPasskey());
+    expect((await screen.findByRole("alert")).textContent).toMatch(code === "ledger_other_account" ? /already belongs to an account/ : /cancelled/);
+    expect(screen.getByRole("button", { name: "Sign in with passkey" })).toBeTruthy();
+  });
+}
+
+it("judges the sanitized account name in Unicode code points", () => {
+  render(<LoginPage />);
+  fireEvent.change(nameField(), { target: { value: "\u200b\u200d\u202e" } });
+  expect(createPasskey().disabled).toBe(true);
+  fireEvent.change(nameField(), { target: { value: "\u{1F600}".repeat(64) } });
+  expect(createPasskey().disabled).toBe(false);
+  fireEvent.change(nameField(), { target: { value: "\u{1F600}".repeat(65) } });
+  expect(createPasskey().disabled).toBe(true);
+  fireEvent.change(nameField(), { target: { value: `a\u200b${"b".repeat(63)}` } });
+  expect(createPasskey().disabled).toBe(false);
+});
+
+it("never resolves inherited object keys as messages", async () => {
+  m.client.identifyAccount.mockRejectedValue(new Error("constructor"));
+  render(<LoginPage />);
+  fireEvent.click(screen.getByRole("button", { name: "Sign in with passkey" }));
+  expect((await screen.findByRole("alert")).textContent).toMatch(/Something went wrong/);
 });

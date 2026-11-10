@@ -1,6 +1,6 @@
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
--- Fresh-install schema, equivalent to applying migrations/0001..0011 (passkey ledger).
+-- Fresh-install schema, equivalent to applying migrations/0001..0012 (passkey ledger, multi-account).
 -- Fresh installs apply this file; existing databases use ui/scripts/migrate.mjs.
 
 -- Generic scope-keyed rate limiter (e.g. push, nonce and pair routes). UNLOGGED:
@@ -26,11 +26,16 @@ CREATE TABLE IF NOT EXISTS account_ledger (
   ledger JSONB NOT NULL,
   sticky JSONB NOT NULL DEFAULT '{"deviceIds":[],"bridgeIds":[]}',
   version INTEGER NOT NULL DEFAULT 0,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Raw checkpoint of the stored chain (canonical JSON) and its HMAC keyed from AUTH_SECRET, written with the chain; NULL only for
+  -- rows that predate them. Last, as in the migrated database (0012 adds them).
+  checkpoint TEXT,
+  checkpoint_mac TEXT
 );
 ALTER TABLE account_ledger ADD COLUMN IF NOT EXISTS sticky JSONB NOT NULL DEFAULT '{"deviceIds":[],"bridgeIds":[]}';
 ALTER TABLE account_ledger ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 0;
-CREATE UNIQUE INDEX IF NOT EXISTS accounts_singleton ON accounts ((true));
+ALTER TABLE account_ledger ADD COLUMN IF NOT EXISTS checkpoint TEXT;
+ALTER TABLE account_ledger ADD COLUMN IF NOT EXISTS checkpoint_mac TEXT;
 CREATE TABLE IF NOT EXISTS auth_nonces (
   nonce_hash TEXT PRIMARY KEY,
   purpose TEXT NOT NULL,

@@ -62,7 +62,6 @@ const REQUEST_TIMEOUT_MS = 15000;
 const REFRESH_SPACING_MS = 2000;
 const MAX_RESPONSE_CHARS = LEDGER_LIMITS.maxBytes + 65536;
 const MAX_CODE_ATTEMPTS = 5;
-const MAX_BOOTSTRAP = 256;
 const ATTEMPT_KEY = "ftown-pair-attempts:";
 const HANDLE = /^[A-Za-z0-9_-]{43}$/;
 const SOFT_REFRESH_ERRORS = ["network_unavailable", "server_unavailable", "account_not_found"];
@@ -81,11 +80,8 @@ function fromB64url(value: string): Uint8Array<ArrayBuffer> {
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
   return bytes;
 }
-function validBootstrap(value: unknown): string | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== "string" || value.length === 0 || value.length > MAX_BOOTSTRAP) throw new Error("invalid_bootstrap");
-  return value;
-}
+/** Server rejection reasons of an account creation (POST /api/account/ledger without a stored account), surfaced as client codes of the same name. */
+const CREATION_REASONS = ["registration_closed", "creation_too_large", "invalid_ledger", "origin_mismatch", "server_full", "handle_taken", "rate_limited", "server_misconfigured"];
 function canonicalOrigin(value: unknown): string {
   try { return typeof value === "string" ? new URL(value).origin : ""; } catch { return ""; }
 }
@@ -139,6 +135,18 @@ export function sanitizeLabel(input: string): string {
   return result.trim();
 }
 
+/** Longest account name (Unicode code points); the name only labels the passkey in the OS picker. */
+export const ACCOUNT_NAME_MAX = 64;
+/** The account name as it will be used: NFC, invisible/bidi/control characters and lone surrogates removed, trimmed, never truncated. */
+export function sanitizeAccountName(input: string): string {
+  return Array.from(String(input).normalize("NFC")).filter(symbol => !stripped(symbol)).join("").trim();
+}
+/** True iff the sanitized name is non-empty and at most ACCOUNT_NAME_MAX code points. */
+export function accountNameValid(input: string): boolean {
+  const length = Array.from(sanitizeAccountName(input)).length;
+  return length > 0 && length <= ACCOUNT_NAME_MAX;
+}
+
 type Membership = "member" | "revoked" | "conflict" | "absent";
 /** Where this browser stands in a trust view: a member with these exact keys, revoked, a conflicting entry, or absent. */
 function membership(trusted: LedgerCheckpoint, endpoint: EndpointPublic, authPublicKey: string): Membership {
@@ -153,11 +161,10 @@ function membership(trusted: LedgerCheckpoint, endpoint: EndpointPublic, authPub
 interface Base { ledger: Ledger; checkpoint: LedgerCheckpoint }
 interface PendingCreation { handle: Uint8Array; credentialId: string; publicKey: string; label: string }
 /**
- * `bootstrap`: the registration secret of a creation, in memory only, until the creating POST returns.
  * `signed`: a creation's signed add_device, kept (in memory) until the account is created, so a refused POST is retried without
  * another passkey or signature.
  */
-interface PendingEnrollment extends Base { credentialId: string; creating: boolean; bootstrap?: string; signed?: Signed<LedgerTransition> }
+interface PendingEnrollment extends Base { credentialId: string; creating: boolean; signed?: Signed<LedgerTransition> }
 interface PendingAuthority { accountId: string; credentialId: string; publicKey: string; label: string; consent: PasskeySignature | null }
 interface Device { identity: EndpointIdentity; key: { publicKey: string; privateKey: CryptoKey } }
 interface HttpResult { status: number; value: unknown }
@@ -223,13 +230,14 @@ export class LedgerClient {
   createAccountStart(input: { passkeyLabel: string; userName: string }): Promise<void> {
     return this.exclusive(async () => {
       this.requireCreationOrigin();
+      if (!accountNameValid(input.userName)) throw new Error("invalid_account_name");
       await this.load();
       if (this.deps.replica.raw() !== null) throw new Error("ledger_other_account");
       // A signed genesis is pending: finish it (enrollThisDevice / retryCreateAccount) or forget() it; never mint a second passkey.
       if (this.enrollment !== null && this.enrollment.creating) throw new Error("account_creation_pending");
       const handle = crypto.getRandomValues(new Uint8Array(32));
       const created = await this.deps.passkey.createPasskey({
-        rpId: this.rpId, rpName: RP_NAME, handle, userName: sanitizeLabel(input.userName) || RP_NAME,
+        rpId: this.rpId, rpName: RP_NAME, handle, userName: sanitizeAccountName(input.userName),
       });
       this.creation = { handle, credentialId: created.credentialId, publicKey: created.publicKey, label: sanitizeLabel(input.passkeyLabel) || "Passkey" };
       this.enrollment = null;
@@ -238,15 +246,12 @@ export class LedgerClient {
   }
 
   /**
-   * Gesture 2: signs the genesis; nothing is sent until the first device is enrolled (the server requires one). `bootstrap` is the
-   * server's registration secret: kept only in this object's memory, sent only with the creating POST, dropped once that POST returns.
-   */
-  createAccountFinish(input: { bootstrap?: string } = {}): Promise<void> {
+   * Gesture 2: signs the genesis; nothing is sent until the first device is enrolled (the server requires one). */
+  createAccountFinish(): Promise<void> {
     return this.exclusive(async () => {
       this.requireCreationOrigin();
       const creation = this.creation;
       if (creation === null) throw new Error("account_creation_not_started");
-      const bootstrap = validBootstrap(input.bootstrap);
       // Taken after the creation ceremony returned: the authority is stamped with the genesis' own time.
       const createdAt = this.now();
       const genesis: LedgerGenesis = {
@@ -258,17 +263,17 @@ export class LedgerClient {
       const checkpoint = await verifyLedger(ledger, this.now());
       this.creation = null;
       this.credentialId = creation.credentialId;
-      this.enrollment = { ledger, checkpoint, credentialId: creation.credentialId, creating: true, bootstrap };
+      this.enrollment = { ledger, checkpoint, credentialId: creation.credentialId, creating: true };
       this.publish();
     });
   }
 
   /**
-   * After the creating POST was refused (403 registration_closed, wrong secret) or failed (network): POSTs the SAME signed chain
-   * again with `bootstrap` (memory only, dropped once the POST returns). No passkey prompt. The pending creation is dropped only on
+   * After the creating POST was refused (e.g. 403 registration_closed, 503 server_full, 429 rate_limited) or failed (network): POSTs the SAME signed chain
+   * again. No passkey prompt. The pending creation is dropped only on
    * success or forget().
    */
-  retryCreateAccount(input: { bootstrap?: string } = {}): Promise<void> {
+  retryCreateAccount(): Promise<void> {
     return this.exclusive(async () => {
       this.requireCreationOrigin();
       await this.load();
@@ -277,7 +282,6 @@ export class LedgerClient {
       const accountId = enrollment.checkpoint.accountId;
       const bound = this.deps.replica.raw();
       if (bound !== null && bound.checkpoint.accountId !== accountId) throw new Error("ledger_other_account");
-      enrollment.bootstrap = validBootstrap(input.bootstrap);
       const device = await this.loadDevice(accountId);
       await this.postCreation(enrollment, enrollment.signed, accountId);
       await this.enrolled(enrollment, accountId, device);
@@ -285,9 +289,9 @@ export class LedgerClient {
   }
 
   /** createAccountStart + createAccountFinish + enrollThisDevice. */
-  async createAccount(input: { passkeyLabel: string; deviceLabel: string; userName: string; bootstrap?: string }): Promise<void> {
+  async createAccount(input: { passkeyLabel: string; deviceLabel: string; userName: string }): Promise<void> {
     await this.createAccountStart({ passkeyLabel: input.passkeyLabel, userName: input.userName });
-    await this.createAccountFinish({ bootstrap: input.bootstrap });
+    await this.createAccountFinish();
     await this.enrollThisDevice({ deviceLabel: input.deviceLabel });
   }
 
@@ -393,11 +397,9 @@ export class LedgerClient {
     });
   }
 
-  /** The creating POST. Only createAccountFinish/retryCreateAccount set the secret; it is dropped as soon as this POST returns. */
+  /** The creating POST: server rejection reasons surface as their own client codes (see CREATION_REASONS). */
   private async postCreation(enrollment: PendingEnrollment, signed: Signed<LedgerTransition>, accountId: string): Promise<void> {
-    const secret = enrollment.bootstrap;
-    await this.submit(enrollment.ledger, signed, accountId,
-      secret === undefined ? undefined : { value: secret, spent: () => { enrollment.bootstrap = undefined; } });
+    await this.submit(enrollment.ledger, signed, accountId, true);
   }
 
   /** The enrollment is stored: drop the pending state and sign in. */
@@ -761,7 +763,7 @@ export class LedgerClient {
    * and is re-sent with the next write).
    */
   private async submit(
-    base: Ledger, record: Signed<LedgerTransition>, accountId: string, bootstrap?: { value: string; spent: () => void },
+    base: Ledger, record: Signed<LedgerTransition>, accountId: string, creating = false,
   ): Promise<void> {
     const chain: Ledger = { genesis: base.genesis, transitions: base.transitions.concat([record]) };
     const head = await ledgerHead(record.payload);
@@ -772,19 +774,19 @@ export class LedgerClient {
       // 'keep' of a chain without the record: a longer chain arrived (relay) while the passkey prompt was open.
       if (own === "keep" && !await holds(this.deps.replica.raw()?.ledger, record.payload.revision, head)) await this.lost(record);
     }
-    let response: HttpResult;
-    try {
-      response = await this.request("POST", "/api/account/ledger", bootstrap === undefined ? { ledger: chain } : { ledger: chain, bootstrap: bootstrap.value });
-    } finally {
-      if (bootstrap !== undefined) bootstrap.spent();
-    }
+    const response = await this.request("POST", "/api/account/ledger", { ledger: chain });
     const value = isPlain(response.value) ? response.value : {};
+    if (creating && response.status !== 200 && response.status !== 201 && typeof value.error === "string" && CREATION_REASONS.indexOf(value.error) !== -1) {
+      throw new Error(value.error);
+    }
     if (response.status === 403) throw new Error(value.error === "registration_closed" ? "registration_closed" : "ledger_rejected");
     if (response.status === 409) {
       if (wasBound && value.ledger !== null && value.ledger !== undefined) await this.offerToReplica(value.ledger, { expectAccountId: accountId });
       throw new Error("ledger_rejected");
     }
     if (response.status === 413) throw new Error("ledger_limit");
+    // A per-account write limit: the signed record is already in the local chain (kept like after any transient failure) and is re-sent later.
+    if (response.status === 429 && value.error === "rate_limited") throw new Error("rate_limited");
     if (response.status !== 200 && response.status !== 201) throw new Error(response.status === 429 || response.status >= 500 ? "server_unavailable" : "ledger_rejected");
     if (!wasBound && await this.offerToReplica(chain, { bind: true, expectAccountId: accountId }) !== "adopt") throw new Error("ledger_rejected");
     await this.offerToReplica(value.ledger, { expectAccountId: accountId });

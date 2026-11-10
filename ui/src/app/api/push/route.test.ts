@@ -4,7 +4,8 @@ import webpush from "web-push";
 const mocks=vi.hoisted(()=>({auth:vi.fn(),query:vi.fn(),readLedger:vi.fn()}));
 const ACCOUNT="A".repeat(43),DEVICE="D".repeat(43);
 vi.mock("@/lib/auth",()=>({auth:mocks.auth}));
-vi.mock("@/lib/account-ledger-store",()=>({readLedger:mocks.readLedger}));
+// Auth reads the persisted trusted checkpoint (readTrustedCheckpoint); the fixtures below describe the stored row (no revoked ids).
+vi.mock("@/lib/account-ledger-store",()=>({readTrustedCheckpoint:async(accountId:string)=>{const t=((await mocks.readLedger({accountId})) as {trusted?:object}|null|undefined)?.trusted;return t?{revokedDeviceIds:[],revokedBridgeIds:[],...t}:null;}}));
 vi.mock("@/lib/auth-nonce-store",()=>({consumeNonce:vi.fn()}));
 vi.mock("next-auth/providers/credentials",()=>({default:(config:unknown)=>config}));
 vi.mock("@/lib/db",()=>({getDb:()=>({query:mocks.query})}));

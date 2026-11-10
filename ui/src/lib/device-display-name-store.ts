@@ -1,5 +1,6 @@
 import { getDb } from '@/lib/db';
-import { readLedger, type StoredLedger } from '@/lib/account-ledger-store';
+import { readTrustedCheckpoint } from '@/lib/account-ledger-store';
+import type { LedgerCheckpoint } from '@security/ledger/protocol';
 import { DEVICE_DISPLAY_NAME_MAX_LENGTH, type DeviceNameErrorCode, type DeviceNameKind, type DeviceNameTarget,
   type DeviceDisplayName, type DeviceNamesResponse, type SetDeviceNameRequest, type SetDeviceNameResponse } from './device-display-name-contract';
 
@@ -18,25 +19,25 @@ export function parseDeviceNameRequest(value: unknown): SetDeviceNameRequest {
   return { kind: input.kind, id: input.id, name };
 }
 
-type LedgerReader = (key: { accountId: string }) => Promise<StoredLedger | null>;
+type LedgerReader = (accountId: string) => Promise<LedgerCheckpoint | null>;
 type Query = (text: string, params: unknown[]) => Promise<Record<string, unknown>[]>;
 const key = (target: DeviceNameTarget) => `${target.kind}:${target.id}`;
 
 export class DeviceDisplayNameStore {
   constructor(private readonly query: Query = (text, params) => getDb().query(text, params) as Promise<Record<string, unknown>[]>,
-    private readonly read: LedgerReader = readLedger) {}
+    private readonly read: LedgerReader = readTrustedCheckpoint) {}
 
   /** Eligible targets come from the TRUSTED checkpoint (sticky revocations applied), never the raw one. */
   private async membership(accountId: string) {
-    const stored = await this.read({ accountId });
+    const trusted = await this.read(accountId);
     const targets = new Map<string, DeviceNameTarget>();
-    for (const device of stored?.trusted.devices ?? []) {
+    for (const device of trusted?.devices ?? []) {
       const target: DeviceNameTarget = { kind: 'browser', id: device.endpoint.id }; targets.set(key(target), target);
     }
-    for (const bridge of stored?.trusted.bridges ?? []) {
+    for (const bridge of trusted?.bridges ?? []) {
       const target: DeviceNameTarget = { kind: 'bridge', id: bridge.bridgeId }; targets.set(key(target), target);
     }
-    return { stored, targets };
+    return { trusted, targets };
   }
 
   async list(accountId: string): Promise<DeviceNamesResponse> {
@@ -53,10 +54,10 @@ export class DeviceDisplayNameStore {
 
   async set(accountId: string, input: SetDeviceNameRequest): Promise<SetDeviceNameResponse> {
     const target = parseDeviceNameRequest(input);
-    const { stored, targets } = await this.membership(accountId);
-    if (!stored || !targets.has(key(target))) throw new DeviceNameStoreError('unknown_device');
+    const { trusted, targets } = await this.membership(accountId);
+    if (!trusted || !targets.has(key(target))) throw new DeviceNameStoreError('unknown_device');
     // The write is guarded by the ledger head observed during membership: a concurrent ledger change makes it a conflict.
-    const params = [accountId, target.kind, target.id, stored.checkpoint.head, stored.checkpoint.revision, target.name];
+    const params = [accountId, target.kind, target.id, trusted.head, trusted.revision, target.name];
     const operation = target.name === null
       ? `DELETE FROM security_device_display_names WHERE account_id=$1 AND kind=$2 AND target_id=$3 AND (SELECT allowed FROM guard) RETURNING target_id`
       : `INSERT INTO security_device_display_names(account_id,kind,target_id,display_name) SELECT $1,$2,$3,requested_name FROM guard WHERE allowed

@@ -1,21 +1,26 @@
 import { expect, request as apiRequest } from "@playwright/test";
 import { randomBytes, webcrypto } from "node:crypto";
-import { pathToFileURL } from "node:url";
-import { join } from "node:path";
 import { request as plainRequest } from "node:http";
 import { request as tlsRequest } from "node:https";
 import { test } from "../helpers/fixtures";
 import { login } from "../helpers/app";
-import { E2E_DIR, UI_BASE_URL } from "../helpers/config";
-import { BOOTSTRAP_SECRET, readRunAccount, RP_ID } from "../helpers/passkey";
-import { ledgerLib, proofLib, serverLedger, signProof } from "../helpers/ledger-admin";
+import { UI_BASE_URL } from "../helpers/config";
+import { readRunAccount } from "../helpers/passkey";
+import { creationLedger, ledgerLib, proofLib, serverLedger, signProof } from "../helpers/ledger-admin";
 
 /**
  * Admission surface of the unauthenticated routes: body caps, malformed input,
- * closed registration, nonce/proof abuse and per-source rate limits. Every test
- * owns a fresh synthetic x-real-ip (trusted in this test deployment) so its
- * rate-limit budget is its own and never starves other specs.
+ * open account creation (multi-account server) and its creation-path rules,
+ * nonce/proof abuse and per-source rate limits. Every test owns a fresh
+ * synthetic x-real-ip (trusted in this test deployment) so its rate-limit budget
+ * is its own and never starves other specs. The e2e server runs with
+ * REGISTRATION_ENABLED=true and creation budgets far above the suite's needs
+ * (env.sh), so registration_closed / rate_limited / server_full on the creation
+ * path are covered by the UI unit tests, not here.
  */
+
+const CREATION_MAX_BYTES = 131_072; // ui/src/lib/ledger-limits.ts
+const CREATION_MAX_RECORDS = 16; // ui/src/lib/ledger-limits.ts, genesis included
 
 const LEDGER_BODY_MAX = 2_621_440; // ui/src/lib/ledger-limits.ts
 const PAIR_BODY_MAX = 300 * 1024; // ui/src/app/api/pair/[requestId]/route.ts
@@ -33,6 +38,9 @@ function raw(method: string, path: string, body: string | Buffer, options: { chu
     const httpRequest = new URL(UI_BASE_URL).protocol === "https:" ? tlsRequest : plainRequest;
     const request = httpRequest(new URL(path, UI_BASE_URL), {
       method,
+      // A fresh connection per probe: the keep-alive pool (Node's default agent) would hand the next probe a socket the
+      // server answered early on (413) while this upload was still streaming, and that request stalls until reset.
+      agent: false,
       signal: AbortSignal.timeout(30_000),
       headers: {
         "Content-Type": options.contentType ?? "application/json",
@@ -88,48 +96,120 @@ test.describe("POST /api/account/ledger admission", () => {
       expect(await raw("POST", "/api/account/ledger", body, { ip }), `body ${JSON.stringify(body)}`).toBe(400);
     }
     expect(await raw("POST", "/api/account/ledger", '{"ledger":{}}', { ip, contentType: "text/plain" })).toBe(400);
-    expect(await raw("POST", "/api/account/ledger", JSON.stringify({ ledger: {}, bootstrap: 5 }), { ip })).toBe(400);
-    expect(await raw("POST", "/api/account/ledger", JSON.stringify({ ledger: {}, bootstrap: "b".repeat(257) }), { ip })).toBe(400);
+    // There is no setup secret: a stray `bootstrap` member is ignored, so these fail on the ledger alone.
+    for (const bootstrap of [5, "b".repeat(257)]) {
+      const result = await call("POST", "/api/account/ledger", ip, { ledger: {}, bootstrap });
+      expect(result.status).toBe(400);
+      expect(result.body).toEqual({ error: "invalid_ledger" });
+    }
   });
 
-  test("an unparseable ledger is refused and leaves the account ledger untouched", async () => {
+  test("an unparseable ledger is refused as invalid_ledger and leaves the account ledger untouched", async () => {
     const ip = source();
     const before = (await serverLedger()).checkpoint.head;
     for (const ledger of ["x", 7, {}, { genesis: null, transitions: [] }]) {
       const result = await call("POST", "/api/account/ledger", ip, { ledger });
-      expect([403, 409], JSON.stringify(ledger)).toContain(result.status);
-      expect(result.body.decision).toBeUndefined();
+      expect(result.status, JSON.stringify(ledger)).toBe(400);
+      expect(result.body).toEqual({ error: "invalid_ledger" });
     }
     expect((await serverLedger()).checkpoint.head).toBe(before);
   });
+});
 
-  test("account creation is closed: a fresh, validly signed genesis is refused even with the bootstrap secret", async () => {
+test.describe("POST /api/account/ledger account creation (many accounts per server)", () => {
+  test("a fresh, validly signed genesis with its first device is admitted as a NEW account; the shared account is untouched", async () => {
     const ip = source();
-    const account = readRunAccount();
-    const origin = new URL(account.origin).origin;
-    const before = await serverLedger();
-    const [{ createSoftPasskey }, lib] = await Promise.all([
-      import(pathToFileURL(join(E2E_DIR, "..", "bridge", "dist", "security", "ledger", "testing.js")).href) as Promise<typeof import("../../bridge/src/security/ledger/testing")>,
-      ledgerLib(),
-    ]);
-    const passkey = await createSoftPasskey({ rpId: RP_ID, origin });
-    const payload = {
-      type: "ftown_account_genesis" as const, version: 2 as const, rpId: RP_ID, origins: [origin],
-      handle: randomBytes(32).toString("base64url"), createdAt: Date.now(),
-      authority: { credentialId: passkey.credentialId, publicKey: passkey.publicKey, label: "e2e-intruder", addedAt: Date.now() },
-    };
-    const ledger = { genesis: { payload, signature: await passkey.sign(await lib.ledgerChallenge(payload)) }, transitions: [] };
-    // The genesis is well formed: it verifies with the shared verifier.
-    expect((await lib.verifyLedger(ledger)).accountId).not.toBe(account.accountId);
-    for (const body of [{ ledger }, { ledger, bootstrap: BOOTSTRAP_SECRET }]) {
-      const result = await call("POST", "/api/account/ledger", ip, body);
-      expect(result.status).toBe(403);
-      expect(result.body.error).toBe("registration_closed");
-    }
-    const intruderId = await lib.accountIdOf(payload);
-    expect((await call("GET", `/api/account/ledger?accountId=${intruderId}`, ip)).status).toBe(404);
-    expect((await serverLedger()).checkpoint.head).toBe(before.checkpoint.head);
+    const shared = await serverLedger();
+    const created = await creationLedger();
+    expect(created.accountId).not.toBe(shared.checkpoint.accountId);
+    const result = await call("POST", "/api/account/ledger", ip, { ledger: created.ledger });
+    expect(result.status).toBe(201);
+    expect(result.body.decision).toBe("created");
+    const lib = await ledgerLib();
+    expect((await lib.verifyLedger(lib.parseLedger(result.body.ledger))).accountId).toBe(created.accountId);
+    const read = await call("GET", `/api/account/ledger?accountId=${created.accountId}`, ip);
+    expect(read.status).toBe(200);
+    expect(read.body.ledger).toEqual(created.ledger);
+    // Offering the same chain again is a replica offer of an existing account: kept, never a second account.
+    const again = await call("POST", "/api/account/ledger", ip, { ledger: created.ledger });
+    expect(again.status).toBe(200);
+    expect(again.body.decision).toBe("keep");
+    expect((await serverLedger()).checkpoint.head).toBe(shared.checkpoint.head);
   });
+
+  test("a stray `bootstrap` member is ignored: the chain alone decides", async () => {
+    const ip = source();
+    const created = await creationLedger();
+    const result = await call("POST", "/api/account/ledger", ip, { ledger: created.ledger, bootstrap: "e2e-not-a-secret-0123456789abcdef-anything" });
+    expect(result.status).toBe(201);
+    expect(result.body.decision).toBe("created");
+    expect((await call("GET", `/api/account/ledger?accountId=${created.accountId}`, ip)).status).toBe(200);
+  });
+
+  test(`a creation of more than ${CREATION_MAX_RECORDS} records is 413 creation_too_large; ${CREATION_MAX_RECORDS} records are admitted`, async () => {
+    const ip = source();
+    const largest = await creationLedger({ devices: CREATION_MAX_RECORDS - 1 });
+    const oversized = await creationLedger({ devices: CREATION_MAX_RECORDS });
+    expect(1 + oversized.ledger.transitions.length).toBe(CREATION_MAX_RECORDS + 1);
+    const refused = await call("POST", "/api/account/ledger", ip, { ledger: oversized.ledger });
+    expect(refused.status).toBe(413);
+    expect(refused.body).toEqual({ error: "creation_too_large" });
+    expect((await call("GET", `/api/account/ledger?accountId=${oversized.accountId}`, ip)).status).toBe(404);
+    const admitted = await call("POST", "/api/account/ledger", ip, { ledger: largest.ledger });
+    expect(admitted.status).toBe(201);
+    expect(admitted.body.decision).toBe("created");
+  });
+
+  test(`a creation chain over ${CREATION_MAX_BYTES} bytes is 413 creation_too_large`, async () => {
+    const ip = source();
+    // Labels are at most 200 characters, so only a long chain exceeds the byte budget (it also exceeds the record budget).
+    const big = await creationLedger({ devices: 110, deviceLabelLength: 200 });
+    expect(Buffer.byteLength(JSON.stringify(big.ledger), "utf8")).toBeGreaterThan(CREATION_MAX_BYTES);
+    const refused = await call("POST", "/api/account/ledger", ip, { ledger: big.ledger });
+    expect(refused.status).toBe(413);
+    expect(refused.body).toEqual({ error: "creation_too_large" });
+    expect((await call("GET", `/api/account/ledger?accountId=${big.accountId}`, ip)).status).toBe(404);
+  });
+
+  test("a genesis bound to a foreign origin is 400 origin_mismatch", async () => {
+    const ip = source();
+    const foreign = await creationLedger({ origin: "https://evil.example" });
+    // Self-consistent (it verifies), just not for this server.
+    expect((await (await ledgerLib()).verifyLedger(foreign.ledger)).accountId).toBe(foreign.accountId);
+    const refused = await call("POST", "/api/account/ledger", ip, { ledger: foreign.ledger });
+    expect(refused.status).toBe(400);
+    expect(refused.body).toEqual({ error: "origin_mismatch" });
+    expect((await call("GET", `/api/account/ledger?accountId=${foreign.accountId}`, ip)).status).toBe(404);
+  });
+
+  test("a genesis without a first device is 400 invalid_ledger", async () => {
+    const ip = source();
+    const bare = await creationLedger({ devices: 0 });
+    const refused = await call("POST", "/api/account/ledger", ip, { ledger: bare.ledger });
+    expect(refused.status).toBe(400);
+    expect(refused.body).toEqual({ error: "invalid_ledger" });
+    expect((await call("GET", `/api/account/ledger?accountId=${bare.accountId}`, ip)).status).toBe(404);
+  });
+
+  test("a different account cannot take the shared account's handle: 409 handle_taken, the handle still resolves to the shared account", async () => {
+    const ip = source();
+    const shared = await serverLedger();
+    const handle = shared.ledger.genesis.payload.handle;
+    const squatter = await creationLedger({ handle });
+    expect(squatter.accountId).not.toBe(shared.checkpoint.accountId);
+    const refused = await call("POST", "/api/account/ledger", ip, { ledger: squatter.ledger });
+    expect(refused.status).toBe(409);
+    expect(refused.body).toEqual({ error: "handle_taken" });
+    expect((await call("GET", `/api/account/ledger?accountId=${squatter.accountId}`, ip)).status).toBe(404);
+    const byHandle = await call("GET", `/api/account/ledger?handle=${handle}`, ip);
+    expect(byHandle.status).toBe(200);
+    const lib = await ledgerLib();
+    expect(await lib.accountIdOf(lib.parseLedger(byHandle.body.ledger).genesis.payload)).toBe(shared.checkpoint.accountId);
+    expect((await serverLedger()).checkpoint.head).toBe(shared.checkpoint.head);
+  });
+});
+
+test.describe("POST /api/account/ledger rate limit", () => {
 
   test("write budget is 30/min per source and answers 429 with Retry-After", async () => {
     const ip = source();

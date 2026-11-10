@@ -1,5 +1,7 @@
 # Passkey ledger cut-over (release 0.21.0)
 
+> **Obsolete in part (2026-11-10).** The server now hosts many accounts. `FTOWN_BOOTSTRAP_SECRET` no longer exists, there is no "Setup secret" field, and the section on `/login` is called "Create an account". Skip every step below that sets, copies, types or deletes the setup secret. The one-account wording and the `accounts_singleton` references are history. Current operations: `docs/runbooks/multi-account-operations.md`. The rest of this page is kept as the record of the cut-over.
+
 For the owner (one developer, one account). This is a one-way switch from passwords to a passkey. Read the whole page once before starting. Technical details are in `docs/investigations/2026-11-10-passkey-ledger-contract.md`.
 
 Anything marked "confirm before use" is not defined in this repository; check it yourself before relying on it.
@@ -149,9 +151,9 @@ The passkey prompt does not appear, or "Passkeys need a secure connection":
 - You already created this passkey. Use "Sign in with passkey" instead. If it persists after "Discard this setup and create a new passkey", remove the stale passkey entry for this site in your keychain settings first (outside ftown).
 
 "Account creation is closed" (`registration_closed`):
-- Check in Vercel that `REGISTRATION_ENABLED` is `true`, that `FTOWN_BOOTSTRAP_SECRET` is set and at least 32 characters, that you typed it exactly, and that the deployment is the one built after the env change. The same message appears if an account already exists (only one account can exist). If the secret was wrong, fix the field and use "3. Retry with this secret".
+- Check in Vercel that `REGISTRATION_ENABLED` is `true`, that `FTOWN_BOOTSTRAP_SECRET` is set and at least 32 characters, that you typed it exactly, and that the deployment is the one built after the env change. The same message appears if an account already exists (only one account can exist). If the secret was wrong, fix the field and use "3. Retry with this secret". [Obsolete 2026-11-10: ignore the setup-secret part; only the `REGISTRATION_ENABLED` value matters now.]
 
-"The setup secret is wrong":
+"The setup secret is wrong" [obsolete 2026-11-10: there is no setup secret any more; ignore this entry]:
 - Retype `FTOWN_BOOTSTRAP_SECRET` exactly; the value in Vercel must be the one you generate in section 2.
 
 The bridge says "This computer is not in your account's ledger. Run `ftown start --new-identity` to pair it again." (also: "The server's account ledger does not list this computer"):
@@ -162,7 +164,7 @@ A bridge says it could not reach the server:
 
 Lost passkey:
 - If you have another passkey in the account, you are fine; sign in with it.
-- If you lost all of them, or one was stolen: the account cannot be repaired from inside (authorities are add-only). Recovery is a new account: (1) delete the old account in the database so a new one may be created (the server allows only one account at all; manual SQL, for example deleting the single row from `accounts`, which cascades to the ledger, mailbox, directory and push rows: confirm before use and back up first); (2) set `REGISTRATION_ENABLED=true` and a `FTOWN_BOOTSTRAP_SECRET` again and redeploy; (3) create the account as in section 4; (4) on EACH computer run `ftown start --new-identity` and pair it again (section 6); (5) sign in on each browser (section 7); (6) close registration again (section 5).
+- If you lost all of them, or one was stolen: the account cannot be repaired from inside (authorities are add-only). Recovery is a new account: (1) delete the old account in the database so a new one may be created (the server allows only one account at all; manual SQL, for example deleting the single row from `accounts`, which cascades to the ledger, mailbox, directory and push rows: confirm before use and back up first); (2) set `REGISTRATION_ENABLED=true` and a `FTOWN_BOOTSTRAP_SECRET` again and redeploy; (3) create the account as in section 4; (4) on EACH computer run `ftown start --new-identity` and pair it again (section 6); (5) sign in on each browser (section 7); (6) close registration again (section 5). [Obsolete 2026-11-10: deleting the old account is no longer needed, since the server hosts many accounts and no setup secret exists. Create the new account directly (registration must be open) and re-pair each computer.]
 
 Clock problems and the 24 hour rule:
 - A computer lets your browsers in only if it has talked to the server within the last 24 hours, by its own clock and by its own elapsed time. After a longer outage the browsers get an offline-expired error until the computer reaches the server again (it renews automatically on the next relay token, normally within the hour).

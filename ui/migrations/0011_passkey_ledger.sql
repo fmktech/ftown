@@ -1,4 +1,4 @@
--- Passkey ledger migration. Single-user product: no backward compatibility.
+-- Passkey ledger migration. No backward compatibility with the old password accounts.
 -- Old account data (users, refresh tokens, pairing, account history, pending
 -- approvals) is DROPPED, and tables keyed by owner_id/sub are dropped and
 -- recreated keyed by account_id (rows are not migrated).
@@ -27,7 +27,6 @@ CREATE TABLE IF NOT EXISTS account_ledger (
 );
 ALTER TABLE account_ledger ADD COLUMN IF NOT EXISTS sticky JSONB NOT NULL DEFAULT '{"deviceIds":[],"bridgeIds":[]}';
 ALTER TABLE account_ledger ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 0;
-CREATE UNIQUE INDEX IF NOT EXISTS accounts_singleton ON accounts ((true));
 CREATE TABLE IF NOT EXISTS auth_nonces (
   nonce_hash TEXT PRIMARY KEY,
   purpose TEXT NOT NULL,

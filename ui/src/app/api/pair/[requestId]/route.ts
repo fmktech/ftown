@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { readBoundedJson, BoundedJsonError } from '@/lib/bounded-json';
-import { clientIp } from '@/lib/client-ip';
+import { rateLimitKeyIp } from '@/lib/client-ip';
 import { requireAccount } from '@/lib/ledger-auth';
 import { consumeRateLimit, type RateLimitConfig } from '@/lib/login-rate-limit';
 import { putPairApproval, takePairApproval } from '@/lib/pair-mailbox-store';
@@ -9,6 +9,7 @@ export const runtime = 'nodejs';
 const headers = { 'Cache-Control': 'no-store' };
 const PAIR_READ_RATE_LIMIT: RateLimitConfig = { maxAttempts: 200, lockoutMs: 10 * 60 * 1000 };
 const PAIR_READ_IP_RATE_LIMIT: RateLimitConfig = { maxAttempts: 120, lockoutMs: 60 * 1000 };
+const PAIR_WRITE_RATE_LIMIT: RateLimitConfig = { maxAttempts: 30, lockoutMs: 10 * 60 * 1000 };
 const PAIR_BODY_MAX_BYTES = 300 * 1024;
 
 type Context = { params: Promise<{ requestId: string }> };
@@ -28,6 +29,10 @@ export async function PUT(request: Request, context: Context): Promise<NextRespo
   const requestId = (await context.params).requestId;
   if (!validRequestIdShape(requestId)) return NextResponse.json({ error: 'invalid_request' }, { status: 400, headers });
   try {
+    const writeLimit = await consumeRateLimit('pair-write', accountId, PAIR_WRITE_RATE_LIMIT);
+    if (!writeLimit.allowed) {
+      return NextResponse.json({ error: 'rate_limited' }, { status: 429, headers: { ...headers, 'Retry-After': String(Math.ceil((writeLimit.retryAfterMs ?? 600000) / 1000)) } });
+    }
     const body = await readBoundedJson(request, PAIR_BODY_MAX_BYTES);
     const sealed = typeof body === 'object' && body !== null ? (body as { sealed?: unknown }).sealed : undefined;
     if (typeof sealed !== 'string') return NextResponse.json({ error: 'invalid_request' }, { status: 400, headers });
@@ -40,6 +45,7 @@ export async function PUT(request: Request, context: Context): Promise<NextRespo
     const code = error instanceof Error ? error.message : '';
     if (code === 'invalid_request_id') return NextResponse.json({ error: 'invalid_request' }, { status: 400, headers });
     if (code === 'pair_mailbox_too_large') return NextResponse.json({ error: 'too_large' }, { status: 413, headers });
+    if (code === 'pair_mailbox_full') return NextResponse.json({ error: 'pair_mailbox_full' }, { status: 429, headers });
     if (code === 'pair_mailbox_conflict') return NextResponse.json({ error: 'conflict' }, { status: 409, headers });
     return NextResponse.json({ error: 'unavailable' }, { status: 503, headers });
   }
@@ -49,7 +55,7 @@ export async function GET(request: Request, context: Context): Promise<NextRespo
   try {
     const requestId = (await context.params).requestId;
     if (!validRequestIdShape(requestId)) return NextResponse.json({ error: 'invalid_request' }, { status: 400, headers });
-    const ipLimit = await consumeRateLimit('pair-read-ip', clientIp(request), PAIR_READ_IP_RATE_LIMIT);
+    const ipLimit = await consumeRateLimit('pair-read-ip', rateLimitKeyIp(request), PAIR_READ_IP_RATE_LIMIT);
     if (!ipLimit.allowed) {
       return NextResponse.json({ error: 'rate_limited' }, { status: 429, headers: { ...headers, 'Retry-After': String(Math.ceil((ipLimit.retryAfterMs ?? 60000) / 1000)) } });
     }

@@ -323,6 +323,12 @@ describe("Account security from the passkey ledger", () => {
       expect(screen.getByRole("alert").textContent).toBe(securityErrorMessage(new Error("passkey_cancelled")));
       expect(screen.getByRole("button", { name: "Remove computer My laptop" })).toBeTruthy();
     });
+    it("shows the rate-limited text when the removal is rejected with rate_limited", async () => {
+      const fake = mountLedger(); fake.revokeBridge.mockRejectedValueOnce(Object.assign(new Error("rate_limited"), { code: "rate_limited" }));
+      renderAccount(); open();
+      await click(fake, screen.getByRole("button", { name: "Confirm remove computer" }));
+      expect(screen.getByRole("alert").textContent).toBe("Too many changes in a short time. Wait a few minutes and try again.");
+    });
     it("offers no removal for a computer outside the account and explains how to pair it", () => {
       mountLedger({ checkpoint: checkpoint({ bridges: [] }) }); renderAccount();
       fireEvent.click(screen.getByRole("button", { name: /^Computer My laptop:/ }));
@@ -560,6 +566,7 @@ describe("Mode selection", () => {
   });
   it("maps ledger and legacy error codes to fixed text only", () => {
     expect(securityErrorMessage(new Error("passkey_cancelled"))).toMatch(/cancelled/);
+    expect(securityErrorMessage({ code: "constructor" })).toBe("This security action could not be completed. Refresh and try again.");
     expect(securityErrorMessage({ code: "account_bridge_revoked" })).toBe("This computer was removed from account trust.");
     expect(securityErrorMessage(new Error("Server said <b>no</b>"))).toBe("This security action could not be completed. Refresh and try again.");
   });

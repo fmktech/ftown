@@ -1,6 +1,5 @@
 import { expect, type BrowserContext } from "@playwright/test";
 import jwt from "jsonwebtoken";
-import { randomBytes } from "node:crypto";
 import { test } from "../helpers/fixtures";
 import { login, sharedAccountId, waitForBridgeOnline, createShellSession, getCentrifugoToken } from "../helpers/app";
 import { browserEndpointId } from "../helpers/passkey";
@@ -10,16 +9,16 @@ import { attemptSubscribe, attemptPublish, type CentrifugoAttempt } from "../hel
 import { CENTRIFUGO_TOKEN_SECRET, TOKEN_AUDIENCE, UI_BASE_URL } from "../helpers/config";
 
 /**
- * Channel isolation under the single-account passkey-ledger product.
+ * Relay channel guards of the shared account A that do not need a second
+ * account: unauthenticated / garbage / wrong-secret / expired tokens never
+ * connect, a REVOKED browser can no longer mint a relay token, and raw
+ * plaintext commands published to A's own commands:rpc do not drive the bridge
+ * (the bridge requires encrypted, ledger-trusted envelopes).
  *
- * There is exactly ONE account per server, so there is no "user B". The
- * outsider is another tenant of the relay: a validly signed Centrifugo JWT
- * (HS256, aud ftown:centrifugo) whose `sub` is a different 43-char account id.
- * Its own `#<sub>` channels are allowed; A's `#<accountId>` channels must be
- * denied (allow_user_limited_channels). Raw plaintext commands published to
- * commands:rpc must not drive the bridge (the bridge requires encrypted,
- * ledger-trusted envelopes). Unauthenticated / garbage tokens never connect,
- * and a REVOKED browser can no longer mint a relay token.
+ * Cross-account channel isolation (a REAL second account B's relay token on
+ * every one of A's channels, subscribe and publish) lives in
+ * account-isolation.spec.ts; it replaced the hand-minted "other relay tenant"
+ * JWT this spec used while the server held a single account.
  */
 
 interface TenantA {
@@ -30,13 +29,6 @@ interface TenantA {
 
 let contextA: BrowserContext;
 let tenantA: TenantA;
-let outsiderSub: string;
-let outsiderToken: string;
-
-/** Another relay tenant: same secret/audience, different 43-char base64url sub. */
-function mintOutsiderToken(sub: string): string {
-  return jwt.sign({ sub }, CENTRIFUGO_TOKEN_SECRET, { algorithm: "HS256", audience: TOKEN_AUDIENCE, expiresIn: 600 });
-}
 
 /** A thrown rejection (connect/subscribe refused) is walled; a resolved outcome must be ok:false/103. */
 async function expectWalled(channel: string, attempt: () => Promise<CentrifugoAttempt>, who: string): Promise<void> {
@@ -50,7 +42,7 @@ async function expectWalled(channel: string, attempt: () => Promise<CentrifugoAt
   expect(result.error?.code, `"${channel}" denied but not with permission-denied 103 (got ${JSON.stringify(result.error)})`).toBe(103);
 }
 
-test.describe("IDOR: relay channel isolation", () => {
+test.describe("IDOR: relay channel guards of the shared account", () => {
   test.beforeAll(async ({ browser }) => {
     contextA = await browser.newContext();
     const pageA = await contextA.newPage();
@@ -61,34 +53,16 @@ test.describe("IDOR: relay channel isolation", () => {
     await createShellSession(pageA, `idor-A-${Date.now()}`);
     const sid = await waitForNewSessionId(accountId, before);
     tenantA = { accountId, sid, token: await getCentrifugoToken(pageA) };
-    outsiderSub = randomBytes(32).toString("base64url");
-    expect(outsiderSub).toHaveLength(43);
-    expect(outsiderSub).not.toBe(accountId);
-    outsiderToken = mintOutsiderToken(outsiderSub);
   });
 
   test.afterAll(async () => {
     await contextA?.close();
   });
 
-  for (const [label, channelOf] of [
-    ["sessions:updates", (a: TenantA) => `sessions:updates#${a.accountId}`],
-    ["session events", (a: TenantA) => `events:${a.sid}#${a.accountId}`],
-    ["terminal output", (a: TenantA) => `terminal:${a.sid}#${a.accountId}`],
-    ["terminal-input (keystroke injection)", (a: TenantA) => `terminal-input:${a.sid}#${a.accountId}`],
-    ["bridge presence", (a: TenantA) => `bridges:presence#${a.accountId}`],
-    ["commands:rpc", (a: TenantA) => `commands:rpc#${a.accountId}`],
-  ] as Array<[string, (a: TenantA) => string]>) {
-    test(`another relay tenant cannot subscribe to A's ${label} channel`, async () => {
-      const channel = channelOf(tenantA);
-      await expectWalled(channel, () => attemptSubscribe(outsiderToken, channel), `outsider tenant (${outsiderSub})`);
-    });
-  }
-
-  test("positive control: the outsider CAN subscribe to its OWN commands:rpc channel", async () => {
-    const channel = `commands:rpc#${outsiderSub}`;
-    const result = await attemptSubscribe(outsiderToken, channel);
-    expect(result.ok, `positive control failed on "${channel}" (${JSON.stringify(result.error)}) - rejections above may be a broken client`).toBe(true);
+  test("positive control: A's own relay token subscribes to A's commands:rpc channel", async () => {
+    const channel = `commands:rpc#${tenantA.accountId}`;
+    const result = await attemptSubscribe(tenantA.token, channel);
+    expect(result.ok, `positive control failed on "${channel}" (${JSON.stringify(result.error)}) - rejections below may be a broken client`).toBe(true);
   });
 
   test("no token and garbage tokens cannot connect or subscribe", async () => {
@@ -120,20 +94,13 @@ test.describe("IDOR: relay channel isolation", () => {
   });
 
   test("raw plaintext commands on commands:rpc never drive the bridge; the signed-in browser can create a session", async ({ browser }) => {
-    // Centrifugo accepts client publishes (only SUBSCRIBE is user-limited), so the wall is the
-    // bridge's encrypted-envelope + ledger-trust check. Neither an outsider's nor the account's own
-    // plaintext create_session may spawn a session.
+    // The broker accepts the account's own raw publish, so the wall is the bridge's encrypted-envelope +
+    // ledger-trust check: a plaintext create_session must not spawn a session. (Another account's publish
+    // into this channel: account-isolation.spec.ts.)
     const channel = `commands:rpc#${tenantA.accountId}`;
     expect(await commandsRpcClients(tenantA.accountId)).toBeGreaterThanOrEqual(1);
     const before = await sessionIdsFor(tenantA.accountId);
 
-    const foreign = await attemptPublish(outsiderToken, channel, {
-      type: "create_session",
-      payload: { command: "/bin/zsh -l", shellType: "shell", name: `idor-outsider-${Date.now()}` },
-      requestId: `idor-outsider-${Date.now()}`,
-    }).catch((e: unknown) => ({ ok: false, error: { code: -1, message: String(e) } }) as CentrifugoAttempt);
-    // Either the broker denies the foreign publish or accepts it and the bridge ignores it; both are safe.
-    void foreign;
     const own = await attemptPublish(tenantA.token, channel, {
       type: "create_session",
       payload: { command: "/bin/zsh -l", shellType: "shell", name: `idor-A-plain-${Date.now()}` },

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useLedger } from "@/hooks/useLedger";
+import { accountNameValid, ACCOUNT_NAME_MAX, sanitizeAccountName } from "@/lib/ledger-client";
 import { ledgerRuntimeConfig } from "@/lib/ledger-runtime";
 import { clearSignedOut, isSignedOut } from "@/lib/signed-out-flag";
 
@@ -19,11 +20,20 @@ function safeReturnTo(value: string | null): string | null {
   }
 }
 
+const CREATION_FAILED = "This account could not be created. Discard this setup and try again.";
 const MESSAGES: Record<string, string> = {
   passkey_cancelled: "The passkey prompt was cancelled. Try again when you are ready.",
   secure_context_required: "Passkeys need a secure connection. Open this site over https (or on localhost).",
   passkey_already_registered: "This passkey is already registered. Sign in with it instead.",
-  registration_closed: "Account creation is closed. Sign in with an existing passkey.",
+  registration_closed: "Account creation is closed on this server.",
+  server_full: "This server is not accepting new accounts right now.",
+  server_misconfigured: "This server is not configured for account creation.",
+  rate_limited: "Too many attempts. Try again later.",
+  invalid_account_name: "Enter an account name of up to 64 characters.",
+  creation_too_large: CREATION_FAILED,
+  invalid_ledger: CREATION_FAILED,
+  handle_taken: CREATION_FAILED,
+  ledger_other_account: "This browser already belongs to an account. Sign in with its passkey, or reset this browser in Security first.",
   device_revoked: "This browser was removed from your account.",
   ledger_device_revoked: "This browser was removed from your account.",
   account_not_found: "No account found for that passkey.",
@@ -31,15 +41,17 @@ const MESSAGES: Record<string, string> = {
   network_unavailable: "Cannot reach the server. Check your connection.",
   server_unavailable: "The server is not available right now. Try again soon.",
   origin_mismatch: "This page address does not match the server's public address. Open the official address.",
-  invalid_bootstrap: "The setup secret is wrong. Enter it again.",
   storage_unavailable: "This browser blocks storage, so it cannot keep your account. Allow site data and try again.",
   sign_in_failed: "Sign in failed. Try again.",
 };
 function messageFor(code: string): string {
-  return MESSAGES[code] ?? "Something went wrong. Try again.";
+  return Object.prototype.hasOwnProperty.call(MESSAGES, code) ? MESSAGES[code] : "Something went wrong. Try again.";
 }
 
-const RETRYABLE = ["registration_closed", "invalid_bootstrap", "network_unavailable", "server_unavailable"];
+/** Rejections of the creating POST that a retry of the same signed account can outlive (nothing about the account itself is wrong). */
+const RETRYABLE = ["registration_closed", "server_full", "rate_limited", "server_misconfigured", "network_unavailable", "server_unavailable"];
+/** The signed account can never be accepted as is: only a discard (and a new passkey) gets the user forward. */
+const FATAL_CREATION = ["creation_too_large", "invalid_ledger", "origin_mismatch", "handle_taken"];
 
 const inputClass =
   "w-full px-3 py-2 rounded-[var(--radius-sm)] bg-[var(--bg-base)] border border-[var(--border-default)] text-sm text-[var(--text-primary)] placeholder:text-[var(--text-faint)] outline-none focus-visible:border-[var(--accent)] focus-visible:shadow-[var(--focus-ring)]";
@@ -52,7 +64,7 @@ export default function LoginPage() {
   const [flow, setFlow] = useState<"signin" | "create" | null>(null);
   const [deviceLabel, setDeviceLabel] = useState("This browser");
   const [passkeyLabel, setPasskeyLabel] = useState("My passkey");
-  const [bootstrap, setBootstrap] = useState("");
+  const [accountName, setAccountName] = useState("");
   const [retryable, setRetryable] = useState(false);
   const tried = useRef(false);
 
@@ -91,7 +103,11 @@ export default function LoginPage() {
   useEffect(() => {
     try { setConfigured(ledgerRuntimeConfig().configured); } catch { /* secure/browser checks surface on click */ }
   }, []);
-  const startOver = () => run(async () => { await client.forget(); setFlow(null); setBootstrap(""); setRetryable(false); });
+  const startOver = () => run(async () => { await client.forget(); setFlow(null); setRetryable(false); });
+  const nameLength = Array.from(sanitizeAccountName(accountName)).length;
+  const nameTooLong = nameLength > ACCOUNT_NAME_MAX;
+  const nameValid = accountNameValid(accountName);
+  const fatal = flow === "create" && error !== null && FATAL_CREATION.includes(error);
   const enrolling = snapshot.pending === "enrollment_ready";
 
   const identify = () => run(async () => {
@@ -108,19 +124,16 @@ export default function LoginPage() {
       if (flow === "create" && err instanceof Error && RETRYABLE.includes(err.message)) setRetryable(true);
       throw err;
     }
-    setBootstrap("");
     done();
   });
   const retryCreate = () => run(async () => {
     clearSignedOut();
-    const secret = bootstrap;
     try {
-      await client.retryCreateAccount({ bootstrap: secret });
+      await client.retryCreateAccount();
     } catch (err) {
       if (!(err instanceof Error && RETRYABLE.includes(err.message))) setRetryable(false);
       throw err;
     }
-    setBootstrap("");
     setRetryable(false);
     done();
   });
@@ -128,12 +141,16 @@ export default function LoginPage() {
   const createStart = () => run(async () => {
     clearSignedOut();
     setFlow("create");
-    await client.createAccountStart({ passkeyLabel, userName: passkeyLabel });
+    try {
+      await client.createAccountStart({ passkeyLabel, userName: sanitizeAccountName(accountName) });
+    } catch (err) {
+      // Nothing was started: back to the neutral state so the sign-in button is offered next to the message.
+      if (!(err instanceof Error && err.message === "account_creation_pending")) setFlow(null);
+      throw err;
+    }
   });
   const createFinish = () => run(async () => {
-    const secret = bootstrap;
-    setBootstrap("");
-    await client.createAccountFinish({ bootstrap: secret });
+    await client.createAccountFinish();
   });
 
   return (
@@ -182,14 +199,33 @@ export default function LoginPage() {
         </p>
 
         <details className="mt-6" open={flow === "create"}>
-          <summary className="text-sm text-[var(--text-secondary)] cursor-pointer">First time setup</summary>
+          <summary className="text-sm text-[var(--text-secondary)] cursor-pointer">Create an account</summary>
           {!configured ? (
             <p className="text-sm text-[var(--status-error)] mt-3" role="alert">
               This server is not configured for account creation (FTOWN public URL missing).
             </p>
           ) : (
           <div className="space-y-3 mt-3">
-            <p className="text-sm text-[var(--text-faint)]">Create the account on this server. You need the setup secret from the server admin.</p>
+            <p className="text-sm text-[var(--text-faint)]">Create a new account with a passkey. The passkey is the only key to the account: add a second one right after.</p>
+            <div>
+              <label htmlFor="account-name" className="block text-sm text-[var(--text-secondary)] mb-1">Account name</label>
+              <input
+                id="account-name"
+                value={accountName}
+                onChange={(e) => setAccountName(e.target.value)}
+                required
+                aria-required="true"
+                aria-invalid={nameTooLong}
+                aria-describedby={nameTooLong ? "account-name-error" : undefined}
+                autoComplete="off"
+                className={inputClass}
+              />
+              {nameTooLong && (
+                <p id="account-name-error" role="alert" className="text-xs text-[var(--status-error)] mt-1">
+                  Use at most {ACCOUNT_NAME_MAX} characters.
+                </p>
+              )}
+            </div>
             <div>
               <label htmlFor="passkey-label" className="block text-sm text-[var(--text-secondary)] mb-1">Passkey label</label>
               <input id="passkey-label" value={passkeyLabel} onChange={(e) => setPasskeyLabel(e.target.value)} className={inputClass} />
@@ -198,32 +234,21 @@ export default function LoginPage() {
               <label htmlFor="create-device-label" className="block text-sm text-[var(--text-secondary)] mb-1">This browser label</label>
               <input id="create-device-label" value={deviceLabel} onChange={(e) => setDeviceLabel(e.target.value)} className={inputClass} />
             </div>
-            <div>
-              <label htmlFor="bootstrap" className="block text-sm text-[var(--text-secondary)] mb-1">Setup secret</label>
-              <input
-                id="bootstrap"
-                type="password"
-                value={bootstrap}
-                onChange={(e) => setBootstrap(e.target.value)}
-                autoComplete="off"
-                className={inputClass}
-              />
-            </div>
-            <button type="button" onClick={createStart} disabled={busy || snapshot.pending !== "none"} className="btn-ghost w-full">
+            <button type="button" onClick={createStart} disabled={busy || snapshot.pending !== "none" || !nameValid} className="btn-ghost w-full">
               1. Create passkey
             </button>
             <button type="button" onClick={createFinish} disabled={busy || snapshot.pending !== "passkey_created"} className="btn-ghost w-full">
               2. Sign the account
             </button>
             {retryable && flow === "create" ? (
-              <button type="button" onClick={retryCreate} disabled={busy || !bootstrap} className="btn-ghost w-full">
-                3. Retry with this secret
+              <button type="button" onClick={retryCreate} disabled={busy} className="btn-ghost w-full">
+                3. Retry
               </button>
             ) : (
               <button
                 type="button"
                 onClick={addBrowser}
-                disabled={busy || flow !== "create" || snapshot.pending !== "enrollment_ready"}
+                disabled={busy || fatal || flow !== "create" || snapshot.pending !== "enrollment_ready"}
                 className="btn-ghost w-full"
               >
                 3. Add this browser
