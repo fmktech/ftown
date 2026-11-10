@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { rateLimitKeyIp } from '@/lib/client-ip';
 import { consumeRateLimit } from '@/lib/login-rate-limit';
-import { accountCreateGlobalPerDay, accountCreatePerHour } from '@/lib/account-limits';
+import { accountCreateGlobalPerDay, accountCreatePerHour, accountWritesPer10Min } from '@/lib/account-limits';
 import { offerLedger, readLedger } from '@/lib/account-ledger-store';
 import type { CreationRejection, OfferLimits } from '@/lib/account-ledger-store';
 import { LEDGER_BODY_MAX_BYTES } from '@/lib/ledger-limits';
@@ -15,7 +15,7 @@ const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
 /** Real writes to one existing account (adopt, or keep with new sticky ids). */
-const ACCOUNT_WRITES = { maxAttempts: 60, windowMs: 10 * MINUTE_MS };
+const ACCOUNT_WRITES_WINDOW_MS = 10 * MINUTE_MS;
 const CREATION_STATUS: Record<CreationRejection, number> = {
   invalid_ledger: 400, registration_closed: 403, creation_too_large: 413, origin_mismatch: 400, server_misconfigured: 503, server_full: 503,
   handle_taken: 409, rate_limited: 429,
@@ -43,7 +43,7 @@ function storeLimits(request: Request): OfferLimits & { refusal: () => NextRespo
       return refusal === null;
     },
     admitAccountWrite: async accountId => {
-      refusal = await limited(request, 'ledger-adopt-account', ACCOUNT_WRITES.maxAttempts, ACCOUNT_WRITES.windowMs, accountId);
+      refusal = await limited(request, 'ledger-adopt-account', accountWritesPer10Min(), ACCOUNT_WRITES_WINDOW_MS, accountId);
       return refusal === null;
     },
     refusal: () => refusal ?? json({ error: 'rate_limited' }, 429),

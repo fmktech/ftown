@@ -21,6 +21,7 @@ Set in the server environment. Each must be a plain positive integer. Anything e
 | `FTOWN_MAX_ACCOUNTS` | 1000 | Soft cap. Over it: `server_full` (503). |
 | `FTOWN_ACCOUNT_CREATE_PER_IP_HOUR` | 5 | Attempts per client IP per hour. Over it: 429. |
 | `FTOWN_ACCOUNT_CREATE_GLOBAL_DAY` | 200 | Attempts per day, all clients together. Over it: 429. |
+| `FTOWN_ACCOUNT_WRITES_PER_10MIN` | 60 | Ledger writes to one existing account per 10 minutes. Over it: 429, and the Security panel shows "Too many changes in a short time. Wait a few minutes and try again." |
 
 If the server is not behind a proxy that ftown trusts (Vercel, Fly, or `FTOWN_TRUSTED_PROXY=1`), every client has the same IP key. Then the per-IP limit is shared by everyone and the global daily limit is the real limit. Set `FTOWN_TRUSTED_PROXY=1` only when your proxy overwrites `X-Forwarded-For` / `X-Real-IP`.
 

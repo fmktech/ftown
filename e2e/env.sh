@@ -36,6 +36,7 @@ export AUTH_SECRET="e2e-auth-secret-not-for-production" # gitleaks:allow
 export REGISTRATION_ENABLED="true"
 export FTOWN_ACCOUNT_CREATE_PER_IP_HOUR="100000"
 export FTOWN_ACCOUNT_CREATE_GLOBAL_DAY="100000"
+export FTOWN_ACCOUNT_WRITES_PER_10MIN="100000"
 # Auth.js v5 does not trust the Host header under `next start` (prod) unless told to.
 # Vercel sets this automatically; we set it for the local/CI prod run.
 export AUTH_TRUST_HOST="true"

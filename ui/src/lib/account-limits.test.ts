@@ -7,6 +7,7 @@ const limits = [
   { name: 'maxAccounts', key: 'maxAccounts', variable: 'FTOWN_MAX_ACCOUNTS', fallback: 1000 },
   { name: 'accountCreatePerHour', key: 'accountCreatePerHour', variable: 'FTOWN_ACCOUNT_CREATE_PER_IP_HOUR', fallback: 5 },
   { name: 'accountCreateGlobalPerDay', key: 'accountCreateGlobalPerDay', variable: 'FTOWN_ACCOUNT_CREATE_GLOBAL_DAY', fallback: 200 },
+  { name: 'accountWritesPer10Min', key: 'accountWritesPer10Min', variable: 'FTOWN_ACCOUNT_WRITES_PER_10MIN', fallback: 60 },
 ] as const;
 const ignored = ['0', '00', '-3', '+4', '2.5', '1.0', '1e3', '0x10', '10abc', 'abc', 'NaN', 'Infinity', '2147483647', '99999999999999999999'];
 const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);

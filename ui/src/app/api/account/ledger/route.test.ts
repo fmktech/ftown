@@ -38,6 +38,7 @@ afterEach(() => {
   delete process.env.FLY_APP_NAME;
   delete process.env.FTOWN_ACCOUNT_CREATE_PER_IP_HOUR;
   delete process.env.FTOWN_ACCOUNT_CREATE_GLOBAL_DAY;
+  delete process.env.FTOWN_ACCOUNT_WRITES_PER_10MIN;
 });
 
 describe('GET', () => {
@@ -237,6 +238,17 @@ describe('POST account write budget', () => {
     expect(await response.json()).toEqual({ decision: 'adopt', ledger, discarded: 0 });
     expect(scopes()).toEqual(['ledger-write', 'ledger-adopt-account']);
     expect(mocks.rate).toHaveBeenCalledWith('ledger-adopt-account', ID, { maxAttempts: 60, lockoutMs: 600_000 });
+  });
+
+  it('honours FTOWN_ACCOUNT_WRITES_PER_10MIN, read per request', async () => {
+    process.env.FTOWN_ACCOUNT_WRITES_PER_10MIN = '3';
+    writing();
+    await POST(post(JSON.stringify({ ledger })));
+    expect(mocks.rate).toHaveBeenCalledWith('ledger-adopt-account', ID, { maxAttempts: 3, lockoutMs: 600_000 });
+    process.env.FTOWN_ACCOUNT_WRITES_PER_10MIN = '7';
+    mocks.rate.mockClear();
+    await POST(post(JSON.stringify({ ledger })));
+    expect(mocks.rate).toHaveBeenCalledWith('ledger-adopt-account', ID, { maxAttempts: 7, lockoutMs: 600_000 });
   });
 
   it('over budget: 429 rate_limited with Retry-After bounded by the window, nothing published', async () => {

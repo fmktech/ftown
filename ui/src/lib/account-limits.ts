@@ -30,6 +30,11 @@ export function accountCreatePerHour(env: Env = process.env): number {
   return positive(env, 'FTOWN_ACCOUNT_CREATE_PER_IP_HOUR', 5);
 }
 
+/** Writes admitted per 10 minutes to one existing account's ledger (FTOWN_ACCOUNT_WRITES_PER_10MIN, default 60). */
+export function accountWritesPer10Min(env: Env = process.env): number {
+  return positive(env, 'FTOWN_ACCOUNT_WRITES_PER_10MIN', 60);
+}
+
 /** Account creations admitted per day across all clients (FTOWN_ACCOUNT_CREATE_GLOBAL_DAY, default 200). */
 export function accountCreateGlobalPerDay(env: Env = process.env): number {
   return positive(env, 'FTOWN_ACCOUNT_CREATE_GLOBAL_DAY', 200);

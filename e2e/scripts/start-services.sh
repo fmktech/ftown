@@ -41,7 +41,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
   // Open registration with creation budgets far above the suite's needs (every test source shares the global key).
   assert.equal(process.env.REGISTRATION_ENABLED,'true');
   assert.ok(process.env.FTOWN_BOOTSTRAP_SECRET===undefined);
-  for(const key of ['FTOWN_ACCOUNT_CREATE_PER_IP_HOUR','FTOWN_ACCOUNT_CREATE_GLOBAL_DAY'])assert.ok(/^[0-9]+$/.test(process.env[key]??'')&&Number(process.env[key])>=10000);
+  for(const key of ['FTOWN_ACCOUNT_CREATE_PER_IP_HOUR','FTOWN_ACCOUNT_CREATE_GLOBAL_DAY','FTOWN_ACCOUNT_WRITES_PER_10MIN'])assert.ok(/^[0-9]+$/.test(process.env[key]??'')&&Number(process.env[key])>=10000);
   assert.equal(process.env.NEXT_PUBLIC_CENTRIFUGO_URL,'ws://localhost:8000/connection/websocket');
   for(const name of ['ui','bridge','bridge-2','tls'])assert.ok(!fs.existsSync(path.join(dir,`.${name}.pid`)));
   await Promise.all([ui,tls].map(port=>new Promise((resolve,reject)=>{const server=net.createServer();server.once('error',reject);server.listen(port,'127.0.0.1',()=>server.close(error=>error?reject(error):resolve()));})));
