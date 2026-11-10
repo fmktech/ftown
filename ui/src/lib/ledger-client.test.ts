@@ -380,9 +380,9 @@ describe("LedgerClient account creation", () => {
       return server.fetch(input, init);
     }) as typeof fetch;
     const a = await browser(server, authenticator, { deps: { fetchImpl } });
-    await expect(a.client.createAccount({ passkeyLabel: "Mac", deviceLabel: "Laptop", userName: "owner", bootstrap: "s1" }))
+    await expect(a.client.createAccount({ passkeyLabel: "Mac", deviceLabel: "Laptop", userName: "owner", bootstrap: "SECRET-BOOTSTRAP-VALUE" }))
       .rejects.toThrow("network_unavailable");
-    expect(JSON.stringify(a.client)).not.toContain("s1");
+    expect(JSON.stringify(a.client)).not.toContain("SECRET-BOOTSTRAP-VALUE");
     offline = false;
     await a.client.retryCreateAccount({});
     expect(authenticator.names()).toEqual(["create", "sign", "sign"]);

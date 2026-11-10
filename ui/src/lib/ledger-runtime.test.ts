@@ -6,7 +6,12 @@ vi.mock("next-auth/react", () => ({ signIn: (...args: unknown[]) => signInMock(.
 
 import { buildLedgerDeps, getLedgerClient, ledgerRuntimeConfig, resetLedgerClientForTests } from "./ledger-runtime";
 
-beforeEach(() => { resetLedgerClientForTests(); signInMock.mockReset(); });
+beforeEach(() => {
+  resetLedgerClientForTests(); signInMock.mockReset();
+  // Isolate from CI/e2e job env (which exports these for the whole job).
+  vi.stubEnv("NEXT_PUBLIC_FTOWN_PUBLIC_URL", "");
+  vi.stubEnv("NEXT_PUBLIC_FTOWN_RP_ID", "");
+});
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 
 it("dev: unset public URL falls back to the page origin and is configured", () => {
