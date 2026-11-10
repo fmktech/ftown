@@ -193,6 +193,19 @@ const LOCAL_ONLY = "Removed on this browser only — not yet applied to your acc
 const UNSAVED = "Removal not saved to the server yet";
 /** A removal while nothing is confirmed about the server (snapshot.serverState 'unknown'). */
 const UNCONFIRMED = "Removed here. Not confirmed by the server yet.";
+/** snapshot.divergence: nothing can be signed until the owner chooses a history (the two-histories screen). */
+const DIVERGED_SERVER = "This browser and the server disagree about this account's history. Do not approve anything until this is resolved.";
+const DIVERGED_OTHER = "Two different histories of this account exist. Do not approve anything until this is resolved.";
+/** snapshot.lastConflict, by reason. */
+const WRITE_CONFLICT = "Something else changed first. Confirm again.";
+const WRITE_DIVERGED = "This change was not saved: a different history of this account appeared.";
+const WRITE_REFUSED = "This change was not saved: the server refused it.";
+/** A pending write that is not a removal (a removal is shown on its browser or computer). */
+const PENDING_CHANGE: Partial<Record<LedgerOperation["type"], string>> = {
+  add_bridge: "Adding a computer is not saved to the server yet. Retrying…",
+  add_device: "Adding a browser is not saved to the server yet. Retrying…",
+  add_authority: "Adding a passkey is not saved to the server yet. Retrying…",
+};
 
 /**
  * Signed entries this page has seen per ledger client. The snapshot's checkpoint drops an entry once this browser revoked it locally;
@@ -235,17 +248,18 @@ function PasskeyActionButton({ security, actionKey, label, busyLabel, ariaLabel,
 }
 
 /**
- * A removal the server has not taken yet. The client sends it again by itself; "Retry now" sends it at once, without a passkey, but
- * never before a server Retry-After. No retry happens in a conflict (the owner must sign the conflicting removals again here) or when
- * this browser cannot write: the text then says what to do instead, and there is no button.
+ * A removal the server has not taken yet: the signed change waiting for the server (the target is still in the account), or a removal
+ * in this browser's chain that a rolled-back server lacks. The client sends it again by itself; "Retry now" sends it at once, without a
+ * passkey, but never before a server Retry-After. No retry happens when this browser cannot re-offer: the text then says what to do
+ * instead, and there is no button.
  */
 function UnsavedRemoval({ security, label, id, self = false }: { security: AccountSecurity; label: string | null; id: string; self?: boolean }) {
   const { snapshot } = security;
-  const { text } = unsavedRemovalState(snapshot, self);
+  const { text } = unsavedRemovalState(snapshot, self, id);
   return <div role="group" aria-label="Removal not saved" className="space-y-2 rounded-md border border-[var(--status-pending)] p-3">
     <p className="text-sm">{text}</p>
     <SignedIdentity label={label} id={id} />
-    <UnsavedRemovalRetryButton snapshot={snapshot} busy={!!security.busy} retrying={security.busy === "retry"} onRetry={() => void security.run("retry", client => client.retryNow())} />
+    <UnsavedRemovalRetryButton snapshot={snapshot} busy={!!security.busy} retrying={security.busy === "retry"} id={id} onRetry={() => void security.run("retry", client => client.retryNow())} />
   </div>;
 }
 
@@ -379,13 +393,18 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
   /** The verified chain (sticky revocations applied) is on screen; this browser's own membership is reported separately. */
   const verified = !!trusted && (snapshot.status === "ready" || revokedHere);
   const accountReady = !!trusted && snapshot.status === "ready";
-  /** Passkey-signed changes only from a browser that is itself in the account (never in device_revoked). */
-  const canWrite = accountReady;
+  /** A different history of the account exists: the client refuses every passkey-signed change until the owner chooses one. */
+  const divergence = trusted ? snapshot.divergence ?? null : null;
+  /** Passkey-signed changes only from a browser that is itself in the account (never in device_revoked), and never while diverged. */
+  const canWrite = accountReady && !divergence;
+  /** The signed change waiting for the server; it is not part of `trusted` until the server accepts it. */
+  const pendingWrite = trusted ? snapshot.pendingWrite ?? null : null;
   const displayName = (kind: "browser" | "bridge", id: string) => displayNames.names.find(item => item.kind === kind && item.id === id)?.name;
   // Revoked on this browser only: still in the account for the server, the computers and the other browsers.
   const localDevices = trusted ? snapshot.localOnly.deviceIds : [];
   const localBridges = trusted ? snapshot.localOnly.bridgeIds : [];
-  // Removed in this browser's chain, not yet on the server: the server (and so the computers) still accept them.
+  // Removals the server does not hold yet (the pending write, or removals a rolled-back server lacks): the server (and so the computers)
+  // still accept them. A pending removal's target is still in the account (`trusted` lists it).
   const unsavedDevices = trusted ? (snapshot.unsaved?.deviceIds ?? []).filter(id => !localDevices.includes(id) && id !== currentEndpointId) : [];
   const unsavedBridges = trusted ? (snapshot.unsaved?.bridgeIds ?? []).filter(id => !localBridges.includes(id)) : [];
   /** This browser's own removal, not on the server yet: it is still accepted there, and the client sends it again. */
@@ -406,8 +425,9 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
   const devices = [...(trusted?.devices ?? [])].sort((a, b) => Number(b.endpoint.id === currentEndpointId) - Number(a.endpoint.id === currentEndpointId));
   const browserNodes: SecurityAccessBrowserNode[] = devices.map(device => {
     const current = device.endpoint.id === currentEndpointId; const custom = displayName("browser", device.endpoint.id);
+    const unsaved = current ? unsavedSelf : unsavedDevices.includes(device.endpoint.id);
     return { id: device.endpoint.id, label: custom ?? browserName(device.label, current), customLabel: custom !== undefined, current,
-      accessText: current && revokedHere ? "Access revoked" : verified ? "In your account" : "Access paused",
+      accessText: current && revokedHere ? "Access revoked" : unsaved ? UNSAVED : verified ? "In your account" : "Access paused",
       lockState: verified && !(current && revokedHere) ? "secured" : "approval_needed", edge: verified && !(current && revokedHere) ? "current" : "none" };
   });
   for (const id of localDevices) {
@@ -438,7 +458,8 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
     const entry = roster.find(item => item.bridgeId === computer.bridgeId);
     const localOnly = localBridges.includes(computer.bridgeId);
     const revoked = !localOnly && !!trusted?.revokedBridgeIds.includes(computer.bridgeId);
-    const unsaved = revoked && unsavedBridges.includes(computer.bridgeId);
+    // Removed in this browser's chain (server behind), or the pending removal of a computer still in the account.
+    const unsaved = !localOnly && unsavedBridges.includes(computer.bridgeId);
     const status = computer.security.status;
     const keyMismatch = !!entry && !!computer.security.endpoint && computer.security.endpoint.id !== entry.endpoint.id;
     const inAccount = !!entry && !revoked && !keyMismatch && status !== "revoked" && status !== "key_changed";
@@ -485,14 +506,16 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
         const name = displayName("bridge", id) ?? computers.get(id)?.label ?? signedBridge(id)?.label;
         return `Remove computer “${name || `Computer · ${shortId(id)}`}”`;
       }
+      case "resolve_fork": return "Chose this history over another one";
     }
   };
+  const conflictText = (reason: string) => reason === "write_conflict" ? WRITE_CONFLICT : reason === "ledger_diverged" ? WRITE_DIVERGED : WRITE_REFUSED;
 
   const accountProblem = mismatch ? ACCOUNT_MISMATCH : snapshot.status === "error" ? securityErrorMessage({ code: snapshot.error ?? "" }) : null;
   const message = security.error ? securityErrorMessage({ code: security.error }) : accountProblem;
   const selectedDetails = active && <section aria-label="Selected access details" className="space-y-2">
     {selectedBrowser && <>
-      {selectedDevice && <div className="flex flex-wrap items-center gap-2">
+      {selectedDevice && selectedBrowser.accessText !== UNSAVED && <div className="flex flex-wrap items-center gap-2">
         <button type="button" className="btn-danger inline-flex min-h-11 items-center gap-1 sm:min-h-8" title="Remove this browser from your account" aria-label={`Remove browser ${selectedBrowserLabel}`}
           disabled={!!busy || !canWrite} onClick={() => setConfirm(`browser:${selectedBrowser.id}`)}><TrashIcon />Remove</button></div>}
       {confirm === `browser:${selectedBrowser.id}` && selectedDevice && <div role="group" aria-label="Confirm browser removal" className="space-y-3 rounded-md border border-[var(--border-muted)] p-3">
@@ -512,7 +535,7 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
         <PasskeyActionButton security={security} actionKey={`browser:${selectedBrowser.id}`} label="Sign removal again" busyLabel="Waiting for passkey…" className="btn-danger"
           disabled={!canWrite} action={client => client.revokeDevice(selectedBrowser.id)} />
       </div>}
-      {!selectedDevice && unsavedDevices.includes(selectedBrowser.id) && <UnsavedRemoval security={security} label={signedDevice(selectedBrowser.id)?.label ?? null} id={selectedBrowser.id} />}
+      {unsavedDevices.includes(selectedBrowser.id) && <UnsavedRemoval security={security} label={signedDevice(selectedBrowser.id)?.label ?? null} id={selectedBrowser.id} />}
       {/* This browser's unsaved or unconfirmed removal is explained once, above the map. */}
       {!selectedDevice && selectedBrowser.current && !localDevices.includes(selectedBrowser.id) && !unsavedSelf && !(selfRemoved && unconfirmed) && <p className="text-xs text-[var(--text-muted)]">{selfRemoved ? "This browser was removed from your account." : "This browser is not in your account."} <a href="/login" className="underline">Sign in with your passkey</a> to add it.</p>}
       <details className="text-xs"><summary className="min-h-11 cursor-pointer py-3 sm:min-h-8 sm:py-2">Browser details</summary>
@@ -529,7 +552,7 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
           <p className="break-words">Original name: {entry?.label || computer.label || "Computer"}</p>
           {entry && <p>Added {new Date(entry.approvedAt).toLocaleString()}.</p>}
           {(entry?.endpoint ?? computer.security.endpoint) && <p className="break-all font-mono">Fingerprint: {(entry?.endpoint ?? computer.security.endpoint)?.id}</p>}</details>
-        {entry && !revoked && <div className="space-y-2">
+        {entry && !revoked && !unsaved && <div className="space-y-2">
           <button type="button" aria-label={`Remove computer ${node.label}`} className="btn-danger inline-flex min-h-11 items-center gap-1 sm:min-h-8" disabled={!!busy || !canWrite}
             onClick={() => setConfirm(`computer:${computer.bridgeId}`)}><TrashIcon />Remove computer</button>
           {confirm === `computer:${computer.bridgeId}` && <div role="group" aria-label="Confirm computer removal" className="space-y-3 rounded-md border border-[var(--border-muted)] p-3">
@@ -558,6 +581,15 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
   </section>;
 
   return <div className="space-y-3">
+    {divergence && <div role="alert" aria-label="Different account histories" className="rounded-md border border-[var(--status-error)] p-3">
+      <p className="text-sm font-semibold">{divergence.source === "server" ? DIVERGED_SERVER : DIVERGED_OTHER}</p>
+    </div>}
+    {snapshot.lastConflict && trusted && security.error !== snapshot.lastConflict.reason
+      && <p role="status" className="rounded-md border border-[var(--status-pending)] p-3 text-sm">{conflictText(snapshot.lastConflict.reason)}</p>}
+    {pendingWrite && PENDING_CHANGE[pendingWrite.operation] && <div role="group" aria-label="Change not saved" className="space-y-2 rounded-md border border-[var(--status-pending)] p-3">
+      <p className="text-sm">{PENDING_CHANGE[pendingWrite.operation]}</p>
+      <UnsavedRemovalRetryButton snapshot={snapshot} busy={!!security.busy} retrying={security.busy === "retry"} pending onRetry={() => void security.run("retry", client => client.retryNow())} />
+    </div>}
     {unsavedSelf && currentEndpointId && <UnsavedRemoval security={security} label={signedDevice(currentEndpointId)?.label ?? null} id={currentEndpointId} self />}
     {!unsavedSelf && selfRemoved && unconfirmed && <p role="status" className="rounded-md border border-[var(--border-muted)] p-3 text-sm">{UNCONFIRMED}</p>}
     {revokedHere && !unsavedSelf && !unconfirmed && <div role="alert" className="space-y-2 rounded-md border border-[var(--status-error)] p-3">

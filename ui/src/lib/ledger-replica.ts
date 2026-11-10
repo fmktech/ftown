@@ -1,23 +1,40 @@
-import { accountIdOf, applyRevocations, chooseLedger, ledgerHead, ledgerLastIssuedAt, ledgerRevocations, parseLedger, verifyLedger } from "@security/ledger/ledger";
-import type { LedgerChoice } from "@security/ledger/ledger";
+import {
+  accountIdOf, applyRevocations, chooseLedger, forkPoint, ledgerHead, ledgerHeads, ledgerLastIssuedAt, ledgerRevocations, parseLedger, relate, verifyLedger,
+} from "@security/ledger/ledger";
+import type { LedgerChoice, LedgerRelation } from "@security/ledger/ledger";
 import type { Ledger, LedgerCheckpoint, LedgerTransition, Signed } from "@security/ledger/protocol";
 
 /*
- * The browser's replica of the account ledger (CONTRACT "Decision 2026-11-09", "Amendments after the L2 re-review", U2 reviews).
- * - Only chains that chooseLedger accepts are stored; a shorter chain never replaces a longer one.
- * - Sticky revocations: the union of ledgerRevocations over every candidate that chooseLedger kept or adopted. It never shrinks, not
- *   even across clear() (kept per accountId), and trusted() (applyRevocations output) is the only checkpoint trust decisions use.
- * - Discarded records (local records a fork dropped, or own records that never made it) persist with the account until dismissed or
- *   until their effect is present in the RAW checkpoint, so the owner can sign them again after a reload.
+ * The browser's replica of the account ledger. The one acceptance rule is chooseLedger (shared with the server and the bridges): what is
+ * written is never rewritten. A candidate that strictly extends the local chain ('ahead') and verifies is adopted; one that is the same or
+ * behind is kept; a VALID different history ('diverged') is never adopted, whatever its length, unless it carries the owner's resolve_fork
+ * for exactly this fork (then the local branch is discarded and its removals stay enforced); an invalid candidate changes nothing.
+ * - Sticky revocations: every id the adopted chains revoked, plus the removals a resolve_fork discarded (choice.discarded ids). Kept and
+ *   rejected candidates add nothing. It never shrinks, not even across clear() (kept per accountId), and trusted() (applyRevocations
+ *   output) is the only checkpoint trust decisions use.
+ * - Discarded records (local records a resolve_fork dropped, or own signed records the server never took) persist with the account until
+ *   dismissed or until their effect is present in the RAW checkpoint, so the owner can sign them again after a reload.
+ * - Divergent chains: a valid other history offered with a `source` ('server' | 'relay' | 'peer') is kept, one per source (the newest), so
+ *   the owner can be shown both and choose; an entry goes away once the local chain no longer diverges from it or resolved it.
+ * - The pending write: one passkey-signed record the server has not accepted yet, persisted with the account but never part of the chain.
  * - An unbound replica binds ONLY on an explicit `bind: true` offer (the caller's own verified chain); never from a server or relay.
  *   Once bound, every other account is rejected until clear().
  * Records are re-verified from genesis on load; writes are compare-and-set on a serial, so concurrent tabs never roll back.
+ * Format: version 2. A version-1 record (previous code) loads unchanged: chain, checkpoint, sticky set, discarded records and confirmed
+ * server state; it has no pending write and no divergent chain, and the next write stores it as version 2.
  */
 
+export type LedgerSource = "server" | "relay" | "peer";
+export const LEDGER_SOURCES: readonly LedgerSource[] = ["server", "relay", "peer"];
 export interface StickyRevocations { deviceIds: string[]; bridgeIds: string[] }
+/** A passkey-signed record the server has not accepted: its `previousHead`/`revision - 1` name the head it was built on. */
+export interface PendingWriteRecord { version: 1; record: Signed<LedgerTransition>; since: number }
+/** A valid history of the account that diverges from the local chain; `firstSeen`: when this source first showed this branch. */
+export interface DivergentChain { version: 1; ledger: Ledger; firstSeen: number }
+export type DivergentChains = Partial<Record<LedgerSource, DivergentChain>>;
 /** The bound account's record. `checkpoint` is the RAW chain checkpoint (the chooseLedger cache), never trusted(). */
 export interface ReplicaRecord {
-  version: 1;
+  version: 2;
   accountId: string;
   /** Incremented by every write, clear() included; the compare-and-set token. */
   serial: number;
@@ -28,15 +45,19 @@ export interface ReplicaRecord {
   discarded: Signed<LedgerTransition>[];
   /** The last server state the client confirmed for this account (see ConfirmedServer). Absent: none known. */
   confirmed?: ConfirmedServer;
+  /** The one signed change waiting for the server. Absent: none. */
+  pending?: PendingWriteRecord;
+  /** Valid other histories, at most one per source. Absent or empty: none. */
+  divergence?: DivergentChains;
 }
 /**
- * What the server held at the last answer the client recorded (a read or a POST answer, after fork choice): its chain's head and every
- * id that chain revokes. Kept with the chain so a reload still knows which local removals the server lacks. Versioned; a missing or
- * unreadable value is simply "unknown", never corruption.
+ * What the server held at the last answer the client recorded (a read or a POST answer, after fork choice): its chain's head (and
+ * revision) and every id that chain revokes. Kept with the chain so a reload still knows which local removals the server lacks.
+ * Versioned; a missing or unreadable value is simply "unknown", never corruption. `revision` is absent in records of the previous code.
  */
-export interface ConfirmedServer { version: 1; head: string; revokedDeviceIds: string[]; revokedBridgeIds: string[] }
+export interface ConfirmedServer { version: 1; head: string; revision?: number; revokedDeviceIds: string[]; revokedBridgeIds: string[] }
 /** What an account keeps after clear(): its sticky set (and serial), never its chain. */
-export interface RetainedRecord { version: 1; accountId: string; serial: number; ledger: null; checkpoint: null; sticky: StickyRevocations }
+export interface RetainedRecord { version: 1 | 2; accountId: string; serial: number; ledger: null; checkpoint: null; sticky: StickyRevocations }
 export interface LedgerReplicaStorage {
   /** The bound accountId, or null. */
   bound(): Promise<string | null>;
@@ -47,25 +68,34 @@ export interface LedgerReplicaStorage {
    * `expectedSerial` (null: no record). Returns false when the condition fails (another tab won the race).
    */
   commit(record: ReplicaRecord, expectedSerial: number | null): Promise<boolean>;
-  /** Atomically unbinds; the bound record becomes a RetainedRecord with serial + 1 (chain and discarded dropped, sticky set kept). */
+  /** Atomically unbinds; the bound record becomes a RetainedRecord with serial + 1 (chain, discarded, pending, divergence dropped; sticky kept). */
   clear(): Promise<void>;
 }
-export interface ReplicaOffer { decision: "adopt" | "keep" | "reject"; discarded: Signed<LedgerTransition>[] }
+/**
+ * chooseLedger's verdict as the replica applied it. `relation`: the candidate relative to the local chain (null: no relation, i.e. a
+ * first bind, a candidate that is malformed or of another account, or an unbound replica that refused). `discarded`: the local records a
+ * divergent adoption (resolve_fork) dropped; empty otherwise.
+ */
+export interface ReplicaOffer { decision: "adopt" | "keep" | "reject"; relation: LedgerRelation | null; discarded: Signed<LedgerTransition>[] }
 export interface ReplicaOfferOptions {
   /** Only `true` lets an unbound replica bind, to the caller's own verified chain. Default false. */
   bind?: boolean;
   /** Reject unless the candidate belongs to this account. */
   expectAccountId?: string;
+  /** Where the candidate came from: a valid diverged candidate is then kept as that source's divergent chain. */
+  source?: LedgerSource;
 }
 
 const MAX_ATTEMPTS = 4;
 const MAX_DISCARDED = 256;
 const DATABASE = "ftown-ledger";
 const VERSION = 1;
+const RECORD_VERSION = 2;
 const RECORDS = "replicas";
 const META = "meta";
 const CURRENT = "current";
-const REJECT: ReplicaOffer = { decision: "reject", discarded: [] };
+const HEAD = /^[A-Za-z0-9_-]{43}$/;
+const REJECT: ReplicaOffer = { decision: "reject", relation: null, discarded: [] };
 
 function isPlain(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -91,8 +121,9 @@ function stickyOf(value: unknown): StickyRevocations {
   if (!devices.every(id => typeof id === "string") || !bridges.every(id => typeof id === "string")) throw corrupt();
   return { deviceIds: devices.map(String), bridgeIds: bridges.map(String) };
 }
+/** Version 1 (previous code) and 2 (this code) are read; anything else is corrupt. */
 function header(value: unknown, accountId: string): { serial: number; sticky: StickyRevocations } {
-  if (!isPlain(value) || value.version !== 1 || value.accountId !== accountId
+  if (!isPlain(value) || (value.version !== 1 && value.version !== RECORD_VERSION) || value.accountId !== accountId
     || typeof value.serial !== "number" || !Number.isSafeInteger(value.serial) || value.serial < 1) throw corrupt();
   return { serial: value.serial, sticky: stickyOf(value.sticky) };
 }
@@ -128,49 +159,133 @@ async function mergeDiscarded(checkpoint: LedgerCheckpoint, previous: readonly S
 }
 /** A stored ConfirmedServer, or undefined when absent or not readable (tolerated: it only feeds a display and a hint). */
 function confirmedOf(value: unknown): ConfirmedServer | undefined {
-  if (!isPlain(value) || value.version !== 1 || typeof value.head !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value.head)) return undefined;
+  if (!isPlain(value) || value.version !== 1 || typeof value.head !== "string" || !HEAD.test(value.head)) return undefined;
   const ids = (list: unknown): string[] | null => Array.isArray(list) && list.every(id => typeof id === "string") ? (list as string[]).slice() : null;
   const deviceIds = ids(value.revokedDeviceIds);
   const bridgeIds = ids(value.revokedBridgeIds);
   if (deviceIds === null || bridgeIds === null) return undefined;
-  return { version: 1, head: value.head, revokedDeviceIds: deviceIds, revokedBridgeIds: bridgeIds };
+  const revision = typeof value.revision === "number" && Number.isSafeInteger(value.revision) && value.revision >= 0 ? value.revision : undefined;
+  return revision === undefined
+    ? { version: 1, head: value.head, revokedDeviceIds: deviceIds, revokedBridgeIds: bridgeIds }
+    : { version: 1, head: value.head, revision, revokedDeviceIds: deviceIds, revokedBridgeIds: bridgeIds };
 }
-function sameConfirmed(left: ConfirmedServer | undefined, right: ConfirmedServer | undefined): boolean {
+function sameValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
-/** `record` with `confirmed` set, or without the member when there is none. */
-function withConfirmed(record: ReplicaRecord, confirmed: ConfirmedServer | undefined): ReplicaRecord {
-  const { confirmed: _previous, ...rest } = record;
-  return confirmed === undefined ? rest : { ...rest, confirmed };
+/** A stored pending write, or undefined when absent or unreadable (shape only; the client verifies the record before sending it). */
+function pendingOf(value: unknown, ledger: Ledger): PendingWriteRecord | undefined {
+  if (!isPlain(value) || value.version !== 1 || typeof value.since !== "number" || !Number.isFinite(value.since)) return undefined;
+  try {
+    const record = parseLedger({ genesis: ledger.genesis, transitions: [value.record] }).transitions[0];
+    return record === undefined ? undefined : { version: 1, record, since: value.since };
+  } catch {
+    return undefined;
+  }
+}
+/** `record` with each optional member set, or without it when undefined (absent members keep stored records minimal). */
+function withOptional(record: ReplicaRecord, members: Pick<ReplicaRecord, "confirmed" | "pending" | "divergence">): ReplicaRecord {
+  const { confirmed: _confirmed, pending: _pending, divergence: _divergence, ...rest } = record;
+  const result: ReplicaRecord = { ...rest };
+  if (members.confirmed !== undefined) result.confirmed = members.confirmed;
+  if (members.pending !== undefined) result.pending = members.pending;
+  if (members.divergence !== undefined && Object.keys(members.divergence).length > 0) result.divergence = members.divergence;
+  return result;
 }
 function sameRecords(left: readonly Signed<LedgerTransition>[], right: readonly Signed<LedgerTransition>[]): boolean {
   return left.length === right.length && JSON.stringify(left) === JSON.stringify(right);
 }
+/** True iff `ledger` carries a resolve_fork that discarded the branch of the chain whose heads are `other` (its first record after the fork). */
+function resolvedBy(ledger: Ledger, other: readonly string[]): boolean {
+  return ledger.transitions.some(item => item.payload.operation.type === "resolve_fork" && other.indexOf(item.payload.operation.discardedFirst) !== -1);
+}
+
+/** Heads per chain object, computed once (ledgerHeads hashes every record). */
+const headCache = new WeakMap<Ledger, string[]>();
+async function headsOf(ledger: Ledger): Promise<string[]> {
+  const known = headCache.get(ledger);
+  if (known !== undefined) return known;
+  const heads = await ledgerHeads(ledger);
+  headCache.set(ledger, heads);
+  return heads;
+}
+/**
+ * A valid other history as it is kept: the local chain's own (verified) records up to the fork point, then the other's records after it
+ * (the ones chooseLedger verified). The other's copy of the shared prefix may carry other, unverified signature bytes.
+ */
+async function spliced(local: Ledger, other: Ledger): Promise<Ledger> {
+  const point = forkPoint(await headsOf(local), await headsOf(other));
+  if (point === null) return other;
+  return { genesis: local.genesis, transitions: local.transitions.slice(0, point.revision).concat(other.transitions.slice(point.revision)) };
+}
+/** The divergent chains still to show after the local chain became `ledger`: those it diverges from and did not resolve. */
+async function stillDivergent(chains: DivergentChains | undefined, ledger: Ledger): Promise<DivergentChains | undefined> {
+  if (chains === undefined) return undefined;
+  const local = await headsOf(ledger);
+  const result: DivergentChains = {};
+  for (const source of LEDGER_SOURCES) {
+    const entry = chains[source];
+    if (entry === undefined) continue;
+    try {
+      const other = await headsOf(entry.ledger);
+      if (relate(local, other) === "diverged" && !resolvedBy(ledger, other)) result[source] = entry;
+    } catch {
+      // Unreadable: nothing to show.
+    }
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+/** Stored divergent chains that still verify as a valid other history of the bound chain; anything else is dropped (tolerated). */
+async function divergenceOf(value: unknown, ledger: Ledger, checkpoint: LedgerCheckpoint, now: number): Promise<DivergentChains | undefined> {
+  if (!isPlain(value)) return undefined;
+  const result: DivergentChains = {};
+  for (const source of LEDGER_SOURCES) {
+    const entry = value[source];
+    if (!isPlain(entry) || entry.version !== 1 || typeof entry.firstSeen !== "number" || !Number.isFinite(entry.firstSeen)) continue;
+    try {
+      const other = parseLedger(entry.ledger);
+      const choice = await chooseLedger(ledger, other, Math.max(now, ledgerLastIssuedAt(other)), { head: checkpoint.head, checkpoint });
+      if (choice.decision === "keep" && choice.relation === "diverged") result[source] = { version: 1, ledger: other, firstSeen: entry.firstSeen };
+    } catch {
+      // Not a valid other history any more: dropped.
+    }
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
 
 /** Rebuilds the bound record from scratch: the chain is re-verified from genesis and must match the stored checkpoint. */
-async function verifiedRecord(value: unknown, accountId: string, now: number): Promise<{ record: ReplicaRecord; trusted: LedgerCheckpoint }> {
+async function verifiedRecord(value: unknown, accountId: string, now: number): Promise<{ record: ReplicaRecord; trusted: LedgerCheckpoint; heads: string[] }> {
   const { serial, sticky } = header(value, accountId);
   const stored = value as Record<string, unknown>;
   if (!isPlain(stored.checkpoint)) throw corrupt();
   const storedCheckpoint = stored.checkpoint;
+  let ledger: Ledger;
+  let checkpoint: LedgerCheckpoint;
+  let discarded: Signed<LedgerTransition>[];
+  let heads: string[];
   try {
-    const ledger = parseLedger(stored.ledger);
+    ledger = parseLedger(stored.ledger);
     // A record this replica already verified must not turn invalid because the wall clock moved backwards.
-    const checkpoint = await verifyLedger(ledger, Math.max(now, ledgerLastIssuedAt(ledger)));
+    checkpoint = await verifyLedger(ledger, Math.max(now, ledgerLastIssuedAt(ledger)));
     if (checkpoint.accountId !== accountId || checkpoint.accountId !== storedCheckpoint.accountId
       || checkpoint.head !== storedCheckpoint.head || checkpoint.revision !== storedCheckpoint.revision) throw corrupt();
-    // Shape only (no linkage): discarded records come from abandoned forks.
-    const discarded = stored.discarded === undefined ? [] : parseLedger({ genesis: ledger.genesis, transitions: stored.discarded }).transitions;
-    const trusted = applyRevocations(checkpoint, sticky);
-    return { record: withConfirmed({ version: 1, accountId, serial, ledger, checkpoint, sticky, discarded }, confirmedOf(stored.confirmed)), trusted };
+    // Shape only (no linkage): discarded records come from abandoned branches.
+    discarded = stored.discarded === undefined ? [] : parseLedger({ genesis: ledger.genesis, transitions: stored.discarded }).transitions;
+    heads = await headsOf(ledger);
   } catch {
     throw corrupt();
   }
+  const trusted = applyRevocations(checkpoint, sticky);
+  const divergence = await divergenceOf(stored.divergence, ledger, checkpoint, now);
+  const record = withOptional({ version: RECORD_VERSION, accountId, serial, ledger, checkpoint, sticky, discarded }, {
+    confirmed: confirmedOf(stored.confirmed), pending: pendingOf(stored.pending, ledger), divergence,
+  });
+  return { record, trusted, heads };
 }
 
 export class LedgerReplica {
   private state: ReplicaRecord | null = null;
   private trustedCheckpoint: LedgerCheckpoint | null = null;
+  private localHeads: string[] | null = null;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly storage: LedgerReplicaStorage = indexedDbReplicaStorage(), private readonly now: () => number = Date.now) {}
@@ -185,9 +300,13 @@ export class LedgerReplica {
   }
 
   /**
-   * Replica rule: chooseLedger(local, candidate, now, cache of the RAW local checkpoint). On keep/adopt the candidate's revocations join
-   * the sticky set; adopt stores the candidate, and local records a fork dropped join discarded(). Another account, any invalid
-   * candidate, or an unbound replica without `bind: true` is 'reject' and changes nothing.
+   * The acceptance rule: chooseLedger(local, candidate, now, cache of the RAW local checkpoint), applied as the decision says.
+   * - adopt ('ahead', or 'diverged' with an applicable resolve_fork): the candidate is stored; its revocations and the removals the
+   *   resolve_fork discarded (choice.discarded ids) join the sticky set; the dropped local records join discarded(); divergent chains
+   *   the new chain no longer diverges from (or resolved) are forgotten.
+   * - keep ('same' / 'behind' / 'diverged'): the local chain is untouched and nothing is merged. A 'diverged' candidate offered with a
+   *   `source` is kept as that source's divergent chain (the newest per source).
+   * - reject (invalid, malformed, another account, or an unbound replica without `bind: true`): nothing changes.
    */
   offer(candidate: unknown, options: ReplicaOfferOptions = {}): Promise<ReplicaOffer> {
     return this.serialized(async () => {
@@ -196,8 +315,9 @@ export class LedgerReplica {
         const current = this.state;
         const next = current === null ? await this.binding(candidate, options) : await this.choosing(current, candidate, options);
         if (next === null) return REJECT;
-        if (next.record === null) return { decision: "keep", discarded: [] };
-        if (await this.store(next.record, next.expectedSerial)) return { decision: next.choice.decision, discarded: next.choice.discarded };
+        const { choice } = next;
+        const result: ReplicaOffer = { decision: choice.decision, relation: choice.relation, discarded: choice.decision === "adopt" ? choice.discarded.records : [] };
+        if (next.record === null || await this.store(next.record, next.expectedSerial)) return result;
         // Another tab wrote (or cleared) first: decide again against what it stored.
         await this.reload();
       }
@@ -215,7 +335,12 @@ export class LedgerReplica {
     return this.state === null ? null : { ledger: this.state.ledger, checkpoint: this.state.checkpoint };
   }
 
-  /** Every revocation seen in any kept or adopted chain of the bound account. */
+  /** ledgerHeads of the local chain (index = revision), computed once per adopted chain: the input of relate/relateHead. Null when unbound. */
+  heads(): readonly string[] | null {
+    return this.localHeads;
+  }
+
+  /** Every revocation of an adopted chain of the bound account, and every removal a resolve_fork discarded. */
   sticky(): StickyRevocations | null {
     return this.state === null ? null : { deviceIds: this.state.sticky.deviceIds.slice(), bridgeIds: this.state.sticky.bridgeIds.slice() };
   }
@@ -225,14 +350,57 @@ export class LedgerReplica {
     return this.state === null ? [] : this.state.discarded.slice();
   }
 
-  /** Adds own records that never became part of the chain (for example an append the server's longer chain displaced). */
+  /** Adds own records that never became part of the chain (a signed change the server did not take). */
   noteDiscarded(records: Signed<LedgerTransition>[]): Promise<void> {
-    return this.rewrite(async current => mergeDiscarded(current.checkpoint, current.discarded, records));
+    return this.rewrite(async current => {
+      const discarded = await mergeDiscarded(current.checkpoint, current.discarded, records);
+      return sameRecords(discarded, current.discarded) ? null : { ...current, discarded };
+    });
   }
 
   /** The owner saw the discarded records: forget them. */
   dismissDiscarded(): Promise<void> {
-    return this.rewrite(async () => []);
+    return this.rewrite(async current => current.discarded.length === 0 ? null : { ...current, discarded: [] });
+  }
+
+  /** The persisted pending write of the bound account, or null. */
+  pendingWrite(): PendingWriteRecord | null {
+    const pending = this.state?.pending;
+    return pending === undefined ? null : { ...pending };
+  }
+
+  /**
+   * Compare-and-set of the pending write: stores `value` (null: none) iff the pending record stored now is `expected` (null: none).
+   * Returns false when another record is pending (another tab signed one), true once stored (or already in that state). Unbound: false.
+   */
+  setPendingWrite(value: PendingWriteRecord | null, expected: Signed<LedgerTransition> | null): Promise<boolean> {
+    return this.serialized(async () => {
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+        const current = this.state;
+        if (current === null) return false;
+        const stored = current.pending?.record ?? null;
+        if (sameValue(stored, value?.record ?? null)) return true;
+        if (!sameValue(stored, expected)) return false;
+        const next = withOptional({ ...current, serial: current.serial + 1 }, {
+          confirmed: current.confirmed, pending: value === null ? undefined : { version: 1, record: value.record, since: value.since }, divergence: current.divergence,
+        });
+        if (await this.store(next, current.serial)) return true;
+        await this.reload();
+      }
+      throw new Error("ledger_replica_conflict");
+    });
+  }
+
+  /** The valid other histories of the bound account, at most one per source (copies of the record; empty when none or unbound). */
+  divergence(): DivergentChains {
+    const chains = this.state?.divergence;
+    if (chains === undefined) return {};
+    const result: DivergentChains = {};
+    for (const source of LEDGER_SOURCES) {
+      const entry = chains[source];
+      if (entry !== undefined) result[source] = { ...entry };
+    }
+    return result;
   }
 
   /** The last server state the client confirmed for the bound account (persisted with it), or null when none is known or unbound. */
@@ -244,23 +412,17 @@ export class LedgerReplica {
   /** Records (compare-and-set, no write when unchanged) the server state the client just confirmed; null forgets it. No-op unbound. */
   noteConfirmed(value: ConfirmedServer | null): Promise<void> {
     const next = value === null ? undefined : confirmedOf(value);
-    return this.serialized(async () => {
-      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
-        const current = this.state;
-        if (current === null || sameConfirmed(current.confirmed, next)) return;
-        if (await this.store(withConfirmed({ ...current, serial: current.serial + 1 }, next), current.serial)) return;
-        await this.reload();
-      }
-      throw new Error("ledger_replica_conflict");
-    });
+    return this.rewrite(async current => sameValue(current.confirmed, next) ? null
+      : withOptional(current, { confirmed: next, pending: current.pending, divergence: current.divergence }));
   }
 
-  /** Unbinds and drops the chain. The account's sticky set is kept: binding to it again still distrusts every id it ever revoked. */
+  /** Unbinds and drops the chain (and the pending write and divergent chains). The account's sticky set is kept: binding to it again still distrusts every id it ever revoked. */
   clear(): Promise<void> {
     return this.serialized(async () => {
       await this.storage.clear();
       this.state = null;
       this.trustedCheckpoint = null;
+      this.localHeads = null;
     });
   }
 
@@ -271,10 +433,11 @@ export class LedgerReplica {
     let accountId: string;
     let choice: LedgerChoice;
     try {
-      ledger = parseLedger(candidate);
-      accountId = await accountIdOf(ledger.genesis.payload);
+      const parsed = parseLedger(candidate);
+      accountId = await accountIdOf(parsed.genesis.payload);
       if (options.expectAccountId !== undefined && accountId !== options.expectAccountId) return null;
-      choice = await chooseLedger(null, ledger, this.now());
+      choice = await chooseLedger(null, parsed, this.now());
+      ledger = choice.ledger;
     } catch {
       return null;
     }
@@ -286,11 +449,11 @@ export class LedgerReplica {
     const serial = retained === null ? null : retained.serial;
     return {
       choice, expectedSerial: serial,
-      record: { version: 1, accountId, serial: (serial ?? 0) + 1, ledger, checkpoint: choice.checkpoint, sticky, discarded: [] },
+      record: { version: RECORD_VERSION, accountId, serial: (serial ?? 0) + 1, ledger, checkpoint: choice.checkpoint, sticky, discarded: [] },
     };
   }
 
-  /** Bound: the fork choice against the verified local chain. `record: null` means keep with nothing new to store. */
+  /** Bound: chooseLedger against the verified local chain. `record: null` means nothing to store. */
   private async choosing(current: ReplicaRecord, candidate: unknown, options: ReplicaOfferOptions): Promise<Decided | null> {
     if (options.expectAccountId !== undefined && options.expectAccountId !== current.accountId) return null;
     let choice: LedgerChoice;
@@ -300,31 +463,51 @@ export class LedgerReplica {
       // With a cache that vouches for the local chain this only throws when local state is corrupt.
       throw corrupt();
     }
-    if (choice.decision === "reject") return null;
-    const ledger = parseLedger(candidate);
+    if (choice.decision === "reject") return { choice, expectedSerial: current.serial, record: null };
+    if (choice.decision === "keep") {
+      if (choice.relation !== "diverged" || options.source === undefined) return { choice, expectedSerial: current.serial, record: null };
+      return { choice, expectedSerial: current.serial, record: await this.withDivergent(current, options.source, await spliced(current.ledger, parseLedger(candidate))) };
+    }
+    // The chain chooseLedger verified: local's own prefix records byte-for-byte, then the candidate's records after the fork point.
+    const ledger = choice.ledger;
     const revoked = ledgerRevocations(ledger);
     const previous = current.sticky;
-    const sticky = { deviceIds: union(previous.deviceIds, revoked.deviceIds), bridgeIds: union(previous.bridgeIds, revoked.bridgeIds) };
-    const grew = sticky.deviceIds.length !== previous.deviceIds.length || sticky.bridgeIds.length !== previous.bridgeIds.length;
-    if (choice.decision === "keep" && !grew) return { choice, expectedSerial: current.serial, record: null };
-    const record: ReplicaRecord = choice.decision === "adopt"
-      ? withConfirmed({
-        version: 1, accountId: current.accountId, serial: current.serial + 1, ledger, checkpoint: choice.checkpoint, sticky,
-        discarded: await mergeDiscarded(choice.checkpoint, current.discarded, choice.discarded),
-      }, current.confirmed)
-      : { ...current, serial: current.serial + 1, sticky };
+    const sticky = {
+      deviceIds: union(union(previous.deviceIds, revoked.deviceIds), choice.discarded.deviceIds),
+      bridgeIds: union(union(previous.bridgeIds, revoked.bridgeIds), choice.discarded.bridgeIds),
+    };
+    const record = withOptional({
+      version: RECORD_VERSION, accountId: current.accountId, serial: current.serial + 1, ledger, checkpoint: choice.checkpoint, sticky,
+      discarded: await mergeDiscarded(choice.checkpoint, current.discarded, choice.discarded.records),
+    }, { confirmed: current.confirmed, pending: current.pending, divergence: await stillDivergent(current.divergence, ledger) });
     return { choice, expectedSerial: current.serial, record };
   }
 
-  /** Compare-and-set rewrite of the bound record's discarded list. */
-  private rewrite(next: (current: ReplicaRecord) => Promise<Signed<LedgerTransition>[]>): Promise<void> {
+  /** `current` with `ledger` as the divergent chain of `source` (null when that exact chain is already kept). */
+  private async withDivergent(current: ReplicaRecord, source: LedgerSource, ledger: Ledger): Promise<ReplicaRecord | null> {
+    const previous = current.divergence?.[source];
+    const heads = await headsOf(ledger);
+    let firstSeen = this.now();
+    if (previous !== undefined) {
+      const known = await headsOf(previous.ledger);
+      const relation = relate(known, heads);
+      if (relation === "same") return null;
+      // The same branch, grown: still the divergence first seen then.
+      if (relation === "ahead") firstSeen = previous.firstSeen;
+    }
+    const divergence: DivergentChains = { ...(current.divergence ?? {}), [source]: { version: 1, ledger, firstSeen } };
+    return withOptional({ ...current, serial: current.serial + 1 }, { confirmed: current.confirmed, pending: current.pending, divergence });
+  }
+
+  /** Compare-and-set rewrite of the bound record; `next` returns null for "nothing to change". No-op unbound. */
+  private rewrite(next: (current: ReplicaRecord) => Promise<ReplicaRecord | null>): Promise<void> {
     return this.serialized(async () => {
       for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
         const current = this.state;
         if (current === null) return;
-        const discarded = await next(current);
-        if (sameRecords(discarded, current.discarded)) return;
-        if (await this.store({ ...current, serial: current.serial + 1, discarded }, current.serial)) return;
+        const changed = await next(current);
+        if (changed === null) return;
+        if (await this.store({ ...changed, serial: current.serial + 1 }, current.serial)) return;
         await this.reload();
       }
       throw new Error("ledger_replica_conflict");
@@ -333,9 +516,12 @@ export class LedgerReplica {
 
   private async store(record: ReplicaRecord, expectedSerial: number | null): Promise<boolean> {
     const trusted = applyRevocations(record.checkpoint, record.sticky);
+    const heads = this.state !== null && this.localHeads !== null && this.state.checkpoint.head === record.checkpoint.head
+      && this.state.accountId === record.accountId ? this.localHeads : await headsOf(record.ledger);
     if (!await this.storage.commit(record, expectedSerial)) return false;
     this.state = record;
     this.trustedCheckpoint = trusted;
+    this.localHeads = heads;
     return true;
   }
 
@@ -344,11 +530,13 @@ export class LedgerReplica {
     if (accountId === null) {
       this.state = null;
       this.trustedCheckpoint = null;
+      this.localHeads = null;
       return;
     }
-    const { record, trusted } = await verifiedRecord(await this.storage.read(accountId), accountId, this.now());
+    const { record, trusted, heads } = await verifiedRecord(await this.storage.read(accountId), accountId, this.now());
     this.state = record;
     this.trustedCheckpoint = trusted;
+    this.localHeads = heads;
   }
 
   private serialized<T>(run: () => Promise<T>): Promise<T> {
@@ -360,7 +548,7 @@ export class LedgerReplica {
 interface Decided { choice: LedgerChoice; expectedSerial: number | null; record: ReplicaRecord | null }
 
 function retainedOf(record: { accountId: string; serial: number; sticky: StickyRevocations }): RetainedRecord {
-  return { version: 1, accountId: record.accountId, serial: record.serial + 1, ledger: null, checkpoint: null, sticky: record.sticky };
+  return { version: RECORD_VERSION, accountId: record.accountId, serial: record.serial + 1, ledger: null, checkpoint: null, sticky: record.sticky };
 }
 
 /** Test and non-browser storage: records per accountId plus the bound pointer, structured-cloned like IndexedDB. */
