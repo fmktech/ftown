@@ -1,7 +1,8 @@
 import Credentials from 'next-auth/providers/credentials';
 import { consumeNonce } from '@/lib/auth-nonce-store';
 import { publicOrigin } from '@/lib/public-origin';
-import { readLedger, type StoredLedger } from '@/lib/account-ledger-store';
+import { readTrustedCheckpoint } from '@/lib/account-ledger-store';
+import type { LedgerCheckpoint } from '@security/ledger/protocol';
 import { parseAuthProof, verifyAuthProof } from '@security/ledger/proof';
 
 const MAX_PROOF_JSON = 2048;
@@ -18,9 +19,9 @@ export async function authorizeLedgerProof(raw: unknown): Promise<{ id: string; 
     const proof = parseAuthProof(raw);
     if (!proof || proof.kind !== 'device' || proof.purpose !== 'session') return null;
     if (!(await consumeNonce(proof.nonce, 'session'))) return null;
-    const stored = await readLedger({ accountId: proof.accountId });
-    if (!stored) return null;
-    const ok = await verifyAuthProof(stored.trusted, proof, { audience: publicOrigin(), purpose: 'session' });
+    const trusted = await readTrustedCheckpoint(proof.accountId);
+    if (!trusted) return null;
+    const ok = await verifyAuthProof(trusted, proof, { audience: publicOrigin(), purpose: 'session' });
     return ok ? { id: proof.accountId, endpointId: proof.keyId } : null;
   } catch { return null; }
 }
@@ -50,17 +51,18 @@ export class UnauthorizedError extends Error {
 type SessionReader = () => Promise<{ user?: { id?: string; endpointId?: string } } | null>;
 
 /**
- * Resolve the signed-in account and re-check it against the CURRENT trusted ledger on every call: a session JWT outlives
+ * Resolve the signed-in account and re-check it against the CURRENT trusted checkpoint on every call: a session JWT outlives
  * device revocation, and a pre-ledger cookie must not pass. Throws UnauthorizedError unless the session's device is still trusted.
+ * The checkpoint is the one persisted with the chain (readTrustedCheckpoint): no chain is parsed or verified per request.
  */
-export async function requireAccount(readSession?: SessionReader): Promise<{ accountId: string; endpointId: string; stored: StoredLedger }> {
+export async function requireAccount(readSession?: SessionReader): Promise<{ accountId: string; endpointId: string; trusted: LedgerCheckpoint }> {
   const read = readSession ?? (async () => (await import('@/lib/auth')).auth() as ReturnType<SessionReader>);
   const session = await read();
   const accountId = session?.user?.id;
   const endpointId = session?.user?.endpointId;
   if (typeof accountId !== 'string' || !ACCOUNT_ID.test(accountId)) throw new UnauthorizedError();
   if (typeof endpointId !== 'string' || endpointId.length === 0) throw new UnauthorizedError();
-  const stored = await readLedger({ accountId });
-  if (!stored || stored.trusted.devices.every(device => device.endpoint.id !== endpointId)) throw new UnauthorizedError();
-  return { accountId, endpointId, stored };
+  const trusted = await readTrustedCheckpoint(accountId);
+  if (!trusted || trusted.devices.every(device => device.endpoint.id !== endpointId)) throw new UnauthorizedError();
+  return { accountId, endpointId, trusted };
 }
