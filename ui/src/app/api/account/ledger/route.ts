@@ -1,21 +1,44 @@
 import { NextResponse } from 'next/server';
 import { clientIp } from '@/lib/client-ip';
 import { consumeRateLimit } from '@/lib/login-rate-limit';
+import { accountCreateGlobalPerDay, accountCreatePerHour } from '@/lib/account-limits';
 import { offerLedger, readLedger } from '@/lib/account-ledger-store';
+import type { CreationRejection } from '@/lib/account-ledger-store';
 import { LEDGER_BODY_MAX_BYTES } from '@/lib/ledger-limits';
 import { BoundedJsonError, readBoundedJson } from '@/lib/bounded-json';
 import { afterLedgerResponse, publishLedger } from '@/lib/ledger-publish';
 
 export const runtime = 'nodejs';
-const MAX_BOOTSTRAP_LENGTH = 256;
 const HEADERS = { 'Cache-Control': 'no-store' };
 const KEY = /^[A-Za-z0-9_-]{43}$/;
+const MINUTE_MS = 60_000;
+const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
+const CREATION_STATUS: Record<CreationRejection, number> = {
+  invalid_ledger: 400, registration_closed: 403, creation_too_large: 413, origin_mismatch: 400, server_full: 503, handle_taken: 409, rate_limited: 429,
+};
 const json = (body: unknown, status: number, extra: Record<string, string> = {}): NextResponse => NextResponse.json(body, { status, headers: { ...HEADERS, ...extra } });
 
-async function limited(request: Request, scope: string, maxAttempts: number): Promise<NextResponse | null> {
-  const result = await consumeRateLimit(scope, clientIp(request), { maxAttempts, lockoutMs: 60_000 });
+/** Fixed-window budget of maxAttempts per windowMs for key (default: the client IP). Over budget: 429 rate_limited with Retry-After. */
+async function limited(request: Request, scope: string, maxAttempts: number, windowMs = MINUTE_MS, key = clientIp(request)): Promise<NextResponse | null> {
+  const result = await consumeRateLimit(scope, key, { maxAttempts, lockoutMs: windowMs });
   if (result.allowed) return null;
-  return json({ error: 'rate_limited' }, 429, { 'Retry-After': String(Math.min(60, Math.max(1, Math.ceil((result.retryAfterMs ?? 60_000) / 1000)))) });
+  const seconds = Math.ceil((result.retryAfterMs ?? windowMs) / 1000);
+  return json({ error: 'rate_limited' }, 429, { 'Retry-After': String(Math.min(windowMs / 1000, Math.max(1, seconds))) });
+}
+
+/** The creation budget, spent only when the store is about to verify a chain that would create an account. Per IP first, so a
+ *  throttled client cannot drain the global budget; the global key bounds creations when every client shares one key ("unknown"). */
+function creationBudget(request: Request): { admit: () => Promise<boolean>; refusal: () => NextResponse } {
+  let refusal: NextResponse | null = null;
+  return {
+    admit: async () => {
+      refusal = await limited(request, 'account-create-ip', accountCreatePerHour(), HOUR_MS)
+        ?? await limited(request, 'account-create-global', accountCreateGlobalPerDay(), DAY_MS, 'global');
+      return refusal === null;
+    },
+    refusal: () => refusal ?? json({ error: 'rate_limited' }, 429),
+  };
 }
 
 /** Public by design: the ledger holds only public keys, labels, origins and timestamps, and its ids are unguessable 256-bit values. Rate-limited per IP. */
@@ -38,6 +61,8 @@ export async function GET(request: Request): Promise<NextResponse> {
   }
 }
 
+/** Body { ledger }; other members are ignored. Offers the chain to the store: replica rule for an existing account, genesis admission
+ *  (open registration, creation budget) for a new one. */
 export async function POST(request: Request): Promise<NextResponse> {
   try {
     const blocked = await limited(request, 'ledger-write', 30);
@@ -50,11 +75,13 @@ export async function POST(request: Request): Promise<NextResponse> {
     const record = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : null;
     const ledger = record?.ledger;
     if (ledger === undefined) return json({ error: 'invalid_request' }, 400);
-    const bootstrap = record?.bootstrap;
-    if (bootstrap !== undefined && (typeof bootstrap !== 'string' || bootstrap.length > MAX_BOOTSTRAP_LENGTH)) return json({ error: 'invalid_request' }, 400);
-    const { decision, stored, discarded } = await (bootstrap === undefined ? offerLedger(ledger) : offerLedger(ledger, { bootstrap }));
-    if (decision === 'reject' && !stored) return json({ error: 'registration_closed' }, 403);
-    if (decision === 'reject' || !stored) return json({ error: 'ledger_rejected', ledger: stored?.ledger ?? null }, 409);
+    const budget = creationBudget(request);
+    const result = await offerLedger(ledger, { admitCreation: budget.admit });
+    if (result.decision === 'reject') {
+      if (result.stored === null) return result.reason === 'rate_limited' ? budget.refusal() : json({ error: result.reason }, CREATION_STATUS[result.reason]);
+      return json({ error: 'ledger_rejected', ledger: result.stored.ledger }, 409);
+    }
+    const { decision, stored, discarded } = result;
     if (decision === 'created' || decision === 'adopt') {
       const accountId = stored.checkpoint.accountId;
       afterLedgerResponse(() => publishLedger(accountId, stored.ledger));

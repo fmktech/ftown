@@ -22,12 +22,12 @@ const json = (value: unknown, status = 200): Response => new Response(JSON.strin
 const wire = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const char = (code: number): string => String.fromCharCode(code);
 
-/** In-memory server replica with the real fork choice, nonce store and session check. */
+/** In-memory server with the real fork choice, nonce store and session check, holding several accounts keyed by accountId (and unique handle). */
 class FakeServer {
-  ledger: Ledger | null = null;
-  sticky = { deviceIds: [] as string[], bridgeIds: [] as string[] };
+  ledgers = new Map<string, Ledger>();
+  stickies = new Map<string, { deviceIds: string[]; bridgeIds: string[] }>();
   registrationOpen = true;
-  /** A malicious server that serves its ledger for any handle. */
+  /** A malicious server that serves its first ledger for any handle. */
   anyHandle = false;
   nonces = new Set<string>();
   mailbox = new Map<string, string>();
@@ -35,9 +35,20 @@ class FakeServer {
   proofs: string[] = [];
   requests: string[] = [];
   /** Bodies of POST /api/account/ledger. */
-  posts: { ledger: unknown; bootstrap?: unknown }[] = [];
-  /** When set, creating the account requires this registration secret (else 403 registration_closed). */
-  bootstrap: string | null = null;
+  posts: { ledger: unknown }[] = [];
+  /** When set, the next POST that would create an account is answered with this (status, body) instead of being offered. */
+  creationRefusal: { status: number; body: unknown } | null = null;
+
+  /** The only account (or the first one created): the single-account tests' view of the server. */
+  get ledger(): Ledger | null {
+    return this.ledgers.values().next().value ?? null;
+  }
+  ledgerOf(accountId: string): Ledger | null {
+    return this.ledgers.get(accountId) ?? null;
+  }
+  private byHandle(handle: string): Ledger | null {
+    return [...this.ledgers.values()].find(item => item.genesis.payload.handle === handle) ?? null;
+  }
 
   fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = new URL(String(input));
@@ -54,14 +65,12 @@ class FakeServer {
     if (url.pathname === "/api/account/ledger" && method === "GET") {
       const accountId = url.searchParams.get("accountId");
       const handle = url.searchParams.get("handle");
-      if (this.ledger !== null && ((accountId !== null && accountId === await accountIdOf(this.ledger.genesis.payload))
-        || (handle !== null && (this.anyHandle || handle === this.ledger.genesis.payload.handle)))) return json({ ledger: this.ledger });
-      return json({ error: "not_found" }, 404);
+      const found = accountId !== null ? this.ledgerOf(accountId) : handle !== null ? (this.anyHandle ? this.ledger : this.byHandle(handle)) : null;
+      return found !== null ? json({ ledger: found }) : json({ error: "not_found" }, 404);
     }
     if (url.pathname === "/api/account/ledger" && method === "POST") {
-      const post = body as { ledger: unknown; bootstrap?: unknown };
+      const post = body as { ledger: unknown };
       this.posts.push(post);
-      if (this.ledger === null && this.bootstrap !== null && post.bootstrap !== this.bootstrap) return json({ error: "registration_closed" }, 403);
       return this.offer(post.ledger);
     }
     const pair = /^\/api\/pair\/([A-Za-z0-9_-]+)$/.exec(url.pathname);
@@ -74,31 +83,38 @@ class FakeServer {
   }) as typeof fetch;
 
   offer = async (candidate: unknown): Promise<Response> => {
-    if (this.ledger === null) {
-      if (!this.registrationOpen) return json({ error: "ledger_rejected", ledger: null }, 409);
+    const accountId = await accountIdOf((candidate as Ledger).genesis.payload);
+    const stored = this.ledgers.get(accountId) ?? null;
+    if (stored === null) {
+      if (this.creationRefusal !== null) return json(this.creationRefusal.body, this.creationRefusal.status);
+      if (!this.registrationOpen) return json({ error: "registration_closed" }, 403);
       try {
-        if (!(await verifyLedger(candidate as Ledger)).devices.length) return json({ error: "ledger_rejected", ledger: null }, 409);
+        if (!(await verifyLedger(candidate as Ledger)).devices.length) return json({ error: "invalid_ledger" }, 400);
       } catch {
-        return json({ error: "ledger_rejected", ledger: null }, 409);
+        return json({ error: "invalid_ledger" }, 400);
       }
-      this.ledger = wire(candidate as Ledger);
-      return json({ decision: "created", ledger: this.ledger, discarded: 0 }, 201);
+      if (this.byHandle((candidate as Ledger).genesis.payload.handle) !== null) return json({ error: "handle_taken" }, 409);
+      this.ledgers.set(accountId, wire(candidate as Ledger));
+      return json({ decision: "created", ledger: this.ledgers.get(accountId), discarded: 0 }, 201);
     }
-    const choice = await chooseLedger(this.ledger, candidate as Ledger);
-    if (choice.decision === "reject") return json({ error: "ledger_rejected", ledger: this.ledger }, 409);
+    const choice = await chooseLedger(stored, candidate as Ledger);
+    if (choice.decision === "reject") return json({ error: "ledger_rejected", ledger: stored }, 409);
     const revoked = ledgerRevocations(candidate as Ledger);
-    this.sticky = {
-      deviceIds: [...new Set([...this.sticky.deviceIds, ...revoked.deviceIds])], bridgeIds: [...new Set([...this.sticky.bridgeIds, ...revoked.bridgeIds])],
-    };
-    if (choice.decision === "adopt") this.ledger = wire(candidate as Ledger);
-    return json({ decision: choice.decision, ledger: this.ledger, discarded: choice.discarded.length });
+    const before = this.stickies.get(accountId) ?? { deviceIds: [], bridgeIds: [] };
+    this.stickies.set(accountId, {
+      deviceIds: [...new Set([...before.deviceIds, ...revoked.deviceIds])], bridgeIds: [...new Set([...before.bridgeIds, ...revoked.bridgeIds])],
+    });
+    if (choice.decision === "adopt") this.ledgers.set(accountId, wire(candidate as Ledger));
+    return json({ decision: choice.decision, ledger: this.ledgers.get(accountId), discarded: choice.discarded.length });
   };
 
   signIn = async (proofJson: string): Promise<boolean> => {
     this.proofs.push(proofJson);
     const proof = parseAuthProof(JSON.parse(proofJson));
-    if (proof === null || !this.nonces.delete(proof.nonce) || this.ledger === null) return false;
-    const trusted = applyRevocations(await verifyLedger(this.ledger), this.sticky);
+    if (proof === null || !this.nonces.delete(proof.nonce)) return false;
+    const stored = this.ledgers.get(proof.accountId);
+    if (stored === undefined) return false;
+    const trusted = applyRevocations(await verifyLedger(stored), this.stickies.get(proof.accountId) ?? { deviceIds: [], bridgeIds: [] });
     if (!await verifyAuthProof(trusted, proof, { audience: ORIGIN, purpose: "session" })) return false;
     this.sessions.push(proof.accountId);
     return true;
@@ -299,76 +315,161 @@ describe("LedgerClient account creation", () => {
     expect(server.ledger).toBeNull();
   });
 
-  it("sends the bootstrap secret only with the creating POST, never persists it, and forgets it after use", async () => {
-    const secret = "bootstrap-secret-7f3a";
+  it("keeps the account name out of the POST body, the stored ledger, the persisted state and the client", async () => {
+    const name = "Quokka-Owner-7f3a9c";
     const server = new FakeServer();
-    server.bootstrap = secret;
     const authenticator = new FakeAuthenticator();
     const attempts = memoryAttempts();
     const setItem = vi.spyOn(attempts, "setItem");
     const a = await browser(server, authenticator, { attemptStorage: attempts });
-    await a.client.createAccount({ passkeyLabel: "Mac", deviceLabel: "Laptop", userName: "owner", bootstrap: secret });
+    await a.client.createAccount({ passkeyLabel: "Mac", deviceLabel: "Laptop", userName: name });
     const accountId = a.client.snapshot().checkpoint?.accountId ?? "";
     await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "b1") });
-    await a.client.revokeBridge("b1");
-    expect(server.posts).toHaveLength(3);
-    expect(server.posts[0].bootstrap).toBe(secret);
-    expect(server.posts.slice(1).every(post => !("bootstrap" in post))).toBe(true);
-    // Not in the replica storage, the attempt storage or the snapshot.
+    expect(server.posts).toHaveLength(2);
+    // The name only reaches the passkey ceremony (the OS picker).
+    const create = authenticator.calls[0];
+    expect(create.name === "create" && create.options.userName).toBe(name);
+    expect(JSON.stringify(server.posts)).not.toContain(name);
+    expect(JSON.stringify(current(server))).not.toContain(name);
+    expect(JSON.stringify(server.requests)).not.toContain(name);
     const persisted = JSON.stringify([await a.storage.bound(), await a.storage.read(accountId), a.client.snapshot()]);
-    expect(persisted).not.toContain(secret);
+    expect(persisted).not.toContain(name);
     expect(setItem).not.toHaveBeenCalled();
-    expect(JSON.stringify(a.client)).not.toContain(secret);
+    expect(JSON.stringify(a.client)).not.toContain(name);
+    // No setup secret anywhere on the wire.
+    expect(server.posts.every(post => !("bootstrap" in post))).toBe(true);
   });
 
-  it("maps 403 registration_closed and drops the secret once the creating POST returned", async () => {
+  it.each([
+    ["registration_closed", 403], ["creation_too_large", 413], ["invalid_ledger", 400], ["origin_mismatch", 400],
+    ["server_full", 503], ["handle_taken", 409], ["rate_limited", 429],
+  ] as const)("maps the server reason %s of a creation to the client code of the same name and keeps the pending creation", async (reason, status) => {
     const server = new FakeServer();
-    server.bootstrap = "the-right-secret";
+    server.creationRefusal = { status, body: { error: reason } };
     const authenticator = new FakeAuthenticator();
     const a = await browser(server, authenticator);
     await a.client.createAccountStart({ passkeyLabel: "Mac", userName: "owner" });
-    await a.client.createAccountFinish({ bootstrap: "a-wrong-secret" });
-    await expect(a.client.enrollThisDevice({ deviceLabel: "Laptop" })).rejects.toThrow("registration_closed");
-    expect(server.posts.map(post => post.bootstrap)).toEqual(["a-wrong-secret"]);
-    expect(JSON.stringify(a.client)).not.toContain("a-wrong-secret");
-    // A retry of the same pending creation no longer carries any secret, and re-sends the same signed chain without a prompt.
-    await expect(a.client.enrollThisDevice({ deviceLabel: "Laptop" })).rejects.toThrow("registration_closed");
+    await a.client.createAccountFinish();
+    await expect(a.client.enrollThisDevice({ deviceLabel: "Laptop" })).rejects.toThrow(reason);
+    expect(a.replica.raw()).toBeNull();
+    expect(a.client.snapshot()).toMatchObject({ status: "signed_out", pending: "enrollment_ready" });
+    // The same signed chain is re-sent without another passkey or signature, and the passkey is not minted again.
+    await expect(a.client.retryCreateAccount()).rejects.toThrow(reason);
     expect(server.posts).toHaveLength(2);
-    expect("bootstrap" in server.posts[1]).toBe(false);
     expect(JSON.stringify(server.posts[1].ledger)).toBe(JSON.stringify(server.posts[0].ledger));
     expect(authenticator.names()).toEqual(["create", "sign", "sign"]);
-    expect(a.replica.raw()).toBeNull();
-
-    // forget() drops the pending creation and a secret that was never sent.
-    await a.client.forget();
-    await a.client.createAccountStart({ passkeyLabel: "Mac", userName: "owner" });
-    await a.client.createAccountFinish({ bootstrap: "the-right-secret" });
-    expect(JSON.stringify(a.client)).toContain("the-right-secret");
-    await a.client.forget();
-    expect(JSON.stringify(a.client)).not.toContain("the-right-secret");
-    await expect(a.client.createAccountFinish({ bootstrap: "x".repeat(257) })).rejects.toThrow("account_creation_not_started");
-    await a.client.createAccountStart({ passkeyLabel: "Mac", userName: "owner" });
-    await expect(a.client.createAccountFinish({ bootstrap: "x".repeat(257) })).rejects.toThrow("invalid_bootstrap");
+    await expect(a.client.createAccountStart({ passkeyLabel: "Mac", userName: "owner" })).rejects.toThrow("account_creation_pending");
+    // Once the refusal goes away the same pending creation succeeds.
+    server.creationRefusal = null;
+    await a.client.retryCreateAccount();
+    expect(a.client.snapshot()).toMatchObject({ status: "ready", pending: "none" });
+    expect(authenticator.names()).toEqual(["create", "sign", "sign"]);
   });
 
-  it("retries a refused creation with the same signed chain and a new secret, without another passkey", async () => {
+  it("reads the reason from the body, not the status alone, and keeps generic handling for unknown codes", async () => {
     const server = new FakeServer();
-    server.bootstrap = "the-right-secret";
     const authenticator = new FakeAuthenticator();
     const a = await browser(server, authenticator);
-    await expect(a.client.createAccount({ passkeyLabel: "Mac", deviceLabel: "Laptop", userName: "owner", bootstrap: "wrong" }))
-      .rejects.toThrow("registration_closed");
+    await a.client.createAccountStart({ passkeyLabel: "Mac", userName: "owner" });
+    await a.client.createAccountFinish();
+    server.creationRefusal = { status: 403, body: { error: "something_new" } };
+    await expect(a.client.enrollThisDevice({ deviceLabel: "Laptop" })).rejects.toThrow("ledger_rejected");
+    server.creationRefusal = { status: 400, body: { error: "something_new" } };
+    await expect(a.client.retryCreateAccount()).rejects.toThrow("ledger_rejected");
+    server.creationRefusal = { status: 429, body: {} };
+    await expect(a.client.retryCreateAccount()).rejects.toThrow("server_unavailable");
+    server.creationRefusal = { status: 413, body: {} };
+    await expect(a.client.retryCreateAccount()).rejects.toThrow("ledger_limit");
+    server.creationRefusal = { status: 409, body: { error: "handle_taken" } };
+    await expect(a.client.retryCreateAccount()).rejects.toThrow("handle_taken");
+  });
+
+  it("lets two browsers create two different accounts on one server, each bound to its own", async () => {
+    const server = new FakeServer();
+    const authA = new FakeAuthenticator();
+    const authB = new FakeAuthenticator();
+    const a = await browser(server, authA);
+    const b = await browser(server, authB);
+    await a.client.createAccount({ passkeyLabel: "A passkey", deviceLabel: "A laptop", userName: "alice" });
+    await b.client.createAccount({ passkeyLabel: "B passkey", deviceLabel: "B laptop", userName: "bob" });
+    const idA = a.client.snapshot().checkpoint?.accountId ?? "";
+    const idB = b.client.snapshot().checkpoint?.accountId ?? "";
+    expect(idA).not.toBe("");
+    expect(idB).not.toBe(idA);
+    expect([...server.ledgers.keys()].sort()).toEqual([idA, idB].sort());
+    expect(server.sessions.sort()).toEqual([idA, idB].sort());
+    // Each replica holds only its own chain.
+    expect(a.replica.raw()?.checkpoint.accountId).toBe(idA);
+    expect(b.replica.raw()?.checkpoint.accountId).toBe(idB);
+    // Neither stays bound to, or trusts, the other's account: a read of the other's account never rebinds a bound browser.
+    await expect(a.client.createAccountStart({ passkeyLabel: "x", userName: "y" })).rejects.toThrow("ledger_other_account");
+    await a.client.refresh();
+    expect(a.replica.raw()?.checkpoint.accountId).toBe(idA);
+    // identifyAccount accepts only a ledger of the picked passkey's own handle: a server answering B's ledger for A's handle is refused.
+    const fresh = await browser(server, authA);
+    authA.pick = 0;
+    const other = server.ledgerOf(idB);
+    expect(other).not.toBeNull();
+    const liar = new FakeServer();
+    liar.ledgers.set(idB, other as Ledger);
+    liar.anyHandle = true;
+    const victim = await browser(liar, authA);
+    await expect(victim.client.identifyAccount()).rejects.toThrow("ledger_other_account");
+    expect(victim.replica.raw()).toBeNull();
+    // With an honest server a fresh browser identifies A's passkey as account A, not B.
+    await fresh.client.identifyAccount();
+    expect(fresh.client.snapshot().pending).toBe("enrollment_ready");
+    expect(fresh.replica.raw()).toBeNull();
+    await fresh.client.enrollThisDevice({ deviceLabel: "A phone" });
+    expect(fresh.replica.raw()?.checkpoint.accountId).toBe(idA);
+    expect(server.ledgerOf(idB)?.transitions).toHaveLength(1);
+    // The credential check is separate from the handle check: A's handle with a passkey that is not an authority of A is refused.
+    await authA.module.createPasskey({ rpId: RP_ID, rpName: "FTown", handle: Buffer.from(server.ledgerOf(idA)?.genesis.payload.handle ?? "", "base64url"), userName: "alice" });
+    authA.pick = authA.keys.length - 1;
+    const stranger = await browser(server, authA);
+    await expect(stranger.client.identifyAccount()).rejects.toThrow("passkey_not_authority");
+    expect(stranger.replica.raw()).toBeNull();
+  });
+
+  it("rejects an account name that is empty or too long once sanitized, before any passkey prompt", async () => {
+    const authenticator = new FakeAuthenticator();
+    const a = await browser(new FakeServer(), authenticator);
+    for (const name of ["", "   ", `${char(0x200b)}${char(0x200d)}`, "\u{1F600}".repeat(65)]) {
+      await expect(a.client.createAccountStart({ passkeyLabel: "Mac", userName: name })).rejects.toThrow("invalid_account_name");
+    }
+    expect(authenticator.calls).toEqual([]);
+    await a.client.createAccountStart({ passkeyLabel: "Mac", userName: `${char(0x200b)}${"\u{1F600}".repeat(64)}` });
+    const create = authenticator.calls[0];
+    expect(create.name === "create" && create.options.userName).toBe("\u{1F600}".repeat(64));
+  });
+
+  it("retries a refused creation with the same signed chain, without another passkey", async () => {
+    const server = new FakeServer();
+    server.registrationOpen = false;
+    const authenticator = new FakeAuthenticator();
+    const a = await browser(server, authenticator);
+    await expect(a.client.createAccount({ passkeyLabel: "Mac", deviceLabel: "Laptop", userName: "owner" })).rejects.toThrow("registration_closed");
     expect(a.client.snapshot().pending).toBe("enrollment_ready");
     await expect(a.client.createAccountStart({ passkeyLabel: "Mac", userName: "owner" })).rejects.toThrow("account_creation_pending");
-    await a.client.retryCreateAccount({ bootstrap: "the-right-secret" });
+    server.registrationOpen = true;
+    await a.client.retryCreateAccount();
     expect(authenticator.names()).toEqual(["create", "sign", "sign"]);
-    expect(server.posts.map(post => post.bootstrap)).toEqual(["wrong", "the-right-secret"]);
+    expect(server.posts).toHaveLength(2);
     expect(JSON.stringify(server.posts[0].ledger)).toBe(JSON.stringify(server.posts[1].ledger));
     expect(await verifyLedger(current(server))).toMatchObject({ revision: 1 });
     expect(a.client.snapshot()).toMatchObject({ status: "ready", pending: "none" });
-    expect(JSON.stringify(a.client)).not.toContain("the-right-secret");
     expect(server.sessions).toHaveLength(1);
-    await expect(a.client.retryCreateAccount({ bootstrap: "the-right-secret" })).rejects.toThrow("account_creation_not_started");
+    await expect(a.client.retryCreateAccount()).rejects.toThrow("account_creation_not_started");
+  });
+
+  it("forget() drops a pending creation", async () => {
+    const server = new FakeServer();
+    server.registrationOpen = false;
+    const a = await browser(server, new FakeAuthenticator());
+    await expect(a.client.createAccount({ passkeyLabel: "Mac", deviceLabel: "Laptop", userName: "owner" })).rejects.toThrow("registration_closed");
+    await a.client.forget();
+    expect(a.client.snapshot().pending).toBe("none");
+    await expect(a.client.retryCreateAccount()).rejects.toThrow("account_creation_not_started");
   });
 
   it("keeps the pending creation when the creating POST fails on the network", async () => {
@@ -380,11 +481,10 @@ describe("LedgerClient account creation", () => {
       return server.fetch(input, init);
     }) as typeof fetch;
     const a = await browser(server, authenticator, { deps: { fetchImpl } });
-    await expect(a.client.createAccount({ passkeyLabel: "Mac", deviceLabel: "Laptop", userName: "owner", bootstrap: "SECRET-BOOTSTRAP-VALUE" }))
+    await expect(a.client.createAccount({ passkeyLabel: "Mac", deviceLabel: "Laptop", userName: "owner"}))
       .rejects.toThrow("network_unavailable");
-    expect(JSON.stringify(a.client)).not.toContain("SECRET-BOOTSTRAP-VALUE");
     offline = false;
-    await a.client.retryCreateAccount({});
+    await a.client.retryCreateAccount();
     expect(authenticator.names()).toEqual(["create", "sign", "sign"]);
     expect(a.client.snapshot().status).toBe("ready");
   });
@@ -402,7 +502,7 @@ describe("LedgerClient account creation", () => {
     const server = new FakeServer();
     server.registrationOpen = false;
     const a = await browser(server, new FakeAuthenticator());
-    await expect(a.client.createAccount({ passkeyLabel: "Mac", deviceLabel: "Laptop", userName: "owner" })).rejects.toThrow("ledger_rejected");
+    await expect(a.client.createAccount({ passkeyLabel: "Mac", deviceLabel: "Laptop", userName: "owner" })).rejects.toThrow("registration_closed");
     expect(a.replica.raw()).toBeNull();
     expect(a.client.snapshot().status).toBe("signed_out");
     expect(server.sessions).toEqual([]);
@@ -559,7 +659,8 @@ describe("LedgerClient sign-in", () => {
         { type: "add_authority", authority: { ...stolen, label: "Mac", addedAt: at + 1 }, consent }, at + 1, at);
       const evil: Ledger = { genesis: root, transitions: [{ payload, signature: await attacker.sign(await ledgerChallenge(payload)) }] };
       await expect(verifyLedger(evil)).rejects.toThrow();
-      server.ledger = evil;
+      server.ledgers.clear();
+      server.ledgers.set(evilId, evil);
       const b = await browser(server, authenticator);
       authenticator.calls = [];
       await expect(b.client.signInNewDevice({ deviceLabel: "Phone" })).rejects.toThrow("invalid_ledger");

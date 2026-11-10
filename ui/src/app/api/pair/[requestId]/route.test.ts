@@ -43,6 +43,46 @@ describe('PUT /api/pair/:requestId', () => {
     expect(res.status).toBe(401);
     expect(res.headers.get('Cache-Control')).toBe('no-store');
     expect(putPairApproval).not.toHaveBeenCalled();
+    expect(consumeRateLimit).not.toHaveBeenCalled();
+  });
+
+  it('applies pair-write (30 per 10 minutes) keyed by accountId, 429 rate_limited without storing', async () => {
+    expect((await PUT(put(JSON.stringify({ sealed: 'blob' })), ctx())).status).toBe(204);
+    expect(consumeRateLimit).toHaveBeenCalledWith('pair-write', 'acct-1', { maxAttempts: 30, lockoutMs: 10 * 60 * 1000 });
+    putPairApproval.mockClear();
+    consumeRateLimit.mockResolvedValueOnce({ allowed: false, retryAfterMs: 9000 });
+    const res = await PUT(put(JSON.stringify({ sealed: 'blob' })), ctx());
+    expect(res.status).toBe(429);
+    expect(await res.json()).toEqual({ error: 'rate_limited' });
+    expect(res.headers.get('Retry-After')).toBe('9');
+    expect(putPairApproval).not.toHaveBeenCalled();
+  });
+
+  it('does not throttle account B when account A exhausted its pair-write budget', async () => {
+    const counts = new Map<string, number>();
+    consumeRateLimit.mockImplementation(async (scope: string, key: string, cfg: { maxAttempts: number }) => {
+      const n = (counts.get(`${scope}:${key}`) ?? 0) + 1;
+      counts.set(`${scope}:${key}`, n);
+      return n <= cfg.maxAttempts ? { allowed: true } : { allowed: false, retryAfterMs: 1000 };
+    });
+    for (let i = 0; i < 30; i++) expect((await PUT(put(JSON.stringify({ sealed: 'b' })), ctx())).status).toBe(204);
+    expect((await PUT(put(JSON.stringify({ sealed: 'b' })), ctx())).status).toBe(429);
+    requireAccount.mockResolvedValue({ accountId: 'acct-2', endpointId: 'ep-2', stored: {} });
+    expect((await PUT(put(JSON.stringify({ sealed: 'b' })), ctx())).status).toBe(204);
+  });
+
+  it('maps pair_mailbox_full to 429 pair_mailbox_full', async () => {
+    putPairApproval.mockRejectedValue(new Error('pair_mailbox_full'));
+    const res = await PUT(put(JSON.stringify({ sealed: 'x' })), ctx());
+    expect(res.status).toBe(429);
+    expect(await res.json()).toEqual({ error: 'pair_mailbox_full' });
+  });
+
+  it('409 for a foreign-owned request id reveals nothing about the other account', async () => {
+    putPairApproval.mockRejectedValue(new Error('pair_mailbox_conflict'));
+    const res = await PUT(put(JSON.stringify({ sealed: 'x' })), ctx());
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: 'conflict' });
   });
 
   it('rejects an invalid request id with 400 before reading the body or storing', async () => {

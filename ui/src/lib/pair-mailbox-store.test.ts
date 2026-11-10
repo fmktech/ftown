@@ -9,6 +9,7 @@ const rid = () => randomBytes(32).toString('base64url');
 
 describe('pair mailbox store', () => {
   beforeEach(() => { query.mockReset(); query.mockImplementation(async (t: string) => String(t).startsWith('INSERT') ? [{ request_id: 'r' }] : []); });
+  const insertCall = () => query.mock.calls.find(c => String(c[0]).startsWith('INSERT'))!;
 
   it('rejects invalid request ids', async () => {
     for (const bad of ['', 'short', 'a'.repeat(44), '!'.repeat(43), randomBytes(16).toString('base64url')]) {
@@ -22,13 +23,13 @@ describe('pair mailbox store', () => {
     await expect(putPairApproval(rid(), 'acct', 'x'.repeat(256 * 1024 + 1))).rejects.toThrow('pair_mailbox_too_large');
     expect(query).not.toHaveBeenCalled();
     await putPairApproval(rid(), 'acct', 'x'.repeat(256 * 1024));
-    expect(query).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledTimes(2);
   });
 
   it('upserts with a 10 minute TTL', async () => {
     const id = rid(); const before = Date.now();
     await putPairApproval(id, 'acct', 'sealed');
-    const [text, params] = query.mock.calls[0];
+    const [text, params] = insertCall();
     expect(text).toContain('ON CONFLICT (request_id) DO UPDATE');
     expect(text).toContain('WHERE pair_mailbox.account_id = EXCLUDED.account_id');
     expect(text).toContain('RETURNING');
@@ -40,8 +41,30 @@ describe('pair mailbox store', () => {
   });
 
   it('conflict with another account throws pair_mailbox_conflict', async () => {
-    query.mockResolvedValueOnce([]);
+    query.mockImplementation(async (t: string) => String(t).startsWith('SELECT 1') ? [{ found: 1 }] : []);
     await expect(putPairApproval(rid(), 'other', 's')).rejects.toThrow('pair_mailbox_conflict');
+  });
+
+  it('sweeps only the caller\'s expired rows before inserting', async () => {
+    await putPairApproval(rid(), 'acct-A', 's');
+    const [text, params] = query.mock.calls[0];
+    expect(text).toMatch(/^DELETE FROM pair_mailbox WHERE account_id = \$1 AND expires_at <= NOW\(\)$/);
+    expect(params).toEqual(['acct-A']);
+    expect(String(query.mock.calls[1][0])).toMatch(/^INSERT/);
+  });
+
+  it('caps unexpired rows per account at 20, counting only that account, and lets an own overwrite through', async () => {
+    await putPairApproval(rid(), 'acct-A', 's');
+    const [text, params] = insertCall();
+    expect(text).toMatch(/SELECT COUNT\(\*\) FROM pair_mailbox WHERE account_id = \$2 AND expires_at > NOW\(\)\) < \$5/);
+    expect(text).toMatch(/OR EXISTS \(SELECT 1 FROM pair_mailbox WHERE request_id = \$1 AND account_id = \$2\)/);
+    expect(params[1]).toBe('acct-A');
+    expect(params[4]).toBe(20);
+  });
+
+  it('nothing written and request id unowned means pair_mailbox_full', async () => {
+    query.mockImplementation(async () => []);
+    await expect(putPairApproval(rid(), 'acct-A', 's')).rejects.toThrow('pair_mailbox_full');
   });
 
   it('missing row is pending', async () => {
