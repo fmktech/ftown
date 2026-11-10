@@ -1,11 +1,11 @@
 import { maxAccounts } from '@/lib/account-limits';
-import { checkpointMac, checkpointMacValid } from '@/lib/checkpoint-mac';
+import { checkpointMac, checkpointMacValid, requireCheckpointKey } from '@/lib/checkpoint-mac';
 import { getDb } from '@/lib/db';
 import { CREATION_MAX_BYTES, CREATION_MAX_RECORDS } from '@/lib/ledger-limits';
 import { expectedRpId, publicOrigin } from '@/lib/public-origin';
 import { isRegistrationEnabled } from '@/lib/registration';
 import { accountIdOf, applyRevocations, chooseLedger, ledgerHead, ledgerRevocations, parseLedger, verifyLedger } from '@security/ledger/ledger';
-import type { Ledger, LedgerCheckpoint } from '@security/ledger/protocol';
+import type { Ledger, LedgerCheckpoint, LedgerGenesis, LedgerTransition } from '@security/ledger/protocol';
 
 /*
  * Trust. Bridges and browsers verify every chain they receive themselves; for them the database is not a trust anchor. The server's
@@ -13,12 +13,16 @@ import type { Ledger, LedgerCheckpoint } from '@security/ledger/protocol';
  * database alone must not be able to make the server authorize a key. A chain is verified from its passkey-signed genesis before it is
  * written, and every write stores, in the same statement as the chain, its head, revision and sticky set, the chain's RAW checkpoint
  * (canonical JSON, no sticky applied) and an HMAC over all of them keyed from AUTH_SECRET (checkpoint-mac.ts), a key the database does
- * not hold. Reads trust that checkpoint only when the MAC verifies and it names the row's head and revision; anything else (a row from
- * before the column, a rotated AUTH_SECRET, an older instance that advanced the chain without it, tampering) is healed by verifying the
- * stored chain from genesis again. The trusted checkpoint is applyRevocations(raw, sticky), computed on every read. A database writer
- * can therefore at worst replay an older, internally consistent row: it cannot make the server authorize a key the stored
- * passkey-signed chain does not list. (The sticky set itself is not passkey-signed: edited, it fails the MAC and is healed AS EDITED,
- * so only revocations seen on losing forks can be dropped that way; the chain's own revocations are in the raw checkpoint.)
+ * not hold. Reads trust that checkpoint only when the MAC verifies, it names the row's head and revision, and the chain column's tip
+ * (length and last head) is that same head and revision. Anything else (a row from before the columns, a rotated AUTH_SECRET, an
+ * older instance that advanced the chain without it, tampering) is healed: the stored chain is verified from genesis again and the
+ * row is re-sealed from the CHAIN, with one console.warn per heal. The trusted checkpoint is applyRevocations(raw, sticky), computed
+ * on every read.
+ * Residual risk, accepted: a database-only writer can roll an account back to ANY signed prefix of its chain (no old snapshot needed),
+ * with the sticky set edited to match, and the heal re-seals that state, reviving keys revoked later. It can never make the server
+ * authorize a key that no passkey-signed chain of the account lists. This was equally possible before the checkpoint existed (reads
+ * re-verified whatever chain the column held; sticky was never authenticated). Clients verify chains themselves and keep the longest
+ * one, and the owner's next write (any offer of the current chain) moves the server forward again.
  */
 
 export interface Sticky { deviceIds: string[]; bridgeIds: string[] }
@@ -84,32 +88,49 @@ function sealed(accountId: string, raw: LedgerCheckpoint, sticky: Sticky): { tex
   return { text, mac: checkpointMac({ accountId, revision: raw.revision, head: raw.head, sticky, checkpoint: text }) };
 }
 
-/** The row's raw checkpoint, or null when it cannot be trusted: NULL, a MAC that does not verify, or a checkpoint that does not name
- *  exactly the row's account, head and revision. Parsed by the shared strict checkpoint parser (applyRevocations with no sticky ids is
- *  its exported entry: parseCheckpoint itself is not exported). */
-function authenticated(row: Record<string, unknown>, sticky: Sticky): LedgerCheckpoint | null {
+/** Why a row's checkpoint is not trusted (logged, never more): no seal at all; a seal that does not verify (rotated AUTH_SECRET,
+ *  tampering, a non-text column); a seal of another head or revision than the row (an older instance advanced the chain without it);
+ *  a chain column whose tip is not the row's head and revision. */
+type HealReason = 'absent' | 'mac_mismatch' | 'stale_head' | 'chain_mismatch';
+type Seal = { raw: LedgerCheckpoint } | { reason: HealReason };
+
+/** The row's raw checkpoint if its seal holds. Parsed by the shared strict checkpoint parser (applyRevocations with no sticky ids is
+ *  its exported entry: parseCheckpoint itself is not exported). A checkpoint value that is not a string is never trusted. */
+function unseal(row: Record<string, unknown>, sticky: Sticky): Seal {
   const text = row.checkpoint;
-  if (typeof text !== 'string' || typeof row.account_id !== 'string' || typeof row.head !== 'string' || !safeInteger(row.revision)) return null;
-  if (!checkpointMacValid({ accountId: row.account_id, revision: row.revision, head: row.head, sticky, checkpoint: text }, row.checkpoint_mac)) return null;
-  let raw: LedgerCheckpoint;
-  try { raw = applyRevocations(JSON.parse(text) as LedgerCheckpoint, EMPTY); } catch { return null; }
-  if (raw.accountId !== row.account_id || raw.head !== row.head || raw.revision !== row.revision) return null;
-  return raw;
+  if (text === null || text === undefined || row.checkpoint_mac === null || row.checkpoint_mac === undefined) return { reason: 'absent' };
+  if (typeof text !== 'string' || typeof row.account_id !== 'string' || typeof row.head !== 'string' || !safeInteger(row.revision)) return { reason: 'mac_mismatch' };
+  const macValid = checkpointMacValid({ accountId: row.account_id, revision: row.revision, head: row.head, sticky, checkpoint: text }, row.checkpoint_mac);
+  let raw: LedgerCheckpoint | null;
+  try { raw = applyRevocations(JSON.parse(text) as LedgerCheckpoint, EMPTY); } catch { raw = null; }
+  if (raw && (raw.accountId !== row.account_id || raw.head !== row.head || raw.revision !== row.revision)) return { reason: 'stale_head' };
+  return raw && macValid ? { raw } : { reason: 'mac_mismatch' };
 }
 
-/** Heal: verify the stored chain from genesis and rewrite checkpoint + MAC, guarded by version (and head/revision). null when the row
- *  moved meanwhile: the caller re-reads. A chain that does not verify is corruption. */
-async function heal(row: Record<string, unknown>, ledger: Ledger, sticky: Sticky): Promise<LedgerCheckpoint | null> {
+/** The head of a chain's last record (the genesis when there are no transitions; ledgerHead(genesis) is the accountId), or null. */
+async function tipHead(payload: unknown): Promise<string | null> {
+  try { return await ledgerHead(payload as LedgerGenesis | LedgerTransition); } catch { return null; }
+}
+
+const ACCOUNT_ID = /^[A-Za-z0-9_-]{43}$/;
+/** Heal: verify the stored chain from genesis and re-seal the row FROM THE CHAIN (its revision and head follow the verified chain),
+ *  guarded by the row's version, revision and head as read; the version is not bumped (chain and sticky set are unchanged). null when
+ *  the row moved meanwhile: the caller re-reads. A chain that does not verify, or belongs to another account, is corruption. */
+async function heal(row: Record<string, unknown>, ledger: Ledger, sticky: Sticky, reason: HealReason): Promise<LedgerCheckpoint | null> {
   let raw: LedgerCheckpoint;
   try {
     raw = await verifyLedger(ledger);
     trustedOf(raw, sticky);
   } catch { return corrupt(); }
-  if (raw.accountId !== row.account_id || raw.head !== row.head || raw.revision !== row.revision) return corrupt();
+  if (raw.accountId !== row.account_id) return corrupt();
   const { text, mac } = sealed(raw.accountId, raw, sticky);
-  const rows = await query('UPDATE account_ledger SET checkpoint=$2, checkpoint_mac=$3 WHERE account_id=$1 AND version=$4 AND revision=$5 AND head=$6 RETURNING account_id',
-    [raw.accountId, text, mac, row.version, raw.revision, raw.head]);
-  return rows.length === 1 ? raw : null;
+  const rows = await query('UPDATE account_ledger SET checkpoint=$2, checkpoint_mac=$3, revision=$7, head=$8 WHERE account_id=$1 AND version=$4 AND revision=$5 AND head=$6 RETURNING account_id',
+    [raw.accountId, text, mac, row.version, row.revision, row.head, raw.revision, raw.head]);
+  if (rows.length !== 1) return null;
+  const account = typeof row.account_id === 'string' && ACCOUNT_ID.test(row.account_id) ? row.account_id.slice(0, 8) : '?';
+  const before = safeInteger(row.revision) ? row.revision : '?';
+  console.warn(`[ledger] checkpoint healed: account ${account} reason ${reason} revision ${before}->${raw.revision}`);
+  return raw;
 }
 
 export async function accountCount(): Promise<number> {
@@ -119,19 +140,25 @@ export async function accountCount(): Promise<number> {
   return count;
 }
 
-/** The trusted checkpoint for an auth decision. With a valid MAC: one small SELECT, no chain parse, no signature check. Otherwise the
- *  row is healed through the full read (the only heal path). */
+/** The trusted checkpoint for an auth decision. With a valid seal and a chain column whose tip is the sealed head: one small SELECT,
+ *  one hash, no signature check. Otherwise the row is healed through the full read (the only heal path). */
 export async function readTrustedCheckpoint(accountId: string): Promise<LedgerCheckpoint | null> {
-  const rows = await query('SELECT account_id, revision, head, sticky, version, checkpoint, checkpoint_mac FROM account_ledger WHERE account_id=$1', [accountId]);
+  requireCheckpointKey();
+  // The chain column's length and last payload (the genesis payload when there are no transitions) tie it to the sealed state.
+  const rows = await query(`SELECT account_id, revision, head, sticky, version, checkpoint, checkpoint_mac,
+    CASE WHEN jsonb_typeof(ledger->'transitions')='array' THEN jsonb_array_length(ledger->'transitions') END AS transition_count,
+    COALESCE(ledger->'transitions'->-1->'payload', ledger->'genesis'->'payload') AS last_payload
+    FROM account_ledger WHERE account_id=$1`, [accountId]);
   if (!rows.length) return null;
   if (rows.length !== 1) return corrupt();
   const row = rows[0];
   if (row.account_id !== accountId || !safeInteger(row.version)) return corrupt();
   let sticky: Sticky;
   try { sticky = parseSticky(row.sticky); } catch { return corrupt(); }
-  const raw = authenticated(row, sticky);
-  if (!raw) return (await readRow({ accountId }))?.stored.trusted ?? null;
-  try { return trustedOf(raw, sticky); } catch { return corrupt(); }
+  const chainMatches = row.transition_count === row.revision && await tipHead(row.last_payload) === row.head;
+  const seal = chainMatches ? unseal(row, sticky) : null;
+  if (!seal || !('raw' in seal)) return (await readRow({ accountId }))?.stored.trusted ?? null;
+  try { return trustedOf(seal.raw, sticky); } catch { return corrupt(); }
 }
 
 /** The stored chain, served as-is after the key consistency checks (healing the checkpoint first if needed). */
@@ -143,6 +170,7 @@ export async function readLedger(key: LedgerKey): Promise<StoredLedger | null> {
 type Row = { stored: StoredLedger; version: number; raw: LedgerCheckpoint };
 
 async function readRow(key: LedgerKey): Promise<Row | null> {
+  requireCheckpointKey();
   const byHandle = 'handle' in key;
   for (let attempt = 0; attempt < HEAL_ATTEMPTS; attempt += 1) {
     const rows = await query(`SELECT l.account_id, a.handle, l.revision, l.head, l.ledger, l.sticky, l.version, l.checkpoint, l.checkpoint_mac FROM account_ledger l
@@ -156,14 +184,17 @@ async function readRow(key: LedgerKey): Promise<Row | null> {
       ledger = parseLedger(jsonb(row.ledger));
       sticky = parseSticky(row.sticky);
     } catch { return corrupt(); }
-    if (ledger.genesis.payload.handle !== row.handle || ledger.transitions.length !== row.revision || !safeInteger(row.version)
+    if (ledger.genesis.payload.handle !== row.handle || !safeInteger(row.version)
       || (byHandle ? row.handle !== key.handle : row.account_id !== key.accountId)) return corrupt();
-    // Two hashes, no signature: the chain in the row is the one its columns name.
+    // Two hashes, no signature: the chain belongs to this account, and its tip is (or is not) the row's head and revision.
     const last = ledger.transitions[ledger.transitions.length - 1];
+    let tip: string;
     try {
-      if (await accountIdOf(ledger.genesis.payload) !== row.account_id || (last ? await ledgerHead(last.payload) : row.account_id) !== row.head) return corrupt();
+      if (await accountIdOf(ledger.genesis.payload) !== row.account_id) return corrupt();
+      tip = last ? await ledgerHead(last.payload) : row.account_id;
     } catch { return corrupt(); }
-    const raw = authenticated(row, sticky) ?? await heal(row, ledger, sticky);
+    const seal: Seal = ledger.transitions.length === row.revision && tip === row.head ? unseal(row, sticky) : { reason: 'chain_mismatch' };
+    const raw = 'raw' in seal ? seal.raw : await heal(row, ledger, sticky, seal.reason);
     if (!raw) continue;
     let trusted: LedgerCheckpoint;
     try { trusted = trustedOf(raw, sticky); } catch { return corrupt(); }
@@ -266,6 +297,8 @@ const once = (gate: Gate): Gate => {
  *  (version, revision, head); a lost race is re-read and re-run once, then throws. */
 export async function offerLedger(candidate: unknown, limits: OfferLimits): Promise<OfferResult> {
   if (typeof limits?.admitCreation !== 'function' || typeof limits.admitAccountWrite !== 'function') throw new TypeError('offerLedger: limits are required');
+  // Before any work: a creation or write could not be sealed anyway, and must not spend a budget first.
+  requireCheckpointKey();
   let parsed: Ledger;
   let accountId: string;
   try {

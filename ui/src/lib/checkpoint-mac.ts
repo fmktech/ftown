@@ -27,6 +27,12 @@ function macKey(): Buffer {
   return derived.key;
 }
 
+/** Throws (naming AUTH_SECRET, never its value) unless the MAC key can be derived. The store calls it before touching an account row,
+ *  so a missing, short or placeholder AUTH_SECRET fails closed: nothing is read, healed or written. */
+export function requireCheckpointKey(): void {
+  macKey();
+}
+
 function wellFormed(input: CheckpointMacInput): boolean {
   return NO_NEWLINE.test(input.accountId) && NO_NEWLINE.test(input.head) && Number.isSafeInteger(input.revision) && input.revision >= 0;
 }
