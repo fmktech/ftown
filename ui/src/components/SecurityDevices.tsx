@@ -7,6 +7,7 @@ import { securityErrorMessage, type SecurityBridge, type SecurityCommandExecutor
 import { SecurityAccessMap, accessBrowserLabel, type SecurityAccessBrowserNode, type SecurityAccessBridgeNode, type SecurityAccessSelection } from "./SecurityAccessMap";
 import type { SecurityLockState } from "./SecurityLockIcon";
 import { useDeviceDisplayNames } from "@/hooks/useDeviceDisplayNames";
+import { UnsavedRemovalRetryButton, unsavedRemovalState } from "./UnsavedRemovalRetry";
 import { DeviceDisplayNameEditor } from "./DeviceDisplayNameEditor";
 import { securityErrorCode, useAccountSecurity, type AccountSecurity } from "@/hooks/useAccountSecurity";
 import type { LedgerClient, LedgerClientSnapshot } from "@/lib/ledger-client";
@@ -190,12 +191,6 @@ const ACCOUNT_MISMATCH = "This browser holds a different account than the one yo
 const LOCAL_ONLY = "Removed on this browser only — not yet applied to your account";
 /** A removal in this browser's chain that the server has not taken yet (refused or failed); the client re-sends it by itself. */
 const UNSAVED = "Removal not saved to the server yet";
-const UNSAVED_DETAIL = "Removal not saved to the server yet. It can still connect. Retrying…";
-const UNSAVED_SELF_DETAIL = "This browser's removal is not saved to the server yet. It can still connect. Retrying…";
-/** No automatic retry: sending this chain would drop removals the server has (snapshot.conflict). */
-const UNSAVED_CONFLICT = "Not saved to the server. Sign this removal again from this browser.";
-/** No automatic retry: this browser's own removal came from another chain, so it cannot write (snapshot.canReoffer false). */
-const UNSAVED_BLOCKED = "Not saved to the server. Remove it again from another browser of your account.";
 /** A removal while nothing is confirmed about the server (snapshot.serverState 'unknown'). */
 const UNCONFIRMED = "Removed here. Not confirmed by the server yet.";
 
@@ -239,22 +234,6 @@ function PasskeyActionButton({ security, actionKey, label, busyLabel, ariaLabel,
     onClick={() => void security.run(actionKey, action, { signs: true }).then(done => { if (done) onDone?.(); })}>{security.busy === actionKey ? busyLabel : label}</button>;
 }
 
-/** The clock, re-read every second until `until` (epoch ms) has passed; for "Retry in N s". */
-function useClockUntil(until: number | null): number {
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    setNow(Date.now());
-    if (until === null || until <= Date.now()) return;
-    const timer = setInterval(() => {
-      const at = Date.now();
-      setNow(at);
-      if (at >= until) clearInterval(timer);
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [until]);
-  return now;
-}
-
 /**
  * A removal the server has not taken yet. The client sends it again by itself; "Retry now" sends it at once, without a passkey, but
  * never before a server Retry-After. No retry happens in a conflict (the owner must sign the conflicting removals again here) or when
@@ -262,17 +241,11 @@ function useClockUntil(until: number | null): number {
  */
 function UnsavedRemoval({ security, label, id, self = false }: { security: AccountSecurity; label: string | null; id: string; self?: boolean }) {
   const { snapshot } = security;
-  const blocked = snapshot.canReoffer === false;
-  const conflict = !blocked && snapshot.conflict === true;
-  const notBefore = snapshot.retryNotBefore ?? null;
-  const now = useClockUntil(notBefore);
-  const wait = notBefore === null ? 0 : Math.ceil((notBefore - now) / 1000);
-  const text = blocked ? UNSAVED_BLOCKED : conflict ? UNSAVED_CONFLICT : self ? UNSAVED_SELF_DETAIL : UNSAVED_DETAIL;
+  const { text } = unsavedRemovalState(snapshot, self);
   return <div role="group" aria-label="Removal not saved" className="space-y-2 rounded-md border border-[var(--status-pending)] p-3">
     <p className="text-sm">{text}</p>
     <SignedIdentity label={label} id={id} />
-    {!blocked && !conflict && <button type="button" className="btn-ghost min-h-11 sm:min-h-8" disabled={!!security.busy || wait > 0}
-      onClick={() => void security.run("retry", client => client.retryNow())}>{wait > 0 ? `Retry in ${wait} s` : security.busy === "retry" ? "Retrying…" : "Retry now"}</button>}
+    <UnsavedRemovalRetryButton snapshot={snapshot} busy={!!security.busy} retrying={security.busy === "retry"} onRetry={() => void security.run("retry", client => client.retryNow())} />
   </div>;
 }
 
