@@ -10,7 +10,7 @@ import { withDb } from "../helpers/db";
 import { test } from "../helpers/fixtures";
 import { createShellSessionWhenAccepted, getCentrifugoToken, login, openSession, runMarkerInTerminal, sharedAccountId, waitForBridgeOnline } from "../helpers/app";
 import { readBridgePointer } from "../helpers/bridge-api";
-import { E2E_DIR, UI_BASE_URL } from "../helpers/config";
+import { BRIDGE_HOME, E2E_DIR, UI_BASE_URL } from "../helpers/config";
 import { sessionIdsFor, waitForNewSessionId } from "../helpers/centrifugo";
 import { attemptPublish, attemptSubscribe, type CentrifugoAttempt } from "../helpers/centrifugo-raw";
 import {
@@ -18,6 +18,7 @@ import {
   serverNonce, signProof,
 } from "../helpers/ledger-admin";
 import { readSharedBridgeLog, tmuxSocket } from "../helpers/ledger-bridge";
+import { startReadinessProbe } from "../helpers/readiness";
 import {
   browserEndpointId, fillCreateAccountForm, readRunAccount, signIn, takeEnrolledBrowsers, virtualAuthenticator, type RunAccount,
 } from "../helpers/passkey";
@@ -182,19 +183,32 @@ test.describe("account isolation: two real accounts on one server", () => {
     const pageErrors: string[] = [];
     page.on("websocket", socket => socket.on("framereceived", ({ payload }) => { frames.push(typeof payload === "string" ? payload : payload.toString("utf8")); }));
     page.on("pageerror", error => pageErrors.push(error.message));
-    await login(page, { browserLabel: `E2E isolation A ${hex(2)}` });
-    const endpointId = await browserEndpointId(page);
+    // Readiness diagnostics: the shared host bridge's output and ledger replica, from before this browser is added to A.
+    const probe = startReadinessProbe(`A's new browser on the shared bridge (account ${accountId.slice(0, 8)})`, {
+      log: () => readSharedBridgeLog("bridge"), replicaFile: join(BRIDGE_HOME, ".ftown", "data", "security", "ledger.json"),
+    });
+    let endpointId: string;
+    try {
+      await login(page, { browserLabel: `E2E isolation A ${hex(2)}` });
+      endpointId = await browserEndpointId(page);
+      probe.watchEndpoint(endpointId);
+      probe.mark("browser added");
+    } catch (error) { probe.stop(); throw error; }
     // Enrolled in a hook: the per-test fixture would revoke it after the FIRST test; this file revokes it in afterAll.
     takeEnrolledBrowsers(test.info().testId);
     enrolledA = endpointId;
-    await waitForBridgeOnline(page);
-    await expect.poll(() => computerCount(page), { timeout: 30_000 }).toBeGreaterThanOrEqual(2);
-    const computers = await computerCount(page);
-    const before = await sessionIdsFor(accountId);
     const sessionName = `iso-A-${hex()}`;
     const hostBridgeId = readBridgePointer().bridgeId;
-    // This browser was just added to A: the computer may refuse its first encrypted requests for a few seconds.
-    await createShellSessionWhenAccepted(page, sessionName, hostBridgeId);
+    let computers: number;
+    let before: Set<string>;
+    try {
+      await waitForBridgeOnline(page);
+      await expect.poll(() => computerCount(page), { timeout: 30_000 }).toBeGreaterThanOrEqual(2);
+      computers = await computerCount(page);
+      before = await sessionIdsFor(accountId);
+      // This browser was just added to A: the computer may refuse its first encrypted requests for a few seconds.
+      await createShellSessionWhenAccepted(page, sessionName, hostBridgeId, { probe, origin: "browser added" });
+    } finally { probe.stop(); }
     const sid = await waitForNewSessionId(accountId, before);
     await openSession(page, sessionName);
     await runMarkerInTerminal(page, `iso-a-baseline-${hex()}`);

@@ -7,6 +7,7 @@ import { createShellSessionWhenAccepted, getCentrifugoToken, waitForBridgeOnline
 import { tryReadBridgePointer, type BridgePointer } from "./bridge-api";
 import { sessionIdsFor, waitForBridgePresence, waitForNewSessionId } from "./centrifugo";
 import { startIsolatedBridge, type IsolatedBridge } from "./ledger-bridge";
+import { startReadinessProbe, type ReadinessProbe } from "./readiness";
 import { approvePairLink, browserEndpointId, createAccountViaUi, readRunAccount, virtualAuthenticator, type RunAccount } from "./passkey";
 
 /**
@@ -80,7 +81,10 @@ export async function createSecondAccount(browser: Browser, options: { name?: st
     const account: RunAccount = { accountId, origin: UI_BASE_URL, credential: credentials[0] };
     const endpointId = await browserEndpointId(page, accountId);
 
+    let probe: ReadinessProbe | null = null;
     const stopBridge = async (): Promise<void> => {
+      probe?.stop();
+      probe = null;
       const current = paired;
       paired = null;
       if (current) await current.bridge.stop();
@@ -91,11 +95,17 @@ export async function createSecondAccount(browser: Browser, options: { name?: st
       async pairBridge() {
         if (paired) return paired;
         const bridge = await startIsolatedBridge();
+        // Readiness diagnostics from spawn until B's first session is accepted (createSession stops it).
+        probe = startReadinessProbe(`B's computer paired (account ${accountId.slice(0, 8)})`, {
+          log: () => bridge.output(), replicaFile: join(bridge.dataDir, "security", "ledger.json"), endpointId,
+        });
         try {
           const prompt = await bridge.pairing({ timeoutMs: 40_000 });
           expect(new URL(prompt.link).origin).toBe(new URL(UI_BASE_URL).origin);
           await approvePairLink(page, prompt.link, prompt.code, account);
+          probe.mark("pairing approved");
           await expect.poll(() => bridge.output(), { timeout: 30_000 }).toContain(`Paired with account ${accountId.slice(0, 8)}`);
+          probe.mark("bridge printed Paired with account");
           // "Paired with account" precedes the account startup after which the bridge writes its local API pointer.
           let pointer: BridgePointer | null = null;
           await expect.poll(() => {
@@ -111,6 +121,8 @@ export async function createSecondAccount(browser: Browser, options: { name?: st
           paired = { bridge, bridgeId, pointer: published, authPrivateKey: identity.authPrivateKey };
           return paired;
         } catch (error) {
+          probe?.stop();
+          probe = null;
           await bridge.stop().catch(() => {});
           throw error;
         }
@@ -122,7 +134,9 @@ export async function createSecondAccount(browser: Browser, options: { name?: st
         await waitForBridgeOnline(page);
         const before = await sessionIdsFor(accountId);
         // The computer was just paired: its first encrypted requests from this browser may be refused for a few seconds.
-        await createShellSessionWhenAccepted(page, sessionName, bridgeId);
+        try {
+          await createShellSessionWhenAccepted(page, sessionName, bridgeId, probe ? { probe, origin: "pairing approved" } : undefined);
+        } finally { probe?.stop(); probe = null; }
         return waitForNewSessionId(accountId, before);
       },
       relayToken: () => getCentrifugoToken(page),

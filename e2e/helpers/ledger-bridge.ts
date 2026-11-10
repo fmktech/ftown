@@ -90,8 +90,9 @@ export async function startIsolatedBridge(options: { apiUrl?: string } = {}): Pr
   const dataDir = join(home, ".ftown", "data");
   const env = isolatedBridgeEnv(home, tmuxDir);
   const removeScratch = async () => {
-    await rm(home, { recursive: true, force: true });
-    await rm(tmuxDir, { recursive: true, force: true });
+    // Retried: a login shell killed with the tmux server may still be saving ~/.zsh_sessions (ENOTEMPTY mid-removal).
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    await rm(tmuxDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   };
   try {
     await writeFile(join(home, "tmux"), `${tmuxDir}\n`);
