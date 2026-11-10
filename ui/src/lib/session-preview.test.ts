@@ -110,7 +110,8 @@ describe('preview protocol validation', () => {
       innerWidth: { get: () => view.width }, innerHeight: { get: () => view.height },
     });
     runInNewContext(script, { window: frame, document: { readyState: 'complete', addEventListener: () => {} }, MessageEvent: FrameMessageEvent, Window: function Window() {} });
-    const fire = (type: string, event?: unknown) => { for (const callback of listeners.get(type) ?? []) callback(event); };
+    // Browser-dispatched events are trusted; tests pass { isTrusted: false } to model script-dispatched ones.
+    const fire = (type: string, event: object = { isTrusted: true }) => { for (const callback of listeners.get(type) ?? []) callback(event); };
     const restore = (y: number) => fire('message', new FrameMessageEvent(parent, { channel: 'ftown-preview-scroll-v1', documentId: id, kind: 'restore', x: 0, y }));
     const restored = () => posted.filter(message => message.kind === 'restored');
     return { view, fire, restore, restored, timers };
@@ -125,6 +126,16 @@ describe('preview protocol validation', () => {
     expect(frame.restored()).toEqual([{ channel: 'ftown-preview-scroll-v1', documentId: id, kind: 'restored', x: 0, y: 600 }]);
     frame.fire('resize');
     expect(frame.restored()).toHaveLength(1);
+  });
+
+  it('ignores script-dispatched resize events while waiting for a viewport', () => {
+    const frame = scrollFrame();
+    frame.restore(600);
+    frame.view.width = 1000; frame.view.height = 811;
+    frame.fire('resize', { isTrusted: false });
+    expect(frame.restored()).toEqual([]);
+    frame.fire('resize');
+    expect(frame.restored()).toEqual([{ channel: 'ftown-preview-scroll-v1', documentId: id, kind: 'restored', x: 0, y: 600 }]);
   });
 
   it('restores immediately into a sized frame and still completes when a frame never gets a size', () => {

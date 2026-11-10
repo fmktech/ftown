@@ -108,7 +108,7 @@ function previewScrollScript(documentId: string): string {
       // Scrolling a 0x0 viewport clamps to the top and would report (and so lose) the restored position:
       // wait for the first real size, bounded by the restore deadline.
       if (force !== true && !userMoved && desired && !sized()) {
-        if (!awaitingSize) { awaitingSize = true; window.addEventListener('resize', () => finish(), { passive: true }); timeout(() => finish(true), ${PREVIEW_SCROLL_RESTORE_MS}); }
+        if (!awaitingSize) { awaitingSize = true; window.addEventListener('resize', event => { if (event.isTrusted) finish(); }, { passive: true }); timeout(() => finish(true), ${PREVIEW_SCROLL_RESTORE_MS}); }
         return;
       }
       if (!userMoved && desired) apply(scrollTo, window, [{ left: desired.x, top: desired.y, behavior: 'instant' }]);
