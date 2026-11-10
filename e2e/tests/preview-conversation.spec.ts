@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, type Page } from "@playwright/test";
 import { test } from "../helpers/fixtures";
-import { login, sharedEmail, waitForBridgeOnline } from "../helpers/app";
+import { login, sharedAccountId, waitForBridgeOnline } from "../helpers/app";
 import { bridgeApiFetch } from "../helpers/bridge-api";
 import { atomicHtml, createPreviewFixture, previewHtml } from "../helpers/session-preview";
 import { makeConversationAgent } from "../helpers/preview-conversation";
@@ -28,7 +28,7 @@ test("real encrypted conversation reaches a supported agent inbox and retains CL
   const agent = await makeConversationAgent(fixture.directory);
   const session = await fixture.create(name, { shellType: "codex", command: agent.command });
   const shell = await fixture.create(other); await fixture.register(session, file); await fixture.register(shell, file);
-  await login(page, sharedEmail()); await waitForBridgeOnline(page); await select(page, name);
+  await login(page); await waitForBridgeOnline(page); await select(page, name);
   await openChat(page);
   const input = page.getByRole("textbox", { name: "Message the agent" });
   await input.fill("First line\nSecond line"); await page.getByRole("button", { name: "Send", exact: true }).click();

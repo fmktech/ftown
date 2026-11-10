@@ -3,13 +3,13 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { expect } from "@playwright/test";
 import { test } from "../helpers/fixtures";
-import { login, sharedEmail, waitForBridgeOnline } from "../helpers/app";
+import { login, sharedAccountId, waitForBridgeOnline } from "../helpers/app";
 import { bridgeApiFetch } from "../helpers/bridge-api";
 import { BRIDGE_HOME, E2E_DIR } from "../helpers/config";
 const execute = promisify(execFile);
 for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "mobile", width: 320, height: 844 }]) {
   test(`inbox queues a durable reply and dismissal survives reload on ${viewport.name}`, async ({ page }, info) => {
-    test.setTimeout(180_000); await page.setViewportSize({ width: viewport.width, height: viewport.height }); await login(page, sharedEmail()); await waitForBridgeOnline(page);
+    test.setTimeout(180_000); await page.setViewportSize({ width: viewport.width, height: viewport.height }); await login(page); await waitForBridgeOnline(page);
     const name = `Inbox reply ${Date.now().toString(36)}`; let id = "";
     try {
       const created = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name } }); expect(created.status, JSON.stringify(created.body)).toBe(201);

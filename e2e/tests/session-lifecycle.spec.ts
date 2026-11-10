@@ -4,7 +4,7 @@ import { rm, rmdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { test } from "../helpers/fixtures";
 import {
-  sharedEmail,
+  sharedAccountId,
   login,
   waitForBridgeOnline,
   createShellSession,
@@ -140,7 +140,7 @@ test.describe("session lifecycle", () => {
       expect(usage.body).toMatchObject({ usage: { inputTokens: 1234567, outputTokens: 456789, models: ["claude-sonnet-4-5-20250929"] } });
 
       await page.setViewportSize({ width: 1280, height: 900 });
-      await login(page, sharedEmail());
+      await login(page);
       await waitForBridgeOnline(page);
       await openSession(page, name);
       const header = page.getByTestId("terminal-header");
@@ -169,8 +169,8 @@ test.describe("session lifecycle", () => {
   });
 
   test("drag a root between two children to enter their subgroup", async ({ page }) => {
-    const email = sharedEmail();
-    await login(page, email);
+    const accountId = sharedAccountId();
+    await login(page);
     await waitForBridgeOnline(page);
 
     const suffix = Date.now();
@@ -204,8 +204,8 @@ test.describe("session lifecycle", () => {
   });
 
   test("drag a child to another parent and back to the bridge root", async ({ page }) => {
-    const email = sharedEmail();
-    await login(page, email);
+    const accountId = sharedAccountId();
+    await login(page);
     await waitForBridgeOnline(page);
 
     const suffix = Date.now();
@@ -247,15 +247,15 @@ test.describe("session lifecycle", () => {
 
   test("create → interact → stop → remove (controller CRUD round-trip)", async ({ page }, testInfo) => {
     test.setTimeout(150_000);
-    const email = sharedEmail();
-    await login(page, email);
+    const accountId = sharedAccountId();
+    await login(page);
     await waitForBridgeOnline(page);
 
     // --- CREATE + INTERACT (data plane up) ---
     const name = `crud-long-session-name-for-header-layout-and-truncation-${Date.now()}`;
-    const before = await sessionIdsFor(email);
+    const before = await sessionIdsFor(accountId);
     await createShellSession(page, name);
-    const sid = await waitForNewSessionId(email, before);
+    const sid = await waitForNewSessionId(accountId, before);
     await openSession(page, name);
     await runMarkerInTerminal(page, `CRUD${Date.now()}`);
 
@@ -325,15 +325,15 @@ test.describe("session lifecycle", () => {
     // Restart (≤40s presence wait) + two marker round-trips need headroom over the 90s default.
     test.setTimeout(180_000);
 
-    const email = sharedEmail();
-    await login(page, email);
+    const accountId = sharedAccountId();
+    await login(page);
     await waitForBridgeOnline(page);
 
     // --- CREATE + confirm running (marker round-trips) ---
     const name = `resurrect-${Date.now()}`;
-    const before = await sessionIdsFor(email);
+    const before = await sessionIdsFor(accountId);
     await createShellSession(page, name);
-    const sid = await waitForNewSessionId(email, before);
+    const sid = await waitForNewSessionId(accountId, before);
     await openSession(page, name);
     await runMarkerInTerminal(page, `PRE${Date.now()}`);
     await expect

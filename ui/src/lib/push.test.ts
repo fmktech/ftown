@@ -3,10 +3,15 @@ import { createECDH } from "node:crypto";
 import jwt from "jsonwebtoken";
 import { boundedJson, bridgePushIdentity, endpointAllowed, eventIdentity, parsePushEvent, parseSubscription, pushConfig, requireSameOrigin, cleanPushText } from "./push";
 const query=vi.hoisted(()=>vi.fn());
+const readLedger=vi.hoisted(()=>vi.fn());
 vi.mock("@/lib/db",()=>({getDb:()=>({query})}));
+vi.mock("@/lib/account-ledger-store",()=>({readLedger}));
+vi.mock("@/lib/auth-nonce-store",()=>({consumeNonce:vi.fn()}));
+vi.mock("@/lib/auth",()=>({auth:vi.fn()}));
+vi.mock("next-auth/providers/credentials",()=>({default:(config:unknown)=>config}));
 const ecdh=createECDH("prime256v1");ecdh.generateKeys();
 const subscription={endpoint:"https://fcm.googleapis.com/fcm/send/test",keys:{p256dh:ecdh.getPublicKey().toString("base64url"),auth:Buffer.alloc(16,1).toString("base64url")}};
-afterEach(()=>{vi.unstubAllEnvs();query.mockReset();});
+afterEach(()=>{vi.unstubAllEnvs();query.mockReset();readLedger.mockReset();});
 describe("push boundary",()=>{
   it("accepts genuine browser keys and confines endpoints to HTTPS push vendors",()=>{
     expect(parseSubscription(subscription).endpoint).toBe(subscription.endpoint);
@@ -53,14 +58,16 @@ describe("push boundary",()=>{
     vi.stubEnv("FTOWN_PUBLIC_URL","");
     expect(()=>requireSameOrigin(new Request("https://localhost:3000/api/push",{headers:{origin:"https://localhost:3000"}}))).toThrow();
   });
-  it("rejects browser tokens and inactive/cross-owner bridge identities",async()=>{
+  it("rejects browser tokens and inactive/sticky-revoked bridge identities",async()=>{
     vi.stubEnv("CENTRIFUGO_TOKEN_SECRET","unit-secret-long-enough-for-signing-fixtures");
+    const account="A".repeat(43);
     const make=(payload:object)=>new Request("https://app.test/api/push/events",{headers:{authorization:`Bearer ${jwt.sign(payload,process.env.CENTRIFUGO_TOKEN_SECRET!,{audience:"ftown:centrifugo",expiresIn:60})}`}});
-    await expect(bridgePushIdentity(make({sub:"a"}))).rejects.toMatchObject({status:401});
-    query.mockResolvedValueOnce([]);
-    await expect(bridgePushIdentity(make({sub:"a",info:{bridgeId:"b"}}))).rejects.toMatchObject({status:403});
-    query.mockResolvedValueOnce([{bridge_id:"b"}]);
-    await expect(bridgePushIdentity(make({sub:"a",info:{bridgeId:"b"}}))).resolves.toEqual({owner:"a",bridgeId:"b"});
+    const roster=(ids:string[])=>({bridges:ids.map(bridgeId=>({bridgeId})),devices:[]});
+    await expect(bridgePushIdentity(make({sub:account}))).rejects.toMatchObject({status:401});
+    readLedger.mockResolvedValueOnce({checkpoint:roster(["b"]),trusted:roster([]),ledger:{},sticky:{deviceIds:[],bridgeIds:["b"]}});
+    await expect(bridgePushIdentity(make({sub:account,info:{bridgeId:"b",ownerId:account}}))).rejects.toMatchObject({status:401,code:"unauthorized"});
+    readLedger.mockResolvedValueOnce({checkpoint:roster(["b"]),trusted:roster(["b"]),ledger:{},sticky:{deviceIds:[],bridgeIds:[]}});
+    await expect(bridgePushIdentity(make({sub:account,info:{bridgeId:"b",ownerId:account}}))).resolves.toEqual({owner:account,bridgeId:"b"});
   });
   it("stays unavailable with missing or invalid VAPID configuration",()=>{
     vi.stubEnv("VAPID_PUBLIC_KEY","");expect(pushConfig()).toBeNull();

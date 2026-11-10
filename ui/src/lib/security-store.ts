@@ -14,7 +14,7 @@ export async function parseDirectoryEntry(value: unknown): Promise<EndpointDirec
     || (value.bridgeId !== null && !token(value.bridgeId)) || !object(value.endpoint)) return fail();
   const endpoint = value.endpoint;
   if (Object.keys(endpoint).sort().join(',') !== 'id,kind,ownerId,publicKey,version' || endpoint.version !== 1
-    || typeof endpoint.ownerId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(endpoint.ownerId)
+    || typeof endpoint.ownerId !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(endpoint.ownerId)
     || (endpoint.kind !== 'browser' && endpoint.kind !== 'bridge') || typeof endpoint.id !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(endpoint.id)
     || typeof endpoint.publicKey !== 'string' || !/^[A-Za-z0-9_-]{87}$/.test(endpoint.publicKey)) return fail();
   try { await importPublicKey(endpoint.publicKey); } catch { return fail(); }
@@ -35,20 +35,22 @@ export async function boundedSecurityJson(request: Request, maxBytes = 524_288):
 }
 export class SecurityStore {
   constructor(private query: Query = (text, params) => getDb().query(text, params)) {}
-  async register(ownerId: string, entry: EndpointDirectoryEntry): Promise<void> {
-    if (entry.endpoint.ownerId !== ownerId) throw new SecurityStoreError('forbidden', 403);
-    const result = await this.query(`INSERT INTO security_endpoint_directory(owner_id,endpoint_id,bridge_id,entry)
-      SELECT $1,$2,$3,$4::jsonb WHERE EXISTS(SELECT 1 FROM security_endpoint_directory WHERE owner_id=$1 AND endpoint_id=$2)
-      OR (SELECT COUNT(*) FROM security_endpoint_directory WHERE owner_id=$1)<1000
-      ON CONFLICT(owner_id,endpoint_id) DO UPDATE SET entry=EXCLUDED.entry,bridge_id=EXCLUDED.bridge_id,updated_at=NOW()
-      RETURNING endpoint_id`, [ownerId, entry.endpoint.id, entry.bridgeId, JSON.stringify(entry)]);
-    if (!result.length) throw new SecurityStoreError('capacity_exceeded', 409);
+  /** accountId scopes every row; entry.endpoint.ownerId carries the same accountId. */
+  async register(accountId: string, entry: EndpointDirectoryEntry): Promise<void> {
+    if (entry.endpoint.ownerId !== accountId) throw new SecurityStoreError('forbidden', 403);
+    const result = await this.query(`INSERT INTO security_endpoint_directory(account_id,endpoint_id,bridge_id,entry)
+      SELECT $1,$2,$3,$4::jsonb WHERE EXISTS(SELECT 1 FROM security_endpoint_directory WHERE account_id=$1 AND endpoint_id=$2)
+      OR (SELECT COUNT(*) FROM security_endpoint_directory WHERE account_id=$1)<1000
+      ON CONFLICT(account_id,endpoint_id) DO UPDATE SET entry=EXCLUDED.entry,updated_at=NOW()
+      WHERE security_endpoint_directory.bridge_id IS NOT DISTINCT FROM EXCLUDED.bridge_id
+      RETURNING endpoint_id`, [accountId, entry.endpoint.id, entry.bridgeId, JSON.stringify(entry)]);
+    if (!result.length) throw new SecurityStoreError('conflict', 409);
   }
-  async directory(ownerId: string): Promise<EndpointDirectory> {
-    const rows = await this.query('SELECT entry FROM security_endpoint_directory WHERE owner_id=$1 ORDER BY endpoint_id LIMIT 1001', [ownerId]);
+  async directory(accountId: string): Promise<EndpointDirectory> {
+    const rows = await this.query('SELECT entry FROM security_endpoint_directory WHERE account_id=$1 ORDER BY endpoint_id LIMIT 1001', [accountId]);
     if (rows.length > 1000) throw new SecurityStoreError('capacity_exceeded', 409);
     const endpoints = await Promise.all(rows.map(row => parseDirectoryEntry(row.entry)));
-    if (endpoints.some(entry => entry.endpoint.ownerId !== ownerId)) throw new SecurityStoreError('storage_unavailable', 503);
-    return { ownerId, endpoints };
+    if (endpoints.some(entry => entry.endpoint.ownerId !== accountId)) throw new SecurityStoreError('storage_unavailable', 503);
+    return { ownerId: accountId, endpoints };
   }
 }

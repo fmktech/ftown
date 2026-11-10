@@ -87,4 +87,66 @@ describe('preview protocol validation', () => {
     click('#section'); expect(contextWindow.location.hash).toBe('#section'); expect(posted).toHaveLength(1);
   });
 
+  // The sandboxed frame is out of process: it can finish loading before the embedder gives it a size.
+  function scrollFrame() {
+    const script = [...previewDocument('<p>tall</p>', id).matchAll(/<script>([\s\S]*?)<\/script>/g)].map(match => match[1]).find(text => text.includes('ftown-preview-scroll-v1'));
+    if (!script) throw new Error('expected the scroll script');
+    const listeners = new Map<string, ((event?: unknown) => void)[]>();
+    const posted: Record<string, unknown>[] = [];
+    const timers: (() => void)[] = [];
+    const view = { width: 0, height: 0, y: 0, documentHeight: 2675 };
+    const parent = { postMessage: (value: Record<string, unknown>) => { posted.push(value); } };
+    class FrameMessageEvent { constructor(private readonly from: unknown, private readonly payload: unknown) {} get source() { return this.from; } get data() { return this.payload; } }
+    const frame = {
+      parent,
+      setTimeout: (callback: () => void) => { timers.push(callback); return timers.length; },
+      setInterval: () => 0, clearInterval: () => {},
+      // A real viewport clamps scrolling to (document height - viewport height); a 0x0 one cannot scroll at all.
+      scrollTo: ({ top }: { top: number }) => { view.y = view.height > 0 ? Math.max(0, Math.min(top, view.documentHeight - view.height)) : 0; },
+      addEventListener: (type: string, callback: (event?: unknown) => void) => { listeners.set(type, [...(listeners.get(type) ?? []), callback]); },
+    };
+    Object.defineProperties(frame, {
+      scrollX: { get: () => 0 }, scrollY: { get: () => view.y },
+      innerWidth: { get: () => view.width }, innerHeight: { get: () => view.height },
+    });
+    runInNewContext(script, { window: frame, document: { readyState: 'complete', addEventListener: () => {} }, MessageEvent: FrameMessageEvent, Window: function Window() {} });
+    // Browser-dispatched events are trusted; tests pass { isTrusted: false } to model script-dispatched ones.
+    const fire = (type: string, event: object = { isTrusted: true }) => { for (const callback of listeners.get(type) ?? []) callback(event); };
+    const restore = (y: number) => fire('message', new FrameMessageEvent(parent, { channel: 'ftown-preview-scroll-v1', documentId: id, kind: 'restore', x: 0, y }));
+    const restored = () => posted.filter(message => message.kind === 'restored');
+    return { view, fire, restore, restored, timers };
+  }
+
+  it('restores the scroll position once a frame that loaded unsized gets its viewport', () => {
+    const frame = scrollFrame();
+    frame.restore(600);
+    // Restoring into a 0x0 viewport would land at the top and report y=0 to the parent, losing the position.
+    expect(frame.restored()).toEqual([]);
+    frame.view.width = 1000; frame.view.height = 811; frame.fire('resize');
+    expect(frame.restored()).toEqual([{ channel: 'ftown-preview-scroll-v1', documentId: id, kind: 'restored', x: 0, y: 600 }]);
+    frame.fire('resize');
+    expect(frame.restored()).toHaveLength(1);
+  });
+
+  it('ignores script-dispatched resize events while waiting for a viewport', () => {
+    const frame = scrollFrame();
+    frame.restore(600);
+    frame.view.width = 1000; frame.view.height = 811;
+    frame.fire('resize', { isTrusted: false });
+    expect(frame.restored()).toEqual([]);
+    frame.fire('resize');
+    expect(frame.restored()).toEqual([{ channel: 'ftown-preview-scroll-v1', documentId: id, kind: 'restored', x: 0, y: 600 }]);
+  });
+
+  it('restores immediately into a sized frame and still completes when a frame never gets a size', () => {
+    const sized = scrollFrame();
+    sized.view.width = 1000; sized.view.height = 811;
+    sized.restore(600);
+    expect(sized.restored()).toEqual([{ channel: 'ftown-preview-scroll-v1', documentId: id, kind: 'restored', x: 0, y: 600 }]);
+    const unsized = scrollFrame();
+    unsized.restore(600);
+    expect(unsized.restored()).toEqual([]);
+    for (const timer of [...unsized.timers]) timer();
+    expect(unsized.restored()).toEqual([{ channel: 'ftown-preview-scroll-v1', documentId: id, kind: 'restored', x: 0, y: 0 }]);
+  });
 });

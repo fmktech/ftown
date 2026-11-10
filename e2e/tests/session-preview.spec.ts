@@ -1,11 +1,11 @@
 import { join } from "node:path";
 import { symlink, unlink, writeFile } from "node:fs/promises";
-import { expect, type CDPSession, type Page, type TestInfo } from "@playwright/test";
+import { expect, type CDPSession, type Locator, type Page, type TestInfo } from "@playwright/test";
 import { test } from "../helpers/fixtures";
-import { login, sharedEmail, waitForBridgeOnline, runMarkerInTerminal } from "../helpers/app";
+import { login, sharedAccountId, waitForBridgeOnline, runMarkerInTerminal } from "../helpers/app";
 import { bridgeApiFetch, readBridgePointer } from "../helpers/bridge-api";
 import { UI_BASE_URL } from "../helpers/config";
-import { publishSecurityNudge } from "../helpers/security-nudge";
+import { publishLedgerHeadNotice } from "../helpers/security-nudge";
 import { assertSanitized, atomicHtml, createPreviewFixture, observePreviewTransport, previewHtml, sessionRecord } from "../helpers/session-preview";
 
 const iframe = (page: Page, fileName: string) => page.locator(`iframe[title="HTML preview: ${fileName}"]`);
@@ -20,6 +20,30 @@ async function selectSession(page: Page, name: string): Promise<void> {
     .filter({ has: page.getByText(name, { exact: true }) });
   await expect(row).toBeVisible();
   await row.getByText(name, { exact: true }).click();
+}
+
+/**
+ * Click a dashboard control that floats over the preview iframe (conversation launcher and panel, link
+ * confirmation). The iframe is sandboxed, so Chromium renders it out of process and routes pointer input
+ * from the browser with compositor hit-test data that can lag a just-inserted overlay: Playwright's DOM
+ * hit-target check passes in the dashboard, yet the trusted click is delivered to the preview document.
+ * Wait until the browser routes a real pointer move to the control itself, then click it for real.
+ */
+async function clickOverPreview(control: Locator): Promise<void> {
+  await control.evaluate(element => {
+    const probe = element as Element & { e2ePointerReached?: boolean };
+    probe.e2ePointerReached = false;
+    element.addEventListener("pointermove", event => { if (event.isTrusted) probe.e2ePointerReached = true; });
+  });
+  let attempt = 0;
+  await expect.poll(async () => {
+    const box = await control.boundingBox();
+    if (!box) return false;
+    // Alternate between two points so every hover is a real pointer move.
+    await control.hover({ position: { x: box.width / 2 + (attempt++ % 2 ? 2 : -2), y: box.height / 2 } });
+    return control.evaluate(element => (element as Element & { e2ePointerReached?: boolean }).e2ePointerReached === true);
+  }, { message: "the browser routes pointer input to the control, not to the preview iframe under it" }).toBe(true);
+  await control.click();
 }
 
 async function screenshot(page: Page, info: TestInfo, name: string): Promise<void> {
@@ -103,7 +127,7 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     await atomicHtml(otherPath, previewHtml(`OTHER_${suffix}`, 1));
     const target = await fixture.create(targetName);
     const other = await fixture.create(otherName);
-    await login(page, sharedEmail());
+    await login(page);
     await waitForBridgeOnline(page);
     await selectSession(page, targetName);
     await expect(separator(page)).toHaveCount(0);
@@ -144,7 +168,7 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
       expect(dialogBox!.y + dialogBox!.height).toBeLessThanOrEqual(paneBox!.y + paneBox!.height + 1);
       await expect(prompt.getByRole("button", { name: "Open", exact: true })).toBeVisible();
       const popupPromise = context.waitForEvent("page");
-      await prompt.getByRole("button", { name: "Open", exact: true }).click();
+      await clickOverPreview(prompt.getByRole("button", { name: "Open", exact: true }));
       const popup = await popupPromise;
       await expect(popup.getByRole("heading", { name: "External preview destination" })).toBeVisible();
       expect(new URL(popup.url()).hostname).toBe("preview.example.test");
@@ -172,7 +196,7 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
       await expect(openButton).toBeVisible();
       const openBox = await openButton.boundingBox();
       expect(openBox!.y + openBox!.height).toBeLessThanOrEqual(paneBox!.y + paneBox!.height + 1);
-      await longPrompt.getByRole("button", { name: "Cancel" }).click();
+      await clickOverPreview(longPrompt.getByRole("button", { name: "Cancel" }));
       await expect(longPrompt).toHaveCount(0);
     }
     expect(externalHeaders).toHaveLength(2);
@@ -199,11 +223,11 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
       });
       observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ["style", "hidden", "class"] });
     }, suffix);
-    // The account client no longer polls; it refreshes only on an owner nudge.
-    // Publish a real account nudge and observe the resulting account read.
-    const accountRead = page.waitForResponse(response => new URL(response.url()).pathname === "/api/security/account"
+    // The ledger client does not poll; it re-reads the ledger when the relay announces a new head.
+    // Announce one and observe the resulting ledger read: that trust refresh must not interrupt the preview.
+    const accountRead = page.waitForResponse(response => new URL(response.url()).pathname === "/api/account/ledger"
       && response.request().method() === "GET" && response.status() === 200, { timeout: 30_000 });
-    await publishSecurityNudge(page, sharedEmail(), "account");
+    await publishLedgerHeadNotice(page, sharedAccountId());
     await accountRead;
     const afterTrustRefresh = transport.reads.filter(entry => entry.previewId === registration && entry.state === "unchanged").length;
     await expect.poll(() => transport.reads.filter(entry => entry.previewId === registration && entry.state === "unchanged").length,
@@ -268,7 +292,7 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     if (!expandedMain || !expandedPreview) throw new Error("Expanded preview geometry unavailable");
     expect(Math.abs(expandedPreview.x - expandedMain.x)).toBeLessThanOrEqual(2);
     expect(Math.abs(expandedPreview.width - expandedMain.width)).toBeLessThanOrEqual(2);
-    await page.getByRole("button", { name: "Open conversation", exact: true }).click();
+    await clickOverPreview(page.getByRole("button", { name: "Open conversation", exact: true }));
     // The preview is expanded (the Collapse button was asserted focused just
     // above) and the conversation is open. The link confirmation must paint
     // above the chat: Open/Cancel visible and clickable, and Escape must dismiss
@@ -281,7 +305,7 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     const chatCancel = chatPrompt.getByRole("button", { name: "Cancel", exact: true });
     await expect(chatCancel).toBeVisible();
     // A plain pointer click fails if the conversation overlay intercepts it.
-    await chatCancel.click();
+    await clickOverPreview(chatCancel);
     await expect(chatPrompt).toHaveCount(0);
     await documentFrame(page, fileName).locator("#external-link").click();
     await expect(chatPrompt).toBeVisible();
@@ -301,11 +325,11 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     const noPopup = context.waitForEvent("page", { timeout: 500 }).catch(() => null);
     await page.keyboard.press("Enter");
     expect(await noPopup).toBeNull();
-    await injectedPrompt.getByRole("button", { name: "Cancel", exact: true }).click();
+    await clickOverPreview(injectedPrompt.getByRole("button", { name: "Cancel", exact: true }));
     await expect(injectedPrompt).toHaveCount(0);
     await page.getByRole("textbox", { name: "Message the agent" }).fill("Draft survives preview refresh");
     await screenshot(page, info, "preview-expanded-conversation");
-    await page.getByRole("button", { name: "Collapse conversation", exact: true }).click();
+    await clickOverPreview(page.getByRole("button", { name: "Collapse conversation", exact: true }));
     await screenshot(page, info, "preview-expanded");
     await expect(page.locator(`.xterm[data-preview-fixture-terminal="${suffix}"]`)).toHaveCount(1);
     await expect(page.locator(".xterm")).not.toBeVisible();
@@ -331,9 +355,9 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     await noHorizontalOverflow(page);
     await screenshot(page, info, "preview-desktop");
     await page.getByRole("button", { name: "Expand preview", exact: true }).click();
-    await page.getByRole("button", { name: "Open conversation", exact: true }).click();
+    await clickOverPreview(page.getByRole("button", { name: "Open conversation", exact: true }));
     await expect(page.getByRole("textbox", { name: "Message the agent" })).toHaveValue("Draft survives preview refresh");
-    await page.getByRole("button", { name: "Collapse conversation", exact: true }).click();
+    await clickOverPreview(page.getByRole("button", { name: "Collapse conversation", exact: true }));
     await page.getByRole("button", { name: "Collapse preview", exact: true }).click();
 
     await documentFrame(page, fileName).getByRole("button", { name: "Count: 0", exact: true }).click();
@@ -390,13 +414,22 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     }
     expect(sessionRecord((await bridgeApiFetch("GET", `/api/sessions/${target}`)).body).preview).toEqual({ id: replacement, fileName });
 
-    const localBefore = transport.reads.filter((entry) => entry.transport === "local").length;
+    // The shared bridge is an account bridge: its browsers come only from the passkey ledger, so its
+    // /local page opens no invitation-based local HTTP session (LocalDashboard: account_managed) and
+    // sends the owner back to the account dashboard. Back there, after a full page load, the preview
+    // is read again end-to-end encrypted and still shows the current revision.
+    const readsBefore = transport.reads.filter((entry) => entry.previewId === replacement).length;
+    const localRequestsBefore = transport.encryptedLocalRequests;
     await page.goto(`/local?port=${pointer.port}`);
+    await expect(page.getByRole("heading", { name: "This computer belongs to your account", exact: true })).toBeVisible();
+    await page.getByRole("link", { name: "Open your dashboard", exact: true }).click();
+    await page.waitForURL("**/dashboard");
     await waitForBridgeOnline(page);
     await selectSession(page, targetName);
     await expect(documentFrame(page, fileName).getByRole("heading", { name: `${marker} version 4`, exact: true })).toBeVisible();
-    await expect.poll(() => transport.reads.filter((entry) => entry.transport === "local").length).toBeGreaterThan(localBefore);
-    expect(transport.encryptedLocalRequests).toBeGreaterThan(0);
+    await expect.poll(() => transport.reads.filter((entry) => entry.previewId === replacement).length).toBeGreaterThan(readsBefore);
+    expect(transport.encryptedLocalRequests).toBe(localRequestsBefore);
+    expect(transport.reads.some((entry) => entry.transport === "local")).toBe(false);
     expect(transport.leaked).toBe(false);
     await selectSession(page, otherName);
     const clear = await fixture.cli(other, ["preview", "--clear"]);
@@ -434,7 +467,7 @@ test.describe("mobile preview", () => {
     try {
       await atomicHtml(join(fixture.directory, fileName), previewHtml(`MOBILE_${suffix}`, 1));
       const session = await fixture.create(name);
-      await login(page, sharedEmail());
+      await login(page);
       await waitForBridgeOnline(page);
       await selectSession(page, name);
       await page.locator(".xterm").evaluate((element, value) => element.setAttribute("data-preview-fixture-terminal", value), suffix);
@@ -452,9 +485,11 @@ test.describe("mobile preview", () => {
       }
       await noHorizontalOverflow(page);
       await page.getByRole("button", { name: "Expand preview", exact: true }).click();
-      await page.getByRole("button", { name: "Open conversation", exact: true }).click();
+      await clickOverPreview(page.getByRole("button", { name: "Open conversation", exact: true }));
+      await expect(page.locator("#preview-conversation")).toBeVisible();
       await screenshot(page, info, "preview-mobile-conversation");
-      await page.getByRole("button", { name: "Collapse conversation", exact: true }).click();
+      await clickOverPreview(page.getByRole("button", { name: "Collapse conversation", exact: true }));
+      await expect(page.locator("#preview-conversation")).toHaveCount(0);
       await page.getByRole("button", { name: "Collapse preview", exact: true }).click();
       await screenshot(page, info, "preview-mobile");
       await iframe(page, fileName).evaluate((element, value) => element.setAttribute("data-preview-node", value), suffix);

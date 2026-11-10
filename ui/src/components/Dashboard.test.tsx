@@ -12,7 +12,6 @@ import { useBridgeUpdates } from "@/hooks/useBridgeUpdates";
 
 const state = vi.hoisted(() => ({
   sessions: [] as Session[],
-  pending: [] as Array<{ status: string }>,
   bridges: [{ clientId: "client-a", bridgeId: "bridge-a", hostname: "alpha", connectedAt: "2026-10-16T00:00:00Z" }],
   activity: new Map<string, SessionActivity>(),
   createSession: vi.fn().mockResolvedValue(undefined),
@@ -28,7 +27,6 @@ const state = vi.hoisted(() => ({
   terminalSendInput: vi.fn(),
 }));
 
-vi.mock("@/hooks/usePendingApprovals", () => ({ usePendingApprovals: () => ({ client: null, snapshot: { inbox: state.pending } }) }));
 vi.mock("@/hooks/useSessions", () => ({ useSessions: () => ({
   sessions: state.sessions, createSession: state.createSession, stopSession: state.stopSession,
   retrySession: state.retrySession, removeSession: state.removeSession,
@@ -63,11 +61,11 @@ vi.mock("./CloudConnectionNotice", () => ({ CloudConnectionNotice: ({ children }
 function session(id: string, name: string, fields: Partial<Session> = {}): Session {
   return { id, name, bridgeId: "bridge-a", status: "running", shellType: "shell", createdAt: "2026-10-16T00:00:00Z", updatedAt: "2026-10-16T00:00:00Z", ...fields };
 }
-function dashboard(localMode = false, readyAccount = false) {
+function dashboard(localMode = false, accountId: string | null = null) {
   const client = { securityRuntime: { ownerId: "00000000-0000-4000-8000-000000000001", state: (bridgeId: string) => ({ bridgeId, status: "ready", endpoint: null }),
     snapshot: () => [], onChange: () => () => {}, bridge: () => ({ permissions: ["read", "control"] }), identity: { endpoint: { id: "approved-browser" } } } } as unknown as MessageClient;
   return render(<Dashboard client={client} connectionStatus="connected" connectionError={null}
-    userId="user" token="test" centrifugoUrl="ws://localhost" transport={null} onDisconnect={vi.fn()} localMode={localMode} accountState={readyAccount ? { status: "ready", identity: null, signing: null, trust: null, legacyBridges: [], historyExists: false, code: null, offline: false } : undefined} />);
+    userId="user" token="test" centrifugoUrl="ws://localhost" transport={null} onDisconnect={vi.fn()} localMode={localMode} accountId={accountId} />);
 }
 
 beforeEach(() => {
@@ -87,7 +85,6 @@ beforeEach(() => {
   Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value: function(this: HTMLDialogElement) { this.open = false; } });
   vi.clearAllMocks();
   state.activity = new Map();
-  state.pending = [];
   state.rpcCommands = [];
   state.createSession.mockResolvedValue(undefined);
   state.clearSessionAttention.mockResolvedValue(undefined);
@@ -190,7 +187,6 @@ describe("bridge connection command", () => {
     expect(screen.getByText(/After the first start, approve the computer here:/)).toBeTruthy();
     expect(screen.queryByText(/Run this on the machine/)).toBeNull();
     expect(screen.getByRole("link", { name: "Approve a device" }).getAttribute("href")).toBe("/pair");
-    expect(screen.getByRole("link", { name: "Manage devices" }).getAttribute("href")).toBe("/devices");
   });
   it("copies exactly the setup command and marks only that button copied", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
@@ -402,6 +398,18 @@ describe("reconnect and refresh", () => {
   });
 });
 
+describe("account mode navigation", () => {
+  it("offers no switch to /local: the account dashboard already reaches this computer, loopback included", () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    dashboard(false, "A".repeat(43));
+    const nav = screen.getByRole("navigation", { name: "Dashboard actions" });
+    expect(within(nav).queryByRole("link", { name: "Use This computer" })).toBeNull();
+    expect(within(nav).getByRole("button", { name: "Open security" })).toBeTruthy();
+    cleanup(); dashboard();
+    expect(within(screen.getByRole("navigation", { name: "Dashboard actions" })).getByRole("link", { name: "Use This computer" })).toBeTruthy();
+  });
+});
+
 describe("navigation and selected-session actions", () => {
   it("keeps one notification controller in a dismissible mobile disclosure and restores focus", async () => {
     window.matchMedia = vi.fn().mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() });
@@ -501,21 +509,6 @@ describe("sidebar PR review navigation", () => {
     await waitFor(() => expect(screen.getByRole("tabpanel", { name: "PR review" })).toBeTruthy());
     if (!desktop) expect(screen.getByRole("tab", { name: "PR review" }).getAttribute("aria-selected")).toBe("true");
     expect(screen.getByTestId("terminal").textContent).toBe("target");
-  });
-});
-
-describe("device review navigation", () => {
-  it.each([true, false])("shows the pending count and opens devices (desktop=%s)", async desktop => {
-    window.matchMedia = vi.fn().mockReturnValue({ matches: desktop, addEventListener: vi.fn(), removeEventListener: vi.fn() });
-    state.pending = [{status: "pending"}, {status: "approved"}, {status: "pending"}];
-    dashboard(false, true);
-    if (!desktop) fireEvent.click(screen.getByRole("button", { name: "Open navigation menu" }));
-    const review = screen.getByRole("button", { name: "Review 2 pending device approvals" });
-    expect(review.textContent).toContain("2");
-    expect(review.querySelector("svg")).toBeTruthy();
-    fireEvent.click(review);
-    expect(await screen.findByRole("dialog", { name: "Security" })).toBeTruthy();
-    if (!desktop) expect(screen.getByRole("button", { name: "Open navigation menu" }).getAttribute("aria-expanded")).toBe("false");
   });
 });
 

@@ -60,6 +60,6 @@ test('actual operations determine permission and unknown methods/routes/frames d
     ['POST', '/api/sessions/session/usage'], ['PUT', '/api/sessions/session'], ['GET', '/api/browser/devices'],
     ['DELETE', '/api/sessions/session/attention'],
   ]) assert.throws(() => classifyHttp(method, path), { code: 'permission_denied' });
-  for (const command of ['unknown', 'mcp_request', 'security_activity', 'security_activate_mcp', 'security_update_policy']) assert.throws(() => classifyCommand(command), { code: 'permission_denied' });
+  for (const command of ['unknown', 'mcp_request', 'security_activity', 'security_activate_mcp', 'security_update_policy', 'security_account_adopt']) assert.throws(() => classifyCommand(command), { code: 'permission_denied' });
   for (const frame of ['screen', 'output', 'arbitrary']) assert.throws(() => classifyTerminal(frame), { code: 'permission_denied' });
 });

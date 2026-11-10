@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { expect, type Locator, type Page } from "@playwright/test";
 import { test } from "../helpers/fixtures";
-import { login, sharedEmail, waitForBridgeOnline } from "../helpers/app";
+import { login, sharedAccountId, waitForBridgeOnline } from "../helpers/app";
 import { bridgeApiFetch } from "../helpers/bridge-api";
 import { BRIDGE_HOME, E2E_DIR } from "../helpers/config";
 
@@ -147,7 +147,7 @@ for (const viewport of [
     await context.route("https://github.com/**", route => route.fulfill({
       status: 200, contentType: "text/html", body: "<!doctype html><title>PR destination intercepted</title>",
     }));
-    await login(page, sharedEmail());
+    await login(page);
     await waitForBridgeOnline(page);
 
     const suffix = `${testInfo.workerIndex}-${Date.now().toString(36)}`;

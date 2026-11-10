@@ -1,4 +1,4 @@
-import { accessSync, closeSync, constants, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, unlinkSync, writeSync } from 'node:fs';
+import { accessSync, closeSync, constants, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeSync, type Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -19,6 +19,19 @@ function errCode(err: unknown): string | undefined {
 function removeIfPresent(path: string): void {
   try { unlinkSync(path); }
   catch (err) { if (errCode(err) !== 'ENOENT') throw err; }
+}
+
+/** Removes `*.tmp` files (and links) left in `dir` by interrupted atomic writes; never descends into directories. */
+function sweepTemporaries(dir: string): void {
+  let entries: Dirent[];
+  try { entries = readdirSync(dir, { withFileTypes: true }); }
+  catch (err) {
+    if (errCode(err) === 'ENOENT') return;
+    throw err;
+  }
+  for (const entry of entries) {
+    if (entry.name.endsWith('.tmp') && (entry.isFile() || entry.isSymbolicLink())) removeIfPresent(join(dir, entry.name));
+  }
 }
 
 function syncDir(dir: string): void {
@@ -79,13 +92,24 @@ export function completePendingIdentityReset(dataDir: string): IdentityResetResu
   // A crash after step 5 already holds the new id; the previous one is unknowable then.
   if (oldBridgeId === marker.newBridgeId) oldBridgeId = null;
 
+  // v1 account state (also what hasLegacyAccountState looks for, so a finished reset never triggers another).
   removeIfPresent(join(dataDir, 'refresh-token'));
   for (const name of ['account-enrollment.json', 'pending-approval-status.json', 'pending-approval-confirmation.json', 'local-cli-identity.json']) {
     removeIfPresent(join(securityDir, name));
   }
   removeIfPresent(join(dataDir, 'browser-devices.json'));
   removeIfPresent(join(securityDir, 'policy.json'));
+  // Whatever its owner: a v1 account identity, or Solo/--local's `solo:<bridgeId>` one, which names the bridge-id this reset
+  // rotates and so could never be loaded again (Solo/--local then start fresh, as before the ledger). Only account mode starts a
+  // reset; a Solo/--local identity never triggers one (hasLegacyAccountState ignores it).
   removeIfPresent(join(securityDir, 'bridge-identity.json'));
+  // The ledger bridge: its keys, its replica (including the sticky revocations of the old identity), its offline-grace clock and
+  // the last relay URL its server named.
+  removeIfPresent(join(securityDir, 'ledger.json'));
+  removeIfPresent(join(securityDir, 'ledger-clock.json'));
+  removeIfPresent(join(securityDir, 'relay-url.json'));
+  removeIfPresent(join(securityDir, 'ledger-identity.json'));
+  sweepTemporaries(securityDir);
   // Deletions must be durable before the new id lands.
   syncDir(securityDir);
   syncDir(dataDir);
@@ -97,9 +121,10 @@ export function completePendingIdentityReset(dataDir: string): IdentityResetResu
 }
 
 // Every value-taking `ftown start` option (index.ts); each consumes its next token verbatim.
-const VALUE_OPTIONS = ['--port', '--token', '--account', '--api-url', '--data-dir', '--bridge-id'];
-const DROPPED_OPTIONS = ['--bridge-id', '--account', '--token'];
+const VALUE_OPTIONS = ['--port', '--api-url', '--data-dir', '--bridge-id'];
+const DROPPED_OPTIONS = ['--bridge-id'];
 
+/** The same start without the old identity's --bridge-id and without --new-identity; an unpaired start pairs by itself. */
 export function argvForPairingRestart(argv: readonly string[]): string[] {
   const out: string[] = [];
   for (let i = 0; i < argv.length; i++) {
@@ -117,7 +142,6 @@ export function argvForPairingRestart(argv: readonly string[]): string[] {
     }
     out.push(a);
   }
-  if (!out.includes('--bootstrap')) out.push('--bootstrap');
   return out;
 }
 

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { expect, type Locator, type Page } from "@playwright/test";
 import { test } from "../helpers/fixtures";
-import { login, sharedEmail, waitForBridgeOnline } from "../helpers/app";
+import { login, sharedAccountId, waitForBridgeOnline } from "../helpers/app";
 import { bridgeApiFetch } from "../helpers/bridge-api";
 import { BRIDGE_HOME, E2E_DIR } from "../helpers/config";
 
@@ -93,7 +93,7 @@ async function inboxMessages(sessionId: string): Promise<InboxPage["messages"]> 
 test("mail question: pick an option, add a note, answer is mailed and recorded", async ({ page }) => {
   test.setTimeout(180_000);
   await page.setViewportSize({ width: 1280, height: 900 });
-  await login(page, sharedEmail()); await waitForBridgeOnline(page);
+  await login(page); await waitForBridgeOnline(page);
   const name = `Attention mail ${Date.now().toString(36)}`; let id = "";
   try {
     id = await createSession(name);
@@ -128,7 +128,7 @@ test("mail question: pick an option, add a note, answer is mailed and recorded",
 test("waiting CLI receives a multi-select answer directly and no mail is queued", async ({ page }) => {
   test.setTimeout(180_000);
   await page.setViewportSize({ width: 1280, height: 900 });
-  await login(page, sharedEmail()); await waitForBridgeOnline(page);
+  await login(page); await waitForBridgeOnline(page);
   const name = `Attention wait ${Date.now().toString(36)}`; let id = ""; let waiter: ReturnType<typeof startChild> | undefined;
   try {
     id = await createSession(name);
@@ -157,7 +157,7 @@ test("waiting CLI receives a multi-select answer directly and no mail is queued"
 test("AskUserQuestion hook blocks until the dashboard answers it", async ({ page }) => {
   test.setTimeout(180_000);
   await page.setViewportSize({ width: 1280, height: 900 });
-  await login(page, sharedEmail()); await waitForBridgeOnline(page);
+  await login(page); await waitForBridgeOnline(page);
   const name = `Attention hook ${Date.now().toString(36)}`; let id = ""; let hook: ReturnType<typeof startChild> | undefined;
   try {
     id = await createSession(name);
@@ -199,7 +199,7 @@ test("AskUserQuestion hook blocks until the dashboard answers it", async ({ page
 test("answer form has no horizontal overflow at 320 px", async ({ page }, info) => {
   test.setTimeout(180_000);
   await page.setViewportSize({ width: 320, height: 844 });
-  await login(page, sharedEmail()); await waitForBridgeOnline(page);
+  await login(page); await waitForBridgeOnline(page);
   const name = `Attention narrow ${Date.now().toString(36)}`; let id = "";
   try {
     id = await createSession(name);

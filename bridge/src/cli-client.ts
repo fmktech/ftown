@@ -52,15 +52,34 @@ export async function apiResponse(pointer: BridgePointer, method: string, path: 
   return { status: response.status, body: response.body };
 }
 
+/** A security command the bridge refused, with its typed code (e.g. `account_managed`) and its fixed message. */
+export class SecurityCommandError extends Error {
+  constructor(readonly code: string | null, message: string) {
+    super(message);
+    this.name = 'SecurityCommandError';
+  }
+}
+
+/** The bridge's refusal as a SecurityCommandError: a `[a-z_]` code and a printable message, both bounded. */
+export function securityCommandError(response: { [key: string]: ApplicationJson }): SecurityCommandError {
+  const data = response.data;
+  const rawCode = data && typeof data === 'object' && !Array.isArray(data) ? data.code : undefined;
+  const code = typeof rawCode === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(rawCode) ? rawCode : null;
+  const rawMessage = typeof response.error === 'string' ? response.error.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').trim().slice(0, 300) : '';
+  const message = rawMessage || 'Encrypted security command failed';
+  return new SecurityCommandError(code, code !== null && !message.includes(code) ? `${message} (${code})` : message);
+}
+
 export async function securityCommand(pointer: BridgePointer, type: 'security_devices' | 'security_invite' | 'security_revoke',
-  payload: Record<string, ApplicationJson> = {}): Promise<ApplicationJson> {
+  payload: Record<string, ApplicationJson> = {}, send: typeof localApplication = localApplication): Promise<ApplicationJson> {
   if (!pointer.bridgeId) throw new Error('Bridge upgrade required');
   const requestId = randomUUID();
-  const data = await localApplication(pointer, { type: 'application', route: { kind: 'command', command: type, requestId, sessionId: null },
+  const data = await send(pointer, { type: 'application', route: { kind: 'command', command: type, requestId, sessionId: null },
     data: { type, requestId, payload: { bridgeId: pointer.bridgeId, ...payload } }, mcp: null });
   if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Invalid encrypted command response');
   const response = data.response;
-  if (!response || typeof response !== 'object' || Array.isArray(response) || response.success !== true) throw new Error('Encrypted security command failed');
+  if (!response || typeof response !== 'object' || Array.isArray(response)) throw new Error('Encrypted security command failed');
+  if (response.success !== true) throw securityCommandError(response);
   return response.data ?? null;
 }
 

@@ -1,120 +1,24 @@
-import { expect, type BrowserContext, type Page } from "@playwright/test";
-import { createHash, randomBytes } from "node:crypto";
+import { expect, type Page } from "@playwright/test";
 import { UI_BASE_URL } from "./config";
-import { pairBrowser } from "./secure-browser";
 import { readBridgePointer } from "./bridge-api";
+import { sharedAccountId, signIn } from "./passkey";
 
-/** Default password for every e2e-registered user (CI-local; nothing sensitive). */
-export const E2E_PASSWORD = "e2e-password-123";
-
-/** A registered/loggable user credential pair. */
-export interface UserCreds {
-  email: string;
-  password: string;
-}
+export { sharedAccountId };
 
 /**
- * The run-scoped user email. The bridge's token `sub` and the dashboard user MUST
- * match, because bridge presence rides the user-limited channel
- * bridges:presence#<email>. The launcher generates it once and exports it here so
- * the bridge and both tests agree.
+ * Sign `page` in to the run's one account with its synced passkey and land on
+ * /dashboard. A fresh browser context enrols itself (passkey identify + "Add
+ * this browser"); a context that already enrolled signs in with its device key.
  */
-export function sharedEmail(): string {
-  const email = process.env.E2E_USER_EMAIL;
-  if (!email) throw new Error("E2E_USER_EMAIL is not set (start-services must export it)");
-  return email;
+export async function login(page: Page, options: { browserLabel?: string } = {}): Promise<void> {
+  await signIn(page, options);
 }
 
 /**
- * Mint a fresh, unique, not-yet-registered credential pair for an isolated user
- * (e.g. "user B" in a cross-tenant test). The email is unique per call so two
- * users never collide within or across runs.
- */
-export function makeUser(prefix = "e2e-b"): UserCreds {
-  const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  return { email: `${prefix}+${unique}@ftown.test`, password: E2E_PASSWORD };
-}
-
-/**
- * Register via the same endpoint the app exposes. Idempotent: F4 made register
- * non-enumerating, so it returns a generic 200 for both new and existing
- * accounts — any 2xx is success.
- */
-export async function registerUser(email: string, password: string = E2E_PASSWORD): Promise<void> {
-  // Distinct fixture users model distinct proxied clients, retaining the real
-  // registration limiter for repeated requests by the same normalized user.
-  // Never send fixture source headers or credentials to another destination.
-  const normalized = email.trim().toLowerCase();
-  if (UI_BASE_URL !== "http://localhost:3000" || normalized.length > 254
-    || !/^[a-z0-9][a-z0-9._+-]*@ftown\.test$/.test(normalized)) {
-    throw new Error("Registration fixtures require the canonical local UI and a test account");
-  }
-  const digest = createHash("sha256").update("ftown-e2e-registration-source-v1\0").update(normalized).digest("hex").slice(0, 24);
-  const source = `2001:db8:${digest.match(/.{4}/g)!.join(":")}`;
-  const res = await fetch(`${UI_BASE_URL}/api/auth/register`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-real-ip": source },
-    body: JSON.stringify({ email, password }),
-  });
-  const body = await res.text();
-  if (!res.ok) {
-    throw new Error(`register failed: ${res.status} ${body}`);
-  }
-}
-
-const loginSourceRoutes = new WeakMap<BrowserContext, Promise<void>>();
-
-/** One logical proxied client per isolated browser context, including repeat logins. */
-async function isolateLoginSource(page: Page): Promise<void> {
-  if (UI_BASE_URL !== "http://localhost:3000") {
-    throw new Error("Login fixtures require the canonical local UI");
-  }
-  const context = page.context();
-  let installed = loginSourceRoutes.get(context);
-  if (!installed) {
-    const groups = randomBytes(12).toString("hex").match(/.{4}/g)!;
-    const source = `2001:db8:${groups.join(":")}`;
-    // Scope the synthetic source to local auth requests so it never accompanies
-    // a navigation to a third-party service. Security specs set their own fixed
-    // source on API contexts and deliberately exercise the real shared budget.
-    installed = context.route("http://localhost:3000/api/auth/**", async (route) => {
-      await route.continue({ headers: { ...route.request().headers(), "x-real-ip": source } });
-    }).then(() => undefined);
-    loginSourceRoutes.set(context, installed);
-  }
-  await installed;
-}
-
-/** Fill the /login credentials form and land on /dashboard. */
-export async function login(page: Page, email: string, password: string = E2E_PASSWORD, options: { pairBridge?: boolean } = {}): Promise<void> {
-  await isolateLoginSource(page);
-  await page.goto("/login");
-  await page.locator("#email").fill(email);
-  await page.locator("#password").fill(password);
-  await page.getByRole("button", { name: "Sign In" }).click();
-  await page.waitForURL("**/dashboard", { timeout: 30_000 });
-  if (options.pairBridge !== false && email === process.env.E2E_USER_EMAIL) await pairBrowser(page, { email, password });
-}
-
-/**
- * Register (idempotent) AND log `page` in as the given user, landing on
- * /dashboard. Omit `creds` to mint a fresh isolated user — useful for a second
- * browser context that must act as user B against user A's resources. Returns
- * the credentials actually used.
- */
-export async function registerAndLogin(page: Page, creds?: UserCreds): Promise<UserCreds> {
-  const user = creds ?? makeUser();
-  await registerUser(user.email, user.password);
-  await login(page, user.email, user.password);
-  return user;
-}
-
-/**
- * Fetch the connect token for whoever `page` is currently logged in as, from
- * POST /api/auth/token. The route returns an HS256 JWT (aud "ftown:centrifugo",
- * sub = the session email) — the same token the browser uses to connect to
- * Centrifugo. Uses the page context's auth cookies, so the token is scoped to
- * that page's user. Throws on non-2xx (e.g. 401 when the page is not logged in).
+ * Fetch the relay (Centrifugo) token for whoever `page` is signed in as, from
+ * POST /api/auth/token: HS256, aud "ftown:centrifugo", sub = accountId, 1 h —
+ * the token the browser connects with. Uses the page context's session cookie.
+ * Throws on non-2xx (e.g. 401 when the page is not signed in).
  */
 export async function getCentrifugoToken(page: Page): Promise<string> {
   const res = await page.request.post(`${UI_BASE_URL}/api/auth/token`);
@@ -137,7 +41,7 @@ export async function waitForBridgeOnline(page: Page): Promise<void> {
 
 /**
  * Open the New Session modal, choose a plain zsh shell (so no claude binary / API
- * key is needed), name it, and submit. Returns the session name.
+ * key is needed), name it, and submit.
  */
 export async function createShellSession(page: Page, name: string): Promise<void> {
   await page.getByRole("button", { name: "Create a new session", exact: true }).click();
@@ -173,8 +77,5 @@ export async function runMarkerInTerminal(page: Page, marker: string): Promise<v
   await term.click();
   await page.keyboard.type(`echo ${marker}`);
   await page.keyboard.press("Enter");
-  // xterm has NO local echo — the marker only renders once the PTY echoes the
-  // typed line and/or command output back over the active transport, proving a
-  // working bidirectional data plane.
   await expect(rows).toContainText(marker, { timeout: 20_000 });
 }

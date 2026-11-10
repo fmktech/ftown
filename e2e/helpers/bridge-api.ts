@@ -48,6 +48,36 @@ export function readBridgePointer(bridgeHome: string = BRIDGE_HOME): BridgePoint
   return parsed as BridgePointer;
 }
 
+/**
+ * readBridgePointer for a bridge that may not have published its pointer yet:
+ * null while bridge.json is absent or created but not yet written. An account
+ * bridge prints "Paired with account" BEFORE its account startup (ledger read,
+ * relay token, endpoint registration) and writes the pointer only after it
+ * (bridge/src/index.ts), and a revoked bridge unlinks it before its re-exec.
+ * Poll this, not readBridgePointer: expect.poll fails on the first throw instead
+ * of retrying. A complete pointer without port/token still throws.
+ */
+export function tryReadBridgePointer(bridgeHome: string = BRIDGE_HOME): BridgePointer | null {
+  const path = join(bridgeHome, ".ftown", "bridge.json");
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  let parsed: Partial<BridgePointer>;
+  try {
+    parsed = JSON.parse(raw) as Partial<BridgePointer>;
+  } catch {
+    return null; // writeFileSync truncates before it writes: an empty or partial read is a pointer in flight
+  }
+  if (typeof parsed.port !== "number" || typeof parsed.token !== "string") {
+    throw new Error(`bridge pointer at ${path} is malformed`);
+  }
+  return parsed as BridgePointer;
+}
+
 export interface BridgeApiResult<T = unknown> {
   status: number;
   /** Parsed JSON body when the response is JSON; otherwise the raw text. */

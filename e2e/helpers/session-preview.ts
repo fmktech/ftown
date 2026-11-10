@@ -21,7 +21,7 @@ export interface PreviewTransportObservation {
 }
 
 export async function createPreviewFixture() {
-  assert.equal(UI_BASE_URL, "http://localhost:3000");
+  assert.ok(["localhost", "127.0.0.1"].includes(new URL(UI_BASE_URL).hostname), "preview fixtures require the local test UI");
   assert.equal(resolve(BRIDGE_HOME), resolve(E2E_DIR, ".bridge-home"));
   const home = await lstat(BRIDGE_HOME);
   assert.ok(home.isDirectory() && !home.isSymbolicLink());

@@ -1,6 +1,6 @@
 import { expect } from "@playwright/test";
 import { test } from "../helpers/fixtures";
-import { createShellSession, login, runMarkerInTerminal, sharedEmail, waitForBridgeOnline } from "../helpers/app";
+import { createShellSession, login, runMarkerInTerminal, sharedAccountId, waitForBridgeOnline } from "../helpers/app";
 import { bridgeApiFetch } from "../helpers/bridge-api";
 
 interface SessionRow { id: string; name: string; status: string }
@@ -22,7 +22,7 @@ for (const mobile of [false, true]) {
       expect(prior.status).toBe(201);
       const priorId = (prior.body as { session: SessionRow }).session.id;
       owned.add(priorId);
-      await login(page, sharedEmail());
+      await login(page);
       await waitForBridgeOnline(page);
       await page.getByRole("button", { name: new RegExp(priorName) }).click();
       await expect(page.locator("main").getByText(priorName, { exact: true })).toBeVisible();

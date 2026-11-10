@@ -12,7 +12,7 @@ vi.mock('@/lib/browser-identity', async importOriginal => ({
   loadBrowserIdentity: cryptoState.loadIdentity,
   readPinnedBridges: cryptoState.readPins,
 }));
-vi.mock('@/lib/secure-endpoint-runtime', () => ({ SecureEndpointRuntime: class {
+vi.mock('@/lib/secure-endpoint-runtime', async importOriginal => ({ accountManagedOwner: (await importOriginal<typeof import('@/lib/secure-endpoint-runtime')>()).accountManagedOwner, SecureEndpointRuntime: class {
   discover() {}
   handshake(...args: unknown[]) { return cryptoState.handshake(...args); }
   state() { return { status: 'ready' }; }
@@ -22,9 +22,12 @@ vi.mock('@/lib/secure-endpoint-runtime', () => ({ SecureEndpointRuntime: class {
 vi.mock('./Dashboard', () => ({ Dashboard: (props: { localMode: boolean; onDisconnect: () => void }) =>
   React.createElement('div', null, 'Local dashboard ' + String(props.localMode), React.createElement('button', { onClick: props.onDisconnect }, 'Disconnect')) }));
 vi.mock('@/lib/direct-transport/hybrid-terminal-transport', () => ({ HybridTerminalTransport: class { dispose() {} } }));
-const ownerId = '00000000-0000-4000-8000-000000000001';
+// Solo and --local bridges (the invitation flow) name `solo:<bridgeId>` as owner; an account bridge names its accountId.
+const ownerId = 'solo:bridge';
 const endpoint = { version: 1, id: 'bridge-key', ownerId, kind: 'bridge', publicKey: 'public' };
-const boot = { protocolVersion: 1, ownerId, bridgeId: 'bridge', endpoint, relayUserId: 'owner@example.com' };
+const boot = { protocolVersion: 1, ownerId, bridgeId: 'bridge', endpoint, relayUserId: 'local' };
+const accountId = 'A'.repeat(43);
+const accountBoot = { protocolVersion: 1, ownerId: accountId, bridgeId: 'bridge', endpoint: { ...endpoint, ownerId: accountId }, relayUserId: accountId };
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status });
 beforeEach(() => {
   localStorage.clear(); sessionStorage.clear(); window.history.replaceState(null, '', '/local');
@@ -32,7 +35,7 @@ beforeEach(() => {
   cryptoState.loadIdentity.mockResolvedValue({ endpoint: { ownerId, id: 'browser-key' }, keyPair: {} });
   cryptoState.readPins.mockResolvedValue([{ bridgeId: 'bridge', endpoint, permissions: ['read', 'control', 'admin'] }]);
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 it('requires the approved identity handshake and remembers only session-scoped port metadata when requested', async () => {
   let approve!: () => void;
@@ -82,4 +85,29 @@ it('keeps remembered discovery metadata on a temporary failure so retry uses the
   await screen.findByRole('alert'); expect(readDevice()?.bridgeId).toBe('bridge'); expect(cryptoState.loadIdentity).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole('button', { name: 'Connect locally' })); await screen.findByText('Local dashboard true');
   expect(cryptoState.loadIdentity).toHaveBeenCalledOnce(); expect(cryptoState.handshake).toHaveBeenCalledOnce();
+});
+
+it('an account bridge is never sent through invitations: /local points to the account dashboard instead', async () => {
+  vi.stubEnv('NEXT_PUBLIC_FTOWN_PUBLIC_URL', 'https://ftown.example');
+  const fetcher = vi.fn().mockResolvedValue(json(accountBoot)); vi.stubGlobal('fetch', fetcher);
+  render(React.createElement(LocalDashboard));
+  fireEvent.change(screen.getByLabelText('Local bridge port'), { target: { value: '40123' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Connect locally' }));
+  expect(await screen.findByRole('heading', { name: 'This computer belongs to your account' })).toBeTruthy();
+  expect(screen.getByRole('link', { name: 'Open your dashboard' }).getAttribute('href')).toBe('https://ftown.example/dashboard');
+  expect(screen.queryByText(/ftown security invite/)).toBeNull(); expect(screen.queryByText('Local dashboard true')).toBeNull();
+  expect(cryptoState.handshake).not.toHaveBeenCalled(); expect(cryptoState.loadIdentity).not.toHaveBeenCalled(); expect(cryptoState.readPins).not.toHaveBeenCalled();
+  expect(readDevice()).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Use another port' }));
+  expect(screen.getByLabelText('Local bridge port')).toBeTruthy(); expect(screen.getByText(/ftown security invite/)).toBeTruthy();
+});
+
+it('a Solo/--local bridge keeps the invitation instructions and never shows the account message', async () => {
+  const fetcher = vi.fn().mockResolvedValue(json(boot)); vi.stubGlobal('fetch', fetcher);
+  render(React.createElement(LocalDashboard));
+  expect(screen.getByText(/ftown security invite/)).toBeTruthy();
+  fireEvent.change(screen.getByLabelText('Local bridge port'), { target: { value: '40123' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Connect locally' }));
+  await screen.findByText('Local dashboard true');
+  expect(screen.queryByText('This computer belongs to your account')).toBeNull(); expect(cryptoState.handshake).toHaveBeenCalledOnce();
 });

@@ -201,7 +201,7 @@ function CtaButtons({ align = "start" }: { align?: "start" | "center" }) {
         className={`flex flex-wrap gap-3 ${align === "center" ? "justify-center" : ""}`}
       >
         <Link
-          href="/register"
+          href="/login"
           className={`btn-accent !text-[13px] !px-6 !py-2.5 min-h-11 no-underline inline-flex items-center ${linkFocus}`}
         >
           Try Hosted
@@ -236,7 +236,7 @@ export default async function LandingPage() {
     redirect("/local");
   }
   const session = await auth();
-  if (session?.user?.email) {
+  if (session?.user?.id) {
     redirect("/dashboard");
   }
 

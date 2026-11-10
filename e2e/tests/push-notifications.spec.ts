@@ -1,10 +1,13 @@
 import { expect } from "@playwright/test";
 import { test } from "../helpers/fixtures";
 import { createECDH, randomUUID } from "node:crypto";
-import jwt from "jsonwebtoken";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import pg from "pg";
-import { registerAndLogin, getCentrifugoToken } from "../helpers/app";
-import { CENTRIFUGO_TOKEN_SECRET, UI_BASE_URL } from "../helpers/config";
+import { login, getCentrifugoToken, sharedAccountId } from "../helpers/app";
+import { BRIDGE_HOME, UI_BASE_URL } from "../helpers/config";
+import { readBridgePointer } from "../helpers/bridge-api";
+import { importAuthKey, requestRelayToken, signProof } from "../helpers/ledger-admin";
 
 // OS permission/provider transport are simulated at browser API boundaries.
 // Real authenticated routes, SQL state, worker receipt/privacy/display/click code run.
@@ -22,7 +25,7 @@ test("explicit push opt-in/opt-out and foreground/closed-page service-worker dis
   const fake={endpoint:value.endpoint,toJSON:()=>value,unsubscribe:async()=>{current=null;return true;}} as unknown as PushSubscription;
   Object.defineProperty(ServiceWorkerRegistration.prototype,"pushManager",{get:()=>({getSubscription:async()=>current,subscribe:async()=>{current=fake;return fake;}})});
  },subscription);
- await registerAndLogin(page);
+ await login(page);
  // Retain diagnostics for the real Permissions API; Notification's OS boundary
  // is deliberately supplied by the synthetic provider fixture above.
  const permissionSnapshot=()=>page.evaluate(async()=>({
@@ -44,11 +47,7 @@ test("explicit push opt-in/opt-out and foreground/closed-page service-worker dis
  expect(afterReload.fixtureRequests).toBe(0);
  expect(afterReload.permissions).toBe("granted");
  const config=await page.request.get("/api/push");expect(config.status()).toBe(200);expect((await config.json()).enabled).toBe(true);
- // This freshly registered account is waiting for its first device approval.
- // Its standalone push control is available before the dashboard exists.
- await page.setViewportSize({width:390,height:844});
- await expect(page.getByRole("region",{name:"Waiting for device approval"})).toBeVisible();
- await expect(page.getByRole("navigation",{name:"Dashboard actions"})).toHaveCount(0);
+ await page.setViewportSize({width:1280,height:900});
  const pushControl=page.locator("[data-push-state]");await expect(pushControl).toHaveCount(1);
  await pushControl.evaluate(element=>element.setAttribute("data-e2e-push-instance","initial"));
  const enable=page.getByRole("button",{name:"Enable push notifications"});await expect(enable).toBeEnabled();
@@ -56,10 +55,11 @@ test("explicit push opt-in/opt-out and foreground/closed-page service-worker dis
  await enable.click();await expect(page.getByRole("button",{name:"Disable push notifications"})).toBeEnabled();
  expect(await page.evaluate(()=>(Notification as unknown as {fixtureRequests:number}).fixtureRequests)).toBe(1);
  await page.getByRole("button",{name:"Disable push notifications"}).click();await expect(enable).toBeEnabled();
- // Resizing the approval shell must not replace its owner-bound controller.
- await page.setViewportSize({width:1280,height:900});
+ // Resizing the dashboard must not replace its owner-bound controller.
+ await page.setViewportSize({width:390,height:844});
  await expect(pushControl).toHaveCount(1);
  await expect(pushControl).toHaveAttribute("data-e2e-push-instance","initial");
+ await page.setViewportSize({width:1280,height:900});
  // Enable again before testing both foreground and closed-page delivery.
  await enable.click();await expect(page.getByRole("button",{name:"Disable push notifications"})).toBeEnabled();
  await page.screenshot({path:testInfo.outputPath("notifications-enabled.png"),fullPage:true});
@@ -124,31 +124,38 @@ test("explicit push opt-in/opt-out and foreground/closed-page service-worker dis
 
 test("real push API ignores legacy idle and durably deduplicates questions without recipients",async({page})=>{
  const idle=`idle:${randomUUID()}`;const nextIdle=`idle:${randomUUID()}`;
- const user=await registerAndLogin(page);const bridgeId=`push-${randomUUID()}`;const sessionId=randomUUID();
+ await login(page);const accountId=sharedAccountId();const sessionId=randomUUID();
+ // A real bridge relay token: sign a relay proof with the shared bridge's auth key.
+ const home=BRIDGE_HOME;
+ const identity=JSON.parse(readFileSync(join(home,".ftown/data/security/ledger-identity.json"),"utf8")) as {authPrivateKey:JsonWebKey};
+ const bridgeId=readBridgePointer(home).bridgeId;
+ const relay=await requestRelayToken(await signProof(await importAuthKey(identity.authPrivateKey),{accountId,kind:"bridge",keyId:bridgeId,purpose:"relay"}));
+ expect(relay.status,JSON.stringify(relay.body)).toBe(200);
+ const token=String(relay.body.token);
  const db=new pg.Client({host:process.env.PGHOST??"localhost",port:Number(process.env.PGPORT??5432),user:process.env.PGUSER??"ftown",password:process.env.PGPASSWORD??"ftown",database:process.env.PGDATABASE??"ftown"});
  await db.connect();
- const token=jwt.sign({sub:user.email,info:{bridgeId}},CENTRIFUGO_TOKEN_SECRET,{audience:"ftown:centrifugo",expiresIn:60});
  const post=(eventKey:string,kind:string,overrideToken=token)=>page.request.post("/api/push/events",{headers:{authorization:`Bearer ${overrideToken}`},data:{sessionId,sessionName:"Agent",eventKey,kind,title:"Ready",message:"Fixture",occurredAt:new Date().toISOString()}});
+ const subscription={endpoint:`https://fcm.googleapis.com/no-backlog-${randomUUID()}`,keys:{p256dh:"",auth:Buffer.alloc(16,1).toString("base64url")}};
  try {
-  await db.query("INSERT INTO bridge_refresh(bridge_id,sub,current_jti) VALUES($1,$2,'test-jti')",[bridgeId,user.email]);
   const browserToken=await getCentrifugoToken(page);expect((await post(idle,"idle",browserToken)).status()).toBe(401);
+  expect((await post(idle,"idle","not-a-token")).status()).toBe(401);
   for(let n=0;n<2;n++){const response=await post(idle,"idle");expect(response.status()).toBe(202);expect(await response.json()).toEqual({accepted:true,pending:false});}
-  expect((await db.query("SELECT COUNT(*)::int AS count FROM push_events WHERE sub=$1 AND bridge_id=$2 AND kind='idle'",[user.email,bridgeId])).rows[0].count).toBe(0);
+  expect((await db.query("SELECT COUNT(*)::int AS count FROM push_events WHERE account_id=$1 AND session_id=$2 AND kind='idle'",[accountId,sessionId])).rows[0].count).toBe(0);
   // A later subscription still must not turn legacy idle into a delivery.
-  const key=createECDH("prime256v1");key.generateKeys();
-  const subscription={endpoint:`https://fcm.googleapis.com/no-backlog-${randomUUID()}`,keys:{p256dh:key.getPublicKey().toString("base64url"),auth:Buffer.alloc(16,1).toString("base64url")}};
+  const key=createECDH("prime256v1");key.generateKeys();subscription.keys.p256dh=key.getPublicKey().toString("base64url");
   expect((await page.request.post("/api/push",{headers:{origin:new URL(UI_BASE_URL).origin},data:subscription})).status()).toBe(201);
   expect((await post(idle,"idle")).status()).toBe(202);
-  expect((await db.query("SELECT COUNT(*)::int AS count FROM push_deliveries d JOIN push_events e ON e.id=d.event_id WHERE e.sub=$1 AND e.bridge_id=$2",[user.email,bridgeId])).rows[0].count).toBe(0);
+  expect((await db.query("SELECT COUNT(*)::int AS count FROM push_deliveries d JOIN push_events e ON e.id=d.event_id WHERE e.account_id=$1 AND e.session_id=$2",[accountId,sessionId])).rows[0].count).toBe(0);
   expect((await page.request.delete("/api/push",{headers:{origin:new URL(UI_BASE_URL).origin},data:{endpoint:subscription.endpoint}})).status()).toBe(204);
   // A subsequent idle period is also ignored; questions still deduplicate.
   for(let n=0;n<2;n++){const response=await post(nextIdle,"idle");expect(response.status()).toBe(202);expect(await response.json()).toEqual({accepted:true,pending:false});}
   const question=`question:${randomUUID()}`;
   await Promise.all([post(question,"question"),post(question,"question")]).then(responses=>responses.forEach(response=>expect(response.status()).toBe(202)));
-  const {rows}=await db.query("SELECT kind,COUNT(*)::int AS count FROM push_events WHERE sub=$1 AND bridge_id=$2 GROUP BY kind ORDER BY kind",[user.email,bridgeId]);
+  const {rows}=await db.query("SELECT kind,COUNT(*)::int AS count FROM push_events WHERE account_id=$1 AND session_id=$2 GROUP BY kind ORDER BY kind",[accountId,sessionId]);
   expect(rows).toEqual([{kind:"question",count:1}]);
-  expect((await db.query("SELECT COUNT(*)::int AS count FROM push_deliveries d JOIN push_events e ON e.id=d.event_id WHERE e.sub=$1 AND e.bridge_id=$2",[user.email,bridgeId])).rows[0].count).toBe(0);
-  await db.query("UPDATE bridge_refresh SET sub='different-owner' WHERE bridge_id=$1",[bridgeId]);expect((await post(idle,"idle")).status()).toBe(403);
-  await db.query("UPDATE bridge_refresh SET sub=$1,current_jti='revoked' WHERE bridge_id=$2",[user.email,bridgeId]);expect((await post(idle,"idle")).status()).toBe(403);
- }finally{await db.query("DELETE FROM push_events WHERE sub=$1 AND bridge_id=$2",[user.email,bridgeId]);await db.query("DELETE FROM bridge_refresh WHERE bridge_id=$1",[bridgeId]);await db.end();}
+  expect((await db.query("SELECT COUNT(*)::int AS count FROM push_deliveries d JOIN push_events e ON e.id=d.event_id WHERE e.account_id=$1 AND e.session_id=$2",[accountId,sessionId])).rows[0].count).toBe(0);
+ }finally{
+  await page.request.delete("/api/push",{headers:{origin:new URL(UI_BASE_URL).origin},data:{endpoint:subscription.endpoint}}).catch(()=>undefined);
+  await db.query("DELETE FROM push_events WHERE account_id=$1 AND session_id=$2",[accountId,sessionId]);await db.end();
+ }
 });

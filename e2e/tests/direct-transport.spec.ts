@@ -1,7 +1,7 @@
 import { expect, type BrowserContext, type Page } from "@playwright/test";
 import { test } from "../helpers/fixtures";
 import {
-  sharedEmail,
+  sharedAccountId,
   login,
   waitForBridgeOnline,
   createShellSession,
@@ -78,13 +78,13 @@ async function blockWebRtc(context: BrowserContext): Promise<void> {
 
 /** Login → create shell session → prove the terminal round-trips a marker. */
 async function terminalFlow(page: Page, sessionName: string, marker: string): Promise<string> {
-  const email = sharedEmail();
-  await login(page, email);
+  const accountId = sharedAccountId();
+  await login(page);
   await waitForBridgeOnline(page);
 
-  const before = await sessionIdsFor(email);
+  const before = await sessionIdsFor(accountId);
   await createShellSession(page, sessionName);
-  const sessionId = await waitForNewSessionId(email, before);
+  const sessionId = await waitForNewSessionId(accountId, before);
   await openSession(page, sessionName);
   await runMarkerInTerminal(page, marker);
   return sessionId;
@@ -104,19 +104,19 @@ test.describe("transport ladder", () => {
     const context = await browser.newContext();
     await blockLoopbackWs(context);
     const page = await context.newPage();
-    const email = sharedEmail();
+    const accountId = sharedAccountId();
 
     try {
       const sessionId = await terminalFlow(page, `webrtc-${Date.now()}`, `E2EDIRECT${Date.now()}`);
       await expectBadge(page, "P2P");
 
       const present = await waitForChannels(
-        () => terminalChannelPresent(sessionId, email),
+        () => terminalChannelPresent(sessionId, accountId),
         (p) => p === false,
         { timeoutMs: 3000 },
       );
       expect(present, `P2P rung must leave terminal:${sessionId} unsubscribed (R3)`).toBe(false);
-      expect(await commandsRpcClients(email)).toBeGreaterThanOrEqual(1);
+      expect(await commandsRpcClients(accountId)).toBeGreaterThanOrEqual(1);
     } finally {
       await context.close();
     }
@@ -128,19 +128,19 @@ test.describe("transport ladder", () => {
     const context = await browser.newContext();
     await blockWebRtc(context);
     const page = await context.newPage();
-    const email = sharedEmail();
+    const accountId = sharedAccountId();
 
     try {
       const sessionId = await terminalFlow(page, `local-${Date.now()}`, `E2ELOCAL${Date.now()}`);
       await expectBadge(page, "Local");
 
       const present = await waitForChannels(
-        () => terminalChannelPresent(sessionId, email),
+        () => terminalChannelPresent(sessionId, accountId),
         (p) => p === false,
         { timeoutMs: 3000 },
       );
       expect(present, `Local rung must leave terminal:${sessionId} unsubscribed (R3/L5)`).toBe(false);
-      expect(await commandsRpcClients(email)).toBeGreaterThanOrEqual(1);
+      expect(await commandsRpcClients(accountId)).toBeGreaterThanOrEqual(1);
     } finally {
       await context.close();
     }
@@ -153,7 +153,7 @@ test.describe("transport ladder", () => {
     await blockWebRtc(context);
     await blockLoopbackWs(context);
     const page = await context.newPage();
-    const email = sharedEmail();
+    const accountId = sharedAccountId();
 
     try {
       // Long fast-typed marker (30+ chars, keyboard.type at full speed): live
@@ -164,12 +164,12 @@ test.describe("transport ladder", () => {
       await expectBadge(page, "Cloud");
 
       const present = await waitForChannels(
-        () => terminalChannelPresent(sessionId, email),
+        () => terminalChannelPresent(sessionId, accountId),
         (p) => p === true,
         { timeoutMs: 8000 },
       );
       expect(present, `Cloud fallback must subscribe terminal:${sessionId} (R2)`).toBe(true);
-      expect(await commandsRpcClients(email)).toBeGreaterThanOrEqual(1);
+      expect(await commandsRpcClients(accountId)).toBeGreaterThanOrEqual(1);
     } finally {
       await context.close();
     }

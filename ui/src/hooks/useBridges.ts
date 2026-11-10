@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { MessageClient, MessageSubscription } from "@/lib/message-client";
+import { accountChannel } from "@security/ledger/channels";
 
 export interface BridgeInfo {
   clientId: string;
@@ -124,7 +125,7 @@ export function useBridges(client: MessageClient | null, userId: string | null):
     }
 
     const abort = new AbortController();
-    const channel = `bridges:presence#${userId}`;
+    const channel = accountChannel("bridges:presence", userId);
 
     const existing = client.getSubscription(channel);
     if (existing) {
@@ -187,7 +188,7 @@ export function useBridges(client: MessageClient | null, userId: string | null):
         await Promise.race([fetchPresence(subRef.current), new Promise<void>(resolve => { timer = setTimeout(resolve, 3000); })]);
       } finally { if (timer) clearTimeout(timer); }
     }
-    // Local discovery grants no authority; explicit invitation approval is required.
+    // Local discovery grants no authority: Solo/--local bridges need an explicit invitation, account bridges trust only the ledger.
   }, [fetchPresence]);
 
   return {

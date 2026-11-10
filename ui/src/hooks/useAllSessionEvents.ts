@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import type { MessageClient, MessageSubscription } from "@/lib/message-client";
+import { sessionChannel } from "@security/ledger/channels";
 import { Session } from "@/types";
 import { clearsManualInputNotice, isAskUserQuestionTool, parseLenientPrompt, hookEventToActivity, extractManualInputNotice, extractToolLabel, isDurableNotice, type ManualInputNotice } from "@/lib/hook-events";
 import type { AnswerSessionAttentionPayload, AttentionAnswerDelivery, AttentionAnswerEntry, AttentionPrompt } from "../../../bridge/src/attention-prompt-protocol";
@@ -188,7 +189,9 @@ export function useAllSessionEvents(
     if (!c || !u) return;
     if (subsRef.current.has(sessionId)) return;
 
-    const channel = `events:${sessionId}#${u}`;
+    let channel: string;
+    // A session id that cannot name a channel is never subscribed.
+    try { channel = sessionChannel("events", sessionId, u); } catch { return; }
 
     const onPublication = (ctx: { data: unknown }): void => {
       if (clientRef.current !== c || userIdRef.current !== u || subsRef.current.get(sessionId)?.sub !== sub) return;

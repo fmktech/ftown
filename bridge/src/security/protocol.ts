@@ -6,8 +6,6 @@
  * Types only. All implementation modules depend on this file, never vice versa.
  */
 
-import type { AccountErrorCode, AccountHead } from './account-protocol.js';
-
 /** Existing application JSON is intentionally open; domain handlers validate it. */
 export type ApplicationJson = null | boolean | number | string | ApplicationJson[] | { [key: string]: ApplicationJson };
 export type EndpointKind = 'bridge' | 'browser' | 'local-cli';
@@ -92,14 +90,17 @@ export interface SecureCrypto {
 }
 
 export type SecurityErrorCode =
-  | AccountErrorCode
+  /** Account mode (passkey ledger): a device the ledger revoked or no longer lists, this bridge revoked, or offline grace lapsed. */
+  | 'account_device_revoked' | 'account_bridge_revoked' | 'account_offline_expired'
   | 'security_setup_required' | 'secure_context_required' | 'storage_unavailable'
   | 'upgrade_required' | 'approval_required' | 'key_changed' | 'endpoint_revoked'
   | 'invalid_envelope' | 'authentication_failed' | 'wrong_context'
   | 'expired' | 'replayed' | 'epoch_changed' | 'permission_denied'
   | 'invitation_invalid' | 'invitation_expired' | 'invitation_consumed'
   | 'capacity_exceeded' | 'audit_unavailable' | 'outcome_unknown'
-  | 'bridge_offline' | 'invalid_cursor' | 'key_unavailable';
+  | 'bridge_offline' | 'invalid_cursor' | 'key_unavailable'
+  /** Account mode: membership is the passkey ledger's; invitations and bridge-side removal of ledger devices are refused. */
+  | 'account_managed';
 
 /** Implementations throw sanitized errors with these fields; never raw secrets. */
 export interface SecurityFailure {
@@ -201,11 +202,9 @@ export interface VerifiedApplication {
 export type SecurityCommand =
   | { type: 'security_devices'; bridgeId: string }
   | { type: 'security_invite'; bridgeId: string; label: string }
-  | { type: 'security_revoke'; bridgeId: string; endpointId: string }
-  | { type: 'security_account_adopt'; bridgeId: string; head: AccountHead };
+  | { type: 'security_revoke'; bridgeId: string; endpointId: string };
 
 export interface SecurityCommandResults {
-  security_account_adopt: { head: AccountHead };
   security_devices: { devices: ApprovedEndpoint[] };
   security_invite: BridgeInvitation;
   security_revoke: { endpointId: string; revoked: true };
@@ -262,7 +261,6 @@ export interface BridgeSecurity {
   createInvitation(actor: VerifiedPrincipal | LocalRecoveryAuthority, options: InvitationOptions): Promise<BridgeInvitation>;
   listDevices(actor: VerifiedPrincipal): Promise<ApprovedEndpoint[]>;
   revokeEndpoint(actor: VerifiedPrincipal, endpointId: string): Promise<void>;
-  adoptAccount(actor: VerifiedPrincipal, head: AccountHead): Promise<AccountHead>;
   onRevoked(listener: (endpointId: string) => void): () => void;
   close(): Promise<void>;
 }

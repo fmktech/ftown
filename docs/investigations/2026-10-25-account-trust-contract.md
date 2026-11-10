@@ -1,3 +1,5 @@
+> **SUPERSEDED (2026-11-10).** This v1 contract (password sessions, refresh tokens, SAS/TOFU pairing, device-signed roster) is replaced by `docs/investigations/2026-11-10-passkey-ledger-contract.md` (passkey ledger v2, release 0.21.0). The text below is kept as history only.
+
 # Account trust and unified pairing — frozen contract v1
 
 Base: `8425849`; shared checkout `/Users/fkesheh/projects/ftown-simplify-all`; branch `feat/account-trust-pairing`. Root owns this contract and `bridge/src/security/{protocol,account-protocol}.ts`. Frozen after three independent reviews and central corrections; no local amendments. Core implementation is the first write wave. Existing E2EE contract remains authoritative except the explicit additions here.

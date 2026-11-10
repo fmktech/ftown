@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Kill ONLY the exact PIDs recorded by start-services.sh. Never pkill/killall.
+# Kill ONLY the exact PIDs recorded by start-services.sh (and by test-owned
+# isolated bridges under e2e/.isolated-bridges/). Never pkill/killall.
 set -uo pipefail
 E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO="$(cd "$E2E_DIR/.." && pwd)"
@@ -19,7 +20,7 @@ for(const [name,homeName]of [['bridge','.bridge-home'],['bridge-2','.bridge-home
   if(!existsSync(pidFile)||!existsSync(pointerFile))continue;
   try{
     const pid=Number(readFileSync(pidFile,'utf8').trim());if(!Number.isSafeInteger(pid)||pid<1)throw Error('invalid pid');
-    try{process.kill(pid,0);}catch{const sessions=join(home,'.ftown/data/sessions');if(existsSync(sessions)&&readdirSync(sessions).length)throw Error('session state requires verification');continue;}
+    try{process.kill(pid,0);}catch{continue;}
     if(process.platform==='linux'&&!readFileSync(`/proc/${pid}/cmdline`,'utf8').split('\0').includes(join(repo,'bridge/dist/index.js')))throw Error('pid mismatch');
     if(realpathSync(home)!==home||lstatSync(home).isSymbolicLink()||lstatSync(join(home,'.ftown')).isSymbolicLink()||lstatSync(pointerFile).isSymbolicLink())throw Error('home mismatch');
     const pointer=JSON.parse(readFileSync(pointerFile,'utf8'));
@@ -37,37 +38,65 @@ for(const [name,homeName]of [['bridge','.bridge-home'],['bridge-2','.bridge-home
 }
 if(failed)process.exitCode=1;
 JS
-for name in tls bridge-2 bridge ui; do
-  f="$E2E_DIR/.$name.pid"
-  if [ -f "$f" ]; then
-    pid="$(cat "$f")"
-    if ! [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then echo "[stop] invalid $name PID record; preserving it"; cleanup_status=1; continue; fi
-    if kill -0 "$pid" 2>/dev/null; then
-      if ! node - "$pid" "$name" "$REPO" <<'JS'
+
+# Exact-PID identity check: the recorded PID must still run the expected entry point.
+owned() { # <pid> <name>
+  node - "$1" "$2" "$REPO" <<'JS'
 const fs=require('node:fs'),path=require('node:path'),cp=require('node:child_process');const [pid,name,repo]=process.argv.slice(2);
 try{
- const args=process.platform==='linux'?fs.readFileSync(`/proc/${pid}/cmdline`,'utf8').split('\0'):cp.execFileSync('ps',['-p',pid,'-o','command='],{encoding:'utf8'}).trim().split(' ');
+ const command=process.platform==='linux'?fs.readFileSync(`/proc/${pid}/cmdline`,'utf8').split('\0').join(' '):cp.execFileSync('ps',['-p',pid,'-o','command='],{encoding:'utf8'}).trim();
+ const args=command.split(' ');
  const expected=name==='ui'?path.join(repo,'ui/node_modules/next/dist/bin/next'):name==='tls'?path.join(repo,'e2e/scripts/tls-proxy.mjs'):path.join(repo,'bridge/dist/index.js');
- const titledUi=process.platform==='linux'&&name==='ui'&&args.join(' ').includes('next-server')&&fs.realpathSync(`/proc/${pid}/cwd`)===path.join(repo,'ui');
+ // `next start` retitles its process to "next-server (vX)"; accept it only when its cwd is this checkout's ui/.
+ const cwd=process.platform==='linux'?fs.realpathSync(`/proc/${pid}/cwd`):(()=>{try{return cp.execFileSync('lsof',['-a','-p',pid,'-d','cwd','-Fn'],{encoding:'utf8'}).split('\n').find(l=>l.startsWith('n'))?.slice(1);}catch{return undefined;}})();
+ const titledUi=name==='ui'&&command.includes('next-server')&&cwd!==undefined&&fs.realpathSync(cwd)===fs.realpathSync(path.join(repo,'ui'));
  if(!args.includes(expected)&&!titledUi)throw Error('unowned process');
- if(process.platform==='linux'&&name.includes('bridge')){
+ if(process.platform==='linux'&&name.includes('bridge')&&!name.startsWith('isolated')){
   const homes={bridge:'.bridge-home','bridge-2':'.bridge-home-2'};
   const vars=fs.readFileSync(`/proc/${pid}/environ`,'utf8').split('\0');if(!vars.includes(`HOME=${path.join(repo,'e2e',homes[name])}`))throw Error('unowned home');
  }
 }catch{process.exitCode=1;}
 JS
-      then echo "[stop] $name PID identity mismatch; preserving process and record"; cleanup_status=1; continue; fi
-      echo "[stop] killing $name pid $pid"
-      kill "$pid" 2>/dev/null || true
-      for _ in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-      kill -9 "$pid" 2>/dev/null || true
-    fi
-    rm -f "$f"
+}
+stop_pid_file() { # <pid file> <name>
+  local f="$1" name="$2" pid
+  [ -f "$f" ] || return 0
+  pid="$(cat "$f")"
+  if ! [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then echo "[stop] invalid $name PID record; preserving it"; cleanup_status=1; return 0; fi
+  if kill -0 "$pid" 2>/dev/null; then
+    if ! owned "$pid" "$name"; then echo "[stop] $name PID identity mismatch; preserving process and record"; cleanup_status=1; return 0; fi
+    echo "[stop] killing $name pid $pid"
+    kill "$pid" 2>/dev/null || true
+    for _ in 1 2 3 4 5 6 7 8; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+    kill -9 "$pid" 2>/dev/null || true
   fi
-done
+  rm -f "$f"
+}
+# A bridge's private tmux server, addressed by its EXPLICIT socket path (never the default socket).
+stop_tmux_dir() { # <file holding the tmux dir>
+  local f="$1" dir sock
+  [ -f "$f" ] || return 0
+  dir="$(cat "$f")"
+  case "$dir" in /tmp/ftpk-??????|/private/tmp/ftpk-??????) ;; *) echo "[stop] unexpected tmux dir record $f; preserving it"; cleanup_status=1; return 0 ;; esac
+  sock="$dir/tmux-$(id -u)/ftown"
+  if [ -S "$sock" ]; then tmux -S "$sock" kill-server 2>/dev/null || true; fi
+  rm -rf "$dir"; rm -f "$f"
+}
+
+for name in tls bridge-2 bridge ui; do stop_pid_file "$E2E_DIR/.$name.pid" "$name"; done
+for name in bridge-2 bridge; do stop_tmux_dir "$E2E_DIR/.$name.tmux"; done
+# Test-owned isolated bridges left behind by an interrupted spec (normally each spec stops its own).
+if [ -d "$E2E_DIR/.isolated-bridges" ]; then
+  for home in "$E2E_DIR"/.isolated-bridges/*/; do
+    [ -d "$home" ] || continue
+    stop_pid_file "${home}pid" isolated-bridge
+    stop_tmux_dir "${home}tmux"
+  done
+fi
+
 # The caller must stop/await Playwright before this teardown. Trust cleanup is
 # independently guarded and never touches the runner's real HOME/NSS database.
-node "$E2E_DIR/scripts/setup-browser-trust.mjs" --cleanup || cleanup_status=1
+if [ "$(uname -s)" = "Linux" ]; then node "$E2E_DIR/scripts/setup-browser-trust.mjs" --cleanup || cleanup_status=1; fi
 # Scratch paths are literal children of this checkout, never caller-provided HOME.
 if [ "$cleanup_status" -eq 0 ]; then
 node <<'JS' || cleanup_status=1
@@ -77,7 +106,10 @@ for(const [name,pid]of [['.bridge-home','bridge'],['.bridge-home-2','bridge-2']]
  const home=path.join(dir,name);if(fs.existsSync(path.join(dir,`.${pid}.pid`)))throw Error('Bridge PID record remains');
  if(fs.existsSync(home)){if(fs.lstatSync(home).isSymbolicLink()||!fs.lstatSync(home).isDirectory())throw Error('Unsafe test home');fs.rmSync(home,{recursive:true,force:true});}
 }
-fs.rmSync(path.join(dir,'.run-email'),{force:true});
+const isolated=path.join(dir,'.isolated-bridges');
+if(fs.existsSync(isolated)){if(fs.lstatSync(isolated).isSymbolicLink())throw Error('Unsafe isolated bridge dir');fs.rmSync(isolated,{recursive:true,force:true});}
+// The account lives in the throwaway database; its passkey record goes with this run.
+for(const file of ['.run-email','.run-account.json'])fs.rmSync(path.join(dir,file),{force:true});
 JS
 else echo "[stop] preserving scratch homes for root verification after cleanup failure"; fi
 echo "[stop] done (docker infra left running; use 'docker compose down -v' in e2e/ to remove)"

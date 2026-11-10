@@ -7,11 +7,10 @@ import { hostname as osHostname, networkInterfaces, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, realpathSync, chmodSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { createInterface } from 'node:readline/promises';
 import { cleanup as ndcCleanup } from 'node-datachannel';
 import { configureUpdateOptions } from './update-options.js';
 
-import { CentrifugoClient } from './centrifugo-client.js';
+import { CentrifugoClient, type LedgerMessage } from './centrifugo-client.js';
 import { WatchRegistry } from './direct-transport/watch-registry.js';
 import { DirectPeerManager } from './direct-transport/peer-manager.js';
 import { PublishRouter } from './direct-transport/publish-router.js';
@@ -33,14 +32,8 @@ import { canonicalNotifyPath } from './install-notify-script.js';
 import { unregisterSession, configureSessionRegistryHome } from './session-registry.js';
 import { createFtownSession, type CreateFtownSessionDeps } from './create-ftown-session.js';
 import { loadOrCreateIdentity, readBoundBridgeIdentity } from './security/bridge/identity.js';
-import { bindPendingBridgeIdentity, prepareBridgeEnrollment, preparePendingBridgeEnrollment, previousPendingBridgeAttempt,
-  savePairingVerificationUrl, type PendingBridgeEnrollment } from './security/bridge/pending-enrollment.js';
-import { selectBridgePairingMode, waitForPendingBridgeDecision, writePendingBridgeStatus } from './security/bridge/pending-approval.js';
-import type { PendingBridgeDecision, PendingPairingVerified } from './security/pending-approval-protocol.js';
-import { readAccountHistory } from './security/bridge/account-client.js';
-import { openAccountApproval } from './security/account-crypto.js';
+import { bindLedgerIdentity } from './security/bridge/ledger-identity.js';
 import { BridgeSecurityService, applicationJson } from './security/bridge/security.js';
-import { readPinnedAccountCheckpoint } from './security/bridge/policy.js';
 import type { ApplicationJson, EndpointIdentity, VerifiedApplication } from './security/protocol.js';
 import { createCommandHandler } from './command-rpc.js';
 import { PullRequestStatusService } from './pull-request-status.js';
@@ -52,14 +45,14 @@ import { TerminalPump } from './terminal-pump.js';
 import { collectSessionUsage } from './usage-collector.js';
 import { AgentSessionIdPersister } from './session-ids.js';
 import { HookUsagePersister } from './hook-usage.js';
-import { BridgeRevokedError, fetchBridgeToken, refreshBridgeToken, type BridgeAuthResponse } from './bridge-auth.js';
-import { beginIdentityReset, completePendingIdentityReset } from './identity-reset.js';
 import { createRevokedRestart } from './revoked-restart.js';
-import { bridgeMode, canReexecAfterRevocation, handlesRevocation, restartForPinnedRevocation, restartForRefreshError } from './revocation-gating.js';
-import { RotatingTokenRefresher } from './rotating-token-refresher.js';
+import { bridgeMode, canReexecAfterRevocation } from './revocation-gating.js';
+import { createEndpointRegistrar, resetIdentityForStart, startAccountIdentity, startRelay, usesLedger, type EndpointRegistrar } from './ledger-startup.js';
+import { createAccountRelay, createLedgerServer, readSavedRelayUrl, registerBridgeEndpoint, saveRelayUrl, subscribeApprovalRequired,
+  type AccountRelay } from './ledger-relay.js';
+import { runLedgerPairing } from './ledger-pairing-client.js';
 import { resolveDefaultDataDir, resolveFtownHome } from './ftown-home.js';
 import { SessionController } from './session-controller.js';
-import { cancelPreviousPendingPairing, runPairing } from './pairing-client.js';
 import { createServer } from 'node:http';
 import { generateAccessKey, mintHubJwt, sha256Hex } from './solo/solo-auth.js';
 import { DEFAULT_SOLO_PORT, SOLO_USER_ID, type SoloConfig } from './solo/contract.js';
@@ -128,17 +121,12 @@ program
   .option('--solo', 'Single-port LAN deployment: no account service, managed hub + panel children, key-based auth')
   .option('--port <port>', 'Public port for --solo front (default: see DEFAULT_SOLO_PORT)')
   .option('--rotate-key', 'With --solo: regenerate the access key, print the new banner, exit (offline)')
-  .option('--token <jwt>', 'Bridge bootstrap token from the ftown dashboard (short-lived; used once to onboard, then a rotating refresh token is stored). Optional: with no token and no stored refresh token, the bridge runs interactive device pairing instead.')
-  .option('--account <email>', 'Request approval in this account’s trusted-device inbox; compare and confirm on both devices')
-  .option('--bootstrap', 'Explicit first-computer setup using a private approval link')
   .option('--api-url <url>', 'ftown UI API URL', DEFAULT_API_URL)
   .option('--data-dir <path>', 'Directory for session data (default: ~/.ftown/data)')
   .option('--bridge-id <id>', 'Bridge instance ID (default: persisted per data dir)')
-  .option('--new-identity', 'Forget this computer’s account identity and credentials, then pair it again as a new computer with a private link (sessions are kept)')
-  .action(async (opts: { allowUpdates?: boolean; local?: boolean; solo?: boolean; port?: string; rotateKey?: boolean; token?: string; account?: string; bootstrap?: boolean; apiUrl: string; dataDir?: string; bridgeId?: string; newIdentity?: boolean }) => {
+  .option('--new-identity', 'Forget this computer’s account identity, then pair it again as a new computer with a passkey link (sessions are kept)')
+  .action(async (opts: { allowUpdates?: boolean; local?: boolean; solo?: boolean; port?: string; rotateKey?: boolean; apiUrl: string; dataDir?: string; bridgeId?: string; newIdentity?: boolean }) => {
     if (opts.local && opts.solo) program.error('--local and --solo cannot be combined');
-    if (opts.account !== undefined && opts.bootstrap) program.error('--account and --bootstrap cannot be combined');
-    if ((opts.local || opts.solo) && (opts.account !== undefined || opts.bootstrap)) program.error('--account and --bootstrap require cloud mode');
     if ((opts.local || opts.solo) && opts.newIdentity) program.error('--new-identity requires cloud mode');
     const apiUrl = new URL(opts.apiUrl);
     const isLocalHost =
@@ -162,9 +150,21 @@ program
     const dataDir = opts.dataDir ? resolve(opts.dataDir) : defaultDataDir;
     // No bridge starts, and no identity is reset, while an update holds the reservation.
     assertUpdateReservationAllowed(homedir());
-    if (opts.newIdentity) beginIdentityReset(dataDir, 'manual');
-    // Also finishes a reset that a revoked restart or a crash left pending.
-    const identityReset = completePendingIdentityReset(dataDir);
+    const runMode = bridgeMode(opts);
+    // Restart context is authenticated by the private helper channel before any mutation. It is read before any reset because a
+    // helper-started bridge has no visible terminal: it must never print a pairing link (an invalid context matters only below).
+    let launchContext: UpdateRestartContext | null = null;
+    let launchContextError: unknown = null;
+    try { launchContext = readUpdateRestartContext(); } catch (err) { launchContextError = err; }
+    const launchedByUpdate = launchContext !== null || launchContextError !== null;
+    // Account mode: --new-identity or v1 account state starts a reset. Every mode finishes one a revoked restart or a crash left pending.
+    const resetOutcome = resetIdentityForStart({ dataDir, mode: runMode, newIdentity: Boolean(opts.newIdentity), updateRestart: launchedByUpdate,
+      log: line => console.log(line) });
+    if (resetOutcome.kind === 'exit') {
+      console.log(resetOutcome.message);
+      return process.exit(1);
+    }
+    const identityReset = resetOutcome.reset;
     let updateRestart: UpdateRestartContext | null = null;
     if (identityReset) {
       console.log(`[Bridge] New identity for this computer: ${identityReset.oldBridgeId ?? 'unknown'} -> ${identityReset.newBridgeId}`);
@@ -173,21 +173,14 @@ program
         opts.bridgeId = undefined;
       }
       // A reset bridge is a fresh install; an update context names the identity it just discarded.
-      try {
-        if (readUpdateRestartContext()) console.warn('[Bridge] Ignoring the update restart context: this computer has a new identity.');
-      } catch (err) {
-        console.warn('[Bridge] Ignoring an invalid update restart context after the identity reset:', err instanceof Error ? err.message : String(err));
-      }
-      if (!opts.local && !opts.solo) {
-        if (opts.token !== undefined || opts.account !== undefined) console.warn('[Bridge] Ignoring --token and --account: a new identity pairs with a private link.');
-        opts.token = undefined;
-        opts.account = undefined;
-        opts.bootstrap = true;
-      }
+      if (launchContextError !== null) {
+        console.warn('[Bridge] Ignoring an invalid update restart context after the identity reset:',
+          launchContextError instanceof Error ? launchContextError.message : String(launchContextError));
+      } else if (launchContext) console.warn('[Bridge] Ignoring the update restart context: this computer has a new identity.');
     } else {
-      // Restart context is authenticated by the private helper channel before any mutation.
-      updateRestart = readUpdateRestartContext();
-      if (updateRestart && (updateRestart.targetVersion !== BRIDGE_VERSION || opts.token || opts.account || opts.bootstrap || opts.solo))
+      if (launchContextError !== null) throw launchContextError;
+      updateRestart = launchContext;
+      if (updateRestart && (updateRestart.targetVersion !== BRIDGE_VERSION || opts.solo))
         throw new Error('Invalid update restart context');
     }
     // Every child/local CLI must resolve this exact instance, including custom --data-dir bridges.
@@ -233,12 +226,6 @@ program
       shutdown: () => releaseForRestart(), log: message => console.log(message), exit: code => process.exit(code),
       canReexec: () => canReexecAfterRevocation({ updateRestart: updateRestart !== null, updatePhase }),
     });
-    const securityDir = join(dataDir, 'security');
-    const runMode = bridgeMode(opts);
-    if (restartForPinnedRevocation(runMode, readPinnedAccountCheckpoint(securityDir), bridgeId)) {
-      await revokedRestart();
-      return;
-    }
 
     // L4: --rotate-key short-circuits BEFORE any listener binds (exit 0,
     // nothing started). Without --solo it is an argument error.
@@ -440,212 +427,116 @@ program
     }
     // ----- END SOLO MODE -----
 
-    // The bootstrap token (--token) is single-use and short-lived (F1). Once a
-    // bridge has onboarded it persists its rotating refresh token (F3) and
-    // resumes from that on restart, so the bootstrap token is never reused.
-    const local = { localPort: hookPort, localNonce };
-    const refreshTokenPath = join(dataDir, 'refresh-token');
-
-    let persistedRefreshToken: string | undefined;
-    try {
-      persistedRefreshToken = readFileSync(refreshTokenPath, 'utf8').trim() || undefined;
-    } catch {
-      persistedRefreshToken = undefined;
-    }
-
-    const persistRefreshToken = (token: string): void => {
-      try {
-        writeFileSync(refreshTokenPath, `${token}\n`, { mode: 0o600 });
-      } catch (err) {
-        console.error(
-          '[Bridge] Failed to persist refresh token:',
-          err instanceof Error ? err.message : String(err),
-        );
-      }
+    const browserOrigin = new URL(opts.apiUrl).origin;
+    const localOrigin = `http://127.0.0.1:${hookPort}`;
+    /** Account startup failures end the process (the local API server would otherwise keep it alive). */
+    const fail = (message: string | null): never => {
+      if (message) console.error(message);
+      return process.exit(1);
     };
+    /** The relay identity of this bridge: account mode uses the accountId (relay JWT `sub`), never an email. */
+    let auth: { ownerId: string; userId: string; token: string; centrifugoUrl: string };
+    let security: BridgeSecurityService;
+    let accountRelay: AccountRelay | undefined;
+    let accountRegistrar: EndpointRegistrar | undefined;
+    /** Bound once the relay client exists: a relay refused earlier reconnects when the key is accepted again. */
+    let reconnectRelay = (): void => {};
 
-    // Onboarding precedence (P7): stored refresh token → else --token exchange →
-    // else interactive device pairing. Pairing yields the SAME token bundle shape
-    // as /api/auth/bridge, so all three paths converge on `auth` and the identical
-    // refresh-token persist/resume logic below.
-    const boundAtStartup = await readBoundBridgeIdentity(dataDir);
-    if (updateRestart && (!boundAtStartup || boundAtStartup.identity.endpoint.id !== updateRestart.endpointId ||
-      boundAtStartup.identity.endpoint.ownerId !== updateRestart.ownerId || (!opts.local && !persistedRefreshToken)))
-      throw new Error('Update restart identity is unavailable');
-    let pendingEnrollment: PendingBridgeEnrollment | undefined;
-    let pendingVerified: PendingPairingVerified | undefined;
-    const onboard = async (): Promise<BridgeAuthResponse> => {
-      if (updateRestart) throw new Error('Update restart requires existing authentication');
-      if (opts.token) {
-        console.log('[Bridge] Authenticating with API...');
-        return fetchBridgeToken(opts.apiUrl, opts.token, bridgeId, local);
+    if (!usesLedger(runMode)) {
+      // Solo and --local: identity is synthesized locally (contract S2/S10); no account, no ledger, no relay token by proof.
+      const boundAtStartup = await readBoundBridgeIdentity(dataDir);
+      if (updateRestart && (!boundAtStartup || boundAtStartup.identity.endpoint.id !== updateRestart.endpointId ||
+        boundAtStartup.identity.endpoint.ownerId !== updateRestart.ownerId))
+        throw new Error('Update restart identity is unavailable');
+      if (opts.local) {
+        auth = { ownerId: `solo:${bridgeId}`, userId: 'local', token: '', centrifugoUrl: 'ws://127.0.0.1/disabled' };
+      } else {
+        // getToken() mints a fresh hub JWT on demand. The bridge's own connection token carries `info` (matching the cloud
+        // minter's shape) so the panel's presence-based bridge list sees it — browser tokens from /api/solo/bootstrap|token
+        // deliberately omit it.
+        const soloRuntime = solo!;
+        auth = {
+          ownerId: `solo:${bridgeId}`,
+          userId: SOLO_USER_ID,
+          token: mintHubJwt({ secret: soloRuntime.config.hubSecret, info: { bridgeId, hostname: osHostname() } }),
+          centrifugoUrl: `ws://127.0.0.1:${soloRuntime.config.hubPort}/connection/websocket`,
+        };
       }
-      console.log('[Bridge] No bootstrap token or stored session — starting device pairing...');
-      if (!boundAtStartup) {
-        const interactive = Boolean(process.stdin.isTTY && process.stderr.isTTY);
-        const previous = await previousPendingBridgeAttempt(dataDir);
-        const mode = await selectBridgePairingMode({ account: opts.account, bootstrap: opts.bootstrap, interactive, previousPending: Boolean(previous) }, async () => {
-          const input = createInterface({ input: process.stdin, output: process.stderr });
-          try { return await input.question('Account email (leave blank only for first-computer private-link setup): '); }
-          finally { input.close(); }
-        });
-        if (previous) await cancelPreviousPendingPairing(opts.apiUrl, previous, AbortSignal.timeout(15000));
-        if (mode.method === 'pending-v1') {
-          const enrollment = await preparePendingBridgeEnrollment(dataDir, bridgeId, osHostname());
-          const lifetime = new AbortController();
-          const abort = () => lifetime.abort(new Error('Computer approval interrupted.'));
-          process.once('SIGINT', abort); process.once('SIGTERM', abort);
-          try {
-            const result = await runPairing({ apiUrl: opts.apiUrl, bridgeId, hostname: osHostname(), platform: process.platform,
-              localPort: local.localPort, localNonce: local.localNonce, accountHint: mode.accountHint,
-              pending: { identity: enrollment.identity, request: enrollment.request, candidateToken: enrollment.candidateToken,
-                signal: lifetime.signal, pinOffer: enrollment.pinOffer, pinHello: enrollment.pinHello,
-                onLocalStatus: state => writePendingBridgeStatus(dataDir, state),
-                waitForLocalDecision: async (state, signal) => {
-                  if (!interactive || state.phase !== 'comparing') return waitForPendingBridgeDecision(dataDir, state, signal);
-                  const localAbort = new AbortController();
-                  const combined = AbortSignal.any([signal, localAbort.signal]);
-                  const input = createInterface({ input: process.stdin, output: process.stderr });
-                  const answer = input.question(`Verification code: ${state.comparisonCode}\nDoes it match the code on your trusted browser? [y/N] `, { signal: combined })
-                    .then(value => ({ version: 1 as const, requestId: state.requestId, processNonce: state.processNonce, expiresAt: state.expiresAt,
-                      ...(value.trim().toLowerCase() === 'y' || value.trim().toLowerCase() === 'yes'
-                        ? { decision: 'confirm' as const, offerHash: state.offerHash, comparisonCode: state.comparisonCode }
-                        : { decision: 'reject' as const, offerHash: state.offerHash }) }) satisfies PendingBridgeDecision);
-                  try { return await Promise.race([answer, waitForPendingBridgeDecision(dataDir, state, combined)]); }
-                  finally { localAbort.abort(); input.close(); }
-                } },
-            });
-            if (result.approvalMethod !== 'pending-v1' || !result.verifiedAccountTrust || result.lastServerReadAt === undefined) throw new Error('account_approval_required');
-            pendingVerified = result;
-            return result;
-          } finally { lifetime.abort(); process.removeListener('SIGINT', abort); process.removeListener('SIGTERM', abort); }
-        }
-        if (!interactive && !opts.bootstrap) console.log('[Bridge] Private-link setup selected. Use --account <email> to request approval without copying a link.');
-        pendingEnrollment = await prepareBridgeEnrollment(dataDir, bridgeId, osHostname(), Date.now(), Boolean(previous) || Boolean(opts.bootstrap));
-      }
-      return runPairing({
-        apiUrl: opts.apiUrl,
-        bridgeId,
-        hostname: osHostname(),
-        platform: process.platform,
-        localPort: local.localPort,
-        localNonce: local.localNonce,
-        log: (msg) => console.log(msg),
-        enrollment: pendingEnrollment?.link,
-        onPairingCode: async code => { await savePairingVerificationUrl(dataDir, opts.apiUrl, code); },
-      });
-    };
-
-    let auth: BridgeAuthResponse;
-    if (opts.local) {
-      auth = { ownerId: `solo:${bridgeId}`, userId: 'local', token: '', refreshToken: '', centrifugoUrl: 'ws://127.0.0.1/disabled' };
-    } else if (solo) {
-      // Solo mode: identity is synthesized locally (contract S2/S10). No
-      // refresh token exists; getToken() mints a fresh hub JWT on demand.
-      // The bridge's own connection token carries `info` (matching the cloud
-      // minter's shape) so the panel's presence-based bridge list sees it —
-      // browser tokens from /api/solo/bootstrap|token deliberately omit it.
-      const token = mintHubJwt({
-        secret: solo.config.hubSecret,
-        info: { bridgeId, hostname: osHostname() },
-      });
-      auth = {
-        ownerId: `solo:${bridgeId}`,
-        userId: SOLO_USER_ID,
-        token,
-        refreshToken: '',
-        centrifugoUrl: `ws://127.0.0.1:${solo.config.hubPort}/connection/websocket`,
-      };
-    } else if (persistedRefreshToken) {
-      console.log('[Bridge] Resuming from stored refresh token...');
-      try {
-        auth = await refreshBridgeToken(opts.apiUrl, persistedRefreshToken, bridgeId, local);
-      } catch (err) {
-        // Only a refusal whose signed history verifies against our own pin resets; anything else keeps today's path.
-        if (await restartForRefreshError({ mode: runMode, error: err, pinned: readPinnedAccountCheckpoint(securityDir), bridgeId })) {
-          await revokedRestart();
-          return;
-        }
-        if (updateRestart) throw new Error('Update restart authentication failed');
-        console.warn(
-          '[Bridge] Stored refresh token rejected, falling back to bootstrap token / pairing:',
-          err instanceof Error ? err.message : String(err),
-        );
-        auth = await onboard();
-      }
-    } else {
-      auth = await onboard();
-    }
-    if (boundAtStartup && boundAtStartup.identity.endpoint.ownerId !== auth.ownerId) throw new Error('wrong_context');
-    const currentRefreshToken = auth.refreshToken;
-    let currentBridgeToken = auth.token;
-    // A virgin enrollment saves its same-point normalized identity/root before credentials.
-    if (!solo && !opts.local && boundAtStartup) persistRefreshToken(currentRefreshToken);
-
-    const tokenRefresher = solo || opts.local
-      ? null
-      : new RotatingTokenRefresher({
-          initialRefreshToken: currentRefreshToken,
-          refresh: async (refreshToken) => {
-            const refreshed = await refreshBridgeToken(opts.apiUrl, refreshToken, bridgeId, local);
-            currentBridgeToken = refreshed.token;
-            return refreshed;
-          },
-          loadPersistedRefreshToken: () => {
-            try {
-              return readFileSync(refreshTokenPath, 'utf8').trim() || undefined;
-            } catch {
-              return undefined;
-            }
-          },
-          persistRefreshToken,
-          onPersistedTokenRecovery: () => {
-            console.warn(
-              '[Bridge] In-memory refresh token was stale; retrying with the newer persisted token.',
-            );
-          },
-        });
-
-    if (!auth.ownerId) throw new Error('security_setup_required: bridge auth must provide immutable ownerId');
-    let identity: EndpointIdentity;
-    let accountBootstrap = boundAtStartup?.bootstrap;
-    if (pendingVerified) {
-      accountBootstrap = pendingVerified.verifiedAccountTrust;
-      if (accountBootstrap.checkpoint.ownerId !== auth.ownerId) throw new Error('wrong_context');
-      identity = await bindPendingBridgeIdentity(dataDir, accountBootstrap);
-    } else if (pendingEnrollment) {
-      if (!auth.accountApproval || !auth.accountHistory) throw new Error('account_approval_required');
-      const history = await readAccountHistory(opts.apiUrl, currentBridgeToken);
-      if (!history) throw new Error('account_approval_required');
-      accountBootstrap = await openAccountApproval(pendingEnrollment.identity, pendingEnrollment.link, auth.accountApproval, history);
-      if (accountBootstrap.checkpoint.ownerId !== auth.ownerId) throw new Error('wrong_context');
-      identity = await bindPendingBridgeIdentity(dataDir, accountBootstrap);
-    } else {
-      identity = boundAtStartup?.identity ?? await loadOrCreateIdentity(dataDir, auth.ownerId, 'bridge');
+      if (boundAtStartup && boundAtStartup.identity.endpoint.ownerId !== auth.ownerId) throw new Error('wrong_context');
+      const identity: EndpointIdentity = boundAtStartup?.identity ?? await loadOrCreateIdentity(dataDir, auth.ownerId, 'bridge');
       if (identity.endpoint.ownerId !== auth.ownerId) throw new Error('wrong_context');
-    }
-    if (!solo && !opts.local) persistRefreshToken(currentRefreshToken);
-    const localIdentity = await loadOrCreateIdentity(dataDir, auth.ownerId, 'local-cli');
-    const security = new BridgeSecurityService(identity, bridgeId, dataDir, {
-      relayUserId: auth.userId, relayUrl: auth.centrifugoUrl, browserOrigin: new URL(opts.apiUrl).origin,
-      localOrigin: `http://127.0.0.1:${hookPort}`,
-      readAccountHistory: !solo && !opts.local ? signal => readAccountHistory(opts.apiUrl, currentBridgeToken, signal) : undefined,
-    });
-    releaseForRestart = async () => { localApiServer.stop(); await security.close(); };
-    let bridgeRevoked = false;
-    if (handlesRevocation(runMode)) security.onBridgeRevoked(() => { bridgeRevoked = true; void revokedRestart(); });
-    await security.policy.provisionLocalEndpoint(localIdentity.endpoint);
-    await security.startAccount(accountBootstrap);
-    // The startup read may prove the revocation; stop here instead of registering a revoked endpoint.
-    if (bridgeRevoked) {
-      await revokedRestart();
-      return;
-    }
-    if (!solo && !opts.local) {
-      const registration = await fetch(`${opts.apiUrl.replace(/\/$/, '')}/api/security/endpoints`, { method: 'PUT',
-        headers: { Authorization: `Bearer ${currentBridgeToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ endpoint: identity.endpoint, bridgeId, label: osHostname(), protocolVersion: 1 }) });
-      if (!registration.ok) throw new Error('security_setup_required: endpoint directory registration failed');
+      const localIdentity = await loadOrCreateIdentity(dataDir, auth.ownerId, 'local-cli');
+      const localSecurity = new BridgeSecurityService(identity, bridgeId, dataDir, { relayUserId: auth.userId, relayUrl: auth.centrifugoUrl, browserOrigin, localOrigin });
+      security = localSecurity;
+      releaseForRestart = async () => { localApiServer.stop(); await localSecurity.close(); };
+      await localSecurity.policy.provisionLocalEndpoint(localIdentity.endpoint);
+    } else {
+      // ----- ACCOUNT MODE: the passkey ledger (CONTRACT C5) -----
+      const server = createLedgerServer({ apiUrl: opts.apiUrl });
+      // Steps 3-4: pair when unpaired, recover the replica when needed, then this bridge's own status, before any network identity use.
+      const startup = await startAccountIdentity({
+        // A helper-started bridge (even one whose context a reset discarded) has no terminal for the pairing link.
+        dataDir, bridgeId, allowPairing: !launchedByUpdate,
+        pair: (keys, store) => runLedgerPairing({ apiUrl: opts.apiUrl, dataDir, bridgeId, label: osHostname(), identity: keys, store,
+          bindIdentity: accountId => bindLedgerIdentity(dataDir, accountId), print: line => console.log(line) }),
+        fetchLedger: accountId => server.fetchLedger(accountId),
+      });
+      if (startup.kind === 'revoked') { await revokedRestart(); return; }
+      if (startup.kind === 'exit') return fail(startup.message);
+      const bound = startup.identity;
+      if (updateRestart && (bound.endpoint.id !== updateRestart.endpointId || bound.accountId !== updateRestart.ownerId))
+        throw new Error('Update restart identity is unavailable');
+      const localIdentity = await loadOrCreateIdentity(dataDir, bound.accountId, 'local-cli');
+      const ledgerSecurity = new BridgeSecurityService({ endpoint: bound.endpoint, keyPair: bound.keyPair }, bridgeId, dataDir, {
+        relayUserId: bound.accountId, browserOrigin, localOrigin,
+        ledger: { store: startup.store, bridgeId, authPublicKey: bound.authPublicKey, fetchLedger: () => server.fetchLedger(bound.accountId) },
+      });
+      security = ledgerSecurity;
+      releaseForRestart = async () => { localApiServer.stop(); await ledgerSecurity.close(); };
+      // Subscribed before startLedger: its read may prove the revocation.
+      let bridgeRevoked = false;
+      ledgerSecurity.onBridgeRevoked(() => { bridgeRevoked = true; void revokedRestart(); });
+      await ledgerSecurity.policy.provisionLocalEndpoint(localIdentity.endpoint);
+      await ledgerSecurity.startLedger();
+      if (bridgeRevoked) { await revokedRestart(); return; }
+
+      const relay = createAccountRelay({
+        apiUrl: opts.apiUrl, accountId: bound.accountId, bridgeId, authPrivateKey: bound.authPrivateKey, security: ledgerSecurity,
+        store: startup.store, server, hostname: () => osHostname(), localPort: () => hookPort,
+        relayUrlOverride: process.env.FTOWN_CENTRIFUGO_URL,
+        // The last relay URL the server named lets a later start come up while the server is unreachable.
+        savedRelayUrl: readSavedRelayUrl(dataDir, opts.apiUrl), onRelayUrl: url => saveRelayUrl(dataDir, url),
+        reconnect: () => reconnectRelay(),
+      });
+      accountRelay = relay;
+      releaseForRestart = async () => { relay.stop(); localApiServer.stop(); await ledgerSecurity.close(); };
+      // A browser that enrolled moments ago may not be in this replica yet: its refused request pulls the server ledger (rate-limited),
+      // so the browser's retry succeeds without waiting for the relay.
+      if (!subscribeApprovalRequired(ledgerSecurity, () => relay.onUnknownEndpoint())) {
+        console.warn('[Bridge] This security service has no approval-required signal; new browsers wait for the relay ledger update.');
+      }
+      // Only this bridge's own ledger endpoint is published, authenticated by its relay token.
+      const registrar = createEndpointRegistrar({
+        register: token => registerBridgeEndpoint({ apiUrl: opts.apiUrl, token, endpoint: bound.endpoint, bridgeId, label: osHostname() }),
+        tokens: relay.tokens, bridgeRevoked: () => bridgeRevoked, log: line => console.warn(line),
+      });
+      accountRegistrar = registrar;
+      // Step 5: a refusal exits; a temporary failure starts offline (local API, sessions) and keeps retrying in the background.
+      const relayStart = await startRelay({ getToken: () => relay.tokens.getToken(), relayUrl: () => relay.relayUrl(),
+        bridgeRevoked: () => bridgeRevoked, apiUrl: opts.apiUrl });
+      if (relayStart.kind === 'revoked') { await revokedRestart(); return; }
+      if (relayStart.kind === 'exit') return fail(relayStart.message);
+      if (relayStart.kind === 'online') {
+        const registration = await registrar.registerNow(relayStart.token);
+        if (registration.kind === 'revoked') { await revokedRestart(); return; }
+        if (registration.kind === 'exit') return fail(registration.message);
+        if (registration.kind === 'retry') registrar.retryInBackground();
+      } else {
+        console.warn(`[Bridge] Could not reach the ftown server (${relayStart.reason}). Starting offline with the last relay URL; reconnecting in the background.`);
+        registrar.retryInBackground();
+      }
+      auth = { ownerId: bound.accountId, userId: bound.accountId, token: relayStart.kind === 'online' ? relayStart.token : '',
+        centrifugoUrl: relayStart.relayUrl };
     }
     const userId = auth.userId;
     const centrifugoUrl = auth.centrifugoUrl;
@@ -668,24 +559,17 @@ program
           info: { bridgeId, hostname: osHostname() },
         });
       }
-      // centrifuge-js polls every 5-10 s during a cooldown; stay quiet.
-      if (tokenRefresher!.cooldownRemainingMs() <= 0) {
-        console.log('[Bridge] Refreshing Centrifugo token...');
-      }
-      let token: string;
+      // --local never connects, so it never asks.
+      if (!accountRelay) throw new Error('No relay in --local mode');
+      // centrifuge-js polls every 5-10 s during a cooldown; stay quiet then. A key_revoked answer is evidence for the security
+      // service (relay token hooks); only a verified revocation restarts this bridge.
+      const quiet = accountRelay.tokens.cooldownRemainingMs() > 0;
       try {
-        token = await tokenRefresher!.getToken();
+        return await accountRelay.connectionToken();
       } catch (err) {
-        // The refusal is unverified; the security service checks it against the pinned account state.
-        if (err instanceof BridgeRevokedError) {
-          security.confirmRevocationEvidence(err.evidence).catch((confirmErr: unknown) => {
-            console.error('[Bridge] Failed to verify revocation evidence:', confirmErr instanceof Error ? confirmErr.message : String(confirmErr));
-          });
-        }
+        if (!quiet) console.warn('[Bridge] Relay token unavailable:', err instanceof Error ? err.message : String(err));
         throw err;
       }
-      console.log('[Bridge] Token refreshed successfully');
-      return token;
     }
 
     const store = new SessionStore(dataDir);
@@ -702,7 +586,14 @@ program
     if (updateRestart) updateAdmission.freeze();
     const updateEffects = new UpdateEffects(updateAdmission);
     let resurrectionComplete = false;
+    // Account mode only: the ledger channel's records and (re)subscriptions feed the replica.
+    const ledgerRelay = accountRelay;
+    const ledgerOptions = ledgerRelay ? {
+      onLedgerMessage: (message: LedgerMessage) => ledgerRelay.onLedgerMessage(message),
+      onLedgerSubscribed: () => ledgerRelay.onLedgerSubscribed(),
+    } : {};
     const centrifugo = new CentrifugoClient(centrifugoUrl, auth.token, getToken, {
+      ...ledgerOptions,
       disabled: opts.local,
       // On a transport reconnect, re-publish the session snapshot. The UI does
       // not re-request its list on reconnect, so without this its session list
@@ -734,8 +625,8 @@ program
       },
     });
     centrifugo.setSecurity(security);
-    centrifugo.onSecurityNudge(scope => { if (scope === 'account') security.requestAccountRefresh(); });
-    centrifugo.onSecurityNudgeHealth(healthy => security.setAccountPushHealthy(healthy));
+    // After a refusal centrifuge-js stops for good; the relay reconnects it once the key is accepted or a ledger is adopted.
+    if (ledgerRelay) reconnectRelay = () => centrifugo.connect();
     centrifugo.onLocalPublication((channel, data) => localApiServer.recordPublication(channel, data));
     // Direct transport (WebRTC DataChannel) data plane. Peers attach per session;
     // terminal output/screen fan out to them directly, and to Centrifugo only when
@@ -839,10 +730,11 @@ program
       console.log(`[Bridge] Loopback WS rung ready at ws://127.0.0.1:${hookPort}/ws`);
     }
     localApiServer.setDependencies(store, runner, centrifugo, userId, terminalManager);
-    const pushNotifier = opts.local || solo ? undefined : new BridgePushNotifier({
+    // Push events authenticate with the relay token (Bearer), reused until it nears expiry.
+    const pushNotifier = !ledgerRelay ? undefined : new BridgePushNotifier({
       apiUrl: opts.apiUrl,
       bridgeId,
-      getToken: () => currentBridgeToken,
+      getToken: () => ledgerRelay.tokens.getToken(),
       getSession: (sessionId) => store.loadSession(sessionId),
     });
     const attentionStore = new AttentionStore(
@@ -1113,7 +1005,11 @@ program
         if (!updateRestart) {
           ready = true;
           console.log('[Bridge] Ready and listening for commands');
-          if (bridgePointerPublished) console.log('[Bridge] Encrypted endpoint ready. Run ftown security invite to pair a browser.');
+          if (bridgePointerPublished) {
+            // Invitations are for Solo and --local only; an account bridge trusts the browsers its passkey ledger lists.
+            if (opts.local || opts.solo) console.log('[Bridge] Encrypted endpoint ready. Run ftown security invite to pair a browser.');
+            else console.log('[Bridge] Encrypted endpoint ready. Browsers signed in to your account with a passkey can reach this computer.');
+          }
         }
         try {
           await resurrection.resurrectSessions();
@@ -1146,6 +1042,8 @@ program
           attentionStore.stopNotifications();
           stopPushSessionObserver();
           pushNotifier?.stop();
+          ledgerRelay?.stop();
+          accountRegistrar?.stop();
           // Solo L2 ordering: stop accepting first, then children (panel before
           // hub), then the rest of the bridge teardown.
           if (solo) {

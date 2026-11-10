@@ -141,6 +141,24 @@ test('public key decoding verifies canonical point format and fingerprint bindin
   await assert.rejects(seal(sender, { ...recipient.endpoint, ownerId: otherOwner }, header, encode.encode('x')), safeError);
 });
 
+test('owners are an account UUID, solo:<bridgeId>, or a 43-character base64url ledger accountId', async () => {
+  const accountId = b64(crypto.getRandomValues(new Uint8Array(32)));
+  assert.equal(accountId.length, 43);
+  const sender = await generateEndpoint(accountId, 'browser');
+  const recipient = await generateEndpoint(accountId, 'bridge');
+  assert.equal(recipient.endpoint.ownerId, accountId);
+  const h = { ...makeHeader(sender, recipient), ownerId: accountId };
+  const packet = await seal(sender, recipient.endpoint, h, encode.encode('ledger owner'));
+  assert.equal(packet.ownerId, accountId);
+  assert.equal(decode.decode(await open(recipient, sender.endpoint, packet, context(h))), 'ledger owner');
+  assert.equal(parseSecureEnvelope({ ...packet, ownerId: 'solo:bridge-a' }).ownerId, 'solo:bridge-a');
+  assert.equal(parseSecureEnvelope({ ...packet, ownerId }).ownerId, ownerId);
+  for (const bad of [accountId.slice(1), `${accountId}A`, `${accountId.slice(1)}+`, `${accountId.slice(1)}=`, `${accountId.slice(2)}.@`, '']) {
+    await assert.rejects(generateEndpoint(bad, 'bridge'), safeError);
+    assert.throws(() => parseSecureEnvelope({ ...packet, ownerId: bad }), { code: 'invalid_envelope' });
+  }
+});
+
 test('imported persistent identities preserve their pinned public identity and become non-extractable', async () => {
   const persistent = await generateEndpoint(ownerId, 'local-cli', true);
   const jwk = await crypto.subtle.exportKey('jwk', persistent.keyPair.privateKey);

@@ -1,6 +1,6 @@
 import { Centrifuge } from 'centrifuge';
 import { BridgeSecurityService, applicationJson } from './security/bridge/security.js';
-import { parseSecurityNudge, securityNudgeChannel, type SecurityNudgeScope } from './security/security-nudge.js';
+import { accountChannel, sessionChannel } from './security/ledger/channels.js';
 import { executeSecurePacket } from './security/bridge/execute.js';
 import type { SecureExecutionObserver } from './security/bridge/execution-observer.js';
 import { scopedUpdateObserver } from './update-effects.js';
@@ -31,6 +31,29 @@ type DirectCommandHandler = (msg: DirectCommandMessage) => void;
 
 const MAX_PUBLISH_BYTES = 300_000;
 
+export type LedgerMessage =
+  | { type: 'ledger'; ledger: unknown }
+  | { type: 'ledger_head'; head: string; revision: number };
+
+/** Strict shape check for `bridges:ledger` publications; anything else is ignored. */
+export function parseLedgerMessage(data: unknown): LedgerMessage | null {
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return null;
+  const record = data as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (record.type === 'ledger') {
+    if (keys.length !== 2 || !keys.includes('ledger') || record.ledger === undefined || record.ledger === null) return null;
+    return { type: 'ledger', ledger: record.ledger };
+  }
+  if (record.type === 'ledger_head') {
+    if (keys.length !== 3 || !keys.includes('head') || !keys.includes('revision')) return null;
+    const { head, revision } = record;
+    if (typeof head !== 'string' || head.length === 0) return null;
+    if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) return null;
+    return { type: 'ledger_head', head, revision };
+  }
+  return null;
+}
+
 /**
  * Fail-closed publisher-identity check for inbound client publications on a
  * user-limited channel `ch#{owner}`.
@@ -47,7 +70,7 @@ const MAX_PUBLISH_BYTES = 300_000;
  * publishes carry `info.user == owner`. We accept ONLY those and drop everything
  * else — a mismatched publisher, and (fail-closed) any publication whose info is
  * missing/empty (e.g. a server-API publish with no client context, or an empty
- * anonymous user). `owner` is always a non-empty email, so the empty-string
+ * anonymous user). `owner` is always a non-empty account id, so the empty-string
  * anonymous user can never match.
  */
 function isOwnerPublication(ctx: PublicationContext, owner: string): boolean {
@@ -97,19 +120,19 @@ export class CentrifugoClient {
   setSecurity(security: BridgeSecurityService): void { this.security = security; }
   private readonly disabled: boolean;
   private readonly localListeners = new Set<(channel: string, data: unknown) => void>();
-  private readonly nudgeListeners = new Set<(scope: SecurityNudgeScope) => void>();
-  private readonly nudgeHealthListeners = new Set<(healthy: boolean) => void>();
-  private nudgeHealthy = false;
-  private nudgeClientDown: (() => void) | null = null;
+  private readonly onLedgerMessage?: (message: LedgerMessage) => void;
+  private readonly onLedgerSubscribed?: () => void;
 
   constructor(
     url: string,
     token: string,
     getToken: () => Promise<string>,
-    opts?: { onReconnect?: () => void | Promise<void>; disabled?: boolean },
+    opts?: { onReconnect?: () => void | Promise<void>; disabled?: boolean; onLedgerMessage?: (message: LedgerMessage) => void; onLedgerSubscribed?: () => void },
   ) {
     this.onReconnect = opts?.onReconnect;
     this.disabled = opts?.disabled ?? false;
+    this.onLedgerMessage = opts?.onLedgerMessage;
+    this.onLedgerSubscribed = opts?.onLedgerSubscribed;
     this.client = new Centrifuge(url, {
       token,
       getToken,
@@ -234,7 +257,7 @@ export class CentrifugoClient {
   }
 
   async publishSessionUpdate(userId: string, session: Session): Promise<void> {
-    const channel = `sessions:updates#${userId}`;
+    const channel = accountChannel('sessions:updates', userId);
     try {
       await this.publish(channel, {
         type: 'session_update',
@@ -248,7 +271,7 @@ export class CentrifugoClient {
   }
 
   async publishTerminalData(userId: string, sessionId: string, data: string): Promise<void> {
-    const channel = `terminal:${sessionId}#${userId}`;
+    const channel = sessionChannel('terminal', sessionId, userId);
     // The bridge only PUBLISHES terminal output; the UI is the sole subscriber.
     // The `terminal` namespace has `allow_publish_for_client: true`
     // (centrifugo/config.json), so client publishing needs no subscription. The
@@ -274,7 +297,7 @@ export class CentrifugoClient {
     onInit?: TerminalInitHandler,
   ): void {
     if (this.disabled) return;
-    const channel = `terminal-input:${sessionId}#${userId}`;
+    const channel = sessionChannel('terminal-input', sessionId, userId);
     if (this.subscriptions.has(channel)) {
       return;
     }
@@ -316,7 +339,7 @@ export class CentrifugoClient {
 
   subscribeSecureCommands(userId: string, dispatch: (message: VerifiedApplication) => Promise<ApplicationJson>, observer?: SecureExecutionObserver): void {
     if (this.disabled) return;
-    const channel = `commands:rpc#${userId}`;
+    const channel = accountChannel('commands:rpc', userId);
     const existing = this.subscriptions.get(channel);
     this.secureCommandSubscription = null;
     this.secureCommandReady = false;
@@ -378,7 +401,7 @@ export class CentrifugoClient {
   // without a subscribe proxy; presence exposes conn_info only.
   joinBridgesChannel(userId: string, bridgeId: string): void {
     if (this.disabled) return;
-    const channel = `bridges:presence#${userId}`;
+    const channel = accountChannel('bridges:presence', userId);
 
     const presenceInfo: BridgePresenceInfo = {
       bridgeId,
@@ -400,69 +423,36 @@ export class CentrifugoClient {
 
     sub.subscribe();
     this.subscriptions.set(channel, sub);
-    this.joinSecurityNudgeChannel(userId);
+    if (this.onLedgerMessage) this.joinLedgerChannel(userId, this.onLedgerMessage);
   }
 
-  onSecurityNudge(listener: (scope: SecurityNudgeScope) => void): () => void {
-    this.nudgeListeners.add(listener);
-    return () => { this.nudgeListeners.delete(listener); };
-  }
-
-  get securityNudgeHealthy(): boolean { return this.nudgeHealthy; }
-
-  onSecurityNudgeHealth(listener: (healthy: boolean) => void): () => void {
-    this.nudgeHealthListeners.add(listener);
-    return () => { this.nudgeHealthListeners.delete(listener); };
-  }
-
-  private setNudgeHealth(healthy: boolean): void {
-    this.nudgeHealthy = healthy;
-    for (const listener of [...this.nudgeHealthListeners]) {
-      try { listener(healthy); } catch (err) { console.error('[Centrifugo] Security nudge health listener failed:', err); }
-    }
-  }
-
-  private emitSecurityNudge(scope: SecurityNudgeScope): void {
-    for (const listener of [...this.nudgeListeners]) {
-      try { listener(scope); } catch (err) { console.error('[Centrifugo] Security nudge listener failed:', err); }
-    }
-  }
-
-  // Raw subscription: the nudge is unsealed and content-free, so it bypasses the
-  // secure-envelope path. Only the owner's own clients may trigger a refresh.
-  private joinSecurityNudgeChannel(userId: string): void {
-    const channel = securityNudgeChannel(userId);
+  // Raw subscription: ledger messages are self-authenticating (the receiver
+  // verifies the ledger from genesis), so this bypasses the secure-envelope
+  // path. Only the owner's own clients may publish; anything malformed is dropped.
+  private joinLedgerChannel(userId: string, onMessage: (message: LedgerMessage) => void): void {
+    const channel = accountChannel('bridges:ledger', userId);
     const existing = this.subscriptions.get(channel);
     if (existing) { existing.unsubscribe(); this.client.removeSubscription(existing); }
-    if (this.nudgeClientDown) { this.client.off('disconnected', this.nudgeClientDown); this.client.off('connecting', this.nudgeClientDown); }
     const sub = this.client.newSubscription(channel);
-    this.setNudgeHealth(false);
-    // Terminal subscribe errors and server unsubscribes surface only as
-    // 'unsubscribed' in centrifuge-js, with no retry, so push is trusted only while subscribed.
-    const down = () => this.setNudgeHealth(false);
-    this.nudgeClientDown = down;
-    this.client.on('disconnected', down);
-    this.client.on('connecting', down);
-    sub.on('unsubscribed', (ctx) => {
-      console.warn(`[Centrifugo] Security nudge channel unsubscribed (code ${ctx.code}): ${ctx.reason ?? ''}`);
-      down();
+    // Every (re)subscribe may follow missed ledger messages (e.g. a revocation), so re-read.
+    sub.on('subscribed', () => {
+      try { this.onLedgerSubscribed?.(); } catch (err) { console.error('[Centrifugo] Ledger subscribed handler failed:', err); }
     });
-    sub.on('subscribing', down);
-    // Every (re)subscribe may follow missed nudges, so resync unconditionally.
-    sub.on('subscribed', () => { this.setNudgeHealth(true); this.emitSecurityNudge('account'); });
     sub.on('publication', (ctx) => {
       if (!isOwnerPublication(ctx, userId)) return;
-      if (parseSecurityNudge(ctx.data) === 'account') this.emitSecurityNudge('account');
+      const message = parseLedgerMessage(ctx.data);
+      if (!message) return;
+      try { onMessage(message); } catch (err) { console.error('[Centrifugo] Ledger message handler failed:', err); }
     });
     sub.on('error', (ctx) => {
-      console.error(`[Centrifugo] Security nudge channel error:`, ctx.error);
+      console.error(`[Centrifugo] Ledger channel error:`, ctx.error);
     });
     sub.subscribe();
     this.subscriptions.set(channel, sub);
   }
 
   async publishTerminalScreen(userId: string, sessionId: string, raw: string): Promise<void> {
-    const channel = `terminal:${sessionId}#${userId}`;
+    const channel = sessionChannel('terminal', sessionId, userId);
     try {
       await this.publish(channel, { type: 'screen_dump', raw: raw.slice(0, 60000), timestamp: new Date().toISOString() });
       for (let offset = 60000; offset < raw.length; offset += 60000) await this.publish(channel, { type: 'output', data: raw.slice(offset, offset + 60000) });
@@ -472,7 +462,7 @@ export class CentrifugoClient {
   }
 
   async publishHookEvent(userId: string, sessionId: string, event: Record<string, unknown>): Promise<void> {
-    const channel = `events:${sessionId}#${userId}`;
+    const channel = sessionChannel('events', sessionId, userId);
     // The events namespace permits client publishing without subscribing.
     // Waiting for a subscription here deadlocks local hooks during cloud loss.
     try {
@@ -484,7 +474,7 @@ export class CentrifugoClient {
 
   /** Publishes a bridge-originated WebRTC signaling message on the commands channel. */
   async publishSignal(userId: string, msg: SignalMessage): Promise<void> {
-    const channel = `commands:rpc#${userId}`;
+    const channel = accountChannel('commands:rpc', userId);
     try {
       await this.publish(channel, msg as unknown as Record<string, unknown>);
     } catch (err) {
@@ -493,7 +483,7 @@ export class CentrifugoClient {
   }
 
   async publishCommandResponse(userId: string, response: CommandResponse): Promise<void> {
-    const channel = `commands:rpc#${userId}`;
+    const channel = accountChannel('commands:rpc', userId);
     try {
       await this.publish(channel, truncateData({
         type: 'command_response',

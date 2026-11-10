@@ -5,16 +5,30 @@ import { Dashboard } from "./Dashboard";
 import { HybridTerminalTransport } from "@/lib/direct-transport/hybrid-terminal-transport";
 import { LocalBrowserClient, bootstrapLocal, forgetDevice, localOrigin, localRequest, readDevice, rememberDevice, type LocalDevice } from "@/lib/local-browser-client";
 import { loadBrowserIdentity, readPinnedBridges } from "@/lib/browser-identity";
-import { SecureEndpointRuntime } from "@/lib/secure-endpoint-runtime";
+import { SecureEndpointRuntime, accountManagedOwner } from "@/lib/secure-endpoint-runtime";
 import { securityErrorMessage } from "./SecurityPanel";
 
 type Runtime = { client: LocalBrowserClient; transport: HybridTerminalTransport; security: SecureEndpointRuntime; device: LocalDevice };
+/** The signed-in account dashboard, at the configured public URL when there is one (it reaches this computer itself, over loopback too). */
+function accountDashboardUrl(): string {
+  try { return new URL("/dashboard", process.env.NEXT_PUBLIC_FTOWN_PUBLIC_URL?.trim() || window.location.origin).href; } catch { return "/dashboard"; }
+}
+/** An account bridge refuses invitations (account_managed): its browsers come only from the passkey ledger, via the dashboard. */
+function AccountManagedComputer({ onBack }: { onBack: () => void }) {
+  return <main className="flex min-h-dvh items-center justify-center bg-[var(--bg-base)] p-4"><section className="w-full max-w-md space-y-5 rounded-xl border border-[var(--border-muted)] bg-[var(--bg-surface)] p-6">
+    <h1 className="text-xl font-semibold">This computer belongs to your account</h1>
+    <p className="text-sm text-[var(--text-muted)]">Its bridge is managed by your FTown account, so browsers join with your passkey, not with an invitation. Open your dashboard and sign in there: it reaches this computer directly, including over loopback when you are on it.</p>
+    <a href={accountDashboardUrl()} className="btn-accent inline-flex min-h-11 w-full items-center justify-center">Open your dashboard</a>
+    <button className="btn-ghost min-h-11" onClick={onBack}>Use another port</button>
+  </section></main>;
+}
 export function LocalDashboard() {
   const [port, setPort] = useState("");
   const [remember, setRemember] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [runtime, setRuntime] = useState<Runtime | null>(null);
+  const [accountBridge, setAccountBridge] = useState(false);
   const [connected, setConnected] = useState(true);
   const active = useRef<Runtime | null>(null);
   const attempt = useRef<AbortController | null>(null);
@@ -25,6 +39,10 @@ export function LocalDashboard() {
   }, []);
   const connect = useCallback(async (device: LocalDevice, signal: AbortSignal, save = true) => {
     const boot = await bootstrapLocal(device, signal);
+    if (signal.aborted) return;
+    // Account bridge: no invitation, pin or handshake from here; the account dashboard is the way in.
+    if (accountManagedOwner(boot.ownerId)) { setAccountBridge(true); return; }
+    setAccountBridge(false);
     const [identity, pins] = await Promise.all([loadBrowserIdentity(boot.ownerId), readPinnedBridges(boot.ownerId)]);
     if (signal.aborted) return;
     const security = new SecureEndpointRuntime(identity, pins);
@@ -69,6 +87,7 @@ export function LocalDashboard() {
     catch (failure) { if (!controller.signal.aborted) setError(securityErrorMessage(failure)); }
     finally { if (!controller.signal.aborted) setBusy(false); }
   }
+  if (accountBridge && !runtime) return <AccountManagedComputer onBack={() => { attempt.current?.abort(); setAccountBridge(false); setBusy(false); setError(null); }} />;
   if (runtime) return <Dashboard client={runtime.client} connectionStatus={connected ? "connected" : "connecting"} connectionError={error}
     userId={runtime.client.boot.userId} token={""} centrifugoUrl={""} transport={runtime.transport} onDisconnect={disconnect} localMode />;
   return <main className="flex min-h-dvh items-center justify-center bg-[var(--bg-base)] p-4"><section className="w-full max-w-md space-y-5 rounded-xl border border-[var(--border-muted)] bg-[var(--bg-surface)] p-6">

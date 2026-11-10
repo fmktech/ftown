@@ -1,0 +1,1 @@
+export const LEDGER_BODY_MAX_BYTES = 2_621_440;

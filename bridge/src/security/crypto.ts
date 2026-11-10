@@ -43,7 +43,7 @@ function token(value: unknown, max = 200): value is string {
 }
 function owner(value: unknown): value is string {
   return typeof value === 'string' && (/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value)
-    || /^solo:[A-Za-z0-9_-]{1,200}$/.test(value));
+    || /^solo:[A-Za-z0-9_-]{1,200}$/.test(value) || /^[A-Za-z0-9_-]{43}$/.test(value));
 }
 function base64(bytes: Uint8Array): string {
   let binary = '';

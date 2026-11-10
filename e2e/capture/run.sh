@@ -176,8 +176,6 @@ printf 'build\n' > "$LOCK/stage"
 (cd "$REPO/bridge" && npm run build)
 printf 'services\n' > "$LOCK/stage"; services=1
 bash "$E2E_DIR/scripts/start-services.sh"
-E2E_USER_EMAIL="$(cat "$E2E_DIR/.run-email")"
-export E2E_USER_EMAIL
 printf 'capture\n' > "$LOCK/stage"
 (cd "$E2E_DIR" && npx playwright test --config capture/playwright.config.ts)
 printf "[capture] capture complete; staging retained at %s\n" "$FTOWN_CAPTURE_DIR"

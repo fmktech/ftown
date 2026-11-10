@@ -5,8 +5,8 @@ import { createRevokedRestart, PAIR_AGAIN_HINT, REVOKED_RESTART_MESSAGE, type Re
 
 const DATA_DIR = '/data/ftown';
 const SCRIPT = '/opt/ftown/cli/dist/ftown-cli.js';
-const ARGV = ['start', '--bridge-id', 'old-id', '--account=me@example.com', '--allow-updates'];
-const RESTART_ARGV = ['start', '--allow-updates', '--bootstrap'];
+const ARGV = ['start', '--bridge-id', 'old-id', '--new-identity', '--allow-updates'];
+const RESTART_ARGV = ['start', '--allow-updates'];
 
 function harness(overrides: Partial<RevokedRestartDeps> = {}) {
   const steps: string[] = [];
@@ -49,7 +49,7 @@ describe('createRevokedRestart', () => {
   it('uses the real argvForPairingRestart by default', async () => {
     const h = harness({ argvForPairingRestart: undefined });
     await h.restart();
-    assert.deepEqual(h.execs, [{ scriptPath: SCRIPT, argv: ['start', '--allow-updates', '--bootstrap'] }]);
+    assert.deepEqual(h.execs, [{ scriptPath: SCRIPT, argv: ['start', '--allow-updates'] }]);
   });
 
   it('runs at most once, even for concurrent and later calls', async () => {

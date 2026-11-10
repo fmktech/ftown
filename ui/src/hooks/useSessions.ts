@@ -15,6 +15,7 @@ import {
   UpdateSessionParentPayload,
 } from "@/types";
 import type { BridgeRpc } from "@/hooks/useBridgeRpc";
+import { accountChannel } from "@security/ledger/channels";
 import { buildUsagePollBatches } from "@/lib/live-usage-polling";
 import { isPreviewDescriptor } from "@/lib/session-preview";
 import { parsePullRequestUrl } from "@/lib/pull-request-url";
@@ -318,7 +319,7 @@ export function useSessions(
     const unregisterSubscribed = onSubscribed(() => requestList(true));
     let sessionsSub: MessageSubscription | null = null;
     if (client) {
-      const channel = `sessions:updates#${userId}`;
+      const channel = accountChannel("sessions:updates", userId);
       const existing = client.getSubscription(channel);
       if (existing) { existing.removeAllListeners(); existing.unsubscribe(); client.removeSubscription(existing); }
       sessionsSub = client.newSubscription(channel);

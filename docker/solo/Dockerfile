@@ -2,7 +2,7 @@
 #
 # Facts this Dockerfile relies on (verified against bridge/src at HEAD):
 #   - bridge/src/index.ts:124-131      CLI flags for --solo: --port <port>,
-#                                       --data-dir <path>, --rotate-key, --token,
+#                                       --data-dir <path>, --rotate-key,
 #                                       --api-url, --bridge-id. There is NO
 #                                       --host/--bind flag.
 #   - bridge/src/solo/contract.ts:35   DEFAULT_SOLO_PORT = 8040.

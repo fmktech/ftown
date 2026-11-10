@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Centrifuge, UnauthorizedError } from "centrifuge";
+import { Centrifuge, UnauthorizedError, type Subscription } from "centrifuge";
 import { v4 as uuidv4 } from "uuid";
+import { accountChannel } from "@security/ledger/channels";
 import type { MessageClient } from "@/lib/message-client";
 import { SecureMessageClient } from "@/lib/secure-message-client";
 import type { SecureEndpointRuntime } from "@/lib/secure-endpoint-runtime";
@@ -34,6 +35,39 @@ function decodeJwtExpMs(token: string): number | null {
   } catch {
     return null;
   }
+}
+
+/** The ledger client's replication entry points (LedgerClient satisfies it); every refresh it runs is throttled single-flight. */
+export interface LedgerFeed {
+  /** A full ledger pushed on the relay. */
+  offer(candidate: unknown): Promise<void>;
+  /** A head announcement: the client ignores lower revisions and refreshes at most at its own pace. Never a direct GET here. */
+  noteHead(head: string, revision: number): Promise<void> | void;
+  /** Re-read the ledger (throttled by the client). */
+  refresh(): Promise<void>;
+}
+
+export type LedgerMessage =
+  | { type: "ledger"; ledger: unknown }
+  | { type: "ledger_head"; head: string; revision: number };
+
+/** Strict shape check for `bridges:ledger` publications (mirrors the bridge's parseLedgerMessage); anything else is ignored. */
+export function parseLedgerMessage(data: unknown): LedgerMessage | null {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return null;
+  const record = data as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (record.type === "ledger") {
+    if (keys.length !== 2 || !keys.includes("ledger") || record.ledger === undefined || record.ledger === null) return null;
+    return { type: "ledger", ledger: record.ledger };
+  }
+  if (record.type === "ledger_head") {
+    if (keys.length !== 3 || !keys.includes("head") || !keys.includes("revision")) return null;
+    const { head, revision } = record;
+    if (typeof head !== "string" || head.length === 0) return null;
+    if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) return null;
+    return { type: "ledger_head", head, revision };
+  }
+  return null;
 }
 
 /** Clock-skew buffer so a token on the verge of expiry is treated as expired. */
@@ -100,6 +134,12 @@ interface UseCentrifugoOptions {
   tokenRefresher?: () => Promise<string>;
   /** Replaces the default "/login" redirect on a permanent auth rejection. */
   onUnauthorized?: () => void;
+  /**
+   * Account mode only (Solo/local never pass it): the page's ledger client. The connection subscribes to
+   * `bridges:ledger#<userId>` and feeds the account's own publications to it; every (re)subscribe and every relay token renewal
+   * (hourly) refreshes, so the browser re-reads the ledger even when no push arrives.
+   */
+  ledger?: LedgerFeed;
 }
 
 export function useCentrifugo(
@@ -113,6 +153,7 @@ export function useCentrifugo(
   const securityRuntime = options?.securityRuntime;
   const tokenRefresher = options?.tokenRefresher;
   const onUnauthorized = options?.onUnauthorized;
+  const ledger = options?.ledger;
 
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
   const [error, setError] = useState<string | null>(null);
@@ -154,9 +195,14 @@ export function useCentrifugo(
     // round trip and let getToken mint a fresh one right away.
     const initialToken = isTokenExpired(token) ? "" : token;
 
+    const mint = tokenRefresher ?? fetchCentrifugoToken;
     const client = new Centrifuge(centrifugoUrl, {
       token: initialToken,
-      getToken: tokenRefresher ?? fetchCentrifugoToken,
+      getToken: ledger ? async () => {
+        const renewed = await mint();
+        void ledger.refresh().catch(() => {});
+        return renewed;
+      } : mint,
     });
 
     client.on("connecting", (ctx) => {
@@ -209,7 +255,7 @@ export function useCentrifugo(
     // Signaling/watch commands ride the same commands:rpc#{userId} channel
     // useSessions publishes RPCs on; publish directly on the client so no
     // second Subscription object is created for it (useSessions owns that).
-    const commandsChannel = `commands:rpc#${userId}`;
+    const commandsChannel = accountChannel("commands:rpc", userId);
     const publishCommand = (msg: DirectCommandMessage) => {
       secureClient.publish(commandsChannel, msg).catch(() => {});
     };
@@ -246,13 +292,39 @@ export function useCentrifugo(
     };
     commandsSub.on("publication", handleInboundSignal);
 
+    // Account mode: the one ledger subscription of this page. Raw (not sealed): a ledger is
+    // self-authenticating, the client verifies it from genesis. Only this account's own
+    // publications are accepted (Centrifugo stamps the publisher as info.user); anything
+    // malformed is dropped. A (re)subscribe may follow missed pushes, so it refreshes.
+    let ledgerSub: Subscription | null = null;
+    if (ledger) {
+      const sub = client.newSubscription(accountChannel("bridges:ledger", userId));
+      sub.on("subscribed", () => { void ledger.refresh().catch(() => {}); });
+      sub.on("publication", (ctx) => {
+        if (ctx.info?.user !== userId) return;
+        const message = parseLedgerMessage(ctx.data);
+        if (!message) return;
+        // A head is only a hint (any connection of the account can publish one): the client throttles the resulting read.
+        try {
+          void Promise.resolve(message.type === "ledger" ? ledger.offer(message.ledger) : ledger.noteHead(message.head, message.revision)).catch(() => {});
+        } catch { /* a failing ledger client never breaks the connection */ }
+      });
+      sub.subscribe();
+      ledgerSub = sub;
+    }
+
     client.connect();
 
     return () => {
       commandsSub.off("publication", handleInboundSignal);
+      if (ledgerSub) {
+        ledgerSub.removeAllListeners();
+        ledgerSub.unsubscribe();
+        client.removeSubscription(ledgerSub);
+      }
       cleanup();
     };
-  }, [token, centrifugoUrl, userId, cleanup, tokenRefresher, onUnauthorized, securityRuntime]);
+  }, [token, centrifugoUrl, userId, cleanup, tokenRefresher, onUnauthorized, securityRuntime, ledger]);
 
   return {
     client: secureClientRef.current,

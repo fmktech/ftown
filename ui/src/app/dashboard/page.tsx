@@ -1,29 +1,28 @@
 import { redirect } from "next/navigation";
-import jwt from "jsonwebtoken";
-import { auth } from "@/lib/auth";
+import { requireAccount } from "@/lib/ledger-auth";
+import { signRelayToken } from "@/lib/relay-jwt";
 import { DashboardClient } from "@/components/DashboardClient";
 
 export default async function DashboardPage() {
-  const session = await auth();
-
-  if (!session?.user?.email) {
-    redirect("/login");
+  let accountId: string;
+  try {
+    ({ accountId } = await requireAccount());
+  } catch (err) {
+    if ((err as { status?: number } | null)?.status === 401) redirect("/login");
+    throw err;
   }
 
-  const email = session.user.email;
-  const centrifugoSecret = process.env.CENTRIFUGO_TOKEN_SECRET;
   const centrifugoUrl = process.env.NEXT_PUBLIC_CENTRIFUGO_URL;
-
-  if (!centrifugoSecret || !centrifugoUrl) {
-    throw new Error("Missing CENTRIFUGO_TOKEN_SECRET or NEXT_PUBLIC_CENTRIFUGO_URL environment variable");
+  if (!centrifugoUrl) {
+    throw new Error("Missing NEXT_PUBLIC_CENTRIFUGO_URL environment variable");
   }
 
-  const token = jwt.sign({ sub: email }, centrifugoSecret, { audience: "ftown:centrifugo", expiresIn: "24h" });
+  const { token } = signRelayToken({ accountId });
 
   return (
     <DashboardClient
-      ownerId={session.user.id!}
-      userId={email}
+      ownerId={accountId}
+      userId={accountId}
       token={token}
       centrifugoUrl={centrifugoUrl}
     />

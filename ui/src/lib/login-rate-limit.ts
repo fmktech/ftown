@@ -15,16 +15,6 @@ export interface RateLimitConfig {
   lockoutMs: number;
 }
 
-export const LOGIN_RATE_LIMIT: RateLimitConfig = {
-  maxAttempts: 10,
-  lockoutMs: 60 * 60 * 1000, // 1 hour
-};
-
-export const REGISTER_RATE_LIMIT: RateLimitConfig = {
-  maxAttempts: 10,
-  lockoutMs: 60 * 60 * 1000, // 1 hour
-};
-
 interface RateLimitRow {
   failed_count: number;
   locked_until: string | null;
@@ -137,35 +127,3 @@ export async function resetAttempts(scope: string, key: string): Promise<void> {
 // --- Legacy login-scoped convenience wrappers retained for compatibility ---
 // The credentials provider now consumes an atomic source-IP admission budget
 // via consumeRateLimit rather than using these separate check/write operations.
-
-const LOGIN_SCOPE = "login";
-const LOGIN_IP_SCOPE = "login-ip";
-
-export const LOGIN_IP_RATE_LIMIT: RateLimitConfig = {
-  maxAttempts: 30,
-  lockoutMs: 15 * 60 * 1000, // 15 minutes
-};
-
-export function checkLoginRateLimit(email: string): Promise<RateLimitResult> {
-  return checkRateLimit(LOGIN_SCOPE, email);
-}
-
-export function recordFailedLogin(email: string): Promise<void> {
-  return recordAttempt(LOGIN_SCOPE, email, LOGIN_RATE_LIMIT);
-}
-
-export function resetLoginAttempts(email: string): Promise<void> {
-  return resetAttempts(LOGIN_SCOPE, email);
-}
-
-export function checkLoginIpRateLimit(ip: string): Promise<RateLimitResult> {
-  return checkRateLimit(LOGIN_IP_SCOPE, ip);
-}
-
-export function recordFailedLoginIp(ip: string): Promise<void> {
-  return recordAttempt(LOGIN_IP_SCOPE, ip, LOGIN_IP_RATE_LIMIT);
-}
-
-export function resetLoginIpAttempts(ip: string): Promise<void> {
-  return resetAttempts(LOGIN_IP_SCOPE, ip);
-}

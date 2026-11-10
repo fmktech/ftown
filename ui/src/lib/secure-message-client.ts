@@ -1,6 +1,7 @@
 import type { Centrifuge, Subscription } from "centrifuge";
 import type { ApplicationRoute, EndpointDirectory, SecureApplication, SecurityCommand, SecurityCommandResults } from "@security/protocol";
 import { SecurityError } from "@security/crypto";
+import { accountChannel } from "@security/ledger/channels";
 import type { MessageClient, MessageEvents, MessageSubscription, MessagePublishOptions } from "./message-client";
 import { applicationJson, SecureEndpointRuntime } from "./secure-endpoint-runtime";
 
@@ -48,6 +49,17 @@ class SecureSubscription implements MessageSubscription {
   }
 }
 
+/**
+ * Account mode: a computer the trusted ledger lists may not have applied the newest ledger yet (a just-enrolled browser is unknown to
+ * it, and it cannot even answer an unknown endpoint), so a failed handshake is retried: after 0.5 s, 1 s, 2 s, 4 s, then every 5 s,
+ * for 60 s in all; every ledger change and every reconnect starts a fresh window. After the window the computer stays offline
+ * (needs attention). A revocation or key change is never retried.
+ */
+export interface ReadyRetryPolicy { delaysMs: number[]; everyMs: number; windowMs: number; helloTimeoutMs: number }
+export const READY_RETRY: ReadyRetryPolicy = { delaysMs: [500, 1000, 2000, 4000], everyMs: 5000, windowMs: 60_000, helloTimeoutMs: 5000 };
+const NEVER_RETRY = ["endpoint_revoked", "account_bridge_revoked", "account_device_revoked", "device_revoked", "key_changed", "wrong_context"];
+interface ReadyRetry { started: number; attempts: number; timer: ReturnType<typeof setTimeout> | null; exhausted: boolean }
+
 /** The raw broker is private to this adapter, including signaling and terminal I/O. */
 export class SecureMessageClient implements MessageClient {
   readonly commandTimeoutMs = 40_000;
@@ -62,8 +74,12 @@ export class SecureMessageClient implements MessageClient {
   private closed = false;
   private recovering = new Map<string, object>();
   private stopTrustObserver: () => void;
-  constructor(private raw: Centrifuge, readonly userId: string, readonly securityRuntime: SecureEndpointRuntime) {
-    const commands = this.newSubscription(`commands:rpc#${userId}`);
+  private stopLedgerObserver: (() => void) | undefined;
+  private retries = new Map<string, ReadyRetry>();
+  private readonly retry: ReadyRetryPolicy;
+  constructor(private raw: Centrifuge, readonly userId: string, readonly securityRuntime: SecureEndpointRuntime, options: { retry?: ReadyRetryPolicy } = {}) {
+    this.retry = options.retry ?? READY_RETRY;
+    const commands = this.newSubscription(accountChannel("commands:rpc", userId));
     commands.subscribe();
     raw.on("connected", this.connected);
     raw.on("disconnected", this.disconnected);
@@ -73,8 +89,44 @@ export class SecureMessageClient implements MessageClient {
         this.recoverBridge(pin.bridgeId, false);
       }
     });
+    // Account mode: a ledger change may be exactly what a waiting computer needed; re-evaluate now with a fresh window.
+    this.stopLedgerObserver = securityRuntime.onLedgerChange?.(() => {
+      if (this.closed || this.raw.state !== "connected") return;
+      for (const pin of securityRuntime.pinnedBridges()) {
+        if (securityRuntime.state(pin.bridgeId).status === "ready") continue;
+        this.resetRetry(pin.bridgeId);
+        this.recoverBridge(pin.bridgeId, false);
+      }
+    });
+  }
+  private resetRetry(bridgeId?: string): void {
+    for (const [id, entry] of this.retries) if (bridgeId === undefined || id === bridgeId) {
+      if (entry.timer !== null) clearTimeout(entry.timer);
+      this.retries.delete(id);
+    }
+  }
+  /** Account mode: schedules the next handshake for a still-trusted computer after a transient failure (see READY_RETRY). */
+  private retryLater(bridgeId: string, error: unknown): void {
+    if (this.closed || !this.securityRuntime.accountManaged) return;
+    const code = record(error) && typeof error.code === "string" ? error.code : error instanceof Error ? error.message : "";
+    if (NEVER_RETRY.includes(code) || !this.securityRuntime.bridge(bridgeId)) { this.resetRetry(bridgeId); return; }
+    if (this.raw.state !== "connected") return; // the next "connected" handshakes every computer anyway
+    const now = Date.now();
+    const entry = this.retries.get(bridgeId) ?? { started: now, attempts: 0, timer: null, exhausted: false };
+    this.retries.set(bridgeId, entry);
+    if (entry.timer !== null || entry.exhausted) return;
+    const left = entry.started + this.retry.windowMs - now;
+    if (left <= 0) { entry.exhausted = true; return; }
+    const delay = Math.min(entry.attempts < this.retry.delaysMs.length ? this.retry.delaysMs[entry.attempts] : this.retry.everyMs, left);
+    entry.attempts++;
+    entry.timer = setTimeout(() => {
+      entry.timer = null;
+      if (this.closed || this.retries.get(bridgeId) !== entry || this.raw.state !== "connected") return;
+      this.recoverBridge(bridgeId, false);
+    }, delay);
   }
   private connected = () => {
+    this.resetRetry();
     for (const pin of this.securityRuntime.pinnedBridges()) void this.ensureReady(pin.bridgeId, true).catch(() => {});
     void fetch("/api/security/endpoints", { credentials: "include", cache: "no-store", signal: this.abort.signal })
       .then(async response => {
@@ -101,13 +153,15 @@ export class SecureMessageClient implements MessageClient {
     let pending = this.handshakes.get(bridgeId);
     if (!pending) {
       const generation = this.generation;
-      pending = this.securityRuntime.handshake(bridgeId, `commands:rpc#${this.userId}`, async packet => {
+      const commands = accountChannel("commands:rpc", this.userId);
+      pending = this.securityRuntime.handshake(bridgeId, commands, async packet => {
         if (this.closed || generation !== this.generation) throw new SecurityError("bridge_offline", "Encrypted connection changed");
         this.securityRuntime.assertCanSend(bridgeId);
-        await this.raw.publish(`commands:rpc#${this.userId}`, packet);
-      }).then(() => {
+        await this.raw.publish(commands, packet);
+      }, this.securityRuntime.accountManaged ? this.retry.helloTimeoutMs : undefined).then(() => {
         if (generation !== this.generation) throw new SecurityError("bridge_offline", "Connection changed during handshake");
-      }).finally(() => { if (this.handshakes.get(bridgeId) === pending) this.handshakes.delete(bridgeId); });
+        this.resetRetry(bridgeId);
+      }, (error: unknown) => { this.retryLater(bridgeId, error); throw error; }).finally(() => { if (this.handshakes.get(bridgeId) === pending) this.handshakes.delete(bridgeId); });
       this.handshakes.set(bridgeId, pending);
     }
     return pending;
@@ -177,7 +231,7 @@ export class SecureMessageClient implements MessageClient {
     void this.ensureReady(bridgeId, force).then(() => {
       if (!this.closed && this.generation === generation && this.recovering.get(bridgeId) === cycle
         && this.securityRuntime.state(bridgeId).status === "ready") {
-        this.getSubscription(`commands:rpc#${this.userId}`)?.emit("subscribed", undefined);
+        this.getSubscription(accountChannel("commands:rpc", this.userId))?.emit("subscribed", undefined);
       }
     }).catch(() => {}).finally(() => {
       if (this.recovering.get(bridgeId) === cycle) this.recovering.delete(bridgeId);
@@ -218,15 +272,15 @@ export class SecureMessageClient implements MessageClient {
       const cancellation = new AbortController(); const deadline = Date.now() + this.commandTimeoutMs;
       const timer = setTimeout(() => { cancellation.abort(); this.pending.delete(requestId); reject(new SecurityError("outcome_unknown", "Bridge delivery is uncertain")); }, this.commandTimeoutMs);
       this.pending.set(requestId, { resolve: value => { cancellation.abort(); resolve(value); }, reject: error => { cancellation.abort(); reject(error); }, timer });
-      void this.publish(`commands:rpc#${this.userId}`, command, { deadline, signal: cancellation.signal }).catch(error => {
+      void this.publish(accountChannel("commands:rpc", this.userId), command, { deadline, signal: cancellation.signal }).catch(error => {
         clearTimeout(timer); cancellation.abort(); this.pending.delete(requestId); reject(error);
       });
     });
   }
   executeSecurity = <C extends SecurityCommand>(command: C): Promise<SecurityCommandResults[C["type"]]> => this.securityRuntime.command(command, value => this.request(value));
   dispose(): void {
-    this.closed = true; this.abort.abort(); this.generation++; this.recovering.clear();
-    this.stopTrustObserver();
+    this.closed = true; this.abort.abort(); this.generation++; this.recovering.clear(); this.resetRetry();
+    this.stopTrustObserver(); this.stopLedgerObserver?.();
     this.raw.off("connected", this.connected); this.raw.off("disconnected", this.disconnected);
     for (const subscription of this.subscriptions.values()) subscription.destroy();
     this.subscriptions.clear(); this.outbound.clear(); this.handshakes.clear(); this.sessionOwners.clear();

@@ -8,7 +8,6 @@ if (!chromium?.use) throw new Error("Canonical Chromium settings are unavailable
 
 export default defineConfig({
   testDir: ".",
-  testMatch: "product.spec.ts",
   workers: 1,
   fullyParallel: false,
   retries: 0,
@@ -16,4 +15,9 @@ export default defineConfig({
   expect: { timeout: 30_000 },
   reporter: [["list"]],
   use: { ...base.use, ...chromium.use, trace: "off", video: "off", screenshot: "off" },
+  projects: [
+    // The server's one account (passkey) and the paired shared bridges come from the suite's setup project.
+    { name: "setup", testDir: "../tests", testMatch: /account\.setup\.ts$/, use: chromium.use },
+    { name: "capture", testMatch: "product.spec.ts", dependencies: ["setup"] },
+  ],
 });

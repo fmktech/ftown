@@ -1,3 +1,4 @@
+import { accountChannel, sessionChannel } from "@security/ledger/channels";
 import type { SecureEndpointRuntime } from "../secure-endpoint-runtime";
 import {
   LOOPBACK_TIMEOUT_MS,
@@ -1078,7 +1079,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     if (entry.disposed || entry.mode === 'centrifugo') return;
     entry.direct = false;
 
-    const outputChannel = `terminal:${entry.sessionId}#${this.userId}`;
+    const outputChannel = sessionChannel("terminal", entry.sessionId, this.userId);
     this.dropSubscription(outputChannel);
     const outputSub = this.client.newSubscription(outputChannel);
     outputSub.on('publication', (ctx) => {
@@ -1109,7 +1110,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     outputSub.subscribe();
     entry.outputSub = outputSub;
 
-    const inputChannel = `terminal-input:${entry.sessionId}#${this.userId}`;
+    const inputChannel = sessionChannel("terminal-input", entry.sessionId, this.userId);
     this.dropSubscription(inputChannel);
     const inputSub = this.client.newSubscription(inputChannel);
     inputSub.subscribe();
@@ -1215,7 +1216,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
    * ownership so dispose() cleans up exactly the one we made (review #4).
    */
   private ensurePresenceSub(): CentrifugoSubscriptionLike {
-    const channel = `bridges:presence#${this.userId}`;
+    const channel = accountChannel("bridges:presence", this.userId);
     const existing = this.client.getSubscription(channel);
     if (existing) return existing;
     if (this.ownedPresenceSub) return this.ownedPresenceSub;

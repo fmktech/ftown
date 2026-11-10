@@ -1,12 +1,15 @@
 import { strict as assert } from 'node:assert';
-import { existsSync, mkdirSync, symlinkSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, symlinkSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { argvForPairingRestart, beginIdentityReset, completePendingIdentityReset, reexec } from './identity-reset.js';
+import { hasLegacyAccountState } from './security/bridge/ledger-identity.js';
 
 const OLD_ID = '11111111-1111-4111-8111-111111111111';
-const SEC_FILES = ['account-enrollment.json', 'pending-approval-status.json', 'pending-approval-confirmation.json', 'local-cli-identity.json', 'policy.json', 'bridge-identity.json'];
+const SEC_FILES = ['account-enrollment.json', 'pending-approval-status.json', 'pending-approval-confirmation.json', 'local-cli-identity.json', 'policy.json',
+  'bridge-identity.json', 'ledger.json', 'ledger-clock.json', 'relay-url.json', 'ledger-identity.json', 'ledger.json.0f8fad5b-d9cb-469f-a165-70867728950e.tmp', 'policy.json.x.tmp'];
+const identityOwnedBy = (ownerId: string): string => JSON.stringify({ version: 1, endpoint: { version: 1, id: 'i', ownerId, kind: 'bridge', publicKey: 'p' }, privateKey: {} });
 
 let dir: string;
 const sec = (n: string) => join(dir, 'security', n);
@@ -45,6 +48,84 @@ describe('identity reset', () => {
     for (const keep of ['local-api-port', 'archive.jsonl', 'unrelated.txt', 'sessions/s1.json', 'security/unrelated-sec.json']) {
       assert.equal(existsSync(join(dir, keep)), true, keep);
     }
+  });
+
+  it('leaves no v1 account state behind, so the legacy trigger cannot fire again', () => {
+    seed();
+    writeFileSync(sec('bridge-identity.json'), identityOwnedBy('349f8d2e-38e4-4d59-888d-687dcfa19e39'));
+    assert.equal(hasLegacyAccountState(dir), true);
+    beginIdentityReset(dir, 'manual');
+    completePendingIdentityReset(dir);
+    assert.equal(hasLegacyAccountState(dir), false);
+    assert.equal(existsSync(sec('bridge-identity.json')), false);
+  });
+
+  it('deletes the bridge identity whatever its owner: a solo:<old bridge-id> identity could never load after the rotation', () => {
+    for (const content of [identityOwnedBy(`solo:${OLD_ID}`), '{corrupt', identityOwnedBy('A'.repeat(43))]) {
+      seed();
+      writeFileSync(sec('bridge-identity.json'), content);
+      assert.equal(hasLegacyAccountState(dir), true, 'seed leaves refresh-token');
+      beginIdentityReset(dir, 'manual');
+      completePendingIdentityReset(dir);
+      for (const f of SEC_FILES) assert.equal(existsSync(sec(f)), false, `${f} after ${content.slice(0, 20)}`);
+    }
+  });
+
+  it('a Solo/--local identity alone never looks like v1 account state', () => {
+    mkdirSync(join(dir, 'security'), { recursive: true });
+    writeFileSync(sec('bridge-identity.json'), identityOwnedBy(`solo:${OLD_ID}`));
+    assert.equal(hasLegacyAccountState(dir), false);
+  });
+
+  it('sweeps only *.tmp files, never directories, and keeps the reset retryable', () => {
+    seed();
+    mkdirSync(sec('dir.tmp'));
+    writeFileSync(sec('dir.tmp/inner.json'), 'keep');
+    beginIdentityReset(dir, 'manual');
+    completePendingIdentityReset(dir);
+    assert.equal(existsSync(sec('dir.tmp/inner.json')), true);
+    assert.equal(existsSync(sec('unrelated-sec.json')), true);
+  });
+
+  // Fault injection, one step at a time: every deletion lands before the new bridge-id, and the marker outlives the bridge-id write,
+  // so a reset interrupted anywhere is finished by the next start with the same new id.
+  const DELETION_STEPS = [['refresh-token'], ...['account-enrollment.json', 'pending-approval-status.json', 'pending-approval-confirmation.json',
+    'local-cli-identity.json'].map(name => ['security', name]), ['browser-devices.json'], ...['policy.json', 'bridge-identity.json', 'ledger.json',
+    'ledger-clock.json', 'relay-url.json', 'ledger-identity.json'].map(name => ['security', name])];
+  for (const step of DELETION_STEPS) {
+    it(`a failure deleting ${step.join('/')} leaves the old bridge-id and the marker, and the retry finishes`, () => {
+      seed();
+      beginIdentityReset(dir, 'revoked');
+      const newId = (JSON.parse(readFileSync(marker(), 'utf8')) as { newBridgeId: string }).newBridgeId;
+      const blocked = join(dir, ...step);
+      rmSync(blocked, { force: true });
+      mkdirSync(blocked);
+      writeFileSync(join(blocked, 'inner'), 'x'); // unlink of a directory fails with a non-ENOENT error
+      assert.throws(() => completePendingIdentityReset(dir));
+      assert.equal(readFileSync(join(dir, 'bridge-id'), 'utf8'), `${OLD_ID}\n`);
+      assert.equal(existsSync(marker()), true);
+      rmSync(blocked, { recursive: true });
+      assert.equal(completePendingIdentityReset(dir)?.newBridgeId, newId);
+      for (const f of SEC_FILES) assert.equal(existsSync(sec(f)), false, f);
+      assert.equal(existsSync(marker()), false);
+    });
+  }
+
+  it('a failure writing the new bridge-id keeps the marker, after every deletion, and the retry finishes', { skip: process.getuid?.() === 0 }, () => {
+    seed();
+    rmSync(join(dir, 'refresh-token'));
+    rmSync(join(dir, 'browser-devices.json'));
+    beginIdentityReset(dir, 'revoked');
+    const newId = (JSON.parse(readFileSync(marker(), 'utf8')) as { newBridgeId: string }).newBridgeId;
+    chmodSync(dir, 0o500); // the data dir refuses the bridge-id temporary; security/ stays writable
+    try {
+      assert.throws(() => completePendingIdentityReset(dir));
+      assert.equal(existsSync(marker()), true);
+      for (const f of SEC_FILES) assert.equal(existsSync(sec(f)), false, f);
+      assert.equal(readFileSync(join(dir, 'bridge-id'), 'utf8'), `${OLD_ID}\n`);
+    } finally { chmodSync(dir, 0o700); }
+    assert.deepEqual(completePendingIdentityReset(dir), { oldBridgeId: OLD_ID, newBridgeId: newId, reason: 'revoked' });
+    assert.equal(existsSync(marker()), false);
   });
 
   it('returns null without a marker', () => {
@@ -155,18 +236,18 @@ describe('identity reset', () => {
 
 describe('argvForPairingRestart', () => {
   const cases: Array<[string, string[], string[]]> = [
-    ['empty', [], ['--bootstrap']],
-    ['removes --bridge-id v', ['--bridge-id', 'x', '--foo'], ['--foo', '--bootstrap']],
-    ['removes --bridge-id=v', ['--bridge-id=x', '--foo'], ['--foo', '--bootstrap']],
-    ['removes --new-identity (no value)', ['--new-identity', '--foo', 'bar'], ['--foo', 'bar', '--bootstrap']],
-    ['removes --account and --token both forms', ['--account', 'a', '--token=t', 'start'], ['start', '--bootstrap']],
-    ['keeps --bootstrap once', ['--bootstrap', '--foo'], ['--bootstrap', '--foo']],
-    ['value options consume next token', ['--data-dir', '/d', '--token', 'x'], ['--data-dir', '/d', '--bootstrap']],
-    ['trailing --token', ['--foo', '--token'], ['--foo', '--bootstrap']],
-    ['--account followed by flag-like value', ['--account', '--bootstrap'], ['--bootstrap']],
-    ['kept option value equal to --token', ['--data-dir', '--token', '--port', '1'], ['--data-dir', '--token', '--port', '1', '--bootstrap']],
-    ['keeps --port= form', ['--port=9', '--token=t'], ['--port=9', '--bootstrap']],
-    ['preserves order of others', ['a', '--b', 'c', '--bridge-id', 'x', 'd'], ['a', '--b', 'c', 'd', '--bootstrap']],
+    ['empty', [], []],
+    ['removes --bridge-id v', ['--bridge-id', 'x', '--foo'], ['--foo']],
+    ['removes --bridge-id=v', ['--bridge-id=x', '--foo'], ['--foo']],
+    ['removes --new-identity (no value)', ['--new-identity', '--foo', 'bar'], ['--foo', 'bar']],
+    ['removes --new-identity= form', ['--new-identity=1', 'start'], ['start']],
+    ['value options consume next token', ['--data-dir', '/d', '--bridge-id', 'x'], ['--data-dir', '/d']],
+    ['trailing --bridge-id', ['--foo', '--bridge-id'], ['--foo']],
+    ['--bridge-id followed by flag-like value', ['--bridge-id', '--allow-updates'], []],
+    ['kept option value equal to --bridge-id', ['--data-dir', '--bridge-id', '--port', '1'], ['--data-dir', '--bridge-id', '--port', '1']],
+    ['keeps --port= and --api-url= forms', ['--port=9', '--api-url=https://a.test', '--bridge-id=x'], ['--port=9', '--api-url=https://a.test']],
+    ['keeps --api-url value', ['--api-url', 'https://a.test', 'start'], ['--api-url', 'https://a.test', 'start']],
+    ['preserves order of others', ['a', '--b', 'c', '--bridge-id', 'x', 'd'], ['a', '--b', 'c', 'd']],
   ];
   for (const [name, input, expected] of cases) {
     it(name, () => {
