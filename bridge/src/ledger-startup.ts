@@ -15,9 +15,14 @@ import { MISSING_RELAY_URL_MESSAGE, isRefusal, relayTokenFailureMessage } from '
 export const LEGACY_ACCOUNT_RESET_MESSAGE = '[Bridge] Old account data from a previous ftown version was cleared. Pair this computer again with the link below.';
 export const NOT_IN_LEDGER_MESSAGE = "This computer is not in your account's ledger. Run `ftown start --new-identity` to pair it again.";
 export const PAIRING_REJECTED_HINT = 'Pairing did not complete. Run `ftown start` to try again.';
+export const PAIRING_REVOKED_MESSAGE = "[Bridge] This computer's id was removed from the account before pairing completed. "
+  + 'Run `ftown start --new-identity` to pair it with a new id.';
 export const SERVER_LEDGER_MISMATCH_MESSAGE = "[Bridge] The server's account ledger does not list this computer. If it was removed from your account, run `ftown start --new-identity` to pair it again.";
 export const UPDATE_RESTART_UNPAIRED_MESSAGE = '[Bridge] An update restart cannot pair this computer. Run `ftown start` to pair it.';
 export const UPDATED_TO_LEDGER_MESSAGE = '[Bridge] ftown was updated to the passkey ledger; run `ftown start` to pair this computer.';
+export const DIVERGED_SERVER_MESSAGE = "[Bridge] The ftown server holds a different history of your account than this computer and refused this computer's key. "
+  + 'This computer keeps its own history and did not reset itself. Choose which history to keep in Security on the dashboard; '
+  + 'run `ftown start --new-identity` only if you keep the server\'s.';
 
 /** Only account bridges use the passkey ledger (legacy reset, pairing, ledger replica, relay token by proof). */
 export function usesLedger(mode: BridgeMode): boolean {
@@ -83,7 +88,8 @@ export interface AccountStartupDeps {
   /** False during an update restart: it must come back with its existing identity and never pair. */
   allowPairing: boolean;
   /** One pairing attempt (runLedgerPairing) with the unbound identity and the empty store; binds both on success. Throws
-   *  Error('pairing_expired') (its hint already printed) or Error('pairing_rejected'). */
+   *  Error('pairing_expired') (its hint already printed), Error('pairing_revoked') (the account already revokes this bridge id) or
+   *  Error('pairing_rejected'). */
   pair: (identity: LedgerBridgeIdentity, store: BridgeLedgerStore) => Promise<unknown>;
   /** The server's ledger for this account (GET /api/account/ledger?accountId=…, bounded). */
   fetchLedger: (accountId: string) => Promise<unknown>;
@@ -125,6 +131,8 @@ export async function startAccountIdentity(deps: AccountStartupDeps): Promise<Ac
       const code = messageOf(error);
       if (code === 'pairing_expired') return { kind: 'exit', message: null };
       if (code === 'pairing_rejected') return { kind: 'exit', message: PAIRING_REJECTED_HINT };
+      // Not a removal of a paired bridge: nothing is reset; the owner picks a new id.
+      if (code === 'pairing_revoked') return { kind: 'exit', message: PAIRING_REVOKED_MESSAGE };
       throw error;
     }
   }
@@ -165,12 +173,14 @@ export function offlineWithoutRelayUrlMessage(reason: string): string {
  */
 export async function startRelay(input: {
   getToken: () => Promise<string>; relayUrl: () => string | null; bridgeRevoked: () => boolean; apiUrl: string;
+  /** The replica refused a different history from the server (its refusal is then about that history, not a removal of ours). */
+  serverDiverged?: () => boolean;
 }): Promise<RelayStartup> {
   let token: string;
   try { token = await input.getToken(); }
   catch (error) {
     if (input.bridgeRevoked()) return { kind: 'revoked' };
-    if (isRefusal(error)) return { kind: 'exit', message: relayTokenFailureMessage(error, input.apiUrl) };
+    if (isRefusal(error)) return { kind: 'exit', message: input.serverDiverged?.() ? DIVERGED_SERVER_MESSAGE : relayTokenFailureMessage(error, input.apiUrl) };
     const reason = messageOf(error);
     const relayUrl = input.relayUrl();
     return relayUrl === null ? { kind: 'exit', message: offlineWithoutRelayUrlMessage(reason) } : { kind: 'offline', relayUrl, reason };

@@ -10,6 +10,9 @@ export interface RelayTokenFetcherDeps {
   head: () => string | null;
   /** Called with a ledger returned by the server, BEFORE the token is handed back. */
   onLedger: (ledger: unknown) => Promise<void>;
+  /** A successful answer WITHOUT a ledger (the server sends one only when its head differs from the one sent): the server's head, as the
+   *  answer names it ({ head, revision }), else the head this request sent (revision null). Called before the token is handed back. */
+  onServerHead?: (server: { head: string | null; revision: number | null }) => void;
   /** Called with the evidence ledger of a 401 key_revoked, BEFORE UnauthorizedError is thrown. */
   onRevoked: (ledger: unknown) => Promise<void>;
   fetchImpl?: typeof fetch;
@@ -118,7 +121,8 @@ export function createRelayTokenFetcher(deps: RelayTokenFetcherDeps): () => Prom
       audience,
     });
 
-    const res = await post(fetchImpl, `${apiUrl}/api/auth/relay-token`, { proof, head: deps.head(), ...presence() }, timeoutMs);
+    const sentHead = deps.head();
+    const res = await post(fetchImpl, `${apiUrl}/api/auth/relay-token`, { proof, head: sentHead, ...presence() }, timeoutMs);
     const text = res.text;
 
     if (res.status === 401) {
@@ -136,6 +140,11 @@ export function createRelayTokenFetcher(deps: RelayTokenFetcherDeps): () => Prom
       throw new Error('Relay token response malformed');
     }
     if (body.ledger !== undefined && body.ledger !== null) await deps.onLedger(body.ledger);
+    else if (deps.onServerHead) {
+      const named = typeof body.head === 'string' && typeof body.revision === 'number' && Number.isSafeInteger(body.revision) && body.revision >= 0;
+      try { deps.onServerHead(named ? { head: body.head as string, revision: body.revision as number } : { head: sentHead, revision: null }); }
+      catch { /* a hint only: the token is still returned */ }
+    }
     return { token: body.token, expiresAt: body.expiresAt };
   };
 

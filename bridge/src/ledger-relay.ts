@@ -3,15 +3,20 @@
  * - the server's public ledger endpoints, bounded (createLedgerServer);
  * - the relay token by proof (createRelayTokenFetcher) behind the cooldown/caching provider, with the ledger hooks (createAccountRelay);
  * - the relay's ledger messages and (re)subscriptions, spaced so a relay publisher cannot force back-to-back reads and verifies;
+ * - the re-offer of this bridge's chain when a server read shows the server behind it (ledger-reoffer.ts): relay input only ever leads to
+ *   a paced read, never to a POST, and a refused relay token (plain 401) only to a read that may then re-offer;
  * - the last relay URL the server named (security/relay-url.json), for an offline start.
- * Nothing here decides trust: every ledger goes to security.offerLedger / refreshLedger, which verify it.
+ * Nothing here decides trust: every ledger goes to security.offerLedgerResult / refreshLedger / readServerLedger, which verify it.
  */
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { UnauthorizedError } from 'centrifuge';
 import type { LedgerMessage } from './centrifugo-client.js';
+import type { LedgerHeadRelation } from './security/ledger/ledger.js';
+import type { LedgerOfferOutcome, ServerLedgerRead } from './security/bridge/security.js';
 import type { EndpointPublic } from './security/protocol.js';
+import { createLedgerReoffer, type LedgerPostAnswer } from './ledger-reoffer.js';
 import { createRelayTokenFetcher } from './relay-token.js';
 import { createTokenProvider, type TokenProvider } from './token-provider.js';
 
@@ -27,10 +32,23 @@ export const RELAY_LEDGER_MAX_SPACING_MS = 60_000;
 export const UNKNOWN_ENDPOINT_REFRESH_SPACING_MS = 2_000;
 
 export interface LedgerServer {
-  /** GET /api/account/ledger?accountId=… (public read): the `ledger` field, unverified. Throws on any failure. */
+  /** GET /api/account/ledger?accountId=… (public read): the `ledger` field, unverified. Throws on any failure (HttpStatusError for a
+   *  non-200 answer). */
   fetchLedger(accountId: string): Promise<unknown>;
-  /** POST /api/account/ledger {ledger}: the response status (the server stores the chain only if it wins its fork choice). */
-  postLedger(ledger: unknown): Promise<number>;
+  /** POST /api/account/ledger { ledger, expectHead } (a re-offer: the server never creates an account for it, and answers 409
+   *  head_changed when its head is no longer expectHead). The status, the bounded JSON body and Retry-After. Throws on a network failure. */
+  postLedger(ledger: unknown, expectHead: string): Promise<LedgerPostAnswer>;
+}
+
+/** Retry-After as ms from `now`: delta-seconds or an HTTP date; null when absent or unreadable. */
+export function parseRetryAfter(value: string | null, now: number = Date.now()): number | null {
+  if (value === null) return null;
+  const text = value.trim();
+  if (/^\d{1,9}$/.test(text)) return Number(text) * 1000;
+  // An HTTP date starts with the day name ("Sun, 06 Nov 1994 08:49:37 GMT"); anything else is not a date here.
+  if (!/^[A-Za-z]{3}/.test(text)) return null;
+  const at = Date.parse(text);
+  return Number.isNaN(at) ? null : Math.max(0, at - now);
 }
 
 /** An HTTP answer that is not a success, with its status. */
@@ -91,15 +109,25 @@ export function createLedgerServer(input: { apiUrl: string; fetchImpl?: typeof f
       if (typeof ledger !== 'object' || ledger === null) throw new Error('Ledger response malformed');
       return ledger;
     },
-    async postLedger(ledger) {
+    async postLedger(ledger, expectHead) {
+      let status: number;
+      let retryAfterMs: number | null;
+      let text: string | null = null;
       try {
         const response = await fetchImpl(`${base}/api/account/ledger`, {
           method: 'POST', headers: { 'Content-Type': 'application/json', accept: 'application/json' }, cache: 'no-store',
-          body: JSON.stringify({ ledger }), signal: AbortSignal.timeout(timeoutMs),
+          body: JSON.stringify({ ledger, expectHead }), signal: AbortSignal.timeout(timeoutMs),
         });
-        await response.body?.cancel().catch(() => undefined);
-        return response.status;
+        status = response.status;
+        retryAfterMs = parseRetryAfter(response.headers.get('retry-after'));
+        if (Number(response.headers.get('content-length')) > maxBytes) await response.body?.cancel().catch(() => undefined);
+        else text = await response.text();
       } catch (error) { throw timeoutError(error, timeoutMs); }
+      let body: unknown = null;
+      if (text !== null && Buffer.byteLength(text, 'utf8') <= maxBytes) {
+        try { body = JSON.parse(text); } catch { body = null; }
+      }
+      return { status, body, retryAfterMs };
     },
   };
 }
@@ -185,11 +213,15 @@ export function saveRelayUrl(dataDir: string, url: string): void {
 
 /** The parts of BridgeSecurityService this wiring drives. */
 export interface AccountRelaySecurity {
-  offerLedger(candidate: unknown, source: 'server' | 'relay'): Promise<'adopt' | 'keep' | 'reject'>;
+  offerLedgerResult(candidate: unknown, source: 'server' | 'relay'): Promise<LedgerOfferOutcome>;
+  /** One uncoalesced GET of the server ledger, offered as 'server' (the re-offer's fresh read). */
+  readServerLedger(): Promise<ServerLedgerRead>;
+  /** A relay-token answer without a chain: what the server's head says about it. */
+  noteServerHead(server: { head: string | null; revision: number | null }): LedgerHeadRelation | null;
   noteServerContact(now?: number): void;
   /** Coalesced GET of the server ledger, offered as 'server'. */
   refreshLedger(): Promise<void>;
-  ledgerStatus(): { head: string | null };
+  ledgerStatus(): { head: string | null; own: string; serverBehind: boolean };
 }
 
 export interface AccountRelayDeps {
@@ -198,8 +230,8 @@ export interface AccountRelayDeps {
   bridgeId: string;
   authPrivateKey: CryptoKey;
   security: AccountRelaySecurity;
-  /** The local replica: its chain is POSTed when the server does not know this bridge's key. */
-  store: { read(): Promise<{ ledger: unknown } | null> };
+  /** The local replica: its chain is re-offered (with expectHead) when a server read shows the server behind it. */
+  store: { read(): Promise<{ ledger: unknown; checkpoint: { head: string } } | null> };
   server: LedgerServer;
   hostname: () => string;
   localPort: () => number | undefined;
@@ -212,8 +244,9 @@ export interface AccountRelayDeps {
   /** Reconnects the relay after it was refused (centrifugo.connect()). */
   reconnect?: () => void;
   fetchImpl?: typeof fetch;
-  /** Monotonic clock (token reuse, cooldown, relay spacing); injectable for tests. */
+  /** Monotonic clock (token reuse, cooldown, relay spacing, re-offer pacing); injectable for tests. */
   now?: () => number;
+  /** [0, 1): token cooldown and re-offer jitter. */
   random?: () => number;
   /** Timer for relay spacing; returns a cancel function. Defaults to an unref'd setTimeout. */
   schedule?: (run: () => void, ms: number) => () => void;
@@ -275,9 +308,25 @@ export function createAccountRelay(deps: AccountRelayDeps): AccountRelay {
   const head = (): string | null => deps.security.ledgerStatus().head;
   /** The relay connection was refused (terminal for centrifuge-js) and has not been reconnected since. */
   let relayRefused = false;
-  /** The local head whose chain was last POSTed after a plain 401 (at most once per head). */
-  let postedHead: string | null | undefined;
   let stopped = false;
+
+  // Our chain goes back to the server only after a fresh read shows the server holding a strict prefix of it, with that head as expectHead.
+  const reoffer = createLedgerReoffer({
+    read: () => deps.security.readServerLedger(),
+    local: async () => {
+      // Like a browser, a bridge that is not an active member of its own chain sends nothing.
+      if (deps.security.ledgerStatus().own !== 'active') return null;
+      const state = await deps.store.read();
+      return state === null ? null : { ledger: state.ledger, head: state.checkpoint.head };
+    },
+    post: (ledger, expectHead) => deps.server.postLedger(ledger, expectHead),
+    offer: ledger => deps.security.offerLedgerResult(ledger, 'server'),
+    now: monotonic, random: deps.random ?? Math.random, schedule, log,
+  });
+  /** After any server read: the server is behind us, so re-offer (paced; it reads again first). */
+  const afterServerRead = (): void => {
+    if (!stopped && deps.security.ledgerStatus().serverBehind) reoffer.noteServerBehind();
+  };
 
   const reconnectIfRefused = (): void => {
     if (!relayRefused || stopped) return;
@@ -310,33 +359,31 @@ export function createAccountRelay(deps: AccountRelayDeps): AccountRelay {
     bridgeId: deps.bridgeId,
     authPrivateKey: deps.authPrivateKey,
     head,
-    // A newer server ledger rides the token response. An invalid one is only logged: the token is still returned.
+    // A newer server ledger rides the token response. An invalid one is only logged: the token is still returned. One the server holds
+    // as a strict prefix of ours (a rolled-back server) starts the re-offer.
     onLedger: async ledger => {
       try {
-        if (await deps.security.offerLedger(ledger, 'server') === 'reject') log('[Bridge] Ignored an account ledger from the relay-token response.');
+        const outcome = await deps.security.offerLedgerResult(ledger, 'server');
+        if (outcome.decision === 'reject') log('[Bridge] Ignored an account ledger from the relay-token response.');
+        if (outcome.relation === 'behind') reoffer.noteServerBehind();
       } catch (error) { log(`[Bridge] Account ledger from the relay-token response failed: ${messageOf(error)}`); }
     },
-    // Evidence of a revoked key: only a ledger that verifies and revokes this bridge triggers the reset (security's onBridgeRevoked).
+    // No chain in the answer: the server's head is the one we sent (or the one it names). Behind -> re-offer; unknown -> read it.
+    onServerHead: server => {
+      const relation = deps.security.noteServerHead(server);
+      if (relation === 'behind') reoffer.noteServerBehind();
+      else if (relation === 'unknown') submit({ kind: 'refresh', head: null });
+    },
+    // Evidence of a revoked key: the replica's append-only rule decides. Only a chain that is AHEAD of ours (or an owner-chosen history)
+    // and revokes this bridge triggers the reset (security's onBridgeRevoked); a diverged one is refused and recorded, never evidence.
     onRevoked: async ledger => {
-      try { await deps.security.offerLedger(ledger, 'server'); }
+      try { await deps.security.offerLedgerResult(ledger, 'server'); }
       catch (error) { log(`[Bridge] Revocation evidence failed: ${messageOf(error)}`); }
     },
-    // The server may be missing our add_bridge (e.g. the approving browser's write was lost): offer it our chain once per local head,
-    // then retry once.
-    onUnauthorized: async () => {
-      const current = head();
-      if (postedHead !== undefined && postedHead === current) return false;
-      try {
-        const state = await deps.store.read();
-        if (state === null) return false;
-        const status = await deps.server.postLedger(state.ledger);
-        postedHead = current;
-        return status === 200 || status === 201;
-      } catch (error) {
-        log(`[Bridge] Could not send the account ledger to the server: ${messageOf(error)}`);
-        return false;
-      }
-    },
+    // A plain 401: the server may lack our records (a rolled-back server missing our add_bridge). Nothing is posted blindly: the
+    // re-offer reads the server first and posts our chain (expectHead, never creating an account) only if the server is behind it.
+    // The token is retried once only when the server took our chain.
+    onUnauthorized: async () => (await reoffer.check()) === 'posted',
     hostname: deps.hostname,
     localPort: deps.localPort,
     fetchImpl,
@@ -369,10 +416,15 @@ export function createAccountRelay(deps: AccountRelayDeps): AccountRelay {
     const before = head();
     try {
       if (work.kind === 'offer') {
-        if (await deps.security.offerLedger(work.ledger, 'relay') !== 'adopt') return 'idle';
+        const outcome = await deps.security.offerLedgerResult(work.ledger, 'relay');
+        // A relayed chain that is a prefix of ours hints that the server may be behind: read the server (paced). A relay message is never
+        // proof of the server's state, so it never leads to a POST by itself.
+        if (outcome.relation === 'behind' && pending === null) pending = { kind: 'refresh', head: null };
+        if (outcome.decision !== 'adopt') return 'idle';
       } else {
         if (work.head !== null && work.head === before) return 'skipped';
         await deps.security.refreshLedger();
+        afterServerRead();
         if (head() === before) return 'idle';
       }
     } catch (error) {
@@ -432,13 +484,16 @@ export function createAccountRelay(deps: AccountRelayDeps): AccountRelay {
     unknownReadyAt = monotonic() + UNKNOWN_ENDPOINT_REFRESH_SPACING_MS;
     const before = head();
     deps.security.refreshLedger()
-      .then(() => { if (head() !== before) reconnectIfRefused(); })
+      .then(() => { afterServerRead(); if (head() !== before) reconnectIfRefused(); })
       .catch((error: unknown) => log(`[Bridge] Account ledger refresh failed: ${messageOf(error)}`))
       .finally(() => {
         unknownInFlight = false;
         if (unknownQueued) { unknownQueued = false; refreshForUnknown(); }
       });
   };
+
+  // The startup read (security.startLedger) may already have shown the server behind.
+  afterServerRead();
 
   return {
     tokens,
@@ -458,6 +513,7 @@ export function createAccountRelay(deps: AccountRelayDeps): AccountRelay {
     onUnknownEndpoint: refreshForUnknown,
     stop() {
       stopped = true;
+      reoffer.stop();
       pending = null;
       cancelTimer?.();
       cancelTimer = null;
