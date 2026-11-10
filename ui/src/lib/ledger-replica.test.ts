@@ -298,6 +298,42 @@ describe("LedgerReplica", () => {
     expect(replica.sticky()?.bridgeIds).toEqual(["b1"]);
   });
 
+  it("persists the confirmed server state with the record: across reloads and adopts, unreadable means unknown, clear() drops it", async () => {
+    const a = await account();
+    const one = await addDevice(a, a.ledger);
+    const storage = memoryReplicaStorage();
+    const replica = new LedgerReplica(storage);
+    await replica.offer(one, BIND);
+    expect(replica.confirmed()).toBeNull();
+    const confirmed = { version: 1 as const, head: (await verifyLedger(one)).head, revokedDeviceIds: ["d".repeat(43)], revokedBridgeIds: ["studio"] };
+    await replica.noteConfirmed(confirmed);
+    const serial = (await storage.read(a.accountId) as ReplicaRecord).serial;
+    // Unchanged: no write.
+    await replica.noteConfirmed(clone(confirmed));
+    expect((await storage.read(a.accountId) as ReplicaRecord).serial).toBe(serial);
+    const reloaded = new LedgerReplica(storage);
+    await reloaded.load();
+    expect(reloaded.confirmed()).toEqual(confirmed);
+    // Adopting a longer chain keeps it (it describes the server, not the local chain).
+    expect((await reloaded.offer(await addBridge(a, one, "b1"))).decision).toBe("adopt");
+    expect(reloaded.confirmed()).toEqual(confirmed);
+    // A damaged value is no corruption: the record loads, the server state is unknown.
+    const stored = await storage.read(a.accountId) as ReplicaRecord;
+    expect(await storage.commit({ ...stored, serial: stored.serial + 1, confirmed: { version: 2, head: 5 } as unknown as ReplicaRecord["confirmed"] }, stored.serial)).toBe(true);
+    const damaged = new LedgerReplica(storage);
+    await damaged.load();
+    expect(damaged.raw()).not.toBeNull();
+    expect(damaged.confirmed()).toBeNull();
+    await damaged.noteConfirmed(confirmed);
+    await damaged.noteConfirmed(null);
+    expect(damaged.confirmed()).toBeNull();
+    await damaged.noteConfirmed(confirmed);
+    await damaged.clear();
+    expect(damaged.confirmed()).toBeNull();
+    await damaged.offer(one, BIND);
+    expect(damaged.confirmed()).toBeNull();
+  });
+
   it("reports secure_context_required without WebCrypto", async () => {
     vi.stubGlobal("crypto", undefined);
     await expect(new LedgerReplica(memoryReplicaStorage()).load()).rejects.toThrow("secure_context_required");

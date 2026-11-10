@@ -219,7 +219,8 @@ async function browser(
     return found;
   });
   const resets: string[] = [];
-  const replica = new LedgerReplica(storage);
+  // The clock looked up on each call, so a fake clock installed later (fakeTime) applies to verification too.
+  const replica = new LedgerReplica(storage, () => Date.now());
   const client = new LedgerClient({
     origin: ORIGIN, pageOrigin: ORIGIN, publicOrigin: `${ORIGIN}/`, rpId: RP_ID, fetchImpl: server.fetch, replica, passkey: authenticator.module,
     deviceKey: async () => key, endpoint, signIn: proof => server.signIn(proof), attemptStorage: options.attemptStorage,
@@ -1355,19 +1356,27 @@ describe("LedgerClient re-offer", () => {
   it("unsaved lists a refused revocation only while the server is known to be behind; retryNow() sends it once, without a prompt", async () => {
     const { server, authenticator, a, page, phone } = await withPhone();
     let refuse = true;
-    server.postHook = () => (refuse ? rateLimited(600) : null);
+    // No Retry-After: retryNow() may skip the backoff (a Retry-After it would honour, see S5).
+    server.postHook = () => (refuse ? rateLimited() : null);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     fakeTime();
     await expect(page.client.revokeDevice(phone)).rejects.toThrow("rate_limited");
-    expect(page.client.snapshot().unsaved).toEqual({ deviceIds: [phone], bridgeIds: [] });
-    // Another page of the profile has the revocation in its chain but has not read the server: unknown is not "unsaved".
+    expect(page.client.snapshot()).toMatchObject({ serverState: "behind", unsaved: { deviceIds: [phone], bridgeIds: [] }, conflict: false, canReoffer: true });
+    expect(page.client.snapshot().retryAt).toBe(Date.now() + 24_000);
+    expect(page.client.snapshot().retryNotBefore).toBeNull();
+    // Another page of the profile, before any read: the confirmed server state persisted with the chain already tells.
     const other = await browser(server, authenticator, { storage: a.storage, identity: a, deps: { random: () => 0 } });
     await other.client.load();
     expect(other.replica.raw()?.checkpoint.revokedDeviceIds).toEqual([phone]);
-    expect(other.client.snapshot().unsaved).toEqual({ deviceIds: [], bridgeIds: [] });
-    await other.client.refresh({ force: true });
-    expect(other.client.snapshot().unsaved).toEqual({ deviceIds: [phone], bridgeIds: [] });
+    expect(other.client.snapshot()).toMatchObject({ serverState: "behind", unsaved: { deviceIds: [phone], bridgeIds: [] } });
+    // A profile with the same chain but no confirmed server state: unknown, and unknown is not "unsaved".
+    const unread = await browser(server, authenticator, { storage: memoryReplicaStorage(), identity: a });
+    const chain = page.replica.raw()?.ledger;
+    expect((await unread.replica.offer(chain, { bind: true, expectAccountId: (await verifyLedger(current(server))).accountId })).decision).toBe("adopt");
+    await unread.client.load();
+    expect(unread.client.snapshot()).toMatchObject({ serverState: "unknown", unsaved: { deviceIds: [], bridgeIds: [] }, retryAt: null });
     other.client.dispose();
+    unread.client.dispose();
     // retryNow(): past the 600 s Retry-After, one fresh read and one POST.
     refuse = false;
     const posts = server.posts.length;
@@ -1600,23 +1609,41 @@ describe("LedgerClient re-offer", () => {
     expect(authenticator.calls).toEqual([]);
   });
 
-  it("never re-offers for a browser whose own device the local chain revokes, loaded or not", async () => {
+  it("a browser whose own chain revokes it restores that revocation to a rolled-back server, loaded or not", async () => {
     const { server, authenticator, a, accountId } = await owner();
     const b = await browser(server, authenticator);
     await b.client.signInNewDevice({ deviceLabel: "Phone" });
-    await a.client.revokeDevice((await b.endpoint(accountId)).endpoint.id);
+    const phone = (await b.endpoint(accountId)).endpoint.id;
+    await a.client.revokeDevice(phone);
+    // b adopts the chain that revokes it: its own RAW chain now holds the revocation.
     await b.client.refresh({ force: true });
-    expect(b.client.snapshot().status).toBe("device_revoked");
-    rollBack(server, accountId, 2);
+    expect(b.client.snapshot()).toMatchObject({ status: "device_revoked", canReoffer: true });
+    expect(b.replica.raw()?.checkpoint.revokedDeviceIds).toEqual([phone]);
+    const full = current(server);
+    for (const which of ["loaded", "reloaded"] as const) {
+      rollBack(server, accountId, 2);
+      const posts = server.posts.length;
+      authenticator.calls = [];
+      const page = which === "loaded" ? b : await browser(server, authenticator, { storage: b.storage, identity: b });
+      await page.client.refresh({ force: true });
+      expect(server.posts, which).toHaveLength(posts + 1);
+      expect(await headOf(current(server)), which).toBe(await headOf(full));
+      expect((await verifyLedger(current(server))).revokedDeviceIds).toEqual([phone]);
+      expect(authenticator.calls).toEqual([]);
+    }
+  });
+
+  it("never re-offers for a browser whose own removal it knows only from another chain (sticky): it cannot write", async () => {
+    const { server, a, b, phone } = await phoneAhead();
+    await a.client.revokeDevice(phone);
     const posts = server.posts.length;
-    authenticator.calls = [];
+    // A forced read: b keeps its longer chain, the revocation becomes sticky only.
     await b.client.refresh({ force: true });
-    const page = await browser(server, authenticator, { storage: b.storage, identity: b });
-    await page.client.refresh({ force: true });
-    expect(page.replica.raw()?.checkpoint.revision).toBe(3);
+    expect(b.replica.raw()?.checkpoint.revokedDeviceIds).toEqual([]);
+    expect(b.client.snapshot()).toMatchObject({ status: "device_revoked", canReoffer: false, retryAt: null });
+    await b.client.retryNow();
+    await elapse(3_600_000, 60_000);
     expect(server.posts).toHaveLength(posts);
-    expect(current(server).transitions).toHaveLength(2);
-    expect(authenticator.calls).toEqual([]);
   });
 
   it("never re-offers while unbound or during an account creation, and arms no retry for a refused creation", async () => {
@@ -1853,6 +1880,244 @@ describe("LedgerClient re-offer", () => {
     expect(done).toBe(false);
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => expect(done).toBe(true), { timeout: 5_000 });
+  });
+
+  it("S1: sends nothing that would drop another device's removal the server has (conflict), until it is signed again here", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    const b = await browser(server, authenticator);
+    await b.client.signInNewDevice({ deviceLabel: "Phone" });
+    const c = await browser(server, authenticator);
+    await c.client.signInNewDevice({ deviceLabel: "Tablet" });
+    const tablet = (await c.endpoint(accountId)).endpoint.id;
+    await a.client.refresh({ force: true });
+    await b.client.refresh({ force: true });
+    let refusals = 2;
+    server.postHook = () => (refusals-- > 0 ? rateLimited(120) : null);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    fakeTime();
+    await expect(b.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "x") })).rejects.toThrow("rate_limited");
+    await expect(b.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "y") })).rejects.toThrow("rate_limited");
+    await a.client.revokeDevice(tablet);
+    const posts = server.posts.length;
+    authenticator.calls = [];
+    // b's retry: the fresh read shows the server's chain revoking the tablet, which b's longer chain still lists.
+    await elapse(150_000);
+    await vi.waitFor(() => expect(b.client.snapshot().conflict).toBe(true), { timeout: 5_000 });
+    expect(server.posts).toHaveLength(posts);
+    expect((await verifyLedger(current(server))).revokedDeviceIds).toEqual([tablet]);
+    expect(b.client.snapshot()).toMatchObject({ serverState: "behind", retryAt: null, canReoffer: true, status: "ready" });
+    expect(b.client.snapshot().localOnly.deviceIds).toEqual([tablet]);
+    await b.client.retryNow();
+    await elapse(3_600_000, 60_000);
+    expect(server.posts).toHaveLength(posts);
+    // The owner signs that removal again on this browser: a user write on top of b's chain, which keeps x and y.
+    await b.client.revokeDevice(tablet);
+    expect(authenticator.names()).toEqual(["sign"]);
+    const served = await verifyLedger(current(server));
+    expect(served.revokedDeviceIds).toEqual([tablet]);
+    expect(served.bridges.map(item => item.bridgeId).sort()).toEqual(["x", "y"]);
+    expect(b.client.snapshot()).toMatchObject({ conflict: false, serverState: "current", localOnly: { deviceIds: [], bridgeIds: [] } });
+  });
+
+  it("S2: a browser's own refused removal is sent again (not before Retry-After, retryNow included) and the server stops listing it", async () => {
+    const { server, authenticator, accountId } = await owner();
+    const b = await browser(server, authenticator);
+    await b.client.signInNewDevice({ deviceLabel: "Phone" });
+    const phone = (await b.endpoint(accountId)).endpoint.id;
+    let refusals = 1;
+    server.postHook = () => (refusals-- > 0 ? rateLimited(60) : null);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    fakeTime();
+    await expect(b.client.revokeDevice(phone)).rejects.toThrow("rate_limited");
+    expect(b.client.snapshot()).toMatchObject({ status: "device_revoked", canReoffer: true, serverState: "behind", unsaved: { deviceIds: [phone], bridgeIds: [] } });
+    const posts = server.posts.length;
+    authenticator.calls = [];
+    await b.client.retryNow();
+    expect(server.posts).toHaveLength(posts);
+    await elapse(70_000, 1_000);
+    await vi.waitFor(async () => expect((await verifyLedger(current(server))).revokedDeviceIds).toEqual([phone]), { timeout: 5_000 });
+    expect(server.posts).toHaveLength(posts + 1);
+    expect((await verifyLedger(current(server))).devices.some(item => item.endpoint.id === phone)).toBe(false);
+    await b.client.refresh({ force: true });
+    expect(b.client.snapshot()).toMatchObject({ serverState: "current", unsaved: { deviceIds: [], bridgeIds: [] } });
+    expect(authenticator.calls).toEqual([]);
+  });
+
+  it.each(["account_unknown", "converged_reset", "refused_with_ours"] as const)("S3: a hostile server (%s, alternating prefixes, a hint every 2 s) gets POSTs only on the backoff schedule", async mode => {
+    const { server, authenticator, a, full } = await revokedBridge();
+    const p1 = wire({ genesis: full.genesis, transitions: full.transitions.slice(0, 1) });
+    const p2 = wire({ genesis: full.genesis, transitions: full.transitions.slice(0, 2) });
+    let reads = 0;
+    let posts = 0;
+    const sent: { at: number; head: unknown }[] = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const method = init?.method ?? "GET";
+      if (new URL(String(input)).pathname !== "/api/account/ledger") return server.fetch(input, init);
+      if (method === "GET") {
+        reads += 1;
+        if (mode !== "converged_reset") return json({ ledger: reads % 2 ? p1 : p2 });
+        const turn = reads % 4;
+        return json({ ledger: turn === 0 || turn === 2 ? full : turn === 1 ? p1 : p2 });
+      }
+      posts += 1;
+      sent.push({ at: Date.now(), head: (JSON.parse(String(init?.body)) as { expectHead?: unknown }).expectHead });
+      if (mode === "account_unknown") return json({ error: "account_unknown" }, 404);
+      // refused_with_ours: a refusal that claims to hold this very chain, which leaves nothing to send.
+      return json({ error: "head_changed", ledger: mode === "refused_with_ours" ? full : posts % 2 ? p1 : p2 }, 409);
+    }) as typeof fetch;
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const page = await browser(server, authenticator, { storage: a.storage, identity: a, deps: { fetchImpl, random: () => 0 } });
+    fakeTime();
+    await page.client.load();
+    for (let at = 0; at < 600_000; at += 2_000) {
+      void page.client.noteHead("z".repeat(43), 1);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await settle();
+    }
+    // The backoff with the jitter pinned low: 0, 24 s (then the pair window), 72 s, 168 s, 360 s.
+    expect(posts).toBeLessThanOrEqual(6);
+    // The pair window holds for the head each fresh read returned: the same head is never sent twice within 30 s.
+    for (const [index, item] of sent.entries()) {
+      for (const later of sent.slice(index + 1)) if (later.head === item.head) expect(later.at - item.at).toBeGreaterThanOrEqual(30_000);
+    }
+    expect(page.replica.raw()?.checkpoint.revision).toBe(3);
+  });
+
+  it("L2: the pair window holds for the head the fresh read returns, not only for the one that triggered the attempt", async () => {
+    const { server, authenticator, a, accountId, full } = await revokedBridge();
+    const s1 = rollBack(server, accountId, 2);
+    const s2 = wire({ genesis: full.genesis, transitions: full.transitions.slice(0, 1) });
+    let serveS2 = false;
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if ((init?.method ?? "GET") === "GET" && serveS2 && new URL(String(input)).pathname === "/api/account/ledger") {
+        serveS2 = false;
+        return json({ ledger: s2 });
+      }
+      return server.fetch(input, init);
+    }) as typeof fetch;
+    const sent: { at: number; head: unknown }[] = [];
+    server.postHook = () => rateLimited();
+    const inner = server.fetch;
+    server.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "POST" && new URL(String(input)).pathname === "/api/account/ledger") {
+        sent.push({ at: Date.now(), head: (JSON.parse(String(init.body)) as { expectHead?: unknown }).expectHead });
+      }
+      return inner(input, init);
+    }) as typeof fetch;
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    // Jitter pinned low: the first backoff (24 s) is shorter than the 30 s pair window.
+    const page = await browser(server, authenticator, { storage: a.storage, identity: a, deps: { fetchImpl, random: () => 0 } });
+    fakeTime();
+    await page.client.refresh({ force: true });
+    expect(sent.map(item => item.head)).toEqual([await headOf(s1)]);
+    // A read that shows another head: at 24 s the attempt is due for that pair, but its fresh read returns the one sent at 0 s.
+    await elapse(10_000, 1_000);
+    serveS2 = true;
+    await page.client.refresh({ force: true });
+    await elapse(25_000, 1_000);
+    await vi.waitFor(() => expect(sent).toHaveLength(2), { timeout: 5_000 });
+    expect(sent[1].head).toBe(await headOf(s1));
+    expect(sent[1].at - sent[0].at).toBeGreaterThanOrEqual(30_000);
+  });
+
+  it("S4: after a reload with the server down, a removal the server never took is still unsaved (persisted confirmed state)", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "studio") });
+    server.postHook = () => new Response(JSON.stringify({ error: "ledger_unavailable" }), { status: 503 });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await expect(a.client.revokeBridge("studio")).rejects.toThrow("server_unavailable");
+    expect(a.client.snapshot()).toMatchObject({ serverState: "behind", unsaved: { deviceIds: [], bridgeIds: ["studio"] } });
+    a.client.dispose();
+    const down = (async () => new Response(JSON.stringify({ error: "ledger_unavailable" }), { status: 503 })) as typeof fetch;
+    const page = await browser(server, authenticator, { storage: a.storage, identity: a, deps: { fetchImpl: down } });
+    await page.client.load();
+    expect(page.client.snapshot()).toMatchObject({ serverState: "behind", unsaved: { deviceIds: [], bridgeIds: ["studio"] } });
+    await expect(page.client.refresh({ force: true })).rejects.toThrow("server_unavailable");
+    expect(page.client.snapshot()).toMatchObject({ serverState: "behind", unsaved: { deviceIds: [], bridgeIds: ["studio"] } });
+    expect((await verifyLedger(current(server))).revokedBridgeIds).toEqual([]);
+  });
+
+  it("a profile with no confirmed server state is 'unknown' while reads fail, and 'current' after the first read, which persists", async () => {
+    const { server, authenticator, a, accountId } = await revokedBridge();
+    let down = true;
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => (down
+      ? new Response(JSON.stringify({ error: "ledger_unavailable" }), { status: 503 }) : server.fetch(input, init))) as typeof fetch;
+    const page = await browser(server, authenticator, { storage: memoryReplicaStorage(), identity: a, deps: { fetchImpl } });
+    expect((await page.replica.offer(a.replica.raw()?.ledger, { bind: true, expectAccountId: accountId })).decision).toBe("adopt");
+    await page.client.load();
+    expect(page.client.snapshot()).toMatchObject({ serverState: "unknown", unsaved: { deviceIds: [], bridgeIds: [] }, conflict: false, retryAt: null });
+    await expect(page.client.refresh({ force: true })).rejects.toThrow("server_unavailable");
+    expect(page.client.snapshot().serverState).toBe("unknown");
+    down = false;
+    await page.client.refresh({ force: true });
+    expect(page.client.snapshot()).toMatchObject({ serverState: "current", unsaved: { deviceIds: [], bridgeIds: [] } });
+    expect(page.replica.confirmed()?.head).toBe(await headOf(current(server)));
+    const again = await browser(server, authenticator, { storage: page.storage, identity: a });
+    await again.client.load();
+    expect(again.client.snapshot().serverState).toBe("current");
+  });
+
+  it("S5: retryNow() sends nothing before a pending Retry-After, however often it is called, and sends at once after it", async () => {
+    const { server, a, accountId, authenticator } = await revokedBridge();
+    rollBack(server, accountId, 2);
+    let refusals = 1;
+    server.postHook = () => (refusals-- > 0 ? rateLimited(10) : null);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    // Jitter pinned high: the automatic retry is due at 36 s, long after the 10 s Retry-After.
+    const page = await browser(server, authenticator, { storage: a.storage, identity: a, deps: { random: () => 1 } });
+    fakeTime();
+    await page.client.refresh({ force: true });
+    const posts = server.posts.length;
+    expect(page.client.snapshot().retryNotBefore).toBe(Date.now() + 10_000);
+    expect(page.client.snapshot().retryAt).toBe(Date.now() + 36_000);
+    for (let index = 0; index < 20; index += 1) await page.client.retryNow();
+    expect(server.posts).toHaveLength(posts);
+    await vi.advanceTimersByTimeAsync(10_000);
+    // A deadline, compared with the clock: now in the past.
+    expect(page.client.snapshot().retryNotBefore).toBeLessThanOrEqual(Date.now());
+    await page.client.retryNow();
+    expect(server.posts).toHaveLength(posts + 1);
+    expect(page.client.snapshot()).toMatchObject({ serverState: "current", retryAt: null, retryNotBefore: null });
+  });
+
+  it("S6: a user write requested while a slow hostile server keeps the re-offer busy still gets the queue", async () => {
+    const { server, authenticator, a, accountId, full } = await revokedBridge();
+    const p1 = wire({ genesis: full.genesis, transitions: full.transitions.slice(0, 1) });
+    const p2 = wire({ genesis: full.genesis, transitions: full.transitions.slice(0, 2) });
+    let reads = 0;
+    let posts = 0;
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const method = init?.method ?? "GET";
+      if (new URL(String(input)).pathname !== "/api/account/ledger") return server.fetch(input, init);
+      if (method === "GET") {
+        reads += 1;
+        const turn = reads % 4;
+        return json({ ledger: turn === 0 || turn === 2 ? full : turn === 1 ? p1 : p2 });
+      }
+      posts += 1;
+      await new Promise(resolve => setTimeout(resolve, 10_000));
+      return json({ error: "head_changed", ledger: posts % 2 ? p1 : p2 }, 409);
+    }) as typeof fetch;
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const page = await browser(server, authenticator, { storage: a.storage, identity: a, deps: { fetchImpl, random: () => 0 } });
+    const bridge = await testBridge(accountId, "q");
+    fakeTime();
+    await page.client.load();
+    const t0 = Date.now();
+    let prompted = -1;
+    let settled = -1;
+    authenticator.beforeSign = async () => { if (prompted < 0) prompted = Date.now() - t0; };
+    for (let at = 0; at < 120_000; at += 2_000) {
+      void page.client.noteHead("z".repeat(43), 1);
+      if (at === 20_000) void page.client.append({ type: "add_bridge", bridge }).then(() => { settled = Date.now() - t0; }, () => { settled = Date.now() - t0; });
+      await vi.advanceTimersByTimeAsync(2_000);
+      await settle();
+    }
+    // At most one running re-offer (a fresh read and at most two 10 s POSTs) ahead of it.
+    expect(prompted).toBeGreaterThanOrEqual(20_000);
+    expect(prompted).toBeLessThanOrEqual(20_000 + 25_000);
+    expect(settled).toBeGreaterThan(prompted);
+    expect(settled).toBeLessThanOrEqual(prompted + 15_000);
   });
 });
 

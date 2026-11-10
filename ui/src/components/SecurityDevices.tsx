@@ -191,6 +191,13 @@ const LOCAL_ONLY = "Removed on this browser only — not yet applied to your acc
 /** A removal in this browser's chain that the server has not taken yet (refused or failed); the client re-sends it by itself. */
 const UNSAVED = "Removal not saved to the server yet";
 const UNSAVED_DETAIL = "Removal not saved to the server yet. It can still connect. Retrying…";
+const UNSAVED_SELF_DETAIL = "This browser's removal is not saved to the server yet. It can still connect. Retrying…";
+/** No automatic retry: sending this chain would drop removals the server has (snapshot.conflict). */
+const UNSAVED_CONFLICT = "Not saved to the server. Sign this removal again from this browser.";
+/** No automatic retry: this browser's own removal came from another chain, so it cannot write (snapshot.canReoffer false). */
+const UNSAVED_BLOCKED = "Not saved to the server. Remove it again from another browser of your account.";
+/** A removal while nothing is confirmed about the server (snapshot.serverState 'unknown'). */
+const UNCONFIRMED = "Removed here. Not confirmed by the server yet.";
 
 /**
  * Signed entries this page has seen per ledger client. The snapshot's checkpoint drops an entry once this browser revoked it locally;
@@ -232,13 +239,40 @@ function PasskeyActionButton({ security, actionKey, label, busyLabel, ariaLabel,
     onClick={() => void security.run(actionKey, action, { signs: true }).then(done => { if (done) onDone?.(); })}>{security.busy === actionKey ? busyLabel : label}</button>;
 }
 
-/** A removal the server has not taken yet. The client sends it again by itself; "Retry now" sends it at once, without a passkey. */
-function UnsavedRemoval({ security, label, id }: { security: AccountSecurity; label: string | null; id: string }) {
+/** The clock, re-read every second until `until` (epoch ms) has passed; for "Retry in N s". */
+function useClockUntil(until: number | null): number {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    setNow(Date.now());
+    if (until === null || until <= Date.now()) return;
+    const timer = setInterval(() => {
+      const at = Date.now();
+      setNow(at);
+      if (at >= until) clearInterval(timer);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [until]);
+  return now;
+}
+
+/**
+ * A removal the server has not taken yet. The client sends it again by itself; "Retry now" sends it at once, without a passkey, but
+ * never before a server Retry-After. No retry happens in a conflict (the owner must sign the conflicting removals again here) or when
+ * this browser cannot write: the text then says what to do instead, and there is no button.
+ */
+function UnsavedRemoval({ security, label, id, self = false }: { security: AccountSecurity; label: string | null; id: string; self?: boolean }) {
+  const { snapshot } = security;
+  const blocked = snapshot.canReoffer === false;
+  const conflict = !blocked && snapshot.conflict === true;
+  const notBefore = snapshot.retryNotBefore ?? null;
+  const now = useClockUntil(notBefore);
+  const wait = notBefore === null ? 0 : Math.ceil((notBefore - now) / 1000);
+  const text = blocked ? UNSAVED_BLOCKED : conflict ? UNSAVED_CONFLICT : self ? UNSAVED_SELF_DETAIL : UNSAVED_DETAIL;
   return <div role="group" aria-label="Removal not saved" className="space-y-2 rounded-md border border-[var(--status-pending)] p-3">
-    <p className="text-sm">{UNSAVED_DETAIL}</p>
+    <p className="text-sm">{text}</p>
     <SignedIdentity label={label} id={id} />
-    <button type="button" className="btn-ghost min-h-11 sm:min-h-8" disabled={!!security.busy}
-      onClick={() => void security.run("retry", client => client.retryNow())}>{security.busy === "retry" ? "Retrying…" : "Retry now"}</button>
+    {!blocked && !conflict && <button type="button" className="btn-ghost min-h-11 sm:min-h-8" disabled={!!security.busy || wait > 0}
+      onClick={() => void security.run("retry", client => client.retryNow())}>{wait > 0 ? `Retry in ${wait} s` : security.busy === "retry" ? "Retrying…" : "Retry now"}</button>}
   </div>;
 }
 
@@ -381,6 +415,12 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
   // Removed in this browser's chain, not yet on the server: the server (and so the computers) still accept them.
   const unsavedDevices = trusted ? (snapshot.unsaved?.deviceIds ?? []).filter(id => !localDevices.includes(id) && id !== currentEndpointId) : [];
   const unsavedBridges = trusted ? (snapshot.unsaved?.bridgeIds ?? []).filter(id => !localBridges.includes(id)) : [];
+  /** This browser's own removal, not on the server yet: it is still accepted there, and the client sends it again. */
+  const unsavedSelf = !!trusted && !!currentEndpointId && (snapshot.unsaved?.deviceIds ?? []).includes(currentEndpointId);
+  /** Nothing is confirmed about the server yet: a removal here may not be there. */
+  const unconfirmed = !!trusted && snapshot.serverState === "unknown";
+  // Map labels end without a period (the map appends ". <connection>"); the details show UNCONFIRMED as written.
+  const removedText = unconfirmed ? UNCONFIRMED.replace(/\.$/, "") : "Removed from your account";
   useEffect(() => { rememberEntries(security.client, trusted); }, [security.client, trusted]);
   const seen = security.client ? seenEntries.get(security.client) : undefined;
   const discardedOperations = snapshot.discarded.map(record => record.payload.operation);
@@ -409,9 +449,10 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
     browserNodes.push({ id, label: custom ?? browserName(signedDevice(id)?.label ?? "", false), customLabel: custom !== undefined, current: false,
       accessText: UNSAVED, lockState: "approval_needed", edge: "none" });
   }
+  const selfRemoved = !!currentEndpointId && (revokedHere || !!trusted?.revokedDeviceIds.includes(currentEndpointId));
   if (currentEndpointId && !browserNodes.some(node => node.id === currentEndpointId)) browserNodes.unshift({ id: currentEndpointId, label: "This browser", current: true,
-    accessText: revokedHere || trusted?.revokedDeviceIds.includes(currentEndpointId) ? "Removed from your account" : trusted ? "Not in your account" : "Not signed in",
-    lockState: "approval_needed", edge: "none" });
+    accessText: unsavedSelf ? UNSAVED : selfRemoved ? removedText : trusted ? "Not in your account" : "Not signed in",
+    lockState: selfRemoved && unconfirmed && !unsavedSelf ? "unknown" : "approval_needed", edge: "none" });
 
   const roster = trusted?.bridges ?? [];
   const computers = new Map(bridges.map(computer => [computer.bridgeId, computer]));
@@ -429,11 +470,13 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
     const keyMismatch = !!entry && !!computer.security.endpoint && computer.security.endpoint.id !== entry.endpoint.id;
     const inAccount = !!entry && !revoked && !keyMismatch && status !== "revoked" && status !== "key_changed";
     const edge: SecurityAccessBridgeNode["edge"] = verified && inAccount ? status === "ready" ? "current" : status === "offline" || status === "connecting" ? "historical" : "none" : "none";
-    const access = localOnly ? LOCAL_ONLY : unsaved ? UNSAVED : revoked ? "Removed from your account" : !entry ? "Not in your account" : !inAccount ? "Key changed · check this computer"
+    const access = localOnly ? LOCAL_ONLY : unsaved ? UNSAVED : revoked ? removedText : !entry ? "Not in your account" : !inAccount ? "Key changed · check this computer"
       : status === "upgrade_required" ? "Update FTown on this computer" : !verified ? "Access paused" : status === "ready" ? "In your account"
       : status === "unpaired" ? "Waiting for this computer to update" : "In your account · reconnect to verify";
     const connection = status === "ready" ? "Connected" : status === "connecting" ? "Connecting…" : status === "offline" ? "Offline" : "Not connected";
-    const lockState: SecurityLockState = edge === "current" ? "secured" : !inAccount || status === "unpaired" || status === "upgrade_required" ? "approval_needed" : "unknown";
+    // A removal nobody confirmed yet is shown neutral, not as a settled "removed".
+    const lockState: SecurityLockState = edge === "current" ? "secured" : revoked && !unsaved && unconfirmed ? "unknown"
+      : !inAccount || status === "unpaired" || status === "upgrade_required" ? "approval_needed" : "unknown";
     const node: SecurityAccessBridgeNode = { current: currentComputerIds?.has(computer.bridgeId) ?? false, id: computer.bridgeId,
       label: displayName("bridge", computer.bridgeId) ?? (computer.label || entry?.label || "Computer"), accessText: access, connectionText: connection, lockState, edge };
     return { computer, entry, revoked, localOnly, unsaved, inAccount, node };
@@ -497,7 +540,8 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
           disabled={!canWrite} action={client => client.revokeDevice(selectedBrowser.id)} />
       </div>}
       {!selectedDevice && unsavedDevices.includes(selectedBrowser.id) && <UnsavedRemoval security={security} label={signedDevice(selectedBrowser.id)?.label ?? null} id={selectedBrowser.id} />}
-      {!selectedDevice && selectedBrowser.current && !localDevices.includes(selectedBrowser.id) && <p className="text-xs text-[var(--text-muted)]">{revokedHere || trusted?.revokedDeviceIds.includes(selectedBrowser.id) ? "This browser was removed from your account." : "This browser is not in your account."} <a href="/login" className="underline">Sign in with your passkey</a> to add it.</p>}
+      {/* This browser's unsaved or unconfirmed removal is explained once, above the map. */}
+      {!selectedDevice && selectedBrowser.current && !localDevices.includes(selectedBrowser.id) && !unsavedSelf && !(selfRemoved && unconfirmed) && <p className="text-xs text-[var(--text-muted)]">{selfRemoved ? "This browser was removed from your account." : "This browser is not in your account."} <a href="/login" className="underline">Sign in with your passkey</a> to add it.</p>}
       <details className="text-xs"><summary className="min-h-11 cursor-pointer py-3 sm:min-h-8 sm:py-2">Browser details</summary>
         <p className="mb-2">Browsers in your account can use your computers. Only your passkeys can add or remove them.</p>
         {selectedDevice && <><p>Original name: {selectedDevice.label || "Browser"}</p><p>Added {new Date(selectedDevice.approvedAt).toLocaleString()}.</p></>}
@@ -534,14 +578,16 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
             disabled={!canWrite} action={client => client.revokeBridge(computer.bridgeId)} />
         </div>}
         {unsaved && <UnsavedRemoval security={security} label={signedBridge(computer.bridgeId)?.label ?? null} id={computer.bridgeId} />}
-        {revoked && !unsaved && <p className="text-xs text-[var(--text-muted)]">This computer was removed from your account. To use it again, pair it as a new computer.</p>}
+        {revoked && !unsaved && <p className="text-xs text-[var(--text-muted)]">{unconfirmed ? UNCONFIRMED : "This computer was removed from your account. To use it again, pair it as a new computer."}</p>}
         {!entry && !revoked && !localOnly && <p className="text-xs leading-relaxed text-[var(--text-muted)]">This computer is not in your account. To add it, run <code>ftown start</code> on it and open the pairing link it prints.</p>}
       </div>;
     })()}
   </section>;
 
   return <div className="space-y-3">
-    {revokedHere && <div role="alert" className="space-y-2 rounded-md border border-[var(--status-error)] p-3">
+    {unsavedSelf && currentEndpointId && <UnsavedRemoval security={security} label={signedDevice(currentEndpointId)?.label ?? null} id={currentEndpointId} self />}
+    {!unsavedSelf && selfRemoved && unconfirmed && <p role="status" className="rounded-md border border-[var(--border-muted)] p-3 text-sm">{UNCONFIRMED}</p>}
+    {revokedHere && !unsavedSelf && !unconfirmed && <div role="alert" className="space-y-2 rounded-md border border-[var(--status-error)] p-3">
       <p className="text-sm font-semibold">This browser was removed from your account.</p>
       <p className="text-xs leading-relaxed text-[var(--text-muted)]">It can no longer reach your computers, and passkey changes are turned off here. To use it again, set it up with new keys and sign in with your passkey.</p>
       <a href="/login" className="btn-accent inline-flex min-h-11 items-center sm:min-h-8">Set up this browser again</a>
