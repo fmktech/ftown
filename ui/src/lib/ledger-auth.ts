@@ -53,7 +53,7 @@ type SessionReader = () => Promise<{ user?: { id?: string; endpointId?: string }
 /**
  * Resolve the signed-in account and re-check it against the CURRENT trusted checkpoint on every call: a session JWT outlives
  * device revocation, and a pre-ledger cookie must not pass. Throws UnauthorizedError unless the session's device is still trusted.
- * The checkpoint is the one persisted with the chain (readTrustedCheckpoint): no chain is parsed or verified per request.
+ * The checkpoint is the MAC-authenticated one persisted with the chain (readTrustedCheckpoint): no chain is verified per request.
  */
 export async function requireAccount(readSession?: SessionReader): Promise<{ accountId: string; endpointId: string; trusted: LedgerCheckpoint }> {
   const read = readSession ?? (async () => (await import('@/lib/auth')).auth() as ReturnType<SessionReader>);
@@ -63,6 +63,7 @@ export async function requireAccount(readSession?: SessionReader): Promise<{ acc
   if (typeof accountId !== 'string' || !ACCOUNT_ID.test(accountId)) throw new UnauthorizedError();
   if (typeof endpointId !== 'string' || endpointId.length === 0) throw new UnauthorizedError();
   const trusted = await readTrustedCheckpoint(accountId);
-  if (!trusted || trusted.devices.every(device => device.endpoint.id !== endpointId)) throw new UnauthorizedError();
+  // A revoked id never passes, even if a checkpoint ever listed it as a member too.
+  if (!trusted || trusted.revokedDeviceIds.includes(endpointId) || trusted.devices.every(device => device.endpoint.id !== endpointId)) throw new UnauthorizedError();
   return { accountId, endpointId, trusted };
 }

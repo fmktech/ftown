@@ -13,8 +13,8 @@ export type RelayCaller =
 
 /**
  * Authenticate a bridge by its relay JWT (HS256, audience ftown:centrifugo, sub = accountId, info.bridgeId, info.ownerId === sub) and
- * re-check the bridge against the CURRENT trusted checkpoint (sticky revocations applied; the persisted one, so no chain is verified per
- * request): a 1 h token outlives revocation.
+ * re-check the bridge against the CURRENT trusted checkpoint (sticky revocations applied; from the MAC-authenticated persisted raw
+ * checkpoint, so no chain is verified per request): a 1 h token outlives revocation.
  * Throws UnauthorizedError (status 401) on every failure.
  */
 export async function requireBridge(request: Request): Promise<{ accountId: string; bridgeId: string; trusted: LedgerCheckpoint }> {
@@ -30,7 +30,8 @@ export async function requireBridge(request: Request): Promise<{ accountId: stri
   const { bridgeId, ownerId } = info as { bridgeId?: unknown; ownerId?: unknown };
   if (typeof bridgeId !== 'string' || bridgeId.length === 0 || ownerId !== sub) throw new UnauthorizedError();
   const trusted = await readTrustedCheckpoint(sub);
-  if (!trusted || !trusted.bridges.some(bridge => bridge.bridgeId === bridgeId)) throw new UnauthorizedError();
+  // A revoked id never passes, even if a checkpoint ever listed it as a member too.
+  if (!trusted || trusted.revokedBridgeIds.includes(bridgeId) || !trusted.bridges.some(bridge => bridge.bridgeId === bridgeId)) throw new UnauthorizedError();
   return { accountId: sub, bridgeId, trusted };
 }
 

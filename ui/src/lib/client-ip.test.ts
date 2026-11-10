@@ -81,6 +81,16 @@ describe('rateLimitKey', () => {
     expect([...keys]).toEqual(['2001:db8:1:2::/64']);
   });
 
+  it('strips a port from IPv4, bare or bracketed', () => {
+    expect(rateLimitKey('203.0.113.7:443')).toBe('203.0.113.7');
+    expect(rateLimitKey('[203.0.113.7]:443')).toBe('203.0.113.7');
+    expect(rateLimitKey('[203.0.113.7]')).toBe('203.0.113.7');
+    expect(rateLimitKey(' 203.0.113.7:8080 ')).toBe('203.0.113.7');
+    expect(rateLimitKey('203.0.113.7:')).toBe('203.0.113.7:');
+    expect(rateLimitKey('203.0.113.7:123456')).toBe('203.0.113.7:123456');
+    expect(rateLimitKey('300.0.113.7:443')).toBe('300.0.113.7:443');
+  });
+
   it('treats an IPv4-mapped IPv6 address as its IPv4 address', () => {
     expect(rateLimitKey('::ffff:203.0.113.7')).toBe('203.0.113.7');
     expect(rateLimitKey('::FFFF:cb00:7107')).toBe('203.0.113.7');

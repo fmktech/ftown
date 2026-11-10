@@ -1,26 +1,31 @@
-import { createHash } from 'node:crypto';
 import { maxAccounts } from '@/lib/account-limits';
+import { checkpointMac, checkpointMacValid } from '@/lib/checkpoint-mac';
 import { getDb } from '@/lib/db';
 import { CREATION_MAX_BYTES, CREATION_MAX_RECORDS } from '@/lib/ledger-limits';
 import { expectedRpId, publicOrigin } from '@/lib/public-origin';
 import { isRegistrationEnabled } from '@/lib/registration';
 import { accountIdOf, applyRevocations, chooseLedger, ledgerHead, ledgerRevocations, parseLedger, verifyLedger } from '@security/ledger/ledger';
-import type { LedgerCache } from '@security/ledger/ledger';
 import type { Ledger, LedgerCheckpoint } from '@security/ledger/protocol';
 
 /*
- * Trust. The database row is not a trust anchor for clients: bridges and browsers verify every chain they receive themselves. For the
- * server's own decisions a database writer is already inside the trust boundary (it could rewrite any table, sessions included), so
- * re-verifying a stored chain on every read bought nothing and cost a full signature check per request. A chain is verified once,
- * before it is written, and every write persists, in the same statement, the trusted checkpoint the auth paths read. Reads check
- * structure and that the row's columns agree with each other; any disagreement is corruption, never "absent".
+ * Trust. Bridges and browsers verify every chain they receive themselves; for them the database is not a trust anchor. The server's
+ * own decisions must not trust the database blindly either: sessions are stateless JWTs signed with AUTH_SECRET, so a writer of the
+ * database alone must not be able to make the server authorize a key. A chain is verified from its passkey-signed genesis before it is
+ * written, and every write stores, in the same statement as the chain, its head, revision and sticky set, the chain's RAW checkpoint
+ * (canonical JSON, no sticky applied) and an HMAC over all of them keyed from AUTH_SECRET (checkpoint-mac.ts), a key the database does
+ * not hold. Reads trust that checkpoint only when the MAC verifies and it names the row's head and revision; anything else (a row from
+ * before the column, a rotated AUTH_SECRET, an older instance that advanced the chain without it, tampering) is healed by verifying the
+ * stored chain from genesis again. The trusted checkpoint is applyRevocations(raw, sticky), computed on every read. A database writer
+ * can therefore at worst replay an older, internally consistent row: it cannot make the server authorize a key the stored
+ * passkey-signed chain does not list. (The sticky set itself is not passkey-signed: edited, it fails the MAC and is healed AS EDITED,
+ * so only revocations seen on losing forks can be dropped that way; the chain's own revocations are in the raw checkpoint.)
  */
 
 export interface Sticky { deviceIds: string[]; bridgeIds: string[] }
 export interface StoredLedger {
-  /** The stored chain, served as-is. */
+  /** The stored chain, served as-is (it was verified before it was written; clients verify it again). */
   ledger: Ledger;
-  /** The chain's checkpoint with the sticky revocations applied: the only checkpoint a trust decision may use. */
+  /** applyRevocations(raw checkpoint, sticky): the only checkpoint a trust decision may use. */
   trusted: LedgerCheckpoint;
   sticky: Sticky;
 }
@@ -50,6 +55,8 @@ const union = (a: string[], b: string[]): string[] => a.concat(b.filter(id => a.
 const unionSticky = (a: Sticky, b: Sticky): Sticky => ({ deviceIds: union(a.deviceIds, b.deviceIds), bridgeIds: union(a.bridgeIds, b.bridgeIds) });
 const sameSticky = (a: Sticky, b: Sticky): boolean => a.deviceIds.length === b.deviceIds.length && a.bridgeIds.length === b.bridgeIds.length;
 const EMPTY: Sticky = { deviceIds: [], bridgeIds: [] };
+/** Heal rounds before a row that keeps changing under us is reported as a conflict. */
+const HEAL_ATTEMPTS = 3;
 
 function parseSticky(value: unknown): Sticky {
   const record = typeof value === 'string' ? JSON.parse(value) as unknown : value;
@@ -65,8 +72,44 @@ function parseSticky(value: unknown): Sticky {
 const jsonb = (value: unknown): unknown => (typeof value === 'string' ? JSON.parse(value) : value);
 const safeInteger = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value);
 
-function build(ledger: Ledger, checkpoint: LedgerCheckpoint, sticky: Sticky): StoredLedger {
-  return { ledger, trusted: applyRevocations(checkpoint, sticky), sticky };
+/** The shared trust rule, never a local copy of it. Throws on an over-limit sticky set. */
+const trustedOf = (raw: LedgerCheckpoint, sticky: Sticky): LedgerCheckpoint => applyRevocations(raw, sticky);
+function build(ledger: Ledger, raw: LedgerCheckpoint, sticky: Sticky): StoredLedger {
+  return { ledger, trusted: trustedOf(raw, sticky), sticky };
+}
+
+/** The checkpoint columns for a row: canonical JSON of the raw checkpoint and its MAC over the row's other trust inputs. */
+function sealed(accountId: string, raw: LedgerCheckpoint, sticky: Sticky): { text: string; mac: string } {
+  const text = JSON.stringify(raw);
+  return { text, mac: checkpointMac({ accountId, revision: raw.revision, head: raw.head, sticky, checkpoint: text }) };
+}
+
+/** The row's raw checkpoint, or null when it cannot be trusted: NULL, a MAC that does not verify, or a checkpoint that does not name
+ *  exactly the row's account, head and revision. Parsed by the shared strict checkpoint parser (applyRevocations with no sticky ids is
+ *  its exported entry: parseCheckpoint itself is not exported). */
+function authenticated(row: Record<string, unknown>, sticky: Sticky): LedgerCheckpoint | null {
+  const text = row.checkpoint;
+  if (typeof text !== 'string' || typeof row.account_id !== 'string' || typeof row.head !== 'string' || !safeInteger(row.revision)) return null;
+  if (!checkpointMacValid({ accountId: row.account_id, revision: row.revision, head: row.head, sticky, checkpoint: text }, row.checkpoint_mac)) return null;
+  let raw: LedgerCheckpoint;
+  try { raw = applyRevocations(JSON.parse(text) as LedgerCheckpoint, EMPTY); } catch { return null; }
+  if (raw.accountId !== row.account_id || raw.head !== row.head || raw.revision !== row.revision) return null;
+  return raw;
+}
+
+/** Heal: verify the stored chain from genesis and rewrite checkpoint + MAC, guarded by version (and head/revision). null when the row
+ *  moved meanwhile: the caller re-reads. A chain that does not verify is corruption. */
+async function heal(row: Record<string, unknown>, ledger: Ledger, sticky: Sticky): Promise<LedgerCheckpoint | null> {
+  let raw: LedgerCheckpoint;
+  try {
+    raw = await verifyLedger(ledger);
+    trustedOf(raw, sticky);
+  } catch { return corrupt(); }
+  if (raw.accountId !== row.account_id || raw.head !== row.head || raw.revision !== row.revision) return corrupt();
+  const { text, mac } = sealed(raw.accountId, raw, sticky);
+  const rows = await query('UPDATE account_ledger SET checkpoint=$2, checkpoint_mac=$3 WHERE account_id=$1 AND version=$4 AND revision=$5 AND head=$6 RETURNING account_id',
+    [raw.accountId, text, mac, row.version, raw.revision, raw.head]);
+  return rows.length === 1 ? raw : null;
 }
 
 export async function accountCount(): Promise<number> {
@@ -76,129 +119,57 @@ export async function accountCount(): Promise<number> {
   return count;
 }
 
-/** Checkpoints of chains this process verified (rows without a persisted checkpoint, and fork choice against sticky rows), LRU. */
-const MEMO_SIZE = 32;
-const memo = new Map<string, LedgerCheckpoint>();
-const digest = (text: string): string => createHash('sha256').update(text).digest('hex');
-async function verified(ledger: Ledger): Promise<LedgerCheckpoint> {
-  const key = digest(JSON.stringify(ledger));
-  const known = memo.get(key);
-  if (known) {
-    memo.delete(key);
-    memo.set(key, known);
-    return known;
-  }
-  const checkpoint = await verifyLedger(ledger);
-  memo.set(key, checkpoint);
-  while (memo.size > MEMO_SIZE) memo.delete(memo.keys().next().value as string);
-  return checkpoint;
-}
-
-const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
-const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === 'string');
-/** a, then the ids of b not already present, in order (applyRevocations' order). */
-function mergeIds(a: string[], b: string[]): string[] {
-  const seen = new Set(a);
-  const out = a.slice();
-  for (const id of b) if (!seen.has(id)) { seen.add(id); out.push(id); }
-  return out;
-}
-
-/** The persisted trusted checkpoint, structurally checked, with the row's sticky set applied again. Not the strict checkpoint parser:
- *  a trusted checkpoint may list more revoked ids (chain + sticky) than a chain's own checkpoint can. Re-applying sticky is idempotent
- *  for a checkpoint written with that set (applyRevocations' exact result), and keeps a revocation in force even if the column lagged. */
-function persistedTrust(row: Record<string, unknown>, sticky: Sticky): LedgerCheckpoint {
-  let value: unknown;
-  try { value = jsonb(row.checkpoint); } catch { return corrupt(); }
-  if (!isRecord(value) || value.version !== 2 || value.accountId !== row.account_id || value.head !== row.head || value.revision !== row.revision
-    || !Array.isArray(value.authorities) || !value.authorities.length || !value.authorities.every(isRecord)
-    || !Array.isArray(value.devices) || !value.devices.every(item => isRecord(item) && isRecord(item.endpoint) && typeof item.endpoint.id === 'string')
-    || !Array.isArray(value.bridges) || !value.bridges.every(item => isRecord(item) && typeof item.bridgeId === 'string')
-    || !strings(value.revokedDeviceIds) || !strings(value.revokedBridgeIds)) return corrupt();
-  const checkpoint = value as unknown as LedgerCheckpoint;
-  const deviceIds = new Set(sticky.deviceIds);
-  const bridgeIds = new Set(sticky.bridgeIds);
-  return {
-    ...checkpoint,
-    devices: checkpoint.devices.filter(item => !deviceIds.has(item.endpoint.id)),
-    bridges: checkpoint.bridges.filter(item => !bridgeIds.has(item.bridgeId)),
-    revokedDeviceIds: mergeIds(checkpoint.revokedDeviceIds, sticky.deviceIds),
-    revokedBridgeIds: mergeIds(checkpoint.revokedBridgeIds, sticky.bridgeIds),
-  };
-}
-
-/** Rows written before checkpoints were persisted: one verification, then the column is filled in. The version guard keeps a
- *  concurrent writer's newer checkpoint; the version is not bumped, since neither the chain nor the sticky set changed. */
-async function backfill(row: Record<string, unknown>, ledger: Ledger, sticky: Sticky): Promise<{ trusted: LedgerCheckpoint; raw: LedgerCheckpoint }> {
-  let raw: LedgerCheckpoint;
-  let trusted: LedgerCheckpoint;
-  try {
-    raw = await verified(ledger);
-    trusted = applyRevocations(raw, sticky);
-  } catch { return corrupt(); }
-  if (raw.accountId !== row.account_id || raw.head !== row.head || raw.revision !== row.revision) return corrupt();
-  await query('UPDATE account_ledger SET checkpoint=$2::jsonb WHERE account_id=$1 AND version=$3 AND checkpoint IS NULL',
-    [row.account_id, JSON.stringify(trusted), row.version]);
-  return { trusted, raw };
-}
-
-/** The trusted checkpoint for an auth decision: one small SELECT, no chain parse and no signature verification (see "Trust"). */
+/** The trusted checkpoint for an auth decision. With a valid MAC: one small SELECT, no chain parse, no signature check. Otherwise the
+ *  row is healed through the full read (the only heal path). */
 export async function readTrustedCheckpoint(accountId: string): Promise<LedgerCheckpoint | null> {
-  const rows = await query('SELECT account_id, revision, head, sticky, version, checkpoint FROM account_ledger WHERE account_id=$1', [accountId]);
+  const rows = await query('SELECT account_id, revision, head, sticky, version, checkpoint, checkpoint_mac FROM account_ledger WHERE account_id=$1', [accountId]);
   if (!rows.length) return null;
   if (rows.length !== 1) return corrupt();
   const row = rows[0];
   if (row.account_id !== accountId || !safeInteger(row.version)) return corrupt();
-  if (row.checkpoint === null || row.checkpoint === undefined) return (await readRow({ accountId }))?.stored.trusted ?? null;
   let sticky: Sticky;
   try { sticky = parseSticky(row.sticky); } catch { return corrupt(); }
-  return persistedTrust(row, sticky);
+  const raw = authenticated(row, sticky);
+  if (!raw) return (await readRow({ accountId }))?.stored.trusted ?? null;
+  try { return trustedOf(raw, sticky); } catch { return corrupt(); }
 }
 
-/** The stored chain, served as-is after the key consistency checks; it is not re-verified (see "Trust"). */
+/** The stored chain, served as-is after the key consistency checks (healing the checkpoint first if needed). */
 export async function readLedger(key: LedgerKey): Promise<StoredLedger | null> {
   return (await readRow(key))?.stored ?? null;
 }
 
-type Row = { stored: StoredLedger; version: number; raw: LedgerCheckpoint | null };
+/** raw: the authenticated (or just healed) raw checkpoint of exactly this row's head and revision. */
+type Row = { stored: StoredLedger; version: number; raw: LedgerCheckpoint };
 
 async function readRow(key: LedgerKey): Promise<Row | null> {
   const byHandle = 'handle' in key;
-  const rows = await query(`SELECT l.account_id, a.handle, l.revision, l.head, l.ledger, l.sticky, l.version, l.checkpoint FROM account_ledger l
-    JOIN accounts a ON a.account_id=l.account_id WHERE ${byHandle ? 'a.handle' : 'l.account_id'}=$1`, [byHandle ? key.handle : key.accountId]);
-  if (!rows.length) return null;
-  if (rows.length !== 1) return corrupt();
-  const row = rows[0];
-  let ledger: Ledger;
-  let sticky: Sticky;
-  try {
-    ledger = parseLedger(jsonb(row.ledger));
-    sticky = parseSticky(row.sticky);
-  } catch { return corrupt(); }
-  if (ledger.genesis.payload.handle !== row.handle || ledger.transitions.length !== row.revision || !safeInteger(row.version)
-    || (byHandle ? row.handle !== key.handle : row.account_id !== key.accountId)) return corrupt();
-  // Two hashes, no signature: the chain in the row is the one its columns (and so its checkpoint) name.
-  const last = ledger.transitions[ledger.transitions.length - 1];
-  try {
-    if (await accountIdOf(ledger.genesis.payload) !== row.account_id || (last ? await ledgerHead(last.payload) : row.account_id) !== row.head) return corrupt();
-  } catch { return corrupt(); }
-  if (row.checkpoint === null || row.checkpoint === undefined) {
-    const { trusted, raw } = await backfill(row, ledger, sticky);
+  for (let attempt = 0; attempt < HEAL_ATTEMPTS; attempt += 1) {
+    const rows = await query(`SELECT l.account_id, a.handle, l.revision, l.head, l.ledger, l.sticky, l.version, l.checkpoint, l.checkpoint_mac FROM account_ledger l
+      JOIN accounts a ON a.account_id=l.account_id WHERE ${byHandle ? 'a.handle' : 'l.account_id'}=$1`, [byHandle ? key.handle : key.accountId]);
+    if (!rows.length) return null;
+    if (rows.length !== 1) return corrupt();
+    const row = rows[0];
+    let ledger: Ledger;
+    let sticky: Sticky;
+    try {
+      ledger = parseLedger(jsonb(row.ledger));
+      sticky = parseSticky(row.sticky);
+    } catch { return corrupt(); }
+    if (ledger.genesis.payload.handle !== row.handle || ledger.transitions.length !== row.revision || !safeInteger(row.version)
+      || (byHandle ? row.handle !== key.handle : row.account_id !== key.accountId)) return corrupt();
+    // Two hashes, no signature: the chain in the row is the one its columns name.
+    const last = ledger.transitions[ledger.transitions.length - 1];
+    try {
+      if (await accountIdOf(ledger.genesis.payload) !== row.account_id || (last ? await ledgerHead(last.payload) : row.account_id) !== row.head) return corrupt();
+    } catch { return corrupt(); }
+    const raw = authenticated(row, sticky) ?? await heal(row, ledger, sticky);
+    if (!raw) continue;
+    let trusted: LedgerCheckpoint;
+    try { trusted = trustedOf(raw, sticky); } catch { return corrupt(); }
     return { stored: { ledger, trusted, sticky }, version: row.version, raw };
   }
-  return { stored: { ledger, trusted: persistedTrust(row, sticky), sticky }, version: row.version, raw: null };
-}
-
-/** chooseLedger's cache for the stored side. With no sticky ids the trusted checkpoint IS the chain's checkpoint (applyRevocations
- *  removes nothing), so it vouches for the chain without a signature check. With sticky ids it no longer describes the chain and must
- *  never be the cache: the chain's own checkpoint is verified once and memoised. */
-async function cacheFor(row: Row): Promise<LedgerCache> {
-  const { stored, raw } = row;
-  if (raw) return { head: raw.head, checkpoint: raw };
-  if (!stored.sticky.deviceIds.length && !stored.sticky.bridgeIds.length) return { head: stored.trusted.head, checkpoint: stored.trusted };
-  let checkpoint: LedgerCheckpoint;
-  try { checkpoint = await verified(stored.ledger); } catch { return corrupt(); }
-  return { head: checkpoint.head, checkpoint };
+  throw new Error('account_ledger_conflict');
 }
 
 type Attempt = { done: true; result: OfferResult } | { done: false };
@@ -232,13 +203,14 @@ async function create(candidate: Ledger, accountId: string, admitCreation: Gate)
   if (!await admitCreation()) return refuse('rate_limited');
   // Soft cap: the count and the insert are separate statements, so concurrent creations can overshoot it by a few.
   if (await accountCount() >= maxAccounts()) return refuse('server_full');
-  // One statement: the account row, its ledger and its trusted checkpoint appear together. account_id is the only arbiter, so a handle
-  // held by another account raises a unique violation instead of being silently skipped.
+  // One statement: the account row, its chain, sticky set and sealed checkpoint appear together. account_id is the only arbiter, so a
+  // handle held by another account raises a unique violation instead of being silently skipped.
+  const seal = sealed(accountId, checkpoint, sticky);
   let rows: Record<string, unknown>[];
   try {
     rows = await query(`WITH a AS (INSERT INTO accounts(account_id,handle) VALUES ($1,$2) ON CONFLICT (account_id) DO NOTHING RETURNING account_id)
-      INSERT INTO account_ledger(account_id,revision,head,ledger,sticky,checkpoint) SELECT account_id,$3,$4,$5::jsonb,$6::jsonb,$7::jsonb FROM a RETURNING account_id`,
-    [accountId, candidate.genesis.payload.handle, checkpoint.revision, checkpoint.head, JSON.stringify(candidate), JSON.stringify(sticky), JSON.stringify(built.trusted)]);
+      INSERT INTO account_ledger(account_id,revision,head,ledger,sticky,checkpoint,checkpoint_mac) SELECT account_id,$3,$4,$5::jsonb,$6::jsonb,$7,$8 FROM a RETURNING account_id`,
+    [accountId, candidate.genesis.payload.handle, checkpoint.revision, checkpoint.head, JSON.stringify(candidate), JSON.stringify(sticky), seal.text, seal.mac]);
   } catch (error) {
     if (!isUniqueViolation(error)) throw error;
     // The handle index can also fire for an identical creation that committed between the arbiter check and our index insert;
@@ -252,13 +224,14 @@ async function create(candidate: Ledger, accountId: string, admitCreation: Gate)
 
 /** Replica rule for an existing account. */
 async function replicate(candidate: Ledger, accountId: string, row: Row, admitAccountWrite: Gate): Promise<Attempt> {
-  const { stored, version } = row;
-  const choice = await chooseLedger(stored.ledger, candidate, Date.now(), await cacheFor(row));
+  const { stored, version, raw } = row;
+  // The authenticated RAW checkpoint of exactly this head/revision vouches for the stored chain: it is never re-verified here.
+  const choice = await chooseLedger(stored.ledger, candidate, Date.now(), { head: raw.head, checkpoint: raw });
   if (choice.decision === 'reject') return { done: true, result: { decision: 'reject', stored, discarded: 0 } };
   const sticky = unionSticky(stored.sticky, ledgerRevocations(candidate));
   const adopt = choice.decision === 'adopt';
   if (!adopt && sameSticky(sticky, stored.sticky)) return { done: true, result: { decision: 'keep', stored, discarded: 0 } };
-  // choice.checkpoint is the candidate's on adopt and the stored chain's own on keep.
+  // choice.checkpoint is the candidate's raw checkpoint on adopt and the stored chain's own on keep.
   const nextLedger = adopt ? candidate : stored.ledger;
   // Built BEFORE writing: an over-limit sticky set is rejected here and can never be persisted.
   let built: StoredLedger;
@@ -266,11 +239,12 @@ async function replicate(candidate: Ledger, accountId: string, row: Row, admitAc
   // Only a verified candidate that really changes the row spends the account's write budget: a third party replaying public or
   // junk chains cannot exhaust it and block the owner's revocations.
   if (!await admitAccountWrite()) return { done: true, result: { decision: 'reject', stored, discarded: 0, reason: 'rate_limited' } };
+  const seal = sealed(accountId, choice.checkpoint, sticky);
   // version makes the check cover sticky too: two concurrent keeps that add different ids cannot overwrite each other.
-  const rows = await query(`UPDATE account_ledger SET revision=$2,head=$3,ledger=$4::jsonb,sticky=$5::jsonb,checkpoint=$9::jsonb,version=version+1,updated_at=NOW()
+  const rows = await query(`UPDATE account_ledger SET revision=$2,head=$3,ledger=$4::jsonb,sticky=$5::jsonb,checkpoint=$9,checkpoint_mac=$10,version=version+1,updated_at=NOW()
     WHERE account_id=$1 AND version=$6 AND revision=$7 AND head=$8 RETURNING account_id`,
   [accountId, choice.checkpoint.revision, choice.checkpoint.head, JSON.stringify(nextLedger), JSON.stringify(sticky), version,
-    stored.trusted.revision, stored.trusted.head, JSON.stringify(built.trusted)]);
+    raw.revision, raw.head, seal.text, seal.mac]);
   if (rows.length !== 1) return { done: false };
   return { done: true, result: { decision: adopt ? 'adopt' : 'keep', stored: built, discarded: adopt ? choice.discarded.length : 0 } };
 }
@@ -286,10 +260,10 @@ const once = (gate: Gate): Gate => {
  *  [publicOrigin()], rpId expectedRpId()), full verification (invalid_ledger), limits.admitCreation (rate_limited), the maxAccounts()
  *  soft cap (server_full) and the insert (handle_taken when another account holds the handle). Losing the insert to an identical
  *  creation is not an error: it is re-read and answered as a replica offer.
- *  Existing account: chooseLedger (the longest chain wins), with no creation limit; keep and adopt add the candidate's revocations to the
- *  sticky set, a real write first passes limits.admitAccountWrite (else reject, reason rate_limited, nothing written), reject changes
- *  nothing and returns the stored chain. Optimistic concurrency on (version, revision, head); a lost race is re-read and re-run once,
- *  then throws. */
+ *  Existing account (its checkpoint healed first if it cannot be trusted): chooseLedger (the longest chain wins), with no creation
+ *  limit; keep and adopt add the candidate's revocations to the sticky set, a real write first passes limits.admitAccountWrite (else
+ *  reject, reason rate_limited, nothing written), reject changes nothing and returns the stored chain. Optimistic concurrency on
+ *  (version, revision, head); a lost race is re-read and re-run once, then throws. */
 export async function offerLedger(candidate: unknown, limits: OfferLimits): Promise<OfferResult> {
   if (typeof limits?.admitCreation !== 'function' || typeof limits.admitAccountWrite !== 'function') throw new TypeError('offerLedger: limits are required');
   let parsed: Ledger;

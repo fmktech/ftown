@@ -12,6 +12,11 @@ vi.mock('next-auth/providers/credentials', () => ({ default: (config: unknown) =
 
 import { requireAccountOrBridge, requireBridge } from './relay-auth';
 import { UnauthorizedError } from './ledger-auth';
+import { createHash } from 'node:crypto';
+import { accountIdOf, applyRevocations, ledgerChallenge, ledgerLastIssuedAt, nextTransition, verifyLedger } from '@security/ledger/ledger';
+import type { Ledger, LedgerGenesis, LedgerOperation, LedgerTransition, Signed } from '@security/ledger/protocol';
+import { generateAuthKey } from '@security/ledger/proof';
+import { createSoftPasskey, type SoftPasskey } from '@security/ledger/testing';
 
 const SECRET = 'relay-auth-test-secret-long-enough-0123456789';
 const ACCOUNT = 'A'.repeat(43);
@@ -24,7 +29,7 @@ const checkpoint = (roster: Roster) => ({
   bridges: roster.bridges.map(bridgeId => ({ bridgeId })), devices: roster.devices.map(id => ({ endpoint: { id } })),
 });
 /** The persisted trusted checkpoint (sticky revocations applied): a sticky-revoked bridge is simply absent from it. */
-const trusted = (roster: Roster) => ({ accountId: ACCOUNT, ...checkpoint(roster) });
+const trusted = (roster: Roster, revokedBridgeIds: string[] = []) => ({ accountId: ACCOUNT, ...checkpoint(roster), revokedDeviceIds: [], revokedBridgeIds });
 const FULL: Roster = { bridges: [BRIDGE], devices: [DEVICE] };
 
 function bearer(claims: Record<string, unknown>, options: jwt.SignOptions & { secret?: string } = {}): Request {
@@ -104,5 +109,53 @@ describe('requireAccountOrBridge', () => {
     await expect(requireAccountOrBridge(request)).rejects.toMatchObject({ status: 401 });
     authMock.mockResolvedValue(null);
     await expect(requireAccountOrBridge(request)).rejects.toMatchObject({ status: 401 });
+  });
+});
+
+describe('revoked bridges never pass (shared applyRevocations, real chains)', () => {
+  const ORIGIN = 'https://ftown.example';
+  const b64 = (data: Uint8Array): string => Buffer.from(data).toString('base64url');
+  const T = Date.now() - 60_000;
+  interface Chain { passkey: SoftPasskey; ledger: Ledger; accountId: string; issuedAt: number }
+  async function signed<T extends LedgerGenesis | LedgerTransition>(passkey: SoftPasskey, payload: T): Promise<Signed<T>> {
+    return { payload, signature: await passkey.sign(await ledgerChallenge(payload)) };
+  }
+  async function append(chain: Chain, operation: LedgerOperation): Promise<Chain> {
+    const payload = nextTransition(await verifyLedger(chain.ledger), chain.passkey.credentialId, operation, chain.issuedAt + 1000, ledgerLastIssuedAt(chain.ledger));
+    return { ...chain, ledger: { genesis: chain.ledger.genesis, transitions: [...chain.ledger.transitions, await signed(chain.passkey, payload)] }, issuedAt: payload.issuedAt };
+  }
+  async function bridged(): Promise<Chain> {
+    const passkey = await createSoftPasskey({ rpId: 'ftown.example', origin: ORIGIN });
+    const genesis = await signed(passkey, { type: 'ftown_account_genesis', version: 2, rpId: 'ftown.example', origins: [ORIGIN],
+      handle: b64(crypto.getRandomValues(new Uint8Array(32))), createdAt: T, authority: { credentialId: passkey.credentialId, publicKey: passkey.publicKey, label: 'Key', addedAt: T } } as LedgerGenesis);
+    const accountId = await accountIdOf(genesis.payload);
+    const pair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+    const raw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
+    const endpoint = { version: 1 as const, id: b64(new Uint8Array(createHash('sha256').update(raw).digest())), ownerId: accountId, kind: 'bridge' as const, publicKey: b64(raw) };
+    const chain: Chain = { passkey, ledger: { genesis, transitions: [] }, accountId, issuedAt: T };
+    return append(chain, { type: 'add_bridge', bridge: { bridgeId: BRIDGE, endpoint, authPublicKey: (await generateAuthKey(false)).publicKey, label: 'Studio', approvedAt: T } });
+  }
+  const token = (accountId: string) => bearer({ sub: accountId, info: { bridgeId: BRIDGE, ownerId: accountId } });
+
+  it('accepts the bridge of a real chain, refuses it once revoked in the chain or only by a sticky id', async () => {
+    const chain = await bridged();
+    readTrusted.mockResolvedValue(applyRevocations(await verifyLedger(chain.ledger), { deviceIds: [], bridgeIds: [] }));
+    expect((await requireBridge(token(chain.accountId))).bridgeId).toBe(BRIDGE);
+    const revoked = await append(chain, { type: 'revoke_bridge', bridgeId: BRIDGE });
+    for (const trusted of [applyRevocations(await verifyLedger(revoked.ledger), { deviceIds: [], bridgeIds: [] }),
+      applyRevocations(await verifyLedger(chain.ledger), { deviceIds: [], bridgeIds: [BRIDGE] })]) {
+      expect(trusted.revokedBridgeIds).toContain(BRIDGE);
+      readTrusted.mockResolvedValue(trusted);
+      await expect(requireBridge(token(chain.accountId))).rejects.toMatchObject({ status: 401 });
+    }
+  });
+
+  it('a checkpoint that lists a bridge both as a member and as revoked is refused', async () => {
+    const chain = await bridged();
+    const both = applyRevocations(await verifyLedger(chain.ledger), { deviceIds: [], bridgeIds: [] });
+    both.revokedBridgeIds.push(BRIDGE);
+    expect(both.bridges.map(bridge => bridge.bridgeId)).toContain(BRIDGE);
+    readTrusted.mockResolvedValue(both);
+    await expect(requireBridge(token(chain.accountId))).rejects.toMatchObject({ status: 401 });
   });
 });
