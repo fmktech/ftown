@@ -70,8 +70,10 @@ export async function GET(request: Request): Promise<NextResponse> {
   }
 }
 
-/** Body { ledger }; other members are ignored. Offers the chain to the store: replica rule (and the account's write budget) for an
- *  existing account, genesis admission (open registration, creation budget) for a new one. */
+/** Body { ledger, expectHead? }; other members are ignored. Offers the chain to the store: replica rule (and the account's write budget)
+ *  for an existing account, genesis admission (open registration, creation budget) for a new one. expectHead (a browser re-offering
+ *  its chain; a 43-character head, anything else is 400): never creates (404 account_unknown), and a stored head other than
+ *  expectHead is 409 head_changed with the stored chain, before fork choice and any budget. */
 export async function POST(request: Request): Promise<NextResponse> {
   try {
     const blocked = await limited(request, 'ledger-write', 30);
@@ -84,11 +86,19 @@ export async function POST(request: Request): Promise<NextResponse> {
     const record = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : null;
     const ledger = record?.ledger;
     if (ledger === undefined) return json({ error: 'invalid_request' }, 400);
+    const hasExpectHead = record !== null && Object.prototype.hasOwnProperty.call(record, 'expectHead');
+    const expectHead = hasExpectHead ? record.expectHead : undefined;
+    if (hasExpectHead && (typeof expectHead !== 'string' || !KEY.test(expectHead))) return json({ error: 'invalid_request' }, 400);
     const limits = storeLimits(request);
-    const result = await offerLedger(ledger, { admitCreation: limits.admitCreation, admitAccountWrite: limits.admitAccountWrite });
+    const offerLimits = { admitCreation: limits.admitCreation, admitAccountWrite: limits.admitAccountWrite };
+    const result = typeof expectHead === 'string' ? await offerLedger(ledger, offerLimits, { expectHead }) : await offerLedger(ledger, offerLimits);
     if (result.decision === 'reject') {
       if (result.reason === 'rate_limited') return limits.refusal();
-      if (result.stored === null) return json({ error: result.reason }, CREATION_STATUS[result.reason]);
+      if (result.reason === 'head_changed') return json({ error: 'head_changed', ledger: result.stored.ledger }, 409);
+      if (result.stored === null) {
+        if (result.reason === 'account_unknown') return json({ error: 'account_unknown' }, 404);
+        return json({ error: result.reason }, CREATION_STATUS[result.reason]);
+      }
       return json({ error: 'ledger_rejected', ledger: result.stored.ledger }, 409);
     }
     const { decision, stored, discarded } = result;
