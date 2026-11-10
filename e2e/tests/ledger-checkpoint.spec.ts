@@ -8,7 +8,7 @@ import { E2E_DIR, UI_BASE_URL } from "../helpers/config";
 import { ledgerRow, withDb } from "../helpers/db";
 import { test } from "../helpers/fixtures";
 import { appendOperation, browserDeviceWithKey, requestRelayToken, serverLedger, serverNonce, signProof } from "../helpers/ledger-admin";
-import { virtualAuthenticator } from "../helpers/passkey";
+import { browserEndpointId, signIn, virtualAuthenticator } from "../helpers/passkey";
 import { createSecondAccount, type SecondAccount } from "../helpers/second-account";
 
 /**
@@ -426,68 +426,238 @@ test("re-offer never re-creates a deleted account: the browser holding its chain
   }
 });
 
-test("a removal the server refused is shown as not saved, and Retry now stores it without another passkey prompt", async ({ browser }) => {
+// ---- Removals the server refused (the panel's unsaved states) ----
+
+const UNSAVED_DETAIL = "Removal not saved to the server yet. It can still connect. Retrying…";
+const UNSAVED_SELF_DETAIL = "This browser's removal is not saved to the server yet. It can still connect. Retrying…";
+
+/**
+ * Answers the page's ledger POSTs (reads always pass): `refuse(n)` decides for the n-th POST (1-based) whether to answer
+ * 429 rate_limited and with which Retry-After (seconds; null: no header). Records each POST's time and outcome.
+ */
+async function refuseLedgerWrites(page: Page, refuse: (n: number) => { retryAfter: number | null } | null) {
+  const log: { at: number; refused: boolean }[] = [];
+  await page.route(url => url.pathname === "/api/account/ledger", async route => {
+    if (route.request().method() !== "POST") return route.fallback();
+    const decision = refuse(log.length + 1);
+    log.push({ at: Date.now(), refused: decision !== null });
+    if (!decision) return route.fallback();
+    return route.fulfill({
+      status: 429, contentType: "application/json", body: JSON.stringify({ error: "rate_limited" }),
+      headers: { "Cache-Control": "no-store", ...(decision.retryAfter === null ? {} : { "Retry-After": String(decision.retryAfter) }) },
+    });
+  });
+  return { log, refused: () => log.filter(item => item.refused).length };
+}
+
+async function openSecurity(page: Page) {
+  await page.getByRole("button", { name: "Open security", exact: true }).click();
+  return page.getByRole("dialog", { name: "Security", exact: true });
+}
+
+/** Select a browser in the access map and remove it with the panel (one confirmation, one passkey approval). */
+async function removeBrowserInPanel(dialog: ReturnType<Page["getByRole"]>, endpointId: string): Promise<void> {
+  const node = dialog.locator(`[data-access-kind="browser"][data-access-node="${endpointId}"]`).first();
+  await expect(node).toBeVisible({ timeout: 30_000 });
+  await node.click();
+  const remove = dialog.getByRole("button", { name: /^Remove browser / });
+  await expect(remove).toBeEnabled();
+  await remove.click();
+  await dialog.getByRole("group", { name: "Confirm browser removal", exact: true }).getByRole("button", { name: "Confirm remove browser", exact: true }).click();
+}
+
+async function serverRevoked(account: SecondAccount["account"], endpointId: string): Promise<boolean> {
+  try { return (await serverLedger(account)).checkpoint.revokedDeviceIds.includes(endpointId); } catch { return false; }
+}
+
+/** A throwaway account whose browser B1 knows a second device D2 (added by the account passkey); B1 is on its dashboard. */
+async function accountWithSecondDevice(browser: Parameters<typeof createSecondAccount>[0], name: string) {
+  const second = await createSecondAccount(browser, { name: `${name} ${randomBytes(3).toString("hex")}` });
+  const d2 = await browserDeviceWithKey(second.accountId, "E2E second device", Date.now());
+  const claim = { accountId: second.accountId, kind: "device" as const, keyId: d2.device.endpoint.id, purpose: "relay" as const };
+  await appendOperation({ type: "add_device", device: d2.device }, second.account);
+  const added = (await serverTip(second.accountId))!;
+  await second.page.goto("/dashboard");
+  await expect.poll(() => localTip(second.page, second.accountId), { timeout: 30_000 }).toEqual(added);
+  return { second, d2, claim, added };
+}
+
+test("a refused removal waits for the server's Retry-After, then the automatic retry delivers it (no click)", async ({ browser }) => {
   test.setTimeout(180_000);
-  const second = await createSecondAccount(browser, { name: `E2E unsaved removal ${randomBytes(3).toString("hex")}` });
+  const { second, d2, claim, added } = await accountWithSecondDevice(browser, "E2E unsaved removal");
   try {
     const page = second.page;
-    const d2 = await browserDeviceWithKey(second.accountId, "E2E second device", Date.now());
-    const claim = { accountId: second.accountId, kind: "device" as const, keyId: d2.device.endpoint.id, purpose: "relay" as const };
-    await appendOperation({ type: "add_device", device: d2.device }, second.account);
-    const added = (await serverTip(second.accountId))!;
-    await page.goto("/dashboard");
-    await expect.poll(() => localTip(page, second.accountId), { timeout: 30_000 }).toEqual(added);
-
-    // The server refuses the NEXT ledger write once (429, Retry-After 600); everything else goes through.
-    const writes: number[] = [];
-    let refused = 0;
-    await page.route(url => url.pathname === "/api/account/ledger", async route => {
-      if (route.request().method() !== "POST") return route.fallback();
-      writes.push(Date.now());
-      if (refused === 0) {
-        refused += 1;
-        return route.fulfill({ status: 429, contentType: "application/json", headers: { "Retry-After": "600", "Cache-Control": "no-store" }, body: JSON.stringify({ error: "rate_limited" }) });
-      }
-      return route.fallback();
-    });
-
+    const writes = await refuseLedgerWrites(page, n => n === 1 ? { retryAfter: 3 } : null);
     const countBefore = await signCount(second);
-    await page.getByRole("button", { name: "Open security", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "Security", exact: true });
-    const node = dialog.locator(`[data-access-kind="browser"][data-access-node="${d2.device.endpoint.id}"]`).first();
-    await expect(node).toBeVisible({ timeout: 30_000 });
-    await node.click();
-    const remove = dialog.getByRole("button", { name: /^Remove browser / });
-    await expect(remove).toBeEnabled();
-    await remove.click();
-    const confirmation = dialog.getByRole("group", { name: "Confirm browser removal", exact: true });
-    await confirmation.getByRole("button", { name: "Confirm remove browser", exact: true }).click();
+    const dialog = await openSecurity(page);
+    await removeBrowserInPanel(dialog, d2.device.endpoint.id);
+    const refusedAt = Date.now();
 
-    // Refused by the server: shown as not saved, with Retry now; the server (and so every computer) still accepts the device.
+    // While the server's delay is pending: the amber text and a disabled "Retry in N s".
     const unsaved = dialog.getByRole("group", { name: "Removal not saved", exact: true });
     await expect(unsaved).toBeVisible({ timeout: 30_000 });
-    await expect(unsaved).toContainText("Removal not saved to the server yet. It can still connect. Retrying…");
-    const retry = unsaved.getByRole("button", { name: "Retry now", exact: true });
-    await expect(retry).toBeVisible();
-    expect(refused).toBe(1);
-    expect((await serverTip(second.accountId))!).toEqual(added);
+    await expect(unsaved).toContainText(UNSAVED_DETAIL);
+    const waiting = unsaved.getByRole("button", { name: /^Retry in \d+ s$/ });
+    await expect(waiting).toBeVisible();
+    await expect(waiting).toBeDisabled();
+    expect(writes.refused()).toBe(1);
+    expect(await serverTip(second.accountId)).toEqual(added);
     expect((await requestRelayToken(await signProof(d2.authKey, claim))).status, "the refused removal is not in force").toBe(200);
     expect(await signCount(second), "the removal itself asked for the passkey once").toBe(countBefore + 1);
+    // After the delay the button is enabled again ("Retry now") — not clicked here.
+    await expect(unsaved.getByRole("button", { name: "Retry now", exact: true })).toBeEnabled({ timeout: 10_000 });
 
-    await retry.click();
-    await expect.poll(async () => {
-      try { return (await serverLedger(second.account)).checkpoint.revokedDeviceIds.includes(d2.device.endpoint.id); } catch { return false; }
-    }, { timeout: 30_000, message: "Retry now stores the revocation" }).toBe(true);
+    // The automatic retry delivers the removal on its own.
+    await expect.poll(() => serverRevoked(second.account, d2.device.endpoint.id), { timeout: 90_000, intervals: [250], message: "the automatic retry stores the revocation" }).toBe(true);
+    const deliveredMs = Date.now() - refusedAt;
+    test.info().annotations.push({ type: "automatic retry delivered the refused removal", description: `${deliveredMs} ms after the refusal (Retry-After 3 s); POSTs ${writes.log.length}` });
     await expect(unsaved).toBeHidden({ timeout: 15_000 });
     await expect(dialog.getByText("Removal not saved to the server yet", { exact: false })).toHaveCount(0);
-    // The normal removed state: the device is no longer listed as a browser of the account.
-    await expect(node).toHaveCount(0);
+    await expect(dialog.locator(`[data-access-kind="browser"][data-access-node="${d2.device.endpoint.id}"]`)).toHaveCount(0);
     const revoked = await requestRelayToken(await signProof(d2.authKey, claim));
     expect(revoked.status).toBe(401);
     expect(revoked.body.error).toBe("key_revoked");
     expect(await signCount(second), "exactly one passkey assertion in total (the removal)").toBe(countBefore + 1);
-    test.info().annotations.push({ type: "unsaved removal: ledger POSTs from the page", description: `${writes.length} (first refused with 429)` });
   } finally {
     await second.close();
   }
 });
+
+test("a refused removal without Retry-After is delivered at once by Retry now, long before the automatic retry", async ({ browser }) => {
+  test.setTimeout(180_000);
+  const { second, d2, claim, added } = await accountWithSecondDevice(browser, "E2E retry now");
+  try {
+    const page = second.page;
+    const writes = await refuseLedgerWrites(page, n => n <= 2 ? { retryAfter: null } : null);
+    const countBefore = await signCount(second);
+    const dialog = await openSecurity(page);
+    await removeBrowserInPanel(dialog, d2.device.endpoint.id);
+    const refusedAt = Date.now();
+    const unsaved = dialog.getByRole("group", { name: "Removal not saved", exact: true });
+    await expect(unsaved).toBeVisible({ timeout: 30_000 });
+    await expect(unsaved).toContainText(UNSAVED_DETAIL);
+    expect(await serverTip(second.accountId)).toEqual(added);
+    // No server delay: "Retry now" is enabled; each click sends at once (two POSTs are refused in all).
+    const retry = unsaved.getByRole("button", { name: "Retry now", exact: true });
+    let clicks = 0;
+    while (!await serverRevoked(second.account, d2.device.endpoint.id) && Date.now() - refusedAt < 25_000) {
+      await expect(retry).toBeEnabled({ timeout: 10_000 });
+      await retry.click();
+      clicks += 1;
+      await expect.poll(async () => await serverRevoked(second.account, d2.device.endpoint.id) || writes.log.length > clicks, { timeout: 10_000 }).toBe(true);
+      await page.waitForTimeout(300);
+    }
+    const deliveredMs = Date.now() - refusedAt;
+    expect(await serverRevoked(second.account, d2.device.endpoint.id), "Retry now delivered the removal").toBe(true);
+    expect(deliveredMs, "delivered by the click, not by the ≥ 24 s automatic retry").toBeLessThan(24_000);
+    expect(writes.refused()).toBe(2);
+    test.info().annotations.push({ type: "Retry now delivered the refused removal", description: `${clicks} click(s), ${deliveredMs} ms after the first refusal; POSTs ${writes.log.length} (2 refused)` });
+    await expect(unsaved).toBeHidden({ timeout: 15_000 });
+    expect((await requestRelayToken(await signProof(d2.authKey, claim))).body.error).toBe("key_revoked");
+    expect(await signCount(second), "exactly one passkey assertion in total (the removal)").toBe(countBefore + 1);
+  } finally {
+    await second.close();
+  }
+});
+
+test("a refused removal survives a reload: still shown as not saved, then delivered once the server accepts writes", async ({ browser }) => {
+  test.setTimeout(180_000);
+  const { second, d2, claim, added } = await accountWithSecondDevice(browser, "E2E unsaved reload");
+  try {
+    const page = second.page;
+    let refusing = true;
+    const writes = await refuseLedgerWrites(page, () => refusing ? { retryAfter: null } : null);
+    const countBefore = await signCount(second);
+    let dialog = await openSecurity(page);
+    await removeBrowserInPanel(dialog, d2.device.endpoint.id);
+    await expect(dialog.getByRole("group", { name: "Removal not saved", exact: true })).toContainText(UNSAVED_DETAIL, { timeout: 30_000 });
+
+    await page.reload();
+    await waitForBridgeAgnosticDashboard(page);
+    dialog = await openSecurity(page);
+    const node = dialog.locator(`[data-access-kind="browser"][data-access-node="${d2.device.endpoint.id}"]`).first();
+    await expect(node, "the refused removal is still listed after the reload").toBeVisible({ timeout: 30_000 });
+    await node.click();
+    const unsaved = dialog.getByRole("group", { name: "Removal not saved", exact: true });
+    await expect(unsaved).toContainText(UNSAVED_DETAIL);
+    expect(await serverTip(second.accountId)).toEqual(added);
+    expect((await requestRelayToken(await signProof(d2.authKey, claim))).status).toBe(200);
+
+    refusing = false;
+    const refusedSoFar = writes.refused();
+    const retry = unsaved.getByRole("button", { name: "Retry now", exact: true });
+    await expect(retry).toBeEnabled({ timeout: 15_000 });
+    await retry.click();
+    await expect.poll(() => serverRevoked(second.account, d2.device.endpoint.id), { timeout: 30_000 }).toBe(true);
+    await expect(unsaved).toBeHidden({ timeout: 15_000 });
+    test.info().annotations.push({ type: "unsaved removal across a reload", description: `${refusedSoFar} POSTs refused (incl. after the reload), then delivered by Retry now` });
+    expect((await requestRelayToken(await signProof(d2.authKey, claim))).body.error).toBe("key_revoked");
+    expect(await signCount(second), "exactly one passkey assertion in total (the removal)").toBe(countBefore + 1);
+  } finally {
+    await second.close();
+  }
+});
+
+test("Remove this browser, refused: 'Removing this browser…' until the server stores it, then 'This browser was removed'", async ({ browser }) => {
+  test.setTimeout(180_000);
+  const second = await createSecondAccount(browser, { name: `E2E remove self ${randomBytes(3).toString("hex")}` });
+  const contextB2 = await browser.newContext();
+  try {
+    // B2: the same account's synced passkey on another browser (identify + add this browser).
+    const pageB2 = await contextB2.newPage();
+    await signIn(pageB2, { account: second.account, browserLabel: "E2E B2" });
+    const idB2 = await browserEndpointId(pageB2, second.accountId);
+    const proofB2 = async () => requestRelayToken(await signWithBrowserDeviceKey(pageB2, {
+      accountId: second.accountId, kind: "device", keyId: idB2, nonce: await serverNonce("relay"), purpose: "relay", audience,
+    }));
+    const authenticatorB2 = await virtualAuthenticator(pageB2);
+    const countB2 = async () => (await authenticatorB2.credentials()).find(item => item.credentialId === second.account.credential.credentialId)?.signCount ?? -1;
+    const countBefore = await countB2(); // after B2's own sign-in (identify + add this browser)
+    expect(countBefore).toBeGreaterThan(0);
+    const writes = await refuseLedgerWrites(pageB2, n => n === 1 ? { retryAfter: 2 } : null);
+    const dialog = await openSecurity(pageB2);
+    await removeBrowserInPanel(dialog, idB2);
+    await expect.poll(() => writes.refused(), { timeout: 15_000 }).toBe(1);
+    const refusedAt = Date.now();
+
+    // The full page (the Security panel is not mounted there) while the server still lists B2.
+    const removing = pageB2.getByRole("heading", { name: "Removing this browser…", exact: true });
+    await expect(removing).toBeVisible({ timeout: 10_000 });
+    await expect(pageB2.getByRole("status").filter({ hasText: UNSAVED_SELF_DETAIL })).toBeVisible();
+    await expect(pageB2.getByRole("status").filter({ hasText: UNSAVED_SELF_DETAIL })).toHaveText(UNSAVED_SELF_DETAIL);
+    await expect(pageB2.getByRole("button", { name: /^Retry in \d+ s$/ })).toBeDisabled();
+    await expect(pageB2.getByRole("button", { name: "Sign in again", exact: true })).toHaveCount(0);
+    await expect(pageB2.getByRole("heading", { name: "This browser was removed", exact: true })).toHaveCount(0);
+    await expect(dialog).toHaveCount(0);
+    const unsavedLedger = (await serverLedger(second.account)).checkpoint;
+    expect(unsavedLedger.devices.map(item => item.endpoint.id), "the server still lists B2").toContain(idB2);
+    expect(unsavedLedger.revokedDeviceIds).not.toContain(idB2);
+    expect((await proofB2()).status, "B2's key still gets a token while the removal is not stored").toBe(200);
+
+    // Delivered by the user's click once the Retry-After has passed (the automatic retry would take ~30 s more).
+    const retry = pageB2.getByRole("button", { name: "Retry now", exact: true });
+    await expect(retry).toBeEnabled({ timeout: 10_000 });
+    await retry.click();
+    await expect.poll(() => serverRevoked(second.account, idB2), { timeout: 15_000, intervals: [250], message: "Retry now stores B2's removal" }).toBe(true);
+    const deliveredMs = Date.now() - refusedAt;
+    // Live switch to the confirmed screen.
+    await expect(pageB2.getByRole("heading", { name: "This browser was removed", exact: true })).toBeVisible({ timeout: 15_000 });
+    await expect(pageB2.getByRole("alert").filter({ hasText: "This browser was removed from your account, so it can no longer open encrypted sessions. Sign in with your passkey to add it again." })).toBeVisible();
+    await expect(pageB2.getByRole("button", { name: "Sign in again", exact: true })).toBeVisible();
+    await expect(removing).toHaveCount(0);
+    test.info().annotations.push({ type: "Remove this browser: delivered by Retry now", description: `${deliveredMs} ms after the refusal (Retry-After 2 s); POSTs ${writes.log.length} (1 refused)` });
+    const refused = await proofB2();
+    expect(refused.status).toBe(401);
+    expect(refused.body.error).toBe("key_revoked");
+    expect(await countB2(), "exactly one passkey assertion for the removal").toBe(countBefore + 1);
+  } finally {
+    await contextB2.close();
+    await second.close();
+  }
+});
+
+/** The dashboard after a reload, whether or not the account has computers. */
+async function waitForBridgeAgnosticDashboard(page: Page): Promise<void> {
+  await page.waitForURL("**/dashboard", { timeout: 30_000 });
+  await expect(page.getByRole("button", { name: "Open security", exact: true })).toBeVisible({ timeout: 30_000 });
+}
