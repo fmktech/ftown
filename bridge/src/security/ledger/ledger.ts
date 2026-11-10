@@ -1,3 +1,12 @@
+/*
+ * The account ledger, shared by the server, every browser and every bridge (type-checked by the UI build at ES2017).
+ * What is written is never rewritten: each record names the head it extends (previousHead) and is signed by an authority of the state before it.
+ * A replica adopts another chain of its account only if that chain is valid and strictly extends its own ('ahead'); only the new records are verified.
+ * A chain that is the same or behind is kept, and a chain that diverges is never adopted, whatever its length or content.
+ * The one way a replica replaces what it holds is the owner's choice: a valid chain carrying a resolve_fork for exactly the fork point, signed by a
+ * passkey that was already an authority there, naming a record of the replica's own branch; revocations on the discarded branch are returned to stay enforced.
+ * relate, forkPoint and relateHead classify two chains from record heads alone (ledgerHeads), with no signature work.
+ */
 import type { EndpointPublic } from '../protocol.js';
 import { AUTHORITY_CONSENT_DOMAIN, LEDGER_DOMAIN, LEDGER_LIMITS, SIGNIN_DOMAIN } from './protocol.js';
 import type {
@@ -7,10 +16,24 @@ import type {
 import { verifyPasskeyAssertion } from './webauthn.js';
 
 export type LedgerErrorCode = 'invalid_ledger' | 'ledger_other_account' | 'ledger_revoked' | 'ledger_limit';
-/** 'keep' and 'adopt' imply the candidate's payloads belong to a valid chain, so its ledgerRevocations may be merged; 'reject' does not. */
-export interface LedgerChoice { decision: 'adopt' | 'keep' | 'reject'; checkpoint: LedgerCheckpoint; discarded: Signed<LedgerTransition>[] }
+/** How a candidate chain relates to the local one, from record heads alone (see relate). */
+export type LedgerRelation = 'same' | 'ahead' | 'behind' | 'diverged';
+/** relateHead: what a bare `{ revision, head }` of another replica says about it. 'unknown' (ahead, diverged or another account) needs its chain. */
+export type LedgerHeadRelation = 'same' | 'behind' | 'unknown';
+/** The last record two chains share. Revision 0 is the genesis, whose head is the accountId. */
+export interface LedgerForkPoint { revision: number; head: string }
+/** What an adopted resolve_fork discarded from the local chain: its records after the fork point, in chain order, and the device endpoint ids /
+ *  bridgeIds those records revoke that the adopted chain does not. The caller adds the ids to its sticky set. Empty unless a diverged chain was adopted. */
+export interface LedgerDiscarded { records: Signed<LedgerTransition>[]; deviceIds: string[]; bridgeIds: string[] }
+/** chooseLedger's verdict. `checkpoint` is the RAW checkpoint of the chain to hold afterwards: the candidate's on 'adopt', local's otherwise.
+ *  `relation` is null only when there is none: no local chain (first bind), or a candidate that is malformed or of another account.
+ *  'keep' + 'diverged' = a VALID different history (alert the owner); 'reject' = an invalid candidate (ignore it). */
+export interface LedgerChoice { decision: 'adopt' | 'keep' | 'reject'; relation: LedgerRelation | null; checkpoint: LedgerCheckpoint; discarded: LedgerDiscarded }
 /** A checkpoint that verifyLedger or chooseLedger returned for the local chain whose last head is `head`. */
 export interface LedgerCache { head: string; checkpoint: LedgerCheckpoint }
+/** describeFork: the last shared record and each side's payloads after it, in chain order (payloads only, no signatures). */
+export interface LedgerFork { relation: LedgerRelation; fork: LedgerForkPoint; mine: LedgerTransition[]; theirs: LedgerTransition[] }
+type ResolveFork = Extract<LedgerOperation, { type: 'resolve_fork' }>;
 
 const messages: { readonly [code in LedgerErrorCode]: string } = {
   invalid_ledger: 'Account ledger could not be verified.',
@@ -37,8 +60,11 @@ const MAX_CLIENT_DATA_BYTES = 4096;
 const MAX_DER_SIGNATURE_BYTES = 72;
 const MAX_STICKY_IDS = 8 * LEDGER_LIMITS.maxTransitions;
 
-/** A parsed chain with the head of every record; nothing about it is verified yet. */
-interface Indexed { ledger: Ledger; accountId: string; heads: string[]; head: string }
+/** A parsed chain with the head of every record, index = revision (heads[0] is the genesis head = accountId); nothing is verified yet. */
+interface Indexed { ledger: Ledger; accountId: string; heads: string[] }
+/** What the history rules of resolve_fork need from the chain before a record: every earlier head (index = revision) and the revision at which
+ *  each authority joined (authorities are add-only, so "an authority at revision r" is "joined at or before r"). */
+interface Trail { heads: string[]; joined: { credentialId: string; revision: number }[] }
 
 function fail(code: LedgerErrorCode = 'invalid_ledger'): never {
   throw new LedgerError(code);
@@ -159,6 +185,13 @@ function parseOperation(value: unknown): LedgerOperation {
     case 'add_authority': {
       const fields = exact(record, ['type', 'authority', 'consent']);
       return { type: 'add_authority', authority: parseAuthority(fields.authority), consent: parseSignature(fields.consent) };
+    }
+    case 'resolve_fork': {
+      const fields = exact(record, ['type', 'forkHead', 'discardedHead', 'discardedRevision']);
+      return {
+        type: 'resolve_fork', forkHead: fingerprint(fields.forkHead), discardedHead: fingerprint(fields.discardedHead),
+        discardedRevision: count(fields.discardedRevision, 1),
+      };
     }
     default: return fail();
   }
@@ -286,9 +319,51 @@ function apply(current: LedgerCheckpoint, operation: LedgerOperation, issuedAt: 
       next.authorities.push(added);
       break;
     }
+    case 'resolve_fork':
+      // Membership is unchanged. Only the rules that need no history are here; settle() checks forkHead against the chain itself.
+      if (operation.discardedHead === operation.forkHead || operation.discardedHead === next.head || operation.discardedHead === next.accountId) fail();
+      break;
     default: return fail();
   }
   return next;
+}
+function joinedAt(trail: Trail, credentialId: string): number {
+  for (const item of trail.joined) if (item.credentialId === credentialId) return item.revision;
+  return -1;
+}
+/** History rules of resolve_fork, against the chain before the record: forkHead is one of its heads, the signer was an authority at it,
+ *  the discarded record comes after it, and the discarded record is not part of this chain. */
+function settle(trail: Trail, operation: LedgerOperation, credentialId: string): void {
+  if (operation.type !== 'resolve_fork') return;
+  const fork = trail.heads.indexOf(operation.forkHead);
+  if (fork === -1 || operation.discardedRevision <= fork || trail.heads.indexOf(operation.discardedHead) !== -1) fail();
+  const joined = joinedAt(trail, credentialId);
+  if (joined === -1 || joined > fork) fail();
+}
+function note(trail: Trail, payload: LedgerTransition, head: string): void {
+  trail.heads.push(head);
+  if (payload.operation.type === 'add_authority') trail.joined.push({ credentialId: payload.operation.authority.credentialId, revision: payload.revision });
+}
+function initialState(root: LedgerGenesis, accountId: string): LedgerCheckpoint {
+  return { version: 2, accountId, revision: 0, head: accountId, authorities: [root.authority], devices: [], bridges: [], revokedDeviceIds: [], revokedBridgeIds: [] };
+}
+function initialTrail(root: LedgerGenesis, accountId: string): Trail {
+  return { heads: [accountId], joined: [{ credentialId: root.authority.credentialId, revision: 0 }] };
+}
+/** The trail of the first `length` records of a chain already verified or vouched for; no signature work. */
+function trailOf(chain: Indexed, length: number): Trail {
+  const trail = initialTrail(chain.ledger.genesis.payload, chain.accountId);
+  for (let index = 0; index < length; index += 1) note(trail, chain.ledger.transitions[index].payload, chain.heads[index + 1]);
+  return trail;
+}
+/** The checkpoint after the first `length` records of a chain already verified or vouched for: the verifier's state rules, no signature work. */
+function replay(chain: Indexed, length: number): LedgerCheckpoint {
+  let state = initialState(chain.ledger.genesis.payload, chain.accountId);
+  for (let index = 0; index < length; index += 1) {
+    const payload = chain.ledger.transitions[index].payload;
+    state = { ...apply(state, payload.operation, payload.issuedAt), revision: payload.revision, head: chain.heads[index + 1] };
+  }
+  return state;
 }
 function copyOf(state: LedgerCheckpoint): LedgerCheckpoint {
   return {
@@ -303,8 +378,11 @@ async function consented(operation: Extract<LedgerOperation, { type: 'add_author
   const challenge = await authorityConsentChallenge(accountId, operation.authority);
   if (!await verifyPasskeyAssertion({ rpId: root.rpId, origins: root.origins, publicKey: operation.authority.publicKey, challenge, signature: operation.consent })) fail();
 }
-/** Verifies `records` in order on top of a verified `state` whose last record was issued at `previousTime`. */
-async function extend(state: LedgerCheckpoint, root: LedgerGenesis, previousTime: number, records: Signed<LedgerTransition>[], at: number): Promise<LedgerCheckpoint> {
+/** Verifies `records` in order on top of a verified `state` whose last record was issued at `previousTime`; `trail` describes the chain up
+ *  to `state` and is extended in place. */
+async function extend(
+  state: LedgerCheckpoint, root: LedgerGenesis, previousTime: number, records: Signed<LedgerTransition>[], at: number, trail: Trail,
+): Promise<LedgerCheckpoint> {
   let current = state;
   let lastTime = previousTime;
   for (const record of records) {
@@ -314,11 +392,14 @@ async function extend(state: LedgerCheckpoint, root: LedgerGenesis, previousTime
     if (payload.previousHead !== current.head) fail();
     if (payload.issuedAt < lastTime || payload.issuedAt > at + LEDGER_LIMITS.maxFutureSkewMs) fail();
     const signer = signerOf(current, payload.credentialId);
+    settle(trail, payload.operation, signer.credentialId);
     const challenge = await ledgerChallenge(payload);
     if (!await verifyPasskeyAssertion({ rpId: root.rpId, origins: root.origins, publicKey: signer.publicKey, challenge, signature: record.signature })) fail();
     await keyMaterial(payload.operation);
     if (payload.operation.type === 'add_authority') await consented(payload.operation, current.accountId, root);
-    current = { ...apply(current, payload.operation, payload.issuedAt), revision: payload.revision, head: b64url(challenge) };
+    const head = b64url(challenge);
+    current = { ...apply(current, payload.operation, payload.issuedAt), revision: payload.revision, head };
+    note(trail, payload, head);
     lastTime = payload.issuedAt;
   }
   return current;
@@ -330,10 +411,7 @@ async function verifyAll(ledger: Ledger, at: number): Promise<LedgerCheckpoint> 
   const challenge = await ledgerChallenge(root);
   if (!await verifyPasskeyAssertion({ rpId: root.rpId, origins: root.origins, publicKey: root.authority.publicKey, challenge, signature: ledger.genesis.signature })) fail();
   const accountId = b64url(challenge);
-  const initial: LedgerCheckpoint = {
-    version: 2, accountId, revision: 0, head: accountId, authorities: [root.authority], devices: [], bridges: [], revokedDeviceIds: [], revokedBridgeIds: [],
-  };
-  return extend(initial, root, root.createdAt, ledger.transitions, at);
+  return extend(initialState(root, accountId), root, root.createdAt, ledger.transitions, at, initialTrail(root, accountId));
 }
 /** Unexpected (non-ledger) failures become invalid_ledger. */
 async function guarded<T>(run: () => Promise<T>): Promise<T> {
@@ -346,10 +424,9 @@ async function guarded<T>(run: () => Promise<T>): Promise<T> {
 }
 async function indexed(value: unknown): Promise<Indexed> {
   const ledger = parseLedger(value);
-  const accountId = await ledgerHead(ledger.genesis.payload);
-  const heads: string[] = [];
+  const heads = [await ledgerHead(ledger.genesis.payload)];
   for (const record of ledger.transitions) heads.push(await ledgerHead(record.payload));
-  return { ledger, accountId, heads, head: heads.length ? heads[heads.length - 1] : accountId };
+  return { ledger, accountId: heads[0], heads };
 }
 /** The cache vouches for `chain` only if it names the chain's last head and the chain is hash-linked up to it. */
 function vouched(chain: Indexed, cache: LedgerCache | undefined): LedgerCheckpoint | null {
@@ -357,11 +434,12 @@ function vouched(chain: Indexed, cache: LedgerCache | undefined): LedgerCheckpoi
   try {
     const record = object(cache);
     const checkpoint = parseCheckpoint(record.checkpoint);
-    if (record.head !== chain.head || checkpoint.head !== chain.head || checkpoint.accountId !== chain.accountId
-      || checkpoint.revision !== chain.heads.length) return null;
-    for (let index = 0; index < chain.heads.length; index += 1) {
+    const head = chain.heads[chain.heads.length - 1];
+    if (record.head !== head || checkpoint.head !== head || checkpoint.accountId !== chain.accountId
+      || checkpoint.revision !== chain.heads.length - 1) return null;
+    for (let index = 0; index < chain.ledger.transitions.length; index += 1) {
       const payload = chain.ledger.transitions[index].payload;
-      if (payload.revision !== index + 1 || payload.previousHead !== (index === 0 ? chain.accountId : chain.heads[index - 1])) return null;
+      if (payload.revision !== index + 1 || payload.previousHead !== chain.heads[index]) return null;
     }
     return checkpoint;
   } catch {
@@ -379,23 +457,61 @@ function sameRecords(local: Ledger, candidate: Ledger, length: number): boolean 
   }
   return true;
 }
-function revocationCount(ledger: Ledger): number {
-  let total = 0;
-  for (const record of ledger.transitions) {
-    const type = record.payload.operation.type;
-    if (type === 'revoke_device' || type === 'revoke_bridge') total += 1;
+/** Index of the first revision whose heads differ, or the shorter length when one list is a prefix of the other. String compares only. */
+function firstDifference(local: readonly string[], candidate: readonly string[]): number {
+  const length = Math.min(local.length, candidate.length);
+  let index = 0;
+  while (index < length && local[index] === candidate[index]) index += 1;
+  return index;
+}
+/** null when even the genesis differs (another account). */
+function classify(local: readonly string[], candidate: readonly string[]): LedgerRelation | null {
+  const index = firstDifference(local, candidate);
+  if (index === 0) return null;
+  if (index < local.length && index < candidate.length) return 'diverged';
+  if (local.length === candidate.length) return 'same';
+  return candidate.length > local.length ? 'ahead' : 'behind';
+}
+function headList(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) return fail();
+  const heads: readonly unknown[] = value;
+  if (heads.length < 1 || heads.length > LEDGER_LIMITS.maxTransitions + 1 || heads.some(item => typeof item !== 'string')) return fail();
+  return value;
+}
+/** True iff `operation`, found in one chain, discards the branch of `chain` after `fork`: it names exactly the fork point and a record of that branch. */
+function against(operation: ResolveFork, chain: Indexed, fork: number): boolean {
+  return operation.forkHead === chain.heads[fork] && operation.discardedRevision > fork && operation.discardedRevision < chain.heads.length
+    && chain.heads[operation.discardedRevision] === operation.discardedHead;
+}
+/** True iff the (verified) diverged candidate carries a resolve_fork after the fork point that discards local's branch. When local's branch holds
+ *  its own resolve_fork against the candidate, the candidate's must discard a record at or after the latest one: its signer saw that choice and
+ *  overrode it. Two resolutions cannot each have seen the other (hash chaining), so replicas never flip back and forth between them. */
+function resolves(mine: Indexed, theirs: Indexed, fork: number): boolean {
+  let seen = 0;
+  for (let index = fork; index < mine.ledger.transitions.length; index += 1) {
+    const payload = mine.ledger.transitions[index].payload;
+    if (payload.operation.type === 'resolve_fork' && against(payload.operation, theirs, fork)) seen = payload.revision;
   }
-  return total;
+  for (let index = fork; index < theirs.ledger.transitions.length; index += 1) {
+    const operation = theirs.ledger.transitions[index].payload.operation;
+    if (operation.type === 'resolve_fork' && against(operation, mine, fork) && operation.discardedRevision >= seen) return true;
+  }
+  return false;
 }
-/** The fork order, strict and total on distinct chains of one account: longer, then more revocations in the whole chain, then the smaller head. */
-function outranks(candidate: Indexed, local: Indexed): boolean {
-  if (candidate.heads.length !== local.heads.length) return candidate.heads.length > local.heads.length;
-  const revocations = revocationCount(candidate.ledger) - revocationCount(local.ledger);
-  if (revocations !== 0) return revocations > 0;
-  return candidate.head < local.head;
+/** Local's records after the fork, and the revocations among them that the adopted chain lacks. */
+function discardedBy(mine: Indexed, fork: number, adopted: LedgerCheckpoint): LedgerDiscarded {
+  const records = mine.ledger.transitions.slice(fork);
+  const deviceIds: string[] = [];
+  const bridgeIds: string[] = [];
+  for (const record of records) {
+    const operation = record.payload.operation;
+    if (operation.type === 'revoke_device' && adopted.revokedDeviceIds.indexOf(operation.endpointId) === -1) deviceIds.push(operation.endpointId);
+    if (operation.type === 'revoke_bridge' && adopted.revokedBridgeIds.indexOf(operation.bridgeId) === -1) bridgeIds.push(operation.bridgeId);
+  }
+  return { records, deviceIds, bridgeIds };
 }
-function choice(decision: LedgerChoice['decision'], checkpoint: LedgerCheckpoint, discarded: Signed<LedgerTransition>[]): LedgerChoice {
-  return { decision, checkpoint: copyOf(checkpoint), discarded };
+function choice(decision: LedgerChoice['decision'], relation: LedgerRelation | null, checkpoint: LedgerCheckpoint, discarded?: LedgerDiscarded): LedgerChoice {
+  return { decision, relation, checkpoint: copyOf(checkpoint), discarded: discarded ?? { records: [], deviceIds: [], bridgeIds: [] } };
 }
 
 /** SHA-256(UTF-8(LEDGER_DOMAIN + canonical(payload))): the WebAuthn challenge, and the record's head. */
@@ -425,8 +541,8 @@ export function ledgerLastIssuedAt(ledger: Ledger): number {
   const last = ledger.transitions[ledger.transitions.length - 1];
   return time(last === undefined ? ledger.genesis.payload.createdAt : last.payload.issuedAt);
 }
-/** Every device endpoint id and bridgeId revoked anywhere in the chain, in chain order. Only for chains that verified (or that
- *  chooseLedger did not reject): replicas keep the union over all of them and never trust those ids again. Throws on a malformed shape. */
+/** Every device endpoint id and bridgeId revoked anywhere in the chain, in chain order. Only for chains that verified: replicas keep the
+ *  union over the chains they held (plus chooseLedger's `discarded` ids) and never trust those ids again. Throws on a malformed shape. */
 export function ledgerRevocations(ledger: Ledger): { deviceIds: string[]; bridgeIds: string[] } {
   const deviceIds: string[] = [];
   const bridgeIds: string[] = [];
@@ -473,50 +589,128 @@ export async function verifyLedger(ledger: Ledger, now: number = Date.now()): Pr
   return copyOf(await guarded(() => verifyAll(parseLedger(ledger), at)));
 }
 
-/** Fork choice, a pure total order on valid chains of one account: longer wins, then more revoke_device/revoke_bridge records in the
- *  whole chain, then the lexicographically smaller head.
- *  - different genesis or invalid candidate -> 'reject'; equal chain or a prefix of local -> 'keep' (decided from record heads alone)
- *  - otherwise the order decides; when a fork wins, `discarded` lists the local records after the common prefix.
- *  `cache` is the checkpoint of the already-verified local chain; when it vouches for `local`, local signatures and timestamps are not
- *  re-checked, and an extension only has its new records verified. Throws only when `local` is invalid (and not vouched for), or when
- *  `local` is null and the candidate is invalid. */
+/** The head of every record, index = revision: [accountId, head of revision 1, ..., head of the tip]. O(n) SHA-256 over the parsed chain and no
+ *  signature work; compute it once per chain and keep it for relate/forkPoint/relateHead. Throws like parseLedger. */
+export async function ledgerHeads(ledger: Ledger): Promise<string[]> {
+  return (await guarded(() => indexed(ledger))).heads;
+}
+/** How `candidate` relates to `local` (both ledgerHeads lists of chains of ONE account): 'same' (identical heads), 'ahead' (candidate strictly
+ *  extends local), 'behind' (local strictly extends candidate), 'diverged' (they differ at some revision both have). Pure, O(min(n, m)) string
+ *  compares, no hashing. Another account is not a relation: throws ledger_other_account (genesis heads differ); a malformed list throws
+ *  invalid_ledger. Every head of the shorter list is compared, so a list whose tip matches but whose middle differs is 'diverged'. */
+export function relate(local: readonly string[], candidate: readonly string[]): LedgerRelation {
+  const relation = classify(headList(local), headList(candidate));
+  return relation === null ? fail('ledger_other_account') : relation;
+}
+/** The last record `local` and `candidate` (ledgerHeads lists) share, or null when even the genesis differs. Same cost as relate. */
+export function forkPoint(local: readonly string[], candidate: readonly string[]): LedgerForkPoint | null {
+  const mine = headList(local);
+  const index = firstDifference(mine, headList(candidate));
+  return index === 0 ? null : { revision: index - 1, head: mine[index - 1] };
+}
+/** What another replica's bare `{ revision, head }` (an RPC answer or head announcement; other fields ignored) says relative to `local`
+ *  (a ledgerHeads list): 'same', 'behind' (local holds that head at that revision and more), or 'unknown' (ahead, diverged or another
+ *  account: fetch its chain and run chooseLedger). O(1). Throws invalid_ledger on a malformed head or revision. */
+export function relateHead(local: readonly string[], other: { revision: number; head: string }): LedgerHeadRelation {
+  const mine = headList(local);
+  const record = object(other);
+  const revision = count(record.revision, 0);
+  const head = fingerprint(record.head);
+  if (revision >= mine.length || mine[revision] !== head) return 'unknown';
+  return revision === mine.length - 1 ? 'same' : 'behind';
+}
+
+/**
+ * The append-only acceptance rule, the same on every replica (server, browser, bridge). The candidate's relation decides:
+ * - no local chain (first bind): verified from genesis and adopted, relation null; an invalid candidate throws.
+ * - malformed or another account: 'reject', relation null.
+ * - 'same' / 'behind': 'keep', decided from record heads alone (no candidate signature is checked).
+ * - 'ahead': only the records after local's head are verified, on top of local's state -> 'adopt', or 'reject' if any is invalid.
+ * - 'diverged': the candidate's records after the fork point are verified on top of the shared prefix -> 'reject' if invalid. It is
+ *   'adopt'ed only if it carries a resolve_fork, after the fork point, whose forkHead is exactly this fork point and whose discardedHead is
+ *   local's record at discardedRevision (local's tip or an earlier record of its branch), and which saw any resolve_fork of local's branch
+ *   against it (see resolves); `discarded` then lists local's records after the fork and the revocations the adopted chain lacks.
+ *   Otherwise 'keep': a valid different history is never adopted, whatever its length or content.
+ * The shared prefix is not re-verified when the candidate's copy is byte-identical to local's; a copy with other signature bytes is verified
+ * with the whole candidate from genesis. `cache` is the checkpoint of the already-verified local chain: when it vouches for `local` (same last
+ * head, hash-linked) local is not re-verified, else local is verified from genesis. Throws only when `local` is invalid (and not vouched for),
+ * or when `local` is null and the candidate is invalid.
+ */
 export async function chooseLedger(local: Ledger | null, candidate: Ledger, now: number = Date.now(), cache?: LedgerCache): Promise<LedgerChoice> {
   const at = time(now);
-  if (local === null) return choice('adopt', await guarded(() => verifyAll(parseLedger(candidate), at)), []);
+  if (local === null) return choice('adopt', null, await guarded(() => verifyAll(parseLedger(candidate), at)));
   const mine = await guarded(() => indexed(local));
   const base = vouched(mine, cache) ?? await guarded(() => verifyAll(mine.ledger, at));
   let theirs: Indexed;
   try {
     theirs = await indexed(candidate);
   } catch {
-    return choice('reject', base, []);
+    return choice('reject', null, base);
   }
-  if (theirs.accountId !== mine.accountId) return choice('reject', base, []);
-  const localLength = mine.heads.length;
-  const candidateLength = theirs.heads.length;
-  let common = 0;
-  while (common < localLength && common < candidateLength && mine.heads[common] === theirs.heads[common]) common += 1;
-  if (common === candidateLength) return choice('keep', base, []);
-  if (common === localLength && sameRecords(mine.ledger, theirs.ledger, localLength)) {
-    try {
-      const fresh = theirs.ledger.transitions.slice(localLength);
-      return choice('adopt', await extend(base, mine.ledger.genesis.payload, ledgerLastIssuedAt(mine.ledger), fresh, at), []);
-    } catch {
-      return choice('reject', base, []);
-    }
-  }
-  let winner: LedgerCheckpoint;
+  const relation = classify(mine.heads, theirs.heads);
+  if (relation === null) return choice('reject', null, base);
+  if (relation === 'same' || relation === 'behind') return choice('keep', relation, base);
+  // Revision of the last shared record: local's tip when 'ahead'.
+  const fork = firstDifference(mine.heads, theirs.heads) - 1;
+  const shared = sameRecords(mine.ledger, theirs.ledger, fork);
+  // Local is verified or vouched for, so replaying its prefix can only fail on corrupt local state, which throws like an invalid local.
+  const start = !shared ? null : relation === 'ahead' ? base : await guarded(async () => replay(mine, fork));
+  let verified: LedgerCheckpoint;
   try {
-    winner = await verifyAll(theirs.ledger, at);
+    const root = mine.ledger.genesis.payload;
+    const previousTime = fork === 0 ? root.createdAt : mine.ledger.transitions[fork - 1].payload.issuedAt;
+    verified = start === null
+      ? await verifyAll(theirs.ledger, at)
+      : await extend(start, root, previousTime, theirs.ledger.transitions.slice(fork), at, trailOf(mine, fork));
   } catch {
-    return choice('reject', base, []);
+    return choice('reject', relation, base);
   }
-  return outranks(theirs, mine) ? choice('adopt', winner, mine.ledger.transitions.slice(common)) : choice('keep', base, []);
+  if (relation === 'ahead') return choice('adopt', relation, verified);
+  return resolves(mine, theirs, fork) ? choice('adopt', relation, verified, discardedBy(mine, fork, verified)) : choice('keep', relation, base);
+}
+
+/** describeFork(local, other): where the two chains part and each side's payloads after that point, for showing two histories side by side.
+ *  Works for any relation of one account (for 'same' both lists are empty). Throws ledger_other_account for another account, else like parseLedger. */
+export async function describeFork(local: Ledger, other: Ledger): Promise<LedgerFork> {
+  const mine = await guarded(() => indexed(local));
+  const theirs = await guarded(() => indexed(other));
+  const relation = classify(mine.heads, theirs.heads);
+  if (relation === null) return fail('ledger_other_account');
+  const revision = firstDifference(mine.heads, theirs.heads) - 1;
+  return {
+    relation, fork: { revision, head: mine.heads[revision] },
+    mine: mine.ledger.transitions.slice(revision).map(record => record.payload),
+    theirs: theirs.ledger.transitions.slice(revision).map(record => record.payload),
+  };
+}
+
+/** The unsigned resolve_fork that keeps `chosen` and discards `other` from their fork point: appended to `chosen`, forkHead = the last shared
+ *  record, discardedHead/discardedRevision = other's tip. Verifies `chosen` (skipped when `cache` vouches for it, as in chooseLedger) and
+ *  throws invalid_ledger when the chains do not diverge or `credentialId` was not an authority at the fork point (one added on chosen's own
+ *  branch cannot discard the other), ledger_other_account for another account, else nextTransition's errors. `other` is not verified. */
+export async function resolveForkTransition(
+  chosen: Ledger, other: Ledger, credentialId: string, now: number = Date.now(), cache?: LedgerCache,
+): Promise<LedgerTransition> {
+  const at = time(now);
+  const mine = await guarded(() => indexed(chosen));
+  const theirs = await guarded(() => indexed(other));
+  const relation = classify(mine.heads, theirs.heads);
+  if (relation === null) fail('ledger_other_account');
+  if (relation !== 'diverged') fail();
+  const checkpoint = vouched(mine, cache) ?? await guarded(() => verifyAll(mine.ledger, at));
+  const fork = firstDifference(mine.heads, theirs.heads) - 1;
+  const signer = credential(credentialId);
+  if (joinedAt(trailOf(mine, fork), signer) === -1) fail();
+  const operation: LedgerOperation = {
+    type: 'resolve_fork', forkHead: mine.heads[fork], discardedHead: theirs.heads[theirs.heads.length - 1], discardedRevision: theirs.heads.length - 1,
+  };
+  return nextTransition(checkpoint, signer, operation, at, ledgerLastIssuedAt(mine.ledger));
 }
 
 /** Pure next-payload builder for the signer. Applies the operation to a copy of the checkpoint with the verifier's rules and throws the
- *  same errors. Not checked here (they need async crypto): endpoint id = SHA-256(point), points on the curve, and the add_authority
- *  consent signature (only its shape is checked); verifyLedger enforces all three.
+ *  same errors. Not checked here (they need async crypto or the chain): endpoint id = SHA-256(point), points on the curve, the add_authority
+ *  consent signature (only its shape is checked) and resolve_fork's forkHead and signer rules (build it with resolveForkTransition);
+ *  verifyLedger enforces all of them.
  *  `lastIssuedAt` is the issuedAt of the ledger's last record (see ledgerLastIssuedAt); the result's issuedAt is max(now, lastIssuedAt). */
 export function nextTransition(
   checkpoint: LedgerCheckpoint, credentialId: string, operation: LedgerOperation, now: number = Date.now(), lastIssuedAt?: number,

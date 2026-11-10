@@ -26,13 +26,18 @@ export interface LedgerGenesis {
   authority: LedgerAuthority;
 }
 /** Authorities are add-only: a lost or compromised passkey means a new account. `consent` is the added passkey's own assertion
- *  over authorityConsentChallenge(accountId, authority), so no account can claim a passkey that did not agree to join it. */
+ *  over authorityConsentChallenge(accountId, authority), so no account can claim a passkey that did not agree to join it.
+ *  `resolve_fork` is the owner's choice between two diverged histories, appended to the chosen chain: `forkHead` is the head of the last
+ *  record both share, `discardedHead`/`discardedRevision` the tip of the other chain as the signer saw it. It changes no membership. Valid
+ *  only if forkHead is an earlier record of the same chain (or its genesis), the signer was already an authority at forkHead,
+ *  discardedRevision is after forkHead's revision and discardedHead is not a record of this chain (see chooseLedger for its effect). */
 export type LedgerOperation =
   | { type: 'add_device'; device: LedgerDevice }
   | { type: 'revoke_device'; endpointId: string }
   | { type: 'add_bridge'; bridge: LedgerBridge }
   | { type: 'revoke_bridge'; bridgeId: string }
-  | { type: 'add_authority'; authority: LedgerAuthority; consent: PasskeySignature };
+  | { type: 'add_authority'; authority: LedgerAuthority; consent: PasskeySignature }
+  | { type: 'resolve_fork'; forkHead: string; discardedHead: string; discardedRevision: number };
 export interface LedgerTransition {
   type: 'ftown_account_transition';
   version: 2;
