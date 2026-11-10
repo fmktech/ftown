@@ -71,12 +71,17 @@ function ipv6Groups(text: string): number[] | null {
 
 /**
  * A client address as a rate-limit key. One IPv6 subscriber usually holds a whole /64, so an IPv6 address is bucketed to its /64
- * ("2001:db8:1:2::/64"); an IPv4-mapped IPv6 address (::ffff:a.b.c.d) is its IPv4 address. IPv4, "unknown" and anything that does
- * not parse are returned unchanged. A bracketed form with a port ("[2001:db8::1]:443") is accepted.
+ * ("2001:db8:1:2::/64"); an IPv4-mapped IPv6 address (::ffff:a.b.c.d) is its IPv4 address; IPv4 is itself without any port.
+ * "unknown" and anything that does not parse are returned unchanged. Bracketed forms with a port ("[2001:db8::1]:443") are accepted.
  */
 export function rateLimitKey(ip: string): string {
   const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(ip.trim());
-  const groups = ipv6Groups(bracketed ? bracketed[1] : ip.trim());
+  const bare = bracketed ? bracketed[1] : ip.trim();
+  // IPv4 with a port ("203.0.113.7:443", "[203.0.113.7]:443"): the port is not part of the key.
+  const withPort = /^([0-9.]+):\d{1,5}$/.exec(bare);
+  if (withPort && IPV4.test(withPort[1])) return withPort[1];
+  if (IPV4.test(bare)) return bare;
+  const groups = ipv6Groups(bare);
   if (!groups) return ip;
   if (groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff) {
     return `${groups[6] >> 8}.${groups[6] & 255}.${groups[7] >> 8}.${groups[7] & 255}`;

@@ -5,8 +5,8 @@ import { boundedJson, bridgePushIdentity, endpointAllowed, eventIdentity, parseP
 const query=vi.hoisted(()=>vi.fn());
 const readLedger=vi.hoisted(()=>vi.fn());
 vi.mock("@/lib/db",()=>({getDb:()=>({query})}));
-// Auth reads the persisted trusted checkpoint (readTrustedCheckpoint); the fixtures below describe the stored row.
-vi.mock("@/lib/account-ledger-store",()=>({readTrustedCheckpoint:async(accountId:string)=>((await readLedger({accountId})) as {trusted?:unknown}|null|undefined)?.trusted??null}));
+// Auth reads the persisted trusted checkpoint (readTrustedCheckpoint); the fixtures below describe the stored row (no revoked ids).
+vi.mock("@/lib/account-ledger-store",()=>({readTrustedCheckpoint:async(accountId:string)=>{const t=((await readLedger({accountId})) as {trusted?:object}|null|undefined)?.trusted;return t?{revokedDeviceIds:[],revokedBridgeIds:[],...t}:null;}}));
 vi.mock("@/lib/auth-nonce-store",()=>({consumeNonce:vi.fn()}));
 vi.mock("@/lib/auth",()=>({auth:vi.fn()}));
 vi.mock("next-auth/providers/credentials",()=>({default:(config:unknown)=>config}));

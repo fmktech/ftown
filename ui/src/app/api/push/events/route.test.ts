@@ -3,8 +3,8 @@ import jwt from "jsonwebtoken";
 import webpush from "web-push";
 const mocks = vi.hoisted(() => ({ query: vi.fn(), send: vi.fn(), config: vi.fn(), readLedger: vi.fn() }));
 const ACCOUNT = "A".repeat(43);
-// Auth reads the persisted trusted checkpoint (readTrustedCheckpoint); the fixtures below describe the stored row.
-vi.mock("@/lib/account-ledger-store", () => ({ readTrustedCheckpoint: async (accountId: string) => ((await mocks.readLedger({ accountId })) as { trusted?: unknown } | null | undefined)?.trusted ?? null }));
+// Auth reads the persisted trusted checkpoint (readTrustedCheckpoint); the fixtures below describe the stored row (no revoked ids).
+vi.mock("@/lib/account-ledger-store", () => ({ readTrustedCheckpoint: async (accountId: string) => { const t = ((await mocks.readLedger({ accountId })) as { trusted?: object } | null | undefined)?.trusted; return t ? { revokedDeviceIds: [], revokedBridgeIds: [], ...t } : null; } }));
 vi.mock("@/lib/auth-nonce-store", () => ({ consumeNonce: vi.fn() }));
 vi.mock("@/lib/auth", () => ({ auth: vi.fn() }));
 vi.mock("next-auth/providers/credentials", () => ({ default: (config: unknown) => config }));

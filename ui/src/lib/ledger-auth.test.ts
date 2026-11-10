@@ -218,6 +218,29 @@ describe('requireAccount', () => {
   });
 });
 
+describe('revoked ids never pass (shared applyRevocations, real chains)', () => {
+  const session = (id: string, endpointId: string) => async () => ({ user: { id, endpointId } });
+  it('a device revoked in the chain, or only by a sticky id, is refused by requireAccount and authorizeLedgerProof', async () => {
+    const revoked = await append(fx, { type: 'revoke_device', endpointId: fx.deviceId });
+    for (const trusted of [await trustedOf(revoked.ledger), await trustedOf(fx.ledger, { deviceIds: [fx.deviceId], bridgeIds: [] })]) {
+      expect(trusted.revokedDeviceIds).toContain(fx.deviceId);
+      readTrusted.mockResolvedValue(trusted);
+      await expect(requireAccount(session(fx.accountId, fx.deviceId))).rejects.toMatchObject({ status: 401 });
+      expect(await authorizeLedgerProof(await proof())).toBeNull();
+    }
+  });
+  it('a checkpoint that lists a device both as a member and as revoked is refused', async () => {
+    const both = await trustedOf(fx.ledger);
+    both.revokedDeviceIds.push(fx.deviceId);
+    expect(both.devices.map(device => device.endpoint.id)).toContain(fx.deviceId);
+    readTrusted.mockResolvedValue(both);
+    await expect(requireAccount(session(fx.accountId, fx.deviceId))).rejects.toMatchObject({ status: 401 });
+    expect(await authorizeLedgerProof(await proof())).toBeNull();
+    readTrusted.mockResolvedValue(await trustedOf(fx.ledger));
+    expect((await requireAccount(session(fx.accountId, fx.deviceId))).endpointId).toBe(fx.deviceId);
+  });
+});
+
 describe('session lifetime', () => {
   it('is 12 hours', () => { expect(LEDGER_SESSION_MAX_AGE_SECONDS).toBe(43200); });
 });
