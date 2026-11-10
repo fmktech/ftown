@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "../helpers/fixtures";
 import { login } from "../helpers/app";
-import { bridgeApiFetch } from "../helpers/bridge-api";
+import { bridgeApiFetch, tryReadBridgePointer } from "../helpers/bridge-api";
 import { E2E_DIR } from "../helpers/config";
 import { importAuthKey, requestRelayToken, serverLedger, signProof } from "../helpers/ledger-admin";
 import { startIsolatedBridge, type IsolatedBridge } from "../helpers/ledger-bridge";
@@ -34,6 +34,13 @@ test("removing a computer in Security: the bridge re-execs as a new identity wit
     await expect.poll(() => bridge!.output(), { timeout: 30_000 }).toContain("Paired with account");
     const identity = JSON.parse(readFileSync(join(bridge.dataDir, "security", "ledger-identity.json"), "utf8")) as LedgerIdentityFile;
     const oldKey = await importAuthKey(identity.authPrivateKey);
+
+    // "Paired with account" precedes the account startup after which the bridge publishes its local API pointer, so wait
+    // for THIS process's pointer for THIS identity before calling the API (bridgeApiFetch throws without one).
+    await expect.poll(() => {
+      const pointer = tryReadBridgePointer(bridge!.home);
+      return pointer && { pid: pointer.pid, bridgeId: pointer.bridgeId };
+    }, { timeout: 30_000, message: "The paired bridge must publish its local API pointer" }).toEqual({ pid: bridge.pid, bridgeId });
 
     // A session on this computer survives the identity reset (tmux keeps it).
     await expect.poll(async () => (await bridgeApiFetch("GET", "/api/sessions", { bridgeHome: bridge!.home })).status, { timeout: 30_000 }).toBe(200);
@@ -86,6 +93,9 @@ test("removing a computer in Security: the bridge re-execs as a new identity wit
     expect(fresh.link).not.toBe(prompt.link);
     expect((await (await pairing()).parsePairLink(new URL(fresh.link).hash)).request.bridgeId).toBe(newBridgeId);
     expect(await bridge.hasTmuxSession(sessionId), "Sessions must survive the identity reset").toBe(true);
+    // The pre-exec shutdown unlinks the revoked identity's pointer and the unpaired image publishes none until it is paired
+    // again, so no CLI is pointed at the revoked identity's port and token.
+    expect(tryReadBridgePointer(bridge.home), "The revoked identity's local API pointer must not outlive the re-exec").toBeNull();
 
     // (c) The old key is refused for relay tokens, with the signed evidence.
     const after = await requestRelayToken(await signProof(oldKey, { accountId: account.accountId, kind: "bridge", keyId: bridgeId!, purpose: "relay" }));

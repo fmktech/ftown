@@ -96,12 +96,21 @@ function previewScrollScript(documentId: string): string {
     const parent = window.parent, post = parent.postMessage, scrollTo = window.scrollTo;
     const descriptor = name => Object.getOwnPropertyDescriptor(window, name) || Object.getOwnPropertyDescriptor(Window.prototype, name);
     const xGetter = descriptor('scrollX')?.get, yGetter = descriptor('scrollY')?.get;
+    const widthGetter = descriptor('innerWidth')?.get, heightGetter = descriptor('innerHeight')?.get;
     const getPosition = () => ({ x: maxValue(0, min(max, xGetter ? apply(xGetter, window, []) : 0)), y: maxValue(0, min(max, yGetter ? apply(yGetter, window, []) : 0)) });
+    // The sandboxed frame renders out of process and can load before its embedder has given it a size.
+    const sized = () => !widthGetter || !heightGetter || (apply(widthGetter, window, []) > 0 && apply(heightGetter, window, []) > 0);
     const send = value => apply(post, parent, [value, '*']);
-    let restored = false, requested = false, loaded = document.readyState === 'complete', userMoved = false, queued = false, desired = null;
+    let restored = false, requested = false, loaded = document.readyState === 'complete', userMoved = false, queued = false, desired = null, awaitingSize = false;
     const report = kind => send({ channel, documentId: id, kind, ...getPosition() });
-    const finish = () => {
+    const finish = force => {
       if (restored || !requested) return;
+      // Scrolling a 0x0 viewport clamps to the top and would report (and so lose) the restored position:
+      // wait for the first real size, bounded by the restore deadline.
+      if (force !== true && !userMoved && desired && !sized()) {
+        if (!awaitingSize) { awaitingSize = true; window.addEventListener('resize', () => finish(), { passive: true }); timeout(() => finish(true), ${PREVIEW_SCROLL_RESTORE_MS}); }
+        return;
+      }
       if (!userMoved && desired) apply(scrollTo, window, [{ left: desired.x, top: desired.y, behavior: 'instant' }]);
       restored = true; report('restored');
     };
