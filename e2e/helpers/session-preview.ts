@@ -10,6 +10,37 @@ import { BRIDGE_HOME, E2E_DIR, UI_BASE_URL } from "./config";
 const execute = promisify(execFile);
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 
+/**
+ * Errors of an evaluation that raced the preview iframe's OWN lifecycle: the dashboard replaces or re-navigates that iframe
+ * whenever the file changes or the user refreshes, so the frame is detached, its execution context destroyed, or the element
+ * the locator resolved belongs to the document being replaced. They mean "the preview document is not there yet".
+ */
+const PREVIEW_FRAME_NOT_READY = [
+  /Frame was detached/i,
+  /frame got detached/i,
+  /Execution context was destroyed/i,
+  /Cannot find context with specified id/i,
+  /Element is not attached to the DOM/i,
+  /Target closed/i,
+];
+
+/**
+ * For expect.poll / toPass callbacks: evaluate `fn` on the <body> of the preview document of `fileName`
+ * (iframe[title="HTML preview: <fileName>"]). When the evaluation races the iframe being swapped or navigated
+ * (PREVIEW_FRAME_NOT_READY), return `notReady` so the poll simply retries; pick a value the poll's matcher never accepts
+ * (NaN for numeric comparisons, null for equality). Any other error fails the test, and so does a closed PAGE (a
+ * "Target closed" for the page itself is not a frame swap).
+ */
+export async function inPreviewFrame<R, N>(page: Page, fileName: string, fn: (body: Element) => R, notReady: N): Promise<R | N> {
+  try {
+    return await page.frameLocator(`iframe[title="HTML preview: ${fileName}"]`).locator("body").evaluate(fn) as R;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!page.isClosed() && PREVIEW_FRAME_NOT_READY.some(pattern => pattern.test(message))) return notReady;
+    throw error;
+  }
+}
+
 export interface CliOutput { code: number; stdout: string; stderr: string }
 export interface PreviewReadObservation { state: string; previewId: string; transport: "cloud" | "local"; offset?: number }
 export interface PreviewTransportObservation {
