@@ -1,5 +1,5 @@
-import { expect, type Page } from "@playwright/test";
-import { randomBytes, webcrypto } from "node:crypto";
+import { expect, request as apiRequest, type Page } from "@playwright/test";
+import { createECDH, randomBytes, webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { LedgerCheckpoint } from "../../bridge/src/security/ledger/protocol";
@@ -7,7 +7,7 @@ import { signWithBrowserDeviceKey } from "../helpers/browser-proof";
 import { E2E_DIR, UI_BASE_URL } from "../helpers/config";
 import { ledgerRow, withDb } from "../helpers/db";
 import { test } from "../helpers/fixtures";
-import { appendOperation, browserDeviceWithKey, requestRelayToken, serverNonce, signProof } from "../helpers/ledger-admin";
+import { appendOperation, browserDeviceWithKey, requestRelayToken, serverLedger, serverNonce, signProof } from "../helpers/ledger-admin";
 import { virtualAuthenticator } from "../helpers/passkey";
 import { createSecondAccount, type SecondAccount } from "../helpers/second-account";
 
@@ -349,6 +349,144 @@ test("re-offer control: with no browser open a full rollback stays; opening the 
     console.log(`[ledger-checkpoint] opening the browser repaired the rolled-back server after ${repairedMs} ms`);
     expect(await localTip(page, second.accountId)).toEqual(post);
     await expectRepaired(state, page);
+  } finally {
+    await second.close();
+  }
+});
+
+/** Rows an account owns in each per-account table (all `REFERENCES accounts(account_id) ON DELETE CASCADE` in ui/schema.sql). */
+const ACCOUNT_TABLES = ["accounts", "account_ledger", "security_endpoint_directory", "security_device_display_names", "pair_mailbox", "push_subscriptions", "push_events"] as const;
+async function accountRows(accountId: string): Promise<Record<string, number>> {
+  return withDb(async db => {
+    const counts: Record<string, number> = {};
+    for (const table of ACCOUNT_TABLES) counts[table] = (await db.query(`SELECT COUNT(*)::int AS n FROM ${table} WHERE account_id=$1`, [accountId])).rows[0].n as number;
+    return counts;
+  });
+}
+
+test("re-offer never re-creates a deleted account: the browser holding its chain cannot bring it back", async ({ browser }) => {
+  test.setTimeout(180_000);
+  const second = await createSecondAccount(browser, { name: `E2E deleted account ${randomBytes(3).toString("hex")}` });
+  try {
+    const page = second.page;
+    const origin = { origin: UI_BASE_URL };
+    // Per-account rows to watch cascade: directory entry, display name, pair mailbox entry and push subscription of this browser.
+    const own = (await serverLedger(second.account)).checkpoint.devices.find(item => item.endpoint.id === second.endpointId)!;
+    expect((await page.request.put("/api/security/endpoints", { headers: origin, data: { protocolVersion: 1, bridgeId: null, label: own.label, endpoint: own.endpoint } })).status()).toBe(200);
+    expect((await page.request.put("/api/security/device-names", { headers: origin, data: { kind: "browser", id: second.endpointId, name: "E2E doomed browser" } })).status()).toBe(200);
+    expect((await page.request.put(`/api/pair/${randomBytes(32).toString("base64url")}`, { data: { sealed: "e2e-doomed" } })).status()).toBe(204);
+    const ecdh = createECDH("prime256v1"); ecdh.generateKeys();
+    expect((await page.request.post("/api/push", { headers: origin, data: {
+      endpoint: `https://fcm.googleapis.com/fcm/send/e2e-doomed-${randomBytes(8).toString("hex")}`, keys: { p256dh: ecdh.getPublicKey().toString("base64url"), auth: randomBytes(16).toString("base64url") },
+    } })).status()).toBe(201);
+    const local = await localTip(page, second.accountId);
+    expect(local, "the browser's replica holds the account's chain").not.toBeNull();
+    const countBefore = await signCount(second);
+    const before = await accountRows(second.accountId);
+    expect(before.accounts).toBe(1);
+    await quiet(page);
+
+    await withDb(db => db.query("DELETE FROM accounts WHERE account_id=$1", [second.accountId]));
+    const after = await accountRows(second.accountId);
+    test.info().annotations.push({ type: "cascade on account delete", description: ACCOUNT_TABLES.map(table => `${table} ${before[table]}->${after[table]}`).join(", ") });
+    expect(Object.values(after).every(count => count === 0), JSON.stringify(after)).toBe(true);
+
+    const posts: number[] = [];
+    const started = Date.now();
+    page.on("request", request => {
+      if (request.method() === "POST" && new URL(request.url()).pathname === "/api/account/ledger") posts.push(Date.now() - started);
+    });
+    await page.goto("/dashboard");
+    // For 10 s the account stays gone: no row, and the public read is 404.
+    const anonymous = await apiRequest.newContext({ baseURL: UI_BASE_URL, extraHTTPHeaders: { "x-real-ip": `2001:db8:de1:${randomBytes(10).toString("hex").match(/.{4}/g)!.join(":")}` } });
+    try {
+      while (Date.now() - started < 10_000) {
+        expect((await anonymous.get(`/api/account/ledger?accountId=${second.accountId}`)).status(), "SECURITY: a deleted account was re-created").toBe(404);
+        expect((await accountRows(second.accountId)).account_ledger).toBe(0);
+        await page.waitForTimeout(1000);
+      }
+    } finally { await anonymous.dispose(); }
+    // ...and the page settles: count the browser's ledger POSTs over 15 s from the load.
+    await page.waitForTimeout(Math.max(0, 15_000 - (Date.now() - started)));
+    const url = new URL(page.url()).pathname;
+    const alert = await page.locator("#login-error").innerText().catch(() => "");
+    const signInVisible = await page.getByRole("button", { name: "Sign in with passkey" }).isVisible().catch(() => false);
+    const headings = (await page.getByRole("heading").allInnerTexts().catch(() => [])).join(" | ");
+    const seen = `url ${url}; login error ${JSON.stringify(alert.trim())}; sign-in button ${signInVisible}; headings ${JSON.stringify(headings)}; ledger POSTs ${posts.length} at [${posts.join(", ")}] ms`;
+    test.info().annotations.push({ type: "deleted account: what the user sees after 15 s", description: seen });
+    console.log(`[ledger-checkpoint] deleted account, after 15 s: ${seen}`);
+    expect(posts.length, "the page must not loop ledger writes").toBeLessThanOrEqual(2);
+    // A sane end state: the sign-in page (observed: /login with "Sign in with passkey" and no error message).
+    await expect(page).toHaveURL(/\/login/);
+    await expect(page.getByRole("button", { name: "Sign in with passkey" })).toBeVisible();
+    expect(await accountRows(second.accountId)).toEqual(after);
+    expect(await signCount(second), "no passkey prompt").toBe(countBefore);
+  } finally {
+    await second.close();
+  }
+});
+
+test("a removal the server refused is shown as not saved, and Retry now stores it without another passkey prompt", async ({ browser }) => {
+  test.setTimeout(180_000);
+  const second = await createSecondAccount(browser, { name: `E2E unsaved removal ${randomBytes(3).toString("hex")}` });
+  try {
+    const page = second.page;
+    const d2 = await browserDeviceWithKey(second.accountId, "E2E second device", Date.now());
+    const claim = { accountId: second.accountId, kind: "device" as const, keyId: d2.device.endpoint.id, purpose: "relay" as const };
+    await appendOperation({ type: "add_device", device: d2.device }, second.account);
+    const added = (await serverTip(second.accountId))!;
+    await page.goto("/dashboard");
+    await expect.poll(() => localTip(page, second.accountId), { timeout: 30_000 }).toEqual(added);
+
+    // The server refuses the NEXT ledger write once (429, Retry-After 600); everything else goes through.
+    const writes: number[] = [];
+    let refused = 0;
+    await page.route(url => url.pathname === "/api/account/ledger", async route => {
+      if (route.request().method() !== "POST") return route.fallback();
+      writes.push(Date.now());
+      if (refused === 0) {
+        refused += 1;
+        return route.fulfill({ status: 429, contentType: "application/json", headers: { "Retry-After": "600", "Cache-Control": "no-store" }, body: JSON.stringify({ error: "rate_limited" }) });
+      }
+      return route.fallback();
+    });
+
+    const countBefore = await signCount(second);
+    await page.getByRole("button", { name: "Open security", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Security", exact: true });
+    const node = dialog.locator(`[data-access-kind="browser"][data-access-node="${d2.device.endpoint.id}"]`).first();
+    await expect(node).toBeVisible({ timeout: 30_000 });
+    await node.click();
+    const remove = dialog.getByRole("button", { name: /^Remove browser / });
+    await expect(remove).toBeEnabled();
+    await remove.click();
+    const confirmation = dialog.getByRole("group", { name: "Confirm browser removal", exact: true });
+    await confirmation.getByRole("button", { name: "Confirm remove browser", exact: true }).click();
+
+    // Refused by the server: shown as not saved, with Retry now; the server (and so every computer) still accepts the device.
+    const unsaved = dialog.getByRole("group", { name: "Removal not saved", exact: true });
+    await expect(unsaved).toBeVisible({ timeout: 30_000 });
+    await expect(unsaved).toContainText("Removal not saved to the server yet. It can still connect. Retrying…");
+    const retry = unsaved.getByRole("button", { name: "Retry now", exact: true });
+    await expect(retry).toBeVisible();
+    expect(refused).toBe(1);
+    expect((await serverTip(second.accountId))!).toEqual(added);
+    expect((await requestRelayToken(await signProof(d2.authKey, claim))).status, "the refused removal is not in force").toBe(200);
+    expect(await signCount(second), "the removal itself asked for the passkey once").toBe(countBefore + 1);
+
+    await retry.click();
+    await expect.poll(async () => {
+      try { return (await serverLedger(second.account)).checkpoint.revokedDeviceIds.includes(d2.device.endpoint.id); } catch { return false; }
+    }, { timeout: 30_000, message: "Retry now stores the revocation" }).toBe(true);
+    await expect(unsaved).toBeHidden({ timeout: 15_000 });
+    await expect(dialog.getByText("Removal not saved to the server yet", { exact: false })).toHaveCount(0);
+    // The normal removed state: the device is no longer listed as a browser of the account.
+    await expect(node).toHaveCount(0);
+    const revoked = await requestRelayToken(await signProof(d2.authKey, claim));
+    expect(revoked.status).toBe(401);
+    expect(revoked.body.error).toBe("key_revoked");
+    expect(await signCount(second), "exactly one passkey assertion in total (the removal)").toBe(countBefore + 1);
+    test.info().annotations.push({ type: "unsaved removal: ledger POSTs from the page", description: `${writes.length} (first refused with 429)` });
   } finally {
     await second.close();
   }
