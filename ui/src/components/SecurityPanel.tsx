@@ -92,7 +92,7 @@ export function securityErrorMessage(error: unknown): string {
     device_rotation_failed: "Could not create new keys for this browser. Try again.",
     rate_limited: "Too many changes in a short time. Wait a few minutes and try again.",
   };
-  return messages[code] ?? "This security action could not be completed. Refresh and try again.";
+  return Object.hasOwn(messages, code) ? messages[code] : "This security action could not be completed. Refresh and try again.";
 }
 
 export function SecurityPanel({ open, onClose, bridges, currentEndpointId, currentComputerIds, execute, initialBridgeId,

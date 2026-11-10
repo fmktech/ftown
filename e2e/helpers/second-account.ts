@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { UI_BASE_URL } from "./config";
-import { createShellSession, getCentrifugoToken, waitForBridgeOnline } from "./app";
+import { createShellSessionWhenAccepted, getCentrifugoToken, waitForBridgeOnline } from "./app";
 import { tryReadBridgePointer, type BridgePointer } from "./bridge-api";
 import { sessionIdsFor, waitForBridgePresence, waitForNewSessionId } from "./centrifugo";
 import { startIsolatedBridge, type IsolatedBridge } from "./ledger-bridge";
@@ -121,22 +121,9 @@ export async function createSecondAccount(browser: Browser, options: { name?: st
         await page.goto("/dashboard");
         await waitForBridgeOnline(page);
         const before = await sessionIdsFor(accountId);
-        // Precondition, not an assertion: for a few seconds right after a pairing, the approving browser's first encrypted
-        // requests to the new computer are refused ("Encrypted request rejected"), for any account. Retry, bounded.
-        const deadline = Date.now() + 60_000;
-        for (;;) {
-          await createShellSession(page, sessionName, bridgeId);
-          const created = page.getByRole("button", { name: new RegExp(sessionName) });
-          const rejected = page.getByText("Encrypted request rejected", { exact: true });
-          const outcome = await Promise.race([
-            created.waitFor({ timeout: 15_000 }).then(() => "created" as const),
-            rejected.waitFor({ timeout: 15_000 }).then(() => "rejected" as const),
-          ]).catch(() => "timeout" as const);
-          if (outcome === "created") return waitForNewSessionId(accountId, before);
-          if (outcome === "timeout" || Date.now() > deadline) throw new Error(`B could not create a session on its own bridge (${outcome})`);
-          await page.getByRole("button", { name: "Cancel", exact: true }).click();
-          await page.waitForTimeout(2000);
-        }
+        // The computer was just paired: its first encrypted requests from this browser may be refused for a few seconds.
+        await createShellSessionWhenAccepted(page, sessionName, bridgeId);
+        return waitForNewSessionId(accountId, before);
       },
       relayToken: () => getCentrifugoToken(page),
       stopBridge,

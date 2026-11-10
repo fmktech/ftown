@@ -1,4 +1,4 @@
-import { expect, type Page } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { UI_BASE_URL } from "./config";
 import { readBridgePointer } from "./bridge-api";
 import { sharedAccountId, signIn } from "./passkey";
@@ -50,6 +50,30 @@ export async function createShellSession(page: Page, name: string, bridgeId: str
   await page.locator("#ns-bridge").selectOption(bridgeId);
   await page.locator('input[placeholder="Optional name for this session"]').fill(name);
   await page.getByRole("button", { name: "Create Session" }).click();
+}
+
+/**
+ * createShellSession for a browser that was JUST enrolled or a computer that was JUST paired: for a few seconds the
+ * computer refuses that browser's encrypted requests ("Encrypted request rejected") until it has the new ledger. That is a
+ * product race (reported), not what the caller tests, so this retries the precondition, bounded, and records every
+ * refusal as a test annotation ("create_session refused while the computer catches up") so it stays visible.
+ */
+export async function createShellSessionWhenAccepted(page: Page, name: string, bridgeId: string = readBridgePointer().bridgeId): Promise<void> {
+  const deadline = Date.now() + 60_000;
+  for (let refusals = 0; ; refusals += 1) {
+    await createShellSession(page, name, bridgeId);
+    const created = page.getByRole("button", { name: new RegExp(name) });
+    const rejected = page.getByText("Encrypted request rejected", { exact: true });
+    const outcome = await Promise.race([
+      created.waitFor({ timeout: 15_000 }).then(() => "created" as const),
+      rejected.waitFor({ timeout: 15_000 }).then(() => "rejected" as const),
+    ]).catch(() => "timeout" as const);
+    if (outcome === "created") return;
+    if (outcome === "timeout" || Date.now() > deadline) throw new Error(`create_session was not accepted (${outcome} after ${refusals} refusal(s))`);
+    try { test.info().annotations.push({ type: "create_session refused while the computer catches up", description: `${name} on ${bridgeId}` }); } catch { /* outside a test */ }
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.waitForTimeout(2000);
+  }
 }
 
 /** Select the session row by its displayed name in the sidebar. */

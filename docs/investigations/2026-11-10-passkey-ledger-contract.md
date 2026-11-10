@@ -15,7 +15,7 @@ Goals:
 - Solo and `--local` keep working unchanged (section 12).
 
 Adversaries and what the design gives:
-- Compromised or malicious server (or database): cannot forge a ledger record, cannot bind a bridge or browser to another account (pairing proof, authority consent, section 5 and 11), cannot make a replica go back to a shorter chain (section 6). It can withhold or delay records, serve a stale or forked chain to a replica that has not seen the newer one, and see the public ledger. It can mint relay/session tokens only for keys that the ledger it holds lists.
+- Compromised or malicious server (or database): cannot forge a ledger record, cannot bind a bridge or browser to another account (pairing proof, authority consent, section 5 and 11), cannot make a replica go back to a shorter chain (section 6). It can withhold or delay records, serve a stale or forked chain to a replica that has not seen the newer one, and see the public ledger. It can mint relay/session tokens only for keys that the ledger it holds lists. (The server's own copy is protected against a database-only writer by the sealed checkpoint; see "Server reads: sealed checkpoint" in the amendment at the end.)
 - Network attacker: same as the server for the parts that are unauthenticated; the ledger is self-authenticating, so a tampered ledger does not verify.
 - Stolen browser or computer: the owner removes it with a passkey-signed record; access stops at the next ledger update (bridges) and at the next relay token (at most 1 h, section 9).
 - Lost or compromised passkey: not recoverable inside the account (section 5).
@@ -149,7 +149,7 @@ Routes (all responses `Cache-Control: no-store` where stated in code):
 
 Account creation (the only path that creates a row): `offerLedger` with no stored account accepts a candidate only if all hold, checked cheapest first before any signature work: `REGISTRATION_ENABLED === 'true'` (unset means enabled outside production, disabled in production); `bootstrap` equals `FTOWN_BOOTSTRAP_SECRET` (at least 32 characters, SHA-256 + timing-safe comparison); no account exists; the chain contains at least one `add_device`; genesis `origins` is exactly `[publicOrigin()]` and `rpId` equals `FTOWN_RP_ID` or the public hostname; the chain verifies. The insert is one statement guarded by `NOT EXISTS (SELECT 1 FROM accounts)` plus the singleton index; a concurrent second genesis gets a reject. The browser additionally refuses creation unless `location.origin` equals `NEXT_PUBLIC_FTOWN_PUBLIC_URL` (`origin_mismatch`). [Superseded: no bootstrap secret and no single-account condition; see the amendment at the end for the current order.]
 
-Existing account: `chooseLedger` with the stored checkpoint as cache; optimistic concurrency on `(version, revision, head)`, one retry, then `account_ledger_conflict` (503). `readLedger` re-verifies the stored chain (memoised by hash) and cross-checks the denormalised columns; a row that does not verify is corruption (503), never "absent".
+Existing account: `chooseLedger` with the stored checkpoint as cache; optimistic concurrency on `(version, revision, head)`, one retry, then `account_ledger_conflict` (503). `readLedger` cross-checks the denormalised columns and the two hashes (genesis to `account_id`, last record to `head`); it does not re-verify signatures on every read. Auth decisions use a MAC-sealed checkpoint, and a row whose checkpoint cannot be trusted is healed by verifying the stored chain from genesis; a chain that does not verify is corruption (503), never "absent". [Superseded: see "Server reads: sealed checkpoint" in the amendment at the end.]
 
 ## 9. Relay tokens
 
@@ -293,20 +293,22 @@ The text above describes the first release: one account per server, created with
 
 ### Genesis admission
 
-Applies when the server holds no account for the chain's `accountId`. The first failing check answers; the checks run in this order.
+Applies when the server holds no account for the chain's `accountId`. The first failing check answers; the checks run in this order. Before them, `POST /api/account/ledger` applies the `ledger-write` limit (30 per minute per client IP) and the 2,621,440-byte body cap. A body without `ledger` is 400 `invalid_request`.
 
 | # | Check | `error` | HTTP |
 |---|---|---|---|
+| 0 | the chain parses | `invalid_ledger` | 400 |
 | 1 | `REGISTRATION_ENABLED` allows creation (in production only the exact value `true`) | `registration_closed` | 403 |
 | 2 | at most 16 records including genesis, at most 131072 bytes serialized | `creation_too_large` | 413 |
 | 3 | at least one `add_device` | `invalid_ledger` | 400 |
-| 4 | genesis `origins` is exactly `[publicOrigin()]` and `rpId` equals the server RP ID | `origin_mismatch` | 400 |
-| 5 | creation budget (per IP per hour, then global per day) | `rate_limited` | 429 |
-| 6 | the chain parses and verifies from genesis | `invalid_ledger` | 400 |
+| 4a | the server has a usable public origin and RP ID (otherwise the error is logged) | `server_misconfigured` | 503 |
+| 4b | genesis `origins` is exactly `[publicOrigin()]` and `rpId` equals the server RP ID | `origin_mismatch` | 400 |
+| 5 | the chain verifies from genesis (signatures included) | `invalid_ledger` | 400 |
+| 6 | creation budget: per IP per hour, then global per day | `rate_limited` | 429 |
 | 7 | account count below the soft cap | `server_full` | 503 |
 | 8 | insert; another account already holds the handle | `handle_taken` | 409 |
 
-A chain that does not parse is `invalid_ledger` (400) before check 1. Checks 1 to 4 are cheap and spend no budget. The budget is spent only after them and before signature verification, so a malformed or closed-registration request cannot drain it. Two identical creations racing is not an error: the loser is re-read and treated as a replica offer. The cap is soft: count and insert are separate statements, so concurrent creations can overshoot it by a few.
+Signature verification (5) comes before the creation budget (6). The budget is spent only by a chain that verified, so unsigned or malformed junk cannot drain it. Checks 0 to 4 are cheap and run before any signature work; 2 bounds the work that 5 does. The per-IP budget is consumed first. If it refuses, the global budget is not touched, so one throttled client cannot drain the global budget. Two identical creations racing is not an error: the loser is re-read and treated as a replica offer. The cap is soft: count and insert are separate statements, so concurrent creations can overshoot it by a few. A store or database failure is 503 `ledger_unavailable`.
 
 ### Creation limits
 
@@ -316,12 +318,38 @@ A chain that does not parse is `invalid_ledger` (400) before check 1. Checks 1 t
 | `FTOWN_ACCOUNT_CREATE_PER_IP_HOUR` | 5 | Creation attempts per client IP per hour (scope `account-create-ip`). |
 | `FTOWN_ACCOUNT_CREATE_GLOBAL_DAY` | 200 | Creation attempts per day across all clients (scope `account-create-global`, one key). |
 
-Each value must be a plain positive integer. Anything else (unset, empty, 0, negative, decimal, exponent, too large) falls back to the default, so a typo never disables a limit. An attempt counts when it reaches check 5, whether or not it later succeeds. Over budget answers 429 `rate_limited` with a `Retry-After` header. The existing `ledger-write` limit (30 per minute per IP) and the 2,621,440-byte body cap still apply first. Offers for an existing account are not subject to these limits or to the creation size rule.
+Each value must be a plain positive integer, at most 2,147,483,646. Anything else that is set (0, negative, decimal, exponent, hex, too large) is ignored with one `console.warn` per process per variable, and the default applies, so a typo never disables a limit. Unset or blank is the default, silently. An attempt counts when it reaches check 6, that is, when its chain verified, whether or not it later succeeds. Over budget answers 429 `rate_limited` with a `Retry-After` header. Offers for an existing account are not subject to these limits or to the creation size rule.
+
+Rate-limit keys that use the client address bucket IPv6 by /64: `2001:db8:1:2:...` becomes `2001:db8:1:2::/64`. An IPv4-mapped IPv6 address is its IPv4 address, and an IPv4 address loses any port. This applies to every per-IP key in the ledger route (`ledger-write`, `ledger-read`, `account-create-ip`). One IPv6 subscriber usually holds a whole /64, so a client cannot get a fresh budget by changing the low 64 bits. All clients of one /64 share a budget.
 
 ### Per-account limits
 
 - Pairing mailbox, `PUT /api/pair/[requestId]`: 30 writes per 10 minutes per account (`pair-write`, 429 `rate_limited`), and at most 20 unexpired rows per account (429 `pair_mailbox_full`). Each write first deletes that account's expired rows. Rows live 10 minutes.
 - Session relay token, `POST /api/auth/token`: 120 per minute per account (`relay-token-session`, 429 `rate_limited`).
+- Ledger writes to an existing account, `POST /api/account/ledger` (scope `ledger-adopt-account`, key = `accountId`): 60 per 10 minutes, fixed window, 429 `rate_limited` with `Retry-After`. It is consumed only when the offered chain verified and leads to a real row write: the server adopts it, or keeps its own chain and adds new revocation ids to the sticky set. A reject, or a keep that changes nothing, spends nothing. A third party cannot use it to lock the owner out: a chain that is invalid, or a replay of the stored or an older chain, does not change the row and does not spend the budget. A chain that does change the row has to be a valid, passkey-signed chain, which only a holder of the account's keys can produce; replaying a public fork that carries revocations the server has not recorded yet spends the budget once, because the server records them. The browser shows "Too many changes in a short time. Wait a few minutes and try again." (Security panel).
+
+### Server reads: sealed checkpoint
+
+Why. Sessions are stateless JWTs signed with `AUTH_SECRET`. If the server trusted any value the database holds, a writer of the database alone could make it authorize a key. Verifying the whole chain on every request would be too slow. So the server stores a checkpoint of the verified chain and seals it with a key the database does not hold.
+
+What is stored (migration `0012_multi_account.sql`, columns on `account_ledger`):
+- `checkpoint`: text, the canonical JSON of the raw checkpoint of the chain, as `verifyLedger` returned it. No sticky revocations are applied to it.
+- `checkpoint_mac`: text, lowercase hex HMAC-SHA256.
+- They are written in the same statement as `ledger`, `sticky`, `head`, `revision` on every create and every write.
+- The columns are nullable for rows that predate them.
+
+What the MAC covers. The message is the lines `ftown-checkpoint-v1`, `account_id`, `revision`, `head`, hex SHA-256 of the canonical sticky set, and the checkpoint text, joined with `\n`. The canonical sticky set is `{"deviceIds":[...],"bridgeIds":[...]}` with those two keys in that order; the column's own text is not used because `jsonb` reorders keys. The key is `HKDF-SHA256(AUTH_SECRET, salt = empty, info = "ftown-checkpoint-v1", 32 bytes)`. The comparison is constant time. A MAC therefore binds the checkpoint to its account, revision, head and sticky set.
+
+When the server trusts it. An auth decision (`readTrustedCheckpoint`) reads one small row. It trusts the checkpoint only if the MAC verifies and the checkpoint names exactly the row's `account_id`, `head` and `revision`. Then it parses no chain and checks no signature. The trusted checkpoint is `applyRevocations(raw, sticky)`, computed on every read from the raw checkpoint and the sticky set, never stored. `chooseLedger` for an offer uses the same MAC-checked raw checkpoint as its cache for the stored chain.
+
+Heal path. If the checkpoint is absent, stale (head or revision differ from the row), tampered (MAC does not verify), or the MAC key changed (`AUTH_SECRET` rotated, or another instance wrote the row with a different secret), the server verifies the stored chain from genesis, checks that it matches the row's account, head and revision, and writes a fresh checkpoint and MAC. The write is guarded by `version`, `revision` and `head`. If the row moved meanwhile it re-reads, up to 3 rounds, then fails with `account_ledger_conflict` (503). A stored chain that does not verify is `account_ledger_corrupt` (503), never "absent". The heal uses the sticky set as it is in the row.
+
+Threat model. A writer of the database alone, without `AUTH_SECRET`, cannot get a key authorized that the passkey-signed chain does not list. It cannot write a checkpoint the server will trust, and the heal derives the checkpoint from the stored chain, which must verify from the passkey-signed genesis. What such a writer can still do:
+- Replay an older, internally consistent row (chain, sticky, checkpoint and MAC from a backup). The server then trusts the older state until a newer chain arrives.
+- Remove sticky-only revocations. The sticky set is not passkey-signed. If it is edited, the MAC fails and the heal re-seals the edited set. Only revocations that exist solely on a discarded fork can be dropped this way; revocations of the winning chain are in the raw checkpoint.
+- Serve a tampered `ledger` column to clients. Clients verify every chain from genesis themselves and reject it. The server does not verify signatures on a read whose MAC is valid; it checks only the two hashes (genesis to `account_id`, last record to `head`) and the columns.
+
+Consequences for operations: rotating `AUTH_SECRET` is safe for stored accounts (each row is healed on its first read, one chain verification) but invalidates all sessions. Two instances with different `AUTH_SECRET` values re-heal each other's rows. See `docs/runbooks/multi-account-operations.md`.
 
 ### Account name
 
@@ -338,7 +366,10 @@ Registration is open to anyone with a passkey when `REGISTRATION_ENABLED=true`. 
 a. Relay client publish is not limited per user in Centrifugo. A foreign account can publish ciphertext or noise into another account's channels. Receivers drop it, but it is a flooding and history-poisoning vector. Close it before opening registration to strangers.
 b. Centrifugo connection limits are global and shared by all accounts.
 c. Without a trusted proxy (`FTOWN_TRUSTED_PROXY`, Vercel or Fly), `clientIp()` returns the constant `unknown`. Per-IP limits are then shared by everyone, and the global daily cap becomes the effective creation limit.
-d. Pairing: anyone who obtains a pairing link and its 6-digit code within the 10-minute lifetime can pair that computer into their own account. The terminal prints which account it paired with ("Paired with account ..."); check it.
+d. Pairing: the 6-digit code is `pairComparisonCode(request)`, a hash of the request that is part of the link itself (`bridge/src/security/ledger/pairing.ts`). It does not depend on the link's `secret`. Anyone who has the link can therefore compute the code, and a leaked link is enough to pair that computer into their own account within the 10-minute lifetime. The terminal prints which account it paired with ("Paired with account ..."); check it.
 e. A rejected creation can leave an orphan passkey in the user's authenticator.
 f. There is no account deletion and no cleanup of abandoned accounts.
 g. A push endpoint already registered to one account cannot be claimed by another (409 `subscription_limit_or_conflict`).
+h. A revocation POST that is rejected or rate-limited is not retried by the browser until its next write. Bridges learn new chains only through the server, so the server can keep authorizing a just-revoked key until a later write succeeds.
+i. For a few seconds after a pairing, the approving browser can get "Encrypted request rejected" from the new computer. Seen in e2e; the cause was not investigated.
+j. There is no e2e coverage of `registration_closed`, creation `rate_limited` and `server_full`; they have unit tests only.

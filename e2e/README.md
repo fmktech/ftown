@@ -20,7 +20,10 @@ attention, mail, push, usage and the admission/IDOR guards.
 - `helpers/` — `passkey.ts` (Chrome virtual authenticator, account creation, sign-in, /pair
   approval), `second-account.ts` (a real second account B), `ledger-admin.ts` (Node-side
   passkey signer, ledger reads, key proofs, creation chains), `ledger-bridge.ts`
-  (test-owned unpaired bridges), app/Centrifugo/bridge-API helpers.
+  (test-owned unpaired bridges), `db.ts` (direct access to the throwaway fixture
+  database, e.g. sealed-checkpoint tampering in `ledger-checkpoint.spec.ts`),
+  `browser-proof.ts` (proofs signed in-page by a browser's own device key),
+  app/Centrifugo/bridge-API helpers.
 - `tests/account.setup.ts` — the `setup` project: creates the shared account A and pairs
   the two shared bridges to it. `tests/*.spec.ts` — the suite.
 

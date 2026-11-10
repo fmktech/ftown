@@ -163,15 +163,21 @@ export async function importAuthKey(jwk: JsonWebKey): Promise<CryptoKey> {
 
 /** A fresh browser device of `accountId` for an add_device operation: ECDH endpoint point (id = SHA-256(point)) and a distinct ECDSA auth key. */
 export async function browserDevice(accountId: string, label: string, approvedAt: number): Promise<LedgerDevice> {
+  return (await browserDeviceWithKey(accountId, label, approvedAt)).device;
+}
+
+/** browserDevice plus the device's ECDSA auth private key, so a test can sign proofs as that device. */
+export async function browserDeviceWithKey(accountId: string, label: string, approvedAt: number): Promise<{ device: LedgerDevice; authKey: CryptoKey }> {
   const endpoint = await webcrypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]) as CryptoKeyPair;
   const auth = await webcrypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]) as CryptoKeyPair;
   const point = Buffer.from(await webcrypto.subtle.exportKey("raw", endpoint.publicKey));
-  return {
+  const device: LedgerDevice = {
     endpoint: { version: 1, id: createHash("sha256").update(point).digest("base64url"), ownerId: accountId, kind: "browser", publicKey: b64url(point) },
     authPublicKey: b64url(Buffer.from(await webcrypto.subtle.exportKey("raw", auth.publicKey))),
     label,
     approvedAt,
   };
+  return { device, authKey: auth.privateKey as CryptoKey };
 }
 
 export interface CreationLedger {

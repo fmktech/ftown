@@ -566,6 +566,7 @@ describe("Mode selection", () => {
   });
   it("maps ledger and legacy error codes to fixed text only", () => {
     expect(securityErrorMessage(new Error("passkey_cancelled"))).toMatch(/cancelled/);
+    expect(securityErrorMessage({ code: "constructor" })).toBe("This security action could not be completed. Refresh and try again.");
     expect(securityErrorMessage({ code: "account_bridge_revoked" })).toBe("This computer was removed from account trust.");
     expect(securityErrorMessage(new Error("Server said <b>no</b>"))).toBe("This security action could not be completed. Refresh and try again.");
   });

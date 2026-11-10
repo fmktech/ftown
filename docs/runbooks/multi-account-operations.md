@@ -14,7 +14,7 @@ For the operator of an ftown server. One server hosts many independent accounts.
 
 ## Limits on account creation
 
-Set in the server environment. Each must be a plain positive integer. Anything else falls back to the default.
+Set in the server environment. Each must be a plain positive integer. Anything else (0, negative, decimal, empty, too large) falls back to the default and the server logs a warning once per process. A limit cannot be switched off with 0. `REGISTRATION_ENABLED` is the only off switch.
 
 | Env var | Default | Meaning |
 |---|---|---|
@@ -23,6 +23,22 @@ Set in the server environment. Each must be a plain positive integer. Anything e
 | `FTOWN_ACCOUNT_CREATE_GLOBAL_DAY` | 200 | Attempts per day, all clients together. Over it: 429. |
 
 If the server is not behind a proxy that ftown trusts (Vercel, Fly, or `FTOWN_TRUSTED_PROXY=1`), every client has the same IP key. Then the per-IP limit is shared by everyone and the global daily limit is the real limit. Set `FTOWN_TRUSTED_PROXY=1` only when your proxy overwrites `X-Forwarded-For` / `X-Real-IP`.
+
+IPv6 clients are counted by /64, not by full address. All clients in one /64 (usually one household or one office) share one budget. IPv4 clients are counted by address.
+
+The per-IP and global creation budgets are spent only by a request whose chain verified, after the signature check. Malformed or unsigned requests do not use them. Other answers on account creation: `server_misconfigured` (503, the public origin or RP ID is not set up; see the server log), `origin_mismatch` (400), `creation_too_large` (413), `handle_taken` (409).
+
+## Limit on changes to an existing account
+
+Each account can make 60 ledger writes per 10 minutes (a write is a chain that the server adopts, or one that adds revocations it did not have). Over it, the server answers 429 `rate_limited` and the Security panel shows "Too many changes in a short time. Wait a few minutes and try again." Waiting up to 10 minutes clears it. Only valid, signed chains count, so another person cannot use up an account's budget with junk.
+
+## Rotating AUTH_SECRET and mixed deploys
+
+The server keeps a sealed copy of each account's checkpoint, keyed from `AUTH_SECRET` (see "Server reads: sealed checkpoint" in the contract amendment).
+
+- Rotating `AUTH_SECRET` does not damage stored accounts. Each row is re-sealed on its first read after the change, which costs one verification of that account's chain. Expect a short burst of CPU after the change if many accounts are active.
+- It signs everyone out, because sessions are signed with the same secret. Users sign in again with their passkey.
+- During a rolling deploy where two instances run with different `AUTH_SECRET` values, each instance finds the other's seal invalid and re-seals the row. Nothing is lost, but each read can cost a chain verification and rows are written repeatedly. Give all instances the same value, and finish the roll quickly.
 
 ## What a new user does
 
@@ -51,8 +67,10 @@ This does not disconnect computers or browsers that are already connected, and r
 
 Do not set `REGISTRATION_ENABLED=true` on a public server until these are done.
 
-- [ ] Relay publish isolation. Centrifugo client publish is not limited per user, so one account can publish noise into another account's channels. Receivers drop it, but it can flood and poison history. Tracked as a separate change; see "Known gaps" in the contract amendment.
-- [ ] Centrifugo connection limits. They are global and shared by all accounts. Size them for the expected number of users.
+- [ ] Relay publish isolation (PR B). Centrifugo client publish is not limited per user, so one account can publish noise into another account's channels. Receivers drop it, but it can flood and poison history. Tracked as a separate change; see "Known gaps" in the contract amendment.
+- [ ] Relay connection and memory limits. Centrifugo connection limits are global and shared by all accounts. Size them, and the relay's memory, for the expected number of users.
 - [ ] A trusted proxy, so per-IP limits work (see above).
-- [ ] You accept that there is no account deletion and no abandoned-account cleanup.
+- [ ] Account removal and abandoned-account cleanup. Neither exists. The soft cap (1000 accounts by default) can be filled for good: at the default global budget of 200 creations per day, it takes about five days. Until cleanup exists, raise `FTOWN_MAX_ACCOUNTS` or delete rows by hand (see "Removing an account").
+- [ ] Pairing confirmation on the bridge. A computer pairs when someone with the link and the account's passkey approves. The terminal only prints the account afterwards; it does not ask. Anyone who has the link can compute the 6-digit code, so a leaked link is enough. Tell users to keep the link private and to check the printed account.
+- [ ] Automatic retry of pending revocations. A revocation that the server rejects or rate-limits is not retried by the browser until its next write, and bridges learn new chains only through the server. The server can keep authorizing a just-revoked key until a later write succeeds. Tell users to confirm in Security that a removal took effect.
 - [ ] Limits set to values you chose, not just the defaults.

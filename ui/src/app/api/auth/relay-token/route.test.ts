@@ -158,25 +158,50 @@ describe('POST /api/auth/relay-token', () => {
     expect(await res.json()).toEqual({ error: 'unauthorized' });
     expect(readChain).not.toHaveBeenCalled();
   });
-  it('returns key_revoked with the ledger as evidence for a revoked bridge', async () => {
-    const t = checkpoint({ ...trusted, bridges: [], revokedBridgeIds: [BRIDGE_ID] });
-    readTrusted.mockResolvedValue(t);
+  // A chain that recorded both members, so a revoked member's auth key is found in its add record.
+  const chainWith = () => ({
+    ledger: { genesis: {}, transitions: [
+      { payload: { operation: { type: 'add_device', device: trusted.devices[0] } } },
+      { payload: { operation: { type: 'add_bridge', bridge: trusted.bridges[0] } } },
+    ] },
+    trusted, sticky: { deviceIds: [], bridgeIds: [] },
+  });
+  const revokeBridge = () => { readTrusted.mockResolvedValue(checkpoint({ ...trusted, bridges: [], revokedBridgeIds: [BRIDGE_ID] })); readChain.mockResolvedValue(chainWith()); };
+  it('returns key_revoked with the ledger as evidence for a revoked bridge that signed the proof', async () => {
+    revokeBridge();
     const res = await POST(req(await bridgeBody()));
     expect(res.status).toBe(401);
-    expect(await res.json()).toEqual({ error: 'key_revoked', ledger: LEDGER });
+    expect(await res.json()).toEqual({ error: 'key_revoked', ledger: chainWith().ledger });
+    expect(consumeNonce).toHaveBeenCalledTimes(1);
   });
-  it('returns key_revoked for a sticky-revoked bridge (the trusted checkpoint lists it as revoked)', async () => {
-    const t = checkpoint({ ...trusted, bridges: [], revokedBridgeIds: [BRIDGE_ID] });
-    readTrusted.mockResolvedValue(t);
-    const res = await POST(req(await bridgeBody()));
-    expect(res.status).toBe(401);
-    expect((await res.json()).error).toBe('key_revoked');
-  });
-  it('returns key_revoked for a revoked device', async () => {
-    const t = checkpoint({ ...trusted, devices: [], revokedDeviceIds: [DEVICE_ID] });
-    readTrusted.mockResolvedValue(t);
+  it('returns key_revoked for a revoked device that signed the proof', async () => {
+    readTrusted.mockResolvedValue(checkpoint({ ...trusted, devices: [], revokedDeviceIds: [DEVICE_ID] }));
+    readChain.mockResolvedValue(chainWith());
     const res = await POST(req({ proof: await proof({ kind: 'device', keyId: DEVICE_ID }, deviceKey), head: HEAD }));
     expect((await res.json()).error).toBe('key_revoked');
+    expect(consumeNonce).toHaveBeenCalledTimes(1);
+  });
+  it('gives a plain 401 without the ledger when a revoked key id is claimed but another key signed', async () => {
+    revokeBridge();
+    const res = await POST(req({ proof: await proof({}, deviceKey), head: HEAD, hostname: 'h' }));
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: 'unauthorized' });
+    expect(consumeNonce).toHaveBeenCalledTimes(1);
+  });
+  it('gives a plain 401 for a revoked key with a valid signature but the wrong audience or purpose', async () => {
+    revokeBridge();
+    for (const over of [{ audience: 'https://evil.example' }, { purpose: 'session' as const }]) {
+      consumeNonce.mockClear();
+      const res = await POST(req(await bridgeBody({}, over)));
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: 'unauthorized' });
+    }
+  });
+  it('gives a plain 401 when the chain has no add record for the revoked id', async () => {
+    revokeBridge();
+    readChain.mockResolvedValue({ ...chainWith(), ledger: { genesis: {}, transitions: [] } });
+    const res = await POST(req(await bridgeBody()));
+    expect(await res.json()).toEqual({ error: 'unauthorized' });
   });
   it('gives a plain 401 with no ledger for an unknown key or account', async () => {
     const unknown = 'U'.repeat(43);

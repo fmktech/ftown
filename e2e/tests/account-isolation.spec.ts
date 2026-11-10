@@ -4,11 +4,11 @@ import { createECDH, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import pg from "pg";
-import type { AuthProof, AuthProofFields } from "../../bridge/src/security/ledger/proof";
 import type { LedgerTransition, Signed } from "../../bridge/src/security/ledger/protocol";
+import { signWithBrowserDeviceKey } from "../helpers/browser-proof";
+import { withDb } from "../helpers/db";
 import { test } from "../helpers/fixtures";
-import { createShellSession, getCentrifugoToken, login, openSession, runMarkerInTerminal, sharedAccountId, waitForBridgeOnline } from "../helpers/app";
+import { createShellSessionWhenAccepted, getCentrifugoToken, login, openSession, runMarkerInTerminal, sharedAccountId, waitForBridgeOnline } from "../helpers/app";
 import { readBridgePointer } from "../helpers/bridge-api";
 import { E2E_DIR, UI_BASE_URL } from "../helpers/config";
 import { sessionIdsFor, waitForNewSessionId } from "../helpers/centrifugo";
@@ -170,40 +170,6 @@ async function showASession(): Promise<void> {
   await expect(a.page.locator(".xterm-rows").first()).toContainText(/[$%#>]/, { timeout: 30_000 });
 }
 
-/**
- * Sign an auth proof with THIS browser's own device key, inside the page (the key is non-extractable): the same bytes
- * signAuthProof (bridge/src/security/ledger/proof.ts) signs, low-S normalized.
- */
-async function signWithBrowserDeviceKey(page: Page, fields: AuthProofFields): Promise<AuthProof> {
-  return page.evaluate(async f => {
-    const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open("ftown-device-auth");
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(new Error("device auth storage unavailable"));
-    });
-    try {
-      const record = await new Promise<{ privateKey?: CryptoKey } | undefined>((resolve, reject) => {
-        const request = db.transaction("device-auth-v2").objectStore("device-auth-v2").get("device");
-        request.onsuccess = () => resolve(request.result as { privateKey?: CryptoKey } | undefined);
-        request.onerror = () => reject(new Error("device auth key unavailable"));
-      });
-      const key = record?.privateKey;
-      if (!(key instanceof CryptoKey) || key.type !== "private" || key.extractable !== false) throw new Error("expected this browser's non-extractable device auth key");
-      const text = "ftown-auth-proof-v1\n" + JSON.stringify({ accountId: f.accountId, audience: f.audience, keyId: f.keyId, kind: f.kind, nonce: f.nonce, purpose: f.purpose });
-      const raw = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, new TextEncoder().encode(text)));
-      const order = BigInt("0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551");
-      const s = BigInt("0x" + Array.from(raw.subarray(32), byte => byte.toString(16).padStart(2, "0")).join(""));
-      if (s > order / BigInt(2)) {
-        const low = (order - s).toString(16).padStart(64, "0");
-        for (let index = 0; index < 32; index += 1) raw[32 + index] = parseInt(low.slice(index * 2, index * 2 + 2), 16);
-      }
-      let binary = "";
-      for (const byte of raw) binary += String.fromCharCode(byte);
-      return { ...f, signature: btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "") };
-    } finally { db.close(); }
-  }, fields);
-}
-
 test.describe("account isolation: two real accounts on one server", () => {
   test.beforeAll(async ({ browser }) => {
     test.setTimeout(300_000);
@@ -227,7 +193,8 @@ test.describe("account isolation: two real accounts on one server", () => {
     const before = await sessionIdsFor(accountId);
     const sessionName = `iso-A-${hex()}`;
     const hostBridgeId = readBridgePointer().bridgeId;
-    await createShellSession(page, sessionName, hostBridgeId);
+    // This browser was just added to A: the computer may refuse its first encrypted requests for a few seconds.
+    await createShellSessionWhenAccepted(page, sessionName, hostBridgeId);
     const sid = await waitForNewSessionId(accountId, before);
     await openSession(page, sessionName);
     await runMarkerInTerminal(page, `iso-a-baseline-${hex()}`);
@@ -369,24 +336,22 @@ test.describe("account isolation: two real accounts on one server", () => {
     const keys = () => { const ecdh = createECDH("prime256v1"); ecdh.generateKeys(); return { p256dh: ecdh.getPublicKey().toString("base64url"), auth: b64url(16) }; };
     const endpoint = `https://fcm.googleapis.com/fcm/send/e2e-isolation-${hex(8)}`;
     const keysA = keys();
-    const db = new pg.Client({ host: process.env.PGHOST ?? "localhost", port: Number(process.env.PGPORT ?? 5432), user: process.env.PGUSER ?? "ftown", password: process.env.PGPASSWORD ?? "ftown", database: process.env.PGDATABASE ?? "ftown" });
-    await db.connect();
-    const rows = async () => (await db.query("SELECT account_id, p256dh, auth FROM push_subscriptions WHERE endpoint=$1", [endpoint])).rows as { account_id: string; p256dh: string; auth: string }[];
-    try {
-      const subscribed = await a.page.request.post("/api/push", { headers: origin, data: { endpoint, keys: keysA } });
-      expect(subscribed.status()).toBe(201);
-      const takeover = await b.second.page.request.post("/api/push", { headers: origin, data: { endpoint, keys: keys() } });
-      expect(takeover.status()).toBe(409);
-      expect(await takeover.json()).toEqual({ error: "subscription_limit_or_conflict" });
-      const removal = await b.second.page.request.delete("/api/push", { headers: origin, data: { endpoint } });
-      expect(removal.status()).toBe(204); // idempotent and scoped to B: B holds no such subscription
-      expect(await rows()).toEqual([{ account_id: a.accountId, p256dh: keysA.p256dh, auth: keysA.auth }]);
-    } finally {
+    await withDb(async db => {
+      const rows = async () => (await db.query("SELECT account_id, p256dh, auth FROM push_subscriptions WHERE endpoint=$1", [endpoint])).rows as { account_id: string; p256dh: string; auth: string }[];
       try {
+        const subscribed = await a.page.request.post("/api/push", { headers: origin, data: { endpoint, keys: keysA } });
+        expect(subscribed.status()).toBe(201);
+        const takeover = await b.second.page.request.post("/api/push", { headers: origin, data: { endpoint, keys: keys() } });
+        expect(takeover.status()).toBe(409);
+        expect(await takeover.json()).toEqual({ error: "subscription_limit_or_conflict" });
+        const removal = await b.second.page.request.delete("/api/push", { headers: origin, data: { endpoint } });
+        expect(removal.status()).toBe(204); // idempotent and scoped to B: B holds no such subscription
+        expect(await rows()).toEqual([{ account_id: a.accountId, p256dh: keysA.p256dh, auth: keysA.auth }]);
+      } finally {
         expect((await a.page.request.delete("/api/push", { headers: origin, data: { endpoint } })).status()).toBe(204);
         expect(await rows()).toEqual([]);
-      } finally { await db.end(); }
-    }
+      }
+    });
   });
 
   test("pair mailbox: B cannot overwrite A's sealed approval and the refusal reveals nothing", async () => {
