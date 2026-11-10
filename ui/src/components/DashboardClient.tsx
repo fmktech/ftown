@@ -10,6 +10,8 @@ import { SecureEndpointRuntime } from "@/lib/secure-endpoint-runtime";
 import { Dashboard } from "@/components/Dashboard";
 import { detachPushSubscription } from "./PushNotificationsControl";
 import { securityErrorMessage } from "./SecurityPanel";
+import { useLedger } from "@/hooks/useLedger";
+import { UnsavedRemovalRetryButton, unsavedRemovalState } from "./UnsavedRemovalRetry";
 
 interface DashboardClientProps {
   ownerId: string;
@@ -54,26 +56,49 @@ function AccountDashboardClient(props: DashboardClientProps) {
   const state = useAccountIdentity(props.ownerId);
   if (state.status === "checking") return <OpeningIdentity />;
   if (state.status === "error") return <BrowserSecurityUnavailable code={state.code} />;
-  if (state.status !== "ready") return <AccountAccessEnded removed={state.status === "removed"} />;
+  if (state.status !== "ready") return <AccountAccessEnded removed={state.status === "removed"} endpointId={state.identity.endpoint.id} />;
   return <EncryptedDashboardClient {...props} identity={state.identity} ledger={state.ledger} accountId={props.userId} />;
 }
 
-/** This browser is not (or no longer) a trusted device of the signed-in account: no encrypted resources exist on this screen. */
-function AccountAccessEnded({ removed }: { removed: boolean }) {
+/**
+ * This browser is not (or no longer) a trusted device of the signed-in account: no encrypted resources exist on this screen.
+ * A removal is only reported as final once the server has it: while it is unsaved the server still accepts this browser, so the screen
+ * says so (and retries) instead of offering to sign in again; while nothing is confirmed it says "not confirmed".
+ */
+function AccountAccessEnded({ removed, endpointId }: { removed: boolean; endpointId: string }) {
   const { signOut } = useAuthMode();
+  const { client, snapshot } = useLedger();
   const [leaving, setLeaving] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const unsaved = removed && (snapshot.unsaved?.deviceIds ?? []).includes(endpointId);
+  const unconfirmed = removed && !unsaved && snapshot.serverState === "unknown";
   function signInAgain() {
     if (leaving) return;
     setLeaving(true);
     void detachPushSubscription().catch(() => {}).finally(signOut);
   }
-  return <main className="flex min-h-dvh items-center justify-center p-4"><section className="max-w-md space-y-4 rounded-xl border border-[var(--border-muted)] bg-[var(--bg-surface)] p-6">
+  function retry() {
+    if (retrying) return;
+    setRetrying(true);
+    void client.retryNow().catch(() => {}).finally(() => setRetrying(false));
+  }
+  const shell = (children: React.ReactNode) => <main className="flex min-h-dvh items-center justify-center p-4"><section className="max-w-md space-y-4 rounded-xl border border-[var(--border-muted)] bg-[var(--bg-surface)] p-6">{children}</section></main>;
+  if (unsaved) return shell(<>
+    <h1 className="text-xl font-semibold">Removing this browser…</h1>
+    <p role="status" className="text-sm text-[var(--text-secondary)]">{unsavedRemovalState(snapshot, true).text}</p>
+    <UnsavedRemovalRetryButton snapshot={snapshot} busy={retrying} retrying={retrying} onRetry={retry} />
+  </>);
+  if (unconfirmed) return shell(<>
+    <h1 className="text-xl font-semibold">This browser was removed</h1>
+    <p role="status" className="text-sm text-[var(--text-secondary)]">Removed here. Not confirmed by the server yet.</p>
+  </>);
+  return shell(<>
     <h1 className="text-xl font-semibold">{removed ? "This browser was removed" : "Sign in again"}</h1>
     <p role="alert" className="text-sm text-[var(--text-secondary)]">{removed
       ? "This browser was removed from your account, so it can no longer open encrypted sessions. Sign in with your passkey to add it again."
       : "This browser does not hold your account's keys. Sign in with your passkey to continue."}</p>
     <button type="button" className="btn-ghost min-h-11" disabled={leaving} onClick={signInAgain}>{leaving ? "Signing out…" : "Sign in again"}</button>
-  </section></main>;
+  </>);
 }
 
 function EncryptedDashboardClient({ identity, pins, ledger, accountId, ...props }: DashboardClientProps & { identity: EndpointIdentity; pins?: ApprovedBridge[]; ledger?: LedgerClient; accountId?: string }) {
