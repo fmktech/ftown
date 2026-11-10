@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { readBoundedJson, BoundedJsonError } from '@/lib/bounded-json';
-import { clientIp } from '@/lib/client-ip';
+import { rateLimitKeyIp } from '@/lib/client-ip';
 import { requireAccount } from '@/lib/ledger-auth';
 import { consumeRateLimit, type RateLimitConfig } from '@/lib/login-rate-limit';
 import { putPairApproval, takePairApproval } from '@/lib/pair-mailbox-store';
@@ -55,7 +55,7 @@ export async function GET(request: Request, context: Context): Promise<NextRespo
   try {
     const requestId = (await context.params).requestId;
     if (!validRequestIdShape(requestId)) return NextResponse.json({ error: 'invalid_request' }, { status: 400, headers });
-    const ipLimit = await consumeRateLimit('pair-read-ip', clientIp(request), PAIR_READ_IP_RATE_LIMIT);
+    const ipLimit = await consumeRateLimit('pair-read-ip', rateLimitKeyIp(request), PAIR_READ_IP_RATE_LIMIT);
     if (!ipLimit.allowed) {
       return NextResponse.json({ error: 'rate_limited' }, { status: 429, headers: { ...headers, 'Retry-After': String(Math.ceil((ipLimit.retryAfterMs ?? 60000) / 1000)) } });
     }

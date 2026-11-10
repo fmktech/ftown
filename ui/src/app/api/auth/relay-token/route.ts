@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { consumeNonce } from '@/lib/auth-nonce-store';
-import { readLedger } from '@/lib/account-ledger-store';
-import { clientIp } from '@/lib/client-ip';
+import { readLedger, readTrustedCheckpoint } from '@/lib/account-ledger-store';
+import { rateLimitKeyIp } from '@/lib/client-ip';
 import { consumeRateLimit, type RateLimitConfig } from '@/lib/login-rate-limit';
 import { publicOrigin } from '@/lib/ledger-auth';
 import { signRelayToken } from '@/lib/relay-jwt';
@@ -22,7 +22,7 @@ const unauthorized = () => fail(401, { error: 'unauthorized' });
 
 export async function POST(request: Request): Promise<NextResponse> {
   try {
-    const ipLimit = await consumeRateLimit('relay-token-ip', clientIp(request), IP_LIMIT);
+    const ipLimit = await consumeRateLimit('relay-token-ip', rateLimitKeyIp(request), IP_LIMIT);
     if (!ipLimit.allowed) return fail(429, { error: 'rate_limited' }, { 'Retry-After': String(Math.ceil((ipLimit.retryAfterMs ?? 60000) / 1000)) });
 
     let body: unknown;
@@ -44,14 +44,17 @@ export async function POST(request: Request): Promise<NextResponse> {
 
     // Consume the nonce before any ledger work: replay protection is only this atomic delete.
     if (!(await consumeNonce(proof.nonce, 'relay'))) return unauthorized();
-    const stored = await readLedger({ accountId: proof.accountId });
-    if (!stored) return unauthorized();
+    // The decision uses the persisted trusted checkpoint; the chain itself is read (never re-verified) only when it is sent back.
+    const trusted = await readTrustedCheckpoint(proof.accountId);
+    if (!trusted) return unauthorized();
+    const chain = async () => (await readLedger({ accountId: proof.accountId }))?.ledger ?? null;
 
-    const trusted = stored.trusted;
     const valid = await verifyAuthProof(trusted, proof, { audience: publicOrigin(), purpose: 'relay' });
     if (!valid) {
       const revoked = trusted.revokedBridgeIds.includes(proof.keyId) || trusted.revokedDeviceIds.includes(proof.keyId);
-      return revoked ? fail(401, { error: 'key_revoked', ledger: stored.ledger }) : unauthorized();
+      if (!revoked) return unauthorized();
+      const ledger = await chain();
+      return ledger ? fail(401, { error: 'key_revoked', ledger }) : unauthorized();
     }
 
     const keyLimit = await consumeRateLimit('relay-token-key', `${proof.accountId}:${proof.keyId}`, KEY_LIMIT);
@@ -59,8 +62,10 @@ export async function POST(request: Request): Promise<NextResponse> {
 
     const centrifugoUrl = process.env.NEXT_PUBLIC_CENTRIFUGO_URL;
     if (!centrifugoUrl) { console.error('[auth/relay-token] NEXT_PUBLIC_CENTRIFUGO_URL is not configured'); return fail(503, { error: 'unavailable' }); }
+    const ledger = head === trusted.head ? null : await chain();
+    if (head !== trusted.head && !ledger) return unauthorized();
     const { token, expiresAt } = signRelayToken({ accountId: proof.accountId, info });
-    return NextResponse.json(head === stored.checkpoint.head ? { token, expiresAt, centrifugoUrl } : { token, expiresAt, centrifugoUrl, ledger: stored.ledger }, { headers });
+    return NextResponse.json(ledger ? { token, expiresAt, centrifugoUrl, ledger } : { token, expiresAt, centrifugoUrl }, { headers });
   } catch (error) {
     console.error('[auth/relay-token] unavailable:', error instanceof Error ? error.name : 'unknown');
     return fail(503, { error: 'unavailable' });

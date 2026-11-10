@@ -4,7 +4,11 @@ const issueNonce = vi.fn();
 const consumeRateLimit = vi.fn();
 vi.mock('@/lib/auth-nonce-store', () => ({ issueNonce: (...a: unknown[]) => issueNonce(...a) }));
 vi.mock('@/lib/login-rate-limit', () => ({ consumeRateLimit: (...a: unknown[]) => consumeRateLimit(...a) }));
-vi.mock('@/lib/client-ip', () => ({ clientIp: () => '1.2.3.4' }));
+const ipState = vi.hoisted(() => ({ ip: '1.2.3.4' }));
+vi.mock('@/lib/client-ip', async importOriginal => {
+  const actual = await importOriginal<typeof import('@/lib/client-ip')>();
+  return { ...actual, clientIp: () => ipState.ip, rateLimitKeyIp: () => actual.rateLimitKey(ipState.ip) };
+});
 import { POST } from './route';
 
 const req = (body: string) => new Request('https://x.example/api/auth/nonce', { method: 'POST', body });
@@ -45,5 +49,24 @@ describe('POST /api/auth/nonce', () => {
   it('503s when storage fails', async () => {
     issueNonce.mockRejectedValue(new Error('db'));
     expect((await POST(req(JSON.stringify({ purpose: 'relay' })))).status).toBe(503);
+  });
+});
+
+describe('auth-nonce limiter key', () => {
+  const keyFor = async (ip: string) => {
+    ipState.ip = ip;
+    consumeRateLimit.mockClear();
+    await POST(req(JSON.stringify({ purpose: 'session' })));
+    return consumeRateLimit.mock.calls.find(c => c[0] === 'auth-nonce')![1];
+  };
+  it('shares one key across addresses of the same IPv6 /64, separates other /64s, leaves IPv4 unchanged', async () => {
+    const a = await keyFor('2001:db8:1:2::1');
+    const b = await keyFor('2001:db8:1:2:ffff:aaaa:bbbb:cccc');
+    const c = await keyFor('2001:db8:1:3::1');
+    expect(a).toBe(b);
+    expect(c).not.toBe(a);
+    expect(await keyFor('1.2.3.4')).toBe('1.2.3.4');
+    expect(await keyFor('unknown')).toBe('unknown');
+    ipState.ip = '1.2.3.4';
   });
 });

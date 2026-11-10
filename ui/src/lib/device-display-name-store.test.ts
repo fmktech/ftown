@@ -1,12 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { StoredLedger } from './account-ledger-store';
+import type { LedgerCheckpoint } from '@security/ledger/protocol';
 import { DeviceDisplayNameStore, parseDeviceNameRequest } from './device-display-name-store';
 
 const roster = (devices: string[], bridges: string[]) => ({ devices: devices.map(id => ({ endpoint: { id } })), bridges: bridges.map(bridgeId => ({ bridgeId })) });
-/** raw lists browser-id, roster-bridge and sticky-bridge; trusted drops sticky-bridge (sticky revocation). */
-const stored = { checkpoint: { ...roster(['browser-id'], ['roster-bridge', 'sticky-bridge']), revision: 3, head: 'head' },
-  trusted: roster(['browser-id'], ['roster-bridge']), ledger: {}, sticky: { deviceIds: [], bridgeIds: ['sticky-bridge'] } } as unknown as StoredLedger;
-const reader = (value: StoredLedger | null = stored) => vi.fn(async () => value);
+/** The persisted trusted checkpoint: the chain lists sticky-bridge too, but its sticky revocation removed it here. */
+const trusted = { ...roster(['browser-id'], ['roster-bridge']), revision: 3, head: 'head', revokedBridgeIds: ['sticky-bridge'] } as unknown as LedgerCheckpoint;
+const reader = (value: LedgerCheckpoint | null = trusted) => vi.fn(async (_accountId: string) => value);
 
 describe('account device display names', () => {
   it('lists only trusted account targets and excludes sticky-revoked and foreign metadata', async () => {
@@ -20,7 +19,7 @@ describe('account device display names', () => {
     const store = new DeviceDisplayNameStore(query, read);
     expect(await store.list('acct')).toEqual({ names: [{ kind: 'browser', id: 'browser-id', name: 'Phone' }],
       eligible: [{ kind: 'browser', id: 'browser-id' }, { kind: 'bridge', id: 'roster-bridge' }] });
-    expect(read).toHaveBeenCalledWith({ accountId: 'acct' });
+    expect(read).toHaveBeenCalledWith('acct');
     expect(query.mock.calls[0][0]).toContain('WHERE account_id=$1');
   });
 

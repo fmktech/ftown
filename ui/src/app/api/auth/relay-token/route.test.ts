@@ -5,12 +5,21 @@ import type { LedgerCheckpoint } from '@security/ledger/protocol';
 
 const calls: string[] = [];
 const consumeNonce = vi.fn();
-const readLedger = vi.fn();
+const readTrusted = vi.fn();
+const readChain = vi.fn();
 const consumeRateLimit = vi.fn();
 vi.mock('@/lib/auth-nonce-store', () => ({ consumeNonce: (...a: unknown[]) => { calls.push('nonce'); return consumeNonce(...a); } }));
-vi.mock('@/lib/account-ledger-store', () => ({ readLedger: (...a: unknown[]) => { calls.push('ledger'); return readLedger(...a); } }));
+// The decision uses the persisted trusted checkpoint; the stored chain is read only when it is sent back.
+vi.mock('@/lib/account-ledger-store', () => ({
+  readTrustedCheckpoint: (...a: unknown[]) => { calls.push('checkpoint'); return readTrusted(...a); },
+  readLedger: (...a: unknown[]) => { calls.push('chain'); return readChain(...a); },
+}));
 vi.mock('@/lib/login-rate-limit', () => ({ consumeRateLimit: (...a: unknown[]) => consumeRateLimit(...a) }));
-vi.mock('@/lib/client-ip', () => ({ clientIp: () => '1.2.3.4' }));
+const ipState = vi.hoisted(() => ({ ip: '1.2.3.4' }));
+vi.mock('@/lib/client-ip', async importOriginal => {
+  const actual = await importOriginal<typeof import('@/lib/client-ip')>();
+  return { ...actual, clientIp: () => ipState.ip, rateLimitKeyIp: () => actual.rateLimitKey(ipState.ip) };
+});
 vi.mock('next-auth/providers/credentials', () => ({ default: (config: unknown) => config }));
 
 import { POST } from './route';
@@ -30,7 +39,6 @@ const checkpoint = (over: Partial<LedgerCheckpoint>): LedgerCheckpoint => ({ ver
 
 let deviceKey: CryptoKey; let bridgeKey: CryptoKey;
 let trusted: LedgerCheckpoint;
-const store = (raw: LedgerCheckpoint, t: LedgerCheckpoint) => ({ ledger: LEDGER, checkpoint: raw, trusted: t, sticky: { deviceIds: [], bridgeIds: [] } });
 
 async function proof(over: Partial<Omit<AuthProof, 'signature'>> = {}, key?: CryptoKey): Promise<AuthProof> {
   return signAuthProof(key ?? bridgeKey, { accountId: ACCOUNT, kind: 'bridge', keyId: BRIDGE_ID, nonce: NONCE, purpose: 'relay', audience: ORIGIN, ...over });
@@ -52,7 +60,8 @@ beforeEach(async () => {
     devices: [{ endpoint: endpoint(DEVICE_ID, 'browser'), authPublicKey: d.publicKey, label: 'd', approvedAt: 1 }],
     bridges: [{ bridgeId: BRIDGE_ID, endpoint: endpoint(BRIDGE_ID, 'bridge'), authPublicKey: b.publicKey, label: 'b', approvedAt: 1 }],
   });
-  readLedger.mockReset().mockResolvedValue(store(trusted, trusted));
+  readTrusted.mockReset().mockResolvedValue(trusted);
+  readChain.mockReset().mockResolvedValue({ ledger: LEDGER, trusted, sticky: { deviceIds: [], bridgeIds: [] } });
 });
 
 describe('POST /api/auth/relay-token', () => {
@@ -92,12 +101,20 @@ describe('POST /api/auth/relay-token', () => {
     expect(claims.exp! - claims.iat!).toBe(3600);
     expect(claims.info).toBeUndefined();
   });
-  it('includes the ledger only when the head differs', async () => {
+  it('includes the ledger only when the head differs, and reads the chain only then', async () => {
     expect((await (await POST(req(await bridgeBody()))).json()).ledger).toBeUndefined();
+    expect(readChain).not.toHaveBeenCalled();
     const res = await POST(req(await bridgeBody({ head: 'other' })));
     expect((await res.json()).ledger).toEqual(LEDGER);
     const res2 = await POST(req(await bridgeBody({ head: undefined })));
     expect((await res2.json()).ledger).toEqual(LEDGER);
+    expect(readChain).toHaveBeenCalledWith({ accountId: ACCOUNT });
+  });
+  it('401s without a token when the chain to send back is gone', async () => {
+    readChain.mockResolvedValue(null);
+    const res = await POST(req(await bridgeBody({ head: 'other' })));
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: 'unauthorized' });
   });
   it('returns centrifugoUrl for bridge and device proofs', async () => {
     expect((await (await POST(req(await bridgeBody()))).json()).centrifugoUrl).toBe('wss://relay.example/connection/websocket');
@@ -116,11 +133,12 @@ describe('POST /api/auth/relay-token', () => {
     const res = await POST(req(await bridgeBody()));
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ error: 'unauthorized' });
-    expect(readLedger).not.toHaveBeenCalled();
+    expect(readTrusted).not.toHaveBeenCalled();
   });
-  it('consumes the nonce before reading the ledger', async () => {
+  it('consumes the nonce before reading the ledger, and decides from the checkpoint alone', async () => {
     await POST(req(await bridgeBody()));
-    expect(calls).toEqual(['nonce', 'ledger']);
+    expect(calls).toEqual(['nonce', 'checkpoint']);
+    expect(readTrusted).toHaveBeenCalledWith(ACCOUNT);
   });
   it('consumes the nonce even when verification fails', async () => {
     const res = await POST(req(await bridgeBody({}, { audience: 'https://evil.example' })));
@@ -138,24 +156,25 @@ describe('POST /api/auth/relay-token', () => {
     const res = await POST(req({ proof: await proof({}, wrongKey), head: HEAD, hostname: 'h' }));
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ error: 'unauthorized' });
+    expect(readChain).not.toHaveBeenCalled();
   });
   it('returns key_revoked with the ledger as evidence for a revoked bridge', async () => {
     const t = checkpoint({ ...trusted, bridges: [], revokedBridgeIds: [BRIDGE_ID] });
-    readLedger.mockResolvedValue(store(t, t));
+    readTrusted.mockResolvedValue(t);
     const res = await POST(req(await bridgeBody()));
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ error: 'key_revoked', ledger: LEDGER });
   });
-  it('returns key_revoked for a sticky-revoked bridge (raw checkpoint still lists it)', async () => {
+  it('returns key_revoked for a sticky-revoked bridge (the trusted checkpoint lists it as revoked)', async () => {
     const t = checkpoint({ ...trusted, bridges: [], revokedBridgeIds: [BRIDGE_ID] });
-    readLedger.mockResolvedValue({ ...store(trusted, t), sticky: { deviceIds: [], bridgeIds: [BRIDGE_ID] } });
+    readTrusted.mockResolvedValue(t);
     const res = await POST(req(await bridgeBody()));
     expect(res.status).toBe(401);
     expect((await res.json()).error).toBe('key_revoked');
   });
   it('returns key_revoked for a revoked device', async () => {
     const t = checkpoint({ ...trusted, devices: [], revokedDeviceIds: [DEVICE_ID] });
-    readLedger.mockResolvedValue(store(t, t));
+    readTrusted.mockResolvedValue(t);
     const res = await POST(req({ proof: await proof({ kind: 'device', keyId: DEVICE_ID }, deviceKey), head: HEAD }));
     expect((await res.json()).error).toBe('key_revoked');
   });
@@ -164,8 +183,9 @@ describe('POST /api/auth/relay-token', () => {
     const res = await POST(req(await bridgeBody({}, { keyId: unknown })));
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ error: 'unauthorized' });
-    readLedger.mockResolvedValue(null);
+    readTrusted.mockResolvedValue(null);
     expect((await POST(req(await bridgeBody()))).status).toBe(401);
+    expect(readChain).not.toHaveBeenCalled();
   });
   it('validates a present bridge hostname and localPort before consuming the nonce', async () => {
     expect((await POST(req(await bridgeBody({ hostname: '' })))).status).toBe(400);
@@ -190,10 +210,29 @@ describe('POST /api/auth/relay-token', () => {
     expect(consumeRateLimit).toHaveBeenCalledWith('relay-token-key', `${ACCOUNT}:${BRIDGE_ID}`, { maxAttempts: 30, lockoutMs: 600000 });
   });
   it('503s when storage fails', async () => {
-    readLedger.mockRejectedValue(new Error('account_ledger_corrupt'));
+    readTrusted.mockRejectedValue(new Error('account_ledger_corrupt'));
     const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     expect((await POST(req(await bridgeBody()))).status).toBe(503);
     expect(log).toHaveBeenCalled();
     log.mockRestore();
+  });
+});
+
+describe('relay-token-ip limiter key', () => {
+  const keyFor = async (ip: string) => {
+    ipState.ip = ip;
+    consumeRateLimit.mockClear();
+    await POST(req({}));
+    return consumeRateLimit.mock.calls.find(c => c[0] === 'relay-token-ip')![1];
+  };
+  it('shares one key across addresses of the same IPv6 /64, separates other /64s, leaves IPv4 unchanged', async () => {
+    const a = await keyFor('2001:db8:1:2::1');
+    const b = await keyFor('2001:db8:1:2:ffff:aaaa:bbbb:cccc');
+    const c = await keyFor('2001:db8:1:3::1');
+    expect(a).toBe(b);
+    expect(c).not.toBe(a);
+    expect(await keyFor('1.2.3.4')).toBe('1.2.3.4');
+    expect(await keyFor('unknown')).toBe('unknown');
+    ipState.ip = '1.2.3.4';
   });
 });

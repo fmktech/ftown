@@ -6,9 +6,11 @@ import { accountIdOf, applyRevocations, ledgerChallenge, ledgerHead, ledgerLastI
 import { createSoftPasskey, type SoftPasskey } from '@security/ledger/testing';
 
 const consumeNonce = vi.fn();
-const readLedger = vi.fn();
+const readTrusted = vi.fn();
+const readChain = vi.fn();
 vi.mock('@/lib/auth-nonce-store', () => ({ consumeNonce: (...a: unknown[]) => consumeNonce(...a) }));
-vi.mock('@/lib/account-ledger-store', () => ({ readLedger: (...a: unknown[]) => readLedger(...a) }));
+// Auth decisions use only the persisted trusted checkpoint; reading (let alone verifying) the chain per request is a regression.
+vi.mock('@/lib/account-ledger-store', () => ({ readTrustedCheckpoint: (...a: unknown[]) => readTrusted(...a), readLedger: (...a: unknown[]) => readChain(...a) }));
 vi.mock('next-auth/providers/credentials', () => ({ default: (config: unknown) => config }));
 
 import { authorizeLedgerProof, ledgerCredentialsProvider, LEDGER_SESSION_MAX_AGE_SECONDS, publicOrigin, requireAccount } from './ledger-auth';
@@ -55,9 +57,9 @@ async function makeFixture(): Promise<Fixture> {
   f = await append(f, { type: 'add_bridge', bridge: { bridgeId: 'studio', endpoint: bridgeEndpoint, authPublicKey: bKey.publicKey, label: 'Studio', approvedAt: createdAt } });
   return f;
 }
-async function storedOf(ledger: Ledger, sticky: Sticky = { deviceIds: [], bridgeIds: [] }) {
-  const checkpoint: LedgerCheckpoint = await verifyLedger(ledger);
-  return { ledger, checkpoint, trusted: applyRevocations(checkpoint, sticky), sticky };
+/** What the store persists for `ledger` with `sticky`: its checkpoint with the sticky revocations applied. */
+async function trustedOf(ledger: Ledger, sticky: Sticky = { deviceIds: [], bridgeIds: [] }): Promise<LedgerCheckpoint> {
+  return applyRevocations(await verifyLedger(ledger), sticky);
 }
 
 let fx: Fixture;
@@ -67,21 +69,23 @@ const proof = (over: Partial<Omit<AuthProof, 'signature'>> = {}, key?: CryptoKey
 beforeEach(async () => {
   vi.stubEnv('FTOWN_PUBLIC_URL', ORIGIN);
   consumeNonce.mockReset().mockResolvedValue(true);
-  readLedger.mockReset();
+  readTrusted.mockReset();
+  readChain.mockReset().mockRejectedValue(new Error('the chain must not be read for an auth decision'));
   fx = await makeFixture();
-  readLedger.mockResolvedValue(await storedOf(fx.ledger));
+  readTrusted.mockResolvedValue(await trustedOf(fx.ledger));
 });
 
 describe('authorizeLedgerProof', () => {
   it('accepts a valid device session proof', async () => {
     expect(await authorizeLedgerProof(await proof())).toEqual({ id: fx.accountId, endpointId: fx.deviceId });
     expect(consumeNonce).toHaveBeenCalledWith(NONCE, 'session');
-    expect(readLedger).toHaveBeenCalledWith({ accountId: fx.accountId });
+    expect(readTrusted).toHaveBeenCalledWith(fx.accountId);
+    expect(readChain).not.toHaveBeenCalled();
   });
   it('rejects a reused nonce without reading the ledger', async () => {
     consumeNonce.mockResolvedValue(false);
     expect(await authorizeLedgerProof(await proof())).toBeNull();
-    expect(readLedger).not.toHaveBeenCalled();
+    expect(readTrusted).not.toHaveBeenCalled();
   });
   it('rejects a wrong audience', async () => {
     expect(await authorizeLedgerProof(await proof({ audience: 'https://evil.example' }))).toBeNull();
@@ -96,15 +100,15 @@ describe('authorizeLedgerProof', () => {
   });
   it('rejects a device revoked in the chain', async () => {
     const revoked = await append(fx, { type: 'revoke_device', endpointId: fx.deviceId });
-    readLedger.mockResolvedValue(await storedOf(revoked.ledger));
+    readTrusted.mockResolvedValue(await trustedOf(revoked.ledger));
     expect(await authorizeLedgerProof(await proof())).toBeNull();
   });
   it('uses trusted, not the raw checkpoint: a sticky-revoked device is rejected', async () => {
-    readLedger.mockResolvedValue(await storedOf(fx.ledger, { deviceIds: [fx.deviceId], bridgeIds: [] }));
+    readTrusted.mockResolvedValue(await trustedOf(fx.ledger, { deviceIds: [fx.deviceId], bridgeIds: [] }));
     expect(await authorizeLedgerProof(await proof())).toBeNull();
   });
   it('rejects an unknown account', async () => {
-    readLedger.mockResolvedValue(null);
+    readTrusted.mockResolvedValue(null);
     expect(await authorizeLedgerProof(await proof())).toBeNull();
   });
   it('rejects a forged signature', async () => {
@@ -119,7 +123,7 @@ describe('authorizeLedgerProof', () => {
     expect(await authorizeLedgerProof(raw)).toBeNull();
   });
   it('never throws when a dependency fails', async () => {
-    readLedger.mockRejectedValue(new Error('corrupt'));
+    readTrusted.mockRejectedValue(new Error('account_ledger_corrupt'));
     expect(await authorizeLedgerProof(await proof())).toBeNull();
     consumeNonce.mockRejectedValue(new Error('db'));
     expect(await authorizeLedgerProof(await proof())).toBeNull();
@@ -172,12 +176,17 @@ describe('publicOrigin', () => {
 
 describe('requireAccount', () => {
   const session = (id: string | undefined, endpointId: string | undefined) => async () => ({ user: { id, endpointId } });
-  it('returns the account and the stored ledger for a trusted device', async () => {
+  it('returns the account and its trusted checkpoint for a trusted device, from the checkpoint read alone', async () => {
     const result = await requireAccount(session(fx.accountId, fx.deviceId));
     expect(result.accountId).toBe(fx.accountId);
     expect(result.endpointId).toBe(fx.deviceId);
-    expect(result.stored.trusted.accountId).toBe(fx.accountId);
-    expect(readLedger).toHaveBeenCalledWith({ accountId: fx.accountId });
+    expect(result.trusted.accountId).toBe(fx.accountId);
+    expect(readTrusted).toHaveBeenCalledWith(fx.accountId);
+    expect(readChain).not.toHaveBeenCalled();
+  });
+  it('propagates a corrupt row (not a 401)', async () => {
+    readTrusted.mockRejectedValue(new Error('account_ledger_corrupt'));
+    await expect(requireAccount(session(fx.accountId, fx.deviceId))).rejects.toThrow('account_ledger_corrupt');
   });
   it('throws 401 with no session', async () => {
     await expect(requireAccount(async () => null)).rejects.toMatchObject({ status: 401 });
@@ -185,16 +194,16 @@ describe('requireAccount', () => {
   });
   it('401s a device revoked in the chain', async () => {
     const revoked = await append(fx, { type: 'revoke_device', endpointId: fx.deviceId });
-    readLedger.mockResolvedValue(await storedOf(revoked.ledger));
+    readTrusted.mockResolvedValue(await trustedOf(revoked.ledger));
     await expect(requireAccount(session(fx.accountId, fx.deviceId))).rejects.toMatchObject({ status: 401 });
   });
   it('401s a sticky-revoked device (trusted, not the raw checkpoint)', async () => {
-    readLedger.mockResolvedValue(await storedOf(fx.ledger, { deviceIds: [fx.deviceId], bridgeIds: [] }));
+    readTrusted.mockResolvedValue(await trustedOf(fx.ledger, { deviceIds: [fx.deviceId], bridgeIds: [] }));
     await expect(requireAccount(session(fx.accountId, fx.deviceId))).rejects.toMatchObject({ status: 401 });
   });
   it('401s a non-accountId session id (old v1 UUID) without reading the ledger', async () => {
     await expect(requireAccount(session('3f2b8c1e-9d4a-4b7e-8a11-0c2d5e6f7a89', fx.deviceId))).rejects.toMatchObject({ status: 401 });
-    expect(readLedger).not.toHaveBeenCalled();
+    expect(readTrusted).not.toHaveBeenCalled();
   });
   it('401s a missing endpointId', async () => {
     await expect(requireAccount(session(fx.accountId, undefined))).rejects.toMatchObject({ status: 401 });
@@ -204,7 +213,7 @@ describe('requireAccount', () => {
     await expect(requireAccount(session(fx.accountId, 'z'.repeat(43)))).rejects.toMatchObject({ status: 401 });
   });
   it('401s an unknown account', async () => {
-    readLedger.mockResolvedValue(null);
+    readTrusted.mockResolvedValue(null);
     await expect(requireAccount(session(fx.accountId, fx.deviceId))).rejects.toMatchObject({ status: 401 });
   });
 });

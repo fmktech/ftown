@@ -10,16 +10,20 @@ import { LEDGER_BODY_MAX_BYTES } from '@/lib/ledger-limits';
 const ID = 'A'.repeat(43);
 const OTHER = 'B'.repeat(43);
 const ledger = { genesis: { payload: { handle: 'h' } }, transitions: [] };
-const stored = { ledger, checkpoint: { accountId: ID, head: 'head', revision: 3 } };
+const stored = { ledger, trusted: { accountId: ID, head: 'head', revision: 3 } };
 const get = (query: string) => new Request(`https://public.test/api/account/ledger${query}`);
 const post = (body: string, headers: Record<string, string> = {}) => new Request('https://public.test/api/account/ledger', {
   method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body });
 const offer = (decision: string, withStored: unknown = stored, discarded = 0) => mocks.offer.mockResolvedValue({ decision, stored: withStored, discarded });
 const refuse = (reason: string) => mocks.offer.mockResolvedValue({ decision: 'reject', stored: null, discarded: 0, reason });
-type Options = { admitCreation: () => Promise<boolean> };
+type Options = { admitCreation: () => Promise<boolean>; admitAccountWrite: (accountId: string) => Promise<boolean> };
+const LIMITS = { admitCreation: expect.any(Function), admitAccountWrite: expect.any(Function) };
 /** The store reaching the creation budget: consults it, then creates or refuses with rate_limited. */
 const creating = () => mocks.offer.mockImplementation(async (_ledger: unknown, options: Options) => (await options.admitCreation()
   ? { decision: 'created', stored, discarded: 0 } : { decision: 'reject', stored: null, discarded: 0, reason: 'rate_limited' }));
+/** The store reaching a real write on the existing account ID: consults its write budget, then adopts or refuses with rate_limited. */
+const writing = () => mocks.offer.mockImplementation(async (_ledger: unknown, options: Options) => (await options.admitAccountWrite(ID)
+  ? { decision: 'adopt', stored, discarded: 0 } : { decision: 'reject', stored, discarded: 0, reason: 'rate_limited' }));
 const scopes = () => mocks.rate.mock.calls.map(call => call[0] as string);
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
@@ -31,6 +35,7 @@ beforeEach(() => {
   mocks.publish.mockResolvedValue(undefined);
 });
 afterEach(() => {
+  delete process.env.FLY_APP_NAME;
   delete process.env.FTOWN_ACCOUNT_CREATE_PER_IP_HOUR;
   delete process.env.FTOWN_ACCOUNT_CREATE_GLOBAL_DAY;
 });
@@ -79,7 +84,7 @@ describe('POST', () => {
     expect(response.status).toBe(201);
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(await response.json()).toEqual({ decision: 'created', ledger, discarded: 0 });
-    expect(mocks.offer).toHaveBeenCalledWith(ledger, { admitCreation: expect.any(Function) });
+    expect(mocks.offer).toHaveBeenCalledWith(ledger, LIMITS);
     expect(mocks.publish).toHaveBeenCalledTimes(1);
     expect(mocks.publish).toHaveBeenCalledWith(ID, ledger);
     expect(mocks.rate).toHaveBeenCalledWith('ledger-write', expect.any(String), { maxAttempts: 30, lockoutMs: 60_000 });
@@ -112,7 +117,7 @@ describe('POST', () => {
   it('maps every creation rejection to its status, with { error: reason } only', async () => {
     const table: Array<[string, number]> = [
       ['invalid_ledger', 400], ['registration_closed', 403], ['creation_too_large', 413], ['origin_mismatch', 400],
-      ['server_full', 503], ['handle_taken', 409], ['rate_limited', 429],
+      ['server_misconfigured', 503], ['server_full', 503], ['handle_taken', 409], ['rate_limited', 429],
     ];
     for (const [reason, status] of table) {
       refuse(reason);
@@ -129,7 +134,7 @@ describe('POST', () => {
     for (const extra of [{ bootstrap: 'secret-value' }, { bootstrap: 5 }, { bootstrap: 'b'.repeat(1000) }, { other: true }]) {
       const response = await POST(post(JSON.stringify({ ledger, ...extra })));
       expect(response.status, JSON.stringify(extra)).toBe(201);
-      expect(mocks.offer).toHaveBeenLastCalledWith(ledger, { admitCreation: expect.any(Function) });
+      expect(mocks.offer).toHaveBeenLastCalledWith(ledger, LIMITS);
     }
   });
 
@@ -221,5 +226,49 @@ describe('POST creation budget', () => {
     }
     await POST(post('{}'));
     expect(scopes().every(scope => scope === 'ledger-write')).toBe(true);
+  });
+});
+
+describe('POST account write budget', () => {
+  it('a real write to an existing account spends ledger-adopt-account, 60 per 10 minutes, keyed by accountId', async () => {
+    writing();
+    const response = await POST(post(JSON.stringify({ ledger })));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ decision: 'adopt', ledger, discarded: 0 });
+    expect(scopes()).toEqual(['ledger-write', 'ledger-adopt-account']);
+    expect(mocks.rate).toHaveBeenCalledWith('ledger-adopt-account', ID, { maxAttempts: 60, lockoutMs: 600_000 });
+  });
+
+  it('over budget: 429 rate_limited with Retry-After bounded by the window, nothing published', async () => {
+    writing();
+    mocks.rate.mockImplementation(async (scope: string) => (scope === 'ledger-adopt-account' ? { allowed: false, retryAfterMs: 9_999_999 } : { allowed: true }));
+    const response = await POST(post(JSON.stringify({ ledger })));
+    expect(response.status).toBe(429);
+    expect(response.headers.get('retry-after')).toBe('600');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual({ error: 'rate_limited' });
+    expect(mocks.publish).not.toHaveBeenCalled();
+  });
+
+  it('a creation never spends it, and a write never spends the creation budget', async () => {
+    creating();
+    await POST(post(JSON.stringify({ ledger })));
+    writing();
+    await POST(post(JSON.stringify({ ledger })));
+    expect(scopes()).toEqual(['ledger-write', 'account-create-ip', 'account-create-global', 'ledger-write', 'ledger-adopt-account']);
+  });
+});
+
+describe('POST client keys', () => {
+  it('buckets an IPv6 client by /64 for the per-IP limits; IPv4 is unchanged', async () => {
+    process.env.FLY_APP_NAME = 'ftown';
+    creating();
+    await POST(post(JSON.stringify({ ledger }), { 'fly-client-ip': '2001:db8:aa:bb:1:2:3:4' }));
+    await POST(post(JSON.stringify({ ledger }), { 'fly-client-ip': '2001:db8:aa:bb:ffff::9' }));
+    await POST(post(JSON.stringify({ ledger }), { 'fly-client-ip': '203.0.113.7' }));
+    const keys = (scope: string) => mocks.rate.mock.calls.filter(call => call[0] === scope).map(call => call[1] as string);
+    expect(keys('ledger-write')).toEqual(['2001:db8:aa:bb::/64', '2001:db8:aa:bb::/64', '203.0.113.7']);
+    expect(keys('account-create-ip')).toEqual(['2001:db8:aa:bb::/64', '2001:db8:aa:bb::/64', '203.0.113.7']);
+    expect(keys('account-create-global')).toEqual(['global', 'global', 'global']);
   });
 });

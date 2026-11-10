@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import jwt from 'jsonwebtoken';
 
-const readLedger = vi.fn();
+const readTrusted = vi.fn();
+const readChain = vi.fn();
 const authMock = vi.fn();
-vi.mock('@/lib/account-ledger-store', () => ({ readLedger: (...a: unknown[]) => readLedger(...a) }));
+// Auth decisions use only the persisted trusted checkpoint; reading (let alone verifying) the chain per request is a regression.
+vi.mock('@/lib/account-ledger-store', () => ({ readTrustedCheckpoint: (...a: unknown[]) => readTrusted(...a), readLedger: (...a: unknown[]) => readChain(...a) }));
 vi.mock('@/lib/auth-nonce-store', () => ({ consumeNonce: vi.fn() }));
 vi.mock('@/lib/auth', () => ({ auth: () => authMock() }));
 vi.mock('next-auth/providers/credentials', () => ({ default: (config: unknown) => config }));
@@ -21,10 +23,8 @@ interface Roster { bridges: string[]; devices: string[] }
 const checkpoint = (roster: Roster) => ({
   bridges: roster.bridges.map(bridgeId => ({ bridgeId })), devices: roster.devices.map(id => ({ endpoint: { id } })),
 });
-/** raw = what the stored chain lists; trusted = after sticky revocations. They differ for a sticky-revoked bridge. */
-function stored(raw: Roster, trusted: Roster) {
-  return { checkpoint: checkpoint(raw), trusted: checkpoint(trusted), ledger: {}, sticky: { deviceIds: [], bridgeIds: [] } };
-}
+/** The persisted trusted checkpoint (sticky revocations applied): a sticky-revoked bridge is simply absent from it. */
+const trusted = (roster: Roster) => ({ accountId: ACCOUNT, ...checkpoint(roster) });
 const FULL: Roster = { bridges: [BRIDGE], devices: [DEVICE] };
 
 function bearer(claims: Record<string, unknown>, options: jwt.SignOptions & { secret?: string } = {}): Request {
@@ -34,23 +34,29 @@ function bearer(claims: Record<string, unknown>, options: jwt.SignOptions & { se
 }
 const good = () => bearer({ sub: ACCOUNT, info: { bridgeId: BRIDGE, ownerId: ACCOUNT } });
 
-beforeEach(() => { vi.stubEnv('CENTRIFUGO_TOKEN_SECRET', SECRET); readLedger.mockResolvedValue(stored(FULL, FULL)); });
+beforeEach(() => {
+  vi.stubEnv('CENTRIFUGO_TOKEN_SECRET', SECRET);
+  readTrusted.mockResolvedValue(trusted(FULL));
+  readChain.mockRejectedValue(new Error('the chain must not be read for an auth decision'));
+});
 afterEach(() => { vi.unstubAllEnvs(); vi.resetAllMocks(); });
 
 describe('requireBridge', () => {
-  it('accepts a trusted bridge and returns accountId, bridgeId and the stored ledger', async () => {
+  it('accepts a trusted bridge and returns accountId, bridgeId and the trusted checkpoint, from the checkpoint read alone', async () => {
     const result = await requireBridge(good());
     expect(result.accountId).toBe(ACCOUNT); expect(result.bridgeId).toBe(BRIDGE);
-    expect(readLedger).toHaveBeenCalledWith({ accountId: ACCOUNT });
+    expect(result.trusted.bridges).toEqual([{ bridgeId: BRIDGE }]);
+    expect(readTrusted).toHaveBeenCalledWith(ACCOUNT);
+    expect(readChain).not.toHaveBeenCalled();
   });
-  it('rejects a bridge revoked by a sticky id (trusted differs from raw checkpoint)', async () => {
-    readLedger.mockResolvedValue(stored(FULL, { bridges: [], devices: [DEVICE] }));
+  it('rejects a bridge revoked by a sticky id (absent from the trusted checkpoint)', async () => {
+    readTrusted.mockResolvedValue(trusted({ bridges: [], devices: [DEVICE] }));
     await expect(requireBridge(good())).rejects.toMatchObject({ status: 401 });
   });
   it('rejects a bridge absent from the roster and an unknown account', async () => {
-    readLedger.mockResolvedValue(stored({ bridges: [], devices: [] }, { bridges: [], devices: [] }));
+    readTrusted.mockResolvedValue(trusted({ bridges: [], devices: [] }));
     await expect(requireBridge(good())).rejects.toBeInstanceOf(UnauthorizedError);
-    readLedger.mockResolvedValue(null);
+    readTrusted.mockResolvedValue(null);
     await expect(requireBridge(good())).rejects.toMatchObject({ status: 401 });
   });
   it('rejects a wrong audience, wrong secret, wrong algorithm, expired and missing bearer', async () => {
@@ -60,7 +66,7 @@ describe('requireBridge', () => {
       bearer(claims, { algorithm: 'HS512' }), bearer(claims, { expiresIn: -10 }),
       new Request('https://app.test/x'), new Request('https://app.test/x', { headers: { authorization: 'Basic abc' } }),
     ]) await expect(requireBridge(request)).rejects.toMatchObject({ status: 401 });
-    expect(readLedger).not.toHaveBeenCalled();
+    expect(readTrusted).not.toHaveBeenCalled();
   });
   it('rejects ownerId different from sub, a malformed sub, and missing info', async () => {
     for (const claims of [
@@ -69,7 +75,7 @@ describe('requireBridge', () => {
       { sub: 'owner@example.test', info: { bridgeId: BRIDGE, ownerId: 'owner@example.test' } },
       { sub: ACCOUNT }, { sub: ACCOUNT, info: { ownerId: ACCOUNT } }, { sub: ACCOUNT, info: { bridgeId: 7, ownerId: ACCOUNT } },
     ]) await expect(requireBridge(bearer(claims))).rejects.toMatchObject({ status: 401 });
-    expect(readLedger).not.toHaveBeenCalled();
+    expect(readTrusted).not.toHaveBeenCalled();
   });
   it('rejects a browser token (no info) for a trusted account', async () => {
     await expect(requireBridge(bearer({ sub: ACCOUNT }))).rejects.toMatchObject({ status: 401 });
@@ -93,7 +99,8 @@ describe('requireAccountOrBridge', () => {
     authMock.mockResolvedValue({ user: { id: ACCOUNT, endpointId: DEVICE } });
     const request = new Request('https://app.test/x');
     expect(await requireAccountOrBridge(request)).toMatchObject({ kind: 'account', accountId: ACCOUNT, endpointId: DEVICE });
-    readLedger.mockResolvedValue(stored(FULL, { bridges: [BRIDGE], devices: [] }));
+    expect(readChain).not.toHaveBeenCalled();
+    readTrusted.mockResolvedValue(trusted({ bridges: [BRIDGE], devices: [] }));
     await expect(requireAccountOrBridge(request)).rejects.toMatchObject({ status: 401 });
     authMock.mockResolvedValue(null);
     await expect(requireAccountOrBridge(request)).rejects.toMatchObject({ status: 401 });

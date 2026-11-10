@@ -10,7 +10,11 @@ vi.mock('@/lib/pair-mailbox-store', () => ({
   takePairApproval: (...a: unknown[]) => takePairApproval(...a),
 }));
 vi.mock('@/lib/login-rate-limit', () => ({ consumeRateLimit: (...a: unknown[]) => consumeRateLimit(...a) }));
-vi.mock('@/lib/client-ip', () => ({ clientIp: () => '1.2.3.4' }));
+const ipState = vi.hoisted(() => ({ ip: '1.2.3.4' }));
+vi.mock('@/lib/client-ip', async importOriginal => {
+  const actual = await importOriginal<typeof import('@/lib/client-ip')>();
+  return { ...actual, clientIp: () => ipState.ip, rateLimitKeyIp: () => actual.rateLimitKey(ipState.ip) };
+});
 import { GET, PUT } from './route';
 
 const REQUEST_ID = 'A'.repeat(43);
@@ -197,5 +201,24 @@ describe('GET /api/pair/:requestId', () => {
   it('maps other failures to 503', async () => {
     takePairApproval.mockRejectedValue(new Error('db down'));
     expect((await GET(get(), ctx())).status).toBe(503);
+  });
+});
+
+describe('pair-read-ip limiter key', () => {
+  const keyFor = async (ip: string) => {
+    ipState.ip = ip;
+    consumeRateLimit.mockClear();
+    await GET(get(), ctx());
+    return consumeRateLimit.mock.calls.find(c => c[0] === 'pair-read-ip')![1];
+  };
+  it('shares one key across addresses of the same IPv6 /64, separates other /64s, leaves IPv4 unchanged', async () => {
+    const a = await keyFor('2001:db8:1:2::1');
+    const b = await keyFor('2001:db8:1:2:ffff:aaaa:bbbb:cccc');
+    const c = await keyFor('2001:db8:1:3::1');
+    expect(a).toBe(b);
+    expect(c).not.toBe(a);
+    expect(await keyFor('1.2.3.4')).toBe('1.2.3.4');
+    expect(await keyFor('unknown')).toBe('unknown');
+    ipState.ip = '1.2.3.4';
   });
 });

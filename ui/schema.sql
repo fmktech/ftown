@@ -26,10 +26,14 @@ CREATE TABLE IF NOT EXISTS account_ledger (
   ledger JSONB NOT NULL,
   sticky JSONB NOT NULL DEFAULT '{"deviceIds":[],"bridgeIds":[]}',
   version INTEGER NOT NULL DEFAULT 0,
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Trusted checkpoint (sticky revocations applied) of the stored chain, written with it; NULL only for rows that predate it.
+  -- Last, as in the migrated database (0012 adds it).
+  checkpoint JSONB
 );
 ALTER TABLE account_ledger ADD COLUMN IF NOT EXISTS sticky JSONB NOT NULL DEFAULT '{"deviceIds":[],"bridgeIds":[]}';
 ALTER TABLE account_ledger ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE account_ledger ADD COLUMN IF NOT EXISTS checkpoint JSONB;
 CREATE TABLE IF NOT EXISTS auth_nonces (
   nonce_hash TEXT PRIMARY KEY,
   purpose TEXT NOT NULL,

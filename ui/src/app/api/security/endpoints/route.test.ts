@@ -4,7 +4,8 @@ import { generateEndpoint } from '@security/crypto';
 const mocks = vi.hoisted(() => ({ auth: vi.fn(), query: vi.fn(), readLedger: vi.fn() }));
 vi.mock('@/lib/auth', () => ({ auth: mocks.auth }));
 vi.mock('@/lib/db', () => ({ getDb: () => ({ query: mocks.query }) }));
-vi.mock('@/lib/account-ledger-store', () => ({ readLedger: mocks.readLedger }));
+// Auth reads the persisted trusted checkpoint (readTrustedCheckpoint); the fixtures below describe the stored row.
+vi.mock('@/lib/account-ledger-store', () => ({ readTrustedCheckpoint: async (accountId: string) => ((await mocks.readLedger({ accountId })) as { trusted?: unknown } | null | undefined)?.trusted ?? null }));
 vi.mock('@/lib/auth-nonce-store', () => ({ consumeNonce: vi.fn() }));
 vi.mock('next-auth/providers/credentials', () => ({ default: (config: unknown) => config }));
 import { PUT, GET } from './route';
