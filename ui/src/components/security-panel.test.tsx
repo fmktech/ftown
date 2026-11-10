@@ -503,14 +503,32 @@ describe("Account security from the passkey ledger", () => {
       expect(screen.queryByText("Something else changed first. Confirm again.", { selector: "[role=status]" })).toBeNull();
     });
 
-    it("a different history blocks every signed change behind an alert", () => {
+    it("a different history shows the two-histories screen and blocks every signed change", async () => {
       const other = { genesis: record(1, { type: "revoke_device", endpointId: "phone" }), transitions: [] } as unknown as NonNullable<LedgerClientSnapshot["divergence"]>["other"];
-      mountLedger({ divergence: { other, source: "server", firstSeen: AT, fork: { relation: "diverged", fork: { revision: 3, head: "head-3" }, mine: [], theirs: [] }, mine: { carry: [], canKeep: true, reason: null }, theirs: { carry: [], canKeep: true, reason: null } } });
+      const fake = mountLedger({ divergence: { other, source: "server", firstSeen: AT, fork: { relation: "diverged", fork: { revision: 3, head: "head-3" }, mine: [], theirs: [] }, mine: { carry: [], canKeep: true, reason: null }, theirs: { carry: [], canKeep: true, reason: null } } });
       renderAccount();
-      expect(screen.getByRole("alert", { name: "Different account histories" }).textContent)
-        .toBe("This browser and the server disagree about this account's history. Do not approve anything until this is resolved.");
+      expect(screen.getByRole("heading", { name: "Two different histories of this account exist" })).toBeTruthy();
+      expect(screen.getByText("The server holds the other history.")).toBeTruthy();
+      expect(screen.getByText(/Other changes to your account are turned off/)).toBeTruthy();
       fireEvent.click(screen.getByRole("button", { name: "Computer My laptop: In your account. Connected" }));
       expect((screen.getByRole("button", { name: "Remove computer My laptop" }) as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.queryByRole("group", { name: "Add another passkey" })).toBeNull();
+      // Choosing a history ends the screen and leaves a status line for the session.
+      const resolve = vi.fn(async () => { publish({ ...current(), divergence: null }); });
+      Object.assign(fake, { resolveDivergence: resolve });
+      await act(async () => { fireEvent.click(within(screen.getByRole("region", { name: "This browser's history" })).getByRole("button", { name: "Keep this history" })); });
+      expect(resolve).toHaveBeenCalledExactlyOnceWith("mine");
+      expect(screen.queryByRole("heading", { name: /Two different histories/ })).toBeNull();
+      expect(screen.getByText("History kept. Other replicas will follow.").getAttribute("role")).toBe("status");
+    });
+
+    it("an action error of the two-histories screen is shown once, by the screen", async () => {
+      const other = { genesis: record(1, { type: "revoke_device", endpointId: "phone" }), transitions: [] } as unknown as NonNullable<LedgerClientSnapshot["divergence"]>["other"];
+      const fake = mountLedger({ divergence: { other, source: "peer", firstSeen: AT, fork: { relation: "diverged", fork: { revision: 3, head: "head-3" }, mine: [], theirs: [] }, mine: { carry: [], canKeep: true, reason: null }, theirs: { carry: [], canKeep: true, reason: null } } });
+      Object.assign(fake, { resolveDivergence: vi.fn(async () => { throw new Error("resolution_outdated"); }) });
+      renderAccount();
+      await act(async () => { fireEvent.click(within(screen.getByRole("region", { name: "The other history" })).getByRole("button", { name: "Keep this history" })); });
+      expect(screen.getAllByRole("alert").map(item => item.textContent)).toEqual(["The other history changed. Review it again."]);
     });
 
     it("shows a removed browser the server still accepts, with Retry now (no passkey) until it is saved", async () => {
@@ -738,5 +756,23 @@ describe("Mode selection", () => {
     expect(securityErrorMessage({ code: "constructor" })).toBe("This security action could not be completed. Refresh and try again.");
     expect(securityErrorMessage({ code: "account_bridge_revoked" })).toBe("This computer was removed from account trust.");
     expect(securityErrorMessage(new Error("Server said <b>no</b>"))).toBe("This security action could not be completed. Refresh and try again.");
+  });
+});
+
+describe("securityErrorMessage: the append-only ledger codes", () => {
+  it.each([
+    ["write_conflict", "Something else changed first. Confirm again."],
+    ["write_pending", "Finish saving the previous change first."],
+    ["ledger_diverged", "Two different histories of this account exist. Choose one before making changes."],
+    ["resolution_outdated", "The other history changed. Review it again."],
+    ["no_divergence", "There is nothing to resolve."],
+    ["resolution_incomplete", "This history cannot be kept yet. Review it again."],
+    ["account_not_found", "Your account was not found on the server."],
+  ])("%s", (code, text) => {
+    expect(securityErrorMessage(new Error(code))).toBe(text);
+    expect(securityErrorMessage({ code })).toBe(text);
+  });
+  it("still uses own-property lookup", () => {
+    expect(securityErrorMessage(new Error("constructor"))).toBe("This security action could not be completed. Refresh and try again.");
   });
 });

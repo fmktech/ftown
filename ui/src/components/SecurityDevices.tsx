@@ -9,6 +9,7 @@ import type { SecurityLockState } from "./SecurityLockIcon";
 import { useDeviceDisplayNames } from "@/hooks/useDeviceDisplayNames";
 import { UnsavedRemovalRetryButton, unsavedRemovalState } from "./UnsavedRemovalRetry";
 import { DeviceDisplayNameEditor } from "./DeviceDisplayNameEditor";
+import { ForkResolution, FORK_KEPT } from "./ForkResolution";
 import { securityErrorCode, useAccountSecurity, type AccountSecurity } from "@/hooks/useAccountSecurity";
 import type { LedgerClient, LedgerClientSnapshot } from "@/lib/ledger-client";
 
@@ -194,8 +195,6 @@ const UNSAVED = "Removal not saved to the server yet";
 /** A removal while nothing is confirmed about the server (snapshot.serverState 'unknown'). */
 const UNCONFIRMED = "Removed here. Not confirmed by the server yet.";
 /** snapshot.divergence: nothing can be signed until the owner chooses a history (the two-histories screen). */
-const DIVERGED_SERVER = "This browser and the server disagree about this account's history. Do not approve anything until this is resolved.";
-const DIVERGED_OTHER = "Two different histories of this account exist. Do not approve anything until this is resolved.";
 /** snapshot.lastConflict, by reason. */
 const WRITE_CONFLICT = "Something else changed first. Confirm again.";
 const WRITE_DIVERGED = "This change was not saved: a different history of this account appeared.";
@@ -385,6 +384,8 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
   const displayNames = useDeviceDisplayNames(accountId);
   const [selection, setSelection] = useState<{ scope: string; node: SecurityAccessSelection } | null>(null);
   const [confirm, setConfirm] = useState<string | null>(null);
+  /** The owner kept a history in this session (the screen is gone; this line stays). */
+  const [kept, setKept] = useState(false);
   const context = `${accountId}:${currentEndpointId ?? ""}`;
   useEffect(() => { setConfirm(null); }, [context]);
   const mismatch = !!snapshot.checkpoint && snapshot.checkpoint.accountId !== accountId;
@@ -512,7 +513,8 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
   const conflictText = (reason: string) => reason === "write_conflict" ? WRITE_CONFLICT : reason === "ledger_diverged" ? WRITE_DIVERGED : WRITE_REFUSED;
 
   const accountProblem = mismatch ? ACCOUNT_MISMATCH : snapshot.status === "error" ? securityErrorMessage({ code: snapshot.error ?? "" }) : null;
-  const message = security.error ? securityErrorMessage({ code: security.error }) : accountProblem;
+  // The two-histories screen shows its own action errors.
+  const message = security.error && !divergence ? securityErrorMessage({ code: security.error }) : security.error ? null : accountProblem;
   const selectedDetails = active && <section aria-label="Selected access details" className="space-y-2">
     {selectedBrowser && <>
       {selectedDevice && selectedBrowser.accessText !== UNSAVED && <div className="flex flex-wrap items-center gap-2">
@@ -581,9 +583,8 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
   </section>;
 
   return <div className="space-y-3">
-    {divergence && <div role="alert" aria-label="Different account histories" className="rounded-md border border-[var(--status-error)] p-3">
-      <p className="text-sm font-semibold">{divergence.source === "server" ? DIVERGED_SERVER : DIVERGED_OTHER}</p>
-    </div>}
+    {divergence && <ForkResolution divergence={divergence} security={security} checkpoint={trusted} onKept={() => setKept(true)} />}
+    {kept && !divergence && <p role="status" className="rounded-md border border-[var(--border-muted)] p-3 text-sm">{FORK_KEPT}</p>}
     {snapshot.lastConflict && trusted && security.error !== snapshot.lastConflict.reason
       && <p role="status" className="rounded-md border border-[var(--status-pending)] p-3 text-sm">{conflictText(snapshot.lastConflict.reason)}</p>}
     {pendingWrite && PENDING_CHANGE[pendingWrite.operation] && <div role="group" aria-label="Change not saved" className="space-y-2 rounded-md border border-[var(--status-pending)] p-3">
