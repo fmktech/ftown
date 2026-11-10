@@ -75,7 +75,8 @@ export async function GET(request: Request): Promise<NextResponse> {
  *  its chain; a 43-character head, anything else is 400): never creates (404 account_unknown), and a stored head other than
  *  expectHead is 409 head_changed with the stored chain, before chooseLedger and any budget.
  *  Existing account, each answer distinct for the client: 200 { decision: 'adopt' | 'keep', ledger, discarded } (adopt: the chain was
- *  written and is published); 409 { error: 'diverged', ledger } (a VALID other history: nothing written, the owner must choose);
+ *  written and is published); 409 { error: 'diverged', ledger } (a VALID other history: none of it stored, the owner must choose; the
+ *  store may enforce its removals through the sticky set, outside the account write budget);
  *  409 { error: 'ledger_rejected', ledger } (an invalid chain: ignore it); 409 { error: 'head_changed', ledger }; 429 rate_limited.
  *  Every 409 carries the stored chain. */
 export async function POST(request: Request): Promise<NextResponse> {
