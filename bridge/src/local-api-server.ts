@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { ApplicationJson, BridgeSecurityInfo, EnrollmentPacket, LocalEventPage, SecureEnvelope, VerifiedApplication } from './security/protocol.js';
-import { BridgeSecurityService, applicationJson } from './security/bridge/security.js';
+import { BridgeSecurityService, applicationJson, type LedgerStatus } from './security/bridge/security.js';
 import { executeSecurePacket } from './security/bridge/execute.js';
 import type { SecureExecutionObserver } from './security/bridge/execution-observer.js';
 import { observeHttpDelivery, scopedUpdateObserver } from './update-effects.js';
@@ -198,6 +198,14 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     command: (message: VerifiedApplication) => Promise<ApplicationJson>, observer?: SecureExecutionObserver): void {
     this.security = security; this.securityInfo = info; this.secureCommand = command;
     this.secureObserver = observer;
+  }
+  /** GET /api/security/info: the static info, plus in account mode `ledger: { divergence, serverBehind }` (CONTRACT §5: a computer
+   *  holding a different account history is shown with a warning). */
+  private securityInfoPayload(): BridgeSecurityInfo | (BridgeSecurityInfo & { ledger: Pick<LedgerStatus, 'divergence' | 'serverBehind'> }) {
+    const info = this.securityInfo!;
+    if (!this.security?.options.ledger) return info;
+    const status = this.security.ledgerStatus();
+    return { ...info, ledger: { divergence: status.divergence, serverBehind: status.serverBehind } };
   }
   recordPublication(channel: string, data: unknown): void {
     const item = { channel, data: applicationJson(data), cursor: ++this.localEventSequence };
@@ -479,7 +487,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       }
       if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
       if (!this.security || !this.securityInfo) { jsonResponse(res, 503, { error: 'security_setup_required', code: 'security_setup_required' }); return; }
-      if (path === '/api/security/info' && req.method === 'GET') { jsonResponse(res, 200, this.securityInfo); return; }
+      if (path === '/api/security/info' && req.method === 'GET') { jsonResponse(res, 200, this.securityInfoPayload()); return; }
       if (req.method === 'POST' && (path === '/api/security/envelope' || path === '/api/security/events')) {
         const security = this.security;
         void parseBody(req).then(async body => {

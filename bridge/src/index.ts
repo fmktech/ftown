@@ -523,7 +523,7 @@ program
       accountRegistrar = registrar;
       // Step 5: a refusal exits; a temporary failure starts offline (local API, sessions) and keeps retrying in the background.
       const relayStart = await startRelay({ getToken: () => relay.tokens.getToken(), relayUrl: () => relay.relayUrl(),
-        bridgeRevoked: () => bridgeRevoked, apiUrl: opts.apiUrl });
+        bridgeRevoked: () => bridgeRevoked, apiUrl: opts.apiUrl, serverDiverged: () => ledgerSecurity.ledgerStatus().divergence?.source === 'server' });
       if (relayStart.kind === 'revoked') { await revokedRestart(); return; }
       if (relayStart.kind === 'exit') return fail(relayStart.message);
       if (relayStart.kind === 'online') {

@@ -4,14 +4,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, before, beforeEach, describe, it } from 'node:test';
 import {
-  LEGACY_ACCOUNT_RESET_MESSAGE, NOT_IN_LEDGER_MESSAGE, PAIRING_REJECTED_HINT, SERVER_LEDGER_MISMATCH_MESSAGE, UPDATED_TO_LEDGER_MESSAGE,
+  LEGACY_ACCOUNT_RESET_MESSAGE, NOT_IN_LEDGER_MESSAGE, PAIRING_REJECTED_HINT, PAIRING_REVOKED_MESSAGE, SERVER_LEDGER_MISMATCH_MESSAGE, UPDATED_TO_LEDGER_MESSAGE,
   UPDATE_RESTART_UNPAIRED_MESSAGE,
   ledgerUnavailableMessage, ownStatusAction, resetIdentityForStart, startAccountIdentity, usesLedger, type AccountStartupDeps,
 } from './ledger-startup.js';
 import { beginIdentityReset } from './identity-reset.js';
 import { UnauthorizedError } from 'centrifuge';
 import { HttpStatusError, MISSING_RELAY_URL_MESSAGE, relayTokenFailureMessage } from './ledger-relay.js';
-import { createEndpointRegistrar, endpointRefusedMessage, offlineWithoutRelayUrlMessage, startRelay } from './ledger-startup.js';
+import { DIVERGED_SERVER_MESSAGE, createEndpointRegistrar, endpointRefusedMessage, offlineWithoutRelayUrlMessage, startRelay } from './ledger-startup.js';
 import type { BridgeMode } from './revocation-gating.js';
 import { accountIdOf, ledgerChallenge, ledgerHead, ledgerLastIssuedAt, nextTransition, verifyLedger } from './security/ledger/ledger.js';
 import { bridgeFromPairRequest, createBridgePairRequest } from './security/ledger/pairing.js';
@@ -223,6 +223,10 @@ describe('startAccountIdentity (steps 3-4)', () => {
     assert.deepEqual(expired, { kind: 'exit', message: null });
     const rejected = await startAccountIdentity(deps({ pair: async () => { throw new Error('pairing_rejected'); } }).value);
     assert.deepEqual(rejected, { kind: 'exit', message: PAIRING_REJECTED_HINT });
+    // The account already revokes this bridge id: a clear exit that names the fix, never a loop and never a reset.
+    const revoked = await startAccountIdentity(deps({ pair: async () => { throw new Error('pairing_revoked'); } }).value);
+    assert.deepEqual(revoked, { kind: 'exit', message: PAIRING_REVOKED_MESSAGE });
+    assert.match(PAIRING_REVOKED_MESSAGE, /removed from the account before pairing completed.*--new-identity/);
     await assert.rejects(startAccountIdentity(deps({ pair: async () => { throw new Error('disk full'); } }).value), /disk full/);
   });
 
@@ -314,6 +318,15 @@ describe('startRelay (step 5: the first relay token)', () => {
     assert.deepEqual(await start(async () => { throw unauthorized; }, { revoked: () => true }), { kind: 'revoked' });
     const forbidden = new Error('Relay token failed (403): no');
     assert.deepEqual(await start(async () => { throw forbidden; }), { kind: 'exit', message: relayTokenFailureMessage(forbidden, API) });
+  });
+
+  it('a refusal by a server that holds a different history says so, and never advises a reset by itself', async () => {
+    const unauthorized = new UnauthorizedError('Bridge revoked');
+    const refused = await startRelay({ getToken: async () => { throw unauthorized; }, relayUrl: () => URL_, bridgeRevoked: () => false, apiUrl: API, serverDiverged: () => true });
+    assert.deepEqual(refused, { kind: 'exit', message: DIVERGED_SERVER_MESSAGE });
+    assert.match(DIVERGED_SERVER_MESSAGE, /did not reset itself/);
+    const temporary = await startRelay({ getToken: async () => { throw new Error('fetch failed'); }, relayUrl: () => URL_, bridgeRevoked: () => false, apiUrl: API, serverDiverged: () => true });
+    assert.equal(temporary.kind, 'offline');
   });
 
   it('a temporary failure starts offline with the saved relay URL, and exits only without one', async () => {
