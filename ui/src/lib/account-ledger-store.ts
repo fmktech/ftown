@@ -40,10 +40,13 @@ export type CreationRejection = 'invalid_ledger' | 'registration_closed' | 'crea
   | 'server_full' | 'handle_taken' | 'rate_limited';
 export type OfferResult =
   | { decision: 'created' | 'adopt' | 'keep'; stored: StoredLedger; discarded: number }
-  /** Existing account: the stored chain stays (and is returned). reason rate_limited: the write was refused by admitAccountWrite. */
-  | { decision: 'reject'; stored: StoredLedger; discarded: number; reason?: 'rate_limited' }
-  /** No account was created or touched. */
-  | { decision: 'reject'; stored: null; discarded: number; reason: CreationRejection };
+  /** Existing account: the stored chain stays (and is returned). reason rate_limited: the write was refused by admitAccountWrite.
+   *  reason head_changed: the stored head is not options.expectHead; nothing was chosen or written. */
+  | { decision: 'reject'; stored: StoredLedger; discarded: number; reason?: 'rate_limited' | 'head_changed' }
+  /** No account was created or touched. reason account_unknown: options.expectHead was given and no account exists. */
+  | { decision: 'reject'; stored: null; discarded: number; reason: CreationRejection | 'account_unknown' };
+/** expectHead: a re-offer of a chain the client holds, made against the stored head it just read (a 43-character head). */
+export interface OfferOptions { expectHead?: string }
 /** Required: no chain can be created or written unthrottled by omission. Each hook is awaited at most once per offer. */
 export interface OfferLimits {
   /** Only when the candidate would create an account, after it fully verified and before the soft cap and the insert. */
@@ -294,9 +297,15 @@ const once = (gate: Gate): Gate => {
  *  Existing account (its checkpoint healed first if it cannot be trusted): chooseLedger (the longest chain wins), with no creation
  *  limit; keep and adopt add the candidate's revocations to the sticky set, a real write first passes limits.admitAccountWrite (else
  *  reject, reason rate_limited, nothing written), reject changes nothing and returns the stored chain. Optimistic concurrency on
- *  (version, revision, head); a lost race is re-read and re-run once, then throws. */
-export async function offerLedger(candidate: unknown, limits: OfferLimits): Promise<OfferResult> {
+ *  (version, revision, head); a lost race is re-read and re-run once, then throws.
+ *  options.expectHead (a client re-offering its chain): never creates (no row: reject, reason account_unknown, no creation budget),
+ *  and a row whose head is not expectHead is reject, reason head_changed, before fork choice and any budget. The comparison is made
+ *  on the row read in the same round as the write, whose UPDATE is guarded by that row's (version, revision, head): if the head moves
+ *  in between, the write matches nothing, the round is re-run, and the re-read row then answers head_changed. */
+export async function offerLedger(candidate: unknown, limits: OfferLimits, options: OfferOptions = {}): Promise<OfferResult> {
   if (typeof limits?.admitCreation !== 'function' || typeof limits.admitAccountWrite !== 'function') throw new TypeError('offerLedger: limits are required');
+  const expectHead = options.expectHead;
+  if (expectHead !== undefined && typeof expectHead !== 'string') throw new TypeError('offerLedger: expectHead must be a string');
   // Before any work: a creation or write could not be sealed anyway, and must not spend a budget first.
   requireCheckpointKey();
   let parsed: Ledger;
@@ -309,6 +318,11 @@ export async function offerLedger(candidate: unknown, limits: OfferLimits): Prom
   const admitAccountWrite = once(() => limits.admitAccountWrite(accountId));
   for (let round = 0; round < 2; round += 1) {
     const row = await readRow({ accountId });
+    if (expectHead !== undefined) {
+      if (!row) return { decision: 'reject', stored: null, discarded: 0, reason: 'account_unknown' };
+      // row.raw is the checkpoint of exactly the row's head; replicate's UPDATE is guarded by this same (version, revision, head).
+      if (row.raw.head !== expectHead) return { decision: 'reject', stored: row.stored, discarded: 0, reason: 'head_changed' };
+    }
     const result = row ? await replicate(parsed, accountId, row, admitAccountWrite) : await create(parsed, accountId, admitCreation);
     if (result.done) return result.result;
   }

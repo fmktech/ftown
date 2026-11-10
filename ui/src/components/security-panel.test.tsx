@@ -227,6 +227,9 @@ class FakeLedger {
   });
   dismissDiscarded = vi.fn(() => { publish({ ...current(), discarded: [] }); });
   rotateDeviceIdentity = vi.fn(async () => {});
+  /** Never prompts; resolves when `retried` is resolved, then the server has the removals. */
+  retried: Promise<void> = Promise.resolve();
+  retryNow = vi.fn(async () => { await this.retried; publish({ ...current(), unsaved: { deviceIds: [], bridgeIds: [] } }); });
 }
 
 function mountLedger(snapshot: Partial<LedgerClientSnapshot> = {}): FakeLedger {
@@ -432,6 +435,47 @@ describe("Account security from the passkey ledger", () => {
       expect(within(warning).getByText("Signed name: not known on this browser · ID bridge-o")).toBeTruthy();
       expect(await click(fake, within(warning).getByRole("button", { name: "Sign removal again" }))).toBe(1);
       expect(fake.revokeBridge).toHaveBeenCalledExactlyOnceWith("bridge-one");
+      expect(screen.getByRole("button", { name: "Computer My laptop: Removed from your account. Connected" })).toBeTruthy();
+    });
+  });
+
+  describe("Removals not saved to the server yet", () => {
+    const UNSAVED = "Removal not saved to the server yet";
+    const DETAIL = "Removal not saved to the server yet. It can still connect. Retrying…";
+    it("shows a removed browser the server still accepts, with Retry now (no passkey) until it is saved", async () => {
+      const fake = mountLedger({ checkpoint: checkpoint({ devices: [ledgerDevice("self", "Laptop"), ledgerDevice("phone", "Phone")] }) });
+      renderAccount();
+      // Seen once in the account, then removed here with a revocation the server refused.
+      act(() => publish({ ...current(), checkpoint: checkpoint({ devices: [ledgerDevice("self", "Laptop")], revokedDeviceIds: ["phone"] }), unsaved: { deviceIds: ["phone"], bridgeIds: [] } }));
+      expect(screen.queryByRole("region", { name: "Removals not applied" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: `Browser Phone: ${UNSAVED}` }));
+      const notice = screen.getByRole("group", { name: "Removal not saved" });
+      expect(notice.className).toContain("border-[var(--status-pending)]");
+      expect(within(notice).getByText(DETAIL)).toBeTruthy();
+      expect(within(notice).getByText("Signed name: “Phone” · ID phone")).toBeTruthy();
+      let finish: () => void = () => undefined;
+      fake.retried = new Promise<void>(resolve => { finish = resolve; });
+      expect(await click(fake, within(notice).getByRole("button", { name: "Retry now" }))).toBe(0);
+      expect(fake.retryNow).toHaveBeenCalledOnce();
+      // Busy while it runs: the button says so and cannot be pressed again.
+      const busy = within(notice).getByRole("button", { name: "Retrying…" }) as HTMLButtonElement;
+      expect(busy.disabled).toBe(true);
+      await act(async () => { finish(); await fake.retried; });
+      expect(screen.queryByRole("group", { name: "Removal not saved" })).toBeNull();
+      expect(screen.queryByRole("button", { name: /^Browser Phone:/ })).toBeNull();
+      expect(fake.revokeDevice).not.toHaveBeenCalled();
+    });
+
+    it("shows a removed computer the server still accepts instead of 'Removed from your account'", async () => {
+      const fake = mountLedger({ checkpoint: checkpoint({ bridges: [], revokedBridgeIds: ["bridge-one"] }), unsaved: { deviceIds: [], bridgeIds: ["bridge-one"] } });
+      renderAccount();
+      expect(screen.queryByRole("button", { name: "Computer My laptop: Removed from your account. Connected" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: `Computer My laptop: ${UNSAVED}. Connected` }));
+      const notice = screen.getByRole("group", { name: "Removal not saved" });
+      expect(within(notice).getByText(DETAIL)).toBeTruthy();
+      expect(screen.queryByText("This computer was removed from your account. To use it again, pair it as a new computer.")).toBeNull();
+      expect(await click(fake, within(notice).getByRole("button", { name: "Retry now" }))).toBe(0);
+      expect(fake.retryNow).toHaveBeenCalledOnce();
       expect(screen.getByRole("button", { name: "Computer My laptop: Removed from your account. Connected" })).toBeTruthy();
     });
   });

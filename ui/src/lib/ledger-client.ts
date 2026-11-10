@@ -1,4 +1,4 @@
-import { accountIdOf, chooseLedger, LedgerError, ledgerHead, ledgerLastIssuedAt, nextTransition, parseLedger, verifyLedger } from "@security/ledger/ledger";
+import { accountIdOf, chooseLedger, LedgerError, ledgerHead, ledgerLastIssuedAt, ledgerRevocations, nextTransition, parseLedger, verifyLedger } from "@security/ledger/ledger";
 import { bridgeFromPairRequest, pairComparisonCode, parsePairLink, sealPairApproval } from "@security/ledger/pairing";
 import { signAuthProof } from "@security/ledger/proof";
 import { LEDGER_LIMITS } from "@security/ledger/protocol";
@@ -14,6 +14,19 @@ import type { LedgerReplica, ReplicaOfferOptions } from "./ledger-replica";
  * handle whose genesis carries that handle and whose verified authorities include the identifying credential. Each WebAuthn ceremony
  * has its own public step so the UI can run it from its own user gesture (Safari); the combined methods only chain those steps.
  * Errors are Error(code) with a stable snake_case message.
+ *
+ * Re-offer (closes gap h of the 2026-11-10 amendment): the server's copy can fall behind the local chain (a refused or failed POST,
+ * a database restore, a database-only writer replaying an old sealed row). Whenever a server read or a POST answer shows the server
+ * holding a chain the local one outranks (the replica's fork choice kept local), the client POSTs its own chain again through the
+ * same store() path as a write, without a prompt: one run at a time on the exclusive() queue, the same (local, server) head pair at
+ * most once per 30 s, failures backed off (30 s doubling to 10 min, ±20%, never sooner than Retry-After) by one retry timer.
+ * Every attempt first reads the server again (so a deleted account, or a revocation of this very browser made elsewhere, is seen
+ * before anything is sent) and then POSTs with `expectHead`, the head it just read: the server refuses (409 head_changed) if its
+ * chain moved since, and never creates an account for it (404 account_unknown).
+ * Relay input is not proof of the server's state (anyone holding a token can publish on the channel): an older head or a shorter
+ * pushed chain only causes a paced read, and that read decides.
+ * Backoff, pair memory and the retry timer are per tab (per LedgerClient): several tabs of one profile each run their own schedule,
+ * and only a tab whose in-memory replica holds a record can re-offer it.
  */
 
 export type AttemptStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
@@ -38,6 +51,8 @@ export interface LedgerClientDeps {
   /** Pairing-code attempt counters; must survive a reload (wave 4: sessionStorage). Default: this page only. */
   attemptStorage?: AttemptStorage;
   now?: () => number;
+  /** Jitter source of the re-offer backoff, in [0, 1). Default Math.random. */
+  random?: () => number;
 }
 export type LedgerClientPending = "none" | "passkey_created" | "enrollment_ready" | "authority_created" | "authority_consented";
 export interface LedgerClientSnapshot {
@@ -53,6 +68,12 @@ export interface LedgerClientSnapshot {
   signer: string | null;
   /** Which multi-gesture flow is half done. */
   pending: LedgerClientPending;
+  /**
+   * Ids revoked in the local chain but not in the last server chain seen, while the server is known to be behind (a refused or
+   * failed revocation, a rolled-back server): the server still accepts them until a re-offer lands. Empty when the server holds the
+   * local chain or its state is unknown. Always set on published snapshots; optional only for hand-built ones (SSR placeholder, tests).
+   */
+  unsaved?: { deviceIds: string[]; bridgeIds: string[] };
   error?: string;
 }
 
@@ -65,6 +86,33 @@ const MAX_CODE_ATTEMPTS = 5;
 const ATTEMPT_KEY = "ftown-pair-attempts:";
 const HANDLE = /^[A-Za-z0-9_-]{43}$/;
 const SOFT_REFRESH_ERRORS = ["network_unavailable", "server_unavailable", "account_not_found"];
+/** Re-offer pacing: the same (local head, server head) pair is sent at most once per window. */
+const REOFFER_PAIR_MS = 30_000;
+const BACKOFF_BASE_MS = 30_000;
+const BACKOFF_MAX_MS = 600_000;
+const BACKOFF_JITTER = 0.2;
+/** Longest Retry-After honoured; a larger value is read as this, so a retry still happens eventually. */
+const MAX_RETRY_AFTER_MS = 3_600_000;
+/** Write failures that leave the signed record in the local chain and that a later POST of the same chain can fix. */
+const TRANSIENT_STORE_ERRORS = ["network_unavailable", "server_unavailable", "rate_limited", "ledger_not_stored"];
+
+/**
+ * A refused or failed POST of a chain (see store()). `retryAfterMs`: the answer's Retry-After. `answered`: a 409 that carried the
+ * server's chain, which was already offered to the replica.
+ */
+class StoreError extends Error {
+  constructor(message: string, readonly retryAfterMs?: number, readonly answered = false) {
+    super(message);
+  }
+}
+/** Retry-After as milliseconds (delta-seconds or an HTTP date), capped at MAX_RETRY_AFTER_MS; undefined when absent or unreadable. */
+function retryAfterOf(value: string | null, now: number): number | undefined {
+  if (value === null) return undefined;
+  const text = value.trim();
+  if (/^[0-9]{1,10}$/.test(text)) return Math.min(Number(text) * 1000, MAX_RETRY_AFTER_MS);
+  const at = Date.parse(text);
+  return Number.isFinite(at) ? Math.min(Math.max(0, at - now), MAX_RETRY_AFTER_MS) : undefined;
+}
 
 function isPlain(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -167,7 +215,10 @@ interface PendingCreation { handle: Uint8Array; credentialId: string; publicKey:
 interface PendingEnrollment extends Base { credentialId: string; creating: boolean; signed?: Signed<LedgerTransition> }
 interface PendingAuthority { accountId: string; credentialId: string; publicKey: string; label: string; consent: PasskeySignature | null }
 interface Device { identity: EndpointIdentity; key: { publicKey: string; privateKey: CryptoKey } }
-interface HttpResult { status: number; value: unknown }
+interface HttpResult { status: number; value: unknown; retryAfterMs?: number }
+/** What the server held at its last recorded answer: the chain's head and every id that chain revokes. */
+interface ServerView { accountId: string; head: string; revokedDeviceIds: string[]; revokedBridgeIds: string[] }
+const NO_IDS = (): { deviceIds: string[]; bridgeIds: string[] } => ({ deviceIds: [], bridgeIds: [] });
 
 export class LedgerClient {
   private readonly origin: string;
@@ -192,6 +243,30 @@ export class LedgerClient {
   /** This browser's keys for the account they were last loaded for (drives the device_revoked status). */
   private device: { accountId: string; endpoint: EndpointPublic; authPublicKey: string } | null = null;
   private readonly memoryAttempts = new Map<string, number>();
+  private readonly random: () => number;
+  /**
+   * Re-offer state (see the header). `server`: the head and revocations of the bound account's chain the server last answered with
+   * (a read, or a POST answer), recorded only after the replica judged that chain, so it never outranks the local chain (see
+   * behind()), and only when that exchange was sent after the one recorded before (`serverSeq`, from `exchangeSeq`). Null: unknown.
+   * `reoffering`: the one queued or running re-offer, `reofferRunning` while its body runs; `reofferAgain`: a trigger arrived
+   * meanwhile; `reofferForced`: retryNow() asked for one attempt past the pair window and the backoff. `reofferPair`: the last pair
+   * sent and when. `retryAt`: when a pending retry is due (0: none), kept by the one `retryTimer`. `warnedStep`: the largest backoff
+   * step already warned about. `exclusiveActive`: exclusive() tasks running now.
+   */
+  private server: ServerView | null = null;
+  private exchangeSeq = 0;
+  private serverSeq = 0;
+  private reoffering: Promise<void> | null = null;
+  private reofferRunning = false;
+  private reofferAgain = false;
+  private reofferForced = false;
+  private exclusiveActive = 0;
+  private reofferPair: { local: string; server: string; at: number } | null = null;
+  private reofferFailures = 0;
+  private retryAt = 0;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private warnedStep = 0;
+  private disposed = false;
 
   constructor(private readonly deps: LedgerClientDeps) {
     if (canonicalOrigin(deps.origin) !== deps.origin || deps.origin === "null") throw new Error("invalid_origin");
@@ -200,6 +275,7 @@ export class LedgerClient {
     this.rpId = deps.rpId;
     this.now = deps.now ?? Date.now;
     this.fetcher = deps.fetchImpl ?? fetch;
+    this.random = deps.random ?? Math.random;
   }
 
   snapshot = (): LedgerClientSnapshot => this.value;
@@ -310,6 +386,7 @@ export class LedgerClient {
       const picked = await this.deps.passkey.identifyPasskey({ rpId: this.rpId, allowCredentialIds });
       if (!HANDLE.test(picked.handle)) throw new Error("ledger_other_account");
       if (bound !== null && picked.handle !== bound.ledger.genesis.payload.handle) throw new Error("ledger_other_account");
+      const seq = this.nextExchange();
       const response = await this.request("GET", `/api/account/ledger?handle=${encodeURIComponent(picked.handle)}`);
       let base: Base;
       if (response.status === 404 && bound !== null) {
@@ -319,7 +396,8 @@ export class LedgerClient {
         if (bound !== null) {
           const parsed = parseLedger(candidate);
           if (await accountIdOf(parsed.genesis.payload) !== bound.checkpoint.accountId) throw new Error("ledger_other_account");
-          await this.offerToReplica(candidate, { expectAccountId: bound.checkpoint.accountId });
+          // A server read: a server behind this chain is brought forward once this flow released the queue (see kick()).
+          await this.serverChain(candidate, bound.checkpoint.accountId, seq);
           const latest = this.deps.replica.raw();
           if (latest === null) throw new Error("ledger_replica_corrupt");
           base = latest;
@@ -428,6 +506,9 @@ export class LedgerClient {
         // Offline or a server without the account: the server re-checks the proof against its own ledger anyway.
         if (SOFT_REFRESH_ERRORS.indexOf(code(error)) === -1) throw error;
       }
+      // The server checks the proof against its own chain: a server behind this one (even one missing this browser's own add_device)
+      // is brought forward first. Never throws, never prompts.
+      await this.reofferSettled();
       const trusted = this.deps.replica.trusted();
       if (trusted === null) return false;
       const device = await this.loadDevice(trusted.accountId);
@@ -451,6 +532,8 @@ export class LedgerClient {
       if (accountId === null) throw new Error("signed_out");
       await this.deps.resetDeviceIdentity(accountId);
       this.device = null;
+      // The new keys are not a member until enrolled: nothing is re-offered for the old ones.
+      this.resetReoffer();
       const fresh = await this.loadDevice(accountId);
       const trusted = this.deps.replica.trusted();
       if (trusted !== null && membership(trusted, fresh.identity.endpoint, fresh.key.publicKey) !== "absent") throw new Error("device_rotation_failed");
@@ -609,11 +692,14 @@ export class LedgerClient {
   /**
    * GET the bound account's ledger and offer it to the replica. No-op while signed out. Reads start at least 2 s apart: when idle the
    * read starts now; otherwise the call joins the one trailing read at the end of the window (deferred, never dropped) and resolves
-   * with it. `force` skips the spacing but joins a read already in flight.
+   * with it. `force` skips the spacing but joins a read already in flight. A re-offer in flight is awaited first (so the read sees
+   * it), and one the read causes (the server is behind the local chain) is awaited too; a re-offer never throws.
    */
   async refresh(options: { force?: boolean } = {}): Promise<void> {
     try {
+      await this.reofferSettled();
       await this.refreshShared(options.force === true);
+      await this.reofferSettled();
     } catch (error) {
       throw coded(error);
     }
@@ -621,16 +707,19 @@ export class LedgerClient {
 
   /**
    * A head announced by the relay. Refreshes (paced like refresh(): immediately when idle, else one trailing read at the end of the
-   * window) only when it is ahead of the local RAW chain: a higher revision, or the same revision with another head (a fork). A lower
-   * revision, or the same revision and head, is ignored. Resolves once the read it caused is done. Never throws: it is only a hint.
+   * window) unless it is the local RAW head: a higher revision or a fork means the server may be ahead, a lower revision that it may
+   * be behind (and the read then brings it forward, see refreshNow). The same revision and head is ignored. Resolves once the read it
+   * caused, and a re-offer that read caused, are done. Never throws: it is only a hint.
    */
   async noteHead(head: string, revision: number): Promise<void> {
     try {
       await this.load();
       const raw = this.deps.replica.raw();
-      if (raw === null || typeof head !== "string" || !Number.isSafeInteger(revision)) return;
+      if (raw === null || typeof head !== "string" || !Number.isSafeInteger(revision) || revision < 0) return;
       const local = raw.checkpoint;
-      if (revision > local.revision || (revision === local.revision && head !== local.head)) await this.refreshShared(false);
+      if (revision === local.revision && head === local.head) return;
+      await this.refreshShared(false);
+      await this.reofferSettled();
     } catch {
       // The next explicit refresh reports the failure.
     }
@@ -638,7 +727,9 @@ export class LedgerClient {
 
   /**
    * A ledger pushed on `account:ledger#<accountId>`: a bare ledger, `{type:'ledger', ledger}`, or `{type:'ledger_head', head, revision}`
-   * (see noteHead). Ignored while unbound (a push never selects the account); foreign or invalid chains are ignored.
+   * (see noteHead). Ignored while unbound (a push never selects the account); foreign or invalid chains are ignored. A valid chain the
+   * local one outranks starts a paced read in the background (the server may be behind, or the message is old or replayed); this
+   * resolves once the chain itself was offered.
    */
   async offer(candidate: unknown): Promise<void> {
     try {
@@ -649,11 +740,35 @@ export class LedgerClient {
         await this.noteHead(String(candidate.head), Number(candidate.revision));
         return;
       }
-      await this.offerToReplica(isPlain(candidate) && candidate.type === "ledger" ? candidate.ledger : candidate,
-        { bind: false, expectAccountId: raw.checkpoint.accountId });
+      const pushed = isPlain(candidate) && candidate.type === "ledger" ? candidate.ledger : candidate;
+      const decision = await this.offerToReplica(pushed, { bind: false, expectAccountId: raw.checkpoint.accountId });
+      const local = this.deps.replica.raw();
+      if (decision === "keep" && local !== null && await this.headOf(pushed) !== local.checkpoint.head) {
+        void this.refreshShared(false).then(() => this.reofferSettled()).catch(() => undefined);
+      } else if (decision === "adopt" && this.behind()) {
+        // A pushed winner moved the local chain past the server state on record: the run's own read tells what the server holds now.
+        void this.kick();
+      }
     } catch (error) {
       throw coded(error);
     }
+  }
+
+  /**
+   * "Retry now": a fresh read, then one re-offer attempt that skips the 30 s pair window and the backoff wait once. Serialized with
+   * every other flow like any re-offer, never prompts, and still sends only a chain that outranks the server's, from a trusted
+   * device. Calls while one is pending share it. Resolves when that run is done; never throws.
+   */
+  retryNow(): Promise<void> {
+    if (this.disposed) return Promise.resolve();
+    this.reofferForced = true;
+    return this.kick();
+  }
+
+  /** Stops re-offers for good: the retry timer is cancelled and no later trigger sends anything. Every other method keeps working. */
+  dispose(): void {
+    this.disposed = true;
+    this.resetReoffer();
   }
 
   /** Throws Error('account_bridge_revoked') unless `bridgeId` is a trusted (sticky-filtered) bridge with exactly that endpoint id. */
@@ -679,6 +794,7 @@ export class LedgerClient {
    */
   forget(): Promise<void> {
     return this.exclusive(async () => {
+      this.resetReoffer();
       this.credentialId = null;
       this.creation = null;
       this.enrollment = null;
@@ -759,8 +875,8 @@ export class LedgerClient {
    * Stores base + record. A bound replica adopts this own chain BEFORE the POST, so a signed revocation is kept (and sticky) locally
    * whatever the server answers. An unbound replica binds only to this own chain, after the server accepted it. The server's answer
    * is then offered like any other candidate (never binding). Throws ledger_append_lost when the record is not in the chain that won
-   * (it is added to the persisted discarded list), ledger_not_stored when the server's chain lacks it (it stays in the local chain,
-   * and is re-sent with the next write).
+   * (it is added to the persisted discarded list), ledger_not_stored when the server's chain lacks it. A bound account's record
+   * stays in the local chain after a transient failure and is sent again by the re-offer retry (see storeLater), or with the next write.
    */
   private async submit(
     base: Ledger, record: Signed<LedgerTransition>, accountId: string, creating = false,
@@ -774,24 +890,375 @@ export class LedgerClient {
       // 'keep' of a chain without the record: a longer chain arrived (relay) while the passkey prompt was open.
       if (own === "keep" && !await holds(this.deps.replica.raw()?.ledger, record.payload.revision, head)) await this.lost(record);
     }
-    const response = await this.request("POST", "/api/account/ledger", { ledger: chain });
+    try {
+      const value = await this.store(chain, accountId, wasBound, creating);
+      if (!await holds(this.deps.replica.raw()?.ledger, record.payload.revision, head)) await this.lost(record);
+      if (!await holds(value.ledger, record.payload.revision, head)) throw new Error("ledger_not_stored");
+    } catch (error) {
+      if (wasBound) {
+        // The server answered with its own chain and refused this one: the re-offer this answer queued must not send it straight back.
+        if (error instanceof StoreError && error.answered) this.notePair(head);
+        this.storeLater(error);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * POST `chain` and read the answer: the one path of a write (submit) and of a re-offer. Any chain the server answers with (200/201,
+   * or a 409 of a bound account) is offered to the replica, which adopts it only if it wins, and recorded as the server's chain.
+   * `expectHead` (re-offers only): the server head just read; the server then never creates the account (404 account_unknown) and
+   * refuses when its head moved (409 head_changed, with its chain). Returns the answer body; throws StoreError: a creation reason
+   * (CREATION_REASONS, `creating` only), registration_closed, account_unknown, head_changed, ledger_rejected, ledger_limit,
+   * rate_limited (429 rate_limited, with its Retry-After), server_unavailable; or a request error.
+   */
+  private async store(chain: Ledger, accountId: string, wasBound: boolean, creating = false, expectHead?: string): Promise<Record<string, unknown>> {
+    const seq = this.nextExchange();
+    const response = await this.request("POST", "/api/account/ledger", expectHead === undefined ? { ledger: chain } : { ledger: chain, expectHead });
     const value = isPlain(response.value) ? response.value : {};
     if (creating && response.status !== 200 && response.status !== 201 && typeof value.error === "string" && CREATION_REASONS.indexOf(value.error) !== -1) {
-      throw new Error(value.error);
+      throw new StoreError(value.error, response.retryAfterMs);
     }
-    if (response.status === 403) throw new Error(value.error === "registration_closed" ? "registration_closed" : "ledger_rejected");
+    if (response.status === 403) throw new StoreError(value.error === "registration_closed" ? "registration_closed" : "ledger_rejected");
+    if (response.status === 404 && value.error === "account_unknown") {
+      this.serverGone(seq);
+      throw new StoreError("account_unknown");
+    }
     if (response.status === 409) {
-      if (wasBound && value.ledger !== null && value.ledger !== undefined) await this.offerToReplica(value.ledger, { expectAccountId: accountId });
-      throw new Error("ledger_rejected");
+      const answered = wasBound && value.ledger !== null && value.ledger !== undefined;
+      if (answered) await this.serverChain(value.ledger, accountId, seq);
+      throw new StoreError(value.error === "head_changed" ? "head_changed" : "ledger_rejected", undefined, answered);
     }
-    if (response.status === 413) throw new Error("ledger_limit");
+    if (response.status === 413) throw new StoreError("ledger_limit");
     // A per-account write limit: the signed record is already in the local chain (kept like after any transient failure) and is re-sent later.
-    if (response.status === 429 && value.error === "rate_limited") throw new Error("rate_limited");
-    if (response.status !== 200 && response.status !== 201) throw new Error(response.status === 429 || response.status >= 500 ? "server_unavailable" : "ledger_rejected");
-    if (!wasBound && await this.offerToReplica(chain, { bind: true, expectAccountId: accountId }) !== "adopt") throw new Error("ledger_rejected");
-    await this.offerToReplica(value.ledger, { expectAccountId: accountId });
-    if (!await holds(this.deps.replica.raw()?.ledger, record.payload.revision, head)) await this.lost(record);
-    if (!await holds(value.ledger, record.payload.revision, head)) throw new Error("ledger_not_stored");
+    if (response.status === 429 && value.error === "rate_limited") throw new StoreError("rate_limited", response.retryAfterMs);
+    if (response.status !== 200 && response.status !== 201) {
+      throw new StoreError(response.status === 429 || response.status >= 500 ? "server_unavailable" : "ledger_rejected", response.retryAfterMs);
+    }
+    if (!wasBound && await this.offerToReplica(chain, { bind: true, expectAccountId: accountId }) !== "adopt") throw new StoreError("ledger_rejected");
+    await this.serverChain(value.ledger, accountId, seq);
+    return value;
+  }
+
+  /** A sequence number for a server exchange, taken when it is sent: answers are recorded only in this order (see serverChain). */
+  private nextExchange(): number {
+    this.exchangeSeq += 1;
+    return this.exchangeSeq;
+  }
+
+  /**
+   * A chain the server answered with in exchange `seq`: offered to the replica (adopted only if it wins, its revocations made sticky),
+   * then recorded with its head and revocation ids unless a later-sent exchange was recorded already, then published; see `server`
+   * and behind(). Queues a re-offer when the server is behind the local chain.
+   */
+  private async serverChain(candidate: unknown, accountId: string, seq: number): Promise<void> {
+    // Published once below, after the server state is recorded, so no snapshot pairs the new chain with the old server state.
+    const { decision } = await this.deps.replica.offer(candidate, { expectAccountId: accountId });
+    let view: ServerView | null = null;
+    if (decision !== "reject") {
+      try {
+        const revoked = ledgerRevocations(parseLedger(candidate));
+        view = { accountId, head: await this.headOf(candidate), revokedDeviceIds: revoked.deviceIds, revokedBridgeIds: revoked.bridgeIds };
+      } catch {
+        view = null;
+      }
+    }
+    // Synchronous from here: no other answer can be recorded between the order check and the write.
+    if (seq > this.serverSeq) {
+      this.serverSeq = seq;
+      const raw = this.deps.replica.raw();
+      this.server = view !== null && raw !== null && raw.checkpoint.accountId === accountId ? view : null;
+    }
+    this.publish();
+    // Every trigger lands here; only a server behind the local chain needs a run (one queued behind whatever holds the queue now).
+    if (this.behind()) void this.kick();
+    else if (this.converged()) this.settleReoffer();
+  }
+
+  /** The server answered exchange `seq` without the account: its state is unknown from now on (nothing is re-offered to it). */
+  private serverGone(seq: number): void {
+    if (seq <= this.serverSeq) return;
+    this.serverSeq = seq;
+    this.server = null;
+    this.publish();
+  }
+
+  /** The head of a chain: its last record's, or its genesis' (the accountId) when it has none. Throws on a malformed chain. */
+  private async headOf(candidate: unknown): Promise<string> {
+    const ledger = parseLedger(candidate);
+    const last = ledger.transitions[ledger.transitions.length - 1];
+    return ledgerHead(last === undefined ? ledger.genesis.payload : last.payload);
+  }
+
+  // ---- Re-offer (see the header). ----
+
+  /**
+   * True iff the server holds a chain the local one outranks. The fork-choice guard: `server` is recorded only after the replica's
+   * chooseLedger kept or adopted that chain, so it lost or tied against the local chain then, and the local chain only moves forward
+   * in fork order since; a head other than the local one therefore lost. Equal heads: nothing to send.
+   */
+  private behind(): boolean {
+    const raw = this.deps.replica.raw();
+    const server = this.server;
+    return raw !== null && server !== null && server.accountId === raw.checkpoint.accountId && server.head !== raw.checkpoint.head;
+  }
+  /** True iff the server's chain on record is the local chain. */
+  private converged(): boolean {
+    const raw = this.deps.replica.raw();
+    const server = this.server;
+    return raw !== null && server !== null && server.accountId === raw.checkpoint.accountId && server.head === raw.checkpoint.head;
+  }
+
+  /**
+   * For the public calls that trigger re-offers (refresh, noteHead, signInKnownDevice): resolves when the re-offer run that is
+   * running now (or about to start, nothing else holding the queue) is done, and after REQUEST_TIMEOUT_MS at most. A run queued
+   * behind another flow (a passkey prompt can stay open for minutes) is not waited for: it finishes in the background.
+   */
+  private reofferSettled(): Promise<void> {
+    const run = this.reoffering;
+    if (run === null || (!this.reofferRunning && this.exclusiveActive > 0)) return Promise.resolve();
+    return new Promise<void>(resolve => {
+      const timer = setTimeout(resolve, REQUEST_TIMEOUT_MS);
+      void run.then(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+
+  /**
+   * Starts the one re-offer run on the exclusive() queue, or marks the queued/running one to look again when it is done. Returns that
+   * run (it never rejects). Never awaited from inside an exclusive() task (the run would wait for that task).
+   */
+  private kick(): Promise<void> {
+    this.reofferAgain = true;
+    if (this.reoffering === null && !this.disposed) {
+      const run: Promise<void> = this.exclusive(async () => {
+        this.reofferRunning = true;
+        try {
+          while (this.reofferAgain && !this.disposed) {
+            this.reofferAgain = false;
+            await this.reofferOnce();
+          }
+        } finally {
+          this.reofferRunning = false;
+        }
+      }).catch(() => undefined).then(() => {
+        if (this.reoffering === run) this.reoffering = null;
+        // A trigger that arrived after the loop's last look.
+        if (this.reofferAgain && !this.disposed) return this.kick();
+        return undefined;
+      });
+      this.reoffering = run;
+    }
+    return this.reoffering ?? Promise.resolve();
+  }
+
+  /**
+   * One decision, and at most two POSTs of the local chain (the second only after a head_changed answer). Never throws.
+   * 1. On what is known (skipped once by retryNow): send nothing unless the server is behind, this browser may re-offer, and neither
+   *    the pair window nor a pending retry blocks; a blocked attempt arms the timer for when it is due, so a behind server is never
+   *    left without one.
+   * 2. A fresh read through refreshNow (fork choice, sticky revocations, the server state recorded). 404: the account is gone, stop
+   *    and reset the backoff. Any other failure backs off.
+   * 3. On the fresh state: stop when the server is no longer behind or this browser may not re-offer (it may just have learnt its
+   *    own revocation); else POST with expectHead. A rejection that carried the server's chain (fork choice ran on it): stop when no
+   *    longer behind; after head_changed, one immediate re-evaluation; otherwise back off.
+   */
+  private async reofferOnce(): Promise<void> {
+    const forced = this.reofferForced;
+    this.reofferForced = false;
+    const known = this.deps.replica.raw();
+    if (known === null) {
+      this.cancelRetry();
+      return;
+    }
+    if (!forced) {
+      if (!this.behind()) {
+        this.settleOrCancel();
+        return;
+      }
+      if (!await this.mayReoffer(known.checkpoint.accountId)) {
+        this.cancelRetry();
+        return;
+      }
+      const due = this.dueAt();
+      if (this.now() < due) {
+        this.arm(due);
+        return;
+      }
+    } else if (!await this.mayReoffer(known.checkpoint.accountId)) {
+      return;
+    }
+    try {
+      await this.refreshNow();
+    } catch (error) {
+      if (code(error) === "account_not_found") {
+        this.settleReoffer();
+        return;
+      }
+      this.reofferFailed(code(error), error instanceof StoreError ? error.retryAfterMs : undefined);
+      return;
+    }
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const raw = this.deps.replica.raw();
+      const server = this.server;
+      if (raw === null || server === null || !this.behind()) {
+        this.settleOrCancel();
+        return;
+      }
+      if (!await this.mayReoffer(raw.checkpoint.accountId)) {
+        this.cancelRetry();
+        return;
+      }
+      this.reofferPair = { local: raw.checkpoint.head, server: server.head, at: this.now() };
+      try {
+        // The bound account's own chain, nothing else: public by design, already signed, so no prompt.
+        await this.store(raw.ledger, raw.checkpoint.accountId, true, false, server.head);
+      } catch (error) {
+        if (code(error) === "account_unknown") {
+          this.settleReoffer();
+          return;
+        }
+        if (error instanceof StoreError && error.answered) {
+          // The answer's chain went through serverChain(): fork choice ran on it and its revocations are recorded.
+          if (!this.behind()) {
+            this.settleOrCancel();
+            return;
+          }
+          if (error.message === "head_changed" && attempt === 0) continue;
+          this.reofferFailed(error.message, undefined);
+          return;
+        }
+        this.reofferFailed(code(error), error instanceof StoreError ? error.retryAfterMs : undefined);
+        return;
+      }
+      // store() recorded the server's answer; still behind means the server did not take this chain.
+      if (this.behind()) this.reofferFailed("ledger_not_stored", undefined);
+      else this.settleReoffer();
+      return;
+    }
+  }
+
+  /** When the next attempt for the current (local, server) pair may run: the later of the pair window and a pending retry. */
+  private dueAt(): number {
+    const raw = this.deps.replica.raw();
+    const server = this.server;
+    const now = this.now();
+    const pair = this.reofferPair;
+    const repeatAt = raw !== null && server !== null && pair !== null && pair.local === raw.checkpoint.head && pair.server === server.head && now >= pair.at
+      ? pair.at + REOFFER_PAIR_MS : 0;
+    // A retry time far beyond any delay this client sets means the clock went back: it is due.
+    const retryAt = this.retryAt - now > MAX_RETRY_AFTER_MS ? 0 : this.retryAt;
+    return Math.max(retryAt, repeatAt);
+  }
+
+  /** The current pair was just answered with a refusal (a user write): the re-offer waits out the pair window before sending it. */
+  private notePair(localHead: string): void {
+    const server = this.server;
+    if (server !== null) this.reofferPair = { local: localHead, server: server.head, at: this.now() };
+  }
+
+  /** Ids the local chain revokes and the server's chain on record does not, only while the server is known to be behind. */
+  private unsavedIds(): { deviceIds: string[]; bridgeIds: string[] } {
+    const raw = this.deps.replica.raw();
+    if (raw === null || !this.behind()) return NO_IDS();
+    // behind() holds, so the server state is known.
+    const server = this.server as ServerView;
+    return {
+      deviceIds: raw.checkpoint.revokedDeviceIds.filter(id => server.revokedDeviceIds.indexOf(id) === -1),
+      bridgeIds: raw.checkpoint.revokedBridgeIds.filter(id => server.revokedBridgeIds.indexOf(id) === -1),
+    };
+  }
+
+  /**
+   * Never for an unbound or signed-out client, during an account creation, or for a browser whose own keys are not a trusted device
+   * of the account (revoked, replaced, or not enrolled), checked on the keys as stored even when this page has not loaded them yet.
+   */
+  private async mayReoffer(accountId: string): Promise<boolean> {
+    if (this.disposed || this.creation !== null || (this.enrollment !== null && this.enrollment.creating) || this.value.status !== "ready") return false;
+    const trusted = this.deps.replica.trusted();
+    if (trusted === null || trusted.accountId !== accountId) return false;
+    try {
+      let device = this.device;
+      if (device === null || device.accountId !== accountId) {
+        // Read only: this.device (and so the snapshot status) changes only in the flows that load the device themselves.
+        const identity = await this.deps.endpoint(accountId);
+        if (identity.endpoint.ownerId !== accountId || identity.endpoint.kind !== "browser") return false;
+        device = { accountId, endpoint: identity.endpoint, authPublicKey: (await this.deps.deviceKey()).publicKey };
+      }
+      return membership(trusted, device.endpoint, device.authPublicKey) === "member";
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * A bound account's write failed after its record joined the local chain: retry without a prompt, after the jittered backoff
+   * floor or the server's Retry-After, whichever is later (a Retry-After of 0 or in the past does not mean "now").
+   */
+  private storeLater(error: unknown): void {
+    if (this.disposed || TRANSIENT_STORE_ERRORS.indexOf(code(error)) === -1) return;
+    const retryAfter = error instanceof StoreError ? error.retryAfterMs : undefined;
+    const delay = Math.max(retryAfter ?? 0, this.jittered(this.backoffStep(Math.max(1, this.reofferFailures))));
+    this.retryAt = Math.max(this.retryAt, this.now() + delay);
+    this.arm(this.retryAt);
+  }
+
+  private reofferFailed(reason: string, retryAfterMs: number | undefined): void {
+    this.reofferFailures += 1;
+    const step = this.backoffStep(this.reofferFailures);
+    const delay = Math.max(retryAfterMs ?? 0, this.jittered(step));
+    this.retryAt = this.now() + delay;
+    if (step > this.warnedStep) {
+      this.warnedStep = step;
+      console.warn(`[ledger] the server's copy of the account ledger is behind; sending it failed (${reason}), next try in ${Math.round(delay / 1000)} s`);
+    }
+    this.arm(this.retryAt);
+  }
+
+  /** 30 s for the first failure, doubling, at most 10 min. */
+  private backoffStep(failures: number): number {
+    return Math.min(BACKOFF_BASE_MS * 2 ** Math.max(0, failures - 1), BACKOFF_MAX_MS);
+  }
+  private jittered(ms: number): number {
+    const unit = Math.min(1, Math.max(0, this.random()));
+    return Math.round(ms * (1 - BACKOFF_JITTER + 2 * BACKOFF_JITTER * unit));
+  }
+
+  /** The one retry timer, due at `at`. */
+  private arm(at: number): void {
+    if (this.retryTimer !== null) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    if (this.disposed) return;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      void this.kick();
+    }, Math.max(0, at - this.now()));
+  }
+  private cancelRetry(): void {
+    this.retryAt = 0;
+    if (this.retryTimer !== null) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+  }
+  /** The server holds the local chain, or the account is gone from it: no retry pending, the backoff starts over. */
+  private settleReoffer(): void {
+    this.cancelRetry();
+    this.reofferFailures = 0;
+    this.warnedStep = 0;
+  }
+  /** Not behind: settled when the server holds the local chain, else (state unknown) only the pending retry is dropped. */
+  private settleOrCancel(): void {
+    if (this.converged()) this.settleReoffer();
+    else this.cancelRetry();
+  }
+  /** Sign-out, a device rotation or dispose(): forget everything the re-offer knew. A run already queued finds nothing to send. */
+  private resetReoffer(): void {
+    this.settleReoffer();
+    this.server = null;
+    this.reofferPair = null;
+    this.reofferAgain = false;
+    this.reofferForced = false;
   }
 
   /** An own record that is not in the winning chain: keep it (persisted) for re-signing, then report it. */
@@ -847,8 +1314,16 @@ export class LedgerClient {
     const raw = this.deps.replica.raw();
     if (raw === null) return;
     const accountId = raw.checkpoint.accountId;
+    const seq = this.nextExchange();
     const response = await this.request("GET", `/api/account/ledger?accountId=${encodeURIComponent(accountId)}`);
-    await this.offerToReplica(this.ledgerOf(response, "account_not_found"), { expectAccountId: accountId });
+    if (response.status === 404) {
+      // A server without the account is not "behind": a POST would be an account creation, which only the owner starts.
+      this.serverGone(seq);
+      throw new Error("account_not_found");
+    }
+    if (response.status === 429 || response.status >= 500) throw new StoreError("server_unavailable", response.retryAfterMs);
+    // Offered, recorded, and when the server is behind the local chain, re-offered (see serverChain).
+    await this.serverChain(this.ledgerOf(response, "account_not_found"), accountId, seq);
   }
 
   private async offerToReplica(candidate: unknown, options: ReplicaOfferOptions): Promise<"adopt" | "keep" | "reject"> {
@@ -947,19 +1422,30 @@ export class LedgerClient {
         throw new Error("network_unavailable");
       }
       if (response.status === 204) return { status: 204, value: null };
+      let retryAfter: string | null = null;
+      try { retryAfter = response.headers.get("Retry-After"); } catch { retryAfter = null; }
       let text: string;
       try { text = await response.text(); } catch { throw new Error("network_unavailable"); }
       if (text.length > MAX_RESPONSE_CHARS) throw new Error("ledger_limit");
       let value: unknown = null;
       try { value = text ? JSON.parse(text) : null; } catch { value = null; }
-      return { status: response.status, value };
+      const retryAfterMs = retryAfterOf(retryAfter, this.now());
+      return retryAfterMs === undefined ? { status: response.status, value } : { status: response.status, value, retryAfterMs };
     } finally {
       clearTimeout(timer);
     }
   }
 
   private exclusive<T>(run: () => Promise<T>): Promise<T> {
-    const result = this.lock.then(run, run);
+    const task = async (): Promise<T> => {
+      this.exclusiveActive += 1;
+      try {
+        return await run();
+      } finally {
+        this.exclusiveActive -= 1;
+      }
+    };
+    const result = this.lock.then(task, task);
     this.lock = result.then(() => undefined, () => undefined);
     return result.catch(error => { throw coded(error); });
   }
@@ -983,7 +1469,7 @@ export class LedgerClient {
     const ids = raw === null ? null : raw.checkpoint.authorities.map(item => item.credentialId);
     const signer = ids === null ? this.credentialId
       : this.credentialId !== null && ids.indexOf(this.credentialId) !== -1 ? this.credentialId : ids.length === 1 ? ids[0] : null;
-    this.update({ status, checkpoint: trusted, discarded: this.deps.replica.discarded(), localOnly, signer, pending });
+    this.update({ status, checkpoint: trusted, discarded: this.deps.replica.discarded(), localOnly, signer, pending, unsaved: this.unsavedIds() });
   }
 
   private update(value: LedgerClientSnapshot): void {

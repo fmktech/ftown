@@ -8,6 +8,7 @@ import { E2E_DIR, UI_BASE_URL } from "../helpers/config";
 import { ledgerRow, withDb } from "../helpers/db";
 import { test } from "../helpers/fixtures";
 import { appendOperation, browserDeviceWithKey, requestRelayToken, serverNonce, signProof } from "../helpers/ledger-admin";
+import { virtualAuthenticator } from "../helpers/passkey";
 import { createSecondAccount, type SecondAccount } from "../helpers/second-account";
 
 /**
@@ -24,6 +25,9 @@ import { createSecondAccount, type SecondAccount } from "../helpers/second-accou
  *  - /api/auth/relay-token's `key_revoked` evidence (with the ledger) goes only to the holder of the revoked key: a proof
  *    that merely CLAIMS a revoked key id, signed by any other key, is a plain 401 unauthorized without the ledger.
  *    (computer-removal.spec.ts asserts the evidence for a revoked bridge's own key.)
+ *  - a FULL database rollback (the whole row, internally consistent and correctly sealed) is accepted by the server until a
+ *    signed-in browser that holds the newer chain connects: its ledger client sees the server behind and re-offers its own
+ *    chain without a passkey prompt (re-offer). With no browser open, the rollback stays.
  */
 
 const audience = new URL(UI_BASE_URL).origin;
@@ -178,6 +182,173 @@ test("relay-token: a claim of a revoked key id gets key_revoked evidence only wh
     expect(evidence.body.token).toBeUndefined();
     const ledger = evidence.body.ledger as { transitions: { payload: { operation: { type: string; endpointId?: string } } }[] };
     expect(ledger.transitions.some(item => item.payload.operation.type === "revoke_device" && item.payload.operation.endpointId === doomed.device.endpoint.id)).toBe(true);
+  } finally {
+    await second.close();
+  }
+});
+
+// ---- Full database rollback and the browser's re-offer ----
+
+type Tip = { revision: number; head: string };
+type FullRow = Tip & { ledger: unknown; sticky: unknown; checkpoint: string; checkpoint_mac: string };
+
+async function serverTip(accountId: string): Promise<Tip | null> {
+  try {
+    return await withDb(async db => (await db.query("SELECT revision, head FROM account_ledger WHERE account_id=$1", [accountId])).rows[0] as Tip);
+  } catch { return null; }
+}
+
+/** The page's own ledger replica tip (IndexedDB `ftown-ledger`, store `replicas`), or null while unreadable (never throws). */
+async function localTip(page: Page, accountId: string): Promise<Tip | null> {
+  try {
+    return await page.evaluate(async id => {
+      // Never create the database: an empty one would shadow the app's own upgrade.
+      if (!(await indexedDB.databases()).some(item => item.name === "ftown-ledger")) return null;
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open("ftown-ledger");
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(new Error("replica unavailable"));
+      });
+      try {
+        if (!db.objectStoreNames.contains("replicas")) return null;
+        const record = await new Promise<{ checkpoint?: { revision?: number; head?: string } } | undefined>((resolve, reject) => {
+          const request = db.transaction("replicas").objectStore("replicas").get(id);
+          request.onsuccess = () => resolve(request.result as { checkpoint?: { revision?: number; head?: string } } | undefined);
+          request.onerror = () => reject(new Error("replica unavailable"));
+        });
+        const checkpoint = record?.checkpoint;
+        return checkpoint && typeof checkpoint.revision === "number" && typeof checkpoint.head === "string" ? { revision: checkpoint.revision, head: checkpoint.head } : null;
+      } finally { db.close(); }
+    }, accountId);
+  } catch { return null; }
+}
+
+/** The authenticator's signature counter for the account's passkey: it advances on every assertion (no prompt means no change). */
+async function signCount(second: SecondAccount): Promise<number> {
+  const held = await (await virtualAuthenticator(second.page)).credentials();
+  const own = held.find(item => item.credentialId === second.account.credential.credentialId);
+  if (!own) throw new Error("the account's passkey is not in its authenticator");
+  return own.signCount;
+}
+
+interface RolledBack {
+  second: SecondAccount;
+  doomed: Awaited<ReturnType<typeof browserDeviceWithKey>>;
+  claim: { accountId: string; kind: "device"; keyId: string; purpose: "relay" };
+  /** The server's tip before (pre) and after (post) the revocation. */
+  pre: Tip;
+  post: Tip;
+}
+
+/**
+ * A throwaway account whose browser holds the post-revocation chain while the server is fully rolled back to the row from
+ * before the revocation. Its browser is left on a same-origin page WITHOUT the app (no ledger client running).
+ */
+async function rolledBackAccount(browser: Parameters<typeof createSecondAccount>[0], name: string): Promise<RolledBack> {
+  const second = await createSecondAccount(browser, { name: `${name} ${randomBytes(3).toString("hex")}` });
+  const page = second.page;
+  const doomed = await browserDeviceWithKey(second.accountId, "E2E device rolled back", Date.now());
+  const claim = { accountId: second.accountId, kind: "device" as const, keyId: doomed.device.endpoint.id, purpose: "relay" as const };
+  // Each server write is passkey-signed here (the account passkey, Node-side); the browser learns it like any change: on load.
+  const learn = async (tip: Tip) => {
+    await page.goto("/dashboard");
+    await expect.poll(() => localTip(page, second.accountId), { timeout: 30_000, message: "the browser's replica follows the server" }).toEqual(tip);
+  };
+  await appendOperation({ type: "add_device", device: doomed.device }, second.account);
+  expect((await requestRelayToken(await signProof(doomed.authKey, claim))).status, "D2 is trusted").toBe(200);
+  const pre = (await serverTip(second.accountId))!;
+  await learn(pre);
+  const snapshot = await withDb(async db => (await db.query(
+    "SELECT ledger, revision, head, sticky, checkpoint, checkpoint_mac FROM account_ledger WHERE account_id=$1", [second.accountId])).rows[0] as FullRow);
+  expect(snapshot.checkpoint).not.toBeNull();
+
+  await appendOperation({ type: "revoke_device", endpointId: doomed.device.endpoint.id }, second.account);
+  const revoked = await requestRelayToken(await signProof(doomed.authKey, claim));
+  expect(revoked.status).toBe(401);
+  expect(revoked.body.error).toBe("key_revoked");
+  const post = (await serverTip(second.accountId))!;
+  expect(post.revision).toBe(pre.revision + 1);
+  await learn(post);
+  await quiet(page);
+
+  // Full rollback: the whole row as it was before the revocation (internally consistent, correctly sealed).
+  await withDb(db => db.query("UPDATE account_ledger SET ledger=$2::jsonb, revision=$3, head=$4, sticky=$5::jsonb, checkpoint=$6, checkpoint_mac=$7 WHERE account_id=$1",
+    [second.accountId, JSON.stringify(snapshot.ledger), snapshot.revision, snapshot.head, JSON.stringify(snapshot.sticky), snapshot.checkpoint, snapshot.checkpoint_mac]));
+  expect(await serverTip(second.accountId)).toEqual(pre);
+  // The accepted window: until a holder of the newer chain shows up, the server serves the older chain, and D2 is trusted again.
+  const reopened = await requestRelayToken(await signProof(doomed.authKey, claim));
+  expect(reopened.status, "the rolled-back server trusts D2 again (accepted window)").toBe(200);
+  expect(await localTip(page, second.accountId), "the browser keeps the newer chain").toEqual(post);
+  return { second, doomed, claim, pre, post };
+}
+
+/** After the repair: the server is at the post-revocation tip again, D2 is refused, and the account's browser still works. */
+async function expectRepaired(state: RolledBack, page: Page): Promise<void> {
+  const { second, doomed, claim, post } = state;
+  const refused = await requestRelayToken(await signProof(doomed.authKey, claim));
+  expect(refused.status, "SECURITY: the revoked device is trusted after the repair").toBe(401);
+  expect(refused.body.error).toBe("key_revoked");
+  expect(refused.body.token).toBeUndefined();
+  expect((await page.request.post(`${UI_BASE_URL}/api/auth/token`)).status()).toBe(200);
+  const legit = await requestRelayToken(await signWithBrowserDeviceKey(page, {
+    accountId: second.accountId, kind: "device", keyId: second.endpointId, nonce: await serverNonce("relay"), purpose: "relay", audience,
+  }));
+  expect(legit.status).toBe(200);
+  expect(await serverTip(second.accountId)).toEqual(post);
+}
+
+test("re-offer: a fully rolled-back server is repaired by the next browser that connects, without a passkey prompt", async ({ browser }) => {
+  test.setTimeout(180_000);
+  const state = await rolledBackAccount(browser, "E2E reoffer");
+  const { second, pre, post } = state;
+  try {
+    const page = second.page;
+    const countBefore = await signCount(second);
+    expect(countBefore, "the counter advances on assertions (account creation made some)").toBeGreaterThan(0);
+    // Trigger: B1 loads its dashboard (as a user would). The app's ledger client refreshes on load (bridges:ledger subscribed).
+    const local: (Tip | null)[] = [];
+    const started = Date.now();
+    await page.goto("/dashboard");
+    await expect.poll(async () => {
+      local.push(await localTip(page, second.accountId));
+      return serverTip(second.accountId);
+    }, { timeout: 60_000, intervals: [100], message: "the server row returns to the post-revocation tip" }).toEqual(post);
+    const repairedMs = Date.now() - started;
+    test.info().annotations.push({ type: "re-offer repair after dashboard load", description: `${repairedMs} ms` });
+    console.log(`[ledger-checkpoint] re-offer repaired the rolled-back server ${repairedMs} ms after the dashboard load`);
+    expect(await signCount(second), "no passkey assertion was made by the repair").toBe(countBefore);
+    const readable = local.filter((tip): tip is Tip => tip !== null);
+    expect(readable.length, "the local replica was readable during the repair").toBeGreaterThan(0);
+    expect(readable.filter(tip => tip.revision !== post.revision || tip.head !== post.head), "B1's own chain never went back").toEqual([]);
+    expect(pre.revision).toBe(post.revision - 1);
+    await expectRepaired(state, page);
+  } finally {
+    await second.close();
+  }
+});
+
+test("re-offer control: with no browser open a full rollback stays; opening the account's browser repairs it", async ({ browser }) => {
+  test.setTimeout(180_000);
+  const state = await rolledBackAccount(browser, "E2E reoffer control");
+  const { second, pre, post } = state;
+  try {
+    // No browser of this account is open: close its only page (the context keeps its cookies and IndexedDB, like a closed tab).
+    await second.page.close();
+    const until = Date.now() + 10_000;
+    while (Date.now() < until) {
+      expect(await serverTip(second.accountId), "the server stays rolled back while no browser holds a connection").toEqual(pre);
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    // The reopened page has NO virtual authenticator (one lives per page): the repair cannot involve a passkey at all.
+    const page = await second.context.newPage();
+    const started = Date.now();
+    await page.goto("/dashboard");
+    await expect.poll(() => serverTip(second.accountId), { timeout: 60_000, intervals: [100] }).toEqual(post);
+    const repairedMs = Date.now() - started;
+    test.info().annotations.push({ type: "re-offer repair after opening the browser", description: `${repairedMs} ms` });
+    console.log(`[ledger-checkpoint] opening the browser repaired the rolled-back server after ${repairedMs} ms`);
+    expect(await localTip(page, second.accountId)).toEqual(post);
+    await expectRepaired(state, page);
   } finally {
     await second.close();
   }

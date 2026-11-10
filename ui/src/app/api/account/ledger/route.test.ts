@@ -130,6 +130,47 @@ describe('POST', () => {
     expect(mocks.publish).not.toHaveBeenCalled();
   });
 
+  describe('expectHead (a browser re-offering its chain)', () => {
+    const HEAD = 'H'.repeat(43);
+    it('passes a well-formed expectHead to the store; without it the store gets no options', async () => {
+      offer('adopt');
+      const response = await POST(post(JSON.stringify({ ledger, expectHead: HEAD })));
+      expect(response.status).toBe(200);
+      expect(mocks.offer).toHaveBeenLastCalledWith(ledger, LIMITS, { expectHead: HEAD });
+      expect(mocks.publish).toHaveBeenCalledTimes(1);
+      await POST(post(JSON.stringify({ ledger })));
+      expect(mocks.offer.mock.calls[1]).toHaveLength(2);
+    });
+
+    it('an unknown account is 404 account_unknown and spends no creation budget', async () => {
+      mocks.offer.mockResolvedValue({ decision: 'reject', stored: null, discarded: 0, reason: 'account_unknown' });
+      const response = await POST(post(JSON.stringify({ ledger, expectHead: HEAD })));
+      expect(response.status).toBe(404);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(await response.json()).toEqual({ error: 'account_unknown' });
+      expect(scopes()).toEqual(['ledger-write']);
+      expect(mocks.publish).not.toHaveBeenCalled();
+    });
+
+    it('a moved head is 409 head_changed with the stored chain, spending no account write budget', async () => {
+      mocks.offer.mockResolvedValue({ decision: 'reject', stored, discarded: 0, reason: 'head_changed' });
+      const response = await POST(post(JSON.stringify({ ledger, expectHead: HEAD })));
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: 'head_changed', ledger });
+      expect(scopes()).toEqual(['ledger-write']);
+      expect(mocks.publish).not.toHaveBeenCalled();
+    });
+
+    it('400 for an expectHead that is not a head, without calling the store', async () => {
+      for (const expectHead of [null, 5, '', 'short', 'H'.repeat(44), '+'.repeat(43), ['x'], { head: HEAD }]) {
+        const response = await POST(post(JSON.stringify({ ledger, expectHead })));
+        expect(response.status, JSON.stringify(expectHead)).toBe(400);
+        expect(await response.json()).toEqual({ error: 'invalid_request' });
+      }
+      expect(mocks.offer).not.toHaveBeenCalled();
+    });
+  });
+
   it('ignores unknown body members, a stray bootstrap included', async () => {
     offer('created');
     for (const extra of [{ bootstrap: 'secret-value' }, { bootstrap: 5 }, { bootstrap: 'b'.repeat(1000) }, { other: true }]) {
