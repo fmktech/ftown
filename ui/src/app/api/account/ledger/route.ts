@@ -14,7 +14,7 @@ const KEY = /^[A-Za-z0-9_-]{43}$/;
 const MINUTE_MS = 60_000;
 const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
-/** Real writes to one existing account (adopt, or keep with new sticky ids). */
+/** Real writes to one existing account: an adopted chain (the only write the replica rule makes). */
 const ACCOUNT_WRITES_WINDOW_MS = 10 * MINUTE_MS;
 const CREATION_STATUS: Record<CreationRejection, number> = {
   invalid_ledger: 400, registration_closed: 403, creation_too_large: 413, origin_mismatch: 400, server_misconfigured: 503, server_full: 503,
@@ -73,7 +73,11 @@ export async function GET(request: Request): Promise<NextResponse> {
 /** Body { ledger, expectHead? }; other members are ignored. Offers the chain to the store: replica rule (and the account's write budget)
  *  for an existing account, genesis admission (open registration, creation budget) for a new one. expectHead (a browser re-offering
  *  its chain; a 43-character head, anything else is 400): never creates (404 account_unknown), and a stored head other than
- *  expectHead is 409 head_changed with the stored chain, before fork choice and any budget. */
+ *  expectHead is 409 head_changed with the stored chain, before chooseLedger and any budget.
+ *  Existing account, each answer distinct for the client: 200 { decision: 'adopt' | 'keep', ledger, discarded } (adopt: the chain was
+ *  written and is published); 409 { error: 'diverged', ledger } (a VALID other history: nothing written, the owner must choose);
+ *  409 { error: 'ledger_rejected', ledger } (an invalid chain: ignore it); 409 { error: 'head_changed', ledger }; 429 rate_limited.
+ *  Every 409 carries the stored chain. */
 export async function POST(request: Request): Promise<NextResponse> {
   try {
     const blocked = await limited(request, 'ledger-write', 30);
@@ -95,6 +99,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     if (result.decision === 'reject') {
       if (result.reason === 'rate_limited') return limits.refusal();
       if (result.reason === 'head_changed') return json({ error: 'head_changed', ledger: result.stored.ledger }, 409);
+      if (result.reason === 'diverged') return json({ error: 'diverged', ledger: result.stored.ledger }, 409);
       if (result.stored === null) {
         if (result.reason === 'account_unknown') return json({ error: 'account_unknown' }, 404);
         return json({ error: result.reason }, CREATION_STATUS[result.reason]);
