@@ -627,6 +627,7 @@ program
     centrifugo.setSecurity(security);
     // After a refusal centrifuge-js stops for good; the relay reconnects it once the key is accepted or a ledger is adopted.
     if (ledgerRelay) reconnectRelay = () => centrifugo.connect();
+    if (ledgerRelay) ledgerRelay.setLedgerPublisher(announcement => centrifugo.publishLedgerAnnouncement(userId, announcement));
     centrifugo.onLocalPublication((channel, data) => localApiServer.recordPublication(channel, data));
     // Direct transport (WebRTC DataChannel) data plane. Peers attach per session;
     // terminal output/screen fan out to them directly, and to Centrifugo only when

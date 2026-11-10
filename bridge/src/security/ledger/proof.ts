@@ -25,6 +25,8 @@ const MAX_ACCOUNT = 64;
 const MAX_KEY_ID = 128;
 const MAX_AUDIENCE = 256;
 const SIGNATURE_LENGTH = 86;
+/** 65 bytes unpadded base64url; bounds the decode of a hostile key string. */
+const PUBLIC_KEY_LENGTH = 87;
 const LOOPBACK = ['localhost', '127.0.0.1', '[::1]'];
 const ORDER = hexBytes('FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551');
 const HALF_ORDER = hexBytes('7FFFFFFF800000007FFFFFFFFFFFFFFFDE737D56D38BCF4279DCE5617E3192A8');
@@ -80,6 +82,37 @@ function decode(value: string): Uint8Array<ArrayBuffer> | null {
   } catch { return null; }
 }
 
+/**
+ * ECDSA P-256/SHA-256 over `bytes`, returned as canonical unpadded base64url of raw r||s (64 bytes) with low S. The helper adds NO domain of
+ * its own: every caller must prefix `bytes` with its own protocol domain string (auth proofs: 'ftown-auth-proof-v1\n'; head announcements:
+ * HEAD_ANNOUNCE_DOMAIN), so a signature made for one protocol can never verify as another.
+ */
+export async function signDomain(privateKey: CryptoKey, bytes: Uint8Array): Promise<string> {
+  const data = new Uint8Array(new ArrayBuffer(bytes.length));
+  data.set(bytes);
+  return encode(lowS(new Uint8Array(await crypto.subtle.sign(SIGN, privateKey, data))));
+}
+
+/**
+ * Whether `signature` (canonical unpadded base64url of raw r||s, exactly 64 bytes, low S) is a valid ECDSA P-256/SHA-256 signature over `bytes`
+ * under `authPublicKey` (raw uncompressed P-256 point, 65 bytes, base64url). No domain of its own: the caller passes the same domain-prefixed
+ * bytes it expects the signer to have signed. High-S, non-canonical, short or long encodings and any malformed input return false; never throws.
+ */
+export async function verifyDomain(authPublicKey: string, signature: string, bytes: Uint8Array): Promise<boolean> {
+  try {
+    if (typeof authPublicKey !== 'string' || typeof signature !== 'string' || signature.length !== SIGNATURE_LENGTH) return false;
+    // Tag check instead of instanceof so typed arrays from another realm are accepted.
+    if (authPublicKey.length > PUBLIC_KEY_LENGTH || Object.prototype.toString.call(bytes) !== '[object Uint8Array]') return false;
+    const raw = decode(authPublicKey);
+    const decoded = decode(signature);
+    if (!raw || raw.length !== 65 || !decoded || decoded.length !== 64 || encode(decoded) !== signature || isHighS(decoded.subarray(32))) return false;
+    const data = new Uint8Array(new ArrayBuffer(bytes.length));
+    data.set(bytes);
+    const key = await crypto.subtle.importKey('raw', raw, ECDSA, false, ['verify']);
+    return await crypto.subtle.verify(SIGN, key, decoded, data);
+  } catch { return false; }
+}
+
 function canonicalBytes(fields: AuthProofFields): Uint8Array<ArrayBuffer> {
   const ordered = {
     accountId: fields.accountId,
@@ -103,8 +136,8 @@ export async function generateAuthKey(extractable: boolean): Promise<{ publicKey
 
 export async function signAuthProof(privateKey: CryptoKey, fields: AuthProofFields): Promise<AuthProof> {
   const { accountId, kind, keyId, nonce, purpose, audience } = fields;
-  const signature = new Uint8Array(await crypto.subtle.sign(SIGN, privateKey, canonicalBytes({ accountId, kind, keyId, nonce, purpose, audience })));
-  return { accountId, kind, keyId, nonce, purpose, audience, signature: encode(lowS(signature)) };
+  const signature = await signDomain(privateKey, canonicalBytes({ accountId, kind, keyId, nonce, purpose, audience }));
+  return { accountId, kind, keyId, nonce, purpose, audience, signature };
 }
 
 export function parseAuthProof(value: unknown): AuthProof | null {
@@ -145,10 +178,6 @@ export async function verifyAuthProof(
       authPublicKey = checkpoint.bridges.filter(entry => entry.bridgeId === parsed.keyId)[0]?.authPublicKey;
     }
     if (!authPublicKey) return false;
-    const raw = decode(authPublicKey);
-    const signature = decode(parsed.signature);
-    if (!raw || raw.length !== 65 || !signature || signature.length !== 64 || encode(signature) !== parsed.signature || isHighS(signature.subarray(32))) return false;
-    const key = await crypto.subtle.importKey('raw', raw, ECDSA, false, ['verify']);
-    return await crypto.subtle.verify(SIGN, key, signature, canonicalBytes(parsed));
+    return await verifyDomain(authPublicKey, parsed.signature, canonicalBytes(parsed));
   } catch { return false; }
 }
