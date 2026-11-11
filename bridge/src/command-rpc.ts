@@ -141,7 +141,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             const result = await deps.enqueueSessionMessage(session, payload.message);
             if (result.ok && typeof result.id === 'string' && result.id.length > 0) {
               if (typeof payload.eventId === 'string' && deps.attentionStore) {
-                try { await deps.attentionStore.resolveReplied(payload.sessionId, payload.eventId); } catch { /* The reply is durable even if the item is gone. */ }
+                try { await deps.attentionStore.resolveReplied(payload.sessionId, payload.eventId); } catch (err) { console.warn('[Bridge] Could not resolve replied attention:', err instanceof Error ? err.message : err); }
               }
               response = { requestId: command.requestId, success: true, data: { sessionId: session.id, messageId: result.id, status: 'queued' } satisfies SessionMessageAccepted };
             } else {

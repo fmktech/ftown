@@ -20,7 +20,7 @@ import { sanitizeAttentionText } from './attention-events.js';
 import { parseAttentionPrompt } from './attention-prompt.js';
 import { ATTENTION_ITEM_WAIT_MAX_SECONDS, type AttentionPrompt } from './attention-prompt-protocol.js';
 import type { Session } from './types.js';
-import { MailDeliveryService, sanitizeMessageText, parseNativeWakeRegistration, NativeWakeRegistrationError, type AcceptMailResult } from './mail-delivery.js';
+import { MailDeliveryService, sanitizeMessageText, parseNativeWakeRegistration, NativeWakeRegistrationError, type AcceptMailResult, type NativeWakeRegistration } from './mail-delivery.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { TerminalManager } from './terminal-manager.js';
@@ -1331,8 +1331,9 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return;
     }
 
+    let registration: NativeWakeRegistration | undefined;
     try {
-      const registration = parseNativeWakeRegistration(url.searchParams);
+      registration = parseNativeWakeRegistration(url.searchParams);
       if (registration) this.mail.registerNativeWake(session, registration);
     } catch (error) {
       if (!(error instanceof NativeWakeRegistrationError)) throw error;
@@ -1348,6 +1349,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     });
 
     if (result.kind === 'immediate') {
+      // Opencode hands mail to its plugin via this authenticated peek; its
+      // UserPromptSubmit hook carries no prompt text, so record the handoff for
+      // the no-prompt 15s rule (the prompt-text prefix rule cannot apply).
+      if (registration && result.messages.length > 0) this.mail.notePluginHandoff(sessionId);
       jsonResponse(res, 200, { messages: result.messages });
       return;
     }

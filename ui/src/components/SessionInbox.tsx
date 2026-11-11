@@ -115,7 +115,7 @@ export function SessionInboxTrigger({ count, collapsed, open, onOpen, buttonRef 
     if (count > prev && count > 0) {
       setFlash(true);
       const timer = setTimeout(() => setFlash(false), 1200);
-      return () => clearTimeout(timer);
+      return () => { clearTimeout(timer); setFlash(false); };
     }
   }, [count]);
   const label = hasItems ? `Inbox, ${count} waiting` : `Inbox, ${count} ${count === 1 ? "message" : "messages"}`;

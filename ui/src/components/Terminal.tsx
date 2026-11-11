@@ -17,6 +17,7 @@ import "@xterm/xterm/css/xterm.css";
 
 export interface TerminalHandle {
   sendInput: (data: string) => void;
+  focus: () => void;
   refit: (options?: { forceResize?: boolean }) => void;
   /** Plain text of the terminal buffer (see terminalBufferText). "" before xterm is initialised. */
   getText: (options?: { maxLines?: number }) => string;
@@ -196,6 +197,11 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
     sendInput(data: string) {
       sendInputRef.current(data);
       if (isLoneInterrupt(data)) onInterruptRef.current?.();
+    },
+    focus() {
+      const term = xtermRef.current as unknown as { focus?: () => void } | null;
+      if (typeof term?.focus === "function") term.focus();
+      else containerRef.current?.querySelector("textarea")?.focus();
     },
     refit(options) {
       fitAndSyncResize(options?.forceResize === true);

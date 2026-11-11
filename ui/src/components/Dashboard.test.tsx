@@ -43,8 +43,8 @@ vi.mock("@/hooks/useAllSessionEvents", () => ({ useAllSessionEvents: () => ({
 vi.mock("./Terminal", async () => {
   const { forwardRef, useImperativeHandle } = await import("react");
   return { Terminal: forwardRef(function Terminal({ sessionId, headerActions }: { sessionId: string | null; headerActions?: ReactNode }, ref) {
-    useImperativeHandle(ref, () => ({ sendInput: state.terminalSendInput, refit: vi.fn(), getText: state.terminalGetText, paste: state.terminalPaste }));
-    return <section aria-label="Terminal session header"><div data-testid="terminal">{sessionId}</div>{headerActions}</section>;
+    useImperativeHandle(ref, () => ({ sendInput: state.terminalSendInput, focus: () => { (document.querySelector('[data-testid="terminal"]') as HTMLElement | null)?.focus(); }, refit: vi.fn(), getText: state.terminalGetText, paste: state.terminalPaste }));
+    return <section aria-label="Terminal session header"><div data-testid="terminal" tabIndex={-1}>{sessionId}</div>{headerActions}</section>;
   }) };
 });
 vi.mock("./MobileControlBar", async () => {
@@ -259,7 +259,7 @@ describe("new-session navigation", () => {
     state.createSession.mockResolvedValue(created);
     dashboard(local);
     fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
-    fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+    fireEvent.click(screen.getByRole("tab", { name: /^Workspace/ }));
     fireEvent.click(screen.getByRole("button", { name: "Create a new session" }));
     fireEvent.click(screen.getByRole("button", { name: "Submit new session" }));
     await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("created-id"));
@@ -272,12 +272,12 @@ describe("new-session navigation", () => {
     state.createSession.mockRejectedValue(new Error("Create rejected"));
     dashboard();
     fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
-    fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+    fireEvent.click(screen.getByRole("tab", { name: /^Workspace/ }));
     fireEvent.click(screen.getByRole("button", { name: "Create a new session" }));
     fireEvent.click(screen.getByRole("button", { name: "Submit new session" }));
     await waitFor(() => expect(state.createSession).toHaveBeenCalled());
     expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
-    expect(screen.getByRole("tab", { name: "Workspace" }).classList.contains("mobile-tab-active")).toBe(true);
+    expect(screen.getByRole("tab", { name: /^Workspace/ }).classList.contains("mobile-tab-active")).toBe(true);
     expect(screen.getByText("New Session")).toBeTruthy();
     expect(state.clearSessionAttention).not.toHaveBeenCalled();
   });
@@ -289,7 +289,7 @@ describe("full-page inbox navigation", () => {
     const { container } = dashboard();
     fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
     const terminal = screen.getByTestId("terminal");
-    if (!desktop) fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+    if (!desktop) fireEvent.click(screen.getByRole("tab", { name: /^Workspace/ }));
     const trigger = screen.getByRole("button", { name: "Inbox, 0 messages" });
     trigger.focus(); fireEvent.click(trigger);
     expect(screen.getByRole("heading", { name: "Inbox" })).toBe(document.activeElement);
@@ -300,7 +300,7 @@ describe("full-page inbox navigation", () => {
     expect(screen.queryByRole("region", { name: "Inbox" })).toBeNull();
     expect(document.activeElement).toBe(trigger);
     expect(container.querySelector('[data-testid="terminal"]')).toBe(terminal);
-    if (!desktop) expect(screen.getByRole("tab", { name: "Workspace" }).getAttribute("aria-selected")).toBe("true");
+    if (!desktop) expect(screen.getByRole("tab", { name: /^Workspace/ }).getAttribute("aria-selected")).toBe("true");
     fireEvent.click(trigger);
     fireEvent.click(screen.getByRole("tab", { name: "Terminal" }));
     expect(screen.queryByRole("region", { name: "Inbox" })).toBeNull();
@@ -316,10 +316,10 @@ describe("attention navigation preserves the request", () => {
     fireEvent.click(original);
     const notice = { type: "agent_needs_input" as const, title: "Review requested", message: "Inspect the result before continuing", receivedAt: 10 };
     state.activity = new Map([["ordinary", { activity: "idle", attention: notice }]]);
-    fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+    fireEvent.click(screen.getByRole("tab", { name: /^Workspace/ }));
     for (let i = 0; i < 2; i++) {
       fireEvent.click(original); expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
-      fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+      fireEvent.click(screen.getByRole("tab", { name: /^Workspace/ }));
       fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 waiting" }));
       expect(screen.getByText("Inspect the result before continuing")).toBeTruthy();
       expect(state.clearSessionAttention).not.toHaveBeenCalled();
@@ -327,7 +327,7 @@ describe("attention navigation preserves the request", () => {
       fireEvent.click(openSession);
       expect(screen.getByRole("region", { name: "Session workspace: Regular shell" })).toBe(document.activeElement);
       expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
-      fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+      fireEvent.click(screen.getByRole("tab", { name: /^Workspace/ }));
     }
     fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 waiting" }));
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
@@ -344,11 +344,27 @@ describe("inbox document title", () => {
     expect(document.title).toBe("ftown base");
     const notice = { type: "agent_needs_input" as const, title: "Review", message: "Inspect", receivedAt: 10 };
     state.activity = new Map([["ordinary", { activity: "idle", attention: notice }]]);
-    fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+    fireEvent.click(screen.getByRole("tab", { name: /^Workspace/ }));
     await waitFor(() => expect(document.title).toBe("(1) ftown base"));
     state.activity = new Map();
     fireEvent.click(screen.getByRole("tab", { name: "Terminal" }));
     await waitFor(() => expect(document.title).toBe("ftown base"));
+  });
+  it("derives the base by stripping the prefix so a later title change is kept", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    document.title = "ftown base";
+    dashboard();
+    expect(document.title).toBe("ftown base");
+    const notice1 = { type: "agent_needs_input" as const, title: "Review", message: "Inspect", receivedAt: 10 };
+    state.activity = new Map([["ordinary", { activity: "idle", attention: notice1 }]]);
+    fireEvent.click(screen.getByRole("tab", { name: /^Workspace/ }));
+    await waitFor(() => expect(document.title).toBe("(1) ftown base"));
+    document.title = "ftown new";
+    const notice2 = { ...notice1, title: "Review 2", receivedAt: 11 };
+    state.activity = new Map([["ordinary", { activity: "idle", attention: notice2 }], ["worker", { activity: "idle", attention: notice2 }]]);
+    fireEvent.click(screen.getByRole("tab", { name: "Terminal" }));
+    fireEvent.click(screen.getByRole("tab", { name: /^Workspace, 2 waiting$/ }));
+    await waitFor(() => expect(document.title).toBe("(2) ftown new"));
   });
 });
 
@@ -359,7 +375,7 @@ describe("inbox popup overlay", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
     const notice = { type: "agent_needs_input" as const, title: "Review", message: "Inspect", receivedAt: 10 };
     state.activity = new Map([["ordinary", { activity: "idle", attention: notice }]]);
-    fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+    fireEvent.click(screen.getByRole("tab", { name: /^Workspace/ }));
     const region = screen.getByRole("region", { name: "Waiting for you" });
     expect(region.textContent).toContain("Inspect");
     expect(region.contains(document.activeElement)).toBe(false);
@@ -371,6 +387,20 @@ describe("inbox popup overlay", () => {
     expect(screen.getByRole("region", { name: "Waiting for you" })).toBeTruthy();
     fireEvent.click(await screen.findByRole("button", { name: /project-t42-implement/ }));
     expect(screen.queryByRole("region", { name: "Waiting for you" })).toBeNull();
+  });
+});
+
+describe("mobile inbox badge", () => {
+  it("shows the workspace badge with an accessible waiting label off the sessions tab", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    dashboard();
+    const notice = { type: "agent_needs_input" as const, title: "Review", message: "Inspect", receivedAt: 10 };
+    state.activity = new Map([["ordinary", { activity: "idle", attention: notice }]]);
+    fireEvent.click(screen.getByRole("tab", { name: "Terminal" }));
+    const workspaceTab = screen.getByRole("tab", { name: /^Workspace, 1 waiting$/ });
+    expect(workspaceTab.getAttribute("aria-label")).toBe("Workspace, 1 waiting");
+    const badge = workspaceTab.querySelector(".mobile-tab-inbox-badge");
+    expect(badge?.textContent).toBe("1");
   });
 });
 
@@ -498,7 +528,7 @@ describe("navigation and selected-session actions", () => {
       fireEvent.click(within(header).getByRole("button", { name: action }));
       expect(action === "Stop" ? state.stopSession : state.retrySession).toHaveBeenLastCalledWith(id);
       if (!desktop) {
-        fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+        fireEvent.click(screen.getByRole("tab", { name: /^Workspace/ }));
         const workspaceHeader = screen.getByRole("region", { name: "Selected session header" });
         expect(screen.getAllByRole("group", { name: "Selected session actions" })).toHaveLength(1);
         fireEvent.click(within(workspaceHeader).getByRole("button", { name: action }));
@@ -522,12 +552,12 @@ describe("sidebar PR review navigation", () => {
     const { container } = dashboard();
     fireEvent.click(screen.getByRole("button", { name: /Regular shell/ }));
     expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
-    if (!desktop) fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+    if (!desktop) fireEvent.click(screen.getByRole("tab", { name: /^Workspace/ }));
     fireEvent.click(screen.getByRole("button", { name: "Inbox, 0 messages" }));
     expect(screen.getByRole("region", { name: "Inbox" })).toBeTruthy();
     if (!desktop) {
       fireEvent.click(screen.getByRole("button", { name: "Back to workspace" }));
-      fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+      fireEvent.click(screen.getByRole("tab", { name: /^Workspace/ }));
     }
     const target = container.querySelector<HTMLElement>('[data-session-row="target"]')!;
     fireEvent.click(within(target).getByRole("button", { name: /Review pull request: PR #123/ }));
@@ -539,7 +569,7 @@ describe("sidebar PR review navigation", () => {
     if (desktop) fireEvent.click(within(screen.getByRole("tablist", { name: "Session view" })).getByRole("tab", { name: "Preview" }));
     else {
       fireEvent.click(screen.getByRole("tab", { name: "Preview" }));
-      fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+      fireEvent.click(screen.getByRole("tab", { name: /^Workspace/ }));
     }
     fireEvent.click(within(target).getByRole("button", { name: "Session actions" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Review pull request" }));

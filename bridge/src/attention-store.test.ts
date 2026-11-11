@@ -190,7 +190,9 @@ test('injected prompt resolves nothing; human prompt leaves ask_user with a prom
   // A new request for the replied path.
   const second = (await store.record('s1', 'Notification', notice('B', { notification_type: 'agent_needs_input' })))!;
   const third = (await store.record('s1', 'Notification', notice('C', { notification_type: 'agent_needs_input' })))!;
+  const beforeSeq = (await store.explicitSnapshot('s1')).sequence;
   await store.resolveReplied('s1', second.id);
+  assert.equal((await store.explicitSnapshot('s1')).sequence, beforeSeq + 1, 'replied must bump the ledger sequence');
   const after = await store.list('s1');
   assert.deepEqual(after.events.map((e) => e.id).sort(), [ask.id, third.id].sort());
   const afterAll = await store.list('s1', { includeResolved: true });

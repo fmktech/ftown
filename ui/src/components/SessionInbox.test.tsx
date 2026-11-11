@@ -28,6 +28,16 @@ it("shows full text, sorted outstanding counts, and retains ordinary hidden filt
   expect(articles[0].querySelector(".whitespace-pre-wrap")?.textContent).toBe(entries[0].notice.message); expect(base.onDismiss).not.toHaveBeenCalled(); expect(base.onOpenSession).not.toHaveBeenCalled();
   fireEvent.click(within(articles[0]).getByRole("button", { name: "Open session" })); expect(base.onOpenSession).toHaveBeenCalledWith("newest");
 });
+it("trigger flash is cleared when the count drops and replays on the next increase", () => {
+  const view = render(<Fixture entries={[]}/>);
+  expect(screen.getByRole("button", { name: "Inbox, 0 messages" }).className).not.toContain("session-inbox-trigger-flash");
+  view.rerender(<Fixture entries={[entry("first")]} />);
+  expect(screen.getByRole("button", { name: "Inbox, 1 waiting" }).className).toContain("session-inbox-trigger-flash");
+  view.rerender(<Fixture entries={[]} />);
+  expect(screen.getByRole("button", { name: "Inbox, 0 messages" }).className).not.toContain("session-inbox-trigger-flash");
+  view.rerender(<Fixture entries={[entry("first", 2)]} />);
+  expect(screen.getByRole("button", { name: "Inbox, 1 waiting" }).className).toContain("session-inbox-trigger-flash");
+});
 it("renders the trigger muted at 0, highlighted with a pill at 1 and 9+", () => {
   const empty = render(<Fixture entries={[]}/>);
   const zero = screen.getByRole("button", { name: "Inbox, 0 messages" });

@@ -373,6 +373,7 @@ export class AttentionStore {
       const timestamp = new Date(this.notificationOptions.now()).toISOString();
       event.resolvedAt = timestamp;
       event.resolution = 'replied';
+      ledger.sequence++;
       this.prune(ledger, [event.id]);
       await this.save(id, ledger);
       this.wakeItemWaiters(id);

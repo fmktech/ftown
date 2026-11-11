@@ -351,16 +351,18 @@ describe("durable explicit attention restoration", () => {
     expect(h.current()?.attention).toBeUndefined();
   });
 
-  it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("a human %s clears a restored request locally", async event => {
+  it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("preserves a newer restored request when an older %s publication arrives later", async event => {
     const reread = deferred();
     let reads = 0;
     const h = durableSetup(() => ++reads === 1 ? Promise.resolve(reply(newer)) : reread.promise);
     await settle();
     expect(h.current()?.attention?.attentionId).toBe(newer.id);
     act(() => h.publish(event));
-    expect(h.current()?.attention).toBeUndefined();
-    await act(async () => reread.resolve(reply(null)));
-    expect(h.current()?.attention).toBeUndefined();
+    expect(h.current()?.attention?.attentionId).toBe(newer.id);
+    await act(async () => reread.resolve(reply(newer)));
+    expect(h.current()?.attention?.attentionId).toBe(newer.id);
+    act(() => h.publishSaved(newer));
+    expect(h.current()?.attention?.attentionId).toBe(newer.id);
   });
 
   it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("preserves a newer restored request when an older injected %s publication arrives later", async event => {

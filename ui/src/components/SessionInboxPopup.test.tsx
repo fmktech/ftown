@@ -54,6 +54,21 @@ it("Hide collapses to a pill, pill expands, Escape collapses and returns focus",
   await act(async () => { fireEvent.keyDown(hide, { key: "Escape" }); });
   expect(screen.getByText("1 waiting")).toBeTruthy();
   expect(base.onReturnFocus).toHaveBeenCalled();
+  expect(document.activeElement).toBe(screen.getByTestId("terminal"));
+});
+
+it("does not take focus when it appears", () => {
+  const PropsHarness = ({ value }: { value: InboxEntry | null }) => <div>
+    <input data-testid="terminal-input" />
+    <SessionInboxPopup entry={value} {...base} onReturnFocus={base.onReturnFocus} />
+  </div>;
+  const view = render(<PropsHarness value={null} />);
+  const input = screen.getByTestId("terminal-input");
+  input.focus();
+  expect(document.activeElement).toBe(input);
+  view.rerender(<PropsHarness value={entry("first")} />);
+  expect(screen.getByRole("region", { name: "Waiting for you" })).toBeTruthy();
+  expect(document.activeElement).toBe(input);
 });
 
 it("stays collapsed for the same item after hiding, re-opens for a new item", () => {

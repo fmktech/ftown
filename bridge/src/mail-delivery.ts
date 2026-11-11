@@ -18,7 +18,11 @@ export const MAIL_NUDGE_MIN_INTERVAL_MS = 30_000;
 export const MAIL_NUDGE_BUSY_RECHECK_MS = 60_000;
 export const AGENT_BUSY_STALE_MS = 30 * 60_000;
 export const NATIVE_WAKE_LEASE_MS = 30_000;
-export const MAIL_WAKE_TEXT = "FTown mail may be available. If this prompt's hooks supplied [ftown mail], process that mail without reading it again. Otherwise run `ftown harness mail read` once; if no mail is returned, no action is needed.";
+/** Leading literals of every ftown-originated prompt (bridge or installed plugin). Trimmed prompts starting with one are injected. */
+export const INJECTED_PROMPT_PREFIXES = ['[ftown msg from ', '[ftown mail]', 'FTown mail may be available.'] as const;
+export const MAIL_WAKE_TEXT = `${INJECTED_PROMPT_PREFIXES[2]} If this prompt's hooks supplied [ftown mail], process that mail without reading it again. Otherwise run \`ftown harness mail read\` once; if no mail is returned, no action is needed.`;
+/** The opencode plugin's effective wake prompt; mirrored by the static asset (asset-tested). */
+export const OPENCODE_MAIL_WAKE_TEXT = `${INJECTED_PROMPT_PREFIXES[1]} You have new ftown mail — run \`ftown harness mail read\` to read it.`;
 export interface NativeWakeRegistration { adapter: 'claude-mod' | 'opencode'; nativeSessionId: string }
 export class NativeWakeRegistrationError extends Error {
   constructor(readonly status: 400 | 409, message: string) { super(message); }
@@ -62,7 +66,7 @@ interface MailWaiter {
 }
 const codexMetadata = (value: string) => value.slice(0, 200).replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
 const codexMailText = (message: MailMessage) =>
-  `[ftown mail] id=${JSON.stringify(codexMetadata(message.id))} from=${JSON.stringify(codexMetadata(message.from))}`
+  `${INJECTED_PROMPT_PREFIXES[1]} id=${JSON.stringify(codexMetadata(message.id))} from=${JSON.stringify(codexMetadata(message.from))}`
   + (message.fromName ? ` fromName=${JSON.stringify(codexMetadata(message.fromName))}` : '')
   + ` type=${JSON.stringify(codexMetadata(message.type))}`
   + (message.threadId ? ` threadId=${JSON.stringify(codexMetadata(message.threadId))}` : '')
@@ -277,6 +281,7 @@ export class MailDeliveryService {
   /** Hook Stop/SessionEnd: the agent's turn ended. */
   markAgentIdle(sessionId: string): void {
     this.agentBusySince.delete(sessionId);
+    this.lastInjection.delete(sessionId);
   }
 
   /** Last bridge-submitted text for a session (PTY nudge or native wake), if any. */
@@ -288,36 +293,50 @@ export class MailDeliveryService {
     this.lastInjection.set(sessionId, { text, at: this.now() });
   }
 
+  /** Let the API server record an opencode/claude-mod plugin handoff (mail handed to the plugin). */
+  notePluginHandoff(sessionId: string): void {
+    this.recordInjection(sessionId, OPENCODE_MAIL_WAKE_TEXT);
+  }
+
   /**
-   * Whether a UserPromptSubmit hook payload was submitted by the bridge itself.
-   * Generic over harnesses: any `prompt` string counts as prompt text.
-   * A human typing the marker is treated as injected (accepted false positive).
+   * Whether a UserPromptSubmit hook payload was submitted by ftown itself (bridge or installed plugin).
+   * Generic over harnesses: any `prompt` string counts as prompt text. A human typing a marker at
+   * the start is treated as injected (accepted false positive); a marker merely contained mid-text is human.
    */
   isInjectedPrompt(sessionId: string, hookData: Record<string, unknown>): boolean {
     const rawPrompt = typeof hookData.prompt === 'string' ? hookData.prompt : '';
     const last = this.lastInjection.get(sessionId);
     if (rawPrompt.trim().length > 0) {
       const trimmed = rawPrompt.trim();
-      if (trimmed.startsWith('[ftown msg from ')) return true;
+      if (INJECTED_PROMPT_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return true;
       const firstLine = last?.text.split('\n')[0]?.trim() ?? '';
       if (firstLine && trimmed.startsWith(firstLine)) return true;
       return false;
     }
     if (!last) return false;
-    return this.now() - last.at < 15_000;
+    // One-shot: the first no-prompt hook consumes the record; the timed rule
+    // for hooks carrying text is not consumed.
+    if (this.now() - last.at < 15_000) {
+      this.lastInjection.delete(sessionId);
+      return true;
+    }
+    return false;
   }
 
   // Plain shells would execute the message as a command; deliver it as a quoted no-op
   // (`: '...'`) — interactive zsh has no '#' comments by default.
   // origin 'human' deliveries (dashboard-typed text, if any) must not record an injection.
+  // Recorded BEFORE the first write: the prompt hook can fire before the settle
+  // delays finish, and a stale record after a failed write is acceptable.
   async injectPtyLine(session: Session, sender: string, text: string, options?: { origin?: 'injected' | 'human' }): Promise<boolean> {
     if (this.stopped || !this.runner) return false;
     const epoch = this.dependencyEpoch;
     const isAgent = session.shellType && session.shellType !== 'shell';
     const safeSender = sender.replace(/['\r\n]/g, '');
     const line = isAgent
-      ? `[ftown msg from ${safeSender}] ${text}`
-      : `: '[ftown msg from ${safeSender}] ${text.replace(/'/g, '')}'`;
+      ? `${INJECTED_PROMPT_PREFIXES[0]}${safeSender}] ${text}`
+      : `: '${INJECTED_PROMPT_PREFIXES[0]}${safeSender}] ${text.replace(/'/g, '')}'`;
+    if (options?.origin !== 'human') this.recordInjection(session.id, line);
     if (!this.runner.write(session.id, line)) return false;
     // Composer TUIs detect pastes by input arrival rate; the submit CR must come well
     // after that window or it is treated as a pasted newline.
@@ -331,7 +350,6 @@ export class MailDeliveryService {
       if (this.stopped || epoch !== this.dependencyEpoch) return false;
       if (!this.runner.write(session.id, submitSuffixFor(session.shellType))) return false;
     }
-    if (options?.origin !== 'human') this.recordInjection(session.id, line);
     return true;
   }
 
@@ -577,9 +595,10 @@ export class MailDeliveryService {
           && this.codexClaims.get(sessionId) === message.id && pending.some(m => m.id === message.id);
       };
       const wakeText = codexMailText(message);
+      // Recorded BEFORE the wake call: the prompt hook can fire before it resolves.
+      this.recordInjection(sessionId, wakeText);
       const result = await this.nativeWake(session, wakeText, controller.signal, isCurrent)
         .catch(() => ({ status: 'unknown' as const }));
-      if ((result.status === 'accepted' || result.status === 'unknown') && current() && !controller.signal.aborted) this.recordInjection(sessionId, wakeText);
       if (result.status === 'accepted' && current() && !controller.signal.aborted) {
         accepted = await this.withSelection(sessionId, async () => {
           if (!current() || controller.signal.aborted || this.codexClaims.get(sessionId) !== message.id) return false;
@@ -656,11 +675,12 @@ export class MailDeliveryService {
           && runner.isRunning(sessionId) && pending.some(message => undelivered.some(original => original.id === message.id));
       };
       let result;
+      // Recorded BEFORE the wake call: the prompt hook can fire before it resolves.
+      this.recordInjection(sessionId, MAIL_WAKE_TEXT);
       try { result = await this.nativeWake(session, MAIL_WAKE_TEXT, controller.signal, isCurrent).catch(() => ({ status: 'unknown' as const })); }
       finally { if (this.wakeControllers.get(sessionId) === controller) this.wakeControllers.delete(sessionId); }
       if (!current()) return;
       if (result.status === 'accepted' || result.status === 'unknown') {
-        this.recordInjection(sessionId, MAIL_WAKE_TEXT);
         this.nativeBatches.set(sessionId, { identity, ids: new Set(pending.map((message) => message.id)) });
         return;
       }

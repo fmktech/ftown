@@ -551,12 +551,10 @@ PY`;
   const inboxReady = connectionStatus === "connected" ? new Set(readyBridges.map(bridge => bridge.bridgeId)) : new Set<string>();
   const canReply = (bridgeId: string) => !!securityRuntime?.bridge(bridgeId)?.permissions.includes("control");
   const inbox = inboxEntries(sessions, sessionActivity, bridges, hiddenSessionIds, hiddenBridgeIds, inboxReady, canReply);
-  const baseTitleRef = useRef<string | null>(null);
   useEffect(() => {
-    if (baseTitleRef.current === null) baseTitleRef.current = document.title;
-    const base = baseTitleRef.current;
+    const base = document.title.replace(/^\((\d+)\)\s+/, "");
     document.title = inbox.length > 0 ? `(${inbox.length}) ${base}` : base;
-    return () => { document.title = base; };
+    return () => { document.title = document.title.replace(/^\((\d+)\)\s+/, ""); };
   }, [inbox.length]);
   const replyToInbox = async (entry: InboxEntry, message: string) => {
     const current = sessions.find(session => session.id === entry.session.id && session.bridgeId === entry.session.bridgeId);
@@ -1036,9 +1034,10 @@ PY`;
       >
         <button
           className={`mobile-tab ${mobileTab === "sessions" ? "mobile-tab-active" : ""}`} role="tab" tabIndex={mobileTab === "sessions" ? 0 : -1} aria-selected={mobileTab === "sessions"}
+          aria-label={inbox.length > 0 && mobileTab !== "sessions" ? `Workspace, ${inbox.length} waiting` : "Workspace"}
           onClick={() => handleMobileTabSwitch("sessions")}
         >
-          Workspace{inbox.length > 0 && mobileTab !== "sessions" ? <span aria-hidden="true" className="mobile-tab-inbox-badge" style={{ marginLeft: 6, display: "inline-flex", alignItems: "center", justifyContent: "center", minWidth: 20, height: 20, padding: "0 5px", borderRadius: 9999, background: "var(--accent)", color: "var(--bg-void)", fontSize: 11, fontWeight: 700 }}>{inbox.length}</span> : null}
+          Workspace{inbox.length > 0 && mobileTab !== "sessions" ? <span aria-hidden="true" className="mobile-tab-inbox-badge">{inbox.length}</span> : null}
         </button>
         <button
           className={`mobile-tab ${mobileTab === "terminal" ? "mobile-tab-active" : ""}`}
@@ -1228,7 +1227,7 @@ PY`;
             <MobileControlBar ref={mobileControlRef} onSendInput={(data) => terminalRef.current?.sendInput(data)} onPaste={handleMobilePaste} onHostPaste={hostPasteAvailable ? handleHostPaste : undefined} onSelectText={handleMobileSelectText} />
           )}
           </SessionWorkspace>
-          <SessionInboxPopup entry={!inboxOpen && selectedSession && (isDesktop || mobileTab === "terminal") ? inbox.find(e => e.session.id === selectedSession.id) ?? null : null} onOpenSession={id => { focusOpenedSessionRef.current = true; handleSelectSession(id); setMobileTab("terminal"); scheduleTerminalRenderAdjustment(); }} onDismiss={entry => clearSessionAttention(entry.session.id, entry.notice)} onReply={replyToInbox} onAnswer={answerInbox} onReturnFocus={() => workspaceFocusRef.current?.focus()} />
+          <SessionInboxPopup entry={!inboxOpen && selectedSession && (isDesktop || mobileTab === "terminal") ? inbox.find(e => e.session.id === selectedSession.id) ?? null : null} onOpenSession={id => { focusOpenedSessionRef.current = true; handleSelectSession(id); setMobileTab("terminal"); scheduleTerminalRenderAdjustment(); }} onDismiss={entry => clearSessionAttention(entry.session.id, entry.notice)} onReply={replyToInbox} onAnswer={answerInbox} onReturnFocus={() => terminalRef.current?.focus()} />
           </div>
         </main>
 
