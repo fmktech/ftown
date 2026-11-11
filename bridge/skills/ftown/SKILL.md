@@ -45,7 +45,9 @@ ftown sessions attention --title "Pick a database" --message "Which database sho
 ftown sessions attention-status <event-id> --wait
 ftown sessions pr https://github.com/owner/repo/pull/123
 ftown sessions pr --clear
-ftown sessions preview ./preview.html
+ftown sessions preview ./preview.html ./notes.md
+ftown sessions preview --add ./extra.html
+ftown sessions preview --remove notes.md
 ftown sessions preview --clear
 ftown sessions preview-reply --message "The preview is ready."
 ftown harness mail send <session-id> --type task "review the API client"
@@ -59,12 +61,21 @@ Read `references/sessions.md` for the session, mail and terminal command
 reference. Read `references/orchestrator.md` for practical worker coordination
 examples. Each command group also has `--help`.
 
-`ftown sessions preview <path>` registers a self-contained HTML file in the
-current session's working directory for the dashboard. Inline CSS and scripts
-and data images work; sibling assets and network access are unsupported. Publish
-updates by writing a temporary file and atomically renaming it into place. Use
-`--session-id <id>` for an explicit target or `--clear` to remove registration;
-clearing never deletes the file.
+`ftown sessions preview <path...>` registers up to 12 files in the current
+session's working directory for the dashboard, in this order. Kind is by
+extension: `.html`/`.htm` → HTML, `.md`/`.markdown` → Markdown, anything else
+is rejected. Each file is at most 1 MiB. A duplicate basename is rejected.
+`--add <path...>` appends to the current set, `--remove <name...>` removes by
+basename, and `--clear` removes the whole registration (never deletes files).
+HTML previews are self-contained: inline CSS and scripts and data images work;
+sibling assets and network access are unsupported. Markdown is rendered as a
+readable document with GFM (tables, task lists, fenced code) in the same
+sandbox iframe, with no network and only `data:` images; raw HTML inside the
+markdown is isolated the same way. With two or more registered files, the
+dashboard shows a selector in the preview toolbar; a relative link between
+registered files switches the selector. Publish updates by writing a temporary
+file and atomically renaming it into place. Use `--session-id <id>` for an
+explicit target.
 
 Messages from the preview conversation arrive as ftown mail. Respond explicitly
 with `ftown sessions preview-reply --message "Your response"`; use

@@ -51,6 +51,32 @@ export interface PreviewTransportObservation {
   markers: Set<string>;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function kindFor(fileName: string): "html" | "markdown" {
+  const lower = fileName.toLowerCase();
+  if (lower.endsWith(".html") || lower.endsWith(".htm")) return "html";
+  if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "markdown";
+  throw new Error(`Unsupported preview file kind: ${fileName}`);
+}
+function assertPreviewShape(preview: unknown, expectedNames: readonly string[], sessionId: string): string {
+  if (!record(preview) || typeof preview.id !== "string" || !UUID_RE.test(preview.id) || !Array.isArray(preview.files)) throw new Error("Preview registration fixture response is invalid");
+  const files = preview.files as unknown[];
+  if (files.length !== expectedNames.length) throw new Error("Preview registration files length mismatch");
+  for (let i = 0; i < expectedNames.length; i++) {
+    const file = files[i];
+    if (!record(file) || typeof file.id !== "string" || !UUID_RE.test(file.id) || typeof file.fileName !== "string" || typeof file.kind !== "string") throw new Error("Preview registration file entry is invalid");
+    if (file.fileName !== expectedNames[i]) throw new Error("Preview registration file order or name mismatch");
+    if (file.kind !== kindFor(expectedNames[i])) throw new Error("Preview registration file kind mismatch");
+  }
+  return preview.id;
+}
+function assertPreviewBody(body: unknown, sessionId: string, expectedNames: readonly string[], directory: string): string {
+  for (const name of expectedNames) assertSanitized(body, join(directory, name));
+  if (!record(body) || !record(body.session) || body.session.id !== sessionId) throw new Error("Preview registration fixture response is invalid");
+  if (!record(body.session.preview)) throw new Error("Preview registration fixture response is invalid");
+  return assertPreviewShape(body.session.preview, expectedNames, sessionId);
+}
+
 export async function createPreviewFixture() {
   assert.ok(["localhost", "127.0.0.1"].includes(new URL(UI_BASE_URL).hostname), "preview fixtures require the local test UI");
   assert.equal(resolve(BRIDGE_HOME), resolve(E2E_DIR, ".bridge-home"));
@@ -91,10 +117,14 @@ export async function createPreviewFixture() {
       const result = await this.cli(sessionId, ["preview", fileName]);
       expect(result.code).toBe(0);
       const body: unknown = JSON.parse(result.stdout);
-      assertSanitized(body, join(directory, fileName));
-      if (!record(body) || !record(body.session) || body.session.id !== sessionId || !record(body.session.preview)
-        || typeof body.session.preview.id !== "string" || body.session.preview.fileName !== fileName) throw new Error("Preview registration fixture response is invalid");
-      return body.session.preview.id;
+      return assertPreviewBody(body, sessionId, [fileName], directory);
+    },
+    async registerMultiple(sessionId: string, fileNames: string[]): Promise<string> {
+      if (fileNames.length < 1) throw new Error("registerMultiple requires at least one file");
+      const result = await this.cli(sessionId, ["preview", ...fileNames]);
+      expect(result.code).toBe(0);
+      const body: unknown = JSON.parse(result.stdout);
+      return assertPreviewBody(body, sessionId, fileNames, directory);
     },
     async cleanup(): Promise<void> {
       const results = await Promise.allSettled([...sessions].map(async (id) => {
@@ -138,6 +168,14 @@ try{localStorage.setItem('preview-fixture','yes');report.dataset.storage='allowe
 document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.remove();
 fetch('${probe}fetch').then(()=>{report.dataset.fetch='allowed'},()=>{report.dataset.fetch='blocked'});
 </script></body></html>`;
+}
+
+export function previewMarkdown(marker: string): string {
+  return `# ${marker} Notes\n\n| Name | Value |\n| --- | --- |\n| alpha | ${marker}-cell |\n\n[View a.html](a.html)\n`;
+}
+
+export function previewSimpleHtml(marker: string, version: number): string {
+  return `<!doctype html><html><head><title>${marker} v${version}</title></head><body><h1>${marker} version ${version}</h1><p>Simple HTML</p></body></html>`;
 }
 
 /** Passive crypto observation keeps real authentication and every native result intact. */
