@@ -124,9 +124,11 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           const payload = command.payload as Record<string, unknown>;
           const failure = (code: SessionMessageErrorCode, error: string): CommandResponse =>
             ({ requestId: command.requestId, success: false, error, data: { code } });
-          if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).sort().join(',') !== 'bridgeId,message,sessionId'
+          const keys = payload && typeof payload === 'object' && !Array.isArray(payload) ? Object.keys(payload).sort().join(',') : '';
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload) || (keys !== 'bridgeId,eventId,message,sessionId' && keys !== 'bridgeId,message,sessionId')
             || payload.bridgeId !== bridgeId || typeof payload.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(payload.sessionId)
-            || typeof payload.message !== 'string' || !payload.message.trim() || payload.message.length > 65_536) {
+            || typeof payload.message !== 'string' || !payload.message.trim() || payload.message.length > 65_536
+            || (payload.eventId !== undefined && (typeof payload.eventId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(payload.eventId)))) {
             response = failure('invalid_request', 'Invalid reply request.'); break;
           }
           let session: Session | null;
@@ -137,11 +139,16 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           if (!deps.enqueueSessionMessage) { response = failure('mail_not_ready', 'Mail is not ready on this bridge.'); break; }
           try {
             const result = await deps.enqueueSessionMessage(session, payload.message);
-            response = result.ok && typeof result.id === 'string' && result.id.length > 0
-              ? { requestId: command.requestId, success: true, data: { sessionId: session.id, messageId: result.id, status: 'queued' } satisfies SessionMessageAccepted }
-              : !result.ok && result.error === 'Mail store not ready'
+            if (result.ok && typeof result.id === 'string' && result.id.length > 0) {
+              if (typeof payload.eventId === 'string' && deps.attentionStore) {
+                try { await deps.attentionStore.resolveReplied(payload.sessionId, payload.eventId); } catch { /* The reply is durable even if the item is gone. */ }
+              }
+              response = { requestId: command.requestId, success: true, data: { sessionId: session.id, messageId: result.id, status: 'queued' } satisfies SessionMessageAccepted };
+            } else {
+              response = !result.ok && result.error === 'Mail store not ready'
                 ? failure('mail_not_ready', 'Mail is not ready on this bridge.')
                 : failure('enqueue_failed', 'Reply may have been queued; check before sending again.');
+            }
           } catch {
             response = failure('enqueue_failed', 'Reply may have been queued; check before sending again.');
           }

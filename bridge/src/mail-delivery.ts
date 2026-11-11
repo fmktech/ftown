@@ -143,6 +143,7 @@ export class MailDeliveryService {
   private wakeLocks = new Map<string, Promise<void>>();
   private wakeControllers = new Map<string, AbortController>();
   private legacyReadyAt = new Map<string, number>();
+  private lastInjection = new Map<string, { text: string; at: number }>();
   private stopped = false;
   private dependencyEpoch = 0;
   private readonly nativeWake: NativeMailWaker;
@@ -218,6 +219,7 @@ export class MailDeliveryService {
     this.nativeBatches.clear();
     this.legacyReadyAt.clear();
     this.codexRetryAt.clear();
+    this.lastInjection.clear();
     for (const controller of this.wakeControllers.values()) controller.abort();
     this.wakeControllers.clear();
   }
@@ -277,9 +279,38 @@ export class MailDeliveryService {
     this.agentBusySince.delete(sessionId);
   }
 
+  /** Last bridge-submitted text for a session (PTY nudge or native wake), if any. */
+  lastPromptInjection(sessionId: string): { text: string; at: number } | undefined {
+    return this.lastInjection.get(sessionId);
+  }
+
+  private recordInjection(sessionId: string, text: string): void {
+    this.lastInjection.set(sessionId, { text, at: this.now() });
+  }
+
+  /**
+   * Whether a UserPromptSubmit hook payload was submitted by the bridge itself.
+   * Generic over harnesses: any `prompt` string counts as prompt text.
+   * A human typing the marker is treated as injected (accepted false positive).
+   */
+  isInjectedPrompt(sessionId: string, hookData: Record<string, unknown>): boolean {
+    const rawPrompt = typeof hookData.prompt === 'string' ? hookData.prompt : '';
+    const last = this.lastInjection.get(sessionId);
+    if (rawPrompt.trim().length > 0) {
+      const trimmed = rawPrompt.trim();
+      if (trimmed.startsWith('[ftown msg from ')) return true;
+      const firstLine = last?.text.split('\n')[0]?.trim() ?? '';
+      if (firstLine && trimmed.startsWith(firstLine)) return true;
+      return false;
+    }
+    if (!last) return false;
+    return this.now() - last.at < 15_000;
+  }
+
   // Plain shells would execute the message as a command; deliver it as a quoted no-op
   // (`: '...'`) — interactive zsh has no '#' comments by default.
-  async injectPtyLine(session: Session, sender: string, text: string): Promise<boolean> {
+  // origin 'human' deliveries (dashboard-typed text, if any) must not record an injection.
+  async injectPtyLine(session: Session, sender: string, text: string, options?: { origin?: 'injected' | 'human' }): Promise<boolean> {
     if (this.stopped || !this.runner) return false;
     const epoch = this.dependencyEpoch;
     const isAgent = session.shellType && session.shellType !== 'shell';
@@ -300,6 +331,7 @@ export class MailDeliveryService {
       if (this.stopped || epoch !== this.dependencyEpoch) return false;
       if (!this.runner.write(session.id, submitSuffixFor(session.shellType))) return false;
     }
+    if (options?.origin !== 'human') this.recordInjection(session.id, line);
     return true;
   }
 
@@ -544,8 +576,10 @@ export class MailDeliveryService {
           && live.shellType === 'codex' && nativeIdentity(live) === identity && runner.isRunning(sessionId)
           && this.codexClaims.get(sessionId) === message.id && pending.some(m => m.id === message.id);
       };
-      const result = await this.nativeWake(session, codexMailText(message), controller.signal, isCurrent)
+      const wakeText = codexMailText(message);
+      const result = await this.nativeWake(session, wakeText, controller.signal, isCurrent)
         .catch(() => ({ status: 'unknown' as const }));
+      if ((result.status === 'accepted' || result.status === 'unknown') && current() && !controller.signal.aborted) this.recordInjection(sessionId, wakeText);
       if (result.status === 'accepted' && current() && !controller.signal.aborted) {
         accepted = await this.withSelection(sessionId, async () => {
           if (!current() || controller.signal.aborted || this.codexClaims.get(sessionId) !== message.id) return false;
@@ -626,6 +660,7 @@ export class MailDeliveryService {
       finally { if (this.wakeControllers.get(sessionId) === controller) this.wakeControllers.delete(sessionId); }
       if (!current()) return;
       if (result.status === 'accepted' || result.status === 'unknown') {
+        this.recordInjection(sessionId, MAIL_WAKE_TEXT);
         this.nativeBatches.set(sessionId, { identity, ids: new Set(pending.map((message) => message.id)) });
         return;
       }

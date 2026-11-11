@@ -174,6 +174,29 @@ test('only explicit continuation resolves; storage failure cannot report durable
   await assert.rejects(new AttentionStore(resolve).record('missing', 'Notification', notice()), (e: unknown) => e instanceof AttentionError && e.code === 'attention_storage_error');
 });
 
+test('injected prompt resolves nothing; human prompt leaves ask_user with a prompt; replied resolves one item', async (t) => {
+  const { store } = await fixture(t);
+  const first = (await store.record('s1', 'Notification', notice('A', { notification_type: 'agent_needs_input' })))!;
+  const ask = (await store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'iq1', tool_input: { questions: [{ question: 'Pick', header: 'C', options: [{ label: 'A' }, { label: 'B' }], multiSelect: false }] } }))!;
+  assert.equal((await store.list('s1')).events.length, 2);
+  await store.record('s1', 'UserPromptSubmit', {}, { promptOrigin: 'injected' });
+  assert.equal((await store.list('s1')).events.length, 2, 'injected prompt must not resolve');
+  await store.record('s1', 'UserPromptSubmit', {}, { promptOrigin: 'human' });
+  const open = await store.list('s1');
+  assert.equal(open.events.length, 1, 'human prompt must leave the ask_user question open');
+  assert.equal(open.events[0].id, ask.id);
+  const all = await store.list('s1', { includeResolved: true });
+  assert.equal(all.events.find((e) => e.id === first.id)?.resolution, 'user_prompt');
+  // A new request for the replied path.
+  const second = (await store.record('s1', 'Notification', notice('B', { notification_type: 'agent_needs_input' })))!;
+  const third = (await store.record('s1', 'Notification', notice('C', { notification_type: 'agent_needs_input' })))!;
+  await store.resolveReplied('s1', second.id);
+  const after = await store.list('s1');
+  assert.deepEqual(after.events.map((e) => e.id).sort(), [ask.id, third.id].sort());
+  const afterAll = await store.list('s1', { includeResolved: true });
+  assert.equal(afterAll.events.find((e) => e.id === second.id)?.resolution, 'replied');
+});
+
 test('record returns its own committed public event through concurrent requests and deduplication', async (t) => {
   const f = await fixture(t);
   const pushed: string[] = [];
