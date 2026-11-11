@@ -56,7 +56,7 @@ it('preserves iframe and terminal nodes through expansion and benign auth checks
   const session: Session = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '', preview: { id: '12345678-1234-4234-8234-123456789abc', files: [{ id: '22345678-2234-4234-8234-123456789abc', fileName: 'demo.html', kind: 'html' }] } };
   const workspace = (readable: boolean, reviewOpen = false, isDesktop = true, mobileTab: "terminal" | "preview" | "review" = "preview") => <SessionWorkspace session={session} client={client} userId="user" readable={readable} sendCommand={sendCommand} subscribeAuthority={subscribeAuthority} securityGeneration={0} open onClose={vi.fn()} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={vi.fn()} onRefit={vi.fn()} reviewOpen={reviewOpen} reviewActivation={reviewOpen ? 1 : 0}><div data-testid="terminal-node">Terminal content</div></SessionWorkspace>;
   const { container, rerender } = render(workspace(true));
-  const frame = await screen.findByTitle('HTML preview: demo.html');
+  const frame = await screen.findByTitle('Preview: demo.html');
   expect(frame.getAttribute('sandbox')).toBe('allow-scripts');
   const terminal = screen.getByTestId('terminal-node');
   const separator = screen.getByRole('separator', { name: 'Resize terminal and preview' });
@@ -65,17 +65,17 @@ it('preserves iframe and terminal nodes through expansion and benign auth checks
   const expand = screen.getByRole('button', { name: 'Expand preview' }); expand.focus(); fireEvent.click(expand);
   expect(screen.getByRole('button', { name: 'Collapse preview' })).toBe(expand);
   expect(document.activeElement).toBe(expand); expect(terminal.parentElement?.hidden).toBe(true);
-  expect(screen.getByTitle('HTML preview: demo.html')).toBe(frame);
+  expect(screen.getByTitle('Preview: demo.html')).toBe(frame);
   expect(container.querySelector('[role="separator"]')).toBeNull();
   fireEvent.keyDown(expand, { key: 'Escape' });
   expect(screen.getByRole('button', { name: 'Expand preview' })).toBe(expand);
   expect(terminal.parentElement?.hidden).toBe(false); expect(terminal.parentElement?.getAttribute('style')).toBe(width);
-  expect(screen.getByTitle('HTML preview: demo.html')).toBe(frame); expect(screen.getByTestId('terminal-node')).toBe(terminal);
+  expect(screen.getByTitle('Preview: demo.html')).toBe(frame); expect(screen.getByTestId('terminal-node')).toBe(terminal);
   rerender(workspace(true, true));
   expect(screen.getByRole('tab', { name: 'PR review' }).getAttribute('aria-selected')).toBe('true');
   expect(frame.isConnected).toBe(true); expect(screen.getByTestId('terminal-node')).toBe(terminal);
   fireEvent.click(screen.getByRole('tab', { name: 'Preview' }));
-  expect(screen.getByTitle('HTML preview: demo.html')).toBe(frame);
+  expect(screen.getByTitle('Preview: demo.html')).toBe(frame);
   fireEvent.keyDown(screen.getByRole('tablist', { name: 'Auxiliary view' }), { key: 'End' });
   expect(screen.getByRole('tab', { name: 'PR review' }).getAttribute('aria-selected')).toBe('true');
   fireEvent.click(screen.getByRole('tab', { name: 'Preview' }));
@@ -85,21 +85,21 @@ it('preserves iframe and terminal nodes through expansion and benign auth checks
   expect(terminal.parentElement?.hidden).toBe(false);
   expect(frame.isConnected).toBe(true); expect(screen.getByTestId('terminal-node')).toBe(terminal);
   rerender(workspace(true, true, false, 'preview'));
-  expect(screen.getByTitle('HTML preview: demo.html')).toBe(frame);
+  expect(screen.getByTitle('Preview: demo.html')).toBe(frame);
   rerender(workspace(true));
   act(() => listeners.forEach(listener => listener()));
   expect(frame.isConnected).toBe(true); expect(frame.style.visibility).not.toBe('hidden');
   expect(screen.queryByText('Checking preview access…')).toBeNull();
   await act(async () => { pending.shift()!({ requestId: 's2', success: true, data: { state: 'unchanged', previewId: session.preview!.id, fileId: '22345678-2234-4234-8234-123456789abc', revision, totalBytes: html.length } }); });
   await waitFor(() => expect(frame.isConnected).toBe(true));
-  expect(screen.getByTitle('HTML preview: demo.html')).toBe(frame);
+  expect(screen.getByTitle('Preview: demo.html')).toBe(frame);
   act(() => { status = 'offline'; listeners.forEach(listener => listener()); });
   rerender(workspace(false));
-  expect(screen.getByTitle('HTML preview: demo.html')).toBe(frame);
+  expect(screen.getByTitle('Preview: demo.html')).toBe(frame);
   expect(frame.isConnected).toBe(true); expect(frame.style.visibility).not.toBe('hidden');
   expect(screen.queryByText('Reconnect to load preview')).toBeNull();
   act(() => { status = 'connecting'; listeners.forEach(listener => listener()); });
-  expect(screen.getByTitle('HTML preview: demo.html')).toBe(frame);
+  expect(screen.getByTitle('Preview: demo.html')).toBe(frame);
   act(() => { allowed = false; accountListeners.forEach(listener => listener()); allowed = true; accountListeners.forEach(listener => listener()); });
   expect(frame.isConnected).toBe(false);
   if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
@@ -127,7 +127,7 @@ it('disconnects the old iframe when the timer detects changed permissions while 
     const session: Session = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '', preview: { id: previewId, files: [{ id: fileId, fileName: 'demo.html', kind: 'html' }] } };
     const workspace = (readable: boolean) => <SessionWorkspace session={session} client={client} userId="user" readable={readable} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>;
     const { rerender } = render(workspace(true)); await act(async () => {});
-    const frame = screen.getByTitle('HTML preview: demo.html');
+    const frame = screen.getByTitle('Preview: demo.html');
     rerender(workspace(false)); expect(frame.isConnected).toBe(true);
     pin.permissions.push('control'); // Still has read, but its authority fingerprint changed.
     await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
@@ -289,7 +289,7 @@ it('focuses the link confirmation once and keeps user focus across unrelated ren
   try {
     const { rerender } = render(workspace(0));
     await act(async () => {});
-    const frame = screen.getByTitle('HTML preview: demo.html') as HTMLIFrameElement;
+    const frame = screen.getByTitle('Preview: demo.html') as HTMLIFrameElement;
     const expand = screen.getByRole('button', { name: 'Expand preview' });
     expand.focus(); expect(document.activeElement).toBe(expand);
     act(() => { window.dispatchEvent(new MessageEvent('message', { data: { channel: 'ftown-preview-link-v1', kind: 'open-link', url: 'https://preview.example.test/x' }, source: frame.contentWindow, origin: 'null' })); });
@@ -524,7 +524,7 @@ it('switching files shows loading never stale content and markdown vs HTML srcDo
     <SessionWorkspace session={session} client={{} as unknown as MessageClient} userId="user" readable={true} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>
   );
   // first file loads html
-  const frame = await screen.findByTitle('HTML preview: a.html');
+  const frame = await screen.findByTitle('Preview: a.html');
   const srcDoc = frame.getAttribute('srcdoc') ?? '';
   expect(srcDoc).toContain(PREVIEW_CSP);
   expect(srcDoc).toContain('first');
@@ -534,8 +534,8 @@ it('switching files shows loading never stale content and markdown vs HTML srcDo
   const mdTab = within(list).getByRole('tab', { name: 'notes.md' });
   fireEvent.click(mdTab);
   // while loading, stale content should not be visible: iframe disappears and loading message appears, or at least not show previous html under new name
-  expect(screen.queryByTitle('HTML preview: a.html')).toBeNull();
-  const mdFrame = await screen.findByTitle('HTML preview: notes.md');
+  expect(screen.queryByTitle('Preview: a.html')).toBeNull();
+  const mdFrame = await screen.findByTitle('Preview: notes.md');
   const mdSrcDoc = mdFrame.getAttribute('srcdoc') ?? '';
   expect(mdSrcDoc).toContain(PREVIEW_CSP);
   expect(mdSrcDoc).toContain('Heading');
@@ -563,7 +563,7 @@ it('relative link to registered file switches selection via onSwitchFile', async
     },
   };
   render(<SessionWorkspace session={session} client={{} as unknown as MessageClient} userId="user" readable={true} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>);
-  const frame = await screen.findByTitle('HTML preview: a.html') as HTMLIFrameElement;
+  const frame = await screen.findByTitle('Preview: a.html') as HTMLIFrameElement;
   // simulate iframe posting switch-file
   act(() => {
     window.dispatchEvent(new MessageEvent('message', { data: { channel: 'ftown-preview-link-v1', kind: 'switch-file', fileName: 'notes.md' }, source: frame.contentWindow, origin: 'null' }));
@@ -573,6 +573,96 @@ it('relative link to registered file switches selection via onSwitchFile', async
   expect(mdTab.getAttribute('aria-selected')).toBe('true');
   const aTab = within(list).getByRole('tab', { name: 'a.html' });
   expect(aTab.getAttribute('aria-selected')).toBe('false');
+  if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
+});
+
+it('ignores switch-file for an unregistered file and keeps the current selection', async () => {
+  resizeTo(900);
+  const originalSubtle = Object.getOwnPropertyDescriptor(globalThis.crypto, 'subtle');
+  Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest: async () => Uint8Array.from({ length: 32 }, () => 0x99).buffer } });
+  const html = '<p>preview</p>'; const revision = '9'.repeat(64);
+  const sendCommand = vi.fn(async (command: Command) => ({ requestId: 'x', success: true, data: command.type === 'session_preview_chunk'
+    ? { state: 'chunk', previewId: '12345678-1234-4234-8234-123456789abc', fileId: (command.payload as Record<string, unknown>).fileId, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true }
+    : { state: 'ready', previewId: '12345678-1234-4234-8234-123456789abc', fileId: (command.payload as Record<string, unknown>).fileId, revision, totalBytes: html.length } }));
+  const session: Session = {
+    id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+    preview: {
+      id: '12345678-1234-4234-8234-123456789abc',
+      files: [
+        { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000002', fileName: 'notes.md', kind: 'markdown' },
+      ],
+    },
+  };
+  render(<SessionWorkspace session={session} client={{} as unknown as MessageClient} userId="user" readable={true} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>);
+  await screen.findByTitle('Preview: a.html');
+  // Start on the second file so a broken match check (which would store the
+  // unknown name and fall back to the first file) is observable.
+  const list = screen.getByRole('tablist', { name: 'Preview file' });
+  fireEvent.click(within(list).getByRole('tab', { name: 'notes.md' }));
+  const mdFrame = await screen.findByTitle('Preview: notes.md') as HTMLIFrameElement;
+  expect(within(screen.getByRole('tablist', { name: 'Preview file' })).getByRole('tab', { name: 'notes.md' }).getAttribute('aria-selected')).toBe('true');
+  act(() => {
+    window.dispatchEvent(new MessageEvent('message', { data: { channel: 'ftown-preview-link-v1', kind: 'switch-file', fileName: 'missing.md' }, source: mdFrame.contentWindow, origin: 'null' }));
+  });
+  const after = screen.getByRole('tablist', { name: 'Preview file' });
+  expect(within(after).getByRole('tab', { name: 'notes.md' }).getAttribute('aria-selected')).toBe('true');
+  expect(within(after).getByRole('tab', { name: 'a.html' }).getAttribute('aria-selected')).toBe('false');
+  expect(screen.getByTitle('Preview: notes.md')).toBe(mdFrame);
+  if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
+});
+
+it('remembers the selected file per session across session switches while mounted', async () => {
+  resizeTo(900);
+  const originalSubtle = Object.getOwnPropertyDescriptor(globalThis.crypto, 'subtle');
+  Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest: async () => Uint8Array.from({ length: 32 }, () => 0x99).buffer } });
+  const html = '<p>preview</p>'; const revision = '9'.repeat(64);
+  const client = {} as unknown as MessageClient;
+  const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
+    const payload = command.payload as Record<string, unknown>;
+    const previewId = typeof payload.previewId === 'string' ? payload.previewId : '';
+    const fileId = typeof payload.fileId === 'string' ? payload.fileId : '';
+    if (command.type === 'session_preview_chunk') {
+      return Promise.resolve({ requestId: 'c', success: true, data: { state: 'chunk', previewId, fileId, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true } });
+    }
+    return Promise.resolve({ requestId: 's', success: true, data: { state: 'ready', previewId, fileId, revision, totalBytes: html.length } });
+  });
+  const sessionA: Session = {
+    id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+    preview: {
+      id: '11111111-1111-4111-8111-111111111111',
+      files: [
+        { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000002', fileName: 'notes.md', kind: 'markdown' },
+      ],
+    },
+  };
+  const sessionB: Session = {
+    id: 'two', bridgeId: 'bridge', name: 'two', status: 'running', createdAt: '', updatedAt: '',
+    preview: {
+      id: '22222222-2222-4222-8222-222222222222',
+      files: [
+        { id: '40000000-4000-4000-8000-000000000003', fileName: 'x.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000004', fileName: 'y.md', kind: 'markdown' },
+      ],
+    },
+  };
+  const workspace = (session: Session) => <SessionWorkspace session={session} client={client} userId="user" readable={true} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>;
+  const { rerender } = render(workspace(sessionA));
+  await screen.findByTitle('Preview: a.html');
+  fireEvent.click(within(screen.getByRole('tablist', { name: 'Preview file' })).getByRole('tab', { name: 'notes.md' }));
+  await screen.findByTitle('Preview: notes.md');
+  expect(within(screen.getByRole('tablist', { name: 'Preview file' })).getByRole('tab', { name: 'notes.md' }).getAttribute('aria-selected')).toBe('true');
+  rerender(workspace(sessionB));
+  await screen.findByTitle('Preview: x.html');
+  const listB = screen.getByRole('tablist', { name: 'Preview file' });
+  expect(within(listB).getByRole('tab', { name: 'x.html' }).getAttribute('aria-selected')).toBe('true');
+  expect(within(listB).getByRole('tab', { name: 'y.md' }).getAttribute('aria-selected')).toBe('false');
+  rerender(workspace(sessionA));
+  await screen.findByTitle('Preview: notes.md');
+  const listBack = screen.getByRole('tablist', { name: 'Preview file' });
+  expect(within(listBack).getByRole('tab', { name: 'notes.md' }).getAttribute('aria-selected')).toBe('true');
+  expect(within(listBack).getByRole('tab', { name: 'a.html' }).getAttribute('aria-selected')).toBe('false');
   if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
 });
 

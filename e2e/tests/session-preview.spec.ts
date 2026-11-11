@@ -8,8 +8,8 @@ import { UI_BASE_URL } from "../helpers/config";
 import { publishLedgerHeadNotice } from "../helpers/security-nudge";
 import { assertSanitized, atomicHtml, createPreviewFixture, inPreviewFrame, observePreviewTransport, previewHtml, previewMarkdown, previewSimpleHtml, sessionRecord } from "../helpers/session-preview";
 
-const iframe = (page: Page, fileName: string) => page.locator(`iframe[title="HTML preview: ${fileName}"]`);
-const documentFrame = (page: Page, fileName: string) => page.frameLocator(`iframe[title="HTML preview: ${fileName}"]`);
+const iframe = (page: Page, fileName: string) => page.locator(`iframe[title="Preview: ${fileName}"]`);
+const documentFrame = (page: Page, fileName: string) => page.frameLocator(`iframe[title="Preview: ${fileName}"]`);
 const previewRegion = (page: Page) => page.locator('[aria-label="Session preview"]');
 /** The preview document's scroll offset for a poll; NaN (never accepted by a numeric matcher) while the iframe is being swapped. */
 const previewScrollY = (page: Page, fileName: string) => inPreviewFrame(page, fileName, body => body.ownerDocument.defaultView!.scrollY, Number.NaN);
@@ -527,18 +527,18 @@ test("multi-file preview with markdown selector and cross-file links", async ({ 
     await expect(tablist).toBeVisible({ timeout: 15_000 });
     await expect(tablist.getByRole("tab")).toHaveCount(2);
     await expect(page.getByRole("tab", { name: aName })).toHaveAttribute("aria-selected", "true");
-    await expect(page.locator(`iframe[title="HTML preview: ${aName}"]`)).toBeVisible({ timeout: 15_000 });
-    await expect(page.locator(`iframe[title="HTML preview: ${aName}"]`)).toHaveAttribute("sandbox", "allow-scripts");
-    await expect(page.locator(`iframe[title="HTML preview: ${aName}"]`)).toHaveAttribute("referrerpolicy", "no-referrer");
+    await expect(page.locator(`iframe[title="Preview: ${aName}"]`)).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator(`iframe[title="Preview: ${aName}"]`)).toHaveAttribute("sandbox", "allow-scripts");
+    await expect(page.locator(`iframe[title="Preview: ${aName}"]`)).toHaveAttribute("referrerpolicy", "no-referrer");
     await expect.poll(() => inPreviewFrame(page, aName, body => body.querySelector("h1")?.textContent?.includes(marker) ? "ok" : null, null)).toBe("ok");
 
     // Switch to markdown file via selector
     await page.getByRole("tab", { name: mdName }).click();
     await expect(page.getByRole("tab", { name: mdName })).toHaveAttribute("aria-selected", "true");
     await expect(page.getByRole("tab", { name: aName })).toHaveAttribute("aria-selected", "false");
-    await expect(page.locator(`iframe[title="HTML preview: ${mdName}"]`)).toBeVisible({ timeout: 15_000 });
-    await expect(page.locator(`iframe[title="HTML preview: ${mdName}"]`)).toHaveAttribute("sandbox", "allow-scripts");
-    await expect(page.locator(`iframe[title="HTML preview: ${mdName}"]`)).toHaveAttribute("referrerpolicy", "no-referrer");
+    await expect(page.locator(`iframe[title="Preview: ${mdName}"]`)).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator(`iframe[title="Preview: ${mdName}"]`)).toHaveAttribute("sandbox", "allow-scripts");
+    await expect(page.locator(`iframe[title="Preview: ${mdName}"]`)).toHaveAttribute("referrerpolicy", "no-referrer");
 
     // Assert heading + table cell INSIDE sandboxed frame via inPreviewFrame
     await expect.poll(() => inPreviewFrame(page, mdName, body => {
@@ -551,10 +551,10 @@ test("multi-file preview with markdown selector and cross-file links", async ({ 
     }, null)).toBe("cell");
 
     // Click relative link from markdown to a.html and see selection switch
-    const mdFrame = page.frameLocator(`iframe[title="HTML preview: ${mdName}"]`);
+    const mdFrame = page.frameLocator(`iframe[title="Preview: ${mdName}"]`);
     await mdFrame.locator('a[href="a.html"]').click();
     await expect(page.getByRole("tab", { name: aName })).toHaveAttribute("aria-selected", "true", { timeout: 15_000 });
-    await expect(page.locator(`iframe[title="HTML preview: ${aName}"]`)).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator(`iframe[title="Preview: ${aName}"]`)).toBeVisible({ timeout: 15_000 });
     await expect.poll(() => inPreviewFrame(page, aName, body => body.querySelector("h1")?.textContent?.includes(marker) ? "ok" : null, null)).toBe("ok");
 
     // --add third file and see it selected
@@ -562,7 +562,7 @@ test("multi-file preview with markdown selector and cross-file links", async ({ 
     expect(addRes.code).toBe(0);
     assertSanitized(JSON.parse(addRes.stdout), cPath);
     await expect(page.getByRole("tab", { name: cName })).toHaveAttribute("aria-selected", "true", { timeout: 15_000 });
-    await expect(page.locator(`iframe[title="HTML preview: ${cName}"]`)).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator(`iframe[title="Preview: ${cName}"]`)).toBeVisible({ timeout: 15_000 });
     await expect(tablist.getByRole("tab")).toHaveCount(3);
 
     // --remove back to one file and selector disappears
@@ -570,7 +570,7 @@ test("multi-file preview with markdown selector and cross-file links", async ({ 
     expect(removeRes.code).toBe(0);
     await expect(page.getByRole("tablist", { name: "Preview file" })).toHaveCount(0, { timeout: 15_000 });
     await expect(page.locator(".session-preview-filename")).toHaveText(aName);
-    await expect(page.locator(`iframe[title="HTML preview: ${aName}"]`)).toBeVisible();
+    await expect(page.locator(`iframe[title="Preview: ${aName}"]`)).toBeVisible();
 
     expect(prohibitedRequests).toBe(0);
     expect(transport.leaked).toBe(false);

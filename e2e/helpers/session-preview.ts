@@ -26,14 +26,14 @@ const PREVIEW_FRAME_NOT_READY = [
 
 /**
  * For expect.poll / toPass callbacks: evaluate `fn` on the <body> of the preview document of `fileName`
- * (iframe[title="HTML preview: <fileName>"]). When the evaluation races the iframe being swapped or navigated
+ * (iframe[title="Preview: <fileName>"]). When the evaluation races the iframe being swapped or navigated
  * (PREVIEW_FRAME_NOT_READY), return `notReady` so the poll simply retries; pick a value the poll's matcher never accepts
  * (NaN for numeric comparisons, null for equality). Any other error fails the test, and so does a closed PAGE (a
  * "Target closed" for the page itself is not a frame swap).
  */
 export async function inPreviewFrame<R, N>(page: Page, fileName: string, fn: (body: Element) => R, notReady: N): Promise<R | N> {
   try {
-    return await page.frameLocator(`iframe[title="HTML preview: ${fileName}"]`).locator("body").evaluate(fn) as R;
+    return await page.frameLocator(`iframe[title="Preview: ${fileName}"]`).locator("body").evaluate(fn) as R;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!page.isClosed() && PREVIEW_FRAME_NOT_READY.some(pattern => pattern.test(message))) return notReady;
