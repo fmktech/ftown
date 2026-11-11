@@ -46,6 +46,8 @@ export const FETCH_SPACING_MS = 10_000;
 export const ANNOUNCE_SPACING_MS = 5_000;
 /** Received announcements waiting for verification beyond this are dropped. */
 export const MAX_QUEUED = 20;
+/** A fresh presence read not answered within this (or failed) is replaced by asking every member computer. */
+export const PRESENCE_WAIT_MS = 500;
 /** Remembered verified signatures (a replay is not verified again). */
 const MAX_VERIFIED = 256;
 /** At most this many present computers are considered (presence is an unauthenticated hint). */
@@ -91,6 +93,10 @@ export interface LedgerPeersTransport {
   request(bridgeId: string, type: "ledger_head" | "ledger_chain", payload: Record<string, unknown>): Promise<unknown>;
   /** Publishes on the account's ledger channel. */
   publish(announcement: HeadAnnouncement): Promise<unknown>;
+  /** Resolves once this connection can carry a request and its answer: connected, commands and ledger channels subscribed. */
+  ready(): Promise<void>;
+  /** A fresh read of the computers present on the relay (their bridgeIds); rejects when presence cannot be read. */
+  presence(): Promise<string[]>;
 }
 
 /** The entry points the relay connection feeds (LedgerPeers satisfies it). */
@@ -164,6 +170,8 @@ export class LedgerPeers implements LedgerPeersFeed {
   private readonly fetches = new Map<string, FetchEntry>();
   /** >0 while prepare() waits (the client's beforeSign hook is running). */
   private preparing = 0;
+  /** The connection generation whose checkAll() is running, else null. */
+  private checking: number | null = null;
   private readonly checks = new Map<string, { at: number; announced: string | null }>();
   private queue: HeadAnnouncement[] = [];
   private draining = false;
@@ -192,64 +200,137 @@ export class LedgerPeers implements LedgerPeersFeed {
   // ---- The agreement step before signing. ----
 
   /**
-   * The client's beforeSign hook. In parallel: `ledger_head` to every online computer of the trusted checkpoint, and the announcements
-   * of the last 10 s; at most PREPARE_BUDGET_MS in total, then it returns (late answers are still used afterwards). A computer whose head
-   * is unknown here gives its chain (paged ledger_chain) to learnChain: 'ahead' is adopted (the client then builds on the new head),
-   * 'invalid' is ignored. A browser announcing an unknown head causes a paced server read. Throws Error('ledger_diverged') only when a
-   * computer proved a valid different history (the client is then in its divergence state), never for silence, timeouts or errors;
-   * never while the client already holds a divergence (the owner's resolution then needs this step to pass).
+   * The client's beforeSign hook; everything below shares ONE budget of PREPARE_BUDGET_MS, then it returns (late answers are still used
+   * afterwards). Nothing attached (no signed-in relay connection, e.g. the pairing page): returns at once. A connection still opening is
+   * waited for. Then, in parallel: `ledger_head` to every computer of the trusted checkpoint already known online, a FRESH presence read
+   * (each member computer it newly lists is asked at once; when it fails or does not answer within PRESENCE_WAIT_MS, every member
+   * computer is asked: one that is offline simply does not answer), and the announcements of the last 10 s. At most one `ledger_head`
+   * per member computer per call. A computer whose head is unknown here gives its chain (paged ledger_chain) to learnChain: 'ahead' is
+   * adopted (the client then builds on the new head), 'invalid' is ignored. A browser announcing an unknown head causes a paced server
+   * read. Throws Error('ledger_diverged') only when a computer proved a valid different history (the client is then in its divergence
+   * state), never for silence, timeouts or errors; never while the client already holds a divergence (the owner's resolution then needs
+   * this step to pass).
    */
   prepare = async (_head: { revision: number; head: string }): Promise<void> => {
-    const context = this.ready();
-    if (context === null) return;
+    const transport = this.transport;
+    if (transport === null || this.ready() === null) return;
     const started = this.now();
+    const deadline = started + PREPARE_BUDGET_MS;
     const resolving = this.deps.client.snapshot().divergence != null;
-    const tasks: Promise<PeerOutcome>[] = [];
-    const asked = new Set<string>();
     this.preparing += 1;
     try {
-      for (const bridgeId of this.onlineMembers(context.trusted)) {
+      // A connection still opening (relay, commands or ledger channel): wait for it within the budget rather than ask nobody.
+      if (await this.within(this.usable(transport), deadline) === null) return;
+      const context = this.ready();
+      if (context === null || context.transport !== transport) return;
+      const batch = this.batch(deadline, !resolving);
+      const asked = new Set<string>();
+      const ask = (bridgeId: string): void => {
+        const trusted = this.deps.trusted();
+        if (asked.has(bridgeId) || trusted === null || !isMember(trusted, "bridge", bridgeId)) return;
         asked.add(bridgeId);
-        tasks.push(this.compareBridge(bridgeId));
-      }
+        // This counts as the computer's comparison for the onBridgeConnected spacing.
+        this.checks.set(bridgeId, { at: this.now(), announced: this.announced.get(bridgeId) ?? null });
+        batch.add(this.compareBridge(bridgeId));
+      };
+      for (const bridgeId of this.onlineMembers(context.trusted)) ask(bridgeId);
+      batch.add(this.discover(transport, ask, deadline));
       for (const report of Array.from(this.reports.values())) {
         if (report.source !== "announcement" || started - report.at > RECENT_ANNOUNCEMENT_MS || this.relation(report) !== "unknown") continue;
         if (report.kind === "bridge") {
           if (asked.has(report.id) || !isMember(context.trusted, "bridge", report.id)) continue;
           asked.add(report.id);
-          tasks.push(this.learnFrom(report.id));
+          batch.add(this.learnFrom(report.id));
         } else {
-          tasks.push(this.refreshFor(report).then(() => "skipped" as const));
+          batch.add(this.refreshFor(report).then(() => "skipped" as const));
         }
       }
-      if (tasks.length > 0) await this.settle(tasks, started + PREPARE_BUDGET_MS, !resolving);
+      await batch.close();
     } finally {
       this.preparing -= 1;
     }
   };
 
-  /** Resolves when every task settled or at `deadline`; rejects with ledger_diverged on the first proven divergence when `strict`. */
-  private settle(tasks: Promise<PeerOutcome>[], deadline: number, strict: boolean): Promise<void> {
-    return new Promise((resolve, reject) => {
-      let left = tasks.length;
+  /**
+   * A set of tasks that may grow until close(): close() resolves when every task added settled, or at `deadline`, and rejects with
+   * ledger_diverged on the first proven divergence when `strict`.
+   */
+  private batch(deadline: number, strict: boolean): { add(task: Promise<PeerOutcome>): void; close(): Promise<void> } {
+    let left = 0;
+    let closed = false;
+    let done = false;
+    let settle: (error?: Error) => void = () => undefined;
+    const finished = new Promise<void>((resolve, reject) => {
+      settle = error => { if (error === undefined) resolve(); else reject(error); };
+    });
+    const finish = (error?: Error): void => {
+      if (done) return;
+      done = true;
+      this.clearTimer(timer);
+      settle(error);
+    };
+    const timer = this.setTimer(() => finish(), Math.max(0, deadline - this.now()));
+    const one = (): void => {
+      left -= 1;
+      if (closed && left === 0) finish();
+    };
+    return {
+      add: task => {
+        left += 1;
+        task.then(outcome => {
+          if (strict && outcome === "diverged") finish(new Error("ledger_diverged"));
+          one();
+        }, one);
+      },
+      close: () => {
+        closed = true;
+        if (left === 0) finish();
+        return finished;
+      },
+    };
+  }
+
+  /**
+   * prepare()'s fresh presence read: every member computer it lists is asked (`ask` skips those already asked and non-members); when it
+   * fails or does not answer within PRESENCE_WAIT_MS, every member computer of the trusted checkpoint is asked.
+   */
+  private async discover(transport: LedgerPeersTransport, ask: (bridgeId: string) => void, deadline: number): Promise<PeerOutcome> {
+    const present = await this.readPresence(transport, Math.min(deadline, this.now() + PRESENCE_WAIT_MS));
+    const trusted = this.deps.trusted();
+    if (this.transport !== transport || trusted === null) return "failed";
+    if (present === null) {
+      for (const bridge of trusted.bridges) ask(bridge.bridgeId);
+      return "skipped";
+    }
+    for (const bridgeId of present) ask(bridgeId);
+    this.setOnline(present);
+    return "skipped";
+  }
+
+  /** The relay's present computers, read now; null when the read fails, answers garbage, or `until` passes first. */
+  private async readPresence(transport: LedgerPeersTransport, until: number): Promise<string[] | null> {
+    const found = await this.within(Promise.resolve().then(() => transport.presence()), until);
+    if (found === null || !Array.isArray(found.value)) return null;
+    return found.value.filter((id): id is string => typeof id === "string" && BRIDGE_ID.test(id)).slice(0, MAX_ONLINE);
+  }
+
+  /** The connection's readiness (a transport that throws rejects). */
+  private usable(transport: LedgerPeersTransport): Promise<void> {
+    return Promise.resolve().then(() => transport.ready());
+  }
+
+  /** `work`'s value, or null when it rejects or `until` passes first. */
+  private within<T>(work: Promise<T>, until: number): Promise<{ value: T } | null> {
+    return new Promise(resolve => {
       let done = false;
-      const finish = (error?: Error): void => {
+      const finish = (result: { value: T } | null): void => {
         if (done) return;
         done = true;
         this.clearTimer(timer);
-        if (error === undefined) resolve(); else reject(error);
+        resolve(result);
       };
-      const timer = this.setTimer(() => finish(), Math.max(0, deadline - this.now()));
-      for (const task of tasks) {
-        task.then(outcome => {
-          if (strict && outcome === "diverged") finish(new Error("ledger_diverged"));
-          left -= 1;
-          if (left === 0) finish();
-        }, () => {
-          left -= 1;
-          if (left === 0) finish();
-        });
-      }
+      const timer = this.setTimer(() => finish(null), Math.max(0, until - this.now()));
+      work.then(value => finish({ value }), () => finish(null));
     });
   }
 
@@ -270,11 +351,33 @@ export class LedgerPeers implements LedgerPeersFeed {
     void this.compareBridge(bridgeId);
   }
 
-  /** onBridgeConnected for every online computer of the trusted checkpoint (after sign-in / subscribe). */
+  /**
+   * The comparison without a pending write (after attach, sign-in, each subscribe): once the connection is usable, a fresh presence
+   * read, then onBridgeConnected for every member computer present, or for every member computer when presence cannot be read. One run
+   * at a time per connection; the per-computer spacing applies.
+   */
   checkAll(): void {
-    const context = this.ready();
-    if (context === null) return;
-    for (const bridgeId of this.onlineMembers(context.trusted)) this.onBridgeConnected(bridgeId);
+    const transport = this.transport;
+    if (transport === null || this.ready() === null || this.checking === this.generation) return;
+    const generation = this.generation;
+    this.checking = generation;
+    void (async () => {
+      try {
+        await this.usable(transport);
+        if (generation !== this.generation) return;
+        const present = await this.readPresence(transport, this.now() + PRESENCE_WAIT_MS);
+        const context = this.ready();
+        if (generation !== this.generation || context === null) return;
+        if (present === null) {
+          for (const bridge of context.trusted.bridges) this.onBridgeConnected(bridge.bridgeId);
+          return;
+        }
+        this.setOnline(present);
+        for (const bridgeId of this.onlineMembers(context.trusted)) this.onBridgeConnected(bridgeId);
+      } finally {
+        if (this.checking === generation) this.checking = null;
+      }
+    })();
   }
 
   /** `ledger_head`, then (unknown head) the chain through learnChain. Never rejects. */
@@ -563,10 +666,12 @@ export class LedgerPeers implements LedgerPeersFeed {
     this.online = [];
     this.queue = [];
     this.lastHead = tipOf(this.deps.heads());
-    // channelSubscribed() announces and compares for a connection that is ready now; onClientChange for one that becomes ready.
+    // channelSubscribed() announces (and compares again) for a connection that is ready now; onClientChange for one that becomes ready.
     this.wasReady = this.ready() !== null;
     const generation = this.generation;
     this.scheduleView();
+    // Compare as soon as the connection can carry requests, not only once presence was first polled.
+    this.checkAll();
     return () => {
       if (this.generation === generation) this.detach();
     };

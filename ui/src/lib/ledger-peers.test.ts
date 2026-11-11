@@ -14,7 +14,7 @@ import type { SoftPasskey } from "@security/ledger/testing";
 import type { EndpointIdentity, EndpointPublic } from "@security/protocol";
 import { LedgerClient } from "./ledger-client";
 import type { LedgerClientDeps, LedgerPeersView } from "./ledger-client";
-import { CHAIN_MAX_PAGES, LedgerPeers, MAX_QUEUED, PREPARE_BUDGET_MS, presentBridgeIds } from "./ledger-peers";
+import { CHAIN_MAX_PAGES, LedgerPeers, MAX_QUEUED, PREPARE_BUDGET_MS, PRESENCE_WAIT_MS, presentBridgeIds } from "./ledger-peers";
 import type { LedgerPeersClient, LedgerPeersTransport } from "./ledger-peers";
 import { LedgerReplica, memoryReplicaStorage } from "./ledger-replica";
 import type { LedgerReplicaStorage } from "./ledger-replica";
@@ -147,7 +147,36 @@ class FakeBridges {
   onPage: ((bridgeId: string, fromRevision: number) => void) | null = null;
   readonly log: string[] = [];
   readonly payloads: Record<string, unknown>[] = [];
+  /** What a presence read reports: when null, the computers the test last put online (setOnline). */
+  present: string[] | null = null;
+  lastOnline: string[] = [];
+  /** A presence read rejects with this, or never answers when "hang". */
+  presenceFails: Error | "hang" | null = null;
   constructor(private readonly accountId = ACCOUNT) {}
+  presence = async (): Promise<string[]> => {
+    if (this.presenceFails === "hang") return new Promise(() => undefined);
+    if (this.presenceFails !== null) throw this.presenceFails;
+    return (this.present ?? this.lastOnline).slice();
+  };
+  /** The transport of a usable connection to these computers (overrides replace its parts). */
+  transport(published: HeadAnnouncement[], overrides: Partial<LedgerPeersTransport> = {}): LedgerPeersTransport {
+    return {
+      self: SELF,
+      request: vi.fn(this.request),
+      publish: vi.fn(async (item: HeadAnnouncement): Promise<void> => { published.push(item); }),
+      ready: vi.fn(async (): Promise<void> => undefined),
+      presence: vi.fn(this.presence),
+      ...overrides,
+    };
+  }
+  /** Presence reports what the test puts online, unless `present` says otherwise. */
+  mirror(peers: LedgerPeers): void {
+    const setOnline = peers.setOnline.bind(peers);
+    peers.setOnline = (bridgeIds: readonly string[]): void => {
+      this.lastOnline = bridgeIds.slice();
+      setOnline(bridgeIds);
+    };
+  }
   /** A real chain held by a computer. */
   async setChain(bridgeId: string, ledger: Ledger): Promise<void> {
     const last = ledger.transitions[ledger.transitions.length - 1];
@@ -182,11 +211,8 @@ function setup(options: { client?: FakeClient; deviceKey?: AuthKey; attach?: boo
     client, heads: () => client.heads, trusted: () => client.trusted, deviceKey: async () => options.deviceKey ?? keys.self, verify, warn,
   });
   made.push(peers);
-  const transport: LedgerPeersTransport = {
-    self: SELF,
-    request: vi.fn(bridges.request),
-    publish: vi.fn(async (item: HeadAnnouncement): Promise<void> => { published.push(item); }),
-  };
+  bridges.mirror(peers);
+  const transport = bridges.transport(published);
   if (options.attach !== false) peers.attach(transport);
   return { client, bridges, peers, transport, published, verify, warn };
 }
@@ -451,6 +477,129 @@ describe("LedgerPeers prepare (before signing)", () => {
     expect(bridges.log).toEqual([`${STUDIO} chain 0`]);
     expect(learntAt).toBe(t0 + 1_000);
     expect(resolvedAt).toBe(t0 + 1_000);
+  });
+});
+
+describe("LedgerPeers prepare never relies on a stale or empty online list", () => {
+  it("online list empty while a member computer is present: a fresh presence read asks it and its longer chain is learnt before prepare resolves", async () => {
+    fakeTime();
+    const { peers, bridges, client, transport } = setup();
+    await quiet();
+    expect(client.peers?.online).toEqual([]);
+    bridges.present = [STUDIO];
+    bridges.hold.set(STUDIO, holding(4));
+    client.learnChain.mockImplementation(async () => { client.move(4); return "ahead"; });
+    const t0 = Date.now();
+    await peers.prepare(HEAD2);
+    expect(Date.now()).toBe(t0);
+    expect(transport.presence).toHaveBeenCalledTimes(2);
+    expect(bridges.log).toEqual([`${STUDIO} head`, `${STUDIO} chain 0`]);
+    expect(client.learnChain).toHaveBeenCalledExactlyOnceWith(chainOf(fakeRecords(4)), "peer", "bridge studio-m");
+    expect(client.heads).toEqual(chainHeads(4));
+    await quiet();
+    expect(client.peers?.online).toEqual([STUDIO]);
+  });
+
+  it("presence cannot be read (refused, or no answer within 500 ms): every member computer is asked, at most once each", async () => {
+    fakeTime();
+    const client = new FakeClient();
+    client.trusted = checkpoint({ bridges: checkpoint().bridges.filter(item => item.bridgeId === STUDIO), revokedBridgeIds: [AIR] });
+    const { peers, bridges } = setup({ client });
+    bridges.presenceFails = new Error("permission denied");
+    bridges.hold.set(STUDIO, holding(2));
+    await quiet();
+    // On connect the comparison already fell back to every member computer.
+    expect(bridges.log).toEqual([`${STUDIO} head`]);
+    bridges.log.length = 0;
+    await peers.prepare(HEAD2);
+    expect(bridges.log).toEqual([`${STUDIO} head`]);
+    // A read that never answers: asked once PRESENCE_WAIT_MS passed, all within the budget.
+    bridges.presenceFails = "hang";
+    bridges.log.length = 0;
+    const t0 = Date.now();
+    let resolvedAt = -1;
+    void peers.prepare(HEAD2).then(() => { resolvedAt = Date.now(); });
+    await advance(499);
+    expect(bridges.log).toEqual([]);
+    await advance(1);
+    expect(bridges.log).toEqual([`${STUDIO} head`]);
+    expect(resolvedAt).toBe(t0 + PRESENCE_WAIT_MS);
+  });
+
+  it("a connection still opening is waited for (connected after 300 ms): the computer is still asked within the budget", async () => {
+    fakeTime();
+    const { peers, bridges, client, transport } = setup({ attach: false });
+    let connect: () => void = () => undefined;
+    const connected = new Promise<void>(resolve => { connect = resolve; });
+    transport.ready = vi.fn(() => connected);
+    setTimeout(() => connect(), 300);
+    peers.attach(transport);
+    bridges.present = [STUDIO];
+    bridges.hold.set(STUDIO, holding(4));
+    client.learnChain.mockImplementation(async () => { client.move(4); return "ahead"; });
+    const t0 = Date.now();
+    let resolvedAt = -1;
+    void peers.prepare(HEAD2).then(() => { resolvedAt = Date.now(); });
+    await quiet();
+    expect(bridges.log).toEqual([]);
+    expect(resolvedAt).toBe(-1);
+    await advance(300);
+    expect(resolvedAt).toBe(t0 + 300);
+    expect(bridges.log.filter(line => line.includes("chain"))).toEqual([`${STUDIO} chain 0`]);
+    expect(client.learnChain).toHaveBeenCalledOnce();
+    expect(client.heads).toEqual(chainHeads(4));
+  });
+
+  it("a connection that never becomes usable: exactly 2 s, nobody asked, no error", async () => {
+    fakeTime();
+    const { peers, bridges, transport } = setup({ attach: false });
+    transport.ready = vi.fn(() => new Promise<void>(() => undefined));
+    peers.attach(transport);
+    bridges.present = [STUDIO];
+    bridges.hold.set(STUDIO, holding(4));
+    const done = vi.fn();
+    const failed = vi.fn();
+    void peers.prepare(HEAD2).then(done, failed);
+    await advance(PREPARE_BUDGET_MS - 1);
+    expect(done).not.toHaveBeenCalled();
+    await advance(1);
+    expect(done).toHaveBeenCalledOnce();
+    expect(failed).not.toHaveBeenCalled();
+    expect(bridges.log).toEqual([]);
+    expect(transport.presence).not.toHaveBeenCalled();
+  });
+
+  it("nothing attached (e.g. the pairing page): prepare resolves at once, reads nothing, sets no timer", async () => {
+    fakeTime();
+    const { peers, transport } = setup({ attach: false });
+    const done = vi.fn();
+    void peers.prepare(HEAD2).then(done);
+    await quiet();
+    expect(done).toHaveBeenCalledOnce();
+    expect(transport.ready).not.toHaveBeenCalled();
+    expect(transport.presence).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("on connect, compares as soon as the connection is usable, without waiting for a presence poll", async () => {
+    fakeTime();
+    const { peers, bridges, transport } = setup({ attach: false });
+    let connect: () => void = () => undefined;
+    const connected = new Promise<void>(resolve => { connect = resolve; });
+    transport.ready = vi.fn(() => connected);
+    bridges.present = [STUDIO, "stranger-9"];
+    bridges.hold.set(STUDIO, holding(2));
+    peers.attach(transport);
+    await quiet();
+    expect(bridges.log).toEqual([]);
+    connect();
+    await quiet();
+    expect(bridges.log).toEqual([`${STUDIO} head`]);
+    // Repeats keep the per-computer spacing.
+    peers.checkAll();
+    await quiet();
+    expect(transport.presence).toHaveBeenCalledTimes(2);
+    expect(bridges.log).toEqual([`${STUDIO} head`]);
   });
 });
 
@@ -832,7 +981,7 @@ async function account() {
   await a.client.append({ type: "add_bridge", bridge: studio.bridge });
   return { server, authenticator, a, accountId, studio };
 }
-async function agreement(server: FakeServer, authenticator: FakeAuthenticator, a: Browser, accountId: string) {
+async function agreement(server: FakeServer, authenticator: FakeAuthenticator, a: Browser, accountId: string, options: { attach?: boolean; transport?: Partial<LedgerPeersTransport> } = {}) {
   let peers: LedgerPeers | null = null;
   const page = await browser(server, authenticator, { identity: a, deps: { beforeSign: head => (peers === null ? Promise.resolve() : peers.prepare(head)) } });
   await page.client.load();
@@ -840,9 +989,11 @@ async function agreement(server: FakeServer, authenticator: FakeAuthenticator, a
   made.push(created);
   peers = created;
   const bridges = new FakeBridges(accountId);
+  bridges.mirror(created);
   const published: HeadAnnouncement[] = [];
-  created.attach({ self: (await a.endpoint(accountId)).endpoint, request: bridges.request, publish: async item => { published.push(item); } });
-  return { page, peers: created, bridges, published };
+  const transport = bridges.transport(published, { self: (await a.endpoint(accountId)).endpoint, ...options.transport });
+  if (options.attach !== false) created.attach(transport);
+  return { page, peers: created, bridges, published, transport };
 }
 const signs = (authenticator: FakeAuthenticator): number => authenticator.calls.filter(name => name === "sign").length;
 const tipHead = async (ledger: Ledger): Promise<string> => (await verifyLedger(ledger)).head;
@@ -872,6 +1023,36 @@ describe("LedgerPeers with the real ledger client", () => {
     expect(current(server).transitions.slice(0, ahead.transitions.length)).toEqual(wire(ahead).transitions);
     expect(current(server).transitions).toHaveLength(ahead.transitions.length + 1);
     expect(page.replica.raw()?.ledger).toEqual(current(server));
+  });
+
+  it("H, repair before signing: server rolled back, a computer ahead, the change confirmed right after the dashboard opened -> built on the computer's head, one prompt", async () => {
+    const { server, authenticator, a, accountId } = await account();
+    // The server lost H2 (rolled back to H1); the computer still holds it; this browser only ever saw H1.
+    const h1 = current(server);
+    const h2 = await addDevices(h1, authenticator, accountId, 1);
+    fakeTime();
+    let connect: () => void = () => undefined;
+    const connected = new Promise<void>(resolve => { connect = resolve; });
+    // The relay connects 300 ms after the dashboard opened, and presence is not readable yet (useBridges has not subscribed).
+    const { page, peers, bridges, transport } = await agreement(server, authenticator, a, accountId, {
+      attach: false, transport: { ready: () => connected, presence: () => Promise.reject(new Error("permission denied")) },
+    });
+    await bridges.setChain(STUDIO, h2);
+    setTimeout(() => connect(), 300);
+    peers.attach(transport);
+    authenticator.calls = [];
+    const posts = server.posts.length;
+    const write = page.client.append({ type: "add_bridge", bridge: (await bridgeMember(accountId, "b1")).bridge });
+    await advance(300);
+    await write;
+    expect(bridges.log.filter(line => line.includes("chain"))).toEqual([`${STUDIO} chain 0`]);
+    expect(signs(authenticator)).toBe(1);
+    expect(server.posts).toHaveLength(posts + 1);
+    expect(server.posts[posts]).toMatchObject({ expectHead: await tipHead(h1) });
+    expect(current(server).transitions.slice(0, h2.transitions.length)).toEqual(wire(h2).transitions);
+    expect(current(server).transitions).toHaveLength(h2.transitions.length + 1);
+    expect(page.replica.raw()?.ledger).toEqual(current(server));
+    expect(page.client.snapshot().divergence).toBeNull();
   });
 
   it("a chain fetched just before a write started (its learnChain queued behind that write) is learnt inside prepare at once", async () => {

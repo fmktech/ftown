@@ -311,6 +311,8 @@ export function useCentrifugo(
     let ledgerSub: Subscription | null = null;
     let detachPeers: (() => void) | null = null;
     let presenceTimer: ReturnType<typeof setInterval> | null = null;
+    /** Pending transport.ready() calls of the agreement step (dropped with the connection; its own budget ends their wait). */
+    let waiters: (() => void)[] = [];
     if (ledger) {
       const peers = ledgerPeersOption !== undefined ? ledgerPeersOption : ledgerPeersFor(ledger);
       const sub = client.newSubscription(accountChannel("bridges:ledger", userId));
@@ -336,16 +338,30 @@ export function useCentrifugo(
       sub.subscribe();
       ledgerSub = sub;
       if (peers) {
-        // This connection's end-to-end encrypted request/response RPC to one computer (the same path as executeSecurity), and the
-        // ledger channel for this browser's own signed announcements.
+        // Usable = a request can go out and its answer come back: relay connected, commands channel (answers) and ledger channel
+        // (announcements) subscribed. ready() resolves at once when usable, else at the first event that makes it so.
+        const usable = () => client.state === "connected" && commandsSub.state === "subscribed" && sub.state === "subscribed";
+        const wake = () => {
+          if (!usable() || waiters.length === 0) return;
+          const ready = waiters;
+          waiters = [];
+          for (const resolve of ready) resolve();
+        };
+        client.on("connected", wake);
+        commandsSub.on("subscribed", wake);
+        sub.on("subscribed", wake);
+        // Which computers are online: the relay's presence of bridges:presence#<userId> (useBridges holds that subscription on this
+        // same connection; a read before it is subscribed fails: the agreement step then asks every member computer).
+        const presenceChannel = accountChannel("bridges:presence", userId);
+        // This connection's end-to-end encrypted request/response RPC to one computer (the same path as executeSecurity), the
+        // ledger channel for this browser's own signed announcements, its readiness, and a fresh presence read.
         detachPeers = peers.attach({
           self: securityRuntime.identity.endpoint,
           request: (_bridgeId, type, payload) => secureClient.request({ type, requestId: uuidv4(), payload }),
           publish: announcement => sub.publish(announcement),
+          ready: () => (usable() ? Promise.resolve() : new Promise<void>(resolve => { waiters.push(resolve); })),
+          presence: () => client.presence(presenceChannel).then(presentBridgeIds),
         });
-        // Which computers are online: the relay's presence of bridges:presence#<userId> (useBridges holds that subscription on this
-        // same connection; a read before it is subscribed fails and the next one succeeds).
-        const presenceChannel = accountChannel("bridges:presence", userId);
         const readPresence = () => {
           void client.presence(presenceChannel).then(result => { peers.setOnline(presentBridgeIds(result)); }, () => {});
         };
@@ -359,6 +375,7 @@ export function useCentrifugo(
 
     return () => {
       if (presenceTimer !== null) clearInterval(presenceTimer);
+      waiters = [];
       detachPeers?.();
       commandsSub.off("publication", handleInboundSignal);
       if (ledgerSub) {

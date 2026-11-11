@@ -4,22 +4,24 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SecureEndpointRuntime } from "@/lib/secure-endpoint-runtime";
 
 type Handler = (ctx: { data?: unknown; info?: { user?: string } }) => void;
-interface FakeSub { channel: string; handlers: Map<string, Handler[]>; subscribe: () => void; unsubscribe: () => void; removeAllListeners: () => void; publish: (data: unknown) => Promise<unknown> }
+interface FakeSub { channel: string; state: string; handlers: Map<string, Handler[]>; subscribe: () => void; unsubscribe: () => void; removeAllListeners: () => void; publish: (data: unknown) => Promise<unknown> }
 type ClientHandler = (ctx: unknown) => void;
+interface FakeCommands { state: string; handlers: Map<string, (() => void)[]> }
 const mocks = vi.hoisted(() => ({
   subs: [] as FakeSub[], removed: [] as string[], secure: [] as { userId: string; request: (command: unknown) => Promise<unknown> }[],
   getToken: [] as (() => Promise<string>)[], clientOn: [] as [string, ClientHandler][], presence: [] as string[],
-  presenceResult: null as unknown,
+  presenceResult: null as unknown, clients: [] as { state: string }[], commands: [] as FakeCommands[],
 }));
 vi.mock("centrifuge", () => ({
   UnauthorizedError: class extends Error {},
   Centrifuge: class {
-    constructor(_url: string, options: { getToken: () => Promise<string> }) { mocks.getToken.push(options.getToken); }
+    state = "disconnected";
+    constructor(_url: string, options: { getToken: () => Promise<string> }) { mocks.getToken.push(options.getToken); mocks.clients.push(this); }
     on(event: string, handler: ClientHandler) { mocks.clientOn.push([event, handler]); return this; } off() { return this; } connect() {} disconnect() {}
     presence(channel: string) { mocks.presence.push(channel); return Promise.resolve(mocks.presenceResult); }
     newSubscription(channel: string) {
       const handlers = new Map<string, Handler[]>();
-      const sub = { channel, handlers, on(event: string, handler: Handler) { handlers.set(event, [...(handlers.get(event) ?? []), handler]); return sub; },
+      const sub = { channel, handlers, state: "unsubscribed", on(event: string, handler: Handler) { handlers.set(event, [...(handlers.get(event) ?? []), handler]); return sub; },
         subscribe: vi.fn(), unsubscribe: vi.fn(), removeAllListeners: vi.fn(), publish: vi.fn(async () => ({})) };
       mocks.subs.push(sub); return sub;
     }
@@ -32,7 +34,12 @@ vi.mock("@/lib/secure-message-client", () => ({
     request = vi.fn(async (command: unknown) => ({ requestId: (command as { requestId: string }).requestId, success: true, data: { echo: command } }));
     constructor(_raw: unknown, public userId: string) { mocks.secure.push(this); }
     dispose() {} publish() { return Promise.resolve(); } getSubscription() { return null; }
-    newSubscription() { return { on() {}, off() {}, subscribe() {} }; }
+    newSubscription() {
+      const handlers = new Map<string, (() => void)[]>();
+      const commands = { state: "unsubscribed", handlers, on(event: string, handler: () => void) { handlers.set(event, [...(handlers.get(event) ?? []), handler]); }, off() {}, subscribe() {} };
+      mocks.commands.push(commands);
+      return commands;
+    }
   },
 }));
 vi.mock("@/lib/direct-transport/hybrid-terminal-transport", () => ({ HybridTerminalTransport: class { dispose() {} } }));
@@ -53,7 +60,7 @@ const fire = (sub: FakeSub, event: string, ctx: Parameters<Handler>[0] = {}) => 
 const fireClient = (event: string, ctx: unknown = {}) => { act(() => { for (const [name, handler] of mocks.clientOn) if (name === event) handler(ctx); }); };
 beforeEach(() => {
   mocks.subs.length = 0; mocks.removed.length = 0; mocks.secure.length = 0; mocks.getToken.length = 0; mocks.clientOn.length = 0; mocks.presence.length = 0;
-  mocks.presenceResult = null;
+  mocks.presenceResult = null; mocks.clients.length = 0; mocks.commands.length = 0;
 });
 
 describe("account ledger channel", () => {
@@ -161,6 +168,28 @@ describe("account ledger agreement step (LedgerPeers)", () => {
     expect(peers.setOnline).toHaveBeenLastCalledWith([]);
     unmount();
     expect(peers.detach).toHaveBeenCalledOnce();
+  });
+
+  it("transport.ready resolves once connected with the commands and ledger channels subscribed; presence is a fresh read of bridges:presence", async () => {
+    const peers = fakePeers(); const ledger = fakeLedger();
+    renderHook(() => useCentrifugo(jwt, "wss://relay.test", accountId, { securityRuntime: accountRuntime, ledger, ledgerPeers: peers }));
+    const transport = peers.attach.mock.calls[0][0];
+    const raw = mocks.clients[0]; const sub = ledgerSub(); const commands = mocks.commands[0];
+    let ready = 0;
+    const wait = () => { void transport.ready().then(() => { ready += 1; }); };
+    const flush = () => act(async () => { await Promise.resolve(); });
+    wait(); wait();
+    raw.state = "connected"; fireClient("connected"); await flush();
+    expect(ready).toBe(0);
+    sub.state = "subscribed"; fire(sub, "subscribed"); await flush();
+    expect(ready).toBe(0);
+    commands.state = "subscribed"; for (const handler of commands.handlers.get("subscribed") ?? []) handler(); await flush();
+    expect(ready).toBe(2);
+    await expect(transport.ready()).resolves.toBeUndefined();
+    mocks.presence.length = 0;
+    mocks.presenceResult = { clients: { c1: { connInfo: { bridgeId: "studio" } }, c2: { connInfo: { bridgeId: "studio" } }, c3: { connInfo: { user: "x" } } } };
+    await expect(transport.presence()).resolves.toEqual(["studio"]);
+    expect(mocks.presence).toEqual([`bridges:presence#${accountId}`]);
   });
 
   it("re-reads presence every 10 s while mounted, never after unmount", async () => {
