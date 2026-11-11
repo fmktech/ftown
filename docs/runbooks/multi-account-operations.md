@@ -51,6 +51,23 @@ The server keeps a sealed copy of each account's checkpoint, keyed from `AUTH_SE
 
 A browser profile belongs to one account. To use another account in the same profile, reset the browser in Security first.
 
+## After a database restore
+
+Restoring `account_ledger` from a backup can put an account back to an older signed prefix of its chain. The server then authorizes the state of that older chain, for example a key that was revoked later.
+
+What happens by itself. The first browser of the account that reads its ledger, with a copy of the chain that is ahead of the restored row, sends that chain back. This happens when the browser opens the Security panel, renews its relay token, subscribes to the ledger channel or signs in. It needs no passkey and creates no account. The server adopts the chain if it wins fork choice and the account's write limit allows it. The row's `revision` and `head` move forward again.
+
+What does not happen.
+- An account with no browser online stays at the restored state until one connects.
+- A browser with no local copy of the chain (new browser, cleared site data) cannot notice anything.
+- Bridges do not send their chain ahead of the server. They read it.
+- A longer chain without a later revocation can win over a shorter one that had it. Check the revocations of important accounts by hand.
+
+What to check.
+- Record `SELECT account_id, revision, head FROM account_ledger` before the restore and again after the users have reconnected. A `revision` that went back and then forward again is a re-offer that landed.
+- The server logs nothing for a re-offer. It logs `[ledger] checkpoint healed: account <first 8 characters of account_id> reason <absent|mac_mismatch|stale_head|chain_mismatch> revision <old>-><new>` (one line, `console.warn`) when a restored row's sealed checkpoint cannot be trusted, for example after a restore from another `AUTH_SECRET`. That line is about the checkpoint, not about the re-offer.
+- A user can see an unapplied removal in Security as "Removal not saved to the server yet" and press "Retry now".
+
 ## Removing an account
 
 There is no shipped command or UI for this. Accounts are not deleted automatically either, and abandoned accounts stay.
@@ -61,6 +78,8 @@ Deleting the row in `accounts` removes the account's data: in `ui/schema.sql` th
 -- verify before running; replace the id
 DELETE FROM accounts WHERE account_id = '<accountId>';
 ```
+
+A browser re-offering its chain cannot bring the account back: its POST carries `expectHead`, and for an unknown account the server answers 404 `account_unknown` before genesis admission. The browser also reads first, and a 404 stops it. A normal user-signed change from a still-signed-in browser reads first too, so it fails before the passkey prompt with `account_not_found`. Two paths do send a plain POST (no `expectHead`) that goes through genesis admission and can re-create the account while `REGISTRATION_ENABLED` allows it and the chain has at most 16 records: a change signed after the account was deleted during the passkey prompt, and a bridge of the account that sends its chain once per local head after its relay token request is refused. Close registration (or accept the re-creation) before deleting, and stop the computers of that account.
 
 This does not disconnect computers or browsers that are already connected, and relay tokens already issued stay valid until they expire (up to one hour). The people involved keep their passkeys and computers; the computers need `ftown start --new-identity` to join another account. `rate_limit_attempts` rows are keyed by scope and key, not by account, and are not removed.
 

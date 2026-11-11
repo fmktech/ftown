@@ -6,11 +6,13 @@ import { login, sharedAccountId, waitForBridgeOnline, runMarkerInTerminal } from
 import { bridgeApiFetch, readBridgePointer } from "../helpers/bridge-api";
 import { UI_BASE_URL } from "../helpers/config";
 import { publishLedgerHeadNotice } from "../helpers/security-nudge";
-import { assertSanitized, atomicHtml, createPreviewFixture, observePreviewTransport, previewHtml, sessionRecord } from "../helpers/session-preview";
+import { assertSanitized, atomicHtml, createPreviewFixture, inPreviewFrame, observePreviewTransport, previewHtml, sessionRecord } from "../helpers/session-preview";
 
 const iframe = (page: Page, fileName: string) => page.locator(`iframe[title="HTML preview: ${fileName}"]`);
 const documentFrame = (page: Page, fileName: string) => page.frameLocator(`iframe[title="HTML preview: ${fileName}"]`);
 const previewRegion = (page: Page) => page.locator('[aria-label="Session preview"]');
+/** The preview document's scroll offset for a poll; NaN (never accepted by a numeric matcher) while the iframe is being swapped. */
+const previewScrollY = (page: Page, fileName: string) => inPreviewFrame(page, fileName, body => body.ownerDocument.defaultView!.scrollY, Number.NaN);
 const separator = (page: Page) => page.getByRole("separator", { name: "Resize terminal and preview", exact: true });
 
 async function selectSession(page: Page, name: string): Promise<void> {
@@ -209,7 +211,7 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     }
     expect(await documentFrame(page, fileName).locator("body").getAttribute("data-preview-javascript")).toBeNull();
     await documentFrame(page, fileName).locator("#hash-link").click();
-    await expect.poll(() => documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.location.hash)).toBe("#inside");
+    await expect.poll(() => inPreviewFrame(page, fileName, body => body.ownerDocument.location.hash, null)).toBe("#inside");
     await expect(iframe(page, fileName)).toHaveAttribute("data-preview-node", suffix);
     await expect(count).toHaveText("Count: 1");
     await iframe(page, fileName).evaluate((element, value) => {
@@ -342,14 +344,14 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     await expect(count).toHaveText("Count: 1");
     recordScroll({ kind: "test-scroll-request", time: Date.now() });
     await documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollTo(0, 600));
-    await expect.poll(() => documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollY)).toBeGreaterThan(500);
+    await expect.poll(() => previewScrollY(page, fileName)).toBeGreaterThan(500);
     await separator(page).focus();
     recordScroll({ kind: "test-after-focus", time: Date.now() });
     recordScroll({ kind: "test-update-request", time: Date.now() });
     await atomicHtml(path, second);
     recordScroll({ kind: "test-update-complete", time: Date.now() });
     await expect(documentFrame(page, fileName).getByRole("heading", { name: `${marker} version 2`, exact: true })).toHaveCount(1);
-    await expect.poll(() => documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollY)).toBeGreaterThan(500);
+    await expect.poll(() => previewScrollY(page, fileName)).toBeGreaterThan(500);
     await expect(documentFrame(page, fileName).getByRole("button", { name: "Count: 0", exact: true })).toHaveCount(1);
     await expect(separator(page)).toBeFocused();
     await noHorizontalOverflow(page);
@@ -362,12 +364,12 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
 
     await documentFrame(page, fileName).getByRole("button", { name: "Count: 0", exact: true }).click();
     await documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollTo(0, 600));
-    await expect.poll(() => documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollY)).toBeGreaterThan(500);
+    await expect.poll(() => previewScrollY(page, fileName)).toBeGreaterThan(500);
     await page.getByRole("button", { name: "Refresh preview", exact: true }).click();
     await expect(documentFrame(page, fileName).getByRole("button", { name: "Count: 0", exact: true })).toHaveCount(1);
-    await expect.poll(() => documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollY)).toBeGreaterThan(500);
+    await expect.poll(() => previewScrollY(page, fileName)).toBeGreaterThan(500);
     await atomicHtml(path, previewHtml(marker, 2, true));
-    await expect.poll(() => documentFrame(page, fileName).locator("body").evaluate(element => element.ownerDocument.defaultView!.scrollY)).toBeLessThan(600);
+    await expect.poll(() => previewScrollY(page, fileName)).toBeLessThan(600);
     await page.getByRole("button", { name: "Close preview", exact: true }).click();
     await expect(iframe(page, fileName)).not.toBeVisible();
     await atomicHtml(path, previewHtml(marker, 3, true));

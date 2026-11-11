@@ -560,6 +560,90 @@ describe('account write budget (admitAccountWrite)', () => {
   });
 });
 
+describe('expectHead (a browser re-offering its chain)', () => {
+  it('never creates: no row is account_unknown, with no creation budget, verification or insert', async () => {
+    const { chain } = await fresh();
+    const { limits, admitCreation, admitAccountWrite } = budget(true);
+    verifySpy.calls = 0;
+    expect(await offerLedger(chain.ledger, limits, { expectHead: chain.head })).toEqual({ decision: 'reject', stored: null, discarded: 0, reason: 'account_unknown' });
+    expect(admitCreation).not.toHaveBeenCalled();
+    expect(admitAccountWrite).not.toHaveBeenCalled();
+    expect(verifySpy.calls).toBe(0);
+    expect(db.inserts).toBe(0);
+    expect(db.rows.has(chain.accountId)).toBe(false);
+  });
+
+  it('a stored head other than expectHead is head_changed with the stored chain: no fork choice, no budget, no write', async () => {
+    const { passkey, base } = await registered();
+    const { chain: longer } = await addDevice(base, passkey, 'D2');
+    const { chain: stale } = await addDevice(base, passkey, 'F1');
+    const { limits, admitCreation, admitAccountWrite } = budget(true);
+    const caches = verifySpy.caches.length;
+    const result = await offerLedger(longer.ledger, limits, { expectHead: stale.head });
+    expect(result).toMatchObject({ decision: 'reject', discarded: 0, reason: 'head_changed' });
+    expect(result.stored?.ledger).toEqual(base.ledger);
+    expect(result.stored?.trusted.head).toBe(base.head);
+    expect(verifySpy.caches).toHaveLength(caches);
+    expect(admitAccountWrite).not.toHaveBeenCalled();
+    expect(admitCreation).not.toHaveBeenCalled();
+    expect(db.updates).toBe(0);
+    expect(row(base.accountId).head).toBe(base.head);
+  });
+
+  it('the stored head equal to expectHead is an ordinary offer: fork choice, budget and write as without it', async () => {
+    const { passkey, base } = await registered();
+    const { chain: longer } = await addDevice(base, passkey, 'D2');
+    const { limits, admitAccountWrite } = budget(false, true);
+    expect(await offerLedger(longer.ledger, limits, { expectHead: base.head })).toMatchObject({ decision: 'adopt', discarded: 0 });
+    expect(admitAccountWrite).toHaveBeenCalledExactlyOnceWith(base.accountId);
+    expect(row(base.accountId).head).toBe(longer.head);
+    // A losing (shorter) chain against the head it names is kept, spending nothing.
+    expect((await offerLedger(base.ledger, limits, { expectHead: longer.head })).decision).toBe('keep');
+    expect(admitAccountWrite).toHaveBeenCalledTimes(1);
+    expect(row(base.accountId).head).toBe(longer.head);
+  });
+
+  it('a head that moves between the read and the write is head_changed on the re-read, never overwritten', async () => {
+    const { passkey, base } = await registered();
+    const { chain: one } = await addDevice(base, passkey, 'D2');
+    const { chain: fork } = await addDevice(base, passkey, 'F1');
+    const { chain: forkLonger } = await addDevice(fork, passkey, 'F2');
+    const landed = await sealed(one);
+    db.races = [() => { db.rows.set(base.accountId, { ...landed, version: row(base.accountId).version }); }];
+    const { limits } = budget(true);
+    const result = await offerLedger(forkLonger.ledger, limits, { expectHead: base.head });
+    expect(result).toMatchObject({ decision: 'reject', reason: 'head_changed' });
+    expect(result.stored?.trusted.head).toBe(one.head);
+    expect(row(base.accountId).head).toBe(one.head);
+    expect(db.writes).toBe(0);
+  });
+
+  it('a row that must be re-sealed first is healed, then compared: the healed head equal to expectHead proceeds, another is head_changed', async () => {
+    const { passkey, base } = await registered();
+    const { chain: longer } = await addDevice(base, passkey, 'D2');
+    const { chain: longest } = await addDevice(longer, passkey, 'D3');
+    // A row from before the checkpoint columns, holding `longer`.
+    db.rows.set(base.accountId, { ...(await sealed(longer)), checkpoint: null, checkpoint_mac: null });
+    const { limits, admitAccountWrite } = budget(true);
+    expect(await offerLedger(longest.ledger, limits, { expectHead: base.head })).toMatchObject({ decision: 'reject', reason: 'head_changed' });
+    expect(db.heals).toBe(1);
+    expect(macValid(row(base.accountId))).toBe(true);
+    expect(admitAccountWrite).not.toHaveBeenCalled();
+    expect(row(base.accountId).head).toBe(longer.head);
+    db.rows.set(base.accountId, { ...row(base.accountId), checkpoint: null, checkpoint_mac: null });
+    expect(await offerLedger(longest.ledger, limits, { expectHead: longer.head })).toMatchObject({ decision: 'adopt' });
+    expect(db.heals).toBe(2);
+    expect(admitAccountWrite).toHaveBeenCalledTimes(1);
+    expect(row(base.accountId).head).toBe(longest.head);
+    expect(macValid(row(base.accountId))).toBe(true);
+  });
+
+  it('refuses an expectHead that is not a string', async () => {
+    const { base } = await registered();
+    await expect(offerLedger(base.ledger, OPEN, { expectHead: 5 as unknown as string })).rejects.toThrow(TypeError);
+  });
+});
+
 describe('sealed checkpoint', () => {
   it('auth reads with a valid MAC use one small SELECT: no chain read, no verification', async () => {
     const { base } = await registered();

@@ -227,6 +227,9 @@ class FakeLedger {
   });
   dismissDiscarded = vi.fn(() => { publish({ ...current(), discarded: [] }); });
   rotateDeviceIdentity = vi.fn(async () => {});
+  /** Never prompts; resolves when `retried` is resolved, then the server has the removals. */
+  retried: Promise<void> = Promise.resolve();
+  retryNow = vi.fn(async () => { await this.retried; publish({ ...current(), unsaved: { deviceIds: [], bridgeIds: [] } }); });
 }
 
 function mountLedger(snapshot: Partial<LedgerClientSnapshot> = {}): FakeLedger {
@@ -432,6 +435,100 @@ describe("Account security from the passkey ledger", () => {
       expect(within(warning).getByText("Signed name: not known on this browser · ID bridge-o")).toBeTruthy();
       expect(await click(fake, within(warning).getByRole("button", { name: "Sign removal again" }))).toBe(1);
       expect(fake.revokeBridge).toHaveBeenCalledExactlyOnceWith("bridge-one");
+      expect(screen.getByRole("button", { name: "Computer My laptop: Removed from your account. Connected" })).toBeTruthy();
+    });
+  });
+
+  describe("Removals not saved to the server yet", () => {
+    const UNSAVED = "Removal not saved to the server yet";
+    const DETAIL = "Removal not saved to the server yet. It can still connect. Retrying…";
+    it("shows a removed browser the server still accepts, with Retry now (no passkey) until it is saved", async () => {
+      const fake = mountLedger({ checkpoint: checkpoint({ devices: [ledgerDevice("self", "Laptop"), ledgerDevice("phone", "Phone")] }) });
+      renderAccount();
+      // Seen once in the account, then removed here with a revocation the server refused.
+      act(() => publish({ ...current(), checkpoint: checkpoint({ devices: [ledgerDevice("self", "Laptop")], revokedDeviceIds: ["phone"] }), unsaved: { deviceIds: ["phone"], bridgeIds: [] } }));
+      expect(screen.queryByRole("region", { name: "Removals not applied" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: `Browser Phone: ${UNSAVED}` }));
+      const notice = screen.getByRole("group", { name: "Removal not saved" });
+      expect(notice.className).toContain("border-[var(--status-pending)]");
+      expect(within(notice).getByText(DETAIL)).toBeTruthy();
+      expect(within(notice).getByText("Signed name: “Phone” · ID phone")).toBeTruthy();
+      let finish: () => void = () => undefined;
+      fake.retried = new Promise<void>(resolve => { finish = resolve; });
+      expect(await click(fake, within(notice).getByRole("button", { name: "Retry now" }))).toBe(0);
+      expect(fake.retryNow).toHaveBeenCalledOnce();
+      // Busy while it runs: the button says so and cannot be pressed again.
+      const busy = within(notice).getByRole("button", { name: "Retrying…" }) as HTMLButtonElement;
+      expect(busy.disabled).toBe(true);
+      await act(async () => { finish(); await fake.retried; });
+      expect(screen.queryByRole("group", { name: "Removal not saved" })).toBeNull();
+      expect(screen.queryByRole("button", { name: /^Browser Phone:/ })).toBeNull();
+      expect(fake.revokeDevice).not.toHaveBeenCalled();
+    });
+
+    it("this browser's own removal not saved yet: says it can still connect, with Retry now, instead of 'removed'", async () => {
+      const fake = mountLedger({
+        status: "device_revoked", checkpoint: checkpoint({ devices: [ledgerDevice("phone", "Phone")], revokedDeviceIds: ["self"] }),
+        unsaved: { deviceIds: ["self"], bridgeIds: [] }, serverState: "behind", conflict: false, canReoffer: true, retryAt: Date.now() + 30_000, retryNotBefore: null,
+      });
+      renderAccount();
+      const notice = screen.getByRole("group", { name: "Removal not saved" });
+      expect(within(notice).getByText("This browser's removal is not saved to the server yet. It can still connect. Retrying…")).toBeTruthy();
+      expect(screen.queryByText("This browser was removed from your account.")).toBeNull();
+      expect(screen.getByRole("button", { name: `Browser This browser (this browser): ${UNSAVED}` })).toBeTruthy();
+      expect(await click(fake, within(notice).getByRole("button", { name: "Retry now" }))).toBe(0);
+      expect(fake.retryNow).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      ["a conflict", { conflict: true, canReoffer: true }, "Not saved to the server. Sign this removal again from this browser."],
+      ["a browser that cannot write", { conflict: false, canReoffer: false }, "Not saved to the server. Remove it again from another browser of your account."],
+    ] as const)("with no retry coming (%s) says what to do instead, without Retrying… or Retry now", async (_case, state, text) => {
+      mountLedger({ checkpoint: checkpoint({ devices: [ledgerDevice("self", "Laptop")], revokedDeviceIds: ["phone"] }), unsaved: { deviceIds: ["phone"], bridgeIds: [] },
+        serverState: "behind", retryAt: null, retryNotBefore: null, ...state });
+      renderAccount();
+      fireEvent.click(screen.getByRole("button", { name: new RegExp(`^Browser .*: ${UNSAVED}$`) }));
+      const notice = screen.getByRole("group", { name: "Removal not saved" });
+      expect(within(notice).getByText(text)).toBeTruthy();
+      expect(within(notice).queryByText(/Retrying/)).toBeNull();
+      expect(within(notice).queryByRole("button")).toBeNull();
+    });
+
+    it("while the server asked to wait, Retry now is disabled with the seconds left", async () => {
+      mountLedger({ checkpoint: checkpoint({ devices: [ledgerDevice("self", "Laptop")], revokedDeviceIds: ["phone"] }), unsaved: { deviceIds: ["phone"], bridgeIds: [] },
+        serverState: "behind", conflict: false, canReoffer: true, retryAt: Date.now() + 42_000, retryNotBefore: Date.now() + 42_000 });
+      renderAccount();
+      fireEvent.click(screen.getByRole("button", { name: new RegExp(`^Browser .*: ${UNSAVED}$`) }));
+      const button = within(screen.getByRole("group", { name: "Removal not saved" })).getByRole("button", { name: "Retry in 42 s" }) as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+    });
+
+    it("while nothing is confirmed about the server, a removal reads 'Removed here. Not confirmed by the server yet.', neutral, no retry", async () => {
+      const fake = mountLedger({ checkpoint: checkpoint({ bridges: [], revokedBridgeIds: ["bridge-one"] }), unsaved: { deviceIds: [], bridgeIds: [] }, serverState: "unknown",
+        conflict: false, canReoffer: true, retryAt: null, retryNotBefore: null });
+      renderAccount();
+      expect(screen.queryByRole("button", { name: "Computer My laptop: Removed from your account. Connected" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Computer My laptop: Removed here. Not confirmed by the server yet. Connected" }));
+      expect(screen.getByText("Removed here. Not confirmed by the server yet.")).toBeTruthy();
+      expect(screen.queryByText("This computer was removed from your account. To use it again, pair it as a new computer.")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Retry now" })).toBeNull();
+      expect(screen.queryByRole("group", { name: "Removal not saved" })).toBeNull();
+      // The first successful read: the server has it.
+      act(() => publish({ ...current(), serverState: "current" }));
+      expect(screen.getByRole("button", { name: "Computer My laptop: Removed from your account. Connected" })).toBeTruthy();
+      expect(fake.retryNow).not.toHaveBeenCalled();
+    });
+
+    it("shows a removed computer the server still accepts instead of 'Removed from your account'", async () => {
+      const fake = mountLedger({ checkpoint: checkpoint({ bridges: [], revokedBridgeIds: ["bridge-one"] }), unsaved: { deviceIds: [], bridgeIds: ["bridge-one"] } });
+      renderAccount();
+      expect(screen.queryByRole("button", { name: "Computer My laptop: Removed from your account. Connected" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: `Computer My laptop: ${UNSAVED}. Connected` }));
+      const notice = screen.getByRole("group", { name: "Removal not saved" });
+      expect(within(notice).getByText(DETAIL)).toBeTruthy();
+      expect(screen.queryByText("This computer was removed from your account. To use it again, pair it as a new computer.")).toBeNull();
+      expect(await click(fake, within(notice).getByRole("button", { name: "Retry now" }))).toBe(0);
+      expect(fake.retryNow).toHaveBeenCalledOnce();
       expect(screen.getByRole("button", { name: "Computer My laptop: Removed from your account. Connected" })).toBeTruthy();
     });
   });

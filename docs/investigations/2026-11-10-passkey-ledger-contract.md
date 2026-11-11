@@ -359,6 +359,48 @@ Consequences for operations: rotating `AUTH_SECRET` is safe for stored accounts 
 
 The ledger format and `accountId = hash(genesis)`; the bridge and its pairing client; channel names (`...#<accountId>`); authorities are add-only; one account per browser profile (a browser that already belongs to an account must sign in to it or be reset in Security).
 
+### Browsers re-offer their chain
+
+Why. The server's copy of an account can fall behind a browser's chain: a database rollback to a signed prefix, a write the server refused, or a write that failed in transit. A replica never accepts a chain that loses fork choice, but before this change nothing pushed the winning chain back to the server until the next user-signed change. A removal could stay unapplied on the server for that whole time.
+
+When. A signed-in browser re-offers its verified local chain when a server read, or the answer to a POST, shows the server holding a chain that the local chain outranks. The server's head is recorded only after the replica ran fork choice on that chain, so a head different from the local head means the server lost. Equal heads send nothing. The triggers are:
+
+- Any read of the account's ledger: opening the Security panel, its "Refresh access" button, every relay token renewal, every subscription to the ledger channel, sign-in of a known device, and the read each write and each pairing makes before it signs.
+- A user-signed write that failed after its record joined the local chain (network error, 5xx, 429). It arms a retry timer.
+- The retry timer, and "Retry now" in the panel.
+- The answer to a re-offer or a user write that carries the server's chain (409).
+
+Relay messages (`ledger_head`, or a pushed chain the local one outranks) never cause a POST. Anyone holding a relay token can publish on the channel, so a message is not proof of the server's state. It only starts a read, paced to at most one per 2 seconds, and that read decides. A re-offer also always reads again before it sends, even when a trigger just recorded the server's head.
+
+Safety rules.
+- Fresh read immediately before the POST. If the read says the account is gone (404), nothing is sent. If it shows the server is no longer behind, nothing is sent.
+- Fork choice decides. The browser sends only a chain that outranks the server's; the server runs `chooseLedger` on it like on any offer.
+- Never when the browser is unbound or signed out, during an account creation, or when this browser's own keys are not a trusted device of the account in its local chain (revoked, replaced, not enrolled).
+- Never for another account: the chain sent is the bound account's own chain.
+- Never creates an account. A re-offer carries `expectHead`, and the server answers 404 instead of running genesis admission.
+- No passkey prompt. The records are already signed and public.
+
+Wire shape. `POST /api/account/ledger` with `{ ledger, expectHead }`. `expectHead` is the server head the browser just read, a 43-character head; any other value is 400 `invalid_request`. The server checks it on the row it is about to write, before fork choice and before the account's write budget:
+
+| Condition | Answer |
+|---|---|
+| no account for the chain | 404 `{ error: "account_unknown" }`, no creation budget spent |
+| stored head is not `expectHead` | 409 `{ error: "head_changed", ledger }` with the stored chain, nothing written |
+| stored head is `expectHead` | the normal replica answer (200 with `decision`, `ledger`, `discarded`), subject to the per-account write limit |
+
+After `head_changed` the browser runs fork choice on the returned chain and, if the server is still behind, sends again once in the same run. The `ledger-write` limit of the route (30 per minute per IP) still applies.
+
+Pacing. The same (local head, server head) pair is sent at most once per 30 seconds. After a failure the next try waits 30 seconds, doubling to at most 10 minutes, each wait with a random factor of plus or minus 20 percent. A `Retry-After` from the server is honoured when it is later than that wait, up to one hour. Success, a server that is no longer behind, or a 404 resets the backoff. The first failure at each larger step is logged once with `console.warn` in the browser. One run at a time, one retry timer per tab.
+
+What the user sees. In the Security panel a removal that is in the browser's chain but not in the server's is shown as "Removal not saved to the server yet" (on the computer row), with the text "Removal not saved to the server yet. It can still connect. Retrying…" and a "Retry now" button (the label becomes "Retrying…" while it runs). A removed browser shows the same group. "Retry now" does a fresh read and one attempt that skips the 30-second pair window and the backoff wait. It still sends only a chain that outranks the server's, still needs a trusted device, and needs no passkey. The notice disappears when the server holds the removal.
+
+Limits.
+- A client with no local copy of the chain (a new browser, a re-paired bridge) cannot detect a rollback. It reads the server's chain, adopts it, and has nothing to send.
+- Bridges do not re-offer a chain they hold ahead of the server. They read it. The one POST a bridge makes is the plain one in `onUnauthorized` (no `expectHead`), sent once per local head after the relay token request is refused. An account with no browser tab open therefore stays rolled back.
+- Between a rollback and the next browser connecting, the server authorizes the key the rollback revived.
+- "Longest chain wins" also means a longer fork without a revocation beats a shorter one with it. Replicas that saw the revocation keep enforcing it as sticky; replicas that never saw it (for example a database restored from before it) do not.
+- Backoff, pair memory and the retry timer are per tab. Several tabs of one profile each run their own schedule, and only a tab whose in-memory replica holds a record can re-offer it.
+
 ### Known gaps
 
 Registration is open to anyone with a passkey when `REGISTRATION_ENABLED=true`. The following are not closed.
@@ -370,6 +412,6 @@ d. Pairing: the 6-digit code is `pairComparisonCode(request)`, a hash of the req
 e. A rejected creation can leave an orphan passkey in the user's authenticator.
 f. There is no account deletion and no cleanup of abandoned accounts.
 g. A push endpoint already registered to one account cannot be claimed by another (409 `subscription_limit_or_conflict`).
-h. A revocation POST that is rejected or rate-limited is not retried by the browser until its next write. Bridges learn new chains only through the server, so the server can keep authorizing a just-revoked key until a later write succeeds.
+h. A browser re-sends a chain the server is behind on (see "Browsers re-offer their chain"), and the Security panel shows a removal the server has not stored. Still open: bridges do not re-offer, and a rolled-back account with no browser tab open stays rolled back. A browser that closes before its retry runs sends it the next time it reads the ledger.
 i. For a few seconds after a pairing, the approving browser can get "Encrypted request rejected" from the new computer. Seen in e2e; the cause was not investigated.
 j. There is no e2e coverage of `registration_closed`, creation `rate_limited` and `server_full`; they have unit tests only.
