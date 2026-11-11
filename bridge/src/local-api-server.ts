@@ -797,10 +797,30 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       const controller = this.getSessionController();
       if (!controller) { jsonResponse(res, 503, { error: 'Server not ready' }); return; }
       const body = await parseBody(req);
-      if (req.method === 'PUT' ? Object.keys(body).length !== 1 || typeof body.path !== 'string' : Object.keys(body).length !== 0) {
+      if (req.method === 'PUT') {
+        if (Object.keys(body).some((key) => key !== 'paths' && key !== 'mode') || !('paths' in body) || !Array.isArray(body.paths) || body.paths.length < 1 || body.paths.length > 12 || body.paths.some((entry) => typeof entry !== 'string' || entry.length === 0)) {
+          jsonResponse(res, 400, { error: 'Invalid preview request' }); return;
+        }
+        const mode = body.mode;
+        if (mode !== undefined && mode !== 'replace' && mode !== 'add') {
+          jsonResponse(res, 400, { error: 'Invalid preview request' }); return;
+        }
+        const result = mode === 'add' ? await controller.addPreview(sessionPreviewMatch[1], body.paths) : await controller.setPreview(sessionPreviewMatch[1], body.paths);
+        if (!result.ok) { jsonResponse(res, result.code === 'not_found' ? 404 : result.code === 'too_large' ? 413 : 400, { error: result.message }); return; }
+        jsonResponse(res, 200, { session: toWireSession(result.session) }); return;
+      }
+      if (Object.keys(body).some((key) => key !== 'names')) {
         jsonResponse(res, 400, { error: 'Invalid preview request' }); return;
       }
-      const result = req.method === 'PUT' ? await controller.setPreview(sessionPreviewMatch[1], body.path) : await controller.clearPreview(sessionPreviewMatch[1]);
+      if (body.names === undefined || (Array.isArray(body.names) && body.names.length === 0)) {
+        const result = await controller.clearPreview(sessionPreviewMatch[1]);
+        if (!result.ok) { jsonResponse(res, result.code === 'not_found' ? 404 : 400, { error: result.message }); return; }
+        jsonResponse(res, 200, { session: toWireSession(result.session) }); return;
+      }
+      if (!Array.isArray(body.names) || body.names.some((entry) => typeof entry !== 'string' || entry.length === 0)) {
+        jsonResponse(res, 400, { error: 'Invalid preview request' }); return;
+      }
+      const result = await controller.removePreview(sessionPreviewMatch[1], body.names);
       if (!result.ok) { jsonResponse(res, result.code === 'not_found' ? 404 : result.code === 'too_large' ? 413 : 400, { error: result.message }); return; }
       jsonResponse(res, 200, { session: toWireSession(result.session) }); return;
     }

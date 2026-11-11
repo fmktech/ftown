@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { basename, relative, resolve } from 'node:path';
 import { AUTOMATION_REMOVED_CODE, AUTOMATION_REMOVED_MESSAGE, isRetiredAutomationSession } from './retired-automation.js';
 import {
   createFtownSession,
@@ -10,9 +11,9 @@ import {
 import type { RemoveFtownSessionOptions } from './remove-ftown-session.js';
 import type { Session, SessionUsage } from './types.js';
 import { normalizePullRequestUrl } from './pull-request-url.js';
-import { currentPreview, preparePreview, PreviewError, previewChunk, previewStatus, SessionPreviewReader, validPreviewId, validRevision } from './session-preview.js';
+import { currentPreview, preparePreview, PreviewError, previewChunk, previewStatus, SessionPreviewReader, validFileId, validPreviewId, validRevision } from './session-preview.js';
 import type { SessionPreviewChunk, SessionPreviewSource, SessionPreviewStatus } from './preview-protocol.js';
-import { PREVIEW_CHUNK_BYTES } from './preview-protocol.js';
+import { PREVIEW_CHUNK_BYTES, PREVIEW_MAX_FILES } from './preview-protocol.js';
 import { PreviewChatError, PreviewChatStore, validateChatInput } from './preview-chat.js';
 import { PREVIEW_CHAT_AGENT_SHELLS } from './preview-chat-protocol.js';
 import type { PreviewChatErrorCode, PreviewChatInput, PreviewChatPage, PreviewChatWriteResult } from './preview-chat-protocol.js';
@@ -360,21 +361,157 @@ export class SessionController {
     });
   }
 
-  async setPreview(sessionId: string, path: unknown): Promise<SessionControllerResult<{ session: Session }>> {
+  async setPreview(sessionId: string, paths: unknown): Promise<SessionControllerResult<{ session: Session }>> {
     return this.withSessionMutation(sessionId, async () => {
       const session = await this.deps.store.loadSession(sessionId);
       if (!session) return { ok: false, code: 'not_found', message: 'Session not found' };
       try {
-        const prepared = await preparePreview(session, path);
+        const prepared = await preparePreview(session, paths);
         session.preview = prepared.preview; session.previewSource = prepared.previewSource;
         session.updatedAt = new Date().toISOString();
         await this.deps.store.saveSession(session);
         await this.deps.publishSessionUpdate(session);
         return { ok: true, session };
       } catch (error) {
-        if (error instanceof PreviewError) return { ok: false, code: error.reason === 'too_large' ? 'too_large' : 'invalid', message: 'Invalid preview file' };
+        if (error instanceof PreviewError) return { ok: false, code: error.reason === 'too_large' ? 'too_large' : 'invalid', message: error.message && error.message !== 'Preview unavailable' ? error.message : 'Invalid preview file' };
         throw error;
       }
+    });
+  }
+
+  async addPreview(sessionId: string, paths: unknown): Promise<SessionControllerResult<{ session: Session }>> {
+    return this.withSessionMutation(sessionId, async () => {
+      const session = await this.deps.store.loadSession(sessionId);
+      if (!session) return { ok: false, code: 'not_found', message: 'Session not found' };
+      if (!Array.isArray(paths) || paths.length < 1) {
+        return { ok: false, code: 'invalid', message: 'Invalid preview file' };
+      }
+      for (const entry of paths) {
+        if (typeof entry !== 'string') {
+          return { ok: false, code: 'invalid', message: 'Invalid preview file' };
+        }
+      }
+      const added = paths as string[];
+      const seen = new Set<string>();
+      for (const entry of added) {
+        const name = basename(entry);
+        if (seen.has(name)) {
+          return { ok: false, code: 'invalid', message: `duplicate basename: ${name}` };
+        }
+        seen.add(name);
+      }
+      const existing =
+        session.preview && session.previewSource
+          ? currentPreview(session, session.preview.id)
+          : null;
+      if (!existing || !session.preview || !session.workingDir) {
+        try {
+          const prepared = await preparePreview(session, added);
+          session.preview = prepared.preview; session.previewSource = prepared.previewSource;
+          session.updatedAt = new Date().toISOString();
+          await this.deps.store.saveSession(session);
+          await this.deps.publishSessionUpdate(session);
+          return { ok: true, session };
+        } catch (error) {
+          if (error instanceof PreviewError) return { ok: false, code: error.reason === 'too_large' ? 'too_large' : 'invalid', message: error.message && error.message !== 'Preview unavailable' ? error.message : 'Invalid preview file' };
+          throw error;
+        }
+      }
+      const source: SessionPreviewSource = existing;
+      const descriptor = session.preview;
+      const pathById = new Map(source.files.map((file) => [file.id, file.filePath] as const));
+      const existingByName = new Map<string, { index: number; fileId: string }>();
+      for (let i = 0; i < descriptor.files.length; i++) {
+        const file = descriptor.files[i];
+        existingByName.set(file.fileName, { index: i, fileId: file.id });
+      }
+      const requestedRoot = resolve(session.workingDir);
+      const canonicalRoot = source.root;
+      const toRequested = (canonical: string): string => resolve(requestedRoot, relative(canonicalRoot, canonical));
+      const finalPaths: string[] = descriptor.files.map((file) => {
+        const canonical = pathById.get(file.id);
+        return canonical ? toRequested(canonical) : '';
+      });
+      const replaced = new Set<number>();
+      for (const entry of added) {
+        const name = basename(entry);
+        const existingEntry = existingByName.get(name);
+        if (existingEntry) {
+          finalPaths[existingEntry.index] = entry;
+          replaced.add(existingEntry.index);
+        } else {
+          finalPaths.push(entry);
+        }
+      }
+      if (finalPaths.length > PREVIEW_MAX_FILES) {
+        return { ok: false, code: 'invalid', message: 'Invalid preview file' };
+      }
+      try {
+        const prepared = await preparePreview(session, finalPaths);
+        for (let i = 0; i < descriptor.files.length; i++) {
+          if (!replaced.has(i)) {
+            const originalId = descriptor.files[i].id;
+            prepared.preview.files[i].id = originalId;
+            prepared.previewSource.files[i].id = originalId;
+          }
+        }
+        session.preview = prepared.preview; session.previewSource = prepared.previewSource;
+        session.updatedAt = new Date().toISOString();
+        await this.deps.store.saveSession(session);
+        await this.deps.publishSessionUpdate(session);
+        return { ok: true, session };
+      } catch (error) {
+        if (error instanceof PreviewError) return { ok: false, code: error.reason === 'too_large' ? 'too_large' : 'invalid', message: error.message && error.message !== 'Preview unavailable' ? error.message : 'Invalid preview file' };
+        throw error;
+      }
+    });
+  }
+
+  async removePreview(sessionId: string, names: unknown): Promise<SessionControllerResult<{ session: Session }>> {
+    return this.withSessionMutation(sessionId, async () => {
+      const session = await this.deps.store.loadSession(sessionId);
+      if (!session) return { ok: false, code: 'not_found', message: 'Session not found' };
+      if (!Array.isArray(names) || names.length < 1) {
+        return { ok: false, code: 'invalid', message: 'Invalid preview file' };
+      }
+      for (const entry of names) {
+        if (typeof entry !== 'string' || entry.length === 0) {
+          return { ok: false, code: 'invalid', message: 'Invalid preview file' };
+        }
+      }
+      const requested = names as string[];
+      const existing =
+        session.preview && session.previewSource
+          ? currentPreview(session, session.preview.id)
+          : null;
+      if (!existing || !session.preview) {
+        return { ok: false, code: 'invalid', message: `Preview file not found: ${requested[0]}` };
+      }
+      const descriptor = session.preview;
+      const source: SessionPreviewSource = existing;
+      const present = new Set(descriptor.files.map((file) => file.fileName));
+      for (const name of requested) {
+        if (!present.has(name)) {
+          return { ok: false, code: 'invalid', message: `Preview file not found: ${name}` };
+        }
+      }
+      const removeSet = new Set(requested);
+      const remainingFiles = descriptor.files.filter((file) => !removeSet.has(file.fileName));
+      if (remainingFiles.length === 0) {
+        delete session.preview; delete session.previewSource;
+        session.updatedAt = new Date().toISOString();
+        await this.deps.store.saveSession(session);
+        await this.deps.publishSessionUpdate(session);
+        return { ok: true, session };
+      }
+      const remainingIds = new Set(remainingFiles.map((file) => file.id));
+      const nextId = randomUUID();
+      session.preview = { id: nextId, files: remainingFiles.map((file) => ({ id: file.id, fileName: file.fileName, kind: file.kind })) };
+      session.previewSource = { version: 2, id: nextId, root: source.root, files: source.files.filter((file) => remainingIds.has(file.id)).map((file) => ({ id: file.id, filePath: file.filePath })) };
+      session.updatedAt = new Date().toISOString();
+      await this.deps.store.saveSession(session);
+      await this.deps.publishSessionUpdate(session);
+      return { ok: true, session };
     });
   }
 
@@ -398,38 +535,38 @@ export class SessionController {
     });
   }
 
-  async getPreviewStatus(sessionId: string, previewId: string, knownRevision?: string): Promise<SessionControllerResult<{ preview: SessionPreviewStatus }>> {
-    if (!validPreviewId(previewId) || (knownRevision !== undefined && !validRevision(knownRevision))) return { ok: false, code: 'invalid', message: 'Invalid preview request' };
+  async getPreviewStatus(sessionId: string, previewId: string, fileId: string, knownRevision?: string): Promise<SessionControllerResult<{ preview: SessionPreviewStatus }>> {
+    if (!validPreviewId(previewId) || !validFileId(fileId) || (knownRevision !== undefined && !validRevision(knownRevision))) return { ok: false, code: 'invalid', message: 'Invalid preview request' };
     const selected = await this.previewSnapshot(sessionId, previewId);
     if (!selected) return { ok: false, code: 'not_found', message: 'Session not found' };
-    if (!selected.source) return { ok: true, preview: { state: 'unregistered' } };
+    if (!selected.source || !selected.source.files.some((file) => file.id === fileId)) return { ok: true, preview: { state: 'unregistered' } };
     try {
-      const data = await this.previewReader.read(selected.session, selected.source);
+      const data = await this.previewReader.read(selected.session, selected.source, fileId);
       const current = await this.previewSnapshot(sessionId, previewId);
-      if (!current?.source || current.session.workingDir !== selected.session.workingDir || JSON.stringify(current.source) !== JSON.stringify(selected.source)) return { ok: true, preview: { state: 'unregistered' } };
-      return { ok: true, preview: previewStatus(previewId, data, knownRevision) };
+      if (!current?.source || current.session.workingDir !== selected.session.workingDir || JSON.stringify(current.source) !== JSON.stringify(selected.source) || !current.source.files.some((file) => file.id === fileId)) return { ok: true, preview: { state: 'unregistered' } };
+      return { ok: true, preview: previewStatus(previewId, fileId, data, knownRevision) };
     } catch (error) {
       const current = await this.previewSnapshot(sessionId, previewId);
-      if (!current?.source || current.session.workingDir !== selected.session.workingDir || JSON.stringify(current.source) !== JSON.stringify(selected.source)) return { ok: true, preview: { state: 'unregistered' } };
-      return { ok: true, preview: { state: 'unavailable', previewId, reason: error instanceof PreviewError ? error.reason : 'unavailable' } };
+      if (!current?.source || current.session.workingDir !== selected.session.workingDir || JSON.stringify(current.source) !== JSON.stringify(selected.source) || !current.source.files.some((file) => file.id === fileId)) return { ok: true, preview: { state: 'unregistered' } };
+      return { ok: true, preview: { state: 'unavailable', previewId, fileId, reason: error instanceof PreviewError ? error.reason : 'unavailable' } };
     }
   }
 
-  async getPreviewChunk(sessionId: string, previewId: string, revision: string, offset: number): Promise<SessionControllerResult<{ preview: SessionPreviewChunk }>> {
-    if (!validPreviewId(previewId) || !validRevision(revision) || !Number.isSafeInteger(offset) || offset < 0 || offset % PREVIEW_CHUNK_BYTES !== 0) return { ok: false, code: 'invalid', message: 'Invalid preview request' };
+  async getPreviewChunk(sessionId: string, previewId: string, fileId: string, revision: string, offset: number): Promise<SessionControllerResult<{ preview: SessionPreviewChunk }>> {
+    if (!validPreviewId(previewId) || !validFileId(fileId) || !validRevision(revision) || !Number.isSafeInteger(offset) || offset < 0 || offset % PREVIEW_CHUNK_BYTES !== 0) return { ok: false, code: 'invalid', message: 'Invalid preview request' };
     const selected = await this.previewSnapshot(sessionId, previewId);
     if (!selected) return { ok: false, code: 'not_found', message: 'Session not found' };
-    if (!selected.source) return { ok: true, preview: { state: 'stale_revision' } };
+    if (!selected.source || !selected.source.files.some((file) => file.id === fileId)) return { ok: true, preview: { state: 'stale_revision' } };
     try {
-      const data = await this.previewReader.read(selected.session, selected.source);
+      const data = await this.previewReader.read(selected.session, selected.source, fileId);
       const current = await this.previewSnapshot(sessionId, previewId);
-      if (!current?.source || current.session.workingDir !== selected.session.workingDir || JSON.stringify(current.source) !== JSON.stringify(selected.source)) return { ok: true, preview: { state: 'stale_revision' } };
+      if (!current?.source || current.session.workingDir !== selected.session.workingDir || JSON.stringify(current.source) !== JSON.stringify(selected.source) || !current.source.files.some((file) => file.id === fileId)) return { ok: true, preview: { state: 'stale_revision' } };
       if (data.revision === revision && (data.bytes.length === 0 ? offset !== 0 : offset >= data.bytes.length)) return { ok: false, code: 'invalid', message: 'Invalid preview request' };
-      return { ok: true, preview: previewChunk(previewId, data, revision, offset) };
+      return { ok: true, preview: previewChunk(previewId, fileId, data, revision, offset) };
     } catch (error) {
       const current = await this.previewSnapshot(sessionId, previewId);
-      if (!current?.source || current.session.workingDir !== selected.session.workingDir || JSON.stringify(current.source) !== JSON.stringify(selected.source)) return { ok: true, preview: { state: 'stale_revision' } };
-      return { ok: true, preview: { state: 'unavailable', previewId, reason: error instanceof PreviewError ? error.reason : 'unavailable' } };
+      if (!current?.source || current.session.workingDir !== selected.session.workingDir || JSON.stringify(current.source) !== JSON.stringify(selected.source) || !current.source.files.some((file) => file.id === fileId)) return { ok: true, preview: { state: 'stale_revision' } };
+      return { ok: true, preview: { state: 'unavailable', previewId, fileId, reason: error instanceof PreviewError ? error.reason : 'unavailable' } };
     }
   }
 

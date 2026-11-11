@@ -90,9 +90,28 @@ test('preview probes capability before registering and clearing; old bridges nev
   process.env.FTOWN_SESSION_ID = 'self-id';
   assert.equal(await runSessions(['preview', 'index.html']), 0);
   assert.equal(requests[0].method, 'GET'); assert.equal(requests[1].method, 'PUT');
-  assert.deepEqual(requests[1].body, { path: new URL('index.html', `file://${process.cwd()}/`).pathname });
+  assert.deepEqual(requests[1].body, { paths: [new URL('index.html', `file://${process.cwd()}/`).pathname], mode: 'replace' });
   assert.equal(await runSessions(['preview', '--clear']), 0);
   assert.equal(requests[2].method, 'GET'); assert.equal(requests[3].method, 'DELETE');
+}, request => request.method === 'GET' ? { capabilities: { sessionMetadata: { preview: true } } } : { session: { id: 'self-id' } }));
+
+test('preview replaces, adds and removes files; flags are mutually exclusive', async () => fixture(async (requests, output) => {
+  process.env.FTOWN_SESSION_ID = 'self-id';
+  assert.equal(await runSessions(['preview', 'a.html', 'notes.md']), 0);
+  assert.deepEqual(requests[1].body, { paths: [new URL('a.html', `file://${process.cwd()}/`).pathname, new URL('notes.md', `file://${process.cwd()}/`).pathname], mode: 'replace' });
+  assert.equal(await runSessions(['preview', '--add', 'c.html']), 0);
+  assert.deepEqual(requests[3].body, { paths: [new URL('c.html', `file://${process.cwd()}/`).pathname], mode: 'add' });
+  assert.equal(await runSessions(['preview', '--remove', 'notes.md']), 0);
+  assert.equal(requests[5].method, 'DELETE');
+  assert.deepEqual(requests[5].body, { names: ['notes.md'] });
+  assert.equal(await runSessions(['preview', '--remove', 'a.html', 'c.html']), 0);
+  assert.deepEqual(requests[7].body, { names: ['a.html', 'c.html'] });
+  assert.equal(await runSessions(['preview', '--add', 'a.html', '--remove', 'notes.md']), 1);
+  assert.equal(await runSessions(['preview', '--add', 'a.html', '--clear']), 1);
+  assert.equal(await runSessions(['preview', '--remove', 'a.html', '--clear']), 1);
+  assert.equal(await runSessions(['preview', 'a.html', '--add', 'b.html']), 1);
+  assert.equal(await runSessions(['preview', 'a.html', '--remove', 'b.html']), 1);
+  assert.ok(output.some(line => line.includes('only one of --add, --remove or --clear')));
 }, request => request.method === 'GET' ? { capabilities: { sessionMetadata: { preview: true } } } : { session: { id: 'self-id' } }));
 
 test('preview rejects missing or contradictory arguments and missing capability without mutation', async () => fixture(async (requests, output) => {
