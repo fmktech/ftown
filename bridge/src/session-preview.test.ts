@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { appendFile, mkdir, mkdtemp, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { toWireSession } from './session-wire.js';
 import { PREVIEW_CHUNK_BYTES, PREVIEW_MAX_BYTES, PREVIEW_MAX_FILES, previewKindForPath } from './preview-protocol.js';
-import { currentPreview, preparePreview, PreviewError, previewChunk, previewStatus, SessionPreviewReader, validPreviewId } from './session-preview.js';
+import { currentPreview, preparePreview, preparePreviewAdd, PreviewError, previewChunk, previewStatus, SessionPreviewReader, validPreviewId } from './session-preview.js';
 import type { SessionPreviewSource } from './preview-protocol.js';
 import type { Session } from './types.js';
+import { SessionStore } from './session-store.js';
 
 function makeSession(root: string): Session {
   return { id: 's', name: 'test', command: 'shell', bridgeId: 'b', status: 'completed', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), workingDir: root };
@@ -296,6 +297,132 @@ test('reader limits active file reads to four without an unbounded queue', async
   release();
   const results = await Promise.all(active);
   for (const result of results) assert.equal(result.bytes.toString().startsWith('ok-'), true);
+});
+
+test('reader validates only the requested file: a deleted sibling does not affect the healthy file', async t => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'ftown-preview-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const aPath = join(root, 'a.html');
+  const bPath = join(root, 'b.md');
+  await writeFile(aPath, '<p>a</p>');
+  await writeFile(bPath, '# b');
+  const session = makeSession(root);
+  const prepared = await preparePreview(session, [aPath, bPath]);
+  session.preview = prepared.preview;
+  session.previewSource = prepared.previewSource;
+  const reader = new SessionPreviewReader();
+  const source = currentPreview(session, prepared.preview.id)!;
+  const aId = prepared.preview.files[0].id;
+  const bId = prepared.preview.files[1].id;
+  await unlink(bPath);
+  // The healthy file reads fine while its sibling is gone.
+  const snapshot = await reader.read(session, source, aId);
+  assert.equal(snapshot.bytes.toString(), '<p>a</p>');
+  // The missing sibling alone reports missing.
+  await assertPreviewError(reader.read(session, source, bId), 'missing');
+  // A symlink-swapped sibling likewise does not affect the healthy read.
+  await writeFile(join(root, 'target.html'), '<p>target</p>');
+  await symlink(join(root, 'target.html'), bPath);
+  const again = await reader.read(session, source, aId);
+  assert.equal(again.bytes.toString(), '<p>a</p>');
+  await assertPreviewError(reader.read(session, source, bId), 'invalid_file');
+});
+
+test('preparePreviewAdd validates only incoming paths and carries existing entries verbatim', async t => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'ftown-preview-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const aPath = join(root, 'a.html');
+  const bPath = join(root, 'b.md');
+  const cPath = join(root, 'c.html');
+  await writeFile(aPath, '<p>a</p>');
+  await writeFile(bPath, '# b');
+  await writeFile(cPath, '<p>c</p>');
+  const session = makeSession(root);
+  const first = await preparePreview(session, [aPath, bPath]);
+  session.preview = first.preview;
+  session.previewSource = first.previewSource;
+  const aId = first.preview.files[0].id;
+  const bId = first.preview.files[1].id;
+  const bFilePath = first.previewSource.files[1].filePath;
+  // Existing file deleted on disk: the add still succeeds and retains it.
+  await unlink(bPath);
+  const merged = await preparePreviewAdd(session, { preview: first.preview, previewSource: first.previewSource }, [cPath]);
+  assert.deepEqual(merged.preview.files.map(file => file.fileName), ['a.html', 'b.md', 'c.html']);
+  assert.equal(merged.preview.files[0].id, aId);
+  assert.equal(merged.preview.files[1].id, bId);
+  assert.equal(merged.previewSource.files[1].id, bId);
+  assert.equal(merged.previewSource.files[1].filePath, bFilePath);
+  assert.notEqual(merged.preview.id, first.preview.id);
+  assert.notEqual(merged.preview.files[2].id, aId);
+  assert.notEqual(merged.preview.files[2].id, bId);
+  // A symlink-swapped existing file likewise does not block the add.
+  await writeFile(join(root, 'target2.html'), '<p>target</p>');
+  await symlink(join(root, 'target2.html'), bPath);
+  const dPath = join(root, 'd.md');
+  await writeFile(dPath, '# d');
+  const merged2 = await preparePreviewAdd(session, { preview: merged.preview, previewSource: merged.previewSource }, [dPath]);
+  assert.deepEqual(merged2.preview.files.map(file => file.fileName), ['a.html', 'b.md', 'c.html', 'd.md']);
+  assert.equal(merged2.preview.files[1].id, bId);
+  assert.equal(merged2.previewSource.files[1].filePath, bFilePath);
+  // Incoming validation still bites: a missing incoming file is rejected.
+  await assertPreviewError(
+    preparePreviewAdd(session, { preview: merged.preview, previewSource: merged.previewSource }, [join(root, 'gone.html')]),
+    'missing',
+  );
+  // Within-batch duplicates are still rejected with the duplicate named.
+  await mkdir(join(root, 'sub'), { recursive: true });
+  await writeFile(join(root, 'sub', 'c.html'), '<p>other c</p>');
+  const dupError = await assertPreviewError(
+    preparePreviewAdd(session, { preview: merged.preview, previewSource: merged.previewSource }, [cPath, join(root, 'sub', 'c.html')]),
+    'invalid_file',
+  );
+  assert.match(dupError.message, /c\.html/);
+});
+
+test('old persisted shape is dropped on store load (both fields, wire, and re-save)', async t => {
+  const dataDir = await mkdtemp(join(await realpath(tmpdir()), 'ftown-preview-store-'));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const store = new SessionStore(dataDir);
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'ftown-preview-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'page.html');
+  await writeFile(path, '<p>x</p>');
+  const legacyId = randomUUID();
+  const legacy = {
+    ...makeSession(root),
+    id: 'legacy-1',
+    preview: { id: legacyId, fileName: 'page.html' } as never,
+    previewSource: { version: 1, id: legacyId, root: await realpath(root), filePath: path } as never,
+  };
+  await store.saveSession(legacy);
+  const onDisk = await readFile(join(store.sessionDir('legacy-1'), 'session.json'), 'utf-8');
+  assert.ok(onDisk.includes('previewSource'));
+  const loaded = await store.loadSession('legacy-1');
+  assert.ok(loaded);
+  assert.equal(loaded.preview, undefined);
+  assert.equal(loaded.previewSource, undefined);
+  const wire = toWireSession(loaded);
+  assert.equal('preview' in wire, false);
+  assert.equal('previewSource' in wire, false);
+  assert.equal(currentPreview(loaded, legacyId), null);
+  // Re-saving the loaded (cleaned) session persists the drop.
+  await store.saveSession(loaded);
+  const cleaned = await readFile(join(store.sessionDir('legacy-1'), 'session.json'), 'utf-8');
+  assert.equal(cleaned.includes('previewSource'), false);
+  assert.equal(cleaned.includes('page.html'), false);
+  // A valid v2 shape survives the same load untouched.
+  const session = makeSession(root);
+  session.id = 'valid-1';
+  const prepared = await preparePreview(session, [path]);
+  session.preview = prepared.preview;
+  session.previewSource = prepared.previewSource;
+  await store.saveSession(session);
+  const reloaded = await store.loadSession('valid-1');
+  assert.ok(reloaded?.preview);
+  assert.ok(reloaded?.previewSource);
+  assert.equal(reloaded.preview.id, prepared.preview.id);
+  assert.equal(reloaded.previewSource.version, 2);
+  assert.equal(currentPreview(reloaded, prepared.preview.id)?.id, prepared.preview.id);
 });
 
 test('a file growing beyond the cap after stat is rejected before unbounded allocation', async t => {

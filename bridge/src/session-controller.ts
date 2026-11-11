@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { basename, relative, resolve } from 'node:path';
+
 import { AUTOMATION_REMOVED_CODE, AUTOMATION_REMOVED_MESSAGE, isRetiredAutomationSession } from './retired-automation.js';
 import {
   createFtownSession,
@@ -11,9 +11,9 @@ import {
 import type { RemoveFtownSessionOptions } from './remove-ftown-session.js';
 import type { Session, SessionUsage } from './types.js';
 import { normalizePullRequestUrl } from './pull-request-url.js';
-import { currentPreview, preparePreview, PreviewError, previewChunk, previewStatus, SessionPreviewReader, validFileId, validPreviewId, validRevision } from './session-preview.js';
+import { currentPreview, preparePreview, preparePreviewAdd, PreviewError, previewChunk, previewStatus, SessionPreviewReader, validFileId, validPreviewId, validRevision } from './session-preview.js';
 import type { SessionPreviewChunk, SessionPreviewSource, SessionPreviewStatus } from './preview-protocol.js';
-import { PREVIEW_CHUNK_BYTES, PREVIEW_MAX_FILES } from './preview-protocol.js';
+import { PREVIEW_CHUNK_BYTES } from './preview-protocol.js';
 import { PreviewChatError, PreviewChatStore, validateChatInput } from './preview-chat.js';
 import { PREVIEW_CHAT_AGENT_SHELLS } from './preview-chat-protocol.js';
 import type { PreviewChatErrorCode, PreviewChatInput, PreviewChatPage, PreviewChatWriteResult } from './preview-chat-protocol.js';
@@ -392,14 +392,6 @@ export class SessionController {
         }
       }
       const added = paths as string[];
-      const seen = new Set<string>();
-      for (const entry of added) {
-        const name = basename(entry);
-        if (seen.has(name)) {
-          return { ok: false, code: 'invalid', message: `duplicate basename: ${name}` };
-        }
-        seen.add(name);
-      }
       const existing =
         session.preview && session.previewSource
           ? currentPreview(session, session.preview.id)
@@ -417,44 +409,11 @@ export class SessionController {
           throw error;
         }
       }
-      const source: SessionPreviewSource = existing;
-      const descriptor = session.preview;
-      const pathById = new Map(source.files.map((file) => [file.id, file.filePath] as const));
-      const existingByName = new Map<string, { index: number; fileId: string }>();
-      for (let i = 0; i < descriptor.files.length; i++) {
-        const file = descriptor.files[i];
-        existingByName.set(file.fileName, { index: i, fileId: file.id });
-      }
-      const requestedRoot = resolve(session.workingDir);
-      const canonicalRoot = source.root;
-      const toRequested = (canonical: string): string => resolve(requestedRoot, relative(canonicalRoot, canonical));
-      const finalPaths: string[] = descriptor.files.map((file) => {
-        const canonical = pathById.get(file.id);
-        return canonical ? toRequested(canonical) : '';
-      });
-      const replaced = new Set<number>();
-      for (const entry of added) {
-        const name = basename(entry);
-        const existingEntry = existingByName.get(name);
-        if (existingEntry) {
-          finalPaths[existingEntry.index] = entry;
-          replaced.add(existingEntry.index);
-        } else {
-          finalPaths.push(entry);
-        }
-      }
-      if (finalPaths.length > PREVIEW_MAX_FILES) {
-        return { ok: false, code: 'invalid', message: 'Invalid preview file' };
-      }
+      // Merge path: preparePreviewAdd validates ONLY the incoming command-line
+      // paths and carries existing entries over verbatim without re-validation.
+      // Within-batch duplicates and the resulting-set cap are enforced there.
       try {
-        const prepared = await preparePreview(session, finalPaths);
-        for (let i = 0; i < descriptor.files.length; i++) {
-          if (!replaced.has(i)) {
-            const originalId = descriptor.files[i].id;
-            prepared.preview.files[i].id = originalId;
-            prepared.previewSource.files[i].id = originalId;
-          }
-        }
+        const prepared = await preparePreviewAdd(session, { preview: session.preview, previewSource: existing }, added);
         session.preview = prepared.preview; session.previewSource = prepared.previewSource;
         session.updatedAt = new Date().toISOString();
         await this.deps.store.saveSession(session);

@@ -25,24 +25,32 @@ function contained(root: string, path: string): boolean {
 function validFileName(fileName: string): boolean {
   return fileName.length > 0 && Buffer.byteLength(fileName, 'utf8') <= 255 && !/[\u0000-\u001f\u007f-\u009f]/u.test(fileName);
 }
-async function validatePaths(workingDir: string | undefined, source: SessionPreviewSource): Promise<void> {
-  if (!workingDir || !safePath(workingDir) || !safePath(source.root) || !isAbsolute(workingDir) || !isAbsolute(source.root)
-    || resolve(source.root) !== source.root) invalid();
+async function validateRoot(workingDir: string | undefined, root: string): Promise<void> {
+  if (!workingDir || !safePath(workingDir) || !safePath(root) || !isAbsolute(workingDir) || !isAbsolute(root)
+    || resolve(root) !== root) invalid();
   const rootInfo = await lstat(workingDir);
-  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || await realpath(workingDir) !== source.root) invalid();
-  const rootCanonical = await lstat(source.root);
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink() || await realpath(workingDir) !== root) invalid();
+  const rootCanonical = await lstat(root);
   if (!rootCanonical.isDirectory() || rootCanonical.isSymbolicLink()) invalid();
+}
+
+async function validateFileEntry(root: string, filePath: string): Promise<void> {
+  if (!safePath(filePath) || !isAbsolute(filePath) || resolve(filePath) !== filePath
+    || !contained(root, filePath)) invalid();
+  const parts = relative(root, filePath).split(sep);
+  let current = root;
+  for (let i = 0; i < parts.length; i++) {
+    current = resolve(current, parts[i]);
+    const info = await lstat(current);
+    if (info.isSymbolicLink() || (i < parts.length - 1 ? !info.isDirectory() : !info.isFile())) invalid();
+  }
+  if (await realpath(filePath) !== filePath) invalid();
+}
+
+async function validatePaths(workingDir: string | undefined, source: SessionPreviewSource): Promise<void> {
+  await validateRoot(workingDir, source.root);
   for (const entry of source.files) {
-    if (!safePath(entry.filePath) || !isAbsolute(entry.filePath) || resolve(entry.filePath) !== entry.filePath
-      || !contained(source.root, entry.filePath)) invalid();
-    const parts = relative(source.root, entry.filePath).split(sep);
-    let current = source.root;
-    for (let i = 0; i < parts.length; i++) {
-      current = resolve(current, parts[i]);
-      const info = await lstat(current);
-      if (info.isSymbolicLink() || (i < parts.length - 1 ? !info.isDirectory() : !info.isFile())) invalid();
-    }
-    if (await realpath(entry.filePath) !== entry.filePath) invalid();
+    await validateFileEntry(source.root, entry.filePath);
   }
 }
 function reason(error: unknown): PreviewUnavailableReason {
@@ -110,7 +118,8 @@ export class SessionPreviewReader {
       const entry = source.files.find(file => file.id === fileId);
       if (!entry) throw new PreviewError('invalid_file');
       const filePath = entry.filePath;
-      await validatePaths(session.workingDir, source);
+      await validateRoot(session.workingDir, source.root);
+      await validateFileEntry(source.root, filePath);
       const handle = await this.openFile(filePath);
       try {
         const before = await this.initialStat(handle);
@@ -136,6 +145,98 @@ export class SessionPreviewReader {
     finally { this.active--; }
   }
 }
+/**
+ * Append/replace merge for addPreview: validates ONLY the incoming
+ * command-line paths (root + those files) and carries existing entries over
+ * verbatim without re-validation, so a deleted/swapped existing file never
+ * blocks the add. Enforces within-batch duplicate basenames and the cap on
+ * the resulting set. All-or-nothing: validates before returning the merge.
+ */
+export async function preparePreviewAdd(
+  session: Session,
+  existing: { preview: SessionPreviewDescriptor; previewSource: SessionPreviewSource },
+  addedPaths: unknown,
+): Promise<{ preview: SessionPreviewDescriptor; previewSource: SessionPreviewSource }> {
+  if (!Array.isArray(addedPaths) || addedPaths.length < 1 || addedPaths.length > PREVIEW_MAX_FILES || !session.workingDir) invalid();
+  for (const path of addedPaths) {
+    if (typeof path !== 'string' || !safePath(path) || !isAbsolute(path) || resolve(path) !== path) invalid();
+  }
+  const entries: { path: string; fileName: string; kind: NonNullable<ReturnType<typeof previewKindForPath>> }[] = [];
+  const seen = new Set<string>();
+  for (const path of addedPaths as string[]) {
+    const fileName = basename(path);
+    if (!validFileName(fileName)) invalid();
+    const kind = previewKindForPath(fileName);
+    if (!kind) invalid();
+    if (seen.has(fileName)) invalid(`duplicate basename: ${fileName}`);
+    seen.add(fileName);
+    entries.push({ path, fileName, kind });
+  }
+  try {
+    const root = await realpath(session.workingDir);
+    const requestedRoot = resolve(session.workingDir);
+    const resolvedIncoming: { filePath: string; fileName: string; kind: NonNullable<ReturnType<typeof previewKindForPath>> }[] = [];
+    for (const entry of entries) {
+      if (!contained(requestedRoot, entry.path)) invalid();
+      resolvedIncoming.push({ filePath: resolve(root, relative(requestedRoot, entry.path)), fileName: entry.fileName, kind: entry.kind });
+    }
+    const existingByName = new Map<string, number>();
+    for (let i = 0; i < existing.preview.files.length; i++) {
+      existingByName.set(existing.preview.files[i].fileName, i);
+    }
+    let newCount = 0;
+    for (const entry of resolvedIncoming) {
+      if (!existingByName.has(entry.fileName)) newCount++;
+    }
+    if (existing.preview.files.length + newCount > PREVIEW_MAX_FILES) invalid();
+    await validateRoot(session.workingDir, root);
+    for (const entry of resolvedIncoming) {
+      await validateFileEntry(root, entry.filePath);
+    }
+    for (const entry of resolvedIncoming) {
+      const info = await lstat(entry.filePath);
+      if (info.size > PREVIEW_MAX_BYTES) throw new PreviewError('too_large');
+    }
+    const incomingByName = new Map<string, { filePath: string; fileName: string; kind: NonNullable<ReturnType<typeof previewKindForPath>> }>();
+    for (const entry of resolvedIncoming) {
+      incomingByName.set(entry.fileName, entry);
+    }
+    const sourceById = new Map<string, string>();
+    for (const file of existing.previewSource.files) {
+      sourceById.set(file.id, file.filePath);
+    }
+    const setId = randomUUID();
+    const newPreviewFiles: SessionPreviewDescriptor['files'] = [];
+    const newSourceFiles: SessionPreviewSource['files'] = [];
+    for (const file of existing.preview.files) {
+      const incoming = incomingByName.get(file.fileName);
+      if (incoming) {
+        const id = randomUUID();
+        newPreviewFiles.push({ id, fileName: file.fileName, kind: incoming.kind });
+        newSourceFiles.push({ id, filePath: incoming.filePath });
+      } else {
+        const filePath = sourceById.get(file.id);
+        if (filePath === undefined) invalid();
+        newPreviewFiles.push({ id: file.id, fileName: file.fileName, kind: file.kind });
+        newSourceFiles.push({ id: file.id, filePath });
+      }
+    }
+    for (const entry of resolvedIncoming) {
+      if (existingByName.has(entry.fileName)) continue;
+      const id = randomUUID();
+      newPreviewFiles.push({ id, fileName: entry.fileName, kind: entry.kind });
+      newSourceFiles.push({ id, filePath: entry.filePath });
+    }
+    return {
+      preview: { id: setId, files: newPreviewFiles },
+      previewSource: { version: 2, id: setId, root, files: newSourceFiles },
+    };
+  } catch (error) {
+    if (error instanceof PreviewError) throw error;
+    throw new PreviewError(reason(error));
+  }
+}
+
 export function previewStatus(id: string, fileId: string, snapshot: Snapshot, knownRevision?: string): SessionPreviewStatus {
   return { state: snapshot.revision === knownRevision ? 'unchanged' : 'ready', previewId: id, fileId, revision: snapshot.revision, totalBytes: snapshot.bytes.length };
 }

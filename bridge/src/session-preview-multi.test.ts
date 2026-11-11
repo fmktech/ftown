@@ -275,6 +275,142 @@ test('old persisted shape (version:1) loads as no preview for status, chunk and 
   if (!removed.ok) assert.match(removed.message, /page\.html/);
 });
 
+test('deleted sibling does not affect healthy file status/chunk; missing file reports missing only', async (t) => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'ftown-preview-multi-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const aPath = join(root, 'a.html');
+  const bPath = join(root, 'b.md');
+  await writeFile(aPath, '<p>a</p>');
+  await writeFile(bPath, '# b');
+  const session = makeSession(root);
+  const { controller } = setup([session]);
+  const set = await controller.setPreview('sess-1', [aPath, bPath]);
+  assert.ok(set.ok);
+  if (!set.ok) return;
+  const previewId = set.session.preview!.id;
+  const aId = set.session.preview!.files[0].id;
+  const bId = set.session.preview!.files[1].id;
+  await rm(bPath, { force: true });
+  // Healthy sibling still ready + chunkable while b.md is missing.
+  const good = await controller.getPreviewStatus('sess-1', previewId, aId);
+  assert.ok(good.ok);
+  if (!good.ok) return;
+  assert.equal(good.preview.state, 'ready');
+  if (!good.ok || good.preview.state !== 'ready') return;
+  const chunk = await controller.getPreviewChunk('sess-1', previewId, aId, good.preview.revision, 0);
+  assert.ok(chunk.ok);
+  if (chunk.ok && chunk.preview.state === 'chunk') assert.equal(Buffer.from(chunk.preview.dataBase64, 'base64').toString(), '<p>a</p>');
+  else assert.fail('expected chunk state');
+  // Missing file alone reports unavailable/missing.
+  const gone = await controller.getPreviewStatus('sess-1', previewId, bId);
+  assert.ok(gone.ok);
+  if (gone.ok) {
+    assert.equal(gone.preview.state, 'unavailable');
+    if (gone.preview.state === 'unavailable') {
+      assert.equal(gone.preview.fileId, bId);
+      assert.equal(gone.preview.reason, 'missing');
+    }
+  }
+});
+
+test('--add succeeds while an existing file is missing or swapped; entries retained verbatim', async (t) => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'ftown-preview-multi-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const aPath = join(root, 'a.html');
+  const bPath = join(root, 'b.md');
+  const cPath = join(root, 'c.html');
+  await writeFile(aPath, '<p>a</p>');
+  await writeFile(bPath, '# b');
+  await writeFile(cPath, '<p>c</p>');
+  const session = makeSession(root);
+  const { controller, store } = setup([session]);
+  const set = await controller.setPreview('sess-1', [aPath, bPath]);
+  assert.ok(set.ok);
+  if (!set.ok) return;
+  const aId = set.session.preview!.files[0].id;
+  const bId = set.session.preview!.files[1].id;
+  const bFilePath = set.session.previewSource!.files[1].filePath;
+  await rm(bPath, { force: true });
+  // Existing b.md deleted: --add still succeeds, b retained with same id/path.
+  const appended = await controller.addPreview('sess-1', [cPath]);
+  assert.ok(appended.ok);
+  if (!appended.ok) return;
+  assert.deepEqual(appended.session.preview!.files.map((f) => f.fileName), ['a.html', 'b.md', 'c.html']);
+  assert.equal(appended.session.preview!.files[0].id, aId);
+  assert.equal(appended.session.preview!.files[1].id, bId);
+  assert.equal(appended.session.previewSource!.files[1].id, bId);
+  assert.equal(appended.session.previewSource!.files[1].filePath, bFilePath);
+  assert.equal(store.saved.length, 2);
+  const previewId = appended.session.preview!.id;
+  const bGone = await controller.getPreviewStatus('sess-1', previewId, bId);
+  assert.ok(bGone.ok);
+  if (bGone.ok && bGone.preview.state === 'unavailable') assert.equal(bGone.preview.reason, 'missing');
+  else assert.fail('expected unavailable/missing for deleted b.md');
+  const aGood = await controller.getPreviewStatus('sess-1', previewId, aId);
+  assert.ok(aGood.ok);
+  if (aGood.ok) assert.equal(aGood.preview.state, 'ready');
+  // Swapping b.md to a symlink also does not block --add.
+  await writeFile(join(root, 'target.html'), '<p>target</p>');
+  await rm(bPath, { force: true });
+  await symlink(join(root, 'target.html'), bPath);
+  const dPath = join(root, 'd.md');
+  await writeFile(dPath, '# d');
+  const swapped = await controller.addPreview('sess-1', [dPath]);
+  assert.ok(swapped.ok);
+  if (!swapped.ok) return;
+  assert.deepEqual(swapped.session.preview!.files.map((f) => f.fileName), ['a.html', 'b.md', 'c.html', 'd.md']);
+  assert.equal(swapped.session.preview!.files[1].id, bId);
+  assert.equal(swapped.session.previewSource!.files[1].filePath, bFilePath);
+  const bSwapped = await controller.getPreviewStatus('sess-1', swapped.session.preview!.id, bId);
+  assert.ok(bSwapped.ok);
+  if (bSwapped.ok && bSwapped.preview.state === 'unavailable') assert.equal(bSwapped.preview.reason, 'invalid_file');
+  else assert.fail('expected unavailable/invalid_file for symlinked b.md');
+});
+
+test('--add enforces the cap across the resulting set, including missing entries; in-place re-register at 12 succeeds', async (t) => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'ftown-preview-multi-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const paths: string[] = [];
+  for (let i = 0; i < 12; i++) {
+    const path = join(root, `n${i}.md`);
+    await writeFile(path, `# ${i}`);
+    paths.push(path);
+  }
+  const session = makeSession(root);
+  const { controller, store } = setup([session]);
+  const twelve = await controller.setPreview('sess-1', paths);
+  assert.ok(twelve.ok);
+  if (!twelve.ok) return;
+  const twelveId = twelve.session.preview!.id;
+  const keepId = twelve.session.preview!.files[5].id;
+  // Re-register one file in place at the cap: still 12, replaced id is new.
+  await writeFile(paths[5], '# 5 v2');
+  const reRegistered = await controller.addPreview('sess-1', [paths[5]]);
+  assert.ok(reRegistered.ok);
+  if (!reRegistered.ok) return;
+  assert.equal(reRegistered.session.preview!.files.length, 12);
+  assert.notEqual(reRegistered.session.preview!.files[5].id, keepId);
+  assert.equal(reRegistered.session.preview!.files[4].id, twelve.session.preview!.files[4].id);
+  // Delete one existing file, then adding a 13th distinct file still fails:
+  // the missing entry is retained and counts toward the cap.
+  await rm(paths[0], { force: true });
+  const thirteenth = join(root, 'n12.md');
+  await writeFile(thirteenth, '# 13');
+  const overflow = await controller.addPreview('sess-1', [thirteenth]);
+  assert.ok(!overflow.ok);
+  if (!overflow.ok) assert.equal(overflow.code, 'invalid');
+  assert.equal(store.sessions.get('sess-1')!.preview!.files.length, 12);
+  assert.equal(store.sessions.get('sess-1')!.preview!.id, reRegistered.session.preview!.id);
+  assert.notEqual(twelveId, reRegistered.session.preview!.id);
+  // A within-batch duplicate on --add is still rejected.
+  await mkdir(join(root, 'other'), { recursive: true });
+  const other = join(root, 'other', 'n1.md');
+  await writeFile(other, '# other');
+  const dup = await controller.addPreview('sess-1', [paths[1], other]);
+  assert.ok(!dup.ok);
+  if (!dup.ok) assert.match(dup.message, /duplicate basename: n1\.md/);
+});
+
 test('RPC requires fileId and threads it to the controller', async () => {
   const calls: Array<{ method: string; args: unknown[] }> = [];
   const statusState = { state: 'ready' as const, previewId: 'p', fileId: 'f', revision: 'r', totalBytes: 1 };
