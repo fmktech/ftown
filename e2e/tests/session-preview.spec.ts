@@ -407,7 +407,7 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     await expect(iframe(page, otherFileName)).not.toBeVisible();
     await selectSession(page, targetName);
     await unlink(path);
-    await expect(previewRegion(page)).toContainText("Preview file is missing");
+    await expect(previewRegion(page)).toContainText(`${fileName} is missing`);
     await expect(iframe(page, fileName)).not.toBeVisible();
     await atomicHtml(path, previewHtml(marker, 4, true));
     await expect(documentFrame(page, fileName).getByRole("heading", { name: `${marker} version 4`, exact: true })).toBeVisible();

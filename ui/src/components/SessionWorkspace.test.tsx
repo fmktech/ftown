@@ -691,11 +691,154 @@ it('error shows file name of selected file', async () => {
   render(<SessionWorkspace session={session} client={{} as unknown as MessageClient} userId="user" readable={true} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>);
   const list = screen.getByRole('tablist', { name: 'Preview file' });
   expect(list).toBeTruthy();
-  // error state shows Retry and file-related message; file name is visible in selector/tab
+  // error state shows Retry and file-related message including the selected file name
   await waitFor(() => expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy());
-  // When transport rejects with a non-transient code the hook shows 'Preview unavailable' (error) but may first show offline/loading; allow either offline or error text.
-  const body = document.body.textContent ?? '';
-  expect(body).toMatch(/Preview unavailable|Reconnect to load preview/);
+  const status = screen.getByRole('status');
+  expect(status.querySelector('span')?.textContent).toBe('a.html is unavailable');
   // selected file name is in the tablist
   expect(within(list).getByRole('tab', { name: 'a.html' }).getAttribute('aria-selected')).toBe('true');
+});
+
+it('first registration of two files selects the first file', () => {
+  resizeTo(900);
+  const sendCommand = vi.fn();
+  const baseSession = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '' } as Session;
+  const workspace = (session: Session) => <SessionWorkspace session={session} client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>;
+  const { rerender } = render(workspace(baseSession));
+  expect(screen.queryByRole('tablist', { name: 'Preview file' })).toBeNull();
+  rerender(workspace({
+    ...baseSession,
+    preview: {
+      id: '11111111-1111-4111-8111-111111111111',
+      files: [
+        { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000002', fileName: 'notes.md', kind: 'markdown' },
+      ],
+    },
+  }));
+  const list = screen.getByRole('tablist', { name: 'Preview file' });
+  const tabs = within(list).getAllByRole('tab');
+  expect(tabs).toHaveLength(2);
+  expect(tabs[0].getAttribute('aria-selected')).toBe('true');
+  expect(tabs[1].getAttribute('aria-selected')).toBe('false');
+});
+
+it('replacing the set with all-new names selects the first file', () => {
+  resizeTo(900);
+  const sendCommand = vi.fn();
+  const baseSession = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '' } as Session;
+  const workspace = (preview: Session['preview']) => <SessionWorkspace session={{ ...baseSession, preview }} client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>;
+  const { rerender } = render(workspace({
+    id: '11111111-1111-4111-8111-111111111111',
+    files: [
+      { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+      { id: '40000000-4000-4000-8000-000000000002', fileName: 'b.html', kind: 'html' },
+    ],
+  }));
+  let list = screen.getByRole('tablist', { name: 'Preview file' });
+  let tabs = within(list).getAllByRole('tab');
+  fireEvent.click(tabs[1]);
+  expect(tabs[1].getAttribute('aria-selected')).toBe('true');
+  rerender(workspace({
+    id: '22222222-2222-4222-8222-222222222222',
+    files: [
+      { id: '40000000-4000-4000-8000-000000000011', fileName: 'x.html', kind: 'html' },
+      { id: '40000000-4000-4000-8000-000000000012', fileName: 'y.md', kind: 'markdown' },
+    ],
+  }));
+  list = screen.getByRole('tablist', { name: 'Preview file' });
+  tabs = within(list).getAllByRole('tab');
+  expect(tabs[0].getAttribute('aria-selected')).toBe('true');
+  expect(tabs[1].getAttribute('aria-selected')).toBe('false');
+});
+
+it('add selects the newly added file and several new selects the last new', () => {
+  resizeTo(900);
+  const sendCommand = vi.fn();
+  const baseSession = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '' } as Session;
+  const workspace = (preview: Session['preview']) => <SessionWorkspace session={{ ...baseSession, preview }} client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>;
+  const { rerender } = render(workspace({
+    id: '11111111-1111-4111-8111-111111111111',
+    files: [
+      { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+    ],
+  }));
+  rerender(workspace({
+    id: '22222222-2222-4222-8222-222222222222',
+    files: [
+      { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+      { id: '40000000-4000-4000-8000-000000000002', fileName: 'b.md', kind: 'markdown' },
+    ],
+  }));
+  let list = screen.getByRole('tablist', { name: 'Preview file' });
+  let tabs = within(list).getAllByRole('tab');
+  expect(tabs[1].getAttribute('aria-selected')).toBe('true');
+  expect(tabs[0].getAttribute('aria-selected')).toBe('false');
+  rerender(workspace({
+    id: '33333333-3333-4333-8333-333333333333',
+    files: [
+      { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+      { id: '40000000-4000-4000-8000-000000000002', fileName: 'b.md', kind: 'markdown' },
+      { id: '40000000-4000-4000-8000-000000000003', fileName: 'c.html', kind: 'html' },
+      { id: '40000000-4000-4000-8000-000000000004', fileName: 'd.html', kind: 'html' },
+    ],
+  }));
+  list = screen.getByRole('tablist', { name: 'Preview file' });
+  tabs = within(list).getAllByRole('tab');
+  expect(tabs[3].getAttribute('aria-selected')).toBe('true');
+  expect(tabs[0].getAttribute('aria-selected')).toBe('false');
+  expect(tabs[1].getAttribute('aria-selected')).toBe('false');
+});
+
+it('dashboard reload with existing three-file set selects the first file', () => {
+  resizeTo(900);
+  const sendCommand = vi.fn();
+  const session: Session = {
+    id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+    preview: {
+      id: '12345678-1234-4234-8234-123456789abc',
+      files: [
+        { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000002', fileName: 'b.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000003', fileName: 'c.html', kind: 'html' },
+      ],
+    },
+  };
+  render(<SessionWorkspace session={session} client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>);
+  const list = screen.getByRole('tablist', { name: 'Preview file' });
+  const tabs = within(list).getAllByRole('tab');
+  expect(tabs).toHaveLength(3);
+  expect(tabs[0].getAttribute('aria-selected')).toBe('true');
+  expect(tabs[1].getAttribute('aria-selected')).toBe('false');
+  expect(tabs[2].getAttribute('aria-selected')).toBe('false');
+});
+
+it.each([
+  { reason: 'missing', expected: 'a.html is missing' },
+  { reason: 'too_large', expected: 'a.html exceeds the 1 MiB limit' },
+  { reason: 'invalid_utf8', expected: 'a.html is not valid UTF-8' },
+  { reason: 'invalid_file', expected: 'a.html is unavailable' },
+  { reason: 'unavailable', expected: 'a.html is unavailable' },
+])('per-file error text includes the selected file name for reason $reason', async ({ reason, expected }) => {
+  resizeTo(900);
+  const previewId = '12345678-1234-4234-8234-123456789abc';
+  const sendCommand = vi.fn((command: Command) => {
+    const payload = command.payload as Record<string, unknown>;
+    const fileId = typeof payload.fileId === 'string' ? payload.fileId : '40000000-4000-4000-8000-000000000001';
+    const requestedPreviewId = typeof payload.previewId === 'string' ? payload.previewId : previewId;
+    return Promise.resolve({ requestId: 'x', success: true, data: { state: 'unavailable', previewId: requestedPreviewId, fileId, reason } });
+  });
+  const session: Session = {
+    id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+    preview: {
+      id: previewId,
+      files: [
+        { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000002', fileName: 'notes.md', kind: 'markdown' },
+      ],
+    },
+  };
+  render(<SessionWorkspace session={session} client={{} as unknown as MessageClient} userId="user" readable={true} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>);
+  await waitFor(() => expect(screen.getByRole('status').querySelector('span')?.textContent).toBe(expected));
+  expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
 });

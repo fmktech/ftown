@@ -22,7 +22,16 @@ interface Props {
   selectedFileName?: string;
   onSelectFile?: (fileName: string) => void;
 }
-const messages = { missing: 'Preview file is missing', too_large: 'Preview exceeds the 1 MiB limit', invalid_utf8: 'Preview file is not valid UTF-8', invalid_file: 'Preview unavailable', unavailable: 'Preview unavailable' };
+type PreviewErrorReason = 'missing' | 'too_large' | 'invalid_utf8' | 'invalid_file' | 'unavailable';
+function previewErrorMessage(reason: PreviewErrorReason, fileName: string): string {
+  switch (reason) {
+    case 'missing': return `${fileName} is missing`;
+    case 'too_large': return `${fileName} exceeds the 1 MiB limit`;
+    case 'invalid_utf8': return `${fileName} is not valid UTF-8`;
+    case 'invalid_file':
+    case 'unavailable': return `${fileName} is unavailable`;
+  }
+}
 export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {}, selectedFileName, onSelectFile }: Props) {
   const mainRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
@@ -42,17 +51,22 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
   // Per-session selection stored internally (persisted while Dashboard is open because SessionWorkspace stays mounted and sessionKey changes).
   // If Dashboard supplies controlled props (selectedFileName/onSelectFile) they take precedence.
   const [internalSelections, setInternalSelections] = useState<Record<string, string>>({});
-  const previousNamesByKey = useRef<Record<string, string[]>>({});
+  const previousRecordByKey = useRef<Record<string, { id: string | null; names: string[] }>>({});
+  const descriptorId = descriptor?.id ?? null;
 
+  const storedSelection = selectedFileName !== undefined ? selectedFileName : sessionKey ? internalSelections[sessionKey] : undefined;
   let effectiveFileName: string | undefined;
   if (files.length > 0) {
-    const stored = selectedFileName !== undefined ? selectedFileName : internalSelections[sessionKey];
-    const prevNames = previousNamesByKey.current[sessionKey];
-    const newNames = prevNames ? fileNames.filter(n => !prevNames.includes(n)) : [];
-    if (newNames.length > 0) {
+    const prev = sessionKey ? previousRecordByKey.current[sessionKey] : undefined;
+    const prevNames = prev?.names;
+    const hasPrevNonEmpty = !!prevNames && prevNames.length > 0;
+    const kept = hasPrevNonEmpty ? prevNames.some(n => fileNames.includes(n)) : false;
+    const newNames = hasPrevNonEmpty ? fileNames.filter(n => !prevNames.includes(n)) : [];
+    const isAdd = hasPrevNonEmpty && kept && newNames.length > 0;
+    if (isAdd) {
       effectiveFileName = newNames[newNames.length - 1];
-    } else if (stored && fileNames.includes(stored)) {
-      effectiveFileName = stored;
+    } else if (storedSelection && fileNames.includes(storedSelection)) {
+      effectiveFileName = storedSelection;
     } else {
       effectiveFileName = fileNames[0];
     }
@@ -73,10 +87,10 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
   // Keep previous set tracking and sync storage when the effective selection is derived from a set change (new file added, selected removed, or initial fallback).
   useEffect(() => {
     if (!sessionKey) return;
-    const prev = previousNamesByKey.current[sessionKey];
-    const namesChanged = !prev || prev.length !== fileNames.length || prev.some((n, i) => n !== fileNames[i]);
+    const prev = previousRecordByKey.current[sessionKey];
+    const namesChanged = !prev || prev.id !== descriptorId || prev.names.length !== fileNames.length || prev.names.some((n, i) => n !== fileNames[i]);
     if (namesChanged) {
-      previousNamesByKey.current = { ...previousNamesByKey.current, [sessionKey]: [...fileNames] };
+      previousRecordByKey.current = { ...previousRecordByKey.current, [sessionKey]: { id: descriptorId, names: [...fileNames] } };
     }
     if (effectiveFileName === undefined) return;
     const isControlled = onSelectFile !== undefined;
@@ -85,17 +99,12 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
       if (isControlled && onSelectFile) {
         onSelectFile(effectiveFileName);
       } else if (!isControlled) {
-        const hadPrevious = prev !== undefined;
-        if (hadPrevious || stored !== undefined || fileNames.length > 0) {
-          if (stored !== effectiveFileName) {
-            setInternalSelections(prevSel => prevSel[sessionKey] === effectiveFileName ? prevSel : { ...prevSel, [sessionKey]: effectiveFileName });
-          }
-        }
+        setInternalSelections(prevSel => prevSel[sessionKey] === effectiveFileName ? prevSel : { ...prevSel, [sessionKey]: effectiveFileName });
       }
     }
     // Include fileNames identity via joined string to detect order changes; effectiveFileName captures derived choice.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionKey, effectiveFileName, selectedFileName, onSelectFile, fileNames.join('|'), internalSelections[sessionKey]]);
+  }, [sessionKey, effectiveFileName, selectedFileName, onSelectFile, descriptorId, fileNames.join('|'), internalSelections[sessionKey]]);
 
   // Also update previous tracking on sessionKey change: when switching sessions, previous for new key should be treated as undefined on next render.
   // We already handle via per-key map; no extra reset needed because prev for new key is undefined until first effect.
@@ -269,7 +278,7 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
               ? markdownPreviewDocument(html, selectedFile.fileName, docId, fileNames)
               : previewDocument(html, docId, fileNames);
             return <><iframe ref={scroll.iframeRef} key={scroll.display.key} title={`Preview: ${selectedFile?.fileName ?? ''}`} sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={srcDoc} />{state.updating && <span className="session-preview-updating">Updating preview…</span>}</>;
-          })() : <div className="session-preview-message" role="status"><span>{state.kind === 'loading' || state.kind === 'ready' ? 'Loading preview…' : state.kind === 'offline' ? 'Reconnect to load preview' : state.kind === 'unregistered' ? 'No preview registered' : state.kind === 'unavailable' ? messages[state.reason] : 'Preview unavailable'}</span>{state.kind !== 'loading' && state.kind !== 'ready' && state.kind !== 'unregistered' && <button type="button" className="btn-ghost" onClick={refresh}>Retry</button>}</div>}
+          })() : <div className="session-preview-message" role="status"><span>{state.kind === 'loading' || state.kind === 'ready' ? 'Loading preview…' : state.kind === 'offline' ? 'Reconnect to load preview' : state.kind === 'unregistered' ? 'No preview registered' : state.kind === 'unavailable' ? previewErrorMessage(state.reason, selectedFile?.fileName ?? '') : selectedFile ? previewErrorMessage('unavailable', selectedFile.fileName) : 'Preview unavailable'}</span>{state.kind !== 'loading' && state.kind !== 'ready' && state.kind !== 'unregistered' && <button type="button" className="btn-ghost" onClick={refresh}>Retry</button>}</div>}
           {scroll.linkPrompt && <div ref={focusLinkPrompt} tabIndex={-1} className="session-preview-link-prompt" role="dialog" aria-label="Open external link" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); scroll.dismissLink(); } }}><div className="session-preview-link-scroll" tabIndex={0} role="group" aria-label="Destination URL"><span className="session-preview-link-host" title={scroll.linkPrompt}>{scroll.linkPrompt}</span></div><div className="session-preview-link-actions"><span>Open in a new tab?</span><button type="button" className="btn-ghost" onClick={scroll.confirmLink}>Open</button><button type="button" className="btn-ghost" onClick={scroll.dismissLink}>Cancel</button></div></div>}
           {activeExpanded && session && <PreviewConversation session={session} activity={activity} open={conversationOpen} onOpen={() => setConversationOpen(true)} onClose={() => setConversationOpen(false)} conversation={conversation} />}
           {dragging && <div className="session-preview-drag-shield" />}
