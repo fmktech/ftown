@@ -241,14 +241,15 @@ describe('mail nudge vs open attention (real handleHook + store)', () => {
 
 function replyHandler(f: { session: Session; attention: AttentionStore }, enqueue: NonNullable<import('./command-rpc.js').CommandRpcDeps['enqueueSessionMessage']>) {
   const responses: CommandResponse[] = [];
+  const publishes: string[] = [];
   const security = { revalidate: async () => {}, policy: { revalidate: async () => {} } } as unknown as BridgeSecurityService;
   const verified = { principal: {} } as VerifiedApplication;
   const sessionController = { get: async (id: string) => (id === f.session.id ? f.session : null) } as unknown as SessionController;
   const handler = createCommandHandler({
     bridgeId: 'machine-a', security, sessionController, enqueueSessionMessage: enqueue,
-    attentionStore: f.attention, publishCommandResponse: async (response: CommandResponse) => { responses.push(response); },
+    attentionStore: f.attention, publishAttentionChanged: (sessionId: string) => { publishes.push(sessionId); }, publishCommandResponse: async (response: CommandResponse) => { responses.push(response); },
   });
-  return { handler, verified, responses };
+  return { handler, verified, responses, publishes };
 }
 
 describe('inbox reply resolves exactly its item', () => {
@@ -257,10 +258,11 @@ describe('inbox reply resolves exactly its item', () => {
     const first = (await f.attention.record('s1', 'Notification', { notification_type: 'agent_needs_input', title: 'One', message: 'First' }))!;
     const second = (await f.attention.record('s1', 'Notification', { notification_type: 'agent_needs_input', title: 'Two', message: 'Second' }))!;
     assert.equal((await f.attention.list('s1')).events.length, 2);
-    const { handler, verified, responses } = replyHandler(f, async (session, message) => ({ ok: true, id: 'mail-1' }));
+    const { handler, verified, responses, publishes } = replyHandler(f, async (session, message) => ({ ok: true, id: 'mail-1' }));
     const command: Command = { type: 'send_message', requestId: 'r1', payload: { bridgeId: 'machine-a', sessionId: 's1', message: 'my reply', eventId: first.id } } as Command;
     await handler(command, verified);
     assert.equal(responses.at(-1)?.success, true);
+    assert.deepEqual(publishes, ['s1'], 'replied must publish the attention-changed signal');
     const open = await f.attention.list('s1');
     assert.equal(open.events.length, 1);
     assert.equal(open.events[0].id, second.id, 'second item must remain');
@@ -271,10 +273,11 @@ describe('inbox reply resolves exactly its item', () => {
   it('reply whose mail is rejected resolves nothing', async (t) => {
     const f = await fixture(t);
     const first = (await f.attention.record('s1', 'Notification', { notification_type: 'agent_needs_input', title: 'One', message: 'First' }))!;
-    const { handler, verified, responses } = replyHandler(f, async () => ({ ok: false, error: 'Mail store not ready' }));
+    const { handler, verified, responses, publishes } = replyHandler(f, async () => ({ ok: false, error: 'Mail store not ready' }));
     const command: Command = { type: 'send_message', requestId: 'r2', payload: { bridgeId: 'machine-a', sessionId: 's1', message: 'my reply', eventId: first.id } } as Command;
     await handler(command, verified);
     assert.equal(responses.at(-1)?.success, false);
+    assert.deepEqual(publishes, [], 'rejected mail must not publish');
     assert.equal((await f.attention.list('s1')).events.length, 1, 'rejected mail must not resolve');
   });
 });
@@ -418,5 +421,30 @@ describe('injected prefix sources (plugin self-submits)', () => {
     assert.equal(f.mail.lastPromptInjection('s1'), undefined, 'SessionEnd must delete the record');
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit' });
     assert.equal(f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, undefined);
+  });
+
+  it('record, Stop, no-text UserPromptSubmit stays injected', async (t) => {
+    const f = await fixture(t);
+    await openTwo(f);
+    f.mail.notePluginHandoff('s1');
+    await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'Stop' });
+    assert.ok(f.mail.lastPromptInjection('s1'), 'Stop must keep the record');
+    await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit' });
+    assert.equal((await f.attention.list('s1')).events.length, 2);
+    assert.equal(f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, true);
+  });
+
+  it('FtownWakeSubmitted records without forwarding or attention', async (t) => {
+    const f = await fixture(t);
+    await openTwo(f);
+    const before = (await f.attention.list('s1')).events.length;
+    const res = await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'FtownWakeSubmitted' });
+    assert.equal(res.status, 200);
+    assert.equal(f.events.some((e) => e.eventName === 'FtownWakeSubmitted'), false, 'must not forward to the dashboard');
+    assert.equal((await f.attention.list('s1')).events.length, before, 'must not record attention');
+    assert.ok(f.mail.lastPromptInjection('s1'), 'must record the injection');
+    await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit' });
+    assert.equal((await f.attention.list('s1')).events.length, 2);
+    assert.equal(f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, true);
   });
 });

@@ -278,9 +278,13 @@ export class MailDeliveryService {
     this.agentBusySince.set(sessionId, this.now());
   }
 
-  /** Hook Stop/SessionEnd: the agent's turn ended. */
+  /** Hook Stop: the agent's turn ended (the injection record is kept). */
   markAgentIdle(sessionId: string): void {
     this.agentBusySince.delete(sessionId);
+  }
+
+  /** Hook SessionEnd / session removal: forget the injection record. */
+  markSessionEnded(sessionId: string): void {
     this.lastInjection.delete(sessionId);
   }
 

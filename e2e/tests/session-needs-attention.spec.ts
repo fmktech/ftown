@@ -15,7 +15,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       test.setTimeout(180_000); await page.setViewportSize({ width: viewport.width, height: viewport.height }); await login(page); await waitForBridgeOnline(page);
       const suffix = Date.now().toString(36), firstName = `Review deployment ${suffix}`, secondName = `Approve API ${suffix}`, idleName = `Idle ${suffix}`;
       const ids: string[] = []; const mobile = viewport.name === "mobile";
-      const workspace = async () => { if (mobile) await page.getByRole("tab", { name: /^Workspace/ }).click(); };
+      const workspace = async () => { if (mobile) await page.getByRole("tab", { name: "Workspace", exact: true }).click(); };
       const inbox = page.getByRole("region", { name: "Inbox", exact: true });
       const openInbox = async () => { await page.getByRole("button", { name: /^Inbox, / }).click(); await expect(inbox).toBeVisible(); };
       const closeInbox = async () => inbox.getByRole("button", { name: "Back to workspace", exact: true }).click();

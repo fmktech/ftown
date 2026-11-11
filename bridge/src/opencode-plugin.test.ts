@@ -51,6 +51,7 @@ describe('OpenCode native mail wake', () => {
   it('uses authenticated heartbeat peeks and native pointer only, without consuming mail', async t => {
     const f = fixture(t);
     await f.event('session.created', { info: { id: 'ses_root' } });
+    await tick(); await f.advance();
     assert.equal(f.prompts.length, 1);
     assert.equal(f.prompts[0].path.id, 'ses_root');
     const text = f.prompts[0].body.parts[0].text;
@@ -69,6 +70,7 @@ describe('OpenCode native mail wake', () => {
   it('polls independently while idle and while a native prompt is in flight, preserving concurrent arrivals', async t => {
     const f = fixture(t); const pending = deferred<unknown>(); f.setSubmit(() => pending.promise);
     await f.event('session.created', { info: { id: 'ses_root' } });
+    await tick();
     assert.equal(f.prompts.length, 1);
     f.setMessages([{ id: 'm1', body: 'private task body', from: 'parent' }, { id: 'm2', body: 'later', from: 'parent' }]);
     await f.advance(); assert.equal(f.prompts.length, 1); assert.equal(f.requests.filter(r => r.url.includes('/inbox')).length, 2);
@@ -109,9 +111,34 @@ describe('OpenCode native mail wake', () => {
     assert.equal(f.requests.length, 0);
     await f.event('message.updated', { info: { id: 'msg_2', sessionID: 'ses_root', role: 'user' } });
     await f.event('session.idle', { sessionID: 'ses_root' });
+    await tick(); await f.advance();
     assert.equal(f.prompts[0].path.id, 'ses_root');
     await f.event('session.idle', { sessionID: 'ses_foreign' });
     assert.ok(f.requests.filter(r => r.url.endsWith('/hook')).every(r => JSON.parse(String(r.init?.body)).session_id === 'ses_root'));
+  });
+
+  it('posts FtownWakeSubmitted before the wake prompt', async t => {
+    const f = fixture(t);
+    await f.event('session.created', { info: { id: 'ses_root' } });
+    await tick(); await f.advance();
+    assert.equal(f.prompts.length, 1);
+    const hooks = f.requests.filter(r => r.url.endsWith('/hook')).map(r => JSON.parse(String(r.init?.body)));
+    assert.ok(hooks.some(hook => hook.hook_event_name === 'FtownWakeSubmitted'), `hooks: ${JSON.stringify(hooks)}`);
+    await f.event('session.idle', { sessionID: 'ses_root' }); await f.advance();
+    const hooksAfter = f.requests.filter(r => r.url.endsWith('/hook')).map(r => JSON.parse(String(r.init?.body)));
+    const wakeIndex = hooksAfter.findIndex(hook => hook.hook_event_name === 'FtownWakeSubmitted');
+    assert.ok(wakeIndex >= 0);
+    assert.ok(f.prompts.length >= 1);
+  });
+
+  it('posts UserPromptSubmit at most once per user message id', async t => {
+    const f = fixture(t); f.setMessages([]);
+    await f.event('session.created', { info: { id: 'ses_root' } });
+    await f.event('message.updated', { info: { id: 'msg_dup', sessionID: 'ses_root', role: 'user' } });
+    await f.event('message.updated', { info: { id: 'msg_dup', sessionID: 'ses_root', role: 'user' } });
+    await f.event('message.updated', { info: { id: 'msg_dup2', sessionID: 'ses_root', role: 'user' } });
+    const submits = f.requests.filter(r => r.url.endsWith('/hook')).map(r => JSON.parse(String(r.init?.body))).filter(hook => hook.hook_event_name === 'UserPromptSubmit');
+    assert.equal(submits.length, 2, `expected one per distinct id: ${JSON.stringify(submits)}`);
   });
 
   it('shutdown invalidates pending callbacks and clears polling; manual runs stay inert', async t => {

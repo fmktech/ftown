@@ -294,7 +294,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
       return next;
     });
   }, [bridges, rawSessions, setBridgeOrder]);
-  const { sessionActivity, markSessionIdle, clearSessionAttention, answerSessionAttention } = useAllSessionEvents(client, rawSessions, userId, rpc);
+  const { sessionActivity, markSessionIdle, clearSessionAttention, answerSessionAttention, refreshSessionAttention } = useAllSessionEvents(client, rawSessions, userId, rpc);
   const installedHookBridges = useRef(new Set<string>());
 
   useEffect(() => {
@@ -564,6 +564,7 @@ PY`;
     if (!inboxReady.has(current.bridgeId)) throw new Error("Reconnect this computer before replying.");
     if (!canReply(current.bridgeId)) throw new Error("This browser does not have permission to reply to this session.");
     await queueSessionReply(rpc.sendCommand, { ...entry, session: current }, message);
+    if (entry.notice.attentionId) await refreshSessionAttention(current.id);
   };
   const answerInbox = async (entry: InboxEntry, answers: AttentionAnswerEntry[]): Promise<AttentionAnswerSubmitResult> => {
     const current = sessions.find(session => session.id === entry.session.id && session.bridgeId === entry.session.bridgeId);
@@ -1034,11 +1035,12 @@ PY`;
       >
         <button
           className={`mobile-tab ${mobileTab === "sessions" ? "mobile-tab-active" : ""}`} role="tab" tabIndex={mobileTab === "sessions" ? 0 : -1} aria-selected={mobileTab === "sessions"}
-          aria-label={inbox.length > 0 && mobileTab !== "sessions" ? `Workspace, ${inbox.length} waiting` : "Workspace"}
+          aria-describedby={inbox.length > 0 && mobileTab !== "sessions" ? "mobile-tab-inbox-waiting" : undefined}
           onClick={() => handleMobileTabSwitch("sessions")}
         >
           Workspace{inbox.length > 0 && mobileTab !== "sessions" ? <span aria-hidden="true" className="mobile-tab-inbox-badge">{inbox.length}</span> : null}
         </button>
+        {inbox.length > 0 && mobileTab !== "sessions" ? <span id="mobile-tab-inbox-waiting" className="inbox-visually-hidden">{inbox.length} waiting</span> : null}
         <button
           className={`mobile-tab ${mobileTab === "terminal" ? "mobile-tab-active" : ""}`}
           role="tab" tabIndex={mobileTab === "terminal" ? 0 : -1} aria-selected={mobileTab === "terminal"} aria-controls="session-terminal-panel"

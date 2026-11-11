@@ -32,7 +32,7 @@ it("appears for the selected session with an item and reuses the Inbox body", ()
   expect(region.textContent).toContain("Full message");
   expect(screen.getByLabelText("Reply to first")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Hide" })).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Open session" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Open session" })).toBeNull();
   expect(document.activeElement).not.toBe(region);
 });
 

@@ -62,7 +62,7 @@ export function inboxEntries(sessions: readonly Session[], activity: ReadonlyMap
   }).sort((a, b) => b.notice.receivedAt - a.notice.receivedAt);
 }
 
-export function InboxItemBody({ entry, onOpenSession, onDismiss, onReply, onAnswer }: { entry: InboxEntry; onOpenSession: (id: string) => void; onDismiss: (entry: InboxEntry) => Promise<void>; onReply: (entry: InboxEntry, message: string) => Promise<void>; onAnswer: (entry: InboxEntry, answers: AttentionAnswerEntry[]) => Promise<AttentionAnswerSubmitResult> }) {
+export function InboxItemBody({ entry, onOpenSession, onDismiss, onReply, onAnswer, hideOpenSession }: { entry: InboxEntry; onOpenSession: (id: string) => void; onDismiss: (entry: InboxEntry) => Promise<void>; onReply: (entry: InboxEntry, message: string) => Promise<void>; onAnswer: (entry: InboxEntry, answers: AttentionAnswerEntry[]) => Promise<AttentionAnswerSubmitResult>; hideOpenSession?: boolean }) {
   const [draft, setDraft] = useState(""); const [message, setMessage] = useState(""); const [error, setError] = useState("");
   const [sending, setSending] = useState(false); const [dismissing, setDismissing] = useState(false);
   const sendingRef = useRef(false), dismissingRef = useRef(false);
@@ -90,7 +90,7 @@ export function InboxItemBody({ entry, onOpenSession, onDismiss, onReply, onAnsw
     <div className="min-w-0"><h3 className="break-words text-sm font-semibold [overflow-wrap:anywhere]">{name}</h3><p className="break-words text-xs text-[var(--text-muted)] [overflow-wrap:anywhere]">{entry.bridgeName} · <time dateTime={new Date(entry.notice.receivedAt).toISOString()}>{new Date(entry.notice.receivedAt).toLocaleString()}</time></p></div>
     <p className="break-words text-sm font-semibold [overflow-wrap:anywhere]">{entry.notice.title}</p>
     {!messageDuplicatesQuestion && <p className="whitespace-pre-wrap text-sm [overflow-wrap:anywhere]">{entry.notice.message}</p>}
-    <div className="flex flex-wrap gap-2"><button type="button" className="btn-ghost min-h-11" onClick={() => onOpenSession(entry.session.id)}>Open session</button>{!hookPrompt && <button type="button" className="btn-ghost min-h-11" disabled={dismissing} onClick={() => void dismiss()}>{dismissing ? "Dismissing…" : "Dismiss"}</button>}</div>
+    <div className="flex flex-wrap gap-2">{hideOpenSession ? null : <button type="button" className="btn-ghost min-h-11" onClick={() => onOpenSession(entry.session.id)}>Open session</button>}{!hookPrompt && <button type="button" className="btn-ghost min-h-11" disabled={dismissing} onClick={() => void dismiss()}>{dismissing ? "Dismissing…" : "Dismiss"}</button>}</div>
     {prompt ? <AttentionAnswerForm key={noticeKey(entry.session.id, entry.notice)} prompt={prompt} sessionName={name} disabledReason={entry.replyDisabledReason} onSubmit={answers => onAnswer(entry, answers)} onAnswerInTerminal={hookPrompt ? () => void answerInTerminal() : undefined} /> : <>
     <label className="flex min-w-0 flex-col gap-1 text-xs text-[var(--text-muted)]">Reply to {name}<textarea className="min-h-20 w-full min-w-0 rounded-md border border-[var(--border-muted)] bg-[var(--bg-surface)] p-2 text-sm text-[var(--text-primary)]" maxLength={65536} value={draft} onChange={event => { setDraft(event.target.value); setMessage(""); setError(""); }} disabled={sending || !!entry.replyDisabledReason} /></label>
     {entry.replyDisabledReason && <p className="text-xs text-[var(--text-muted)]">{entry.replyDisabledReason}</p>}

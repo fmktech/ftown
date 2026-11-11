@@ -68,6 +68,8 @@ export interface CommandRpcDeps {
   pullRequestReview?: PrReviewService;
   enqueueSessionMessage?: (session: Session, message: string) => Promise<{ ok: true; id: string } | { ok: false; error: string }>;
   attentionStore?: AttentionStore;
+  /** Ask every tab to re-read the attention snapshot after a command resolves it. */
+  publishAttentionChanged?: (sessionId: string) => void;
   /** Durable mail path with full mail fields (threadId etc.); used for the answer_session_attention mail fallback. */
   acceptSessionMail?: (session: Session, body: Record<string, unknown>) => Promise<{ ok: true; id: string } | { ok: false; error: string }>;
   updates?: BridgeUpdateCoordinator;
@@ -141,7 +143,10 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             const result = await deps.enqueueSessionMessage(session, payload.message);
             if (result.ok && typeof result.id === 'string' && result.id.length > 0) {
               if (typeof payload.eventId === 'string' && deps.attentionStore) {
-                try { await deps.attentionStore.resolveReplied(payload.sessionId, payload.eventId); } catch (err) { console.warn('[Bridge] Could not resolve replied attention:', err instanceof Error ? err.message : err); }
+                try {
+                  await deps.attentionStore.resolveReplied(payload.sessionId, payload.eventId);
+                  try { deps.publishAttentionChanged?.(payload.sessionId); } catch (err) { console.warn('[Bridge] Could not publish replied attention:', err instanceof Error ? err.message : err); }
+                } catch (err) { console.warn('[Bridge] Could not resolve replied attention:', err instanceof Error ? err.message : err); }
               }
               response = { requestId: command.requestId, success: true, data: { sessionId: session.id, messageId: result.id, status: 'queued' } satisfies SessionMessageAccepted };
             } else {
@@ -282,6 +287,9 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           const snapshot = command.type === 'get_session_attention'
             ? await deps.attentionStore.explicitSnapshot(payload.sessionId)
             : await deps.attentionStore.resolveExplicitThrough(payload.sessionId, payload.eventId as string);
+          if (command.type === 'resolve_session_attention') {
+            try { deps.publishAttentionChanged?.(payload.sessionId); } catch (err) { console.warn('[Bridge] Could not publish dismissed attention:', err instanceof Error ? err.message : err); }
+          }
           response = { requestId: command.requestId, success: true, data: { sessionId: payload.sessionId, ...snapshot } };
           break;
         }

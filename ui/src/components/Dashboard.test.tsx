@@ -21,6 +21,7 @@ const state = vi.hoisted(() => ({
   bridgeExec: vi.fn().mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 }),
   clearSessionAttention: vi.fn(),
   answerSessionAttention: vi.fn(),
+  refreshSessionAttention: vi.fn(),
   rpcCommands: [] as string[],
   terminalGetText: vi.fn(() => "terminal output"),
   terminalPaste: vi.fn(),
@@ -33,12 +34,12 @@ vi.mock("@/hooks/useSessions", () => ({ useSessions: () => ({
   renameSession: vi.fn(), setSessionParent: vi.fn(), refreshSessions: vi.fn(),
 }) }));
 vi.mock("@/hooks/useBridgeRpc", () => ({ useBridgeRpc: () => ({ bridgeExec: state.bridgeExec,
-  sendCommand: vi.fn().mockImplementation(async command => { state.rpcCommands.push(command.type); return { success: true, data: { sessionId: "ordinary", attention: null, sequence: 0 } }; }),
+  sendCommand: vi.fn().mockImplementation(async command => { state.rpcCommands.push(command.type); return command.type === "send_message" ? { success: true, data: { sessionId: "ordinary", messageId: "m1", status: "queued" } } : { success: true, data: { sessionId: "ordinary", attention: null, sequence: 0 } }; }),
   onSubscribed: () => () => {},
 }) }));
 vi.mock("@/hooks/useBridges", () => ({ useBridges: () => ({ bridges: state.bridges, hasBridges: true, prepareLocalAccess: vi.fn() }) }));
 vi.mock("@/hooks/useAllSessionEvents", () => ({ useAllSessionEvents: () => ({
-  sessionActivity: state.activity, markSessionIdle: vi.fn(), clearSessionAttention: state.clearSessionAttention, answerSessionAttention: state.answerSessionAttention,
+  sessionActivity: state.activity, markSessionIdle: vi.fn(), clearSessionAttention: state.clearSessionAttention, answerSessionAttention: state.answerSessionAttention, refreshSessionAttention: state.refreshSessionAttention,
 }) }));
 vi.mock("./Terminal", async () => {
   const { forwardRef, useImperativeHandle } = await import("react");
@@ -88,6 +89,7 @@ beforeEach(() => {
   state.rpcCommands = [];
   state.createSession.mockResolvedValue(undefined);
   state.clearSessionAttention.mockResolvedValue(undefined);
+  state.refreshSessionAttention.mockResolvedValue(undefined);
   state.sessions = [
     session("ordinary", "Regular shell"),
     session("legacy", "Preserved run", { loopId: "retired-loop", status: "error" }),
@@ -363,7 +365,7 @@ describe("inbox document title", () => {
     const notice2 = { ...notice1, title: "Review 2", receivedAt: 11 };
     state.activity = new Map([["ordinary", { activity: "idle", attention: notice2 }], ["worker", { activity: "idle", attention: notice2 }]]);
     fireEvent.click(screen.getByRole("tab", { name: "Terminal" }));
-    fireEvent.click(screen.getByRole("tab", { name: /^Workspace, 2 waiting$/ }));
+    fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
     await waitFor(() => expect(document.title).toBe("(2) ftown new"));
   });
 });
@@ -391,14 +393,15 @@ describe("inbox popup overlay", () => {
 });
 
 describe("mobile inbox badge", () => {
-  it("shows the workspace badge with an accessible waiting label off the sessions tab", async () => {
+  it("shows the workspace badge with an accessible waiting description off the sessions tab", async () => {
     window.matchMedia = vi.fn().mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() });
     dashboard();
     const notice = { type: "agent_needs_input" as const, title: "Review", message: "Inspect", receivedAt: 10 };
     state.activity = new Map([["ordinary", { activity: "idle", attention: notice }]]);
     fireEvent.click(screen.getByRole("tab", { name: "Terminal" }));
-    const workspaceTab = screen.getByRole("tab", { name: /^Workspace, 1 waiting$/ });
-    expect(workspaceTab.getAttribute("aria-label")).toBe("Workspace, 1 waiting");
+    const workspaceTab = screen.getByRole("tab", { name: "Workspace" });
+    expect(workspaceTab.getAttribute("aria-describedby")).toBe("mobile-tab-inbox-waiting");
+    expect(document.getElementById("mobile-tab-inbox-waiting")?.textContent).toBe("1 waiting");
     const badge = workspaceTab.querySelector(".mobile-tab-inbox-badge");
     expect(badge?.textContent).toBe("1");
   });
@@ -418,6 +421,29 @@ describe("inbox answers", () => {
     fireEvent.click(screen.getByLabelText("Safe")); fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
     await waitFor(() => expect(state.answerSessionAttention).toHaveBeenCalledExactlyOnceWith("ordinary", notice, [{ selected: [1] }]));
     expect((await screen.findAllByText("Answer delivered to Regular shell.")).length).toBeGreaterThan(0);
+  });
+  it("re-reads the snapshot after a stamped reply so the item drops", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    dashboard();
+    const notice = { type: "agent_needs_input" as const, title: "Review", message: "Inspect", receivedAt: 10, attentionId: "att-1", attentionSequence: 1 };
+    state.activity = new Map([["ordinary", { activity: "idle", attention: notice }]]);
+    fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 waiting" }));
+    fireEvent.change(screen.getByLabelText("Reply to Regular shell"), { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => expect(state.refreshSessionAttention).toHaveBeenCalledWith("ordinary"));
+  });
+  it("does not re-read after an unstamped reply", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    dashboard();
+    const notice = { type: "agent_needs_input" as const, title: "Review", message: "Inspect", receivedAt: 10 };
+    state.activity = new Map([["ordinary", { activity: "idle", attention: notice }]]);
+    fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 waiting" }));
+    fireEvent.change(screen.getByLabelText("Reply to Regular shell"), { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => expect(state.rpcCommands).toContain("send_message"));
+    expect(state.refreshSessionAttention).not.toHaveBeenCalled();
   });
 });
 

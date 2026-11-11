@@ -82,6 +82,8 @@ export interface AllSessionEvents {
   markSessionIdle: (sessionId: string) => void;
   clearSessionAttention: (sessionId: string, expected?: ManualInputNotice) => Promise<void>;
   answerSessionAttention: (sessionId: string, expected: ManualInputNotice, answers: AttentionAnswerEntry[]) => Promise<AnswerSessionAttentionResult>;
+  /** Re-read a session's durable attention snapshot (after a reply resolved it). */
+  refreshSessionAttention: (sessionId: string) => Promise<void>;
 }
 
 export type AnswerSessionAttentionResult =
@@ -253,7 +255,9 @@ export function useAllSessionEvents(
       // Prompt hooks have already resolved the ledger. Learn its watermark
       // even if the first read was pending and no displayed ID was known yet.
       // A finished AskUserQuestion was resolved by the bridge; learn that from a snapshot.
-      if (msg.eventName === "UserPromptSubmit" || msg.eventName === "beforeSubmitPrompt"
+      // AttentionSnapshot is the cross-tab signal for command resolutions
+      // (dismiss/reply); it only triggers a re-read, with no activity/clear.
+      if (msg.eventName === "UserPromptSubmit" || msg.eventName === "beforeSubmitPrompt" || msg.eventName === "AttentionSnapshot"
         || ((msg.eventName === "PostToolUse" || msg.eventName === "postToolUse" || msg.eventName === "postToolUseFailure")
           && isAskUserQuestionTool(extractToolLabel(msg.eventName, msg.data)))) void hydrate(sessionId);
     };
@@ -484,5 +488,9 @@ export function useAllSessionEvents(
     return effective;
   }, [activityMap, sessions]);
 
-  return { sessionActivity, markSessionIdle, clearSessionAttention, answerSessionAttention };
+  const refreshSessionAttention = useCallback(async (sessionId: string) => {
+    await readSnapshot(sessionId);
+  }, [readSnapshot]);
+
+  return { sessionActivity, markSessionIdle, clearSessionAttention, answerSessionAttention, refreshSessionAttention };
 }

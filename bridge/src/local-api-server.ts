@@ -20,7 +20,7 @@ import { sanitizeAttentionText } from './attention-events.js';
 import { parseAttentionPrompt } from './attention-prompt.js';
 import { ATTENTION_ITEM_WAIT_MAX_SECONDS, type AttentionPrompt } from './attention-prompt-protocol.js';
 import type { Session } from './types.js';
-import { MailDeliveryService, sanitizeMessageText, parseNativeWakeRegistration, NativeWakeRegistrationError, type AcceptMailResult, type NativeWakeRegistration } from './mail-delivery.js';
+import { MailDeliveryService, sanitizeMessageText, parseNativeWakeRegistration, NativeWakeRegistrationError, type AcceptMailResult } from './mail-delivery.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { TerminalManager } from './terminal-manager.js';
@@ -854,6 +854,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       }
 
       await controller.remove(sessionId);
+      this.mail.markSessionEnded(sessionId);
 
       jsonResponse(res, 200, { removed: true, sessionId });
       return;
@@ -1331,9 +1332,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return;
     }
 
-    let registration: NativeWakeRegistration | undefined;
     try {
-      registration = parseNativeWakeRegistration(url.searchParams);
+      const registration = parseNativeWakeRegistration(url.searchParams);
       if (registration) this.mail.registerNativeWake(session, registration);
     } catch (error) {
       if (!(error instanceof NativeWakeRegistrationError)) throw error;
@@ -1349,10 +1349,6 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     });
 
     if (result.kind === 'immediate') {
-      // Opencode hands mail to its plugin via this authenticated peek; its
-      // UserPromptSubmit hook carries no prompt text, so record the handoff for
-      // the no-prompt 15s rule (the prompt-text prefix rule cannot apply).
-      if (registration && result.messages.length > 0) this.mail.notePluginHandoff(sessionId);
       jsonResponse(res, 200, { messages: result.messages });
       return;
     }
@@ -1379,6 +1375,18 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         } catch { jsonResponse(res, 409, { error: 'invalid_native_target' }); }
         return;
       }
+      if (payload.hook_event_name === 'FtownWakeSubmitted') {
+        // Opencode announces the wake before submitting it (same 200 either way).
+        // Record only: never forwarded to the dashboard, never attention.
+        const submittedId = typeof payload.ftown_session_id === 'string' ? payload.ftown_session_id : undefined;
+        const submittedSource = typeof payload.ftown_session_source === 'string' ? payload.ftown_session_source : undefined;
+        if (submittedId && submittedSource !== 'workspace' && /^[a-zA-Z0-9_-]+$/.test(submittedId)
+          && await this.store?.loadSession(submittedId)) {
+          this.mail.notePluginHandoff(submittedId);
+        }
+        jsonResponse(res, 200, { ok: true });
+        return;
+      }
       const hookEventName = typeof payload.hook_event_name === 'string' ? payload.hook_event_name : undefined;
       let ftownSessionId = typeof payload.ftown_session_id === 'string' ? payload.ftown_session_id : undefined;
       let source = typeof payload.ftown_session_source === 'string' ? payload.ftown_session_source : undefined;
@@ -1402,7 +1410,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           isPromptSubmit ? { promptOrigin: injected ? 'injected' : 'human' } : undefined);
       }
       if (hookEventName === 'UserPromptSubmit' || hookEventName === 'PreToolUse' || hookEventName === 'PostToolUse') this.mail.markAgentBusy(ftownSessionId);
-      else if (hookEventName === 'Stop' || hookEventName === 'SessionEnd') this.mail.markAgentIdle(ftownSessionId);
+      else if (hookEventName === 'Stop') this.mail.markAgentIdle(ftownSessionId);
+      else if (hookEventName === 'SessionEnd') { this.mail.markAgentIdle(ftownSessionId); this.mail.markSessionEnded(ftownSessionId); }
       const conversationId = payload.conversation_id;
       if (typeof conversationId === 'string' && conversationId && source !== 'workspace') registerSessionConversation(ftownSessionId, conversationId);
       const hookEvent: HookEvent = { sessionId: ftownSessionId, eventName: hookEventName, data: {

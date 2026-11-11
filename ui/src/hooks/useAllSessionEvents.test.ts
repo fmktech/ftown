@@ -601,6 +601,27 @@ describe("structured attention questions", () => {
       payload: { bridgeId: "bridge", sessionId: "agent" } }));
   });
 
+  it("refreshSessionAttention clears after the bridge resolved the item", async () => {
+    let item: AnyItem | null = saved;
+    const h = durableSetup(async () => respond(item));
+    await settle();
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    item = null;
+    await act(async () => { await h.result.current.refreshSessionAttention("agent"); });
+    expect(h.current()?.attention).toBeUndefined();
+  });
+
+  it("AttentionSnapshot re-reads the snapshot so other tabs follow a reply", async () => {
+    let item: AnyItem | null = saved;
+    const h = durableSetup(async () => respond(item));
+    await settle();
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    item = null;
+    act(() => h.publish("AttentionSnapshot"));
+    await settle();
+    expect(h.current()?.attention).toBeUndefined();
+  });
+
   it("a snapshot without the question clears it", async () => {
     let item: AnyItem | null = asked;
     const h = durableSetup(async () => respond(item));

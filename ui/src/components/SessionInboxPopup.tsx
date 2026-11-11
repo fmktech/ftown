@@ -50,7 +50,7 @@ export function SessionInboxPopup({ entry, onOpenSession, onDismiss, onReply, on
   }
   return <div ref={regionRef} role="region" aria-label="Waiting for you" className="session-inbox-popup" onKeyDown={onEscape}>
     <div className="min-w-0 space-y-2" data-inbox-popup-entry={entry.session.id} key={noticeKey(entry.session.id, entry.notice)}>
-      <InboxItemBody entry={entry} onOpenSession={onOpenSession} onDismiss={onDismiss} onReply={onReply} onAnswer={onAnswer} />
+      <InboxItemBody entry={entry} onOpenSession={onOpenSession} onDismiss={onDismiss} onReply={onReply} onAnswer={onAnswer} hideOpenSession />
     </div>
     <button type="button" className="session-inbox-popup-hide btn-ghost min-h-11" onClick={collapse}>Hide</button>
   </div>;

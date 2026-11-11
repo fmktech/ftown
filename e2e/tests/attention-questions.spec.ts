@@ -68,7 +68,7 @@ async function createSession(name: string): Promise<string> {
 }
 
 async function openInboxEntry(page: Page, id: string, mobile: boolean, timeout?: number): Promise<{ inbox: Locator; item: Locator }> {
-  if (mobile) await page.getByRole("tab", { name: /^Workspace/ }).click();
+  if (mobile) await page.getByRole("tab", { name: "Workspace", exact: true }).click();
   const trigger = page.getByRole("button", { name: /^Inbox, \d+ (waiting|messages?)$/ });
   await expect(trigger).toBeVisible();
   await trigger.click();

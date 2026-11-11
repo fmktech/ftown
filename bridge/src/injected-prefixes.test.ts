@@ -37,6 +37,16 @@ describe('injected prompt prefixes (single source of truth)', () => {
     assert.ok(startsWithListedPrefix(match[1]), `opencode lead: ${JSON.stringify(match[1])}`);
   });
 
+  it('bridge OPENCODE wake equals the full opencode asset wake text', () => {
+    const path = join(BRIDGE_ROOT, 'opencode-plugin/ftown.js');
+    const source = readFileSync(path, 'utf8');
+    const exported = /export const MAIL_WAKE_TEXT = '([^']*)'/.exec(source);
+    assert.ok(exported, 'MAIL_WAKE_TEXT export not found in opencode asset');
+    const template = /`([^\`$]+)\$\{MAIL_WAKE_TEXT\}/.exec(source);
+    assert.ok(template, 'opencode wake template not found');
+    assert.equal(OPENCODE_MAIL_WAKE_TEXT, `${template[1]}${exported[1]}`, 'bridge OPENCODE wake must equal the asset full text');
+  });
+
   it('pi static wake starts with a listed prefix', () => {
     const path = join(BRIDGE_ROOT, 'pi-extension/ftown.js');
     assert.ok(existsSync(path), `missing ${path}`);
