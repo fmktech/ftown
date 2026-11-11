@@ -2570,6 +2570,27 @@ describe("LedgerClient divergence", () => {
   });
 });
 
+describe("LedgerClient peers view", () => {
+  it("setPeers sets snapshot.peers (default: nothing known) and nothing else; learnChain's `from` names the peer in its one warning", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    expect(a.client.snapshot().peers).toEqual({ head: "", confirmed: [], online: [], diverged: [] });
+    const before = a.client.snapshot();
+    const posts = server.posts.length;
+    const view = { head: before.checkpoint?.head ?? "", confirmed: [{ kind: "bridge" as const, id: "studio", at: 1 }], online: ["studio"], diverged: [] };
+    a.client.setPeers(view);
+    expect(a.client.snapshot()).toEqual({ ...before, peers: view });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const forged = wire(await addDevices(current(server), authenticator, accountId, 2));
+    forged.transitions[forged.transitions.length - 1].signature = forged.transitions[forged.transitions.length - 2].signature;
+    expect(await a.client.learnChain(forged, "peer", "bridge studio-m")).toBe("invalid");
+    expect(await a.client.learnChain(forged, "peer", "bridge studio-m")).toBe("invalid");
+    expect(warn.mock.calls.map(call => call[0])).toEqual(["[ledger] ignored an invalid chain from bridge studio-m"]);
+    await quiet();
+    expect(server.posts).toHaveLength(posts);
+    expect(a.client.snapshot().peers).toEqual(view);
+  });
+});
+
 describe("LedgerClient signer", () => {
   it("is the only authority without a prompt, and otherwise the credential learned from a prompt", async () => {
     const { server, authenticator, a } = await owner();
