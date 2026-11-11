@@ -320,7 +320,7 @@ describe("attention navigation preserves the request", () => {
     for (let i = 0; i < 2; i++) {
       fireEvent.click(original); expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
       fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
-      fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 message" }));
+      fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 waiting" }));
       expect(screen.getByText("Inspect the result before continuing")).toBeTruthy();
       expect(state.clearSessionAttention).not.toHaveBeenCalled();
       const openSession = screen.getByRole("button", { name: "Open session" }); openSession.focus(); expect(document.activeElement).toBe(openSession);
@@ -329,12 +329,50 @@ describe("attention navigation preserves the request", () => {
       expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
       fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
     }
-    fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 message" }));
+    fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 waiting" }));
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
     await waitFor(() => expect(state.clearSessionAttention).toHaveBeenCalledExactlyOnceWith("ordinary", notice));
   });
 });
 
+
+describe("inbox document title", () => {
+  it("prefixes the title with the waiting count and restores it at zero", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    document.title = "ftown base";
+    dashboard();
+    expect(document.title).toBe("ftown base");
+    const notice = { type: "agent_needs_input" as const, title: "Review", message: "Inspect", receivedAt: 10 };
+    state.activity = new Map([["ordinary", { activity: "idle", attention: notice }]]);
+    fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+    await waitFor(() => expect(document.title).toBe("(1) ftown base"));
+    state.activity = new Map();
+    fireEvent.click(screen.getByRole("tab", { name: "Terminal" }));
+    await waitFor(() => expect(document.title).toBe("ftown base"));
+  });
+});
+
+describe("inbox popup overlay", () => {
+  it("shows for the selected session, hides while the Inbox page is open or another session is selected", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    const { container } = dashboard();
+    fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
+    const notice = { type: "agent_needs_input" as const, title: "Review", message: "Inspect", receivedAt: 10 };
+    state.activity = new Map([["ordinary", { activity: "idle", attention: notice }]]);
+    fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+    const region = screen.getByRole("region", { name: "Waiting for you" });
+    expect(region.textContent).toContain("Inspect");
+    expect(region.contains(document.activeElement)).toBe(false);
+    expect(container.querySelector('[data-testid="terminal"]')).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 waiting" }));
+    expect(screen.getByRole("heading", { name: "Inbox" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Waiting for you" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Back to workspace" }));
+    expect(screen.getByRole("region", { name: "Waiting for you" })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: /project-t42-implement/ }));
+    expect(screen.queryByRole("region", { name: "Waiting for you" })).toBeNull();
+  });
+});
 
 describe("inbox answers", () => {
   it("submits a prompted answer through answerSessionAttention and maps the delivery", async () => {
@@ -345,7 +383,7 @@ describe("inbox answers", () => {
       prompt: { channel: "mail" as const, questions: [{ question: "Which path?", options: [{ label: "Fast" }, { label: "Safe" }], multiSelect: false, allowText: false }] } };
     state.activity = new Map([["ordinary", { activity: "idle", attention: notice }]]);
     fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 message" }));
+    fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 waiting" }));
     expect(screen.queryByRole("button", { name: "Send reply" })).toBeNull();
     fireEvent.click(screen.getByLabelText("Safe")); fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
     await waitFor(() => expect(state.answerSessionAttention).toHaveBeenCalledExactlyOnceWith("ordinary", notice, [{ selected: [1] }]));

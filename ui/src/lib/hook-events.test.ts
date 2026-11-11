@@ -128,6 +128,20 @@ describe("current attention lifecycle", () => {
     }
   });
 
+  it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("an injected %s clears no notice type", (event) => {
+    for (const type of ["agent_needs_input", "permission_prompt", "elicitation_dialog", "ask_user"] as const) {
+      expect(clearsManualInputNotice(event, { injected: true }, notice(type))).toBe(false);
+    }
+    const durable: ManualInputNotice = { type: "agent_needs_input", title: "t", message: "m", receivedAt: 1, attentionId: "a1", attentionSequence: 1 };
+    expect(clearsManualInputNotice(event, { injected: true }, durable)).toBe(false);
+    const durableQuestion: ManualInputNotice = { type: "ask_user", title: "t", message: "m", receivedAt: 1, attentionId: "a1", attentionSequence: 1,
+      prompt: { channel: "hook", questions: [{ question: "Q", options: [{ label: "A" }], multiSelect: false, allowText: false }] } };
+    expect(clearsManualInputNotice(event, { injected: true }, durableQuestion)).toBe(false);
+    // Human clears durable agent_needs_input but not a durable question.
+    expect(clearsManualInputNotice(event, {}, durable)).toBe(true);
+    expect(clearsManualInputNotice(event, {}, durableQuestion)).toBe(false);
+  });
+
   it.each(["permission_prompt", "elicitation_dialog", "ask_user"] as const)("preserves the legacy %s tool-completion lifecycle", (type) => {
     for (const event of ["PostToolUse", "postToolUse", "postToolUseFailure"]) {
       expect(clearsManualInputNotice(event, {}, notice(type))).toBe(true);

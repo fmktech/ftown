@@ -206,12 +206,9 @@ export function useAllSessionEvents(
       setActivityMap((prev) => {
         if (clientRef.current !== c || userIdRef.current !== u || subsRef.current.get(sessionId)?.sub !== sub) return prev;
         const current = prev.get(sessionId) ?? { activity: "idle" as const };
-        // Use the latest queued notice, including a Notification from this React batch.
-        // A delayed prompt publication may predate an already restored newer
-        // request. Only the committed snapshot can resolve a stamped notice.
-        const durablePrompt = (msg.eventName === "UserPromptSubmit" || msg.eventName === "beforeSubmitPrompt")
-          && current.attention?.type === "agent_needs_input" && !!current.attention.attentionId;
-        const clearsAttention = !durablePrompt && clearsManualInputNotice(msg.eventName, msg.data, current.attention);
+        // A human prompt clears agent_needs_input locally; an injected prompt clears
+        // nothing (clearsManualInputNotice returns false) and the snapshot keeps the item.
+        const clearsAttention = clearsManualInputNotice(msg.eventName, msg.data, current.attention);
         if (!activity && !attention && !clearsAttention) return prev;
         const toolName =
           activity === "tool_use"

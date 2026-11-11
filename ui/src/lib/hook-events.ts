@@ -154,6 +154,8 @@ export function clearsManualInputNotice(
   data: Record<string, unknown>,
   currentNotice?: ManualInputNotice,
 ): boolean {
+  // An injected prompt (bridge-typed mail pointer) is not a human answering.
+  if ((eventName === "UserPromptSubmit" || eventName === "beforeSubmitPrompt") && data.injected === true) return false;
   // A stamped question is resolved by the bridge (user prompt / tool complete)
   // before the event is published; only a snapshot re-read may clear it.
   if (currentNotice?.type === "ask_user" && isDurableNotice(currentNotice)) return false;

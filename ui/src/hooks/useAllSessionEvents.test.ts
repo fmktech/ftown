@@ -351,13 +351,25 @@ describe("durable explicit attention restoration", () => {
     expect(h.current()?.attention).toBeUndefined();
   });
 
-  it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("preserves a newer restored request when an older %s publication arrives later", async event => {
+  it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("a human %s clears a restored request locally", async event => {
     const reread = deferred();
     let reads = 0;
     const h = durableSetup(() => ++reads === 1 ? Promise.resolve(reply(newer)) : reread.promise);
     await settle();
     expect(h.current()?.attention?.attentionId).toBe(newer.id);
     act(() => h.publish(event));
+    expect(h.current()?.attention).toBeUndefined();
+    await act(async () => reread.resolve(reply(null)));
+    expect(h.current()?.attention).toBeUndefined();
+  });
+
+  it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("preserves a newer restored request when an older injected %s publication arrives later", async event => {
+    const reread = deferred();
+    let reads = 0;
+    const h = durableSetup(() => ++reads === 1 ? Promise.resolve(reply(newer)) : reread.promise);
+    await settle();
+    expect(h.current()?.attention?.attentionId).toBe(newer.id);
+    act(() => h.publish(event, { injected: true }));
     expect(h.current()?.attention?.attentionId).toBe(newer.id);
     await act(async () => reread.resolve(reply(newer)));
     expect(h.current()?.attention?.attentionId).toBe(newer.id);
@@ -574,6 +586,17 @@ describe("structured attention questions", () => {
     await act(async () => { h.publish("UserPromptSubmit"); await Promise.resolve(); });
     await settle();
     expect(h.current()?.attention?.attentionId).toBe("ask-1");
+  });
+
+  it("keeps an entry across an injected prompt and the snapshot re-read", async () => {
+    const h = durableSetup(async () => respond(saved));
+    await settle();
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    await act(async () => { h.publish("UserPromptSubmit", { injected: true }); await Promise.resolve(); });
+    await settle();
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    expect(h.rpc.sendCommand).toHaveBeenCalledWith(expect.objectContaining({ type: "get_session_attention",
+      payload: { bridgeId: "bridge", sessionId: "agent" } }));
   });
 
   it("a snapshot without the question clears it", async () => {

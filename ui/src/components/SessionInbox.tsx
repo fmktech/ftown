@@ -14,7 +14,10 @@ export interface InboxEntry { session: Session; notice: ManualInputNotice; bridg
 /** Queue exactly one browser reply; ambiguous outcomes require an explicit user decision. */
 export async function queueSessionReply(send: (command: Command) => Promise<CommandResponse>, entry: InboxEntry, message: string): Promise<void> {
   let response: CommandResponse;
-  try { response = await send({ type: "send_message", requestId: uuidv4(), payload: { bridgeId: entry.session.bridgeId, sessionId: entry.session.id, message } }); }
+  const payload = entry.notice.attentionId
+    ? { bridgeId: entry.session.bridgeId, sessionId: entry.session.id, message, eventId: entry.notice.attentionId }
+    : { bridgeId: entry.session.bridgeId, sessionId: entry.session.id, message };
+  try { response = await send({ type: "send_message", requestId: uuidv4(), payload }); }
   catch { throw new Error("Reply may have been queued. Check the session before sending again."); }
   const data = response.data && typeof response.data === "object" && !Array.isArray(response.data) ? response.data as Record<string, unknown> : null;
   if (response.success) {
@@ -59,7 +62,7 @@ export function inboxEntries(sessions: readonly Session[], activity: ReadonlyMap
   }).sort((a, b) => b.notice.receivedAt - a.notice.receivedAt);
 }
 
-function InboxItem({ entry, onOpenSession, onDismiss, onReply, onAnswer }: { entry: InboxEntry; onOpenSession: (id: string) => void; onDismiss: (entry: InboxEntry) => Promise<void>; onReply: (entry: InboxEntry, message: string) => Promise<void>; onAnswer: (entry: InboxEntry, answers: AttentionAnswerEntry[]) => Promise<AttentionAnswerSubmitResult> }) {
+export function InboxItemBody({ entry, onOpenSession, onDismiss, onReply, onAnswer }: { entry: InboxEntry; onOpenSession: (id: string) => void; onDismiss: (entry: InboxEntry) => Promise<void>; onReply: (entry: InboxEntry, message: string) => Promise<void>; onAnswer: (entry: InboxEntry, answers: AttentionAnswerEntry[]) => Promise<AttentionAnswerSubmitResult> }) {
   const [draft, setDraft] = useState(""); const [message, setMessage] = useState(""); const [error, setError] = useState("");
   const [sending, setSending] = useState(false); const [dismissing, setDismissing] = useState(false);
   const sendingRef = useRef(false), dismissingRef = useRef(false);
@@ -83,7 +86,7 @@ function InboxItem({ entry, onOpenSession, onDismiss, onReply, onAnswer }: { ent
   const hookPrompt = prompt?.channel === "hook";
   const normalizeText = (text?: string) => (text ?? "").trim().replace(/\s+/g, " ");
   const messageDuplicatesQuestion = !!prompt && prompt.questions.length === 1 && normalizeText(entry.notice.message) === normalizeText(prompt.questions[0].question);
-  return <article data-inbox-entry={entry.session.id} className="min-w-0 space-y-2 rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)] p-3">
+  return <>
     <div className="min-w-0"><h3 className="break-words text-sm font-semibold [overflow-wrap:anywhere]">{name}</h3><p className="break-words text-xs text-[var(--text-muted)] [overflow-wrap:anywhere]">{entry.bridgeName} · <time dateTime={new Date(entry.notice.receivedAt).toISOString()}>{new Date(entry.notice.receivedAt).toLocaleString()}</time></p></div>
     <p className="break-words text-sm font-semibold [overflow-wrap:anywhere]">{entry.notice.title}</p>
     {!messageDuplicatesQuestion && <p className="whitespace-pre-wrap text-sm [overflow-wrap:anywhere]">{entry.notice.message}</p>}
@@ -94,11 +97,30 @@ function InboxItem({ entry, onOpenSession, onDismiss, onReply, onAnswer }: { ent
     <button type="button" className="btn-accent min-h-11" disabled={sending || !!entry.replyDisabledReason || !draft.trim()} onClick={() => void send()}>{sending ? "Sending…" : "Send reply"}</button>
     </>}
     {message && <p role="status" className="text-xs text-[var(--text-muted)]">{message}</p>}{error && <p role="alert" className="text-xs text-[var(--status-error)]">{error}</p>}
+  </>;
+}
+
+function InboxItem({ entry, onOpenSession, onDismiss, onReply, onAnswer }: { entry: InboxEntry; onOpenSession: (id: string) => void; onDismiss: (entry: InboxEntry) => Promise<void>; onReply: (entry: InboxEntry, message: string) => Promise<void>; onAnswer: (entry: InboxEntry, answers: AttentionAnswerEntry[]) => Promise<AttentionAnswerSubmitResult> }) {
+  return <article data-inbox-entry={entry.session.id} className="min-w-0 space-y-2 rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)] p-3">
+    <InboxItemBody entry={entry} onOpenSession={onOpenSession} onDismiss={onDismiss} onReply={onReply} onAnswer={onAnswer} />
   </article>;
 }
 export function SessionInboxTrigger({ count, collapsed, open, onOpen, buttonRef }: { count: number; collapsed: boolean; open: boolean; onOpen: () => void; buttonRef?: RefObject<HTMLButtonElement | null> }) {
-  return <button ref={buttonRef} type="button" aria-label={`Inbox, ${count} ${count === 1 ? "message" : "messages"}`} aria-pressed={open} title="Inbox" className={`flex min-h-11 w-full items-center gap-2 border-b border-[var(--border-muted)] px-3 text-left text-xs text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] ${collapsed ? "justify-center" : ""}`} onClick={onOpen}>
-    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h16v16H4zM4 14h5l2 3h2l2-3h5"/></svg>{!collapsed && <span>Inbox</span>}<span aria-hidden="true" className="font-semibold tabular-nums">{count}</span>
+  const hasItems = count > 0;
+  const prevCount = useRef(0);
+  const [flash, setFlash] = useState(false);
+  useEffect(() => {
+    const prev = prevCount.current;
+    prevCount.current = count;
+    if (count > prev && count > 0) {
+      setFlash(true);
+      const timer = setTimeout(() => setFlash(false), 1200);
+      return () => clearTimeout(timer);
+    }
+  }, [count]);
+  const label = hasItems ? `Inbox, ${count} waiting` : `Inbox, ${count} ${count === 1 ? "message" : "messages"}`;
+  return <button ref={buttonRef} type="button" aria-label={label} aria-pressed={open} title="Inbox" className={`flex min-h-11 w-full items-center gap-2 border-b px-3 text-left text-xs hover:bg-[var(--bg-hover)] ${hasItems ? "session-inbox-trigger-active" : "border-[var(--border-muted)] text-[var(--text-secondary)]"} ${flash && hasItems ? "session-inbox-trigger-flash" : ""} ${collapsed ? "justify-center" : ""}`} onClick={onOpen}>
+    <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h16v16H4zM4 14h5l2 3h2l2-3h5"/></svg>{!collapsed && <span className={hasItems ? "session-inbox-trigger-label" : ""}>Inbox</span>}{hasItems ? <span aria-hidden="true" className="session-inbox-trigger-pill">{count}</span> : <span aria-hidden="true" className="font-semibold tabular-nums" style={collapsed ? undefined : { marginLeft: "auto" }}>{count}</span>}
   </button>;
 }
 

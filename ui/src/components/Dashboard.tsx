@@ -19,6 +19,7 @@ import { SessionList } from "./SessionList";
 import type { AttentionAnswerEntry } from "../../../bridge/src/attention-prompt-protocol";
 import type { AttentionAnswerSubmitResult } from "./AttentionAnswerForm";
 import { SessionInboxPage, SessionInboxTrigger, inboxEntries, noticeKey, queueSessionReply, attentionAnswerSubmitResult, type InboxEntry } from "./SessionInbox";
+import { SessionInboxPopup } from "./SessionInboxPopup";
 import { PullRequestStatusProvider } from "./PullRequestStatusProvider";
 import { SessionWorkspace } from "./SessionWorkspace";
 import { parsePullRequestUrl } from "@/lib/pull-request-url";
@@ -550,6 +551,13 @@ PY`;
   const inboxReady = connectionStatus === "connected" ? new Set(readyBridges.map(bridge => bridge.bridgeId)) : new Set<string>();
   const canReply = (bridgeId: string) => !!securityRuntime?.bridge(bridgeId)?.permissions.includes("control");
   const inbox = inboxEntries(sessions, sessionActivity, bridges, hiddenSessionIds, hiddenBridgeIds, inboxReady, canReply);
+  const baseTitleRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (baseTitleRef.current === null) baseTitleRef.current = document.title;
+    const base = baseTitleRef.current;
+    document.title = inbox.length > 0 ? `(${inbox.length}) ${base}` : base;
+    return () => { document.title = base; };
+  }, [inbox.length]);
   const replyToInbox = async (entry: InboxEntry, message: string) => {
     const current = sessions.find(session => session.id === entry.session.id && session.bridgeId === entry.session.bridgeId);
     const notice = sessionActivity.get(entry.session.id)?.attention;
@@ -1030,7 +1038,7 @@ PY`;
           className={`mobile-tab ${mobileTab === "sessions" ? "mobile-tab-active" : ""}`} role="tab" tabIndex={mobileTab === "sessions" ? 0 : -1} aria-selected={mobileTab === "sessions"}
           onClick={() => handleMobileTabSwitch("sessions")}
         >
-          Workspace
+          Workspace{inbox.length > 0 && mobileTab !== "sessions" ? <span aria-hidden="true" className="mobile-tab-inbox-badge" style={{ marginLeft: 6, display: "inline-flex", alignItems: "center", justifyContent: "center", minWidth: 20, height: 20, padding: "0 5px", borderRadius: 9999, background: "var(--accent)", color: "var(--bg-void)", fontSize: 11, fontWeight: 700 }}>{inbox.length}</span> : null}
         </button>
         <button
           className={`mobile-tab ${mobileTab === "terminal" ? "mobile-tab-active" : ""}`}
@@ -1199,7 +1207,7 @@ PY`;
         <main aria-hidden={!isDesktop && mobileTab === "sessions" && !inboxOpen} className={`flex-1 flex-col min-h-0 min-w-0 ${mobileTab !== "sessions" || inboxOpen ? "flex" : "hidden"} md:flex`}>
           <SessionInboxPage entries={inbox} open={inboxOpen} onClose={() => { restoreInboxFocusRef.current = true; setInboxOpen(false); scheduleTerminalRenderAdjustment(); }}
             onOpenSession={id => { focusOpenedSessionRef.current = true; handleSelectSession(id); setMobileTab("terminal"); scheduleTerminalRenderAdjustment(); }} onDismiss={entry => clearSessionAttention(entry.session.id, entry.notice)} onReply={replyToInbox} onAnswer={answerInbox} />
-          <div ref={workspaceFocusRef} role="region" aria-label={`Session workspace: ${selectedSession?.name || selectedSession?.prompt?.slice(0, 48) || "Session"}`} tabIndex={-1} className="min-h-0 min-w-0 flex-1 flex-col focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)]" style={{ display: inboxOpen ? "none" : "flex" }} aria-hidden={inboxOpen}>
+          <div ref={workspaceFocusRef} role="region" aria-label={`Session workspace: ${selectedSession?.name || selectedSession?.prompt?.slice(0, 48) || "Session"}`} tabIndex={-1} className="relative min-h-0 min-w-0 flex-1 flex-col focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)]" style={{ display: inboxOpen ? "none" : "flex" }} aria-hidden={inboxOpen}>
           <SessionWorkspace session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabSwitch} onRefit={refitPreviewTerminal} reviewOpen={reviewOpen} reviewActivation={reviewChoice.activation} onCloseReview={closeReview}>
           <Terminal
             ref={terminalRef}
@@ -1220,6 +1228,7 @@ PY`;
             <MobileControlBar ref={mobileControlRef} onSendInput={(data) => terminalRef.current?.sendInput(data)} onPaste={handleMobilePaste} onHostPaste={hostPasteAvailable ? handleHostPaste : undefined} onSelectText={handleMobileSelectText} />
           )}
           </SessionWorkspace>
+          <SessionInboxPopup entry={!inboxOpen && selectedSession && (isDesktop || mobileTab === "terminal") ? inbox.find(e => e.session.id === selectedSession.id) ?? null : null} onOpenSession={id => { focusOpenedSessionRef.current = true; handleSelectSession(id); setMobileTab("terminal"); scheduleTerminalRenderAdjustment(); }} onDismiss={entry => clearSessionAttention(entry.session.id, entry.notice)} onReply={replyToInbox} onAnswer={answerInbox} onReturnFocus={() => workspaceFocusRef.current?.focus()} />
           </div>
         </main>
 
