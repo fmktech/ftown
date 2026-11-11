@@ -27,13 +27,22 @@ import type { DivergentChain, LedgerReplica, LedgerSource, PendingWriteRecord, R
  *   landed first) is adopted and the record dropped (write_conflict; it is kept in discarded() for signing again, never re-signed
  *   automatically). A failed or refused request keeps it pending: it is retried with the re-offer pacing below while the local chain is
  *   still the head it was signed on, delivered once the server's chain holds it, and dropped (write_conflict) once the local chain moved.
+ *   A pending record is verified again before it is sent; the owner can withdraw it (discardPending).
+ * - A signed removal is enforced on this browser at once, before the server has it (the replica's local block, snapshot.blocked): from
+ *   the pending write, and from a dropped or withdrawn removal until its discarded entry is dismissed or the chain holds it. It is never
+ *   part of the chain or of what is sent.
+ * - No POST of a bound account's chain leaves without `expectHead` (with no server state known, it waits for the next read). Before each
+ *   send the persisted state is read again: another tab may have sent, withdrawn or forgotten it. A write left pending at forget() is
+ *   held while signed out and sent after the next sign-in of the same account.
  * - Re-offer: when a server read or a POST answer shows the server's chain `behind` the local one (a rolled-back database), the client
  *   POSTs its own chain again, without a prompt: one run at a time on the exclusive() queue, the same (candidate, server) pair at most
  *   once per 30 s, failures backed off (30 s doubling to 10 min, ±20%, never sooner than Retry-After) by one retry timer. Every attempt
  *   first reads the server again (so a deleted account, or a revocation of this very browser made elsewhere, is seen before anything is
  *   sent) and then POSTs with `expectHead`: the server refuses (409 head_changed) if its chain moved since, and never creates an account
  *   for it (404 account_unknown). The pending write is delivered by the same runs (local + record).
- * - Nothing is POSTed or re-offered while a divergence holds, and user writes are refused with ledger_diverged.
+ * - Nothing is POSTed or re-offered while a divergence holds, and user writes are refused with ledger_diverged; resolveDivergence resolves
+ *   exactly the divergence the owner was shown, and keeps its signed bundle for a retry after a failed request. A branch the local
+ *   chain's own resolution discarded exactly never raises the divergence again; a server holding it gets the resolved chain re-offered.
  * Relay input is not proof of the server's state (anyone holding a token can publish on the channel): an older head or a shorter
  * pushed chain only causes a paced read, and that read decides. An invalid chain from anywhere is ignored (one console.warn).
  * Backoff, pair memory and the retry timer are per tab (per LedgerClient); the pending write is persisted with the replica, so every tab
@@ -78,9 +87,10 @@ export interface LedgerWriteTarget { operation: LedgerOperation["type"]; deviceI
 /** The one passkey-signed change the server has not accepted yet. `since`: when it was signed (epoch ms). */
 export interface LedgerPendingWrite extends LedgerWriteTarget { since: number }
 /**
- * The last signed change that was dropped without becoming part of the account (its record is in `discarded` for signing again).
- * `reason`: write_conflict (another change landed first: confirm again), ledger_diverged (a different history appeared), or the code of
- * a definitive refusal (ledger_rejected, ledger_limit, registration_closed). `at`: when it was dropped (epoch ms).
+ * The last signed change that was dropped without becoming part of the account (its record is in `discarded` for signing again; a
+ * removal stays enforced on this browser until that entry is dismissed). `reason`: write_conflict (another change landed first: confirm
+ * again), ledger_diverged (a different history appeared), discarded (the owner withdrew it, see discardPending), or the code of a
+ * definitive refusal (ledger_rejected, ledger_limit, registration_closed). `at`: when it was dropped (epoch ms).
  */
 export interface LedgerWriteConflict extends LedgerWriteTarget { at: number; reason: string }
 /**
@@ -92,21 +102,26 @@ export interface LedgerWriteConflict extends LedgerWriteTarget { at: number; rea
 export interface LedgerDivergenceSide { carry: LedgerOperation[]; canKeep: boolean; reason: string | null }
 /**
  * A valid history of the account that diverges from the local chain. `source`: where it was learnt (the server's read or answer, a
- * relay push, or a peer through learnChain). `fork`: describeFork(local, other). `mine` / `theirs`: what keeping this browser's history
- * or the other one takes (see LedgerDivergenceSide).
+ * relay push, or a peer through learnChain). `otherHead`: the head of `other` (pass it, with `source`, to resolveDivergence). `fork`:
+ * describeFork(local, other). `mine` / `theirs`: what keeping this browser's history or the other one takes (see LedgerDivergenceSide).
+ * `abandoned[i]`: fork.theirs[i] is a record this browser signed itself and dropped (it is in discarded(): never saved). `recommend`:
+ * 'mine' when every record of the other history after the fork is such an abandoned record, else null.
  */
 export interface LedgerDivergence {
   other: Ledger;
+  otherHead: string;
   source: LedgerSource;
   fork: LedgerFork;
   firstSeen: number;
   mine: LedgerDivergenceSide;
   theirs: LedgerDivergenceSide;
+  abandoned: boolean[];
+  recommend: "mine" | null;
 }
 export interface LedgerClientSnapshot {
   /** device_revoked: the account is known but this browser's keys are revoked (or replaced); see rotateDeviceIdentity(). */
   status: "signed_out" | "ready" | "device_revoked" | "error";
-  /** trusted(): sticky revocations applied. */
+  /** trusted(): sticky revocations and the local block (`blocked`) applied. */
   checkpoint: LedgerCheckpoint | null;
   /** Records to sign again (own signed changes the server never took, local records a resolve_fork dropped); persisted until dismissed or effective. */
   discarded: Signed<LedgerTransition>[];
@@ -121,10 +136,20 @@ export interface LedgerClientSnapshot {
    * placeholder, test fixtures).
    */
   /**
-   * The signed change waiting for the server (never part of `checkpoint`: until the server accepts it, nothing has changed). Hidden
-   * while its first request is in flight. Null when none. While it is set every other user write is refused with write_pending.
+   * The signed change waiting for the server (not in the chain until the server accepts it; a removal is enforced on this browser at
+   * once, see `blocked`). Null when none. While it is set every other user write is refused with write_pending (see discardPending).
    */
   pendingWrite?: LedgerPendingWrite | null;
+  /**
+   * Ids enforced on this browser only because the owner signed their removal and the account does not hold it: the pending write's target
+   * and every removal in `discarded`. Not in the chain, not in localOnly; lifted when the removal is in the chain or its discarded entry is
+   * dismissed.
+   */
+  blocked?: { deviceIds: string[]; bridgeIds: string[] };
+  /** The server answered that the account does not exist (404), and no read found it since: a pending write cannot be saved (discard it). */
+  accountMissing?: boolean;
+  /** Which history the owner chose in a signed resolution that the server has not taken yet (retried by itself), or null. */
+  resolutionPending?: "mine" | "theirs" | null;
   /** The last signed change dropped without being saved (see LedgerWriteConflict), until the next user write, dismissDiscarded() or forget(). */
   lastConflict?: LedgerWriteConflict | null;
   /** A valid different history of the account (see LedgerDivergence), or null. While set nothing is sent and user writes are refused. */
@@ -206,8 +231,13 @@ class StoreError extends Error {
 }
 /** The result of one POST of the pending write (see sendPending). */
 type Delivery = { kind: "delivered" } | { kind: "dropped"; code: string } | { kind: "kept"; code: string; retryAfterMs?: number; answered: boolean };
-/** What reconcilePending found: no pending write, one still deliverable, or one it just settled. */
-type Reconciled = "none" | "live" | "delivered" | "write_conflict" | "ledger_diverged";
+/** What reconcilePending found: no pending write, one still deliverable, or one it just settled (ledger_rejected: its record does not verify). */
+type Reconciled = "none" | "live" | "delivered" | "write_conflict" | "ledger_diverged" | "ledger_rejected";
+/**
+ * A signed resolution the server has not taken (see resolveDivergence): retried while the local chain and the divergent chain it resolves
+ * are unchanged. `chain`: chosen + carried records + resolution.
+ */
+interface ResolutionBundle { keep: "mine" | "theirs"; source: LedgerSource; otherHead: string; localHead: string; chain: Ledger; record: Signed<LedgerTransition> }
 function targetOf(operation: LedgerOperation): LedgerWriteTarget {
   switch (operation.type) {
     case "revoke_device": return { operation: operation.type, deviceId: operation.endpointId };
@@ -344,10 +374,14 @@ interface PendingEnrollment extends Base { credentialId: string; creating: boole
 interface PendingAuthority { accountId: string; credentialId: string; publicKey: string; label: string; consent: PasskeySignature | null }
 interface Device { identity: EndpointIdentity; key: { publicKey: string; privateKey: CryptoKey } }
 interface HttpResult { status: number; value: unknown; retryAfterMs?: number }
-/** What the server held at its last recorded answer: the chain's head and revision and every id that chain revokes. */
-interface ServerView { accountId: string; head: string; revision: number; revokedDeviceIds: string[]; revokedBridgeIds: string[] }
+/**
+ * What the server held at its last recorded answer: the chain's head and revision and every id that chain revokes. `covered`: a valid
+ * other history that a resolve_fork of the local chain already discarded exactly; the local chain is then re-offered to it like to a
+ * server that is behind.
+ */
+interface ServerView { accountId: string; head: string; revision: number; revokedDeviceIds: string[]; revokedBridgeIds: string[]; covered: boolean }
 /** The snapshot's divergence, computed for this local head and this other chain (describeFork and both resolution plans). */
-interface DivergenceView { localHead: string; source: LedgerSource; entry: DivergentChain; value: LedgerDivergence }
+interface DivergenceView { localHead: string; source: LedgerSource; entry: DivergentChain; abandonedKey: string; value: LedgerDivergence }
 const NO_IDS = (): { deviceIds: string[]; bridgeIds: string[] } => ({ deviceIds: [], bridgeIds: [] });
 
 export class LedgerClient {
@@ -404,14 +438,17 @@ export class LedgerClient {
   private warnedStep = 0;
   private disposed = false;
   /**
-   * Write state (see the header). `lastConflict`: snapshot.lastConflict. `sending`: the pending record during its first POST (hidden
-   * from the snapshot meanwhile). `settled`: what reconcilePending last decided about the record sendPending is sending. `divergenceView`:
-   * snapshot.divergence, recomputed after every replica change. `hookDepth`: >0 while a beforeSign hook runs (learnChain then skips the
-   * queue that write holds). `warnedInvalid`: invalid chains already warned about.
+   * Write state (see the header). `lastConflict`: snapshot.lastConflict. `settled`: what reconcilePending last decided about the record
+   * sendPending is sending. `verifiedPending`: the pending record (signature) last checked on top of the local head (head). `accountMissing`:
+   * snapshot.accountMissing. `resolution`: the signed resolution awaiting the server. `divergenceView`: snapshot.divergence, recomputed
+   * after every replica change. `hookDepth`: >0 while a beforeSign hook runs (learnChain then skips the queue that write holds).
+   * `warnedInvalid`: invalid chains already warned about.
    */
   private lastConflict: LedgerWriteConflict | null = null;
-  private sending: Signed<LedgerTransition> | null = null;
   private settled: { record: Signed<LedgerTransition>; result: Reconciled } | null = null;
+  private verifiedPending: { signature: string; head: string } | null = null;
+  private accountMissing = false;
+  private resolution: ResolutionBundle | null = null;
   private divergenceView: DivergenceView | null = null;
   private otherCheckpoint: { head: string; checkpoint: LedgerCheckpoint } | null = null;
   private hookDepth = 0;
@@ -451,6 +488,7 @@ export class LedgerClient {
           if (revision >= 0) {
             this.server = {
               accountId: raw.checkpoint.accountId, head: confirmed.head, revision, revokedDeviceIds: confirmed.revokedDeviceIds, revokedBridgeIds: confirmed.revokedBridgeIds,
+              covered: false,
             };
           }
         }
@@ -636,7 +674,8 @@ export class LedgerClient {
         } else if (bound !== null) {
           await this.sendNew(base, signed);
         } else {
-          await this.submitUnbound(base.ledger, signed, accountId);
+          // A new browser: bound to the head it re-based on (never an account creation; a concurrent write is a write_conflict).
+          await this.submitUnbound(base.ledger, signed, accountId, false, base.checkpoint.head);
         }
       } else if (bound === null) {
         await this.offerToReplica(base.ledger, { bind: true, expectAccountId: accountId });
@@ -861,77 +900,141 @@ export class LedgerClient {
   // ---- Divergence. ----
 
   /**
-   * The owner's choice between this browser's history ('mine') and the other one in snapshot.divergence ('theirs'). After a fresh read
-   * (the newest copy of either history) and the beforeSign hook: every operation of the discarded branch the chosen one must carry
-   * (resolutionPlan: removals and passkeys added there) is signed again on top of the chosen chain, one passkey prompt each (an added
-   * passkey keeps its original consent), then the resolve_fork record (one more prompt), all in memory only. Then ONE POST of chosen +
-   * carried records + resolution; the replica adopts the chain the server answers with through fork choice, so with 'theirs' nothing
-   * is adopted before the server accepted it. A cancelled prompt or a failed request sends or keeps nothing: the divergence stays and
-   * the action can start over. Throws no_divergence, resolution_outdated (the other side moved meanwhile; the divergence then shows its
-   * newer chain), or a request error.
+   * The owner's choice between this browser's history ('mine') and the other one in snapshot.divergence ('theirs'). `expected`: the
+   * divergence as the owner was shown it (its source and otherHead); after a fresh read and the beforeSign hook, a divergence that is
+   * not exactly that one is refused with resolution_outdated, before any prompt. Then every operation of the discarded branch the
+   * chosen one must carry (resolutionPlan: removals and passkeys added there) is signed again on top of the chosen chain, one passkey
+   * prompt each (an added passkey keeps its original consent), then the resolve_fork record (one more prompt), all in memory only. Then
+   * ONE POST of chosen + carried records + resolution (always with expectHead); the replica adopts the chain the server answers with
+   * through fork choice, so with 'theirs' nothing is adopted before the server accepted it. A cancelled prompt sends or keeps nothing.
+   * After a failed request (network, 5xx, 429) the signed bundle is kept in memory and sent again by itself with the retry pacing, and
+   * by a repeated call without new prompts, while neither chain changes (snapshot.resolutionPending); any change of either drops it.
+   * Throws no_divergence, resolution_outdated (the other side changed; the divergence then shows its newer chain), or a request error.
    */
-  resolveDivergence(keep: "mine" | "theirs"): Promise<void> {
+  resolveDivergence(keep: "mine" | "theirs", expected: { source: LedgerSource; otherHead: string }): Promise<void> {
     return this.exclusive(async () => {
       if (keep !== "mine" && keep !== "theirs") throw new Error("invalid_request");
+      if (!isPlain(expected) || typeof expected.otherHead !== "string" || typeof expected.source !== "string") throw new Error("invalid_request");
       await this.load();
+      await this.syncReplica();
       if (this.deps.replica.raw() === null) throw new Error("signed_out");
       this.lastConflict = null;
       await this.refreshShared(true);
-      if (this.currentDivergence() === null) throw new Error("no_divergence");
-      await this.runHook();
-      const raw = this.deps.replica.raw();
-      const entry = this.currentDivergence();
-      if (raw === null) throw new Error("signed_out");
-      if (entry === null) throw new Error("no_divergence");
-      const accountId = raw.checkpoint.accountId;
-      const [chosen, other] = keep === "mine" ? [raw.ledger, entry.ledger] : [entry.ledger, raw.ledger];
-      const plan = await resolutionPlan(chosen, other);
-      let checkpoint = keep === "mine" ? raw.checkpoint : await this.checkpointOf(chosen);
-      // A side that cannot carry the other's records is refused before any prompt (snapshot.divergence says so already).
-      const side = this.side(checkpoint, chosen, plan.carry);
-      if (!side.canKeep) throw new Error(side.reason ?? "invalid_ledger");
-      // Signed by a passkey that was an authority at the fork point: it is one on both branches.
-      const shared: Ledger = { genesis: raw.ledger.genesis, transitions: raw.ledger.transitions.slice(0, plan.fork.revision) };
-      const atFork = await verifyLedger(shared, Math.max(this.now(), ledgerLastIssuedAt(shared)));
-      const credentialId = await this.signerAmong(raw, atFork.authorities.map(item => item.credentialId));
-      const rpId = raw.ledger.genesis.payload.rpId;
-      let growing = chosen;
-      const records: Signed<LedgerTransition>[] = [];
-      try {
-        for (const operation of plan.carry) {
-          const payload = nextTransition(checkpoint, credentialId, operation, this.now(), ledgerLastIssuedAt(growing));
-          const signed = await this.deps.passkey.signLedgerRecord(payload, { rpId, credentialId });
-          const next = appended(growing, [signed]);
-          const step = await chooseLedger(growing, next, Math.max(this.now(), payload.issuedAt), { head: checkpoint.head, checkpoint });
-          if (step.decision !== "adopt") throw new Error("ledger_rejected");
-          records.push(signed);
-          growing = next;
-          checkpoint = step.checkpoint;
-        }
-        const payload = await resolveForkTransition(growing, other, credentialId, this.now(), { head: checkpoint.head, checkpoint });
-        const signed = await this.deps.passkey.signLedgerRecord(payload, { rpId, credentialId });
-        records.push(signed);
-        growing = appended(growing, [signed]);
-      } catch (error) {
-        if (code(error) === "passkey_wrong_credential") this.credentialId = null;
-        throw error;
+      let bundle = this.resolution;
+      if (bundle === null || bundle.keep !== keep || bundle.source !== expected.source || bundle.otherHead !== expected.otherHead) {
+        bundle = await this.signResolution(keep, expected);
+        this.resolution = bundle;
+        this.publish();
       }
-      this.credentialId = credentialId;
-      const resolution = records[records.length - 1];
-      // Checked here, never stored: the replica takes the resolution only from the server's answer.
-      const verdict = await chooseLedger(raw.ledger, growing, Math.max(this.now(), resolution.payload.issuedAt), { head: raw.checkpoint.head, checkpoint: raw.checkpoint })
-        .catch(() => null);
-      if (verdict === null || verdict.decision !== "adopt") throw new Error("ledger_rejected");
-      const server = this.server;
-      try {
-        await this.store(growing, accountId, true, false, server !== null && server.accountId === accountId ? server.head : undefined);
-      } catch (error) {
-        // The server's chain went through fork choice: the divergence now holds the newer other chain.
-        if (error instanceof StoreError && error.answered && (error.message === "diverged" || error.message === "head_changed")) throw new Error("resolution_outdated");
-        throw error;
+      const delivery = await this.sendResolution(bundle);
+      if (delivery.kind === "delivered") return;
+      if (delivery.kind === "dropped") throw new Error(delivery.code);
+      if (delivery.code !== "account_not_found") {
+        if (delivery.answered) this.notePair(this.candidateKey());
+        this.storeLater(delivery.retryAfterMs);
       }
-      if (!await holds(this.deps.replica.raw()?.ledger, resolution.payload.revision, await ledgerHead(resolution.payload))) throw new Error("ledger_not_stored");
+      throw new Error(delivery.code);
     });
+  }
+
+  /** Builds and signs the resolution bundle (see resolveDivergence); nothing is sent or stored. */
+  private async signResolution(keep: "mine" | "theirs", expected: { source: LedgerSource; otherHead: string }): Promise<ResolutionBundle> {
+    if (this.currentDivergence() === null) throw new Error("no_divergence");
+    await this.runHook();
+    const raw = this.deps.replica.raw();
+    const entry = this.currentDivergence();
+    if (raw === null) throw new Error("signed_out");
+    if (entry === null) throw new Error("no_divergence");
+    const otherHead = await this.headOf(entry.ledger);
+    // What the owner decided about is what is resolved, or nothing.
+    if (entry.source !== expected.source || otherHead !== expected.otherHead) throw new Error("resolution_outdated");
+    const [chosen, other] = keep === "mine" ? [raw.ledger, entry.ledger] : [entry.ledger, raw.ledger];
+    const plan = await resolutionPlan(chosen, other);
+    let checkpoint = keep === "mine" ? raw.checkpoint : await this.checkpointOf(chosen);
+    // A side that cannot carry the other's records is refused before any prompt (snapshot.divergence says so already).
+    const side = this.side(checkpoint, chosen, plan.carry);
+    if (!side.canKeep) throw new Error(side.reason ?? "invalid_ledger");
+    // Signed by a passkey that was an authority at the fork point: it is one on both branches.
+    const shared: Ledger = { genesis: raw.ledger.genesis, transitions: raw.ledger.transitions.slice(0, plan.fork.revision) };
+    const atFork = await verifyLedger(shared, Math.max(this.now(), ledgerLastIssuedAt(shared)));
+    const credentialId = await this.signerAmong(raw, atFork.authorities.map(item => item.credentialId));
+    const rpId = raw.ledger.genesis.payload.rpId;
+    let growing = chosen;
+    let record: Signed<LedgerTransition>;
+    try {
+      for (const operation of plan.carry) {
+        const payload = nextTransition(checkpoint, credentialId, operation, this.now(), ledgerLastIssuedAt(growing));
+        const signed = await this.deps.passkey.signLedgerRecord(payload, { rpId, credentialId });
+        const next = appended(growing, [signed]);
+        const step = await chooseLedger(growing, next, Math.max(this.now(), payload.issuedAt), { head: checkpoint.head, checkpoint });
+        if (step.decision !== "adopt") throw new Error("ledger_rejected");
+        growing = next;
+        checkpoint = step.checkpoint;
+      }
+      const payload = await resolveForkTransition(growing, other, credentialId, this.now(), { head: checkpoint.head, checkpoint });
+      record = await this.deps.passkey.signLedgerRecord(payload, { rpId, credentialId });
+      growing = appended(growing, [record]);
+    } catch (error) {
+      if (code(error) === "passkey_wrong_credential") this.credentialId = null;
+      throw error;
+    }
+    this.credentialId = credentialId;
+    // Checked here, never stored: the replica takes the resolution only from the server's answer.
+    const verdict = await chooseLedger(raw.ledger, growing, Math.max(this.now(), record.payload.issuedAt), { head: raw.checkpoint.head, checkpoint: raw.checkpoint })
+      .catch(() => null);
+    if (verdict === null || verdict.decision !== "adopt") throw new Error("ledger_rejected");
+    return { keep, source: entry.source, otherHead, localHead: raw.checkpoint.head, chain: growing, record };
+  }
+
+  /**
+   * One POST of the resolution bundle, with expectHead (never without: with no server state known it is kept for the next run, which
+   * reads first). The answer's chain goes through fork choice. Delivered: the local chain holds the resolution (the bundle is gone).
+   * Dropped: resolution_outdated (the server's chain or either chain changed) or a definitive refusal. Kept: anything else.
+   */
+  private async sendResolution(bundle: ResolutionBundle): Promise<Delivery> {
+    try {
+      await this.syncReplica();
+      if (this.resolution !== bundle) return { kind: "dropped", code: "resolution_outdated" };
+      const raw = this.deps.replica.raw();
+      const server = this.server;
+      if (raw === null) return { kind: "dropped", code: "signed_out" };
+      const accountId = raw.checkpoint.accountId;
+      if (server === null || server.accountId !== accountId) return { kind: "kept", code: this.accountMissing ? "account_not_found" : "ledger_invalid", answered: false };
+      try {
+        await this.store(bundle.chain, accountId, true, false, server.head);
+      } catch (error) {
+        if (error instanceof StoreError && (error.answered && (error.message === "diverged" || error.message === "head_changed"))) {
+          // The server's chain went through fork choice: the divergence now holds the newer other chain.
+          if (this.resolution === bundle) this.resolution = null;
+          return { kind: "dropped", code: "resolution_outdated" };
+        }
+        if (error instanceof StoreError && error.status !== undefined && DEFINITIVE_STATUSES.indexOf(error.status) !== -1) {
+          if (this.resolution === bundle) this.resolution = null;
+          return { kind: "dropped", code: error.message };
+        }
+        const reason = error instanceof StoreError ? error.message === "account_unknown" ? "account_not_found" : error.message : code(error);
+        return { kind: "kept", code: reason, retryAfterMs: error instanceof StoreError ? error.retryAfterMs : undefined, answered: error instanceof StoreError && error.answered };
+      }
+      if (await holds(this.deps.replica.raw()?.ledger, bundle.record.payload.revision, await ledgerHead(bundle.record.payload))) {
+        if (this.resolution === bundle) this.resolution = null;
+        this.settleReoffer();
+        return { kind: "delivered" };
+      }
+      return { kind: "kept", code: "ledger_not_stored", answered: true };
+    } finally {
+      this.publish();
+    }
+  }
+
+  /** Drops the kept resolution bundle once the local chain or the divergent chain it resolves changed. */
+  private async checkResolution(): Promise<void> {
+    const bundle = this.resolution;
+    if (bundle === null) return;
+    const raw = this.deps.replica.raw();
+    const entry = this.deps.replica.divergence()[bundle.source];
+    let live = raw !== null && entry !== undefined && raw.checkpoint.head === bundle.localHead;
+    if (live && entry !== undefined) live = await this.headOf(entry.ledger) === bundle.otherHead;
+    if (!live && this.resolution === bundle) this.resolution = null;
   }
 
   /**
@@ -1058,19 +1161,23 @@ export class LedgerClient {
     this.publish();
   }
 
-  /** Clears the (persisted) discarded-records notice, and snapshot.lastConflict, after the UI showed them. */
-  async dismissDiscarded(): Promise<void> {
+  /**
+   * Clears the (persisted) discarded-records notice (`records`: only these entries), and snapshot.lastConflict, after the UI showed them.
+   * This lifts the local block of their removals (see snapshot.blocked): the owner decided not to sign them again.
+   */
+  async dismissDiscarded(records?: Signed<LedgerTransition>[]): Promise<void> {
     this.lastConflict = null;
     try {
-      await this.deps.replica.dismissDiscarded();
+      await this.deps.replica.dismissDiscarded(records);
     } finally {
       this.publish();
     }
   }
 
   /**
-   * Forgets this browser's account binding, chain, discarded records, pending write and divergent chains, and every half-done flow (a
-   * pending creation and its secret included). The account's sticky revocations are kept.
+   * Forgets this browser's account binding, chain, discarded records and divergent chains, and every half-done flow (a pending creation
+   * and its secret included). The account's sticky revocations, its pending write and the local block are kept with the account: nothing
+   * is sent while signed out, and the pending write is sent after the next sign-in of the same account (other tabs stop at once).
    */
   forget(): Promise<void> {
     return this.exclusive(async () => {
@@ -1082,6 +1189,8 @@ export class LedgerClient {
       this.device = null;
       this.lastConflict = null;
       this.divergenceView = null;
+      this.resolution = null;
+      this.accountMissing = false;
       try {
         await this.deps.replica.clear();
       } finally {
@@ -1139,11 +1248,14 @@ export class LedgerClient {
   }
 
   /**
-   * The start of every bound user write, before any prompt: refused with ledger_diverged while a divergence holds and with write_pending
-   * while another signed change waits for the server (after a fresh read, which may find it delivered); otherwise the fresh read
-   * (`refreshed`: the caller just made it), which adopts a server chain that extends the local one.
+   * The start of every bound user write, before any prompt: the persisted state is read again first (another tab may hold a pending write,
+   * or have forgotten the account); refused with ledger_diverged while a divergence holds and with write_pending while another signed
+   * change waits for the server (after a fresh read, which may find it delivered); otherwise the fresh read (`refreshed`: the caller just
+   * made it), which adopts a server chain that extends the local one.
    */
   private async beginWrite(refreshed: boolean): Promise<void> {
+    await this.syncReplica();
+    if (this.deps.replica.raw() === null) throw new Error("signed_out");
     this.requireNoDivergence();
     this.lastConflict = null;
     const waiting = this.deps.replica.pendingWrite() !== null;
@@ -1158,6 +1270,13 @@ export class LedgerClient {
     }
     this.requireNoDivergence();
     if (this.deps.replica.pendingWrite() !== null) throw new Error("write_pending");
+  }
+
+  /** Catches up with what another tab stored (see LedgerReplica.sync), then follows any change up like a replica change. */
+  private async syncReplica(): Promise<void> {
+    await this.deps.replica.sync();
+    await this.afterReplicaChange();
+    this.publish();
   }
 
   /**
@@ -1212,11 +1331,12 @@ export class LedgerClient {
 
   /**
    * A bound user write's signed record: checked on top of `base` (never stored in the replica), persisted as THE pending write (the
-   * passkey was used: a reload must not lose it), then sent once (see sendPending). Resolves when the server's chain holds it and the
-   * replica adopted that chain. Otherwise throws: write_conflict (another change landed first; the record went to discarded), ledger_diverged,
-   * a definitive refusal (the record went to discarded), or the code of a refusal/failure after which it stays pending and is retried
-   * by itself (network_unavailable, server_unavailable, rate_limited, head_changed, ledger_rejected, ledger_not_stored, account_not_found).
-   * write_pending when another tab's signed change is pending already (this record then went to discarded, unsent).
+   * passkey was used: a reload must not lose it; a removal is enforced here from now on, see snapshot.blocked), then sent once (see
+   * sendPending). Resolves when the server's chain holds it and the replica adopted that chain. Otherwise throws: write_conflict (another
+   * change landed first; the record went to discarded), ledger_diverged, ledger_rejected (it does not verify), a definitive refusal (the
+   * record went to discarded), or the code of a refusal/failure after which it stays pending and is retried by itself (network_unavailable,
+   * server_unavailable, rate_limited, head_changed, ledger_rejected, ledger_not_stored; account_not_found: kept, not retried until the
+   * account is found again). write_pending when another tab's signed change is pending already (this record then went to discarded, unsent).
    */
   private async sendNew(base: Base, record: Signed<LedgerTransition>): Promise<void> {
     const candidate = appended(base.ledger, [record]);
@@ -1228,14 +1348,9 @@ export class LedgerClient {
       this.publish();
       throw new Error("write_pending");
     }
-    this.sending = record;
-    let delivery: Delivery;
-    try {
-      delivery = await this.sendPending(record);
-    } finally {
-      this.sending = null;
-      this.publish();
-    }
+    this.verifiedPending = { signature: record.signature.signature, head: base.checkpoint.head };
+    this.publish();
+    const delivery = await this.sendPending(record);
     if (delivery.kind === "delivered") return;
     if (delivery.kind === "dropped") throw new Error(delivery.code);
     if (delivery.code !== "account_not_found") {
@@ -1247,10 +1362,12 @@ export class LedgerClient {
   }
 
   /**
-   * One POST of the local chain + the pending `record`, with `expectHead` the server head on record. Before it, and after the answer
-   * (whose chain the replica judged), reconcilePending decides: delivered (the local chain holds it), dropped (the local chain moved past
-   * its base: write_conflict; or a divergence holds: ledger_diverged), else still pending. A 400/403/413 drops it too (its code); every
-   * other refusal or failure keeps it (`code`: what the user write reports; `answered`: a 409 that carried the server's chain).
+   * One POST of the local chain + the pending `record`, with `expectHead` the server head on record (never without one: with no server
+   * state known the record is kept and the next run reads first). Before it the persisted state is read again (another tab may have
+   * sent, discarded or forgotten it), and before and after the answer (whose chain the replica judged) reconcilePending decides:
+   * delivered (the local chain holds it), dropped (the local chain moved past its base: write_conflict; a divergence holds:
+   * ledger_diverged; it does not verify: ledger_rejected), else still pending. A 400/403/413 drops it too (its code); every other refusal
+   * or failure keeps it (`code`: what the user write reports; `answered`: a 409 that carried the server's chain).
    */
   private async sendPending(record: Signed<LedgerTransition>): Promise<Delivery> {
     try {
@@ -1261,16 +1378,24 @@ export class LedgerClient {
     }
   }
   private async sendPendingOnce(record: Signed<LedgerTransition>): Promise<Delivery> {
+    await this.syncReplica();
+    const current = this.deps.replica.pendingWrite();
+    if (this.deps.replica.raw() === null) return { kind: "dropped", code: "signed_out" };
+    // Another tab sent, discarded or replaced it: nothing of this page's to send.
+    if (current === null || current.record.signature.signature !== record.signature.signature) {
+      return await holds(this.deps.replica.raw()?.ledger, record.payload.revision, await ledgerHead(record.payload)) ? { kind: "delivered" } : { kind: "dropped", code: "write_conflict" };
+    }
     const before = await this.reconcilePending();
     if (before !== "live") return before === "delivered" || before === "none" ? { kind: "delivered" } : { kind: "dropped", code: before };
     const raw = this.deps.replica.raw();
     const server = this.server;
     if (raw === null) return { kind: "dropped", code: "signed_out" };
     const accountId = raw.checkpoint.accountId;
+    if (server === null || server.accountId !== accountId) return { kind: "kept", code: this.accountMissing ? "account_not_found" : "ledger_invalid", answered: false };
     this.settled = { record, result: "live" };
     let kept: Delivery;
     try {
-      await this.store(appended(raw.ledger, [record]), accountId, true, false, server !== null && server.accountId === accountId ? server.head : undefined);
+      await this.store(appended(raw.ledger, [record]), accountId, true, false, server.head);
       kept = { kind: "kept", code: "ledger_not_stored", answered: true };
     } catch (error) {
       if (error instanceof StoreError && error.status !== undefined && DEFINITIVE_STATUSES.indexOf(error.status) !== -1) {
@@ -1285,14 +1410,16 @@ export class LedgerClient {
     this.settled = null;
     const after = settled !== null && settled.record === record && settled.result !== "live" ? settled.result : await this.reconcilePending();
     if (after === "delivered" || after === "none") return { kind: "delivered" };
-    if (after === "write_conflict" || after === "ledger_diverged") return { kind: "dropped", code: after };
+    if (after !== "live") return { kind: "dropped", code: after };
     return kept;
   }
 
   /**
    * Brings the pending write in line with the local chain (after every replica change): 'delivered' when the local chain holds it (the
-   * server took it, maybe through another tab), dropped as 'ledger_diverged' while a divergence holds or as 'write_conflict' when the
-   * local chain is no longer the head it was signed on (another change landed first); else 'live'. A dropped record goes to discarded().
+   * server took it, maybe through another tab); dropped as 'ledger_diverged' while a divergence holds, as 'write_conflict' when the local
+   * chain is no longer the head it was signed on (another change landed first), or as 'ledger_rejected' when it does not verify on top of
+   * that head (a persisted record is checked again, once per head); else 'live'. A dropped record goes to discarded() (its removal stays
+   * blocked here).
    */
   private async reconcilePending(): Promise<Reconciled> {
     const pending = this.deps.replica.pendingWrite();
@@ -1303,6 +1430,7 @@ export class LedgerClient {
     if (await holds(raw.ledger, record.payload.revision, await ledgerHead(record.payload))) result = "delivered";
     else if (this.diverged()) result = "ledger_diverged";
     else if (raw.checkpoint.revision !== record.payload.revision - 1 || raw.checkpoint.head !== record.payload.previousHead) result = "write_conflict";
+    else if (!await this.pendingVerifies(raw, record)) result = "ledger_rejected";
     if (result === "live") return result;
     if (this.settled !== null && this.settled.record.signature.signature === record.signature.signature) this.settled = { record: this.settled.record, result };
     if (result === "delivered") {
@@ -1314,7 +1442,18 @@ export class LedgerClient {
     return result;
   }
 
-  /** The pending write will never be sent: it is kept in discarded() (to sign again) and reported as snapshot.lastConflict. */
+  /** True iff `record` is a valid next record of `base` (chooseLedger: adopt/ahead); remembered per record and head. */
+  private async pendingVerifies(base: Base, record: Signed<LedgerTransition>): Promise<boolean> {
+    const known = this.verifiedPending;
+    if (known !== null && known.signature === record.signature.signature && known.head === base.checkpoint.head) return true;
+    const verdict = await chooseLedger(base.ledger, appended(base.ledger, [record]), Math.max(this.now(), record.payload.issuedAt),
+      { head: base.checkpoint.head, checkpoint: base.checkpoint }).catch(() => null);
+    const valid = verdict !== null && verdict.decision === "adopt" && verdict.relation === "ahead";
+    if (valid) this.verifiedPending = { signature: record.signature.signature, head: base.checkpoint.head };
+    return valid;
+  }
+
+  /** The pending write will never be sent: it is kept in discarded() (to sign again; a removal stays blocked) and reported as snapshot.lastConflict. */
   private async dropPending(record: Signed<LedgerTransition>, reason: string): Promise<void> {
     await this.deps.replica.setPendingWrite(null, record).catch(() => false);
     await this.deps.replica.noteDiscarded([record]).catch(() => undefined);
@@ -1322,12 +1461,52 @@ export class LedgerClient {
   }
 
   /**
-   * An unbound browser's first record (account creation, or a new browser's add_device): POSTed, and the replica binds to this own
-   * chain only after the server accepted it; the server's answer is then offered like any other candidate (never binding). Throws
-   * ledger_not_stored when the server's chain lacks the record.
+   * Withdraws the pending write, without a passkey. A fresh read first: when the server already holds it, nothing is withdrawn and
+   * 'already_saved' is returned. Otherwise it moves to discarded() (snapshot.lastConflict reason 'discarded'); a removal stays enforced
+   * on this browser until that entry is dismissed or signed again. A server that received it but did not answer can still apply it until
+   * another change is saved on top. Throws no_pending_write when there is none.
    */
-  private async submitUnbound(base: Ledger, record: Signed<LedgerTransition>, accountId: string, creating = false): Promise<void> {
-    const value = await this.store(appended(base, [record]), accountId, false, creating);
+  discardPending(): Promise<"discarded" | "already_saved"> {
+    return this.exclusive(async () => {
+      await this.load();
+      await this.syncReplica();
+      if (this.deps.replica.raw() === null) throw new Error("signed_out");
+      const pending = this.deps.replica.pendingWrite();
+      if (pending === null) throw new Error("no_pending_write");
+      try {
+        await this.refreshShared(true);
+      } catch {
+        // Not known whether the server holds it: it is withdrawn here all the same.
+      }
+      const raw = this.deps.replica.raw();
+      const still = this.deps.replica.pendingWrite();
+      if (still === null || still.record.signature.signature !== pending.record.signature.signature) {
+        return raw !== null && await holds(raw.ledger, pending.record.payload.revision, await ledgerHead(pending.record.payload)) ? "already_saved" : "discarded";
+      }
+      await this.dropPending(pending.record, "discarded");
+      this.stopTimer();
+      this.publish();
+      return "discarded";
+    });
+  }
+
+  /**
+   * An unbound browser's first record: an account creation (no expectHead), or a new browser's add_device, bound to the head it re-based
+   * on (`expectHead`: never an account creation; another change landed first: write_conflict, sign again on the new head). The replica
+   * binds to this own chain only after the server accepted it; the server's answer is then offered like any other candidate (never
+   * binding). Throws ledger_not_stored when the server's chain lacks the record.
+   */
+  private async submitUnbound(base: Ledger, record: Signed<LedgerTransition>, accountId: string, creating = false, expectHead?: string): Promise<void> {
+    let value: Record<string, unknown>;
+    try {
+      value = await this.store(appended(base, [record]), accountId, false, creating, expectHead);
+    } catch (error) {
+      if (expectHead !== undefined && error instanceof StoreError) {
+        if (error.message === "head_changed" || error.message === "diverged") throw new Error("write_conflict");
+        if (error.message === "account_unknown") throw new Error("account_not_found");
+      }
+      throw error;
+    }
     if (!await holds(value.ledger, record.payload.revision, await ledgerHead(record.payload))) throw new Error("ledger_not_stored");
   }
 
@@ -1386,7 +1565,7 @@ export class LedgerClient {
    */
   private async serverChain(candidate: unknown, accountId: string, seq: number, posted = false): Promise<void> {
     // Published once below, after the server state is recorded, so no snapshot pairs the new chain with the old server state.
-    const { decision } = await this.deps.replica.offer(candidate, { expectAccountId: accountId, source: "server" });
+    const { decision, covered } = await this.deps.replica.offer(candidate, { expectAccountId: accountId, source: "server" });
     if (decision === "reject") await this.warnInvalid("server", candidate);
     let view: ServerView | null = null;
     if (decision !== "reject") {
@@ -1395,6 +1574,7 @@ export class LedgerClient {
         const revoked = ledgerRevocations(parsed);
         view = {
           accountId, head: await this.headOf(candidate), revision: parsed.transitions.length, revokedDeviceIds: revoked.deviceIds, revokedBridgeIds: revoked.bridgeIds,
+          covered,
         };
       } catch {
         view = null;
@@ -1408,14 +1588,17 @@ export class LedgerClient {
       const raw = this.deps.replica.raw();
       this.server = view !== null && raw !== null && raw.checkpoint.accountId === accountId ? view : null;
       // A chain the replica refused is not a confirmed state: the last confirmed one stays stored.
-      if (this.server !== null) persisted = this.persistServer(this.server);
+      if (this.server !== null) {
+        this.accountMissing = false;
+        persisted = this.persistServer(this.server);
+      }
     }
     if (persisted !== null) await persisted;
     await this.afterReplicaChange();
     this.publish();
     // Every trigger lands here; a run is needed only for something to send (one queued behind whatever holds the queue now).
-    if (this.diverged()) this.stopTimer();
-    else if (this.needsSend()) void this.kick();
+    if (this.needsSend()) void this.kick();
+    else if (this.diverged()) this.stopTimer();
     else if (this.converged()) {
       if (posted) this.settleReoffer();
       else this.stopTimer();
@@ -1427,6 +1610,7 @@ export class LedgerClient {
     if (seq <= this.serverSeq) return;
     this.serverSeq = seq;
     this.server = null;
+    this.accountMissing = true;
     void this.persistServer(null);
     this.publish();
   }
@@ -1445,18 +1629,23 @@ export class LedgerClient {
     return ledgerHead(last === undefined ? ledger.genesis.payload : last.payload);
   }
 
-  /** The replica took or judged a chain: the pending write and the divergence view follow it. */
+  /** The replica took or judged a chain: the pending write, the kept resolution and the divergence view follow it. */
   private async afterReplicaChange(): Promise<void> {
     await this.reconcilePending();
+    await this.checkResolution();
     await this.refreshDivergenceView();
   }
 
-  /** Offers a chain to the replica (warning once about an invalid one from a source, named `from`), then follows it up like any replica change. */
+  /**
+   * Offers a chain to the replica (warning once about an invalid one from a source, named `from`), then follows it up like any replica
+   * change. A sign-in that binds the replica again may bring back the account's pending write (kept across forget()): it is sent then.
+   */
   private async offerToReplica(candidate: unknown, options: ReplicaOfferOptions, from?: string): Promise<ReplicaOffer> {
     const result = await this.deps.replica.offer(candidate, options);
     if (result.decision === "reject" && options.source !== undefined) await this.warnInvalid(from ?? options.source, candidate);
     await this.afterReplicaChange();
     this.publish();
+    if (options.bind === true && result.decision === "adopt" && this.livePending() !== null) void this.kick();
     return result;
   }
 
@@ -1495,17 +1684,25 @@ export class LedgerClient {
       this.divergenceView = null;
       return;
     }
+    const discarded = this.deps.replica.discarded();
+    const abandonedKey = discarded.map(item => item.signature.signature).join(",");
     const known = this.divergenceView;
-    if (known !== null && known.localHead === raw.checkpoint.head && known.source === entry.source && known.entry.ledger === entry.ledger) return;
+    if (known !== null && known.localHead === raw.checkpoint.head && known.source === entry.source && known.entry.ledger === entry.ledger
+      && known.abandonedKey === abandonedKey) return;
     try {
-      const [fork, mine, theirs, other] = await Promise.all([
+      const [fork, mine, theirs, other, otherHead] = await Promise.all([
         describeFork(raw.ledger, entry.ledger), resolutionPlan(raw.ledger, entry.ledger), resolutionPlan(entry.ledger, raw.ledger), this.checkpointOf(entry.ledger),
+        this.headOf(entry.ledger),
       ]);
+      // A record of the other branch that this browser signed and dropped itself (never saved): exactly that signed record is in discarded().
+      const dropped = new Set(discarded.map(item => JSON.stringify(item)));
+      const abandoned = entry.ledger.transitions.slice(fork.fork.revision).map(item => dropped.has(JSON.stringify(item)));
       this.divergenceView = {
-        localHead: raw.checkpoint.head, source: entry.source, entry,
+        localHead: raw.checkpoint.head, source: entry.source, entry, abandonedKey,
         value: {
-          other: entry.ledger, source: entry.source, fork, firstSeen: entry.firstSeen,
+          other: entry.ledger, otherHead, source: entry.source, fork, firstSeen: entry.firstSeen,
           mine: this.side(raw.checkpoint, raw.ledger, mine.carry), theirs: this.side(other, entry.ledger, theirs.carry),
+          abandoned, recommend: abandoned.length > 0 && abandoned.every(item => item) ? "mine" : null,
         },
       };
     } catch {
@@ -1556,9 +1753,13 @@ export class LedgerClient {
       return "unknown";
     }
   }
-  /** True iff the server's chain on record is a strict prefix of the local chain: the local records after it are to be re-offered. */
+  /**
+   * True iff the local chain is to be re-offered to the server: its chain on record is a strict prefix of the local one, or a different
+   * history that a resolve_fork of the local chain discarded exactly (covered: the server adopts the resolution like an extension).
+   */
   private behind(): boolean {
-    return this.serverRelation() === "behind";
+    const relation = this.serverRelation();
+    return relation === "behind" || (relation === "unknown" && this.server !== null && this.server.covered);
   }
   /** True iff the server's chain on record is the local chain. */
   private converged(): boolean {
@@ -1572,12 +1773,13 @@ export class LedgerClient {
     const payload = pending.record.payload;
     return raw.checkpoint.revision === payload.revision - 1 && raw.checkpoint.head === payload.previousHead ? pending : null;
   }
-  /** Something to send: the pending write, or local records the server lacks; never while diverged. */
+  /** Something to send: the kept resolution; else (never while diverged) the pending write, or local records the server lacks. */
   private needsSend(): boolean {
-    return !this.diverged() && (this.livePending() !== null || this.behind());
+    return this.resolution !== null || (!this.diverged() && (this.livePending() !== null || this.behind()));
   }
-  /** What a run would send now, as the pair-window key: the pending record, else the local head. */
+  /** What a run would send now, as the pair-window key: the resolution, else the pending record, else the local head. */
   private candidateKey(): string {
+    if (this.resolution !== null) return `resolution:${this.resolution.record.signature.signature}`;
     const pending = this.livePending();
     if (pending !== null) return `pending:${pending.record.signature.signature}`;
     return this.deps.replica.raw()?.checkpoint.head ?? "";
@@ -1664,9 +1866,32 @@ export class LedgerClient {
       return;
     }
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        // Another tab may have forgotten the account, or sent or withdrawn what this one was about to send.
+        await this.syncReplica();
+      } catch {
+        this.stopTimer();
+        return;
+      }
       const raw = this.deps.replica.raw();
       const server = this.server;
       if (raw === null || server === null || !await this.mayAttempt(raw.checkpoint.accountId, !forced || attempt > 0)) return;
+      const resolution = this.resolution;
+      if (resolution !== null) {
+        this.reofferPair = { local: this.candidateKey(), server: server.head, at: this.now() };
+        const delivery = await this.sendResolution(resolution);
+        if (delivery.kind === "delivered") {
+          this.settleReoffer();
+          return;
+        }
+        if (delivery.kind === "dropped") {
+          this.stopTimer();
+          return;
+        }
+        if (delivery.code === "head_changed" && attempt === 0 && this.resolution === resolution) continue;
+        this.reofferFailed(delivery.code, delivery.retryAfterMs, this.needsSend());
+        return;
+      }
       const pending = this.livePending();
       if (pending !== null) {
         const relation = this.serverRelation();
@@ -1724,7 +1949,7 @@ export class LedgerClient {
    * there is nothing to do, re-arms it when the attempt is only early.
    */
   private async mayAttempt(accountId: string, paced: boolean): Promise<boolean> {
-    const allowed = this.livePending() !== null ? this.mayDeliver() : await this.mayReoffer(accountId);
+    const allowed = this.resolution !== null || this.livePending() !== null ? this.mayDeliver() : await this.mayReoffer(accountId);
     if (!this.needsSend() || !allowed) {
       this.stopTimer();
       return false;
@@ -1736,7 +1961,10 @@ export class LedgerClient {
     }
     return true;
   }
-  /** The pending write is a passkey-signed record: any bound, non-creating client may deliver it, whatever its own keys. */
+  /**
+   * The pending write (or the kept resolution) is passkey-signed: any bound, non-creating client may deliver it, whatever its own keys
+   * (also once its own removal is blocked here). Never while unbound: a write left pending at forget() waits for the account's next sign-in.
+   */
   private mayDeliver(): boolean {
     return !this.disposed && this.creation === null && !(this.enrollment !== null && this.enrollment.creating) && this.deps.replica.raw() !== null;
   }
@@ -1783,10 +2011,10 @@ export class LedgerClient {
     return ids;
   }
 
-  /** snapshot.pendingWrite: the replica's pending write, unless it is the record whose first request is in flight. */
+  /** snapshot.pendingWrite: the replica's pending write (also while its first request is in flight: its removal is enforced already). */
   private visiblePending(): LedgerPendingWrite | null {
     const pending = this.deps.replica.pendingWrite();
-    if (pending === null || (this.sending !== null && this.sending.signature.signature === pending.record.signature.signature)) return null;
+    if (pending === null) return null;
     return { ...targetOf(pending.record.payload.operation), since: pending.since };
   }
 
@@ -1820,7 +2048,8 @@ export class LedgerClient {
     if (this.disposed || this.creation !== null || (this.enrollment !== null && this.enrollment.creating)) return false;
     if (status !== "ready" && status !== "device_revoked") return false;
     const raw = this.deps.replica.raw();
-    const trusted = this.deps.replica.trusted();
+    // The chain and its sticky set decide; this browser's own local block (a removal of itself not saved yet) does not.
+    const trusted = this.deps.replica.chainTrusted();
     if (raw === null || trusted === null || trusted.accountId !== raw.checkpoint.accountId) return false;
     const own = this.ownKeys(raw.checkpoint.accountId);
     if (own === null) return status === "ready";
@@ -2122,9 +2351,11 @@ export class LedgerClient {
     // Only a view computed for this local head and the divergent chain shown now (afterReplicaChange keeps it current).
     const divergence = view !== null && raw !== null && shown !== null && view.localHead === raw.checkpoint.head && view.source === shown.source
       && view.entry.ledger === shown.ledger ? view.value : null;
+    const blocked = raw === null ? NO_IDS() : this.deps.replica.blocked();
     this.update({
       status, checkpoint: trusted, discarded: this.deps.replica.discarded(), localOnly, signer, pending,
-      pendingWrite, lastConflict: this.lastConflict, divergence,
+      pendingWrite, lastConflict: this.lastConflict, divergence, blocked, accountMissing: raw !== null && this.accountMissing,
+      resolutionPending: this.resolution?.keep ?? null,
       serverState, unsaved: this.unsavedIds(pendingWrite), retryAt: this.retryTimerAt,
       retryNotBefore: this.retryAfterUntil > 0 ? this.retryAfterUntil : null, canReoffer: this.canReoffer(status), peers: this.peersView,
     });
