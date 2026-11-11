@@ -163,7 +163,7 @@ describe('BridgeLedgerStore', () => {
     assert.equal(await empty.trusted(), null);
     assert.equal(await empty.ownBridgeStatus(ownKeys(f.studio, 'studio')), 'absent');
     for (const source of ['relay', 'server'] as const) {
-      for (const chain of [f.base, f.C, f.R]) assert.deepEqual(await empty.offer(chain.ledger, source), { decision: 'reject', relation: null, candidate: null, state: null, discarded: [] });
+      for (const chain of [f.base, f.C, f.R]) assert.deepEqual(await empty.offer(chain.ledger, source), { decision: 'reject', relation: null, candidate: null, state: null, discarded: [], covered: false });
     }
     assert.equal((await empty.offer(f.base.ledger, 'pairing' as 'server')).decision, 'reject');
     assert.equal(existsSync(file), false);
@@ -355,8 +355,10 @@ describe('BridgeLedgerStore', () => {
     assert.ok(!state.trusted.devices.some(device => device.endpoint.id === f.laptopId));
     assert.equal(await replica.ownBridgeStatus(ownKeys(f.studio, 'studio')), 'active');
     // From now on the old history is the diverged one, and it is refused like any other.
+    // The discarded history replayed is covered by our resolve_fork: behind the owner's decision, not a new divergence.
     const old = await replica.offer(f.S.ledger, 'server');
-    assert.deepEqual([old.decision, old.relation], ['keep', 'diverged']);
+    assert.deepEqual([old.decision, old.relation, old.covered], ['keep', 'behind', true]);
+    assert.deepEqual((await store().read())?.divergences, []);
     assert.deepEqual((await store().read())?.sticky, { deviceIds: [f.laptopId], bridgeIds: [] });
   });
 
@@ -492,6 +494,63 @@ describe('BridgeLedgerStore', () => {
     // Nor across our own head: after we move on, the same forged copy is verified again.
     assert.equal((await replica.offer(f.C.ledger, 'server')).decision, 'adopt');
     assert.deepEqual([(await replica.offer(forged, 'server')).decision], ['reject']);
+  });
+
+  it('E2E scenario E: keeping OUR side clears the server divergence, whichever source brings the resolution (clearing rules 1 and 2)', async () => {
+    for (const via of ['relay', 'server'] as const) {
+      lines.length = 0;
+      rmSync(file, { force: true });
+      // M1 holds S (base + a removal); the rolled-back server holds B (base + another record): refused, recorded, logged once.
+      await seed(f.S);
+      const replica = store();
+      assert.equal((await replica.offer(f.B.ledger, 'server')).relation, 'diverged');
+      assert.equal((await replica.offer(f.B.ledger, 'relay')).relation, 'diverged');
+      assert.deepEqual((await store().read())?.divergences.map(entry => entry.source), ['server', 'relay']);
+      // The owner keeps M1's side: S + resolve_fork discarding B's tip. It is AHEAD of M1's chain, adopted from `via`.
+      const chosen = await resolve(f.S, f.B, f.passkey);
+      const adopted = await replica.offer(chosen.ledger, via);
+      assert.deepEqual([adopted.decision, adopted.relation], ['adopt', 'ahead'], via);
+      assert.deepEqual(adopted.state?.divergences, [], `${via}: both entries name exactly the tip the resolution discards`);
+      assert.deepEqual((await store().read())?.divergences, [], via);
+      assert.equal(lines.filter(line => line.includes('REFUSED')).length, 1, via);
+    }
+  });
+
+  it('a diverged chain our own resolve_fork discards is covered: behind our decision, never re-recorded or re-logged', async () => {
+    let now = NOW;
+    await seed(f.S);
+    const replica = store(undefined, () => now);
+    await replica.offer(f.B.ledger, 'server');
+    const chosen = await resolve(f.S, f.B, f.passkey);
+    assert.equal((await replica.offer(chosen.ledger, 'relay')).decision, 'adopt');
+    assert.deepEqual((await store().read())?.divergences, []);
+    const settled = fileState();
+    // The server (or anyone on the relay) replays the discarded chain: covered, answered keep/'behind' (the server gets our chain
+    // re-offered), no entry, no line, no write — also from the cached verdict and after a restart, and after the refused-head memory.
+    for (const source of ['server', 'relay', 'server'] as const) {
+      now += 61_000;
+      const result = await store(undefined, () => now).offer(f.B.ledger, source);
+      assert.deepEqual([result.decision, result.relation, result.covered], ['keep', 'behind', true], source);
+      assert.deepEqual(result.state?.divergences, [], source);
+    }
+    assert.equal(lines.filter(line => line.includes('REFUSED')).length, 1, 'only the first refusal, before the resolution');
+    assert.deepEqual(fileState(), settled, 'nothing changes, nothing is written');
+    // Our own removal of laptop stays enforced; this bridge stays active.
+    assert.deepEqual((await store().read())?.sticky, { deviceIds: [f.laptopId], bridgeIds: [] });
+    assert.equal(await store().ownBridgeStatus(ownKeys(f.studio)), 'active');
+    // Its first record alone is covered too; a chain that EXTENDS the discarded branch past its tip is not (it may hold records the
+    // owner never saw): recorded and logged.
+    const extended = await append(f.B, f.passkey, { type: 'add_device', device: await newDevice(f.B.accountId, 'after the choice') });
+    now += 61_000;
+    const beyond = await replica.offer(extended.ledger, 'server');
+    assert.deepEqual([beyond.decision, beyond.relation, beyond.covered], ['keep', 'diverged', false]);
+    assert.equal((await store().read())?.divergences[0]?.otherHead, extended.head);
+    assert.equal(lines.filter(line => line.includes('REFUSED')).length, 2);
+    // A source that recorded a divergence and then shows the covered chain is behind our decision: its entry is cleared.
+    now += 61_000;
+    const back = await replica.offer(f.B.ledger, 'server');
+    assert.equal(back.covered, true);
+    assert.deepEqual((await store().read())?.divergences, []);
   });
 
   it('reports the own bridge as active, revoked or absent', async () => {

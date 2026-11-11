@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { createCommandHandler } from '../../command-rpc.js';
 import { createAccountRelay, createLedgerServer } from '../../ledger-relay.js';
+import { createLedgerReoffer } from '../../ledger-reoffer.js';
 import { LocalApiServer } from '../../local-api-server.js';
 import type { SessionController } from '../../session-controller.js';
 import type { CommandResponse } from '../../types.js';
@@ -1022,4 +1023,50 @@ test('a sticky-only entry for our own id (e.g. left by 0.21) never resets the id
   await microtasks();
   assert.equal(h.fired.count, 0);
   assert.equal(h.security.ledgerStatus().own, 'absent');
+});
+
+/** The owner keeps `chosen` over `other`: carried records, then resolve_fork, each signed (production builders). */
+async function keepHistory(chosen: Chain, other: Chain, passkey: SoftPasskey): Promise<Chain> {
+  let chain = chosen;
+  for (const operation of (await resolutionPlan(chosen.ledger, other.ledger)).carry) chain = await append(chain, passkey, operation);
+  const last = ledgerLastIssuedAt(chain.ledger);
+  const payload = await resolveForkTransition(chain.ledger, other.ledger, passkey.credentialId, last + 1000);
+  return { ledger: { genesis: chain.ledger.genesis, transitions: [...chain.ledger.transitions, await signed(passkey, payload)] }, accountId: chain.accountId };
+}
+
+test('E2E scenario E at the service: keeping OUR side, adopted through the relay, clears the server divergence; a replay of the discarded chain is behind our decision', async t => {
+  const w = await world();
+  // M1 holds dropLaptopFork (base + a removal); the rolled-back server holds withPhone (base + phone).
+  const h = await harness(t, w, w.dropLaptopFork);
+  h.serve(async () => w.withPhone.ledger);
+  await h.security.startLedger();
+  const refusedLines = () => h.lines.filter(line => line.includes('REFUSED')).length;
+  assert.equal(h.security.ledgerStatus().divergence?.source, 'server');
+  assert.equal(refusedLines(), 1);
+  // The owner keeps M1's side; the server stores it and publishes it on the relay, where M1 adopts it at once.
+  const chosen = await keepHistory(w.dropLaptopFork, w.withPhone, w.passkey);
+  const adopted = await h.security.offerLedgerResult(chosen.ledger, 'relay');
+  assert.deepEqual([adopted.decision, adopted.relation], ['adopt', 'ahead']);
+  const status = h.security.ledgerStatus();
+  assert.equal(status.divergence, null, 'the server entry named exactly the tip our resolve_fork discards');
+  assert.equal(status.removedOnOtherHistory, false);
+  assert.equal(status.head, await chainHead(chosen));
+  // A server that replays the discarded chain is behind our decision: no REFUSED line, no divergence, and our chain is re-offered.
+  const outcome = await h.security.readServerLedger();
+  assert.deepEqual(outcome.kind === 'read' ? [outcome.outcome.decision, outcome.outcome.relation, outcome.outcome.head] : outcome,
+    ['keep', 'behind', await chainHead(w.withPhone)]);
+  assert.equal(h.security.ledgerStatus().divergence, null);
+  assert.equal(h.security.ledgerStatus().serverBehind, true);
+  assert.equal(refusedLines(), 1);
+  assert.equal(h.fired.count, 0);
+  const posts: Array<{ ledger: unknown; expectHead: string }> = [];
+  const reoffer = createLedgerReoffer({
+    read: () => h.security.readServerLedger(),
+    local: async () => { const state = await h.store.read(); return state === null ? null : { ledger: state.ledger, head: state.checkpoint.head }; },
+    post: async (ledger, expectHead) => { posts.push({ ledger, expectHead }); return { status: 200, body: null, retryAfterMs: null }; },
+    offer: ledger => h.security.offerLedgerResult(ledger, 'server'),
+    now: () => 0, random: () => 0.5, schedule: () => () => undefined, log: () => undefined,
+  });
+  assert.equal(await reoffer.check(), 'posted');
+  assert.deepEqual(posts, [{ ledger: chosen.ledger, expectHead: await chainHead(w.withPhone) }]);
 });
