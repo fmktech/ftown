@@ -814,6 +814,50 @@ describe("Mode selection", () => {
   });
 });
 
+describe("Replica agreement and diverged replicas in the account panel", () => {
+  beforeEach(() => { vi.stubGlobal("fetch", vi.fn(async () => reply({ names: [], eligible: [] }))); });
+  const peers = (over: object = {}) => ({ head: "abcdef123456", confirmed: [], online: ["bridge-one"], diverged: [], ...over });
+
+  it("shows the agreement line under the map when signed in", () => {
+    mountLedger({ peers: peers({ confirmed: [{ kind: "bridge", id: "bridge-one", at: AT }, { kind: "device", id: "phone", at: AT }] }) });
+    renderAccount();
+    expect(screen.getByRole("status", { name: "" , hidden: false }) && document.querySelector("[data-replica-agreement]")?.textContent).toBe("Applied on 1 computer and 1 browser.");
+  });
+  it("shows nothing when signed out, with an empty head, or while the two-histories screen is open", () => {
+    mountLedger({ status: "signed_out", checkpoint: null, peers: peers() });
+    renderAccount();
+    expect(document.querySelector("[data-replica-agreement]")).toBeNull();
+    cleanup();
+    mountLedger({ peers: peers({ head: "" }) });
+    renderAccount();
+    expect(document.querySelector("[data-replica-agreement]")).toBeNull();
+    cleanup();
+    const other = { genesis: record(1, { type: "revoke_device", endpointId: "phone" }), transitions: [] } as unknown as NonNullable<LedgerClientSnapshot["divergence"]>["other"];
+    mountLedger({ peers: peers(), divergence: { other, source: "server", otherHead: "h", abandoned: [], recommend: null, firstSeen: AT, fork: { relation: "diverged", fork: { revision: 3, head: "head-3" }, mine: [], theirs: [] }, mine: { carry: [], canKeep: true, reason: null }, theirs: { carry: [], canKeep: true, reason: null } } });
+    renderAccount();
+    expect(document.querySelector("[data-replica-agreement]")).toBeNull();
+  });
+  it("marks a diverged computer and browser with a visible badge and a description, and keeps the row working", () => {
+    mountLedger({ peers: peers({ diverged: [{ kind: "bridge", id: "bridge-one", head: "deadbeef", revision: 7 }, { kind: "device", id: "phone", head: "cafebabe", revision: 6 }] }) });
+    renderAccount();
+    const computer = document.querySelector('[data-access-card="bridge:bridge-one"]') as HTMLElement;
+    expect(within(computer).getByText("Different history")).toBeTruthy();
+    const row = computer.querySelector("button[data-access-node]") as HTMLButtonElement;
+    expect(document.getElementById(row.getAttribute("aria-describedby") ?? "")?.textContent).toBe("This computer holds a different account history (revision 7, head deadbeef)");
+    const browser = document.querySelector('[data-access-card="browser:phone"]') as HTMLElement;
+    expect(within(browser).getByText("Different history")).toBeTruthy();
+    expect(document.getElementById((browser.querySelector("button[data-access-node]") as HTMLElement).getAttribute("aria-describedby") ?? "")?.textContent)
+      .toBe("This browser holds a different account history (revision 6, head cafebabe)");
+    fireEvent.click(row);
+    expect(row.getAttribute("aria-pressed")).toBe("true");
+  });
+  it("shows no badge for replicas that are not diverged", () => {
+    mountLedger({ peers: peers() });
+    renderAccount();
+    expect(screen.queryByText("Different history")).toBeNull();
+  });
+});
+
 describe("securityErrorMessage: the append-only ledger codes", () => {
   it.each([
     ["write_conflict", "Something else changed first. Confirm again."],
