@@ -10,7 +10,7 @@ import {
   LedgerError, accountIdOf, applyRevocations, authorityConsentChallenge, chooseLedger, ledgerChallenge, ledgerHead, ledgerLastIssuedAt, ledgerRevocations, nextTransition,
   parseLedger, signInChallenge, verifyLedger,
 } from './ledger.js';
-import type { LedgerCache, LedgerChoice, LedgerErrorCode } from './ledger.js';
+import type { LedgerCache, LedgerChoice, LedgerDiscarded, LedgerErrorCode, LedgerRelation, LedgerSeen } from './ledger.js';
 import { createSoftPasskey } from './testing.js';
 import type { SoftPasskey } from './testing.js';
 
@@ -94,7 +94,7 @@ async function fixture() {
   chain = await append(chain, a, { type: 'add_bridge', bridge });
   return { a, chain, device, bridge };
 }
-/** base (2 records); A and B tie at 3 with no revocation; R and S tie at 3 with one revocation each; C extends A and D extends B, tying at 4. */
+/** base (2 records); A, B, R, S each add one record to base (R and S revoke); C extends A and D extends B. */
 async function forest() {
   const { a, chain: base, device } = await fixture();
   const add = async (chain: Chain, label: string): Promise<Chain> => append(chain, a, { type: 'add_device', device: await newDevice(base.accountId, label) });
@@ -106,14 +106,27 @@ async function forest() {
   const S = await append(base, a, { type: 'revoke_device', endpointId: device.endpoint.id });
   return { a, base, A, B, C, D, R, S };
 }
-const revocations = (chain: Chain): number => chain.ledger.transitions.filter(record => record.payload.operation.type === 'revoke_device' || record.payload.operation.type === 'revoke_bridge').length;
-/** The reference fork order: longer, then more revocations, then the smaller head. */
-function best(chains: Chain[]): Chain {
-  return chains.reduce((winner, chain) => {
-    const length = chain.ledger.transitions.length - winner.ledger.transitions.length;
-    const revoked = revocations(chain) - revocations(winner);
-    return length > 0 || (length === 0 && (revoked > 0 || (revoked === 0 && chain.head < winner.head))) ? chain : winner;
-  });
+const NONE: LedgerDiscarded = { records: [], deviceIds: [], bridgeIds: [] };
+const UNSEEN: LedgerSeen = { deviceIds: [], bridgeIds: [] };
+/** `ledger` is the chain the caller must store afterwards: local on keep/reject. */
+function verdict(decision: LedgerChoice['decision'], relation: LedgerRelation | null, checkpoint: LedgerCheckpoint, ledger: Ledger, seen: LedgerSeen = UNSEEN): LedgerChoice {
+  return { decision, relation, checkpoint, discarded: NONE, ledger, seen };
+}
+/** Reference for LedgerSeen when every record after the fork (revision 2, the fixture's base) is signed by a prefix authority. */
+function removalsAfterBase(chain: Chain): LedgerSeen {
+  const seen: LedgerSeen = { deviceIds: [], bridgeIds: [] };
+  for (const record of chain.ledger.transitions.slice(2)) {
+    const operation = record.payload.operation;
+    if (operation.type === 'revoke_device') seen.deviceIds.push(operation.endpointId);
+    if (operation.type === 'revoke_bridge') seen.bridgeIds.push(operation.bridgeId);
+  }
+  return seen;
+}
+/** The append-only reference: a replica adopts only a chain whose records start with exactly its own records (by payload). */
+function extendsChain(current: Ledger, candidate: Ledger): boolean {
+  const mine = [current.genesis, ...current.transitions].map(record => JSON.stringify(record.payload));
+  const theirs = [candidate.genesis, ...candidate.transitions].map(record => JSON.stringify(record.payload));
+  return theirs.length > mine.length && mine.every((item, index) => theirs[index] === item);
 }
 async function cacheFor(ledger: Ledger, now = NOW): Promise<LedgerCache> {
   const checkpoint = await verifyLedger(ledger, now);
@@ -167,7 +180,7 @@ async function replicate(order: Ledger[], useCache: boolean): Promise<string> {
       if (current === null && error instanceof LedgerError) continue;
       throw error;
     }
-    if (result.decision === 'adopt') current = candidate;
+    current = result.ledger;
     cache = { head: result.checkpoint.head, checkpoint: result.checkpoint };
   }
   assert.ok(cache);
@@ -180,7 +193,6 @@ async function rejects(promise: Promise<unknown>, code: LedgerErrorCode, message
 function throws(run: () => unknown, code: LedgerErrorCode, message?: string): void {
   assert.throws(run, isCode(code), message);
 }
-const ids = (ledger: Ledger): string[] => ledger.transitions.map(record => JSON.stringify(record));
 
 test('ledgerChallenge is SHA-256 of the domain and key-sorted canonical JSON; heads and accountId are its base64url', async () => {
   const passkey = await newPasskey();
@@ -273,7 +285,7 @@ test('add_authority requires the new passkey\'s own consent, bound to this accou
 test('chooseLedger checks add_authority consent on the extension path, with and without a cache', async () => {
   const { a, chain } = await fixture();
   const b = await newPasskey();
-  const reject = { decision: 'reject', checkpoint: await verifyLedger(chain.ledger, NOW), discarded: [] };
+  const reject = verdict('reject', 'ahead', await verifyLedger(chain.ledger, NOW), chain.ledger);
   const valid = await addAuthority(b, chain.accountId, 'Phone', chain.issuedAt);
   assert.equal((await chooseLedger(chain.ledger, (await raw(chain, a, valid)).ledger, NOW, await cacheFor(chain.ledger))).decision, 'adopt', 'control');
   const victim = await start(b);
@@ -550,10 +562,28 @@ test('verifyLedger refuses duplicate ids and shared keys', async () => {
     // Validly consented, so only the duplicate rule can refuse them.
     ['authority credentialId present', await addAuthority(b, chain.accountId, 'B', chain.issuedAt, { credentialId: a.credentialId })],
     ['authority key present', await addAuthority(a, chain.accountId, 'A', chain.issuedAt, { credentialId: b.credentialId })],
-    ['revoke an unknown device', { type: 'revoke_device', endpointId: fresh.endpoint.id }],
-    ['revoke an unknown bridge', { type: 'revoke_bridge', bridgeId: 'nowhere' }],
+    ['revoke_device naming a bridge member\'s endpoint', { type: 'revoke_device', endpointId: bridge.endpoint.id }],
   ];
   for (const [name, op] of cases) await rejects(verifyLedger((await raw(chain, a, op)).ledger, NOW), 'invalid_ledger', name);
+});
+
+test('revoking an id that is not a member tombstones it: it can never be added later, and a second revocation is ledger_revoked', async () => {
+  const { a, chain } = await fixture();
+  const stranger = await newDevice(chain.accountId, 'Never added');
+  const strangerBridge = await newBridge(chain.accountId, 'garage');
+  let tombstoned = await append(chain, a, { type: 'revoke_device', endpointId: stranger.endpoint.id });
+  tombstoned = await append(tombstoned, a, { type: 'revoke_bridge', bridgeId: 'garage' });
+  const before = await verifyLedger(chain.ledger, NOW);
+  const after = await verifyLedger(tombstoned.ledger, NOW);
+  assert.deepEqual(after, { ...before, revision: 4, head: tombstoned.head, revokedDeviceIds: [stranger.endpoint.id], revokedBridgeIds: ['garage'] }, 'membership unchanged');
+  assert.deepEqual(ledgerRevocations(tombstoned.ledger), { deviceIds: [stranger.endpoint.id], bridgeIds: ['garage'] });
+  await rejects(verifyLedger((await raw(tombstoned, a, { type: 'add_device', device: stranger })).ledger, NOW), 'ledger_revoked', 'device added later');
+  await rejects(verifyLedger((await raw(tombstoned, a, { type: 'add_bridge', bridge: strangerBridge })).ledger, NOW), 'ledger_revoked', 'bridge added later');
+  const asBridge: LedgerBridge = { ...strangerBridge, bridgeId: 'other', endpoint: { ...stranger.endpoint, kind: 'bridge' } };
+  await rejects(verifyLedger((await raw(tombstoned, a, { type: 'add_bridge', bridge: asBridge })).ledger, NOW), 'ledger_revoked', 'tombstoned endpoint as a bridge');
+  throws(() => nextTransition(after, a.credentialId, { type: 'add_device', device: stranger }, NOW), 'ledger_revoked', 'builder');
+  await rejects(verifyLedger((await raw(tombstoned, a, { type: 'revoke_device', endpointId: stranger.endpoint.id })).ledger, NOW), 'ledger_revoked', 'device tombstoned twice');
+  await rejects(verifyLedger((await raw(tombstoned, a, { type: 'revoke_bridge', bridgeId: 'garage' })).ledger, NOW), 'ledger_revoked', 'bridge tombstoned twice');
 });
 
 test('verifyLedger binds endpoints and records to the account', async () => {
@@ -601,42 +631,50 @@ test('verifyLedger enforces maxAuthorities and maxDevices', async () => {
 test('chooseLedger: null local adopts a valid candidate and throws for an invalid one', async () => {
   const { chain } = await fixture();
   const result = await chooseLedger(null, chain.ledger, NOW);
-  assert.deepEqual(result, { decision: 'adopt', checkpoint: await verifyLedger(chain.ledger, NOW), discarded: [] });
+  assert.deepEqual(result, verdict('adopt', null, await verifyLedger(chain.ledger, NOW), chain.ledger));
+  assert.notEqual(result.ledger, chain.ledger, 'a parsed copy');
   const broken = tamper(chain.ledger, copy => { copy.genesis.payload.createdAt += 1; });
   await rejects(chooseLedger(null, broken, NOW), 'invalid_ledger');
 });
 
-test('chooseLedger: identical, prefix and extension', async () => {
+test('chooseLedger: same and behind are kept, ahead is adopted, and every verdict carries the relation', async () => {
   const { a, chain: base } = await fixture();
   const longer = await append(base, a, { type: 'revoke_bridge', bridgeId: 'studio' });
   const baseCheckpoint = await verifyLedger(base.ledger, NOW);
   const longerCheckpoint = await verifyLedger(longer.ledger, NOW);
-  assert.deepEqual(await chooseLedger(base.ledger, structuredClone(base.ledger), NOW), { decision: 'keep', checkpoint: baseCheckpoint, discarded: [] });
+  assert.deepEqual(await chooseLedger(base.ledger, structuredClone(base.ledger), NOW), verdict('keep', 'same', baseCheckpoint, base.ledger));
   const resigned: Ledger = { genesis: await signed(a, base.ledger.genesis.payload), transitions: base.ledger.transitions };
-  assert.equal((await chooseLedger(base.ledger, resigned, NOW)).decision, 'keep', 'same payloads, fresh signature bytes');
-  assert.deepEqual(await chooseLedger(longer.ledger, base.ledger, NOW), { decision: 'keep', checkpoint: longerCheckpoint, discarded: [] });
+  assert.notDeepEqual(resigned.genesis.signature, base.ledger.genesis.signature);
+  assert.deepEqual(await chooseLedger(base.ledger, resigned, NOW), verdict('keep', 'same', baseCheckpoint, base.ledger), 'same payloads, fresh signature bytes');
+  // 'behind' is information for the caller (re-offer), never an adoption.
+  assert.deepEqual(await chooseLedger(longer.ledger, base.ledger, NOW), verdict('keep', 'behind', longerCheckpoint, longer.ledger));
+  assert.deepEqual(await chooseLedger(longer.ledger, base.ledger, NOW, await cacheFor(longer.ledger)), verdict('keep', 'behind', longerCheckpoint, longer.ledger), 'behind (cache)');
   const genesisOnly: Ledger = { genesis: base.ledger.genesis, transitions: [] };
-  assert.equal((await chooseLedger(longer.ledger, genesisOnly, NOW)).decision, 'keep');
-  assert.deepEqual(await chooseLedger(base.ledger, longer.ledger, NOW), { decision: 'adopt', checkpoint: longerCheckpoint, discarded: [] });
-  assert.equal((await chooseLedger(genesisOnly, longer.ledger, NOW)).decision, 'adopt');
+  assert.deepEqual(await chooseLedger(longer.ledger, genesisOnly, NOW), verdict('keep', 'behind', longerCheckpoint, longer.ledger));
+  assert.deepEqual(await chooseLedger(genesisOnly, genesisOnly, NOW), verdict('keep', 'same', await verifyLedger(genesisOnly, NOW), genesisOnly));
+  assert.deepEqual(await chooseLedger(base.ledger, longer.ledger, NOW), verdict('adopt', 'ahead', longerCheckpoint, longer.ledger));
+  assert.deepEqual(await chooseLedger(genesisOnly, longer.ledger, NOW), verdict('adopt', 'ahead', longerCheckpoint, longer.ledger));
+  // The candidate's prefix carries other (valid) signature bytes: local's are stored, the candidate's are dropped.
   const resignedLonger: Ledger = { genesis: resigned.genesis, transitions: longer.ledger.transitions };
-  assert.deepEqual(await chooseLedger(base.ledger, resignedLonger, NOW, await cacheFor(base.ledger)), { decision: 'adopt', checkpoint: longerCheckpoint, discarded: [] }, 'extension with fresh prefix signatures');
+  assert.deepEqual(await chooseLedger(base.ledger, resignedLonger, NOW, await cacheFor(base.ledger)), verdict('adopt', 'ahead', longerCheckpoint, longer.ledger), 'extension with fresh prefix signatures');
 });
 
 test('chooseLedger rejects another account and invalid candidates, and throws for an invalid local', async () => {
   const { a, chain } = await fixture();
   const checkpoint = await verifyLedger(chain.ledger, NOW);
-  const reject = { decision: 'reject', checkpoint, discarded: [] };
+  // Another account is not a relation.
+  const unrelated = verdict('reject', null, checkpoint, chain.ledger);
   const other = await fixture();
-  assert.deepEqual(await chooseLedger(chain.ledger, other.chain.ledger, NOW), reject);
+  assert.deepEqual(await chooseLedger(chain.ledger, other.chain.ledger, NOW), unrelated);
   const sameKeyOtherAccount = await start(a);
-  assert.deepEqual(await chooseLedger(chain.ledger, sameKeyOtherAccount.ledger, NOW), reject, 'same passkey, different genesis');
+  assert.deepEqual(await chooseLedger(chain.ledger, sameKeyOtherAccount.ledger, NOW), unrelated, 'same passkey, different genesis');
+  const reject = verdict('reject', 'ahead', checkpoint, chain.ledger);
   const extended = await append(chain, a, { type: 'revoke_bridge', bridgeId: 'studio' });
   const forgedTail = tamper(extended.ledger, copy => { copy.transitions[2].payload.issuedAt += 1; });
   assert.deepEqual(await chooseLedger(chain.ledger, forgedTail, NOW), reject, 'tampered extension');
   assert.deepEqual(await chooseLedger(chain.ledger, (await raw(chain, a, { type: 'revoke_bridge', bridgeId: 'studio' }, { issuedAt: NOW + SKEW + 1 })).ledger, NOW), reject, 'future extension');
   const garbage: unknown = { genesis: null, transitions: 'x' };
-  assert.deepEqual(await chooseLedger(chain.ledger, garbage as Ledger, NOW), reject, 'garbage');
+  assert.deepEqual(await chooseLedger(chain.ledger, garbage as Ledger, NOW), unrelated, 'garbage');
   await rejects(chooseLedger(forgedTail, chain.ledger, NOW), 'invalid_ledger');
 });
 
@@ -644,7 +682,7 @@ test('chooseLedger verifies every new record of an extension, with or without a 
   const { a, chain } = await fixture();
   const stranger = await newPasskey();
   const checkpoint = await verifyLedger(chain.ledger, NOW);
-  const reject = { decision: 'reject', checkpoint, discarded: [] };
+  const reject = verdict('reject', 'ahead', checkpoint, chain.ledger);
   const op: LedgerOperation = { type: 'revoke_bridge', bridgeId: 'studio' };
   const forgedFirst = await raw(chain, stranger, op, { credentialId: a.credentialId });
   const forgeries: [string, Ledger][] = [
@@ -656,24 +694,28 @@ test('chooseLedger verifies every new record of an extension, with or without a 
     assert.deepEqual(await chooseLedger(chain.ledger, forged, NOW), reject, name);
     assert.deepEqual(await chooseLedger(chain.ledger, forged, NOW, await cacheFor(chain.ledger)), reject, `${name} (cache)`);
   }
-  // The candidate's copy of the shared prefix carries a corrupted signature: never adopted as a cheap extension.
+  // The candidate's copy of the shared prefix carries a corrupted signature: it is never checked and never stored; the new record is.
   const extended = await append(chain, a, op);
   const corruptPrefix = tamper(extended.ledger, copy => { copy.transitions[0].signature = copy.transitions[1].signature; });
-  assert.deepEqual(await chooseLedger(chain.ledger, corruptPrefix, NOW, await cacheFor(chain.ledger)), reject, 'corrupted prefix signature');
-  assert.deepEqual(await chooseLedger(chain.ledger, corruptPrefix, NOW), reject, 'corrupted prefix signature (no cache)');
+  const adopted = verdict('adopt', 'ahead', await verifyLedger(extended.ledger, NOW), extended.ledger);
+  assert.deepEqual(await chooseLedger(chain.ledger, corruptPrefix, NOW, await cacheFor(chain.ledger)), adopted, 'corrupted prefix signature');
+  assert.deepEqual(await chooseLedger(chain.ledger, corruptPrefix, NOW), adopted, 'corrupted prefix signature (no cache)');
   // An equal chain is decided from heads alone, before any candidate signature is checked.
   const corruptEqual = tamper(chain.ledger, copy => { copy.transitions[0].signature = copy.transitions[1].signature; });
-  assert.equal((await chooseLedger(chain.ledger, corruptEqual, NOW)).decision, 'keep');
+  assert.deepEqual(await chooseLedger(chain.ledger, corruptEqual, NOW), verdict('keep', 'same', checkpoint, chain.ledger));
 });
 
-test('chooseLedger: the extension path enforces the genesis signature, issuedAt order and tombstones', async () => {
+test('chooseLedger: the extension path enforces issuedAt order and tombstones, and keeps local\'s genesis bytes', async () => {
   const { a, chain: base } = await fixture();
   const local = await append(base, a, { type: 'revoke_bridge', bridgeId: 'studio' });
-  const reject = { decision: 'reject', checkpoint: await verifyLedger(local.ledger, NOW), discarded: [] };
+  const reject = verdict('reject', 'ahead', await verifyLedger(local.ledger, NOW), local.ledger);
   const valid = await raw(local, a, { type: 'add_device', device: await newDevice(base.accountId, 'iPad') });
   assert.equal((await chooseLedger(local.ledger, valid.ledger, NOW, await cacheFor(local.ledger))).decision, 'adopt', 'control');
+  const corruptGenesis = tamper(valid.ledger, copy => { copy.genesis.signature = copy.transitions[0].signature; });
+  const stored = await chooseLedger(local.ledger, corruptGenesis, NOW, await cacheFor(local.ledger));
+  assert.equal(stored.decision, 'adopt', 'corrupted genesis signature bytes of the candidate are ignored');
+  assert.deepEqual(stored.ledger, valid.ledger, 'and replaced by local\'s');
   const cases: [string, Ledger][] = [
-    ['corrupted genesis signature bytes', tamper(valid.ledger, copy => { copy.genesis.signature = copy.transitions[0].signature; })],
     ['new record issued before the last one', (await raw(local, a, { type: 'add_device', device: await newDevice(base.accountId, 'iPad', T0) }, { issuedAt: local.issuedAt - 1 })).ledger],
     ['revoked bridge re-added', (await raw(local, a, { type: 'add_bridge', bridge: await newBridge(base.accountId, 'studio') })).ledger],
   ];
@@ -710,91 +752,76 @@ test('applyRevocations removes sticky ids from the roster and tombstones them, w
   throws(() => applyRevocations({ ...checkpoint, extra: 1 } as LedgerCheckpoint, { deviceIds: [], bridgeIds: [] }), 'invalid_ledger');
 });
 
-test('chooseLedger: a longer fork is adopted and lists the discarded local records', async () => {
+test('APPEND-ONLY: a LONGER diverged chain is NEVER adopted (the old tie-break adopted it), in both directions, with and without a cache', async () => {
   const { a, chain: base } = await fixture();
   const local = await append(base, a, { type: 'revoke_bridge', bridgeId: 'studio' });
-  let candidate = await append(base, a, { type: 'add_device', device: await newDevice(base.accountId, 'iPad') });
-  candidate = await append(candidate, a, { type: 'add_device', device: await newDevice(base.accountId, 'Watch') });
-  const result = await chooseLedger(local.ledger, candidate.ledger, NOW);
-  assert.equal(result.decision, 'adopt');
-  assert.deepEqual(result.checkpoint, await verifyLedger(candidate.ledger, NOW));
-  assert.deepEqual(ids({ genesis: base.ledger.genesis, transitions: result.discarded }), ids(local.ledger).slice(2));
-  assert.equal(result.discarded[0].payload.operation.type, 'revoke_bridge');
-  // No sticky exception: the revocation is discarded from the winner, and replicas keep it through ledgerRevocations of the loser.
-  assert.deepEqual(result.checkpoint.revokedBridgeIds, []);
-  assert.deepEqual(ledgerRevocations(local.ledger).bridgeIds, ['studio']);
-  assert.deepEqual(ledgerRevocations(candidate.ledger).bridgeIds, []);
-  assert.deepEqual(await chooseLedger(local.ledger, candidate.ledger, NOW, await cacheFor(local.ledger)), result, 'cache path');
+  let longer = base;
+  for (let index = 0; index < 12; index += 1) longer = await append(longer, a, { type: 'add_device', device: await newDevice(base.accountId, `Device ${index}`) });
+  assert.equal(longer.ledger.transitions.length - local.ledger.transitions.length, 11);
+  const localCheckpoint = await verifyLedger(local.ledger, NOW);
+  const kept = verdict('keep', 'diverged', localCheckpoint, local.ledger);
+  assert.deepEqual(await chooseLedger(local.ledger, longer.ledger, NOW), kept, '11 records longer, still kept');
+  assert.deepEqual(await chooseLedger(local.ledger, longer.ledger, NOW, await cacheFor(local.ledger)), kept, 'cache path');
+  // Nothing is discarded and nothing becomes sticky: the local revocation is still in the chain the replica holds.
+  assert.deepEqual(localCheckpoint.revokedBridgeIds, ['studio']);
+  // The other side keeps its own too: neither replica replaces what it holds.
+  assert.deepEqual(await chooseLedger(longer.ledger, local.ledger, NOW), verdict('keep', 'diverged', await verifyLedger(longer.ledger, NOW), longer.ledger, { deviceIds: [], bridgeIds: ['studio'] }), 'shorter fork, its removal is seen');
+  assert.deepEqual(await chooseLedger(longer.ledger, base.ledger, NOW), verdict('keep', 'behind', await verifyLedger(longer.ledger, NOW), longer.ledger), 'prefix');
 });
 
-test('chooseLedger: a shorter chain never replaces a longer one', async () => {
-  const { a, chain: base } = await fixture();
-  const shorter = await append(base, a, { type: 'revoke_bridge', bridgeId: 'studio' });
-  let longer = await append(base, a, { type: 'add_device', device: await newDevice(base.accountId, 'iPad') });
-  longer = await append(longer, a, { type: 'add_device', device: await newDevice(base.accountId, 'Watch') });
-  const kept = { decision: 'keep', checkpoint: await verifyLedger(longer.ledger, NOW), discarded: [] };
-  assert.deepEqual(await chooseLedger(longer.ledger, shorter.ledger, NOW), kept, 'shorter fork');
-  assert.deepEqual(await chooseLedger(longer.ledger, shorter.ledger, NOW, await cacheFor(longer.ledger)), kept, 'shorter fork (cache)');
-  assert.deepEqual(await chooseLedger(longer.ledger, base.ledger, NOW), kept, 'prefix');
-  // Paired with the reverse direction, this fails for any head-only rule whatever the random heads are.
-  assert.equal((await chooseLedger(shorter.ledger, longer.ledger, NOW)).decision, 'adopt');
-});
-
-test('chooseLedger: an equal-length fork with more revocations wins whatever the heads, in both directions', async () => {
-  const { a, base, A, B, C, R, S } = await forest();
-  for (const [plain, revoking] of [[A, R], [B, R], [A, S]]) {
-    const kept = { decision: 'keep', checkpoint: await verifyLedger(revoking.ledger, NOW), discarded: [] };
-    // One of these two fails for a head-only tie-break, whichever head is smaller.
-    assert.deepEqual(await chooseLedger(revoking.ledger, plain.ledger, NOW), kept);
-    assert.deepEqual(await chooseLedger(plain.ledger, revoking.ledger, NOW), { decision: 'adopt', checkpoint: kept.checkpoint, discarded: plain.ledger.transitions.slice(2) });
-    assert.deepEqual(await chooseLedger(revoking.ledger, plain.ledger, NOW, await cacheFor(revoking.ledger)), kept);
+test('APPEND-ONLY: a diverged chain with MORE revocations, or of equal length, is not adopted whatever the heads', async () => {
+  const { a, base, A, B, R, S } = await forest();
+  for (const [plain, revoking] of [[A, R], [B, R], [A, S], [R, S], [S, R], [A, B], [B, A]]) {
+    // Each pair in both directions: no length, revocation count or head order decides.
+    for (const [local, candidate] of [[plain, revoking], [revoking, plain]]) {
+      const kept = verdict('keep', 'diverged', await verifyLedger(local.ledger, NOW), local.ledger, removalsAfterBase(candidate));
+      assert.deepEqual(await chooseLedger(local.ledger, candidate.ledger, NOW), kept);
+      assert.deepEqual(await chooseLedger(local.ledger, candidate.ledger, NOW, await cacheFor(local.ledger)), kept, 'cache');
+    }
   }
-  // Equal revocation counts fall back to the head; length still dominates revocations.
-  const [first, second] = R.head < S.head ? [R, S] : [S, R];
-  assert.equal((await chooseLedger(second.ledger, first.ledger, NOW)).decision, 'adopt');
-  assert.equal((await chooseLedger(first.ledger, second.ledger, NOW)).decision, 'keep');
-  assert.equal((await chooseLedger(R.ledger, C.ledger, NOW)).decision, 'adopt', 'longer without revocations beats shorter with one');
-  // The count is over the whole chain: a revocation deeper in one branch still counts.
+  // A revocation deeper in a longer branch does not win either.
   const deep = await append(await append(base, a, { type: 'revoke_bridge', bridgeId: 'studio' }), a, { type: 'add_device', device: await newDevice(base.accountId, 'Late') });
-  assert.equal((await chooseLedger(C.ledger, deep.ledger, NOW)).decision, 'adopt');
-  assert.equal((await chooseLedger(deep.ledger, C.ledger, NOW)).decision, 'keep');
+  assert.deepEqual(await chooseLedger(A.ledger, deep.ledger, NOW), verdict('keep', 'diverged', await verifyLedger(A.ledger, NOW), A.ledger, { deviceIds: [], bridgeIds: ['studio'] }));
 });
 
-test('chooseLedger: an equal-length fork with equal revocations is won by the lexicographically smaller head, in both directions', async () => {
-  const { A, B } = await forest();
-  assert.notEqual(A.head, B.head);
-  const [small, large] = A.head < B.head ? [A, B] : [B, A];
-  const fromLarge = await chooseLedger(large.ledger, small.ledger, NOW);
-  const fromSmall = await chooseLedger(small.ledger, large.ledger, NOW);
-  assert.equal(fromLarge.decision, 'adopt');
-  assert.equal(fromSmall.decision, 'keep');
-  assert.equal(fromLarge.checkpoint.head, small.head);
-  assert.equal(fromSmall.checkpoint.head, small.head);
-  assert.deepEqual(fromLarge.discarded, large.ledger.transitions.slice(2));
-  assert.deepEqual(await chooseLedger(large.ledger, small.ledger, NOW), fromLarge);
-  assert.deepEqual(await chooseLedger(large.ledger, small.ledger, NOW, await cacheFor(large.ledger)), fromLarge);
+test('chooseLedger: a diverged candidate is verified; an invalid one is rejected, never kept as a valid other history', async () => {
+  const { a, A, B } = await forest();
+  const reject = verdict('reject', 'diverged', await verifyLedger(A.ledger, NOW), A.ledger);
+  const badSignature = (await raw(B, a, { type: 'revoke_bridge', bridgeId: 'studio' }, {}, { uv: false })).ledger;
+  const stranger = (await raw(B, await newPasskey(), { type: 'revoke_bridge', bridgeId: 'studio' })).ledger;
+  const corruptFork = tamper(B.ledger, copy => { copy.transitions[2].signature = copy.transitions[1].signature; });
+  const future = (await raw(B, a, { type: 'revoke_bridge', bridgeId: 'studio' }, { issuedAt: NOW + SKEW + 1 })).ledger;
+  for (const [name, candidate] of [['bad signature after the fork', badSignature], ['stranger', stranger], ['corrupt first record of the branch', corruptFork], ['future-dated', future]] as const) {
+    assert.deepEqual(await chooseLedger(A.ledger, candidate, NOW), reject, name);
+    assert.deepEqual(await chooseLedger(A.ledger, candidate, NOW, await cacheFor(A.ledger)), reject, `${name} (cache)`);
+  }
 });
 
-test('chooseLedger converges: every arrival order ends on the same chain, with and without a cache', async () => {
+test('chooseLedger follows the append-only model in every arrival order, with and without a cache', async () => {
   const { a, base, A, B, C, D, R, S } = await forest();
   const forged = (await raw(C, await newPasskey(), { type: 'revoke_bridge', bridgeId: 'studio' }, { credentialId: a.credentialId })).ledger;
   const sets: [string, Chain[], Ledger[]][] = [
-    ['two tied extensions of a tie', [A, B, C, D], []],
-    ['prefix, tie and a forged extension', [base, A, B], [forged]],
-    ['extension of one side of a tie', [A, B, C], []],
-    ['a tie decided by revocation count', [A, R, B], []],
-    ['revocation tie decided by head, beside plain ties', [A, R, S, B], []],
-    ['length beats revocations', [R, S, C, base], []],
+    ['two branches, each extended', [A, B, C, D], []],
+    ['prefix, two branches and a forged extension', [base, A, B], [forged]],
+    ['one branch extended', [A, B, C], []],
+    ['revoking and plain branches', [A, R, B], []],
+    ['four branches and their prefix', [R, S, C, base], []],
   ];
-  assert.equal(best([A, R, B]).head, R.head);
   for (const [name, chains, invalid] of sets) {
-    const expected = best(chains).head;
     for (const useCache of [false, true]) {
       for (const order of permutations([...chains.map(chain => chain.ledger), ...invalid])) {
-        assert.equal(await replicate(order, useCache), expected, `${name}, cache ${useCache}`);
+        let expected: Ledger | null = null;
+        for (const candidate of order) {
+          if (candidate === forged) continue;
+          if (expected === null || extendsChain(expected, candidate)) expected = candidate;
+        }
+        assert.ok(expected);
+        assert.equal(await replicate(order, useCache), await ledgerHead(expected.transitions[expected.transitions.length - 1].payload), `${name}, cache ${useCache}`);
       }
     }
   }
+  // A linear history converges whatever the order: every replica ends on its tip.
+  for (const order of permutations([base.ledger, A.ledger, C.ledger])) assert.equal(await replicate(order, true), C.head);
 });
 
 test('chooseLedger: the cache path decides exactly like the no-cache path', async () => {
@@ -818,8 +845,8 @@ test('chooseLedger: a vouched local chain that looks future-dated after a clock 
   const earlier = T0 - 600_000;
   const cache = await cacheFor(C.ledger);
   await rejects(chooseLedger(C.ledger, C.ledger, earlier), 'invalid_ledger', 'without a cache the local chain is re-verified');
-  assert.deepEqual(await chooseLedger(C.ledger, C.ledger, earlier, cache), { decision: 'keep', checkpoint: cache.checkpoint, discarded: [] });
-  assert.equal((await chooseLedger(C.ledger, A.ledger, earlier, cache)).decision, 'keep');
+  assert.deepEqual(await chooseLedger(C.ledger, C.ledger, earlier, cache), verdict('keep', 'same', cache.checkpoint, C.ledger));
+  assert.deepEqual(await chooseLedger(C.ledger, A.ledger, earlier, cache), verdict('keep', 'behind', cache.checkpoint, C.ledger));
   const extension = await append(C, a, { type: 'revoke_bridge', bridgeId: 'studio' });
   assert.equal((await chooseLedger(C.ledger, extension.ledger, earlier, cache)).decision, 'reject');
   assert.equal((await chooseLedger(C.ledger, (await fixture()).chain.ledger, earlier, cache)).decision, 'reject');
@@ -831,7 +858,7 @@ test('chooseLedger: a cache vouches only for the hash-linked chain it was made f
   // Same last record and length as C, but its middle record comes from the other branch.
   const spliced: Ledger = { genesis: C.ledger.genesis, transitions: [...C.ledger.transitions.slice(0, 2), B.ledger.transitions[2], C.ledger.transitions[3]] };
   await rejects(chooseLedger(spliced, A.ledger, NOW, cache), 'invalid_ledger');
-  const kept = { decision: 'keep', checkpoint: await verifyLedger(C.ledger, NOW), discarded: [] };
+  const kept = verdict('keep', 'behind', await verifyLedger(C.ledger, NOW), C.ledger);
   const wrongRevision = { head: cache.head, checkpoint: { ...cache.checkpoint, revision: 3 } };
   assert.deepEqual(await chooseLedger(C.ledger, A.ledger, NOW, wrongRevision), kept, 'inconsistent cache falls back');
   assert.deepEqual(await chooseLedger(C.ledger, A.ledger, NOW, { head: 'x', checkpoint: cache.checkpoint }), kept, 'mismatched cache falls back');
@@ -887,7 +914,8 @@ test('nextTransition refuses invalid operations with the verifier errors', async
   throws(() => nextTransition(checkpoint, a.credentialId, { type: 'add_device', device: foreign }, at), 'ledger_other_account', 'owner');
   throws(() => nextTransition(checkpoint, a.credentialId, { type: 'add_device', device: { ...fresh, authPublicKey: fresh.endpoint.publicKey } }, at), 'invalid_ledger', 'key reuse');
   throws(() => nextTransition(checkpoint, a.credentialId, { type: 'add_device', device: { ...fresh, approvedAt: at + 1 } }, at), 'invalid_ledger', 'approvedAt');
-  throws(() => nextTransition(checkpoint, a.credentialId, { type: 'revoke_bridge', bridgeId: 'nowhere' }, at), 'invalid_ledger', 'unknown bridge');
+  assert.equal(nextTransition(checkpoint, a.credentialId, { type: 'revoke_bridge', bridgeId: 'nowhere' }, at).revision, 3, 'an unknown bridge is tombstoned');
+  throws(() => nextTransition(checkpoint, a.credentialId, { type: 'revoke_device', endpointId: (checkpoint.bridges[0]).endpoint.id }, at), 'invalid_ledger', 'device revocation of a bridge endpoint');
   const extra: unknown = { ...revoke, extra: 1 };
   throws(() => nextTransition(checkpoint, a.credentialId, extra as LedgerOperation, at), 'invalid_ledger', 'unknown key');
   const removed: unknown = { type: 'revoke_authority', credentialId: a.credentialId };

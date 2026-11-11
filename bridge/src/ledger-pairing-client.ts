@@ -6,7 +6,7 @@
  */
 import type { EndpointIdentity } from './security/protocol.js';
 import type { LedgerBridgeIdentity } from './security/bridge/ledger-identity.js';
-import type { BridgeLedgerStore } from './security/bridge/ledger-store.js';
+import { LedgerStoreError, type BridgeLedgerStore } from './security/bridge/ledger-store.js';
 import {
   PAIR_FRAGMENT_PREFIX, PAIR_LIFETIME_MS, createBridgePairRequest, encodePairLink, openPairApproval, pairComparisonCode,
 } from './security/ledger/pairing.js';
@@ -154,12 +154,13 @@ export async function runLedgerPairing(deps: LedgerPairingDeps): Promise<{ accou
     else await sleep(pollIntervalMs);
   }
 
-  // adoptPaired verifies (confirmPairedLedger) and persists; only then is the identity bound.
+  // adoptPaired verifies (confirmPairedLedger) and persists; only then is the identity bound. An account that already revokes this
+  // bridge id (pairing_revoked) can never take it: a retry with the same id would fail the same way.
   let checkpoint: LedgerCheckpoint;
   try {
     checkpoint = await deps.store.adoptPaired(link, approval, ledger, now());
-  } catch {
-    throw new Error('pairing_rejected');
+  } catch (error) {
+    throw new Error(error instanceof LedgerStoreError && error.code === 'ledger_store_pairing_revoked' ? 'pairing_revoked' : 'pairing_rejected');
   }
   await deps.bindIdentity(approval.accountId);
 

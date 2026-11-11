@@ -9,6 +9,8 @@ import type { SecurityLockState } from "./SecurityLockIcon";
 import { useDeviceDisplayNames } from "@/hooks/useDeviceDisplayNames";
 import { UnsavedRemovalRetryButton, unsavedRemovalState } from "./UnsavedRemovalRetry";
 import { DeviceDisplayNameEditor } from "./DeviceDisplayNameEditor";
+import { ForkResolution, FORK_KEPT } from "./ForkResolution";
+import { ReplicaAgreement } from "./ReplicaAgreement";
 import { securityErrorCode, useAccountSecurity, type AccountSecurity } from "@/hooks/useAccountSecurity";
 import type { LedgerClient, LedgerClientSnapshot } from "@/lib/ledger-client";
 
@@ -193,6 +195,23 @@ const LOCAL_ONLY = "Removed on this browser only — not yet applied to your acc
 const UNSAVED = "Removal not saved to the server yet";
 /** A removal while nothing is confirmed about the server (snapshot.serverState 'unknown'). */
 const UNCONFIRMED = "Removed here. Not confirmed by the server yet.";
+/** The pending write: withdrawing it (no passkey), and what that means. */
+const DISCARD_PENDING = "Discard this change";
+const DISCARD_NOTE = "If the server already received it, it can still apply until another change is saved.";
+const ALREADY_SAVED = "The server had already saved this change.";
+/** snapshot.accountMissing with a pending write. */
+const ACCOUNT_MISSING = "Your account was not found on the server, so this change cannot be saved. You can discard it.";
+/** snapshot.lastConflict, by reason. */
+const WRITE_CONFLICT = "Something else changed first. Confirm again.";
+const WRITE_DIVERGED = "This change was not saved: a different history of this account appeared.";
+const WRITE_REFUSED = "This change was not saved: the server refused it.";
+const WRITE_DISCARDED = "The change was discarded. It was not saved to your account.";
+/** A pending write that is not a removal (a removal is shown on its browser or computer). */
+const PENDING_CHANGE: Partial<Record<LedgerOperation["type"], string>> = {
+  add_bridge: "Adding a computer is not saved to the server yet. Retrying…",
+  add_device: "Adding a browser is not saved to the server yet. Retrying…",
+  add_authority: "Adding a passkey is not saved to the server yet. Retrying…",
+};
 
 /**
  * Signed entries this page has seen per ledger client. The snapshot's checkpoint drops an entry once this browser revoked it locally;
@@ -235,17 +254,37 @@ function PasskeyActionButton({ security, actionKey, label, busyLabel, ariaLabel,
 }
 
 /**
- * A removal the server has not taken yet. The client sends it again by itself; "Retry now" sends it at once, without a passkey, but
- * never before a server Retry-After. No retry happens in a conflict (the owner must sign the conflicting removals again here) or when
- * this browser cannot write: the text then says what to do instead, and there is no button.
+ * A removal the server has not taken yet: the signed change waiting for the server (the target is still in the account), or a removal
+ * in this browser's chain that a rolled-back server lacks. The client sends it again by itself; "Retry now" sends it at once, without a
+ * passkey, but never before a server Retry-After. No retry happens when this browser cannot re-offer: the text then says what to do
+ * instead, and there is no button.
  */
 function UnsavedRemoval({ security, label, id, self = false }: { security: AccountSecurity; label: string | null; id: string; self?: boolean }) {
   const { snapshot } = security;
-  const { text } = unsavedRemovalState(snapshot, self);
+  const { text } = unsavedRemovalState(snapshot, self, id);
+  const pending = snapshot.pendingWrite;
+  const isPending = !!pending && (pending.operation === "revoke_device" ? pending.deviceId === id : pending.operation === "revoke_bridge" && pending.bridgeId === id);
   return <div role="group" aria-label="Removal not saved" className="space-y-2 rounded-md border border-[var(--status-pending)] p-3">
-    <p className="text-sm">{text}</p>
+    <p className="text-sm">{isPending && snapshot.accountMissing ? ACCOUNT_MISSING : text}</p>
     <SignedIdentity label={label} id={id} />
-    <UnsavedRemovalRetryButton snapshot={snapshot} busy={!!security.busy} retrying={security.busy === "retry"} onRetry={() => void security.run("retry", client => client.retryNow())} />
+    <div className="flex flex-wrap gap-2">
+      {!(isPending && snapshot.accountMissing) && <UnsavedRemovalRetryButton snapshot={snapshot} busy={!!security.busy} retrying={security.busy === "retry"} id={id} onRetry={() => void security.run("retry", client => client.retryNow())} />}
+      {isPending && <DiscardPending security={security} />}
+    </div>
+  </div>;
+}
+
+/** "Discard this change": withdraws the pending write without a passkey (see LedgerClient.discardPending), with what that means. */
+export function DiscardPending({ security }: { security: AccountSecurity }) {
+  const [saved, setSaved] = useState(false);
+  const discard = () => {
+    let result: "discarded" | "already_saved" | null = null;
+    void security.run("discard", async client => { result = await client.discardPending(); }).then(done => { if (done && result === "already_saved") setSaved(true); });
+  };
+  return <div className="space-y-1">
+    <button type="button" className="btn-ghost min-h-11 sm:min-h-8" disabled={!!security.busy} onClick={discard}>{security.busy === "discard" ? "Discarding…" : DISCARD_PENDING}</button>
+    <p className="text-xs text-[var(--text-muted)]">{DISCARD_NOTE}</p>
+    {saved && <p role="status" className="text-xs">{ALREADY_SAVED}</p>}
   </div>;
 }
 
@@ -254,7 +293,7 @@ function SignerHint({ security }: { security: AccountSecurity }) {
   return <p className="text-xs text-[var(--text-muted)]">Your account has {security.snapshot.checkpoint?.authorities.length ?? 0} passkeys. Choose the passkey on this device first, then confirm.</p>;
 }
 
-/** The fork notice: local records dropped because a longer chain won. Each can be signed again (one prompt each). */
+/** Records this browser signed that are not part of the account (the server never saved them, or the owner discarded them by keeping the other history). Each can be signed again (one prompt each). */
 function DiscardedChanges({ security, canWrite, describe }: { security: AccountSecurity; canWrite: boolean; describe: (operation: LedgerOperation) => string }) {
   const { client, snapshot } = security;
   const [resolved, setResolved] = useState<Record<string, string>>({});
@@ -371,6 +410,8 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
   const displayNames = useDeviceDisplayNames(accountId);
   const [selection, setSelection] = useState<{ scope: string; node: SecurityAccessSelection } | null>(null);
   const [confirm, setConfirm] = useState<string | null>(null);
+  /** The owner kept a history in this session (the screen is gone; this line stays). */
+  const [kept, setKept] = useState(false);
   const context = `${accountId}:${currentEndpointId ?? ""}`;
   useEffect(() => { setConfirm(null); }, [context]);
   const mismatch = !!snapshot.checkpoint && snapshot.checkpoint.accountId !== accountId;
@@ -379,13 +420,27 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
   /** The verified chain (sticky revocations applied) is on screen; this browser's own membership is reported separately. */
   const verified = !!trusted && (snapshot.status === "ready" || revokedHere);
   const accountReady = !!trusted && snapshot.status === "ready";
-  /** Passkey-signed changes only from a browser that is itself in the account (never in device_revoked). */
-  const canWrite = accountReady;
+  /** A different history of the account exists: the client refuses every passkey-signed change until the owner chooses one. */
+  const divergence = trusted ? snapshot.divergence ?? null : null;
+  /** Passkey-signed changes only from a browser that is itself in the account (never in device_revoked), and never while diverged. */
+  const canWrite = accountReady && !divergence;
+  /** The signed change waiting for the server; it is not part of `trusted` until the server accepts it. */
+  const pendingWrite = trusted ? snapshot.pendingWrite ?? null : null;
   const displayName = (kind: "browser" | "bridge", id: string) => displayNames.names.find(item => item.kind === kind && item.id === id)?.name;
-  // Revoked on this browser only: still in the account for the server, the computers and the other browsers.
-  const localDevices = trusted ? snapshot.localOnly.deviceIds : [];
-  const localBridges = trusted ? snapshot.localOnly.bridgeIds : [];
-  // Removed in this browser's chain, not yet on the server: the server (and so the computers) still accept them.
+  // Revoked on this browser only: still in the account for the server, the computers and the other browsers. Either kept from an
+  // older replica or seen on another history (snapshot.localOnly), or a removal the owner signed that was not saved (snapshot.blocked,
+  // except the pending one, shown as not saved yet): that one can be dismissed.
+  const pendingIds = { deviceIds: snapshot.unsaved?.deviceIds ?? [], bridgeIds: snapshot.unsaved?.bridgeIds ?? [] };
+  const blockedDevices = trusted ? (snapshot.blocked?.deviceIds ?? []).filter(id => !pendingIds.deviceIds.includes(id)) : [];
+  const blockedBridges = trusted ? (snapshot.blocked?.bridgeIds ?? []).filter(id => !pendingIds.bridgeIds.includes(id)) : [];
+  const localDevices = trusted ? [...new Set([...snapshot.localOnly.deviceIds, ...blockedDevices])] : [];
+  const localBridges = trusted ? [...new Set([...snapshot.localOnly.bridgeIds, ...blockedBridges])] : [];
+  /** The discarded removal records that keep `id` blocked here (dismissing them lifts the block). */
+  const blockingRecords = (kind: "device" | "bridge", id: string) => snapshot.discarded.filter(record => kind === "device"
+    ? record.payload.operation.type === "revoke_device" && record.payload.operation.endpointId === id
+    : record.payload.operation.type === "revoke_bridge" && record.payload.operation.bridgeId === id);
+  // Removals the server does not hold yet (the pending write, or removals a rolled-back server lacks): the server (and so the computers)
+  // still accept them. A pending removal's target is still in the account (`trusted` lists it).
   const unsavedDevices = trusted ? (snapshot.unsaved?.deviceIds ?? []).filter(id => !localDevices.includes(id) && id !== currentEndpointId) : [];
   const unsavedBridges = trusted ? (snapshot.unsaved?.bridgeIds ?? []).filter(id => !localBridges.includes(id)) : [];
   /** This browser's own removal, not on the server yet: it is still accepted there, and the client sends it again. */
@@ -406,8 +461,9 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
   const devices = [...(trusted?.devices ?? [])].sort((a, b) => Number(b.endpoint.id === currentEndpointId) - Number(a.endpoint.id === currentEndpointId));
   const browserNodes: SecurityAccessBrowserNode[] = devices.map(device => {
     const current = device.endpoint.id === currentEndpointId; const custom = displayName("browser", device.endpoint.id);
+    const unsaved = current ? unsavedSelf : unsavedDevices.includes(device.endpoint.id);
     return { id: device.endpoint.id, label: custom ?? browserName(device.label, current), customLabel: custom !== undefined, current,
-      accessText: current && revokedHere ? "Access revoked" : verified ? "In your account" : "Access paused",
+      accessText: current && revokedHere ? "Access revoked" : unsaved ? UNSAVED : verified ? "In your account" : "Access paused",
       lockState: verified && !(current && revokedHere) ? "secured" : "approval_needed", edge: verified && !(current && revokedHere) ? "current" : "none" };
   });
   for (const id of localDevices) {
@@ -438,7 +494,8 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
     const entry = roster.find(item => item.bridgeId === computer.bridgeId);
     const localOnly = localBridges.includes(computer.bridgeId);
     const revoked = !localOnly && !!trusted?.revokedBridgeIds.includes(computer.bridgeId);
-    const unsaved = revoked && unsavedBridges.includes(computer.bridgeId);
+    // Removed in this browser's chain (server behind), or the pending removal of a computer still in the account.
+    const unsaved = !localOnly && unsavedBridges.includes(computer.bridgeId);
     const status = computer.security.status;
     const keyMismatch = !!entry && !!computer.security.endpoint && computer.security.endpoint.id !== entry.endpoint.id;
     const inAccount = !!entry && !revoked && !keyMismatch && status !== "revoked" && status !== "key_changed";
@@ -455,6 +512,11 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
     return { computer, entry, revoked, localOnly, unsaved, inAccount, node };
   });
 
+  /** Members whose head is a different history (snapshot.peers.diverged) get a warning badge; the row keeps its normal behaviour. */
+  const withBadges = <N extends { id: string }>(kind: "device" | "bridge", nodes: N[]): (N & { badge?: { text: string; description: string } })[] => nodes.map(node => {
+    const found = (snapshot.peers?.diverged ?? []).find(item => item.kind === kind && item.id === node.id);
+    return found ? { ...node, badge: { text: "Different history", description: `This ${kind === "bridge" ? "computer" : "browser"} holds a different account history (revision ${found.revision}, head ${found.head})` } } : node;
+  });
   const scope = `${context}:${selected?.bridgeId ?? ""}`;
   const validSelection = (node: SecurityAccessSelection) => node.kind === "browser" ? browserNodes.some(item => item.id === node.id) : computerViews.some(item => item.node.id === node.id);
   const currentBrowser = browserNodes.find(node => node.current);
@@ -485,14 +547,18 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
         const name = displayName("bridge", id) ?? computers.get(id)?.label ?? signedBridge(id)?.label;
         return `Remove computer “${name || `Computer · ${shortId(id)}`}”`;
       }
+      case "resolve_fork": return "Chose this history over another one";
     }
   };
+  const conflictText = (reason: string) => reason === "write_conflict" ? WRITE_CONFLICT : reason === "ledger_diverged" ? WRITE_DIVERGED
+    : reason === "discarded" ? WRITE_DISCARDED : WRITE_REFUSED;
 
   const accountProblem = mismatch ? ACCOUNT_MISMATCH : snapshot.status === "error" ? securityErrorMessage({ code: snapshot.error ?? "" }) : null;
-  const message = security.error ? securityErrorMessage({ code: security.error }) : accountProblem;
+  // The two-histories screen shows its own action errors.
+  const message = security.error && !divergence ? securityErrorMessage({ code: security.error }) : security.error ? null : accountProblem;
   const selectedDetails = active && <section aria-label="Selected access details" className="space-y-2">
     {selectedBrowser && <>
-      {selectedDevice && <div className="flex flex-wrap items-center gap-2">
+      {selectedDevice && selectedBrowser.accessText !== UNSAVED && <div className="flex flex-wrap items-center gap-2">
         <button type="button" className="btn-danger inline-flex min-h-11 items-center gap-1 sm:min-h-8" title="Remove this browser from your account" aria-label={`Remove browser ${selectedBrowserLabel}`}
           disabled={!!busy || !canWrite} onClick={() => setConfirm(`browser:${selectedBrowser.id}`)}><TrashIcon />Remove</button></div>}
       {confirm === `browser:${selectedBrowser.id}` && selectedDevice && <div role="group" aria-label="Confirm browser removal" className="space-y-3 rounded-md border border-[var(--border-muted)] p-3">
@@ -508,11 +574,16 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
         <p className="text-sm">{LOCAL_ONLY}.</p>
         <p className="text-xs leading-relaxed text-[var(--text-muted)]">Your computers, the server and your other browsers still trust this browser. Sign the removal again to apply it.</p>
         <SignedIdentity label={signedDevice(selectedBrowser.id)?.label ?? null} id={selectedBrowser.id} />
-        <SignerHint security={security} />
-        <PasskeyActionButton security={security} actionKey={`browser:${selectedBrowser.id}`} label="Sign removal again" busyLabel="Waiting for passkey…" className="btn-danger"
-          disabled={!canWrite} action={client => client.revokeDevice(selectedBrowser.id)} />
+        {/* While two histories exist nothing can be signed: the removal stays enforced here, without the button. */}
+        {!divergence && <SignerHint security={security} />}
+        <div className="flex flex-wrap gap-2">
+          {!divergence && <PasskeyActionButton security={security} actionKey={`browser:${selectedBrowser.id}`} label="Sign removal again" busyLabel="Waiting for passkey…" className="btn-danger"
+            disabled={!canWrite} action={client => client.revokeDevice(selectedBrowser.id)} />}
+          {blockingRecords("device", selectedBrowser.id).length > 0 && <button type="button" className="btn-ghost min-h-11 sm:min-h-8" disabled={!!busy}
+            onClick={() => void security.client?.dismissDiscarded(blockingRecords("device", selectedBrowser.id))}>Dismiss</button>}
+        </div>
       </div>}
-      {!selectedDevice && unsavedDevices.includes(selectedBrowser.id) && <UnsavedRemoval security={security} label={signedDevice(selectedBrowser.id)?.label ?? null} id={selectedBrowser.id} />}
+      {unsavedDevices.includes(selectedBrowser.id) && <UnsavedRemoval security={security} label={signedDevice(selectedBrowser.id)?.label ?? null} id={selectedBrowser.id} />}
       {/* This browser's unsaved or unconfirmed removal is explained once, above the map. */}
       {!selectedDevice && selectedBrowser.current && !localDevices.includes(selectedBrowser.id) && !unsavedSelf && !(selfRemoved && unconfirmed) && <p className="text-xs text-[var(--text-muted)]">{selfRemoved ? "This browser was removed from your account." : "This browser is not in your account."} <a href="/login" className="underline">Sign in with your passkey</a> to add it.</p>}
       <details className="text-xs"><summary className="min-h-11 cursor-pointer py-3 sm:min-h-8 sm:py-2">Browser details</summary>
@@ -529,7 +600,7 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
           <p className="break-words">Original name: {entry?.label || computer.label || "Computer"}</p>
           {entry && <p>Added {new Date(entry.approvedAt).toLocaleString()}.</p>}
           {(entry?.endpoint ?? computer.security.endpoint) && <p className="break-all font-mono">Fingerprint: {(entry?.endpoint ?? computer.security.endpoint)?.id}</p>}</details>
-        {entry && !revoked && <div className="space-y-2">
+        {entry && !revoked && !unsaved && <div className="space-y-2">
           <button type="button" aria-label={`Remove computer ${node.label}`} className="btn-danger inline-flex min-h-11 items-center gap-1 sm:min-h-8" disabled={!!busy || !canWrite}
             onClick={() => setConfirm(`computer:${computer.bridgeId}`)}><TrashIcon />Remove computer</button>
           {confirm === `computer:${computer.bridgeId}` && <div role="group" aria-label="Confirm computer removal" className="space-y-3 rounded-md border border-[var(--border-muted)] p-3">
@@ -546,9 +617,13 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
           <p className="text-sm">{LOCAL_ONLY}.</p>
           <p className="text-xs leading-relaxed text-[var(--text-muted)]">The server, your other browsers and the computer itself still trust it. Sign the removal again to apply it.</p>
           <SignedIdentity label={signedBridge(computer.bridgeId)?.label ?? null} id={computer.bridgeId} />
-          <SignerHint security={security} />
-          <PasskeyActionButton security={security} actionKey={`computer:${computer.bridgeId}`} label="Sign removal again" busyLabel="Waiting for passkey…" className="btn-danger"
-            disabled={!canWrite} action={client => client.revokeBridge(computer.bridgeId)} />
+          {!divergence && <SignerHint security={security} />}
+          <div className="flex flex-wrap gap-2">
+            {!divergence && <PasskeyActionButton security={security} actionKey={`computer:${computer.bridgeId}`} label="Sign removal again" busyLabel="Waiting for passkey…" className="btn-danger"
+              disabled={!canWrite} action={client => client.revokeBridge(computer.bridgeId)} />}
+            {blockingRecords("bridge", computer.bridgeId).length > 0 && <button type="button" className="btn-ghost min-h-11 sm:min-h-8" disabled={!!busy}
+              onClick={() => void security.client?.dismissDiscarded(blockingRecords("bridge", computer.bridgeId))}>Dismiss</button>}
+          </div>
         </div>}
         {unsaved && <UnsavedRemoval security={security} label={signedBridge(computer.bridgeId)?.label ?? null} id={computer.bridgeId} />}
         {revoked && !unsaved && <p className="text-xs text-[var(--text-muted)]">{unconfirmed ? UNCONFIRMED : "This computer was removed from your account. To use it again, pair it as a new computer."}</p>}
@@ -558,6 +633,17 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
   </section>;
 
   return <div className="space-y-3">
+    {divergence && <ForkResolution divergence={divergence} security={security} checkpoint={trusted} saving={snapshot.resolutionPending ?? null} onKept={() => setKept(true)} />}
+    {kept && !divergence && <p role="status" className="rounded-md border border-[var(--border-muted)] p-3 text-sm">{FORK_KEPT}</p>}
+    {snapshot.lastConflict && trusted && security.error !== snapshot.lastConflict.reason
+      && <p role="status" className="rounded-md border border-[var(--status-pending)] p-3 text-sm">{conflictText(snapshot.lastConflict.reason)}</p>}
+    {pendingWrite && PENDING_CHANGE[pendingWrite.operation] && <div role="group" aria-label="Change not saved" className="space-y-2 rounded-md border border-[var(--status-pending)] p-3">
+      <p className="text-sm">{snapshot.accountMissing ? ACCOUNT_MISSING : PENDING_CHANGE[pendingWrite.operation]}</p>
+      <div className="flex flex-wrap gap-2">
+        {!snapshot.accountMissing && <UnsavedRemovalRetryButton snapshot={snapshot} busy={!!security.busy} retrying={security.busy === "retry"} pending onRetry={() => void security.run("retry", client => client.retryNow())} />}
+        <DiscardPending security={security} />
+      </div>
+    </div>}
     {unsavedSelf && currentEndpointId && <UnsavedRemoval security={security} label={signedDevice(currentEndpointId)?.label ?? null} id={currentEndpointId} self />}
     {!unsavedSelf && selfRemoved && unconfirmed && <p role="status" className="rounded-md border border-[var(--border-muted)] p-3 text-sm">{UNCONFIRMED}</p>}
     {revokedHere && !unsavedSelf && !unconfirmed && <div role="alert" className="space-y-2 rounded-md border border-[var(--status-error)] p-3">
@@ -570,7 +656,7 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
       <p className="text-[var(--text-muted)]">Your account still includes {localDevices.length + localBridges.length === 1 ? "it" : "them"}. Select each item marked “{LOCAL_ONLY}” and sign its removal again.</p>
     </section>}
     <DiscardedChanges security={security} canWrite={canWrite} describe={describe} />
-    <SecurityAccessMap browsers={browserNodes} bridges={computerViews.map(item => item.node)}
+    <SecurityAccessMap browsers={withBadges("device", browserNodes)} bridges={withBadges("bridge", computerViews.map(item => item.node))}
       account={{ statusText: mismatch ? "Different account" : accountReady ? "Verified" : revokedHere ? "This browser was removed" : snapshot.status === "error" ? "Access paused" : "Not signed in",
         lockState: accountReady ? "secured" : snapshot.status === "error" ? "unknown" : "approval_needed" }}
       selected={active} onSelect={node => { setSelection({ scope, node }); setConfirm(null); }} selectedDetails={selectedDetails}
@@ -582,6 +668,7 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
         {message && <p role="alert" className="w-full text-sm text-[var(--status-error)]">{message}</p>}
         {snapshot.status === "signed_out" && !mismatch && <p role="status" className="w-full text-xs text-[var(--text-muted)]">Sign in with your passkey to manage your account.</p>}
       </div>} />
+    {trusted && snapshot.status !== "signed_out" && !divergence && <ReplicaAgreement peers={snapshot.peers} checkpoint={trusted} />}
     <PasskeysSection security={security} canWrite={canWrite} />
     <details className="text-xs text-[var(--text-muted)]"><summary className="min-h-11 cursor-pointer py-3 sm:min-h-8 sm:py-2">Recovery and security details</summary>
       <p>Only your passkeys can change your account. Removing a browser or computer takes effect as soon as your computers receive the signed change; offline computers apply it when they reconnect. Clearing this browser's storage removes its keys; sign in again with your passkey to add it back. If you lose every passkey, create a new account and run <code>ftown start --new-identity</code> on each computer.</p></details>

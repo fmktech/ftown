@@ -24,7 +24,7 @@ const endpoint = { id: 'browser-endpoint', ownerId: accountId, kind: 'browser' a
 const identity = { endpoint, keyPair: {} } as unknown as EndpointIdentity;
 const checkpoint: LedgerCheckpoint = { version: 2, accountId, revision: 1, head: 'h'.repeat(43), authorities: [],
   devices: [{ endpoint, authPublicKey: 'device-key', label: 'Laptop', approvedAt: 0 }], bridges: [], revokedDeviceIds: [], revokedBridgeIds: [] };
-const ledger = { load: vi.fn(async () => {}), retryNow: vi.fn(async () => {}) };
+const ledger = { load: vi.fn(async () => {}), retryNow: vi.fn(async () => {}), discardPending: vi.fn(async () => 'discarded' as const), dismissDiscarded: vi.fn(async () => {}) };
 const signedOut: LedgerClientSnapshot = { status: 'signed_out', checkpoint: null, discarded: [], localOnly: { deviceIds: [], bridgeIds: [] }, signer: null, pending: 'none' };
 const ready: LedgerClientSnapshot = { ...signedOut, status: 'ready', checkpoint };
 const account = { ownerId: accountId, userId: accountId, token: 'test-token', centrifugoUrl: 'wss://relay.test' };
@@ -78,7 +78,7 @@ it('a browser removed from the ledger gets no encrypted resources, and Sign in a
 
 describe('own removal not yet saved by the server', () => {
   const revoked = { ...ready, checkpoint: { ...checkpoint, devices: [], revokedDeviceIds: [endpoint.id] } };
-  const unsavedSnap = (extra: Partial<LedgerClientSnapshot> = {}): LedgerClientSnapshot => ({ ...revoked, unsaved: { deviceIds: [endpoint.id], bridgeIds: [] }, serverState: 'behind', canReoffer: true, conflict: false, ...extra });
+  const unsavedSnap = (extra: Partial<LedgerClientSnapshot> = {}): LedgerClientSnapshot => ({ ...revoked, unsaved: { deviceIds: [endpoint.id], bridgeIds: [] }, serverState: 'behind', canReoffer: true, ...extra });
   const TEXT = "This browser's removal is not saved to the server yet. It can still connect. Retrying…";
   it('says it is still removing, offers Retry now and no Sign in again; nothing encrypted is mounted', async () => {
     mocks.useLedger.mockReturnValue({ client: ledger, snapshot: unsavedSnap() });
@@ -118,6 +118,38 @@ describe('own removal not yet saved by the server', () => {
     mocks.useLedger.mockReturnValue({ client: ledger, snapshot: { ...revoked, serverState: 'current' } });
     rerender(<DashboardClient {...account} />);
     expect(await screen.findByRole('button', { name: 'Sign in again' })).toBeTruthy();
+  });
+  it('a pending removal of this browser is enforced here at once: no dashboard, "Removing this browser…", Retry now and Discard', async () => {
+    // Not in the chain yet, but blocked here: the trusted checkpoint revokes this browser (snapshot.blocked), the status says so.
+    const pending = { ...revoked, status: 'device_revoked' as const, pendingWrite: { operation: 'revoke_device' as const, deviceId: endpoint.id, since: 0 },
+      unsaved: { deviceIds: [endpoint.id], bridgeIds: [] }, blocked: { deviceIds: [endpoint.id], bridgeIds: [] }, serverState: 'current' as const, canReoffer: true };
+    mocks.useLedger.mockReturnValue({ client: ledger, snapshot: pending });
+    render(<DashboardClient {...account} />);
+    expect(await screen.findByRole('heading', { name: 'Removing this browser…' })).toBeTruthy();
+    expect(screen.getByRole('status').textContent).toBe(TEXT);
+    expect(mocks.dashboard).not.toHaveBeenCalled(); expect(mocks.connection).not.toHaveBeenCalled();
+    expect(screen.getByText('If the server already received it, it can still apply until another change is saved.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Discard this change' }));
+    await waitFor(() => expect(ledger.discardPending).toHaveBeenCalledOnce());
+    // The server lost the account: said so, and only Discard is offered.
+    cleanup();
+    mocks.useLedger.mockReturnValue({ client: ledger, snapshot: { ...pending, accountMissing: true } });
+    render(<DashboardClient {...account} />);
+    expect((await screen.findByText("Your account was not found on the server, so this browser's removal cannot be saved. You can discard it.")).getAttribute('role')).toBe('status');
+    expect(screen.queryByRole('button', { name: 'Retry now' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Discard this change' })).toBeTruthy();
+  });
+  it("this browser's removal that was dropped or discarded is enforced here only: it says so and can keep this browser", async () => {
+    const record = { payload: { type: 'ftown_account_transition', version: 2, accountId, revision: 2, previousHead: 'h'.repeat(43), issuedAt: 1, credentialId: 'c',
+      operation: { type: 'revoke_device', endpointId: endpoint.id } }, signature: { authenticatorData: 'a', clientDataJSON: 'b', signature: 's' } } as unknown as LedgerClientSnapshot['discarded'][number];
+    mocks.useLedger.mockReturnValue({ client: ledger, snapshot: { ...revoked, status: 'device_revoked', discarded: [record], blocked: { deviceIds: [endpoint.id], bridgeIds: [] },
+      unsaved: { deviceIds: [], bridgeIds: [] }, serverState: 'current' } });
+    render(<DashboardClient {...account} />);
+    expect(await screen.findByRole('heading', { name: "This browser's removal was not saved" })).toBeTruthy();
+    expect(screen.getByRole('status').textContent).toBe('It is applied on this browser only: your account and your computers still list this browser. Keep this browser to use it again.');
+    expect(screen.queryByRole('button', { name: 'Sign in again' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Keep this browser' }));
+    await waitFor(() => expect(ledger.dismissDiscarded).toHaveBeenCalledExactlyOnceWith([record]));
   });
   it('another browser unsaved removal does not change this browser removed screen', async () => {
     mocks.useLedger.mockReturnValue({ client: ledger, snapshot: { ...revoked, serverState: 'behind', unsaved: { deviceIds: ['other'], bridgeIds: [] } } });

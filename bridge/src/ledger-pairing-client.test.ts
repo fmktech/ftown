@@ -243,12 +243,34 @@ test('a ledger without this bridge is rejected', async () => {
   try { await rejects(w, 'pairing_rejected'); } finally { await cleanup(w); }
 });
 
-test('a bridge revoked later in the chain is rejected', async () => {
+test('a bridge revoked later in the chain fails as pairing_revoked (its id can never be a member), and binds nothing', async () => {
   const w = await world({
     serve: async ctx => {
       // The honest chain, then the same passkey revokes the bridge.
       const revoked = await append(ctx.approved, ctx.passkey, { type: 'revoke_bridge', bridgeId: 'studio' });
       return json(200, { ledger: revoked });
+    },
+  });
+  try { await rejects(w, 'pairing_revoked'); } finally { await cleanup(w); }
+});
+
+test('a tombstone of this bridge id in the account (revoked before it was ever added) fails as pairing_revoked, not as a removal', async () => {
+  const w = await world({
+    serve: async ctx => {
+      const before = { genesis: ctx.approved.genesis, transitions: ctx.approved.transitions.slice(0, -1) };
+      return json(200, { ledger: await append(before, ctx.passkey, { type: 'revoke_bridge', bridgeId: 'studio' }) });
+    },
+  });
+  try { await rejects(w, 'pairing_revoked'); } finally { await cleanup(w); }
+});
+
+test('a revocation of this bridge id in a chain that does not verify is only pairing_rejected', async () => {
+  const w = await world({
+    serve: async ctx => {
+      const revoked = await append(ctx.approved, ctx.passkey, { type: 'revoke_bridge', bridgeId: 'studio' });
+      const last = revoked.transitions[revoked.transitions.length - 1];
+      const forged = { ...revoked, transitions: [...revoked.transitions.slice(0, -1), { payload: last.payload, signature: revoked.transitions[0].signature }] };
+      return json(200, { ledger: forged });
     },
   });
   try { await rejects(w, 'pairing_rejected'); } finally { await cleanup(w); }

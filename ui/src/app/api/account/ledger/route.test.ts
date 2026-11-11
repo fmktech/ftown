@@ -115,6 +115,45 @@ describe('POST', () => {
     expect(mocks.publish).not.toHaveBeenCalled();
   });
 
+  it('a valid diverged chain is 409 diverged with the stored ledger, never ledger_rejected; nothing published or spent', async () => {
+    mocks.offer.mockResolvedValue({ decision: 'reject', stored, discarded: 0, reason: 'diverged' });
+    const response = await POST(post(JSON.stringify({ ledger })));
+    expect(response.status).toBe(409);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toEqual({ error: 'diverged', ledger });
+    expect(scopes()).toEqual(['ledger-write']);
+    expect(mocks.publish).not.toHaveBeenCalled();
+  });
+
+  it('an owner-chosen history adopted over a diverged one is 200 adopt, published, with the count of discarded records', async () => {
+    offer('adopt', stored, 3);
+    const response = await POST(post(JSON.stringify({ ledger, expectHead: 'H'.repeat(43) })));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ decision: 'adopt', ledger, discarded: 3 });
+    expect(mocks.publish).toHaveBeenCalledExactlyOnceWith(ID, ledger);
+  });
+
+  it('decision table: each store answer for an existing account has its own status and body, so the client can tell them apart', async () => {
+    const table: Array<[string, Record<string, unknown>, number, Record<string, unknown>, boolean]> = [
+      ['adopt (ahead)', { decision: 'adopt', stored, discarded: 0 }, 200, { decision: 'adopt', ledger, discarded: 0 }, true],
+      ['adopt (owner-chosen, diverged)', { decision: 'adopt', stored, discarded: 2 }, 200, { decision: 'adopt', ledger, discarded: 2 }, true],
+      ['keep (same or behind)', { decision: 'keep', stored, discarded: 0 }, 200, { decision: 'keep', ledger, discarded: 0 }, false],
+      ['diverged (valid other history)', { decision: 'reject', stored, discarded: 0, reason: 'diverged' }, 409, { error: 'diverged', ledger }, false],
+      ['invalid chain', { decision: 'reject', stored, discarded: 0 }, 409, { error: 'ledger_rejected', ledger }, false],
+      ['head_changed', { decision: 'reject', stored, discarded: 0, reason: 'head_changed' }, 409, { error: 'head_changed', ledger }, false],
+      ['account_unknown', { decision: 'reject', stored: null, discarded: 0, reason: 'account_unknown' }, 404, { error: 'account_unknown' }, false],
+      ['rate_limited', { decision: 'reject', stored, discarded: 0, reason: 'rate_limited' }, 429, { error: 'rate_limited' }, false],
+    ];
+    for (const [name, result, status, body, published] of table) {
+      mocks.publish.mockClear();
+      mocks.offer.mockResolvedValue(result);
+      const response = await POST(post(JSON.stringify({ ledger })));
+      expect(response.status, name).toBe(status);
+      expect(await response.json(), name).toEqual(body);
+      expect(mocks.publish, name).toHaveBeenCalledTimes(published ? 1 : 0);
+    }
+  });
+
   it('maps every creation rejection to its status, with { error: reason } only', async () => {
     const table: Array<[string, number]> = [
       ['invalid_ledger', 400], ['registration_closed', 403], ['creation_too_large', 413], ['origin_mismatch', 400],
@@ -262,6 +301,8 @@ describe('POST creation budget', () => {
       offer(decision);
       await POST(post(JSON.stringify({ ledger })));
     }
+    mocks.offer.mockResolvedValue({ decision: 'reject', stored, discarded: 0, reason: 'diverged' });
+    await POST(post(JSON.stringify({ ledger })));
     for (const reason of ['invalid_ledger', 'registration_closed', 'creation_too_large', 'origin_mismatch']) {
       refuse(reason);
       await POST(post(JSON.stringify({ ledger })));
@@ -301,6 +342,15 @@ describe('POST account write budget', () => {
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(await response.json()).toEqual({ error: 'rate_limited' });
     expect(mocks.publish).not.toHaveBeenCalled();
+  });
+
+  it('a keep, a diverged refusal or a rejection never reaches it', async () => {
+    for (const result of [{ decision: 'keep', stored, discarded: 0 }, { decision: 'reject', stored, discarded: 0, reason: 'diverged' }, { decision: 'reject', stored, discarded: 0 },
+      { decision: 'reject', stored, discarded: 0, reason: 'head_changed' }]) {
+      mocks.offer.mockResolvedValue(result);
+      await POST(post(JSON.stringify({ ledger })));
+    }
+    expect(scopes()).toEqual(['ledger-write', 'ledger-write', 'ledger-write', 'ledger-write']);
   });
 
   it('a creation never spends it, and a write never spends the creation budget', async () => {

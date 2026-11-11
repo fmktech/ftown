@@ -5,15 +5,21 @@ import { join } from 'node:path';
 import { before, describe, it } from 'node:test';
 import { UnauthorizedError } from 'centrifuge';
 import {
-  HttpStatusError, MISSING_RELAY_URL_MESSAGE, RELAY_LEDGER_MAX_SPACING_MS, UNKNOWN_ENDPOINT_REFRESH_SPACING_MS, createAccountRelay, subscribeApprovalRequired, createLedgerServer, httpStatusOf, isRefusal,
-  parseRelayUrl, readSavedRelayUrl, registerBridgeEndpoint, relayTokenFailureMessage, saveRelayUrl, type AccountRelayDeps, type AccountRelaySecurity,
+  HEAD_ANNOUNCE_SPACING_MS, HEAD_ANNOUNCE_WARN_SPACING_MS, HttpStatusError, MISSING_RELAY_URL_MESSAGE, RELAY_LEDGER_MAX_SPACING_MS, UNKNOWN_ENDPOINT_REFRESH_SPACING_MS, createAccountRelay, subscribeApprovalRequired, createLedgerServer, httpStatusOf, isRefusal,
+  parseRelayUrl, parseRetryAfter, readSavedRelayUrl, registerBridgeEndpoint, relayTokenFailureMessage, saveRelayUrl, type AccountRelayDeps, type AccountRelaySecurity,
 } from './ledger-relay.js';
+import type { LedgerHeadRelation, LedgerRelation } from './security/ledger/ledger.js';
 import { generateAuthKey } from './security/ledger/proof.js';
+import { HEAD_ANNOUNCE_MAX_AGE_MS, verifyHeadAnnouncement, type HeadAnnouncement } from './security/ledger/announce.js';
+import type { LedgerCheckpoint } from './security/ledger/protocol.js';
+import type { ServerLedgerRead } from './security/bridge/security.js';
 import type { EndpointPublic } from './security/protocol.js';
 
 const API = 'https://ftown.example';
 const ACCOUNT = 'A'.repeat(43);
 const LEDGER = { genesis: { payload: 'g' }, transitions: [] };
+/** What the fake store holds: our chain and its head. */
+const STORED = { ledger: LEDGER, checkpoint: { head: 'local-head' } };
 const b64 = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString('base64url');
 /** A one-hour JWT-shaped relay token. */
 const JWT = `${b64({ alg: 'HS256' })}.${b64({ sub: ACCOUNT, iat: 1_000, exp: 4_600 })}.sig`;
@@ -39,28 +45,48 @@ function fakeFetch(routes: Record<string, Reply[]>) {
 
 function fakeSecurity(initialHead: string | null = 'local-head') {
   const log: string[] = [];
-  const state = { head: initialHead };
+  /** noteServerHead calls, kept apart from `log`. */
+  const heads: string[] = [];
+  const state = { head: initialHead, revision: initialHead === null ? null : 3 as number | null, own: 'active', serverBehind: false };
+  const headListeners = new Set<() => void>();
+  /** judgeHeadAnnouncement calls (keyIds), kept apart from `log`. */
+  const judged: string[] = [];
+  let judgement: (announcement: HeadAnnouncement) => Promise<LedgerHeadRelation | null> = async () => 'same';
   let offerResult: () => Promise<'adopt' | 'keep' | 'reject'> = async () => 'keep';
+  let relation: LedgerRelation | null = 'same';
+  let serverRead: () => ServerLedgerRead = () => ({ kind: 'read', outcome: { decision: 'keep', relation: 'same', head: state.head, revision: 3 } });
+  let headRelation: LedgerHeadRelation | null = 'same';
   let refreshEffect: () => void = () => undefined;
   let refreshGate: Promise<void> = Promise.resolve();
   const security: AccountRelaySecurity = {
-    offerLedger: async (candidate, source) => {
+    offerLedgerResult: async (candidate, source) => {
       log.push(`offer:${source}:${JSON.stringify(candidate)}`);
       const decision = await offerResult();
       if (decision === 'adopt') state.head = `${state.head}+`;
-      return decision;
+      return { decision, relation, head: null, revision: null };
     },
+    readServerLedger: async () => { log.push('read'); return serverRead(); },
+    noteServerHead: server => { heads.push(`${server.head}@${server.revision}`); return headRelation; },
     noteServerContact: () => { log.push('contact'); },
     refreshLedger: async () => { log.push('refresh'); refreshEffect(); await refreshGate; },
-    ledgerStatus: () => ({ head: state.head }),
+    ledgerStatus: () => ({ head: state.head, revision: state.revision, own: state.own, serverBehind: state.serverBehind }),
+    judgeHeadAnnouncement: async announcement => { judged.push(announcement.keyId); return judgement(announcement); },
+    onLedgerHead: listener => { headListeners.add(listener); return () => { headListeners.delete(listener); }; },
   };
   return {
-    security, log, state,
+    security, log, heads, state, judged, headListeners,
+    /** What an adopt does in the real service: a new head, then the head listeners. */
+    adopt: (head: string, revision: number) => { state.head = head; state.revision = revision; for (const listener of Array.from(headListeners)) listener(); },
+    setJudge: (fn: (announcement: HeadAnnouncement) => Promise<LedgerHeadRelation | null>) => { judgement = fn; },
     setOffer: (fn: () => Promise<'adopt' | 'keep' | 'reject'>) => { offerResult = fn; },
+    setRelation: (value: LedgerRelation | null) => { relation = value; },
+    setServerRead: (fn: () => ServerLedgerRead) => { serverRead = fn; },
+    setHeadRelation: (value: LedgerHeadRelation | null) => { headRelation = value; },
     setRefresh: (fn: () => void) => { refreshEffect = fn; },
     setRefreshGate: (gate: Promise<void>) => { refreshGate = gate; },
   };
 }
+const serverBehind = (head = 'server-head'): ServerLedgerRead => ({ kind: 'read', outcome: { decision: 'keep', relation: 'behind', head, revision: 2 } });
 
 /** Manual timers and a manual monotonic clock. */
 function fakeTimers() {
@@ -92,20 +118,25 @@ describe('createAccountRelay: relay token by proof', () => {
   let authPrivateKey: CryptoKey;
   before(async () => { authPrivateKey = (await generateAuthKey(false)).privateKey; });
 
-  function relay(routes: Record<string, Reply[]>, overrides: Partial<AccountRelayDeps> = {}, head: string | null = 'local-head') {
+  function relay(routes: Record<string, Reply[]>, overrides: Partial<AccountRelayDeps> = {}, head: string | null = 'local-head',
+    setup: (sec: ReturnType<typeof fakeSecurity>) => void = () => undefined) {
     const fetcher = fakeFetch({ 'POST /api/auth/nonce': NONCE, ...routes });
     const sec = fakeSecurity(head);
+    setup(sec);
     const logs: string[] = [];
     const clock = { t: 1_000 };
+    const timers: Array<{ ms: number; run: () => void }> = [];
     const deps: AccountRelayDeps = {
       apiUrl: API, accountId: ACCOUNT, bridgeId: 'studio', authPrivateKey, security: sec.security,
-      store: { read: async () => ({ ledger: LEDGER }) }, server: createLedgerServer({ apiUrl: API, fetchImpl: fetcher.impl }),
+      store: { read: async () => STORED }, server: createLedgerServer({ apiUrl: API, fetchImpl: fetcher.impl }),
       hostname: () => 'studio.local', localPort: () => 4321, fetchImpl: fetcher.impl, log: line => logs.push(line), now: () => clock.t,
+      schedule: (run, ms) => { timers.push({ ms, run }); return () => undefined; }, random: () => 0.5,
       ...overrides,
     };
-    return { relay: createAccountRelay(deps), fetcher, sec, logs, clock };
+    return { relay: createAccountRelay(deps), fetcher, sec, logs, clock, timers };
   }
   const relayTokenCalls = (r: ReturnType<typeof relay>) => r.fetcher.paths().filter(path => path === 'POST /api/auth/relay-token').length;
+  const ledgerPosts = (r: ReturnType<typeof relay>) => r.fetcher.calls.filter(call => call.init?.method === 'POST' && new URL(call.url).pathname === '/api/account/ledger');
 
   it('signs a relay proof with the local head and presence, and notes server contact after the token', async () => {
     const r = relay({ 'POST /api/auth/relay-token': [TOKEN()] });
@@ -151,45 +182,99 @@ describe('createAccountRelay: relay token by proof', () => {
     }
   });
 
-  it('401 key_revoked: offers the evidence ledger, then fails with UnauthorizedError and no cooldown', async () => {
-    const r = relay({ 'POST /api/auth/relay-token': [{ status: 401, body: { error: 'key_revoked', ledger: LEDGER } }] });
+  it('401 key_revoked: offers the evidence ledger to the replica (which alone decides), then fails with UnauthorizedError and no cooldown', async () => {
+    const r = relay({ 'POST /api/auth/relay-token': [{ status: 401, body: { error: 'key_revoked', ledger: LEDGER } }], 'POST /api/account/ledger': [{ status: 200, body: {} }] });
     await assert.rejects(r.relay.tokens.getToken(), UnauthorizedError);
     assert.deepEqual(r.sec.log, [`offer:server:${JSON.stringify(LEDGER)}`]);
     assert.equal(r.relay.tokens.cooldownRemainingMs(), 0);
+    assert.deepEqual(ledgerPosts(r), []);
   });
 
-  it('plain 401: posts the local ledger, and retries once only when the server accepted it', async () => {
-    const accepted = relay({
-      'POST /api/auth/relay-token': [{ status: 401, body: { error: 'unauthorized' } }, TOKEN()],
-      'POST /api/account/ledger': [{ status: 200, body: { decision: 'adopt' } }],
-    });
-    assert.equal(await accepted.relay.tokens.getToken(), JWT);
-    assert.deepEqual(accepted.fetcher.paths(), ['POST /api/auth/nonce', 'POST /api/auth/relay-token', 'POST /api/account/ledger', 'POST /api/auth/nonce', 'POST /api/auth/relay-token']);
-    assert.deepEqual(accepted.fetcher.calls[2].body, { ledger: LEDGER });
+  it('plain 401: onUnauthorized never posts blindly; with the server not behind (or unknown, 404) nothing is posted and nothing retried', async () => {
+    for (const read of [
+      { kind: 'read', outcome: { decision: 'keep', relation: 'same', head: 'local-head', revision: 3 } },
+      { kind: 'read', outcome: { decision: 'keep', relation: 'diverged', head: 'other-head', revision: 9 } },
+      { kind: 'unknown_account', reason: 'Ledger read failed (404)' },
+      { kind: 'failed', reason: 'fetch failed' },
+    ] as ServerLedgerRead[]) {
+      const r = relay({ 'POST /api/auth/relay-token': [{ status: 401, body: { error: 'unauthorized' } }], 'POST /api/account/ledger': [{ status: 200, body: {} }] },
+        {}, 'local-head', sec => sec.setServerRead(() => read));
+      await assert.rejects(r.relay.tokens.getToken(), UnauthorizedError);
+      assert.deepEqual(ledgerPosts(r), [], read.kind);
+      assert.equal(relayTokenCalls(r), 1, read.kind);
+      assert.deepEqual(r.sec.log, ['read'], 'a fresh read decides');
+    }
+  });
 
-    for (const status of [409, 429, 503]) {
-      const refused = relay({ 'POST /api/auth/relay-token': [{ status: 401, body: { error: 'unauthorized' } }], 'POST /api/account/ledger': [{ status }] });
+  it('plain 401 with the server behind us: one POST of our chain with expectHead after the fresh read, then one token retry', async () => {
+    const r = relay({
+      'POST /api/auth/relay-token': [{ status: 401, body: { error: 'unauthorized' } }, TOKEN()],
+      'POST /api/account/ledger': [{ status: 200, body: { decision: 'adopt', ledger: LEDGER } }],
+    }, {}, 'local-head', sec => sec.setServerRead(() => serverBehind('server-head')));
+    assert.equal(await r.relay.tokens.getToken(), JWT);
+    assert.deepEqual(r.fetcher.paths(), ['POST /api/auth/nonce', 'POST /api/auth/relay-token', 'POST /api/account/ledger', 'POST /api/auth/nonce', 'POST /api/auth/relay-token']);
+    assert.deepEqual(ledgerPosts(r).map(call => call.body), [{ ledger: LEDGER, expectHead: 'server-head' }]);
+    assert.deepEqual(r.sec.log, ['read', `offer:server:${JSON.stringify(LEDGER)}`, 'contact'], 'read first; the answered chain goes to the replica');
+
+    for (const status of [404, 409, 429, 503]) {
+      const refused = relay({ 'POST /api/auth/relay-token': [{ status: 401, body: { error: 'unauthorized' } }], 'POST /api/account/ledger': [{ status, body: { error: 'x' } }] },
+        {}, 'local-head', sec => sec.setServerRead(() => serverBehind()));
       await assert.rejects(refused.relay.tokens.getToken(), UnauthorizedError);
       assert.equal(relayTokenCalls(refused), 1, String(status));
+      assert.equal(ledgerPosts(refused).length, 1, String(status));
     }
-
-    const empty = relay({ 'POST /api/auth/relay-token': [{ status: 401, body: { error: 'unauthorized' } }] }, { store: { read: async () => null } });
-    await assert.rejects(empty.relay.tokens.getToken(), UnauthorizedError);
-    assert.equal(empty.fetcher.paths().includes('POST /api/account/ledger'), false);
   });
 
-  it('a plain 401 is remembered: no re-proof for 10 minutes, and the local chain is posted at most once per local head', async () => {
-    const r = relay({ 'POST /api/auth/relay-token': [{ status: 401, body: { error: 'unauthorized' } }], 'POST /api/account/ledger': [{ status: 409 }] });
-    const posts = () => r.fetcher.paths().filter(path => path === 'POST /api/account/ledger').length;
+  it('a plain 401 is remembered: no re-proof for 10 minutes, and the pair window and backoff bound the re-offers', async () => {
+    const r = relay({ 'POST /api/auth/relay-token': [{ status: 401, body: { error: 'unauthorized' } }], 'POST /api/account/ledger': [{ status: 503 }] },
+      {}, 'local-head', sec => sec.setServerRead(() => serverBehind()));
     await assert.rejects(r.relay.tokens.getToken(), UnauthorizedError);
     await assert.rejects(r.relay.tokens.getToken(), UnauthorizedError);
-    assert.deepEqual([relayTokenCalls(r), posts()], [1, 1]);
+    assert.deepEqual([relayTokenCalls(r), ledgerPosts(r).length], [1, 1]);
     r.clock.t += 600_000;
     await assert.rejects(r.relay.tokens.getToken(), UnauthorizedError);
-    assert.deepEqual([relayTokenCalls(r), posts()], [2, 1], 'same local head: no second post');
-    r.sec.state.head = 'newer-head';
+    assert.deepEqual([relayTokenCalls(r), ledgerPosts(r).length], [2, 2], 'after the backoff the next refusal may re-offer again (fresh read first)');
+  });
+
+  it('never posts when our own bridge is not active in our chain', async () => {
+    const r = relay({ 'POST /api/auth/relay-token': [{ status: 401, body: { error: 'unauthorized' } }], 'POST /api/account/ledger': [{ status: 200, body: {} }] },
+      {}, 'local-head', sec => { sec.setServerRead(() => serverBehind()); sec.state.own = 'absent'; });
     await assert.rejects(r.relay.tokens.getToken(), UnauthorizedError);
-    assert.deepEqual([relayTokenCalls(r), posts()], [3, 2], 'a new local head is posted once');
+    assert.deepEqual(ledgerPosts(r), []);
+  });
+
+  it('a token response carrying a server chain that is behind ours starts the re-offer (fresh read, then expectHead)', async () => {
+    const r = relay({ 'POST /api/auth/relay-token': [TOKEN({ ledger: { older: true } })], 'POST /api/account/ledger': [{ status: 200, body: {} }] },
+      {}, 'local-head', sec => { sec.setRelation('behind'); sec.setServerRead(() => serverBehind('older-head')); });
+    assert.equal(await r.relay.tokens.getToken(), JWT);
+    await settle();
+    // The re-offer starts while the token is handed back; its first step is a fresh read of the server.
+    assert.deepEqual(r.sec.log.filter(line => line !== 'contact'), ['offer:server:{"older":true}', 'read']);
+    assert.deepEqual(ledgerPosts(r).map(call => call.body), [{ ledger: LEDGER, expectHead: 'older-head' }]);
+  });
+
+  it('a token response without a chain reports the server head: behind re-offers, unknown reads the server, same does nothing', async () => {
+    for (const [relation, expected] of [['same', []], ['behind', ['read']], ['unknown', ['refresh']]] as const) {
+      const r = relay({ 'POST /api/auth/relay-token': [TOKEN()], 'POST /api/account/ledger': [{ status: 200, body: {} }] },
+        {}, 'local-head', sec => { sec.setHeadRelation(relation); sec.setServerRead(() => serverBehind()); });
+      await r.relay.tokens.getToken();
+      await settle();
+      assert.deepEqual(r.sec.heads, ['local-head@null'], relation);
+      assert.deepEqual(r.sec.log.filter(line => line !== 'contact'), expected, relation);
+    }
+    const named = relay({ 'POST /api/auth/relay-token': [TOKEN({ head: 'H'.repeat(43), revision: 4 })] });
+    await named.relay.tokens.getToken();
+    assert.deepEqual(named.sec.heads, [`${'H'.repeat(43)}@4`]);
+  });
+
+  it('a server read that already showed the server behind (startup) re-offers as soon as the relay wiring starts', async () => {
+    const r = relay({ 'POST /api/account/ledger': [{ status: 200, body: {} }] }, {}, 'local-head', sec => {
+      sec.state.serverBehind = true;
+      sec.setServerRead(() => serverBehind('startup-head'));
+    });
+    await settle();
+    assert.deepEqual(r.sec.log, ['read']);
+    assert.deepEqual(ledgerPosts(r).map(call => call.body), [{ ledger: LEDGER, expectHead: 'startup-head' }]);
   });
 
   it('a refused relay connection reconnects when the key is accepted again', async () => {
@@ -240,9 +325,9 @@ describe('createAccountRelay: relay ledger channel (spaced, latest wins)', () =>
     const timers = fakeTimers();
     const reconnects: string[] = [];
     const authPrivateKey = (await generateAuthKey(false)).privateKey;
-    const fetcher = fakeFetch({});
+    const fetcher = fakeFetch({ 'POST /api/account/ledger': [{ status: 200, body: {} }] });
     const r = createAccountRelay({
-      apiUrl: API, accountId: ACCOUNT, bridgeId: 'studio', authPrivateKey, security: sec.security, store: { read: async () => null },
+      apiUrl: API, accountId: ACCOUNT, bridgeId: 'studio', authPrivateKey, security: sec.security, store: { read: async () => STORED },
       server: createLedgerServer({ apiUrl: API, fetchImpl: fetcher.impl }), hostname: () => 'h', localPort: () => undefined, fetchImpl: fetcher.impl,
       now: () => timers.clock.t, schedule: timers.schedule, reconnect: () => reconnects.push('reconnect'), log: () => undefined,
     });
@@ -329,6 +414,32 @@ describe('createAccountRelay: relay ledger channel (spaced, latest wins)', () =>
     assert.deepEqual(fetcher.calls, []);
   });
 
+  it('relay input alone never POSTs: a relayed chain behind ours only causes a paced server read', async () => {
+    const { r, sec, fetcher, timers } = await relayWith('H1');
+    sec.setRelation('behind');
+    r.onLedgerMessage(offer(1));
+    await settle();
+    assert.deepEqual(sec.log, ['offer:relay:{"n":1}'], 'the read waits for the relay spacing');
+    timers.fire();
+    await settle();
+    assert.deepEqual(sec.log, ['offer:relay:{"n":1}', 'refresh']);
+    r.onLedgerMessage({ type: 'ledger_head', head: 'H0', revision: 1 });
+    r.onLedgerSubscribed();
+    await settle();
+    while (timers.live().length > 0) { timers.fire(); await settle(); }
+    assert.deepEqual(fetcher.calls, [], 'the server read showed nothing behind: no POST');
+  });
+
+  it('a relay-triggered read that shows the server behind re-offers our chain after one more fresh read', async () => {
+    const { r, sec, fetcher } = await relayWith('H1');
+    sec.setServerRead(() => serverBehind('S1'));
+    sec.setRefresh(() => { sec.state.serverBehind = true; });
+    r.onLedgerSubscribed();
+    await settle();
+    assert.deepEqual(sec.log.slice(0, 2), ['refresh', 'read']);
+    assert.deepEqual(fetcher.calls.map(call => call.body), [{ ledger: LEDGER, expectHead: 'S1' }]);
+  });
+
   it('every (re)subscribe of the ledger channel refreshes through security, spaced', async () => {
     const { r, sec, timers } = await relayWith(null);
     r.onLedgerSubscribed();
@@ -411,6 +522,198 @@ describe('createAccountRelay: relay ledger channel (spaced, latest wins)', () =>
   });
 });
 
+describe('createAccountRelay: head announcements (CONTRACT §13)', () => {
+  const head = (n: number): string => Buffer.alloc(32, n).toString('base64url');
+  const NOW = 1_750_000_000_000;
+  async function announcing(publish: 'none' | 'ok' | 'fail' = 'ok') {
+    const sec = fakeSecurity(head(1));
+    const timers = fakeTimers();
+    const logs: string[] = [];
+    const key = await generateAuthKey(false);
+    const fetcher = fakeFetch({ 'POST /api/account/ledger': [{ status: 200, body: {} }] });
+    const r = createAccountRelay({
+      apiUrl: API, accountId: ACCOUNT, bridgeId: 'studio', authPrivateKey: key.privateKey, security: sec.security, store: { read: async () => STORED },
+      server: createLedgerServer({ apiUrl: API, fetchImpl: fetcher.impl }), hostname: () => 'h', localPort: () => undefined, fetchImpl: fetcher.impl,
+      now: () => timers.clock.t, wallClock: () => NOW + timers.clock.t, schedule: timers.schedule, log: line => logs.push(line),
+    });
+    const published: HeadAnnouncement[] = [];
+    if (publish !== 'none') {
+      r.setLedgerPublisher(async announcement => {
+        published.push(announcement);
+        if (publish === 'fail') throw new Error('Ledger channel not subscribed');
+      });
+    }
+    // The checkpoint a receiver would hold: this bridge as a member with its auth key.
+    const checkpoint = { version: 2, accountId: ACCOUNT, revision: 3, head: head(1), authorities: [], devices: [],
+      bridges: [{ bridgeId: 'studio', endpoint: {} as never, authPublicKey: key.publicKey, label: 'Studio', approvedAt: 1 }],
+      revokedDeviceIds: [], revokedBridgeIds: [] } satisfies LedgerCheckpoint;
+    return { r, sec, timers, logs, published, fetcher, checkpoint };
+  }
+  /** Signing is real WebCrypto work: wait until `done` holds (bounded). */
+  async function until(done: () => boolean): Promise<void> {
+    for (let i = 0; i < 200 && !done(); i++) await new Promise(resolve => setTimeout(resolve, 1));
+  }
+  /** A received announcement (shape only: the fake security judges it). */
+  const received = (keyId: string, n: number, kind: 'device' | 'bridge' = 'device'): { type: 'head_announcement'; announcement: HeadAnnouncement } => ({
+    type: 'head_announcement',
+    announcement: { type: 'ledger_head', version: 1, accountId: ACCOUNT, kind, keyId, head: head(n), revision: n, at: NOW, signature: 'A'.repeat(86) },
+  });
+
+  it('announces a signed head when the ledger channel subscribes; callers never wait for it', async () => {
+    const { r, published, timers, checkpoint } = await announcing();
+    assert.equal(r.onLedgerSubscribed(), undefined);
+    await until(() => published.length === 1);
+    assert.equal(published.length, 1);
+    const [announcement] = published;
+    assert.deepEqual({ ...announcement, signature: '' }, {
+      type: 'ledger_head', version: 1, accountId: ACCOUNT, kind: 'bridge', keyId: 'studio', head: head(1), revision: 3, at: NOW + timers.clock.t, signature: '',
+    });
+    assert.equal(await verifyHeadAnnouncement(checkpoint, announcement, NOW + timers.clock.t), true, 'signed with the bridge auth key');
+    assert.equal(await verifyHeadAnnouncement(checkpoint, announcement, NOW + timers.clock.t + HEAD_ANNOUNCE_MAX_AGE_MS + 1), false);
+  });
+
+  it('announces after every adopt, at most once per 5 s, coalescing to the latest head', async () => {
+    const { r, sec, published, timers } = await announcing();
+    r.onLedgerSubscribed();
+    await until(() => published.length === 1);
+    sec.adopt(head(2), 4);
+    sec.adopt(head(3), 5);
+    sec.adopt(head(4), 6);
+    await settle();
+    assert.equal(published.length, 1, 'the next waits for the spacing');
+    const announceTimers = timers.live().filter(timer => timer.at - timers.clock.t === HEAD_ANNOUNCE_SPACING_MS);
+    assert.equal(announceTimers.length, 1, 'one pending announcement, not three');
+    while (timers.live().length > 0) { timers.fire(); await settle(); }
+    await until(() => published.length === 2);
+    assert.deepEqual(published.map(item => [item.head, item.revision]), [[head(1), 3], [head(4), 6]]);
+    // A quiet 5 s later the next adopt is announced at once.
+    timers.clock.t += HEAD_ANNOUNCE_SPACING_MS;
+    sec.adopt(head(5), 7);
+    await until(() => published.length === 3);
+    assert.deepEqual(published.map(item => item.revision), [3, 6, 7]);
+  });
+
+  it('only an active member announces: nothing while revoked, absent, unpaired or without a head', async () => {
+    for (const own of ['revoked', 'absent', 'unpaired']) {
+      const { r, sec, published, timers } = await announcing();
+      sec.state.own = own;
+      r.onLedgerSubscribed();
+      sec.adopt(head(2), 4);
+      while (timers.live().length > 0) { timers.fire(); await settle(); }
+      await new Promise(resolve => setTimeout(resolve, 20));
+      assert.deepEqual(published, [], own);
+    }
+    const { r, sec, published } = await announcing();
+    sec.state.head = null; sec.state.revision = null;
+    r.onLedgerSubscribed();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(published, []);
+  });
+
+  it('without a publisher announcing is a silent no-op; once set, the next adopt is announced', async () => {
+    const { r, sec, published, timers, logs } = await announcing('none');
+    r.onLedgerSubscribed();
+    sec.adopt(head(2), 4);
+    await settle();
+    assert.deepEqual(timers.live().filter(timer => timer.at - timers.clock.t === HEAD_ANNOUNCE_SPACING_MS), []);
+    assert.deepEqual(logs, []);
+    r.setLedgerPublisher(async announcement => { published.push(announcement); });
+    sec.adopt(head(3), 5);
+    await until(() => published.length === 1);
+    assert.deepEqual(published.map(item => item.revision), [5]);
+  });
+
+  it('a failed publish is ignored (best effort) and logged at most once a minute', async () => {
+    const { r, sec, published, timers, logs } = await announcing('fail');
+    r.onLedgerSubscribed();
+    await until(() => logs.length === 1);
+    assert.equal(logs.length, 1);
+    assert.match(logs[0], /Could not announce the ledger head: Ledger channel not subscribed/);
+    for (let i = 0; i < 5; i++) {
+      timers.clock.t += HEAD_ANNOUNCE_SPACING_MS;
+      sec.adopt(head(10 + i), 10 + i);
+      await until(() => published.length === 2 + i);
+    }
+    assert.equal(published.length, 6);
+    assert.equal(logs.length, 1, 'no second line within the minute');
+    timers.clock.t += HEAD_ANNOUNCE_WARN_SPACING_MS;
+    sec.adopt(head(20), 20);
+    await until(() => logs.length === 2);
+    assert.equal(logs.length, 2);
+  });
+
+  it('stop cancels a pending announcement and unsubscribes from the head signal', async () => {
+    const { r, sec, published, timers } = await announcing();
+    r.onLedgerSubscribed();
+    await until(() => published.length === 1);
+    sec.adopt(head(2), 4);
+    r.stop();
+    assert.deepEqual(timers.live(), []);
+    assert.equal(sec.headListeners.size, 0);
+    r.onLedgerSubscribed();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(published.length, 1);
+  });
+
+  it('a verified announcement with an unknown head queues exactly one paced server read; same and behind do nothing', async () => {
+    const { r, sec, fetcher, timers } = await announcing();
+    sec.setJudge(async () => 'same');
+    r.onLedgerMessage(received('laptop'.padEnd(43, 'A'), 3));
+    sec.setJudge(async () => 'behind');
+    r.onLedgerMessage(received('laptop'.padEnd(43, 'A'), 2));
+    await settle();
+    assert.deepEqual(sec.log, []);
+    sec.setJudge(async () => 'unknown');
+    r.onLedgerMessage(received('laptop'.padEnd(43, 'A'), 9));
+    await settle();
+    assert.deepEqual(sec.log, ['refresh']);
+    assert.deepEqual(sec.judged.length, 3);
+    // An announcement never leads to a POST, nor to any request of the relay's own.
+    assert.deepEqual(fetcher.calls, []);
+    while (timers.live().length > 0) { timers.fire(); await settle(); }
+    assert.deepEqual(sec.log, ['refresh']);
+  });
+
+  it('a burst of unknown heads from a member is bounded by the relay spacing: one read now, one for the rest', async () => {
+    const { r, sec, timers, fetcher } = await announcing();
+    sec.setJudge(async () => 'unknown');
+    for (let n = 0; n < 200; n++) r.onLedgerMessage(received('laptop'.padEnd(43, 'A'), 10 + n));
+    await settle();
+    assert.equal(sec.judged.length, 200, 'one judgement (one signature check) per message');
+    assert.deepEqual(sec.log, ['refresh']);
+    timers.fire();
+    await settle();
+    assert.deepEqual(sec.log, ['refresh', 'refresh'], 'the rest were coalesced into one trailing read');
+    assert.deepEqual(timers.live().filter(timer => timer.at > timers.clock.t), []);
+    assert.deepEqual(fetcher.calls, []);
+  });
+
+  it('dropped announcements and our own echo cause nothing; our own is not even judged', async () => {
+    const { r, sec, timers } = await announcing();
+    sec.setJudge(async () => null);
+    r.onLedgerMessage(received('laptop'.padEnd(43, 'A'), 9));
+    r.onLedgerMessage(received('studio', 9, 'bridge'));
+    sec.setJudge(async () => { throw new Error('boom'); });
+    r.onLedgerMessage(received('other-bridge', 9, 'bridge'));
+    await settle();
+    assert.deepEqual(sec.judged, ['laptop'.padEnd(43, 'A'), 'other-bridge']);
+    assert.deepEqual(sec.log, []);
+    assert.deepEqual(timers.live(), []);
+  });
+
+  it('the unsigned ledger_head notice keeps its behaviour beside announcements', async () => {
+    const { r, sec } = await announcing();
+    r.onLedgerMessage({ type: 'ledger_head', head: head(1), revision: 3 });
+    await settle();
+    assert.deepEqual(sec.log, []);
+    assert.deepEqual(sec.judged, []);
+    r.onLedgerMessage({ type: 'ledger_head', head: head(2), revision: 4 });
+    await settle();
+    assert.deepEqual(sec.log, ['refresh']);
+    assert.deepEqual(sec.judged, []);
+  });
+});
+
 describe('createAccountRelay: reconnect after a terminal 401 once a ledger is adopted', () => {
   it('reconnects on an adopted relay ledger, once', async () => {
     const sec = fakeSecurity('H1');
@@ -419,7 +722,7 @@ describe('createAccountRelay: reconnect after a terminal 401 once a ledger is ad
     const fetcher = fakeFetch({ 'POST /api/auth/nonce': NONCE, 'POST /api/auth/relay-token': [{ status: 401, body: { error: 'unauthorized' } }], 'POST /api/account/ledger': [{ status: 409 }] });
     const r = createAccountRelay({
       apiUrl: API, accountId: ACCOUNT, bridgeId: 'studio', authPrivateKey: (await generateAuthKey(false)).privateKey, security: sec.security,
-      store: { read: async () => ({ ledger: LEDGER }) }, server: createLedgerServer({ apiUrl: API, fetchImpl: fetcher.impl }), hostname: () => 'h',
+      store: { read: async () => STORED }, server: createLedgerServer({ apiUrl: API, fetchImpl: fetcher.impl }), hostname: () => 'h',
       localPort: () => undefined, fetchImpl: fetcher.impl, now: () => timers.clock.t, schedule: timers.schedule,
       reconnect: () => reconnects.push('reconnect'), log: () => undefined,
     });
@@ -489,10 +792,26 @@ describe('createLedgerServer', () => {
     await assert.rejects(createLedgerServer({ apiUrl: API, fetchImpl: small.impl, maxBytes: 10 }).fetchLedger(ACCOUNT), /too_large/);
   });
 
-  it('posts {ledger} and reports the status', async () => {
-    const f = fakeFetch({ 'POST /api/account/ledger': [{ status: 201, body: { decision: 'adopt' } }] });
-    assert.equal(await createLedgerServer({ apiUrl: API, fetchImpl: f.impl }).postLedger(LEDGER), 201);
-    assert.deepEqual(f.calls[0].body, { ledger: LEDGER });
+  it('posts { ledger, expectHead } and reports the status, the bounded JSON body and Retry-After', async () => {
+    const f = fakeFetch({ 'POST /api/account/ledger': [
+      { status: 409, body: { error: 'head_changed', ledger: LEDGER } },
+      { status: 429, body: { error: 'rate_limited' }, headers: { 'retry-after': '120' } },
+      { status: 200, body: { ledger: LEDGER }, headers: { 'content-length': String(4 * 1024 * 1024) } },
+    ] });
+    const server = createLedgerServer({ apiUrl: API, fetchImpl: f.impl });
+    assert.deepEqual(await server.postLedger(LEDGER, 'E'.repeat(43)), { status: 409, body: { error: 'head_changed', ledger: LEDGER }, retryAfterMs: null });
+    assert.deepEqual(f.calls[0].body, { ledger: LEDGER, expectHead: 'E'.repeat(43) });
+    assert.equal(f.calls[0].init?.cache, 'no-store');
+    assert.deepEqual(await server.postLedger(LEDGER, 'E'.repeat(43)), { status: 429, body: { error: 'rate_limited' }, retryAfterMs: 120_000 });
+    assert.deepEqual(await server.postLedger(LEDGER, 'E'.repeat(43)), { status: 200, body: null, retryAfterMs: null }, 'an oversized body is not read');
+  });
+
+  it('reads Retry-After as seconds or an HTTP date', () => {
+    assert.equal(parseRetryAfter('30'), 30_000);
+    assert.equal(parseRetryAfter(' 7 '), 7_000);
+    assert.equal(parseRetryAfter(new Date(1_000_000 + 90_000).toUTCString(), 1_000_000), 90_000);
+    assert.equal(parseRetryAfter(new Date(0).toUTCString(), 1_000_000), 0);
+    for (const value of [null, '', 'soon', '-5', '1.5']) assert.equal(parseRetryAfter(value), null, String(value));
   });
 
   it('turns a timeout into a readable error', async () => {

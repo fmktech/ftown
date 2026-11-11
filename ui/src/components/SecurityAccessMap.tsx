@@ -3,10 +3,12 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { SecurityLockIcon, type SecurityLockState } from "./SecurityLockIcon";
 
+/** A warning on a row: visible `text` plus a longer `description` (the row button's aria-describedby). */
+export interface AccessBadge { text: string; description: string }
 export type AccessEdgeCertainty = "current" | "historical" | "none";
 export type SecurityAccessSelection = { kind: "browser"; id: string } | { kind: "bridge"; id: string };
-export interface SecurityAccessBrowserNode { id: string; label: string; customLabel?: boolean; current: boolean; accessText: string; lockState: SecurityLockState; edge: AccessEdgeCertainty }
-export interface SecurityAccessBridgeNode { current?: boolean; id: string; label: string; accessText: string; connectionText: string; lockState: SecurityLockState; edge: AccessEdgeCertainty }
+export interface SecurityAccessBrowserNode { id: string; label: string; customLabel?: boolean; current: boolean; accessText: string; lockState: SecurityLockState; edge: AccessEdgeCertainty; badge?: AccessBadge }
+export interface SecurityAccessBridgeNode { current?: boolean; id: string; label: string; accessText: string; connectionText: string; lockState: SecurityLockState; edge: AccessEdgeCertainty; badge?: AccessBadge }
 export interface SecurityAccessMapProps {
   scope?: "account" | "computer";
   browsers: readonly SecurityAccessBrowserNode[];
@@ -74,6 +76,11 @@ export function SecurityAccessMap({ scope = "account", browsers, bridges, accoun
   }, [layoutKey]);
   const edges = [ ...browsers.map(node => ({ ...node, kind: "browser" as const })), ...bridges.map(node => ({ ...node, kind: "bridge" as const })) ];
   const cardClass = (current: boolean, active: boolean) => `relative z-10 min-w-0 rounded-md border bg-[var(--bg-base)] ${current ? "border-[var(--shell-claude)]" : "border-[var(--border-muted)]"} ${active ? "outline outline-1 outline-offset-2 outline-[var(--text-secondary)]" : ""}`;
+  const badgeId = (key: string) => `access-badge-${key.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+  const Badge = ({ node, kind }: { node: { id: string; badge?: AccessBadge }; kind: string }) => node.badge ? <>
+    <span data-access-badge={`${kind}:${node.id}`} className="mt-0.5 inline-block rounded border border-[var(--status-pending)] px-1 text-[10px] font-semibold text-[var(--text-primary)]"><span aria-hidden="true">⚠ </span>{node.badge.text}</span>
+    <span id={badgeId(`${kind}:${node.id}`)} className="sr-only">{node.badge.description}</span></> : null;
+  const describedBy = (kind: string, node: { id: string; badge?: AccessBadge }) => node.badge ? badgeId(`${kind}:${node.id}`) : undefined;
   const buttonClass = (edge: AccessEdgeCertainty) => `relative flex min-h-11 w-full items-start gap-2 rounded-md px-2 py-2 text-left hover:bg-[var(--bg-hover)] ${edge === "current" ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}`;
   const currentStyle = { background: "color-mix(in srgb, var(--shell-claude) 9%, var(--bg-base))" };
   return <section aria-label="Browser and computer access map" className="space-y-2">
@@ -97,18 +104,18 @@ export function SecurityAccessMap({ scope = "account", browsers, bridges, accoun
             {renderBrowserName ? <div ref={element => { if (element) nodes.current.set(`browser:${node.id}`, element); else nodes.current.delete(`browser:${node.id}`); }} className="relative flex min-w-0 flex-wrap items-start gap-1 rounded-md px-2 py-1">
               <div className="min-w-[4.5rem] flex-1">{renderBrowserName(node, label)}
                 {node.current && label !== "This browser" && <span className="block text-[10px] text-[var(--shell-claude)]">This browser</span>}
-                <span className="hidden break-words text-[10px] leading-4 text-[var(--text-muted)] sm:block">{node.accessText}</span></div>
-              <button type="button" data-access-kind="browser" data-access-node={node.id} aria-pressed={active} aria-label={`Browser ${label}${node.current ? " (this browser)" : ""}: ${node.accessText}`}
+                <span className="hidden break-words text-[10px] leading-4 text-[var(--text-muted)] sm:block">{node.accessText}</span><Badge node={node} kind="browser" /></div>
+              <button type="button" data-access-kind="browser" data-access-node={node.id} aria-describedby={describedBy("browser", node)} aria-pressed={active} aria-label={`Browser ${label}${node.current ? " (this browser)" : ""}: ${node.accessText}`}
                 className={`flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-1 rounded-md px-1 text-left hover:bg-[var(--bg-hover)] ${node.edge === "current" ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}`} onClick={() => onSelect({ kind: "browser", id: node.id })}>
                 <span className="hidden shrink-0 sm:block"><DeviceIcon browser /></span>
                 <SecurityLockIcon state={node.lockState} className={`shrink-0 ${node.edge === "current" ? "text-[var(--accent)]" : "text-[var(--text-muted)]"}`} />
               </button>
             </div> : <button type="button" ref={element => { if (element) nodes.current.set(`browser:${node.id}`, element); else nodes.current.delete(`browser:${node.id}`); }}
-              data-access-kind="browser" data-access-node={node.id} aria-pressed={active} aria-label={`Browser ${label}${node.current ? " (this browser)" : ""}: ${node.accessText}`}
+              data-access-kind="browser" data-access-node={node.id} aria-describedby={describedBy("browser", node)} aria-pressed={active} aria-label={`Browser ${label}${node.current ? " (this browser)" : ""}: ${node.accessText}`}
               className={buttonClass(node.edge)} onClick={() => onSelect({ kind: "browser", id: node.id })}>
               <span className="hidden shrink-0 pt-0.5 sm:block"><DeviceIcon browser /></span><span className="min-w-0 flex-1"><span className="block break-words text-[10px] font-semibold sm:text-xs [overflow-wrap:anywhere]">{label}</span>
                 {node.current && label !== "This browser" && <span className="block text-[10px] text-[var(--shell-claude)]">This browser</span>}
-                <span className="mt-0.5 hidden text-[10px] leading-4 text-[var(--text-muted)] sm:block">{node.accessText}</span></span>
+                <span className="mt-0.5 hidden text-[10px] leading-4 text-[var(--text-muted)] sm:block">{node.accessText}</span><Badge node={node} kind="browser" /></span>
               <SecurityLockIcon state={node.lockState} className={`shrink-0 ${node.edge === "current" ? "text-[var(--accent)]" : "text-[var(--text-muted)]"}`} />
             </button>}{active && selectedDetails && <div className="border-t border-[var(--border-subtle)] p-2">{selectedDetails}</div>}</li>;
           })}
@@ -125,11 +132,11 @@ export function SecurityAccessMap({ scope = "account", browsers, bridges, accoun
           {bridges.map(node => {
             const active = selected?.kind === "bridge" && selected.id === node.id;
             return <li key={node.id} data-access-card={`bridge:${node.id}`} data-current-device={node.current ? "bridge" : undefined} className={cardClass(!!node.current, active)} style={node.current ? currentStyle : undefined}><button type="button" ref={element => { if (element) nodes.current.set(`bridge:${node.id}`, element); else nodes.current.delete(`bridge:${node.id}`); }}
-              data-access-kind="bridge" data-access-node={node.id} data-computer-access={node.id} aria-pressed={active} aria-label={`Computer ${node.label}${node.current ? " (this computer)" : ""}: ${node.accessText}. ${node.connectionText}`}
+              data-access-kind="bridge" data-access-node={node.id} data-computer-access={node.id} aria-describedby={describedBy("bridge", node)} aria-pressed={active} aria-label={`Computer ${node.label}${node.current ? " (this computer)" : ""}: ${node.accessText}. ${node.connectionText}`}
               className={buttonClass(node.edge)} onClick={() => onSelect({ kind: "bridge", id: node.id })}>
               <span className="shrink-0 pt-0.5"><DeviceIcon browser={false} /></span><span className="min-w-0 flex-1"><span className="block break-words text-xs font-semibold [overflow-wrap:anywhere]">{node.label}</span>
                 {node.current && <span className="block text-[10px] text-[var(--shell-claude)]">This computer</span>}
-                <span className="mt-0.5 flex flex-wrap gap-x-2 text-[10px] leading-4 text-[var(--text-muted)] sm:block"><span>{node.accessText}</span><span className="text-[var(--text-faint)] sm:block">{node.connectionText}</span></span></span>
+                <span className="mt-0.5 flex flex-wrap gap-x-2 text-[10px] leading-4 text-[var(--text-muted)] sm:block"><span>{node.accessText}</span><span className="text-[var(--text-faint)] sm:block">{node.connectionText}</span></span><Badge node={node} kind="bridge" /></span>
               <SecurityLockIcon state={node.lockState} className={`shrink-0 ${node.edge === "current" ? "text-[var(--accent)]" : "text-[var(--text-muted)]"}`} />
             </button>{active && selectedDetails && <div className="border-t border-[var(--border-subtle)] p-2">{selectedDetails}</div>}</li>;
           })}

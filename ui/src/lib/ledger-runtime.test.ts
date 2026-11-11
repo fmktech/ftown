@@ -4,7 +4,9 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const signInMock = vi.fn();
 vi.mock("next-auth/react", () => ({ signIn: (...args: unknown[]) => signInMock(...args) }));
 
-import { buildLedgerDeps, getLedgerClient, ledgerRuntimeConfig, resetLedgerClientForTests } from "./ledger-runtime";
+import { buildLedgerDeps, getLedgerClient, ledgerPeersFor, ledgerRuntimeConfig, resetLedgerClientForTests } from "./ledger-runtime";
+import type { LedgerClientDeps } from "./ledger-client";
+import { LedgerPeers } from "./ledger-peers";
 
 beforeEach(() => {
   resetLedgerClientForTests(); signInMock.mockReset();
@@ -44,6 +46,26 @@ it("returns one client per page", () => {
   const first = getLedgerClient();
   expect(getLedgerClient()).toBe(first);
   expect(typeof first.load).toBe("function");
+});
+
+it("the page client's beforeSign is its agreement step; ledgerPeersFor knows only that client, and a reset disposes both", async () => {
+  const client = getLedgerClient();
+  const peers = ledgerPeersFor(client);
+  expect(peers).toBeInstanceOf(LedgerPeers);
+  expect(ledgerPeersFor({})).toBeNull();
+  expect(ledgerPeersFor(null)).toBeNull();
+  const prepare = vi.spyOn(peers as LedgerPeers, "prepare").mockResolvedValue(undefined);
+  const deps = (client as unknown as { deps: LedgerClientDeps }).deps;
+  await deps.beforeSign?.({ revision: 1, head: "h" });
+  expect(prepare).toHaveBeenCalledExactlyOnceWith({ revision: 1, head: "h" });
+  // Nothing attached (no signed-in relay connection): the real step resolves at once without asking anyone.
+  prepare.mockRestore();
+  await expect(deps.beforeSign?.({ revision: 1, head: "h" })).resolves.toBeUndefined();
+  const dispose = vi.spyOn(peers as LedgerPeers, "dispose");
+  resetLedgerClientForTests();
+  expect(dispose).toHaveBeenCalledOnce();
+  expect(ledgerPeersFor(client)).toBeNull();
+  expect(ledgerPeersFor(getLedgerClient())).not.toBe(peers);
 });
 
 it("throws a clear error on the server", () => {
