@@ -2,7 +2,7 @@ import { exec } from 'node:child_process';
 import type { VerifiedApplication } from './security/protocol.js';
 import type { BridgeSecurityService } from './security/bridge/security.js';
 import { BridgeSecurityError } from './security/bridge/errors.js';
-import { ledgerChainPage, ledgerHeadAnswer, parseLedgerChainQuery, parseLedgerHeadQuery } from './security/bridge/ledger-rpc.js';
+import { ledgerChainPage, ledgerHeadAnswer, parseLedgerChainQuery, parseLedgerHeadQuery, type HeldLedger } from './security/bridge/ledger-rpc.js';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -251,13 +251,14 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           // Read-only, account mode: only a browser of this bridge's trusted checkpoint may read its chain (memberLedger refuses anyone
           // else, before the arguments are looked at). No side effects.
           if (!deps.security || !verified || payloadBridgeId !== bridgeId) throw new BridgeSecurityError('permission_denied');
-          const held = await deps.security.memberLedger(verified.principal);
+          // ledger_head answers the tip without touching the chain; ledger_chain copies only the records of its page.
+          const held = command.type === 'ledger_head' ? await deps.security.memberHead(verified.principal) : await deps.security.memberLedger(verified.principal);
           const query = command.type === 'ledger_head' ? parseLedgerHeadQuery(command.payload, bridgeId) : parseLedgerChainQuery(command.payload, bridgeId);
           if (query === false || query === null) {
             response = { requestId: command.requestId, success: false, error: 'Invalid ledger request', data: { code: 'invalid' } };
             break;
           }
-          const data = query === true ? ledgerHeadAnswer(held) : ledgerChainPage(held, query);
+          const data = query === true ? ledgerHeadAnswer(held) : ledgerChainPage(held as HeldLedger, query);
           response = { requestId: command.requestId, success: true, data };
           break;
         }

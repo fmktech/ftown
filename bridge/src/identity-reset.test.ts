@@ -1,9 +1,9 @@
 import { strict as assert } from 'node:assert';
-import { chmodSync, existsSync, mkdirSync, symlinkSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, symlinkSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { argvForPairingRestart, beginIdentityReset, completePendingIdentityReset, reexec } from './identity-reset.js';
+import { LEDGER_ARCHIVES_KEPT, argvForPairingRestart, beginIdentityReset, completePendingIdentityReset, reexec } from './identity-reset.js';
 import { hasLegacyAccountState } from './security/bridge/ledger-identity.js';
 
 const OLD_ID = '11111111-1111-4111-8111-111111111111';
@@ -48,6 +48,32 @@ describe('identity reset', () => {
     for (const keep of ['local-api-port', 'archive.jsonl', 'unrelated.txt', 'sessions/s1.json', 'security/unrelated-sec.json']) {
       assert.equal(existsSync(join(dir, keep)), true, keep);
     }
+    // ledger.json is archived, never deleted.
+    assert.equal(readdirSync(join(dir, 'security')).filter(name => name.endsWith('.archived.json')).length, 1);
+  });
+
+  it('archives security/ledger.json (it may be the only copy of the history): renamed with a timestamp, 0600, newest 5 kept', () => {
+    seed();
+    writeFileSync(sec('ledger.json'), '{"the":"only copy"}', { mode: 0o644 });
+    const older = Array.from({ length: 6 }, (_, index) => `ledger.2026-01-0${index + 1}T00-00-00.000Z.archived.json`);
+    for (const name of older) writeFileSync(sec(name), 'old');
+    writeFileSync(sec('ledger.notes.json'), 'keep');
+    beginIdentityReset(dir, 'revoked');
+    completePendingIdentityReset(dir, () => new Date('2026-11-10T12:34:56.789Z'));
+    const archive = sec('ledger.2026-11-10T12-34-56.789Z.archived.json');
+    assert.equal(readFileSync(archive, 'utf8'), '{"the":"only copy"}');
+    assert.equal(statSync(archive).mode & 0o777, 0o600);
+    assert.equal(existsSync(sec('ledger.json')), false);
+    const kept = readdirSync(join(dir, 'security')).filter(name => name.endsWith('.archived.json')).sort();
+    assert.equal(kept.length, LEDGER_ARCHIVES_KEPT);
+    assert.deepEqual(kept, [...older.slice(2), 'ledger.2026-11-10T12-34-56.789Z.archived.json']);
+    assert.equal(readFileSync(sec('ledger.notes.json'), 'utf8'), 'keep');
+    // A second reset in the same millisecond gets its own name.
+    writeFileSync(sec('ledger.json'), '{"second":true}');
+    beginIdentityReset(dir, 'manual');
+    completePendingIdentityReset(dir, () => new Date('2026-11-10T12:34:56.789Z'));
+    assert.equal(readFileSync(sec('ledger.2026-11-10T12-34-56.789Z-1.archived.json'), 'utf8'), '{"second":true}');
+    assert.equal(readFileSync(archive, 'utf8'), '{"the":"only copy"}');
   });
 
   it('leaves no v1 account state behind, so the legacy trigger cannot fire again', () => {
@@ -90,7 +116,7 @@ describe('identity reset', () => {
   // Fault injection, one step at a time: every deletion lands before the new bridge-id, and the marker outlives the bridge-id write,
   // so a reset interrupted anywhere is finished by the next start with the same new id.
   const DELETION_STEPS = [['refresh-token'], ...['account-enrollment.json', 'pending-approval-status.json', 'pending-approval-confirmation.json',
-    'local-cli-identity.json'].map(name => ['security', name]), ['browser-devices.json'], ...['policy.json', 'bridge-identity.json', 'ledger.json',
+    'local-cli-identity.json'].map(name => ['security', name]), ['browser-devices.json'], ...['policy.json', 'bridge-identity.json',
     'ledger-clock.json', 'relay-url.json', 'ledger-identity.json'].map(name => ['security', name])];
   for (const step of DELETION_STEPS) {
     it(`a failure deleting ${step.join('/')} leaves the old bridge-id and the marker, and the retry finishes`, () => {

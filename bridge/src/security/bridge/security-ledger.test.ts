@@ -132,10 +132,12 @@ interface Harness {
   cli: () => Promise<VerifiedPrincipal>; principal: (who: Browser) => Promise<VerifiedPrincipal>; ids: () => Promise<string[]>;
   policyText: () => Promise<string>; ledgerText: () => Promise<string>;
 }
-async function seed(dir: string, chain: Chain, lastServerReadAt: number | null): Promise<void> {
+async function seed(dir: string, chain: Chain, lastServerReadAt: number | null, extra: { deviceIds: string[]; bridgeIds: string[] } = { deviceIds: [], bridgeIds: [] }): Promise<void> {
   await mkdir(join(dir, 'security'), { recursive: true });
+  const own = ledgerRevocations(chain.ledger);
   await writeFile(join(dir, 'security', 'ledger.json'), JSON.stringify({ version: 1, ledger: chain.ledger,
-    checkpoint: await verifyLedger(chain.ledger, START), sticky: ledgerRevocations(chain.ledger), lastServerReadAt }));
+    checkpoint: await verifyLedger(chain.ledger, START),
+    sticky: { deviceIds: [...own.deviceIds, ...extra.deviceIds], bridgeIds: [...own.bridgeIds, ...extra.bridgeIds] }, lastServerReadAt }));
 }
 /** A real BridgeLedgerStore in a temp dir, optionally seeded with `chain`; the server serves `null` (rejected) unless `serve` replaces it. */
 async function harness(t: TestContext, w: World, chain: Chain | null, lastServerReadAt: number | null = START): Promise<Harness> {
@@ -152,7 +154,7 @@ async function harness(t: TestContext, w: World, chain: Chain | null, lastServer
   const fetches = { count: 0 };
   let fetcher: () => Promise<unknown> = async () => null;
   const lines: string[] = [];
-  const store = new BridgeLedgerStore(dir, { accountId: w.accountId, now: () => clock, log: line => lines.push(line) });
+  const store = new BridgeLedgerStore(dir, { accountId: w.accountId, now: () => clock, log: line => lines.push(line), bridgeId: BRIDGE });
   const revoked: string[] = [];
   const fired = { count: 0 };
   const make = (): BridgeSecurityService => {
@@ -182,6 +184,8 @@ const ids = (...items: (Browser | EndpointIdentity)[]): string[] => items.map(it
 const code = (expected: string) => (error: unknown): boolean => typeof error === 'object' && error !== null && 'code' in error && error.code === expected;
 const microtasks = async (): Promise<void> => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
 const chainHead = (chain: Chain): Promise<string> => verifyLedger(chain.ledger, START).then(checkpoint => checkpoint.head);
+/** This bridge's own keys for store.ownBridgeStatus. */
+const ownKeys = (w: World) => ({ bridgeId: BRIDGE, endpointId: w.bridge.endpoint.id, endpointPublicKey: w.bridge.endpoint.publicKey, authPublicKey: w.bridgeAuth });
 
 test('projection makes the account devices exactly the trusted roster and emits onRevoked for each removal', async t => {
   const w = await world();
@@ -189,7 +193,7 @@ test('projection makes the account devices exactly the trusted roster and emits 
   h.serve(async () => w.withPhone.ledger);
   await h.security.startLedger();
   assert.equal(h.fetches.count, 1);
-  assert.deepEqual(h.security.ledgerStatus(), { accountId: w.accountId, revision: 3, head: await chainHead(w.withPhone), own: 'active', divergence: null, serverBehind: false, announcements: { accepted: 0, dropped: 0 } });
+  assert.deepEqual(h.security.ledgerStatus(), { accountId: w.accountId, revision: 3, head: await chainHead(w.withPhone), own: 'active', divergence: null, serverBehind: false, removedOnOtherHistory: false, announcements: { accepted: 0, dropped: 0 } });
   assert.deepEqual(await h.ids(), ids(w.cli, w.laptop, w.phone));
   const listed = await h.security.listDevices(await h.cli());
   assert.deepEqual(listed.filter(device => device.source === 'account').map(device => device.endpoint.id).sort(), ids(w.laptop, w.phone));
@@ -246,25 +250,37 @@ test('ledger changes invalidate only the removed device: other principals, in-fl
   assert.deepEqual(fresh.revoked, [w.phone.identity.endpoint.id, w.laptop.identity.endpoint.id]);
 });
 
-test('a diverged chain that removes a device changes nothing: the device stays trusted and the history is refused, also across a restart', async t => {
+test('P1: a browser removed on a VALID diverged history is refused right after the read that showed it, and still after a restart', async t => {
   const w = await world();
   const h = await harness(t, w, w.longer);
-  await h.security.startLedger();
-  await h.principal(w.laptop);
-  const outcome = await h.security.offerLedgerResult(w.dropLaptopFork.ledger, 'relay');
-  assert.deepEqual([outcome.decision, outcome.relation, outcome.revision], ['keep', 'diverged', 3]);
-  assert.deepEqual(h.revoked, []);
-  await h.principal(w.laptop);
-  assert.deepEqual(await h.ids(), ids(w.cli, w.laptop, w.phone, w.tablet));
-  assert.deepEqual((await h.store.read())!.sticky, { deviceIds: [], bridgeIds: [] });
-  const refused = h.lines.filter(line => line.includes('REFUSED'));
-  assert.equal(refused.length, 1);
-  assert.match(refused[0], /^\[ledger\] REFUSED a different account history from relay \(head .{8}, revision 3\); keeping ours \(head .{8}, revision 4\)$/);
+  const laptop = await (async () => { await h.security.startLedger(); return h.principal(w.laptop); })();
+  await h.security.policy.revalidate(laptop, 'control');
+  // The server's history (base + revoke laptop) diverges from ours: refused, but its removal of laptop is enforced here at once.
+  h.serve(async () => w.dropLaptopFork.ledger);
+  await h.security.refreshLedger();
+  assert.equal(h.security.ledgerStatus().divergence?.source, 'server');
+  assert.equal(h.security.ledgerStatus().head, await chainHead(w.longer), 'our chain is unchanged');
+  assert.deepEqual(h.revoked, [w.laptop.identity.endpoint.id]);
+  await assert.rejects(h.security.policy.revalidate(laptop, 'control'), code('account_device_revoked'));
+  await assert.rejects(h.principal(w.laptop), code('account_device_revoked'));
+  await h.principal(w.phone);
+  assert.deepEqual(await h.ids(), ids(w.cli, w.phone, w.tablet));
+  // Its raw checkpoint still lists laptop: only the sticky set (local enforcement) removes it.
+  const state = (await h.store.read())!;
+  assert.ok(state.checkpoint.devices.some(device => device.endpoint.id === w.laptop.identity.endpoint.id));
+  assert.deepEqual(state.sticky, { deviceIds: [w.laptop.identity.endpoint.id], bridgeIds: [] });
+  // 46 h later the laptop is still refused (offline grace is irrelevant to it), and so after a restart.
+  h.elapse(46 * 3_600_000);
+  h.security.noteServerContact();
+  await assert.rejects(h.principal(w.laptop), code('account_device_revoked'));
   await h.security.close();
   h.security = h.restart();
   await h.security.startLedger();
-  await h.principal(w.laptop);
-  assert.equal(h.security.ledgerStatus().divergence?.source, 'relay');
+  await assert.rejects(h.principal(w.laptop), code('account_device_revoked'));
+  await h.principal(w.phone);
+  // The ledger RPCs' membership check uses the same trusted view.
+  await assert.rejects(h.security.memberHead(laptop), (error: unknown) => error instanceof Error);
+  assert.equal(h.fired.count, 0);
 });
 
 test('a LONGER diverged chain from the server is never adopted and the trusted members are unchanged', async t => {
@@ -341,12 +357,18 @@ test('own removal: a DIVERGED chain that revokes this bridge is not evidence (no
   assert.equal(h.fired.count, 0);
   assert.equal(h.security.ledgerStatus().own, 'active');
   await h.security.revalidate(phone);
-  assert.equal(await h.store.ownBridgeStatus(BRIDGE, w.bridgeAuth), 'active', 'the startup check after a restart agrees');
+  assert.equal(await h.store.ownBridgeStatus(ownKeys(w)), 'active', 'the startup check after a restart agrees');
   assert.deepEqual((await h.store.read())!.sticky, { deviceIds: [], bridgeIds: [] });
   assert.deepEqual(h.security.ledgerStatus().divergence, {
     source: 'server', otherHead: (await chainHead(w.revokeBridgeFork)).slice(0, 8), otherRevision: 3, ourRevision: 4, firstSeen: START,
+    forkRevision: 2, removedOnOtherHistory: true,
   });
-  assert.equal(h.lines.filter(line => line.includes('REFUSED')).length, 1, 'one line per distinct other head');
+  assert.equal(h.security.ledgerStatus().removedOnOtherHistory, true);
+  const refused = h.lines.filter(line => line.includes('REFUSED'));
+  assert.equal(refused.length, 1, 'one line per distinct other head');
+  assert.match(refused[0], /; that history removes this computer$/);
+  // Our own id never enters the sticky set, so neither the running check nor the startup check can ever reset on it.
+  assert.deepEqual((await h.store.read())!.sticky.bridgeIds, []);
 });
 
 test('a stored chain that already revokes this bridge emits at startup without reading the server', async t => {
@@ -378,7 +400,7 @@ test('absent (not listed, or listed with other keys, or another account) fails c
   h.serve(async () => w.foreign.ledger);
   await h.security.startLedger();
   assert.equal(h.fired.count, 0);
-  assert.deepEqual(h.security.ledgerStatus(), { accountId: null, revision: null, head: null, own: 'unpaired', divergence: null, serverBehind: false, announcements: { accepted: 0, dropped: 0 } });
+  assert.deepEqual(h.security.ledgerStatus(), { accountId: null, revision: null, head: null, own: 'unpaired', divergence: null, serverBehind: false, removedOnOtherHistory: false, announcements: { accepted: 0, dropped: 0 } });
 });
 
 test('offline grace: a lapsed or missing server contact fails closed until noteServerContact renews it', async t => {
@@ -601,7 +623,7 @@ test('an invalid candidate is rejected with no state change; without a ledger ev
   await solo.startLedger();
   assert.equal(await solo.offerLedger(w.withPhone.ledger, 'relay'), 'reject');
   solo.noteServerContact(START);
-  assert.deepEqual(solo.ledgerStatus(), { accountId: null, revision: null, head: null, own: 'unpaired', divergence: null, serverBehind: false, announcements: { accepted: 0, dropped: 0 } });
+  assert.deepEqual(solo.ledgerStatus(), { accountId: null, revision: null, head: null, own: 'unpaired', divergence: null, serverBehind: false, removedOnOtherHistory: false, announcements: { accepted: 0, dropped: 0 } });
   await solo.refreshLedger();
   await solo.policy.provisionLocalEndpoint(w.cli.endpoint);
   const cli = await solo.policy.principal(w.cli.endpoint.id);
@@ -775,6 +797,7 @@ test('ledgerStatus: divergence (the server first, heads cut to 8 characters) and
   await h.security.offerLedgerResult(w.dropLaptopFork.ledger, 'relay');
   assert.deepEqual(h.security.ledgerStatus().divergence, {
     source: 'relay', otherHead: (await chainHead(w.dropLaptopFork)).slice(0, 8), otherRevision: 3, ourRevision: 4, firstSeen: START,
+    forkRevision: 2, removedOnOtherHistory: false,
   });
   // The server now holds another history too: it is the one shown, and it is not "behind".
   h.serve(async () => w.deskFork.ledger);
@@ -782,8 +805,9 @@ test('ledgerStatus: divergence (the server first, heads cut to 8 characters) and
   await h.security.refreshLedger();
   assert.deepEqual(JSON.parse(JSON.stringify(h.security.ledgerStatus())), {
     accountId: w.accountId, revision: 4, head: await chainHead(w.longer), own: 'active',
-    divergence: { source: 'server', otherHead: (await chainHead(w.deskFork)).slice(0, 8), otherRevision: 4, ourRevision: 4, firstSeen: START + 5000 },
-    serverBehind: false,
+    divergence: { source: 'server', otherHead: (await chainHead(w.deskFork)).slice(0, 8), otherRevision: 4, ourRevision: 4, firstSeen: START + 5000,
+      forkRevision: 2, removedOnOtherHistory: false },
+    serverBehind: false, removedOnOtherHistory: false,
     announcements: { accepted: 0, dropped: 0 },
   });
   // The server agrees again: its entry is cleared, the relay's remains.
@@ -808,7 +832,7 @@ test('ledgerStatus: divergence (the server first, heads cut to 8 characters) and
   const port = await api.start();
   t.after(() => api.stop());
   const info = await (await fetch(`http://127.0.0.1:${port}/api/security/info`)).json() as Record<string, unknown>;
-  assert.deepEqual(info.ledger, { divergence: h.security.ledgerStatus().divergence, serverBehind: false });
+  assert.deepEqual(info.ledger, { divergence: h.security.ledgerStatus().divergence, serverBehind: false, removedOnOtherHistory: false });
   assert.equal(info.bridgeId, BRIDGE);
 });
 
@@ -836,7 +860,7 @@ test('the 401 key_revoked evidence goes through the same append-only decision: a
     await microtasks();
     assert.equal(h.fired.count, fired, 'onBridgeRevoked starts the identity reset (index.ts revokedRestart)');
     assert.equal(h.security.ledgerStatus().own, fired ? 'revoked' : 'active');
-    assert.equal(await h.store.ownBridgeStatus(BRIDGE, w.bridgeAuth), fired ? 'revoked' : 'active');
+    assert.equal(await h.store.ownBridgeStatus(ownKeys(w)), fired ? 'revoked' : 'active');
     if (!fired) assert.equal(h.security.ledgerStatus().divergence?.source, 'server');
     assert.deepEqual(posts, [], 'evidence is never answered with a POST');
   }
@@ -938,7 +962,7 @@ test('own removal needs membership: a tombstone of our id, or a removal of our i
   await microtasks();
   assert.equal(absent.fired.count, 0);
   assert.equal(absent.security.ledgerStatus().own, 'absent');
-  assert.equal(await absent.store.ownBridgeStatus(BRIDGE, w.bridgeAuth), 'absent');
+  assert.equal(await absent.store.ownBridgeStatus(ownKeys(w)), 'absent');
   // A stored chain holding that tombstone at startup: no emission either.
   const stored = await harness(t, w, tombstone);
   await stored.security.startLedger();
@@ -952,16 +976,16 @@ test('own removal needs membership: a tombstone of our id, or a removal of our i
   assert.equal(await other.security.offerLedger(removed.ledger, 'relay'), 'adopt');
   await microtasks();
   assert.equal(other.fired.count, 0);
-  assert.equal(await other.store.ownBridgeStatus(BRIDGE, w.bridgeAuth), 'absent');
+  assert.equal(await other.store.ownBridgeStatus(ownKeys(w)), 'absent');
   // The same removal of OUR membership is evidence, from a running bridge and from the stored chain at startup.
   const ours = await harness(t, w, w.base);
   await ours.security.startLedger();
   assert.equal(await ours.security.offerLedger(w.revokeBridgeFork.ledger, 'relay'), 'adopt');
   assert.equal(ours.fired.count, 1);
-  assert.equal(await ours.store.ownBridgeStatus(BRIDGE, w.bridgeAuth), 'revoked');
+  assert.equal(await ours.store.ownBridgeStatus(ownKeys(w)), 'revoked');
 });
 
-test('own removal: an owner-chosen history that revokes our id removes us when the chain we held listed us as active', async t => {
+test('own removal: an owner-chosen history that only tombstones our id (it never added us) leaves us absent: no reset, like the startup check', async t => {
   const w = await world();
   const h = await harness(t, w, w.base);
   await h.security.startLedger();
@@ -974,7 +998,28 @@ test('own removal: an owner-chosen history that revokes our id removes us when t
   chosen = { ledger: { genesis: chosen.ledger.genesis, transitions: [...chosen.ledger.transitions, await signed(w.passkey, payload)] }, accountId: chosen.accountId };
   const outcome = await h.security.offerLedgerResult(chosen.ledger, 'server');
   assert.deepEqual([outcome.decision, outcome.relation], ['adopt', 'diverged']);
-  assert.equal(h.fired.count, 1);
-  assert.equal(h.security.ledgerStatus().own, 'revoked');
+  await microtasks();
+  // The raw chain never added this bridge, so its revoke_bridge is a tombstone: absent (refused, fails closed), never a reset, on the
+  // running bridge exactly as at startup (no "it was active before" shortcut: that one could fire on a sticky-only id).
+  assert.equal(h.fired.count, 0);
+  assert.equal(h.security.ledgerStatus().own, 'absent');
+  assert.equal(await h.store.ownBridgeStatus(ownKeys(w)), 'absent');
   assert.ok(h.lines.some(line => line.startsWith('[ledger] adopted an owner-chosen history: fork at revision 1, discarded 1 of our records')));
+});
+
+test('a sticky-only entry for our own id (e.g. left by 0.21) never resets the identity: absent, fail closed, on start and while running', async t => {
+  const w = await world();
+  const h = await harness(t, w, null);
+  await seed(h.dir, w.longer, START, { deviceIds: [], bridgeIds: [BRIDGE] });
+  await h.security.startLedger();
+  await microtasks();
+  assert.equal(h.fired.count, 0);
+  assert.equal(h.security.ledgerStatus().own, 'absent');
+  assert.equal(await h.store.ownBridgeStatus(ownKeys(w)), 'absent');
+  // An extension that does not revoke us changes nothing about that.
+  const more = await append(w.longer, w.passkey, { type: 'add_device', device: w.desk.device });
+  assert.equal(await h.security.offerLedger(more.ledger, 'relay'), 'adopt');
+  await microtasks();
+  assert.equal(h.fired.count, 0);
+  assert.equal(h.security.ledgerStatus().own, 'absent');
 });

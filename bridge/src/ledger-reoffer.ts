@@ -4,18 +4,25 @@
  * just read, so an account with no browser open is repaired too.
  * - Never blind. Every attempt starts with a fresh read of the server's chain and POSTs only when that read says 'behind'. Relay input never
  *   reaches here: it only causes the paced reads of ledger-relay.ts, whose results may call noteServerBehind().
- * - Never creates. expectHead turns an unknown account into a 404; after a 404 (to the read or the POST) this process never posts again.
- * - Pacing: one attempt at a time; the same (our head, server head) pair at most once per 30 s, checked after the fresh read. A failed
- *   attempt (any non-2xx, a network error, a failed read) waits 30 s doubling to 10 min, each wait times 0.8..1.2 (jitter), and a later
- *   Retry-After (at most 1 h) wins; then it retries on its own (fresh read first). Success or a server that is no longer behind resets it.
- * - Answers: 2xx -> done (the answered chain is offered to the replica); 404 account_unknown -> stop; 409 head_changed -> offer the server's
- *   chain and, if the server is still behind, send once more in the same attempt; 409 diverged -> offer it (the replica records the
- *   divergence); 409 ledger_rejected -> logged once per local head; 429 -> Retry-After.
+ * - Never creates. expectHead turns an unknown account into a 404; after a 404 (to the read or the POST) nothing is posted for an hour, or
+ *   until a later read finds the account (noteServerBehind, or this module's own fresh read).
+ * - Pacing: one attempt at a time; at most one POST per 30 s whatever the heads (a hostile server cannot make it post faster by showing a
+ *   new head on every read), and the same (our head, server head) pair at most once per 30 s, both checked after the fresh read. A failed
+ *   attempt (any non-2xx, a network error, a failed read, or a 2xx after which the next read still shows the server behind) waits 30 s
+ *   doubling to 10 min, each wait times 0.8..1.2 (jitter), and a later Retry-After (at most 1 h) wins; then it retries on its own (fresh
+ *   read first). A server that is no longer behind resets it.
+ * - Answers: 2xx -> sent (the answered chain is offered to the replica; the next read confirms it); 404 account_unknown -> pause;
+ *   409 head_changed -> offer the server's chain: done if the server is no longer behind, else backoff (the retry reads and sends again);
+ *   409 diverged -> offer it (the replica records the divergence); 409 ledger_rejected -> logged once per local head; 429 -> Retry-After.
  * Nothing here decides trust: every chain the server answers with goes through the replica's append-only rule.
  */
 import type { LedgerOfferOutcome, ServerLedgerRead } from './security/bridge/security.js';
 
 export const REOFFER_PAIR_WINDOW_MS = 30_000;
+/** At most one POST per this interval, whatever the (our head, server head) pair. */
+export const REOFFER_MIN_POST_SPACING_MS = 30_000;
+/** After a 404 (the server does not know the account), nothing is posted for this long unless a read finds the account again. */
+export const REOFFER_UNKNOWN_ACCOUNT_PAUSE_MS = 3_600_000;
 export const REOFFER_FIRST_BACKOFF_MS = 30_000;
 export const REOFFER_MAX_BACKOFF_MS = 600_000;
 export const REOFFER_MAX_RETRY_AFTER_MS = 3_600_000;
@@ -49,12 +56,14 @@ export interface LedgerReofferDeps {
   log(line: string): void;
 }
 
-/** posted: the server took our chain. not_behind: nothing to send. skipped: the pair was sent less than 30 s ago. failed: backing off.
- *  deferred: an earlier failure's wait has not passed (a retry is scheduled). stopped: shut down, or the server does not know the account. */
+/** posted: the server answered 2xx (the next read confirms it). not_behind: nothing to send. skipped: the pair, or any POST, was sent less
+ *  than 30 s ago. failed: backing off. deferred: an earlier failure's wait has not passed (a retry is scheduled). stopped: shut down, or
+ *  paused after the server said it does not know the account. */
 export type ReofferOutcome = 'posted' | 'not_behind' | 'skipped' | 'failed' | 'deferred' | 'stopped';
 
 export interface LedgerReoffer {
-  /** A server read showed the server holding a strict prefix of our chain: start one paced attempt (it reads again before it posts). */
+  /** A server read showed the server holding a strict prefix of our chain (so the server knows the account: a 404 pause ends): start one
+   *  paced attempt (it reads again before it posts). */
   noteServerBehind(): void;
   /** Runs an attempt now unless one is running (joined) or a backoff wait is pending ('deferred'); for a relay token refused with a plain
    *  401, which may mean the server lacks our records. It posts only when its own fresh read says 'behind'. */
@@ -80,18 +89,23 @@ export function createLedgerReoffer(deps: LedgerReofferDeps): LedgerReoffer {
   let readyAt = Number.NEGATIVE_INFINITY;
   let cancelTimer: (() => void) | null = null;
   let stopped = false;
-  /** The server does not know this account: never post again in this process. */
-  let gone = false;
+  /** The server said it does not know this account: no attempt before this monotonic time (unless a read finds the account). */
+  let pausedUntil = Number.NEGATIVE_INFINITY;
+  /** The last POST (any pair), for the global floor. */
+  let lastPostAt = Number.NEGATIVE_INFINITY;
+  /** The last POST was answered 2xx: the next read must no longer show the server behind, else that counts as a failure. */
+  let confirming = false;
   /** (our head, server head) -> when it was last posted. */
   const sent = new Map<string, number>();
   /** Local heads whose ledger_rejected answer was logged. */
   const rejectedLogged = new Set<string>();
 
   const cancel = (): void => { cancelTimer?.(); cancelTimer = null; };
+  const paused = (): boolean => deps.now() < pausedUntil;
   /** (Re)arms the one retry timer: an attempt `ms` from now, unless one is running then. */
   const arm = (ms: number): void => {
     cancel();
-    if (stopped || gone) return;
+    if (stopped) return;
     cancelTimer = deps.schedule(() => { cancelTimer = null; if (running === null) void start(); }, Math.max(0, ms));
   };
   const settled = (outcome: ReofferOutcome): ReofferOutcome => {
@@ -112,8 +126,11 @@ export function createLedgerReoffer(deps: LedgerReofferDeps): LedgerReoffer {
     return 'failed';
   };
   const unknownAccount = (): ReofferOutcome => {
-    if (!gone) deps.log('[ledger] the server does not know this account (404); this computer will not send its account history to it');
-    gone = true;
+    if (!paused()) deps.log('[ledger] the server does not know this account (404); this computer will not send its account history to it for an hour');
+    pausedUntil = deps.now() + REOFFER_UNKNOWN_ACCOUNT_PAUSE_MS;
+    confirming = false;
+    failures = 0;
+    readyAt = Number.NEGATIVE_INFINITY;
     cancel();
     return 'stopped';
   };
@@ -121,19 +138,23 @@ export function createLedgerReoffer(deps: LedgerReofferDeps): LedgerReoffer {
     try { return await deps.offer(ledger); } catch { return null; }
   };
 
-  const send = async (serverHead: string, mayRepeat: boolean): Promise<ReofferOutcome> => {
+  const send = async (serverHead: string): Promise<ReofferOutcome> => {
     const local = await deps.local();
     if (local === null) return settled('not_behind');
     const now = deps.now();
     for (const [key, at] of sent) if (now < at || now - at >= REOFFER_PAIR_WINDOW_MS) sent.delete(key);
     const pair = `${local.head}\n${serverHead}`;
-    const sentAt = sent.get(pair);
-    if (sentAt !== undefined) {
-      // A retry after a failure can come back before the pair window closes (the first wait may be 24 s): try again when it does.
-      if (failures > 0) arm(sentAt + REOFFER_PAIR_WINDOW_MS - now);
+    const pairAt = sent.get(pair);
+    // Both floors, after the fresh read: this pair at most once per 30 s, and any POST at most once per 30 s.
+    const floorAt = now >= lastPostAt ? lastPostAt + REOFFER_MIN_POST_SPACING_MS : Number.NEGATIVE_INFINITY;
+    const until = Math.max(pairAt === undefined ? Number.NEGATIVE_INFINITY : pairAt + REOFFER_PAIR_WINDOW_MS, floorAt);
+    if (until > now) {
+      // A retry after a failure can come back before a floor ends (the first wait may be 24 s): try again when it does.
+      if (failures > 0) arm(until - now);
       return 'skipped';
     }
     sent.set(pair, now);
+    lastPostAt = now;
     let answer: LedgerPostAnswer;
     try { answer = await deps.post(local.ledger, serverHead); }
     catch (error) { return failed(messageOf(error)); }
@@ -144,15 +165,16 @@ export function createLedgerReoffer(deps: LedgerReofferDeps): LedgerReoffer {
     const answered = typeof chain === 'object' && chain !== null;
     if (status >= 200 && status < 300) {
       if (answered) await offerQuietly(chain);
-      return settled('posted');
+      // Not settled yet: the next read must show the server holding our chain.
+      confirming = true;
+      return 'posted';
     }
     if (status === 404) return unknownAccount();
     if (status === 409 && error === 'head_changed') {
-      // Another write landed since our read: judge the server's chain, and if it is still a prefix of ours send once more.
+      // Another write landed since our read: judge the server's chain; if it is still a prefix of ours, the retry reads and sends again.
       const outcome = answered ? await offerQuietly(chain) : null;
-      if (outcome === null || outcome.decision === 'reject') return failed('head_changed');
-      if (outcome.relation !== 'behind' || outcome.head === null) return settled('not_behind');
-      return mayRepeat ? send(outcome.head, false) : failed('head_changed');
+      if (outcome !== null && outcome.decision !== 'reject' && outcome.relation !== 'behind') return settled('not_behind');
+      return failed('head_changed');
     }
     if (status === 409 && error === 'diverged') {
       if (answered) await offerQuietly(chain);
@@ -169,14 +191,21 @@ export function createLedgerReoffer(deps: LedgerReofferDeps): LedgerReoffer {
   };
 
   const attempt = async (): Promise<ReofferOutcome> => {
-    if (stopped || gone) return 'stopped';
+    if (stopped) return 'stopped';
+    if (paused()) return 'stopped';
     const read = await deps.read();
     if (stopped) return 'stopped';
     if (read.kind === 'unknown_account') return unknownAccount();
     if (read.kind === 'failed') return failed(`read failed: ${read.reason}`);
+    // The account is there again.
+    pausedUntil = Number.NEGATIVE_INFINITY;
     const { relation, head } = read.outcome;
+    const wasConfirming = confirming;
+    confirming = false;
     if (relation !== 'behind' || head === null) return settled('not_behind');
-    return send(head, true);
+    // The server answered 2xx to our last POST, yet still lacks our records: a hostile or broken server, not progress.
+    if (wasConfirming) return failed('the server accepted our history but still lacks it');
+    return send(head);
   };
 
   const start = (): Promise<ReofferOutcome> => {
@@ -187,13 +216,16 @@ export function createLedgerReoffer(deps: LedgerReofferDeps): LedgerReoffer {
 
   return {
     noteServerBehind() {
-      if (stopped || gone || running !== null || cancelTimer !== null) return;
+      if (stopped) return;
+      // The caller's read found the account: a 404 pause is over.
+      pausedUntil = Number.NEGATIVE_INFINITY;
+      if (running !== null || cancelTimer !== null) return;
       const wait = readyAt - deps.now();
       if (wait > 0) arm(wait);
       else void start();
     },
     check() {
-      if (stopped || gone) return Promise.resolve<ReofferOutcome>('stopped');
+      if (stopped || paused()) return Promise.resolve<ReofferOutcome>('stopped');
       if (running !== null) return running;
       if (readyAt - deps.now() > 0) {
         if (cancelTimer === null) arm(readyAt - deps.now());
