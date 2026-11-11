@@ -51,7 +51,7 @@ async function resolved(chosen: Ledger, other: Ledger, passkey: SoftPasskey): Pr
   const payload = await resolveForkTransition(chain, other, passkey.credentialId, Date.now());
   return { genesis: chain.genesis, transitions: [...chain.transitions, { payload, signature: await passkey.sign(await ledgerChallenge(payload)) }] };
 }
-const NONE = { decision: "reject", relation: null, discarded: [] };
+const NONE = { decision: "reject", relation: null, discarded: [], covered: false };
 
 /** Counts commits. */
 function counting(inner: LedgerReplicaStorage): LedgerReplicaStorage & { commits: number } {
@@ -103,7 +103,7 @@ describe("LedgerReplica", () => {
     expect(await replica.offer(chain)).toEqual(NONE);
     expect(await replica.offer(chain, { bind: false })).toEqual(NONE);
     expect(await storage.bound()).toBeNull();
-    expect(await replica.offer(chain, BIND)).toEqual({ decision: "adopt", relation: null, discarded: [] });
+    expect(await replica.offer(chain, BIND)).toEqual({ decision: "adopt", relation: null, discarded: [], covered: false });
     expect(replica.trusted()?.accountId).toBe(a.accountId);
     expect(replica.trusted()?.devices).toHaveLength(1);
     expect(await storage.bound()).toBe(a.accountId);
@@ -138,13 +138,13 @@ describe("LedgerReplica", () => {
     await replica.load();
     await replica.offer(one, BIND);
     const before = replica.heads();
-    expect(await replica.offer(two)).toEqual({ decision: "adopt", relation: "ahead", discarded: [] });
+    expect(await replica.offer(two)).toEqual({ decision: "adopt", relation: "ahead", discarded: [], covered: false });
     expect(storage.commits).toBe(2);
     // ledgerHeads of the adopted chain, recomputed only by the adoption.
     expect(replica.heads()).toEqual(await ledgerHeads(two));
     expect(replica.heads()).not.toBe(before);
-    expect(await replica.offer(one)).toEqual({ decision: "keep", relation: "behind", discarded: [] });
-    expect(await replica.offer(two)).toEqual({ decision: "keep", relation: "same", discarded: [] });
+    expect(await replica.offer(one)).toEqual({ decision: "keep", relation: "behind", discarded: [], covered: false });
+    expect(await replica.offer(two)).toEqual({ decision: "keep", relation: "same", discarded: [], covered: false });
     expect(storage.commits).toBe(2);
     expect(replica.raw()?.checkpoint.revision).toBe(2);
     const heads = replica.heads();
@@ -163,7 +163,7 @@ describe("LedgerReplica", () => {
     const longer = await addDevice(a, await addDevice(a, a.ledger));
     const forged = clone(longer);
     forged.transitions[1].signature = longer.transitions[0].signature;
-    expect(await replica.offer(forged, { source: "relay" })).toEqual({ decision: "reject", relation: "diverged", discarded: [] });
+    expect(await replica.offer(forged, { source: "relay" })).toEqual({ decision: "reject", relation: "diverged", discarded: [], covered: false });
     expect(await replica.offer({ nonsense: true })).toEqual(NONE);
     expect(storage.commits).toBe(1);
     expect(replica.trusted()?.accountId).toBe(a.accountId);
@@ -187,10 +187,10 @@ describe("LedgerReplica", () => {
     await replica.load();
     await replica.offer(mine, BIND);
     const local = JSON.stringify(replica.raw());
-    expect(await replica.offer(theirs)).toEqual({ decision: "keep", relation: "diverged", discarded: [] });
+    expect(await replica.offer(theirs)).toEqual({ decision: "keep", relation: "diverged", discarded: [], covered: false });
     // Without a source nothing is kept, not even the other chain.
     expect(storage.commits).toBe(1);
-    expect(await replica.offer(theirs, { source: "server" })).toEqual({ decision: "keep", relation: "diverged", discarded: [] });
+    expect(await replica.offer(theirs, { source: "server" })).toEqual({ decision: "keep", relation: "diverged", discarded: [], covered: false });
     expect(JSON.stringify(replica.raw())).toBe(local);
     expect(replica.sticky()).toEqual({ deviceIds: [], bridgeIds: ["b1"] });
     const kept = replica.divergence().server;
@@ -213,7 +213,7 @@ describe("LedgerReplica", () => {
     const resolution = await resolved(grown, mine, a.passkey);
     expect(resolution.transitions.slice(-2).map(item => item.payload.operation.type)).toEqual(["revoke_bridge", "resolve_fork"]);
     const result = await reloaded.offer(resolution, { source: "server" });
-    expect(result).toEqual({ decision: "adopt", relation: "diverged", discarded: [mine.transitions[2]] });
+    expect(result).toEqual({ decision: "adopt", relation: "diverged", discarded: [mine.transitions[2]], covered: false });
     expect(reloaded.raw()?.ledger).toEqual(resolution);
     expect(reloaded.raw()?.checkpoint.revokedBridgeIds).toEqual(["b1"]);
     // Both kept chains are prefixes of (or the branch resolved by) the adopted one: nothing diverges any more.
@@ -238,7 +238,7 @@ describe("LedgerReplica", () => {
     // A kept different history is spliced the same way: local's verified prefix, then the other branch.
     const branch = clone(await addDevice(a, { genesis: local.genesis, transitions: local.transitions.slice(0, 1) }));
     branch.transitions[0].signature = local.transitions[1].signature;
-    expect(await replica.offer(branch, { source: "peer" })).toEqual({ decision: "keep", relation: "diverged", discarded: [] });
+    expect(await replica.offer(branch, { source: "peer" })).toEqual({ decision: "keep", relation: "diverged", discarded: [], covered: false });
     expect(replica.divergence().peer?.ledger.transitions).toEqual([local.transitions[0], branch.transitions[1]]);
   });
 
@@ -250,12 +250,12 @@ describe("LedgerReplica", () => {
     theirs.transitions[2].signature = theirs.transitions[1].signature;
     const replica = new LedgerReplica(memoryReplicaStorage());
     await replica.offer(mine, BIND);
-    expect(await replica.offer(theirs, { source: "peer" })).toEqual({ decision: "reject", relation: "diverged", discarded: [] });
+    expect(await replica.offer(theirs, { source: "peer" })).toEqual({ decision: "reject", relation: "diverged", discarded: [], covered: false });
     expect(replica.divergence()).toEqual({});
     expect(replica.raw()?.ledger).toEqual(mine);
   });
 
-  it("adds a kept candidate's revocations to nothing; an adopted chain's revocations become sticky; trusted() excludes them", async () => {
+  it("a removal seen on a valid other history becomes sticky at once (whatever the source); an adopted chain's revocations too; trusted() excludes them", async () => {
     const a = await account();
     const withBridges = await addBridge(a, await addBridge(a, a.ledger, "b1"), "b2");
     const other = await extend(withBridges, a.passkey, { type: "revoke_bridge", bridgeId: "b1" });
@@ -264,17 +264,21 @@ describe("LedgerReplica", () => {
     const replica = new LedgerReplica(storage);
     await replica.load();
     await replica.offer(local, BIND);
-    expect((await replica.offer(other, { source: "relay" })).decision).toBe("keep");
-    expect(replica.sticky()?.bridgeIds).toEqual([]);
-    expect(replica.trusted()?.bridges.map(item => item.bridgeId)).toEqual(["b1", "b2"]);
+    // Kept (never adopted), but its removal by an authority of the fork point is enforced here (chooseLedger's `seen`).
+    expect((await replica.offer(other)).decision).toBe("keep");
+    expect(replica.sticky()?.bridgeIds).toEqual(["b1"]);
+    expect(replica.raw()?.checkpoint.bridges.map(item => item.bridgeId)).toEqual(["b1", "b2"]);
+    expect(replica.trusted()?.bridges.map(item => item.bridgeId)).toEqual(["b2"]);
+    // Not part of the chain: the chain-only view and what is sent are unchanged.
+    expect(replica.raw()?.ledger).toEqual(local);
 
     const revoked = await extend(local, a.passkey, { type: "revoke_bridge", bridgeId: "b2" });
     expect((await replica.offer(revoked)).decision).toBe("adopt");
-    expect(replica.sticky()?.bridgeIds).toEqual(["b2"]);
-    expect(replica.trusted()?.bridges.map(item => item.bridgeId)).toEqual(["b1"]);
+    expect(replica.sticky()?.bridgeIds).toEqual(["b1", "b2"]);
+    expect(replica.trusted()?.bridges).toEqual([]);
     const reloaded = new LedgerReplica(storage);
     await reloaded.load();
-    expect(reloaded.trusted()?.revokedBridgeIds).toEqual(["b2"]);
+    expect(reloaded.trusted()?.revokedBridgeIds.slice().sort()).toEqual(["b1", "b2"]);
   });
 
   it("loads a version-1 record of the previous code: sticky ids stay enforced, the next write stores version 2", async () => {
@@ -331,7 +335,105 @@ describe("LedgerReplica", () => {
     await damaged.setPendingWrite({ version: 1, record: other, since: 7 }, null);
     await damaged.clear();
     expect(damaged.pendingWrite()).toBeNull();
-    expect(await storage.read(a.accountId)).not.toHaveProperty("pending");
+    // Kept with the account across clear() (nothing is sent while unbound), and back when the same account is bound again.
+    expect(await storage.read(a.accountId)).toMatchObject({ ledger: null, pending: { version: 1, record: other, since: 7 } });
+    expect((await damaged.offer(one, BIND)).decision).toBe("adopt");
+    expect(damaged.pendingWrite()?.record).toEqual(other);
+  });
+
+  it("blocks a removal the owner signed at once, locally only: pending, then discarded, until it is in the chain or dismissed", async () => {
+    const a = await account();
+    const base = await addBridge(a, await addBridge(a, a.ledger, "b1"), "b2");
+    const revoke = (await extend(base, a.passkey, { type: "revoke_bridge", bridgeId: "b1" })).transitions[2];
+    const storage = memoryReplicaStorage();
+    const replica = new LedgerReplica(storage);
+    await replica.offer(base, BIND);
+    expect(await replica.setPendingWrite({ version: 1, record: revoke, since: 1 }, null)).toBe(true);
+    // Enforced here at once; not in the chain, not sticky, not in the chain-only view.
+    expect(replica.trusted()?.bridges.map(item => item.bridgeId)).toEqual(["b2"]);
+    expect(replica.trusted()?.revokedBridgeIds).toEqual(["b1"]);
+    expect(replica.chainTrusted()?.bridges.map(item => item.bridgeId)).toEqual(["b1", "b2"]);
+    expect(replica.raw()?.ledger).toEqual(base);
+    expect(replica.sticky()).toEqual({ deviceIds: [], bridgeIds: [] });
+    expect(replica.blocked()).toEqual({ deviceIds: [], bridgeIds: ["b1"] });
+    // Clearing the pending write does not lift it; dropping it into discarded keeps it; a reload and clear() keep it.
+    expect(await replica.setPendingWrite(null, revoke)).toBe(true);
+    expect(replica.blocked()).toEqual({ deviceIds: [], bridgeIds: ["b1"] });
+    await replica.noteDiscarded([revoke]);
+    const reloaded = new LedgerReplica(storage);
+    await reloaded.load();
+    expect(reloaded.trusted()?.bridges.map(item => item.bridgeId)).toEqual(["b2"]);
+    // Only the owner's dismissal of that entry lifts it.
+    await reloaded.dismissDiscarded([revoke]);
+    expect(reloaded.blocked()).toEqual({ deviceIds: [], bridgeIds: [] });
+    expect(reloaded.trusted()?.bridges.map(item => item.bridgeId)).toEqual(["b1", "b2"]);
+    // Or the removal reaching the chain.
+    await reloaded.setPendingWrite({ version: 1, record: revoke, since: 2 }, null);
+    await reloaded.clear();
+    expect(await storage.read(a.accountId)).toMatchObject({ blocked: { deviceIds: [], bridgeIds: ["b1"] } });
+    await reloaded.offer(base, BIND);
+    expect(reloaded.trusted()?.bridges.map(item => item.bridgeId)).toEqual(["b2"]);
+    expect((await reloaded.offer({ genesis: base.genesis, transitions: [...base.transitions, revoke] })).decision).toBe("adopt");
+    expect(reloaded.blocked()).toEqual({ deviceIds: [], bridgeIds: [] });
+    expect(reloaded.raw()?.checkpoint.revokedBridgeIds).toEqual(["b1"]);
+  });
+
+  it("a chain its own resolve_fork discarded exactly is covered: never kept again; a grown or sibling copy is a new divergence", async () => {
+    const a = await account();
+    const base = await addDevice(a, a.ledger);
+    const mine = await addBridge(a, base, "mine");
+    const theirs = await addDevice(a, base);
+    const replica = new LedgerReplica(memoryReplicaStorage());
+    await replica.offer(mine, BIND);
+    expect((await replica.offer(theirs, { source: "server" })).relation).toBe("diverged");
+    const resolution = await resolved(mine, theirs, a.passkey);
+    expect((await replica.offer(resolution, { source: "server" })).decision).toBe("adopt");
+    expect(replica.divergence()).toEqual({});
+    // The exact discarded branch again, from anyone: covered, nothing kept.
+    for (const source of ["server", "relay", "peer"] as const) {
+      expect(await replica.offer(theirs, { source })).toEqual({ decision: "keep", relation: "diverged", discarded: [], covered: true });
+    }
+    expect(replica.divergence()).toEqual({});
+    // That branch grown with a record the signer never saw, or a sibling that starts the same way: not covered.
+    const grown = await addDevice(a, theirs);
+    expect((await replica.offer(grown, { source: "peer" })).covered).toBe(false);
+    expect(Object.keys(replica.divergence())).toEqual(["peer"]);
+  });
+
+  it("forgets a source's divergent chain once that source offers the same chain, a prefix, or an extension of the local one", async () => {
+    const a = await account();
+    const base = await addDevice(a, a.ledger);
+    const mine = await addBridge(a, base, "mine");
+    const theirs = await addDevice(a, base);
+    const replica = new LedgerReplica(memoryReplicaStorage());
+    await replica.offer(mine, BIND);
+    for (const [source, agreeing] of [["server", mine], ["relay", base], ["peer", await addDevice(a, mine)]] as const) {
+      await replica.offer(theirs, { source });
+      expect(replica.divergence()[source]).toBeDefined();
+      await replica.offer(agreeing, { source });
+      expect(replica.divergence()[source]).toBeUndefined();
+    }
+  });
+
+  it("sync(): follows another tab's write, and an unbinding, with one read when nothing changed", async () => {
+    const a = await account();
+    const one = await addDevice(a, a.ledger);
+    const two = await addDevice(a, one);
+    const storage = counting(memoryReplicaStorage());
+    const tabA = new LedgerReplica(storage);
+    const tabB = new LedgerReplica(storage);
+    await tabA.offer(one, BIND);
+    await tabB.load();
+    await tabB.sync();
+    expect(tabB.raw()?.ledger).toEqual(one);
+    await tabA.offer(two);
+    expect(tabB.raw()?.ledger).toEqual(one);
+    await tabB.sync();
+    expect(tabB.raw()?.ledger).toEqual(two);
+    await tabA.clear();
+    await tabB.sync();
+    expect(tabB.raw()).toBeNull();
+    expect(storage.commits).toBe(2);
   });
 
   it("throws ledger_replica_corrupt on a corrupted record and never resets it; a tampered divergent chain is only dropped", async () => {
@@ -381,7 +483,7 @@ describe("LedgerReplica", () => {
     await tabB.load();
     await tabB.offer(three);
     // tabA still holds `one`; its write of `two` loses the compare-and-set, re-reads `three` and keeps it.
-    expect(await tabA.offer(two)).toEqual({ decision: "keep", relation: "behind", discarded: [] });
+    expect(await tabA.offer(two)).toEqual({ decision: "keep", relation: "behind", discarded: [], covered: false });
     expect(tabA.raw()?.checkpoint.revision).toBe(3);
     expect(tabA.heads()).toEqual(await ledgerHeads(three));
     expect(((await shared.read(a.accountId)) as ReplicaRecord).checkpoint.revision).toBe(3);

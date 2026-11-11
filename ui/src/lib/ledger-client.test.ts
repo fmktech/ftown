@@ -84,6 +84,8 @@ const json = (value: unknown, status = 200): Response => new Response(JSON.strin
 const wire = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const char = (code: number): string => String.fromCharCode(code);
 
+/** Requests that broke a client invariant (checked after every test): see FakeServer.fetch. */
+const violations: string[] = [];
 /** In-memory server with the real fork choice, nonce store and session check, holding several accounts keyed by accountId (and unique handle). */
 class FakeServer {
   ledgers = new Map<string, Ledger>();
@@ -143,6 +145,13 @@ class FakeServer {
     if (url.pathname === "/api/account/ledger" && method === "POST") {
       const post = body as { ledger: unknown; expectHead?: unknown };
       this.posts.push(post);
+      // Invariant: a chain of an account the server holds is never POSTed without expectHead (it could re-create a deleted account).
+      try {
+        const id = await accountIdOf((post.ledger as Ledger).genesis.payload);
+        if (this.ledgers.has(id) && typeof post.expectHead !== "string") violations.push(`POST of account ${id.slice(0, 8)} without expectHead`);
+      } catch {
+        // Not a chain: the store refuses it.
+      }
       const hooked = this.postHook === null ? null : await this.postHook(post.ledger as Ledger);
       return hooked ?? this.offer(post.ledger, typeof post.expectHead === "string" ? post.expectHead : undefined);
     }
@@ -358,6 +367,12 @@ async function resolving(chosen: Ledger, other: Ledger, authenticator: FakeAuthe
   const payload = await resolveForkTransition(chain, other, key.credentialId, Date.now());
   return { genesis: chain.genesis, transitions: [...chain.transitions, { payload, signature: await key.sign(await ledgerChallenge(payload)) }] };
 }
+/** What the owner was shown of the divergence: resolveDivergence resolves exactly that or nothing. */
+function shown(b: Browser): { source: "server" | "relay" | "peer"; otherHead: string } {
+  const divergence = b.client.snapshot().divergence;
+  if (!divergence) throw new Error("no divergence shown");
+  return { source: divergence.source, otherHead: divergence.otherHead };
+}
 function memoryAttempts(): AttemptStorage {
   const values = new Map<string, string>();
   return { getItem: key => values.get(key) ?? null, setItem: (key, value) => { values.set(key, value); }, removeItem: key => { values.delete(key); } };
@@ -412,6 +427,7 @@ beforeEach(() => {
   instrumentCrypto();
 });
 afterEach(() => {
+  expect(violations.splice(0)).toEqual([]);
   for (const client of clients.splice(0)) client.dispose();
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -807,7 +823,7 @@ describe("LedgerClient sign-in", () => {
     await a.client.offer(foreign);
     await a.client.offer({ type: "ledger", ledger: foreign });
     expect(a.replica.raw()?.checkpoint.head).toBe(head);
-    expect(await a.replica.offer(foreign)).toEqual({ decision: "reject", relation: null, discarded: [] });
+    expect(await a.replica.offer(foreign)).toEqual({ decision: "reject", relation: null, discarded: [], covered: false });
 
     authenticator.pick = 1;
     authenticator.ignoreAllowList = true;
@@ -943,7 +959,7 @@ describe("LedgerClient writes", () => {
     expect(a.replica.raw()?.checkpoint.head).toBe(after.head);
   });
 
-  it("a revocation the server answers 200 without: ledger_not_stored, kept pending (not applied here), and sent again", async () => {
+  it("a revocation the server answers 200 without: ledger_not_stored, kept pending (enforced here, not in the chain), and sent again", async () => {
     const { server, a, accountId } = await owner();
     const studio = await testBridge(accountId, "studio");
     await a.client.append({ type: "add_bridge", bridge: studio });
@@ -951,15 +967,20 @@ describe("LedgerClient writes", () => {
     server.offer = async () => json({ decision: "keep", ledger: server.ledger, discarded: 0 });
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     await expect(a.client.revokeBridge("studio")).rejects.toThrow("ledger_not_stored");
-    // Nothing is applied before the server holds it: the computer is still trusted, the removal is shown as not saved.
-    expect(() => a.client.assertBridgeAccess("studio", studio.endpoint.id)).not.toThrow();
+    // Not in the chain before the server holds it, but enforced here at once (the local block): the computer is no longer trusted.
+    expect(() => a.client.assertBridgeAccess("studio", studio.endpoint.id)).toThrow("account_bridge_revoked");
     expect(a.replica.raw()?.checkpoint.revokedBridgeIds).toEqual([]);
-    expect(a.client.snapshot()).toMatchObject({ pendingWrite: { operation: "revoke_bridge", bridgeId: "studio" }, unsaved: { deviceIds: [], bridgeIds: ["studio"] }, discarded: [] });
+    expect(a.client.snapshot()).toMatchObject({
+      pendingWrite: { operation: "revoke_bridge", bridgeId: "studio" }, unsaved: { deviceIds: [], bridgeIds: ["studio"] }, discarded: [],
+      blocked: { deviceIds: [], bridgeIds: ["studio"] }, localOnly: { deviceIds: [], bridgeIds: [] },
+    });
+    expect(a.client.snapshot().checkpoint?.bridges).toEqual([]);
     server.offer = original;
     await a.client.retryNow();
     expect((await verifyLedger(current(server))).revokedBridgeIds).toEqual(["studio"]);
     expect(() => a.client.assertBridgeAccess("studio", studio.endpoint.id)).toThrow("account_bridge_revoked");
-    expect(a.client.snapshot()).toMatchObject({ pendingWrite: null, unsaved: { deviceIds: [], bridgeIds: [] } });
+    // In the chain now: the local block is lifted (the chain enforces it).
+    expect(a.client.snapshot()).toMatchObject({ pendingWrite: null, unsaved: { deviceIds: [], bridgeIds: [] }, blocked: { deviceIds: [], bridgeIds: [] } });
   });
 
   it("a write answered with a longer chain that lacks it: write_conflict, the chain adopted, the record kept only to sign again", async () => {
@@ -977,11 +998,17 @@ describe("LedgerClient writes", () => {
     expect(discarded).toHaveLength(1);
     expect(discarded[0].payload.operation.type).toBe("revoke_device");
     expect(a.replica.raw()?.checkpoint.head).toBe((await verifyLedger(fork)).head);
-    // Never applied: this browser was not removed, and its record is in no chain.
-    expect(a.client.snapshot()).toMatchObject({ status: "ready", pendingWrite: null, lastConflict: { operation: "revoke_device", deviceId: laptop, reason: "write_conflict" } });
+    // In no chain; enforced on this browser only (its own removal: removed here) until the owner dismisses the dropped record.
+    expect(a.client.snapshot()).toMatchObject({
+      status: "device_revoked", pendingWrite: null, lastConflict: { operation: "revoke_device", deviceId: laptop, reason: "write_conflict" },
+      blocked: { deviceIds: [laptop], bridgeIds: [] }, localOnly: { deviceIds: [], bridgeIds: [] },
+    });
     expect(a.replica.sticky()).toEqual({ deviceIds: [], bridgeIds: [] });
+    expect(a.client.snapshot().canReoffer).toBe(true);
     // Never signed again by itself.
     expect(authenticator.names()).toEqual(["create", "sign", "sign", "sign"]);
+    await a.client.dismissDiscarded(discarded);
+    expect(a.client.snapshot()).toMatchObject({ status: "ready", blocked: { deviceIds: [], bridgeIds: [] }, discarded: [] });
   });
 
   it("adds an authority in three gestures with the new passkey's consent", async () => {
@@ -1208,7 +1235,7 @@ describe("LedgerClient replication", () => {
 });
 
 describe("LedgerClient dropped changes and discarded records", () => {
-  it("a removal overtaken by another change persists as discarded (never applied, never local-only) and can be signed again", async () => {
+  it("a removal overtaken by another change persists as discarded, stays enforced here (blocked, not in the chain), and can be signed again", async () => {
     const { server, authenticator, a, accountId } = await owner();
     const studio = await testBridge(accountId, "studio");
     await a.client.append({ type: "add_bridge", bridge: studio });
@@ -1224,12 +1251,15 @@ describe("LedgerClient dropped changes and discarded records", () => {
     expect(lost.localOnly).toEqual({ deviceIds: [], bridgeIds: [] });
     expect(lost.discarded.map(item => item.payload.operation)).toEqual([{ type: "revoke_bridge", bridgeId: "studio" }]);
     expect(a.replica.raw()?.checkpoint.head).toBe(await headOf(fork));
-    expect(() => a.client.assertBridgeAccess("studio", studio.endpoint.id)).not.toThrow();
+    expect(a.replica.raw()?.checkpoint.bridges.map(item => item.bridgeId)).toEqual(["studio"]);
+    expect(() => a.client.assertBridgeAccess("studio", studio.endpoint.id)).toThrow("account_bridge_revoked");
+    expect(lost.blocked).toEqual({ deviceIds: [], bridgeIds: ["studio"] });
 
-    // Persisted: a reloaded page still lists it.
+    // Persisted: a reloaded page still lists it and still enforces it.
     const reloaded = await browser(server, authenticator, { storage: a.storage });
     await reloaded.client.load();
     expect(reloaded.client.snapshot().discarded).toEqual(lost.discarded);
+    expect(() => reloaded.client.assertBridgeAccess("studio", studio.endpoint.id)).toThrow("account_bridge_revoked");
     reloaded.client.dispose();
 
     // Confirmed again on the new head; its discarded entry then disappears (its effect is in the chain).
@@ -1973,7 +2003,7 @@ describe("LedgerClient re-offer", () => {
     expect(done).toBe(true);
   });
 
-  it("S2: a browser's own refused removal stays pending (still a member) and is sent again (not before Retry-After, retryNow included)", async () => {
+  it("S2: a browser's own refused removal is enforced here at once (removed here, not in the chain) and is delivered without membership (not before Retry-After, retryNow included)", async () => {
     const { server, authenticator, accountId } = await owner();
     const b = await browser(server, authenticator);
     await b.client.signInNewDevice({ deviceLabel: "Phone" });
@@ -1983,11 +2013,15 @@ describe("LedgerClient re-offer", () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const start = fakeTime();
     await expect(b.client.revokeDevice(phone)).rejects.toThrow("rate_limited");
-    // Not accepted, so not applied: this browser is still a member until the server holds its removal.
+    // Not in the chain until the server accepts it, but enforced here at once: this browser is removed here (the removed-browser screen
+    // says "Removing this browser…" from `unsaved`), and it may still re-offer (its block is local).
     expect(b.client.snapshot()).toMatchObject({
-      status: "ready", canReoffer: true, serverState: "current", pendingWrite: { operation: "revoke_device", deviceId: phone }, unsaved: { deviceIds: [phone], bridgeIds: [] },
+      status: "device_revoked", canReoffer: true, serverState: "current", pendingWrite: { operation: "revoke_device", deviceId: phone }, unsaved: { deviceIds: [phone], bridgeIds: [] },
+      blocked: { deviceIds: [phone], bridgeIds: [] },
     });
-    expect(b.client.snapshot().checkpoint?.devices.some(item => item.endpoint.id === phone)).toBe(true);
+    expect(b.replica.raw()?.checkpoint.devices.some(item => item.endpoint.id === phone)).toBe(true);
+    expect(b.client.snapshot().checkpoint?.devices.some(item => item.endpoint.id === phone)).toBe(false);
+    expect(await b.client.signInKnownDevice()).toBe(false);
     const posts = server.posts.length;
     authenticator.calls = [];
     await b.client.retryNow();
@@ -1995,11 +2029,11 @@ describe("LedgerClient re-offer", () => {
     // max(Retry-After 60 s, the 30 s floor without jitter).
     await advance(59_999);
     expect(postsAt(server, start, start)).toEqual([0]);
-    expect(b.client.snapshot().status).toBe("ready");
+    expect(b.client.snapshot().status).toBe("device_revoked");
     await advance(1);
     expect(postsAt(server, start, start)).toEqual([0, 60_000]);
-    // Accepted: now it is removed here too.
-    expect(b.client.snapshot()).toMatchObject({ status: "device_revoked", pendingWrite: null });
+    // Accepted: removed in the chain now; the block is lifted.
+    expect(b.client.snapshot()).toMatchObject({ status: "device_revoked", pendingWrite: null, blocked: { deviceIds: [], bridgeIds: [] } });
     expect((await verifyLedger(current(server))).revokedDeviceIds).toEqual([phone]);
     expect(server.posts).toHaveLength(posts + 1);
     expect((await verifyLedger(current(server))).devices.some(item => item.endpoint.id === phone)).toBe(false);
@@ -2198,7 +2232,7 @@ describe("LedgerClient re-offer", () => {
 });
 
 describe("LedgerClient server-sequenced writes", () => {
-  it("a write is in the replica only after the server accepted it: the record is persisted as pending (hidden) during the POST", async () => {
+  it("a write is in the replica only after the server accepted it: the record is persisted (and shown) as pending during the POST", async () => {
     const { server, authenticator, a, accountId } = await owner();
     const base = current(server);
     const seen: { head: string | undefined; pending: boolean; shown: unknown }[] = [];
@@ -2208,7 +2242,7 @@ describe("LedgerClient server-sequenced writes", () => {
     };
     authenticator.calls = [];
     await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "b1") });
-    expect(seen).toEqual([{ head: await headOf(base), pending: true, shown: null }]);
+    expect(seen).toEqual([{ head: await headOf(base), pending: true, shown: expect.objectContaining({ operation: "add_bridge", bridgeId: "b1" }) }]);
     expect(a.replica.raw()?.ledger).toEqual(current(server));
     expect(current(server).transitions).toHaveLength(2);
     expect(server.posts.at(-1)).toMatchObject({ expectHead: await headOf(base) });
@@ -2394,7 +2428,7 @@ describe("LedgerClient divergence", () => {
     expect(a.client.snapshot().divergence).toMatchObject({ mine: { carry: [], canKeep: true }, theirs: { carry: [], canKeep: true } });
     const posts = server.posts.length;
     authenticator.calls = [];
-    await a.client.resolveDivergence("mine");
+    await a.client.resolveDivergence("mine", shown(a));
     expect(signs(authenticator)).toBe(1);
     expect(server.posts).toHaveLength(posts + 1);
     const chain = current(server);
@@ -2416,18 +2450,21 @@ describe("LedgerClient divergence", () => {
     expect(view?.theirs).toEqual({ carry: [{ type: "revoke_bridge", bridgeId: "studio" }], canKeep: true, reason: null });
     expect(view?.mine.carry).toEqual([]);
     const local = a.replica.raw()?.ledger;
-    // The server is down at the POST: nothing kept or adopted, the divergence stays; a restart signs everything again.
+    // The server is down at the POST: nothing adopted, the divergence stays; the signed choice is kept in memory (L6).
     server.postHook = () => new Response(JSON.stringify({ error: "ledger_unavailable" }), { status: 503 });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
     authenticator.calls = [];
-    await expect(a.client.resolveDivergence("theirs")).rejects.toThrow("server_unavailable");
+    await expect(a.client.resolveDivergence("theirs", shown(a))).rejects.toThrow("server_unavailable");
     expect(signs(authenticator)).toBe(2);
     expect(a.replica.raw()?.ledger).toEqual(local);
-    expect(a.client.snapshot().divergence?.other).toEqual(other);
+    expect(a.client.snapshot()).toMatchObject({ divergence: { other }, resolutionPending: "theirs" });
     expect(current(server)).toEqual(other);
     server.postHook = null;
     authenticator.calls = [];
-    await a.client.resolveDivergence("theirs");
-    expect(signs(authenticator)).toBe(2);
+    // Asked again: the same signed bundle is sent, no new prompt.
+    await a.client.resolveDivergence("theirs", shown(a));
+    expect(signs(authenticator)).toBe(0);
+    expect(a.client.snapshot().resolutionPending).toBeNull();
     const chain = current(server);
     expect(chain.transitions.slice(0, other.transitions.length)).toEqual(other.transitions);
     expect(chain.transitions.slice(other.transitions.length).map(item => item.payload.operation.type)).toEqual(["revoke_bridge", "resolve_fork"]);
@@ -2464,14 +2501,14 @@ describe("LedgerClient divergence", () => {
     let prompt = 0;
     authenticator.beforeSign = async () => { prompt += 1; if (prompt === 2) throw new Error("passkey_cancelled"); };
     authenticator.calls = [];
-    await expect(a.client.resolveDivergence("mine")).rejects.toThrow("passkey_cancelled");
+    await expect(a.client.resolveDivergence("mine", shown(a))).rejects.toThrow("passkey_cancelled");
     expect(server.posts).toHaveLength(posts);
     expect(a.replica.raw()?.ledger).toEqual(local);
     expect(a.client.snapshot().divergence?.other).toEqual(other);
     // From scratch: 3 carried records + the resolution = 4 prompts, and no consent prompt for the carried passkey.
     authenticator.beforeSign = null;
     authenticator.calls = [];
-    await a.client.resolveDivergence("mine");
+    await a.client.resolveDivergence("mine", shown(a));
     expect(authenticator.names()).toEqual(["sign", "sign", "sign", "sign"]);
     expect(server.posts).toHaveLength(posts + 1);
     const checkpoint = await verifyLedger(current(server));
@@ -2499,7 +2536,7 @@ describe("LedgerClient divergence", () => {
     expect(view?.theirs).toMatchObject({ canKeep: false, reason: "ledger_limit" });
     const posts = server.posts.length;
     authenticator.calls = [];
-    await expect(a.client.resolveDivergence("mine")).rejects.toThrow("ledger_limit");
+    await expect(a.client.resolveDivergence("mine", shown(a))).rejects.toThrow("ledger_limit");
     expect(authenticator.calls).toEqual([]);
     expect(server.posts).toHaveLength(posts);
   });
@@ -2511,11 +2548,11 @@ describe("LedgerClient divergence", () => {
     );
     const newer = await signed(other, authenticator, { type: "add_bridge", bridge: await testBridge(accountId, "theirs-2") });
     server.postHook = () => { server.ledgers.set(accountId, wire(newer)); return json({ error: "diverged", ledger: newer }, 409); };
-    await expect(a.client.resolveDivergence("mine")).rejects.toThrow("resolution_outdated");
+    await expect(a.client.resolveDivergence("mine", shown(a))).rejects.toThrow("resolution_outdated");
     expect(a.replica.raw()?.ledger).toEqual(local);
     expect(a.client.snapshot().divergence?.other).toEqual(newer);
     server.postHook = null;
-    await a.client.resolveDivergence("mine");
+    await a.client.resolveDivergence("mine", shown(a));
     expect(a.client.snapshot().divergence).toBeNull();
     expect(a.replica.raw()?.ledger).toEqual(current(server));
   });
@@ -2588,6 +2625,342 @@ describe("LedgerClient peers view", () => {
     await quiet();
     expect(server.posts).toHaveLength(posts);
     expect(a.client.snapshot().peers).toEqual(view);
+  });
+});
+
+describe("LedgerClient review regressions (T1–T12) and the local block", () => {
+  /** a holds base + "mine"; the server base + theirsOps (a rollback, then a history-less writer). */
+  async function split(theirsOps: (accountId: string) => Promise<LedgerOperation[]>, prepare?: (accountId: string) => Promise<LedgerOperation[]>) {
+    const { server, authenticator, a, accountId } = await owner();
+    for (const operation of prepare === undefined ? [] : await prepare(accountId)) await a.client.append(operation);
+    const base = current(server);
+    await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "mine") });
+    const local = current(server);
+    let other = base;
+    for (const operation of await theirsOps(accountId)) other = await signed(other, authenticator, operation);
+    server.ledgers.set(accountId, wire(other));
+    await a.client.refresh({ force: true });
+    expect(a.client.snapshot().divergence?.other).toEqual(other);
+    return { server, authenticator, a, accountId, base, local, other };
+  }
+
+  it("T1: a removal the server keeps refusing is enforced here at once and retried; the owner can withdraw it, and the block stays until dismissed", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "stolen") });
+    await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "other") });
+    const stolen = a.replica.raw()?.checkpoint.bridges.find(item => item.bridgeId === "stolen");
+    if (stolen === undefined) throw new Error("setup");
+    server.postHook = () => json({ error: "ledger_rejected", ledger: current(server) }, 409);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    fakeTime();
+    await expect(a.client.revokeBridge("stolen")).rejects.toThrow("ledger_rejected");
+    // The computer the owner just removed is no longer trusted here (sealing, assertBridgeAccess), though the account still lists it.
+    expect(() => a.client.assertBridgeAccess("stolen", stolen.endpoint.id)).toThrow("account_bridge_revoked");
+    expect(a.client.snapshot().checkpoint?.bridges.map(item => item.bridgeId)).toEqual(["other"]);
+    expect(a.replica.raw()?.checkpoint.bridges.map(item => item.bridgeId)).toEqual(["stolen", "other"]);
+    const posts = server.posts.length;
+    await advance(2 * 3_600_000);
+    expect(server.posts.length).toBeGreaterThan(posts + 5);
+    expect(a.client.snapshot().pendingWrite).toMatchObject({ operation: "revoke_bridge", bridgeId: "stolen" });
+    expect(() => a.client.assertBridgeAccess("stolen", stolen.endpoint.id)).toThrow("account_bridge_revoked");
+    authenticator.calls = [];
+    await expect(a.client.revokeBridge("other")).rejects.toThrow("write_pending");
+    expect(authenticator.calls).toEqual([]);
+    // The owner withdraws it (no passkey): writes are open again; the removal stays enforced here, listed to sign again or dismiss.
+    server.postHook = null;
+    expect(await a.client.discardPending()).toBe("discarded");
+    expect(authenticator.calls).toEqual([]);
+    const after = a.client.snapshot();
+    expect(after).toMatchObject({ pendingWrite: null, lastConflict: { bridgeId: "stolen", reason: "discarded" }, blocked: { deviceIds: [], bridgeIds: ["stolen"] }, retryAt: null });
+    expect(after.discarded.map(item => item.payload.operation)).toEqual([{ type: "revoke_bridge", bridgeId: "stolen" }]);
+    expect(() => a.client.assertBridgeAccess("stolen", stolen.endpoint.id)).toThrow("account_bridge_revoked");
+    const sent = server.posts.length;
+    await advance(3_600_000);
+    expect(server.posts).toHaveLength(sent);
+    await a.client.revokeBridge("other");
+    expect((await verifyLedger(current(server))).revokedBridgeIds).toEqual(["other"]);
+    // Dismissing the entry lifts the block: the computer is trusted again (the account never removed it).
+    await a.client.dismissDiscarded(a.client.snapshot().discarded);
+    expect(() => a.client.assertBridgeAccess("stolen", stolen.endpoint.id)).not.toThrow();
+    await expect(a.client.discardPending()).rejects.toThrow("no_pending_write");
+  });
+
+  it("discardPending() says so when the server already holds the change (its answer was lost), and withdraws nothing", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    let lose = true;
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await server.fetch(input, init);
+      if (lose && init?.method === "POST" && new URL(String(input)).pathname === "/api/account/ledger") { lose = false; throw new TypeError("reset"); }
+      return response;
+    }) as typeof fetch;
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const page = await browser(server, authenticator, { storage: a.storage, identity: a, deps: { fetchImpl } });
+    fakeTime();
+    await expect(page.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "b1") })).rejects.toThrow("network_unavailable");
+    expect(page.client.snapshot().pendingWrite).toMatchObject({ operation: "add_bridge", bridgeId: "b1" });
+    expect(await page.client.discardPending()).toBe("already_saved");
+    expect(page.client.snapshot()).toMatchObject({ pendingWrite: null, discarded: [], lastConflict: null });
+    expect(page.replica.raw()?.ledger).toEqual(current(server));
+  });
+
+  it("T2: a persisted pending record that does not verify (shape intact) is never sent after a reload: dropped, writes open again", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "b1") });
+    let offline = true;
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (offline && init?.method === "POST" && new URL(String(input)).pathname === "/api/account/ledger") throw new TypeError("offline");
+      return server.fetch(input, init);
+    }) as typeof fetch;
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const page = await browser(server, authenticator, { storage: a.storage, identity: a, deps: { fetchImpl } });
+    await expect(page.client.revokeBridge("b1")).rejects.toThrow("network_unavailable");
+    page.client.dispose();
+    a.client.dispose();
+    const stored = await a.storage.read(accountId) as ReplicaRecord;
+    if (stored.pending === undefined) throw new Error("no pending");
+    const bad = { ...stored.pending, record: { ...stored.pending.record, signature: stored.ledger.transitions[stored.ledger.transitions.length - 1].signature } };
+    expect(await a.storage.commit({ ...stored, serial: stored.serial + 1, pending: bad }, stored.serial)).toBe(true);
+    offline = false;
+    const before = server.posts.length;
+    fakeTime();
+    const reloaded = await browser(server, authenticator, { storage: a.storage, identity: a, deps: { fetchImpl } });
+    await reloaded.client.load();
+    await advance(3_600_000);
+    expect(server.posts).toHaveLength(before);
+    expect(reloaded.client.snapshot()).toMatchObject({ pendingWrite: null, lastConflict: { operation: "revoke_bridge", reason: "ledger_rejected" } });
+    await reloaded.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "b2") });
+    expect((await verifyLedger(current(server))).bridges.map(item => item.bridgeId)).toEqual(["b1", "b2"]);
+  });
+
+  it("T3/M6: a server replaying this browser's own refused record shows it as abandoned and recommends 'mine'; serving our chain again clears it", async () => {
+    const { server, a, accountId } = await owner();
+    let captured: Ledger | null = null;
+    server.postHook = ledger => {
+      if (captured !== null) return null;
+      captured = wire(ledger);
+      return json({ error: "forbidden" }, 403);
+    };
+    await expect(a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "evil") })).rejects.toThrow("ledger_rejected");
+    expect(a.client.snapshot().discarded).toHaveLength(1);
+    await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "studio") });
+    if (captured === null) throw new Error("setup");
+    server.ledgers.set(accountId, wire(captured));
+    await a.client.refresh({ force: true });
+    const view = a.client.snapshot().divergence;
+    expect(view?.source).toBe("server");
+    expect(view?.other.transitions.at(-1)).toEqual(a.client.snapshot().discarded[0]);
+    expect(view).toMatchObject({ abandoned: [true], recommend: "mine", otherHead: await headOf(captured) });
+    await expect(a.client.revokeBridge("studio")).rejects.toThrow("ledger_diverged");
+    // The server serves the account's chain again: that source agrees, its divergence is gone, writes are open.
+    server.ledgers.set(accountId, wire(a.replica.raw()?.ledger as Ledger));
+    await a.client.refresh({ force: true });
+    expect(a.client.snapshot().divergence).toBeNull();
+    await a.client.revokeBridge("studio");
+    expect((await verifyLedger(current(server))).revokedBridgeIds).toEqual(["studio"]);
+  });
+
+  it("T4/M1: after resolveDivergence('mine'), a replay of the discarded branch (peer, relay, server read) raises nothing; a server serving it gets our resolution", async () => {
+    const { server, a, accountId, other } = await split(async accountId => [{ type: "add_device", device: await testDevice(accountId) }]);
+    await a.client.resolveDivergence("mine", shown(a));
+    expect(a.client.snapshot().divergence).toBeNull();
+    const resolvedChain = current(server);
+    expect(await a.client.learnChain(other, "peer")).toBe("diverged");
+    await a.client.offer({ type: "ledger", ledger: other });
+    expect(a.client.snapshot().divergence).toBeNull();
+    expect(a.replica.divergence()).toEqual({});
+    // A server rolled back to the discarded branch: covered, so the resolved chain is re-offered to it (it adopts the resolution).
+    server.ledgers.set(accountId, wire(other));
+    const posts = server.posts.length;
+    await a.client.refresh({ force: true });
+    expect(server.posts).toHaveLength(posts + 1);
+    expect(current(server)).toEqual(resolvedChain);
+    expect(a.client.snapshot()).toMatchObject({ divergence: null, serverState: "current" });
+    await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "x") });
+  });
+
+  it("T4b/M2: resolving against the server's S keeps a peer chain that extends S with a newer removal diverged; that removal is enforced here (seen)", async () => {
+    const { a, authenticator, other } = await split(
+      async accountId => [{ type: "add_device", device: await testDevice(accountId) }],
+      async accountId => [{ type: "add_bridge", bridge: await testBridge(accountId, "studio") }],
+    );
+    const newer = await signed(other, authenticator, { type: "revoke_bridge", bridgeId: "studio" });
+    expect(await a.client.learnChain(newer, "peer")).toBe("diverged");
+    expect(Object.keys(a.replica.divergence()).sort()).toEqual(["peer", "server"]);
+    // Seen on a valid other history: enforced here at once (sticky), though the local chain lists it.
+    expect(a.client.snapshot().checkpoint?.bridges.map(item => item.bridgeId)).not.toContain("studio");
+    expect(a.client.snapshot().localOnly.bridgeIds).toEqual(["studio"]);
+    await a.client.resolveDivergence("mine", shown(a));
+    // The peer's branch carries a record the resolution never saw: still shown, still enforced.
+    expect(a.client.snapshot().divergence?.source).toBe("peer");
+    expect(a.client.snapshot().checkpoint?.bridges.map(item => item.bridgeId)).not.toContain("studio");
+  });
+
+  it("T5/M5/L7: the account is gone while the prompt is open: no POST without expectHead, nothing re-created; shown, and discardable", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    authenticator.beforeSign = async () => {
+      authenticator.beforeSign = null;
+      server.ledgers.delete(accountId);
+      await a.client.refresh({ force: true }).catch(() => undefined);
+    };
+    const posts = server.posts.length;
+    const result = await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "b1") }).then(() => "ok", (error: Error) => error.message);
+    expect(result).toBe("account_not_found");
+    expect(server.posts).toHaveLength(posts);
+    expect(server.ledgerOf(accountId)).toBeNull();
+    expect(a.client.snapshot()).toMatchObject({ accountMissing: true, pendingWrite: { operation: "add_bridge", bridgeId: "b1" } });
+    expect(await a.client.discardPending()).toBe("discarded");
+    expect(a.client.snapshot().pendingWrite).toBeNull();
+    expect(server.posts).toHaveLength(posts);
+  });
+
+  it("T7/L1: a new browser's add_device names the head it re-based on; a concurrent write is a write_conflict, never a creation", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    const b = await browser(server, authenticator);
+    await b.client.signInNewDevice({ deviceLabel: "Phone" });
+    expect(server.posts.at(-1)).toHaveProperty("expectHead");
+    const c = await browser(server, authenticator);
+    await c.client.identifyAccount();
+    authenticator.beforeSign = async () => {
+      authenticator.beforeSign = null;
+      await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "concurrent") });
+    };
+    await expect(c.client.enrollThisDevice({ deviceLabel: "Tablet" })).rejects.toThrow("write_conflict");
+    expect(c.replica.raw()).toBeNull();
+    // Confirmed again on the new head.
+    await c.client.enrollThisDevice({ deviceLabel: "Tablet" });
+    expect((await verifyLedger(current(server))).devices.map(item => item.label)).toContain("Tablet");
+  });
+
+  it("T8: three histories (server S, peer P, mine): two resolutions in a row converge without looping", async () => {
+    const { a, server, authenticator, accountId, base } = await split(async accountId => [{ type: "add_device", device: await testDevice(accountId) }]);
+    const peer = await signed(base, authenticator, { type: "add_bridge", bridge: await testBridge(accountId, "peer-only") });
+    expect(await a.client.learnChain(peer, "peer")).toBe("diverged");
+    await a.client.resolveDivergence("mine", shown(a));
+    expect(a.client.snapshot().divergence?.source).toBe("peer");
+    await a.client.resolveDivergence("mine", shown(a));
+    expect(a.client.snapshot().divergence).toBeNull();
+    expect(a.replica.raw()?.ledger).toEqual(current(server));
+    expect(current(server).transitions.map(item => item.payload.operation.type).filter(type => type === "resolve_fork")).toHaveLength(2);
+  });
+
+  it("T9/L2/L3: another tab forgetting the account stops this tab's pending write; it is sent after the next sign-in of the account", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    let refusing = true;
+    server.postHook = () => (refusing ? rateLimited(30) : null);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    fakeTime();
+    await expect(a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "regretted") })).rejects.toThrow("rate_limited");
+    // Another tab of the profile (its own first attempt is refused too), then "start over" there.
+    const other = await browser(server, authenticator, { storage: a.storage, identity: a });
+    await other.client.load();
+    await quiet();
+    await other.client.forget();
+    refusing = false;
+    const posts = server.posts.length;
+    await advance(120_000);
+    expect(server.posts).toHaveLength(posts);
+    expect((await verifyLedger(current(server))).bridges.map(item => item.bridgeId)).not.toContain("regretted");
+    expect(a.replica.raw()).toBeNull();
+    // Held while signed out, sent once the same account is signed in again on this profile.
+    expect(await other.client.identifyAccount()).toEqual({ enrolled: true });
+    await advance(60_000);
+    expect((await verifyLedger(current(server))).bridges.map(item => item.bridgeId)).toContain("regretted");
+  });
+
+  it("T10/L4: two tabs of one profile: the second tab's write while the first one's is pending is refused before any prompt", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    const tab2 = await browser(server, authenticator, { storage: a.storage, identity: a });
+    await tab2.client.load();
+    server.postHook = () => rateLimited(600);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await expect(a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "one") })).rejects.toThrow("rate_limited");
+    server.postHook = null;
+    const posts = server.posts.length;
+    authenticator.calls = [];
+    await expect(tab2.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "two") })).rejects.toThrow("write_pending");
+    expect(authenticator.calls).toEqual([]);
+    expect(server.posts).toHaveLength(posts);
+  });
+
+  it("T11/H1: a valid diverged relay push drops a pending REVOKE (ledger_diverged); its target stays untrusted here", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    const base = current(server);
+    await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "stolen") });
+    const stolen = a.replica.raw()?.checkpoint.bridges[0];
+    if (stolen === undefined) throw new Error("setup");
+    server.postHook = () => new Response(JSON.stringify({ error: "ledger_unavailable" }), { status: 503 });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await expect(a.client.revokeBridge("stolen")).rejects.toThrow("server_unavailable");
+    await a.client.offer({ type: "ledger", ledger: await addDevices(base, authenticator, accountId, 1) });
+    expect(a.client.snapshot()).toMatchObject({ pendingWrite: null, lastConflict: { bridgeId: "stolen", reason: "ledger_diverged" }, divergence: { source: "relay" } });
+    expect(() => a.client.assertBridgeAccess("stolen", stolen.endpoint.id)).toThrow("account_bridge_revoked");
+    expect(a.client.snapshot().blocked).toEqual({ deviceIds: [], bridgeIds: ["stolen"] });
+    await expect(a.client.revokeBridge("stolen")).rejects.toThrow("ledger_diverged");
+  });
+
+  it("T12/M7: resolveDivergence refuses, before any prompt, a divergence other than the one the owner was shown", async () => {
+    const { server, authenticator, a, accountId, other } = await split(async accountId => [{ type: "add_device", device: await testDevice(accountId) }]);
+    const decided = shown(a);
+    const swapped = await signed(other, authenticator, { type: "add_bridge", bridge: await testBridge(accountId, "never-shown") });
+    server.ledgers.set(accountId, wire(swapped));
+    authenticator.calls = [];
+    const posts = server.posts.length;
+    await expect(a.client.resolveDivergence("theirs", decided)).rejects.toThrow("resolution_outdated");
+    expect(authenticator.calls).toEqual([]);
+    expect(server.posts).toHaveLength(posts);
+    expect(current(server)).toEqual(wire(swapped));
+    // The screen now shows the newer chain; resolving what it shows works.
+    expect(a.client.snapshot().divergence?.other).toEqual(swapped);
+    await expect(a.client.resolveDivergence("theirs", { ...decided, source: "peer" })).rejects.toThrow("resolution_outdated");
+    await a.client.resolveDivergence("theirs", shown(a));
+    expect((await verifyLedger(current(server))).bridges.map(item => item.bridgeId)).toContain("never-shown");
+  });
+
+  it("H1: a pending removal of another browser blocks it here at once; delivered, the chain holds it", async () => {
+    const { server, authenticator, a, accountId } = await owner();
+    const b = await browser(server, authenticator);
+    await b.client.signInNewDevice({ deviceLabel: "Phone" });
+    const phone = (await b.endpoint(accountId)).endpoint.id;
+    await a.client.refresh({ force: true });
+    let refusals = 1;
+    server.postHook = () => (refusals-- > 0 ? rateLimited(30) : null);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    fakeTime();
+    await expect(a.client.revokeDevice(phone)).rejects.toThrow("rate_limited");
+    expect(a.client.snapshot().checkpoint?.devices.map(item => item.endpoint.id)).not.toContain(phone);
+    expect(a.client.snapshot().checkpoint?.revokedDeviceIds).toEqual([phone]);
+    expect(a.client.snapshot()).toMatchObject({ status: "ready", unsaved: { deviceIds: [phone], bridgeIds: [] }, blocked: { deviceIds: [phone], bridgeIds: [] } });
+    // What is sent is unchanged by the block: the chain, plus the signed record.
+    expect(a.replica.raw()?.checkpoint.devices.map(item => item.endpoint.id)).toContain(phone);
+    await advance(60_000);
+    expect((await verifyLedger(current(server))).revokedDeviceIds).toEqual([phone]);
+    expect(a.client.snapshot()).toMatchObject({ pendingWrite: null, blocked: { deviceIds: [], bridgeIds: [] }, unsaved: { deviceIds: [], bridgeIds: [] } });
+  });
+
+  it("L6: a resolution the server could not take is retried by itself without new prompts; a change of the other chain cancels it", async () => {
+    for (const change of [false, true]) {
+      const { server, authenticator, a, accountId, other } = await split(async accountId => [{ type: "add_device", device: await testDevice(accountId) }]);
+      let refusals = 1;
+      server.postHook = () => (refusals-- > 0 ? new Response(JSON.stringify({ error: "ledger_unavailable" }), { status: 503 }) : null);
+      vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      fakeTime();
+      authenticator.calls = [];
+      await expect(a.client.resolveDivergence("mine", shown(a))).rejects.toThrow("server_unavailable");
+      expect(authenticator.names()).toEqual(["sign"]);
+      expect(a.client.snapshot().resolutionPending).toBe("mine");
+      if (change) server.ledgers.set(accountId, wire(await signed(other, authenticator, { type: "add_bridge", bridge: await testBridge(accountId, "later") })));
+      await advance(120_000);
+      if (change) {
+        // The other history moved: the signed choice no longer applies and is dropped; the owner reviews the newer chain.
+        expect(a.client.snapshot()).toMatchObject({ resolutionPending: null, divergence: { source: "server" } });
+        expect(current(server).transitions.some(item => item.payload.operation.type === "resolve_fork")).toBe(false);
+      } else {
+        expect(a.client.snapshot()).toMatchObject({ resolutionPending: null, divergence: null });
+        expect(a.replica.raw()?.ledger).toEqual(current(server));
+      }
+      expect(authenticator.names().filter(name => name === "sign")).toHaveLength(1);
+      vi.useRealTimers();
+    }
   });
 });
 

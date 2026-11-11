@@ -18,6 +18,14 @@ export const FORK_BLOCKED = "Other changes to your account are turned off until 
 export const FORK_KEPT = "History kept. Other replicas will follow.";
 export const FORK_NO_CHANGES = "No changes after the common part.";
 export const FORK_NOTHING_LOST = "Nothing will be lost.";
+/** snapshot.divergence.recommend === 'mine'. */
+export const FORK_RECOMMEND_MINE = "The other history only contains changes this browser signed that were not saved. Keeping this browser's history is recommended.";
+/** A removal on the other history that this browser enforces already (seen there). */
+export const FORK_SEEN = "Removed on the other history";
+/** snapshot.resolutionPending: the signed choice the server has not taken yet. */
+export const FORK_SAVING = "Your choice is signed but not saved to the server yet. Retrying…";
+/** A record of the other history that this browser signed and dropped itself. */
+export const forkAbandoned = (when: string) => `You signed this on ${when}. It was not saved.`;
 const SOURCES: Record<LedgerDivergence["source"], string> = {
   server: "The server holds the other history.",
   peer: "One of your computers holds the other history.",
@@ -69,30 +77,43 @@ export function carryText(side: LedgerDivergenceSide): string {
   return `Keeping this history re-applies ${re} from the other one, then discards the rest. You will confirm ${plural(side.carry.length + 1, "time", "times")}.`;
 }
 
-function Records({ transitions, names, empty }: { transitions: LedgerTransition[]; names: Names; empty: string }) {
+/** True iff this browser enforces the removal `operation` makes (a revocation in its trust view: seen on the other history, or its own). */
+function enforcedHere(operation: LedgerOperation, checkpoint: LedgerCheckpoint | null): boolean {
+  if (checkpoint === null) return false;
+  if (operation.type === "revoke_device") return checkpoint.revokedDeviceIds.includes(operation.endpointId);
+  if (operation.type === "revoke_bridge") return checkpoint.revokedBridgeIds.includes(operation.bridgeId);
+  return false;
+}
+
+function Records({ transitions, names, empty, abandoned, seen }: {
+  transitions: LedgerTransition[]; names: Names; empty: string; abandoned?: boolean[]; seen?: LedgerCheckpoint | null;
+}) {
   if (!transitions.length) return <p className="text-xs text-[var(--text-muted)]">{empty}</p>;
   return <ol className="space-y-2">
-    {transitions.map(item => {
+    {transitions.map((item, index) => {
       const { text, label } = describeOperation(item.operation, names);
       const when = new Date(item.issuedAt);
+      const valid = Number.isFinite(when.getTime());
       return <li key={item.revision} className="min-w-0 text-sm">
         <span className="block truncate" title={label ?? text}>{text}</span>
-        {Number.isFinite(when.getTime()) && <time dateTime={when.toISOString()} className="block text-xs text-[var(--text-muted)]">{when.toLocaleString()}</time>}
+        {valid && <time dateTime={when.toISOString()} className="block text-xs text-[var(--text-muted)]">{when.toLocaleString()}</time>}
+        {abandoned?.[index] && <p className="text-xs text-[var(--status-pending)]">{forkAbandoned(valid ? when.toLocaleString() : "this browser")}</p>}
+        {seen !== undefined && enforcedHere(item.operation, seen) && <p className="text-xs text-[var(--text-muted)]">{FORK_SEEN}</p>}
       </li>;
     })}
   </ol>;
 }
 
-function Column({ title, transitions, other, side, names, busy, running, steps, onKeep }: {
+function Column({ title, transitions, other, side, names, busy, running, steps, onKeep, abandoned, seen }: {
   title: string; transitions: LedgerTransition[]; other: LedgerTransition[]; side: LedgerDivergenceSide; names: Names;
-  busy: boolean; running: boolean; steps: number; onKeep: () => void;
+  busy: boolean; running: boolean; steps: number; onKeep: () => void; abandoned?: boolean[]; seen?: LedgerCheckpoint | null;
 }) {
   const titleId = useId();
   /** What this choice loses: the other history's added browsers and computers. Removals and passkeys are carried, never lost. */
   const lost = other.filter(item => item.operation.type === "add_device" || item.operation.type === "add_bridge");
   return <section aria-labelledby={titleId} className="min-w-0 space-y-3 rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)] p-3">
     <h4 id={titleId} className="text-sm font-semibold">{title}</h4>
-    <Records transitions={transitions} names={names} empty={FORK_NO_CHANGES} />
+    <Records transitions={transitions} names={names} empty={FORK_NO_CHANGES} abandoned={abandoned} seen={seen} />
     <p className="text-xs leading-relaxed text-[var(--text-muted)]">{carryText(side)}</p>
     {side.carry.length > 0 && <ul aria-label="Re-applied from the other history" className="list-disc space-y-1 pl-4 text-xs">
       {side.carry.map((operation, index) => <li key={index} className="min-w-0 truncate" title={describeOperation(operation, names).text}>{describeOperation(operation, names).text}</li>)}
@@ -111,15 +132,19 @@ function Column({ title, transitions, other, side, names, busy, running, steps, 
   </section>;
 }
 
-export function ForkResolution({ divergence, security, checkpoint, onKept }: {
+export function ForkResolution({ divergence, security, checkpoint, onKept, saving = null }: {
   divergence: LedgerDivergence; security: AccountSecurity; checkpoint: LedgerCheckpoint | null; onKept?: () => void;
+  /** snapshot.resolutionPending. */
+  saving?: "mine" | "theirs" | null;
 }) {
   const headingId = useId();
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => { heading.current?.focus(); }, []);
   const names = memberNames(divergence, checkpoint);
   const { busy, error } = security;
-  const keep = (which: "mine" | "theirs") => void security.run(`fork:${which}`, client => client.resolveDivergence(which), { signs: true }).then(done => { if (done) onKept?.(); });
+  // Resolves exactly the divergence shown here: another one (it changed meanwhile) is refused before any prompt.
+  const expected = { source: divergence.source, otherHead: divergence.otherHead };
+  const keep = (which: "mine" | "theirs") => void security.run(`fork:${which}`, client => client.resolveDivergence(which, expected), { signs: true }).then(done => { if (done) onKept?.(); });
   const steps = (side: LedgerDivergenceSide) => side.carry.length + 1;
   const errorText = error === null ? null : error === "resolution_outdated" ? "The other history changed. Review it again."
     : error === "passkey_cancelled" ? "Cancelled. Nothing was changed." : securityErrorMessage({ code: error });
@@ -129,6 +154,8 @@ export function ForkResolution({ divergence, security, checkpoint, onKept }: {
     <p className="text-xs text-[var(--text-muted)]">{SOURCES[divergence.source]}</p>
     <p className="text-xs text-[var(--text-muted)]">{FORK_BLOCKED}</p>
     <p className="text-xs">{plural(divergence.fork.fork.revision, "earlier change is", "earlier changes are")} identical.</p>
+    {divergence.recommend === "mine" && <p role="note" className="text-xs font-semibold">{FORK_RECOMMEND_MINE}</p>}
+    {saving !== null && <p role="status" className="text-xs">{FORK_SAVING}</p>}
     {security.needsSigner && <div className="space-y-1">
       <p className="text-xs text-[var(--text-muted)]">Your account has several passkeys. Choose the passkey on this device first, then keep a history.</p>
       <button type="button" className="btn-accent min-h-11 sm:min-h-8" disabled={!!busy} onClick={() => void security.chooseSigner()}>{busy === "signer" ? "Waiting for passkey…" : "Choose passkey"}</button>
@@ -137,7 +164,8 @@ export function ForkResolution({ divergence, security, checkpoint, onKept }: {
       <Column title="This browser's history" transitions={divergence.fork.mine} other={divergence.fork.theirs} side={divergence.mine} names={names}
         busy={!!busy} running={busy === "fork:mine"} steps={steps(divergence.mine)} onKeep={() => keep("mine")} />
       <Column title="The other history" transitions={divergence.fork.theirs} other={divergence.fork.mine} side={divergence.theirs} names={names}
-        busy={!!busy} running={busy === "fork:theirs"} steps={steps(divergence.theirs)} onKeep={() => keep("theirs")} />
+        busy={!!busy} running={busy === "fork:theirs"} steps={steps(divergence.theirs)} onKeep={() => keep("theirs")}
+        abandoned={divergence.abandoned} seen={checkpoint} />
     </div>
     {errorText && <p role="alert" className="text-sm text-[var(--status-error)]">{errorText}</p>}
   </section>;

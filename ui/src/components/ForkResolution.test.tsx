@@ -6,12 +6,12 @@ import {
   accountIdOf, authorityConsentChallenge, describeFork, ledgerChallenge, ledgerHead, ledgerLastIssuedAt, nextTransition, resolutionPlan, resolveForkTransition, verifyLedger,
 } from "@security/ledger/ledger";
 import { generateAuthKey } from "@security/ledger/proof";
-import type { Ledger, LedgerBridge, LedgerDevice, LedgerGenesis, LedgerOperation } from "@security/ledger/protocol";
+import type { Ledger, LedgerBridge, LedgerCheckpoint, LedgerDevice, LedgerGenesis, LedgerOperation } from "@security/ledger/protocol";
 import { createSoftPasskey } from "@security/ledger/testing";
 import type { SoftPasskey } from "@security/ledger/testing";
 import type { LedgerClientSnapshot, LedgerDivergence } from "@/lib/ledger-client";
 import { useAccountSecurity } from "@/hooks/useAccountSecurity";
-import { ForkResolution, carryText, describeOperation, memberNames } from "./ForkResolution";
+import { FORK_RECOMMEND_MINE, FORK_SAVING, FORK_SEEN, ForkResolution, carryText, describeOperation, forkAbandoned, memberNames } from "./ForkResolution";
 
 const RP = "ftown.test"; const ORIGIN = "https://ftown.test";
 const state = vi.hoisted(() => ({ snapshot: null as unknown, client: null as unknown, listeners: new Set<() => void>() }));
@@ -44,7 +44,12 @@ async function divergence(mine: Ledger, theirs: Ledger, source: LedgerDivergence
   const sideOf = async (chosen: Ledger, other: Ledger) => {
     try { return { carry: (await resolutionPlan(chosen, other)).carry, canKeep: true, reason: null }; } catch (error) { return { carry: [], canKeep: false, reason: (error as Error).message }; }
   };
-  return { other: theirs, source, fork: await describeFork(mine, theirs), firstSeen: Date.now(), mine: await sideOf(mine, theirs), theirs: await sideOf(theirs, mine) };
+  const fork = await describeFork(mine, theirs);
+  const last = theirs.transitions[theirs.transitions.length - 1];
+  return {
+    other: theirs, otherHead: await ledgerHead(last === undefined ? theirs.genesis.payload : last.payload), source, fork, firstSeen: Date.now(),
+    mine: await sideOf(mine, theirs), theirs: await sideOf(theirs, mine), abandoned: fork.theirs.map(() => false), recommend: null,
+  };
 }
 
 let iphone: LedgerDevice; let homeServer: LedgerBridge; let macStudio: LedgerBridge;
@@ -82,20 +87,20 @@ beforeAll(async () => {
 beforeEach(() => { state.listeners.clear(); });
 afterEach(() => cleanup());
 
-const resolveDivergence = vi.fn<(keep: "mine" | "theirs") => Promise<void>>();
+const resolveDivergence = vi.fn<(keep: "mine" | "theirs", expected: { source: string; otherHead: string }) => Promise<void>>();
 function snapshotFor(value: LedgerDivergence | null): LedgerClientSnapshot {
   return { status: "ready", checkpoint: null, discarded: [], localOnly: { deviceIds: [], bridgeIds: [] }, signer: keyA.credentialId, pending: "none", divergence: value };
 }
-function Harness({ value }: { value: LedgerDivergence }) {
+function Harness({ value, checkpoint = null, saving = null }: { value: LedgerDivergence; checkpoint?: LedgerCheckpoint | null; saving?: "mine" | "theirs" | null }) {
   const security = useAccountSecurity();
   const divergenceNow = security.snapshot.divergence;
-  return divergenceNow ? <ForkResolution divergence={divergenceNow} security={security} checkpoint={null} onKept={() => undefined} /> : <p>gone {value.source}</p>;
+  return divergenceNow ? <ForkResolution divergence={divergenceNow} security={security} checkpoint={checkpoint} saving={saving} onKept={() => undefined} /> : <p>gone {value.source}</p>;
 }
-function mount(value: LedgerDivergence) {
+function mount(value: LedgerDivergence, options: { checkpoint?: LedgerCheckpoint | null; saving?: "mine" | "theirs" | null } = {}) {
   resolveDivergence.mockReset();
   state.client = { refresh: vi.fn(async () => {}), resolveDivergence };
   state.snapshot = snapshotFor(value);
-  return render(<Harness value={value} />);
+  return render(<Harness value={value} checkpoint={options.checkpoint} saving={options.saving} />);
 }
 const column = (name: string) => screen.getByRole("region", { name });
 const mineColumn = () => column("This browser's history");
@@ -200,7 +205,8 @@ describe("ForkResolution", () => {
     let finish: () => void = () => undefined;
     resolveDivergence.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
     await act(async () => { fireEvent.click(within(otherColumn()).getByRole("button", { name: "Keep this history" })); });
-    expect(resolveDivergence).toHaveBeenCalledExactlyOnceWith("theirs");
+    // What was shown is what is resolved: the client refuses another divergence before any prompt.
+    expect(resolveDivergence).toHaveBeenCalledExactlyOnceWith("theirs", { source: "server", otherHead: fx.several.otherHead });
     for (const item of screen.getAllByRole("button", { name: "Keep this history" })) expect((item as HTMLButtonElement).disabled).toBe(true);
     await act(async () => { fireEvent.click(within(mineColumn()).getByRole("button", { name: "Keep this history" })); });
     expect(resolveDivergence).toHaveBeenCalledOnce();
@@ -212,7 +218,7 @@ describe("ForkResolution", () => {
     mount(fx.several);
     resolveDivergence.mockResolvedValueOnce();
     await act(async () => { fireEvent.click(within(mineColumn()).getByRole("button", { name: "Keep this history" })); });
-    expect(resolveDivergence).toHaveBeenCalledExactlyOnceWith("mine");
+    expect(resolveDivergence).toHaveBeenCalledExactlyOnceWith("mine", { source: "server", otherHead: fx.several.otherHead });
   });
 
   it.each([
@@ -250,5 +256,38 @@ describe("ForkResolution", () => {
     const view = mount(hostile);
     expect(view.container.querySelector("img")).toBeNull();
     expect(within(otherColumn()).getByText("Added browser “<img src=x onerror=alert(1)>”")).toBeTruthy();
+  });
+});
+
+describe("ForkResolution: records this browser abandoned, removals seen, a choice not saved yet", () => {
+  it("labels the other history's records this browser signed and dropped, and recommends keeping this browser's history", () => {
+    const abandoned = { ...fx.one, abandoned: fx.one.fork.theirs.map(() => true), recommend: "mine" as const };
+    mount(abandoned);
+    const when = new Date(fx.one.fork.theirs[0].issuedAt).toLocaleString();
+    expect(within(otherColumn()).getByText(forkAbandoned(when))).toBeTruthy();
+    expect(within(otherColumn()).getByText(`You signed this on ${when}. It was not saved.`)).toBeTruthy();
+    expect(screen.getByText(FORK_RECOMMEND_MINE).getAttribute("role")).toBe("note");
+    expect(FORK_RECOMMEND_MINE).toBe("The other history only contains changes this browser signed that were not saved. Keeping this browser's history is recommended.");
+    // Without recommend: no such line, no label.
+    cleanup();
+    mount(fx.one);
+    expect(screen.queryByText(FORK_RECOMMEND_MINE)).toBeNull();
+    expect(within(otherColumn()).queryByText(/It was not saved\./)).toBeNull();
+  });
+
+  it("marks a removal of the other history that this browser enforces already", () => {
+    const revoked = fx.one.fork.theirs.find(item => item.operation.type === "revoke_device");
+    if (revoked === undefined || revoked.operation.type !== "revoke_device") throw new Error("setup");
+    const checkpoint = { version: 2, accountId, revision: 4, head: "h", authorities: [], devices: [], bridges: [], revokedDeviceIds: [revoked.operation.endpointId], revokedBridgeIds: [] } as unknown as LedgerCheckpoint;
+    mount(fx.one, { checkpoint });
+    expect(within(otherColumn()).getByText(FORK_SEEN)).toBeTruthy();
+    expect(FORK_SEEN).toBe("Removed on the other history");
+    expect(within(mineColumn()).queryByText(FORK_SEEN)).toBeNull();
+  });
+
+  it("says a signed choice is not saved yet", () => {
+    mount(fx.several, { saving: "mine" });
+    expect(screen.getByText(FORK_SAVING)).toBeTruthy();
+    expect(FORK_SAVING).toBe("Your choice is signed but not saved to the server yet. Retrying…");
   });
 });
