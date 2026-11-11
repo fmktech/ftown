@@ -50,57 +50,62 @@ test("mail nudge survives agent mail, highlights the trigger and pops up on open
   await page.setViewportSize({ width: 1280, height: 900 });
   await login(page); await waitForBridgeOnline(page);
   const stamp = Date.now().toString(36);
+  const nameA = `A ${stamp}`, nameB = `B ${stamp}`;
   let idA = ""; let idB = "";
   const FTOWN_CLI = join(E2E_DIR, "..", "bridge", "dist", "ftown-cli.js");
   const HARNESS_CLI = join(E2E_DIR, "..", "bridge", "dist", "harness-cli.js");
+  const row = (name: string) => page.locator('#dashboard-sidebar button[draggable="true"]').filter({ has: page.getByText(name, { exact: true }) });
   try {
-    const createdA = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name: `A ${stamp}` } });
+    const createdA = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name: nameA } });
     expect(createdA.status, JSON.stringify(createdA.body)).toBe(201);
     idA = (createdA.body as { session: { id: string } }).session.id;
-    const createdB = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name: `B ${stamp}` } });
+    const createdB = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name: nameB } });
     expect(createdB.status, JSON.stringify(createdB.body)).toBe(201);
     idB = (createdB.body as { session: { id: string } }).session.id;
     // A raises an attention request via the real CLI.
     await execute(process.execPath, [FTOWN_CLI, "sessions", "attention", "--title", "Review A", "--message", `Please review A ${stamp}`], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: idA }, timeout: 30_000 });
-    // B sends ftown mail to A via the real CLI.
+    // Nothing is selected: the highlighted trigger and the title prefix show up, no popup yet.
+    const trigger = page.getByRole("button", { name: "Inbox, 1 waiting" });
+    await expect(trigger).toBeVisible();
+    await expect.poll(() => page.title()).toMatch(/^\(1\) /);
+    // B sends ftown mail to A via the real CLI; the bridge nudges A's terminal.
     await execute(process.execPath, [HARNESS_CLI, "mail", "send", idA, "--type", "message", `Agent mail for A ${stamp}`], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: idB }, timeout: 30_000 });
-    // Wait for the bridge to nudge A (pointer visible on the PTY screen).
     await expect.poll(async () => {
       const screen = await bridgeApiFetch("GET", `/api/sessions/${idA}/screen?limit=200`);
       return JSON.stringify(screen.body).includes("You have new ftown mail");
     }, { timeout: 30_000 }).toBe(true);
-    // The harness fires UserPromptSubmit with the nudge pointer (injected).
-    const hook = await bridgeApiFetch("POST", "/hook", { body: { ftown_session_id: idA, ftown_session_source: "env", hook_event_name: "UserPromptSubmit", prompt: `[ftown msg from ftown-mail] You have new ftown mail — run \`ftown harness mail read\` to read it.` } });
+    // A harness that echoes the injected line fires UserPromptSubmit with the nudge text: it must not resolve the item.
+    const hook = await bridgeApiFetch("POST", "/hook", { body: { ftown_session_id: idA, ftown_session_source: "env", hook_event_name: "UserPromptSubmit", prompt: "[ftown msg from ftown-mail] You have new ftown mail — run `ftown harness mail read` to read it." } });
     expect(hook.status).toBe(200);
-    // The Inbox still lists A's item and the trigger is highlighted.
-    const trigger = page.getByRole("button", { name: /^Inbox, \d+ waiting$/ });
+    // The bridge still holds the item unresolved.
+    const listed = await bridgeApiFetch("GET", `/api/sessions/${idA}/attention`);
+    const events = (listed.body as { events: Array<{ resolvedAt?: string }> }).events;
+    const open = events.filter((event) => !event.resolvedAt);
+    expect(open).toHaveLength(1);
+    const itemId = (open[0] as { id: string }).id;
+    // The UI still lists it after the nudge, with the trigger highlighted.
     await expect(trigger).toBeVisible();
-    await expect.poll(async () => page.title()).toContain("(1)");
-    // Opening A shows the popup.
-    const workspace = page.getByRole("region", { name: /Session workspace:/ });
-    // Select A from the session list.
-    await page.getByRole("button", { name: new RegExp(`A ${stamp}`) }).click().catch(() => undefined);
-    // Directly select via the list row is layout-dependent; fall back to opening via Inbox.
-    const triggerVisible = await trigger.isVisible().catch(() => false);
-    if (!triggerVisible) await page.getByRole("button", { name: /^Inbox, / }).click();
-    else {
-      // Re-query after click; popup is the overlay region.
-      await expect(page.getByRole("region", { name: "Waiting for you" })).toBeVisible({ timeout: 10_000 }).catch(() => undefined);
-    }
-    void workspace;
-    // Replying from the popup removes the item (bridge resolves with 'replied').
+    await expect(page.getByRole("region", { name: "Waiting for you" })).toHaveCount(0);
+    await trigger.click();
+    await expect(page.getByRole("region", { name: "Inbox", exact: true }).locator(`[data-inbox-entry="${idA}"]`)).toBeVisible();
+    await page.getByRole("region", { name: "Inbox", exact: true }).getByRole("button", { name: "Back to workspace" }).click();
+    // Opening A from the session list shows the popup.
+    await expect(row(nameA)).toBeVisible({ timeout: 30_000 });
+    await row(nameA).click();
     const popup = page.getByRole("region", { name: "Waiting for you" });
-    if (await popup.isVisible().catch(() => false)) {
-      const nameA = `A ${stamp}`;
-      const replyText = `Popup reply ${Date.now().toString(36)}`;
-      await popup.getByLabel(new RegExp(`Reply to`)).fill(replyText).catch(() => undefined);
-      await popup.getByRole("button", { name: /^Send reply$/ }).click().catch(() => undefined);
-      await expect.poll(async () => {
-        const listed = await bridgeApiFetch("GET", `/api/sessions/${idA}/attention`);
-        const events = (listed.body as { events?: Array<{ resolvedAt?: string; resolution?: string }> }).events ?? [];
-        return events.some((event) => event.resolvedAt && event.resolution === "replied");
-      }, { timeout: 30_000 }).toBe(true);
-    }
+    await expect(popup).toBeVisible();
+    await expect(popup.getByText(`Please review A ${stamp}`)).toBeVisible();
+    // Replying from the popup resolves exactly that item ('replied') and the popup goes away.
+    await popup.getByLabel(`Reply to ${nameA}`).fill(`Popup reply ${stamp}`);
+    await popup.getByRole("button", { name: "Send reply" }).click();
+    await expect.poll(async () => {
+      const after = await bridgeApiFetch("GET", `/api/sessions/${idA}/attention/${itemId}`);
+      const event = (after.body as { event?: { resolvedAt?: string; resolution?: string } }).event;
+      return event?.resolvedAt ? event.resolution : "open";
+    }, { timeout: 30_000 }).toBe("replied");
+    await expect(popup).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Inbox, 0 messages" })).toBeVisible();
+    await expect.poll(() => page.title()).not.toMatch(/^\(\d+\) /);
   } finally {
     if (idA) await bridgeApiFetch("DELETE", `/api/sessions/${idA}`).catch(() => undefined);
     if (idB) await bridgeApiFetch("DELETE", `/api/sessions/${idB}`).catch(() => undefined);
