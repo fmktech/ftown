@@ -489,7 +489,7 @@ test.describe("append-only ledger", () => {
     }
   });
 
-  test("J: after an accepted write the computer adopts the new head", async ({ browser }) => {
+  test("J: after an accepted write the computer adopts the new head and the browser shows it applied", async ({ browser }) => {
     test.setTimeout(240_000);
     const { second, bridge } = await accountWithBridge(browser, "E2E announce");
     try {
@@ -504,16 +504,17 @@ test.describe("append-only ledger", () => {
       const final = (await serverTip(second.accountId))!;
       const started = Date.now();
       await expect.poll(() => bridge.replicaTip(), { timeout: 30_000, intervals: [250] }).toEqual(final);
-      test.info().annotations.push({ type: "J: M1 adopted B1's write", description: `${Date.now() - started} ms after the server stored it` });
+      const adoptedMs = Date.now() - started;
+      // B1's panel reports the agreement: M1 announced the new head.
+      const agreement = dialog.locator("[data-replica-agreement]");
+      await expect(agreement).toContainText("Applied on 1 computer.", { timeout: 30_000 });
+      const confirmedMs = Date.now() - started;
+      test.info().annotations.push({ type: "J: agreement", description: `M1 adopted ${adoptedMs} ms after the server stored it; B1's panel read ${JSON.stringify(await agreement.innerText())} ${confirmedMs} ms after` });
     } finally {
       await second.close();
     }
   });
 
-  test.fixme("J (UI): B1 lists M1 as having confirmed the new head", async () => {
-    // Not observable: the dashboard renders no per-replica confirmation ("Applied on …") and the bridge's local API
-    // (GET /api/security/info) exposes divergence / serverBehind / removedOnOtherHistory, not its announcement counters.
-  });
 });
 
 // ---- Bridge scenarios: shared setup ----
