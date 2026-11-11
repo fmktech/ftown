@@ -153,8 +153,24 @@ export interface LedgerClientSnapshot {
    * False when its own removal is only in the sticky set (kept from a replica of older code). The pending write does not need it.
    */
   canReoffer?: boolean;
+  /** Agreement with the account's other online replicas (see LedgerPeersView); informational, nothing waits on it. */
+  peers?: LedgerPeersView;
   error?: string;
 }
+/**
+ * What the other replicas of the account (its computers and browsers) reported, kept by LedgerPeers (ledger-peers.ts) and set with
+ * setPeers(). `head`: the local head the confirmations refer to ('' while unbound). `confirmed`: the members that reported exactly that
+ * head (a signed announcement or a ledger_head answer), cleared when the head changes; `at` = when the report arrived (epoch ms).
+ * `online`: bridgeIds of the trusted computers present on the relay. `diverged`: members whose head is neither this one, nor an ancestor,
+ * nor (after fetching) an extension of it (`head`: its first 8 characters).
+ */
+export interface LedgerPeersView {
+  head: string;
+  confirmed: Array<{ kind: "device" | "bridge"; id: string; at: number }>;
+  online: string[];
+  diverged: Array<{ kind: "device" | "bridge"; id: string; head: string; revision: number }>;
+}
+const NO_PEERS: LedgerPeersView = { head: "", confirmed: [], online: [], diverged: [] };
 
 const RP_NAME = "FTown";
 const REQUEST_TIMEOUT_MS = 15000;
@@ -400,6 +416,8 @@ export class LedgerClient {
   private otherCheckpoint: { head: string; checkpoint: LedgerCheckpoint } | null = null;
   private hookDepth = 0;
   private readonly warnedInvalid = new Set<string>();
+  /** snapshot.peers, as LedgerPeers last set it. */
+  private peersView: LedgerPeersView = NO_PEERS;
 
   constructor(private readonly deps: LedgerClientDeps) {
     if (canonicalOrigin(deps.origin) !== deps.origin || deps.origin === "null") throw new Error("invalid_origin");
@@ -921,14 +939,14 @@ export class LedgerClient {
    * (at once while a beforeSign hook holds that queue): adopted when it strictly extends the local chain (a server behind it is then
    * brought forward by the re-offer), kept as the peer's divergent chain when it is a valid other history (the divergence state), ignored
    * when invalid (one console.warn), behind or the same. Returns its relation to the local chain ('diverged' also when it carried the
-   * owner's resolution and was adopted: see snapshot.divergence), or 'invalid'.
+   * owner's resolution and was adopted: see snapshot.divergence), or 'invalid'. `from` names the peer in that warning (default: the source).
    */
-  learnChain(chain: Ledger, source: "peer"): Promise<LedgerRelation | "invalid"> {
+  learnChain(chain: Ledger, source: "peer", from?: string): Promise<LedgerRelation | "invalid"> {
     const run = async (): Promise<LedgerRelation | "invalid"> => {
       await this.load();
       const raw = this.deps.replica.raw();
       if (raw === null) throw new Error("signed_out");
-      const result = await this.offerToReplica(chain, { expectAccountId: raw.checkpoint.accountId, source });
+      const result = await this.offerToReplica(chain, { expectAccountId: raw.checkpoint.accountId, source }, from);
       if (result.decision === "reject" || result.relation === null) return "invalid";
       if (result.decision === "adopt" && this.needsSend()) void this.kick();
       return result.relation;
@@ -1032,6 +1050,12 @@ export class LedgerClient {
     if (trusted === null || !trusted.bridges.some(item => item.bridgeId === bridgeId && item.endpoint.id === endpointId)) {
       throw new Error("account_bridge_revoked");
     }
+  }
+
+  /** Sets snapshot.peers (LedgerPeers calls it when what the other replicas reported changed) and publishes. Touches nothing else. */
+  setPeers(view: LedgerPeersView): void {
+    this.peersView = view;
+    this.publish();
   }
 
   /** Clears the (persisted) discarded-records notice, and snapshot.lastConflict, after the UI showed them. */
@@ -1427,17 +1451,17 @@ export class LedgerClient {
     await this.refreshDivergenceView();
   }
 
-  /** Offers a chain to the replica (warning once about an invalid one from a source), then follows it up like any replica change. */
-  private async offerToReplica(candidate: unknown, options: ReplicaOfferOptions): Promise<ReplicaOffer> {
+  /** Offers a chain to the replica (warning once about an invalid one from a source, named `from`), then follows it up like any replica change. */
+  private async offerToReplica(candidate: unknown, options: ReplicaOfferOptions, from?: string): Promise<ReplicaOffer> {
     const result = await this.deps.replica.offer(candidate, options);
-    if (result.decision === "reject" && options.source !== undefined) await this.warnInvalid(options.source, candidate);
+    if (result.decision === "reject" && options.source !== undefined) await this.warnInvalid(from ?? options.source, candidate);
     await this.afterReplicaChange();
     this.publish();
     return result;
   }
 
   /** One console.warn per distinct invalid chain and source: such a chain is ignored like silence. */
-  private async warnInvalid(source: LedgerSource, candidate: unknown): Promise<void> {
+  private async warnInvalid(source: string, candidate: unknown): Promise<void> {
     let key: string;
     try {
       key = `${source}:${await this.headOf(candidate)}`;
@@ -2102,7 +2126,7 @@ export class LedgerClient {
       status, checkpoint: trusted, discarded: this.deps.replica.discarded(), localOnly, signer, pending,
       pendingWrite, lastConflict: this.lastConflict, divergence,
       serverState, unsaved: this.unsavedIds(pendingWrite), retryAt: this.retryTimerAt,
-      retryNotBefore: this.retryAfterUntil > 0 ? this.retryAfterUntil : null, canReoffer: this.canReoffer(status),
+      retryNotBefore: this.retryAfterUntil > 0 ? this.retryAfterUntil : null, canReoffer: this.canReoffer(status), peers: this.peersView,
     });
   }
 

@@ -2,6 +2,7 @@ import { signIn } from "next-auth/react";
 import { clearDeviceAuthKey, loadDeviceAuthKey } from "./device-auth-key";
 import { deleteBrowserIdentity, loadBrowserIdentity } from "./browser-identity";
 import { LedgerClient, type LedgerClientDeps } from "./ledger-client";
+import { LedgerPeers } from "./ledger-peers";
 import { LedgerReplica, indexedDbReplicaStorage } from "./ledger-replica";
 import * as passkey from "./passkey";
 
@@ -61,13 +62,35 @@ export function buildLedgerDeps(): LedgerClientDeps {
 }
 
 let instance: LedgerClient | null = null;
+let peers: LedgerPeers | null = null;
 
-/** The single LedgerClient of this page. Browser only; safe to import during SSR, throws if called on the server. */
+/**
+ * The single LedgerClient of this page. Browser only; safe to import during SSR, throws if called on the server. Its beforeSign hook is
+ * the agreement step with the account's other online replicas (LedgerPeers), created with it; that step does nothing until the signed-in
+ * dashboard's relay connection attaches to it (useCentrifugo).
+ */
 export function getLedgerClient(): LedgerClient {
   requireBrowser();
-  if (instance === null) instance = new LedgerClient(buildLedgerDeps());
+  if (instance === null) {
+    const deps = buildLedgerDeps();
+    let agreement: LedgerPeers | null = null;
+    const client = new LedgerClient({ ...deps, beforeSign: head => (agreement === null ? Promise.resolve() : agreement.prepare(head)) });
+    agreement = new LedgerPeers({ client, heads: () => deps.replica.heads(), trusted: () => deps.replica.trusted(), deviceKey: deps.deviceKey });
+    instance = client;
+    peers = agreement;
+  }
   return instance;
 }
 
-/** Test seam: drops the singleton. */
-export function resetLedgerClientForTests(): void { instance = null; }
+/** The agreement step of the page's LedgerClient when `client` is that client (created by getLedgerClient), else null. */
+export function ledgerPeersFor(client: unknown): LedgerPeers | null {
+  return instance !== null && client === instance ? peers : null;
+}
+
+/** Test seam: disposes and drops the singletons. */
+export function resetLedgerClientForTests(): void {
+  peers?.dispose();
+  instance?.dispose();
+  instance = null;
+  peers = null;
+}
