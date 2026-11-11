@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { generateAuthKey, parseAuthProof, signAuthProof, verifyAuthProof, type AuthProof } from './proof.js';
+import { generateAuthKey, parseAuthProof, signAuthProof, signDomain, verifyAuthProof, verifyDomain, type AuthProof } from './proof.js';
 import type { LedgerCheckpoint } from './protocol.js';
 
 const ACCOUNT = 'acct-1';
@@ -247,4 +247,62 @@ test('oversized signature is rejected quickly', async () => {
   assert.ok(Date.now() - started < 200);
   assert.equal(await check(checkpoint, { ...proof, accountId: 'a'.repeat(65) }), false);
   assert.equal(await check(checkpoint, { ...proof, keyId: 'k'.repeat(129) }), false);
+});
+
+// signDomain / verifyDomain: the one ECDSA implementation behind auth proofs and head announcements. No domain of their own.
+const BYTES = new TextEncoder().encode('test-domain-v1\n{"x":1}');
+
+test('signDomain/verifyDomain round trip; the bytes are signed exactly as given', async () => {
+  const { device } = await setup();
+  const signature = await signDomain(device.privateKey, BYTES);
+  assert.match(signature, /^[A-Za-z0-9_-]{86}$/);
+  assert.equal(await verifyDomain(device.publicKey, signature, BYTES), true);
+  assert.equal(await verifyDomain(device.publicKey, signature, new Uint8Array(BYTES.subarray(0, BYTES.length - 1))), false);
+  const flipped = new Uint8Array(BYTES); flipped[0] ^= 1;
+  assert.equal(await verifyDomain(device.publicKey, signature, flipped), false);
+  // A subarray view with an offset is signed as its own bytes.
+  const padded = new Uint8Array(BYTES.length + 4); padded.set(BYTES, 2);
+  assert.equal(await verifyDomain(device.publicKey, await signDomain(device.privateKey, padded.subarray(2, 2 + BYTES.length)), BYTES), true);
+});
+
+test('signDomain emits low-S; verifyDomain refuses the high-S twin', async () => {
+  const { device } = await setup();
+  for (let i = 0; i < 20; i++) {
+    const bytes = new TextEncoder().encode(`d\n${i}`);
+    const raw = Buffer.from(await signDomain(device.privateKey, bytes), 'base64url');
+    const s = BigInt('0x' + raw.subarray(32).toString('hex'));
+    assert.ok(s <= N / BigInt(2));
+    assert.equal(await verifyDomain(device.publicKey, raw.toString('base64url'), bytes), true);
+    const high = Buffer.concat([raw.subarray(0, 32), toBytes(N - s)]).toString('base64url');
+    assert.equal(await verifyDomain(device.publicKey, high, bytes), false);
+  }
+});
+
+test('verifyDomain refuses non-canonical, short and long signatures and a wrong key', async () => {
+  const { device, other } = await setup();
+  const signature = await signDomain(device.privateKey, BYTES);
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const alt = alphabet[alphabet.indexOf(signature[85]) ^ 1];
+  assert.equal(await verifyDomain(device.publicKey, signature.slice(0, 85) + alt, BYTES), false);
+  assert.equal(await verifyDomain(device.publicKey, signature.slice(0, 85), BYTES), false);
+  assert.equal(await verifyDomain(device.publicKey, signature + 'A', BYTES), false);
+  assert.equal(await verifyDomain(device.publicKey, signature + '==', BYTES), false);
+  // Padded standard base64 of the same 64 bytes.
+  assert.equal(await verifyDomain(device.publicKey, Buffer.from(signature, 'base64url').toString('base64'), BYTES), false);
+  assert.equal(await verifyDomain(other.publicKey, signature, BYTES), false);
+});
+
+test('verifyDomain never throws on garbage', async () => {
+  const { device } = await setup();
+  const signature = await signDomain(device.privateKey, BYTES);
+  const hostile = new Proxy(new Uint8Array(4), { get() { throw new Error('boom'); } });
+  const cases: Array<[unknown, unknown, unknown]> = [
+    [null, signature, BYTES], [device.publicKey, null, BYTES], [device.publicKey, signature, null], [device.publicKey, signature, 'bytes'],
+    [device.publicKey, signature, [1, 2, 3]], [device.publicKey, signature, hostile], ['A'.repeat(10_000_000), signature, BYTES],
+    [device.publicKey.slice(0, 80), signature, BYTES], ['!'.repeat(87), signature, BYTES], ['A'.repeat(87), signature, BYTES],
+    [device.publicKey, '!'.repeat(86), BYTES], [device.publicKey, 'A'.repeat(86), BYTES], [5, 5, 5], [{}, {}, {}],
+  ];
+  for (const [key, sig, bytes] of cases) {
+    assert.equal(await verifyDomain(key as string, sig as string, bytes as Uint8Array), false);
+  }
 });

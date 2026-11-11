@@ -4,6 +4,9 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { Centrifuge, UnauthorizedError, type Subscription } from "centrifuge";
 import { v4 as uuidv4 } from "uuid";
 import { accountChannel } from "@security/ledger/channels";
+import { parseHeadAnnouncement } from "@security/ledger/announce";
+import { presentBridgeIds, type LedgerPeersFeed } from "@/lib/ledger-peers";
+import { ledgerPeersFor } from "@/lib/ledger-runtime";
 import type { MessageClient } from "@/lib/message-client";
 import { SecureMessageClient } from "@/lib/secure-message-client";
 import type { SecureEndpointRuntime } from "@/lib/secure-endpoint-runtime";
@@ -72,6 +75,8 @@ export function parseLedgerMessage(data: unknown): LedgerMessage | null {
 
 /** Clock-skew buffer so a token on the verge of expiry is treated as expired. */
 const TOKEN_EXPIRY_SKEW_MS = 5_000;
+/** Account mode: how often the computers present on the relay are re-read for the ledger agreement step (as useBridges does). */
+export const LEDGER_PRESENCE_POLL_MS = 10_000;
 
 function isTokenExpired(token: string): boolean {
   const expMs = decodeJwtExpMs(token);
@@ -140,6 +145,12 @@ interface UseCentrifugoOptions {
    * (hourly) refreshes, so the browser re-reads the ledger even when no push arrives.
    */
   ledger?: LedgerFeed;
+  /**
+   * Account mode only: the agreement step with the account's other replicas (lib/ledger-peers.ts). Default: the one of the page's ledger
+   * client when `ledger` is that client; null: none. While connected it gets this connection's encrypted command RPC to the computers,
+   * the computers present on the relay, the ledger channel's head announcements, and publishes this browser's own.
+   */
+  ledgerPeers?: LedgerPeersFeed | null;
 }
 
 export function useCentrifugo(
@@ -154,6 +165,7 @@ export function useCentrifugo(
   const tokenRefresher = options?.tokenRefresher;
   const onUnauthorized = options?.onUnauthorized;
   const ledger = options?.ledger;
+  const ledgerPeersOption = options?.ledgerPeers;
 
   const [status, setStatus] = useState<ConnectionStatus>("disconnected");
   const [error, setError] = useState<string | null>(null);
@@ -297,11 +309,25 @@ export function useCentrifugo(
     // publications are accepted (Centrifugo stamps the publisher as info.user); anything
     // malformed is dropped. A (re)subscribe may follow missed pushes, so it refreshes.
     let ledgerSub: Subscription | null = null;
+    let detachPeers: (() => void) | null = null;
+    let presenceTimer: ReturnType<typeof setInterval> | null = null;
+    /** Pending transport.ready() calls of the agreement step (dropped with the connection; its own budget ends their wait). */
+    let waiters: (() => void)[] = [];
     if (ledger) {
+      const peers = ledgerPeersOption !== undefined ? ledgerPeersOption : ledgerPeersFor(ledger);
       const sub = client.newSubscription(accountChannel("bridges:ledger", userId));
-      sub.on("subscribed", () => { void ledger.refresh().catch(() => {}); });
+      sub.on("subscribed", () => {
+        void ledger.refresh().catch(() => {});
+        try { peers?.channelSubscribed(); } catch { /* the agreement step never breaks the connection */ }
+      });
       sub.on("publication", (ctx) => {
         if (ctx.info?.user !== userId) return;
+        // A signed head announcement of another replica of the account: the agreement step verifies it against the local trusted
+        // chain; it is never proof of a chain (nothing is adopted from it, at most a chain is fetched or the server re-read).
+        if (parseHeadAnnouncement(ctx.data) !== null) {
+          try { peers?.receive(ctx.data); } catch { /* ignored like any malformed publication */ }
+          return;
+        }
         const message = parseLedgerMessage(ctx.data);
         if (!message) return;
         // A head is only a hint (any connection of the account can publish one): the client throttles the resulting read.
@@ -311,11 +337,46 @@ export function useCentrifugo(
       });
       sub.subscribe();
       ledgerSub = sub;
+      if (peers) {
+        // Usable = a request can go out and its answer come back: relay connected, commands channel (answers) and ledger channel
+        // (announcements) subscribed. ready() resolves at once when usable, else at the first event that makes it so.
+        const usable = () => client.state === "connected" && commandsSub.state === "subscribed" && sub.state === "subscribed";
+        const wake = () => {
+          if (!usable() || waiters.length === 0) return;
+          const ready = waiters;
+          waiters = [];
+          for (const resolve of ready) resolve();
+        };
+        client.on("connected", wake);
+        commandsSub.on("subscribed", wake);
+        sub.on("subscribed", wake);
+        // Which computers are online: the relay's presence of bridges:presence#<userId> (useBridges holds that subscription on this
+        // same connection; a read before it is subscribed fails: the agreement step then asks every member computer).
+        const presenceChannel = accountChannel("bridges:presence", userId);
+        // This connection's end-to-end encrypted request/response RPC to one computer (the same path as executeSecurity), the
+        // ledger channel for this browser's own signed announcements, its readiness, and a fresh presence read.
+        detachPeers = peers.attach({
+          self: securityRuntime.identity.endpoint,
+          request: (_bridgeId, type, payload) => secureClient.request({ type, requestId: uuidv4(), payload }),
+          publish: announcement => sub.publish(announcement),
+          ready: () => (usable() ? Promise.resolve() : new Promise<void>(resolve => { waiters.push(resolve); })),
+          presence: () => client.presence(presenceChannel).then(presentBridgeIds),
+        });
+        const readPresence = () => {
+          void client.presence(presenceChannel).then(result => { peers.setOnline(presentBridgeIds(result)); }, () => {});
+        };
+        client.on("connected", readPresence);
+        client.on("disconnected", () => { peers.setOnline([]); });
+        presenceTimer = setInterval(readPresence, LEDGER_PRESENCE_POLL_MS);
+      }
     }
 
     client.connect();
 
     return () => {
+      if (presenceTimer !== null) clearInterval(presenceTimer);
+      waiters = [];
+      detachPeers?.();
       commandsSub.off("publication", handleInboundSignal);
       if (ledgerSub) {
         ledgerSub.removeAllListeners();
@@ -324,7 +385,7 @@ export function useCentrifugo(
       }
       cleanup();
     };
-  }, [token, centrifugoUrl, userId, cleanup, tokenRefresher, onUnauthorized, securityRuntime, ledger]);
+  }, [token, centrifugoUrl, userId, cleanup, tokenRefresher, onUnauthorized, securityRuntime, ledger, ledgerPeersOption]);
 
   return {
     client: secureClientRef.current,

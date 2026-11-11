@@ -94,6 +94,27 @@ test('no ledger in the response does not call onLedger', async () => {
   assert.equal(called, false);
 });
 
+test('an answer without a ledger reports the server head: the one sent, or the one the answer names; never with a ledger or a failure', async () => {
+  const { key } = await setup();
+  const seen: unknown[] = [];
+  const onServerHead = (server: { head: string | null; revision: number | null }) => { seen.push(server); };
+  await createRelayTokenFetcher(deps(key.privateKey, fakeFetch({ status: 200, body: { token: 'jwt', expiresAt: 5 } }).impl, { onServerHead }))();
+  assert.deepEqual(seen, [{ head: 'head-1', revision: null }]);
+  await createRelayTokenFetcher(deps(key.privateKey, fakeFetch({ status: 200, body: { token: 'jwt', expiresAt: 5, head: 'h2', revision: 7 } }).impl, { onServerHead }))();
+  assert.deepEqual(seen.at(-1), { head: 'h2', revision: 7 });
+  for (const revision of [-1, 1.5, '7']) {
+    await createRelayTokenFetcher(deps(key.privateKey, fakeFetch({ status: 200, body: { token: 'jwt', expiresAt: 5, head: 'h2', revision } }).impl, { onServerHead }))();
+    assert.deepEqual(seen.at(-1), { head: 'head-1', revision: null }, String(revision));
+  }
+  const count = seen.length;
+  await createRelayTokenFetcher(deps(key.privateKey, fakeFetch({ status: 200, body: { token: 'jwt', expiresAt: 5, ledger: { x: 1 } } }).impl, { onServerHead }))();
+  await assert.rejects(createRelayTokenFetcher(deps(key.privateKey, fakeFetch({ status: 503, body: {} }).impl, { onServerHead }))());
+  assert.equal(seen.length, count);
+  // A throwing hook never costs the token.
+  assert.deepEqual(await createRelayTokenFetcher(deps(key.privateKey, fakeFetch({ status: 200, body: { token: 'jwt', expiresAt: 5 } }).impl,
+    { onServerHead: () => { throw new Error('boom'); } }))(), { token: 'jwt', expiresAt: 5 });
+});
+
 test('401 key_revoked hands evidence to onRevoked then throws UnauthorizedError', async () => {
   const { key } = await setup();
   const { impl } = fakeFetch({ status: 401, body: { error: 'key_revoked', ledger: { ev: true } } });

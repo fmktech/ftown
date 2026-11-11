@@ -62,7 +62,8 @@ export const LOCAL_RECOVERY_AUTHORITY: LocalRecoveryAuthority = Object.freeze({ 
 export interface PolicyOptions { now?: () => number; relayUrl?: string; localOrigin?: string }
 
 /** This bridge in its trusted ledger: 'unpaired' = no ledger stored, 'absent' = not listed with exactly its keys (or another
- *  account's ledger), 'revoked' = its bridgeId is revoked (signed, or sticky from any chain the replica kept or adopted). */
+ *  account's ledger), 'revoked' = its bridgeId is revoked (signed in the stored chain, or sticky from a chain the replica adopted;
+ *  a refused, diverged chain never counts). */
 export type LedgerOwnStatus = 'active' | 'revoked' | 'absent' | 'unpaired';
 /** The account-mode authority, held in memory and replaced only by BridgeSecurityService. */
 export interface LedgerView {

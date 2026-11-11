@@ -191,7 +191,31 @@ describe('account runtime (passkey ledger authority)', () => {
     expect(await received(f, runtime, { private: 'stale-key' })).toEqual([]); runtime.dispose();
   });
 
-  it('a computer revoked only on a losing fork stays untrusted (sticky), though the winning chain lists it', async () => {
+  it('a signed computer removal waiting for the server already stops sealing and accepting (enforced here, not in the chain)', async () => {
+    const f = await account(); const runtime = accountRuntime(f); await establish(runtime, f.bridge, f.browser, f.accountId);
+    const record = (await appended(f.ledger, f.passkey, { type: 'revoke_bridge', bridgeId: 'bridge-one' })).transitions[2];
+    expect(await f.replica.setPendingWrite({ version: 1, record, since: Date.now() }, null)).toBe(true);
+    expect(f.replica.raw()?.checkpoint.bridges.map(item => item.bridgeId)).toEqual(['bridge-one']);
+    expect(() => f.client.assertBridgeAccess('bridge-one', f.bridge.endpoint.id)).toThrow('account_bridge_revoked');
+    await expect(runtime.sealApplication('bridge-one', channel, APP)).rejects.toMatchObject({ code: 'endpoint_revoked' });
+    expect(await received(f, runtime, { private: 'must-not-deliver' })).toEqual([]);
+    // Published: the runtime drops it from its pins too.
+    await f.client.dismissDiscarded();
+    expect(runtime.bridge('bridge-one')).toBeNull(); runtime.dispose();
+  });
+
+  it('this browser\'s own signed removal waiting for the server already stops it sealing and accepting', async () => {
+    const f = await account(); const runtime = accountRuntime(f); await establish(runtime, f.bridge, f.browser, f.accountId);
+    const record = (await appended(f.ledger, f.passkey, { type: 'revoke_device', endpointId: f.browser.endpoint.id })).transitions[2];
+    expect(await f.replica.setPendingWrite({ version: 1, record, since: Date.now() }, null)).toBe(true);
+    await f.client.dismissDiscarded();
+    expect(f.client.snapshot().checkpoint?.revokedDeviceIds).toEqual([f.browser.endpoint.id]);
+    expect(ledgerStanding(f.client.snapshot(), f.browser.endpoint)).toBe('revoked');
+    await expect(runtime.sealApplication('bridge-one', channel, APP)).rejects.toMatchObject({ code: 'endpoint_revoked' });
+    expect(await received(f, runtime, { private: 'after-own-removal' })).toEqual([]); runtime.dispose();
+  });
+
+  it('a computer removed on a valid other history stays untrusted here (seen), though the local chain lists it', async () => {
     const f = await account(); const runtime = accountRuntime(f);
     const losing = await appended(f.ledger, f.passkey, { type: 'revoke_bridge', bridgeId: 'bridge-one' });
     const winning = await appended(await appended(f.ledger, f.passkey, await otherDevice(f.accountId)), f.passkey, await otherDevice(f.accountId));

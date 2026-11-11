@@ -1,4 +1,4 @@
-import { accessSync, closeSync, constants, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeSync, type Dirent } from 'node:fs';
+import { accessSync, chmodSync, closeSync, constants, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeSync, type Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -32,6 +32,27 @@ function sweepTemporaries(dir: string): void {
   for (const entry of entries) {
     if (entry.name.endsWith('.tmp') && (entry.isFile() || entry.isSymbolicLink())) removeIfPresent(join(dir, entry.name));
   }
+}
+
+/** Archived ledger replicas kept by identity resets (the newest ones). */
+export const LEDGER_ARCHIVES_KEPT = 5;
+const ARCHIVE = /^ledger\.\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:\.\d{3})?Z(?:-\d+)?\.archived\.json$/;
+
+/**
+ * Moves security/ledger.json aside instead of deleting it: it may be the only copy of the account's history (a server rolled back or
+ * holding another history). Renamed to `ledger.<ISO timestamp>.archived.json` (colons as dashes), mode 0600; only the newest
+ * LEDGER_ARCHIVES_KEPT archives are kept. Nothing reads an archive: it is for the owner (or the operator's restore tool).
+ */
+function archiveLedger(securityDir: string, now: Date): void {
+  const source = join(securityDir, 'ledger.json');
+  if (!existsSync(source)) return;
+  const stamp = now.toISOString().replace(/:/g, '-');
+  let target = join(securityDir, `ledger.${stamp}.archived.json`);
+  for (let n = 1; existsSync(target); n++) target = join(securityDir, `ledger.${stamp}-${n}.archived.json`);
+  renameSync(source, target);
+  chmodSync(target, 0o600);
+  const archives = readdirSync(securityDir).filter(name => ARCHIVE.test(name)).sort();
+  for (const name of archives.slice(0, Math.max(0, archives.length - LEDGER_ARCHIVES_KEPT))) removeIfPresent(join(securityDir, name));
 }
 
 function syncDir(dir: string): void {
@@ -78,7 +99,7 @@ export function beginIdentityReset(dataDir: string, reason: IdentityResetReason)
   writeAtomic(markerPath(dataDir), join(dataDir, 'security'), JSON.stringify(marker));
 }
 
-export function completePendingIdentityReset(dataDir: string): IdentityResetResult | null {
+export function completePendingIdentityReset(dataDir: string, now: () => Date = () => new Date()): IdentityResetResult | null {
   const marker = readMarker(dataDir);
   if (marker === null) return null;
   // A corrupt marker cannot name the new identity; leave it for beginIdentityReset to replace.
@@ -103,9 +124,9 @@ export function completePendingIdentityReset(dataDir: string): IdentityResetResu
   // rotates and so could never be loaded again (Solo/--local then start fresh, as before the ledger). Only account mode starts a
   // reset; a Solo/--local identity never triggers one (hasLegacyAccountState ignores it).
   removeIfPresent(join(securityDir, 'bridge-identity.json'));
-  // The ledger bridge: its keys, its replica (including the sticky revocations of the old identity), its offline-grace clock and
-  // the last relay URL its server named.
-  removeIfPresent(join(securityDir, 'ledger.json'));
+  // The ledger bridge: its keys, its offline-grace clock and the last relay URL its server named are deleted. Its replica (including the
+  // sticky revocations of the old identity) is ARCHIVED, never deleted: it may be the only copy of the account's history.
+  archiveLedger(securityDir, now());
   removeIfPresent(join(securityDir, 'ledger-clock.json'));
   removeIfPresent(join(securityDir, 'relay-url.json'));
   removeIfPresent(join(securityDir, 'ledger-identity.json'));

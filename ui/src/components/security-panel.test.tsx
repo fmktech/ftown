@@ -225,7 +225,8 @@ class FakeLedger {
     this.signs();
     publish({ ...current(), pending: "none", checkpoint: { ...current().checkpoint!, authorities: [...current().checkpoint!.authorities, authority("cred-2", "Security key")] } });
   });
-  dismissDiscarded = vi.fn(() => { publish({ ...current(), discarded: [] }); });
+  dismissDiscarded = vi.fn((_records?: Signed<LedgerTransition>[]) => { publish({ ...current(), discarded: [] }); });
+  discardPending = vi.fn(async (): Promise<"discarded" | "already_saved"> => "discarded");
   rotateDeviceIdentity = vi.fn(async () => {});
   /** Never prompts; resolves when `retried` is resolved, then the server has the removals. */
   retried: Promise<void> = Promise.resolve();
@@ -442,6 +443,149 @@ describe("Account security from the passkey ledger", () => {
   describe("Removals not saved to the server yet", () => {
     const UNSAVED = "Removal not saved to the server yet";
     const DETAIL = "Removal not saved to the server yet. It can still connect. Retrying…";
+    /** A pending removal as the client publishes it: not in the chain, but blocked here (trusted checkpoint without it). */
+    const pendingRemoval = (target: { deviceId?: string; bridgeId?: string }, extra: Partial<LedgerClientSnapshot> = {}): Partial<LedgerClientSnapshot> => {
+      const deviceIds = target.deviceId !== undefined ? [target.deviceId] : [];
+      const bridgeIds = target.bridgeId !== undefined ? [target.bridgeId] : [];
+      return {
+        checkpoint: checkpoint({
+          devices: [ledgerDevice("self", "Laptop"), ledgerDevice("phone", "Phone")].filter(item => !deviceIds.includes(item.endpoint.id)), revokedDeviceIds: deviceIds,
+          bridges: [ledgerBridge("bridge-one", "Computer")].filter(item => !bridgeIds.includes(item.bridgeId)), revokedBridgeIds: bridgeIds,
+        }),
+        pendingWrite: { operation: target.deviceId !== undefined ? "revoke_device" : "revoke_bridge", ...target, since: AT },
+        unsaved: { deviceIds, bridgeIds }, blocked: { deviceIds, bridgeIds },
+        serverState: "current", canReoffer: true, retryAt: Date.now() + 30_000, retryNotBefore: null, ...extra,
+      };
+    };
+    const removalRecord = (operation: LedgerOperation) => record(5, operation);
+
+    it("a pending removal of another browser is enforced here at once: shown as not saved, Retry now, Discard this change, no second Remove", async () => {
+      const fake = mountLedger();
+      renderAccount();
+      act(() => publish({ ...current(), ...pendingRemoval({ deviceId: "phone" }) }));
+      fireEvent.click(screen.getByRole("button", { name: `Browser Phone: ${UNSAVED}` }));
+      const notice = screen.getByRole("group", { name: "Removal not saved" });
+      expect(within(notice).getByText(DETAIL)).toBeTruthy();
+      expect(within(notice).getByText("Signed name: “Phone” · ID phone")).toBeTruthy();
+      expect(within(notice).getByText("If the server already received it, it can still apply until another change is saved.")).toBeTruthy();
+      expect(screen.queryByRole("button", { name: /^Remove browser/ })).toBeNull();
+      fake.discardPending.mockResolvedValueOnce("already_saved");
+      expect(await click(fake, within(notice).getByRole("button", { name: "Discard this change" }))).toBe(0);
+      expect(fake.discardPending).toHaveBeenCalledOnce();
+      expect(within(notice).getByText("The server had already saved this change.").getAttribute("role")).toBe("status");
+      expect(await click(fake, within(notice).getByRole("button", { name: "Retry now" }))).toBe(0);
+      expect(fake.retryNow).toHaveBeenCalledOnce();
+      expect(fake.revokeDevice).not.toHaveBeenCalled();
+    });
+
+    it("this browser's pending removal: removed here at once, with the self notice, Retry now and Discard (no 'removed' alert)", async () => {
+      const fake = mountLedger({ ...pendingRemoval({ deviceId: "self" }), status: "device_revoked" });
+      renderAccount();
+      const notice = screen.getByRole("group", { name: "Removal not saved" });
+      expect(within(notice).getByText("This browser's removal is not saved to the server yet. It can still connect. Retrying…")).toBeTruthy();
+      expect(screen.queryByText("This browser was removed from your account.")).toBeNull();
+      expect(screen.getByRole("button", { name: `Browser This browser (this browser): ${UNSAVED}` })).toBeTruthy();
+      expect(await click(fake, within(notice).getByRole("button", { name: "Retry now" }))).toBe(0);
+      expect(fake.retryNow).toHaveBeenCalledOnce();
+      expect(within(notice).getByRole("button", { name: "Discard this change" })).toBeTruthy();
+    });
+
+    it("a pending removal of a computer: shown as not saved (it can still connect), no second Remove computer", async () => {
+      mountLedger({ ...pendingRemoval({ bridgeId: "bridge-one" }) });
+      renderAccount();
+      fireEvent.click(screen.getByRole("button", { name: `Computer My laptop: ${UNSAVED}. Connected` }));
+      expect(within(screen.getByRole("group", { name: "Removal not saved" })).getByText(DETAIL)).toBeTruthy();
+      expect(screen.queryByRole("button", { name: /^Remove computer/ })).toBeNull();
+    });
+
+    it("a pending removal when the server lost the account: says so, offers Discard and no retry", async () => {
+      const fake = mountLedger({ ...pendingRemoval({ bridgeId: "bridge-one" }, { accountMissing: true }) });
+      renderAccount();
+      fireEvent.click(screen.getByRole("button", { name: `Computer My laptop: ${UNSAVED}. Connected` }));
+      const notice = screen.getByRole("group", { name: "Removal not saved" });
+      expect(within(notice).getByText("Your account was not found on the server, so this change cannot be saved. You can discard it.")).toBeTruthy();
+      expect(within(notice).queryByRole("button", { name: "Retry now" })).toBeNull();
+      expect(await click(fake, within(notice).getByRole("button", { name: "Discard this change" }))).toBe(0);
+      expect(fake.discardPending).toHaveBeenCalledOnce();
+    });
+
+    it("a removal that was dropped or discarded stays enforced here: removed on this browser only, Sign removal again or Dismiss", async () => {
+      const dropped = removalRecord({ type: "revoke_bridge", bridgeId: "bridge-one" });
+      const fake = mountLedger({ checkpoint: checkpoint({ bridges: [], revokedBridgeIds: ["bridge-one"] }), discarded: [dropped],
+        blocked: { deviceIds: [], bridgeIds: ["bridge-one"] }, unsaved: { deviceIds: [], bridgeIds: [] }, serverState: "current" });
+      renderAccount();
+      fireEvent.click(screen.getByRole("button", { name: "Computer My laptop: Removed on this browser only — not yet applied to your account. Connected" }));
+      const group = screen.getByRole("group", { name: "Removal not applied" });
+      expect(within(group).getByRole("button", { name: "Sign removal again" })).toBeTruthy();
+      fireEvent.click(within(group).getByRole("button", { name: "Dismiss" }));
+      expect(fake.dismissDiscarded).toHaveBeenCalledExactlyOnceWith([dropped]);
+    });
+
+    it("a removal seen on the other history while two histories exist: enforced here, without a Sign button", () => {
+      const other = { genesis: record(1, { type: "revoke_bridge", bridgeId: "bridge-one" }), transitions: [] } as unknown as NonNullable<LedgerClientSnapshot["divergence"]>["other"];
+      mountLedger({ checkpoint: checkpoint({ bridges: [], revokedBridgeIds: ["bridge-one"] }), localOnly: { deviceIds: [], bridgeIds: ["bridge-one"] },
+        divergence: { other, source: "server", firstSeen: AT, fork: { relation: "diverged", fork: { revision: 3, head: "head-3" }, mine: [], theirs: [] },
+          mine: { carry: [], canKeep: true, reason: null }, theirs: { carry: [], canKeep: true, reason: null }, otherHead: "other-head", abandoned: [], recommend: null } });
+      renderAccount();
+      fireEvent.click(screen.getByRole("button", { name: "Computer My laptop: Removed on this browser only — not yet applied to your account. Connected" }));
+      const group = screen.getByRole("group", { name: "Removal not applied" });
+      expect(within(group).queryByRole("button", { name: "Sign removal again" })).toBeNull();
+      expect(within(group).queryByRole("button", { name: "Dismiss" })).toBeNull();
+    });
+
+    it("a pending change that is not a removal gets its own notice with Retry now and Discard", async () => {
+      const fake = mountLedger({ pendingWrite: { operation: "add_bridge", bridgeId: "studio", since: AT }, serverState: "current", canReoffer: false, retryAt: null, retryNotBefore: null });
+      renderAccount();
+      const notice = screen.getByRole("group", { name: "Change not saved" });
+      expect(within(notice).getByText("Adding a computer is not saved to the server yet. Retrying…")).toBeTruthy();
+      expect(await click(fake, within(notice).getByRole("button", { name: "Retry now" }))).toBe(0);
+      expect(fake.retryNow).toHaveBeenCalledOnce();
+      expect(await click(fake, within(notice).getByRole("button", { name: "Discard this change" }))).toBe(0);
+      expect(fake.discardPending).toHaveBeenCalledOnce();
+    });
+
+    it("a dropped change asks to confirm again, unless that is already the error shown", async () => {
+      const fake = mountLedger({ lastConflict: { operation: "revoke_bridge", bridgeId: "bridge-one", at: AT, reason: "write_conflict" } });
+      renderAccount();
+      expect(screen.getByText("Something else changed first. Confirm again.").getAttribute("role")).toBe("status");
+      // The same news as the error of the action just tried: shown once, as that error.
+      fake.revokeBridge.mockRejectedValueOnce(new Error("write_conflict"));
+      fireEvent.click(screen.getByRole("button", { name: "Computer My laptop: In your account. Connected" }));
+      fireEvent.click(screen.getByRole("button", { name: "Remove computer My laptop" }));
+      await click(fake, screen.getByRole("button", { name: "Confirm remove computer" }));
+      expect(screen.queryByText("Something else changed first. Confirm again.", { selector: "[role=status]" })).toBeNull();
+    });
+
+    it("a different history shows the two-histories screen and blocks every signed change", async () => {
+      const other = { genesis: record(1, { type: "revoke_device", endpointId: "phone" }), transitions: [] } as unknown as NonNullable<LedgerClientSnapshot["divergence"]>["other"];
+      const fake = mountLedger({ divergence: { other, source: "server", firstSeen: AT, fork: { relation: "diverged", fork: { revision: 3, head: "head-3" }, mine: [], theirs: [] }, mine: { carry: [], canKeep: true, reason: null }, theirs: { carry: [], canKeep: true, reason: null },
+        otherHead: "other-head", abandoned: [], recommend: null } });
+      renderAccount();
+      expect(screen.getByRole("heading", { name: "Two different histories of this account exist" })).toBeTruthy();
+      expect(screen.getByText("The server holds the other history.")).toBeTruthy();
+      expect(screen.getByText(/Other changes to your account are turned off/)).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Computer My laptop: In your account. Connected" }));
+      expect((screen.getByRole("button", { name: "Remove computer My laptop" }) as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.queryByRole("group", { name: "Add another passkey" })).toBeNull();
+      // Choosing a history ends the screen and leaves a status line for the session.
+      const resolve = vi.fn(async () => { publish({ ...current(), divergence: null }); });
+      Object.assign(fake, { resolveDivergence: resolve });
+      await act(async () => { fireEvent.click(within(screen.getByRole("region", { name: "This browser's history" })).getByRole("button", { name: "Keep this history" })); });
+      expect(resolve).toHaveBeenCalledExactlyOnceWith("mine", { source: "server", otherHead: "other-head" });
+      expect(screen.queryByRole("heading", { name: /Two different histories/ })).toBeNull();
+      expect(screen.getByText("History kept. Other replicas will follow.").getAttribute("role")).toBe("status");
+    });
+
+    it("an action error of the two-histories screen is shown once, by the screen", async () => {
+      const other = { genesis: record(1, { type: "revoke_device", endpointId: "phone" }), transitions: [] } as unknown as NonNullable<LedgerClientSnapshot["divergence"]>["other"];
+      const fake = mountLedger({ divergence: { other, source: "peer", firstSeen: AT, fork: { relation: "diverged", fork: { revision: 3, head: "head-3" }, mine: [], theirs: [] }, mine: { carry: [], canKeep: true, reason: null }, theirs: { carry: [], canKeep: true, reason: null },
+        otherHead: "other-head", abandoned: [], recommend: null } });
+      Object.assign(fake, { resolveDivergence: vi.fn(async () => { throw new Error("resolution_outdated"); }) });
+      renderAccount();
+      await act(async () => { fireEvent.click(within(screen.getByRole("region", { name: "The other history" })).getByRole("button", { name: "Keep this history" })); });
+      expect(screen.getAllByRole("alert").map(item => item.textContent)).toEqual(["The other history changed. Review it again."]);
+    });
+
     it("shows a removed browser the server still accepts, with Retry now (no passkey) until it is saved", async () => {
       const fake = mountLedger({ checkpoint: checkpoint({ devices: [ledgerDevice("self", "Laptop"), ledgerDevice("phone", "Phone")] }) });
       renderAccount();
@@ -469,7 +613,7 @@ describe("Account security from the passkey ledger", () => {
     it("this browser's own removal not saved yet: says it can still connect, with Retry now, instead of 'removed'", async () => {
       const fake = mountLedger({
         status: "device_revoked", checkpoint: checkpoint({ devices: [ledgerDevice("phone", "Phone")], revokedDeviceIds: ["self"] }),
-        unsaved: { deviceIds: ["self"], bridgeIds: [] }, serverState: "behind", conflict: false, canReoffer: true, retryAt: Date.now() + 30_000, retryNotBefore: null,
+        unsaved: { deviceIds: ["self"], bridgeIds: [] }, serverState: "behind", canReoffer: true, retryAt: Date.now() + 30_000, retryNotBefore: null,
       });
       renderAccount();
       const notice = screen.getByRole("group", { name: "Removal not saved" });
@@ -481,8 +625,7 @@ describe("Account security from the passkey ledger", () => {
     });
 
     it.each([
-      ["a conflict", { conflict: true, canReoffer: true }, "Not saved to the server. Sign this removal again from this browser."],
-      ["a browser that cannot write", { conflict: false, canReoffer: false }, "Not saved to the server. Remove it again from another browser of your account."],
+      ["a browser that cannot re-offer", { canReoffer: false }, "Not saved to the server. Remove it again from another browser of your account."],
     ] as const)("with no retry coming (%s) says what to do instead, without Retrying… or Retry now", async (_case, state, text) => {
       mountLedger({ checkpoint: checkpoint({ devices: [ledgerDevice("self", "Laptop")], revokedDeviceIds: ["phone"] }), unsaved: { deviceIds: ["phone"], bridgeIds: [] },
         serverState: "behind", retryAt: null, retryNotBefore: null, ...state });
@@ -496,7 +639,7 @@ describe("Account security from the passkey ledger", () => {
 
     it("while the server asked to wait, Retry now is disabled with the seconds left", async () => {
       mountLedger({ checkpoint: checkpoint({ devices: [ledgerDevice("self", "Laptop")], revokedDeviceIds: ["phone"] }), unsaved: { deviceIds: ["phone"], bridgeIds: [] },
-        serverState: "behind", conflict: false, canReoffer: true, retryAt: Date.now() + 42_000, retryNotBefore: Date.now() + 42_000 });
+        serverState: "behind", canReoffer: true, retryAt: Date.now() + 42_000, retryNotBefore: Date.now() + 42_000 });
       renderAccount();
       fireEvent.click(screen.getByRole("button", { name: new RegExp(`^Browser .*: ${UNSAVED}$`) }));
       const button = within(screen.getByRole("group", { name: "Removal not saved" })).getByRole("button", { name: "Retry in 42 s" }) as HTMLButtonElement;
@@ -505,7 +648,7 @@ describe("Account security from the passkey ledger", () => {
 
     it("while nothing is confirmed about the server, a removal reads 'Removed here. Not confirmed by the server yet.', neutral, no retry", async () => {
       const fake = mountLedger({ checkpoint: checkpoint({ bridges: [], revokedBridgeIds: ["bridge-one"] }), unsaved: { deviceIds: [], bridgeIds: [] }, serverState: "unknown",
-        conflict: false, canReoffer: true, retryAt: null, retryNotBefore: null });
+        canReoffer: true, retryAt: null, retryNotBefore: null });
       renderAccount();
       expect(screen.queryByRole("button", { name: "Computer My laptop: Removed from your account. Connected" })).toBeNull();
       fireEvent.click(screen.getByRole("button", { name: "Computer My laptop: Removed here. Not confirmed by the server yet. Connected" }));
@@ -584,8 +727,10 @@ describe("Account security from the passkey ledger", () => {
     await click(fake, screen.getByRole("button", { name: "Sign again: Remove browser “Phone”" }));
     expect(screen.queryByRole("alert")).toBeNull();
     expect(fake.dismissDiscarded).toHaveBeenCalledOnce();
-    publish({ ...current(), discarded: [record(6, { type: "add_bridge", bridge: ledgerBridge("bridge-three", "Studio") })] });
+    publish({ ...current(), discarded: [record(6, { type: "add_bridge", bridge: ledgerBridge("bridge-three", "Studio") }),
+      record(7, { type: "resolve_fork", forkHead: "head-3", discardedFirst: "head-4", discardedHead: "head-5", discardedRevision: 5 })] });
     expect(await screen.findByText("Add computer “Studio”")).toBeTruthy();
+    expect(screen.getByText("Chose this history over another one")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(fake.dismissDiscarded).toHaveBeenCalledTimes(2);
     expect(fake.prompts).toBe(1);
@@ -666,5 +811,67 @@ describe("Mode selection", () => {
     expect(securityErrorMessage({ code: "constructor" })).toBe("This security action could not be completed. Refresh and try again.");
     expect(securityErrorMessage({ code: "account_bridge_revoked" })).toBe("This computer was removed from account trust.");
     expect(securityErrorMessage(new Error("Server said <b>no</b>"))).toBe("This security action could not be completed. Refresh and try again.");
+  });
+});
+
+describe("Replica agreement and diverged replicas in the account panel", () => {
+  beforeEach(() => { vi.stubGlobal("fetch", vi.fn(async () => reply({ names: [], eligible: [] }))); });
+  const peers = (over: object = {}) => ({ head: "abcdef123456", confirmed: [], online: ["bridge-one"], diverged: [], ...over });
+
+  it("shows the agreement line under the map when signed in", () => {
+    mountLedger({ peers: peers({ confirmed: [{ kind: "bridge", id: "bridge-one", at: AT }, { kind: "device", id: "phone", at: AT }] }) });
+    renderAccount();
+    expect(screen.getByRole("status", { name: "" , hidden: false }) && document.querySelector("[data-replica-agreement]")?.textContent).toBe("Applied on 1 computer and 1 browser.");
+  });
+  it("shows nothing when signed out, with an empty head, or while the two-histories screen is open", () => {
+    mountLedger({ status: "signed_out", checkpoint: null, peers: peers() });
+    renderAccount();
+    expect(document.querySelector("[data-replica-agreement]")).toBeNull();
+    cleanup();
+    mountLedger({ peers: peers({ head: "" }) });
+    renderAccount();
+    expect(document.querySelector("[data-replica-agreement]")).toBeNull();
+    cleanup();
+    const other = { genesis: record(1, { type: "revoke_device", endpointId: "phone" }), transitions: [] } as unknown as NonNullable<LedgerClientSnapshot["divergence"]>["other"];
+    mountLedger({ peers: peers(), divergence: { other, source: "server", otherHead: "h", abandoned: [], recommend: null, firstSeen: AT, fork: { relation: "diverged", fork: { revision: 3, head: "head-3" }, mine: [], theirs: [] }, mine: { carry: [], canKeep: true, reason: null }, theirs: { carry: [], canKeep: true, reason: null } } });
+    renderAccount();
+    expect(document.querySelector("[data-replica-agreement]")).toBeNull();
+  });
+  it("marks a diverged computer and browser with a visible badge and a description, and keeps the row working", () => {
+    mountLedger({ peers: peers({ diverged: [{ kind: "bridge", id: "bridge-one", head: "deadbeef", revision: 7 }, { kind: "device", id: "phone", head: "cafebabe", revision: 6 }] }) });
+    renderAccount();
+    const computer = document.querySelector('[data-access-card="bridge:bridge-one"]') as HTMLElement;
+    expect(within(computer).getByText("Different history")).toBeTruthy();
+    const row = computer.querySelector("button[data-access-node]") as HTMLButtonElement;
+    expect(document.getElementById(row.getAttribute("aria-describedby") ?? "")?.textContent).toBe("This computer holds a different account history (revision 7, head deadbeef)");
+    const browser = document.querySelector('[data-access-card="browser:phone"]') as HTMLElement;
+    expect(within(browser).getByText("Different history")).toBeTruthy();
+    expect(document.getElementById((browser.querySelector("button[data-access-node]") as HTMLElement).getAttribute("aria-describedby") ?? "")?.textContent)
+      .toBe("This browser holds a different account history (revision 6, head cafebabe)");
+    fireEvent.click(row);
+    expect(row.getAttribute("aria-pressed")).toBe("true");
+  });
+  it("shows no badge for replicas that are not diverged", () => {
+    mountLedger({ peers: peers() });
+    renderAccount();
+    expect(screen.queryByText("Different history")).toBeNull();
+  });
+});
+
+describe("securityErrorMessage: the append-only ledger codes", () => {
+  it.each([
+    ["write_conflict", "Something else changed first. Confirm again."],
+    ["write_pending", "Finish saving the previous change first."],
+    ["ledger_diverged", "Two different histories of this account exist. Choose one before making changes."],
+    ["resolution_outdated", "The other history changed. Review it again."],
+    ["no_divergence", "There is nothing to resolve."],
+    ["resolution_incomplete", "This history cannot be kept yet. Review it again."],
+    ["account_not_found", "Your account was not found on the server."],
+  ])("%s", (code, text) => {
+    expect(securityErrorMessage(new Error(code))).toBe(text);
+    expect(securityErrorMessage({ code })).toBe(text);
+  });
+  it("still uses own-property lookup", () => {
+    expect(securityErrorMessage(new Error("constructor"))).toBe("This security action could not be completed. Refresh and try again.");
   });
 });

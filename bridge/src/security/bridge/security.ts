@@ -8,9 +8,12 @@ import { BridgePolicyStore, type LedgerOwnStatus, type PolicyOptions } from './p
 import { BridgeSecurityError } from './errors.js';
 import { classifyCommand, classifyHttp, classifyTerminal, type OperationPermission } from './permissions.js';
 import { endpointSchema } from './metadata.js';
-import { accountIdOf, ledgerHead, parseLedger } from '../ledger/ledger.js';
-import type { LedgerCheckpoint } from '../ledger/protocol.js';
-import type { BridgeLedgerState, BridgeLedgerStore, LedgerSource } from './ledger-store.js';
+import { accountIdOf, ledgerHead, ledgerHeads, parseLedger, relateHead } from '../ledger/ledger.js';
+import type { LedgerHeadRelation, LedgerRelation } from '../ledger/ledger.js';
+import type { Ledger, LedgerCheckpoint } from '../ledger/protocol.js';
+import { verifyHeadAnnouncement, type HeadAnnouncement } from '../ledger/announce.js';
+import { ledgerRemovesBridge, shortHead } from './ledger-store.js';
+import type { BridgeLedgerState, BridgeLedgerStore, LedgerDivergence, LedgerSource, LedgerTip, OwnBridgeKeys } from './ledger-store.js';
 
 const token = z.string().regex(/^[A-Za-z0-9_-]{1,200}$/);
 const routeSchema = z.discriminatedUnion('kind', [
@@ -43,21 +46,56 @@ export interface BridgeSecurityOptions extends PolicyOptions {
   /** Absent for Solo and --local: their devices come only from invitations and the local CLI. */
   ledger?: BridgeLedgerOptions;
 }
-export interface LedgerStatus { accountId: string | null; revision: number | null; head: string | null; own: LedgerOwnStatus }
+/** A refused history (the store's divergence entry, server preferred), as the status shows it: heads cut to 8 characters. */
+export interface LedgerDivergenceStatus {
+  source: LedgerSource; otherHead: string; otherRevision: number; ourRevision: number; firstSeen: number;
+  /** The revision both histories last share; null when unknown. */
+  forkRevision: number | null;
+  /** That history removes this computer (status only: this bridge keeps its own history and is never reset by it). */
+  removedOnOtherHistory: boolean;
+}
+/** What this bridge holds that the server lacks (its records after the fork point, or after the server's revision when the server is
+ *  behind): the removals (revoke_device / revoke_bridge) and passkeys (add_authority) among them. */
+export interface UniqueHistory { afterRevision: number; records: number; removals: number; passkeys: number }
+export interface LedgerStatus {
+  accountId: string | null; revision: number | null; head: string | null; own: LedgerOwnStatus;
+  /** Another valid history of this account was refused (CONTRACT §5); null when none is recorded. */
+  divergence: LedgerDivergenceStatus | null;
+  /** The last server chain this bridge evaluated was a strict prefix of its own (the bridge re-offers its chain). */
+  serverBehind: boolean;
+  /** A refused history (from the server or the relay) removes this computer. Status only. */
+  removedOnOtherHistory: boolean;
+  /** Head announcements from the ledger channel since start: verified against the trusted checkpoint ('accepted'), or refused ('dropped':
+   *  bad signature, unknown or revoked member, other account, stale, or no trusted chain yet). This bridge's own echoes are not counted. */
+  announcements: { accepted: number; dropped: number };
+}
 type OfferDecision = 'adopt' | 'keep' | 'reject';
-/** One offer per source waits behind the one in flight; a newer candidate replaces it and its callers share the newer decision. */
-interface PendingOffer { candidate: unknown; waiters: ((decision: OfferDecision) => void)[] }
-/** (length, head) of verified chains already evaluated: a chain's payloads are hash-linked, so an equal pair is an equal chain. */
-const EVALUATED_LIMIT = 16;
+/** An offer's decision, the candidate's relation to the stored chain (null: none, e.g. malformed) and its tip (null: unparseable). */
+export interface LedgerOfferOutcome { decision: OfferDecision; relation: LedgerRelation | null; head: string | null; revision: number | null }
+/** readServerLedger: the server's chain was read and offered ('read'), the server does not know the account (404), or the read failed. */
+export type ServerLedgerRead =
+  | { kind: 'read'; outcome: LedgerOfferOutcome }
+  | { kind: 'unknown_account'; reason: string }
+  | { kind: 'failed'; reason: string };
+/** The stored chain as a trusted browser may read it (ledger_head / ledger_chain). */
+export interface MemberLedger { ledger: Ledger; accountId: string; head: string; revision: number }
+/** ledger_head: the stored tip only. */
+export interface MemberHead { accountId: string; head: string; revision: number }
+/** One offer per source waits behind the one in flight; a newer candidate replaces it and its callers share the newer outcome. */
+interface PendingOffer { candidate: unknown; waiters: ((outcome: LedgerOfferOutcome) => void)[] }
 /** onApprovalRequired: at most one emission per endpoint per spacing, and at most this many endpoints tracked at once. */
 const APPROVAL_SPACING_MS = 2000;
 const APPROVAL_TRACKED_LIMIT = 1024;
+const REJECTED: LedgerOfferOutcome = { decision: 'reject', relation: null, head: null, revision: null };
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error);
-async function chainKey(candidate: unknown): Promise<string | null> {
+const httpStatus = (error: unknown): number | null =>
+  typeof error === 'object' && error !== null && 'status' in error && typeof error.status === 'number' ? error.status : null;
+/** The candidate's last record ({revision, head}), or null when it is not a well-formed chain. One hash, no signature work. */
+async function chainTip(candidate: unknown): Promise<LedgerTip | null> {
   try {
     const ledger = parseLedger(candidate);
     const last = ledger.transitions[ledger.transitions.length - 1];
-    return `${ledger.transitions.length}:${last === undefined ? await accountIdOf(ledger.genesis.payload) : await ledgerHead(last.payload)}`;
+    return { revision: ledger.transitions.length, head: last === undefined ? await accountIdOf(ledger.genesis.payload) : await ledgerHead(last.payload) };
   } catch { return null; }
 }
 
@@ -77,14 +115,23 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
   private readonly ledgerNow: () => number;
   /** Ledger offers and their projections run one at a time, so the policy never sees an older view after a newer one. */
   private ledgerTail: Promise<unknown> = Promise.resolve();
-  private status: LedgerStatus = { accountId: null, revision: null, head: null, own: 'unpaired' };
+  private status: Omit<LedgerStatus, 'announcements'> = {
+    accountId: null, revision: null, head: null, own: 'unpaired', divergence: null, serverBehind: false, removedOnOtherHistory: false,
+  };
+  private readonly announcements = { accepted: 0, dropped: 0 };
+  private readonly headListeners = new Set<() => void>();
   private readonly ledgerMonotonic: () => number;
   /** The trusted view of the last projection (null: none yet, or another account's). */
   private trustedView: LedgerCheckpoint | null = null;
+  /** The state of the last projection (null: none yet, or an empty store), and the record heads of its chain (null: not computed). */
+  private held: BridgeLedgerState | null = null;
+  private heads: { of: string; list: string[] } | null = null;
   private readonly approvalListeners = new Set<(endpointId: string) => void>();
   private readonly approvalEmitted = new Map<string, number>();
   private readonly pendingOffers = new Map<LedgerSource, PendingOffer>();
-  private readonly evaluated = new Set<string>();
+  private serverBehind = false;
+  /** The server's revision when it was last seen behind us (null: unknown). */
+  private serverRevision: number | null = null;
   private refreshing: Promise<void> | null = null;
   private refreshQueued: Promise<void> | null = null;
   constructor(readonly identity: EndpointIdentity, readonly bridgeId: string, dataDir: string, readonly options: BridgeSecurityOptions) {
@@ -275,9 +322,10 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
     await this.refreshLedger();
   }
   /**
-   * Reads the server's ledger and offers it ('server'). A result that is not 'reject' counts as server contact; a fetch failure is
-   * logged, never thrown. Single in flight: calls during a read share one trailing read, so a change announced mid-read is not missed.
-   * The wiring calls it on every relay (re)subscribe and on a `ledger_head` that differs from ledgerStatus().head.
+   * Reads the server's ledger and offers it ('server') through readServerLedger. A result that is not 'reject' counts as server contact;
+   * a fetch failure is logged, never thrown. Single in flight: calls during a read share one trailing read, so a change announced
+   * mid-read is not missed. The wiring calls it on every relay (re)subscribe and on a `ledger_head` that differs from ledgerStatus().head,
+   * and checks ledgerStatus().serverBehind afterwards.
    */
   refreshLedger(): Promise<void> {
     if (!this.options.ledger || this.closed) return Promise.resolve();
@@ -289,24 +337,38 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
     return this.refreshing;
   }
   private async refreshOnce(): Promise<void> {
-    const ledger = this.options.ledger!;
-    let fetched: unknown;
-    try { fetched = await ledger.fetchLedger(); }
-    catch (error) {
-      console.warn('[Security] Account ledger read failed:', reason(error));
-      return;
-    }
-    if (await this.offerLedger(fetched, 'server') !== 'reject') this.noteServerContact();
+    const read = await this.readServerLedger();
+    if (read.kind !== 'read') console.warn('[Security] Account ledger read failed:', read.reason);
   }
   /**
-   * Offers an untrusted chain (the relay, a relay-token response, a server read) to the replica, then projects the result and checks
-   * this bridge's own status. Never throws: an invalid candidate, a closed service and a local storage failure all return 'reject'.
-   * Per source at most one offer waits behind the one in flight; a newer one replaces it, and the replaced caller gets the newer
-   * decision. A verified chain already evaluated (same length and head) is answered 'keep' before any signature check. Offers never
-   * count as server contact: refreshLedger and noteServerContact decide that.
+   * One read of the server's ledger (not coalesced), offered as 'server'; a result that is not 'reject' counts as server contact. Never
+   * throws: a 404 is 'unknown_account' (the server does not know this account), any other failure 'failed'. The re-offer runs it right
+   * before it posts; refreshLedger runs it for everything else.
    */
-  offerLedger(candidate: unknown, source: LedgerSource): Promise<OfferDecision> {
-    if (!this.options.ledger || this.closed) return Promise.resolve('reject');
+  async readServerLedger(): Promise<ServerLedgerRead> {
+    const ledger = this.options.ledger;
+    if (!ledger || this.closed) return { kind: 'failed', reason: 'Account ledger unavailable' };
+    let fetched: unknown;
+    try { fetched = await ledger.fetchLedger(); }
+    catch (error) { return httpStatus(error) === 404 ? { kind: 'unknown_account', reason: reason(error) } : { kind: 'failed', reason: reason(error) }; }
+    const outcome = await this.offerLedgerResult(fetched, 'server');
+    if (outcome.decision !== 'reject') this.noteServerContact();
+    return { kind: 'read', outcome };
+  }
+  /** offerLedgerResult(candidate, source).decision. */
+  async offerLedger(candidate: unknown, source: LedgerSource): Promise<OfferDecision> {
+    return (await this.offerLedgerResult(candidate, source)).decision;
+  }
+  /**
+   * Offers an untrusted chain (the relay, a relay-token response, a server read or answer) to the replica, then projects the result and
+   * checks this bridge's own status. Never throws: an invalid candidate, a closed service and a local storage failure all return 'reject'.
+   * Per source at most one offer waits behind the one in flight; a newer one replaces it, and the replaced caller gets the newer outcome.
+   * A chain equal to the stored one or a prefix of it is answered keep/same or keep/behind from record heads alone (no signature check),
+   * unless a divergence is recorded for that source (the store clears it). The outcome of a 'server' chain sets serverBehind. Offers never
+   * count as server contact: readServerLedger and noteServerContact decide that.
+   */
+  offerLedgerResult(candidate: unknown, source: LedgerSource): Promise<LedgerOfferOutcome> {
+    if (!this.options.ledger || this.closed) return Promise.resolve(REJECTED);
     return new Promise(resolve => {
       const waiting = this.pendingOffers.get(source);
       if (waiting) {
@@ -319,38 +381,105 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
       void this.ledgerTask(async () => {
         if (this.pendingOffers.get(source) === pending) this.pendingOffers.delete(source);
         return this.evaluate(pending.candidate, source);
-      }).catch((): OfferDecision => 'reject').then(decision => { for (const waiter of pending.waiters) waiter(decision); });
+      }).catch((): LedgerOfferOutcome => REJECTED).then(outcome => { for (const waiter of pending.waiters) waiter({ ...outcome }); });
     });
   }
-  private async evaluate(candidate: unknown, source: LedgerSource): Promise<OfferDecision> {
+  private async evaluate(candidate: unknown, source: LedgerSource): Promise<LedgerOfferOutcome> {
     const ledger = this.options.ledger!;
-    if (this.closed) return 'reject';
-    const key = await chainKey(candidate);
-    if (key !== null && this.evaluated.has(key)) {
-      this.remember(key);
-      return 'keep';
+    if (this.closed) return REJECTED;
+    const tip = await chainTip(candidate);
+    const heads = this.heads;
+    if (tip !== null && heads !== null && this.held !== null && heads.of === this.held.checkpoint.head
+      && !this.held.divergences.some(entry => entry.source === source)) {
+      let known: LedgerHeadRelation = 'unknown';
+      try { known = relateHead(heads.list, tip); } catch { /* not a head of ours */ }
+      if (known === 'same' || known === 'behind') return this.observed(source, { decision: 'keep', relation: known, head: tip.head, revision: tip.revision });
     }
     let result;
     try { result = await ledger.store.offer(candidate, source); }
     catch (error) {
       console.error('[Security] Account ledger offer failed:', reason(error));
-      return 'reject';
+      return REJECTED;
     }
-    if (result.decision === 'reject' || result.state === null) return 'reject';
-    try {
-      await this.projectState(result.state);
-      // Only a chain that verified and was fully applied is remembered; a rejected one never is (it may carry forged signatures).
-      if (key !== null) this.remember(key);
-    } catch (error) { console.error('[Security] Account ledger projection failed:', reason(error)); }
-    return result.decision;
+    const outcome: LedgerOfferOutcome = { decision: result.decision, relation: result.relation, head: result.candidate?.head ?? null, revision: result.candidate?.revision ?? null };
+    if (result.decision === 'reject' || result.state === null) return { ...outcome, decision: 'reject' };
+    try { await this.projectState(result.state); }
+    catch (error) { console.error('[Security] Account ledger projection failed:', reason(error)); }
+    return this.observed(source, outcome);
   }
-  private remember(key: string): void {
-    this.evaluated.delete(key);
-    this.evaluated.add(key);
-    for (const oldest of this.evaluated) {
-      if (this.evaluated.size <= EVALUATED_LIMIT) break;
-      this.evaluated.delete(oldest);
+  /** Records what a non-rejected 'server' chain says about the server: behind (a strict prefix of ours) or not. */
+  private observed(source: LedgerSource, outcome: LedgerOfferOutcome): LedgerOfferOutcome {
+    if (source === 'server' && outcome.decision !== 'reject') this.setServerBehind(outcome.relation === 'behind', outcome.revision);
+    return outcome;
+  }
+  private setServerBehind(behind: boolean, revision: number | null): void {
+    this.serverBehind = behind;
+    this.serverRevision = behind ? revision : null;
+    this.status = { ...this.status, serverBehind: behind };
+  }
+  /**
+   * A relay-token answer that carried no chain: the server's head is `head` (at `revision` when the answer named one, else the head the
+   * request sent). Classified against the stored chain from record heads alone: 'same', 'behind' (sets serverBehind), or 'unknown'
+   * (ahead, diverged, or not a head of ours: the caller reads the server). null without a ledger, a head, or a stored chain.
+   */
+  noteServerHead(server: { head: string | null; revision: number | null }): LedgerHeadRelation | null {
+    const heads = this.heads;
+    if (!this.options.ledger || this.closed || server.head === null || heads === null) return null;
+    const revision = server.revision ?? heads.list.lastIndexOf(server.head);
+    let relation: LedgerHeadRelation = 'unknown';
+    if (revision >= 0) {
+      try { relation = relateHead(heads.list, { revision, head: server.head }); } catch { return null; }
     }
+    if (relation !== 'unknown') this.setServerBehind(relation === 'behind', revision);
+    return relation;
+  }
+  /**
+   * What this bridge holds that the server does not (for the startup message when the server refuses our key): our records after the
+   * fork point of a recorded server divergence, or after the server's revision when it was seen behind us; null when neither is known.
+   */
+  uniqueHistory(): UniqueHistory | null {
+    const held = this.held;
+    if (held === null) return null;
+    const fork = held.divergences.find(entry => entry.source === 'server')?.forkRevision ?? null;
+    const after = fork ?? (this.serverBehind ? this.serverRevision : null);
+    if (after === null || after < 0 || after > held.ledger.transitions.length) return null;
+    const records = held.ledger.transitions.slice(after);
+    let removals = 0;
+    let passkeys = 0;
+    for (const record of records) {
+      const type = record.payload.operation.type;
+      if (type === 'revoke_device' || type === 'revoke_bridge') removals++;
+      if (type === 'add_authority') passkeys++;
+    }
+    return { afterRevision: after, records: records.length, removals, passkeys };
+  }
+  /**
+   * Account mode, read-only (ledger_head / ledger_chain): the stored chain, for a BROWSER that is a member of this bridge's trusted
+   * checkpoint (listed with exactly this endpoint key, not revoked; policy access, offline grace and own status included). Throws
+   * BridgeSecurityError('permission_denied') for anyone else, Solo, --local and the local CLI.
+   */
+  async memberLedger(principal: VerifiedPrincipal): Promise<MemberLedger> {
+    const held = await this.memberState(principal);
+    // Read-only by contract (the ledger_chain pager copies only the records it returns): no copy of the whole chain per request.
+    return { ledger: held.ledger, accountId: held.checkpoint.accountId, head: held.checkpoint.head, revision: held.checkpoint.revision };
+  }
+  /** ledger_head: like memberLedger, but answers the tip only, without touching the chain. */
+  async memberHead(principal: VerifiedPrincipal): Promise<MemberHead> {
+    const held = await this.memberState(principal);
+    return { accountId: held.checkpoint.accountId, head: held.checkpoint.head, revision: held.checkpoint.revision };
+  }
+  private async memberState(principal: VerifiedPrincipal): Promise<BridgeLedgerState> {
+    if (!this.options.ledger || this.closed) throw new BridgeSecurityError('permission_denied');
+    await this.policy.revalidate(principal, 'read');
+    const held = this.held;
+    const endpoint = principal.endpoint;
+    // The trusted checkpoint (sticky applied): a browser removed on a refused history is refused here too.
+    if (held === null || endpoint.kind !== 'browser' || held.trusted.accountId !== this.endpoint.ownerId
+      || held.trusted.revokedDeviceIds.includes(endpoint.id)
+      || !held.trusted.devices.some(device => device.endpoint.id === endpoint.id && device.endpoint.publicKey === endpoint.publicKey)) {
+      throw new BridgeSecurityError('permission_denied');
+    }
+    return held;
   }
   /** A successful server contact (the token provider calls this after a relay-token response): re-anchors offline grace at now and
    *  persists it (the replica's lastServerReadAt and the clock high-water). An invalid time is ignored. */
@@ -363,39 +492,101 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
     ledger.store.markServerRead(at).catch(failed);
     this.policy.persistLedgerClock().catch(failed);
   }
-  ledgerStatus(): LedgerStatus { return { ...this.status }; }
+  ledgerStatus(): LedgerStatus {
+    return { ...this.status, divergence: this.status.divergence === null ? null : { ...this.status.divergence }, announcements: { ...this.announcements } };
+  }
+  /**
+   * A head announcement from the ledger channel (parsed, from an owner publication), judged against this bridge's TRUSTED checkpoint (sticky
+   * revocations applied) and the record heads of its stored chain: its relation ('same', 'behind' or 'unknown': the caller runs a paced server
+   * read) when it verifies, else null. This bridge's own announcements (kind bridge, its bridgeId) return null before any work and are not
+   * counted; every other null is counted as dropped, every relation as accepted. At most one signature verification, then an O(1) compare.
+   * Never throws. An announcement is never proof: nothing here changes the replica.
+   */
+  async judgeHeadAnnouncement(announcement: HeadAnnouncement): Promise<LedgerHeadRelation | null> {
+    if (!this.options.ledger || this.closed) return null;
+    let relation: LedgerHeadRelation | null = null;
+    try {
+      if (announcement.kind === 'bridge' && announcement.keyId === this.bridgeId) return null;
+      const trusted = this.trustedView;
+      if (trusted !== null && this.heads !== null && this.heads.of === trusted.head
+        && await verifyHeadAnnouncement(trusted, announcement, this.ledgerNow())) {
+        // The chain may have moved during the verification: compare with the heads held now.
+        const heads = this.heads;
+        if (heads !== null) relation = relateHead(heads.list, { revision: announcement.revision, head: announcement.head });
+      }
+    } catch { relation = null; }
+    if (relation === null) this.announcements.dropped++;
+    else this.announcements.accepted++;
+    return relation;
+  }
+  /** Account mode: fires (synchronously, after the projection) whenever the stored head or this bridge's own status changes, e.g. after an
+   *  adopt. Listener errors are logged. */
+  onLedgerHead(listener: () => void): () => void {
+    this.headListeners.add(listener);
+    return () => { this.headListeners.delete(listener); };
+  }
   private ledgerTask<T>(run: () => Promise<T>): Promise<T> {
     const next = this.ledgerTail.then(run);
     this.ledgerTail = next.catch(() => undefined);
     return next;
   }
-  private ownOf(trusted: LedgerCheckpoint | null): LedgerOwnStatus {
+  /** This bridge's keys, exactly as its add_bridge lists them. */
+  private ownKeys(): OwnBridgeKeys {
+    return { bridgeId: this.bridgeId, endpointId: this.endpoint.id, endpointPublicKey: this.endpoint.publicKey, authPublicKey: this.options.ledger?.authPublicKey ?? '' };
+  }
+  /**
+   * This bridge in `trusted` (applyRevocations of the projected RAW chain `ledger`). 'active' = listed with exactly its keys. 'revoked' =
+   * the RAW chain proves the removal of THIS bridge (ledgerRemovesBridge: it added these keys, then revoked the id), the only status that
+   * resets the identity, decided exactly like the startup check (store.ownBridgeStatus). A sticky-only id, a removal seen on a refused
+   * history (C1c `seen`, never merged for our own id anyway) or a tombstone of our id is 'absent': fail closed, never a reset.
+   */
+  private ownOf(trusted: LedgerCheckpoint | null, ledger: Ledger | null): LedgerOwnStatus {
     if (trusted === null) return 'unpaired';
     if (trusted.accountId !== this.endpoint.ownerId) return 'absent';
-    if (trusted.revokedBridgeIds.includes(this.bridgeId)) return 'revoked';
-    const own = trusted.bridges.find(item => item.bridgeId === this.bridgeId);
-    return own !== undefined && own.authPublicKey === this.options.ledger?.authPublicKey && own.endpoint.id === this.endpoint.id
-      && own.endpoint.publicKey === this.endpoint.publicKey ? 'active' : 'absent';
+    const own = this.ownKeys();
+    if (trusted.bridges.some(item => item.bridgeId === own.bridgeId && item.authPublicKey === own.authPublicKey && item.endpoint.id === own.endpointId
+      && item.endpoint.publicKey === own.endpointPublicKey)) return 'active';
+    return ledger !== null && ledgerRemovesBridge(ledger, own) ? 'revoked' : 'absent';
   }
   /** `trusted` is always the store's applyRevocations output, never its raw checkpoint. Own status acts before the policy write, so
    *  neither the revocation nor its emission waits on (or is lost to) a policy storage failure. */
   private async projectState(state: BridgeLedgerState): Promise<LedgerOwnStatus> {
-    const own = await this.project(state.trusted, state.lastServerReadAt);
-    // The stored chain itself is known: a relay echo of it is answered without verification.
-    this.remember(`${state.ledger.transitions.length}:${state.checkpoint.head}`);
-    return own;
+    // The stored chain's record heads let an echo of it (or of a prefix) be answered without verification.
+    if (this.heads === null || this.heads.of !== state.checkpoint.head) {
+      try { this.heads = { of: state.checkpoint.head, list: await ledgerHeads(state.ledger) }; } catch { this.heads = null; }
+    }
+    this.held = state;
+    return this.project(state.trusted, state.lastServerReadAt, state.divergences, state.ledger);
   }
-  private async project(trusted: LedgerCheckpoint | null, lastServerReadAt: number | null): Promise<LedgerOwnStatus> {
-    const own = this.ownOf(trusted);
+  private async project(trusted: LedgerCheckpoint | null, lastServerReadAt: number | null, divergences: readonly LedgerDivergence[] = [],
+    ledger: Ledger | null = null): Promise<LedgerOwnStatus> {
+    const own = this.ownOf(trusted, ledger);
     this.trustedView = trusted !== null && trusted.accountId === this.endpoint.ownerId ? trusted : null;
+    if (trusted === null) { this.held = null; this.heads = null; }
     const projection = this.policy.projectLedger({ trusted, own, lastServerReadAt });
     const previous = this.status.own;
-    this.status = { accountId: trusted?.accountId ?? null, revision: trusted?.revision ?? null, head: trusted?.head ?? null, own };
+    const previousHead = this.status.head;
+    // Server first: a server holding another history matters more than a relay publisher that does.
+    const shown = divergences.find(entry => entry.source === 'server') ?? divergences[0];
+    const divergence = shown === undefined || trusted === null ? null : {
+      source: shown.source, otherHead: shortHead(shown.otherHead), otherRevision: shown.otherRevision, ourRevision: trusted.revision, firstSeen: shown.firstSeen,
+      forkRevision: shown.forkRevision, removedOnOtherHistory: shown.removedOnOtherHistory,
+    };
+    this.status = {
+      accountId: trusted?.accountId ?? null, revision: trusted?.revision ?? null, head: trusted?.head ?? null, own, divergence, serverBehind: this.serverBehind,
+      removedOnOtherHistory: trusted !== null && divergences.some(entry => entry.removedOnOtherHistory),
+    };
     if (own === 'revoked') this.emitBridgeRevoked();
     // Not listed is not a signed revocation: fail closed and say so, but never reset the identity on it.
     else if (own === 'absent' && previous !== 'absent') console.warn('[Security] This bridge is not in its account ledger; account devices are refused.');
+    if (own !== previous || this.status.head !== previousHead) this.emitLedgerHead();
     this.emitRevoked(await projection);
     return own;
+  }
+  private emitLedgerHead(): void {
+    for (const listener of Array.from(this.headListeners)) {
+      try { listener(); } catch (error) { console.error('[Security] ledgerHead listener failed:', error); }
+    }
   }
   private emitRevoked(endpointIds: string[]): void {
     for (const id of endpointIds) for (const listener of this.revoked) listener(id);
@@ -461,6 +652,7 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
     this.closed = true;
     await this.ledgerTail.catch(() => undefined);
     this.revoked.clear(); this.bridgeRevokedListeners.clear(); this.approvalListeners.clear(); this.approvalEmitted.clear(); this.replay.clear();
+    this.headListeners.clear();
     await this.policy.close();
   }
 }

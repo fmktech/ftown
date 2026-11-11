@@ -63,15 +63,20 @@ function AccountDashboardClient(props: DashboardClientProps) {
 /**
  * This browser is not (or no longer) a trusted device of the signed-in account: no encrypted resources exist on this screen.
  * A removal is only reported as final once the server has it: while it is unsaved the server still accepts this browser, so the screen
- * says so (and retries) instead of offering to sign in again; while nothing is confirmed it says "not confirmed".
+ * says so (and retries, or the owner discards it) instead of offering to sign in again; while nothing is confirmed it says "not
+ * confirmed". A removal of this browser that was signed here and not saved (dropped or discarded) is enforced here only: the owner can
+ * keep this browser instead.
  */
 function AccountAccessEnded({ removed, endpointId }: { removed: boolean; endpointId: string }) {
   const { signOut } = useAuthMode();
   const { client, snapshot } = useLedger();
   const [leaving, setLeaving] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [working, setWorking] = useState(false);
   const unsaved = removed && (snapshot.unsaved?.deviceIds ?? []).includes(endpointId);
-  const unconfirmed = removed && !unsaved && snapshot.serverState === "unknown";
+  const pendingSelf = unsaved && snapshot.pendingWrite?.operation === "revoke_device" && snapshot.pendingWrite.deviceId === endpointId;
+  const blockedOnly = removed && !unsaved && (snapshot.blocked?.deviceIds ?? []).includes(endpointId);
+  const unconfirmed = removed && !unsaved && !blockedOnly && snapshot.serverState === "unknown";
   function signInAgain() {
     if (leaving) return;
     setLeaving(true);
@@ -82,11 +87,26 @@ function AccountAccessEnded({ removed, endpointId }: { removed: boolean; endpoin
     setRetrying(true);
     void client.retryNow().catch(() => {}).finally(() => setRetrying(false));
   }
+  function act(run: () => Promise<unknown>) {
+    if (working) return;
+    setWorking(true);
+    void run().catch(() => {}).finally(() => setWorking(false));
+  }
+  const records = snapshot.discarded.filter(record => record.payload.operation.type === "revoke_device" && record.payload.operation.endpointId === endpointId);
   const shell = (children: React.ReactNode) => <main className="flex min-h-dvh items-center justify-center p-4"><section className="max-w-md space-y-4 rounded-xl border border-[var(--border-muted)] bg-[var(--bg-surface)] p-6">{children}</section></main>;
   if (unsaved) return shell(<>
     <h1 className="text-xl font-semibold">Removing this browser…</h1>
-    <p role="status" className="text-sm text-[var(--text-secondary)]">{unsavedRemovalState(snapshot, true).text}</p>
-    <UnsavedRemovalRetryButton snapshot={snapshot} busy={retrying} retrying={retrying} onRetry={retry} />
+    <p role="status" className="text-sm text-[var(--text-secondary)]">{pendingSelf && snapshot.accountMissing ? SELF_ACCOUNT_MISSING : unsavedRemovalState(snapshot, true, endpointId).text}</p>
+    <div className="flex flex-wrap gap-2">
+      {!(pendingSelf && snapshot.accountMissing) && <UnsavedRemovalRetryButton snapshot={snapshot} busy={retrying || working} retrying={retrying} id={endpointId} onRetry={retry} />}
+      {pendingSelf && <button type="button" className="btn-ghost min-h-11" disabled={working || retrying} onClick={() => act(() => client.discardPending())}>Discard this change</button>}
+    </div>
+    {pendingSelf && <p className="text-xs text-[var(--text-muted)]">If the server already received it, it can still apply until another change is saved.</p>}
+  </>);
+  if (blockedOnly) return shell(<>
+    <h1 className="text-xl font-semibold">{SELF_NOT_SAVED_TITLE}</h1>
+    <p role="status" className="text-sm text-[var(--text-secondary)]">{SELF_NOT_SAVED}</p>
+    <button type="button" className="btn-ghost min-h-11" disabled={working || records.length === 0} onClick={() => act(() => client.dismissDiscarded(records))}>Keep this browser</button>
   </>);
   if (unconfirmed) return shell(<>
     <h1 className="text-xl font-semibold">This browser was removed</h1>
@@ -100,6 +120,10 @@ function AccountAccessEnded({ removed, endpointId }: { removed: boolean; endpoin
     <button type="button" className="btn-ghost min-h-11" disabled={leaving} onClick={signInAgain}>{leaving ? "Signing out…" : "Sign in again"}</button>
   </>);
 }
+/** This browser's own removal, signed here, dropped without being saved: enforced on this browser only. */
+export const SELF_NOT_SAVED_TITLE = "This browser's removal was not saved";
+export const SELF_NOT_SAVED = "It is applied on this browser only: your account and your computers still list this browser. Keep this browser to use it again.";
+export const SELF_ACCOUNT_MISSING = "Your account was not found on the server, so this browser's removal cannot be saved. You can discard it.";
 
 function EncryptedDashboardClient({ identity, pins, ledger, accountId, ...props }: DashboardClientProps & { identity: EndpointIdentity; pins?: ApprovedBridge[]; ledger?: LedgerClient; accountId?: string }) {
   const { signOut } = useAuthMode();

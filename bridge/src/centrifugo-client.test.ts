@@ -10,6 +10,8 @@ import { secureFixture } from './security/bridge/fixtures.test.js';
 import { loadLocalIdentity } from './security/bridge/identity.js';
 import { seal } from './security/crypto.js';
 import type { SecureApplication } from './security/protocol.js';
+import { signHeadAnnouncement } from './security/ledger/announce.js';
+import { generateAuthKey } from './security/ledger/proof.js';
 import { UpdateAdmission, UpdateResponseTicket } from './update-admission.js';
 import { UpdateEffects } from './update-effects.js';
 
@@ -251,4 +253,70 @@ test('onLedgerSubscribed fires on each (re)subscribe, errors are contained, and 
   const bare = new CentrifugoClient('ws://127.0.0.1:1/unused', '', async () => '', { onLedgerSubscribed: () => { calls++; } });
   Object.defineProperty(bare, 'client', { value: Object.assign(new EventEmitter(), { state: 'connected', newSubscription: (c: string) => { assert.ok(!c.startsWith('bridges:ledger')); return Object.assign(new EventEmitter(), { subscribe() {}, unsubscribe() {} }); } }) });
   bare.joinBridgesChannel('solo', 'bridge'); assert.equal(calls, 2); void solo;
+});
+
+// Head announcements (CONTRACT §13) on the ledger channel.
+const ANNOUNCE_ACCOUNT = Buffer.alloc(32, 7).toString('base64url');
+async function announcementFixture() {
+  const subscriptions = new Map<string, EventEmitter & { state: string }>();
+  const published: Array<{ channel: string; data: unknown }> = [];
+  const got: unknown[] = [];
+  const transport = Object.assign(new EventEmitter(), { state: 'connected', removeSubscription: () => {},
+    publish: async (channel: string, data: unknown) => { published.push({ channel, data }); },
+    newSubscription: (channel: string) => {
+      const sub = Object.assign(new EventEmitter(), { state: 'unsubscribed', subscribe() { this.state = 'subscribed'; this.emit('subscribed'); }, unsubscribe() { this.state = 'unsubscribed'; } });
+      subscriptions.set(channel, sub); return sub;
+    } });
+  const client = new CentrifugoClient('ws://127.0.0.1:1/unused', '', async () => '', { onLedgerMessage: m => got.push(m) });
+  Object.defineProperty(client, 'client', { value: transport });
+  const key = await generateAuthKey(false);
+  const announcement = await signHeadAnnouncement(key.privateKey, {
+    accountId: ANNOUNCE_ACCOUNT, kind: 'bridge', keyId: 'studio', head: Buffer.alloc(32, 9).toString('base64url'), revision: 4, at: 1_750_000_000_000,
+  });
+  return { client, transport, subscriptions, published, got, announcement };
+}
+
+test('a signed head announcement from the owner dispatches as head_announcement; malformed ones and other publishers never do', async () => {
+  const f = await announcementFixture();
+  f.client.joinBridgesChannel(ANNOUNCE_ACCOUNT, 'studio');
+  const sub = f.subscriptions.get(`bridges:ledger#${ANNOUNCE_ACCOUNT}`)!;
+  const owner = { user: ANNOUNCE_ACCOUNT };
+  sub.emit('publication', { info: owner, data: f.announcement });
+  assert.deepEqual(f.got, [{ type: 'head_announcement', announcement: f.announcement }]);
+  // The unsigned 3-key notice keeps its meaning.
+  sub.emit('publication', { info: owner, data: { type: 'ledger_head', head: 'abc', revision: 3 } });
+  assert.deepEqual(f.got.at(-1), { type: 'ledger_head', head: 'abc', revision: 3 });
+  const a = f.announcement;
+  const bad: unknown[] = [{ ...a, extra: 1 }, { ...a, signature: a.signature.slice(1) }, { ...a, version: 2 }, { ...a, revision: 1025 }, { ...a, head: 'abc' },
+    { ...a, kind: 'browser' }, { ...a, at: -1 }, { type: 'ledger_head', head: 'abc' }, { type: 'ledger_head', head: 'abc', revision: 3, at: 1 }];
+  for (const data of bad) sub.emit('publication', { info: owner, data });
+  assert.equal(f.got.length, 2);
+  // Another account's client, an empty user and a server-API publish (no info) are dropped before parsing.
+  for (const info of [{ user: 'someone' }, { user: '' }, undefined]) sub.emit('publication', { info, data: f.announcement });
+  assert.equal(f.got.length, 2);
+});
+
+test('publishLedgerAnnouncement publishes the announcement on the subscribed ledger channel only', async () => {
+  const f = await announcementFixture();
+  await assert.rejects(f.client.publishLedgerAnnouncement(ANNOUNCE_ACCOUNT, f.announcement), /Ledger channel not subscribed/);
+  f.client.joinBridgesChannel(ANNOUNCE_ACCOUNT, 'studio');
+  const sub = f.subscriptions.get(`bridges:ledger#${ANNOUNCE_ACCOUNT}`)!;
+  sub.state = 'subscribing';
+  await assert.rejects(f.client.publishLedgerAnnouncement(ANNOUNCE_ACCOUNT, f.announcement), /Ledger channel not subscribed/);
+  sub.state = 'subscribed';
+  f.transport.state = 'connecting';
+  await assert.rejects(f.client.publishLedgerAnnouncement(ANNOUNCE_ACCOUNT, f.announcement), /Ledger channel not subscribed/);
+  f.transport.state = 'connected';
+  await assert.rejects(f.client.publishLedgerAnnouncement(ANNOUNCE_ACCOUNT, { ...f.announcement, revision: -1 }), /Invalid head announcement/);
+  await assert.rejects(f.client.publishLedgerAnnouncement(ANNOUNCE_ACCOUNT, { ...f.announcement, extra: 1 } as never), /Invalid head announcement/);
+  const other = Buffer.alloc(32, 8).toString('base64url');
+  await assert.rejects(f.client.publishLedgerAnnouncement(other, f.announcement), /Ledger channel not subscribed/);
+  // Subscribed to another account's ledger channel: an announcement of this account is not published there.
+  f.client.joinBridgesChannel(other, 'studio');
+  await assert.rejects(f.client.publishLedgerAnnouncement(other, f.announcement), /Invalid head announcement/);
+  assert.deepEqual(f.published, []);
+  await f.client.publishLedgerAnnouncement(ANNOUNCE_ACCOUNT, f.announcement);
+  assert.deepEqual(f.published, [{ channel: `bridges:ledger#${ANNOUNCE_ACCOUNT}`, data: f.announcement }]);
+  const disabled = new CentrifugoClient('ws://127.0.0.1:1/unused', '', async () => '', { disabled: true, onLedgerMessage: () => {} });
+  await assert.rejects(disabled.publishLedgerAnnouncement(ANNOUNCE_ACCOUNT, f.announcement), /Ledger channel not subscribed/);
 });

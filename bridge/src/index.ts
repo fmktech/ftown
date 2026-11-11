@@ -47,7 +47,7 @@ import { AgentSessionIdPersister } from './session-ids.js';
 import { HookUsagePersister } from './hook-usage.js';
 import { createRevokedRestart } from './revoked-restart.js';
 import { bridgeMode, canReexecAfterRevocation } from './revocation-gating.js';
-import { createEndpointRegistrar, resetIdentityForStart, startAccountIdentity, startRelay, usesLedger, type EndpointRegistrar } from './ledger-startup.js';
+import { createEndpointRegistrar, heldHistoryNotice, resetIdentityForStart, startAccountIdentity, startRelay, usesLedger, type EndpointRegistrar } from './ledger-startup.js';
 import { createAccountRelay, createLedgerServer, readSavedRelayUrl, registerBridgeEndpoint, saveRelayUrl, subscribeApprovalRequired,
   type AccountRelay } from './ledger-relay.js';
 import { runLedgerPairing } from './ledger-pairing-client.js';
@@ -516,14 +516,17 @@ program
         console.warn('[Bridge] This security service has no approval-required signal; new browsers wait for the relay ledger update.');
       }
       // Only this bridge's own ledger endpoint is published, authenticated by its relay token.
+      // An active member of its own history may hold the only copy of it: a refusal never makes it exit or advise a reset.
+      const holdsHistory = (): boolean => !bridgeRevoked && ledgerSecurity.ledgerStatus().own === 'active';
       const registrar = createEndpointRegistrar({
         register: token => registerBridgeEndpoint({ apiUrl: opts.apiUrl, token, endpoint: bound.endpoint, bridgeId, label: osHostname() }),
-        tokens: relay.tokens, bridgeRevoked: () => bridgeRevoked, log: line => console.warn(line),
+        tokens: relay.tokens, bridgeRevoked: () => bridgeRevoked, held: holdsHistory, log: line => console.warn(line),
       });
       accountRegistrar = registrar;
-      // Step 5: a refusal exits; a temporary failure starts offline (local API, sessions) and keeps retrying in the background.
+      // Step 5: a refusal of a computer that holds its own history starts offline (with the held-history notice); any other refusal exits;
+      // a temporary failure starts offline (local API, sessions) and keeps retrying in the background.
       const relayStart = await startRelay({ getToken: () => relay.tokens.getToken(), relayUrl: () => relay.relayUrl(),
-        bridgeRevoked: () => bridgeRevoked, apiUrl: opts.apiUrl });
+        bridgeRevoked: () => bridgeRevoked, apiUrl: opts.apiUrl, held: () => holdsHistory() ? heldHistoryNotice(ledgerSecurity.uniqueHistory()) : null });
       if (relayStart.kind === 'revoked') { await revokedRestart(); return; }
       if (relayStart.kind === 'exit') return fail(relayStart.message);
       if (relayStart.kind === 'online') {
@@ -532,7 +535,8 @@ program
         if (registration.kind === 'exit') return fail(registration.message);
         if (registration.kind === 'retry') registrar.retryInBackground();
       } else {
-        console.warn(`[Bridge] Could not reach the ftown server (${relayStart.reason}). Starting offline with the last relay URL; reconnecting in the background.`);
+        if (relayStart.notice) for (const line of relayStart.notice) console.warn(line);
+        else console.warn(`[Bridge] Could not reach the ftown server (${relayStart.reason}). Starting offline with the last relay URL; reconnecting in the background.`);
         registrar.retryInBackground();
       }
       auth = { ownerId: bound.accountId, userId: bound.accountId, token: relayStart.kind === 'online' ? relayStart.token : '',
@@ -627,6 +631,7 @@ program
     centrifugo.setSecurity(security);
     // After a refusal centrifuge-js stops for good; the relay reconnects it once the key is accepted or a ledger is adopted.
     if (ledgerRelay) reconnectRelay = () => centrifugo.connect();
+    if (ledgerRelay) ledgerRelay.setLedgerPublisher(announcement => centrifugo.publishLedgerAnnouncement(userId, announcement));
     centrifugo.onLocalPublication((channel, data) => localApiServer.recordPublication(channel, data));
     // Direct transport (WebRTC DataChannel) data plane. Peers attach per session;
     // terminal output/screen fan out to them directly, and to Centrifugo only when
