@@ -89,6 +89,9 @@ export interface LedgerOfferResult {
   state: BridgeLedgerState | null;
   /** Local records an owner-chosen history (adopt + diverged) discarded; empty otherwise. */
   discarded: Signed<LedgerTransition>[];
+  /** A diverged candidate that a resolve_fork already in OUR chain discards (the other side is behind the owner's decision): answered
+   *  keep with relation 'behind' (so a server holding it gets our chain re-offered), never recorded as a divergence, never logged. */
+  covered: boolean;
 }
 export interface BridgeLedgerStoreOptions {
   /** The account the bridge identity is bound to: ledgers of any other account are rejected even while the store is empty, and a
@@ -150,7 +153,7 @@ interface Replica {
 }
 type Decided = Omit<BridgeLedgerState, 'trusted'>;
 /** What chooseLedger said about a refused (keep/diverged) chain. */
-interface RefusedVerdict { seen: LedgerSeen; forkRevision: number | null }
+interface RefusedVerdict { seen: LedgerSeen; forkRevision: number | null; covered: boolean }
 
 const FILE_NAME = 'ledger.json';
 const FILE_VERSION = 3;
@@ -449,9 +452,43 @@ function rememberVerdict(replica: Replica, key: string, verdict: RefusedVerdict)
     replica.verdicts.delete(oldest);
   }
 }
-/** The fork point of two chains of one account (revision of the last shared record), from record heads; null if it cannot be computed. */
-async function forkRevisionOf(local: Ledger, other: Ledger): Promise<number | null> {
-  try { return forkPoint(await ledgerHeads(local), await ledgerHeads(other))?.revision ?? null; } catch { return null; }
+/**
+ * Is the diverged `theirs` (record heads) the branch a resolve_fork in OUR chain already discarded? The resolve_fork must name our fork
+ * point with them (forkHead) and their first record after it (discardedFirst, as C1's resolves() identifies a branch), and their tip must
+ * be the very tip it discarded (discardedHead at discardedRevision) or that first record itself. A tip elsewhere on that branch is not
+ * covered: past discardedHead it may hold records the owner never saw (C1c: the owner resolves again), and below it nothing stored proves
+ * it is a prefix of the discarded tip. Pure; O(our records).
+ */
+function coveredBy(ledger: Ledger, ours: readonly string[], theirs: readonly string[], fork: number): boolean {
+  if (fork + 1 >= theirs.length || fork >= ours.length) return false;
+  const tipRevision = theirs.length - 1;
+  for (const record of ledger.transitions) {
+    const operation = record.payload.operation;
+    if (operation.type !== 'resolve_fork' || operation.forkHead !== ours[fork] || operation.discardedFirst !== theirs[fork + 1]) continue;
+    if (tipRevision === fork + 1 || (tipRevision === operation.discardedRevision && theirs[tipRevision] === operation.discardedHead)) return true;
+  }
+  return false;
+}
+/** What a keep/diverged verdict needs beyond chooseLedger's: the fork point and whether one of our resolve_forks covers the candidate. */
+async function refusedVerdict(local: Ledger, other: Ledger, seen: LedgerSeen): Promise<RefusedVerdict> {
+  let ours: string[];
+  let theirs: string[];
+  try { ours = await ledgerHeads(local); theirs = await ledgerHeads(other); } catch { return { seen, forkRevision: null, covered: false }; }
+  const forkRevision = forkPoint(ours, theirs)?.revision ?? null;
+  return { seen, forkRevision, covered: forkRevision !== null && coveredBy(local, ours, theirs, forkRevision) };
+}
+/**
+ * Clearing rule 2: the divergences an adopted `ledger` settles. An entry whose recorded other tip is exactly the tip a resolve_fork in
+ * `ledger` discards (discardedHead at discardedRevision) is over, whatever source recorded it: the owner chose our side against it. Only
+ * the exact tip is matched; any other entry stays until its own source agrees (clearing rule 1).
+ */
+function unresolved(ledger: Ledger, divergences: readonly LedgerDivergence[]): LedgerDivergence[] {
+  const discarded = new Set<string>();
+  for (const record of ledger.transitions) {
+    const operation = record.payload.operation;
+    if (operation.type === 'resolve_fork') discarded.add(`${operation.discardedRevision}:${operation.discardedHead}`);
+  }
+  return divergences.filter(entry => !discarded.has(`${entry.otherRevision}:${entry.otherHead}`));
 }
 
 /**
@@ -461,14 +498,21 @@ async function forkRevisionOf(local: Ledger, other: Ledger): Promise<number | nu
  * - keep / same, behind: nothing changes, except that a divergence recorded FROM THIS SOURCE is cleared (the histories agree again).
  * - keep / diverged: ours is kept and decides; the divergence is recorded (refuse) and the removals chooseLedger saw on it (`seen`) are
  *   added to the sticky set, except this bridge's own id (status only). A chain already judged (same source, our head, its tip) is not
- *   verified again.
+ *   verified again. A diverged chain that one of OUR resolve_forks already discards is `covered` (cover): answered keep/'behind', its
+ *   removals enforced, never recorded or logged.
+ * Clearing a recorded divergence: (1) an offer from the SAME source that is same, behind, covered or adopted ahead clears that source's
+ * entry; (2) any adoption clears every entry whose tip a resolve_fork of the adopted chain discards (exact tip), and an owner-chosen
+ * adoption clears all of them.
  * - reject: ignored (logged, spaced).
  */
 async function decide(replica: Replica, candidate: unknown, source: LedgerSource): Promise<LedgerOfferResult> {
   const now = replica.clock();
   const stored = await load(replica);
   const answer = (decision: LedgerOfferResult['decision'], relation: LedgerRelation | null, tip: LedgerTip | null, state = stored,
-    discarded: Signed<LedgerTransition>[] = []): LedgerOfferResult => ({ decision, relation, candidate: tip, state, discarded });
+    discarded: Signed<LedgerTransition>[] = []): LedgerOfferResult => ({ decision, relation, candidate: tip, state, discarded, covered: false });
+  const settled = async (verdict: RefusedVerdict, tip: LedgerTip, from: BridgeLedgerState): Promise<LedgerOfferResult> => verdict.covered
+    ? { ...answer('keep', 'behind', tip, await cover(replica, from, source, verdict)), covered: true }
+    : answer('keep', 'diverged', tip, await refuse(replica, from, source, tip, now, verdict));
   if (source !== 'server' && source !== 'relay') return answer('reject', null, null);
   if (stored === null) return answer('reject', null, null);
   let ledger: Ledger;
@@ -478,7 +522,7 @@ async function decide(replica: Replica, candidate: unknown, source: LedgerSource
   const key = verdictKey(source, stored.checkpoint.head, tip);
   const known = replica.verdicts.get(key);
   // Same payloads (hash-linked to this tip) against the same chain of ours: chooseLedger would answer keep/diverged again.
-  if (known !== undefined) return answer('keep', 'diverged', tip, await refuse(replica, stored, source, tip, now, known));
+  if (known !== undefined) return settled(known, tip, stored);
   const choice = await chooseLedger(stored.ledger, ledger, now, cacheOf(stored));
   if (choice.decision === 'reject') { ignored(replica, source, now); return answer('reject', choice.relation, tip); }
   if (choice.decision === 'adopt') {
@@ -486,21 +530,38 @@ async function decide(replica: Replica, candidate: unknown, source: LedgerSource
     // choice.ledger, never the candidate as passed in: our own prefix byte-for-byte, then the candidate's verified records.
     const adopted = await commit(replica, {
       ledger: choice.ledger, checkpoint: choice.checkpoint, sticky: adoptedSticky(stored.sticky, choice), lastServerReadAt: stored.lastServerReadAt,
-      // An owner-chosen history replaces ours: every recorded divergence was measured against the chain it discarded.
-      divergences: divergent ? [] : withoutSource(stored.divergences, source), refused: stored.refused,
+      // An owner-chosen history replaces ours: every recorded divergence was measured against the chain it discarded. An extension clears
+      // this source's entry (rule 1) and every entry whose tip one of its resolve_forks discards (rule 2), whichever source brought it.
+      divergences: divergent ? [] : unresolved(choice.ledger, withoutSource(stored.divergences, source)), refused: stored.refused,
     });
     if (adopted === null) return answer('reject', choice.relation, tip);
     if (divergent) replica.log(adoptionLine(stored, choice));
     return answer('adopt', choice.relation, tip, adopted, choice.discarded.records);
   }
   if (choice.relation === 'diverged') {
-    const verdict: RefusedVerdict = { seen: choice.seen, forkRevision: await forkRevisionOf(stored.ledger, ledger) };
+    const verdict = await refusedVerdict(stored.ledger, ledger, choice.seen);
     rememberVerdict(replica, key, verdict);
-    return answer('keep', 'diverged', tip, await refuse(replica, stored, source, tip, now, verdict));
+    return settled(verdict, tip, stored);
   }
   // same / behind: the histories agree; a divergence recorded FROM THIS SOURCE is over (another source's stays).
   if (!stored.divergences.some(entry => entry.source === source)) return answer('keep', choice.relation, tip);
   return answer('keep', choice.relation, tip, await persist(replica, { ...stored, divergences: withoutSource(stored.divergences, source) }));
+}
+/**
+ * keep / diverged, but covered: our own resolve_fork already discards that chain, so the source is behind the owner's decision. Like
+ * behind: this source's divergence entry is over (rule 1) and nothing is logged or recorded (rule 3); the chain's removals are still
+ * enforced (`seen`, never our own id), exactly as for any refused chain. Written only when something changes.
+ */
+async function cover(replica: Replica, stored: BridgeLedgerState, source: LedgerSource, verdict: RefusedVerdict): Promise<BridgeLedgerState> {
+  const sticky = union(stored.sticky, enforced(replica, verdict.seen));
+  const divergences = withoutSource(stored.divergences, source);
+  const stickyChanged = !sameSticky(sticky, stored.sticky);
+  if (!stickyChanged && divergences.length === stored.divergences.length) return stored;
+  if (stickyChanged) {
+    const merged = await commit(replica, { ledger: stored.ledger, checkpoint: stored.checkpoint, sticky, lastServerReadAt: stored.lastServerReadAt, divergences, refused: stored.refused });
+    if (merged !== null) return merged;
+  }
+  return persist(replica, { ...stored, divergences });
 }
 /**
  * keep / diverged. Our chain and checkpoint are untouched; the file is written only when something changes:
@@ -580,7 +641,7 @@ async function admit(
     if (choice.decision === 'adopt') {
       const divergent = choice.relation === 'diverged';
       next = { ledger: choice.ledger, checkpoint: choice.checkpoint, sticky: adoptedSticky(stored.sticky, choice), lastServerReadAt: stored.lastServerReadAt,
-        divergences: divergent ? [] : stored.divergences, refused: stored.refused };
+        divergences: divergent ? [] : unresolved(choice.ledger, stored.divergences), refused: stored.refused };
       if (divergent) adoption = adoptionLine(stored, choice);
     } else {
       // keep (same, behind or a refused divergence): ours decides; of a refused history only its removals are enforced (C1c `seen`, never
