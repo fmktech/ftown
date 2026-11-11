@@ -65,22 +65,34 @@ export interface IsolatedBridge {
   home: string;
   dataDir: string;
   tmuxDir: string;
-  pid: number;
-  /** Everything the process wrote to stdout/stderr; a revoked re-exec keeps the PID and the pipes. */
+  /** The CURRENT process (changes on restartProcess). */
+  readonly pid: number;
+  /** Everything the process wrote to stdout/stderr, across restarts; a revoked re-exec keeps the PID and the pipes. */
   output(): string;
   running(): boolean;
   /** Trimmed <dataDir>/bridge-id, or null. */
   bridgeIdFile(): string | null;
+  /** The bridge's own ledger replica tip (<dataDir>/security/ledger.json checkpoint), or null while absent or being replaced. */
+  replicaTip(): { revision: number; head: string } | null;
   /** The last pairing prompt printed after `afterOffset` characters of output. */
   pairing(options?: { afterOffset?: number; timeoutMs?: number }): Promise<PairingPrompt>;
   hasTmuxSession(sessionId: string): Promise<boolean>;
+  /** Stop THIS bridge's process (SIGTERM, then SIGKILL) and keep its HOME, data and tmux server. */
+  stopProcess(): Promise<void>;
+  /** Start the bridge again on the same HOME (after stopProcess); records the new PID. */
+  startProcess(): Promise<void>;
+  /** SIGSTOP / SIGCONT this bridge's own process: alive and connected, but silent. */
+  freeze(): void;
+  thaw(): void;
+  /** Stop the process, its private tmux server, and remove the scratch HOME. */
   stop(): Promise<void>;
 }
 
 /**
  * A test-owned, UNPAIRED account bridge: private HOME, data dir and tmux socket
  * dir under e2e/.isolated-bridges/ and /tmp/ftpk-*, captured output, recorded
- * PID (stop-services.sh kills leftovers by that exact record only).
+ * PID (stop-services.sh kills leftovers by that exact record only). Every
+ * signal goes to the child this helper spawned, never to anything else.
  */
 export async function startIsolatedBridge(options: { apiUrl?: string } = {}): Promise<IsolatedBridge> {
   const root = join(E2E_DIR, ".isolated-bridges");
@@ -103,49 +115,74 @@ export async function startIsolatedBridge(options: { apiUrl?: string } = {}): Pr
     await removeScratch();
     throw new Error("test-owned bridge setup failed");
   }
-  const child: ChildProcess = spawn(process.execPath, [join(BRIDGE_DIST, "index.js"), "--api-url", options.apiUrl ?? UI_BASE_URL], {
-    cwd: home, env, stdio: ["ignore", "pipe", "pipe"],
-  });
-  if (typeof child.pid !== "number") { await removeScratch(); throw new Error("failed to spawn the test bridge"); }
-  const pid = child.pid;
-  await writeFile(join(home, "pid"), `${pid}\n`);
   let output = "";
   const append = (chunk: Buffer) => {
     output += chunk.toString("utf8");
     if (output.length > MAX_OUTPUT) output = output.slice(-MAX_OUTPUT);
   };
-  child.stdout?.on("data", append);
-  child.stderr?.on("data", append);
+  let child: ChildProcess;
   let exited = false;
-  child.once("exit", () => { exited = true; });
-  child.once("error", () => { exited = true; });
+  const spawnBridge = async () => {
+    const next = spawn(process.execPath, [join(BRIDGE_DIST, "index.js"), "--api-url", options.apiUrl ?? UI_BASE_URL], {
+      cwd: home, env, stdio: ["ignore", "pipe", "pipe"],
+    });
+    if (typeof next.pid !== "number") throw new Error("failed to spawn the test bridge");
+    exited = false;
+    next.stdout?.on("data", append);
+    next.stderr?.on("data", append);
+    next.once("exit", () => { if (child === next) exited = true; });
+    next.once("error", () => { if (child === next) exited = true; });
+    child = next;
+    await writeFile(join(home, "pid"), `${next.pid}\n`);
+  };
+  try { await spawnBridge(); } catch (error) { await removeScratch(); throw error; }
   const stopped = () => exited || child.exitCode !== null || child.signalCode !== null;
   const waitExit = async (timeout: number) => {
     const deadline = Date.now() + timeout;
     while (!stopped() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100));
     return stopped();
   };
+  const stopChild = async (): Promise<boolean> => {
+    if (stopped()) return true;
+    try { child.kill("SIGCONT"); } catch { /* not frozen */ }
+    child.kill("SIGTERM");
+    if (!await waitExit(8000)) { child.kill("SIGKILL"); if (!await waitExit(3000)) return false; }
+    return true;
+  };
   const tmux = (args: string[]) => execute("tmux", ["-S", tmuxSocket(tmuxDir), ...args], { env, timeout: 5000, maxBuffer: 32768 });
   return {
-    home, dataDir, tmuxDir, pid,
+    home, dataDir, tmuxDir,
+    get pid() { return child.pid!; },
     output: () => output,
     running: () => !stopped(),
     bridgeIdFile() {
       try { return readFileSync(join(dataDir, "bridge-id"), "utf8").trim() || null; } catch { return null; }
     },
+    replicaTip() {
+      try {
+        const file = JSON.parse(readFileSync(join(dataDir, "security", "ledger.json"), "utf8")) as { checkpoint?: { revision?: unknown; head?: unknown } };
+        const { revision, head } = file.checkpoint ?? {};
+        return typeof revision === "number" && typeof head === "string" ? { revision, head } : null;
+      } catch { return null; }
+    },
     pairing: (opts = {}) => waitForPairingPrompt(() => output, { ...opts, alive: () => !stopped() }),
     async hasTmuxSession(sessionId: string) {
       try { await tmux(["has-session", "-t", `=ftown-${sessionId}`]); return true; } catch { return false; }
     },
+    async stopProcess() {
+      if (!await stopChild()) throw new Error("test-owned bridge did not exit");
+    },
+    async startProcess() {
+      if (!stopped()) throw new Error("the test-owned bridge is still running");
+      await spawnBridge();
+    },
+    freeze() { if (!stopped()) child.kill("SIGSTOP"); },
+    thaw() { if (!stopped()) child.kill("SIGCONT"); },
     async stop() {
-      let failed = false;
-      if (!stopped()) {
-        child.kill("SIGTERM");
-        if (!await waitExit(8000)) { child.kill("SIGKILL"); if (!await waitExit(3000)) failed = true; }
-      }
+      const ok = await stopChild();
       // tmux sessions outlive the bridge by design; this server is reachable only through the private socket.
       if (existsSync(tmuxSocket(tmuxDir))) { try { await tmux(["kill-server"]); } catch { /* already gone */ } }
-      if (failed) throw new Error("test-owned bridge did not exit");
+      if (!ok) throw new Error("test-owned bridge did not exit");
       await removeScratch();
     },
   };

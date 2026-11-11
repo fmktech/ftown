@@ -52,13 +52,17 @@ export function channelsLib(): Promise<ChannelsModule> {
 }
 
 const b64url = (bytes: Uint8Array | Buffer) => Buffer.from(bytes).toString("base64url");
-/** A synthetic per-helper client source (x-real-ip is honoured only in this test deployment). */
-const SOURCE = `2001:db8:a11:${randomBytes(10).toString("hex").match(/.{4}/g)!.join(":")}`;
+/**
+ * A synthetic client source per helper REQUEST (x-real-ip is honoured only in this test deployment; the server buckets IPv6
+ * by /64, so the random part is in the /64). Housekeeping and polling helpers must never spend a per-source budget that a
+ * later test's cleanup needs (a shared source hit `ledger-read` 120/min when tests polled the ledger).
+ */
+const source = () => `2001:db8:a11:${randomBytes(10).toString("hex").match(/.{4}/g)!.join(":")}`;
 
 async function api(path: string, init: { method?: string; body?: unknown } = {}): Promise<{ status: number; body: Record<string, unknown> }> {
   const response = await fetch(`${UI_BASE_URL}${path}`, {
     method: init.method ?? "GET",
-    headers: { "content-type": "application/json", accept: "application/json", "x-real-ip": SOURCE },
+    headers: { "content-type": "application/json", accept: "application/json", "x-real-ip": source() },
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
   });
   let body: Record<string, unknown> = {};
@@ -101,24 +105,37 @@ function rawToDer(raw: Buffer): Buffer {
   return Buffer.concat([Buffer.from([0x30, content.length]), content]);
 }
 
+/** `ledger` extended by passkey-signed records for `operations`, in order, built exactly as a browser signs them (nothing is sent). */
+export async function signedExtension(ledger: Ledger, operations: LedgerOperation[], account: RunAccount = readRunAccount()): Promise<Ledger> {
+  const lib = await ledgerLib();
+  let current = ledger;
+  let checkpoint = await lib.verifyLedger(current);
+  for (const operation of operations) {
+    const payload: LedgerTransition = lib.nextTransition(checkpoint, ledgerCredentialId(account), operation, Date.now(), lib.ledgerLastIssuedAt(current));
+    const record: Signed<LedgerTransition> = { payload, signature: await passkeyAssertion(await lib.ledgerChallenge(payload), account) };
+    current = { genesis: current.genesis, transitions: [...current.transitions, record] };
+    checkpoint = await lib.verifyLedger(current);
+  }
+  return current;
+}
+
+/** POST a chain for an EXISTING account, bound to the head it extends (expectHead), as every bound writer must; null sends it unbound. */
+export async function offerChain(ledger: Ledger, expectHead: string | null): Promise<{ status: number; body: Record<string, unknown> }> {
+  return api("/api/account/ledger", { method: "POST", body: expectHead === null ? { ledger } : { ledger, expectHead } });
+}
+
 /**
- * Append one passkey-signed operation to the server's ledger (POST the whole
- * chain). Retries on a lost race: the record must be in the winning chain.
+ * Append one passkey-signed operation to the server's ledger: the stored chain plus one record, POSTed with `expectHead` (the
+ * stored head it extends). A concurrent write (409 head_changed) is retried on the new head.
  */
 export async function appendOperation(operation: LedgerOperation, account: RunAccount = readRunAccount()): Promise<Ledger> {
   const lib = await ledgerLib();
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const { ledger, checkpoint } = await serverLedger(account);
-    const payload: LedgerTransition = lib.nextTransition(checkpoint, ledgerCredentialId(account), operation, Date.now(), lib.ledgerLastIssuedAt(ledger));
-    const record: Signed<LedgerTransition> = { payload, signature: await passkeyAssertion(await lib.ledgerChallenge(payload), account) };
-    const candidate: Ledger = { genesis: ledger.genesis, transitions: [...ledger.transitions, record] };
-    const { status, body } = await api("/api/account/ledger", { method: "POST", body: { ledger: candidate } });
-    if (status === 200 || status === 201) {
-      const winner = lib.parseLedger(body.ledger);
-      const head = await lib.ledgerHead(payload);
-      if (await Promise.all(winner.transitions.map(item => lib.ledgerHead(item.payload))).then(heads => heads.includes(head))) return winner;
-      continue; // a concurrent append won this revision: rebuild on the new head
-    }
+    const candidate = await signedExtension(ledger, [operation], account);
+    const { status, body } = await offerChain(candidate, checkpoint.head);
+    if (status === 200 || status === 201) return lib.parseLedger(body.ledger);
+    if (status === 409 && body.error === "head_changed") continue; // a concurrent write won: rebuild on the new head
     if (status === 429 || status === 503) { await new Promise(resolve => setTimeout(resolve, 1000)); continue; }
     throw new Error(`POST /api/account/ledger: ${status} ${JSON.stringify(body).slice(0, 200)}`);
   }
