@@ -391,6 +391,9 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     await page.getByRole("button", { name: "Close preview", exact: true }).click();
     const replacement = await fixture.register(target, fileName);
     expect(replacement).not.toBe(registration);
+    // A new set id on an already-seen preview must not re-open a pane the user closed.
+    await expect(iframe(page, fileName)).not.toBeVisible();
+    await page.getByRole("button", { name: "Open preview", exact: true }).click();
     await expect(documentFrame(page, fileName).getByRole("heading", { name: `${marker} version 3`, exact: true })).toBeVisible();
 
     await fixture.register(other, otherFileName);
