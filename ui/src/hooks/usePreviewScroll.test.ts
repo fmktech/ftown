@@ -2,7 +2,7 @@
 import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { usePreviewScroll } from './usePreviewScroll';
-import { PREVIEW_SCROLL_CHANNEL as channel, PREVIEW_LINK_CHANNEL } from '@/lib/preview-scroll-protocol';
+import { PREVIEW_SCROLL_CHANNEL as channel, PREVIEW_LINK_CHANNEL, parsePreviewLinkMessage, parsePreviewScrollOwnerKey, previewScrollOwnerKey } from '@/lib/preview-scroll-protocol';
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 it('uses only the current opaque frame, snapshots before replacement and restores its coordinates', () => {
@@ -84,4 +84,87 @@ it('freezes the confirmed link target and opens it exactly once', () => {
    expect(open).toHaveBeenCalledWith('https://trusted.example.test/', '_blank', 'noopener,noreferrer');
    expect(hook.result.current.linkPrompt).toBeNull();
  } finally { vi.unstubAllGlobals(); }
+});
+
+it('keeps independent scroll coordinates per file owner', () => {
+  const getEpoch = () => 0;
+  const hook = renderHook(({ candidate, owner }) => usePreviewScroll(candidate, owner, getEpoch), { initialProps: { candidate: { html: 'a', key: 'a1' } as { html: string; key: string } | null, owner: 'owner-a' } });
+  const frame = { postMessage: vi.fn() };
+  Object.defineProperty(hook.result.current.iframeRef, 'current', { configurable: true, value: { contentWindow: frame } });
+  const receive = (data: object) => act(() => window.dispatchEvent(new MessageEvent('message', { data, source: frame as unknown as Window, origin: 'null' })));
+  const a1 = hook.result.current.display!.documentId;
+  receive({ channel, documentId: a1, kind: 'ready' });
+  receive({ channel, documentId: a1, kind: 'restored', x: 0, y: 0 });
+  receive({ channel, documentId: a1, kind: 'position', x: 0, y: 300 });
+  hook.rerender({ candidate: null, owner: 'owner-b' });
+  hook.rerender({ candidate: { html: 'b', key: 'b1' }, owner: 'owner-b' });
+  const b1 = hook.result.current.display!.documentId;
+  receive({ channel, documentId: b1, kind: 'ready' });
+  expect(frame.postMessage).toHaveBeenLastCalledWith({ channel, documentId: b1, kind: 'restore', x: 0, y: 0 }, '*');
+  receive({ channel, documentId: b1, kind: 'restored', x: 0, y: 0 });
+  receive({ channel, documentId: b1, kind: 'position', x: 0, y: 700 });
+  hook.rerender({ candidate: null, owner: 'owner-a' });
+  hook.rerender({ candidate: { html: 'a', key: 'a1' }, owner: 'owner-a' });
+  const a2 = hook.result.current.display!.documentId;
+  receive({ channel, documentId: a2, kind: 'ready' });
+  expect(frame.postMessage).toHaveBeenLastCalledWith({ channel, documentId: a2, kind: 'restore', x: 0, y: 300 }, '*');
+});
+
+it('switches the owner directly without a loading gap and restores the earlier position', () => {
+  const getEpoch = () => 0;
+  const hook = renderHook(({ candidate, owner }) => usePreviewScroll(candidate, owner, getEpoch), { initialProps: { candidate: { html: 'a', key: 'a1' } as { html: string; key: string } | null, owner: 'owner-a' } });
+  const frame = { postMessage: vi.fn() };
+  Object.defineProperty(hook.result.current.iframeRef, 'current', { configurable: true, value: { contentWindow: frame } });
+  const receive = (data: object) => act(() => window.dispatchEvent(new MessageEvent('message', { data, source: frame as unknown as Window, origin: 'null' })));
+  const a1 = hook.result.current.display!.documentId;
+  receive({ channel, documentId: a1, kind: 'ready' });
+  receive({ channel, documentId: a1, kind: 'restored', x: 0, y: 0 });
+  receive({ channel, documentId: a1, kind: 'position', x: 12, y: 400 });
+  hook.rerender({ candidate: { html: 'b', key: 'b1' }, owner: 'owner-b' });
+  const b1 = hook.result.current.display!;
+  expect(b1.key).toBe('b1');
+  receive({ channel, documentId: b1.documentId, kind: 'ready' });
+  expect(frame.postMessage).toHaveBeenLastCalledWith({ channel, documentId: b1.documentId, kind: 'restore', x: 0, y: 0 }, '*');
+  hook.rerender({ candidate: { html: 'a', key: 'a1' }, owner: 'owner-a' });
+  const a2 = hook.result.current.display!;
+  receive({ channel, documentId: a2.documentId, kind: 'ready' });
+  expect(frame.postMessage).toHaveBeenLastCalledWith({ channel, documentId: a2.documentId, kind: 'restore', x: 12, y: 400 }, '*');
+});
+
+it('forwards switch-file messages to the caller and ignores malformed ones', () => {
+  const onSwitchFile = vi.fn();
+  const hook = renderHook(() => usePreviewScroll({ html: 'a', key: 'a1' }, 'owner-a', () => 0, onSwitchFile));
+  const frame = { postMessage: vi.fn() };
+  Object.defineProperty(hook.result.current.iframeRef, 'current', { configurable: true, value: { contentWindow: frame } });
+  const receive = (data: object) => act(() => window.dispatchEvent(new MessageEvent('message', { data, source: frame as unknown as Window, origin: 'null' })));
+  receive({ channel: PREVIEW_LINK_CHANNEL, kind: 'switch-file', fileName: 'notes.md' });
+  expect(onSwitchFile).toHaveBeenCalledTimes(1);
+  expect(onSwitchFile).toHaveBeenCalledWith('notes.md');
+  for (const bad of [
+    { channel: PREVIEW_LINK_CHANNEL, kind: 'switch-file' },
+    { channel: PREVIEW_LINK_CHANNEL, kind: 'switch-file', fileName: '' },
+    { channel: PREVIEW_LINK_CHANNEL, kind: 'switch-file', fileName: 'notes.md', extra: true },
+    { channel: PREVIEW_LINK_CHANNEL, kind: 'open-link' },
+  ]) receive(bad);
+  expect(onSwitchFile).toHaveBeenCalledTimes(1);
+  expect(hook.result.current.linkPrompt).toBeNull();
+});
+
+it('round-trips the per-file owner key and rejects bad keys', () => {
+  const owner = { userId: 'user', bridgeId: 'bridge', sessionId: 'one', previewId: '11111111-1111-4111-8111-111111111111', fileId: '22222222-2222-4222-8222-222222222222' };
+  const key = previewScrollOwnerKey(owner);
+  expect(key).toBe(JSON.stringify(['user', 'bridge', 'one', owner.previewId, owner.fileId]));
+  expect(parsePreviewScrollOwnerKey(key)).toEqual(owner);
+  expect(parsePreviewScrollOwnerKey(JSON.stringify(['user', 'bridge', 'one']))).toBeNull();
+  expect(parsePreviewScrollOwnerKey('not-json')).toBeNull();
+  expect(parsePreviewScrollOwnerKey(JSON.stringify(['user', 'bridge', 'one', 1, 2]))).toBeNull();
+});
+
+it('parses link messages strictly', () => {
+  expect(parsePreviewLinkMessage({ channel: PREVIEW_LINK_CHANNEL, kind: 'open-link', url: 'https://example.test/' })).toEqual({ channel: PREVIEW_LINK_CHANNEL, kind: 'open-link', url: 'https://example.test/' });
+  expect(parsePreviewLinkMessage({ channel: PREVIEW_LINK_CHANNEL, kind: 'switch-file', fileName: 'notes.md' })).toEqual({ channel: PREVIEW_LINK_CHANNEL, kind: 'switch-file', fileName: 'notes.md' });
+  expect(parsePreviewLinkMessage({ channel: PREVIEW_LINK_CHANNEL, kind: 'open-link', url: 'https://example.test/', extra: 1 })).toBeNull();
+  expect(parsePreviewLinkMessage({ channel: 'other', kind: 'switch-file', fileName: 'notes.md' })).toBeNull();
+  expect(parsePreviewLinkMessage({ channel: PREVIEW_LINK_CHANNEL, kind: 'switch-file', fileName: 1 })).toBeNull();
+  expect(parsePreviewLinkMessage(null)).toBeNull();
 });

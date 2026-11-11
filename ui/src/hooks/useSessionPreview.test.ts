@@ -3,9 +3,15 @@ import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { MessageClient } from '@/lib/message-client';
 import type { Command, CommandResponse } from '@/types';
+import type { SessionPreviewFile } from '../../../bridge/src/preview-protocol';
 import { useSessionPreview } from './useSessionPreview';
 const id = '12345678-1234-4234-8234-123456789abc';
-const target = { bridgeId: 'bridge', sessionId: 'one', preview: { id, fileName: 'demo.html' } };
+const fileId = '22345678-2234-4234-8234-123456789abc';
+const otherFileId = '32345678-3234-4234-8234-123456789abc';
+const fileA: SessionPreviewFile = { id: fileId, fileName: 'demo.html', kind: 'html' };
+const fileB: SessionPreviewFile = { id: otherFileId, fileName: 'notes.md', kind: 'markdown' };
+const preview = { id, files: [fileA, fileB] };
+const target = { bridgeId: 'bridge', sessionId: 'one', preview, file: fileA };
 const client = {} as MessageClient;
 let subtleDescriptor: PropertyDescriptor | undefined;
 beforeEach(() => { subtleDescriptor = Object.getOwnPropertyDescriptor(globalThis.crypto, 'subtle'); vi.useFakeTimers(); Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' }); });
@@ -38,8 +44,8 @@ it('keeps the document key on unchanged polls, remounts on manual refresh, and p
   const html = '<p>hello</p>'; const digest = createHash('sha256').update(html).digest(); const revision = digest.toString('hex');
   Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest: async () => Uint8Array.from(digest).buffer } });
   const sendCommand = vi.fn(async (command: Command) => ({ requestId: 'x', success: true, data: command.type === 'session_preview_chunk'
-    ? { state: 'chunk', previewId: id, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true }
-    : { state: 'knownRevision' in command.payload ? 'unchanged' : 'ready', previewId: id, revision, totalBytes: html.length } }));
+    ? { state: 'chunk', previewId: id, fileId, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true }
+    : { state: 'knownRevision' in command.payload ? 'unchanged' : 'ready', previewId: id, fileId, revision, totalBytes: html.length } }));
   const hook = renderHook(() => useSessionPreview({ client, userId: 'user', target, visible: true, readable: true, securityGeneration: 0, sendCommand }));
   await act(async () => {});
   expect(hook.result.current.state.kind).toBe('ready');
@@ -66,8 +72,8 @@ it('keeps automatic status checks quiet but shows actual updates and manual refr
   const pendingStatuses: Array<(response: CommandResponse) => void> = [];
   let resolveChunk: ((response: CommandResponse) => void) | undefined;
   const reply = (data: unknown): CommandResponse => ({ requestId: 'x', success: true, data });
-  const status = (state: 'ready' | 'unchanged', revision: string, text: string) => reply({ state, previewId: id, revision, totalBytes: text.length });
-  const chunk = (revision: string, text: string) => reply({ state: 'chunk', previewId: id, revision, totalBytes: text.length, offset: 0, dataBase64: btoa(text), done: true });
+  const status = (state: 'ready' | 'unchanged', revision: string, text: string) => reply({ state, previewId: id, fileId, revision, totalBytes: text.length });
+  const chunk = (revision: string, text: string) => reply({ state: 'chunk', previewId: id, fileId, revision, totalBytes: text.length, offset: 0, dataBase64: btoa(text), done: true });
   let statuses = 0;
   const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
     if (command.type === 'session_preview_status') {
@@ -101,8 +107,8 @@ function stablePreviewHarness() {
   const pending: Array<(reply: CommandResponse) => void> = [];
   let firstStatus = true;
   const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
-    if (command.type === 'session_preview_chunk') return Promise.resolve({ requestId: 'chunk', success: true, data: { state: 'chunk', previewId: id, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true } });
-    if (firstStatus) { firstStatus = false; return Promise.resolve({ requestId: 'status', success: true, data: { state: 'ready', previewId: id, revision, totalBytes: html.length } }); }
+    if (command.type === 'session_preview_chunk') return Promise.resolve({ requestId: 'chunk', success: true, data: { state: 'chunk', previewId: id, fileId, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true } });
+    if (firstStatus) { firstStatus = false; return Promise.resolve({ requestId: 'status', success: true, data: { state: 'ready', previewId: id, fileId, revision, totalBytes: html.length } }); }
     return new Promise(resolve => pending.push(resolve));
   });
   return { html, revision, sendCommand, pending };
@@ -161,10 +167,10 @@ it('latches account authority loss and recovery in one batch and ignores an old 
   const stale = h.pending.shift()!;
   act(() => { auth.account(false); auth.account(true); });
   expect(hook.result.current.state.kind).toBe('loading');
-  await act(async () => { stale({ requestId: 'old', success: true, data: { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  await act(async () => { stale({ requestId: 'old', success: true, data: { state: 'unchanged', previewId: id, fileId, revision: h.revision, totalBytes: h.html.length } }); });
   expect(hook.result.current.state.kind).toBe('loading');
   expect(h.sendCommand.mock.calls.at(-1)?.[0].payload).not.toHaveProperty('knownRevision');
-  await act(async () => { h.pending.shift()!({ requestId: 'new', success: true, data: { state: 'ready', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  await act(async () => { h.pending.shift()!({ requestId: 'new', success: true, data: { state: 'ready', previewId: id, fileId, revision: h.revision, totalBytes: h.html.length } }); });
   expect(hook.result.current.state.kind).toBe('ready');
   if (hook.result.current.state.kind !== 'ready') throw new Error('expected ready');
   expect(hook.result.current.state.key).not.toBe(state.key);
@@ -232,8 +238,8 @@ it('rejects a digest completion started before account authority was revoked', a
   Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest: () => new Promise<ArrayBuffer>(resolve => { finishDigest = resolve; }) } });
   const pending: Array<(value: CommandResponse) => void> = []; let first = true;
   const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
-    if (command.type === 'session_preview_chunk') return Promise.resolve({ requestId: 'c', success: true, data: { state: 'chunk', previewId: id, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true } });
-    if (first) { first = false; return Promise.resolve({ requestId: 's', success: true, data: { state: 'ready', previewId: id, revision, totalBytes: html.length } }); }
+    if (command.type === 'session_preview_chunk') return Promise.resolve({ requestId: 'c', success: true, data: { state: 'chunk', previewId: id, fileId, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true } });
+    if (first) { first = false; return Promise.resolve({ requestId: 's', success: true, data: { state: 'ready', previewId: id, fileId, revision, totalBytes: html.length } }); }
     return new Promise(resolve => pending.push(resolve));
   });
   const hook = renderHook(() => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand, subscribeAuthority: auth.subscribeAuthority }));
@@ -264,7 +270,7 @@ it('latches a selected bridge key change and restoration in one batch', async ()
   act(() => { auth.pin.endpoint.publicKey = 'replacement'; auth.notify(); auth.pin.endpoint.publicKey = 'key'; auth.notify(); });
   expect(hook.result.current.state.kind).toBe('loading');
   expect(h.sendCommand.mock.calls.at(-1)?.[0].payload).not.toHaveProperty('knownRevision');
-  await act(async () => { h.pending.shift()!({ requestId: 'new', success: true, data: { state: 'ready', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  await act(async () => { h.pending.shift()!({ requestId: 'new', success: true, data: { state: 'ready', previewId: id, fileId, revision: h.revision, totalBytes: h.html.length } }); });
   const next = hook.result.current.state; if (next.kind !== 'ready') throw new Error('expected ready');
   expect(next.key).not.toBe(old.key);
 });
@@ -299,7 +305,7 @@ it('latches authority loss and recovery while the preview is offline and hidden'
   expect(hook.result.current.state.kind).toBe('offline');
   act(() => auth.setStatus('ready')); hook.rerender({ readable: true, visible: true });
   expect(h.sendCommand.mock.calls.at(-1)?.[0].payload).not.toHaveProperty('knownRevision');
-  await act(async () => { h.pending.shift()!({ requestId: 'new', success: true, data: { state: 'ready', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  await act(async () => { h.pending.shift()!({ requestId: 'new', success: true, data: { state: 'ready', previewId: id, fileId, revision: h.revision, totalBytes: h.html.length } }); });
   const next = hook.result.current.state; if (next.kind !== 'ready') throw new Error('expected ready');
   expect(next.key).not.toBe(old.key);
 });
@@ -309,7 +315,7 @@ it('rechecks current account authority before accepting a result even before the
   await act(async () => {}); expect(hook.result.current.state.kind).toBe('ready');
   await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
   auth.expire();
-  await act(async () => { h.pending.shift()!({ requestId: 'late', success: true, data: { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  await act(async () => { h.pending.shift()!({ requestId: 'late', success: true, data: { state: 'unchanged', previewId: id, fileId, revision: h.revision, totalBytes: h.html.length } }); });
   expect(hook.result.current.state.kind).toBe('offline');
 });
 it('preserves a manual refresh across a benign authority notification and applies it once after validation', async () => {
@@ -321,7 +327,7 @@ it('preserves a manual refresh across a benign authority notification and applie
   expect(h.pending).toHaveLength(1);
   act(() => auth.notify());
   expect(h.pending).toHaveLength(2);
-  const unchanged = { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length };
+  const unchanged = { state: 'unchanged', previewId: id, fileId, revision: h.revision, totalBytes: h.html.length };
   await act(async () => { h.pending.shift()!({ requestId: 'stale', success: true, data: unchanged }); });
   expect(hook.result.current.state).toMatchObject({ kind: 'ready', key: initial.key });
   await act(async () => { h.pending.shift()!({ requestId: 'current', success: true, data: unchanged }); });
@@ -336,7 +342,7 @@ it('keeps a newer manual refresh requested while the previous one is pending', a
   const hook = renderHook(() => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand, subscribeAuthority: auth.subscribeAuthority }));
   await act(async () => {}); const initial = hook.result.current.state; if (initial.kind !== 'ready') throw new Error('expected ready');
   act(() => hook.result.current.refresh()); act(() => hook.result.current.refresh());
-  const unchanged = { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length };
+  const unchanged = { state: 'unchanged', previewId: id, fileId, revision: h.revision, totalBytes: h.html.length };
   await act(async () => { h.pending.shift()!({ requestId: 'first', success: true, data: unchanged }); });
   const first = hook.result.current.state; if (first.kind !== 'ready') throw new Error('expected ready');
   expect(first.key).not.toBe(initial.key); expect(h.pending).toHaveLength(1);
@@ -351,9 +357,9 @@ it('cancels a pending manual refresh on batched authority loss and recovery', as
   act(() => hook.result.current.refresh());
   const stale = h.pending.shift()!;
   act(() => { auth.account(false); auth.account(true); });
-  await act(async () => { stale({ requestId: 'old', success: true, data: { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  await act(async () => { stale({ requestId: 'old', success: true, data: { state: 'unchanged', previewId: id, fileId, revision: h.revision, totalBytes: h.html.length } }); });
   expect(hook.result.current.state.kind).toBe('loading');
-  await act(async () => { h.pending.shift()!({ requestId: 'new', success: true, data: { state: 'ready', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  await act(async () => { h.pending.shift()!({ requestId: 'new', success: true, data: { state: 'ready', previewId: id, fileId, revision: h.revision, totalBytes: h.html.length } }); });
   expect(hook.result.current.state.kind).toBe('ready');
   expect(h.pending).toHaveLength(0);
 });
@@ -364,7 +370,7 @@ it('does not consume a newer refresh when the previous request fails', async () 
   await act(async () => { h.pending.shift()!({ requestId: 'failed', success: false, data: { code: 'unknown' } }); });
   expect(hook.result.current.state.kind).toBe('loading');
   expect(h.pending).toHaveLength(1);
-  await act(async () => { h.pending.shift()!({ requestId: 'retry', success: true, data: { state: 'ready', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  await act(async () => { h.pending.shift()!({ requestId: 'retry', success: true, data: { state: 'ready', previewId: id, fileId, revision: h.revision, totalBytes: h.html.length } }); });
   expect(hook.result.current.state.kind).toBe('ready'); expect(h.pending).toHaveLength(0);
 });
 
@@ -374,7 +380,7 @@ it.each([false, true])('manual refresh survives an unchanged authority notificat
   await act(async () => {});
   const initial = hook.result.current.state;
   if (initial.kind !== 'ready') throw new Error('expected ready');
-  const unchanged = { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length };
+  const unchanged = { state: 'unchanged', previewId: id, fileId, revision: h.revision, totalBytes: h.html.length };
   act(() => hook.result.current.refresh());
   expect(h.pending).toHaveLength(1);
   const old = h.pending.shift()!;
@@ -399,7 +405,7 @@ it('coalesces refresh clicks during an active request into one follow-up', async
   const hook = renderHook(() => useSessionPreview({ client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand }));
   await act(async () => {});
   const initial = hook.result.current.state; if (initial.kind !== 'ready') throw new Error('expected ready');
-  const unchanged = { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length };
+  const unchanged = { state: 'unchanged', previewId: id, fileId, revision: h.revision, totalBytes: h.html.length };
   act(() => { hook.result.current.refresh(); hook.result.current.refresh(); hook.result.current.refresh(); });
   expect(h.pending).toHaveLength(1);
   await act(async () => { h.pending.shift()!({ requestId: 'first', success: true, data: unchanged }); });
@@ -433,12 +439,12 @@ it('retains manual intent after a stale revision but waits for the normal cadenc
   const hook = renderHook(() => useSessionPreview({ client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand }));
   await act(async () => {}); const initial = hook.result.current.state; if (initial.kind !== 'ready') throw new Error('expected ready');
   act(() => hook.result.current.refresh());
-  await act(async () => { h.pending.shift()!({ requestId: 'changed', success: true, data: { state: 'ready', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  await act(async () => { h.pending.shift()!({ requestId: 'changed', success: true, data: { state: 'ready', previewId: id, fileId, revision: h.revision, totalBytes: h.html.length } }); });
   expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: h.html, key: initial.key });
   expect(sendCommand).toHaveBeenCalledTimes(4);
   await act(async () => { await vi.advanceTimersByTimeAsync(999); }); expect(sendCommand).toHaveBeenCalledTimes(4);
   await act(async () => { await vi.advanceTimersByTimeAsync(1); }); expect(sendCommand).toHaveBeenCalledTimes(5);
-  await act(async () => { h.pending.shift()!({ requestId: 'current', success: true, data: { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  await act(async () => { h.pending.shift()!({ requestId: 'current', success: true, data: { state: 'unchanged', previewId: id, fileId, revision: h.revision, totalBytes: h.html.length } }); });
   const final = hook.result.current.state; if (final.kind !== 'ready') throw new Error('expected ready');
   expect(final.key).not.toBe(initial.key);
 });
@@ -450,10 +456,77 @@ it.each(['authority', 'target'] as const)('clears pending manual intent on real 
   const old = h.pending.shift()!;
   if (change === 'authority') act(() => { auth.account(false); auth.account(true); });
   else hook.rerender({ selected: { ...target, sessionId: 'two' } });
-  await act(async () => { old({ requestId: 'old', success: true, data: { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
-  await act(async () => { h.pending.shift()!({ requestId: 'new', success: true, data: { state: 'ready', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  await act(async () => { old({ requestId: 'old', success: true, data: { state: 'unchanged', previewId: id, fileId, revision: h.revision, totalBytes: h.html.length } }); });
+  await act(async () => { h.pending.shift()!({ requestId: 'new', success: true, data: { state: 'ready', previewId: id, fileId, revision: h.revision, totalBytes: h.html.length } }); });
   const current = hook.result.current.state; if (current.kind !== 'ready') throw new Error('expected ready');
   await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-  await act(async () => { h.pending.shift()!({ requestId: 'poll', success: true, data: { state: 'unchanged', previewId: id, revision: h.revision, totalBytes: h.html.length } }); });
+  await act(async () => { h.pending.shift()!({ requestId: 'poll', success: true, data: { state: 'unchanged', previewId: id, fileId, revision: h.revision, totalBytes: h.html.length } }); });
   expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: h.html, key: current.key });
+});
+
+it('threads fileId into status and chunk requests and returns file metadata', async () => {
+  const h = stablePreviewHarness();
+  const hook = renderHook(() => useSessionPreview({ client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand: h.sendCommand }));
+  await act(async () => {});
+  const state = hook.result.current.state; if (state.kind !== 'ready') throw new Error('expected ready');
+  expect(state.file).toEqual(fileA);
+  const statusCall = h.sendCommand.mock.calls.find(call => call[0].type === 'session_preview_status')!;
+  const chunkCall = h.sendCommand.mock.calls.find(call => call[0].type === 'session_preview_chunk')!;
+  expect(statusCall[0].payload).toMatchObject({ bridgeId: 'bridge', sessionId: 'one', previewId: id, fileId });
+  expect(chunkCall[0].payload).toMatchObject({ previewId: id, fileId, revision: h.revision, offset: 0 });
+});
+
+it('shows loading when switching files and never the previous file content', async () => {
+  const first = '<p>first</p>'; const second = '# Notes';
+  const revisionA = 'a'.repeat(64); const revisionB = 'b'.repeat(64);
+  const digest = async (_algorithm: string, bytes: Uint8Array) => {
+    const text = new TextDecoder().decode(bytes);
+    const byte = text === first ? 0xaa : 0xbb;
+    return Uint8Array.from({ length: 32 }, () => byte).buffer;
+  };
+  Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest } });
+  const pending: Array<{ fileId: string; resolve: (reply: CommandResponse) => void }> = [];
+  const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
+    const payload = command.payload as Record<string, unknown>;
+    const requested = typeof payload.fileId === 'string' ? payload.fileId : '';
+    if (command.type === 'session_preview_chunk') {
+      const text = requested === fileId ? first : second;
+      const revision = requested === fileId ? revisionA : revisionB;
+      return Promise.resolve({ requestId: 'chunk', success: true, data: { state: 'chunk', previewId: id, fileId: requested, revision, totalBytes: text.length, offset: 0, dataBase64: btoa(text), done: true } });
+    }
+    return new Promise(resolve => pending.push({ fileId: requested, resolve }));
+  });
+  const reply = (entry: { fileId: string; resolve: (reply: CommandResponse) => void }) => act(async () => {
+    const text = entry.fileId === fileId ? first : second;
+    const revision = entry.fileId === fileId ? revisionA : revisionB;
+    entry.resolve({ requestId: 'status', success: true, data: { state: 'ready', previewId: id, fileId: entry.fileId, revision, totalBytes: text.length } });
+  });
+  const hook = renderHook(({ selected }) => useSessionPreview({ client, userId: 'user', target: selected, visible: true, readable: true, securityGeneration: 1, sendCommand }), { initialProps: { selected: target } });
+  await reply(pending.shift()!);
+  const loaded = hook.result.current.state; if (loaded.kind !== 'ready') throw new Error('expected ready');
+  expect(loaded).toMatchObject({ html: first, file: fileA });
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  const staleA = pending.shift()!;
+  hook.rerender({ selected: { ...target, file: fileB } });
+  expect(hook.result.current.state.kind).toBe('loading');
+  expect(hook.result.current.state).not.toMatchObject({ html: first });
+  const entryB = pending.shift()!;
+  expect(entryB.fileId).toBe(otherFileId);
+  expect(sendCommand.mock.calls.at(-1)?.[0].payload).toMatchObject({ previewId: id, fileId: otherFileId });
+  await reply(staleA);
+  expect(hook.result.current.state.kind).toBe('loading');
+  await reply(entryB);
+  const switched = hook.result.current.state; if (switched.kind !== 'ready') throw new Error('expected ready');
+  expect(switched).toMatchObject({ html: second, file: fileB });
+  expect(switched.key).not.toBe(loaded.key);
+});
+
+it('treats the old bridge preview shape as no preview and never fetches', async () => {
+  const sendCommand = vi.fn(async () => ({ requestId: 'x', success: true, data: { state: 'unregistered' } }));
+  const oldTarget = { bridgeId: 'bridge', sessionId: 'one', preview: { id, fileName: 'demo.html' }, file: fileA } as unknown as typeof target;
+  const hook = renderHook(() => useSessionPreview({ client, userId: 'user', target: oldTarget, visible: true, readable: true, securityGeneration: 1, sendCommand }));
+  await act(async () => {});
+  expect(hook.result.current.state.kind).toBe('unregistered');
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+  expect(sendCommand).not.toHaveBeenCalled();
 });

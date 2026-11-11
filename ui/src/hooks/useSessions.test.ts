@@ -475,13 +475,13 @@ describe("create result reconciliation boundaries", () => {
 describe("session preview metadata", () => {
   it("accepts a valid descriptor, clears it on omission and fails closed on invalid registration", () => {
     const h = setup();
-    const preview = { id: "12345678-1234-4234-8234-123456789abc", fileName: "view.html" };
+    const preview = { id: "12345678-1234-4234-8234-123456789abc", files: [{ id: "22345678-2234-4234-8234-123456789abc", fileName: "view.html", kind: "html" as const }] };
     h.publication(row("one", "a", { preview }));
     expect(h.result.current.sessions[0].preview).toEqual(preview);
     h.publication(row("one"));
     expect(h.result.current.sessions[0].preview).toBeUndefined();
     h.publication(row("one", "a", { preview }));
-    h.publication(row("one", "a", { preview: { ...preview, fileName: "../private" } }));
+    h.publication(row("one", "a", { preview: { ...preview, files: [{ id: "22345678-2234-4234-8234-123456789abc", fileName: "../private", kind: "html" as const }] } }));
     expect(h.result.current.sessions[0].preview).toBeUndefined();
   });
 });

@@ -479,7 +479,7 @@ describe("sidebar PR review navigation", () => {
     window.matchMedia = vi.fn().mockReturnValue({ matches: desktop, addEventListener: vi.fn(), removeEventListener: vi.fn() });
     state.sessions = [session("ordinary", "Regular shell"), session("target", "Target review", {
       pullRequestUrl: "https://github.com/Org/repo/pull/123", pullRequestReviewGeneration: "target-generation",
-      preview: { id: "12345678-1234-4234-8234-123456789abc", fileName: "demo.html" },
+      preview: { id: "12345678-1234-4234-8234-123456789abc", files: [{ id: "22345678-2234-4234-8234-123456789abc", fileName: "demo.html", kind: "html" }] },
     })];
     const { container } = dashboard();
     fireEvent.click(screen.getByRole("button", { name: /Regular shell/ }));
@@ -513,7 +513,7 @@ describe("sidebar PR review navigation", () => {
 });
 
 it("keeps terminal controls mounted when a compact desktop switches from preview to Terminal", async () => {
-  state.sessions = [session("ordinary", "Regular shell", { preview: { id: "12345678-1234-4234-8234-123456789abc", fileName: "demo.html" } })];
+  state.sessions = [session("ordinary", "Regular shell", { preview: { id: "12345678-1234-4234-8234-123456789abc", files: [{ id: "22345678-2234-4234-8234-123456789abc", fileName: "demo.html", kind: "html" }] } })];
   dashboard();
   fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
   const tabs = screen.getByRole("tablist", { name: "Session view" });
@@ -572,5 +572,54 @@ describe("mobile copy and paste wiring", () => {
   it("hides the Host key for a session without shellType", () => {
     openSession("untyped", "Untyped session", { shellType: undefined });
     expect(screen.queryByRole("button", { name: "Host" })).toBeNull();
+  });
+});
+
+describe("preview auto-open rule", () => {
+  const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+  it("auto-opens only on no-preview-before, preserves closed state when a file is added to a seen set", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    const initialPreview = { id: uuid(1), files: [{ id: uuid(11), fileName: "a.html", kind: "html" as const }] };
+    state.sessions = [session("ordinary", "Regular shell", { preview: initialPreview })];
+    const { rerender } = dashboard();
+    fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
+    // initially auto-opened: Open preview button not present, Preview tab selected
+    expect(screen.queryByRole("button", { name: "Open preview" })).toBeNull();
+    const tabs = screen.getByRole("tablist", { name: "Session view" });
+    expect(within(tabs).getByRole("tab", { name: "Preview" }).getAttribute("aria-selected")).toBe("true");
+    // close preview
+    fireEvent.click(screen.getByRole("button", { name: "Close preview" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open preview" })).toBeTruthy());
+    // file added: new set id, extra file
+    const extended = { id: uuid(2), files: [{ id: uuid(11), fileName: "a.html", kind: "html" as const }, { id: uuid(12), fileName: "c.html", kind: "html" as const }] };
+    state.sessions = [session("ordinary", "Regular shell", { preview: extended })];
+    rerender(<Dashboard client={ { securityRuntime: { ownerId: "00000000-0000-4000-8000-000000000001", state: (bridgeId: string) => ({ bridgeId, status: "ready", endpoint: null }), snapshot: () => [], onChange: () => () => {}, bridge: () => ({ permissions: ["read", "control"] }), identity: { endpoint: { id: "approved-browser" } } } } as unknown as MessageClient } connectionStatus="connected" connectionError={null} userId="user" token="test" centrifugoUrl="ws://localhost" transport={null} onDisconnect={vi.fn()} localMode={false} />);
+    await act(async () => {});
+    // should remain closed, not re-opened on set id change
+    expect(screen.getByRole("button", { name: "Open preview" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Close preview" })).toBeNull();
+  });
+
+  it("re-opens after clear then re-add", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    const p1 = { id: uuid(1), files: [{ id: uuid(11), fileName: "a.html", kind: "html" as const }] };
+    state.sessions = [session("ordinary", "Regular shell", { preview: p1 })];
+    const { rerender } = dashboard();
+    fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
+    expect(screen.queryByRole("button", { name: "Open preview" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Close preview" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open preview" })).toBeTruthy());
+    // clear
+    state.sessions = [session("ordinary", "Regular shell", {})];
+    rerender(<Dashboard client={ { securityRuntime: { ownerId: "00000000-0000-4000-8000-000000000001", state: (bridgeId: string) => ({ bridgeId, status: "ready", endpoint: null }), snapshot: () => [], onChange: () => () => {}, bridge: () => ({ permissions: ["read", "control"] }), identity: { endpoint: { id: "approved-browser" } } } } as unknown as MessageClient } connectionStatus="connected" connectionError={null} userId="user" token="test" centrifugoUrl="ws://localhost" transport={null} onDisconnect={vi.fn()} localMode={false} />);
+    await act(async () => {});
+    expect(screen.queryByRole("button", { name: "Open preview" })).toBeNull();
+    // re-add
+    const p2 = { id: uuid(3), files: [{ id: uuid(21), fileName: "x.md", kind: "markdown" as const }] };
+    state.sessions = [session("ordinary", "Regular shell", { preview: p2 })];
+    rerender(<Dashboard client={ { securityRuntime: { ownerId: "00000000-0000-4000-8000-000000000001", state: (bridgeId: string) => ({ bridgeId, status: "ready", endpoint: null }), snapshot: () => [], onChange: () => () => {}, bridge: () => ({ permissions: ["read", "control"] }), identity: { endpoint: { id: "approved-browser" } } } } as unknown as MessageClient } connectionStatus="connected" connectionError={null} userId="user" token="test" centrifugoUrl="ws://localhost" transport={null} onDisconnect={vi.fn()} localMode={false} />);
+    await act(async () => {});
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Open preview" })).toBeNull());
+    expect(screen.getByRole("tablist", { name: "Session view" })).toBeTruthy();
   });
 });
