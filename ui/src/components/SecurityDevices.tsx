@@ -10,6 +10,7 @@ import { useDeviceDisplayNames } from "@/hooks/useDeviceDisplayNames";
 import { UnsavedRemovalRetryButton, unsavedRemovalState } from "./UnsavedRemovalRetry";
 import { DeviceDisplayNameEditor } from "./DeviceDisplayNameEditor";
 import { ForkResolution, FORK_KEPT } from "./ForkResolution";
+import { ReplicaAgreement } from "./ReplicaAgreement";
 import { securityErrorCode, useAccountSecurity, type AccountSecurity } from "@/hooks/useAccountSecurity";
 import type { LedgerClient, LedgerClientSnapshot } from "@/lib/ledger-client";
 
@@ -292,7 +293,7 @@ function SignerHint({ security }: { security: AccountSecurity }) {
   return <p className="text-xs text-[var(--text-muted)]">Your account has {security.snapshot.checkpoint?.authorities.length ?? 0} passkeys. Choose the passkey on this device first, then confirm.</p>;
 }
 
-/** The fork notice: local records dropped because a longer chain won. Each can be signed again (one prompt each). */
+/** Records this browser signed that are not part of the account (the server never saved them, or the owner discarded them by keeping the other history). Each can be signed again (one prompt each). */
 function DiscardedChanges({ security, canWrite, describe }: { security: AccountSecurity; canWrite: boolean; describe: (operation: LedgerOperation) => string }) {
   const { client, snapshot } = security;
   const [resolved, setResolved] = useState<Record<string, string>>({});
@@ -511,6 +512,11 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
     return { computer, entry, revoked, localOnly, unsaved, inAccount, node };
   });
 
+  /** Members whose head is a different history (snapshot.peers.diverged) get a warning badge; the row keeps its normal behaviour. */
+  const withBadges = <N extends { id: string }>(kind: "device" | "bridge", nodes: N[]): (N & { badge?: { text: string; description: string } })[] => nodes.map(node => {
+    const found = (snapshot.peers?.diverged ?? []).find(item => item.kind === kind && item.id === node.id);
+    return found ? { ...node, badge: { text: "Different history", description: `This ${kind === "bridge" ? "computer" : "browser"} holds a different account history (revision ${found.revision}, head ${found.head})` } } : node;
+  });
   const scope = `${context}:${selected?.bridgeId ?? ""}`;
   const validSelection = (node: SecurityAccessSelection) => node.kind === "browser" ? browserNodes.some(item => item.id === node.id) : computerViews.some(item => item.node.id === node.id);
   const currentBrowser = browserNodes.find(node => node.current);
@@ -650,7 +656,7 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
       <p className="text-[var(--text-muted)]">Your account still includes {localDevices.length + localBridges.length === 1 ? "it" : "them"}. Select each item marked “{LOCAL_ONLY}” and sign its removal again.</p>
     </section>}
     <DiscardedChanges security={security} canWrite={canWrite} describe={describe} />
-    <SecurityAccessMap browsers={browserNodes} bridges={computerViews.map(item => item.node)}
+    <SecurityAccessMap browsers={withBadges("device", browserNodes)} bridges={withBadges("bridge", computerViews.map(item => item.node))}
       account={{ statusText: mismatch ? "Different account" : accountReady ? "Verified" : revokedHere ? "This browser was removed" : snapshot.status === "error" ? "Access paused" : "Not signed in",
         lockState: accountReady ? "secured" : snapshot.status === "error" ? "unknown" : "approval_needed" }}
       selected={active} onSelect={node => { setSelection({ scope, node }); setConfirm(null); }} selectedDetails={selectedDetails}
@@ -662,6 +668,7 @@ function LedgerDevices({ accountId, bridges, selected, currentEndpointId, curren
         {message && <p role="alert" className="w-full text-sm text-[var(--status-error)]">{message}</p>}
         {snapshot.status === "signed_out" && !mismatch && <p role="status" className="w-full text-xs text-[var(--text-muted)]">Sign in with your passkey to manage your account.</p>}
       </div>} />
+    {trusted && snapshot.status !== "signed_out" && !divergence && <ReplicaAgreement peers={snapshot.peers} checkpoint={trusted} />}
     <PasskeysSection security={security} canWrite={canWrite} />
     <details className="text-xs text-[var(--text-muted)]"><summary className="min-h-11 cursor-pointer py-3 sm:min-h-8 sm:py-2">Recovery and security details</summary>
       <p>Only your passkeys can change your account. Removing a browser or computer takes effect as soon as your computers receive the signed change; offline computers apply it when they reconnect. Clearing this browser's storage removes its keys; sign in again with your passkey to add it back. If you lose every passkey, create a new account and run <code>ftown start --new-identity</code> on each computer.</p></details>
