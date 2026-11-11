@@ -50,11 +50,12 @@ export function parseLedgerChainQuery(payload: unknown, bridgeId: string): Ledge
   return { fromRevision, limit };
 }
 
-export function ledgerHeadAnswer(held: HeldLedger): LedgerHeadAnswer {
+export function ledgerHeadAnswer(held: LedgerHeadAnswer): LedgerHeadAnswer {
   return { accountId: held.accountId, head: held.head, revision: held.revision };
 }
 
-/** The page of `held` that starts at query.fromRevision (empty, more false, past the tip). Never splits a record; always makes progress. */
+/** The page of `held` that starts at query.fromRevision (empty, more false, past the tip). Never splits a record; always makes progress.
+ *  `held` is only read; the page carries copies of its records. */
 export function ledgerChainPage(held: HeldLedger, query: LedgerChainQuery, maxBytes: number = LEDGER_CHAIN_PAGE_BYTES): LedgerChainPage {
   const all: Array<Signed<LedgerGenesis> | Signed<LedgerTransition>> = [held.ledger.genesis, ...held.ledger.transitions];
   const records: Array<Signed<LedgerGenesis> | Signed<LedgerTransition>> = [];
@@ -62,7 +63,7 @@ export function ledgerChainPage(held: HeldLedger, query: LedgerChainQuery, maxBy
   for (let revision = query.fromRevision; revision < all.length && records.length < query.limit; revision++) {
     const size = Buffer.byteLength(JSON.stringify(all[revision]), 'utf8');
     if (records.length > 0 && bytes + size > maxBytes) break;
-    records.push(all[revision]);
+    records.push(structuredClone(all[revision]));
     bytes += size;
   }
   return { ...ledgerHeadAnswer(held), fromRevision: query.fromRevision, records, more: query.fromRevision + records.length < all.length };

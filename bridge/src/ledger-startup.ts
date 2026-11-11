@@ -20,9 +20,22 @@ export const PAIRING_REVOKED_MESSAGE = "[Bridge] This computer's id was removed 
 export const SERVER_LEDGER_MISMATCH_MESSAGE = "[Bridge] The server's account ledger does not list this computer. If it was removed from your account, run `ftown start --new-identity` to pair it again.";
 export const UPDATE_RESTART_UNPAIRED_MESSAGE = '[Bridge] An update restart cannot pair this computer. Run `ftown start` to pair it.';
 export const UPDATED_TO_LEDGER_MESSAGE = '[Bridge] ftown was updated to the passkey ledger; run `ftown start` to pair this computer.';
-export const DIVERGED_SERVER_MESSAGE = "[Bridge] The ftown server holds a different history of your account than this computer and refused this computer's key. "
-  + 'This computer keeps its own history and did not reset itself. Choose which history to keep in Security on the dashboard; '
-  + 'run `ftown start --new-identity` only if you keep the server\'s.';
+export const DO_NOT_RESET_LINE = '[Bridge] Do NOT run --new-identity: this computer may hold the only copy. Open Security in the dashboard to choose a history.';
+export const HELD_OFFLINE_LINE = '[Bridge] Starting offline: local sessions keep working, and the relay is retried in the background.';
+export const HELD_NO_RELAY_URL_LINE = '[Bridge] No relay URL was saved by an earlier start, so this computer cannot start offline. Run `ftown start` again later.';
+
+/** What this computer holds that the server lacks (BridgeSecurityService.uniqueHistory), for the held-history notice. */
+export interface HeldHistory { afterRevision: number; records: number; removals: number; passkeys: number }
+
+const plural = (count: number, word: string): string => `${count} ${word}${count === 1 ? '' : 's'}`;
+/** Printed once when the server refuses the key of a computer that is an active member of its own history (step 5): never reset advice. */
+export function heldHistoryNotice(unique: HeldHistory | null): string[] {
+  const detail = unique === null || unique.records === 0
+    ? 'this computer holds changes the server does not have'
+    : `this computer holds account history the server does not have: ${plural(unique.removals, 'removal')} and ${plural(unique.passkeys, 'passkey')} `
+      + `among ${plural(unique.records, 'change')} after revision ${unique.afterRevision}`;
+  return [`[Bridge] The ftown server refused this computer's key, and ${detail}.`, DO_NOT_RESET_LINE];
+}
 
 /** Only account bridges use the passkey ledger (legacy reset, pairing, ledger replica, relay token by proof). */
 export function usesLedger(mode: BridgeMode): boolean {
@@ -126,7 +139,7 @@ export async function startAccountIdentity(deps: AccountStartupDeps): Promise<Ac
   const reconciled = await reconcile(deps.dataDir);
   if (reconciled === 'unpaired') {
     if (!deps.allowPairing) return { kind: 'exit', message: UPDATE_RESTART_UNPAIRED_MESSAGE };
-    try { await deps.pair(keys, new BridgeLedgerStore(deps.dataDir)); }
+    try { await deps.pair(keys, new BridgeLedgerStore(deps.dataDir, { bridgeId: deps.bridgeId })); }
     catch (error) {
       const code = messageOf(error);
       if (code === 'pairing_expired') return { kind: 'exit', message: null };
@@ -139,7 +152,7 @@ export async function startAccountIdentity(deps: AccountStartupDeps): Promise<Ac
 
   const identity = await readIdentity(deps.dataDir);
   if (!bound(identity)) return { kind: 'exit', message: PAIRING_REJECTED_HINT };
-  const store = new BridgeLedgerStore(deps.dataDir, { accountId: identity.accountId });
+  const store = new BridgeLedgerStore(deps.dataDir, { accountId: identity.accountId, bridgeId: deps.bridgeId });
   if (reconciled === 'needs_ledger') {
     try { await store.adoptBound(await deps.fetchLedger(identity.accountId)); }
     catch (error) {
@@ -148,7 +161,9 @@ export async function startAccountIdentity(deps: AccountStartupDeps): Promise<Ac
     }
   }
 
-  const action = ownStatusAction(await store.ownBridgeStatus(deps.bridgeId, identity.authPublicKey));
+  const action = ownStatusAction(await store.ownBridgeStatus({
+    bridgeId: deps.bridgeId, endpointId: identity.endpoint.id, endpointPublicKey: identity.endpoint.publicKey, authPublicKey: identity.authPublicKey,
+  }));
   if (action === 'revoked_restart') return { kind: 'revoked' };
   if (action === 'exit_absent') return { kind: 'exit', message: NOT_IN_LEDGER_MESSAGE };
   return { kind: 'ready', identity, store, reconciled };
@@ -159,28 +174,39 @@ export type RelayStartup =
   /** Exit 1 after printing `message`. */
   | { kind: 'exit'; message: string }
   | { kind: 'online'; token: string; relayUrl: string }
-  /** The server is unreachable for now: start with the saved relay URL and keep retrying in the background. */
-  | { kind: 'offline'; relayUrl: string; reason: string };
+  /** The server is unreachable for now, or refused a computer that may hold the only copy of its history (`notice`, printed once instead
+   *  of the unreachable line): start with the saved relay URL and keep retrying in the background. */
+  | { kind: 'offline'; relayUrl: string; reason: string; notice?: string[] };
 
 export function offlineWithoutRelayUrlMessage(reason: string): string {
   return `[Bridge] Could not reach the ftown server (${reason}) and no relay URL was saved by an earlier start. Check the connection and run \`ftown start\` again.`;
 }
 
 /**
- * Step 5, the first relay token. A proven revocation (the token hooks offer the server's evidence first) wins over everything; a
- * refusal (401/403) exits; a temporary failure (network, timeout, 5xx, cooldown) starts offline with the saved relay URL, and exits
- * only when there is none. After a successful token the revocation is checked again: the token response's ledger may prove it.
+ * Step 5, the first relay token. A proven revocation (the token hooks offer the server's evidence first) wins over everything. A refusal
+ * (401/403) of a computer that is still an active member of its own history (`held` returns the notice: a divergence with the server, a
+ * server behind us, a failed re-offer, or any refusal without proof of our removal) starts OFFLINE and prints the notice once, never the
+ * reset advice: this computer may hold the only copy. Any other refusal (this computer is not an active member: unpaired/absent) exits
+ * with the reset advice. A temporary failure (network, timeout, 5xx, cooldown) starts offline with the saved relay URL. Without a saved
+ * relay URL there is no offline start: exit. After a successful token the revocation is checked again (the token response's ledger may
+ * prove it).
  */
 export async function startRelay(input: {
   getToken: () => Promise<string>; relayUrl: () => string | null; bridgeRevoked: () => boolean; apiUrl: string;
-  /** The replica refused a different history from the server (its refusal is then about that history, not a removal of ours). */
-  serverDiverged?: () => boolean;
+  /** The held-history notice when this computer is an active member of its own history (heldHistoryNotice), else null. */
+  held?: () => string[] | null;
 }): Promise<RelayStartup> {
   let token: string;
   try { token = await input.getToken(); }
   catch (error) {
     if (input.bridgeRevoked()) return { kind: 'revoked' };
-    if (isRefusal(error)) return { kind: 'exit', message: input.serverDiverged?.() ? DIVERGED_SERVER_MESSAGE : relayTokenFailureMessage(error, input.apiUrl) };
+    if (isRefusal(error)) {
+      const notice = input.held?.() ?? null;
+      if (notice === null) return { kind: 'exit', message: relayTokenFailureMessage(error, input.apiUrl) };
+      const savedUrl = input.relayUrl();
+      if (savedUrl === null) return { kind: 'exit', message: [...notice, HELD_NO_RELAY_URL_LINE].join('\n') };
+      return { kind: 'offline', relayUrl: savedUrl, reason: messageOf(error), notice: [...notice, HELD_OFFLINE_LINE] };
+    }
     const reason = messageOf(error);
     const relayUrl = input.relayUrl();
     return relayUrl === null ? { kind: 'exit', message: offlineWithoutRelayUrlMessage(reason) } : { kind: 'offline', relayUrl, reason };
@@ -202,6 +228,9 @@ export interface EndpointRegistrarDeps {
   register: (token: string) => Promise<void>;
   tokens: { getToken(): Promise<string>; cooldownRemainingMs(): number };
   bridgeRevoked: () => boolean;
+  /** This computer is an active member of its own history: a refusal is then not final (it may hold the only copy; the startup notice
+   *  said so): no reset advice, keep retrying with the backoff until the server accepts the key again. */
+  held?: () => boolean;
   log: (line: string) => void;
   /** Returns a cancel function. Defaults to an unref'd setTimeout. */
   schedule?: (run: () => void, ms: number) => () => void;
@@ -240,7 +269,7 @@ export function createEndpointRegistrar(deps: EndpointRegistrarDeps): EndpointRe
       deps.log('[Bridge] Registered this computer\'s encrypted endpoint.');
     } catch (error) {
       if (stopped) return;
-      if (isRefusal(error)) {
+      if (isRefusal(error) && !deps.held?.()) {
         // A verified revocation restarts the bridge on its own; anything else needs the owner.
         if (!deps.bridgeRevoked()) deps.log(endpointRefusedMessage(messageOf(error)));
         stopped = true;
@@ -258,7 +287,7 @@ export function createEndpointRegistrar(deps: EndpointRegistrarDeps): EndpointRe
         return { kind: 'registered' };
       } catch (error) {
         if (deps.bridgeRevoked()) return { kind: 'revoked' };
-        if (isRefusal(error)) return { kind: 'exit', message: endpointRefusedMessage(messageOf(error)) };
+        if (isRefusal(error) && !deps.held?.()) return { kind: 'exit', message: endpointRefusedMessage(messageOf(error)) };
         deps.log(`[Bridge] Could not register this computer's encrypted endpoint yet (${messageOf(error)}); retrying in the background.`);
         return { kind: 'retry' };
       }

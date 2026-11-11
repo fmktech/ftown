@@ -199,13 +199,13 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     this.security = security; this.securityInfo = info; this.secureCommand = command;
     this.secureObserver = observer;
   }
-  /** GET /api/security/info: the static info, plus in account mode `ledger: { divergence, serverBehind }` (CONTRACT §5: a computer
+  /** GET /api/security/info: the static info, plus in account mode `ledger: { divergence, serverBehind, removedOnOtherHistory }` (CONTRACT §5: a computer
    *  holding a different account history is shown with a warning). */
-  private securityInfoPayload(): BridgeSecurityInfo | (BridgeSecurityInfo & { ledger: Pick<LedgerStatus, 'divergence' | 'serverBehind'> }) {
+  private securityInfoPayload(): BridgeSecurityInfo | (BridgeSecurityInfo & { ledger: Pick<LedgerStatus, 'divergence' | 'serverBehind' | 'removedOnOtherHistory'> }) {
     const info = this.securityInfo!;
     if (!this.security?.options.ledger) return info;
     const status = this.security.ledgerStatus();
-    return { ...info, ledger: { divergence: status.divergence, serverBehind: status.serverBehind } };
+    return { ...info, ledger: { divergence: status.divergence, serverBehind: status.serverBehind, removedOnOtherHistory: status.removedOnOtherHistory } };
   }
   recordPublication(channel: string, data: unknown): void {
     const item = { channel, data: applicationJson(data), cursor: ++this.localEventSequence };

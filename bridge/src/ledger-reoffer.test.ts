@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
-  REOFFER_MAX_BACKOFF_MS, REOFFER_MAX_RETRY_AFTER_MS, REOFFER_PAIR_WINDOW_MS, createLedgerReoffer, reofferBackoffMs,
+  REOFFER_MAX_BACKOFF_MS, REOFFER_MAX_RETRY_AFTER_MS, REOFFER_PAIR_WINDOW_MS, REOFFER_UNKNOWN_ACCOUNT_PAUSE_MS, createLedgerReoffer, reofferBackoffMs,
   type LedgerPostAnswer, type LedgerReofferDeps,
 } from './ledger-reoffer.js';
 import type { LedgerOfferOutcome, ServerLedgerRead } from './security/bridge/security.js';
@@ -120,27 +120,30 @@ describe('createLedgerReoffer', () => {
     assert.deepEqual([reads, posts], [1, 1]);
   });
 
-  it('the same (our head, server head) pair is posted at most once per 30 s, checked after the fresh read', async () => {
+  it('the same (our head, server head) pair, and any POST at all, at most once per 30 s, checked after the fresh read', async () => {
     const h = harness();
     h.reads.push(behind('H1'));
     h.replies.push(answer(200, {}));
     h.reoffer.noteServerBehind();
     await settle();
     assert.equal(h.posts.length, 1);
-    // The server stayed behind (e.g. another replica rolled it back again): read again, but the pair is still in its window.
-    h.clock.t += REOFFER_PAIR_WINDOW_MS - 1;
-    assert.equal(await h.reoffer.check(), 'skipped');
-    assert.deepEqual(h.events, ['read', 'post:H1', 'read']);
-    // Another server head is another pair.
+    // The next read confirms the server took it.
     h.reads.length = 0;
-    h.reads.push(behind('H2'));
-    assert.equal(await h.reoffer.check(), 'posted');
-    // The first pair again once its window has passed.
+    h.reads.push(same);
+    assert.equal(await h.reoffer.check(), 'not_behind');
+    // Rolled back again within 30 s: read again, but no POST, for the pair nor for another head (the global floor).
+    h.clock.t += REOFFER_PAIR_WINDOW_MS - 1;
     h.reads.length = 0;
     h.reads.push(behind('H1'));
+    assert.equal(await h.reoffer.check(), 'skipped');
+    h.reads.length = 0;
+    h.reads.push(behind('H2'));
+    assert.equal(await h.reoffer.check(), 'skipped');
+    assert.deepEqual(h.events, ['read', 'post:H1', 'read', 'read', 'read']);
+    // Once 30 s have passed since the last POST.
     h.clock.t += 1;
     assert.equal(await h.reoffer.check(), 'posted');
-    assert.deepEqual(h.posts.map(post => post.expectHead), ['H1', 'H2', 'H1']);
+    assert.deepEqual(h.posts.map(post => post.expectHead), ['H1', 'H2']);
   });
 
   it('backoff after failures: 30 s doubling to 10 min, at exact instants for a fixed random, each retry reading first', async () => {
@@ -188,7 +191,7 @@ describe('createLedgerReoffer', () => {
     assert.equal(h.posts.length, 2);
   });
 
-  it('success and a server that is no longer behind reset the backoff', async () => {
+  it('a server that is no longer behind resets the backoff; a 2xx followed by a read that is still behind is a failure', async () => {
     const h = harness();
     h.reads.push(behind());
     h.replies.push(answer(503), answer(503), answer(200, {}));
@@ -197,24 +200,45 @@ describe('createLedgerReoffer', () => {
     await h.fire();
     assert.equal(h.live()[0].at - h.clock.t, 60_000);
     await h.fire();
-    assert.deepEqual(h.live(), []);
-    h.replies.length = 0;
-    h.replies.push(answer(503));
+    assert.deepEqual(h.live(), [], 'the 2xx arms nothing');
+    // The server answered 2xx but the next read still shows it behind: not progress, a third failure (120 s).
     h.clock.t += REOFFER_PAIR_WINDOW_MS;
     assert.equal(await h.reoffer.check(), 'failed');
-    assert.equal(h.live()[0].at - h.clock.t, 30_000, 'back to the first step');
+    assert.equal(h.live()[0].at - h.clock.t, 120_000);
+    assert.equal(h.posts.length, 3, 'no POST on that read');
+    // A read that is no longer behind resets everything.
     h.reads.length = 0;
     h.reads.push(same);
     await h.fire();
     assert.deepEqual(h.live(), []);
     h.reads.length = 0;
     h.reads.push(behind());
+    h.replies.length = 0;
+    h.replies.push(answer(503));
     h.clock.t += REOFFER_PAIR_WINDOW_MS;
     assert.equal(await h.reoffer.check(), 'failed');
-    assert.equal(h.live()[0].at - h.clock.t, 30_000);
+    assert.equal(h.live()[0].at - h.clock.t, 30_000, 'back to the first step');
   });
 
-  it('404 account_unknown stops it for good: never a POST again, never a creation', async () => {
+  it('P3: a hostile server (2xx to every POST, a new behind head on every read) gets one POST per backoff step, never one per trigger', async () => {
+    const h = harness();
+    let n = 0;
+    const reads = { next: () => behind(`h${n++}`) };
+    h.reads.length = 0;
+    // Every read shows another head the server is "behind" on.
+    const hostile = createLedgerReoffer({
+      read: async () => reads.next(), local: async () => OURS,
+      post: async (ledger, expectHead) => { h.posts.push({ ledger, expectHead, at: h.clock.t }); return answer(200, null); },
+      offer: async () => ({ decision: 'keep', relation: 'same', head: null, revision: null }),
+      now: () => h.clock.t, random: () => 0.5, schedule: () => () => undefined, log: () => undefined,
+    });
+    // A trigger every 2 s for 60 s (relay notices, unknown-endpoint refreshes that each show the server behind).
+    for (let i = 0; i < 30; i++) { h.clock.t += 2000; await hostile.check(); }
+    assert.ok(h.posts.length <= 2, `${h.posts.length} POSTs in 60 s`);
+    for (let i = 1; i < h.posts.length; i++) assert.ok(h.posts[i].at - h.posts[i - 1].at >= 30_000);
+  });
+
+  it('404 account_unknown pauses it for an hour (never a creation), or until a read finds the account again', async () => {
     const h = harness();
     h.reads.push(behind());
     h.replies.push(answer(404, { error: 'account_unknown' }));
@@ -222,36 +246,57 @@ describe('createLedgerReoffer', () => {
     await settle();
     assert.equal(h.posts.length, 1);
     assert.deepEqual(h.live(), []);
-    h.clock.t += 3_600_000;
-    h.reoffer.noteServerBehind();
     assert.equal(await h.reoffer.check(), 'stopped');
-    await settle();
+    h.clock.t += REOFFER_UNKNOWN_ACCOUNT_PAUSE_MS - 1;
+    assert.equal(await h.reoffer.check(), 'stopped');
     assert.equal(h.posts.length, 1);
     assert.equal(h.events.filter(event => event === 'read').length, 1);
     assert.equal(h.logs.length, 1);
+    // An hour later it may try again (fresh read first; expectHead still never creates).
+    h.clock.t += 1;
+    h.replies.length = 0;
+    h.replies.push(answer(200, {}));
+    assert.equal(await h.reoffer.check(), 'posted');
+    assert.equal(h.posts.length, 2);
+    // A read elsewhere that finds the account (noteServerBehind) ends a pause at once.
+    const again = harness();
+    again.reads.push(behind());
+    again.replies.push(answer(404, { error: 'account_unknown' }), answer(200, {}));
+    await again.reoffer.check();
+    again.clock.t += REOFFER_PAIR_WINDOW_MS;
+    again.reoffer.noteServerBehind();
+    await settle();
+    assert.equal(again.posts.length, 2);
   });
 
-  it('no POST ever when the fresh read answers 404', async () => {
+  it('no POST when the fresh read answers 404, for an hour', async () => {
     const h = harness();
     h.reads.push({ kind: 'unknown_account', reason: 'Ledger read failed (404)' });
-    h.reoffer.noteServerBehind();
-    await settle();
+    await h.reoffer.check();
     assert.equal(await h.reoffer.check(), 'stopped');
-    h.reoffer.noteServerBehind();
+    h.clock.t += REOFFER_UNKNOWN_ACCOUNT_PAUSE_MS - 1;
+    assert.equal(await h.reoffer.check(), 'stopped');
     await settle();
     assert.deepEqual(h.events, ['read']);
     assert.equal(h.posts.length, 0);
+    // After the hour the read runs again; still unknown: still no POST.
+    h.clock.t += 1;
+    assert.equal(await h.reoffer.check(), 'stopped');
+    assert.deepEqual(h.events, ['read', 'read']);
+    assert.equal(h.posts.length, 0);
   });
 
-  it('409 head_changed: the server chain is offered, and if the server is still behind it is sent once more, then backoff', async () => {
+  it('409 head_changed: the server chain is offered; still behind -> backoff, and the retry reads and sends after the floor', async () => {
     const h = harness();
-    h.reads.push(behind('H1'));
-    h.replies.push(answer(409, { error: 'head_changed', ledger: { chain: 'server-2' } }), answer(409, { error: 'head_changed', ledger: { chain: 'server-3' } }));
-    h.offerOutcomes.push({ decision: 'keep', relation: 'behind', head: 'H2', revision: 4 }, { decision: 'keep', relation: 'behind', head: 'H3', revision: 4 });
+    h.reads.push(behind('H1'), behind('H2'));
+    h.replies.push(answer(409, { error: 'head_changed', ledger: { chain: 'server-2' } }), answer(200, {}));
+    h.offerOutcomes.push({ decision: 'keep', relation: 'behind', head: 'H2', revision: 4 });
     assert.equal(await h.reoffer.check(), 'failed');
-    assert.deepEqual(h.events, ['read', 'post:H1', 'offer', 'post:H2', 'offer']);
-    assert.deepEqual(h.offers, [{ chain: 'server-2' }, { chain: 'server-3' }]);
-    assert.equal(h.live().length, 1, 'then a backoff retry');
+    assert.deepEqual(h.events, ['read', 'post:H1', 'offer']);
+    assert.deepEqual(h.offers, [{ chain: 'server-2' }]);
+    const retry = await h.fire();
+    assert.equal(retry.at - h.posts[0].at, 30_000);
+    assert.deepEqual(h.posts.map(post => post.expectHead), ['H1', 'H2']);
 
     const moved = harness();
     moved.reads.push(behind('H1'));

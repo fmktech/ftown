@@ -1,19 +1,23 @@
 /*
  * The bridge's local replica of its account ledger: `<dataDir>/security/ledger.json`,
- * {version:2, ledger, checkpoint, sticky, lastServerReadAt, divergences}, file mode 0600, replaced atomically. A version 1 file (the same
- * without `divergences`) is still read, and is rewritten as version 2 on the next change.
+ * {version:3, ledger, checkpoint, sticky, lastServerReadAt, divergences, refused}, file mode 0600, replaced atomically. Version 1 (0.21:
+ * without divergences/refused) and version 2 (an earlier 0.22 build) files are still read, and rewritten as version 3 on the next change.
  * - Append-only rule (CONTRACT §2, §5, §12): chooseLedger decides, always with the RAW checkpoint of the stored chain as its cache. What is
  *   written is never rewritten. A candidate is adopted only when it strictly extends the stored chain ('ahead'), or when it diverges and
  *   carries an owner-signed resolve_fork that applies to the stored chain (the single owner-authorized exception). Same and behind change
  *   nothing; behind is reported to the caller, which may re-offer the stored chain to the server.
- * - A VALID diverged chain without an applicable resolve_fork is refused: the stored chain is kept and still decides every trust question,
- *   nothing of the refused chain reaches the sticky set, and the divergence is recorded per source (one entry each for server and relay,
- *   persisted here) and logged once per distinct other head. The entry is cleared when a later chain from that source agrees with ours
- *   again (same, ahead or behind), and every entry is cleared by an owner-chosen adoption.
+ * - A VALID diverged chain without an applicable resolve_fork is refused: the stored chain is kept, its RAW checkpoint is unchanged, and the
+ *   only thing taken from the refused chain is the list of removals chooseLedger saw on it (C1c `seen`), added to the sticky set so a
+ *   browser removed on the other history is refused here at once; this bridge's own id is never added (status only:
+ *   removedOnOtherHistory). The divergence is recorded per source (one entry each for server and relay, persisted here); a REFUSED line is
+ *   logged once per refused head (the last 16 per source are persisted) and at most once a minute per source. The entry is cleared when a
+ *   later chain from THAT source agrees with ours again (same, ahead or behind), and every entry by an owner-chosen adoption. A refused
+ *   chain seen again (same source, our head, its tip) is not verified again.
  * - An invalid candidate (malformed, another account, a bad record) is ignored, logged at most once per 60 s per source.
  * - Sticky set: the revocations of every chain this replica adopted (its own chain included), plus, on an owner-chosen adoption, the
- *   revocations among the records it discarded, so a removal is never silently undone. trusted() = applyRevocations(checkpoint, sticky) is
- *   the only checkpoint for trust decisions.
+ *   revocations among the records it discarded, plus the `seen` removals of refused histories, so a removal is never silently undone.
+ *   trusted() = applyRevocations(checkpoint, sticky) is the only checkpoint for trust decisions. This bridge's OWN removal is decided from
+ *   the raw chain alone (ledgerRemovesBridge), never from the sticky set.
  * - An empty store is bound to an account ONLY by adoptPaired (link secret proof + confirmPairedLedger) or adoptBound (the identity is
  *   already bound to that account and the chain lists this bridge's keys). offer() never binds an empty store.
  * - Once bound (a stored ledger, or the `accountId` option) every other account's ledger is rejected.
@@ -25,9 +29,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readdir, rename, rm, unlink } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
-  accountIdOf, applyRevocations, chooseLedger, ledgerHead, ledgerLastIssuedAt, ledgerRevocations, parseLedger, verifyLedger,
+  accountIdOf, applyRevocations, chooseLedger, forkPoint, ledgerHead, ledgerHeads, ledgerLastIssuedAt, ledgerRevocations, parseLedger, verifyLedger,
 } from '../ledger/ledger.js';
-import type { LedgerChoice, LedgerRelation } from '../ledger/ledger.js';
+import type { LedgerChoice, LedgerRelation, LedgerSeen } from '../ledger/ledger.js';
 import { confirmPairedLedger } from '../ledger/pairing.js';
 import type { BridgePairLink, PairApproval } from '../ledger/pairing.js';
 import { LEDGER_LIMITS } from '../ledger/protocol.js';
@@ -42,25 +46,36 @@ export interface StickyRevocations { deviceIds: string[]; bridgeIds: string[] }
 /** A valid history of this account from `source` that diverges from the stored chain and was refused. Times are wall-clock ms. */
 export interface LedgerDivergence {
   source: LedgerSource;
-  /** The refused chain's last head and revision. */
+  /** The refused chain's last head and revision (the first new head that source showed; an older refused head coming back changes nothing). */
   otherHead: string;
   otherRevision: number;
+  /** The revision of the last record both histories share; null when unknown (an entry written by an earlier 0.22 build). */
+  forkRevision: number | null;
+  /** A refused history from this source removes THIS bridge (status only: never a sticky entry, never an identity reset). */
+  removedOnOtherHistory: boolean;
   /** When this source was first seen diverging (kept while it keeps diverging, also when its head moves). */
   firstSeen: number;
   /** When it was last seen; persisted at most every DIVERGENCE_LAST_SEEN_RESOLUTION_MS. */
   lastSeen: number;
 }
+/** The last REFUSED_HEADS_PER_SOURCE refused heads per source, oldest first: a REFUSED line is logged once per head (persisted, so also
+ *  across restarts and after the divergence entry was cleared). */
+export interface RefusedHeads { server: string[]; relay: string[] }
+/** This bridge's own keys, exactly as its add_bridge lists them (and as BridgeSecurityService's 'active' check compares them). */
+export interface OwnBridgeKeys { bridgeId: string; endpointId: string; endpointPublicKey: string; authPublicKey: string }
 export interface BridgeLedgerState {
   ledger: Ledger;
   /** The stored chain's own checkpoint (raw). Never use it for a trust decision. */
   checkpoint: LedgerCheckpoint;
   /** applyRevocations(checkpoint, sticky): the checkpoint for every trust decision. */
   trusted: LedgerCheckpoint;
-  /** The revocations of every chain this replica adopted, plus those of records an owner-chosen history discarded. */
+  /** The revocations of every chain this replica adopted, plus those of records an owner-chosen history discarded, plus the removals
+   *  chooseLedger saw on refused histories (`seen`, C1c) except this bridge's own id. Trust only, never evidence of this bridge's removal. */
   sticky: StickyRevocations;
   lastServerReadAt: number | null;
   /** At most one entry per source, ordered server first. */
   divergences: LedgerDivergence[];
+  refused: RefusedHeads;
 }
 /** The last record of a chain: its revision (0 = genesis) and head (the genesis head is the accountId). */
 export interface LedgerTip { revision: number; head: string }
@@ -82,11 +97,19 @@ export interface BridgeLedgerStoreOptions {
   now?: () => number;
   /** The `[ledger]` lines (refused history, owner-chosen adoption, ignored chain). Defaults to console.warn. */
   log?: (line: string) => void;
+  /** This bridge's own bridgeId. A refused history's removal of it is recorded as status only, never added to the sticky set. Without it,
+   *  no bridge removal of a refused history is added to the sticky set at all (device removals still are). */
+  bridgeId?: string | null;
 }
 /** Divergence lastSeen is rewritten at most this often while the same other head keeps arriving. */
 export const DIVERGENCE_LAST_SEEN_RESOLUTION_MS = 10 * 60_000;
 /** "ignored an invalid chain" is logged at most once per this interval per source. */
 export const INVALID_CHAIN_LOG_SPACING_MS = 60_000;
+/** A REFUSED line for a head not refused before is logged at most once per this interval per source. */
+export const REFUSED_LOG_SPACING_MS = 60_000;
+/** Refused heads remembered per source (persisted), and verdicts on refused chains cached per process. */
+export const REFUSED_HEADS_PER_SOURCE = 16;
+export const REFUSED_VERDICT_CACHE_SIZE = 16;
 /** The first 8 characters of a head, as the log lines and the status show it. */
 export const shortHead = (head: string): string => head.slice(0, 8);
 export type LedgerStoreErrorCode =
@@ -115,18 +138,27 @@ interface Replica {
   accountId: string | null;
   clock: () => number;
   log: (line: string) => void;
-  /** When "ignored an invalid chain" was last logged, per source. */
+  /** This bridge's own id (see BridgeLedgerStoreOptions.bridgeId). */
+  bridgeId: string | null;
+  /** When "ignored an invalid chain" / a REFUSED line was last logged, per source. */
   ignoredAt: Map<LedgerSource, number>;
+  refusedLoggedAt: Map<LedgerSource, number>;
+  /** keep/diverged verdicts, per (source, our head, candidate tip): a refused chain seen again is not re-verified. Process lifetime, bounded. */
+  verdicts: Map<string, RefusedVerdict>;
   /** The last file text this replica verified or wrote, and its decoded state. Re-verified whenever the text differs. */
   memo: { text: string; state: BridgeLedgerState } | null;
 }
 type Decided = Omit<BridgeLedgerState, 'trusted'>;
+/** What chooseLedger said about a refused (keep/diverged) chain. */
+interface RefusedVerdict { seen: LedgerSeen; forkRevision: number | null }
 
 const FILE_NAME = 'ledger.json';
-const FILE_VERSION = 2;
+const FILE_VERSION = 3;
 const FILE_KEYS_V1 = ['version', 'ledger', 'checkpoint', 'sticky', 'lastServerReadAt'];
-const FILE_KEYS = [...FILE_KEYS_V1, 'divergences'];
-const DIVERGENCE_KEYS = ['source', 'otherHead', 'otherRevision', 'firstSeen', 'lastSeen'];
+const FILE_KEYS_V2 = [...FILE_KEYS_V1, 'divergences'];
+const FILE_KEYS = [...FILE_KEYS_V2, 'refused'];
+const DIVERGENCE_KEYS_V2 = ['source', 'otherHead', 'otherRevision', 'firstSeen', 'lastSeen'];
+const DIVERGENCE_KEYS = [...DIVERGENCE_KEYS_V2, 'forkRevision', 'removedOnOtherHistory'];
 const SOURCES: readonly LedgerSource[] = ['server', 'relay'];
 const NO_REVOCATIONS: StickyRevocations = { deviceIds: [], bridgeIds: [] };
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
@@ -181,26 +213,31 @@ function covers(sticky: StickyRevocations, ids: StickyRevocations): boolean {
 function sameSticky(left: StickyRevocations, right: StickyRevocations): boolean {
   return left.deviceIds.length === right.deviceIds.length && left.bridgeIds.length === right.bridgeIds.length && covers(left, right);
 }
+function isOwnBridge(bridge: LedgerBridge, own: OwnBridgeKeys): boolean {
+  return bridge.bridgeId === own.bridgeId && bridge.endpoint.id === own.endpointId && bridge.endpoint.publicKey === own.endpointPublicKey
+    && bridge.authPublicKey === own.authPublicKey;
+}
 /**
- * Proof in `ledger` that THIS bridge was removed: an add_bridge of `bridgeId` with exactly this auth key, followed by a revoke_bridge of
- * `bridgeId`. A revoke_bridge of an id the chain never added with these keys is only a tombstone (C1b: revoking a non-member is valid) and
- * proves nothing about this bridge.
+ * Proof in the RAW chain `ledger` that THIS bridge was removed: an add_bridge of exactly these keys (bridgeId, endpoint id, endpoint public
+ * key and auth key), followed by a revoke_bridge of its bridgeId. A revoke_bridge of an id the chain never added with these keys is only a
+ * tombstone (C1b: revoking a non-member is valid) and proves nothing about this bridge. Sticky entries and refused histories never count:
+ * this is the only evidence that resets the identity, on a running bridge and at startup alike.
  */
-export function ledgerRemovesBridge(ledger: Ledger, bridgeId: string, authPublicKey: string): boolean {
+export function ledgerRemovesBridge(ledger: Ledger, own: OwnBridgeKeys): boolean {
   let member = false;
   for (const record of ledger.transitions) {
     const operation = record.payload.operation;
-    if (operation.type === 'add_bridge' && operation.bridge.bridgeId === bridgeId && operation.bridge.authPublicKey === authPublicKey) member = true;
-    if (operation.type === 'revoke_bridge' && operation.bridgeId === bridgeId && member) return true;
+    if (operation.type === 'add_bridge' && isOwnBridge(operation.bridge, own)) member = true;
+    if (operation.type === 'revoke_bridge' && operation.bridgeId === own.bridgeId && member) return true;
   }
   return false;
 }
-/** 'active': trusted() lists bridgeId with this auth key. 'revoked': the stored chain itself proves this bridge's removal
- *  (ledgerRemovesBridge). Anything else, a tombstone or a sticky-only id included, is 'absent': fail closed, never a reset. */
-function statusOf(state: BridgeLedgerState | null, bridgeId: string, authPublicKey: string): OwnBridgeStatus {
+/** 'active': trusted() lists this bridge with exactly its keys. 'revoked': the stored chain itself proves its removal (ledgerRemovesBridge).
+ *  Anything else, a tombstone, a sticky-only id or a removal seen on a refused history included, is 'absent': fail closed, never a reset. */
+function statusOf(state: BridgeLedgerState | null, own: OwnBridgeKeys): OwnBridgeStatus {
   if (state === null) return 'absent';
-  if (state.trusted.bridges.some(bridge => bridge.bridgeId === bridgeId && bridge.authPublicKey === authPublicKey)) return 'active';
-  return ledgerRemovesBridge(state.ledger, bridgeId, authPublicKey) ? 'revoked' : 'absent';
+  if (state.trusted.bridges.some(bridge => isOwnBridge(bridge, own))) return 'active';
+  return ledgerRemovesBridge(state.ledger, own) ? 'revoked' : 'absent';
 }
 /** Is a bridge with exactly these keys a member of the trusted roster (any bridgeId when `bridgeId` is null)? */
 function lists(trusted: LedgerCheckpoint, bridgeId: string | null, endpointId: string, authPublicKey: string): boolean {
@@ -238,22 +275,44 @@ function ignored(replica: Replica, source: LedgerSource, now: number): void {
   replica.ignoredAt.set(source, now);
   replica.log(`[ledger] ignored an invalid chain from ${source}`);
 }
-function parseDivergences(value: unknown): LedgerDivergence[] {
+const isRevision = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= LEDGER_LIMITS.maxTransitions;
+/** Version 3 entries; a version 2 entry (no forkRevision / removedOnOtherHistory) reads as fork unknown, not removing us. */
+function parseDivergences(value: unknown, version: number): LedgerDivergence[] {
   if (!Array.isArray(value) || value.length > SOURCES.length) return corrupt();
+  const expected = version === 2 ? DIVERGENCE_KEYS_V2 : DIVERGENCE_KEYS;
   const items: readonly unknown[] = value;
   const result: LedgerDivergence[] = [];
   for (const item of items) {
     if (!isRecord(item)) return corrupt();
     const keys = Object.keys(item);
-    if (keys.length !== DIVERGENCE_KEYS.length || keys.some(key => DIVERGENCE_KEYS.indexOf(key) === -1)) return corrupt();
+    if (keys.length !== expected.length || keys.some(key => expected.indexOf(key) === -1)) return corrupt();
     const { source, otherHead, otherRevision, firstSeen, lastSeen } = item;
+    const forkRevision = version === 2 ? null : item.forkRevision;
+    const removedOnOtherHistory = version === 2 ? false : item.removedOnOtherHistory;
     if ((source !== 'server' && source !== 'relay') || result.some(entry => entry.source === source)) return corrupt();
-    if (!isAccountId(otherHead) || typeof otherRevision !== 'number' || !Number.isSafeInteger(otherRevision) || otherRevision < 0
-      || otherRevision > LEDGER_LIMITS.maxTransitions || !isTime(firstSeen) || !isTime(lastSeen) || firstSeen > lastSeen) return corrupt();
-    result.push({ source, otherHead, otherRevision, firstSeen, lastSeen });
+    if (!isAccountId(otherHead) || !isRevision(otherRevision) || !isTime(firstSeen) || !isTime(lastSeen) || firstSeen > lastSeen) return corrupt();
+    if ((forkRevision !== null && (!isRevision(forkRevision) || forkRevision >= otherRevision)) || typeof removedOnOtherHistory !== 'boolean') return corrupt();
+    result.push({ source, otherHead, otherRevision, forkRevision, removedOnOtherHistory, firstSeen, lastSeen });
   }
   return ordered(result);
 }
+function parseRefused(value: unknown): RefusedHeads {
+  if (!isRecord(value)) return corrupt();
+  const keys = Object.keys(value);
+  if (keys.length !== 2 || keys.indexOf('server') === -1 || keys.indexOf('relay') === -1) return corrupt();
+  const heads = (list: unknown): string[] => {
+    const items = uniqueStrings(list);
+    return items.length <= REFUSED_HEADS_PER_SOURCE && items.every(isAccountId) ? items : corrupt();
+  };
+  return { server: heads(value.server), relay: heads(value.relay) };
+}
+/** Refused heads of a version 2 file: the heads its entries name. */
+function refusedOf(divergences: readonly LedgerDivergence[]): RefusedHeads {
+  return { server: divergences.filter(entry => entry.source === 'server').map(entry => entry.otherHead),
+    relay: divergences.filter(entry => entry.source === 'relay').map(entry => entry.otherHead) };
+}
+const NO_REFUSED: RefusedHeads = { server: [], relay: [] };
 /** Operations on one file run one at a time within this process, whichever store instance or helper issues them. */
 function serialized<T>(file: string, run: () => Promise<T>): Promise<T> {
   const previous = queues.get(file) ?? Promise.resolve();
@@ -285,7 +344,8 @@ function replicaOf(dataDir: string, options: BridgeLedgerStoreOptions): Replica 
   if (accountId !== null && !isAccountId(accountId)) throw new BridgeSecurityError('wrong_context');
   return {
     dataDir, file: resolve(join(dataDir, 'security', FILE_NAME)), accountId, clock: options.now ?? Date.now,
-    log: options.log ?? (line => console.warn(line)), ignoredAt: new Map(), memo: null,
+    log: options.log ?? (line => console.warn(line)), bridgeId: options.bridgeId ?? null, ignoredAt: new Map(), refusedLoggedAt: new Map(),
+    verdicts: new Map(), memo: null,
   };
 }
 async function readText(replica: Replica): Promise<string | null> {
@@ -312,9 +372,11 @@ async function decode(replica: Replica, text: string): Promise<BridgeLedgerState
     const record: unknown = JSON.parse(text);
     if (!isRecord(record)) return corrupt();
     const keys = Object.keys(record);
-    const expected = record.version === 1 ? FILE_KEYS_V1 : record.version === FILE_VERSION ? FILE_KEYS : corrupt();
+    const version = record.version === 1 || record.version === 2 || record.version === FILE_VERSION ? record.version : corrupt();
+    const expected = version === 1 ? FILE_KEYS_V1 : version === 2 ? FILE_KEYS_V2 : FILE_KEYS;
     if (keys.length !== expected.length || keys.some(key => expected.indexOf(key) === -1)) return corrupt();
-    const divergences = record.version === 1 ? [] : parseDivergences(record.divergences);
+    const divergences = version === 1 ? [] : parseDivergences(record.divergences, version);
+    const refused = version === 1 ? NO_REFUSED : version === 2 ? refusedOf(divergences) : parseRefused(record.refused);
     const lastServerReadAt = record.lastServerReadAt === null ? null : isTime(record.lastServerReadAt) ? record.lastServerReadAt : corrupt();
     if (!isRecord(record.sticky)) return corrupt();
     const stickyKeys = Object.keys(record.sticky);
@@ -325,7 +387,7 @@ async function decode(replica: Replica, text: string): Promise<BridgeLedgerState
     const checkpoint = await verifyLedger(ledger, Math.max(replica.clock(), ledgerLastIssuedAt(ledger)));
     if (canonical(record.checkpoint) !== canonical(checkpoint)) return corrupt();
     if (!covers(sticky, ledgerRevocations(ledger))) return corrupt();
-    return { ledger, checkpoint, trusted: applyRevocations(checkpoint, sticky), sticky, lastServerReadAt, divergences };
+    return { ledger, checkpoint, trusted: applyRevocations(checkpoint, sticky), sticky, lastServerReadAt, divergences, refused };
   } catch {
     return corrupt();
   }
@@ -346,7 +408,7 @@ async function load(replica: Replica): Promise<BridgeLedgerState | null> {
 async function save(replica: Replica, state: BridgeLedgerState): Promise<void> {
   const text = JSON.stringify({
     version: FILE_VERSION, ledger: state.ledger, checkpoint: state.checkpoint, sticky: state.sticky, lastServerReadAt: state.lastServerReadAt,
-    divergences: state.divergences,
+    divergences: state.divergences, refused: state.refused,
   });
   const directory = dirname(replica.file);
   const temporary = `${replica.file}.${randomUUID()}.tmp`;
@@ -370,11 +432,36 @@ async function erase(replica: Replica): Promise<void> {
   await syncDirectory(dirname(replica.file));
 }
 
+/** The removals of a refused history this replica enforces (C1c `seen`): every device id, every bridge id except this bridge's own, and no
+ *  bridge id at all when this store does not know its own. */
+function enforced(replica: Replica, seen: LedgerSeen): StickyRevocations {
+  const own = replica.bridgeId;
+  return { deviceIds: seen.deviceIds.slice(), bridgeIds: own === null ? [] : seen.bridgeIds.filter(id => id !== own) };
+}
+function verdictKey(source: LedgerSource, ours: string, tip: LedgerTip): string {
+  return `${source}\n${ours}\n${tip.revision}:${tip.head}`;
+}
+function rememberVerdict(replica: Replica, key: string, verdict: RefusedVerdict): void {
+  replica.verdicts.delete(key);
+  replica.verdicts.set(key, verdict);
+  for (const oldest of replica.verdicts.keys()) {
+    if (replica.verdicts.size <= REFUSED_VERDICT_CACHE_SIZE) break;
+    replica.verdicts.delete(oldest);
+  }
+}
+/** The fork point of two chains of one account (revision of the last shared record), from record heads; null if it cannot be computed. */
+async function forkRevisionOf(local: Ledger, other: Ledger): Promise<number | null> {
+  try { return forkPoint(await ledgerHeads(local), await ledgerHeads(other))?.revision ?? null; } catch { return null; }
+}
+
 /**
  * The append-only rule for an untrusted candidate on a bound store (C1's chooseLedger table). Never binds an empty store.
- * - adopt (ahead, or diverged with an applicable owner-signed resolve_fork): store it; sticky += its revocations (+ the discarded ones).
- * - keep / same, behind: nothing changes, except that a divergence recorded for this source is cleared (the histories agree again).
- * - keep / diverged: ours is kept, the divergence is recorded (refuse); nothing reaches the sticky set.
+ * - adopt (ahead, or diverged with an applicable owner-signed resolve_fork): store choice.ledger; sticky += its revocations (+ the discarded
+ *   ones); this source's divergence is cleared (every divergence on an owner-chosen adoption).
+ * - keep / same, behind: nothing changes, except that a divergence recorded FROM THIS SOURCE is cleared (the histories agree again).
+ * - keep / diverged: ours is kept and decides; the divergence is recorded (refuse) and the removals chooseLedger saw on it (`seen`) are
+ *   added to the sticky set, except this bridge's own id (status only). A chain already judged (same source, our head, its tip) is not
+ *   verified again.
  * - reject: ignored (logged, spaced).
  */
 async function decide(replica: Replica, candidate: unknown, source: LedgerSource): Promise<LedgerOfferResult> {
@@ -388,6 +475,10 @@ async function decide(replica: Replica, candidate: unknown, source: LedgerSource
   try { ledger = parseLedger(candidate); } catch { ignored(replica, source, now); return answer('reject', null, null); }
   const tip = await tipOf(ledger);
   if (await accountIdOf(ledger.genesis.payload) !== stored.checkpoint.accountId) { ignored(replica, source, now); return answer('reject', null, tip); }
+  const key = verdictKey(source, stored.checkpoint.head, tip);
+  const known = replica.verdicts.get(key);
+  // Same payloads (hash-linked to this tip) against the same chain of ours: chooseLedger would answer keep/diverged again.
+  if (known !== undefined) return answer('keep', 'diverged', tip, await refuse(replica, stored, source, tip, now, known));
   const choice = await chooseLedger(stored.ledger, ledger, now, cacheOf(stored));
   if (choice.decision === 'reject') { ignored(replica, source, now); return answer('reject', choice.relation, tip); }
   if (choice.decision === 'adopt') {
@@ -396,32 +487,63 @@ async function decide(replica: Replica, candidate: unknown, source: LedgerSource
     const adopted = await commit(replica, {
       ledger: choice.ledger, checkpoint: choice.checkpoint, sticky: adoptedSticky(stored.sticky, choice), lastServerReadAt: stored.lastServerReadAt,
       // An owner-chosen history replaces ours: every recorded divergence was measured against the chain it discarded.
-      divergences: divergent ? [] : withoutSource(stored.divergences, source),
+      divergences: divergent ? [] : withoutSource(stored.divergences, source), refused: stored.refused,
     });
     if (adopted === null) return answer('reject', choice.relation, tip);
     if (divergent) replica.log(adoptionLine(stored, choice));
     return answer('adopt', choice.relation, tip, adopted, choice.discarded.records);
   }
-  if (choice.relation === 'diverged') return answer('keep', 'diverged', tip, await refuse(replica, stored, source, tip, now));
-  // same / behind: the histories agree; a divergence recorded for this source is over.
+  if (choice.relation === 'diverged') {
+    const verdict: RefusedVerdict = { seen: choice.seen, forkRevision: await forkRevisionOf(stored.ledger, ledger) };
+    rememberVerdict(replica, key, verdict);
+    return answer('keep', 'diverged', tip, await refuse(replica, stored, source, tip, now, verdict));
+  }
+  // same / behind: the histories agree; a divergence recorded FROM THIS SOURCE is over (another source's stays).
   if (!stored.divergences.some(entry => entry.source === source)) return answer('keep', choice.relation, tip);
   return answer('keep', choice.relation, tip, await persist(replica, { ...stored, divergences: withoutSource(stored.divergences, source) }));
 }
 /**
- * keep / diverged: records (or refreshes) this source's divergence and logs ONE line per distinct other head (across sources and restarts:
- * the persisted entries are the memory). The stored chain, checkpoint and sticky set are untouched.
+ * keep / diverged. Our chain and checkpoint are untouched; the file is written only when something changes:
+ * - sticky += the removals the refused history shows (enforced(): never this bridge's own id, which only sets removedOnOtherHistory);
+ * - the source's entry is created, or replaced when the source shows a head it never showed before (an older refused head coming back
+ *   changes nothing), and lastSeen is refreshed at most every DIVERGENCE_LAST_SEEN_RESOLUTION_MS;
+ * - the head joins the source's refused heads (the last REFUSED_HEADS_PER_SOURCE). A REFUSED line is logged only for a head no source
+ *   refused before, and at most once per REFUSED_LOG_SPACING_MS per source.
  */
-async function refuse(replica: Replica, stored: BridgeLedgerState, source: LedgerSource, tip: LedgerTip, now: number): Promise<BridgeLedgerState> {
-  if (!stored.divergences.some(entry => entry.otherHead === tip.head)) {
-    replica.log(`[ledger] REFUSED a different account history from ${source} (head ${shortHead(tip.head)}, revision ${tip.revision}); `
-      + `keeping ours (head ${shortHead(stored.checkpoint.head)}, revision ${stored.checkpoint.revision})`);
+async function refuse(
+  replica: Replica, stored: BridgeLedgerState, source: LedgerSource, tip: LedgerTip, now: number, verdict: RefusedVerdict,
+): Promise<BridgeLedgerState> {
+  const removesUs = replica.bridgeId !== null && verdict.seen.bridgeIds.indexOf(replica.bridgeId) !== -1;
+  const sticky = union(stored.sticky, enforced(replica, verdict.seen));
+  const heads = stored.refused[source];
+  const fresh = heads.indexOf(tip.head) === -1;
+  const refused: RefusedHeads = fresh ? { ...stored.refused, [source]: [...heads, tip.head].slice(-REFUSED_HEADS_PER_SOURCE) } : stored.refused;
+  if (fresh && stored.refused.server.indexOf(tip.head) === -1 && stored.refused.relay.indexOf(tip.head) === -1) {
+    const last = replica.refusedLoggedAt.get(source);
+    if (last === undefined || now < last || now - last >= REFUSED_LOG_SPACING_MS) {
+      replica.refusedLoggedAt.set(source, now);
+      replica.log(`[ledger] REFUSED a different account history from ${source} (head ${shortHead(tip.head)}, revision ${tip.revision}); `
+        + `keeping ours (head ${shortHead(stored.checkpoint.head)}, revision ${stored.checkpoint.revision})${removesUs ? '; that history removes this computer' : ''}`);
+    }
   }
   const known = stored.divergences.find(entry => entry.source === source);
-  if (known !== undefined && known.otherHead === tip.head && known.otherRevision === tip.revision
-    && now >= known.lastSeen && now - known.lastSeen < DIVERGENCE_LAST_SEEN_RESOLUTION_MS) return stored;
-  const firstSeen = known?.firstSeen ?? now;
-  const entry: LedgerDivergence = { source, otherHead: tip.head, otherRevision: tip.revision, firstSeen, lastSeen: Math.max(now, firstSeen) };
-  return persist(replica, { ...stored, divergences: ordered([...withoutSource(stored.divergences, source), entry]) });
+  let entry: LedgerDivergence | undefined = known;
+  if (known === undefined || (fresh && known.otherHead !== tip.head)) {
+    const firstSeen = known?.firstSeen ?? now;
+    entry = { source, otherHead: tip.head, otherRevision: tip.revision, forkRevision: verdict.forkRevision, removedOnOtherHistory: removesUs,
+      firstSeen, lastSeen: Math.max(now, firstSeen) };
+  } else if ((removesUs && !known.removedOnOtherHistory) || now < known.lastSeen || now - known.lastSeen >= DIVERGENCE_LAST_SEEN_RESOLUTION_MS) {
+    entry = { ...known, removedOnOtherHistory: known.removedOnOtherHistory || removesUs, lastSeen: Math.max(now, known.lastSeen) };
+  }
+  const stickyChanged = !sameSticky(sticky, stored.sticky);
+  if (!stickyChanged && entry === known && refused === stored.refused) return stored;
+  const divergences = entry === known ? stored.divergences : ordered([...withoutSource(stored.divergences, source), entry!]);
+  if (stickyChanged) {
+    const merged = await commit(replica, { ledger: stored.ledger, checkpoint: stored.checkpoint, sticky, lastServerReadAt: stored.lastServerReadAt, divergences, refused });
+    if (merged !== null) return merged;
+    replica.log('[ledger] could not enforce the removals of a refused history: too many removals recorded on this computer');
+  }
+  return persist(replica, { ...stored, divergences, refused });
 }
 /** Writes a state whose chain and sticky set are unchanged (only divergences or lastServerReadAt differ). */
 async function persist(replica: Replica, state: BridgeLedgerState): Promise<BridgeLedgerState> {
@@ -450,18 +572,21 @@ async function admit(
   if (stored === null) {
     let first: LedgerChoice;
     try { first = await chooseLedger(null, ledger, now); } catch { throw new LedgerStoreError(code); }
-    next = { ledger: first.ledger, checkpoint: first.checkpoint, sticky: union(NO_REVOCATIONS, ledgerRevocations(first.ledger)), lastServerReadAt: null, divergences: [] };
+    next = { ledger: first.ledger, checkpoint: first.checkpoint, sticky: union(NO_REVOCATIONS, ledgerRevocations(first.ledger)), lastServerReadAt: null,
+      divergences: [], refused: NO_REFUSED };
   } else {
     const choice = await chooseLedger(stored.ledger, ledger, now, cacheOf(stored));
     if (choice.decision === 'reject') throw new LedgerStoreError(code);
     if (choice.decision === 'adopt') {
       const divergent = choice.relation === 'diverged';
       next = { ledger: choice.ledger, checkpoint: choice.checkpoint, sticky: adoptedSticky(stored.sticky, choice), lastServerReadAt: stored.lastServerReadAt,
-        divergences: divergent ? [] : stored.divergences };
+        divergences: divergent ? [] : stored.divergences, refused: stored.refused };
       if (divergent) adoption = adoptionLine(stored, choice);
     } else {
-      // keep (same, behind or a refused divergence): ours decides, and nothing of the candidate is merged.
-      next = { ledger: stored.ledger, checkpoint: stored.checkpoint, sticky: stored.sticky, lastServerReadAt: stored.lastServerReadAt, divergences: stored.divergences };
+      // keep (same, behind or a refused divergence): ours decides; of a refused history only its removals are enforced (C1c `seen`, never
+      // this bridge's own id).
+      next = { ledger: stored.ledger, checkpoint: stored.checkpoint, sticky: union(stored.sticky, enforced(replica, choice.seen)),
+        lastServerReadAt: stored.lastServerReadAt, divergences: stored.divergences, refused: stored.refused };
     }
   }
   let trusted: LedgerCheckpoint;
@@ -492,10 +617,11 @@ export class BridgeLedgerStore {
     });
   }
 
-  /** The startup decision (ledger-startup ownStatusAction): 'active' iff trusted() lists bridgeId with this auth key; 'revoked' iff the stored
-   *  chain proves this bridge's removal (it added bridgeId with this key, then revoked it); else 'absent' (a tombstone is not a removal). */
-  async ownBridgeStatus(bridgeId: string, authPublicKey: string): Promise<OwnBridgeStatus> {
-    return serialized(this.replica.file, async () => statusOf(await load(this.replica), bridgeId, authPublicKey));
+  /** The startup decision (ledger-startup ownStatusAction): 'active' iff trusted() lists this bridge with exactly its keys; 'revoked' iff the
+   *  stored RAW chain proves its removal (ledgerRemovesBridge: it added these keys, then revoked the id); else 'absent' (a tombstone, a
+   *  sticky-only id or a removal seen on a refused history is no removal). The same rule as BridgeSecurityService's running check. */
+  async ownBridgeStatus(own: OwnBridgeKeys): Promise<OwnBridgeStatus> {
+    return serialized(this.replica.file, async () => statusOf(await load(this.replica), own));
   }
 
   /**

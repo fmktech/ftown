@@ -16,7 +16,7 @@ import type { SoftPasskey } from '../ledger/testing.js';
 import { BridgeSecurityError } from './errors.js';
 import { readLedgerIdentity } from './ledger-identity.js';
 import { BridgeLedgerStore, DIVERGENCE_LAST_SEEN_RESOLUTION_MS, INVALID_CHAIN_LOG_SPACING_MS, LedgerStoreError, reconcileIdentityAndStore } from './ledger-store.js';
-import type { LedgerSource } from './ledger-store.js';
+import type { LedgerSource, OwnBridgeKeys } from './ledger-store.js';
 
 const rpId = 'ftown.example';
 const origin = 'https://ftown.example';
@@ -87,6 +87,9 @@ async function bridgeKeys(bridgeId: string): Promise<BridgeKeys> {
   };
 }
 const lastRecord = (chain: Chain): Signed<LedgerTransition> => chain.ledger.transitions[chain.ledger.transitions.length - 1];
+/** A bridge's own keys for ownBridgeStatus, under `bridgeId` (its own by default). */
+const ownKeys = (keys: BridgeKeys, bridgeId: string = keys.link.request.bridgeId): OwnBridgeKeys =>
+  ({ bridgeId, endpointId: keys.endpointId, endpointPublicKey: keys.link.request.endpointPublicKey, authPublicKey: keys.authPublicKey });
 const storeError = (code: string) => (error: unknown): boolean => error instanceof LedgerStoreError && error.code === code;
 
 /** laptop: genesis + add_device(laptop). base: laptop + add_bridge(studio, from its pair request). A, B: base + add_device (two histories
@@ -125,7 +128,9 @@ describe('BridgeLedgerStore', () => {
   let file: string;
   let identityFile: string;
   let lines: string[];
-  const store = (accountId?: string, now: () => number = () => NOW): BridgeLedgerStore => new BridgeLedgerStore(dataDir, { accountId, now, log: line => lines.push(line) });
+  // The replica of bridge 'studio' (it never adds its own id to the sticky set from a refused history).
+  const store = (accountId?: string, now: () => number = () => NOW): BridgeLedgerStore =>
+    new BridgeLedgerStore(dataDir, { accountId, now, log: line => lines.push(line), bridgeId: 'studio' });
   const approval = (chain: Chain) => ({ accountId: chain.accountId, head: chain.head });
   async function paired(chain: Chain): Promise<BridgeLedgerStore> {
     const trusted = await store().adoptPaired(f.studio.link, approval(chain), chain.ledger);
@@ -156,7 +161,7 @@ describe('BridgeLedgerStore', () => {
     const empty = store();
     assert.equal(await empty.read(), null);
     assert.equal(await empty.trusted(), null);
-    assert.equal(await empty.ownBridgeStatus('studio', f.studio.authPublicKey), 'absent');
+    assert.equal(await empty.ownBridgeStatus(ownKeys(f.studio, 'studio')), 'absent');
     for (const source of ['relay', 'server'] as const) {
       for (const chain of [f.base, f.C, f.R]) assert.deepEqual(await empty.offer(chain.ledger, source), { decision: 'reject', relation: null, candidate: null, state: null, discarded: [] });
     }
@@ -174,10 +179,10 @@ describe('BridgeLedgerStore', () => {
     assert.deepEqual(state.checkpoint, trusted);
     assert.deepEqual(state.sticky, { deviceIds: [], bridgeIds: [] });
     assert.equal(state.lastServerReadAt, null);
-    assert.deepEqual(Object.keys(JSON.parse(readFileSync(file, 'utf8'))), ['version', 'ledger', 'checkpoint', 'sticky', 'lastServerReadAt', 'divergences']);
-    assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 2);
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(file, 'utf8'))), ['version', 'ledger', 'checkpoint', 'sticky', 'lastServerReadAt', 'divergences', 'refused']);
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 3);
     assert.deepEqual(state.divergences, []);
-    assert.equal(await store().ownBridgeStatus('studio', f.studio.authPublicKey), 'active');
+    assert.equal(await store().ownBridgeStatus(ownKeys(f.studio, 'studio')), 'active');
     // A later approval head on a grown chain also pairs (fresh store).
     rmSync(file);
     assert.equal((await store().adoptPaired(f.studio.link, approval(f.C), f.C.ledger)).head, f.C.head);
@@ -238,7 +243,7 @@ describe('BridgeLedgerStore', () => {
     assert.equal(refused.relation, 'diverged');
     assert.deepEqual(refused.discarded, []);
     assert.equal(refused.state?.checkpoint.head, f.A.head);
-    assert.deepEqual(refused.state?.divergences, [{ source: 'relay', otherHead: f.B.head, otherRevision: 3, firstSeen: NOW, lastSeen: NOW }]);
+    assert.deepEqual(refused.state?.divergences, [{ source: 'relay', otherHead: f.B.head, otherRevision: 3, forkRevision: 2, removedOnOtherHistory: false, firstSeen: NOW, lastSeen: NOW }]);
     assert.deepEqual(lines, [`[ledger] REFUSED a different account history from relay (head ${f.B.head.slice(0, 8)}, revision 3); keeping ours (head ${f.A.head.slice(0, 8)}, revision 3)`]);
     const after = await store().read();
     assert.ok(after);
@@ -267,28 +272,61 @@ describe('BridgeLedgerStore', () => {
     assert.deepEqual(after.trusted.devices, before.trusted.devices);
     assert.deepEqual(after.trusted.bridges, before.trusted.bridges);
     assert.deepEqual(after.sticky, before.sticky);
-    assert.equal(await replica.ownBridgeStatus('studio', f.studio.authPublicKey), 'active');
-    assert.deepEqual(after.divergences, [{ source: 'server', otherHead: f.E.head, otherRevision: 5, firstSeen: NOW, lastSeen: NOW }]);
+    assert.equal(await replica.ownBridgeStatus(ownKeys(f.studio, 'studio')), 'active');
+    assert.deepEqual(after.divergences, [{ source: 'server', otherHead: f.E.head, otherRevision: 5, forkRevision: 2, removedOnOtherHistory: false, firstSeen: NOW, lastSeen: NOW }]);
   });
 
-  it('a diverged chain that removes this bridge or a device is not evidence: nothing becomes sticky and nobody is removed', async () => {
+  it('a diverged chain is never evidence of our removal: its device removals are enforced (sticky), our own id is status only', async () => {
     const replica = await paired(f.C);
-    for (const [chain, source] of [[f.R, 'server'], [f.S, 'relay']] as const) {
-      const result = await replica.offer(chain.ledger, source);
-      assert.deepEqual([result.decision, result.relation], ['keep', 'diverged']);
-    }
+    // R removes studio (this bridge) on its branch; S removes laptop on its branch. Both histories are valid and refused.
+    const r = await replica.offer(f.R.ledger, 'server');
+    assert.deepEqual([r.decision, r.relation], ['keep', 'diverged']);
+    assert.match(lines.at(-1)!, /; that history removes this computer$/);
+    const s = await replica.offer(f.S.ledger, 'relay');
+    assert.deepEqual([s.decision, s.relation], ['keep', 'diverged']);
+    assert.doesNotMatch(lines.at(-1)!, /removes this computer/);
     const state = await store().read();
     assert.ok(state);
-    assert.deepEqual(state.sticky, { deviceIds: [], bridgeIds: [] });
-    assert.equal(await replica.ownBridgeStatus('studio', f.studio.authPublicKey), 'active');
-    assert.ok(state.trusted.devices.some(device => device.endpoint.id === f.laptopId));
-    // Across a restart too.
-    assert.equal(await store().ownBridgeStatus('studio', f.studio.authPublicKey), 'active');
+    // Our chain is untouched; laptop is refused here at once; studio never enters the sticky set.
+    assert.equal(state.checkpoint.head, f.C.head);
+    assert.ok(state.checkpoint.devices.some(device => device.endpoint.id === f.laptopId));
+    assert.deepEqual(state.sticky, { deviceIds: [f.laptopId], bridgeIds: [] });
+    assert.ok(!state.trusted.devices.some(device => device.endpoint.id === f.laptopId));
+    assert.deepEqual(state.divergences.map(entry => [entry.source, entry.removedOnOtherHistory]), [['server', true], ['relay', false]]);
+    assert.equal(await replica.ownBridgeStatus(ownKeys(f.studio)), 'active');
+    // Across a restart too (sticky persisted).
+    assert.equal(await store().ownBridgeStatus(ownKeys(f.studio)), 'active');
+    assert.ok(!(await store().trusted())!.devices.some(device => device.endpoint.id === f.laptopId));
     // The same removal on a chain AHEAD of ours is evidence.
     const ahead = await replica.offer(f.RC.ledger, 'server');
     assert.deepEqual([ahead.decision, ahead.relation], ['adopt', 'ahead']);
-    assert.equal(await replica.ownBridgeStatus('studio', f.studio.authPublicKey), 'revoked');
-    assert.deepEqual((await store().read())?.sticky, { deviceIds: [], bridgeIds: ['studio'] });
+    assert.equal(await replica.ownBridgeStatus(ownKeys(f.studio)), 'revoked');
+    assert.deepEqual((await store().read())?.sticky, { deviceIds: [f.laptopId], bridgeIds: ['studio'] });
+  });
+
+  it('P2: a removal of our bridgeId listed with OUR auth key but ANOTHER endpoint key is not our removal (all keys must match)', async () => {
+    const ours = await bridgeFromPairRequest(f.studio.link.request, f.laptop.accountId, T0);
+    const other = await bridgeFromPairRequest(f.kitchen.link.request, f.laptop.accountId, T0);
+    for (const bridge of [{ ...ours, endpoint: other.endpoint }, { ...ours, authPublicKey: other.authPublicKey }]) {
+      const added = await append(f.laptop, f.passkey, { type: 'add_bridge', bridge });
+      await seed(await append(added, f.passkey, { type: 'revoke_bridge', bridgeId: 'studio' }));
+      assert.equal(await store().ownBridgeStatus(ownKeys(f.studio)), 'absent');
+    }
+    // With every key ours, the same removal is ours.
+    await seed(f.R);
+    assert.equal(await store().ownBridgeStatus(ownKeys(f.studio)), 'revoked');
+  });
+
+  it('a sticky-only or refused-history removal of our own id never makes us revoked; only the raw chain decides', async () => {
+    // A store that does not know its own id merges no bridge removal at all; one that does never merges its own.
+    await seed(f.C, { deviceIds: [], bridgeIds: ['studio'] });
+    assert.equal(await store().ownBridgeStatus(ownKeys(f.studio)), 'absent', 'a sticky-only id (e.g. from 0.21) fails closed, never resets');
+    rmSync(file);
+    await seed(f.C);
+    const anonymous = new BridgeLedgerStore(dataDir, { now: () => NOW, log: line => lines.push(line) });
+    await anonymous.offer(f.R.ledger, 'server');
+    assert.deepEqual((await anonymous.read())?.sticky, { deviceIds: [], bridgeIds: [] });
+    assert.equal(await anonymous.ownBridgeStatus(ownKeys(f.studio)), 'active');
   });
 
   it('adopt/diverged: an owner-chosen history replaces ours, our removals stay enforced, and every divergence is cleared', async () => {
@@ -315,7 +353,7 @@ describe('BridgeLedgerStore', () => {
     assert.ok(state.checkpoint.revokedDeviceIds.includes(f.laptopId));
     assert.deepEqual(state.sticky, { deviceIds: [f.laptopId], bridgeIds: [] });
     assert.ok(!state.trusted.devices.some(device => device.endpoint.id === f.laptopId));
-    assert.equal(await replica.ownBridgeStatus('studio', f.studio.authPublicKey), 'active');
+    assert.equal(await replica.ownBridgeStatus(ownKeys(f.studio, 'studio')), 'active');
     // From now on the old history is the diverged one, and it is refused like any other.
     const old = await replica.offer(f.S.ledger, 'server');
     assert.deepEqual([old.decision, old.relation], ['keep', 'diverged']);
@@ -327,7 +365,7 @@ describe('BridgeLedgerStore', () => {
     const chosen = await resolve(f.D, f.base, f.passkey);
     const result = await replica.offer(chosen.ledger, 'server');
     assert.deepEqual([result.decision, result.relation], ['adopt', 'diverged']);
-    assert.equal(await replica.ownBridgeStatus('studio', f.studio.authPublicKey), 'absent');
+    assert.equal(await replica.ownBridgeStatus(ownKeys(f.studio, 'studio')), 'absent');
     assert.deepEqual((await store().read())?.sticky, { deviceIds: [], bridgeIds: [] });
   });
 
@@ -368,32 +406,34 @@ describe('BridgeLedgerStore', () => {
     assert.deepEqual(fileState(), written);
   });
 
-  it('the divergence survives a restart, is logged once per head, refreshes lastSeen sparingly, and is cleared when histories agree', async () => {
+  it('the divergence survives a restart, REFUSED is logged once per head (persisted), lastSeen is refreshed sparingly, and only the same source clears it', async () => {
     let now = NOW;
     const at = () => now;
     await paired(f.A);
     assert.equal((await store(undefined, at).offer(f.B.ledger, 'server')).relation, 'diverged');
     assert.equal(lines.length, 1);
-    // A restart remembers both the entry and that its head was logged.
+    // A restart remembers both the entry and that its head was logged; nothing changes, so nothing is written.
     now += 1000;
     const restarted = store(undefined, at);
+    const quiet = fileState();
     assert.equal((await restarted.offer(f.B.ledger, 'server')).relation, 'diverged');
     assert.equal(lines.length, 1);
-    const unchanged = fileState();
+    assert.deepEqual(fileState(), quiet, 'an offer that changes nothing writes nothing');
     now += DIVERGENCE_LAST_SEEN_RESOLUTION_MS - 1000;
     await restarted.offer(f.B.ledger, 'server');
-    assert.deepEqual((await store().read())?.divergences, [{ source: 'server', otherHead: f.B.head, otherRevision: 3, firstSeen: NOW, lastSeen: now }]);
-    assert.notDeepEqual(fileState(), unchanged);
+    assert.deepEqual((await store().read())?.divergences, [{ source: 'server', otherHead: f.B.head, otherRevision: 3, forkRevision: 2, removedOnOtherHistory: false, firstSeen: NOW, lastSeen: now }]);
+    assert.notDeepEqual(fileState(), quiet);
     // Another head from the same source: one more line, the same entry moves on and keeps firstSeen.
     const B3 = await append(await append(f.B, f.passkey, { type: 'add_device', device: await newDevice(f.B.accountId, 'B2') }), f.passkey, { type: 'add_device', device: await newDevice(f.B.accountId, 'B3') });
     now += 1;
     await restarted.offer(B3.ledger, 'server');
     assert.equal(lines.length, 2);
-    assert.deepEqual((await store().read())?.divergences, [{ source: 'server', otherHead: B3.head, otherRevision: 5, firstSeen: NOW, lastSeen: now }]);
+    assert.deepEqual((await store().read())?.divergences, [{ source: 'server', otherHead: B3.head, otherRevision: 5, forkRevision: 2, removedOnOtherHistory: false, firstSeen: NOW, lastSeen: now }]);
+    assert.deepEqual((await store().read())?.refused, { server: [f.B.head, B3.head], relay: [] });
     // The relay agreeing with us clears nothing of the server's entry.
     assert.equal((await restarted.offer(f.A.ledger, 'relay')).relation, 'same');
     assert.equal((await store().read())?.divergences.length, 1);
-    // The server agreeing again (same, behind, or ahead) clears its entry.
+    // The server agreeing again (same, behind, or ahead) clears its entry; the heads it refused stay remembered (no new line).
     for (const [chain, relation, decision] of [[f.A, 'same', 'keep'], [f.base, 'behind', 'keep'], [f.C, 'ahead', 'adopt']] as const) {
       assert.equal((await restarted.offer(B3.ledger, 'server')).relation, 'diverged');
       assert.equal((await store().read())?.divergences.length, 1, relation);
@@ -402,25 +442,74 @@ describe('BridgeLedgerStore', () => {
       assert.deepEqual(agreed.state?.divergences, [], relation);
       assert.deepEqual((await store().read())?.divergences, [], relation);
     }
-    assert.equal(lines.length, 4, 'B3 is logged again once its entry was cleared');
+    assert.equal(lines.length, 2, 'B3 is not logged again after its entry was cleared');
+  });
+
+  it('P5: two diverged tips alternated by one source: REFUSED once, two file writes, no re-verification; a new head after 60 s is logged', async () => {
+    let now = NOW;
+    await paired(f.A);
+    const replica = store(undefined, () => now);
+    let writes = 0;
+    let last = fileState().text;
+    for (let i = 0; i < 10; i++) {
+      now += 1000;
+      const result = await replica.offer((i % 2 ? f.S : f.B).ledger, 'relay');
+      assert.deepEqual([result.decision, result.relation], ['keep', 'diverged']);
+      const text = fileState().text;
+      if (text !== last) writes++;
+      last = text;
+    }
+    assert.equal(lines.filter(line => line.includes('REFUSED')).length, 1, 'a second new head within 60 s is not logged');
+    assert.equal(writes, 2, 'only the two first sightings change the file');
+    assert.deepEqual((await store().read())?.refused.relay, [f.B.head, f.S.head]);
+    // A third head one minute later is logged (rate limit per source, not a mute).
+    now += 60_000;
+    await replica.offer(f.R.ledger, 'relay');
+    assert.equal(lines.filter(line => line.includes('REFUSED')).length, 2);
+  });
+
+  it('P5b: one diverged chain alternated with our own chain from the relay is logged once', async () => {
+    let now = NOW;
+    await paired(f.A);
+    const replica = store(undefined, () => now);
+    for (let i = 0; i < 10; i++) {
+      now += 1000;
+      await replica.offer((i % 2 ? f.A : f.B).ledger, 'relay');
+    }
+    assert.equal(lines.filter(line => line.includes('REFUSED')).length, 1);
+  });
+
+  it('a refused chain seen again is not verified again: the verdict (with its removals) is cached per source, our head and its tip', async () => {
+    await paired(f.A);
+    const replica = store();
+    // A forged copy of S (same payloads, another signature on its last record) is answered from the cached verdict of the genuine S.
+    assert.equal((await replica.offer(f.S.ledger, 'server')).relation, 'diverged');
+    const last = lastRecord(f.S);
+    const forged = { genesis: f.S.ledger.genesis, transitions: [...f.S.ledger.transitions.slice(0, -1), { payload: last.payload, signature: f.A.ledger.transitions[0].signature }] };
+    assert.deepEqual([(await replica.offer(forged, 'server')).decision], ['keep']);
+    // Never cached across sources: from the relay the forged copy is verified, and rejected.
+    assert.deepEqual([(await replica.offer(forged, 'relay')).decision], ['reject']);
+    // Nor across our own head: after we move on, the same forged copy is verified again.
+    assert.equal((await replica.offer(f.C.ledger, 'server')).decision, 'adopt');
+    assert.deepEqual([(await replica.offer(forged, 'server')).decision], ['reject']);
   });
 
   it('reports the own bridge as active, revoked or absent', async () => {
     const replica = await paired(f.base);
-    assert.equal(await replica.ownBridgeStatus('studio', f.studio.authPublicKey), 'active');
-    assert.equal(await replica.ownBridgeStatus('studio', f.kitchen.authPublicKey), 'absent');
-    assert.equal(await replica.ownBridgeStatus('kitchen', f.kitchen.authPublicKey), 'absent');
+    assert.equal(await replica.ownBridgeStatus(ownKeys(f.studio, 'studio')), 'active');
+    assert.equal(await replica.ownBridgeStatus(ownKeys(f.kitchen, 'studio')), 'absent');
+    assert.equal(await replica.ownBridgeStatus(ownKeys(f.kitchen, 'kitchen')), 'absent');
     assert.equal((await replica.offer(f.R.ledger, 'relay')).decision, 'adopt');
-    assert.equal(await replica.ownBridgeStatus('studio', f.studio.authPublicKey), 'revoked');
+    assert.equal(await replica.ownBridgeStatus(ownKeys(f.studio, 'studio')), 'revoked');
     // The chain added studio with studio's key, not kitchen's: for a bridge with other keys it is no removal.
-    assert.equal(await replica.ownBridgeStatus('studio', f.kitchen.authPublicKey), 'absent');
+    assert.equal(await replica.ownBridgeStatus(ownKeys(f.kitchen, 'studio')), 'absent');
   });
 
   it('a tombstone (revoke_bridge of an id never added with our keys) is not a removal: absent, never revoked', async () => {
     // laptop + revoke_bridge studio: studio was never a member of this chain (valid since C1b).
     const T = await append(f.laptop, f.passkey, { type: 'revoke_bridge', bridgeId: 'studio' });
     await seed(T);
-    assert.equal(await store().ownBridgeStatus('studio', f.studio.authPublicKey), 'absent');
+    assert.equal(await store().ownBridgeStatus(ownKeys(f.studio, 'studio')), 'absent');
     // An extension that adds studio cannot exist (a revoked id is never added again), and pairing that id fails as revoked, writing nothing.
     rmSync(file);
     await assert.rejects(store().adoptPaired(f.studio.link, approval(T), T.ledger), storeError('ledger_store_pairing_revoked'));
@@ -483,7 +572,7 @@ describe('BridgeLedgerStore', () => {
     const trusted = await store().adoptBound(f.C.ledger);
     assert.equal(trusted.head, f.C.head);
     assert.equal(statSync(file).mode & 0o777, 0o600);
-    assert.equal(await store().ownBridgeStatus('studio', f.studio.authPublicKey), 'active');
+    assert.equal(await store().ownBridgeStatus(ownKeys(f.studio, 'studio')), 'active');
     // Once bound, an extension is admitted under the same rules, and another account still is not.
     assert.equal((await store().adoptBound(f.E.ledger)).head, f.E.head);
     await assert.rejects(store().adoptBound(f.X.ledger), rejectedBound);
@@ -573,7 +662,7 @@ describe('BridgeLedgerStore', () => {
       const replica = store();
       await assert.rejects(replica.read(), storeError('ledger_store_corrupt'), written.text.slice(0, 60));
       await assert.rejects(replica.trusted(), storeError('ledger_store_corrupt'));
-      await assert.rejects(replica.ownBridgeStatus('studio', f.studio.authPublicKey), storeError('ledger_store_corrupt'));
+      await assert.rejects(replica.ownBridgeStatus(ownKeys(f.studio, 'studio')), storeError('ledger_store_corrupt'));
       await assert.rejects(replica.offer(f.C.ledger, 'relay'), storeError('ledger_store_corrupt'));
       await assert.rejects(replica.adoptPaired(f.studio.link, approval(f.C), f.C.ledger), storeError('ledger_store_corrupt'));
       await assert.rejects(replica.markServerRead(NOW), storeError('ledger_store_corrupt'));
@@ -581,17 +670,28 @@ describe('BridgeLedgerStore', () => {
     }
   });
 
-  it('reads a version 1 file (no divergences), writes version 2, and treats a malformed divergence entry as corruption', async () => {
+  it('reads version 1 and 2 files, writes version 3, and treats a malformed divergence or refused-heads entry as corruption', async () => {
     await seed(f.A);
     assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 1);
     assert.deepEqual((await store().read())?.divergences, []);
+    assert.deepEqual((await store().read())?.refused, { server: [], relay: [] });
     await store().offer(f.B.ledger, 'server');
     const valid = JSON.parse(readFileSync(file, 'utf8'));
-    assert.equal(valid.version, 2);
-    assert.deepEqual(valid.divergences, [{ source: 'server', otherHead: f.B.head, otherRevision: 3, firstSeen: NOW, lastSeen: NOW }]);
-    const entry = valid.divergences[0];
+    assert.equal(valid.version, 3);
+    const entry = { source: 'server', otherHead: f.B.head, otherRevision: 3, forkRevision: 2, removedOnOtherHistory: false, firstSeen: NOW, lastSeen: NOW };
+    assert.deepEqual(valid.divergences, [entry]);
+    assert.deepEqual(valid.refused, { server: [f.B.head], relay: [] });
+    // An earlier 0.22 build's version 2 file: the entry reads as fork unknown, its head as already refused.
+    const { refused: _refused, ...v2 } = valid;
+    const { forkRevision: _fork, removedOnOtherHistory: _removed, ...v2entry } = entry;
+    writeFileSync(file, JSON.stringify({ ...v2, version: 2, divergences: [v2entry] }));
+    const fromV2 = await store().read();
+    assert.deepEqual(fromV2?.divergences, [{ ...entry, forkRevision: null }]);
+    assert.deepEqual(fromV2?.refused, { server: [f.B.head], relay: [] });
+    writeFileSync(file, JSON.stringify(valid));
     const corruptions: unknown[] = [
       { ...valid, divergences: undefined },
+      { ...valid, refused: undefined },
       { ...valid, divergences: {} },
       { ...valid, divergences: [entry, entry] },
       { ...valid, divergences: [entry, { ...entry, source: 'relay' }, { ...entry, source: 'relay' }] },
@@ -599,10 +699,17 @@ describe('BridgeLedgerStore', () => {
       { ...valid, divergences: [{ ...entry, otherHead: 'short' }] },
       { ...valid, divergences: [{ ...entry, otherRevision: -1 }] },
       { ...valid, divergences: [{ ...entry, otherRevision: 1025 }] },
+      { ...valid, divergences: [{ ...entry, forkRevision: 3 }] },
+      { ...valid, divergences: [{ ...entry, removedOnOtherHistory: 'no' }] },
       { ...valid, divergences: [{ ...entry, firstSeen: NOW + 1 }] },
       { ...valid, divergences: [{ ...entry, extra: 1 }] },
+      { ...valid, refused: { server: ['short'], relay: [] } },
+      { ...valid, refused: { server: [f.B.head, f.B.head], relay: [] } },
+      { ...valid, refused: { server: Array.from({ length: 17 }, (_, i) => `${'A'.repeat(42)}${'AEIMQUYcgkosw048'[i % 16]}`), relay: [] } },
+      { ...valid, refused: { server: [] } },
+      { ...v2, version: 2, divergences: [entry] },
       { version: 1, ledger: valid.ledger, checkpoint: valid.checkpoint, sticky: valid.sticky, lastServerReadAt: null, divergences: [] },
-      { version: 3, ledger: valid.ledger, checkpoint: valid.checkpoint, sticky: valid.sticky, lastServerReadAt: null, divergences: [] },
+      { ...valid, version: 4 },
     ];
     for (const corruption of corruptions) {
       writeFileSync(file, JSON.stringify(corruption));
@@ -614,7 +721,8 @@ describe('BridgeLedgerStore', () => {
     const replica = await paired(f.C);
     const results = await Promise.all([replica.offer(f.R.ledger, 'relay'), store().offer(f.S.ledger, 'server')]);
     assert.deepEqual(results.map(result => [result.decision, result.relation]), [['keep', 'diverged'], ['keep', 'diverged']]);
-    assert.deepEqual((await store().read())?.sticky, { deviceIds: [], bridgeIds: [] });
+    // S's removal of laptop is enforced; R's removal of studio is this bridge's own id: status only.
+    assert.deepEqual((await store().read())?.sticky, { deviceIds: [f.laptopId], bridgeIds: [] });
     assert.deepEqual((await store().read())?.divergences.map(entry => entry.source), ['server', 'relay']);
 
     rmSync(file);
@@ -641,7 +749,7 @@ describe('BridgeLedgerStore', () => {
     const behind = store(undefined, () => T0 - 86400000);
     assert.equal((await behind.read())?.checkpoint.head, f.C.head);
     assert.equal((await behind.offer(f.A.ledger, 'relay')).decision, 'keep');
-    assert.equal(await behind.ownBridgeStatus('studio', f.studio.authPublicKey), 'active');
+    assert.equal(await behind.ownBridgeStatus(ownKeys(f.studio, 'studio')), 'active');
   });
 
   it('removes its own stale temporaries on the first load and leaves every other file alone', async () => {

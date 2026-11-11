@@ -11,7 +11,9 @@ import {
 import { beginIdentityReset } from './identity-reset.js';
 import { UnauthorizedError } from 'centrifuge';
 import { HttpStatusError, MISSING_RELAY_URL_MESSAGE, relayTokenFailureMessage } from './ledger-relay.js';
-import { DIVERGED_SERVER_MESSAGE, createEndpointRegistrar, endpointRefusedMessage, offlineWithoutRelayUrlMessage, startRelay } from './ledger-startup.js';
+import {
+  DO_NOT_RESET_LINE, HELD_NO_RELAY_URL_LINE, HELD_OFFLINE_LINE, createEndpointRegistrar, endpointRefusedMessage, heldHistoryNotice, offlineWithoutRelayUrlMessage, startRelay,
+} from './ledger-startup.js';
 import type { BridgeMode } from './revocation-gating.js';
 import { accountIdOf, ledgerChallenge, ledgerHead, ledgerLastIssuedAt, nextTransition, verifyLedger } from './security/ledger/ledger.js';
 import { bridgeFromPairRequest, createBridgePairRequest } from './security/ledger/pairing.js';
@@ -198,7 +200,8 @@ describe('startAccountIdentity (steps 3-4)', () => {
     assert.equal(result.identity.accountId, f.base.accountId);
     assert.equal(result.identity.endpoint.id, f.keys.endpointId);
     assert.equal(result.reconciled, 'ok');
-    assert.equal(await result.store.ownBridgeStatus('studio', f.keys.authPublicKey), 'active');
+    assert.equal(await result.store.ownBridgeStatus({ bridgeId: 'studio', endpointId: f.keys.endpointId, endpointPublicKey: f.keys.endpointPublicKey,
+      authPublicKey: f.keys.authPublicKey }), 'active');
     assert.deepEqual(d.calls, { pair: 0, fetch: [] });
   });
 
@@ -320,13 +323,36 @@ describe('startRelay (step 5: the first relay token)', () => {
     assert.deepEqual(await start(async () => { throw forbidden; }), { kind: 'exit', message: relayTokenFailureMessage(forbidden, API) });
   });
 
-  it('a refusal by a server that holds a different history says so, and never advises a reset by itself', async () => {
-    const unauthorized = new UnauthorizedError('Bridge revoked');
-    const refused = await startRelay({ getToken: async () => { throw unauthorized; }, relayUrl: () => URL_, bridgeRevoked: () => false, apiUrl: API, serverDiverged: () => true });
-    assert.deepEqual(refused, { kind: 'exit', message: DIVERGED_SERVER_MESSAGE });
-    assert.match(DIVERGED_SERVER_MESSAGE, /did not reset itself/);
-    const temporary = await startRelay({ getToken: async () => { throw new Error('fetch failed'); }, relayUrl: () => URL_, bridgeRevoked: () => false, apiUrl: API, serverDiverged: () => true });
-    assert.equal(temporary.kind, 'offline');
+  it('a refusal of a computer that holds its own history starts OFFLINE with the held-history notice, never the reset advice', async () => {
+    const unauthorized = new UnauthorizedError('Relay token rejected (401)');
+    const notice = heldHistoryNotice({ afterRevision: 5, records: 3, removals: 2, passkeys: 1 });
+    const held = await startRelay({ getToken: async () => { throw unauthorized; }, relayUrl: () => URL_, bridgeRevoked: () => false, apiUrl: API, held: () => notice });
+    assert.deepEqual(held, { kind: 'offline', relayUrl: URL_, reason: 'Relay token rejected (401)', notice: [...notice, HELD_OFFLINE_LINE] });
+    for (const line of held.kind === 'offline' ? held.notice ?? [] : []) assert.doesNotMatch(line, /run `ftown start --new-identity`/);
+    // A 403 refusal too.
+    const forbidden = await startRelay({ getToken: async () => { throw new Error('Relay token failed (403): no'); }, relayUrl: () => URL_, bridgeRevoked: () => false, apiUrl: API, held: () => notice });
+    assert.equal(forbidden.kind, 'offline');
+    // Without a saved relay URL there is no offline start: exit, still without the reset advice.
+    const nowhere = await startRelay({ getToken: async () => { throw unauthorized; }, relayUrl: () => null, bridgeRevoked: () => false, apiUrl: API, held: () => notice });
+    assert.deepEqual(nowhere, { kind: 'exit', message: [...notice, HELD_NO_RELAY_URL_LINE].join('\n') });
+    // A proven revocation still wins; a computer that is not an active member (held() null) gets the reset advice as before.
+    assert.deepEqual(await startRelay({ getToken: async () => { throw unauthorized; }, relayUrl: () => URL_, bridgeRevoked: () => true, apiUrl: API, held: () => notice }), { kind: 'revoked' });
+    assert.deepEqual(await startRelay({ getToken: async () => { throw unauthorized; }, relayUrl: () => URL_, bridgeRevoked: () => false, apiUrl: API, held: () => null }),
+      { kind: 'exit', message: relayTokenFailureMessage(unauthorized, API) });
+    // A temporary failure is the plain offline start.
+    const temporary = await startRelay({ getToken: async () => { throw new Error('fetch failed'); }, relayUrl: () => URL_, bridgeRevoked: () => false, apiUrl: API, held: () => notice });
+    assert.deepEqual(temporary, { kind: 'offline', relayUrl: URL_, reason: 'fetch failed' });
+  });
+
+  it('the held-history notice: what is unique to this computer when known, else that it holds changes the server lacks; then do not reset', () => {
+    assert.deepEqual(heldHistoryNotice({ afterRevision: 5, records: 3, removals: 2, passkeys: 1 }), [
+      "[Bridge] The ftown server refused this computer's key, and this computer holds account history the server does not have: 2 removals and 1 passkey among 3 changes after revision 5.",
+      '[Bridge] Do NOT run --new-identity: this computer may hold the only copy. Open Security in the dashboard to choose a history.',
+    ]);
+    assert.deepEqual(heldHistoryNotice(null), [
+      "[Bridge] The ftown server refused this computer's key, and this computer holds changes the server does not have.", DO_NOT_RESET_LINE,
+    ]);
+    assert.equal(heldHistoryNotice({ afterRevision: 4, records: 0, removals: 0, passkeys: 0 })[0], heldHistoryNotice(null)[0]);
   });
 
   it('a temporary failure starts offline with the saved relay URL, and exits only without one', async () => {
@@ -386,6 +412,33 @@ describe('createEndpointRegistrar (step 6)', () => {
     await h.fire();
     assert.equal(h.registrar.registered(), true);
     assert.deepEqual(h.live(), []);
+  });
+
+  it('background, holding its own history: a refusal is not final, it keeps retrying with the backoff and never advises a reset', async () => {
+    let refuse = true;
+    const registered: string[] = [];
+    const timers: Array<{ ms: number; run: () => void; cancelled: boolean }> = [];
+    const logs: string[] = [];
+    const registrar = createEndpointRegistrar({
+      register: async token => { registered.push(token); },
+      tokens: { getToken: async () => { if (refuse) throw new UnauthorizedError('no'); return 'jwt'; }, cooldownRemainingMs: () => 0 },
+      bridgeRevoked: () => false, held: () => true, log: line => logs.push(line),
+      schedule: (run, ms) => { const timer = { ms, run, cancelled: false }; timers.push(timer); return () => { timer.cancelled = true; }; },
+    });
+    const fire = async () => { const timer = timers.filter(item => !item.cancelled)[0]; timer.cancelled = true; timer.run(); await new Promise(resolve => setImmediate(resolve)); };
+    registrar.retryInBackground();
+    await fire();
+    await fire();
+    assert.deepEqual(timers.filter(item => !item.cancelled).map(item => item.ms), [60_000], 'still retrying, backing off');
+    assert.deepEqual(logs, []);
+    refuse = false;
+    await fire();
+    assert.deepEqual(registered, ['jwt']);
+    assert.equal(registrar.registered(), true);
+    // registerNow with a refused registration: retried in the background, not an exit.
+    const now = createEndpointRegistrar({ register: async () => { throw new HttpStatusError('no', 401); }, tokens: { getToken: async () => 'jwt', cooldownRemainingMs: () => 0 },
+      bridgeRevoked: () => false, held: () => true, log: () => undefined, schedule: () => () => undefined });
+    assert.notEqual((await now.registerNow('jwt')).kind, 'exit');
   });
 
   it('background: a token or registration refusal stops retrying and says why', async () => {
