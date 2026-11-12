@@ -9,6 +9,8 @@ import { bridgeApiFetch } from "../helpers/bridge-api";
 import { BRIDGE_HOME, E2E_DIR } from "../helpers/config";
 import { createPreviewFixture, previewSimpleHtml } from "../helpers/session-preview";
 const execute = promisify(execFile);
+/** The Inbox trigger while anything waits. Other sessions of the shared account may wait too, so tests that do not own every session assert on their own entry or row, not on the count. */
+const waitingTrigger = (page: Page) => page.getByRole("button", { name: /^Inbox, [1-9]\d* waiting$/ });
 for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "mobile", width: 320, height: 844 }]) {
   test(`inbox queues a durable reply and dismissal survives reload on ${viewport.name}`, async ({ page }, info) => {
     test.setTimeout(180_000); await page.setViewportSize({ width: viewport.width, height: viewport.height }); await login(page); await waitForBridgeOnline(page);
@@ -62,9 +64,11 @@ test("mail nudge survives agent mail, highlights the trigger and shows the item 
     // A raises an attention request via the real CLI.
     await execute(process.execPath, [FTOWN_CLI, "sessions", "attention", "--title", "Review A", "--message", `Please review A ${stamp}`], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: idA }, timeout: 30_000 });
     // Nothing is selected: the highlighted trigger and the title prefix show up, and no side pane yet.
-    const trigger = page.getByRole("button", { name: "Inbox, 1 waiting" });
+    const trigger = waitingTrigger(page);
     await expect(trigger).toBeVisible();
-    await expect.poll(() => page.title()).toMatch(/^\(1\) /);
+    await expect(row(nameA).getByRole("img", { name: "Input needed" })).toBeVisible({ timeout: 30_000 });
+    await expect(row(nameB).getByRole("img", { name: "Input needed" })).toHaveCount(0);
+    await expect.poll(() => page.title()).toMatch(/^\(\d+\) /);
     // B sends ftown mail to A via the real CLI; the bridge nudges A's terminal.
     await execute(process.execPath, [HARNESS_CLI, "mail", "send", idA, "--type", "message", `Agent mail for A ${stamp}`], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: idB }, timeout: 30_000 });
     await expect.poll(async () => {
@@ -101,8 +105,9 @@ test("mail nudge survives agent mail, highlights the trigger and shows the item 
       return event?.resolvedAt ? event.resolution : "open";
     }, { timeout: 30_000 }).toBe("replied");
     await expect(pane).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Inbox, 0 messages" })).toBeVisible();
-    await expect.poll(() => page.title()).not.toMatch(/^\(\d+\) /);
+    await expect(row(nameA).getByRole("img", { name: "Input needed" })).toHaveCount(0);
+    await page.getByRole("button", { name: /^Inbox, / }).click();
+    await expect(page.getByRole("region", { name: "Inbox", exact: true }).locator(`[data-inbox-entry="${idA}"]`)).toHaveCount(0);
   } finally {
     if (idA) await bridgeApiFetch("DELETE", `/api/sessions/${idA}`).catch(() => undefined);
     if (idB) await bridgeApiFetch("DELETE", `/api/sessions/${idB}`).catch(() => undefined);
@@ -130,7 +135,8 @@ test("replying to one of two open items clears exactly that one", async ({ page 
     const second = events.find((event) => event.title === "Second")!;
     // The dashboard holds ONE entry per session (latest explicit), so the
     // trigger counts sessions, not bridge events: 2 events still say 1 waiting,
-    // and the entry shows the newest (Second).
+    // and the entry shows the newest (Second). This test creates the only session
+    // and the suite runs serially, so the exact count is the assertion here.
     const trigger = page.getByRole("button", { name: "Inbox, 1 waiting" });
     await expect(trigger).toBeVisible();
     await trigger.click();
@@ -175,14 +181,14 @@ test("a second page sees reply and dismiss without reload", async ({ page, brows
     id = (created.body as { session: { id: string } }).session.id;
     const msg1 = `First ${stamp}`;
     await execute(process.execPath, [FTOWN_CLI, "sessions", "attention", "--title", "First", "--message", msg1], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: id }, timeout: 30_000 });
-    const trigger2 = page2.getByRole("button", { name: "Inbox, 1 waiting" });
+    const trigger2 = waitingTrigger(page2);
     await expect(trigger2).toBeVisible();
     await trigger2.click();
     const inbox2 = page2.getByRole("region", { name: "Inbox", exact: true });
     const item2 = inbox2.locator(`[data-inbox-entry="${id}"]`);
     await expect(item2).toBeVisible();
     // Reply from page 1; page 2 drops the item without page2.reload().
-    await page.getByRole("button", { name: "Inbox, 1 waiting" }).click();
+    await waitingTrigger(page).click();
     const inbox1 = page.getByRole("region", { name: "Inbox", exact: true });
     const item1 = inbox1.locator(`[data-inbox-entry="${id}"]`);
     await expect(item1).toBeVisible();
@@ -190,12 +196,8 @@ test("a second page sees reply and dismiss without reload", async ({ page, brows
     await item1.getByRole("button", { name: "Send reply" }).click();
     await expect.poll(() => pollAttentionOpen(id), { timeout: 30_000 }).toBe(false);
     await expect(item2).toHaveCount(0, { timeout: 30_000 });
-    await expect(page2.getByRole("button", { name: "Inbox, 0 messages" })).toBeVisible({ timeout: 30_000 });
     // Dismiss from page 1; page 2 drops the new item without reload.
     await page1DismissSecond(page, id, `Second ${stamp}`, FTOWN_CLI);
-    const trigger2Again = page2.getByRole("button", { name: "Inbox, 1 waiting" });
-    await expect(trigger2Again).toBeVisible({ timeout: 30_000 });
-    await trigger2Again.click();
     const item2Again = inbox2.locator(`[data-inbox-entry="${id}"]`);
     await expect(item2Again).toBeVisible({ timeout: 30_000 });
     await page1DismissCurrent(page, id);
@@ -213,7 +215,6 @@ async function pollAttentionOpen(sessionId: string): Promise<boolean> {
 }
 async function page1DismissSecond(page: Page, id: string, message: string, FTOWN_CLI: string): Promise<void> {
   await execute(process.execPath, [FTOWN_CLI, "sessions", "attention", "--title", "Second", "--message", message], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: id }, timeout: 30_000 });
-  await page.getByRole("button", { name: "Inbox, 1 waiting" }).click();
   await expect(page.getByRole("region", { name: "Inbox", exact: true }).locator(`[data-inbox-entry="${id}"]`)).toBeVisible({ timeout: 30_000 });
 }
 async function page1DismissCurrent(page: Page, id: string): Promise<void> {
@@ -267,7 +268,7 @@ test("a human prompt typed in the terminal leaves the agent_needs_input item in 
   const row = page.locator('#dashboard-sidebar button[draggable="true"]').filter({ has: page.getByText(name, { exact: true }) });
   const openItems = async () => {
     const listed = await bridgeApiFetch("GET", `/api/sessions/${id}/attention`);
-    return (listed.body as { events: Array<{ type: string; resolvedAt?: string }> }).events.filter(event => !event.resolvedAt).map(event => event.type);
+    return (listed.body as { events: Array<{ type: string; resolvedAt?: string }> }).events.filter(event => !event.resolvedAt).map(event => event.type).sort();
   };
   try {
     const created = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name } });
@@ -279,15 +280,19 @@ test("a human prompt typed in the terminal leaves the agent_needs_input item in 
     await row.click();
     const pane = page.getByRole("region", { name: "Waiting for you" });
     await expect(pane.getByText(`Please review ${stamp}`)).toBeVisible({ timeout: 30_000 });
+    // Positive control: a permission notice raised through the hook path is open beside the explicit item.
+    const permission = await bridgeApiFetch("POST", "/hook", { body: { ftown_session_id: id, ftown_session_source: "env", hook_event_name: "Notification", notification_type: "permission_prompt", title: "Permission", message: `Allow ${stamp}?` } });
+    expect(permission.status).toBe(200);
+    await expect.poll(openItems, { timeout: 30_000 }).toEqual(["agent_needs_input", "permission_prompt"]);
     // The owner types a prompt in the terminal; a harness reports it as a human UserPromptSubmit.
     const marker = `TYPED${stamp}`;
     await runMarkerInTerminal(page, marker);
     const hook = await bridgeApiFetch("POST", "/hook", { body: { ftown_session_id: id, ftown_session_source: "env", hook_event_name: "UserPromptSubmit", prompt: `echo ${marker}` } });
     expect(hook.status).toBe(200);
-    // Nothing resolves it: the bridge still holds it, and after a reload the Inbox and the pane still show it.
-    expect(await openItems()).toEqual(["agent_needs_input"]);
+    // The same prompt clears the permission notice and leaves the explicit item: after a reload the Inbox and the pane still show it.
+    await expect.poll(openItems, { timeout: 30_000 }).toEqual(["agent_needs_input"]);
     await page.reload(); await waitForBridgeOnline(page);
-    await page.getByRole("button", { name: "Inbox, 1 waiting" }).click();
+    await waitingTrigger(page).click();
     const inbox = page.getByRole("region", { name: "Inbox", exact: true });
     await expect(inbox.locator(`[data-inbox-entry="${id}"]`).getByText(`Please review ${stamp}`)).toBeVisible({ timeout: 30_000 });
     await inbox.getByRole("button", { name: "Back to workspace" }).click();
@@ -311,7 +316,7 @@ test("entering a waiting session from the Workspace list on a phone lands on the
     await execute(process.execPath, [FTOWN_CLI, "sessions", "attention", "--title", "Phone", "--message", `Please review ${stamp}`], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: id }, timeout: 30_000 });
     const navigation = page.getByRole("tablist", { name: "Workspace navigation" });
     await navigation.getByRole("tab", { name: "Workspace", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Inbox, 1 waiting" })).toBeVisible({ timeout: 30_000 });
+    await expect(waitingTrigger(page)).toBeVisible({ timeout: 30_000 });
     const row = page.locator('#dashboard-sidebar button[draggable="true"]').filter({ has: page.getByText(name, { exact: true }) });
     await expect(row).toBeVisible({ timeout: 30_000 });
     await row.click();
@@ -381,7 +386,7 @@ test("preview showing switches to the waiting item, file back, reply returns to 
     await list.getByRole("tab", { name: "a.html", exact: true }).click();
     await expect(pane).toHaveCount(0);
     await expect(iframe.locator(`text=Pane ${stamp}`).first()).toBeVisible({ timeout: 30_000 });
-    await page.getByRole("button", { name: "Inbox, 1 waiting" }).click();
+    await waitingTrigger(page).click();
     await expect(page.getByRole("region", { name: "Inbox", exact: true }).locator(`[data-inbox-entry="${id}"]`)).toBeVisible({ timeout: 30_000 });
     await page.getByRole("region", { name: "Inbox", exact: true }).getByRole("button", { name: "Back to workspace" }).click();
     // The file is still in front; the selector's first entry shows the item again, and a reply returns the pane to the file.
