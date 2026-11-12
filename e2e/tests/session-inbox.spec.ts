@@ -126,27 +126,31 @@ test("replying to one of two open items clears exactly that one", async ({ page 
     expect(events.filter((event) => !event.resolvedAt)).toHaveLength(2);
     const first = events.find((event) => event.title === "First")!;
     const second = events.find((event) => event.title === "Second")!;
-    const trigger = page.getByRole("button", { name: "Inbox, 2 waiting" });
+    // The dashboard holds ONE entry per session (latest explicit), so the
+    // trigger counts sessions, not bridge events: 2 events still say 1 waiting,
+    // and the entry shows the newest (Second).
+    const trigger = page.getByRole("button", { name: "Inbox, 1 waiting" });
     await expect(trigger).toBeVisible();
     await trigger.click();
     const inbox = page.getByRole("region", { name: "Inbox", exact: true });
-    const firstArticle = inbox.locator("article").filter({ hasText: msg1 });
-    const secondArticle = inbox.locator("article").filter({ hasText: msg2 });
-    await expect(firstArticle).toHaveCount(1);
-    await expect(secondArticle).toHaveCount(1);
-    await firstArticle.getByLabel(`Reply to ${name}`).fill(`Answer to first ${stamp}`);
-    await firstArticle.getByRole("button", { name: "Send reply" }).click();
+    const article = inbox.locator(`[data-inbox-entry="${id}"]`);
+    await expect(article).toHaveCount(1);
+    await expect(article.getByText(msg2, { exact: true })).toBeVisible();
+    await expect(article.getByText(msg1, { exact: true })).toHaveCount(0);
+    await article.getByLabel(`Reply to ${name}`).fill(`Answer to newest ${stamp}`);
+    await article.getByRole("button", { name: "Send reply" }).click();
     await expect.poll(async () => {
-      const after = await bridgeApiFetch("GET", `/api/sessions/${id}/attention/${first.id}`);
+      const after = await bridgeApiFetch("GET", `/api/sessions/${id}/attention/${second.id}`);
       const event = (after.body as { event?: { resolvedAt?: string; resolution?: string } }).event;
       return event?.resolvedAt ? event.resolution : "open";
     }, { timeout: 30_000 }).toBe("replied");
-    const stillOpen = await bridgeApiFetch("GET", `/api/sessions/${id}/attention/${second.id}`);
-    const secondEvent = (stillOpen.body as { event?: { resolvedAt?: string } }).event!;
-    expect(secondEvent.resolvedAt).toBeFalsy();
-    // The inbox drops exactly the replied article; the other stays.
-    await expect(firstArticle).toHaveCount(0);
-    await expect(secondArticle).toHaveCount(1);
+    const stillOpen = await bridgeApiFetch("GET", `/api/sessions/${id}/attention/${first.id}`);
+    const firstEvent = (stillOpen.body as { event?: { resolvedAt?: string } }).event!;
+    expect(firstEvent.resolvedAt).toBeFalsy();
+    // The entry stays, now showing the remaining (older) item; trigger stays 1.
+    await expect(article).toHaveCount(1);
+    await expect(article.getByText(msg1, { exact: true })).toBeVisible();
+    await expect(article.getByText(msg2, { exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Inbox, 1 waiting" })).toBeVisible();
   } finally { if (id) await bridgeApiFetch("DELETE", `/api/sessions/${id}`).catch(() => undefined); }
 });
@@ -235,7 +239,7 @@ test("popup keeps terminal focus and Escape returns to the terminal", async ({ p
     const popup = page.getByRole("region", { name: "Waiting for you" });
     await expect(popup).toBeVisible();
     await expect(page.locator(".xterm-rows").first()).toBeVisible({ timeout: 30_000 });
-    await page.locator(".xterm-rows").first().click();
+    await page.locator(".xterm").first().click();
     await expect.poll(() => page.evaluate(() => (document.activeElement as HTMLElement | null)?.className ?? "")).toContain("xterm-helper-textarea");
     await expect(popup).toBeVisible();
     await popup.getByRole("button", { name: "Hide" }).focus();
