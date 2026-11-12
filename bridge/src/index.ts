@@ -648,7 +648,7 @@ program
       },
       onInput: (sid, data) => { runner.write(sid, data); },
       onResize: (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
-      onAttach: (sid) => terminalManager.serialize(sid, 20000) ?? '',
+      onAttach: (sid) => { pump.flush(sid); return terminalManager.serialize(sid, 20000) ?? ''; },
     });
     // Loopback WebSocket rung: same DirectMessage protocol as WebRTC, tunneled
     // over TCP on the existing 127.0.0.1 local API server. Bypasses VPN/endpoint
@@ -665,7 +665,7 @@ program
       allowedOrigins: apiOrigin ? [apiOrigin] : [],
       onInput: (sid, data) => { runner.write(sid, data); },
       onResize: (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
-      onAttach: (sid) => terminalManager.serialize(sid, 20000) ?? '',
+      onAttach: (sid) => { pump.flush(sid); return terminalManager.serialize(sid, 20000) ?? ''; },
     });
     const publishRouter = new PublishRouter({
       registry: watchRegistry,
@@ -803,8 +803,11 @@ program
       publishHookEvent: (sid, event) => centrifugo.publishHookEvent(userId, sid, event),
       unregisterSession: (sid) => unregisterSession(sid),
       collectUsage: (session) => collectSessionUsage(session),
+      isWatched: (sid) => publishRouter.hasAttachedPeers(sid) || watchRegistry.hasWatchers(sid),
     });
     pump.attach(runner);
+    // terminal.log readers (screen/grep fallbacks, clear) see pending output too.
+    store.setPendingTerminalFlush((sid) => pump.flush(sid));
 
     // Resurrection engine for sessions left live by a previous bridge process.
     const resurrection = new SessionResurrection({
@@ -919,6 +922,9 @@ program
     process.on('exit', cleanupPointer);
 
     function publishScreenDump(sid: string): void {
+      // Output still coalescing in the pump is already in the emulator: send it
+      // ahead of the dump so it is not delivered a second time afterwards.
+      pump.flush(sid);
       // Phase 1: viewport-only dump (~rows*cols bytes) for instant render.
       const viewportRaw = terminalManager.serialize(sid, 0);
       if (viewportRaw) {
@@ -1061,6 +1067,7 @@ program
           try { localApiServer.stop(); } finally { cleanupPointer(); }
         }
         runner.stopAll();
+        await pump.drain();
         loopbackServer.closeAll();
         directPeers.closeAll();
         watchRegistry.dispose();

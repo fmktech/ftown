@@ -19,13 +19,34 @@ export interface TerminalPumpDeps {
    * previously persisted usage.
    */
   collectUsage?: (session: Session) => Promise<SessionUsage | null>;
+  /**
+   * Whether anyone is receiving this session's live output right now (a direct
+   * peer or an unexpired remote watcher). Unwatched sessions coalesce output in
+   * a longer window. Whoever makes a session watched must call `flush` before
+   * producing the attach snapshot. Defaults to "always watched".
+   */
+  isWatched?: (sessionId: string) => boolean;
   /** Test seams; production uses the defaults. */
   flushIntervalMs?: number;
   maxBufferBytes?: number;
+  unwatchedFlushIntervalMs?: number;
+  unwatchedMaxBufferBytes?: number;
 }
 
 const FLUSH_INTERVAL_MS = 16;
 const MAX_BUFFER_BYTES = 32_000;
+const UNWATCHED_FLUSH_INTERVAL_MS = 250;
+const UNWATCHED_MAX_BUFFER_BYTES = 256 * 1024;
+
+/** Output of one session waiting for its next flush. */
+interface PendingOutput {
+  data: string;
+  /** UTF-8 size of `data`. */
+  bytes: number;
+  timer?: ReturnType<typeof setTimeout>;
+  /** The armed timer is the long unwatched window. */
+  unwatchedTimer: boolean;
+}
 
 /** Raw terminal chars considered for the errorReason tail (pre-sanitize). */
 const ERROR_TAIL_RAW_CHARS = 1200;
@@ -50,12 +71,14 @@ function sanitizeTerminalTail(raw: string): string {
 
 /**
  * Terminal output pump: buffers runner PTY output per session (coalescing into
- * ≤16ms / ≤32KB flushes to the store + transports), and owns the runner
- * lifecycle handlers ('complete'/'error') that persist final session statuses.
+ * ≤16ms / ≤32KB flushes to the store + transports while the session is watched,
+ * ≤250ms / ≤256KiB while nobody is), and owns the runner lifecycle handlers
+ * ('complete'/'error') that persist final session statuses. The live emulator
+ * (terminalManager) is fed immediately and never waits for a flush.
  */
 export class TerminalPump {
-  private readonly outputBuffers = new Map<string, string>();
-  private readonly flushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly pending = new Map<string, PendingOutput>();
+  private readonly pendingAppends = new Set<Promise<void>>();
   // Per-session write queue so concurrent load/modify/save flows (hooks,
   // runner exit handlers, stop_session) cannot interleave and resurrect a
   // stale status.
@@ -67,14 +90,18 @@ export class TerminalPump {
     return work;
   }
   isIdle(): boolean {
-    return this.outputBuffers.size === 0 && this.sessionWrites.size === 0 && this.pendingAsync.size === 0;
+    return this.pending.size === 0 && this.sessionWrites.size === 0 && this.pendingAsync.size === 0;
   }
   private readonly flushIntervalMs: number;
   private readonly maxBufferBytes: number;
+  private readonly unwatchedFlushIntervalMs: number;
+  private readonly unwatchedMaxBufferBytes: number;
 
   constructor(private readonly deps: TerminalPumpDeps) {
     this.flushIntervalMs = deps.flushIntervalMs ?? FLUSH_INTERVAL_MS;
     this.maxBufferBytes = deps.maxBufferBytes ?? MAX_BUFFER_BYTES;
+    this.unwatchedFlushIntervalMs = deps.unwatchedFlushIntervalMs ?? UNWATCHED_FLUSH_INTERVAL_MS;
+    this.unwatchedMaxBufferBytes = deps.unwatchedMaxBufferBytes ?? UNWATCHED_MAX_BUFFER_BYTES;
   }
 
   /** Wire the pump onto the runner's data/lifecycle events. */
@@ -87,26 +114,56 @@ export class TerminalPump {
   handleData(sessionId: string, data: string): void {
     this.deps.terminalManager.write(sessionId, data);
 
-    const existing = this.outputBuffers.get(sessionId) ?? '';
-    this.outputBuffers.set(sessionId, existing + data);
-    if ((existing.length + data.length) >= this.maxBufferBytes) {
+    let pending = this.pending.get(sessionId);
+    if (!pending) {
+      pending = { data: '', bytes: 0, unwatchedTimer: false };
+      this.pending.set(sessionId, pending);
+    }
+    pending.data += data;
+    pending.bytes += Buffer.byteLength(data, 'utf-8');
+
+    if (this.deps.isWatched?.(sessionId) ?? true) {
+      // A buffer still riding the long window means a watcher appeared without
+      // an explicit flush: deliver now instead of making it wait.
+      if (pending.data.length >= this.maxBufferBytes || pending.unwatchedTimer) {
+        this.flush(sessionId);
+      } else if (!pending.timer) {
+        pending.timer = setTimeout(() => this.flush(sessionId), this.flushIntervalMs);
+      }
+    } else if (pending.bytes > this.unwatchedMaxBufferBytes) {
       this.flush(sessionId);
-    } else if (!this.flushTimers.has(sessionId)) {
-      this.flushTimers.set(sessionId, setTimeout(() => this.flush(sessionId), this.flushIntervalMs));
+    } else if (!pending.timer) {
+      pending.timer = setTimeout(() => this.flush(sessionId), this.unwatchedFlushIntervalMs);
+      pending.unwatchedTimer = true;
     }
   }
 
+  /**
+   * Hand a session's pending output to the store and the transports now. Must
+   * run before anything reads state derived from flushed output: an attach
+   * snapshot / screen dump for a new watcher (else the bytes arrive again after
+   * the snapshot that already contains them), terminal.log readers, session
+   * exit, and shutdown.
+   */
   flush(sessionId: string): void {
-    const buf = this.outputBuffers.get(sessionId);
-    if (!buf) return;
-    this.outputBuffers.delete(sessionId);
-    const timer = this.flushTimers.get(sessionId);
-    if (timer) clearTimeout(timer);
-    this.flushTimers.delete(sessionId);
-    this.track(this.deps.store.appendTerminalData(sessionId, buf)).catch((err) => {
+    const pending = this.pending.get(sessionId);
+    if (!pending) return;
+    this.pending.delete(sessionId);
+    if (pending.timer) clearTimeout(pending.timer);
+    const append = this.track(this.deps.store.appendTerminalData(sessionId, pending.data)).catch((err) => {
       console.error(`[Bridge] Failed to store terminal data for ${sessionId}:`, err);
     });
-    this.deps.publishTerminalData(sessionId, buf);
+    this.pendingAppends.add(append);
+    void append.then(() => this.pendingAppends.delete(append));
+    this.deps.publishTerminalData(sessionId, pending.data);
+  }
+
+  /** Flush every session and wait until the store has taken all of it (shutdown). */
+  async drain(): Promise<void> {
+    for (const sessionId of [...this.pending.keys()]) this.flush(sessionId);
+    while (this.pendingAppends.size > 0) {
+      await Promise.all([...this.pendingAppends]);
+    }
   }
 
   withSessionWrite(sessionId: string, task: () => Promise<void>): Promise<void> {
@@ -214,7 +271,7 @@ export class TerminalPump {
   private handleError(sessionId: string, error: Error): void {
     // Capture what's still buffered BEFORE flush drains it — the errorReason
     // tail needs it if the (unawaited) flush append hasn't hit the store yet.
-    const pendingAtError = this.outputBuffers.get(sessionId) ?? '';
+    const pendingAtError = this.pending.get(sessionId)?.data ?? '';
     this.flush(sessionId);
     this.publishSyntheticStop(sessionId, 'error');
     void this.track(this.withSessionWrite(sessionId, async () => {

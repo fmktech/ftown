@@ -1,7 +1,7 @@
 import { readFile, writeFile, mkdir, readdir, appendFile, rm, truncate, stat, open, rename, chmod } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join, dirname } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 
 import type { ArchivedSession, Session } from './types.js';
 
@@ -17,6 +17,27 @@ import type { ArchivedSession, Session } from './types.js';
 const DEFAULT_MAX_TERMINAL_LOG_BYTES = 64 * 1024 * 1024;
 const NEWLINE = 0x0a;
 
+/** Identity of one on-disk session.json revision, from a single bigint stat. */
+interface FileStamp {
+  ino: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+}
+
+/**
+ * One indexed session.json: the stamp it was read under and its record as
+ * compact JSON text. Text rather than a live object so every read hands out a
+ * fresh, caller-owned copy (callers mutate and re-save what they load) that is
+ * by construction identical to parsing the file again.
+ */
+interface IndexedRecord extends FileStamp {
+  json: string;
+}
+
+function isMissing(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException | null)?.code === 'ENOENT';
+}
+
 export class SessionStore {
   private readonly sessionsDir: string;
   private readonly archivePath: string;
@@ -24,6 +45,14 @@ export class SessionStore {
   // Removal is final for this store's lifetime; explicit revival uses a new ID.
   private readonly retiredSessionIds = new Set<string>();
   private readonly maxTerminalLogBytes: number;
+  // session.json index, keyed by session id. An entry is served only while a
+  // fresh stat of the file still matches its stamp, so it can never be stale.
+  private readonly recordIndex = new Map<string, IndexedRecord>();
+  // Sessions whose directory this process has already created.
+  private readonly terminalDirsReady = new Set<string>();
+  // terminal.log size in bytes, tracked after one initial stat per session.
+  private readonly terminalLogSizes = new Map<string, number>();
+  private flushPendingTerminalData: ((sessionId: string) => void) | undefined;
 
   constructor(dataDir: string, options: { maxTerminalLogBytes?: number } = {}) {
     this.sessionsDir = join(dataDir, 'sessions');
@@ -77,34 +106,79 @@ export class SessionStore {
         // incomplete document. A same-directory rename is atomic for readers.
         // 0600: session.json carries the env map with provider tokens, the exact
         // field toWireSession strips from the wire. Never world-readable.
-        await writeFile(tempFilePath, JSON.stringify(session, null, 2), { encoding: 'utf-8', mode: 0o600 });
+        const text = JSON.stringify(session, null, 2);
+        const handle = await open(tempFilePath, 'w', 0o600);
+        let stamp: FileStamp;
+        try {
+          await handle.writeFile(text, 'utf-8');
+          // Stamp the exact inode being published: a rename keeps ino, size and
+          // mtime, so the index entry is valid only for this very snapshot.
+          stamp = await handle.stat({ bigint: true });
+        } finally {
+          await handle.close();
+        }
         await rename(tempFilePath, filePath);
+        this.recordIndex.set(session.id, {
+          ino: stamp.ino,
+          size: stamp.size,
+          mtimeNs: stamp.mtimeNs,
+          json: JSON.stringify(JSON.parse(text)),
+        });
       } catch (error) {
+        this.recordIndex.delete(session.id);
         await rm(tempFilePath, { force: true }).catch(() => undefined);
         throw error;
       }
     });
   }
 
-  async loadSession(sessionId: string): Promise<Session | null> {
+  /**
+   * Current session.json content as JSON text, or null when the file does not
+   * exist. Costs one stat when the indexed revision is still on disk; reads and
+   * parses only a new or changed file. Corrupt files throw and are never indexed.
+   */
+  private async readRecordJson(sessionId: string): Promise<string | null> {
     const filePath = this.sessionFilePath(sessionId);
-    if (!existsSync(filePath)) {
+    let stamp: FileStamp | undefined;
+    try {
+      stamp = statSync(filePath, { bigint: true, throwIfNoEntry: false });
+    } catch {
+      stamp = undefined;
+    }
+    if (!stamp) {
+      this.recordIndex.delete(sessionId);
       return null;
     }
-    const data = await readFile(filePath, 'utf-8');
-    return JSON.parse(data) as Session;
+    const indexed = this.recordIndex.get(sessionId);
+    if (indexed && indexed.ino === stamp.ino && indexed.size === stamp.size && indexed.mtimeNs === stamp.mtimeNs) {
+      return indexed.json;
+    }
+    // The stamp was taken BEFORE the read: if the file is replaced meanwhile,
+    // the next stat differs from it and the entry is re-read.
+    this.recordIndex.delete(sessionId);
+    const json = JSON.stringify(JSON.parse(await readFile(filePath, 'utf-8')));
+    this.recordIndex.set(sessionId, { ino: stamp.ino, size: stamp.size, mtimeNs: stamp.mtimeNs, json });
+    return json;
+  }
+
+  async loadSession(sessionId: string): Promise<Session | null> {
+    const json = await this.readRecordJson(sessionId);
+    return json === null ? null : JSON.parse(json) as Session;
   }
 
   async listSessions(): Promise<Session[]> {
     if (!existsSync(this.sessionsDir)) {
+      this.recordIndex.clear();
       return [];
     }
 
     const entries = await readdir(this.sessionsDir, { withFileTypes: true });
     const sessions: Session[] = [];
+    const present = new Set<string>();
 
     for (const entry of entries) {
       if (entry.isDirectory()) {
+        present.add(entry.name);
         const session = await this.loadSession(entry.name);
         if (session) {
           sessions.push(session);
@@ -112,17 +186,48 @@ export class SessionStore {
       }
     }
 
+    for (const sessionId of this.recordIndex.keys()) {
+      if (!present.has(sessionId)) this.recordIndex.delete(sessionId);
+    }
+
     return sessions.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  /**
+   * Registers the owner of not-yet-persisted terminal output (the pump). It is
+   * invoked before terminal.log is read or cleared so no reader can observe a
+   * log that is missing bytes still waiting in a coalescing window.
+   */
+  setPendingTerminalFlush(flush: (sessionId: string) => void): void {
+    this.flushPendingTerminalData = flush;
   }
 
   async appendTerminalData(sessionId: string, data: string): Promise<void> {
     await this.withSessionWrite(sessionId, async () => {
       if (this.retiredSessionIds.has(sessionId)) return;
-      await mkdir(this.sessionDir(sessionId), { recursive: true, mode: 0o700 });
       const filePath = this.terminalLogPath(sessionId);
-      await appendFile(filePath, data, { encoding: 'utf-8', mode: 0o600 });
-      await this.trimTerminalLogIfNeeded(filePath);
+      const bytes = Buffer.from(data, 'utf-8');
+      try {
+        await this.appendTerminalBytes(sessionId, filePath, bytes);
+      } catch (error) {
+        this.terminalDirsReady.delete(sessionId);
+        this.terminalLogSizes.delete(sessionId);
+        if (!isMissing(error)) throw error;
+        // The directory vanished since it was created: recreate it and retry.
+        await this.appendTerminalBytes(sessionId, filePath, bytes);
+      }
+      await this.trimTerminalLogIfNeeded(sessionId, filePath);
     });
+  }
+
+  private async appendTerminalBytes(sessionId: string, filePath: string, bytes: Buffer): Promise<void> {
+    if (!this.terminalDirsReady.has(sessionId)) {
+      await mkdir(this.sessionDir(sessionId), { recursive: true, mode: 0o700 });
+      this.terminalDirsReady.add(sessionId);
+    }
+    await appendFile(filePath, bytes, { mode: 0o600 });
+    const known = this.terminalLogSizes.get(sessionId);
+    if (known !== undefined) this.terminalLogSizes.set(sessionId, known + bytes.length);
   }
 
   /**
@@ -135,10 +240,19 @@ export class SessionStore {
    * older output was discarded. Best-effort: any failure is swallowed so it can
    * never poison the write-lock chain and stall future appends.
    */
-  private async trimTerminalLogIfNeeded(filePath: string): Promise<void> {
+  private async trimTerminalLogIfNeeded(sessionId: string, filePath: string): Promise<void> {
     try {
+      // The size is tracked in memory after one stat; the file is stat'ed again
+      // only when the tracked size says a trim is due (the trim needs the real
+      // size) or after an error dropped the tracked value.
+      const tracked = this.terminalLogSizes.get(sessionId);
+      if (tracked !== undefined && tracked <= this.maxTerminalLogBytes * 2) {
+        return;
+      }
+      this.terminalLogSizes.delete(sessionId);
       const { size } = await stat(filePath);
       if (size <= this.maxTerminalLogBytes * 2) {
+        this.terminalLogSizes.set(sessionId, size);
         return;
       }
 
@@ -167,14 +281,20 @@ export class SessionStore {
       const tmpPath = `${filePath}.trim-${process.pid}.tmp`;
       await writeFile(tmpPath, Buffer.concat([marker, body]), { mode: 0o600 });
       await rename(tmpPath, filePath);
+      this.terminalLogSizes.set(sessionId, marker.length + body.length);
     } catch (err) {
+      this.terminalLogSizes.delete(sessionId);
       console.error(`[SessionStore] Failed to trim terminal log ${filePath}:`, err);
     }
   }
 
   async deleteSession(sessionId: string): Promise<void> {
     await this.withSessionWrite(sessionId, async () => {
+      this.recordIndex.delete(sessionId);
+      this.terminalDirsReady.delete(sessionId);
+      this.terminalLogSizes.delete(sessionId);
       await rm(this.sessionDir(sessionId), { recursive: true, force: true });
+      this.recordIndex.delete(sessionId);
       // Latch only after successful deletion so failures remain retryable.
       this.retiredSessionIds.add(sessionId);
     });
@@ -233,16 +353,24 @@ export class SessionStore {
   }
 
   async clearTerminalLog(sessionId: string): Promise<void> {
+    // Queue pending output ahead of the truncate so it cannot land afterwards.
+    this.flushPendingTerminalData?.(sessionId);
     await this.withSessionWrite(sessionId, async () => {
       if (this.retiredSessionIds.has(sessionId)) return;
       const filePath = this.terminalLogPath(sessionId);
+      this.terminalLogSizes.delete(sessionId);
       if (existsSync(filePath)) {
         await truncate(filePath, 0);
+        this.terminalLogSizes.set(sessionId, 0);
       }
     });
   }
 
   async loadTerminalLog(sessionId: string): Promise<string> {
+    // Pending output is handed to appendTerminalData synchronously, which joins
+    // the session's write chain; waiting for that chain makes the read complete.
+    this.flushPendingTerminalData?.(sessionId);
+    await this.writeLocks.get(sessionId);
     const filePath = this.terminalLogPath(sessionId);
     if (!existsSync(filePath)) {
       return '';
