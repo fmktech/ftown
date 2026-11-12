@@ -1068,7 +1068,7 @@ it.each(layouts)('$layout: closing the item of a session without preview closes 
   mountPane({ entry: itemFor('a') });
   fireEvent.click(screen.getByRole('button', { name: 'Close waiting' }));
   expect(waitingRegion()).toBeNull();
-  expect(document.querySelector('.session-aux-pane')).toBeNull();
+  expect(document.querySelector('.session-aux-pane:not([hidden])')).toBeNull();
   expect(screen.queryByRole('tablist')).toBeNull();
   expect(screen.getByTestId('terminal-node').parentElement?.hidden).toBe(false);
 });
@@ -1276,6 +1276,8 @@ it('unmounts the preview frame while the item is shown and brings back the chose
     expect(waitingRegion()).toBeTruthy();
     expect(document.querySelector('iframe')).toBeNull();
     expect(first.isConnected).toBe(false);
+    expect(Array.from(document.querySelectorAll('.session-preview-content')).map(node => node.getAttribute('aria-label'))).toEqual(['Waiting for you']);
+    expect(screen.queryByText('Loading preview…')).toBeNull();
     rerender(workspace(null));
     const second = await screen.findByTitle('Preview: notes.html') as HTMLIFrameElement;
     expect(second).not.toBe(first);
@@ -1284,6 +1286,60 @@ it('unmounts the preview frame while the item is shown and brings back the chose
     fromFrame(second, { kind: 'ready' });
     expect(restore).toHaveBeenCalledExactlyOnceWith({ channel, documentId: documentId(second), kind: 'restore', x: 3, y: 420 }, '*');
   } finally {
+    if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
+  }
+});
+
+it('keeps a half-filled answer for the item across a hide and show, and starts clean for another item', () => {
+  resizeTo(900);
+  const prompted = (attentionId: string): InboxEntry => { const entry = itemFor(attentionId); return { ...entry, notice: { ...entry.notice, prompt: { channel: 'mail', questions: [{ question: 'Which path?', options: [{ label: 'Fast' }, { label: 'Safe' }], multiSelect: false, allowText: false }] } } }; };
+  const { set } = mountPane({ session: previewOf('a.html'), entry: prompted('a') });
+  const safe = () => within(waitingRegion()!).getByLabelText('Safe') as HTMLInputElement;
+  fireEvent.click(safe());
+  expect(safe().checked).toBe(true);
+  fireEvent.click(within(screen.getByRole('tablist', { name: 'Side pane view' })).getByRole('tab', { name: 'a.html' }));
+  expect(waitingRegion()).toBeNull();
+  expect(document.querySelectorAll('[aria-label="Waiting for you"][role="region"]')).toHaveLength(0);
+  fireEvent.click(within(screen.getByRole('tablist', { name: 'Side pane view' })).getByRole('tab', { name: 'Waiting for you' }));
+  expect(safe().checked).toBe(true);
+  set({ session: previewOf('a.html'), entry: prompted('b') });
+  expect(safe().checked).toBe(false);
+});
+
+it('stops reading the preview while the item is shown and reads it again when the file comes back', async () => {
+  resizeTo(900);
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const originalSubtle = Object.getOwnPropertyDescriptor(globalThis.crypto, 'subtle');
+  Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest: async () => Uint8Array.from({ length: 32 }, () => 0x99).buffer } });
+  const html = '<p>preview</p>'; const revision = '9'.repeat(64);
+  const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
+    const payload = command.payload as Record<string, unknown>;
+    const ids = { previewId: String(payload.previewId), fileId: String(payload.fileId) };
+    return Promise.resolve(command.type === 'session_preview_chunk'
+      ? { requestId: 'c', success: true, data: { state: 'chunk', ...ids, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true } }
+      : { requestId: 's', success: true, data: { state: 'ready', ...ids, revision, totalBytes: html.length } });
+  });
+  const client = {} as unknown as MessageClient;
+  const workspace = (entry: InboxEntry | null) => <SessionWorkspace session={previewOf('a.html')} client={client} userId="user" readable sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}
+    attention={entry ? { entry, shown: true, onShow: vi.fn(), onHide: vi.fn(), onDismiss: vi.fn(async () => {}), onReply: vi.fn(async () => {}), onAnswer: vi.fn(async () => ({ ok: true, message: 'Answered' }) as const) } : undefined}><div>Terminal</div></SessionWorkspace>;
+  const elapse = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  try {
+    const { rerender } = render(workspace(null));
+    await screen.findByTitle('Preview: a.html');
+    const loaded = sendCommand.mock.calls.length;
+    await elapse(60_000);
+    const polling = sendCommand.mock.calls.length;
+    expect(polling).toBeGreaterThan(loaded);
+    rerender(workspace(itemFor('a')));
+    await elapse(0);
+    const behindItem = sendCommand.mock.calls.length;
+    await elapse(60_000);
+    expect(sendCommand.mock.calls.length).toBe(behindItem);
+    rerender(workspace(null));
+    await elapse(60_000);
+    expect(sendCommand.mock.calls.length).toBeGreaterThan(behindItem);
+  } finally {
+    vi.useRealTimers();
     if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
   }
 });

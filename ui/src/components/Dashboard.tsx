@@ -407,22 +407,28 @@ PY`;
   // The waiting item of the selected session is shown in the side pane unless the owner hid exactly that item.
   // The marker carries the item key, so a new item is shown again; selecting a session clears it.
   const [attentionHidden, setAttentionHidden] = useState<string | null>(null);
+  const [sessionActivation, setSessionActivation] = useState(0);
   const attentionMarker = selectedSession && selectedWaitingEntry ? `${selectedSession.bridgeId}:${selectedSession.id}|${inboxItemKey(selectedWaitingEntry)}` : null;
   const attentionShown = attentionMarker !== null && !inboxOpen && attentionHidden !== attentionMarker;
   // The phone's preview tab is the one side-pane tab: it exists for an open preview or a shown item. When the view behind
   // the selected tab goes away, SessionWorkspace asks for the fallback tab through onMobileTab; nothing here second-guesses it.
   const sidePaneOpen = previewOpen || attentionShown;
-  const refocusTerminalRef = useRef(false);
+  const moveFocusAfterHideRef = useRef(false);
   const showAttention = useCallback(() => setAttentionHidden(null), []);
-  const hideAttention = useCallback((refocusTerminal: boolean) => {
+  const hideAttention = useCallback((moveFocus: boolean) => {
     if (!attentionMarker) return;
-    refocusTerminalRef.current = refocusTerminal;
+    moveFocusAfterHideRef.current = moveFocus;
     setAttentionHidden(attentionMarker);
   }, [attentionMarker]);
+  // After Close or Escape focus goes to the terminal when it is on screen beside a desktop pane. Otherwise (a phone, or a
+  // compact pane that fell back to the preview) it goes to the tab that is now selected: focusing a hidden terminal does
+  // nothing, and on a phone it would raise the keyboard. The tab may only be selected one render later, so this waits for it.
   useEffect(() => {
-    if (!refocusTerminalRef.current) return;
-    refocusTerminalRef.current = false;
-    terminalRef.current?.focus();
+    if (!moveFocusAfterHideRef.current) return;
+    const terminalPanel = document.getElementById("session-terminal-panel");
+    if (isDesktop && terminalPanel && !terminalPanel.hidden) { moveFocusAfterHideRef.current = false; terminalRef.current?.focus(); return; }
+    const tab = document.querySelector<HTMLElement>(`[role="tablist"][aria-label="${isDesktop ? "Session view" : "Workspace navigation"}"] [role="tab"][aria-selected="true"]`);
+    if (tab) { moveFocusAfterHideRef.current = false; tab.focus(); }
   });
   const closeReview = useCallback(() => {
     setReviewChoice(previous => ({ ...previous, identity: "" }));
@@ -517,7 +523,7 @@ PY`;
   const selectedTransportMode = selectedSessionId ? transport?.getMode(selectedSessionId) ?? "connecting" : null;
   const sessionHeaderActions = selectedSession ? <SessionHeaderActions hasPreview={Boolean(selectedPreviewDescriptor)} previewOpen={previewOpen}
     running={selectedSession.status === "running"} relaunchLabel={sessionRelaunchLabel ?? null}
-    onPreview={() => setPreviewOpen(true)} onStop={handleStopSession} onRelaunch={handleRelaunchSession} hasReview={!!reviewIdentity} onReview={openReview} hasWaiting={attentionMarker !== null && !inboxOpen && !attentionShown} onWaiting={showAttention} /> : null;
+    onPreview={() => { setPreviewOpen(true); if (attentionShown) hideAttention(false); }} onStop={handleStopSession} onRelaunch={handleRelaunchSession} hasReview={!!reviewIdentity} onReview={openReview} hasWaiting={attentionMarker !== null && !inboxOpen && !attentionShown} onWaiting={showAttention} /> : null;
 
   // Claude's Stop hook does not fire on user interrupt, so a lone ESC leaves the
   // dashboard stuck on "thinking"/"tool_use". Optimistically clear it locally.
@@ -568,6 +574,7 @@ PY`;
 
   const handleSelectSession = useCallback((id: string | null) => {
     setSelectedSessionId(id);
+    setSessionActivation(count => count + 1);
     setAttentionHidden(null);
     setInboxOpen(false);
     if (id) {
@@ -655,6 +662,12 @@ PY`;
     if (tab === "terminal") {
       scheduleTerminalRenderAdjustment();
     }
+  }, [scheduleTerminalRenderAdjustment]);
+
+  // A tab SessionWorkspace falls back to because its view went away. The owner tapped nothing, so the Inbox page stays open.
+  const handleMobileTabFallback = useCallback((tab: "terminal" | "preview" | "review") => {
+    setMobileTab(tab);
+    if (tab === "terminal") scheduleTerminalRenderAdjustment();
   }, [scheduleTerminalRenderAdjustment]);
 
   const handleCloneSession = useCallback((session: Session) => {
@@ -1257,7 +1270,7 @@ PY`;
           <SessionInboxPage entries={inbox} open={inboxOpen} onClose={() => { restoreInboxFocusRef.current = true; setInboxOpen(false); scheduleTerminalRenderAdjustment(); }}
             onOpenSession={id => { focusOpenedSessionRef.current = true; handleSelectSession(id); setMobileTab("terminal"); scheduleTerminalRenderAdjustment(); }} onDismiss={entry => clearSessionAttention(entry.session.id, entry.notice)} onReply={replyToInbox} onAnswer={answerInbox} />
           <div ref={workspaceFocusRef} role="region" aria-label={`Session workspace: ${selectedSession?.name || selectedSession?.prompt?.slice(0, 48) || "Session"}`} tabIndex={-1} className="relative min-h-0 min-w-0 flex-1 flex-col focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)]" style={{ display: inboxOpen ? "none" : "flex" }} aria-hidden={inboxOpen}>
-          <SessionWorkspace session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabSwitch} onRefit={refitPreviewTerminal} reviewOpen={reviewOpen} reviewActivation={reviewChoice.activation} onCloseReview={closeReview} attention={selectedWaitingEntry ? { entry: selectedWaitingEntry, shown: attentionShown, onShow: showAttention, onHide: hideAttention, onDismiss: entry => clearSessionAttention(entry.session.id, entry.notice), onReply: replyToInbox, onAnswer: answerInbox } : undefined}>
+          <SessionWorkspace session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabFallback} sessionActivation={sessionActivation} onRefit={refitPreviewTerminal} reviewOpen={reviewOpen} reviewActivation={reviewChoice.activation} onCloseReview={closeReview} attention={selectedWaitingEntry ? { entry: selectedWaitingEntry, shown: attentionShown, onShow: showAttention, onHide: hideAttention, onDismiss: entry => clearSessionAttention(entry.session.id, entry.notice), onReply: replyToInbox, onAnswer: answerInbox } : undefined}>
           <Terminal
             ref={terminalRef}
             transport={transport}

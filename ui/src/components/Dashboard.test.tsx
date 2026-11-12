@@ -26,6 +26,7 @@ const state = vi.hoisted(() => ({
   terminalGetText: vi.fn(() => "terminal output"),
   terminalPaste: vi.fn(),
   terminalSendInput: vi.fn(),
+  terminalFocus: vi.fn(),
 }));
 
 vi.mock("@/hooks/useSessions", () => ({ useSessions: () => ({
@@ -44,7 +45,7 @@ vi.mock("@/hooks/useAllSessionEvents", () => ({ useAllSessionEvents: () => ({
 vi.mock("./Terminal", async () => {
   const { forwardRef, useImperativeHandle } = await import("react");
   return { Terminal: forwardRef(function Terminal({ sessionId, headerActions }: { sessionId: string | null; headerActions?: ReactNode }, ref) {
-    useImperativeHandle(ref, () => ({ sendInput: state.terminalSendInput, focus: () => { (document.querySelector('[data-testid="terminal"]') as HTMLElement | null)?.focus(); }, refit: vi.fn(), getText: state.terminalGetText, paste: state.terminalPaste }));
+    useImperativeHandle(ref, () => ({ sendInput: state.terminalSendInput, focus: state.terminalFocus, refit: vi.fn(), getText: state.terminalGetText, paste: state.terminalPaste }));
     return <section aria-label="Terminal session header"><div data-testid="terminal" tabIndex={-1}>{sessionId}</div>{headerActions}</section>;
   }) };
 });
@@ -425,7 +426,7 @@ function expectFallback(layout: Layout, withPreview: boolean) {
   if (layout === "compact" && withPreview) expect(selectedCompactTab()).toEqual(["Preview"]);
   if (layout !== "mobile" && !withPreview) expect(screen.queryByRole("tablist", { name: "Session view" })).toBeNull();
   if (withPreview) expect(screen.getByRole(layout === "wide" ? "region" : "tabpanel", { name: "Session preview" })).toBeTruthy();
-  else expect(document.querySelector(".session-aux-pane")).toBeNull();
+  else expect(document.querySelector(".session-aux-pane:not([hidden])")).toBeNull();
   expect(terminalPane().hidden).toBe(withPreview && layout !== "wide");
 }
 /** The owner looks away from a shown item without resolving it: a file on a wide pane, the terminal tab elsewhere. */
@@ -557,20 +558,56 @@ describe.each(cases)("waiting item in the side pane ($label)", ({ layout, withPr
     expectShown(layout, "a");
   });
 
-  it("returns focus to the terminal on Close and on Escape inside the item", () => {
+  it("moves focus on Close and Escape to the terminal beside a desktop pane, else to the tab left selected", () => {
     waiting({ ordinary: question("a") });
     mountDashboard();
     enter(/Regular shell/);
+    const toTerminal = layout === "wide" || (layout === "compact" && !withPreview);
+    const selectedTab = () => layout === "mobile" ? phoneTab(withPreview ? "Preview" : "Terminal")
+      : within(screen.getByRole("tablist", { name: "Session view" })).getByRole("tab", { name: "Preview" });
+    const expectFocusMoved = (times: number) => {
+      expect(state.terminalFocus).toHaveBeenCalledTimes(toTerminal ? times : 0);
+      if (!toTerminal) { expect(selectedTab().getAttribute("aria-selected")).toBe("true"); expect(document.activeElement).toBe(selectedTab()); }
+    };
     const close = screen.getByRole("button", { name: "Close waiting" });
     close.focus();
     fireEvent.click(close);
-    expect(document.activeElement).toBe(screen.getByTestId("terminal"));
+    expectFallback(layout, withPreview);
+    expectFocusMoved(1);
     showAgain(layout, withPreview);
     const reply = within(pane()!).getByLabelText("Reply to Regular shell");
     reply.focus();
     fireEvent.keyDown(reply, { key: "Escape" });
     expectFallback(layout, withPreview);
-    expect(document.activeElement).toBe(screen.getByTestId("terminal"));
+    expectFocusMoved(2);
+  });
+
+  it("keeps a typed reply while the owner looks at something else, and never carries it to another item", async () => {
+    waiting({ ordinary: question("a") });
+    const { refresh } = mountDashboard();
+    enter(/Regular shell/);
+    const reply = () => within(pane()!).getByLabelText("Reply to Regular shell") as HTMLTextAreaElement;
+    fireEvent.change(reply(), { target: { value: "half a thought" } });
+    if (withPreview) {
+      fireEvent.click(within(screen.getByRole("tablist", { name: "Side pane view" })).getByRole("tab", { name: "demo.html" }));
+      expectFallback(layout, true);
+      fireEvent.click(within(screen.getByRole("tablist", { name: "Side pane view" })).getByRole("tab", { name: "Waiting for you" }));
+      expect(reply().value).toBe("half a thought");
+    }
+    fireEvent.keyDown(reply(), { key: "Escape" });
+    expectFallback(layout, withPreview);
+    showAgain(layout, withPreview);
+    expect(reply().value).toBe("half a thought");
+    waiting({ ordinary: question("b") });
+    await refresh();
+    expectShown(layout, "b");
+    expect(reply().value).toBe("");
+    fireEvent.change(reply(), { target: { value: "for b" } });
+    waiting({});
+    await refresh();
+    waiting({ ordinary: question("b") });
+    await refresh();
+    expect(reply().value).toBe("");
   });
 
   it("hides the pane while the Inbox page is open and never closes that page", async () => {
@@ -657,6 +694,53 @@ it("compact: entering another session starts on its side pane even after the Ter
   expect(selectedCompactTab()).toEqual(["Terminal"]);
   enter(/project-t42-implement/);
   expect(selectedCompactTab()).toEqual(["Preview"]);
+});
+
+describe.each(["wide", "mobile"] as const)("header Open preview over a shown item (%s)", layout => {
+  it("shows the preview file instead of the item, without asking for the terminal", async () => {
+    useLayout(layout);
+    fixtures(true);
+    const { refresh } = mountDashboard();
+    enter(/Regular shell/);
+    fireEvent.click(screen.getByRole("button", { name: "Close preview" }));
+    waiting({ ordinary: question("a") });
+    await refresh();
+    expectShown(layout, "a");
+    if (layout === "mobile") fireEvent.click(phoneTab("Terminal"));
+    fireEvent.click(screen.getAllByRole("button", { name: "Open preview" })[0]);
+    expectFallback(layout, true);
+    expect(state.terminalFocus).not.toHaveBeenCalled();
+    expect(document.querySelectorAll('button[aria-label="Waiting for you"]').length).toBeGreaterThan(0);
+    expect(document.querySelector('button[aria-label="Open preview"]')).toBeNull();
+  });
+});
+
+it("compact: selecting the session it is already in brings a shown item forward from the Terminal tab", () => {
+  useLayout("compact");
+  fixtures(false);
+  waiting({ ordinary: question("a") });
+  mountDashboard();
+  enter(/Regular shell/);
+  fireEvent.click(within(screen.getByRole("tablist", { name: "Session view" })).getByRole("tab", { name: "Terminal" }));
+  expect(selectedCompactTab()).toEqual(["Terminal"]);
+  enter(/Regular shell/);
+  expectShown("compact", "a");
+});
+
+it("keeps the Inbox page open when the window narrows to a phone and the side-pane tab has nothing behind it", () => {
+  const listeners: ((event: { matches: boolean }) => void)[] = [];
+  window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: (_type: string, listener: (event: { matches: boolean }) => void) => { listeners.push(listener); }, removeEventListener: vi.fn() });
+  fixtures(false);
+  waiting({ ordinary: question("a") });
+  mountDashboard();
+  enter(/Regular shell/);
+  fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 waiting" }));
+  expect(screen.getByRole("region", { name: "Inbox" })).toBeTruthy();
+  expect(listeners.length).toBeGreaterThan(0);
+  act(() => { for (const listener of listeners) listener({ matches: false }); });
+  expect(selectedPhoneTab()).toEqual(["Terminal"]);
+  expect(screen.getByRole("region", { name: "Inbox" })).toBeTruthy();
+  expect(within(screen.getByRole("region", { name: "Inbox" })).getByText("Question a")).toBeTruthy();
 });
 
 describe("waiting item on a phone", () => {

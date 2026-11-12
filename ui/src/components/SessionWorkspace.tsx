@@ -21,12 +21,14 @@ interface Props {
   sendCommand: BridgeRpc['sendCommand']; subscribeAuthority?: SessionPreviewAuthoritySubscriber; securityGeneration: number; open: boolean; onClose: () => void;
   isDesktop: boolean; mobileTab: 'sessions' | 'terminal' | 'preview' | 'review'; onMobileTab: (tab: 'terminal' | 'preview' | 'review') => void;
   reviewOpen?: boolean; reviewActivation?: number; onCloseReview?: () => void;
+  /** Bumped every time the owner selects the session, including the one already open. */
+  sessionActivation?: number;
   attention?: {
     entry: InboxEntry;
     shown: boolean;
     onShow(): void;
-    /** Hide this item. Close and Escape hand focus back to the terminal; choosing another view keeps focus where it is. */
-    onHide(refocusTerminal: boolean): void;
+    /** Hide this item. Close and Escape ask the owner of the layout to move focus on (the terminal, or the tab left selected when the terminal is not on screen); choosing another view keeps focus where it is. */
+    onHide(moveFocus: boolean): void;
     onDismiss(entry: InboxEntry): Promise<void>;
     onReply(entry: InboxEntry, message: string): Promise<void>;
     onAnswer(entry: InboxEntry, answers: AttentionAnswerEntry[]): Promise<AttentionAnswerSubmitResult>;
@@ -43,7 +45,7 @@ function previewErrorMessage(reason: PreviewErrorReason, fileName: string): stri
     case 'unavailable': return `${fileName} is unavailable`;
   }
 }
-export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {}, attention }: Props) {
+export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {}, sessionActivation = 0, attention }: Props) {
   const mainRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   const [ratio, setRatio] = useState(50);
@@ -172,6 +174,12 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     previousShownKey.current = shownKey;
     if (shownKey && shownKey !== previous && isDesktop) { setCompactTab('preview'); setAuxTab('preview'); }
   }, [shownKey, isDesktop]);
+  // Selecting the session again brings its shown item forward too, as entering it does.
+  useEffect(() => {
+    if (sessionActivation && isDesktop && attentionShown) { setCompactTab('preview'); setAuxTab('preview'); }
+    // Only a new selection triggers this; the item and layout are read as they are at that moment.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionActivation]);
   useEffect(() => {
     if (expanded && (previewDisappeared || rawView !== view || view === 'terminal' || attentionVisible)) setExpanded(false);
     previousView.current = { showPreview, view };
@@ -277,9 +285,9 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     <div className="session-workspace-panes">
       <div id="session-terminal-panel" role={compact && hasAux ? 'tabpanel' : undefined} aria-label="Terminal" hidden={!terminalVisible} className="session-terminal-pane" style={hasAux && !compact && !activeExpanded ? { flex: `0 0 calc((100% - 8px) * ${actualRatio / 100})` } : undefined}>{children}</div>
       {hasAux && !compact && !activeExpanded && <div role="separator" aria-label="Resize terminal and preview" aria-orientation="vertical" aria-valuemin={Number(min.toFixed(1))} aria-valuemax={Number(max.toFixed(1))} aria-valuenow={Number(actualRatio.toFixed(1))} tabIndex={0} className="session-preview-separator" onPointerDown={start} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish} onLostPointerCapture={finish} onKeyDown={keyDown} onDoubleClick={() => setSplit(50)} />}
-      {hasAux && <div className="session-aux-pane" hidden={compact && view === 'terminal'}>
+      {(hasAux || attention) && <div className="session-aux-pane" hidden={!hasAux || (compact && view === 'terminal')}>
       {!compact && slotOpen && reviewOpen && <div role="tablist" aria-label="Auxiliary view" onKeyDown={tabKeys} className="session-preview-tabs">{tabs.map(tab => <button key={tab} data-preview-tab={tab} role="tab" aria-selected={view === tab} aria-controls={`session-${tab}-panel`} tabIndex={view === tab ? 0 : -1} onClick={() => choose(tab)} className={`mobile-tab ${view === tab ? 'mobile-tab-active' : ''}`}>{tabLabel(tab)}</button>)}</div>}
-      {slotOpen && <section id="session-preview-panel" role={tabbed ? 'tabpanel' : attentionShown ? undefined : 'region'} aria-label={attentionShown ? (tabbed ? 'Waiting' : undefined) : 'Session preview'} hidden={view !== 'preview'} className="session-preview-pane">
+      {(slotOpen || attention) && <section id="session-preview-panel" role={!slotOpen ? undefined : tabbed ? 'tabpanel' : attentionShown ? undefined : 'region'} aria-label={!slotOpen ? undefined : attentionShown ? (tabbed ? 'Waiting' : undefined) : 'Session preview'} hidden={!slotOpen || view !== 'preview'} className="session-preview-pane">
         <div className="session-preview-toolbar">
           {viewSelector}
           {attention && attentionShown ? <button type="button" className="btn-ghost session-preview-icon" aria-label="Close waiting" title="Close waiting" onClick={() => attention.onHide(true)}>
@@ -299,11 +307,13 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
           </button>
           </>}
         </div>
-        {attention && attentionShown ? <div key="attention" role="region" aria-label="Waiting for you" className="session-preview-content p-3" style={{ overflowY: 'auto' }} onKeyDown={event => { if (event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); attention.onHide(true); } }}>
-          <div className="min-w-0 space-y-2" key={inboxItemKey(attention.entry)}>
+        {/* The item body stays mounted, hidden, while its item exists, so a reply draft or half-filled answer survives a peek at a file. It is keyed by the item: nothing typed for one item can reach another. */}
+        {attention && <div key={inboxItemKey(attention.entry)} hidden={!attentionShown} role={attentionShown ? 'region' : undefined} aria-label={attentionShown ? 'Waiting for you' : undefined} className="session-preview-content p-3" style={{ overflowY: 'auto' }} onKeyDown={event => { if (event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); attention.onHide(true); } }}>
+          <div className="min-w-0 space-y-2">
             <InboxItemBody entry={attention.entry} onOpenSession={() => {}} onDismiss={attention.onDismiss} onReply={attention.onReply} onAnswer={attention.onAnswer} hideOpenSession />
           </div>
-        </div> : <div key="preview" className="session-preview-content">
+        </div>}
+        {showPreview && !attentionShown && <div className="session-preview-content">
           {state.kind === 'ready' && scroll.display ? (() => {
             const docId = scroll.display.documentId;
             const html = scroll.display.html;
