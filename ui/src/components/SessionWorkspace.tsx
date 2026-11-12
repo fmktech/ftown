@@ -172,11 +172,11 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
   useEffect(() => {
     const previous = previousShownKey.current;
     previousShownKey.current = shownKey;
-    if (shownKey && shownKey !== previous && isDesktop) { setCompactTab('preview'); setAuxTab('preview'); }
-  }, [shownKey, isDesktop]);
+    if (shownKey && shownKey !== previous && isDesktop && !reviewOpen) { setCompactTab('preview'); setAuxTab('preview'); }
+  }, [shownKey, isDesktop, reviewOpen]);
   // Selecting the session again brings its shown item forward too, as entering it does.
   useEffect(() => {
-    if (sessionActivation && isDesktop && attentionShown) { setCompactTab('preview'); setAuxTab('preview'); }
+    if (sessionActivation && isDesktop && attentionShown && !reviewOpen) { setCompactTab('preview'); setAuxTab('preview'); }
     // Only a new selection triggers this; the item and layout are read as they are at that moment.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionActivation]);

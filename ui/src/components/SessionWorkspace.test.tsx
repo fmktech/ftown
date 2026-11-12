@@ -918,7 +918,7 @@ const itemFor = (attentionId: string, message = `Message ${attentionId}`): Inbox
   session: plainSession, bridgeName: 'Test bridge',
   notice: { type: 'agent_needs_input', title: 'Review', message, receivedAt: 1, attentionId, attentionSequence: 1 },
 });
-type PaneProps = { session?: Session; entry?: InboxEntry | null; isDesktop?: boolean; mobileTab?: 'sessions' | 'terminal' | 'preview' | 'review'; open?: boolean; reviewOpen?: boolean; reviewActivation?: number };
+type PaneProps = { session?: Session; entry?: InboxEntry | null; isDesktop?: boolean; mobileTab?: 'sessions' | 'terminal' | 'preview' | 'review'; open?: boolean; reviewOpen?: boolean; reviewActivation?: number; sessionActivation?: number };
 function paneSpies() {
   return {
     onShow: vi.fn(), onHide: vi.fn<(refocusTerminal: boolean) => void>(), onDismiss: vi.fn(async (_entry: InboxEntry) => {}), onReply: vi.fn(async (_entry: InboxEntry, _message: string) => {}),
@@ -926,10 +926,10 @@ function paneSpies() {
   };
 }
 /** The workspace with the hidden marker kept the way Dashboard keeps it: per item, cleared by onShow. */
-function Pane({ spies, session = plainSession, entry = null, isDesktop = true, mobileTab = 'terminal', open = true, reviewOpen = false, reviewActivation = 0 }: PaneProps & { spies: ReturnType<typeof paneSpies> }) {
+function Pane({ spies, session = plainSession, entry = null, isDesktop = true, mobileTab = 'terminal', open = true, reviewOpen = false, reviewActivation = 0, sessionActivation = 0 }: PaneProps & { spies: ReturnType<typeof paneSpies> }) {
   const [hidden, setHidden] = useState<string | null>(null);
   const key = entry ? entry.notice.attentionId ?? '' : '';
-  return <SessionWorkspace session={session} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open={open} onClose={spies.onClose} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={spies.onMobileTab} onRefit={vi.fn()} reviewOpen={reviewOpen} reviewActivation={reviewActivation}
+  return <SessionWorkspace session={session} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open={open} onClose={spies.onClose} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={spies.onMobileTab} onRefit={vi.fn()} reviewOpen={reviewOpen} reviewActivation={reviewActivation} sessionActivation={sessionActivation}
     attention={entry ? { entry, shown: hidden !== key, onShow: () => { spies.onShow(); setHidden(null); }, onHide: refocus => { spies.onHide(refocus); setHidden(key); }, onDismiss: spies.onDismiss, onReply: spies.onReply, onAnswer: spies.onAnswer } : undefined}>
     <div data-testid="terminal-node" tabIndex={-1}>Terminal</div>
   </SessionWorkspace>;
@@ -1126,7 +1126,33 @@ it('compact: when the item resolves onto the PR review, that review is the selec
   expect(screen.getByRole('button', { name: 'Collapse PR review' })).toBeTruthy();
 });
 
-it('wide: a new item is shown after the owner moved to a file, and again after moving to the PR review', () => {
+it('desktop: a shown waiting item does not steal an explicitly opened PR review in the same commit (session re-select)', () => {
+  resizeTo(900);
+  const session = { ...plainSession, pullRequestUrl: 'https://github.com/owner/repo/pull/1' };
+  const { set } = mountPane({ session, entry: itemFor('a') });
+  expect(waitingRegion()).toBeTruthy();
+  // Dashboard.handleReviewPullRequest selects the session and opens review together (F4).
+  set({ session, entry: itemFor('a'), reviewOpen: true, reviewActivation: 1, sessionActivation: 1 });
+  const aux = within(screen.getByRole('tablist', { name: 'Auxiliary view' }));
+  expect(aux.getByRole('tab', { name: 'PR review' }).getAttribute('aria-selected')).toBe('true');
+  expect(aux.getByRole('tab', { name: 'Waiting' }).getAttribute('aria-selected')).toBe('false');
+  expect(screen.getByRole('tabpanel', { name: 'PR review' }).hidden).toBe(false);
+  expect(waitingRegion()).toBeNull();
+});
+
+it('desktop: a shown item appearing with PR review in the same commit keeps review selected (shown-key change)', () => {
+  resizeTo(900);
+  const session = { ...plainSession, pullRequestUrl: 'https://github.com/owner/repo/pull/1' };
+  const { set } = mountPane({ session });
+  set({ session, entry: itemFor('a'), reviewOpen: true, reviewActivation: 1 });
+  const aux = within(screen.getByRole('tablist', { name: 'Auxiliary view' }));
+  expect(aux.getByRole('tab', { name: 'PR review' }).getAttribute('aria-selected')).toBe('true');
+  expect(aux.getByRole('tab', { name: 'Waiting' }).getAttribute('aria-selected')).toBe('false');
+  expect(screen.getByRole('tabpanel', { name: 'PR review' }).hidden).toBe(false);
+  expect(waitingRegion()).toBeNull();
+});
+
+it('wide: a new item is shown after the owner moved to a file, but not after moving to the PR review', () => {
   resizeTo(900);
   const session = { ...previewOf('a.html'), pullRequestUrl: 'https://github.com/owner/repo/pull/1' };
   const { set } = mountPane({ session, entry: itemFor('a') });
@@ -1139,9 +1165,11 @@ it('wide: a new item is shown after the owner moved to a file, and again after m
   expect(aux().getAllByRole('tab').map(tab => tab.textContent)).toEqual(['Waiting', 'PR review']);
   expect(aux().getByRole('tab', { name: 'PR review' }).getAttribute('aria-selected')).toBe('true');
   expect(waitingRegion()).toBeNull();
+  // F4: attention auto-switch never overrides the explicitly opened PR review.
   set({ session, entry: itemFor('c'), reviewOpen: true, reviewActivation: 1 });
-  expect(aux().getByRole('tab', { name: 'Waiting' }).getAttribute('aria-selected')).toBe('true');
-  expect(within(waitingRegion()!).getByText('Message c')).toBeTruthy();
+  expect(aux().getByRole('tab', { name: 'PR review' }).getAttribute('aria-selected')).toBe('true');
+  expect(aux().getByRole('tab', { name: 'Waiting' }).getAttribute('aria-selected')).toBe('false');
+  expect(waitingRegion()).toBeNull();
 });
 
 it('compact: a new item is shown after the owner moved to the Terminal tab, the same item is not forced back', () => {
