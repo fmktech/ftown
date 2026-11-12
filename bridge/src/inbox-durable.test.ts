@@ -270,6 +270,39 @@ describe('inbox reply resolves exactly its item', () => {
     assert.equal(all.events.find((e) => e.id === first.id)?.resolution, 'replied');
   });
 
+  it('dismiss (resolve_session_attention) publishes the attention-changed signal', async (t) => {
+    const f = await fixture(t);
+    const first = (await f.attention.record('s1', 'Notification', { notification_type: 'agent_needs_input', title: 'One', message: 'First' }))!;
+    const { handler, verified, responses, publishes } = replyHandler(f, async (session, message) => ({ ok: true, id: 'mail-1' }));
+    const command: Command = { type: 'resolve_session_attention', requestId: 'r3', payload: { bridgeId: 'machine-a', sessionId: 's1', eventId: first.id } } as Command;
+    await handler(command, verified);
+    assert.equal(responses.at(-1)?.success, true);
+    assert.deepEqual(publishes, ['s1'], 'dismiss must publish the attention-changed signal');
+  });
+
+  it('index wiring shape emits AttentionSnapshot for reply/dismiss', async (t) => {
+    const f = await fixture(t);
+    const emitted: Array<{ sessionId: string; eventName: string; data: unknown }> = [];
+    f.server.on('event', (event: HookEvent) => { emitted.push({ sessionId: event.sessionId, eventName: event.eventName, data: event.data }); });
+    const first = (await f.attention.record('s1', 'Notification', { notification_type: 'agent_needs_input', title: 'One', message: 'First' }))!;
+    // Mirror of bridge/src/index.ts publishAttentionChanged wiring.
+    const handler = createCommandHandler({
+      bridgeId: 'machine-a', security: { revalidate: async () => {}, policy: { revalidate: async () => {} } } as unknown as BridgeSecurityService,
+      sessionController: { get: async (id: string) => (id === f.session.id ? f.session : null) } as unknown as SessionController,
+      enqueueSessionMessage: async () => ({ ok: true, id: 'mail-1' }),
+      attentionStore: f.attention,
+      publishAttentionChanged: (sessionId) => { f.server.emit('event', { sessionId, eventName: 'AttentionSnapshot', data: {} }); },
+      publishCommandResponse: async () => {}, 
+    });
+    const verified = { principal: {} } as VerifiedApplication;
+    await handler({ type: 'send_message', requestId: 'r4', payload: { bridgeId: 'machine-a', sessionId: 's1', message: 'hi', eventId: first.id } } as Command, verified);
+    assert.deepEqual(emitted, [{ sessionId: 's1', eventName: 'AttentionSnapshot', data: {} }], 'reply must emit AttentionSnapshot');
+    emitted.length = 0;
+    const second = (await f.attention.record('s1', 'Notification', { notification_type: 'agent_needs_input', title: 'Two', message: 'Second' }))!;
+    await handler({ type: 'resolve_session_attention', requestId: 'r5', payload: { bridgeId: 'machine-a', sessionId: 's1', eventId: second.id } } as Command, verified);
+    assert.deepEqual(emitted, [{ sessionId: 's1', eventName: 'AttentionSnapshot', data: {} }], 'dismiss must emit AttentionSnapshot');
+  });
+
   it('reply whose mail is rejected resolves nothing', async (t) => {
     const f = await fixture(t);
     const first = (await f.attention.record('s1', 'Notification', { notification_type: 'agent_needs_input', title: 'One', message: 'First' }))!;

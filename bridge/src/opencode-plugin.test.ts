@@ -119,9 +119,16 @@ describe('OpenCode native mail wake', () => {
 
   it('posts FtownWakeSubmitted before the wake prompt', async t => {
     const f = fixture(t);
+    // At prompt-call time the wake post must already have completed.
+    let wakePostedBeforePrompt = false;
+    f.setSubmit(async () => {
+      wakePostedBeforePrompt = f.requests.some(r => r.url.endsWith('/hook') && JSON.parse(String(r.init?.body)).hook_event_name === 'FtownWakeSubmitted');
+      return { data: {} };
+    });
     await f.event('session.created', { info: { id: 'ses_root' } });
     await tick(); await f.advance();
     assert.equal(f.prompts.length, 1);
+    assert.equal(wakePostedBeforePrompt, true, 'FtownWakeSubmitted must complete before client.session.prompt is called');
     const hooks = f.requests.filter(r => r.url.endsWith('/hook')).map(r => JSON.parse(String(r.init?.body)));
     assert.ok(hooks.some(hook => hook.hook_event_name === 'FtownWakeSubmitted'), `hooks: ${JSON.stringify(hooks)}`);
     await f.event('session.idle', { sessionID: 'ses_root' }); await f.advance();
