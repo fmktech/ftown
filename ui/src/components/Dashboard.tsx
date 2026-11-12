@@ -114,7 +114,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
   const [showToken, setShowToken] = useState(false);
   const [copiedCommand, setCopiedCommand] = useState<"setup" | "start" | null>(null);
-  const [mobileTab, setMobileTab] = useState<"sessions" | "terminal" | "preview" | "review" | "waiting">("sessions");
+  const [mobileTab, setMobileTab] = useState<"sessions" | "terminal" | "preview" | "review">("sessions");
   const [sidebarCollapsed, setSidebarCollapsed] = usePersistentState<boolean>("ftown:sidebarCollapsed", false);
   const [storedSidebarWidth, setStoredSidebarWidth] = usePersistentState<number>("ftown:sidebarWidth", DEFAULT_SIDEBAR_WIDTH);
   const sidebarWidth = clampSidebarWidth(storedSidebarWidth);
@@ -392,6 +392,8 @@ PY`;
   const inboxReady = connectionStatus === "connected" ? new Set(readyBridges.map(bridge => bridge.bridgeId)) : new Set<string>();
   const canReply = (bridgeId: string) => !!securityRuntime?.bridge(bridgeId)?.permissions.includes("control");
   const inbox = inboxEntries(sessions, sessionActivity, bridges, hiddenSessionIds, hiddenBridgeIds, inboxReady, canReply);
+  const inboxRef = useRef(inbox);
+  inboxRef.current = inbox;
   const selectedWaitingEntry = selectedSession ? inbox.find(e => e.session.id === selectedSession.id) ?? null : null;
   const [previewChoices, setPreviewChoices] = useState<Record<string, { id: string; open: boolean }>>({});
   const selectedPreviewKey = selectedSession ? `${selectedSession.bridgeId}:${selectedSession.id}` : "";
@@ -402,14 +404,31 @@ PY`;
   const [reviewChoice, setReviewChoice] = useState<{ identity: string; activation: number }>({ identity: "", activation: 0 });
   const reviewOpen = !!reviewIdentity && reviewChoice.identity === reviewIdentity;
   const openReview = useCallback(() => { if (!reviewIdentity) return; setReviewChoice(previous => ({ identity: reviewIdentity, activation: previous.activation + 1 })); setMobileTab("review"); }, [reviewIdentity]);
+  // The waiting item of the selected session is shown in the side pane unless the owner hid exactly that item.
+  // The marker carries the item key, so a new item is shown again; selecting a session clears it.
   const [attentionHidden, setAttentionHidden] = useState<string | null>(null);
+  const attentionMarker = selectedSession && selectedWaitingEntry ? `${selectedSession.bridgeId}:${selectedSession.id}|${inboxItemKey(selectedWaitingEntry)}` : null;
+  const attentionShown = attentionMarker !== null && !inboxOpen && attentionHidden !== attentionMarker;
+  // The phone's preview tab is the one side-pane tab: it exists for an open preview or a shown item. When the view behind
+  // the selected tab goes away, SessionWorkspace asks for the fallback tab through onMobileTab; nothing here second-guesses it.
+  const sidePaneOpen = previewOpen || attentionShown;
+  const refocusTerminalRef = useRef(false);
+  const showAttention = useCallback(() => setAttentionHidden(null), []);
+  const hideAttention = useCallback((refocusTerminal: boolean) => {
+    if (!attentionMarker) return;
+    refocusTerminalRef.current = refocusTerminal;
+    setAttentionHidden(attentionMarker);
+  }, [attentionMarker]);
+  useEffect(() => {
+    if (!refocusTerminalRef.current) return;
+    refocusTerminalRef.current = false;
+    terminalRef.current?.focus();
+  });
   const closeReview = useCallback(() => {
     setReviewChoice(previous => ({ ...previous, identity: "" }));
-    setMobileTab(current => current === "review" ? (previewOpen ? "preview" : "terminal") : current);
     requestAnimationFrame(() => { const opener = Array.from(document.querySelectorAll<HTMLButtonElement>('[aria-label="Review pull request"]')).find(element => element.getClientRects().length); opener?.focus(); });
-  }, [previewOpen]);
+  }, []);
   useEffect(() => { setReviewChoice(previous => previous.identity && previous.identity !== reviewIdentity ? { ...previous, identity: "" } : previous); }, [reviewIdentity]);
-  useEffect(() => { if (!reviewOpen) setMobileTab(current => current === "review" ? (previewOpen ? "preview" : "terminal") : current); }, [reviewOpen, previewOpen]);
   const observedPreviews = useRef<Record<string, string>>({});
   useEffect(() => {
     const observed: Record<string, string> = {};
@@ -443,14 +462,12 @@ PY`;
       if (Object.keys(next).length === Object.keys(previous).length && Object.keys(next).every(key => next[key] === previous[key])) return previous;
       return next;
     });
-    if (!selectedPreviewDescriptor) setMobileTab(current => current === "preview" ? (reviewOpen ? "review" : "terminal") : current);
-  }, [sessions, selectedSessionId, selectedPreviewDescriptor, reviewOpen]);
+  }, [sessions, selectedSessionId]);
   const setPreviewOpen = useCallback((open: boolean) => {
     if (!selectedPreviewDescriptor) return;
     setPreviewChoices(previous => ({ ...previous, [selectedPreviewKey]: { id: selectedPreviewDescriptor.id, open } }));
     if (open) setMobileTab(current => current === "sessions" ? current : "preview");
-    else setMobileTab(current => current === "preview" ? (reviewOpen ? "review" : "terminal") : current);
-  }, [selectedPreviewDescriptor, selectedPreviewKey, reviewOpen]);
+  }, [selectedPreviewDescriptor, selectedPreviewKey]);
   const refitPreviewTerminal = useCallback(() => { terminalRef.current?.refit({ forceResize: true }); }, []);
   const sessionRelaunchLabel = selectedSession && !selectedSession.loopId
     ? getSessionRelaunchLabel(selectedSession.status)
@@ -500,7 +517,7 @@ PY`;
   const selectedTransportMode = selectedSessionId ? transport?.getMode(selectedSessionId) ?? "connecting" : null;
   const sessionHeaderActions = selectedSession ? <SessionHeaderActions hasPreview={Boolean(selectedPreviewDescriptor)} previewOpen={previewOpen}
     running={selectedSession.status === "running"} relaunchLabel={sessionRelaunchLabel ?? null}
-    onPreview={() => setPreviewOpen(true)} onStop={handleStopSession} onRelaunch={handleRelaunchSession} hasReview={!!reviewIdentity} onReview={openReview} hasWaiting={!!selectedWaitingEntry && !inboxOpen && attentionHidden === (selectedWaitingEntry ? `${selectedSession?.bridgeId}:${selectedSession.id}|${inboxItemKey(selectedWaitingEntry)}` : "")} onWaiting={() => { if (selectedWaitingEntry && selectedSession) setAttentionHidden(current => current === `${selectedSession.bridgeId}:${selectedSession.id}|${inboxItemKey(selectedWaitingEntry)}` ? null : current); }} /> : null;
+    onPreview={() => setPreviewOpen(true)} onStop={handleStopSession} onRelaunch={handleRelaunchSession} hasReview={!!reviewIdentity} onReview={openReview} hasWaiting={attentionMarker !== null && !inboxOpen && !attentionShown} onWaiting={showAttention} /> : null;
 
   // Claude's Stop hook does not fire on user interrupt, so a lone ESC leaves the
   // dashboard stuck on "thinking"/"tool_use". Optimistically clear it locally.
@@ -557,7 +574,9 @@ PY`;
       const session = sessions.find(item => item.id === id);
       const key = session ? `${session.bridgeId}:${session.id}` : "";
       const choice = previewChoices[key];
-      setMobileTab(session?.preview && (choice?.id !== session.preview.id || choice.open) ? "preview" : "terminal");
+      // Entering a session lands on its side pane when there is something in it: the waiting item first, else an open preview.
+      const waiting = inboxRef.current.some(entry => entry.session.id === id);
+      setMobileTab(waiting || (session?.preview && (choice?.id !== session.preview.id || choice.open)) ? "preview" : "terminal");
     }
   }, [sessions, previewChoices]);
 
@@ -576,13 +595,15 @@ PY`;
     document.title = inbox.length > 0 ? `(${inbox.length}) ${base}` : base;
     return () => { document.title = document.title.replace(/^\((\d+)\)\s+/, ""); };
   }, [inbox.length]);
-  const attentionShown = !!selectedWaitingEntry && !inboxOpen && attentionHidden !== (selectedSession && selectedWaitingEntry ? `${selectedSession.bridgeId}:${selectedSession.id}|${inboxItemKey(selectedWaitingEntry)}` : "");
-  const previousAttentionShown = useRef(false);
+  // A newly shown item (new item, re-shown item, Inbox page closed) moves a phone from the terminal to the side-pane tab.
+  // It never leaves the Workspace list or the PR review; entering a session is handled by handleSelectSession.
+  const shownAttention = attentionShown ? attentionMarker : null;
+  const previousShownAttention = useRef<string | null>(null);
   useEffect(() => {
-    const was = previousAttentionShown.current;
-    previousAttentionShown.current = attentionShown;
-    if (!was && attentionShown && !isDesktop && mobileTab === "terminal") setMobileTab("waiting");
-  }, [attentionShown, isDesktop, mobileTab]);
+    const previous = previousShownAttention.current;
+    previousShownAttention.current = shownAttention;
+    if (shownAttention && shownAttention !== previous && !isDesktop && mobileTab === "terminal") setMobileTab("preview");
+  }, [shownAttention, isDesktop, mobileTab]);
   const replyToInbox = async (entry: InboxEntry, message: string) => {
     const current = sessions.find(session => session.id === entry.session.id && session.bridgeId === entry.session.bridgeId);
     const notice = sessionActivity.get(entry.session.id)?.attention;
@@ -628,7 +649,7 @@ PY`;
     return () => navigator.serviceWorker?.removeEventListener("message", onNotification);
   }, [rawSessions, handleSelectSession]);
 
-  const handleMobileTabSwitch = useCallback((tab: "sessions" | "terminal" | "preview" | "review" | "waiting") => {
+  const handleMobileTabSwitch = useCallback((tab: "sessions" | "terminal" | "preview" | "review") => {
     setInboxOpen(false);
     setMobileTab(tab);
     if (tab === "terminal") {
@@ -1075,8 +1096,7 @@ PY`;
         >
           Terminal
         </button>
-        {selectedWaitingEntry && <button className={`mobile-tab ${mobileTab === "waiting" ? "mobile-tab-active" : ""}`} role="tab" tabIndex={mobileTab === "waiting" ? 0 : -1} aria-selected={mobileTab === "waiting"} aria-controls="session-waiting-panel" onClick={() => { if (selectedWaitingEntry && selectedSession) setAttentionHidden(current => current === `${selectedSession.bridgeId}:${selectedSession.id}|${inboxItemKey(selectedWaitingEntry)}` ? null : current); handleMobileTabSwitch("waiting"); }}>Waiting (1)</button>}
-        {selectedSession?.preview && previewOpen && <button className={`mobile-tab ${mobileTab === "preview" ? "mobile-tab-active" : ""}`} role="tab" tabIndex={mobileTab === "preview" ? 0 : -1} aria-selected={mobileTab === "preview"} aria-controls="session-preview-panel" onClick={() => handleMobileTabSwitch("preview")}>Preview</button>}
+        {sidePaneOpen && <button className={`mobile-tab ${mobileTab === "preview" ? "mobile-tab-active" : ""}`} role="tab" tabIndex={mobileTab === "preview" ? 0 : -1} aria-selected={mobileTab === "preview"} aria-controls="session-preview-panel" onClick={() => handleMobileTabSwitch("preview")}>{attentionShown ? "Waiting" : "Preview"}</button>}
         {reviewOpen && <button className={`mobile-tab ${mobileTab === "review" ? "mobile-tab-active" : ""}`} role="tab" tabIndex={mobileTab === "review" ? 0 : -1} aria-selected={mobileTab === "review"} aria-controls="session-review-panel" onClick={() => handleMobileTabSwitch("review")}>PR review</button>}
       </div>
 
@@ -1237,7 +1257,7 @@ PY`;
           <SessionInboxPage entries={inbox} open={inboxOpen} onClose={() => { restoreInboxFocusRef.current = true; setInboxOpen(false); scheduleTerminalRenderAdjustment(); }}
             onOpenSession={id => { focusOpenedSessionRef.current = true; handleSelectSession(id); setMobileTab("terminal"); scheduleTerminalRenderAdjustment(); }} onDismiss={entry => clearSessionAttention(entry.session.id, entry.notice)} onReply={replyToInbox} onAnswer={answerInbox} />
           <div ref={workspaceFocusRef} role="region" aria-label={`Session workspace: ${selectedSession?.name || selectedSession?.prompt?.slice(0, 48) || "Session"}`} tabIndex={-1} className="relative min-h-0 min-w-0 flex-1 flex-col focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)]" style={{ display: inboxOpen ? "none" : "flex" }} aria-hidden={inboxOpen}>
-          <SessionWorkspace session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabSwitch} onRefit={refitPreviewTerminal} reviewOpen={reviewOpen} reviewActivation={reviewChoice.activation} onCloseReview={closeReview} attention={selectedWaitingEntry && selectedSession ? { entry: selectedWaitingEntry, shown: !inboxOpen && attentionHidden !== `${selectedSession.bridgeId}:${selectedSession.id}|${inboxItemKey(selectedWaitingEntry)}`, onShow: () => { if (selectedWaitingEntry && selectedSession) setAttentionHidden(current => current === `${selectedSession.bridgeId}:${selectedSession.id}|${inboxItemKey(selectedWaitingEntry)}` ? null : current); }, onHide: () => { if (selectedWaitingEntry && selectedSession) setAttentionHidden(`${selectedSession.bridgeId}:${selectedSession.id}|${inboxItemKey(selectedWaitingEntry)}`); terminalRef.current?.focus(); }, onDismiss: (entry: InboxEntry) => clearSessionAttention(entry.session.id, entry.notice), onReply: replyToInbox, onAnswer: answerInbox } : undefined}>
+          <SessionWorkspace session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabSwitch} onRefit={refitPreviewTerminal} reviewOpen={reviewOpen} reviewActivation={reviewChoice.activation} onCloseReview={closeReview} attention={selectedWaitingEntry ? { entry: selectedWaitingEntry, shown: attentionShown, onShow: showAttention, onHide: hideAttention, onDismiss: entry => clearSessionAttention(entry.session.id, entry.notice), onReply: replyToInbox, onAnswer: answerInbox } : undefined}>
           <Terminal
             ref={terminalRef}
             transport={transport}
