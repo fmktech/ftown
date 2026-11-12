@@ -51,7 +51,7 @@ async function publicationFixture(t: TestContext) {
   const opened = async (browser: EndpointIdentity, item: { channel: string; envelope: SecureEnvelope }) => JSON.parse(new TextDecoder().decode(
     await open(browser, security.endpoint, item.envelope, { ownerId: browser.endpoint.ownerId, bridgeId: 'bridge', channel: item.channel,
       recipientId: browser.endpoint.id, purpose: 'application' }))) as { route: { kind: string }; data: Record<string, unknown> };
-  return { security, client, cli, browsers, published, drained, opened, directory, ownerId: secure.pointer.ownerId! };
+  return { security, client, cli, browsers, published, drained, opened, directory, transport, ownerId: secure.pointer.ownerId! };
 }
 const recipientsOf = (published: { envelope: SecureEnvelope }[]) => published.map(item => item.envelope.recipientId).sort();
 
@@ -125,9 +125,17 @@ function recordSealed(f: Awaited<ReturnType<typeof publicationFixture>>) {
   return sealed;
 }
 
-test('a recipient revoked after the publication was enqueued loses its packet in prepare(); the others still go out', async t => {
+const FAILED = '[Centrifugo] Encrypted publication failed';
+/** console.error lines of the outbound pipeline's failure record. */
+function captureFailures(t: TestContext) {
+  const errors = t.mock.method(console, 'error', () => undefined);
+  return () => errors.mock.calls.map(call => call.arguments.map(String).join(' ')).filter(line => line.startsWith(FAILED));
+}
+
+test('a recipient revoked after the publication was enqueued gets nothing; the others still go out and the drop is recorded', async t => {
   const f = await publicationFixture(t);
   const sealed = recordSealed(f);
+  const failures = captureFailures(t);
   const [first, revoked, last] = f.browsers;
   const admin = await f.security.policy.principal(f.cli.endpoint.id);
   // Enqueue: the readers of this publication are read from the policy now, before the revocation below is applied.
@@ -135,26 +143,127 @@ test('a recipient revoked after the publication was enqueued loses its packet in
   await f.security.revokeEndpoint(admin, revoked.endpoint.id);
   await f.drained();
   assert.deepEqual(sealed, [f.browsers.map(browser => browser.endpoint.id).sort()], 'the revoked browser was still a reader when the publication was sealed');
-  assert.deepEqual(recipientsOf(f.published), [first.endpoint.id, last.endpoint.id].sort(), 'only the revoked recipient is dropped');
+  assert.deepEqual(f.published.map(item => item.envelope.recipientId), [first.endpoint.id, last.endpoint.id], 'only the revoked recipient is dropped, order kept');
   for (const browser of [first, last]) {
     const application = await f.opened(browser, f.published.find(item => item.envelope.recipientId === browser.endpoint.id)!);
     assert.equal(application.data.marker, 'in-flight');
   }
+  // One record for the one dropped packet, as before this branch: label and fixed error code only.
+  assert.deepEqual(failures(), [`${FAILED}: events/unknown: approval_required: Bridge security: approval_required`]);
+  for (const browser of f.browsers) assert.ok(!failures().join().includes(browser.endpoint.publicKey));
 });
 
-test('a failure of the per-packet re-check that is not about one recipient still fails the whole publication', async t => {
+test('a policy failure at the egress check withholds that packet only, and is recorded', async t => {
   const f = await publicationFixture(t);
-  const errors = t.mock.method(console, 'error', () => undefined);
+  const failures = captureFailures(t);
+  const [first, broken, last] = f.browsers;
   const principal = f.security.policy.principal.bind(f.security.policy);
   f.security.policy.principal = async endpointId => {
-    if (endpointId === f.browsers[1].endpoint.id) throw new BridgeSecurityError('storage_unavailable');
+    if (endpointId === broken.endpoint.id) throw new BridgeSecurityError('storage_unavailable');
     return principal(endpointId);
   };
   await f.client.publishHookEvent(email, 'session', { hook_event_name: 'Stop' });
   await f.drained();
-  assert.deepEqual(f.published, []);
-  assert.equal(errors.mock.callCount(), 1);
+  assert.deepEqual(f.published.map(item => item.envelope.recipientId), [first.endpoint.id, last.endpoint.id]);
+  assert.deepEqual(failures(), [`${FAILED}: events/unknown: storage_unavailable: Bridge security: storage_unavailable`]);
 });
+
+// ---- Revocation windows: whenever the policy change lands, the target gets no envelope handed to the relay after it ----
+
+type Change = 'revoke' | 'unread';
+type Fixture = Awaited<ReturnType<typeof publicationFixture>>;
+/** 'revoke' removes the device. 'unread' keeps it approved without `read` (no API does that; written straight to the policy). */
+async function applyChange(f: Fixture, change: Change, target: EndpointIdentity): Promise<number> {
+  if (change === 'revoke') {
+    await f.security.revokeEndpoint(await f.security.policy.principal(f.cli.endpoint.id), target.endpoint.id);
+  } else {
+    const snapshot = (f.security.policy as unknown as { snapshot: { transact(update: (state: { generation: number;
+      devices: { endpoint: { id: string }; permissions: string[] }[] }) => void): Promise<void> } }).snapshot;
+    await snapshot.transact(state => {
+      state.devices.find(device => device.endpoint.id === target.endpoint.id)!.permissions = ['control', 'admin'];
+      state.generation++;
+    });
+  }
+  return f.published.length;
+}
+/** Wraps an async method so that `after` runs once, right after a call for which `when` holds has returned. */
+function afterFirst(owner: object, name: string, after: () => Promise<unknown>, when: (...args: unknown[]) => boolean = () => true): () => boolean {
+  const holder = owner as Record<string, (...args: unknown[]) => Promise<unknown>>;
+  const original = holder[name];
+  assert.equal(typeof original, 'function', `${name} exists`);
+  let fired = false;
+  holder[name] = async (...args: unknown[]) => {
+    const result = await original.apply(owner, args);
+    if (!fired && when(...args)) { fired = true; await after(); }
+    return result;
+  };
+  return () => fired;
+}
+const dropCode = { revoke: 'approval_required', unread: 'permission_denied' } as const;
+
+for (const change of ['revoke', 'unread'] as const) {
+  const single = async (t: TestContext, arrange: (f: Fixture, strike: () => Promise<unknown>) => (() => boolean) | Promise<() => boolean>,
+    sealedForTarget: boolean) => {
+    const f = await publicationFixture(t);
+    const failures = captureFailures(t);
+    const sealed = recordSealed(f);
+    const [first, second, target] = f.browsers;
+    const fired = await arrange(f, () => applyChange(f, change, target));
+    await f.client.publishHookEvent(email, 'session', { hook_event_name: 'Stop', marker: 'window' });
+    await f.drained();
+    assert.equal(fired(), true, 'the policy change happened inside the window');
+    assert.equal(sealed[0].includes(target.endpoint.id), sealedForTarget);
+    assert.equal(f.published.filter(item => item.envelope.recipientId === target.endpoint.id).length, 0, 'no envelope for the target reaches the relay');
+    assert.deepEqual(f.published.map(item => item.envelope.recipientId), [first.endpoint.id, second.endpoint.id], 'the others are delivered, in order');
+    assert.deepEqual(failures(), sealedForTarget ? [`${FAILED}: events/unknown: ${dropCode[change]}: Bridge security: ${dropCode[change]}`] : []);
+  };
+
+  test(`window 0 (${change} before enqueue): nothing is sealed for the target`, t => single(t, async (_f, strike) => {
+    await strike();
+    return () => true;
+  }, false));
+
+  test(`window 1 (${change} right after the recipient snapshot read, before any seal): 0 envelopes to the target`, t =>
+    single(t, (f, strike) => afterFirst(f.security.policy, 'readers', strike), true));
+
+  test(`window 1.5 (${change} after the first recipient's seal, before the target's): 0 envelopes to the target`, t =>
+    single(t, (f, strike) => afterFirst(f.security, 'replyBytes', strike, recipient => (recipient as { id: string }).id === f.browsers[0].endpoint.id), true));
+
+  test(`window 2 (${change} after sealPublication returned, before the packets are handed over): 0 envelopes to the target`, t =>
+    single(t, (f, strike) => afterFirst(f.security, 'sealPublication', strike), true));
+
+  test(`window 3 (${change} while prepared packets wait for in-flight room): 0 envelopes to the target afterwards, order of the rest kept`, async t => {
+    const f = await publicationFixture(t);
+    const failures = captureFailures(t);
+    const [first, second, target] = f.browsers;
+    const total = 40;
+    // The relay stops acknowledging: 64 packets go in flight, the rest of the prepared packets wait for room.
+    const waiters: (() => void)[] = [];
+    let hold = true;
+    const publish = f.transport.publish;
+    f.transport.publish = async (channel, envelope) => { await publish(channel, envelope); if (hold) await new Promise<void>(resolve => waiters.push(resolve)); };
+    for (let index = 0; index < total; index++) void f.client.publishHookEvent(email, 'session', { hook_event_name: 'Stop', index });
+    for (let spin = 0; spin < 2000 && f.published.length < 64; spin++) await new Promise(resolve => setTimeout(resolve, 2));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(f.published.length, 64, 'the in-flight window is full');
+    const handedOverBefore = await applyChange(f, change, target);
+    assert.equal(handedOverBefore, 64);
+    hold = false;
+    for (const wake of waiters.splice(0)) wake();
+    await f.drained();
+    const after = f.published.slice(handedOverBefore);
+    assert.equal(after.filter(item => item.envelope.recipientId === target.endpoint.id).length, 0, 'no envelope for the target reaches the relay after the change');
+    for (const browser of [first, second]) {
+      const indexes: unknown[] = [];
+      for (const item of f.published.filter(candidate => candidate.envelope.recipientId === browser.endpoint.id)) indexes.push((await f.opened(browser, item)).data.index);
+      assert.deepEqual(indexes, Array.from({ length: total }, (_, index) => index), 'every publication, in enqueue order');
+    }
+    // Recipients keep their relative order inside each publication.
+    assert.deepEqual(after.map(item => item.envelope.recipientId).filter(id => id !== target.endpoint.id).slice(-2), [first.endpoint.id, second.endpoint.id]);
+    // Every dropped packet goes through the pipeline's failure record: the first is logged at once, the rest are summarized by its window.
+    assert.deepEqual(failures(), [`${FAILED}: events/unknown: ${dropCode[change]}: Bridge security: ${dropCode[change]}`]);
+  });
+}
 
 test('a revoked recipient is absent from the next publication although its key is still in the import cache', async t => {
   const f = await publicationFixture(t);

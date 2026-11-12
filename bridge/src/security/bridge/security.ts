@@ -27,10 +27,6 @@ const object = (value: ApplicationJson): Record<string, ApplicationJson> => {
   return value;
 };
 export const applicationJson = (value: unknown): ApplicationJson => JSON.parse(JSON.stringify(value)) as ApplicationJson;
-/** The policy no longer lets this endpoint receive (revoked, never approved, expired, or refused by the account ledger): its packet is
- *  dropped and the other recipients are unaffected. Any other failure is not about one recipient and must surface. */
-export const recipientUnavailable = (error: unknown): boolean => error instanceof BridgeSecurityError
-  && (['endpoint_revoked', 'approval_required', 'expired'].includes(error.code) || error.code.startsWith('account_'));
 /** Account mode: the local ledger replica is the only source of browser authority. */
 export interface BridgeLedgerOptions {
   store: BridgeLedgerStore;
@@ -301,8 +297,8 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
    * from the local events ring, sealed to it per poll by sealTo, so no relay envelope is made for it.
    * The readers and their keys come from ONE policy snapshot read, taken when this is called; each reader still gets its own fresh
    * encapsulation and message id. Nothing here re-reads the policy afterwards: the sender re-checks every packet's recipient with
-   * policy.principal() right before handing it to the relay (centrifugo-client prepare()), and drops the packet of a recipient that
-   * stopped being one (recipientUnavailable).
+   * policy.principal() immediately before handing it to the relay (the packet's send() in centrifugo-client), and does not publish
+   * the packet of a recipient that stopped being one.
    */
   async sealPublication(channel: string, application: SecureApplication): Promise<(SecureEnvelope | SecurePublication)[]> {
     const readers = (await this.policy.readers()).filter(reader => reader.endpoint.kind !== 'local-cli');

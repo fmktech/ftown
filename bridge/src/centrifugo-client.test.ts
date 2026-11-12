@@ -114,7 +114,7 @@ async function publishFixture(t: { after(fn: () => Promise<void>): void }, recip
     return packets as never;
   };
   const principalCalls: string[] = [];
-  security.policy.principal = async (recipientId: string) => { principalCalls.push(recipientId); return {} as never; };
+  security.policy.principal = async (recipientId: string) => { principalCalls.push(recipientId); return { permissions: ['read'] } as never; };
   const published: { channel: string; recipientId: string; messageId: string }[] = [];
   const principalCallsAtPublish: number[] = [];
   let calls = 0;
@@ -171,7 +171,7 @@ test('packets reach the transport in publication order even when replies arrive 
   assert.equal(new Set(publicationIds).size, total);
 });
 
-test('only encrypted packets are published, each authorized once before its publication is sent', async t => {
+test('only encrypted packets are published, each authorized once, immediately before it is sent', async t => {
   captureWarnings(t); const total = 10;
   const f = await publishFixture(t, 3); const recipients = f.recipientCount;
   for (let i = 0; i < total; i++) void f.client.publishTerminalData(email, 'session', `tag-${i}`);
@@ -180,7 +180,8 @@ test('only encrypted packets are published, each authorized once before its publ
   assert.equal(f.published.length, total * recipients);
   assert.ok(f.published.every(p => p.recipientId !== 'not-encrypted' && !p.messageId.endsWith('/enroll')));
   assert.deepEqual(f.principalCalls, f.published.map(p => p.recipientId));
-  f.published.forEach((_, n) => assert.ok(f.principalCallsAtPublish[n] >= (Math.floor(n / recipients) + 1) * recipients,
+  // The recipient check is the last step before egress: every packet's own check has run when it is published.
+  f.published.forEach((_, n) => assert.ok(f.principalCallsAtPublish[n] >= n + 1,
     `publish ${n} sent after only ${f.principalCallsAtPublish[n]} principal calls`));
 });
 
