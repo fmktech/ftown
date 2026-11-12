@@ -287,8 +287,10 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
     await this.policy.revalidate(principal);
     return envelope;
   }
+  /** Relay publications only (the route is always 'cloud'). The local CLI never connects to the relay: it reads the same publications
+   *  from the local events ring, sealed to it per poll by sealTo, so no relay envelope is made for it. */
   async sealPublication(channel: string, application: SecureApplication): Promise<(SecureEnvelope | SecurePublication)[]> {
-    const recipients = await this.policy.recipients();
+    const recipients = (await this.policy.recipients()).filter(recipient => recipient.endpoint.kind !== 'local-cli');
     const packets: SecureEnvelope[] = [];
     for (const recipient of recipients) {
       try { packets.push(await this.sealTo(recipient.endpoint.id, application, { transport: 'cloud', channel, bridgeId: this.bridgeId, pairId: null })); }
