@@ -150,6 +150,40 @@ it('forwards switch-file messages to the caller and ignores malformed ones', () 
   expect(hook.result.current.linkPrompt).toBeNull();
 });
 
+it('honors switch-file from the mounted frame across display transition without loosening scroll or source checks', () => {
+  let epoch = 0; const getEpoch = () => epoch;
+  const onSwitchFile = vi.fn();
+  const hook = renderHook(({ candidate }: { candidate: { html: string; key: string } | null }) => usePreviewScroll(candidate, 'owner', getEpoch, onSwitchFile), { initialProps: { candidate: { html: 'a', key: 'a1' } as { html: string; key: string } | null } });
+  const frame = { postMessage: vi.fn() };
+  Object.defineProperty(hook.result.current.iframeRef, 'current', { configurable: true, value: { contentWindow: frame } });
+  const receive = (data: object, source: object = frame) => act(() => window.dispatchEvent(new MessageEvent('message', { data, source: source as unknown as Window, origin: 'null' })));
+  // Steady state forwards.
+  receive({ channel: PREVIEW_LINK_CHANNEL, kind: 'switch-file', fileName: 'notes.md' });
+  expect(onSwitchFile).toHaveBeenCalledTimes(1);
+  // Stale/foreign source is still rejected.
+  receive({ channel: PREVIEW_LINK_CHANNEL, kind: 'switch-file', fileName: 'notes.md' }, {});
+  expect(onSwitchFile).toHaveBeenCalledTimes(1);
+  // Advance the epoch and let the hook commit at the new epoch.
+  epoch = 1;
+  hook.rerender({ candidate: { html: 'a', key: 'a1' } });
+  // Bump again without a render: display hardEpoch (1) now lags live (2) while
+  // the same frame stays mounted. Switch-file must still be honored.
+  epoch = 2;
+  receive({ channel: PREVIEW_LINK_CHANNEL, kind: 'switch-file', fileName: 'c.html' });
+  expect(onSwitchFile).toHaveBeenCalledTimes(2);
+  expect(onSwitchFile).toHaveBeenLastCalledWith('c.html');
+  // Scroll state for the stale epoch is still ignored (no restore posted).
+  frame.postMessage.mockClear();
+  receive({ channel, documentId: hook.result.current.display!.documentId, kind: 'ready' });
+  expect(frame.postMessage).not.toHaveBeenCalled();
+  // Loading-clear window: candidate null clears displayRef while the iframe
+  // DOM (mocked frame) is still attached. Switch-file from it must not drop.
+  hook.rerender({ candidate: null });
+  receive({ channel: PREVIEW_LINK_CHANNEL, kind: 'switch-file', fileName: 'a.html' });
+  expect(onSwitchFile).toHaveBeenCalledTimes(3);
+  expect(onSwitchFile).toHaveBeenLastCalledWith('a.html');
+});
+
 it('round-trips the per-file owner key and rejects bad keys', () => {
   const owner = { userId: 'user', bridgeId: 'bridge', sessionId: 'one', previewId: '11111111-1111-4111-8111-111111111111', fileId: '22222222-2222-4222-8222-222222222222' };
   const key = previewScrollOwnerKey(owner);
