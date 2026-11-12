@@ -96,8 +96,27 @@ node scripts/setup-db.mjs --reset
 ( cd ../bridge && npm ci && npm run build )
 npx playwright install chromium
 bash scripts/start-services.sh                       # then run Playwright within 10 minutes (pairing links expire)
-npx playwright test                                  # setup project first, then the suite
+npx playwright test                                  # setup, then the suite, then second-passkey (last)
 ```
+
+Project order. `tests/second-passkey.spec.ts` adds a PERMANENT second passkey to the
+shared account; afterwards every browser must "Choose passkey" before it signs, which
+the pairing and removal specs do not expect, so it has to run after everything else.
+In CI it is the `setup` project's teardown (it runs even when a test failed). Locally
+it is a project that depends on `chromium`:
+
+```bash
+npx playwright test                                  # setup -> chromium -> second-passkey
+npx playwright test --project=chromium               # setup -> chromium; no second passkey
+npx playwright test tests/pairing.spec.ts            # setup -> that file only; no second passkey
+npx playwright test --project=second-passkey --no-deps   # only it, on a stack whose setup already ran
+```
+
+Locally `second-passkey` is skipped when a chromium test failed, and without
+`--no-deps` selecting it (`--project=second-passkey` or its file) runs setup and the
+whole chromium project first. Once it has run, the account keeps both passkeys: start
+from a fresh stack (`stop-services.sh`, `setup-db.mjs --reset`, `start-services.sh`)
+before running the pairing/removal specs again.
 
 Centrifugo only allows the origins in `centrifugo.config.json`
 (`http://localhost:3000-3002`, `https://localhost:8444`): pick the UI port from

@@ -32,15 +32,26 @@ function helper(relative, imports, globals = {}) {
 const root = '/isolated task/ftown';
 const e2e = path.join(root, 'e2e');
 
-function playwrightConfig(browserHome, platform = 'linux') {
+function playwrightConfig(browserHome, platform = 'linux', ci = true) {
   return helper('e2e/playwright.config.ts', {
     '@playwright/test': e2eRequire('@playwright/test'),
     'node:crypto': nodeCrypto,
     'node:fs': { existsSync: () => false, readFileSync: () => { throw new Error('unexpected read'); } },
     'node:path': path,
     './helpers/config': { E2E_DIR: e2e, UI_BASE_URL: 'http://localhost:3001' },
-  }, { process: { platform, env: { CI: 'true', ...(browserHome === undefined ? {} : { E2E_BROWSER_HOME: browserHome }) } } }).default;
+  }, { process: { platform, env: { ...(ci ? { CI: 'true' } : {}), ...(browserHome === undefined ? {} : { E2E_BROWSER_HOME: browserHome }) } } }).default;
 }
+
+test('without CI the second passkey runs after the chromium project instead of as the setup teardown', () => {
+  const config = playwrightConfig(undefined, 'linux', false);
+  assert.deepEqual(Array.from(config.projects, project => project.name), ['setup', 'chromium', 'second-passkey']);
+  const [setup, chromium, secondPasskey] = config.projects;
+  // A partial local run (one file, --project=chromium) must not add the permanent passkey: no teardown.
+  assert.equal(setup.teardown, undefined);
+  assert.deepEqual(Array.from(chromium.dependencies), ['setup']);
+  // A plain local run is ordered setup -> chromium -> second-passkey.
+  assert.deepEqual(Array.from(secondPasskey.dependencies), ['chromium']);
+});
 
 test('setup and chromium projects share browser security settings; chromium depends on setup', () => {
   const config = playwrightConfig();
