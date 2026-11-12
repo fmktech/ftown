@@ -48,8 +48,13 @@ export interface DirectPeerManagerOptions {
   onInput: (sessionId: string, data: string) => void;
   /** DataChannel `resize` frames feed here (same sink as terminal-input). */
   onResize: (sessionId: string, cols: number, rows: number) => void;
-  /** Returns the current full serialized screen for a session on attach. */
-  onAttach: (sessionId: string) => string;
+  /**
+   * Supplies the full serialized screen for a session on attach: either returned
+   * directly, or handed to `deliver` later (return nothing). The peer joins the
+   * session's output stream at the moment the screen is delivered, so it never
+   * receives output that precedes its own snapshot.
+   */
+  onAttach: (sessionId: string, deliver: (screen: string) => void) => string | void;
   /** node-datachannel PeerConnection factory; defaults to the real module. */
   peerConnectionFactory?: PeerConnectionFactory;
   /** Injectable clock for keepalive/teardown timers (defaults to Date.now). */
@@ -102,6 +107,8 @@ class DirectPeer {
   private helloOk = false;
   private closed = false;
   private readonly attached = new Set<string>();
+  /** Attach requests still waiting for their screen, by session. */
+  private readonly attaching = new Map<string, object>();
   private readonly seq = new Map<string, number>();
   private pingTimer?: ReturnType<typeof setInterval>;
   private missedPings = 0;
@@ -191,6 +198,7 @@ class DirectPeer {
     if (this.iceDisconnectTimer) clearTimeout(this.iceDisconnectTimer);
     if (this.pairingTimer) clearTimeout(this.pairingTimer);
     this.attached.clear();
+    this.attaching.clear();
     this.seq.clear();
     this.secure?.close();
     try { this.dc?.close(); } catch { /* already gone */ }
@@ -250,12 +258,22 @@ class DirectPeer {
       }
       case 'attach': {
         if (!this.helloOk) return;
-        this.attached.add(msg.sessionId);
-        const screen = this.manager.getScreen(msg.sessionId);
-        this.sendScreen(msg.sessionId, screen);
+        const sessionId = msg.sessionId;
+        const request = {};
+        this.attaching.set(sessionId, request);
+        const deliver = (screen: string): void => {
+          // Superseded by a newer attach, a detach, or the peer closing.
+          if (this.attaching.get(sessionId) !== request) return;
+          this.attaching.delete(sessionId);
+          this.attached.add(sessionId);
+          this.sendScreen(sessionId, screen);
+        };
+        const immediate = this.manager.getScreen(sessionId, deliver);
+        if (typeof immediate === 'string') deliver(immediate);
         return;
       }
       case 'detach': {
+        this.attaching.delete(msg.sessionId);
         this.attached.delete(msg.sessionId);
         this.seq.delete(msg.sessionId);
         return;
@@ -321,7 +339,7 @@ export class DirectPeerManager {
   private readonly sendSignalCb: (msg: SignalMessage) => void;
   private readonly onInputCb: (sessionId: string, data: string) => void;
   private readonly onResizeCb: (sessionId: string, cols: number, rows: number) => void;
-  private readonly onAttachCb: (sessionId: string) => string;
+  private readonly onAttachCb: (sessionId: string, deliver: (screen: string) => void) => string | void;
   private readonly factory: PeerConnectionFactory;
   private readonly peers = new Map<string, DirectPeer>();
 
@@ -412,8 +430,8 @@ export class DirectPeerManager {
     this.sendSignalCb({ ...partial, bridgeId: this.bridgeId });
   }
 
-  getScreen(sessionId: string): string {
-    return this.onAttachCb(sessionId);
+  getScreen(sessionId: string, deliver: (screen: string) => void): string | void {
+    return this.onAttachCb(sessionId, deliver);
   }
 
   deliverInput(sessionId: string, data: string): void {

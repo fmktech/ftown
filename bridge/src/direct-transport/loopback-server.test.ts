@@ -55,7 +55,10 @@ interface Harness {
   attachScreens: Map<string, string>;
 }
 
-async function startHarness(overrides?: { attachScreens?: Map<string, string> }): Promise<Harness> {
+async function startHarness(overrides?: {
+  attachScreens?: Map<string, string>;
+  onAttach?: (sessionId: string, deliver: (screen: string) => void) => string | void;
+}): Promise<Harness> {
   const httpServer = createServer();
   const directory = await mkdtemp(join(tmpdir(), 'ftown-loopback-unit-'));
   const secure = await secureFixture(directory, async () => new Response('{}'));
@@ -71,7 +74,7 @@ async function startHarness(overrides?: { attachScreens?: Map<string, string> })
     bridgeId: BRIDGE_ID,
     onInput: (sessionId: string, data: string) => onInputCalls.push([sessionId, data]),
     onResize: (sessionId: string, cols: number, rows: number) => onResizeCalls.push([sessionId, cols, rows]),
-    onAttach: (sessionId: string) => attachScreens.get(sessionId) ?? '',
+    onAttach: overrides?.onAttach ?? ((sessionId: string) => attachScreens.get(sessionId) ?? ''),
   });
   loopback.attach(httpServer);
 
@@ -305,6 +308,53 @@ describe('LoopbackPeerServer hello gating (L3)', () => {
     assert.deepStrictEqual(h.onInputCalls, [['sess-1', 'ls\n']]);
     assert.deepStrictEqual(h.onResizeCalls, [['sess-1', 80, 24]]);
     socket.close();
+  });
+});
+
+describe('LoopbackPeerServer deferred attach screen', () => {
+  it('joins the output stream only when its screen is delivered', async () => {
+    const delivers: Array<(screen: string) => void> = [];
+    const h = await startHarness({ onAttach: (_sessionId, deliver) => { delivers.push(deliver); } });
+    try {
+      const socket = await handshake(h.port);
+      socket.send(JSON.stringify({ kind: 'attach', sessionId: 'sess-1' } satisfies DirectMessage));
+      while (delivers.length === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+
+      assert.strictEqual(h.loopback.hasAttachedPeers('sess-1'), false);
+      h.loopback.sendOutput('sess-1', 'BEFORE-THE-SNAPSHOT');
+      delivers[0]('SNAPSHOT');
+      h.loopback.sendOutput('sess-1', 'after');
+
+      const first = await waitForMessage(socket);
+      assert.deepStrictEqual(first, { kind: 'screen', sessionId: 'sess-1', data: 'SNAPSHOT', seq: 0 });
+      const second = await waitForMessage(socket);
+      assert.deepStrictEqual(second, { kind: 'output', sessionId: 'sess-1', data: 'after', seq: 1 });
+      socket.close();
+    } finally {
+      await stopHarness(h);
+    }
+  });
+
+  it('a detach before the screen is ready cancels the attach', async () => {
+    const delivers: Array<(screen: string) => void> = [];
+    const h = await startHarness({ onAttach: (_sessionId, deliver) => { delivers.push(deliver); } });
+    try {
+      const socket = await handshake(h.port);
+      socket.send(JSON.stringify({ kind: 'attach', sessionId: 'sess-1' } satisfies DirectMessage));
+      while (delivers.length === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+      socket.send(JSON.stringify({ kind: 'detach', sessionId: 'sess-1' } satisfies DirectMessage));
+      socket.send(JSON.stringify({ kind: 'attach', sessionId: 'sess-2' } satisfies DirectMessage));
+      while (delivers.length === 1) await new Promise((resolve) => setTimeout(resolve, 5));
+
+      delivers[0]('STALE');
+      assert.strictEqual(h.loopback.hasAttachedPeers('sess-1'), false);
+      delivers[1]('SECOND');
+      const only = await waitForMessage(socket);
+      assert.deepStrictEqual(only, { kind: 'screen', sessionId: 'sess-2', data: 'SECOND', seq: 0 });
+      socket.close();
+    } finally {
+      await stopHarness(h);
+    }
   });
 });
 
