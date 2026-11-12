@@ -374,7 +374,7 @@ test("preview showing switches to the waiting item, file back, reply returns to 
     await expect(row).toBeVisible({ timeout: 30_000 });
     await row.click();
     const iframe = page.frameLocator('iframe[title="Preview: a.html"]');
-    await expect(iframe.locator(`text=Pane ${stamp}`).first()).toBeVisible({ timeout: 30_000 });
+    await expect(iframe.getByRole("heading", { name: `Pane ${stamp} version 1` })).toBeVisible({ timeout: 30_000 });
     // Item arrives while the file is showing: the pane switches to the item.
     await execute(process.execPath, [join(E2E_DIR, "..", "bridge/dist/ftown-cli.js"), "sessions", "attention", "--title", "Pane ask", "--message", `Please review ${stamp}`], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: id }, timeout: 30_000 });
     const pane = page.getByRole("region", { name: "Waiting for you" });
@@ -385,12 +385,12 @@ test("preview showing switches to the waiting item, file back, reply returns to 
     await expect(list.getByRole("tab", { name: "Waiting for you", exact: true })).toHaveAttribute("aria-selected", "true");
     await list.getByRole("tab", { name: "a.html", exact: true }).click();
     await expect(pane).toHaveCount(0);
-    await expect(iframe.locator(`text=Pane ${stamp}`).first()).toBeVisible({ timeout: 30_000 });
+    await expect(iframe.getByRole("heading", { name: `Pane ${stamp} version 1` })).toBeVisible({ timeout: 30_000 });
     await waitingTrigger(page).click();
     await expect(page.getByRole("region", { name: "Inbox", exact: true }).locator(`[data-inbox-entry="${id}"]`)).toBeVisible({ timeout: 30_000 });
     await page.getByRole("region", { name: "Inbox", exact: true }).getByRole("button", { name: "Back to workspace" }).click();
     // The file is still in front; the selector's first entry shows the item again, and a reply returns the pane to the file.
-    await expect(iframe.locator(`text=Pane ${stamp}`).first()).toBeVisible({ timeout: 30_000 });
+    await expect(iframe.getByRole("heading", { name: `Pane ${stamp} version 1` })).toBeVisible({ timeout: 30_000 });
     await expect(pane).toHaveCount(0);
     await list.getByRole("tab", { name: "Waiting for you", exact: true }).click();
     await expect(pane).toBeVisible();
@@ -403,7 +403,7 @@ test("preview showing switches to the waiting item, file back, reply returns to 
       return events.some((event) => event.resolvedAt && event.resolution === "replied");
     }, { timeout: 30_000 }).toBe(true);
     await expect(pane).toHaveCount(0);
-    await expect(iframe.locator(`text=Pane ${stamp}`).first()).toBeVisible({ timeout: 30_000 });
+    await expect(iframe.getByRole("heading", { name: `Pane ${stamp} version 1` })).toBeVisible({ timeout: 30_000 });
   } finally {
     await fixture.cleanup().catch(() => undefined);
   }
