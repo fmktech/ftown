@@ -4,12 +4,15 @@ import { EventEmitter } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import xtermHeadless from '@xterm/headless';
 
 import { SessionStore } from './session-store.js';
 import { TerminalManager } from './terminal-manager.js';
 import { createTerminalOutput, type TerminalOutput, type TerminalOutputDeps } from './terminal-output.js';
 
 type Frame = ['data' | 'screen', string];
+/** RIS: every screen carries its own full reset in-band. */
+const RESET = '\x1bc';
 
 interface Harness {
   output: TerminalOutput;
@@ -162,7 +165,7 @@ test('a screen dump sends coalescing output before the screen and never again', 
   h.emit('pending');
   h.remoteWatchers.add('s1');
   h.output.publishScreenDump('s1');
-  assert.deepStrictEqual(h.channel, [['data', 'pending'], ['screen', 'pending']]);
+  assert.deepStrictEqual(h.channel, [['data', 'pending'], ['screen', `${RESET}pending`]]);
   t.mock.timers.tick(250);
   assert.equal(h.channel.length, 2, 'the old coalescing window delivers nothing a second time');
 });
@@ -173,10 +176,10 @@ test('a peer attach does not replay coalescing output after the attach screen', 
   h.emit('pending');
   h.attachPeer();
   t.mock.timers.tick(250);
-  assert.deepStrictEqual(h.peer, [['screen', 'pending']]);
+  assert.deepStrictEqual(h.peer, [['screen', `${RESET}pending`]]);
   h.emit('next');
   t.mock.timers.tick(16);
-  assert.deepStrictEqual(h.peer, [['screen', 'pending'], ['data', 'next']]);
+  assert.deepStrictEqual(h.peer, [['screen', `${RESET}pending`], ['data', 'next']]);
 });
 
 test('a session nobody watches coalesces for 250 ms; a direct peer or a remote watcher restores 16 ms', (t) => {
@@ -268,4 +271,30 @@ test('a chunk that arrives while a peer waits for its attach screen is not delay
   const elapsed = performance.now() - started;
   assert.deepStrictEqual(h.peer.map(([kind]) => kind), ['screen', 'data']);
   assert.ok(elapsed < 150, `chunk delivered after ${elapsed.toFixed(0)} ms`);
+});
+
+test('a viewer that resets on a screen while earlier output is still queued ends up with the screen only', async (t) => {
+  const h = makeHarness();
+  t.after(() => h.output.pump.drain());
+  h.remoteWatchers.add('s1');
+  h.emit('$ echo pasted');
+  h.output.publishScreenDump('s1');
+  await until(() => h.channel.some(([kind]) => kind === 'screen'));
+  assert.equal(h.channel[0][0], 'data', 'coalescing output goes out just before the screen');
+  for (const [kind, data] of h.channel) if (kind === 'screen') assert.ok(data.startsWith(RESET));
+
+  // The UI's handlers (Terminal.tsx): output -> write; screen -> reset() then
+  // write. reset() is synchronous, writes are parsed later, so all frames of
+  // one burst are applied before the terminal has parsed any of them.
+  const viewer = new xtermHeadless.Terminal({ cols: 120, rows: 40, allowProposedApi: true });
+  t.after(() => viewer.dispose());
+  let last: Promise<void> = Promise.resolve();
+  for (const [kind, data] of h.channel) {
+    if (kind === 'screen') viewer.reset();
+    last = new Promise((resolve) => viewer.write(data, resolve));
+  }
+  await last;
+  assert.equal(viewer.buffer.active.getLine(0)?.translateToString(true), '$ echo pasted');
+  assert.equal(viewer.buffer.active.cursorX, '$ echo pasted'.length);
+  assert.equal(viewer.buffer.active.cursorY, 0);
 });

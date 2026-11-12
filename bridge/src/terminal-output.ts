@@ -11,6 +11,15 @@ const ATTACH_SCROLLBACK_LINES = 20000;
  * Centrifugo frame under websocket_message_size_limit.
  */
 const MAX_SCREEN_DUMP_BYTES = 2_500_000;
+/**
+ * RIS (full reset), sent in-band at the head of every screen. A viewer resets
+ * its terminal when a screen arrives, but that reset is synchronous while its
+ * terminal parses writes asynchronously: output received just before the screen
+ * is still queued and would be painted AFTER the reset, under the screen's
+ * content (wrong cursor, repeated text, later lines overwritten). Carrying the
+ * reset inside the data orders it after everything the viewer queued earlier.
+ */
+const SCREEN_RESET = '\x1bc';
 
 export interface TerminalOutputDeps {
   store: TerminalPumpDeps['store'] & Pick<SessionStore, 'setPendingTerminalFlush'>;
@@ -58,7 +67,7 @@ export function createTerminalOutput(deps: TerminalOutputDeps): TerminalOutput {
     pump,
 
     attachScreen(sessionId, deliver) {
-      pump.snapshot(sessionId, () => deliver(terminalManager.serialize(sessionId, ATTACH_SCROLLBACK_LINES) ?? ''));
+      pump.snapshot(sessionId, () => deliver(SCREEN_RESET + (terminalManager.serialize(sessionId, ATTACH_SCROLLBACK_LINES) ?? '')));
     },
 
     publishScreenDump(sessionId) {
@@ -66,7 +75,7 @@ export function createTerminalOutput(deps: TerminalOutputDeps): TerminalOutput {
         // Phase 1: viewport-only dump (~rows*cols bytes) for instant render.
         const viewportRaw = terminalManager.serialize(sessionId, 0);
         if (viewportRaw) {
-          router.publishTerminalScreen(sessionId, viewportRaw);
+          router.publishTerminalScreen(sessionId, SCREEN_RESET + viewportRaw);
         }
 
         // Phase 2: full dump with scrollback. Client re-renders on top of phase 1.
@@ -78,7 +87,7 @@ export function createTerminalOutput(deps: TerminalOutputDeps): TerminalOutput {
         }
         if (!raw) return;
         if (raw === viewportRaw) return;
-        router.publishTerminalScreen(sessionId, raw);
+        router.publishTerminalScreen(sessionId, SCREEN_RESET + raw);
       });
     },
 
