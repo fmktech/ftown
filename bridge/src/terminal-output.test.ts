@@ -253,3 +253,19 @@ test('the runner lifecycle is wired: exit flushes the session', (t) => {
   h.runner.emit('complete', 's1');
   assert.deepStrictEqual(h.appended, ['last words']);
 });
+
+test('a chunk that arrives while a peer waits for its attach screen is not delayed by the unwatched window', async (t) => {
+  const h = makeHarness();
+  t.after(() => h.output.pump.drain());
+  h.emit('OLD ');
+  await parsed(h);
+  await h.output.pump.drain();
+
+  const started = performance.now();
+  h.attachPeer();
+  h.emit('DURING');
+  await until(() => h.peer.some(([kind, data]) => kind === 'data' && data === 'DURING'));
+  const elapsed = performance.now() - started;
+  assert.deepStrictEqual(h.peer.map(([kind]) => kind), ['screen', 'data']);
+  assert.ok(elapsed < 150, `chunk delivered after ${elapsed.toFixed(0)} ms`);
+});

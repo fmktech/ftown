@@ -134,7 +134,8 @@ export class TerminalPump {
     pending.data += data;
     pending.bytes += Buffer.byteLength(data, 'utf-8');
 
-    if (this.deps.isWatched?.(sessionId) ?? true) {
+    // A viewer waiting for its snapshot is not attached yet but is watching.
+    if (this.snapshotHolds.has(sessionId) || (this.deps.isWatched?.(sessionId) ?? true)) {
       // A buffer still riding the long window means a watcher appeared without
       // an explicit flush: deliver now instead of making it wait.
       if (pending.data.length >= this.maxBufferBytes || pending.unwatchedTimer) {
@@ -177,22 +178,43 @@ export class TerminalPump {
    * output received in between is delivered only after it. A viewer that is
    * reset by the snapshot therefore neither loses nor repeats a byte, whether
    * it joined the stream before or after the cut. Concurrent snapshots of one
-   * session share a cut. `produce` runs synchronously when nothing is waiting
-   * to be parsed.
+   * session share a cut. `produce` runs synchronously only for a session that
+   * has no emulator (or a pump without one); otherwise it runs later, from the
+   * emulator's write loop.
+   *
+   * If the emulator has not caught up within the timeout (a very large
+   * backlog), the held output is released as plain output and NO snapshot is
+   * produced from that cut — a screen taken then could be missing bytes that
+   * were already sent. The producers stay queued; when the emulator finally
+   * reports, a new cut is taken for them. A snapshot is therefore late in that
+   * case, never inconsistent.
    */
   snapshot(sessionId: string, produce: () => void): void {
     const active = this.snapshotHolds.get(sessionId);
-    if (active) {
-      active.producers.push(produce);
-      return;
-    }
+    if (active) active.producers.push(produce);
+    else this.startSnapshot(sessionId, [produce]);
+  }
+
+  private startSnapshot(sessionId: string, producers: Array<() => void>): void {
     this.flush(sessionId);
-    const hold: SnapshotHold = { producers: [produce], deferred: [] };
+    const hold: SnapshotHold = { producers, deferred: [] };
     this.snapshotHolds.set(sessionId, hold);
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const finish = (): void => {
-      if (this.snapshotHolds.get(sessionId) !== hold) return;
+    const release = (): void => {
+      this.snapshotHolds.delete(sessionId);
+      for (const data of hold.deferred) this.deps.publishTerminalData(sessionId, data);
+      // Output that arrived during the hold follows at once, not a window later.
+      this.flush(sessionId);
+    };
+    const onParsed = (): void => {
       if (timer) clearTimeout(timer);
+      if (this.snapshotHolds.get(sessionId) !== hold) {
+        // Timed out earlier and its output has moved on: cut again.
+        const current = this.snapshotHolds.get(sessionId);
+        if (current) current.producers.push(...hold.producers);
+        else this.startSnapshot(sessionId, hold.producers);
+        return;
+      }
       try {
         for (const run of hold.producers) {
           try { run(); } catch (err) {
@@ -200,18 +222,20 @@ export class TerminalPump {
           }
         }
       } finally {
-        this.snapshotHolds.delete(sessionId);
-        for (const data of hold.deferred) this.deps.publishTerminalData(sessionId, data);
+        release();
       }
     };
     const whenParsed = this.deps.terminalManager.whenParsed;
     if (!whenParsed) {
-      finish();
+      onParsed();
       return;
     }
-    // Output must never stay held because an emulator failed to report back.
-    timer = setTimeout(finish, this.snapshotTimeoutMs);
-    whenParsed.call(this.deps.terminalManager, sessionId, finish);
+    // Output must never stay held because an emulator is slow to report back.
+    timer = setTimeout(() => {
+      if (this.snapshotHolds.get(sessionId) === hold) release();
+    }, this.snapshotTimeoutMs);
+    timer.unref?.();
+    whenParsed.call(this.deps.terminalManager, sessionId, onParsed);
   }
 
   /** Flush every session and wait until the store has taken all of it (shutdown). */

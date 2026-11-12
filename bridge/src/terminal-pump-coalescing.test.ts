@@ -133,12 +133,43 @@ test('a snapshot that never hears back from the emulator releases its output aft
   h.watched.add('s1');
   h.pump.snapshot('s1', () => h.wire.push('snapshot'));
   h.pump.handleData('s1', 'held');
+  h.pump.flush('s1');
   h.tick(399);
   assert.deepStrictEqual(h.wire, []);
   h.tick(1);
-  assert.deepStrictEqual(h.wire, ['snapshot', 'data:held']);
+  // No screen from a cut the output has already moved past.
+  assert.deepStrictEqual(h.wire, ['data:held']);
+  h.pump.handleData('s1', ' more');
+  h.tick(16);
+  assert.deepStrictEqual(h.wire, ['data:held', 'data: more']);
+
+  // The emulator finally reports: a new cut is taken for the waiting producer.
+  h.pump.handleData('s1', ' tail');
   emulator.settle();
-  assert.deepStrictEqual(h.wire, ['snapshot', 'data:held'], 'a late report produces nothing twice');
+  assert.deepStrictEqual(h.wire, ['data:held', 'data: more', 'data: tail'], 'still waiting for the new cut');
+  h.pump.handleData('s1', ' after');
+  emulator.settle();
+  assert.deepStrictEqual(h.wire, ['data:held', 'data: more', 'data: tail', 'snapshot', 'data: after']);
+  assert.equal(emulator.parsed, 'held more tail');
+  assert.equal(emulator.waiting, 0);
+});
+
+test('output that arrives during a snapshot follows it immediately and keeps the fast cadence', (t) => {
+  let h!: Harness;
+  const emulator = manualEmulator(() => h);
+  h = makeHarness(t, emulator.deps);
+  // Nobody is attached yet: the viewer joins when its snapshot is produced.
+  h.pump.snapshot('s1', () => { h.watched.add('s1'); h.wire.push('snapshot'); });
+  h.pump.handleData('s1', 'during');
+  emulator.settle();
+  assert.deepStrictEqual(h.wire, ['snapshot', 'data:during'], 'no coalescing window after the snapshot');
+
+  h.watched.clear();
+  h.pump.snapshot('s1', () => h.wire.push('snapshot-2'));
+  h.pump.handleData('s1', 'x');
+  h.tick(16);
+  assert.deepStrictEqual(h.appended.map((a) => a.data), ['during', 'x'], 'a pending snapshot counts as a watcher');
+  emulator.settle();
 });
 
 test('a snapshot producer that throws still releases the held output', (t) => {
