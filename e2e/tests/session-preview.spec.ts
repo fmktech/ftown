@@ -6,7 +6,7 @@ import { login, sharedAccountId, waitForBridgeOnline, runMarkerInTerminal } from
 import { bridgeApiFetch, readBridgePointer } from "../helpers/bridge-api";
 import { UI_BASE_URL } from "../helpers/config";
 import { publishLedgerHeadNotice } from "../helpers/security-nudge";
-import { assertSanitized, atomicHtml, createPreviewFixture, inPreviewFrame, observePreviewTransport, previewHtml, previewMarkdown, previewSimpleHtml, sessionRecord } from "../helpers/session-preview";
+import { assertSanitized, atomicHtml, clickPreviewLinkAndExpectSelected, createPreviewFixture, inPreviewFrame, observePreviewTransport, previewHtml, previewMarkdown, previewSimpleHtml, sessionRecord } from "../helpers/session-preview";
 
 const iframe = (page: Page, fileName: string) => page.locator(`iframe[title="Preview: ${fileName}"]`);
 const documentFrame = (page: Page, fileName: string) => page.frameLocator(`iframe[title="Preview: ${fileName}"]`);
@@ -554,9 +554,7 @@ test("multi-file preview with markdown selector and cross-file links", async ({ 
     }, null, `${marker}-cell`)).toBe("cell");
 
     // Click relative link from markdown to a.html and see selection switch
-    const mdFrame = page.frameLocator(`iframe[title="Preview: ${mdName}"]`);
-    await mdFrame.locator('a[href="a.html"]').click();
-    await expect(page.getByRole("tab", { name: aName })).toHaveAttribute("aria-selected", "true", { timeout: 15_000 });
+    await clickPreviewLinkAndExpectSelected(page, mdName, "a.html", aName);
     await expect(page.locator(`iframe[title="Preview: ${aName}"]`)).toBeVisible({ timeout: 15_000 });
     await expect.poll(() => inPreviewFrame(page, aName, (body, expected) => body.querySelector("h1")?.textContent?.includes(expected) ? "ok" : null, null, marker)).toBe("ok");
 
@@ -749,9 +747,7 @@ test("a file name containing '<' registers and cross-file links still switch", a
     await expect(iframe(page, weirdName)).toBeVisible({ timeout: 15_000 });
     await expect.poll(() => inPreviewFrame(page, weirdName, (body, expected) => body.querySelector("h1")?.textContent?.includes(expected) ? "ok" : null, null, `${marker} Notes`)).toBe("ok");
 
-    const mdFrame = page.frameLocator(`iframe[title="Preview: ${weirdName}"]`);
-    await mdFrame.locator('a[href="a.html"]').click();
-    await expect(page.getByRole("tab", { name: aName })).toHaveAttribute("aria-selected", "true", { timeout: 15_000 });
+    await clickPreviewLinkAndExpectSelected(page, weirdName, "a.html", aName);
     await expect(page.locator(`iframe[title="Preview: ${aName}"]`)).toBeVisible({ timeout: 15_000 });
     await expect.poll(() => inPreviewFrame(page, aName, (body, expected) => body.querySelector("h1")?.textContent?.includes(expected) ? "ok" : null, null, `${marker} version 1`)).toBe("ok");
 

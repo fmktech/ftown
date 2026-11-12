@@ -46,6 +46,23 @@ export async function inPreviewFrame<R, N>(page: Page, fileName: string, fn: (bo
   }
 }
 
+/**
+ * Click a relative preview link that requests a switch-file and wait for the target tab to become selected.
+ *
+ * Chromium routes the trusted pointer click to the embedder <iframe> element (never into the out-of-process
+ * sandboxed frame content) when the frame was inserted within ~75ms: Playwright's hit-target check passes in
+ * the dashboard, yet the click lands on the embedder and no postMessage is produced. The first attempt can
+ * therefore fail with no product bug, so the click plus the tab assertion retry. Repeated attempts are harmless
+ * because switching to the already-selected file is a no-op (same effectiveFileName/identity/iframe key), so
+ * retries cannot remount or reset the preview.
+ */
+export async function clickPreviewLinkAndExpectSelected(page: Page, fromFileName: string, linkHref: string, toFileName: string): Promise<void> {
+  await expect(async () => {
+    await page.frameLocator(`iframe[title="Preview: ${fromFileName}"]`).locator(`a[href="${linkHref}"]`).click();
+    await expect(page.getByRole("tab", { name: toFileName })).toHaveAttribute("aria-selected", "true", { timeout: 1000 });
+  }).toPass({ timeout: 15_000 });
+}
+
 export interface CliOutput { code: number; stdout: string; stderr: string }
 export interface PreviewReadObservation { state: string; previewId: string; transport: "cloud" | "local"; offset?: number }
 export interface PreviewTransportObservation {

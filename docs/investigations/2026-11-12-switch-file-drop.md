@@ -4,13 +4,13 @@ symptom: "intermittent switch-file link drop (e2e :475 fails 1/3)"
 slug: switch-file-drop
 date: 2026-11-12T01:16:06-03:00
 investigator: Foad Kesheh
-git_commit: 9af4d26d24cfad512f862b9cbe0539ed9301fe54
+git_commit: 9c779cc
 branch: feat/preview-markdown-multi
 repository: fmktech/ftown
-status: reopened
-hypotheses_formed: 4
-hypotheses_rejected: 3
-hypotheses_proven: 0
+status: resolved
+hypotheses_formed: 5
+hypotheses_rejected: 4
+hypotheses_proven: 1
 ---
 
 # Intermittent switch-file link drop (e2e :475 fails 1/3)
@@ -82,8 +82,8 @@ Every condition under which a link click on a just-loaded file is ignored (verba
   SessionWorkspace.tsx:264: <iframe ref={scroll.iframeRef} key={scroll.display.key} title={...} sandbox="allow-scripts" srcDoc={srcDoc} />
   usePreviewScroll.test.ts:134-151: 'forwards switch-file messages ...' uses same mocked frame for source+ref, no transition case
   ```
-- **Verdict**: HYPOTHESIS (unproven; downgraded from PROVEN on review — the original verdict rested on code reading alone)
-- **Rationale**: In isolation `displayRef` and the iframe DOM can disagree for one effect/render window, but the parent review shows P1/P2 with a still-mounted, clickable frame does not follow: `usePreviewScroll.ts:107` returns `display: null` in the SAME render that owner/`hardEpoch` changes, so `SessionWorkspace.tsx:258` renders the loading message and React unmounts the old frame (`key={display.key}` at `:264`) in that commit — before the clearing effect runs and before `iframeRef` detaches. A `postMessage` task therefore cannot be delivered to a mounted frame while `!current` or `hardEpoch` mismatches: every `hardEpoch` bump (`useSessionPreview.ts:47/99/130/159/175/198`) also nulls `complete` and makes `candidate` null in the same task (`redraw()` follows synchronously), and JS message delivery cannot interleave mid-task. The de1bd21 regression test held `iframeRef.current.contentWindow` attached (mocked `Object.defineProperty`) while rendering `candidate: null`; production React detaches the ref on unmount, so that test pins a state the app cannot reach. P2 (epoch lag) is at most one task wide, with no mounted frame inside it. No observed event, e2e trace, or unit run has yet shown a real `switch-file` dropped by this guard; the flake (1/3) is not attributed to H2.
+- **Verdict**: REJECTED (was HYPOTHESIS after the parent-review downgrade; finally rejected by the parent e2e trace — see H5)
+- **Rationale**: In isolation `displayRef` and the iframe DOM can disagree for one effect/render window, but the parent review shows P1/P2 with a still-mounted, clickable frame does not follow: `usePreviewScroll.ts:107` returns `display: null` in the SAME render that owner/`hardEpoch` changes, so `SessionWorkspace.tsx:258` renders the loading message and React unmounts the old frame (`key={display.key}` at `:264`) in that commit — before the clearing effect runs and before `iframeRef` detaches. A `postMessage` task therefore cannot be delivered to a mounted frame while `!current` or `hardEpoch` mismatches: every `hardEpoch` bump (`useSessionPreview.ts:47/99/130/159/175/198`) also nulls `complete` and makes `candidate` null in the same task (`redraw()` follows synchronously), and JS message delivery cannot interleave mid-task. The de1bd21 regression test held `iframeRef.current.contentWindow` attached (mocked `Object.defineProperty`) while rendering `candidate: null`; production React detaches the ref on unmount, so that test pins a state the app cannot reach. P2 (epoch lag) is at most one task wide, with no mounted frame inside it. No observed event, e2e trace, or unit run has yet shown a real `switch-file` dropped by this guard; the flake (1/3) is not attributed to H2. **E2E falsification (parent trace, HEAD `9c779cc`):** the failing click posted nothing at all — trusted input went to the embedder `<iframe>` element (target=IFRAME), so the guard at `:69` was never evaluated and no message exists for H2 to have dropped. The retry from the same frame forwarded with `sourceMatch=true`, exactly as the steady-state unit test predicts. The transition-window ordering concern is moot: no `switch-file` is ever delivered in that window because the click never enters the frame.
 
 #### H3: The spec clicks before the frame is ready (link script not attached / input not trusted), so no product fix is needed — the spec should wait on a stronger readiness signal.
 
@@ -112,9 +112,26 @@ Every condition under which a link click on a just-loaded file is ignored (verba
   useSessionPreview.ts:164/182 nonce++ only on manual 'unchanged' refresh and on 'ready' completion (once per switch); unchanged polls keep the key.
   ```
 - **Verdict**: REJECTED
-- **Rationale**: The new file mounts exactly once for unchanged bytes under the real poll sequence. The nonce changes a single time on the switch's `ready` completion; later polls are `unchanged` and keep the key (automatic polls never regenerate it). There is no `hardEpoch` bump in the steady sequence, no second `loading → ready`, and no selection-effect key churn (the `SessionWorkspace` iframe node is stable). P3 remount-then-replace is therefore not the flake mechanism at unit level; it remains the hypothesis the e2e trace must still exclude (see Correction).
+- **Rationale**: The new file mounts exactly once for unchanged bytes under the real poll sequence. The nonce changes a single time on the switch's `ready` completion; later polls are `unchanged` and keep the key (automatic polls never regenerate it). There is no `hardEpoch` bump in the steady sequence, no second `loading → ready`, and no selection-effect key churn (the `SessionWorkspace` iframe node is stable). P3 remount-then-replace is therefore not the flake mechanism at unit level; it remains the hypothesis the e2e trace must still exclude (see Correction). **E2E confirmation (parent trace):** exactly one frame per switch — `added t=839862`, `loaded t=839880`, no second add — so P3 is out at the browser level too.
+
+#### H5: The click is routed to the embedder `<iframe>` element by Chromium's compositor hit-test lag, so the frame never receives it — a SPEC bug, not a product bug.
+
+- **Layer**: observation (browser input routing / test artifact).
+- **Prediction**: If H5 is true, the first click after a file switch is delivered to the embedder element (`<iframe>`) with `trusted=true` and never reaches the sandboxed frame document — no FRAME click, no `switch-file` — while the same click seconds later (after hit-test data settles) is delivered into the frame and switches selection. Conversely, if false, the click would reach the frame on the first attempt.
+- **Verification method**: Parent e2e trace with input instrumentation (frame add/load timestamps, mouse/click target, FRAME click presence, parent message source check).
+- **Evidence** (parent trace, HEAD `9c779cc`; this session did not re-run Playwright — ports owned):
+  ```
+  iframe 'Preview: notes.md' added t=839862
+  iframe 'Preview: notes.md' loaded t=839880
+  test clicks link t=839907 (~45-75ms after insertion)
+  parent receives 'mousedown/click trusted=true target=IFRAME' — trusted click delivered to EMBEDDER <iframe> element, never to out-of-process sandboxed frame: no FRAME click, no switch-file
+  second click ~15s later (same frame): FRAME click, then PARENT message sourceMatch=true and selection switched
+  ```
+- **Verdict**: PROVEN
+- **Rationale**: The click was trusted (`trusted=true`), so H1/C2 (untrusted) is out, and the handler was attached (heading polls passed), so H3 as written (handler-absent) is out — S2 (the spec-timing shorthand) is rejected in that form. No message was dropped: none was posted, because input never entered the frame — H2's guard was never evaluated (see H2 falsification above). Exactly one frame existed per switch, so H4/P3 remount is out. The second click from the same frame succeeded, proving the child handler + parent guard + selection path all work once input is actually delivered. This is the same hit-test lag documented in `clickOverPreview` (spec `:28-35`), now in the inverse direction (click *into*, not over, the frame). The product is fine; the spec clicks too soon after insertion.
 
 ## 5 Whys
+**Superseded 2026-11-12 by H5 (proven):** the chain below explains a guard drop (H2). The parent e2e trace proves no message reaches the guard on the failing click (see H5 evidence), so the chain is retained as history and must not be read as the mechanism.
 Symptom:  Click on a DOM-ready markdown link in the mounted preview frame produces no selection (aria-selected stays false).
 Why 1?    Because the parent `receive` returns early at `usePreviewScroll.ts:69` for that `switch-file` (P1 `!current`, P2 epoch mismatch, or P3 source mismatch) and never calls `switchFileRef.current`.
 Why 2?    Because `displayRef`/`hardEpoch` are updated synchronously in effects (`:43-44` commit, `:50` clear) while the iframe DOM (`iframeRef` + `contentWindow`, `SessionWorkspace.tsx:264`) is updated in the next render commit — the guard reads the new lifecycle state against the old DOM for one render window, and also conflates scroll-document lifetime with link intent.
@@ -125,25 +142,29 @@ Why 5?    Because preview frame lifetime (fetch → commit → remount) and user
 ## Falsification
 - Check performed: absence / adjacent-cause + remount count (Correction).
 - Result: In steady state (same mounted frame, same epoch, source matches), the existing unit test `forwards switch-file messages` passes — the guard does NOT drop. Adjacent child-side cause (H1) was rejected by head-before-body + href-parsing evidence; adjacent spec-side cause (H3) was rejected by heading-poll + trusted-click evidence; remount cause (H4) was rejected by the mount-count tests (exactly one mount). No unit or e2e observation yet shows a real `switch-file` dropped by the H2 guard; the transition-window drop exists only as a code-reading candidate with a production-reachability gap (mounted frame vs. `displayRef`/`hardEpoch` ordering per H2 rationale).
-- Conclusion: H2 remains HYPOTHESIS (unproven). (E2E Playwright re-run was not performed — ports owned — so e2e timing is cited from parent trace, not re-observed here.) The parent e2e `--repeat-each=20` run (below) is the falsifier.
+- Conclusion (H5): the parent e2e trace is the falsifier and it resolved the case. The failing click posted nothing (trusted input to the embedder element, no FRAME click, no `switch-file`); the retry from the same frame forwarded with `sourceMatch=true`; exactly one frame existed per switch. H2 (drop-in-guard) is falsified — no message was ever dropped; H4/P3 (remount) is falsified — one frame per switch; H3/S2 as written (handler-absent/untrusted) is falsified — `trusted=true` with heading polls green. The cause is hit-test routing lag (H5, PROVEN). This session did not re-run Playwright; the trace lines are parent-observed and pasted verbatim in H5.
 
 ## Root Cause
-- UNPROVEN candidate (H2): IF a `switch-file` were delivered while the sender frame is still mounted but `displayRef.current===null` or `current.hardEpoch!==getHardEpoch()`, it would be dropped by the shared guard at `ui/src/hooks/usePreviewScroll.ts:69` (`!current || hardEpoch mismatch || source mismatch`). No observation yet proves such a delivery occurs; the parent review (H2 rationale) shows the mounted-frame half of that window is unreachable in production. Treat this section as hypothesis, not root cause, until e2e proves a dropped message.
-- Architectural note (not a proven root): link intent shares the scroll listener's guard — 5 Whys above. Decoupling is therefore a candidate hardening, not a required fix; it is NOT applied (see Fix).
-- Rejected H1: head script runs before body, `a.html` passes all child checks — child posts correctly.
-- Rejected H3: heading+table polls already prove DOM + handler ready; Playwright clicks are trusted (identical `:753` click passes) — spec did wait.
-- Rejected H4: exactly one mount per switch for unchanged bytes at unit level (see H4).
+- PROVEN (H5): the failing click never reached the sandboxed frame. Chromium's compositor hit-test data lags a just-inserted iframe by ~75ms: the trusted click is delivered to the embedder `<iframe>` element, so the child's link handler never fires and no `switch-file` is posted. The parent guard is never evaluated — nothing is dropped by the product. This is a SPEC bug (click issued too soon after insertion), not a product bug. The same lag is documented in `clickOverPreview` (spec `:28-35`) in the inverse direction.
+- Architectural note (retained, not a root): link intent shares the scroll listener's guard — 5 Whys above (superseded; see note there). Decoupling was already reverted and stays reverted (see Fix).
+- Rejected H1: head script runs before body, `a.html` passes all child checks — child posts correctly (proved by the successful retry from the same frame).
+- Rejected H2: no message was dropped — the failing click posted nothing; the guard was never evaluated. The retry forwarded with `sourceMatch=true`.
+- Rejected H3/S2 (spec-timing as written — handler-absent/untrusted): heading+table polls already prove DOM + handler ready and the click was `trusted=true`. The qualified spec-timing cause is H5 (routing, not readiness/trust).
+- Rejected H4/P3 (remount): exactly one frame per switch in the e2e trace (`added t=839862` / `loaded t=839880`, no second add), plus unit mount-count tests (count 1).
 
 ## Fix
 - de1bd21 (decoupling link channel from display/epoch guard) REVERTED: `ui/src/hooks/usePreviewScroll.ts` is byte-identical to pre-de1bd21; the single guard (`!current || hardEpoch mismatch || source mismatch || origin !== 'null'`) covers both channels. Reason: the mount count is exactly 1 (no remount fix needed) and the decoupled tests pinned production-unreachable states (mocked `iframeRef` held attached across `candidate: null` / epoch bump without render). Decoupling would not fix a P3 replace-drop anyway — the source check still rejects the replaced frame — and would have honored selection/prompt after a revocation bump while the frame was still in the DOM.
 - No change to `ui/src/hooks/useSessionPreview.ts` (key stable: `nonce` only on manual refresh and on each `ready` completion, exactly once per switch) and no change to `ui/src/components/SessionWorkspace.tsx`.
+- No product change for H5: the product path (child post → parent forward → selection) is proved correct by the successful retry from the same frame.
+- Spec fix (this session, uncommitted): new `clickPreviewLinkAndExpectSelected(page, fromFileName, linkHref, toFileName)` helper in `e2e/helpers/session-preview.ts` wraps the in-frame link click + tab `aria-selected` assertion in `expect(...).toPass({ timeout: 15_000 })` with a 1000 ms inner assertion, so a hit-test-lagged first click simply retries until input lands. It replaces the identical click+assert pairs at `e2e/tests/session-preview.spec.ts` `:558-559` (`notes.md` → `a.html`) and `:753-754` (weird name → `a.html`). Retrying is safe: selecting the already-selected file is a value-wise no-op in `SessionWorkspace` (same `effectiveFileName`/identity/iframe key — see Resolution). No other frame clicks are after-switch switch-file clicks (see Resolution); `:529-:535` and all other assertions are kept.
 - Tests kept: mount-count cases (P3, count 1) + link-channel strictness cases (wrong origin for `switch-file`/`open-link`; foreign source for `open-link`, with positive controls). The unreachable `honors switch-file... across display transition` case was deleted.
-- Justification: no production-reachable drop is fixed by decoupling; keeping the guard strict and the source check intact is the smallest change consistent with evidence. Any future hardening should target a proven drop, not this window.
+- Justification: no production-reachable drop is fixed by decoupling and no product path is broken by H5; keeping the guard strict and fixing the spec's click timing is the smallest change consistent with evidence.
 
 ## Resolution
 - Diff summary (uncommitted, for parent review): revert of `ui/src/hooks/usePreviewScroll.ts` to pre-de1bd21; `ui/src/hooks/usePreviewScroll.test.ts` — deleted unreachable transition case, added two strictness cases; `ui/src/hooks/useSessionPreview.test.ts` — added P3 mount-count case (1 distinct `display.key`); `ui/src/components/SessionWorkspace.test.tsx` — added P3 iframe-node case (1 node); this log corrected. No stack/Playwright run (ports owned); do NOT commit; e2e confirmation is runner-side per Correction.
 - Verification: P3 mount tests pass with count exactly 1 (see H4); full gates re-run after the revert (results below). Playwright not run.
 - Follow-up: sibling-code nits from parent memory (`preparePreviewAdd` 12-limit, dead `selectedFileName`) are out of scope for this task. Why :753 passed vs :558 flaked: sample of 3 each is too small to attribute the difference to a proven timing variable; both clicks take the same parent path.
+- Resolution update (H5, this session): replaced the two after-switch click+assert pairs (`:558-559`, `:753-754`) with `clickPreviewLinkAndExpectSelected`; no product file changed. No-op-on-reselect verified by code reading: `SessionWorkspace.tsx:76-78` (`handleSelectFile`) with derivation at `:54-70`, sync guard at `:89-90`, iframe key at `:264`, and `useSessionPreview.ts:39` (identity) / `:210` (effect deps) — same file ⇒ same identity string ⇒ no `clear()`, no nonce bump, same `display.key`, no remount (one redundant render from new object identity only). Frame-click inventory from grep (`documentFrame`/`mdFrame` clicks at `:159, :188, :207, :213, :303, :312, :365, :800` plus `:558, :753` — `:558`/`:753`/`:800` are pre-edit numbers for the replaced sites): only `:558` and `:753` are after-switch `switch-file` clicks (`a[href="a.html"]` with a tab assertion); the others target counter/external/hash/long links in a single stable file and carry no tab assertion. `:529-:535` and all other assertions kept.
 
 ## Correction (2026-11-12, parent review response)
 
@@ -160,7 +181,9 @@ Instrument the spec (or a manual run) to log, per tab-switch within 500 ms: (i) 
 
 - Decoupled-link (H2) prediction: exactly one iframe load, the click's message arrives FROM the current mounted frame's window and is dropped by the guard (source would match post-decoupling). If the trace instead shows the dropped message coming from a replaced/detached window (or no message at all), H2 is disproven.
 - P3 remount prediction: two or more iframe loads (or key changes) within the first ~500 ms after the tab switch, with the click's `source` equal to the FIRST mount's window while the parent listens on the SECOND. A single load + current-source drop supports H2; multiple loads + stale-source drop supports P3 (and only then is a stable-key fix indicated — decoupling would not help, since the source check correctly rejects the stale frame).
+- Result (parent trace): neither prediction fired — there is no message at all on the failing click (input to the embedder element, no FRAME click), and exactly one frame per switch. The trace instead proves H5 (hit-test routing lag); see H5 evidence.
 
 ## Verification (corrected run)
 
 - Reverted tree (this correction): `cd ui && npx tsc --noEmit` clean (exit 0); `cd ui && npx vitest run` 114 files / 1854 tests pass; `cd e2e && npx tsc --noEmit` clean (exit 0). Owned files: `usePreviewScroll.test.ts` 11 tests, `useSessionPreview.test.ts` 40 tests, `SessionWorkspace.test.tsx` 34 tests (85 total across the three, all green). No stack/Playwright run. Previous "114 files / 1851 tests pass" described the pre-revert tree.
+- H5 spec-retry tree (this session): `cd e2e && npx tsc --noEmit` clean; `cd ui && npx tsc --noEmit` clean (verify untouched). No stack/Playwright run — runtime UNVERIFIED.
