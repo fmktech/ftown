@@ -7,7 +7,7 @@ export type SyntheticStopReason = 'complete' | 'error' | 'stopped';
 
 export interface TerminalPumpDeps {
   store: Pick<SessionStore, 'appendTerminalData' | 'loadSession' | 'saveSession' | 'loadTerminalLog'>;
-  terminalManager: Pick<TerminalManager, 'write' | 'destroy'>;
+  terminalManager: Pick<TerminalManager, 'write' | 'destroy'> & Partial<Pick<TerminalManager, 'whenParsed'>>;
   publishTerminalData: (sessionId: string, data: string) => void;
   publishSessionUpdate: (session: Session) => Promise<void>;
   publishHookEvent: (sessionId: string, event: Record<string, unknown>) => Promise<void>;
@@ -31,12 +31,21 @@ export interface TerminalPumpDeps {
   maxBufferBytes?: number;
   unwatchedFlushIntervalMs?: number;
   unwatchedMaxBufferBytes?: number;
+  snapshotTimeoutMs?: number;
 }
 
 const FLUSH_INTERVAL_MS = 16;
 const MAX_BUFFER_BYTES = 32_000;
 const UNWATCHED_FLUSH_INTERVAL_MS = 250;
 const UNWATCHED_MAX_BUFFER_BYTES = 256 * 1024;
+/** Upper bound on how long a snapshot may hold back a session's output. */
+const SNAPSHOT_TIMEOUT_MS = 1000;
+
+/** A snapshot in progress: output after its cut waits until it has been produced. */
+interface SnapshotHold {
+  producers: Array<() => void>;
+  deferred: string[];
+}
 
 /** Output of one session waiting for its next flush. */
 interface PendingOutput {
@@ -79,6 +88,7 @@ function sanitizeTerminalTail(raw: string): string {
 export class TerminalPump {
   private readonly pending = new Map<string, PendingOutput>();
   private readonly pendingAppends = new Set<Promise<void>>();
+  private readonly snapshotHolds = new Map<string, SnapshotHold>();
   // Per-session write queue so concurrent load/modify/save flows (hooks,
   // runner exit handlers, stop_session) cannot interleave and resurrect a
   // stale status.
@@ -96,12 +106,14 @@ export class TerminalPump {
   private readonly maxBufferBytes: number;
   private readonly unwatchedFlushIntervalMs: number;
   private readonly unwatchedMaxBufferBytes: number;
+  private readonly snapshotTimeoutMs: number;
 
   constructor(private readonly deps: TerminalPumpDeps) {
     this.flushIntervalMs = deps.flushIntervalMs ?? FLUSH_INTERVAL_MS;
     this.maxBufferBytes = deps.maxBufferBytes ?? MAX_BUFFER_BYTES;
     this.unwatchedFlushIntervalMs = deps.unwatchedFlushIntervalMs ?? UNWATCHED_FLUSH_INTERVAL_MS;
     this.unwatchedMaxBufferBytes = deps.unwatchedMaxBufferBytes ?? UNWATCHED_MAX_BUFFER_BYTES;
+    this.snapshotTimeoutMs = deps.snapshotTimeoutMs ?? SNAPSHOT_TIMEOUT_MS;
   }
 
   /** Wire the pump onto the runner's data/lifecycle events. */
@@ -139,11 +151,9 @@ export class TerminalPump {
   }
 
   /**
-   * Hand a session's pending output to the store and the transports now. Must
-   * run before anything reads state derived from flushed output: an attach
-   * snapshot / screen dump for a new watcher (else the bytes arrive again after
-   * the snapshot that already contains them), terminal.log readers, session
-   * exit, and shutdown.
+   * Hand a session's pending output to the store and the transports now. Runs
+   * before terminal.log is read or cleared, on session exit and on shutdown.
+   * Screen snapshots go through `snapshot`, never a bare flush.
    */
   flush(sessionId: string): void {
     const pending = this.pending.get(sessionId);
@@ -155,7 +165,53 @@ export class TerminalPump {
     });
     this.pendingAppends.add(append);
     void append.then(() => this.pendingAppends.delete(append));
-    this.deps.publishTerminalData(sessionId, pending.data);
+    const hold = this.snapshotHolds.get(sessionId);
+    if (hold) hold.deferred.push(pending.data);
+    else this.deps.publishTerminalData(sessionId, pending.data);
+  }
+
+  /**
+   * Produce a screen snapshot (attach replay, screen dump) at an exact cut in
+   * the output stream. Everything received so far is sent as output first;
+   * `produce` then runs once the emulator has parsed exactly those bytes, and
+   * output received in between is delivered only after it. A viewer that is
+   * reset by the snapshot therefore neither loses nor repeats a byte, whether
+   * it joined the stream before or after the cut. Concurrent snapshots of one
+   * session share a cut. `produce` runs synchronously when nothing is waiting
+   * to be parsed.
+   */
+  snapshot(sessionId: string, produce: () => void): void {
+    const active = this.snapshotHolds.get(sessionId);
+    if (active) {
+      active.producers.push(produce);
+      return;
+    }
+    this.flush(sessionId);
+    const hold: SnapshotHold = { producers: [produce], deferred: [] };
+    this.snapshotHolds.set(sessionId, hold);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (): void => {
+      if (this.snapshotHolds.get(sessionId) !== hold) return;
+      if (timer) clearTimeout(timer);
+      try {
+        for (const run of hold.producers) {
+          try { run(); } catch (err) {
+            console.error(`[Bridge] Failed to produce terminal snapshot for ${sessionId}:`, err);
+          }
+        }
+      } finally {
+        this.snapshotHolds.delete(sessionId);
+        for (const data of hold.deferred) this.deps.publishTerminalData(sessionId, data);
+      }
+    };
+    const whenParsed = this.deps.terminalManager.whenParsed;
+    if (!whenParsed) {
+      finish();
+      return;
+    }
+    // Output must never stay held because an emulator failed to report back.
+    timer = setTimeout(finish, this.snapshotTimeoutMs);
+    whenParsed.call(this.deps.terminalManager, sessionId, finish);
   }
 
   /** Flush every session and wait until the store has taken all of it (shutdown). */

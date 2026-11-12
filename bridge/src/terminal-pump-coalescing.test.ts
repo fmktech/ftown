@@ -59,12 +59,100 @@ function makeHarness(t: TestContext, deps: Partial<TerminalPumpDeps> = {}): Harn
   return h;
 }
 
-/** What index.ts does when a watcher attaches: flush, then snapshot the emulator. */
+/** A watcher attaching: a snapshot of the emulator at an exact cut in the stream. */
 function attachWatcher(h: Harness, sessionId: string): void {
   h.watched.add(sessionId);
-  h.pump.flush(sessionId);
-  h.wire.push(`snapshot:${h.screen}`);
+  h.pump.snapshot(sessionId, () => h.wire.push(`snapshot:${h.screen}`));
 }
+
+/** An emulator that reports "parsed" only when the test says so, like xterm's async write. */
+function manualEmulator(h: () => Harness): { deps: Partial<TerminalPumpDeps>; parsed: string; settle(): void; waiting: number } {
+  const waiters: Array<() => void> = [];
+  const emulator = {
+    parsed: '',
+    get waiting() { return waiters.length; },
+    settle(): void { waiters.shift()?.(); },
+    deps: {
+      terminalManager: {
+        write: (_sid: string, data: string) => { h().screen += data; },
+        destroy: () => undefined,
+        whenParsed: (_sid: string, done: () => void) => {
+          // The cut: exactly what was written before this call.
+          const cut = h().screen;
+          waiters.push(() => { emulator.parsed = cut; done(); });
+        },
+      },
+    } satisfies Partial<TerminalPumpDeps>,
+  };
+  return emulator;
+}
+
+test('a snapshot waits for the emulator and holds later output back until it is produced', (t) => {
+  let h!: Harness;
+  const emulator = manualEmulator(() => h);
+  h = makeHarness(t, emulator.deps);
+  h.watched.add('s1');
+  h.pump.handleData('s1', 'OLD ');
+  h.pump.handleData('s1', 'SAMETICK');
+  h.pump.snapshot('s1', () => h.wire.push(`snapshot:${emulator.parsed}`));
+  assert.deepStrictEqual(h.wire, ['data:OLD SAMETICK'], 'bytes before the cut go out, the snapshot waits');
+
+  h.pump.handleData('s1', ' LATER');
+  h.tick(16);
+  h.pump.handleData('s1', ' MORE');
+  h.pump.flush('s1');
+  assert.deepStrictEqual(h.wire, ['data:OLD SAMETICK'], 'nothing overtakes the snapshot');
+  assert.deepStrictEqual(h.appended.map((a) => a.data), ['OLD SAMETICK', ' LATER', ' MORE'], 'the store is not held');
+
+  emulator.settle();
+  assert.deepStrictEqual(h.wire, ['data:OLD SAMETICK', 'snapshot:OLD SAMETICK', 'data: LATER', 'data: MORE']);
+
+  h.pump.handleData('s1', ' AFTER');
+  h.tick(16);
+  assert.equal(h.wire.at(-1), 'data: AFTER');
+});
+
+test('concurrent snapshots of a session share one cut', (t) => {
+  let h!: Harness;
+  const emulator = manualEmulator(() => h);
+  h = makeHarness(t, emulator.deps);
+  h.pump.handleData('s1', 'A');
+  h.pump.snapshot('s1', () => h.wire.push(`first:${emulator.parsed}`));
+  h.pump.handleData('s1', 'B');
+  h.pump.snapshot('s1', () => h.wire.push(`second:${emulator.parsed}`));
+  assert.equal(emulator.waiting, 1);
+  emulator.settle();
+  h.tick(250);
+  assert.deepStrictEqual(h.wire, ['data:A', 'first:A', 'second:A', 'data:B']);
+});
+
+test('a snapshot that never hears back from the emulator releases its output after the timeout', (t) => {
+  let h!: Harness;
+  const emulator = manualEmulator(() => h);
+  h = makeHarness(t, { ...emulator.deps, snapshotTimeoutMs: 400 });
+  h.watched.add('s1');
+  h.pump.snapshot('s1', () => h.wire.push('snapshot'));
+  h.pump.handleData('s1', 'held');
+  h.tick(399);
+  assert.deepStrictEqual(h.wire, []);
+  h.tick(1);
+  assert.deepStrictEqual(h.wire, ['snapshot', 'data:held']);
+  emulator.settle();
+  assert.deepStrictEqual(h.wire, ['snapshot', 'data:held'], 'a late report produces nothing twice');
+});
+
+test('a snapshot producer that throws still releases the held output', (t) => {
+  let h!: Harness;
+  const emulator = manualEmulator(() => h);
+  h = makeHarness(t, emulator.deps);
+  t.mock.method(console, 'error', () => undefined);
+  h.watched.add('s1');
+  h.pump.snapshot('s1', () => { throw new Error('serialize failed'); });
+  h.pump.handleData('s1', 'held');
+  h.pump.flush('s1');
+  emulator.settle();
+  assert.deepStrictEqual(h.wire, ['data:held']);
+});
 
 test('an unwatched session coalesces output for 250 ms', (t) => {
   const h = makeHarness(t);
