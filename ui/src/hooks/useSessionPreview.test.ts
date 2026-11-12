@@ -5,6 +5,8 @@ import type { MessageClient } from '@/lib/message-client';
 import type { Command, CommandResponse } from '@/types';
 import type { SessionPreviewFile } from '../../../bridge/src/preview-protocol';
 import { useSessionPreview } from './useSessionPreview';
+import { usePreviewScroll } from './usePreviewScroll';
+import { previewScrollOwnerKey } from '@/lib/preview-scroll-protocol';
 const id = '12345678-1234-4234-8234-123456789abc';
 const fileId = '22345678-2234-4234-8234-123456789abc';
 const otherFileId = '32345678-3234-4234-8234-123456789abc';
@@ -519,6 +521,71 @@ it('shows loading when switching files and never the previous file content', asy
   const switched = hook.result.current.state; if (switched.kind !== 'ready') throw new Error('expected ready');
   expect(switched).toMatchObject({ html: second, file: fileB });
   expect(switched.key).not.toBe(loaded.key);
+});
+
+it('mounts the switched file exactly once for unchanged bytes across the real poll sequence (P3)', async () => {
+  const first = '<p>first</p>'; const second = '# Notes';
+  const revisionA = 'a'.repeat(64); const revisionB = 'b'.repeat(64);
+  Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest: async (_algorithm: string, bytes: Uint8Array) => {
+    const text = new TextDecoder().decode(bytes);
+    const byte = text === first ? 0xaa : 0xbb;
+    return Uint8Array.from({ length: 32 }, () => byte).buffer;
+  } } });
+  // Bridge-faithful mock: 'ready' without a matching knownRevision, 'unchanged' when it matches.
+  const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
+    const payload = command.payload as Record<string, unknown>;
+    const requested = typeof payload.fileId === 'string' ? payload.fileId : '';
+    const text = requested === fileId ? first : second;
+    const revision = requested === fileId ? revisionA : revisionB;
+    if (command.type === 'session_preview_chunk') {
+      return Promise.resolve({ requestId: 'chunk', success: true, data: { state: 'chunk', previewId: id, fileId: requested, revision, totalBytes: text.length, offset: 0, dataBase64: btoa(text), done: true } });
+    }
+    if ('knownRevision' in payload && payload.knownRevision === revision) {
+      return Promise.resolve({ requestId: 'status', success: true, data: { state: 'unchanged', previewId: id, fileId: requested, revision, totalBytes: text.length } });
+    }
+    return Promise.resolve({ requestId: 'status', success: true, data: { state: 'ready', previewId: id, fileId: requested, revision, totalBytes: text.length } });
+  });
+  const targetB = { ...target, file: fileB };
+  const stateLog: Array<{ kind: string; key: string | null; hardEpoch: number }> = [];
+  const displayLog: Array<string | null> = [];
+  const hook = renderHook(({ selected }) => {
+    const preview = useSessionPreview({ client, userId: 'user', target: selected, visible: true, readable: true, securityGeneration: 1, sendCommand });
+    const owner = previewScrollOwnerKey({ userId: 'user', bridgeId: 'bridge', sessionId: 'one', previewId: id, fileId: selected.file.id });
+    const scroll = usePreviewScroll(preview.state.kind === 'ready' ? preview.state : null, owner, preview.getHardEpoch, () => {});
+    stateLog.push({ kind: preview.state.kind, key: preview.state.kind === 'ready' ? preview.state.key : null, hardEpoch: preview.getHardEpoch() });
+    displayLog.push(scroll.display?.key ?? null);
+    return { preview, scroll };
+  }, { initialProps: { selected: target } });
+  // Initial file A loads through ready + chunk.
+  await act(async () => {});
+  expect(hook.result.current.preview.state.kind).toBe('ready');
+  // Steady-state polls return 'unchanged' and must not change the key (only manual refresh bumps nonce).
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  const keyA = hook.result.current.preview.state.kind === 'ready' ? hook.result.current.preview.state.key : '';
+  expect(keyA).toBeTruthy();
+  expect(new Set(stateLog.filter(entry => entry.key).map(entry => entry.key)).size).toBe(1);
+  // Switch to file B: identity change, loading gap, then ready + chunk.
+  const beforeSwitch = stateLog.length;
+  hook.rerender({ selected: targetB });
+  expect(hook.result.current.preview.state.kind).toBe('loading');
+  await act(async () => {});
+  expect(hook.result.current.preview.state.kind).toBe('ready');
+  const keyB = hook.result.current.preview.state.kind === 'ready' ? hook.result.current.preview.state.key : '';
+  expect(keyB).toBeTruthy(); expect(keyB).not.toBe(keyA);
+  // Several later 'unchanged' polls until stable.
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  const final = hook.result.current.preview.state; if (final.kind !== 'ready') throw new Error('expected ready');
+  expect(final.key).toBe(keyB);
+  const switchIndex = beforeSwitch;
+  expect(stateLog.slice(switchIndex).some(entry => entry.kind === 'loading')).toBe(true);
+  const stateKeysB = stateLog.slice(switchIndex).map(entry => entry.key).filter((key): key is string => key !== null);
+  const displayKeysB = displayLog.slice(switchIndex).filter((key): key is string => key !== null);
+  expect(new Set(stateKeysB).size).toBe(1);
+  expect(new Set(displayKeysB).size).toBe(1);
+  expect(new Set(displayKeysB)).toEqual(new Set([keyB]));
+  // No hardEpoch bump after the switch load (bumps at useSessionPreview.ts:99/130/159/175/198 would surface here).
+  const hardAfter = stateLog.slice(switchIndex).map(entry => entry.hardEpoch);
+  expect(new Set(hardAfter).size).toBe(1);
 });
 
 it('treats the old bridge preview shape as no preview and never fetches', async () => {

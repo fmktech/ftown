@@ -65,11 +65,8 @@ export function usePreviewScroll(candidate: Candidate | null, owner: string, get
   }, [candidate?.key, owner, hardEpoch, getHardEpoch]);
   useEffect(() => {
     const receive = (event: MessageEvent) => {
-      // Link intent (selection + external confirmation) is validated by
-      // origin/source/parse only: it must be honored from the currently
-      // mounted frame even while display lifecycle state is settling.
-      // Scroll state keeps strict display/epoch/document checks below.
-      if (event.origin !== 'null' || event.source !== iframeRef.current?.contentWindow || !event.data || typeof event.data !== 'object' || Array.isArray(event.data)) return;
+      const current = displayRef.current;
+      if (!current || current.hardEpoch !== getHardEpoch() || event.source !== iframeRef.current?.contentWindow || event.origin !== 'null' || !event.data || typeof event.data !== 'object' || Array.isArray(event.data)) return;
       const data = event.data as Record<string, unknown>;
       if (data.channel === PREVIEW_LINK_CHANNEL) {
         const message = parsePreviewLinkMessage(data);
@@ -87,8 +84,6 @@ export function usePreviewScroll(candidate: Candidate | null, owner: string, get
         } catch { /* Invalid URLs are ignored. */ }
         return;
       }
-      const current = displayRef.current;
-      if (!current || current.hardEpoch !== getHardEpoch()) return;
       if (data.channel !== PREVIEW_SCROLL_CHANNEL || data.documentId !== current.documentId || typeof data.kind !== 'string') return;
       if (data.kind === 'ready' && !restored.current && exact(data, ['channel', 'documentId', 'kind'])) {
         iframeRef.current?.contentWindow?.postMessage({ channel: PREVIEW_SCROLL_CHANNEL, documentId: current.documentId, kind: 'restore', ...coords.current }, '*');

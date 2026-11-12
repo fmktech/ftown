@@ -150,38 +150,35 @@ it('forwards switch-file messages to the caller and ignores malformed ones', () 
   expect(hook.result.current.linkPrompt).toBeNull();
 });
 
-it('honors switch-file from the mounted frame across display transition without loosening scroll or source checks', () => {
-  let epoch = 0; const getEpoch = () => epoch;
+it('rejects switch-file and open-link from a foreign origin', () => {
   const onSwitchFile = vi.fn();
-  const hook = renderHook(({ candidate }: { candidate: { html: string; key: string } | null }) => usePreviewScroll(candidate, 'owner', getEpoch, onSwitchFile), { initialProps: { candidate: { html: 'a', key: 'a1' } as { html: string; key: string } | null } });
+  const hook = renderHook(() => usePreviewScroll({ html: 'a', key: 'a1' }, 'owner-a', () => 0, onSwitchFile));
   const frame = { postMessage: vi.fn() };
   Object.defineProperty(hook.result.current.iframeRef, 'current', { configurable: true, value: { contentWindow: frame } });
-  const receive = (data: object, source: object = frame) => act(() => window.dispatchEvent(new MessageEvent('message', { data, source: source as unknown as Window, origin: 'null' })));
-  // Steady state forwards.
-  receive({ channel: PREVIEW_LINK_CHANNEL, kind: 'switch-file', fileName: 'notes.md' });
+  const receive = (data: object, origin: string) => act(() => window.dispatchEvent(new MessageEvent('message', { data, source: frame as unknown as Window, origin })));
+  receive({ channel: PREVIEW_LINK_CHANNEL, kind: 'switch-file', fileName: 'notes.md' }, 'https://other.example');
+  expect(onSwitchFile).not.toHaveBeenCalled();
+  receive({ channel: PREVIEW_LINK_CHANNEL, kind: 'open-link', url: 'https://trusted.example.test/' }, 'https://other.example');
+  expect(hook.result.current.linkPrompt).toBeNull();
+  // Positive control: the sandboxed frame's opaque origin still forwards.
+  receive({ channel: PREVIEW_LINK_CHANNEL, kind: 'switch-file', fileName: 'notes.md' }, 'null');
   expect(onSwitchFile).toHaveBeenCalledTimes(1);
-  // Stale/foreign source is still rejected.
+  expect(onSwitchFile).toHaveBeenCalledWith('notes.md');
+});
+
+it('rejects open-link from a foreign source even with the correct origin', () => {
+  const onSwitchFile = vi.fn();
+  const hook = renderHook(() => usePreviewScroll({ html: 'a', key: 'a1' }, 'owner-a', () => 0, onSwitchFile));
+  const frame = { postMessage: vi.fn() };
+  Object.defineProperty(hook.result.current.iframeRef, 'current', { configurable: true, value: { contentWindow: frame } });
+  const receive = (data: object, source: object) => act(() => window.dispatchEvent(new MessageEvent('message', { data, source: source as unknown as Window, origin: 'null' })));
+  receive({ channel: PREVIEW_LINK_CHANNEL, kind: 'open-link', url: 'https://trusted.example.test/' }, {});
+  expect(hook.result.current.linkPrompt).toBeNull();
   receive({ channel: PREVIEW_LINK_CHANNEL, kind: 'switch-file', fileName: 'notes.md' }, {});
-  expect(onSwitchFile).toHaveBeenCalledTimes(1);
-  // Advance the epoch and let the hook commit at the new epoch.
-  epoch = 1;
-  hook.rerender({ candidate: { html: 'a', key: 'a1' } });
-  // Bump again without a render: display hardEpoch (1) now lags live (2) while
-  // the same frame stays mounted. Switch-file must still be honored.
-  epoch = 2;
-  receive({ channel: PREVIEW_LINK_CHANNEL, kind: 'switch-file', fileName: 'c.html' });
-  expect(onSwitchFile).toHaveBeenCalledTimes(2);
-  expect(onSwitchFile).toHaveBeenLastCalledWith('c.html');
-  // Scroll state for the stale epoch is still ignored (no restore posted).
-  frame.postMessage.mockClear();
-  receive({ channel, documentId: hook.result.current.display!.documentId, kind: 'ready' });
-  expect(frame.postMessage).not.toHaveBeenCalled();
-  // Loading-clear window: candidate null clears displayRef while the iframe
-  // DOM (mocked frame) is still attached. Switch-file from it must not drop.
-  hook.rerender({ candidate: null });
-  receive({ channel: PREVIEW_LINK_CHANNEL, kind: 'switch-file', fileName: 'a.html' });
-  expect(onSwitchFile).toHaveBeenCalledTimes(3);
-  expect(onSwitchFile).toHaveBeenLastCalledWith('a.html');
+  expect(onSwitchFile).not.toHaveBeenCalled();
+  // Positive control: the current frame with the correct origin prompts.
+  receive({ channel: PREVIEW_LINK_CHANNEL, kind: 'open-link', url: 'https://trusted.example.test/' }, frame);
+  expect(hook.result.current.linkPrompt).toBe('https://trusted.example.test/');
 });
 
 it('round-trips the per-file owner key and rejects bad keys', () => {

@@ -7,10 +7,10 @@ investigator: Foad Kesheh
 git_commit: 9af4d26d24cfad512f862b9cbe0539ed9301fe54
 branch: feat/preview-markdown-multi
 repository: fmktech/ftown
-status: resolved
-hypotheses_formed: 3
-hypotheses_rejected: 2
-hypotheses_proven: 1
+status: reopened
+hypotheses_formed: 4
+hypotheses_rejected: 3
+hypotheses_proven: 0
 ---
 
 # Intermittent switch-file link drop (e2e :475 fails 1/3)
@@ -27,7 +27,7 @@ Cannot run Playwright here (ports owned by runner; do not start stack). Recipe f
 3. Click `a[href="a.html"]` inside `iframe[title="Preview: notes.md"]`.
 4. Assert tab `a.html` `aria-selected='true'` (15s). Flakes 1/3: stays `'false'`.
 
-Verified: parent observed 1/3 fail at step 4 (this session did not re-run Playwright). Unit-level reproduction of the drop condition is documented under H2 (jsdom test would show drop; gate requires code-edit only after this log).
+Verified: parent observed 1/3 fail at step 4 (this session did not re-run Playwright). The jsdom cases added under de1bd21 mocked `iframeRef.current.contentWindow` as still attached while `candidate` was null; per the Correction below that state is not production-reachable, so it is not a reproduction — see H2 (hypothesis) and H4 (remount count).
 
 Message chain read end-to-end (HEAD `9af4d26`):
 - Child script `ui/src/lib/session-preview.ts:80-155` (`previewLinkScript`): attaches `document` `click` capture handler in `<head>` (via `previewDocument` at `:210-211` before `<body>`). On trusted left click on `<a>`/`<area>`, parses `href`, and for a relative file link posts `window.parent.postMessage({channel,kind:'switch-file',fileName:base},'*')` at `:149`/`:152`. `files` array embedded at `:109` from `fileNames` passed by `SessionWorkspace.tsx:262-263`.
@@ -82,8 +82,8 @@ Every condition under which a link click on a just-loaded file is ignored (verba
   SessionWorkspace.tsx:264: <iframe ref={scroll.iframeRef} key={scroll.display.key} title={...} sandbox="allow-scripts" srcDoc={srcDoc} />
   usePreviewScroll.test.ts:134-151: 'forwards switch-file messages ...' uses same mocked frame for source+ref, no transition case
   ```
-- **Verdict**: PROVEN
-- **Rationale**: Code ordering guarantees a window where the iframe element is still in the DOM (React has not yet committed the `setDisplay(null)` unmount, or `setDisplay(new)` remount) but `displayRef`/`hardEpoch` already reflect the new state — any `switch-file` arriving in that window hits P1/P2/P3 and returns silently. A real user (or Playwright at ~200ms after the tab click, i.e. during frame settlement) CAN occupy that window: the frame is painted and clickable (heading poll via `inPreviewFrame` evaluate can pass on the still-attached DOM) while the guard still sees the pre/post-transition `displayRef`. The child-side absence (H1 REJECTED) and the fact that steady-state forwards pass (existing test) force the drop to this guard.
+- **Verdict**: HYPOTHESIS (unproven; downgraded from PROVEN on review — the original verdict rested on code reading alone)
+- **Rationale**: In isolation `displayRef` and the iframe DOM can disagree for one effect/render window, but the parent review shows P1/P2 with a still-mounted, clickable frame does not follow: `usePreviewScroll.ts:107` returns `display: null` in the SAME render that owner/`hardEpoch` changes, so `SessionWorkspace.tsx:258` renders the loading message and React unmounts the old frame (`key={display.key}` at `:264`) in that commit — before the clearing effect runs and before `iframeRef` detaches. A `postMessage` task therefore cannot be delivered to a mounted frame while `!current` or `hardEpoch` mismatches: every `hardEpoch` bump (`useSessionPreview.ts:47/99/130/159/175/198`) also nulls `complete` and makes `candidate` null in the same task (`redraw()` follows synchronously), and JS message delivery cannot interleave mid-task. The de1bd21 regression test held `iframeRef.current.contentWindow` attached (mocked `Object.defineProperty`) while rendering `candidate: null`; production React detaches the ref on unmount, so that test pins a state the app cannot reach. P2 (epoch lag) is at most one task wide, with no mounted frame inside it. No observed event, e2e trace, or unit run has yet shown a real `switch-file` dropped by this guard; the flake (1/3) is not attributed to H2.
 
 #### H3: The spec clicks before the frame is ready (link script not attached / input not trusted), so no product fix is needed — the spec should wait on a stronger readiness signal.
 
@@ -100,6 +100,20 @@ Every condition under which a link click on a just-loaded file is ignored (verba
 - **Verdict**: REJECTED
 - **Rationale**: Heading poll evaluates `body` inside the frame — body exists only after head scripts ran, so handler-ready is already proven. Playwright clicks are trusted (untrusted would also be true for `:753` identical click, which passes). The spec DID wait on real readiness (DOM + handler). A stronger wait cannot resurrect a message the parent already dropped; the drop is downstream (P1–P3).
 
+#### H4: After the tab switch the iframe mounts more than once for unchanged content, so the click lands in a first mount that is then replaced (or fails the `event.source` check).
+
+- **Layer**: state-data (remount / key churn).
+- **Prediction**: If H4 is true, driving a file switch through the real `useSessionPreview` poll sequence (status/chunk, `loading → ready`, `knownRevision → unchanged` polls) yields more than one distinct `display.key` / iframe DOM mount for the new file whose bytes did not change — caused by a nonce regeneration, a first-poll `ready` (not `unchanged`) for the new revision, a `hardEpoch` bump, or the `SessionWorkspace` selection effect. If false, the new file mounts exactly once.
+- **Verification method**: New tests wire `useSessionPreview` + `usePreviewScroll` as `SessionWorkspace.tsx:104-113` does (candidate from `state.kind === 'ready'`, owner from `previewScrollOwnerKey`) with a bridge-faithful `sendCommand` mock (`ready` without matching `knownRevision`, `unchanged` when it matches; per-file digests/revisions), switch file, then advance several 1000 ms polls and count distinct non-null `state.key` / `display.key` values; plus a `SessionWorkspace` tab-switch test that counts distinct iframe DOM nodes via `MutationObserver` across the same polls.
+- **Evidence**:
+  ```
+  useSessionPreview.test.ts: 'mounts the switched file exactly once for unchanged bytes across the real poll sequence (P3)' — distinct state keys for new file: 1; distinct display keys: 1; hardEpoch after switch: stable (no bump).
+  SessionWorkspace.test.tsx: 'mounts the switched iframe exactly once for unchanged bytes (P3)' — MutationObserver iframe nodes titled 'Preview: notes.md': 1; 'Preview: a.html': 1; same DOM node survives 3 poll intervals.
+  useSessionPreview.ts:164/182 nonce++ only on manual 'unchanged' refresh and on 'ready' completion (once per switch); unchanged polls keep the key.
+  ```
+- **Verdict**: REJECTED
+- **Rationale**: The new file mounts exactly once for unchanged bytes under the real poll sequence. The nonce changes a single time on the switch's `ready` completion; later polls are `unchanged` and keep the key (automatic polls never regenerate it). There is no `hardEpoch` bump in the steady sequence, no second `loading → ready`, and no selection-effect key churn (the `SessionWorkspace` iframe node is stable). P3 remount-then-replace is therefore not the flake mechanism at unit level; it remains the hypothesis the e2e trace must still exclude (see Correction).
+
 ## 5 Whys
 Symptom:  Click on a DOM-ready markdown link in the mounted preview frame produces no selection (aria-selected stays false).
 Why 1?    Because the parent `receive` returns early at `usePreviewScroll.ts:69` for that `switch-file` (P1 `!current`, P2 epoch mismatch, or P3 source mismatch) and never calls `switchFileRef.current`.
@@ -109,22 +123,44 @@ Why 4?    Because the multi-file `switch-file` feature (`858fb72`) was added ins
 Why 5?    Because preview frame lifetime (fetch → commit → remount) and user-intent lifetime (click → postMessage → selection) were never given separate readiness contracts — the parent has no way to say "this frame is mounted and its intent is well-formed" independent of "this document's scroll epoch is current".
 
 ## Falsification
-- Check performed: absence / adjacent-cause.
-- Result: In steady state (same mounted frame, same epoch, source matches), the existing unit test `forwards switch-file messages` at `usePreviewScroll.test.ts:134-151` passes — the guard does NOT drop. The drop requires the transition window (P1/P2/P3 mismatch). Adjacent child-side cause (H1) was rejected by head-before-body + href-parsing evidence; adjacent spec-side cause (H3) was rejected by heading-poll + trusted-click evidence. The transition-window drop is the only remaining condition that is both present in code and consistent with "click succeeded but selection stayed false".
-- Conclusion: hypothesis survived. (E2E Playwright re-run was not performed — ports owned — so e2e timing is cited from parent trace, not re-observed here; the code-ordering gap itself is proven by `file:line` ordering above.)
+- Check performed: absence / adjacent-cause + remount count (Correction).
+- Result: In steady state (same mounted frame, same epoch, source matches), the existing unit test `forwards switch-file messages` passes — the guard does NOT drop. Adjacent child-side cause (H1) was rejected by head-before-body + href-parsing evidence; adjacent spec-side cause (H3) was rejected by heading-poll + trusted-click evidence; remount cause (H4) was rejected by the mount-count tests (exactly one mount). No unit or e2e observation yet shows a real `switch-file` dropped by the H2 guard; the transition-window drop exists only as a code-reading candidate with a production-reachability gap (mounted frame vs. `displayRef`/`hardEpoch` ordering per H2 rationale).
+- Conclusion: H2 remains HYPOTHESIS (unproven). (E2E Playwright re-run was not performed — ports owned — so e2e timing is cited from parent trace, not re-observed here.) The parent e2e `--repeat-each=20` run (below) is the falsifier.
 
 ## Root Cause
-- Immediate cause: `switch-file` from the currently mounted frame is dropped by the shared guard at `ui/src/hooks/usePreviewScroll.ts:69` (`!current || hardEpoch mismatch || source mismatch`) while `displayRef` and the iframe DOM disagree for one render transition. Evidence: `usePreviewScroll.ts:43-44,50,69,71-76` + `SessionWorkspace.tsx:264`; steady-state passes (`usePreviewScroll.test.ts:134-151`), transition-window dispatch is dropped by the same lines.
-- Architectural root: link intent (selection, idempotent, no document binding) is coupled to scroll document lifetime (strict `documentId`/`hardEpoch`/`source` gate) — 5 Whys above.
+- UNPROVEN candidate (H2): IF a `switch-file` were delivered while the sender frame is still mounted but `displayRef.current===null` or `current.hardEpoch!==getHardEpoch()`, it would be dropped by the shared guard at `ui/src/hooks/usePreviewScroll.ts:69` (`!current || hardEpoch mismatch || source mismatch`). No observation yet proves such a delivery occurs; the parent review (H2 rationale) shows the mounted-frame half of that window is unreachable in production. Treat this section as hypothesis, not root cause, until e2e proves a dropped message.
+- Architectural note (not a proven root): link intent shares the scroll listener's guard — 5 Whys above. Decoupling is therefore a candidate hardening, not a required fix; it is NOT applied (see Fix).
 - Rejected H1: head script runs before body, `a.html` passes all child checks — child posts correctly.
 - Rejected H3: heading+table polls already prove DOM + handler ready; Playwright clicks are trusted (identical `:753` click passes) — spec did wait.
+- Rejected H4: exactly one mount per switch for unchanged bytes at unit level (see H4).
 
 ## Fix
-- File `ui/src/hooks/usePreviewScroll.ts:69` — decouple `switch-file` (and link-intent validation) from scroll-document lifetime: validate `origin` + `source` + strict parse + parent file-set, without requiring `displayRef.current!==null` or `hardEpoch` match for selection. Scroll channel keeps strict `current`/`hardEpoch`/`documentId`/`restored` checks unchanged. This ensures a switch-file from the currently mounted frame (`event.source===iframeRef.current?.contentWindow`, `origin==='null'`) is never dropped due to display/epoch transition lag, while stale/foreign frames (`source` mismatch, wrong `origin`) and malformed messages are still rejected. No CSP/document structural change; no `session-preview.ts` link-script change; no `SessionWorkspace.tsx` change.
-- Regression test: `ui/src/hooks/usePreviewScroll.test.ts` — case(s) dispatching `switch-file` from the current frame source during the transition window (display null / hardEpoch bumped between commit and delivery) expecting `onSwitchFile` called. Fails before fix (guard returns early), passes after (source+origin gate forwards). Proven by running the new test against pre-fix code (temporary revert) and post-fix code.
-- Justification (not symptom-only): the fix addresses the root coupling (Why 3/5) — selection no longer depends on scroll epoch/readiness — rather than adding a spec wait.
+- de1bd21 (decoupling link channel from display/epoch guard) REVERTED: `ui/src/hooks/usePreviewScroll.ts` is byte-identical to pre-de1bd21; the single guard (`!current || hardEpoch mismatch || source mismatch || origin !== 'null'`) covers both channels. Reason: the mount count is exactly 1 (no remount fix needed) and the decoupled tests pinned production-unreachable states (mocked `iframeRef` held attached across `candidate: null` / epoch bump without render). Decoupling would not fix a P3 replace-drop anyway — the source check still rejects the replaced frame — and would have honored selection/prompt after a revocation bump while the frame was still in the DOM.
+- No change to `ui/src/hooks/useSessionPreview.ts` (key stable: `nonce` only on manual refresh and on each `ready` completion, exactly once per switch) and no change to `ui/src/components/SessionWorkspace.tsx`.
+- Tests kept: mount-count cases (P3, count 1) + link-channel strictness cases (wrong origin for `switch-file`/`open-link`; foreign source for `open-link`, with positive controls). The unreachable `honors switch-file... across display transition` case was deleted.
+- Justification: no production-reachable drop is fixed by decoupling; keeping the guard strict and the source check intact is the smallest change consistent with evidence. Any future hardening should target a proven drop, not this window.
 
 ## Resolution
-- Diff summary: `ui/src/hooks/usePreviewScroll.ts` — moved `current`/`hardEpoch` check to scroll-only branch; link channel now gated by `origin`/`source`/strict parse only (see `## Fix`). `ui/src/hooks/usePreviewScroll.test.ts` — new `honors switch-file from the mounted frame across display transition...` case. No change to `ui/src/lib/session-preview.ts`, `ui/src/components/SessionWorkspace.tsx`, or `e2e/tests/session-preview.spec.ts` (product verdict, not spec-timing).
-- Verification: new test FAILS on pre-fix code (`expected "vi.fn()" to be called 2 times, but got 1 times` at epoch-bump dispatch) and PASSES on fixed code; `ui/src/hooks/usePreviewScroll.test.ts` 10/10 pass. Gates: `cd ui && npx tsc --noEmit` clean; `cd ui && npx vitest run` 114 files / 1851 tests pass; `cd e2e && npx tsc --noEmit` clean. Playwright not run (ports owned). Reproduction recipe from `## Reproduction` no longer drops at the unit level; e2e confirmation remains runner-side.
-- Follow-up: sibling-code nits from parent memory (`preparePreviewAdd` 12-limit, dead `selectedFileName`) are out of scope for this task. Why :753 passed vs :558 flaked: sample of 3 each is too small to attribute the difference to a proven timing variable; both clicks take the same parent path and the fix eliminates the drop condition for both.
+- Diff summary (uncommitted, for parent review): revert of `ui/src/hooks/usePreviewScroll.ts` to pre-de1bd21; `ui/src/hooks/usePreviewScroll.test.ts` — deleted unreachable transition case, added two strictness cases; `ui/src/hooks/useSessionPreview.test.ts` — added P3 mount-count case (1 distinct `display.key`); `ui/src/components/SessionWorkspace.test.tsx` — added P3 iframe-node case (1 node); this log corrected. No stack/Playwright run (ports owned); do NOT commit; e2e confirmation is runner-side per Correction.
+- Verification: P3 mount tests pass with count exactly 1 (see H4); full gates re-run after the revert (results below). Playwright not run.
+- Follow-up: sibling-code nits from parent memory (`preparePreviewAdd` 12-limit, dead `selectedFileName`) are out of scope for this task. Why :753 passed vs :558 flaked: sample of 3 each is too small to attribute the difference to a proven timing variable; both clicks take the same parent path.
+
+## Correction (2026-11-12, parent review response)
+
+- (a) The original "PROVEN" verdict rested on code reading only (no e2e re-run, no observed drop) — downgraded to HYPOTHESIS above; status `resolved` → `reopened`.
+- (b) P1: with `iframe key={scroll.display.key}` (`SessionWorkspace.tsx:264`, key = identity+revision+nonce at `useSessionPreview.ts:182`) and `display: null` returned in the same render on owner/epoch change (`usePreviewScroll.ts:107`), the old frame unmounts in that commit before the clearing effect (`:50`) and `iframeRef` detaches — so a loading gap has no mounted clickable frame. P1 with a mounted frame cannot occur as written.
+- (c) P2: epoch lag is one task wide (bump + `redraw()` in the same task; message tasks cannot interleave mid-task), with no mounted frame inside it.
+- (d) P3 (leading suspect): after the tab switch the iframe mounts exactly once for unchanged bytes (H4, count 1 at unit level; causes: single nonce increment on the switch's `ready` completion, `loading → ready` commits once via the owner-change immediate path, first poll returning `ready` for the new revision exactly once, no `hardEpoch` bump in the steady sequence, no selection-effect churn). Clicking the visible frame therefore has a single stable `event.source`.
+- Decision: REVERT de1bd21 (see Fix); keep only reachable-state tests; no stable-key fix needed since the count is 1.
+- What the parent e2e `--repeat-each=20` run will prove: the true flake rate and mechanism at the browser level. If the flake persists with a single iframe load and only the current frame's `source` ever posting, H2/H4 are both excluded and the cause lies in click delivery/timing (child handler or Playwright input), not in parent lifecycle or remounts. If the flake disappears, the 1/3 rate was small-sample noise and no product change was needed.
+
+## E2E trace signal that distinguishes the hypotheses
+
+Instrument the spec (or a manual run) to log, per tab-switch within 500 ms: (i) iframe `load` event count and distinct `key`/`srcDoc` values for `notes.md`; (ii) every parent `message` event with `channel`, `origin`, and whether `event.source` equals the current `iframe.contentWindow` at delivery time vs. a detached node; (iii) guard outcome (forwarded / dropped-by-guard / never posted).
+
+- Decoupled-link (H2) prediction: exactly one iframe load, the click's message arrives FROM the current mounted frame's window and is dropped by the guard (source would match post-decoupling). If the trace instead shows the dropped message coming from a replaced/detached window (or no message at all), H2 is disproven.
+- P3 remount prediction: two or more iframe loads (or key changes) within the first ~500 ms after the tab switch, with the click's `source` equal to the FIRST mount's window while the parent listens on the SECOND. A single load + current-source drop supports H2; multiple loads + stale-source drop supports P3 (and only then is a stable-key fix indicated — decoupling would not help, since the source check correctly rejects the stale frame).
+
+## Verification (corrected run)
+
+- Reverted tree (this correction): `cd ui && npx tsc --noEmit` clean (exit 0); `cd ui && npx vitest run` 114 files / 1854 tests pass; `cd e2e && npx tsc --noEmit` clean (exit 0). Owned files: `usePreviewScroll.test.ts` 11 tests, `useSessionPreview.test.ts` 40 tests, `SessionWorkspace.test.tsx` 34 tests (85 total across the three, all green). No stack/Playwright run. Previous "114 files / 1851 tests pass" described the pre-revert tree.

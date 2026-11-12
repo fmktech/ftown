@@ -813,6 +813,70 @@ it('dashboard reload with existing three-file set selects the first file', () =>
   expect(tabs[2].getAttribute('aria-selected')).toBe('false');
 });
 
+it('mounts the switched iframe exactly once for unchanged bytes (P3)', async () => {
+  vi.useFakeTimers();
+  resizeTo(900);
+  const originalSubtle = Object.getOwnPropertyDescriptor(globalThis.crypto, 'subtle');
+  const htmlContent = '<p>first</p>'; const mdContent = '# Heading\n\n| A | B |\n|---|---|';
+  const revisionHtml = 'a'.repeat(64); const revisionMd = 'b'.repeat(64);
+  Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest: async (_alg: string, bytes: Uint8Array) => {
+    const text = new TextDecoder().decode(bytes);
+    const byte = text === htmlContent ? 0xaa : 0xbb;
+    return Uint8Array.from({ length: 32 }, () => byte).buffer;
+  } } });
+  try {
+    const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
+      const payload = command.payload as Record<string, unknown>;
+      const fileId = typeof payload.fileId === 'string' ? payload.fileId : '';
+      const isHtml = fileId === '40000000-4000-4000-8000-000000000001';
+      const text = isHtml ? htmlContent : mdContent;
+      const rev = isHtml ? revisionHtml : revisionMd;
+      if (command.type === 'session_preview_chunk') {
+        return Promise.resolve({ requestId: 'c', success: true, data: { state: 'chunk', previewId: '12345678-1234-4234-8234-123456789abc', fileId, revision: rev, totalBytes: text.length, offset: 0, dataBase64: btoa(text), done: true } });
+      }
+      if ('knownRevision' in payload && payload.knownRevision === rev) {
+        return Promise.resolve({ requestId: 's', success: true, data: { state: 'unchanged', previewId: '12345678-1234-4234-8234-123456789abc', fileId, revision: rev, totalBytes: text.length } });
+      }
+      return Promise.resolve({ requestId: 's', success: true, data: { state: 'ready', previewId: '12345678-1234-4234-8234-123456789abc', fileId, revision: rev, totalBytes: text.length } });
+    });
+    const session: Session = {
+      id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+      preview: {
+        id: '12345678-1234-4234-8234-123456789abc',
+        files: [
+          { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+          { id: '40000000-4000-4000-8000-000000000002', fileName: 'notes.md', kind: 'markdown' },
+        ],
+      },
+    };
+    const { container } = render(<SessionWorkspace session={session} client={{} as unknown as MessageClient} userId="user" readable={true} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>);
+    const added: HTMLIFrameElement[] = [];
+    const observer = new MutationObserver(mutations => { for (const mutation of mutations) { mutation.addedNodes.forEach(node => { if (node instanceof HTMLIFrameElement) added.push(node); }); } });
+    observer.observe(container, { childList: true, subtree: true });
+    try {
+      // Initial file A loads through the immediate first poll.
+      await act(async () => {});
+      const frameA = screen.getByTitle('Preview: a.html');
+      expect(frameA).toBeTruthy();
+      fireEvent.click(within(screen.getByRole('tablist', { name: 'Preview file' })).getByRole('tab', { name: 'notes.md' }));
+      await act(async () => {});
+      const frameB = screen.getByTitle('Preview: notes.md');
+      expect(frameB).toBeTruthy();
+      // Several 'unchanged' polls (1000ms cadence) until stable: the same DOM node must survive.
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      await act(async () => {});
+      expect(screen.getByTitle('Preview: notes.md')).toBe(frameB);
+      const notesFrames = new Set(added.filter(node => node.title === 'Preview: notes.md'));
+      notesFrames.add(frameB as HTMLIFrameElement);
+      expect(notesFrames.size).toBe(1);
+      expect(added.filter(node => node.title === 'Preview: a.html')).toHaveLength(1);
+    } finally { observer.disconnect(); }
+  } finally {
+    cleanup(); vi.useRealTimers();
+    if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
+  }
+});
+
 it.each([
   { reason: 'missing', expected: 'a.html is missing' },
   { reason: 'too_large', expected: 'a.html exceeds the 1 MiB limit' },
