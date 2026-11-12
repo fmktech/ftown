@@ -398,7 +398,7 @@ test("preview showing switches to the waiting item, file back, reply returns to 
     await pane.getByLabel(`Reply to ${name}`).fill(`Pane reply ${stamp}`);
     await pane.getByRole("button", { name: "Send reply" }).click();
     await expect.poll(async () => {
-      const listed = await bridgeApiFetch("GET", `/api/sessions/${id}/attention`);
+      const listed = await bridgeApiFetch("GET", `/api/sessions/${id}/attention?includeResolved=true`);
       const events = (listed.body as { events: Array<{ resolvedAt?: string; resolution?: string }> }).events;
       return events.some((event) => event.resolvedAt && event.resolution === "replied");
     }, { timeout: 30_000 }).toBe(true);
