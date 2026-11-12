@@ -1,5 +1,6 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import type { BigIntStats } from 'node:fs';
 import fs from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -27,6 +28,8 @@ interface Fixture {
   store: SessionStore;
   /** session.json paths read from disk since the last reset. */
   reads: string[];
+  /** session.json paths whose next stats are replaced by the given result. */
+  fakeStats: Map<string, BigIntStats>;
   /** What a store with an empty index returns: the uncached scan. */
   uncached(): Promise<Session[]>;
   recordPath(id: string): string;
@@ -41,12 +44,18 @@ async function fixture(t: TestContext): Promise<Fixture> {
     if (String(args[0]).endsWith('session.json')) reads.push(String(args[0]));
     return readFile(...args);
   });
+  const fakeStats = new Map<string, BigIntStats>();
+  const stat = fs.stat;
+  t.mock.method(fs, 'stat', (async (...args: Parameters<typeof fs.stat>) => {
+    return fakeStats.get(String(args[0])) ?? stat(...args);
+  }) as typeof fs.stat);
   syncBuiltinESMExports();
   t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   return {
     dir,
     store: new SessionStore(dir),
     reads,
+    fakeStats,
     uncached: () => new SessionStore(dir).listSessions(),
     recordPath: (id) => join(dir, 'sessions', id, 'session.json'),
   };
@@ -232,4 +241,81 @@ test('a missing sessions directory lists nothing, and non-directory entries are 
   assert.deepStrictEqual((await assertMatchesUncached(f)).map((s) => s.id), ['a']);
   await fs.rm(join(f.dir, 'sessions'), { recursive: true });
   assert.deepStrictEqual(await f.store.listSessions(), []);
+});
+
+test('a rewrite with a different size and its mtime put back is detected', async (t) => {
+  const f = await fixture(t);
+  await f.store.saveSession(makeSession('a'));
+  await f.store.listSessions();
+  const path = f.recordPath('a');
+  const before = await fs.stat(path);
+  await fs.writeFile(path, JSON.stringify(makeSession('a', { name: 'a much longer name than before' }), null, 2));
+  await fs.utimes(path, before.atime, before.mtime);
+  const listed = await assertMatchesUncached(f);
+  assert.equal(listed[0]?.name, 'a much longer name than before');
+});
+
+for (const field of ['ino', 'size', 'mtimeNs', 'ctimeNs'] as const) {
+  test(`a change of ${field} alone invalidates an indexed record`, async (t) => {
+    const f = await fixture(t);
+    await f.store.saveSession(makeSession('a'));
+    await f.store.saveSession(makeSession('bb'));
+    await f.store.listSessions();
+    const path = f.recordPath('a');
+    const indexed = await fs.stat(path, { bigint: true });
+
+    // New content on disk, but the filesystem reports the indexed stamp with
+    // only this one field different.
+    await fs.writeFile(path, JSON.stringify(makeSession('a', { name: 'changed' })));
+    const reported = Object.assign(Object.create(Object.getPrototypeOf(indexed)) as BigIntStats, indexed);
+    reported[field] = indexed[field] + 1n;
+    f.fakeStats.set(path, reported);
+    f.reads.length = 0;
+
+    assert.equal((await f.store.listSessions()).find((s) => s.id === 'a')?.name, 'changed');
+    assert.deepStrictEqual(f.reads, [path]);
+    assert.equal((await f.store.loadSession('a'))?.name, 'changed');
+  });
+}
+
+test('with the identical stamp reported, the indexed record is served without a read', async (t) => {
+  const f = await fixture(t);
+  await f.store.saveSession(makeSession('a'));
+  await f.store.listSessions();
+  const path = f.recordPath('a');
+  f.fakeStats.set(path, await fs.stat(path, { bigint: true }));
+  f.reads.length = 0;
+  assert.equal((await f.store.loadSession('a'))?.name, 'session a');
+  assert.deepStrictEqual(f.reads, []);
+});
+
+test('listing 900 sessions keeps yielding to the event loop, cached or not', async (t) => {
+  const f = await fixture(t);
+  const expected: string[] = [];
+  for (let i = 0; i < 900; i++) {
+    const id = `s${String(i).padStart(3, '0')}`;
+    expected.push(id);
+    await fs.mkdir(join(f.dir, 'sessions', id), { recursive: true });
+    await fs.writeFile(f.recordPath(id), JSON.stringify(
+      makeSession(id, { createdAt: new Date(1_700_000_000_000 + i * 1000).toISOString() })));
+  }
+  const countTurns = async (work: () => Promise<Session[]>): Promise<{ turns: number; sessions: Session[] }> => {
+    let turns = 0;
+    let running = true;
+    const spin = (): void => { if (running) { turns++; setImmediate(spin); } };
+    setImmediate(spin);
+    const sessions = await work();
+    running = false;
+    return { turns, sessions };
+  };
+
+  const cold = await countTurns(() => f.store.listSessions());
+  f.reads.length = 0;
+  const warm = await countTurns(() => f.store.listSessions());
+  assert.deepStrictEqual(f.reads, []);
+  assert.deepStrictEqual(warm.sessions, cold.sessions);
+  assert.deepStrictEqual(warm.sessions.map((s) => s.id), [...expected].reverse());
+  // 900 entries in batches of 32: the loop gets a turn between batches.
+  assert.ok(warm.turns >= 20, `only ${warm.turns} event-loop turns during a cached listing`);
+  assert.ok(cold.turns >= 20, `only ${cold.turns} event-loop turns during an uncached listing`);
 });

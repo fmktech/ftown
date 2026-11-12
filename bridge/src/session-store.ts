@@ -1,7 +1,7 @@
 import { readFile, writeFile, mkdir, readdir, appendFile, rm, truncate, stat, open, rename, chmod } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join, dirname } from 'node:path';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 
 import type { ArchivedSession, Session } from './types.js';
 
@@ -22,7 +22,19 @@ interface FileStamp {
   ino: bigint;
   size: bigint;
   mtimeNs: bigint;
+  ctimeNs: bigint;
 }
+
+function sameStamp(a: FileStamp, b: FileStamp): boolean {
+  return a.ino === b.ino && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
+}
+
+/**
+ * session.json files stat'ed concurrently while listing. Each batch is awaited,
+ * so a listing of any size yields to the event loop between batches instead of
+ * holding it for the whole directory.
+ */
+const LIST_STAT_CONCURRENCY = 32;
 
 /**
  * One indexed session.json: the stamp it was read under and its record as
@@ -108,22 +120,24 @@ export class SessionStore {
         // field toWireSession strips from the wire. Never world-readable.
         const text = JSON.stringify(session, null, 2);
         const handle = await open(tempFilePath, 'w', 0o600);
-        let stamp: FileStamp;
+        let written: FileStamp;
         try {
           await handle.writeFile(text, 'utf-8');
-          // Stamp the exact inode being published: a rename keeps ino, size and
-          // mtime, so the index entry is valid only for this very snapshot.
-          stamp = await handle.stat({ bigint: true });
+          written = await handle.stat({ bigint: true });
         } finally {
           await handle.close();
         }
         await rename(tempFilePath, filePath);
-        this.recordIndex.set(session.id, {
-          ino: stamp.ino,
-          size: stamp.size,
-          mtimeNs: stamp.mtimeNs,
-          json: JSON.stringify(JSON.parse(text)),
-        });
+        // The rename changes ctime, so the stamp is taken afterwards. It is
+        // indexed only if it still describes the inode written above; anything
+        // else means another writer got in between and the entry is dropped.
+        const published = await this.stampOf(filePath);
+        if (published && published.ino === written.ino && published.size === written.size
+          && published.mtimeNs === written.mtimeNs) {
+          this.recordIndex.set(session.id, { ...published, json: JSON.stringify(JSON.parse(text)) });
+        } else {
+          this.recordIndex.delete(session.id);
+        }
       } catch (error) {
         this.recordIndex.delete(session.id);
         await rm(tempFilePath, { force: true }).catch(() => undefined);
@@ -132,37 +146,40 @@ export class SessionStore {
     });
   }
 
-  /**
-   * Current session.json content as JSON text, or null when the file does not
-   * exist. Costs one stat when the indexed revision is still on disk; reads and
-   * parses only a new or changed file. Corrupt files throw and are never indexed.
-   */
-  private async readRecordJson(sessionId: string): Promise<string | null> {
-    const filePath = this.sessionFilePath(sessionId);
-    let stamp: FileStamp | undefined;
+  /** One stat of a file, reduced to its stamp; undefined when it cannot be stat'ed. */
+  private async stampOf(filePath: string): Promise<FileStamp | undefined> {
     try {
-      stamp = statSync(filePath, { bigint: true, throwIfNoEntry: false });
+      const { ino, size, mtimeNs, ctimeNs } = await stat(filePath, { bigint: true });
+      return { ino, size, mtimeNs, ctimeNs };
     } catch {
-      stamp = undefined;
+      return undefined;
     }
+  }
+
+  /**
+   * session.json content as JSON text for a stamp just taken from disk, or null
+   * when the file does not exist. Reads and parses only a new or changed file;
+   * corrupt files throw and are never indexed.
+   */
+  private async recordJsonAt(sessionId: string, stamp: FileStamp | undefined): Promise<string | null> {
     if (!stamp) {
       this.recordIndex.delete(sessionId);
       return null;
     }
     const indexed = this.recordIndex.get(sessionId);
-    if (indexed && indexed.ino === stamp.ino && indexed.size === stamp.size && indexed.mtimeNs === stamp.mtimeNs) {
+    if (indexed && sameStamp(indexed, stamp)) {
       return indexed.json;
     }
     // The stamp was taken BEFORE the read: if the file is replaced meanwhile,
     // the next stat differs from it and the entry is re-read.
     this.recordIndex.delete(sessionId);
-    const json = JSON.stringify(JSON.parse(await readFile(filePath, 'utf-8')));
-    this.recordIndex.set(sessionId, { ino: stamp.ino, size: stamp.size, mtimeNs: stamp.mtimeNs, json });
+    const json = JSON.stringify(JSON.parse(await readFile(this.sessionFilePath(sessionId), 'utf-8')));
+    this.recordIndex.set(sessionId, { ...stamp, json });
     return json;
   }
 
   async loadSession(sessionId: string): Promise<Session | null> {
-    const json = await this.readRecordJson(sessionId);
+    const json = await this.recordJsonAt(sessionId, await this.stampOf(this.sessionFilePath(sessionId)));
     return json === null ? null : JSON.parse(json) as Session;
   }
 
@@ -173,19 +190,24 @@ export class SessionStore {
     }
 
     const entries = await readdir(this.sessionsDir, { withFileTypes: true });
+    const ids = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
     const sessions: Session[] = [];
-    const present = new Set<string>();
 
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        present.add(entry.name);
-        const session = await this.loadSession(entry.name);
+    // Directory order is kept: stats run a batch at a time, records are then
+    // resolved one by one in that order.
+    for (let start = 0; start < ids.length; start += LIST_STAT_CONCURRENCY) {
+      const batch = ids.slice(start, start + LIST_STAT_CONCURRENCY);
+      const stamps = await Promise.all(batch.map((id) => this.stampOf(this.sessionFilePath(id))));
+      for (let i = 0; i < batch.length; i++) {
+        const json = await this.recordJsonAt(batch[i], stamps[i]);
+        const session = json === null ? null : JSON.parse(json) as Session | null;
         if (session) {
           sessions.push(session);
         }
       }
     }
 
+    const present = new Set(ids);
     for (const sessionId of this.recordIndex.keys()) {
       if (!present.has(sessionId)) this.recordIndex.delete(sessionId);
     }
