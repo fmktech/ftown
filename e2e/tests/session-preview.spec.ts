@@ -533,7 +533,7 @@ test("multi-file preview with markdown selector and cross-file links", async ({ 
     await expect(page.locator(`iframe[title="Preview: ${aName}"]`)).toBeVisible({ timeout: 15_000 });
     await expect(page.locator(`iframe[title="Preview: ${aName}"]`)).toHaveAttribute("sandbox", "allow-scripts");
     await expect(page.locator(`iframe[title="Preview: ${aName}"]`)).toHaveAttribute("referrerpolicy", "no-referrer");
-    await expect.poll(() => inPreviewFrame(page, aName, body => body.querySelector("h1")?.textContent?.includes(marker) ? "ok" : null, null)).toBe("ok");
+    await expect.poll(() => inPreviewFrame(page, aName, (body, expected) => body.querySelector("h1")?.textContent?.includes(expected) ? "ok" : null, null, marker)).toBe("ok");
 
     // Switch to markdown file via selector
     await page.getByRole("tab", { name: mdName }).click();
@@ -544,21 +544,21 @@ test("multi-file preview with markdown selector and cross-file links", async ({ 
     await expect(page.locator(`iframe[title="Preview: ${mdName}"]`)).toHaveAttribute("referrerpolicy", "no-referrer");
 
     // Assert heading + table cell INSIDE sandboxed frame via inPreviewFrame
-    await expect.poll(() => inPreviewFrame(page, mdName, body => {
+    await expect.poll(() => inPreviewFrame(page, mdName, (body, expected) => {
       const h1 = body.querySelector("h1")?.textContent ?? "";
-      return h1.includes("Notes") && h1.includes(marker) ? "heading" : null;
-    }, null)).toBe("heading");
-    await expect.poll(() => inPreviewFrame(page, mdName, body => {
+      return h1.includes("Notes") && h1.includes(expected) ? "heading" : null;
+    }, null, marker)).toBe("heading");
+    await expect.poll(() => inPreviewFrame(page, mdName, (body, expected) => {
       const cells = Array.from(body.querySelectorAll("table td")).map(td => td.textContent ?? "");
-      return cells.some(c => c.includes(`${marker}-cell`)) ? "cell" : null;
-    }, null)).toBe("cell");
+      return cells.some(c => c.includes(expected)) ? "cell" : null;
+    }, null, `${marker}-cell`)).toBe("cell");
 
     // Click relative link from markdown to a.html and see selection switch
     const mdFrame = page.frameLocator(`iframe[title="Preview: ${mdName}"]`);
     await mdFrame.locator('a[href="a.html"]').click();
     await expect(page.getByRole("tab", { name: aName })).toHaveAttribute("aria-selected", "true", { timeout: 15_000 });
     await expect(page.locator(`iframe[title="Preview: ${aName}"]`)).toBeVisible({ timeout: 15_000 });
-    await expect.poll(() => inPreviewFrame(page, aName, body => body.querySelector("h1")?.textContent?.includes(marker) ? "ok" : null, null)).toBe("ok");
+    await expect.poll(() => inPreviewFrame(page, aName, (body, expected) => body.querySelector("h1")?.textContent?.includes(expected) ? "ok" : null, null, marker)).toBe("ok");
 
     // --add third file and see it selected
     const addRes = await fixture.cli(sessionId, ["preview", "--add", cName]);
@@ -574,6 +574,186 @@ test("multi-file preview with markdown selector and cross-file links", async ({ 
     await expect(page.getByRole("tablist", { name: "Preview file" })).toHaveCount(0, { timeout: 15_000 });
     await expect(page.locator(".session-preview-filename")).toHaveText(aName);
     await expect(page.locator(`iframe[title="Preview: ${aName}"]`)).toBeVisible();
+
+    expect(prohibitedRequests).toBe(0);
+    expect(transport.leaked).toBe(false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("five or more files use a native select to switch the preview", async ({ page, context }, info) => {
+  test.setTimeout(240_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const fixture = await createPreviewFixture();
+  const suffix = `${info.workerIndex}-${Date.now().toString(36)}`;
+  const marker = `SELECT_${suffix}`;
+  const name = `Select preview ${suffix}`;
+  const htmlFiles = ["one.html", "two.html", "three.html", "four.html"];
+  const mdName = "notes.md";
+  const files = [...htmlFiles, mdName];
+
+  let prohibitedRequests = 0;
+  await context.route(`${UI_BASE_URL}/__e2e-preview-probe/**`, async route => {
+    prohibitedRequests++;
+    await route.fulfill({ status: 200, contentType: "text/plain", body: "forbidden" });
+  });
+  const pointer = readBridgePointer();
+  const transport = await observePreviewTransport(page, pointer.port);
+  transport.markers.add(marker);
+  transport.markers.add('"previewSource"');
+  for (const file of files) transport.markers.add(join(fixture.directory, file));
+
+  try {
+    for (const [index, file] of htmlFiles.entries()) {
+      await atomicHtml(join(fixture.directory, file), previewSimpleHtml(marker, index + 1));
+    }
+    await atomicHtml(join(fixture.directory, mdName), previewMarkdown(marker));
+    const sessionId = await fixture.create(name);
+    await login(page);
+    await waitForBridgeOnline(page);
+    await selectSession(page, name);
+
+    await fixture.registerMultiple(sessionId, files);
+
+    const select = page.getByRole("combobox", { name: "Preview file" });
+    await expect(select).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("tablist", { name: "Preview file" })).toHaveCount(0);
+    await expect(select).toHaveValue("one.html");
+    await expect(page.locator('iframe[title="Preview: one.html"]')).toBeVisible({ timeout: 15_000 });
+    await expect.poll(() => inPreviewFrame(page, "one.html", (body, expected) => body.querySelector("h1")?.textContent?.includes(expected) ? "ok" : null, null, `${marker} version 1`)).toBe("ok");
+
+    await select.selectOption("three.html");
+    await expect(select).toHaveValue("three.html");
+    await expect(page.locator('iframe[title="Preview: three.html"]')).toBeVisible({ timeout: 15_000 });
+    await expect.poll(() => inPreviewFrame(page, "three.html", (body, expected) => body.querySelector("h1")?.textContent?.includes(expected) ? "ok" : null, null, `${marker} version 3`)).toBe("ok");
+
+    await select.selectOption(mdName);
+    await expect(select).toHaveValue(mdName);
+    await expect(page.locator(`iframe[title="Preview: ${mdName}"]`)).toBeVisible({ timeout: 15_000 });
+    await expect.poll(() => inPreviewFrame(page, mdName, (body, expected) => body.querySelector("h1")?.textContent?.includes(expected) ? "ok" : null, null, `${marker} Notes`)).toBe("ok");
+
+    expect(prohibitedRequests).toBe(0);
+    expect(transport.leaked).toBe(false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("a deleted sibling shows a named error while the other file still renders", async ({ page, context }, info) => {
+  test.setTimeout(240_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const fixture = await createPreviewFixture();
+  const suffix = `${info.workerIndex}-${Date.now().toString(36)}`;
+  const marker = `MISSING_${suffix}`;
+  const name = `Missing preview ${suffix}`;
+  const aName = "a.html";
+  const mdName = "notes.md";
+  const aPath = join(fixture.directory, aName);
+  const mdPath = join(fixture.directory, mdName);
+
+  let prohibitedRequests = 0;
+  await context.route(`${UI_BASE_URL}/__e2e-preview-probe/**`, async route => {
+    prohibitedRequests++;
+    await route.fulfill({ status: 200, contentType: "text/plain", body: "forbidden" });
+  });
+  const pointer = readBridgePointer();
+  const transport = await observePreviewTransport(page, pointer.port);
+  transport.markers.add(marker);
+  transport.markers.add(aPath);
+  transport.markers.add(mdPath);
+  transport.markers.add('"previewSource"');
+
+  try {
+    await atomicHtml(aPath, previewSimpleHtml(marker, 1));
+    await atomicHtml(mdPath, previewMarkdown(marker));
+    const sessionId = await fixture.create(name);
+    await login(page);
+    await waitForBridgeOnline(page);
+    await selectSession(page, name);
+
+    const registered = await fixture.cli(sessionId, ["preview", aName, mdName]);
+    expect(registered.code).toBe(0);
+    assertSanitized(JSON.parse(registered.stdout), aPath);
+    assertSanitized(JSON.parse(registered.stdout), mdPath);
+
+    await page.getByRole("tab", { name: mdName }).click();
+    await expect(page.getByRole("tab", { name: mdName })).toHaveAttribute("aria-selected", "true");
+    await expect.poll(() => inPreviewFrame(page, mdName, (body, expected) => body.querySelector("h1")?.textContent?.includes(expected) ? "ok" : null, null, `${marker} Notes`)).toBe("ok");
+
+    await unlink(mdPath);
+    await expect(previewRegion(page)).toContainText(`${mdName} is missing`, { timeout: 15_000 });
+    await expect(iframe(page, mdName)).not.toBeVisible();
+
+    await page.getByRole("tab", { name: aName }).click();
+    await expect(page.getByRole("tab", { name: aName })).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator(`iframe[title="Preview: ${aName}"]`)).toBeVisible({ timeout: 15_000 });
+    await expect.poll(() => inPreviewFrame(page, aName, (body, expected) => body.querySelector("h1")?.textContent?.includes(expected) ? "ok" : null, null, `${marker} version 1`)).toBe("ok");
+    await expect(previewRegion(page)).not.toContainText(`${mdName} is missing`);
+
+    expect(prohibitedRequests).toBe(0);
+    expect(transport.leaked).toBe(false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("a file name containing '<' registers and cross-file links still switch", async ({ page, context }, info) => {
+  test.setTimeout(240_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const fixture = await createPreviewFixture();
+  const suffix = `${info.workerIndex}-${Date.now().toString(36)}`;
+  const marker = `WEIRD_${suffix}`;
+  const name = `Weird preview ${suffix}`;
+  const aName = "a.html";
+  const weirdName = "weird<script>.md";
+  const aPath = join(fixture.directory, aName);
+  const weirdPath = join(fixture.directory, weirdName);
+
+  let prohibitedRequests = 0;
+  await context.route(`${UI_BASE_URL}/__e2e-preview-probe/**`, async route => {
+    prohibitedRequests++;
+    await route.fulfill({ status: 200, contentType: "text/plain", body: "forbidden" });
+  });
+  const pointer = readBridgePointer();
+  const transport = await observePreviewTransport(page, pointer.port);
+  transport.markers.add(marker);
+  transport.markers.add(aPath);
+  transport.markers.add(weirdPath);
+  transport.markers.add('"previewSource"');
+
+  try {
+    await atomicHtml(aPath, previewSimpleHtml(marker, 1));
+    await atomicHtml(weirdPath, previewMarkdown(marker));
+    const sessionId = await fixture.create(name);
+    await login(page);
+    await waitForBridgeOnline(page);
+    await selectSession(page, name);
+
+    const registered = await fixture.cli(sessionId, ["preview", aName, weirdName]);
+    expect(registered.code).toBe(0);
+    const body: unknown = JSON.parse(registered.stdout);
+    assertSanitized(body, aPath);
+    assertSanitized(body, weirdPath);
+    const preview = sessionRecord(body).preview as { files: Array<{ fileName: string; kind: string }> };
+    expect(preview.files.map(file => file.fileName)).toEqual([aName, weirdName]);
+    expect(preview.files[1].kind).toBe("markdown");
+
+    const tablist = page.getByRole("tablist", { name: "Preview file" });
+    await expect(tablist).toBeVisible({ timeout: 15_000 });
+    await expect(tablist.getByRole("tab")).toHaveCount(2);
+    // The angle brackets render as literal tab text, not as markup.
+    await expect(page.getByRole("tab", { name: weirdName })).toHaveText(weirdName);
+    await page.getByRole("tab", { name: weirdName }).click();
+    await expect(page.getByRole("tab", { name: weirdName })).toHaveAttribute("aria-selected", "true");
+    await expect(iframe(page, weirdName)).toBeVisible({ timeout: 15_000 });
+    await expect.poll(() => inPreviewFrame(page, weirdName, (body, expected) => body.querySelector("h1")?.textContent?.includes(expected) ? "ok" : null, null, `${marker} Notes`)).toBe("ok");
+
+    const mdFrame = page.frameLocator(`iframe[title="Preview: ${weirdName}"]`);
+    await mdFrame.locator('a[href="a.html"]').click();
+    await expect(page.getByRole("tab", { name: aName })).toHaveAttribute("aria-selected", "true", { timeout: 15_000 });
+    await expect(page.locator(`iframe[title="Preview: ${aName}"]`)).toBeVisible({ timeout: 15_000 });
+    await expect.poll(() => inPreviewFrame(page, aName, (body, expected) => body.querySelector("h1")?.textContent?.includes(expected) ? "ok" : null, null, `${marker} version 1`)).toBe("ok");
 
     expect(prohibitedRequests).toBe(0);
     expect(transport.leaked).toBe(false);
