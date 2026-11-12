@@ -6,6 +6,23 @@ import { existsSync } from 'node:fs';
 import type { ArchivedSession, Session } from './types.js';
 
 /**
+ * Drop the legacy preview shape on load: version !== 2 or a preview without a
+ * files array means both fields go, so a stale descriptor never reaches the
+ * wire. No migration — an old preview is simply no preview.
+ */
+function dropLegacyPreviewShape(session: Session): void {
+  const preview = session.preview as unknown as { files?: unknown } | undefined;
+  const previewSource = session.previewSource as unknown as { version?: unknown; files?: unknown } | undefined;
+  const legacy = (previewSource !== undefined && previewSource.version !== 2)
+    || (preview !== undefined && !Array.isArray(preview.files))
+    || (previewSource !== undefined && !Array.isArray(previewSource.files));
+  if (legacy) {
+    delete session.preview;
+    delete session.previewSource;
+  }
+}
+
+/**
  * Retained tail size for a session's terminal.log. A misbehaving child (e.g. a
  * TUI stuck in a runaway repaint loop) can otherwise stream unbounded output
  * and grow this file without limit — observed in the wild at 2.5 GB and still
@@ -92,7 +109,9 @@ export class SessionStore {
       return null;
     }
     const data = await readFile(filePath, 'utf-8');
-    return JSON.parse(data) as Session;
+    const session = JSON.parse(data) as Session;
+    dropLegacyPreviewShape(session);
+    return session;
   }
 
   async listSessions(): Promise<Session[]> {

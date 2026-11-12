@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useMemo, useEffect, useRef, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import type { MessageClient } from "@/lib/message-client";
+import { isPreviewDescriptor } from "@/lib/session-preview";
 import { ConnectionStatus } from "@/hooks/useCentrifugo";
 import { TerminalTransportApi } from "@/lib/direct-transport/contract";
 import { Session, ShellType } from "@/types";
@@ -391,8 +392,9 @@ PY`;
   }, [sessions, selectedSessionId]);
   const [previewChoices, setPreviewChoices] = useState<Record<string, { id: string; open: boolean }>>({});
   const selectedPreviewKey = selectedSession ? `${selectedSession.bridgeId}:${selectedSession.id}` : "";
+  const selectedPreviewDescriptor = selectedSession?.preview && isPreviewDescriptor(selectedSession.preview) ? selectedSession.preview : null;
   const choice = previewChoices[selectedPreviewKey];
-  const previewOpen = !!selectedSession?.preview && (choice?.id !== selectedSession.preview.id || choice.open);
+  const previewOpen = !!selectedPreviewDescriptor && (choice?.id !== selectedPreviewDescriptor.id || choice.open);
   const reviewIdentity = reviewIdentityFor(selectedSession);
   const [reviewChoice, setReviewChoice] = useState<{ identity: string; activation: number }>({ identity: "", activation: 0 });
   const reviewOpen = !!reviewIdentity && reviewChoice.identity === reviewIdentity;
@@ -407,28 +409,44 @@ PY`;
   const observedPreviews = useRef<Record<string, string>>({});
   useEffect(() => {
     const observed: Record<string, string> = {};
-    for (const session of sessions) if (session.preview) {
+    let autoOpenSelected = false;
+    for (const session of sessions) {
+      if (!session.preview || !isPreviewDescriptor(session.preview)) continue;
       const key = `${session.bridgeId}:${session.id}`;
+      const hadPreviewBefore = observedPreviews.current[key] !== undefined;
       observed[key] = session.preview.id;
-      if (session.id === selectedSessionId && observedPreviews.current[key] !== session.preview.id) {
-        setMobileTab(current => current === "sessions" || current === "review" ? current : "preview");
+      if (!hadPreviewBefore && session.id === selectedSessionId) {
+        autoOpenSelected = true;
       }
+    }
+    if (autoOpenSelected) {
+      setMobileTab(current => current === "sessions" || current === "review" ? current : "preview");
     }
     observedPreviews.current = observed;
     setPreviewChoices(previous => {
       const next: typeof previous = {};
-      for (const [key, id] of Object.entries(observed)) next[key] = previous[key]?.id === id ? previous[key] : { id, open: true };
+      for (const [key, id] of Object.entries(observed)) {
+        const prev = previous[key];
+        if (!prev) {
+          next[key] = { id, open: true };
+        } else if (prev.id === id) {
+          next[key] = prev;
+        } else {
+          // Set id changed but preview existed before: preserve open/closed state instead of re-opening.
+          next[key] = { id, open: prev.open };
+        }
+      }
       if (Object.keys(next).length === Object.keys(previous).length && Object.keys(next).every(key => next[key] === previous[key])) return previous;
       return next;
     });
-    if (!selectedSession?.preview) setMobileTab(current => current === "preview" ? (reviewOpen ? "review" : "terminal") : current);
-  }, [sessions, selectedSessionId, selectedSession?.preview, reviewOpen]);
+    if (!selectedPreviewDescriptor) setMobileTab(current => current === "preview" ? (reviewOpen ? "review" : "terminal") : current);
+  }, [sessions, selectedSessionId, selectedPreviewDescriptor, reviewOpen]);
   const setPreviewOpen = useCallback((open: boolean) => {
-    if (!selectedSession?.preview) return;
-    setPreviewChoices(previous => ({ ...previous, [selectedPreviewKey]: { id: selectedSession.preview!.id, open } }));
+    if (!selectedPreviewDescriptor) return;
+    setPreviewChoices(previous => ({ ...previous, [selectedPreviewKey]: { id: selectedPreviewDescriptor.id, open } }));
     if (open) setMobileTab(current => current === "sessions" ? current : "preview");
     else setMobileTab(current => current === "preview" ? (reviewOpen ? "review" : "terminal") : current);
-  }, [selectedSession, selectedPreviewKey, reviewOpen]);
+  }, [selectedPreviewDescriptor, selectedPreviewKey, reviewOpen]);
   const refitPreviewTerminal = useCallback(() => { terminalRef.current?.refit({ forceResize: true }); }, []);
   const sessionRelaunchLabel = selectedSession && !selectedSession.loopId
     ? getSessionRelaunchLabel(selectedSession.status)
@@ -476,7 +494,7 @@ PY`;
     if (selectedSessionId) retrySession(selectedSessionId);
   }, [selectedSessionId, retrySession]);
   const selectedTransportMode = selectedSessionId ? transport?.getMode(selectedSessionId) ?? "connecting" : null;
-  const sessionHeaderActions = selectedSession ? <SessionHeaderActions hasPreview={Boolean(selectedSession.preview)} previewOpen={previewOpen}
+  const sessionHeaderActions = selectedSession ? <SessionHeaderActions hasPreview={Boolean(selectedPreviewDescriptor)} previewOpen={previewOpen}
     running={selectedSession.status === "running"} relaunchLabel={sessionRelaunchLabel ?? null}
     onPreview={() => setPreviewOpen(true)} onStop={handleStopSession} onRelaunch={handleRelaunchSession} hasReview={!!reviewIdentity} onReview={openReview} /> : null;
 

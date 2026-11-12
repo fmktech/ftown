@@ -10,7 +10,8 @@ import { usePreviewConversation } from '@/hooks/usePreviewConversation';
 import { PreviewConversation } from './PreviewConversation';
 import { PullRequestReview } from './PullRequestReview';
 import type { SessionActivity } from '@/hooks/useAllSessionEvents';
-import { clampPreviewRatio, previewDocument, previewRatioBounds } from '@/lib/session-preview';
+import { clampPreviewRatio, isPreviewDescriptor, markdownPreviewDocument, previewDocument, previewRatioBounds } from '@/lib/session-preview';
+import { previewScrollOwnerKey } from '@/lib/preview-scroll-protocol';
 
 interface Props {
   session: Session | null; client: MessageClient | null; userId: string; readable: boolean;
@@ -19,7 +20,16 @@ interface Props {
   reviewOpen?: boolean; reviewActivation?: number; onCloseReview?: () => void;
   onRefit: () => void; children: ReactNode; sessions?: Session[]; activity?: SessionActivity;
 }
-const messages = { missing: 'Preview file is missing', too_large: 'Preview exceeds the 1 MiB limit', invalid_utf8: 'Preview file is not valid UTF-8', invalid_file: 'Preview unavailable', unavailable: 'Preview unavailable' };
+type PreviewErrorReason = 'missing' | 'too_large' | 'invalid_utf8' | 'invalid_file' | 'unavailable';
+function previewErrorMessage(reason: PreviewErrorReason, fileName: string): string {
+  switch (reason) {
+    case 'missing': return `${fileName} is missing`;
+    case 'too_large': return `${fileName} exceeds the 1 MiB limit`;
+    case 'invalid_utf8': return `${fileName} is not valid UTF-8`;
+    case 'invalid_file':
+    case 'unavailable': return `${fileName} is unavailable`;
+  }
+}
 export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {} }: Props) {
   const mainRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
@@ -30,28 +40,80 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
   const [expanded, setExpanded] = useState(false);
   const [dragging, setDragging] = useState(false);
   const drag = useRef<{ id: number; startX: number; startRatio: number; cursor: string; select: string } | null>(null);
-  const target = session?.preview ? { bridgeId: session.bridgeId, sessionId: session.id, preview: session.preview } : null;
+
+  const descriptor = session?.preview && isPreviewDescriptor(session.preview) ? session.preview : null;
+  const files = descriptor?.files ?? [];
+  const fileNames = files.map(f => f.fileName);
+  const sessionKey = session ? `${session.bridgeId}:${session.id}` : '';
+
+  // Per-session selection stored internally (persisted while Dashboard is open because SessionWorkspace stays mounted and sessionKey changes).
+  const [internalSelections, setInternalSelections] = useState<Record<string, string>>({});
+  const previousRecordByKey = useRef<Record<string, { id: string | null; names: string[] }>>({});
+  const descriptorId = descriptor?.id ?? null;
+
+  const storedSelection = sessionKey ? internalSelections[sessionKey] : undefined;
+  let effectiveFileName: string | undefined;
+  if (files.length > 0) {
+    const prev = sessionKey ? previousRecordByKey.current[sessionKey] : undefined;
+    const prevNames = prev?.names;
+    const hasPrevNonEmpty = !!prevNames && prevNames.length > 0;
+    const kept = hasPrevNonEmpty ? prevNames.some(n => fileNames.includes(n)) : false;
+    const newNames = hasPrevNonEmpty ? fileNames.filter(n => !prevNames.includes(n)) : [];
+    const isAdd = hasPrevNonEmpty && kept && newNames.length > 0;
+    if (isAdd) {
+      effectiveFileName = newNames[newNames.length - 1];
+    } else if (storedSelection && fileNames.includes(storedSelection)) {
+      effectiveFileName = storedSelection;
+    } else {
+      effectiveFileName = fileNames[0];
+    }
+  }
+
+  const selectedFile = files.find(f => f.fileName === effectiveFileName) ?? files[0];
+
+  const target = descriptor && selectedFile ? { bridgeId: session!.bridgeId, sessionId: session!.id, preview: descriptor, file: selectedFile } : null;
+
+  const handleSelectFile = useCallback((fileName: string) => {
+    setInternalSelections(prev => ({ ...prev, [sessionKey]: fileName }));
+  }, [sessionKey]);
+
+  // Keep previous set tracking and sync storage when the effective selection is derived from a set change (new file added, selected removed, or initial fallback).
+  useEffect(() => {
+    if (!sessionKey) return;
+    const prev = previousRecordByKey.current[sessionKey];
+    const namesChanged = !prev || prev.id !== descriptorId || prev.names.length !== fileNames.length || prev.names.some((n, i) => n !== fileNames[i]);
+    if (namesChanged) {
+      previousRecordByKey.current = { ...previousRecordByKey.current, [sessionKey]: { id: descriptorId, names: [...fileNames] } };
+    }
+    if (effectiveFileName === undefined) return;
+    if (internalSelections[sessionKey] !== effectiveFileName) {
+      setInternalSelections(prevSel => prevSel[sessionKey] === effectiveFileName ? prevSel : { ...prevSel, [sessionKey]: effectiveFileName });
+    }
+    // Include fileNames identity via joined string to detect order changes; effectiveFileName captures derived choice.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionKey, effectiveFileName, descriptorId, fileNames.join('|'), internalSelections[sessionKey]]);
+
   const compact = !isDesktop || width < 640;
   const showPreview = !!target && open;
   const rawView = compact ? (isDesktop ? compactTab : mobileTab) : auxTab;
   const view = rawView === 'preview' && !showPreview ? (reviewOpen ? 'review' : 'terminal') : rawView === 'review' && !reviewOpen ? (showPreview ? 'preview' : 'terminal') : rawView;
-  // The parent may remove Preview and select Review in one render. Compare the
-  // previous committed view so expansion cannot transfer to a fallback panel.
   const previousView = useRef({ showPreview, view });
   const previewDisappeared = previousView.current.showPreview && !showPreview && previousView.current.view === 'preview';
   const activeExpanded = expanded && rawView === view && view !== 'terminal' && !previewDisappeared;
   const previewVisible = !!target && open && view === 'preview';
   const { state, refresh, getHardEpoch } = useSessionPreview({ client, userId, target, visible: previewVisible, readable, securityGeneration, sendCommand, subscribeAuthority });
-  const owner = target ? JSON.stringify([userId, target.bridgeId, target.sessionId, target.preview.id]) : '';
-  const scroll = usePreviewScroll(state.kind === 'ready' ? state : null, owner, getHardEpoch);
-  // Stable callback ref: focus the non-activating dialog once on mount only.
-  // An inline ref would be re-created every render and re-focus the dialog on
-  // unrelated renders (conversation polls, draft typing), stealing focus.
+  const owner = target ? previewScrollOwnerKey({ userId, bridgeId: target.bridgeId, sessionId: target.sessionId, previewId: target.preview.id, fileId: target.file.id }) : '';
+
+  const onSwitchFile = useCallback((fileName: string) => {
+    const match = files.find(f => f.fileName === fileName);
+    if (!match) return;
+    handleSelectFile(fileName);
+  }, [files, handleSelectFile]);
+
+  const scroll = usePreviewScroll(state.kind === 'ready' ? state : null, owner, getHardEpoch, onSwitchFile);
   const previouslyFocused = useRef<HTMLElement | null>(null);
   const focusLinkPrompt = useCallback((node: HTMLDivElement | null) => {
     if (node) {
-      // Capture the element that had focus before the prompt, then focus the
-      // non-activating dialog. Restored when the prompt is dismissed.
       previouslyFocused.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       if (document.activeElement !== node) node.focus();
     } else {
@@ -67,7 +129,7 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     observer.observe(node); return () => observer.disconnect();
   }, []);
   useEffect(() => { setCompactTab('preview'); setAuxTab('preview'); setExpanded(false); setConversationOpen(false); }, [session?.bridgeId, session?.id]);
-  const previewId = session?.preview?.id;
+  const previewId = descriptor?.id;
   const previousPreviewId = useRef(previewId);
   useEffect(() => {
     const previous = previousPreviewId.current;
@@ -120,6 +182,21 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
       choose(next); (event.currentTarget.querySelector(`[data-preview-tab="${next}"]`) as HTMLButtonElement | null)?.focus();
     }
   };
+  const fileTabKeys = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault();
+      const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+      if (buttons.length === 0) return;
+      const currentIndex = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      let nextIndex: number;
+      if (event.key === 'Home') nextIndex = 0;
+      else if (event.key === 'End') nextIndex = buttons.length - 1;
+      else if (event.key === 'ArrowRight') nextIndex = (Math.max(0, currentIndex) + 1) % buttons.length;
+      else nextIndex = (Math.max(0, currentIndex) - 1 + buttons.length) % buttons.length;
+      buttons[nextIndex]?.focus();
+      buttons[nextIndex]?.click();
+    }
+  };
   const terminalVisible = !activeExpanded && (!hasAux || !compact || view === 'terminal');
   const frameVisible = showPreview && view === 'preview';
   const reviewVisible = reviewOpen && view === 'review';
@@ -136,7 +213,34 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
       {!compact && showPreview && reviewOpen && <div role="tablist" aria-label="Auxiliary view" onKeyDown={tabKeys} className="session-preview-tabs">{tabs.map(tab => <button key={tab} data-preview-tab={tab} role="tab" aria-selected={view === tab} aria-controls={`session-${tab}-panel`} tabIndex={view === tab ? 0 : -1} onClick={() => choose(tab)} className={`mobile-tab ${view === tab ? 'mobile-tab-active' : ''}`}>{tab === 'preview' ? 'Preview' : 'PR review'}</button>)}</div>}
       {showPreview && <section id="session-preview-panel" role={compact || reviewOpen ? 'tabpanel' : 'region'} aria-label="Session preview" hidden={!frameVisible} className="session-preview-pane">
         <div className="session-preview-toolbar">
-          <span className="session-preview-filename" title={target.preview.fileName}>{target.preview.fileName}</span>
+          {files.length < 2 ? (
+            selectedFile ? <span className="session-preview-filename" title={selectedFile.fileName}>{selectedFile.fileName}</span> : null
+          ) : files.length <= 4 ? (
+            <div role="tablist" aria-label="Preview file" className="session-preview-file-tablist" onKeyDown={fileTabKeys}>
+              {files.map(file => (
+                <button
+                  key={file.id}
+                  role="tab"
+                  aria-selected={file.fileName === effectiveFileName}
+                  title={file.fileName}
+                  tabIndex={file.fileName === effectiveFileName ? 0 : -1}
+                  onClick={() => handleSelectFile(file.fileName)}
+                  className={`session-preview-file-tab ${file.fileName === effectiveFileName ? 'is-selected' : ''}`}
+                >
+                  {file.fileName}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <select
+              aria-label="Preview file"
+              className="session-preview-file-select"
+              value={effectiveFileName ?? ''}
+              onChange={e => handleSelectFile(e.target.value)}
+            >
+              {files.map(file => <option key={file.id} value={file.fileName}>{file.fileName}</option>)}
+            </select>
+          )}
           <span className="session-preview-auto" role="img" aria-label="Auto-refresh enabled" title="Auto-refresh enabled" />
           <button type="button" className="btn-ghost session-preview-icon" aria-label={activeExpanded ? "Collapse preview" : "Expand preview"} title={activeExpanded ? "Collapse preview" : "Expand preview"} onClick={() => setExpanded(value => !value)}>
             <svg aria-hidden="true" focusable="false" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -151,7 +255,14 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
           </button>
         </div>
         <div className="session-preview-content">
-          {state.kind === 'ready' && scroll.display ? <><iframe ref={scroll.iframeRef} key={scroll.display.key} title={`HTML preview: ${target.preview.fileName}`} sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={previewDocument(scroll.display.html, scroll.display.documentId)} />{state.updating && <span className="session-preview-updating">Updating preview…</span>}</> : <div className="session-preview-message" role="status"><span>{state.kind === 'loading' || state.kind === 'ready' ? 'Loading preview…' : state.kind === 'offline' ? 'Reconnect to load preview' : state.kind === 'unregistered' ? 'No preview registered' : state.kind === 'unavailable' ? messages[state.reason] : 'Preview unavailable'}</span>{state.kind !== 'loading' && state.kind !== 'ready' && state.kind !== 'unregistered' && <button type="button" className="btn-ghost" onClick={refresh}>Retry</button>}</div>}
+          {state.kind === 'ready' && scroll.display ? (() => {
+            const docId = scroll.display.documentId;
+            const html = scroll.display.html;
+            const srcDoc = selectedFile?.kind === 'markdown'
+              ? markdownPreviewDocument(html, selectedFile.fileName, docId, fileNames)
+              : previewDocument(html, docId, fileNames);
+            return <><iframe ref={scroll.iframeRef} key={scroll.display.key} title={`Preview: ${selectedFile?.fileName ?? ''}`} sandbox="allow-scripts" referrerPolicy="no-referrer" srcDoc={srcDoc} />{state.updating && <span className="session-preview-updating">Updating preview…</span>}</>;
+          })() : <div className="session-preview-message" role="status"><span>{state.kind === 'loading' || state.kind === 'ready' ? 'Loading preview…' : state.kind === 'offline' ? 'Reconnect to load preview' : state.kind === 'unregistered' ? 'No preview registered' : state.kind === 'unavailable' ? previewErrorMessage(state.reason, selectedFile?.fileName ?? '') : selectedFile ? previewErrorMessage('unavailable', selectedFile.fileName) : 'Preview unavailable'}</span>{state.kind !== 'loading' && state.kind !== 'ready' && state.kind !== 'unregistered' && <button type="button" className="btn-ghost" onClick={refresh}>Retry</button>}</div>}
           {scroll.linkPrompt && <div ref={focusLinkPrompt} tabIndex={-1} className="session-preview-link-prompt" role="dialog" aria-label="Open external link" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); scroll.dismissLink(); } }}><div className="session-preview-link-scroll" tabIndex={0} role="group" aria-label="Destination URL"><span className="session-preview-link-host" title={scroll.linkPrompt}>{scroll.linkPrompt}</span></div><div className="session-preview-link-actions"><span>Open in a new tab?</span><button type="button" className="btn-ghost" onClick={scroll.confirmLink}>Open</button><button type="button" className="btn-ghost" onClick={scroll.dismissLink}>Cancel</button></div></div>}
           {activeExpanded && session && <PreviewConversation session={session} activity={activity} open={conversationOpen} onOpen={() => setConversationOpen(true)} onClose={() => setConversationOpen(false)} conversation={conversation} />}
           {dragging && <div className="session-preview-drag-shield" />}

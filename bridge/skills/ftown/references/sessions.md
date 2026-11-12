@@ -51,21 +51,44 @@ ftown sessions archive
 ftown sessions revive <session-id>
 ```
 
-## Preview session HTML
+## Preview session files
 
 ```bash
-ftown sessions preview ./preview.html
-ftown sessions preview --session-id <id> ./preview.html
+ftown sessions preview ./preview.html ./notes.md
+ftown sessions preview --add ./extra.html
+ftown sessions preview --remove notes.md
 ftown sessions preview --clear
+ftown sessions preview --session-id <id> ./preview.html ./notes.md
 ```
 
-The target defaults to `FTOWN_SESSION_ID`. The file must be a UTF-8 `.html` or
-`.htm` file of at most 1 MiB inside that session's working directory. Relative
-paths resolve from the CLI's current directory. Use a self-contained document:
-inline CSS and JavaScript and data images are supported; sibling files and
-network access are not. Write a temporary file and rename it over the registered
-file to publish a complete update. Closing the dashboard preview does not clear
-the registration; `--clear` removes the registration without deleting the file.
+The target defaults to `FTOWN_SESSION_ID`. A session holds up to 12 files, in
+registration order. Kind is by extension (case-insensitive): `.html`/`.htm` →
+HTML, `.md`/`.markdown` → Markdown; anything else is rejected. Each file must
+be UTF-8, at most 1 MiB, and inside that session's working directory; relative
+paths resolve from the CLI's current directory. Two registered files may not
+share a basename (the selector and links are by basename): a duplicate basename
+is rejected with a clear error. Registration is all-or-nothing — if any path
+fails validation or the set would exceed 12 files, nothing changes.
+
+The four forms: `preview <path...>` replaces the whole set with these files;
+`--add <path...>` appends to the current set; `--remove <name...>` removes by
+basename (removing the last file clears the preview); `--clear` removes the
+whole registration without deleting files. `--add`, `--remove`, and `--clear`
+are mutually exclusive; no paths and no flag is a usage error. Use
+`--session-id <id>` for an explicit target session.
+
+HTML previews use a self-contained document: inline CSS and JavaScript and
+data images are supported; sibling files and network access are not. Markdown
+is rendered as a readable document with GFM (tables, task lists, strikethrough,
+fenced code) inside the same sandbox iframe — no network, only `data:` images
+— and raw HTML inside the markdown is isolated the same way as an HTML preview.
+With two or more registered files, the dashboard shows a file selector in the
+preview toolbar; a relative link between registered files (matching a
+basename, ignoring `./`, query and `#fragment`) switches the selector instead
+of opening the default behavior. Write a temporary file and rename it over the
+registered file to publish a complete update; a reload resets the preview's own
+interactive state. Closing the dashboard preview does not clear the
+registration; `--clear` removes the registration without deleting the file.
 
 Preview conversation input arrives through the session's existing ftown mail.
 Post a tool-authored reply with:
@@ -298,6 +321,8 @@ The CLI wraps the loopback API. Raw access if needed:
 | POST | `/api/sessions/:id/inbox` | Send mail (`{ body, from?, fromName?, type?, threadId? }`) |
 | GET | `/api/sessions/:id/inbox` | Read mail (`?wait=&peek=&limit=&all=`) |
 | POST | `/api/sessions/:id/message` | Inject a message line as keystrokes (`{ text, from? }`) |
+| PUT | `/api/sessions/:id/preview` | Replace or add preview files, local CLI only (`{ paths: string[], mode: 'replace' \| 'add' }`) |
+| DELETE | `/api/sessions/:id/preview` | Remove preview files by name or clear the preview, local CLI only (`{ names?: string[] }`; absent names clears all) |
 | DELETE | `/api/sessions/:id` | Remove (tombstone-archived) |
 | GET | `/api/archive` | List removed-session tombstones |
 | POST | `/api/sessions/:id/revive` | Recreate a removed session (new id) |
