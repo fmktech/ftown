@@ -221,6 +221,9 @@ export class CentrifugoClient {
               // approved reader (revoked, expired, lost read) or the policy cannot be read, this packet is not published and the
               // rejection is recorded by the pipeline; the other recipients' packets are unaffected. Policy reads resolve in call
               // order, so send order is kept.
+              // Known residual window, unchanged here: while the relay client is reconnecting, centrifuge-js parks the publish (up
+              // to its 5 s timeout) and sends it on reconnect without another check. Rejecting while disconnected would close it,
+              // but would drop events that are delivered today, so it is deliberately left as it is.
               send: () => security.policy.principal(recipientId).then(principal => {
                 if (!principal.permissions.includes('read')) throw new BridgeSecurityError('permission_denied');
                 return this.client.publish(channel, packet);
