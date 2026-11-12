@@ -122,10 +122,11 @@ describe("current attention lifecycle", () => {
     expect(clearsManualInputNotice("Notification", { notification_type }, notice("agent_needs_input"))).toBe(false);
   });
 
-  it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("lets %s clear every existing notice type", (event) => {
-    for (const type of ["agent_needs_input", "permission_prompt", "elicitation_dialog", "ask_user"] as const) {
-      expect(clearsManualInputNotice(event, {}, notice(type))).toBe(true);
-    }
+  it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("lets %s clear non-explicit types but preserves explicit", (event) => {
+    expect(clearsManualInputNotice(event, {}, notice("permission_prompt"))).toBe(true);
+    expect(clearsManualInputNotice(event, {}, notice("elicitation_dialog"))).toBe(true);
+    expect(clearsManualInputNotice(event, {}, notice("ask_user"))).toBe(true);
+    expect(clearsManualInputNotice(event, {}, notice("agent_needs_input"))).toBe(false);
   });
 
   it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("an injected %s clears no notice type", (event) => {
@@ -137,8 +138,8 @@ describe("current attention lifecycle", () => {
     const durableQuestion: ManualInputNotice = { type: "ask_user", title: "t", message: "m", receivedAt: 1, attentionId: "a1", attentionSequence: 1,
       prompt: { channel: "hook", questions: [{ question: "Q", options: [{ label: "A" }], multiSelect: false, allowText: false }] } };
     expect(clearsManualInputNotice(event, { injected: true }, durableQuestion)).toBe(false);
-    // Human clears durable agent_needs_input but not a durable question.
-    expect(clearsManualInputNotice(event, {}, durable)).toBe(true);
+    // C1: a human prompt clears no explicit notice, durable or not.
+    expect(clearsManualInputNotice(event, {}, durable)).toBe(false);
     expect(clearsManualInputNotice(event, {}, durableQuestion)).toBe(false);
   });
 

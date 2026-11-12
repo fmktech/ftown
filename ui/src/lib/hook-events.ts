@@ -156,8 +156,11 @@ export function clearsManualInputNotice(
 ): boolean {
   // An injected prompt (bridge-typed mail pointer) is not a human answering.
   if ((eventName === "UserPromptSubmit" || eventName === "beforeSubmitPrompt") && data.injected === true) return false;
-  // A stamped question is resolved by the bridge (user prompt / tool complete)
-  // before the event is published; only a snapshot re-read may clear it.
+  // Prompts never auto-clear explicit notices (C1): agent_needs_input, or a
+  // question that carries a prompt. Only the snapshot may clear them.
+  const isExplicit = !!currentNotice && (currentNotice.type === "agent_needs_input"
+    || (currentNotice.type === "ask_user" && !!currentNotice.prompt));
+  if ((eventName === "UserPromptSubmit" || eventName === "beforeSubmitPrompt") && isExplicit) return false;
   if (currentNotice?.type === "ask_user" && isDurableNotice(currentNotice)) return false;
   if (eventName === "UserPromptSubmit" || eventName === "beforeSubmitPrompt") return true;
   if (currentNotice?.type === "agent_needs_input") return false;

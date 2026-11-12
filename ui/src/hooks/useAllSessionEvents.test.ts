@@ -71,10 +71,10 @@ describe("explicit agent attention through actual hook subscriptions", () => {
     expect(h.current()).toEqual({ activity: "idle", toolName: undefined, attention: notice });
   });
 
-  it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("clears explicit attention on %s, including same-batch events", (event) => {
+  it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("preserves explicit attention on %s, including same-batch events", (event) => {
     const h = setup();
     act(() => { h.publish("Notification", request); h.publish(event); });
-    expect(h.current()?.attention).toBeUndefined();
+    expect(h.current()?.attention).toMatchObject({ type: "agent_needs_input", title: "Work complete" });
     expect(h.current()?.activity).toBe("thinking");
   });
 

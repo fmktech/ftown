@@ -323,9 +323,9 @@ describe("attention navigation preserves the request", () => {
       fireEvent.click(original); expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
       fireEvent.click(screen.getByRole("tab", { name: /^Workspace/ }));
       fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 waiting" }));
-      expect(screen.getByText("Inspect the result before continuing")).toBeTruthy();
+      expect(within(screen.getByRole("region", { name: "Inbox" })).getByText("Inspect the result before continuing")).toBeTruthy();
       expect(state.clearSessionAttention).not.toHaveBeenCalled();
-      const openSession = screen.getByRole("button", { name: "Open session" }); openSession.focus(); expect(document.activeElement).toBe(openSession);
+      const openSession = within(screen.getByRole("region", { name: "Inbox" })).getByRole("button", { name: "Open session" }); openSession.focus(); expect(document.activeElement).toBe(openSession);
       fireEvent.click(openSession);
       expect(screen.getByRole("region", { name: "Session workspace: Regular shell" })).toBe(document.activeElement);
       expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
@@ -370,8 +370,8 @@ describe("inbox document title", () => {
   });
 });
 
-describe("inbox popup overlay", () => {
-  it("shows for the selected session, hides while the Inbox page is open or another session is selected", async () => {
+describe("waiting side pane", () => {
+  it("shows the waiting pane for the selected session, hides while the Inbox page is open or another session is selected", async () => {
     window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() });
     const { container } = dashboard();
     fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
@@ -380,11 +380,9 @@ describe("inbox popup overlay", () => {
     fireEvent.click(screen.getByRole("tab", { name: /^Workspace/ }));
     const region = screen.getByRole("region", { name: "Waiting for you" });
     expect(region.textContent).toContain("Inspect");
-    expect(region.contains(document.activeElement)).toBe(false);
     expect(container.querySelector('[data-testid="terminal"]')).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 waiting" }));
     expect(screen.getByRole("heading", { name: "Inbox" })).toBeTruthy();
-    expect(screen.queryByRole("region", { name: "Waiting for you" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Back to workspace" }));
     expect(screen.getByRole("region", { name: "Waiting for you" })).toBeTruthy();
     fireEvent.click(await screen.findByRole("button", { name: /project-t42-implement/ }));
@@ -417,8 +415,8 @@ describe("inbox answers", () => {
     state.activity = new Map([["ordinary", { activity: "idle", attention: notice }]]);
     fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
     fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 waiting" }));
-    expect(screen.queryByRole("button", { name: "Send reply" })).toBeNull();
-    fireEvent.click(screen.getByLabelText("Safe")); fireEvent.click(screen.getByRole("button", { name: "Send answer" }));
+    expect(within(screen.getByRole("region", { name: "Inbox" })).queryByRole("button", { name: "Send reply" })).toBeNull();
+    fireEvent.click(within(screen.getByRole("region", { name: "Inbox" })).getByLabelText("Safe")); fireEvent.click(within(screen.getByRole("region", { name: "Inbox" })).getByRole("button", { name: "Send answer" }));
     await waitFor(() => expect(state.answerSessionAttention).toHaveBeenCalledExactlyOnceWith("ordinary", notice, [{ selected: [1] }]));
     expect((await screen.findAllByText("Answer delivered to Regular shell.")).length).toBeGreaterThan(0);
   });
@@ -429,8 +427,8 @@ describe("inbox answers", () => {
     state.activity = new Map([["ordinary", { activity: "idle", attention: notice }]]);
     fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
     fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 waiting" }));
-    fireEvent.change(screen.getByLabelText("Reply to Regular shell"), { target: { value: "hello" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    fireEvent.change(within(screen.getByRole("region", { name: "Inbox" })).getByLabelText("Reply to Regular shell"), { target: { value: "hello" } });
+    fireEvent.click(within(screen.getByRole("region", { name: "Inbox" })).getByRole("button", { name: "Send reply" }));
     await waitFor(() => expect(state.refreshSessionAttention).toHaveBeenCalledWith("ordinary"));
   });
   it("does not re-read after an unstamped reply", async () => {
@@ -440,8 +438,8 @@ describe("inbox answers", () => {
     state.activity = new Map([["ordinary", { activity: "idle", attention: notice }]]);
     fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
     fireEvent.click(screen.getByRole("button", { name: "Inbox, 1 waiting" }));
-    fireEvent.change(screen.getByLabelText("Reply to Regular shell"), { target: { value: "hello" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    fireEvent.change(within(screen.getByRole("region", { name: "Inbox" })).getByLabelText("Reply to Regular shell"), { target: { value: "hello" } });
+    fireEvent.click(within(screen.getByRole("region", { name: "Inbox" })).getByRole("button", { name: "Send reply" }));
     await waitFor(() => expect(state.rpcCommands).toContain("send_message"));
     expect(state.refreshSessionAttention).not.toHaveBeenCalled();
   });

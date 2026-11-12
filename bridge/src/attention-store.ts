@@ -263,8 +263,8 @@ export class AttentionStore {
       const resolvedIds: string[] = [];
       if (observation.resolve) for (const event of ledger.events) {
         if (event.resolvedAt || (observation.resolve === 'elicitation_complete' && event.type !== 'elicitation_dialog')) continue;
-        // A human prompt answered in the terminal must not resolve a waiting question.
-        if (observation.resolve === 'user_prompt' && event.type === 'ask_user' && !!event.prompt) continue;
+        // Prompts never auto-resolve explicit items (C1): user_prompt covers only non-explicit.
+        if (observation.resolve === 'user_prompt' && this.isExplicit(event)) continue;
         event.resolvedAt = timestamp;
         event.resolution = observation.resolve;
         resolvedAny = true; resolvedIds.push(event.id);

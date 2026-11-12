@@ -2,12 +2,15 @@
 
 import { HeaderTooltip } from "./HeaderTooltip";
 
-export function SessionHeaderActions({ hasPreview, previewOpen, running, relaunchLabel, onPreview, onStop, onRelaunch, hasReview = false, onReview }: {
+export function SessionHeaderActions({ hasPreview, previewOpen, running, relaunchLabel, onPreview, onStop, onRelaunch, hasReview = false, onReview, hasWaiting = false, onWaiting }: {
   hasPreview: boolean; previewOpen: boolean; running: boolean; relaunchLabel: string | null;
-  onPreview: () => void; onStop: () => void; onRelaunch: () => void; hasReview?: boolean; onReview?: () => void;
+  onPreview: () => void; onStop: () => void; onRelaunch: () => void; hasReview?: boolean; onReview?: () => void; hasWaiting?: boolean; onWaiting?: () => void;
 }) {
   const size = "flex h-11 min-h-11 w-11 items-center justify-center md:h-8 md:min-h-8 md:w-8";
   return <div role="group" aria-label="Selected session actions" className="flex items-center gap-2">
+    {hasWaiting && <HeaderTooltip label="Open waiting"><button type="button" className={`btn-ghost ${size}`} style={{ padding: 0 }} aria-label="Open waiting" onClick={onWaiting}>
+      <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h16v16H4zM4 14h5l2 3h2l2-3h5"/></svg>
+    </button></HeaderTooltip>}
     {hasPreview && !previewOpen && <HeaderTooltip label="Open preview"><button type="button" className={`btn-ghost ${size}`} style={{ padding: 0 }} aria-label="Open preview" onClick={onPreview}>
       <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
     </button></HeaderTooltip>}

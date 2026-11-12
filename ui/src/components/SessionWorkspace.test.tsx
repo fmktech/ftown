@@ -4,6 +4,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import type { Command, CommandResponse, Session } from '@/types';
 import type { MessageClient } from '@/lib/message-client';
 import { SessionWorkspace } from './SessionWorkspace';
+import type { InboxEntry } from './SessionInbox';
 import { PREVIEW_CSP } from '@/lib/session-preview';
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
@@ -905,4 +906,65 @@ it.each([
   render(<SessionWorkspace session={session} client={{} as unknown as MessageClient} userId="user" readable={true} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>);
   await waitFor(() => expect(screen.getByRole('status').querySelector('span')?.textContent).toBe(expected));
   expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
+});
+
+// SPEC-C waiting side pane
+
+const waitingSession: Session = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '' };
+const waitingEntryFor = (message = 'Waiting message'): InboxEntry => ({
+  session: waitingSession,
+  bridgeName: 'Test bridge',
+  notice: { type: 'agent_needs_input', title: 'Review', message, receivedAt: 1, attentionId: 'att-1', attentionSequence: 1 },
+});
+const waitingProps = {
+  onWaitingOpenSession: vi.fn(), onWaitingDismiss: vi.fn(async () => {}), onWaitingReply: vi.fn(async () => {}),
+  onWaitingAnswer: vi.fn(async () => ({ ok: true, message: 'Answered' }) as const),
+};
+const waitingWorkspace = (entry: InboxEntry | null, extra: Record<string, unknown> = {}) => (
+  <SessionWorkspace session={waitingSession} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open onClose={vi.fn()} isDesktop={true} mobileTab="terminal" onMobileTab={vi.fn()} onRefit={vi.fn()} {...waitingProps} {...extra} waitingEntry={entry}>
+    <div data-testid="terminal-node" tabIndex={-1}>Terminal</div>
+  </SessionWorkspace>
+);
+
+it('shows the waiting pane on entering a session with an item', () => {
+  resizeTo(900);
+  render(waitingWorkspace(waitingEntryFor()));
+  expect(screen.getByRole('region', { name: 'Waiting for you' }).hidden).toBe(false);
+  expect(screen.getByText('Waiting message')).toBeTruthy();
+});
+
+it('switches to the waiting pane when an item arrives while the session is open, without stealing focus', () => {
+  resizeTo(900);
+  const entry = waitingEntryFor();
+  const { rerender } = render(waitingWorkspace(null));
+  const terminal = screen.getByTestId('terminal-node');
+  terminal.focus();
+  expect(document.activeElement).toBe(terminal);
+  rerender(waitingWorkspace(entry));
+  expect(screen.getByRole('region', { name: 'Waiting for you' }).hidden).toBe(false);
+  expect(document.activeElement).toBe(terminal);
+});
+
+it('hides the waiting pane after dismiss (entry gone)', () => {
+  resizeTo(900);
+  const { rerender } = render(waitingWorkspace(waitingEntryFor()));
+  expect(screen.queryByRole('region', { name: 'Waiting for you' })).toBeTruthy();
+  rerender(waitingWorkspace(null));
+  expect(screen.queryByRole('region', { name: 'Waiting for you' })).toBeNull();
+});
+
+it('shows the waiting pane full-screen on mobile when an item arrives', () => {
+  resizeTo(390);
+  const onMobileTab = vi.fn();
+  const phone = (entry: InboxEntry | null, tab: 'terminal' | 'waiting') => (
+    <SessionWorkspace session={waitingSession} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open onClose={vi.fn()} isDesktop={false} mobileTab={tab} onMobileTab={onMobileTab} onRefit={vi.fn()} {...waitingProps} waitingEntry={entry}>
+      <div data-testid="terminal-node">Terminal</div>
+    </SessionWorkspace>
+  );
+  const { rerender } = render(phone(null, 'terminal'));
+  expect(screen.queryByRole('region', { name: 'Waiting for you' })).toBeNull();
+  rerender(phone(waitingEntryFor(), 'terminal'));
+  expect(onMobileTab).toHaveBeenCalledWith('waiting');
+  rerender(phone(waitingEntryFor(), 'waiting'));
+  expect(screen.getByRole('region', { name: 'Waiting for you' }).hidden).toBe(false);
 });

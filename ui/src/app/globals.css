@@ -784,25 +784,3 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .session-inbox-trigger-flash { animation: none; }
 }
-.session-inbox-popup {
-  position: absolute; top: 8px; right: 8px; z-index: 10;
-  width: min(420px, calc(100% - 16px)); max-width: 420px;
-  max-height: 60%; overflow-y: auto;
-  background: var(--bg-elevated); border: 1px solid var(--border-default);
-  border-radius: var(--radius-md); box-shadow: var(--shadow-md);
-  color: var(--text-primary); padding: 10px;
-}
-.session-inbox-popup-pill {
-  position: absolute; top: 8px; right: 8px; z-index: 10;
-  min-height: 36px; padding: 6px 12px; border-radius: 9999px;
-  background: var(--bg-elevated); border: 1px solid var(--accent);
-  color: var(--text-primary); font-weight: 700; font-size: 12px; cursor: pointer;
-}
-@media (max-width: 767px) {
-  .session-inbox-popup {
-    top: 0; right: 0; left: 0; width: auto; max-width: none;
-    border-radius: 0; border-left: none; border-right: none;
-  }
-  .session-inbox-popup-pill { top: 8px; right: 8px; }
-}
-.session-inbox-popup-hide { margin-top: 8px; }

@@ -173,30 +173,30 @@ describe('mail nudge vs open attention (real handleHook + store)', () => {
     assert.equal(page.events.length, 2, `no-prompt within 15s must not resolve, got ${page.events.length}`);
     let published = f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)!;
     assert.equal(published.data.injected, true);
-    // 16s after the injection: human, resolves agent_needs_input but not the ask_user question.
+    // 16s after the injection: human, but prompts never auto-resolve explicit items (C1).
     await settle(f.clock, 16_000);
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit', prompt: 'human answer in terminal' });
     page = await f.attention.list('s1');
     const open = await f.attention.list('s1', { includeResolved: true });
     const reqItem = open.events.find((e) => e.id === req.id)!;
-    assert.equal(reqItem.resolution, 'user_prompt', 'human prompt should resolve agent_needs_input');
-    assert.equal(page.events.length, 1, `human prompt should leave the ask_user question open, got ${page.events.length}`);
+    assert.equal(reqItem.resolution, undefined, 'human prompt must leave agent_needs_input open');
+    assert.equal(page.events.length, 2, `human prompt should leave both explicit items open, got ${page.events.length}`);
     published = f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)!;
     assert.equal(published.data.injected, undefined, 'human prompt should not carry injected');
   });
 
-  it('human UserPromptSubmit resolves non-explicit items and agent_needs_input but leaves ask_user with a prompt', async (t) => {
+  it('human UserPromptSubmit resolves only non-explicit items; explicit stays open', async (t) => {
     const f = await fixture(t);
     const { req } = await openTwo(f);
     await f.attention.record('s1', 'Notification', { notification_type: 'permission_prompt', message: 'Approve?' });
     assert.equal((await f.attention.list('s1')).events.length, 3);
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit', prompt: 'human typed' });
     const page = await f.attention.list('s1');
-    assert.equal(page.events.length, 1, `expected only the ask_user question to remain, got ${page.events.length}`);
-    assert.equal(page.events[0].type, 'ask_user');
+    assert.equal(page.events.length, 2, `expected explicit items to remain, got ${page.events.length}`);
+    assert.deepEqual(page.events.map((e) => e.id).sort(), [req.id, page.events.find((e) => e.type === 'ask_user')!.id].sort());
     const resolved = await f.attention.list('s1', { includeResolved: true });
-    assert.equal(resolved.events.filter((e) => e.resolvedAt && e.resolution === 'user_prompt').length, 2);
-    assert.ok(resolved.events.find((e) => e.id === req.id)?.resolution === 'user_prompt');
+    assert.equal(resolved.events.filter((e) => e.resolvedAt && e.resolution === 'user_prompt').length, 1);
+    assert.equal(resolved.events.find((e) => e.id === req.id)?.resolution, undefined, 'agent_needs_input must stay open');
   });
 
   it('preview-conversation mail and child-idle style mail nudge as injected (resolve nothing)', async (t) => {
@@ -359,6 +359,7 @@ describe('injected prefix sources (plugin self-submits)', () => {
   it('a human prompt merely containing a marker mid-text stays human', async (t) => {
     const f = await fixture(t);
     const { req } = await openTwo(f);
+    const perm = (await f.attention.record('s1', 'Notification', { notification_type: 'permission_prompt', message: 'Approve?' }))!;
     const midMarkers = [
       'please check [ftown msg from ftown-mail] this for me',
       'here is the wake: FTown mail may be available. If this prompt',
@@ -369,10 +370,11 @@ describe('injected prefix sources (plugin self-submits)', () => {
     }
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit', prompt: midMarkers[0] });
     const page = await f.attention.list('s1');
-    assert.equal(page.events.length, 1, 'mid-text marker must stay human (resolves agent_needs_input)');
+    assert.equal(page.events.length, 2, 'mid-text marker must stay human (resolves only non-explicit)');
     assert.equal(f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, undefined);
     const all = await f.attention.list('s1', { includeResolved: true });
-    assert.equal(all.events.find((e) => e.id === req.id)?.resolution, 'user_prompt');
+    assert.equal(all.events.find((e) => e.id === perm.id)?.resolution, 'user_prompt');
+    assert.equal(all.events.find((e) => e.id === req.id)?.resolution, undefined);
   });
 
   it('opencode bridge-side handoff applies the no-prompt 15s rule', async (t) => {
@@ -384,7 +386,7 @@ describe('injected prefix sources (plugin self-submits)', () => {
     assert.equal(f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, true);
     await settle(f.clock, 16_000);
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit' });
-    assert.equal((await f.attention.list('s1')).events.length, 1, 'no-prompt 16s after handoff resolves agent_needs_input');
+    assert.equal((await f.attention.list('s1')).events.length, 2, 'no-prompt 16s after handoff is human and leaves explicit open');
     assert.equal(f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, undefined);
   });
 
@@ -432,7 +434,7 @@ describe('injected prefix sources (plugin self-submits)', () => {
     assert.equal(f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, true);
     await settle(f.clock, 2_000);
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit' });
-    assert.equal((await f.attention.list('s1')).events.length, 1, 'second no-prompt hook 2s later is human');
+    assert.equal((await f.attention.list('s1')).events.length, 2, 'second no-prompt hook 2s later is human (explicit stays)');
     assert.equal(f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, undefined);
     // Text rule not consumed: two prefixed prompts are both injected.
     const f2 = await fixture(t);

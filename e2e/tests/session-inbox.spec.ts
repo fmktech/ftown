@@ -84,21 +84,21 @@ test("mail nudge survives agent mail, highlights the trigger and pops up on open
     await trigger.click();
     await expect(page.getByRole("region", { name: "Inbox", exact: true }).locator(`[data-inbox-entry="${idA}"]`)).toBeVisible();
     await page.getByRole("region", { name: "Inbox", exact: true }).getByRole("button", { name: "Back to workspace" }).click();
-    // Opening A from the session list shows the popup.
+    // Opening A from the session list shows the waiting pane (no floating popup).
     await expect(row(nameA)).toBeVisible({ timeout: 30_000 });
     await row(nameA).click();
-    const popup = page.getByRole("region", { name: "Waiting for you" });
-    await expect(popup).toBeVisible();
-    await expect(popup.getByText(`Please review A ${stamp}`)).toBeVisible();
-    // Replying from the popup resolves exactly that item ('replied') and the popup goes away.
-    await popup.getByLabel(`Reply to ${nameA}`).fill(`Popup reply ${stamp}`);
-    await popup.getByRole("button", { name: "Send reply" }).click();
+    const pane = page.getByRole("region", { name: "Waiting for you" });
+    await expect(pane).toBeVisible();
+    await expect(pane.getByText(`Please review A ${stamp}`)).toBeVisible();
+    // Replying from the pane resolves exactly that item ('replied') and the pane goes away.
+    await pane.getByLabel(`Reply to ${nameA}`).fill(`Pane reply ${stamp}`);
+    await pane.getByRole("button", { name: "Send reply" }).click();
     await expect.poll(async () => {
       const after = await bridgeApiFetch("GET", `/api/sessions/${idA}/attention/${itemId}`);
       const event = (after.body as { event?: { resolvedAt?: string; resolution?: string } }).event;
       return event?.resolvedAt ? event.resolution : "open";
     }, { timeout: 30_000 }).toBe("replied");
-    await expect(popup).toHaveCount(0);
+    await expect(pane).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Inbox, 0 messages" })).toBeVisible();
     await expect.poll(() => page.title()).not.toMatch(/^\(\d+\) /);
   } finally {
@@ -220,7 +220,7 @@ async function page1DismissCurrent(page: Page, id: string): Promise<void> {
   await item.getByRole("button", { name: "Dismiss" }).click();
 }
 
-test("popup keeps terminal focus and Escape returns to the terminal", async ({ page }) => {
+test("waiting pane keeps terminal focus when selecting and typing", async ({ page }) => {
   test.setTimeout(180_000);
   await page.setViewportSize({ width: 1280, height: 900 });
   await login(page); await waitForBridgeOnline(page);
@@ -241,11 +241,8 @@ test("popup keeps terminal focus and Escape returns to the terminal", async ({ p
     await expect(page.locator(".xterm-rows").first()).toBeVisible({ timeout: 30_000 });
     await page.locator(".xterm").first().click();
     await expect.poll(() => page.evaluate(() => (document.activeElement as HTMLElement | null)?.className ?? "")).toContain("xterm-helper-textarea");
+    // The side pane appearing alongside the terminal did not steal focus.
     await expect(popup).toBeVisible();
-    await popup.getByRole("button", { name: "Hide" }).focus();
-    await page.keyboard.press("Escape");
-    await expect(popup).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Waiting for you" })).toBeVisible();
     await expect.poll(() => page.evaluate(() => (document.activeElement as HTMLElement | null)?.className ?? "")).toContain("xterm-helper-textarea");
   } finally { if (id) await bridgeApiFetch("DELETE", `/api/sessions/${id}`).catch(() => undefined); }
 });

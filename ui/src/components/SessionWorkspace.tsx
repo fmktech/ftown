@@ -10,14 +10,21 @@ import { usePreviewConversation } from '@/hooks/usePreviewConversation';
 import { PreviewConversation } from './PreviewConversation';
 import { PullRequestReview } from './PullRequestReview';
 import type { SessionActivity } from '@/hooks/useAllSessionEvents';
+import type { AttentionAnswerEntry } from '../../../bridge/src/attention-prompt-protocol';
+import type { AttentionAnswerSubmitResult } from './AttentionAnswerForm';
+import { InboxItemBody, type InboxEntry } from './SessionInbox';
 import { clampPreviewRatio, isPreviewDescriptor, markdownPreviewDocument, previewDocument, previewRatioBounds } from '@/lib/session-preview';
 import { previewScrollOwnerKey } from '@/lib/preview-scroll-protocol';
 
 interface Props {
   session: Session | null; client: MessageClient | null; userId: string; readable: boolean;
   sendCommand: BridgeRpc['sendCommand']; subscribeAuthority?: SessionPreviewAuthoritySubscriber; securityGeneration: number; open: boolean; onClose: () => void;
-  isDesktop: boolean; mobileTab: 'sessions' | 'terminal' | 'preview' | 'review'; onMobileTab: (tab: 'terminal' | 'preview' | 'review') => void;
+  isDesktop: boolean; mobileTab: 'sessions' | 'terminal' | 'preview' | 'review' | 'waiting'; onMobileTab: (tab: 'terminal' | 'preview' | 'review' | 'waiting') => void;
   reviewOpen?: boolean; reviewActivation?: number; onCloseReview?: () => void;
+  waitingEntry?: InboxEntry | null; waitingActivation?: number;
+  onWaitingOpenSession?: (id: string) => void; onWaitingDismiss?: (entry: InboxEntry) => Promise<void>;
+  onWaitingReply?: (entry: InboxEntry, message: string) => Promise<void>;
+  onWaitingAnswer?: (entry: InboxEntry, answers: AttentionAnswerEntry[]) => Promise<AttentionAnswerSubmitResult>;
   onRefit: () => void; children: ReactNode; sessions?: Session[]; activity?: SessionActivity;
 }
 type PreviewErrorReason = 'missing' | 'too_large' | 'invalid_utf8' | 'invalid_file' | 'unavailable';
@@ -30,12 +37,12 @@ function previewErrorMessage(reason: PreviewErrorReason, fileName: string): stri
     case 'unavailable': return `${fileName} is unavailable`;
   }
 }
-export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {} }: Props) {
+export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {}, waitingEntry = null, waitingActivation = 0, onWaitingOpenSession = () => {}, onWaitingDismiss = async () => {}, onWaitingReply = async () => {}, onWaitingAnswer = async (): Promise<AttentionAnswerSubmitResult> => ({ ok: false, message: 'Unavailable' }) }: Props) {
   const mainRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   const [ratio, setRatio] = useState(50);
-  const [compactTab, setCompactTab] = useState<'terminal' | 'preview' | 'review'>('preview');
-  const [auxTab, setAuxTab] = useState<'preview' | 'review'>('preview');
+  const [compactTab, setCompactTab] = useState<'terminal' | 'preview' | 'review' | 'waiting'>('preview');
+  const [auxTab, setAuxTab] = useState<'preview' | 'review' | 'waiting'>('preview');
   const [conversationOpen, setConversationOpen] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -95,11 +102,14 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
 
   const compact = !isDesktop || width < 640;
   const showPreview = !!target && open;
+  const hasWaiting = !!waitingEntry;
   const rawView = compact ? (isDesktop ? compactTab : mobileTab) : auxTab;
-  const view = rawView === 'preview' && !showPreview ? (reviewOpen ? 'review' : 'terminal') : rawView === 'review' && !reviewOpen ? (showPreview ? 'preview' : 'terminal') : rawView;
+  const view = rawView === 'preview' && !showPreview ? (reviewOpen ? 'review' : 'terminal') : rawView === 'review' && !reviewOpen ? (showPreview ? 'preview' : 'terminal') : rawView === 'waiting' && !hasWaiting ? (reviewOpen ? 'review' : showPreview ? 'preview' : 'terminal') : rawView;
   const previousView = useRef({ showPreview, view });
   const previewDisappeared = previousView.current.showPreview && !showPreview && previousView.current.view === 'preview';
-  const activeExpanded = expanded && rawView === view && view !== 'terminal' && !previewDisappeared;
+  const activeExpanded = expanded && rawView === view && view !== 'terminal' && view !== 'waiting' && !previewDisappeared;
+  const waitingVisible = hasWaiting && view === 'waiting';
+  const waitingKey = waitingEntry ? `${waitingEntry.session.id}:${waitingEntry.notice.attentionId ?? ''}:${waitingEntry.notice.receivedAt}` : '';
   const previewVisible = !!target && open && view === 'preview';
   const { state, refresh, getHardEpoch } = useSessionPreview({ client, userId, target, visible: previewVisible, readable, securityGeneration, sendCommand, subscribeAuthority });
   const owner = target ? previewScrollOwnerKey({ userId, bridgeId: target.bridgeId, sessionId: target.sessionId, previewId: target.preview.id, fileId: target.file.id }) : '';
@@ -128,7 +138,10 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     const observer = new ResizeObserver(entries => setWidth(entries[0]?.contentRect.width ?? 0));
     observer.observe(node); return () => observer.disconnect();
   }, []);
-  useEffect(() => { setCompactTab('preview'); setAuxTab('preview'); setExpanded(false); setConversationOpen(false); }, [session?.bridgeId, session?.id]);
+  useEffect(() => { setCompactTab(hasWaiting ? 'waiting' : 'preview'); setAuxTab(hasWaiting ? 'waiting' : 'preview'); setExpanded(false); setConversationOpen(false); if (!isDesktop && hasWaiting) onMobileTab('waiting'); }, [session?.bridgeId, session?.id]);
+  // C2: a waiting item arriving while the session is open switches the pane to Waiting (no focus steal).
+  useEffect(() => { if (waitingKey) { setCompactTab('waiting'); setAuxTab('waiting'); setExpanded(false); if (!isDesktop) onMobileTab('waiting'); } }, [waitingKey, isDesktop, onMobileTab]);
+  useEffect(() => { if (waitingActivation) { setCompactTab('waiting'); setAuxTab('waiting'); setExpanded(false); if (!isDesktop) onMobileTab('waiting'); } }, [waitingActivation, isDesktop, onMobileTab]);
   const previewId = descriptor?.id;
   const previousPreviewId = useRef(previewId);
   useEffect(() => {
@@ -146,7 +159,7 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     else if (!isDesktop && mobileTab === 'review' && !reviewOpen) onMobileTab(showPreview ? 'preview' : 'terminal');
   }, [showPreview, reviewOpen, isDesktop, mobileTab, onMobileTab]);
   useEffect(() => {
-    if (expanded && (previewDisappeared || rawView !== view || view === 'terminal')) setExpanded(false);
+    if (expanded && (previewDisappeared || rawView !== view || view === 'terminal' || view === 'waiting')) setExpanded(false);
     previousView.current = { showPreview, view };
   }, [expanded, previewDisappeared, rawView, view, showPreview]);
   useEffect(() => { if (!open && !reviewOpen) { setExpanded(false); setConversationOpen(false); } }, [open, reviewOpen]);
@@ -172,12 +185,13 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     const next = event.key === 'ArrowLeft' ? actualRatio - 2 : event.key === 'ArrowRight' ? actualRatio + 2 : event.key === 'Home' ? min : event.key === 'End' ? max : null;
     if (next !== null) { event.preventDefault(); setSplit(next); }
   };
-  const hasAux = showPreview || reviewOpen;
-  const tabs: ('terminal' | 'preview' | 'review')[] = [...(compact ? ['terminal' as const] : []), ...(showPreview ? ['preview' as const] : []), ...(reviewOpen ? ['review' as const] : [])];
-  const choose = (tab: 'terminal' | 'preview' | 'review') => { if (tab !== 'terminal') { setAuxTab(tab); setCompactTab(tab); } else setCompactTab(tab); if (compact && !isDesktop) onMobileTab(tab); };
+  const hasAux = showPreview || reviewOpen || hasWaiting;
+  const auxTabs: ('preview' | 'review' | 'waiting')[] = [...(hasWaiting ? ['waiting' as const] : []), ...(showPreview ? ['preview' as const] : []), ...(reviewOpen ? ['review' as const] : [])];
+  const tabs: ('terminal' | 'preview' | 'review' | 'waiting')[] = [...(compact ? ['terminal' as const] : []), ...auxTabs];
+  const choose = (tab: 'terminal' | 'preview' | 'review' | 'waiting') => { if (tab !== 'terminal') { setAuxTab(tab); setCompactTab(tab); } else setCompactTab(tab); if (compact && !isDesktop) onMobileTab(tab); };
   const tabKeys = (event: KeyboardEvent<HTMLDivElement>) => {
     if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
-      event.preventDefault(); const index = Math.max(0, tabs.indexOf(view as 'terminal' | 'preview' | 'review'));
+      event.preventDefault(); const index = Math.max(0, tabs.indexOf(view as 'terminal' | 'preview' | 'review' | 'waiting'));
       const next = event.key === 'Home' ? tabs[0] : event.key === 'End' ? tabs[tabs.length - 1] : tabs[(index + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
       choose(next); (event.currentTarget.querySelector(`[data-preview-tab="${next}"]`) as HTMLButtonElement | null)?.focus();
     }
@@ -204,13 +218,13 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     if (activeExpanded && event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); setExpanded(false); }
   }}>
     {hasAux && compact && isDesktop && !activeExpanded && <div role="tablist" aria-label="Session view" onKeyDown={tabKeys} className="session-preview-tabs">
-      {tabs.map(tab => <button key={tab} id={`compact-${tab}-tab`} data-preview-tab={tab} role="tab" aria-selected={view === tab} aria-controls={`session-${tab}-panel`} tabIndex={view === tab ? 0 : -1} onClick={() => choose(tab)} className={`mobile-tab ${view === tab ? 'mobile-tab-active' : ''}`}>{tab === 'terminal' ? 'Terminal' : tab === 'preview' ? 'Preview' : 'PR review'}</button>)}
+      {tabs.map(tab => <button key={tab} id={`compact-${tab}-tab`} data-preview-tab={tab} role="tab" aria-selected={view === tab} aria-controls={`session-${tab}-panel`} tabIndex={view === tab ? 0 : -1} onClick={() => choose(tab)} className={`mobile-tab ${view === tab ? 'mobile-tab-active' : ''}`}>{tab === 'terminal' ? 'Terminal' : tab === 'preview' ? 'Preview' : tab === 'waiting' ? `Waiting (${auxTabs.filter(t => t === 'waiting').length || 1})` : 'PR review'}</button>)}
     </div>}
     <div className="session-workspace-panes">
       <div id="session-terminal-panel" role={compact && hasAux ? 'tabpanel' : undefined} aria-label="Terminal" hidden={!terminalVisible} className="session-terminal-pane" style={hasAux && !compact && !activeExpanded ? { flex: `0 0 calc((100% - 8px) * ${actualRatio / 100})` } : undefined}>{children}</div>
       {hasAux && !compact && !activeExpanded && <div role="separator" aria-label="Resize terminal and preview" aria-orientation="vertical" aria-valuemin={Number(min.toFixed(1))} aria-valuemax={Number(max.toFixed(1))} aria-valuenow={Number(actualRatio.toFixed(1))} tabIndex={0} className="session-preview-separator" onPointerDown={start} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish} onLostPointerCapture={finish} onKeyDown={keyDown} onDoubleClick={() => setSplit(50)} />}
       {hasAux && <div className="session-aux-pane" hidden={compact && view === 'terminal'}>
-      {!compact && showPreview && reviewOpen && <div role="tablist" aria-label="Auxiliary view" onKeyDown={tabKeys} className="session-preview-tabs">{tabs.map(tab => <button key={tab} data-preview-tab={tab} role="tab" aria-selected={view === tab} aria-controls={`session-${tab}-panel`} tabIndex={view === tab ? 0 : -1} onClick={() => choose(tab)} className={`mobile-tab ${view === tab ? 'mobile-tab-active' : ''}`}>{tab === 'preview' ? 'Preview' : 'PR review'}</button>)}</div>}
+      {!compact && auxTabs.length > 1 && <div role="tablist" aria-label="Auxiliary view" onKeyDown={tabKeys} className="session-preview-tabs">{auxTabs.map(tab => <button key={tab} data-preview-tab={tab} role="tab" aria-selected={view === tab} aria-controls={`session-${tab}-panel`} tabIndex={view === tab ? 0 : -1} onClick={() => choose(tab)} className={`mobile-tab ${view === tab ? 'mobile-tab-active' : ''}`}>{tab === 'preview' ? 'Preview' : tab === 'waiting' ? `Waiting (${auxTabs.filter(t => t === 'waiting').length || 1})` : 'PR review'}</button>)}</div>}
       {showPreview && <section id="session-preview-panel" role={compact || reviewOpen ? 'tabpanel' : 'region'} aria-label="Session preview" hidden={!frameVisible} className="session-preview-pane">
         <div className="session-preview-toolbar">
           {files.length < 2 ? (
@@ -269,6 +283,14 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
         </div>
       </section>}
       {reviewOpen && <PullRequestReview session={session} client={client} userId={userId} visible={reviewVisible} readable={readable} securityGeneration={securityGeneration} sendCommand={sendCommand} subscribeAuthority={subscribeAuthority} onClose={onCloseReview} expanded={activeExpanded} onExpand={() => setExpanded(value => !value)} />}
+      {hasWaiting && <section id="session-waiting-panel" role="region" aria-label="Waiting for you" hidden={!waitingVisible} className="session-preview-pane">
+        <div className="session-preview-toolbar"><span className="session-preview-filename">Waiting for you</span></div>
+        <div className="session-preview-content" style={{ overflowY: 'auto' }}>
+          {waitingEntry ? <div className="min-w-0 space-y-2" key={waitingEntry.notice.attentionId ? `att:${waitingEntry.notice.attentionId}` : `sess:${waitingEntry.session.id}@${waitingEntry.notice.receivedAt}`}>
+            <InboxItemBody entry={waitingEntry} onOpenSession={onWaitingOpenSession} onDismiss={onWaitingDismiss} onReply={onWaitingReply} onAnswer={onWaitingAnswer} hideOpenSession />
+          </div> : null}
+        </div>
+      </section>}
       </div>}
     </div>
   </div>;
