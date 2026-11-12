@@ -29,12 +29,20 @@ test('shared request encrypts bodies and caller metadata, preserves API errors, 
 
 test('pointer is read lazily and validates its local port', () => {
   const previous = process.env.HOME; const home = mkdtempSync(join(tmpdir(), 'ftown-pointer-')); process.env.HOME = home;
+  const previousDataDir = process.env.FTOWN_DATA_DIR;
+  // Isolate from inherited FTOWN_DATA_DIR: bridgePointerPath() would otherwise
+  // resolve to the production data dir's bridge.json instead of this temp home.
+  process.env.FTOWN_DATA_DIR = join(home, '.ftown', 'data');
   try {
     assert.throws(loadPointer, /Bridge not running/);
     mkdirSync(join(home, '.ftown')); const path = join(home, '.ftown/bridge.json');
     writeFileSync(path, '{"port":1234,"token":"new"}'); assert.equal(loadPointer().token, 'new');
     writeFileSync(path, '{"port":70000,"token":"new"}'); assert.throws(loadPointer, /Invalid/);
-  } finally { if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous; rmSync(home, { recursive: true, force: true }); }
+  } finally {
+    if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous;
+    if (previousDataDir === undefined) delete process.env.FTOWN_DATA_DIR; else process.env.FTOWN_DATA_DIR = previousDataDir;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('mail groups preserve inbox queries and send payload through authenticated envelopes', async () => {

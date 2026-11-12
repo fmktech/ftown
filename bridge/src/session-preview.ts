@@ -157,7 +157,7 @@ export async function preparePreviewAdd(
   existing: { preview: SessionPreviewDescriptor; previewSource: SessionPreviewSource },
   addedPaths: unknown,
 ): Promise<{ preview: SessionPreviewDescriptor; previewSource: SessionPreviewSource }> {
-  if (!Array.isArray(addedPaths) || addedPaths.length < 1 || addedPaths.length > PREVIEW_MAX_FILES || !session.workingDir) invalid();
+  if (!Array.isArray(addedPaths) || addedPaths.length < 1 || !session.workingDir) invalid();
   for (const path of addedPaths) {
     if (typeof path !== 'string' || !safePath(path) || !isAbsolute(path) || resolve(path) !== path) invalid();
   }
@@ -188,7 +188,8 @@ export async function preparePreviewAdd(
     for (const entry of resolvedIncoming) {
       if (!existingByName.has(entry.fileName)) newCount++;
     }
-    if (existing.preview.files.length + newCount > PREVIEW_MAX_FILES) invalid();
+    const resultingCount = existing.preview.files.length + newCount;
+    if (resultingCount > PREVIEW_MAX_FILES) invalid(`Preview file limit is ${PREVIEW_MAX_FILES} files: ${resultingCount} would be registered`);
     await validateRoot(session.workingDir, root);
     for (const entry of resolvedIncoming) {
       await validateFileEntry(root, entry.filePath);

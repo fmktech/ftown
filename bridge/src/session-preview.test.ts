@@ -104,6 +104,31 @@ test('the 13th file is rejected and the registered set is unchanged (all-or-noth
   await assertPreviewError(preparePreview(session, paths[0]), 'invalid_file');
 });
 
+test('addPreview over the 12-file limit names the limit and the resulting count, set unchanged', async t => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'ftown-preview-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const paths: string[] = [];
+  for (let i = 0; i < PREVIEW_MAX_FILES; i++) {
+    const path = join(root, `g${i}.html`);
+    await writeFile(path, `<p>${i}</p>`);
+    paths.push(path);
+  }
+  const session = makeSession(root);
+  const twelve = await preparePreview(session, paths);
+  session.preview = twelve.preview;
+  session.previewSource = twelve.previewSource;
+  const thirteenth = join(root, 'g12.html');
+  await writeFile(thirteenth, '<p>13</p>');
+  const error = await assertPreviewError(
+    preparePreviewAdd(session, { preview: twelve.preview, previewSource: twelve.previewSource }, [thirteenth]),
+    'invalid_file',
+  );
+  assert.match(error.message, /Preview file limit is 12 files: 13 would be registered/);
+  assert.equal(session.preview?.id, twelve.preview.id);
+  assert.equal(session.preview?.files.length, PREVIEW_MAX_FILES);
+  assert.equal(twelve.preview.files.length, PREVIEW_MAX_FILES);
+});
+
 test('duplicate basenames are rejected and the duplicate is named', async t => {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'ftown-preview-'));
   t.after(() => rm(root, { recursive: true, force: true }));

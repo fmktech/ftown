@@ -12,6 +12,7 @@ async function fixture(run: (requests: Request[], output: string[]) => Promise<v
   const home = mkdtempSync(join(tmpdir(), 'ftown-sessions-unit-'));
   const previousHome = process.env.HOME;
   const previousSession = process.env.FTOWN_SESSION_ID;
+  const previousDataDir = process.env.FTOWN_DATA_DIR;
   const previousFetch = globalThis.fetch;
   const previousLog = console.log;
   const previousError = console.error;
@@ -19,6 +20,9 @@ async function fixture(run: (requests: Request[], output: string[]) => Promise<v
   mkdirSync(join(home, '.ftown'));
   process.env.HOME = home;
   delete process.env.FTOWN_SESSION_ID;
+  // Isolate from inherited FTOWN_DATA_DIR: bridgePointerPath() would otherwise
+  // resolve to the production data dir's bridge.json instead of this temp home.
+  process.env.FTOWN_DATA_DIR = join(home, '.ftown', 'data');
   const secure = await secureFixture(join(home, '.ftown'), async (url, init) => {
     requests.push({ url: String(url), method: init?.method ?? 'GET', ...(init?.body ? { body: JSON.parse(String(init.body)) as unknown } : {}) });
     return new Response(JSON.stringify(reply ? reply(requests.at(-1)!) : { session: { id: 'created', name: 'unit', status: 'idle' }, sessions: [], messages: [] }));
@@ -31,6 +35,7 @@ async function fixture(run: (requests: Request[], output: string[]) => Promise<v
   finally {
     if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
     if (previousSession === undefined) delete process.env.FTOWN_SESSION_ID; else process.env.FTOWN_SESSION_ID = previousSession;
+    if (previousDataDir === undefined) delete process.env.FTOWN_DATA_DIR; else process.env.FTOWN_DATA_DIR = previousDataDir;
     await secure.security.close();
     globalThis.fetch = previousFetch; console.log = previousLog; console.error = previousError;
     rmSync(home, { recursive: true, force: true });

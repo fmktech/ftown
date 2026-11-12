@@ -201,6 +201,10 @@ test('all-or-nothing: one bad path or duplicate basename leaves the set unchange
   await writeFile(thirteenth, '# 13');
   const overflow = await controller.addPreview('sess-1', [thirteenth]);
   assert.ok(!overflow.ok);
+  if (!overflow.ok) {
+    assert.equal(overflow.code, 'invalid');
+    assert.match(overflow.message, /Preview file limit is 12 files: 13 would be registered/);
+  }
   assert.equal(store.sessions.get('sess-1')!.preview!.id, twelveId);
   assert.equal(store.sessions.get('sess-1')!.preview!.files.length, 12);
 });
