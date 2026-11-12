@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { expect, type Page } from "@playwright/test";
@@ -6,6 +7,7 @@ import { test } from "../helpers/fixtures";
 import { login, sharedAccountId, waitForBridgeOnline } from "../helpers/app";
 import { bridgeApiFetch } from "../helpers/bridge-api";
 import { BRIDGE_HOME, E2E_DIR } from "../helpers/config";
+import { createPreviewFixture, previewSimpleHtml } from "../helpers/session-preview";
 const execute = promisify(execFile);
 for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "mobile", width: 320, height: 844 }]) {
   test(`inbox queues a durable reply and dismissal survives reload on ${viewport.name}`, async ({ page }, info) => {
@@ -22,7 +24,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       await expect(item.getByText("Review requested", { exact: true })).toBeVisible(); await expect(item.locator("p.whitespace-pre-wrap")).toHaveText(message);
       const openSession = item.getByRole("button", { name: "Open session" }); await openSession.focus(); await page.keyboard.press("Enter"); await expect(inbox).toBeHidden();
       await expect(page.getByRole("region", { name: `Session workspace: ${name}` })).toBeFocused();
-      if (viewport.name === "mobile") { await expect(page.getByRole("tab", { name: "Terminal", exact: true })).toHaveAttribute("aria-selected", "true"); await page.getByRole("tab", { name: "Workspace", exact: true }).click(); }
+      if (viewport.name === "mobile") { await expect(page.getByRole("tab", { name: "Waiting (1)" })).toHaveAttribute("aria-selected", "true"); await page.getByRole("tab", { name: "Workspace", exact: true }).click(); }
       await trigger.click(); await expect(item).toBeVisible();
       expect(await inbox.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await page.screenshot({ path: info.outputPath(`session-inbox-${viewport.name}.png`), fullPage: true });
@@ -233,16 +235,16 @@ test("waiting pane keeps terminal focus when selecting and typing", async ({ pag
     const created = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name } });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     id = (created.body as { session: { id: string } }).session.id;
-    await execute(process.execPath, [FTOWN_CLI, "sessions", "attention", "--title", "Focus", "--message", `Please review ${stamp}`], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: id }, timeout: 30_000 });
     await expect(row(name)).toBeVisible({ timeout: 30_000 });
     await row(name).click();
-    const popup = page.getByRole("region", { name: "Waiting for you" });
-    await expect(popup).toBeVisible();
     await expect(page.locator(".xterm-rows").first()).toBeVisible({ timeout: 30_000 });
     await page.locator(".xterm").first().click();
     await expect.poll(() => page.evaluate(() => (document.activeElement as HTMLElement | null)?.className ?? "")).toContain("xterm-helper-textarea");
-    // The side pane appearing alongside the terminal did not steal focus.
-    await expect(popup).toBeVisible();
+    // The pane appears only after the real CLI raises the item; focus must stay in the terminal.
+    await execute(process.execPath, [FTOWN_CLI, "sessions", "attention", "--title", "Focus", "--message", `Please review ${stamp}`], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: id }, timeout: 30_000 });
+    const popup = page.getByRole("region", { name: "Waiting for you" });
+    await expect(popup).toBeVisible({ timeout: 30_000 });
+    await expect(popup.getByText(`Please review ${stamp}`)).toBeVisible();
     await expect.poll(() => page.evaluate(() => (document.activeElement as HTMLElement | null)?.className ?? "")).toContain("xterm-helper-textarea");
   } finally { if (id) await bridgeApiFetch("DELETE", `/api/sessions/${id}`).catch(() => undefined); }
 });
@@ -268,4 +270,53 @@ test("mobile Workspace tab keeps its name with a waiting description", async ({ 
     await expect(page.locator("#mobile-tab-inbox-waiting")).toHaveText("1 waiting");
     expect(await workspaceTab.locator(".mobile-tab-inbox-badge").textContent()).toBe("1");
   } finally { if (id) await bridgeApiFetch("DELETE", `/api/sessions/${id}`).catch(() => undefined); }
+});
+
+test("preview showing switches to the waiting item, file back, reply returns to file", async ({ page }) => {
+  test.setTimeout(240_000);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const fixture = await createPreviewFixture();
+  let id = "";
+  try {
+    await login(page); await waitForBridgeOnline(page);
+    const stamp = Date.now().toString(36);
+    const name = `Pane ${stamp}`;
+    await writeFile(join(fixture.directory, "a.html"), previewSimpleHtml(`Pane ${stamp}`, 1), "utf8");
+    id = await fixture.create(name);
+    await fixture.register(id, "a.html");
+    const row = page.locator('#dashboard-sidebar button[draggable="true"]').filter({ has: page.getByText(name, { exact: true }) });
+    await expect(row).toBeVisible({ timeout: 30_000 });
+    await row.click();
+    const iframe = page.frameLocator('iframe[title="Preview: a.html"]');
+    await expect(iframe.locator(`text=Pane ${stamp}`).first()).toBeVisible({ timeout: 30_000 });
+    // Item arrives while the file is showing: the pane switches to the item.
+    await execute(process.execPath, [join(E2E_DIR, "..", "bridge/dist/ftown-cli.js"), "sessions", "attention", "--title", "Pane ask", "--message", `Please review ${stamp}`], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: id }, timeout: 30_000 });
+    const pane = page.getByRole("region", { name: "Waiting for you" });
+    await expect(pane).toBeVisible({ timeout: 30_000 });
+    await expect(pane.getByText(`Please review ${stamp}`)).toBeVisible();
+    // Choosing the file tab brings the file back with the item still in the Inbox.
+    const list = page.getByRole("tablist", { name: "Side pane view" });
+    await list.getByRole("tab", { name: "a.html" }).click();
+    await expect(iframe.locator(`text=Pane ${stamp}`).first()).toBeVisible({ timeout: 30_000 });
+    await page.getByRole("button", { name: "Inbox, 1 waiting" }).click();
+    await expect(page.getByRole("region", { name: "Inbox", exact: true }).locator(`[data-inbox-entry="${id}"]`)).toBeVisible({ timeout: 30_000 });
+    await page.getByRole("region", { name: "Inbox", exact: true }).getByRole("button", { name: "Back to workspace" }).click();
+    // Back on the waiting view, reply returns the pane to the file.
+    await pane.getByRole("tab", { name: "Waiting (1)" }).click().catch(() => undefined);
+    const waitTab = page.getByRole("tab", { name: "Waiting for you" });
+    await waitTab.click().catch(() => undefined);
+    await expect(pane).toBeVisible({ timeout: 30_000 });
+    await pane.getByLabel(`Reply to ${name}`).fill(`Pane reply ${stamp}`);
+    await pane.getByRole("button", { name: "Send reply" }).click();
+    await expect.poll(async () => {
+      const listed = await bridgeApiFetch("GET", `/api/sessions/${id}/attention`);
+      const events = (listed.body as { events: Array<{ resolvedAt?: string; resolution?: string }> }).events;
+      return events.some((event) => event.resolvedAt && event.resolution === "replied");
+    }, { timeout: 30_000 }).toBe(true);
+    await expect(pane).toHaveCount(0);
+    await expect(iframe.locator(`text=Pane ${stamp}`).first()).toBeVisible({ timeout: 30_000 });
+  } finally {
+    await fixture.cleanup().catch(() => undefined);
+    void id;
+  }
 });

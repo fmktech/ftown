@@ -303,11 +303,11 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
         </div>
       </section>}
       {reviewOpen && <PullRequestReview session={session} client={client} userId={userId} visible={reviewVisible} readable={readable} securityGeneration={securityGeneration} sendCommand={sendCommand} subscribeAuthority={subscribeAuthority} onClose={onCloseReview} expanded={activeExpanded} onExpand={() => setExpanded(value => !value)} />}
-      {hasWaiting && <section id="session-waiting-panel" role="region" aria-label="Waiting for you" hidden={!waitingVisible} className="session-preview-pane">
+      {hasWaiting && <section id="session-waiting-panel" role="region" aria-label="Waiting for you" hidden={!waitingVisible} className="session-preview-pane" onKeyDown={event => { if (event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); attention?.onHide(); } }}>
         <div className="session-preview-toolbar">{fileSelector}<button type="button" className="btn-ghost session-preview-icon" aria-label="Close waiting" title="Close waiting" onClick={() => attention?.onHide()}>
             <svg aria-hidden="true" focusable="false" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M5 5l14 14M19 5 5 19" /></svg>
           </button></div>
-        <div className="session-preview-content p-3" style={{ overflowY: 'auto' }} onKeyDown={event => { if (event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); attention?.onHide(); } }}>
+        <div className="session-preview-content p-3" style={{ overflowY: 'auto' }}>
           {attention ? <div className="min-w-0 space-y-2" key={inboxItemKey(attention.entry)}>
             <InboxItemBody entry={attention.entry} onOpenSession={() => {}} onDismiss={entry => { attention.onDismiss(entry); return Promise.resolve(); }} onReply={attention.onReply} onAnswer={attention.onAnswer} hideOpenSession />
           </div> : null}

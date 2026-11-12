@@ -946,6 +946,52 @@ it('switches to the waiting pane when an item arrives while the session is open,
   expect(document.activeElement).toBe(terminal);
 });
 
+it('a preview registered while the question is shown keeps the question', () => {
+  resizeTo(900);
+  const noPreview: Session = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '' };
+  const withPreview: Session = { ...noPreview, preview: { id: '12345678-1234-4234-8234-123456789abc', files: [{ id: '22345678-2234-4234-8234-123456789abc', fileName: 'demo.html', kind: 'html' }] } };
+  const ws = (s: Session) => (
+    <SessionWorkspace session={s} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()} attention={{ entry: waitingEntryFor(), shown: true, onShow: vi.fn(), onHide: vi.fn(), ...waitingProps }}><div>Terminal</div></SessionWorkspace>
+  );
+  const { rerender } = render(ws(noPreview));
+  expect(screen.getByRole('region', { name: 'Waiting for you' }).hidden).toBe(false);
+  rerender(ws(withPreview));
+  expect(screen.getByRole('region', { name: 'Waiting for you' }).hidden).toBe(false);
+});
+
+it('choosing a file hides attention and keeps the file selection when returning', () => {
+  resizeTo(900);
+  const onHide = vi.fn();
+  const session: Session = {
+    id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+    preview: { id: '12345678-1234-4234-8234-123456789abc', files: [
+      { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+      { id: '40000000-4000-4000-8000-000000000002', fileName: 'b.html', kind: 'html' },
+    ] },
+  };
+  render(<SessionWorkspace session={session} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()} attention={{ entry: waitingEntryFor(), shown: true, onShow: vi.fn(), onHide, ...waitingProps }}><div>Terminal</div></SessionWorkspace>);
+  const list = screen.getByRole('tablist', { name: 'Side pane view' });
+  fireEvent.click(within(list).getByRole('tab', { name: 'b.html' }));
+  expect(onHide).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole('region', { name: 'Waiting for you' })).toBeNull();
+});
+
+it('Close in attention falls back to the preview and Escape hides the pane', () => {
+  resizeTo(900);
+  const onHide = vi.fn();
+  const session: Session = {
+    id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+    preview: { id: '12345678-1234-4234-8234-123456789abc', files: [{ id: '22345678-2234-4234-8234-123456789abc', fileName: 'demo.html', kind: 'html' }] },
+  };
+  const { rerender } = render(<SessionWorkspace session={session} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()} attention={{ entry: waitingEntryFor(), shown: true, onShow: vi.fn(), onHide, ...waitingProps }}><div data-testid="terminal-node" tabIndex={-1}>Terminal</div></SessionWorkspace>);
+  expect(screen.getByRole('region', { name: 'Waiting for you' }).hidden).toBe(false);
+  fireEvent.keyDown(screen.getByRole('region', { name: 'Waiting for you' }), { key: 'Escape' });
+  expect(onHide).toHaveBeenCalledTimes(1);
+  rerender(<SessionWorkspace session={session} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()} attention={{ entry: waitingEntryFor(), shown: false, onShow: vi.fn(), onHide, ...waitingProps }}><div data-testid="terminal-node" tabIndex={-1}>Terminal</div></SessionWorkspace>);
+  expect(screen.queryByRole('region', { name: 'Waiting for you' })).toBeNull();
+  expect(screen.getByTestId('terminal-node')).toBeTruthy();
+});
+
 it('hides the waiting pane after dismiss (entry gone)', () => {
   resizeTo(900);
   const { rerender } = render(waitingWorkspace(waitingEntryFor()));

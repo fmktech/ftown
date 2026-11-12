@@ -38,7 +38,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
         expect(await inbox.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
         if (mobile) { await page.setViewportSize({ width: 320, height: 844 }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); }
         await page.screenshot({ path: info.outputPath(`inbox-${viewport.name}.png`), fullPage: true });
-        await firstEntry.getByRole("button", { name: "Open session" }).click(); await expect(page.locator(".xterm-rows").first()).toContainText(marker, { timeout: 30_000 });
+        await firstEntry.getByRole("button", { name: "Open session" }).click(); if (mobile) await page.getByRole("tab", { name: "Terminal", exact: true }).click(); await expect(page.locator(".xterm-rows").first()).toContainText(marker, { timeout: 30_000 });
         await workspace(); await expect(trigger).toBeVisible(); await openInbox(); await expect(firstEntry.getByText(message, { exact: true })).toBeVisible(); await closeInbox();
         await page.goto("about:blank"); await postHook(first, "UserPromptSubmit"); await page.goto("/dashboard"); await waitForBridgeOnline(page); await workspace();
         // C1: a prompt never auto-resolves explicit items, so both stay waiting.
