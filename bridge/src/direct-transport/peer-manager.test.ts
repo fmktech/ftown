@@ -335,6 +335,19 @@ describe('DirectPeerManager DataChannel protocol', async () => {
     assert.deepStrictEqual(dc.sent.filter((f) => f.sessionId === 'sess-1'), []);
   });
 
+  it('a deferred screen delivered after the peer was torn down attaches and sends nothing', async () => {
+    const delivers: Array<(screen: string) => void> = [];
+    const { manager, peers } = makeManager((_sessionId, deliver) => { delivers.push(deliver); });
+    const { dc } = await attachPeer(manager, peers, 'sess-1');
+    manager.closeAll();
+    const sentBefore = dc.sent.length;
+
+    assert.doesNotThrow(() => delivers[0]('LATE'));
+    manager.sendOutput('sess-1', 'after');
+    assert.strictEqual(manager.hasAttachedPeers('sess-1'), false);
+    assert.strictEqual(dc.sent.length, sentBefore);
+  });
+
   it('re-attaching a session resets seq (screen resync per R1/R7)', async () => {
     const { manager, peers } = makeManager(() => 'SCREEN');
     const { dc } = await attachPeer(manager, peers, 'sess-1');

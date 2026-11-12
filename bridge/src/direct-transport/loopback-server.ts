@@ -134,7 +134,6 @@ class LoopbackPeer {
     this.closed = true;
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.attached.clear();
-    this.attaching.clear();
     this.seq.clear();
     this.secure?.close();
     try { this.ws.close(); } catch { /* already gone */ }
@@ -184,8 +183,9 @@ class LoopbackPeer {
         const request = {};
         this.attaching.set(sessionId, request);
         const deliver = (screen: string): void => {
-          // Superseded by a newer attach, a detach, or the peer closing.
-          if (this.attaching.get(sessionId) !== request) return;
+          // Superseded by a newer attach or a detach. A peer closed meanwhile
+          // is out of its owner's set and cannot send, so nothing reaches it.
+          if (this.closed || this.attaching.get(sessionId) !== request) return;
           this.attaching.delete(sessionId);
           this.attached.add(sessionId);
           this.sendScreen(sessionId, screen);

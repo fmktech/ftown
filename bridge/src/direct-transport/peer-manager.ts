@@ -198,7 +198,6 @@ class DirectPeer {
     if (this.iceDisconnectTimer) clearTimeout(this.iceDisconnectTimer);
     if (this.pairingTimer) clearTimeout(this.pairingTimer);
     this.attached.clear();
-    this.attaching.clear();
     this.seq.clear();
     this.secure?.close();
     try { this.dc?.close(); } catch { /* already gone */ }
@@ -262,8 +261,9 @@ class DirectPeer {
         const request = {};
         this.attaching.set(sessionId, request);
         const deliver = (screen: string): void => {
-          // Superseded by a newer attach, a detach, or the peer closing.
-          if (this.attaching.get(sessionId) !== request) return;
+          // Superseded by a newer attach or a detach. A peer closed meanwhile
+          // is out of its owner's set and cannot send, so nothing reaches it.
+          if (this.closed || this.attaching.get(sessionId) !== request) return;
           this.attaching.delete(sessionId);
           this.attached.add(sessionId);
           this.sendScreen(sessionId, screen);
