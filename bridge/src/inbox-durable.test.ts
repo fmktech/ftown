@@ -390,6 +390,16 @@ describe('injected prefix sources (plugin self-submits)', () => {
     assert.equal(f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, undefined);
   });
 
+  it('injected prompt resolves no non-explicit item either', async (t) => {
+    const f = await fixture(t);
+    const perm = (await f.attention.record('s1', 'Notification', { notification_type: 'permission_prompt', message: 'Approve?' }))!;
+    await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit', prompt: '[ftown msg from ftown-mail] hi' });
+    assert.equal((await f.attention.list('s1')).events.length, 1, 'injected prompt must leave even non-explicit items open');
+    assert.equal(f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, true);
+    const all = await f.attention.list('s1', { includeResolved: true });
+    assert.equal(all.events.find((e) => e.id === perm.id)?.resolution, undefined);
+  });
+
   it('mid-injection (before injectPtyLine resolves) is injected', async (t) => {
     const f = await fixture(t);
     await openTwo(f);

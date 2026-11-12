@@ -52,6 +52,9 @@ export function attentionAnswerSubmitResult(name: string, result: AnswerSessionA
 export function noticeKey(sessionId: string, notice: ManualInputNotice): string {
   return JSON.stringify([sessionId, notice.type, notice.attentionId ?? null, notice.attentionSequence ?? null, notice.receivedAt, notice.title, notice.message]);
 }
+export function inboxItemKey(entry: InboxEntry): string {
+  return entry.notice.attentionId ? `att:${entry.notice.attentionId}` : `sess:${entry.session.id}@${entry.notice.receivedAt}`;
+}
 export function inboxEntries(sessions: readonly Session[], activity: ReadonlyMap<string, SessionActivity>, bridges: readonly BridgeInfo[], hiddenSessions: ReadonlySet<string>, hiddenBridges: ReadonlySet<string>, ready: ReadonlySet<string>, canControl: (bridgeId: string) => boolean): InboxEntry[] {
   return sessions.flatMap(session => {
     const notice = activity.get(session.id)?.attention;

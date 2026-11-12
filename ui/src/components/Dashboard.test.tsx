@@ -390,6 +390,35 @@ describe("waiting side pane", () => {
   });
 });
 
+describe("waiting header button and fallback", () => {
+  it("Close hides the pane and the Waiting header button re-shows the same item", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    dashboard();
+    fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
+    const notice = { type: "agent_needs_input" as const, title: "Review", message: "Inspect", receivedAt: 10 };
+    state.activity = new Map([["ordinary", { activity: "idle", attention: notice }]]);
+    fireEvent.click(screen.getByRole("tab", { name: /^Workspace/ }));
+    expect(screen.getByRole("region", { name: "Waiting for you" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Close waiting" }));
+    expect(screen.queryByRole("region", { name: "Waiting for you" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Waiting for you" }));
+    expect(screen.getByRole("region", { name: "Waiting for you" })).toBeTruthy();
+  });
+  it("after resolve a valid tab is selected (terminal)", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    dashboard();
+    fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
+    const notice = { type: "agent_needs_input" as const, title: "Review", message: "Inspect", receivedAt: 10 };
+    state.activity = new Map([["ordinary", { activity: "idle", attention: notice }]]);
+    fireEvent.click(screen.getByRole("tab", { name: /^Workspace/ }));
+    expect(screen.getByRole("region", { name: "Waiting for you" })).toBeTruthy();
+    state.activity = new Map();
+    fireEvent.click(within(screen.getByRole("tablist", { name: "Workspace navigation" })).getByRole("tab", { name: "Terminal" }));
+    expect(screen.queryByRole("region", { name: "Waiting for you" })).toBeNull();
+    expect(screen.getByTestId("terminal").textContent).toBe("ordinary");
+  });
+});
+
 describe("mobile inbox badge", () => {
   it("shows the workspace badge with an accessible waiting description off the sessions tab", async () => {
     window.matchMedia = vi.fn().mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() });

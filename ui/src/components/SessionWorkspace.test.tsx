@@ -378,7 +378,7 @@ it('shows a tablist for 2-4 files with aria-selected and title ellipsis', () => 
   expect(tabs[0].getAttribute('aria-selected')).toBe('false');
 });
 
-it('shows a native select for 5+ files', () => {
+it('shows a native select for 6+ side pane entries', () => {
   resizeTo(900);
   const session: Session = {
     id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
@@ -390,6 +390,7 @@ it('shows a native select for 5+ files', () => {
         { id: '40000000-4000-4000-8000-000000000003', fileName: 'c.html', kind: 'html' },
         { id: '40000000-4000-4000-8000-000000000004', fileName: 'd.html', kind: 'html' },
         { id: '40000000-4000-4000-8000-000000000005', fileName: 'e.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000006', fileName: 'f.html', kind: 'html' },
       ],
     },
   };
@@ -917,11 +918,11 @@ const waitingEntryFor = (message = 'Waiting message'): InboxEntry => ({
   notice: { type: 'agent_needs_input', title: 'Review', message, receivedAt: 1, attentionId: 'att-1', attentionSequence: 1 },
 });
 const waitingProps = {
-  onWaitingOpenSession: vi.fn(), onWaitingDismiss: vi.fn(async () => {}), onWaitingReply: vi.fn(async () => {}),
-  onWaitingAnswer: vi.fn(async () => ({ ok: true, message: 'Answered' }) as const),
+  onDismiss: vi.fn(), onReply: vi.fn(async () => {}),
+  onAnswer: vi.fn(async () => ({ ok: true, message: 'Answered' }) as const),
 };
 const waitingWorkspace = (entry: InboxEntry | null, extra: Record<string, unknown> = {}) => (
-  <SessionWorkspace session={waitingSession} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open onClose={vi.fn()} isDesktop={true} mobileTab="terminal" onMobileTab={vi.fn()} onRefit={vi.fn()} {...waitingProps} {...extra} waitingEntry={entry}>
+  <SessionWorkspace session={waitingSession} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open onClose={vi.fn()} isDesktop={true} mobileTab="terminal" onMobileTab={vi.fn()} onRefit={vi.fn()} {...extra} attention={entry ? { entry, shown: true, onShow: vi.fn(), onHide: vi.fn(), ...waitingProps } : undefined}>
     <div data-testid="terminal-node" tabIndex={-1}>Terminal</div>
   </SessionWorkspace>
 );
@@ -953,18 +954,34 @@ it('hides the waiting pane after dismiss (entry gone)', () => {
   expect(screen.queryByRole('region', { name: 'Waiting for you' })).toBeNull();
 });
 
+it('selector includes a Waiting entry when waiting and preview coexist', () => {
+  resizeTo(900);
+  const session: Session = {
+    id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+    preview: { id: '12345678-1234-4234-8234-123456789abc', files: [
+      { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+      { id: '40000000-4000-4000-8000-000000000002', fileName: 'b.html', kind: 'html' },
+    ] },
+  };
+  render(<SessionWorkspace session={session} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()} attention={{ entry: waitingEntryFor(), shown: true, onShow: vi.fn(), onHide: vi.fn(), ...waitingProps }}><div>Terminal</div></SessionWorkspace>);
+  const list = screen.getByRole('tablist', { name: 'Side pane view' });
+  const tabs = within(list).getAllByRole('tab');
+  expect(tabs.map(tab => tab.textContent)).toContain('Waiting for you');
+  expect(tabs[0].textContent).toBe('Waiting for you');
+});
+
 it('shows the waiting pane full-screen on mobile when an item arrives', () => {
   resizeTo(390);
   const onMobileTab = vi.fn();
   const phone = (entry: InboxEntry | null, tab: 'terminal' | 'waiting') => (
-    <SessionWorkspace session={waitingSession} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open onClose={vi.fn()} isDesktop={false} mobileTab={tab} onMobileTab={onMobileTab} onRefit={vi.fn()} {...waitingProps} waitingEntry={entry}>
+    <SessionWorkspace session={waitingSession} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open onClose={vi.fn()} isDesktop={false} mobileTab={tab} onMobileTab={onMobileTab} onRefit={vi.fn()} attention={entry ? { entry, shown: true, onShow: vi.fn(), onHide: vi.fn(), ...waitingProps } : undefined}>
       <div data-testid="terminal-node">Terminal</div>
     </SessionWorkspace>
   );
   const { rerender } = render(phone(null, 'terminal'));
   expect(screen.queryByRole('region', { name: 'Waiting for you' })).toBeNull();
   rerender(phone(waitingEntryFor(), 'terminal'));
-  expect(onMobileTab).toHaveBeenCalledWith('waiting');
+  // Phone auto-switch is owned by Dashboard (mobileTab); Workspace renders for the switched tab.
   rerender(phone(waitingEntryFor(), 'waiting'));
   expect(screen.getByRole('region', { name: 'Waiting for you' }).hidden).toBe(false);
 });

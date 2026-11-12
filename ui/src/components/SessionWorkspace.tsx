@@ -12,7 +12,7 @@ import { PullRequestReview } from './PullRequestReview';
 import type { SessionActivity } from '@/hooks/useAllSessionEvents';
 import type { AttentionAnswerEntry } from '../../../bridge/src/attention-prompt-protocol';
 import type { AttentionAnswerSubmitResult } from './AttentionAnswerForm';
-import { InboxItemBody, type InboxEntry } from './SessionInbox';
+import { InboxItemBody, inboxItemKey, type InboxEntry } from './SessionInbox';
 import { clampPreviewRatio, isPreviewDescriptor, markdownPreviewDocument, previewDocument, previewRatioBounds } from '@/lib/session-preview';
 import { previewScrollOwnerKey } from '@/lib/preview-scroll-protocol';
 
@@ -21,10 +21,15 @@ interface Props {
   sendCommand: BridgeRpc['sendCommand']; subscribeAuthority?: SessionPreviewAuthoritySubscriber; securityGeneration: number; open: boolean; onClose: () => void;
   isDesktop: boolean; mobileTab: 'sessions' | 'terminal' | 'preview' | 'review' | 'waiting'; onMobileTab: (tab: 'terminal' | 'preview' | 'review' | 'waiting') => void;
   reviewOpen?: boolean; reviewActivation?: number; onCloseReview?: () => void;
-  waitingEntry?: InboxEntry | null; waitingActivation?: number;
-  onWaitingOpenSession?: (id: string) => void; onWaitingDismiss?: (entry: InboxEntry) => Promise<void>;
-  onWaitingReply?: (entry: InboxEntry, message: string) => Promise<void>;
-  onWaitingAnswer?: (entry: InboxEntry, answers: AttentionAnswerEntry[]) => Promise<AttentionAnswerSubmitResult>;
+  attention?: {
+    entry: InboxEntry;
+    shown: boolean;
+    onShow(): void;
+    onHide(): void;
+    onDismiss(entry: InboxEntry): void;
+    onReply(entry: InboxEntry, message: string): Promise<void>;
+    onAnswer(entry: InboxEntry, answers: AttentionAnswerEntry[]): Promise<AttentionAnswerSubmitResult>;
+  };
   onRefit: () => void; children: ReactNode; sessions?: Session[]; activity?: SessionActivity;
 }
 type PreviewErrorReason = 'missing' | 'too_large' | 'invalid_utf8' | 'invalid_file' | 'unavailable';
@@ -37,7 +42,7 @@ function previewErrorMessage(reason: PreviewErrorReason, fileName: string): stri
     case 'unavailable': return `${fileName} is unavailable`;
   }
 }
-export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {}, waitingEntry = null, waitingActivation = 0, onWaitingOpenSession = () => {}, onWaitingDismiss = async () => {}, onWaitingReply = async () => {}, onWaitingAnswer = async (): Promise<AttentionAnswerSubmitResult> => ({ ok: false, message: 'Unavailable' }) }: Props) {
+export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {}, attention }: Props) {
   const mainRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   const [ratio, setRatio] = useState(50);
@@ -102,14 +107,14 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
 
   const compact = !isDesktop || width < 640;
   const showPreview = !!target && open;
-  const hasWaiting = !!waitingEntry;
+  const hasWaiting = !!attention;
   const rawView = compact ? (isDesktop ? compactTab : mobileTab) : auxTab;
-  const view = rawView === 'preview' && !showPreview ? (reviewOpen ? 'review' : 'terminal') : rawView === 'review' && !reviewOpen ? (showPreview ? 'preview' : 'terminal') : rawView === 'waiting' && !hasWaiting ? (reviewOpen ? 'review' : showPreview ? 'preview' : 'terminal') : rawView;
+  const attentionShown = !!attention?.shown;
+  const view = rawView === 'preview' && !showPreview ? (reviewOpen ? 'review' : attentionShown ? 'waiting' : 'terminal') : rawView === 'review' && !reviewOpen ? (showPreview ? 'preview' : attentionShown ? 'waiting' : 'terminal') : rawView === 'waiting' && !attentionShown ? (reviewOpen ? 'review' : showPreview ? 'preview' : 'terminal') : rawView;
   const previousView = useRef({ showPreview, view });
   const previewDisappeared = previousView.current.showPreview && !showPreview && previousView.current.view === 'preview';
   const activeExpanded = expanded && rawView === view && view !== 'terminal' && view !== 'waiting' && !previewDisappeared;
-  const waitingVisible = hasWaiting && view === 'waiting';
-  const waitingKey = waitingEntry ? `${waitingEntry.session.id}:${waitingEntry.notice.attentionId ?? ''}:${waitingEntry.notice.receivedAt}` : '';
+  const waitingVisible = attentionShown && view === 'waiting';
   const previewVisible = !!target && open && view === 'preview';
   const { state, refresh, getHardEpoch } = useSessionPreview({ client, userId, target, visible: previewVisible, readable, securityGeneration, sendCommand, subscribeAuthority });
   const owner = target ? previewScrollOwnerKey({ userId, bridgeId: target.bridgeId, sessionId: target.sessionId, previewId: target.preview.id, fileId: target.file.id }) : '';
@@ -138,10 +143,14 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     const observer = new ResizeObserver(entries => setWidth(entries[0]?.contentRect.width ?? 0));
     observer.observe(node); return () => observer.disconnect();
   }, []);
-  useEffect(() => { setCompactTab(hasWaiting ? 'waiting' : 'preview'); setAuxTab(hasWaiting ? 'waiting' : 'preview'); setExpanded(false); setConversationOpen(false); if (!isDesktop && hasWaiting) onMobileTab('waiting'); }, [session?.bridgeId, session?.id]);
+  useEffect(() => { setCompactTab(attentionShown ? 'waiting' : 'preview'); setAuxTab(attentionShown ? 'waiting' : 'preview'); setExpanded(false); setConversationOpen(false); }, [session?.bridgeId, session?.id]);
   // C2: a waiting item arriving while the session is open switches the pane to Waiting (no focus steal).
-  useEffect(() => { if (waitingKey) { setCompactTab('waiting'); setAuxTab('waiting'); setExpanded(false); if (!isDesktop) onMobileTab('waiting'); } }, [waitingKey, isDesktop, onMobileTab]);
-  useEffect(() => { if (waitingActivation) { setCompactTab('waiting'); setAuxTab('waiting'); setExpanded(false); if (!isDesktop) onMobileTab('waiting'); } }, [waitingActivation, isDesktop, onMobileTab]);
+  const previousAttentionShown = useRef(false);
+  useEffect(() => {
+    const was = previousAttentionShown.current;
+    previousAttentionShown.current = attentionShown;
+    if (isDesktop && !was && attentionShown) { setCompactTab('waiting'); setAuxTab('waiting'); setExpanded(false); }
+  }, [attentionShown, isDesktop]);
   const previewId = descriptor?.id;
   const previousPreviewId = useRef(previewId);
   useEffect(() => {
@@ -149,15 +158,15 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     previousPreviewId.current = previewId;
     if (previous === previewId) return;
     if (rawView === 'preview') setExpanded(false);
-    if (previewId && !reviewOpen) { setCompactTab('preview'); setAuxTab('preview'); setConversationOpen(false); }
-  }, [previewId, rawView, reviewOpen]);
+    if (previewId && !reviewOpen && !attentionShown) { setCompactTab('preview'); setAuxTab('preview'); setConversationOpen(false); }
+  }, [previewId, rawView, reviewOpen, attentionShown]);
   useEffect(() => { if (reviewOpen && reviewActivation) { setCompactTab('review'); setAuxTab('review'); } }, [reviewOpen, reviewActivation]);
   useEffect(() => {
-    setCompactTab(current => current === 'preview' && !showPreview ? (reviewOpen ? 'review' : 'terminal') : current === 'review' && !reviewOpen ? (showPreview ? 'preview' : 'terminal') : current);
+    setCompactTab(current => current === 'preview' && !showPreview ? (reviewOpen ? 'review' : attentionShown ? 'waiting' : 'terminal') : current === 'review' && !reviewOpen ? (showPreview ? 'preview' : attentionShown ? 'waiting' : 'terminal') : current);
     setAuxTab(current => current === 'preview' && !showPreview && reviewOpen ? 'review' : current === 'review' && !reviewOpen ? 'preview' : current);
-    if (!isDesktop && mobileTab === 'preview' && !showPreview) onMobileTab(reviewOpen ? 'review' : 'terminal');
-    else if (!isDesktop && mobileTab === 'review' && !reviewOpen) onMobileTab(showPreview ? 'preview' : 'terminal');
-  }, [showPreview, reviewOpen, isDesktop, mobileTab, onMobileTab]);
+    if (!isDesktop && mobileTab === 'preview' && !showPreview) onMobileTab(reviewOpen ? 'review' : attentionShown ? 'waiting' : 'terminal');
+    else if (!isDesktop && mobileTab === 'review' && !reviewOpen) onMobileTab(showPreview ? 'preview' : attentionShown ? 'waiting' : 'terminal');
+  }, [showPreview, reviewOpen, attentionShown, isDesktop, mobileTab, onMobileTab]);
   useEffect(() => {
     if (expanded && (previewDisappeared || rawView !== view || view === 'terminal' || view === 'waiting')) setExpanded(false);
     previousView.current = { showPreview, view };
@@ -185,10 +194,10 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     const next = event.key === 'ArrowLeft' ? actualRatio - 2 : event.key === 'ArrowRight' ? actualRatio + 2 : event.key === 'Home' ? min : event.key === 'End' ? max : null;
     if (next !== null) { event.preventDefault(); setSplit(next); }
   };
-  const hasAux = showPreview || reviewOpen || hasWaiting;
+  const hasAux = showPreview || reviewOpen || attentionShown;
   const auxTabs: ('preview' | 'review' | 'waiting')[] = [...(hasWaiting ? ['waiting' as const] : []), ...(showPreview ? ['preview' as const] : []), ...(reviewOpen ? ['review' as const] : [])];
   const tabs: ('terminal' | 'preview' | 'review' | 'waiting')[] = [...(compact ? ['terminal' as const] : []), ...auxTabs];
-  const choose = (tab: 'terminal' | 'preview' | 'review' | 'waiting') => { if (tab !== 'terminal') { setAuxTab(tab); setCompactTab(tab); } else setCompactTab(tab); if (compact && !isDesktop) onMobileTab(tab); };
+  const choose = (tab: 'terminal' | 'preview' | 'review' | 'waiting') => { if (tab === 'waiting') { setAuxTab('waiting'); setCompactTab('waiting'); setExpanded(false); attention?.onShow(); } else if (tab !== 'terminal') { setAuxTab(tab); setCompactTab(tab); } else setCompactTab('terminal'); if (compact && !isDesktop) onMobileTab(tab); };
   const tabKeys = (event: KeyboardEvent<HTMLDivElement>) => {
     if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
       event.preventDefault(); const index = Math.max(0, tabs.indexOf(view as 'terminal' | 'preview' | 'review' | 'waiting'));
@@ -211,6 +220,44 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
       buttons[nextIndex]?.click();
     }
   };
+  const selectAttentionEntry = () => { setAuxTab('waiting'); setCompactTab('waiting'); setExpanded(false); attention?.onShow(); };
+  const selectFileEntry = (fileName: string) => { attention?.onHide(); handleSelectFile(fileName); setAuxTab('preview'); setCompactTab('preview'); };
+  const entryCount = files.length + (hasWaiting ? 1 : 0);
+  const sidePaneName = hasWaiting ? 'Side pane view' : 'Preview file';
+  const attentionSelected = view === 'waiting';
+  const fileSelector = (
+    entryCount < 2 ? (
+      hasWaiting && files.length === 0 ? <span className="session-preview-filename">Waiting for you</span>
+      : selectedFile ? <span className="session-preview-filename" title={selectedFile.fileName}>{selectedFile.fileName}</span> : null
+    ) : entryCount <= 5 ? (
+      <div role="tablist" aria-label={sidePaneName} className="session-preview-file-tablist" onKeyDown={fileTabKeys}>
+        {hasWaiting && <button key="waiting" role="tab" aria-selected={attentionSelected} title="Waiting for you" tabIndex={attentionSelected ? 0 : -1} onClick={selectAttentionEntry} className={`session-preview-file-tab ${attentionSelected ? 'is-selected' : ''}`}>Waiting for you</button>}
+        {files.map(file => (
+          <button
+            key={file.id}
+            role="tab"
+            aria-selected={!attentionSelected && file.fileName === effectiveFileName}
+            title={file.fileName}
+            tabIndex={!attentionSelected && file.fileName === effectiveFileName ? 0 : -1}
+            onClick={() => selectFileEntry(file.fileName)}
+            className={`session-preview-file-tab ${!attentionSelected && file.fileName === effectiveFileName ? 'is-selected' : ''}`}
+          >
+            {file.fileName}
+          </button>
+        ))}
+      </div>
+    ) : (
+      <select
+        aria-label={sidePaneName}
+        className="session-preview-file-select"
+        value={attentionSelected ? '__waiting' : effectiveFileName ?? ''}
+        onChange={e => { if (e.target.value === '__waiting') selectAttentionEntry(); else selectFileEntry(e.target.value); }}
+      >
+        {hasWaiting && <option value="__waiting">Waiting for you</option>}
+        {files.map(file => <option key={file.id} value={file.fileName}>{file.fileName}</option>)}
+      </select>
+    )
+  );
   const terminalVisible = !activeExpanded && (!hasAux || !compact || view === 'terminal');
   const frameVisible = showPreview && view === 'preview';
   const reviewVisible = reviewOpen && view === 'review';
@@ -218,43 +265,16 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     if (activeExpanded && event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); setExpanded(false); }
   }}>
     {hasAux && compact && isDesktop && !activeExpanded && <div role="tablist" aria-label="Session view" onKeyDown={tabKeys} className="session-preview-tabs">
-      {tabs.map(tab => <button key={tab} id={`compact-${tab}-tab`} data-preview-tab={tab} role="tab" aria-selected={view === tab} aria-controls={`session-${tab}-panel`} tabIndex={view === tab ? 0 : -1} onClick={() => choose(tab)} className={`mobile-tab ${view === tab ? 'mobile-tab-active' : ''}`}>{tab === 'terminal' ? 'Terminal' : tab === 'preview' ? 'Preview' : tab === 'waiting' ? `Waiting (${auxTabs.filter(t => t === 'waiting').length || 1})` : 'PR review'}</button>)}
+      {tabs.map(tab => <button key={tab} id={`compact-${tab}-tab`} data-preview-tab={tab} role="tab" aria-selected={view === tab} aria-controls={`session-${tab}-panel`} tabIndex={view === tab ? 0 : -1} onClick={() => choose(tab)} className={`mobile-tab ${view === tab ? 'mobile-tab-active' : ''}`}>{tab === 'terminal' ? 'Terminal' : tab === 'preview' ? 'Preview' : tab === 'waiting' ? 'Waiting (1)' : 'PR review'}</button>)}
     </div>}
     <div className="session-workspace-panes">
       <div id="session-terminal-panel" role={compact && hasAux ? 'tabpanel' : undefined} aria-label="Terminal" hidden={!terminalVisible} className="session-terminal-pane" style={hasAux && !compact && !activeExpanded ? { flex: `0 0 calc((100% - 8px) * ${actualRatio / 100})` } : undefined}>{children}</div>
       {hasAux && !compact && !activeExpanded && <div role="separator" aria-label="Resize terminal and preview" aria-orientation="vertical" aria-valuemin={Number(min.toFixed(1))} aria-valuemax={Number(max.toFixed(1))} aria-valuenow={Number(actualRatio.toFixed(1))} tabIndex={0} className="session-preview-separator" onPointerDown={start} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish} onLostPointerCapture={finish} onKeyDown={keyDown} onDoubleClick={() => setSplit(50)} />}
       {hasAux && <div className="session-aux-pane" hidden={compact && view === 'terminal'}>
-      {!compact && auxTabs.length > 1 && <div role="tablist" aria-label="Auxiliary view" onKeyDown={tabKeys} className="session-preview-tabs">{auxTabs.map(tab => <button key={tab} data-preview-tab={tab} role="tab" aria-selected={view === tab} aria-controls={`session-${tab}-panel`} tabIndex={view === tab ? 0 : -1} onClick={() => choose(tab)} className={`mobile-tab ${view === tab ? 'mobile-tab-active' : ''}`}>{tab === 'preview' ? 'Preview' : tab === 'waiting' ? `Waiting (${auxTabs.filter(t => t === 'waiting').length || 1})` : 'PR review'}</button>)}</div>}
+      {!compact && auxTabs.length > 1 && <div role="tablist" aria-label="Auxiliary view" onKeyDown={tabKeys} className="session-preview-tabs">{auxTabs.map(tab => <button key={tab} data-preview-tab={tab} role="tab" aria-selected={view === tab} aria-controls={`session-${tab}-panel`} tabIndex={view === tab ? 0 : -1} onClick={() => choose(tab)} className={`mobile-tab ${view === tab ? 'mobile-tab-active' : ''}`}>{tab === 'preview' ? 'Preview' : tab === 'waiting' ? 'Waiting (1)' : 'PR review'}</button>)}</div>}
       {showPreview && <section id="session-preview-panel" role={compact || reviewOpen ? 'tabpanel' : 'region'} aria-label="Session preview" hidden={!frameVisible} className="session-preview-pane">
         <div className="session-preview-toolbar">
-          {files.length < 2 ? (
-            selectedFile ? <span className="session-preview-filename" title={selectedFile.fileName}>{selectedFile.fileName}</span> : null
-          ) : files.length <= 4 ? (
-            <div role="tablist" aria-label="Preview file" className="session-preview-file-tablist" onKeyDown={fileTabKeys}>
-              {files.map(file => (
-                <button
-                  key={file.id}
-                  role="tab"
-                  aria-selected={file.fileName === effectiveFileName}
-                  title={file.fileName}
-                  tabIndex={file.fileName === effectiveFileName ? 0 : -1}
-                  onClick={() => handleSelectFile(file.fileName)}
-                  className={`session-preview-file-tab ${file.fileName === effectiveFileName ? 'is-selected' : ''}`}
-                >
-                  {file.fileName}
-                </button>
-              ))}
-            </div>
-          ) : (
-            <select
-              aria-label="Preview file"
-              className="session-preview-file-select"
-              value={effectiveFileName ?? ''}
-              onChange={e => handleSelectFile(e.target.value)}
-            >
-              {files.map(file => <option key={file.id} value={file.fileName}>{file.fileName}</option>)}
-            </select>
-          )}
+          {fileSelector}
           <span className="session-preview-auto" role="img" aria-label="Auto-refresh enabled" title="Auto-refresh enabled" />
           <button type="button" className="btn-ghost session-preview-icon" aria-label={activeExpanded ? "Collapse preview" : "Expand preview"} title={activeExpanded ? "Collapse preview" : "Expand preview"} onClick={() => setExpanded(value => !value)}>
             <svg aria-hidden="true" focusable="false" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -284,10 +304,12 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
       </section>}
       {reviewOpen && <PullRequestReview session={session} client={client} userId={userId} visible={reviewVisible} readable={readable} securityGeneration={securityGeneration} sendCommand={sendCommand} subscribeAuthority={subscribeAuthority} onClose={onCloseReview} expanded={activeExpanded} onExpand={() => setExpanded(value => !value)} />}
       {hasWaiting && <section id="session-waiting-panel" role="region" aria-label="Waiting for you" hidden={!waitingVisible} className="session-preview-pane">
-        <div className="session-preview-toolbar"><span className="session-preview-filename">Waiting for you</span></div>
-        <div className="session-preview-content" style={{ overflowY: 'auto' }}>
-          {waitingEntry ? <div className="min-w-0 space-y-2" key={waitingEntry.notice.attentionId ? `att:${waitingEntry.notice.attentionId}` : `sess:${waitingEntry.session.id}@${waitingEntry.notice.receivedAt}`}>
-            <InboxItemBody entry={waitingEntry} onOpenSession={onWaitingOpenSession} onDismiss={onWaitingDismiss} onReply={onWaitingReply} onAnswer={onWaitingAnswer} hideOpenSession />
+        <div className="session-preview-toolbar">{fileSelector}<button type="button" className="btn-ghost session-preview-icon" aria-label="Close waiting" title="Close waiting" onClick={() => attention?.onHide()}>
+            <svg aria-hidden="true" focusable="false" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M5 5l14 14M19 5 5 19" /></svg>
+          </button></div>
+        <div className="session-preview-content p-3" style={{ overflowY: 'auto' }} onKeyDown={event => { if (event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); attention?.onHide(); } }}>
+          {attention ? <div className="min-w-0 space-y-2" key={inboxItemKey(attention.entry)}>
+            <InboxItemBody entry={attention.entry} onOpenSession={() => {}} onDismiss={entry => { attention.onDismiss(entry); return Promise.resolve(); }} onReply={attention.onReply} onAnswer={attention.onAnswer} hideOpenSession />
           </div> : null}
         </div>
       </section>}
