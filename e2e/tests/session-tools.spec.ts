@@ -417,7 +417,7 @@ for (const viewport of [
       await inboxEntry.getByRole("button", { name: "Open session", exact: true }).click();
       await expect(replacementLink).toBeVisible();
       await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
-      if (mobile) await expect(page.getByRole("tab", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
+      if (mobile) { await expect(page.getByRole("tab", { name: "Waiting", exact: true })).toHaveAttribute("aria-selected", "true"); await page.getByRole("tab", { name: "Terminal", exact: true }).click(); }
       await tabIntoHeaderLink(page, replacementLink, mobile);
       await screenshot("selected-session-pr-link");
       const beforeThinking = receivedHooks.length;
