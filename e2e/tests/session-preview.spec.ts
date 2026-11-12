@@ -580,14 +580,14 @@ test("multi-file preview with markdown selector and cross-file links", async ({ 
   }
 });
 
-test("five or more files use a native select to switch the preview", async ({ page, context }, info) => {
+test("six or more files use a native select to switch the preview", async ({ page, context }, info) => {
   test.setTimeout(240_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   const fixture = await createPreviewFixture();
   const suffix = `${info.workerIndex}-${Date.now().toString(36)}`;
   const marker = `SELECT_${suffix}`;
   const name = `Select preview ${suffix}`;
-  const htmlFiles = ["one.html", "two.html", "three.html", "four.html"];
+  const htmlFiles = ["one.html", "two.html", "three.html", "four.html", "five.html"];
   const mdName = "notes.md";
   const files = [...htmlFiles, mdName];
 
