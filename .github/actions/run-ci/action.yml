@@ -7,6 +7,9 @@ inputs:
   boat-api-key:
     required: false
     description: Boat CI key for trusted events
+  shard:
+    required: false
+    description: E2E shard as index/total
   npm-version:
     required: false
     description: Release npm matrix version
@@ -25,6 +28,7 @@ runs:
       env:
         INPUT_JOB: ${{ inputs.job }}
         INPUT_NPM_VERSION: ${{ inputs.npm-version }}
+        INPUT_SHARD: ${{ inputs.shard }}
         INPUT_BASE_SHA: ${{ inputs.base-sha }}
         INPUT_HEAD_SHA: ${{ inputs.head-sha }}
         CI_EVENT: ${{ github.event_name }}
@@ -41,6 +45,7 @@ runs:
       env:
         INPUT_JOB: ${{ inputs.job }}
         INPUT_NPM_VERSION: ${{ inputs.npm-version }}
+        INPUT_SHARD: ${{ inputs.shard }}
         INPUT_BASE_SHA: ${{ inputs.base-sha }}
         INPUT_HEAD_SHA: ${{ inputs.head-sha }}
         CI_EVENT: ${{ github.event_name }}
