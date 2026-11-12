@@ -272,7 +272,7 @@ for (const viewport of [
       await page.goto("/dashboard");
       await waitForBridgeOnline(page);
       await showWorkspace();
-      const shortcut = page.getByRole("button", { name: /^Inbox, [1-9]\d* messages?$/ });
+      const shortcut = page.getByRole("button", { name: /^Inbox, [1-9]\d* waiting$/ });
       const region = page.getByRole("region", { name: "Inbox", exact: true });
       const inboxEntry = region.locator(`[data-inbox-entry="${targetId}"]`);
       const checkInbox = async () => { await shortcut.click(); await expect(inboxEntry.getByText(message, { exact: true })).toBeVisible(); await expect(region.getByText(otherName, { exact: true })).toHaveCount(0); await region.getByRole("button", { name: "Back to workspace", exact: true }).click(); };

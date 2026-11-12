@@ -117,9 +117,9 @@ async function offeredComputers(page: Page): Promise<string[]> {
   return values;
 }
 
-/** The Inbox control's accessible label ("Inbox, <n> messages"). */
+/** The Inbox control's accessible label ("Inbox, 0 messages" or "Inbox, <n> waiting"). */
 async function inboxLabel(page: Page): Promise<string> {
-  return page.getByRole("button", { name: /^Inbox, \d+ messages?$/ }).evaluate(node => node.getAttribute("aria-label") ?? node.textContent ?? "");
+  return page.getByRole("button", { name: /^Inbox, \d+ (waiting|messages?)$/ }).evaluate(node => node.getAttribute("aria-label") ?? node.textContent ?? "");
 }
 
 async function terminalText(page: Page): Promise<string> {

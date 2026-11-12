@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { expect } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 import { test } from "../helpers/fixtures";
 import { login, sharedAccountId, waitForBridgeOnline } from "../helpers/app";
 import { bridgeApiFetch } from "../helpers/bridge-api";
@@ -105,4 +105,166 @@ test("mail nudge survives agent mail, highlights the trigger and pops up on open
     if (idA) await bridgeApiFetch("DELETE", `/api/sessions/${idA}`).catch(() => undefined);
     if (idB) await bridgeApiFetch("DELETE", `/api/sessions/${idB}`).catch(() => undefined);
   }
+});
+
+test("replying to one of two open items clears exactly that one", async ({ page }) => {
+  test.setTimeout(180_000);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await login(page); await waitForBridgeOnline(page);
+  const stamp = Date.now().toString(36);
+  const name = `Two items ${stamp}`; let id = "";
+  const FTOWN_CLI = join(E2E_DIR, "..", "bridge", "dist", "ftown-cli.js");
+  try {
+    const created = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name } });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    id = (created.body as { session: { id: string } }).session.id;
+    const msg1 = `First ${stamp}`, msg2 = `Second ${stamp}`;
+    await execute(process.execPath, [FTOWN_CLI, "sessions", "attention", "--title", "First", "--message", msg1], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: id }, timeout: 30_000 });
+    await execute(process.execPath, [FTOWN_CLI, "sessions", "attention", "--title", "Second", "--message", msg2], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: id }, timeout: 30_000 });
+    const listed = await bridgeApiFetch("GET", `/api/sessions/${id}/attention`);
+    const events = (listed.body as { events: Array<{ id: string; title: string; resolvedAt?: string }> }).events;
+    expect(events.filter((event) => !event.resolvedAt)).toHaveLength(2);
+    const first = events.find((event) => event.title === "First")!;
+    const second = events.find((event) => event.title === "Second")!;
+    const trigger = page.getByRole("button", { name: "Inbox, 2 waiting" });
+    await expect(trigger).toBeVisible();
+    await trigger.click();
+    const inbox = page.getByRole("region", { name: "Inbox", exact: true });
+    const firstArticle = inbox.locator("article").filter({ hasText: msg1 });
+    const secondArticle = inbox.locator("article").filter({ hasText: msg2 });
+    await expect(firstArticle).toHaveCount(1);
+    await expect(secondArticle).toHaveCount(1);
+    await firstArticle.getByLabel(`Reply to ${name}`).fill(`Answer to first ${stamp}`);
+    await firstArticle.getByRole("button", { name: "Send reply" }).click();
+    await expect.poll(async () => {
+      const after = await bridgeApiFetch("GET", `/api/sessions/${id}/attention/${first.id}`);
+      const event = (after.body as { event?: { resolvedAt?: string; resolution?: string } }).event;
+      return event?.resolvedAt ? event.resolution : "open";
+    }, { timeout: 30_000 }).toBe("replied");
+    const stillOpen = await bridgeApiFetch("GET", `/api/sessions/${id}/attention/${second.id}`);
+    const secondEvent = (stillOpen.body as { event?: { resolvedAt?: string } }).event!;
+    expect(secondEvent.resolvedAt).toBeFalsy();
+    // The inbox drops exactly the replied article; the other stays.
+    await expect(firstArticle).toHaveCount(0);
+    await expect(secondArticle).toHaveCount(1);
+    await expect(page.getByRole("button", { name: "Inbox, 1 waiting" })).toBeVisible();
+  } finally { if (id) await bridgeApiFetch("DELETE", `/api/sessions/${id}`).catch(() => undefined); }
+});
+
+test("a second page sees reply and dismiss without reload", async ({ page, browser }) => {
+  test.setTimeout(180_000);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const ctx2 = await browser.newContext();
+  const page2 = await ctx2.newPage();
+  await page2.setViewportSize({ width: 1280, height: 900 });
+  let id = "";
+  const FTOWN_CLI = join(E2E_DIR, "..", "bridge", "dist", "ftown-cli.js");
+  try {
+    await login(page); await waitForBridgeOnline(page);
+    await login(page2); await waitForBridgeOnline(page2);
+    const stamp = Date.now().toString(36);
+    const name = `Cross tab ${stamp}`;
+    const created = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name } });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    id = (created.body as { session: { id: string } }).session.id;
+    const msg1 = `First ${stamp}`;
+    await execute(process.execPath, [FTOWN_CLI, "sessions", "attention", "--title", "First", "--message", msg1], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: id }, timeout: 30_000 });
+    const trigger2 = page2.getByRole("button", { name: "Inbox, 1 waiting" });
+    await expect(trigger2).toBeVisible();
+    await trigger2.click();
+    const inbox2 = page2.getByRole("region", { name: "Inbox", exact: true });
+    const item2 = inbox2.locator(`[data-inbox-entry="${id}"]`);
+    await expect(item2).toBeVisible();
+    // Reply from page 1; page 2 drops the item without page2.reload().
+    await page.getByRole("button", { name: "Inbox, 1 waiting" }).click();
+    const inbox1 = page.getByRole("region", { name: "Inbox", exact: true });
+    const item1 = inbox1.locator(`[data-inbox-entry="${id}"]`);
+    await expect(item1).toBeVisible();
+    await item1.getByLabel(`Reply to ${name}`).fill(`Cross tab reply ${stamp}`);
+    await item1.getByRole("button", { name: "Send reply" }).click();
+    await expect.poll(() => pollAttentionOpen(id), { timeout: 30_000 }).toBe(false);
+    await expect(item2).toHaveCount(0, { timeout: 30_000 });
+    await expect(page2.getByRole("button", { name: "Inbox, 0 messages" })).toBeVisible({ timeout: 30_000 });
+    // Dismiss from page 1; page 2 drops the new item without reload.
+    await page1DismissSecond(page, id, `Second ${stamp}`, FTOWN_CLI);
+    const trigger2Again = page2.getByRole("button", { name: "Inbox, 1 waiting" });
+    await expect(trigger2Again).toBeVisible({ timeout: 30_000 });
+    await trigger2Again.click();
+    const item2Again = inbox2.locator(`[data-inbox-entry="${id}"]`);
+    await expect(item2Again).toBeVisible({ timeout: 30_000 });
+    await page1DismissCurrent(page, id);
+    await expect(item2Again).toHaveCount(0, { timeout: 30_000 });
+  } finally {
+    await ctx2.close().catch(() => undefined);
+    if (id) await bridgeApiFetch("DELETE", `/api/sessions/${id}`).catch(() => undefined);
+  }
+});
+
+async function pollAttentionOpen(sessionId: string): Promise<boolean> {
+  const listed = await bridgeApiFetch("GET", `/api/sessions/${sessionId}/attention`);
+  const events = (listed.body as { events: Array<{ resolvedAt?: string }> }).events ?? [];
+  return events.some((event) => !event.resolvedAt);
+}
+async function page1DismissSecond(page: Page, id: string, message: string, FTOWN_CLI: string): Promise<void> {
+  await execute(process.execPath, [FTOWN_CLI, "sessions", "attention", "--title", "Second", "--message", message], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: id }, timeout: 30_000 });
+  await page.getByRole("button", { name: "Inbox, 1 waiting" }).click();
+  await expect(page.getByRole("region", { name: "Inbox", exact: true }).locator(`[data-inbox-entry="${id}"]`)).toBeVisible({ timeout: 30_000 });
+}
+async function page1DismissCurrent(page: Page, id: string): Promise<void> {
+  const inbox = page.getByRole("region", { name: "Inbox", exact: true });
+  const item = inbox.locator(`[data-inbox-entry="${id}"]`);
+  await item.getByRole("button", { name: "Dismiss" }).click();
+}
+
+test("popup keeps terminal focus and Escape returns to the terminal", async ({ page }) => {
+  test.setTimeout(180_000);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await login(page); await waitForBridgeOnline(page);
+  const stamp = Date.now().toString(36);
+  const name = `Focus ${stamp}`;
+  let id = "";
+  const FTOWN_CLI = join(E2E_DIR, "..", "bridge", "dist", "ftown-cli.js");
+  const row = (n: string) => page.locator('#dashboard-sidebar button[draggable="true"]').filter({ has: page.getByText(n, { exact: true }) });
+  try {
+    const created = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name } });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    id = (created.body as { session: { id: string } }).session.id;
+    await execute(process.execPath, [FTOWN_CLI, "sessions", "attention", "--title", "Focus", "--message", `Please review ${stamp}`], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: id }, timeout: 30_000 });
+    await expect(row(name)).toBeVisible({ timeout: 30_000 });
+    await row(name).click();
+    const popup = page.getByRole("region", { name: "Waiting for you" });
+    await expect(popup).toBeVisible();
+    await expect(page.locator(".xterm-rows").first()).toBeVisible({ timeout: 30_000 });
+    await page.locator(".xterm-rows").first().click();
+    await expect.poll(() => page.evaluate(() => (document.activeElement as HTMLElement | null)?.className ?? "")).toContain("xterm-helper-textarea");
+    await expect(popup).toBeVisible();
+    await popup.getByRole("button", { name: "Hide" }).focus();
+    await page.keyboard.press("Escape");
+    await expect(popup).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Waiting for you" })).toBeVisible();
+    await expect.poll(() => page.evaluate(() => (document.activeElement as HTMLElement | null)?.className ?? "")).toContain("xterm-helper-textarea");
+  } finally { if (id) await bridgeApiFetch("DELETE", `/api/sessions/${id}`).catch(() => undefined); }
+});
+
+test("mobile Workspace tab keeps its name with a waiting description", async ({ page }) => {
+  test.setTimeout(180_000);
+  await page.setViewportSize({ width: 320, height: 844 });
+  await login(page); await waitForBridgeOnline(page);
+  const stamp = Date.now().toString(36);
+  const name = `Mobile tab ${stamp}`;
+  let id = "";
+  const FTOWN_CLI = join(E2E_DIR, "..", "bridge", "dist", "ftown-cli.js");
+  try {
+    const created = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name } });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    id = (created.body as { session: { id: string } }).session.id;
+    await execute(process.execPath, [FTOWN_CLI, "sessions", "attention", "--title", "Mobile", "--message", `Please review ${stamp}`], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: id }, timeout: 30_000 });
+    await page.getByRole("tab", { name: "Terminal", exact: true }).click();
+    const workspaceTab = page.getByRole("tab", { name: "Workspace", exact: true });
+    await expect(workspaceTab).toBeVisible();
+    const describedby = await workspaceTab.getAttribute("aria-describedby");
+    expect(describedby).toBe("mobile-tab-inbox-waiting");
+    await expect(page.locator("#mobile-tab-inbox-waiting")).toHaveText("1 waiting");
+    expect(await workspaceTab.locator(".mobile-tab-inbox-badge").textContent()).toBe("1");
+  } finally { if (id) await bridgeApiFetch("DELETE", `/api/sessions/${id}`).catch(() => undefined); }
 });
