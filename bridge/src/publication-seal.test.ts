@@ -265,6 +265,32 @@ for (const change of ['revoke', 'unread'] as const) {
   });
 }
 
+test('each recipient of one publication gets its own message id and encapsulation, bound to that recipient and header', async t => {
+  const f = await publicationFixture(t);
+  await f.client.publishHookEvent(email, 'session', { hook_event_name: 'Stop', marker: 'bound' });
+  await f.drained();
+  const envelopes = f.published.map(item => item.envelope);
+  const channel = f.published[0].channel;
+  assert.equal(envelopes.length, BROWSERS);
+  assert.equal(new Set(envelopes.map(envelope => envelope.messageId)).size, BROWSERS, 'one message id per recipient');
+  assert.equal(new Set(envelopes.map(envelope => envelope.enc)).size, BROWSERS, 'one encapsulation per recipient');
+  assert.equal(new Set(envelopes.map(envelope => envelope.ciphertext)).size, BROWSERS);
+  const [a, b] = f.browsers;
+  const forA = envelopes.find(envelope => envelope.recipientId === a.endpoint.id)!;
+  const forB = envelopes.find(envelope => envelope.recipientId === b.endpoint.id)!;
+  const context = (recipient: EndpointIdentity) => ({ ownerId: f.ownerId, bridgeId: 'bridge', channel, recipientId: recipient.endpoint.id, purpose: 'application' as const });
+  const opens = (recipient: EndpointIdentity, envelope: SecureEnvelope) => open(recipient, f.security.endpoint, envelope, context(recipient));
+  await opens(a, forA);
+  // Cross-recipient swap: A's envelope is useless to B, as it is and relabelled, and B's ciphertext does not open under A's header.
+  await assert.rejects(opens(b, forA), { code: 'wrong_context' });
+  await assert.rejects(opens(b, { ...forA, recipientId: b.endpoint.id }), { code: 'authentication_failed' });
+  await assert.rejects(opens(a, { ...forA, enc: forB.enc, ciphertext: forB.ciphertext }), { code: 'authentication_failed' });
+  // Tampered authenticated header fields.
+  const tampered: Partial<SecureEnvelope>[] = [{ messageId: forB.messageId }, { createdAt: forA.createdAt - 1 }, { expiresAt: forA.expiresAt + 1 },
+    { receiverEpoch: 'epoch' }];
+  for (const change of tampered) await assert.rejects(opens(a, { ...forA, ...change }), { code: 'authentication_failed' });
+});
+
 test('a revoked recipient is absent from the next publication although its key is still in the import cache', async t => {
   const f = await publicationFixture(t);
   const sealed = recordSealed(f);
