@@ -50,6 +50,12 @@ function isMissing(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | null)?.code === 'ENOENT';
 }
 
+/** The file, or a directory on the way to it, is no longer there. */
+function isGone(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
 export class SessionStore {
   private readonly sessionsDir: string;
   private readonly archivePath: string;
@@ -158,8 +164,9 @@ export class SessionStore {
 
   /**
    * session.json content as JSON text for a stamp just taken from disk, or null
-   * when the file does not exist. Reads and parses only a new or changed file;
-   * corrupt files throw and are never indexed.
+   * when the file does not exist — including when it was removed between the
+   * stat and the read. Reads and parses only a new or changed file; corrupt
+   * files throw and are never indexed.
    */
   private async recordJsonAt(sessionId: string, stamp: FileStamp | undefined): Promise<string | null> {
     if (!stamp) {
@@ -173,7 +180,14 @@ export class SessionStore {
     // The stamp was taken BEFORE the read: if the file is replaced meanwhile,
     // the next stat differs from it and the entry is re-read.
     this.recordIndex.delete(sessionId);
-    const json = JSON.stringify(JSON.parse(await readFile(this.sessionFilePath(sessionId), 'utf-8')));
+    let raw: string;
+    try {
+      raw = await readFile(this.sessionFilePath(sessionId), 'utf-8');
+    } catch (error) {
+      if (isGone(error)) return null;
+      throw error;
+    }
+    const json = JSON.stringify(JSON.parse(raw));
     this.recordIndex.set(sessionId, { ...stamp, json });
     return json;
   }

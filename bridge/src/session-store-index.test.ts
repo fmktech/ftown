@@ -30,6 +30,11 @@ interface Fixture {
   reads: string[];
   /** session.json paths whose next stats are replaced by the given result. */
   fakeStats: Map<string, BigIntStats>;
+  /** Runs once, just before the named path is read or stat'ed. */
+  beforeRead: Map<string, () => Promise<void>>;
+  beforeStat: Map<string, () => Promise<void>>;
+  /** Highest number of stats in flight at once since the last reset. */
+  stats: { inFlight: number; maxInFlight: number };
   /** What a store with an empty index returns: the uncached scan. */
   uncached(): Promise<Session[]>;
   recordPath(id: string): string;
@@ -40,14 +45,30 @@ async function fixture(t: TestContext): Promise<Fixture> {
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const reads: string[] = [];
   const readFile = fs.readFile;
+  const beforeRead = new Map<string, () => Promise<void>>();
+  const beforeStat = new Map<string, () => Promise<void>>();
+  const stats = { inFlight: 0, maxInFlight: 0 };
+  const once = async (hooks: Map<string, () => Promise<void>>, path: string): Promise<void> => {
+    const hook = hooks.get(path);
+    hooks.delete(path);
+    await hook?.();
+  };
   t.mock.method(fs, 'readFile', async (...args: Parameters<typeof fs.readFile>) => {
     if (String(args[0]).endsWith('session.json')) reads.push(String(args[0]));
+    await once(beforeRead, String(args[0]));
     return readFile(...args);
   });
   const fakeStats = new Map<string, BigIntStats>();
   const stat = fs.stat;
   t.mock.method(fs, 'stat', (async (...args: Parameters<typeof fs.stat>) => {
-    return fakeStats.get(String(args[0])) ?? stat(...args);
+    stats.inFlight++;
+    stats.maxInFlight = Math.max(stats.maxInFlight, stats.inFlight);
+    try {
+      await once(beforeStat, String(args[0]));
+      return fakeStats.get(String(args[0])) ?? await stat(...args);
+    } finally {
+      stats.inFlight--;
+    }
   }) as typeof fs.stat);
   syncBuiltinESMExports();
   t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
@@ -56,6 +77,9 @@ async function fixture(t: TestContext): Promise<Fixture> {
     store: new SessionStore(dir),
     reads,
     fakeStats,
+    beforeRead,
+    beforeStat,
+    stats,
     uncached: () => new SessionStore(dir).listSessions(),
     recordPath: (id) => join(dir, 'sessions', id, 'session.json'),
   };
@@ -309,13 +333,60 @@ test('listing 900 sessions keeps yielding to the event loop, cached or not', asy
     return { turns, sessions };
   };
 
+  f.stats.maxInFlight = 0;
   const cold = await countTurns(() => f.store.listSessions());
   f.reads.length = 0;
   const warm = await countTurns(() => f.store.listSessions());
+  assert.equal(f.stats.maxInFlight, 32, 'stats run in bounded batches');
   assert.deepStrictEqual(f.reads, []);
   assert.deepStrictEqual(warm.sessions, cold.sessions);
   assert.deepStrictEqual(warm.sessions.map((s) => s.id), [...expected].reverse());
   // 900 entries in batches of 32: the loop gets a turn between batches.
   assert.ok(warm.turns >= 20, `only ${warm.turns} event-loop turns during a cached listing`);
   assert.ok(cold.turns >= 20, `only ${cold.turns} event-loop turns during an uncached listing`);
+});
+
+test('a session removed while a cold listing is in flight is skipped, not fatal', async (t) => {
+  const f = await fixture(t);
+  for (const id of ['a', 'bb', 'ccc']) await f.store.saveSession(makeSession(id));
+  const cold = new SessionStore(f.dir);
+  // Stat'ed with its batch, gone by the time it is read.
+  f.beforeRead.set(f.recordPath('bb'), () => fs.rm(join(f.dir, 'sessions', 'bb'), { recursive: true }));
+  assert.deepStrictEqual((await cold.listSessions()).map((s) => s.id), ['ccc', 'a']);
+  assert.deepStrictEqual(await cold.listSessions(), await f.uncached());
+
+  // Same when only the record is replaced by something that is not a file path.
+  f.beforeRead.set(f.recordPath('a'), async () => {
+    await fs.rm(join(f.dir, 'sessions', 'a'), { recursive: true });
+    await fs.writeFile(join(f.dir, 'sessions', 'a'), 'now a file');
+  });
+  const again = new SessionStore(f.dir);
+  assert.deepStrictEqual((await again.listSessions()).map((s) => s.id), ['ccc']);
+  assert.equal(await again.loadSession('a'), null);
+});
+
+test('a save overtaken by another writer does not index its own content', async (t) => {
+  const f = await fixture(t);
+  await f.store.saveSession(makeSession('a'));
+  const path = f.recordPath('a');
+  const theirs = makeSession('a', { name: 'written by another process, and longer' });
+  // Between this store's rename and its stat of the published file.
+  f.beforeStat.set(path, () => fs.writeFile(path, JSON.stringify(theirs)));
+  await f.store.saveSession(makeSession('a', { name: 'ours' }));
+  assert.equal(f.beforeStat.size, 0, 'the other writer ran inside the save');
+
+  assert.deepStrictEqual(await f.store.loadSession('a'), theirs);
+  assert.deepStrictEqual(await f.store.listSessions(), [theirs]);
+});
+
+test('listing prunes index entries of directories that are gone', async (t) => {
+  const f = await fixture(t);
+  for (const id of ['a', 'bb', 'ccc']) await f.store.saveSession(makeSession(id));
+  await f.store.listSessions();
+  const index = (f.store as unknown as { recordIndex: Map<string, unknown> }).recordIndex;
+  assert.deepStrictEqual([...index.keys()].sort(), ['a', 'bb', 'ccc']);
+  await fs.rm(join(f.dir, 'sessions', 'bb'), { recursive: true });
+  await fs.rm(join(f.dir, 'sessions', 'ccc'), { recursive: true });
+  await f.store.listSessions();
+  assert.deepStrictEqual([...index.keys()], ['a']);
 });
