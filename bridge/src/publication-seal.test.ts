@@ -11,13 +11,16 @@ import { loadLocalIdentity } from './security/bridge/identity.js';
 import { applicationJson } from './security/bridge/security.js';
 import { AtomicSnapshot } from './security/bridge/snapshot.js';
 import { generateEndpoint, open, seal } from './security/crypto.js';
+import { BridgeSecurityError } from './security/bridge/errors.js';
 import type { EndpointIdentity, LocalEventPage, SecureApplication, SecureEnvelope } from './security/protocol.js';
 import { LocalApiServer } from './local-api-server.js';
 
 const email = 'owner@example.test';
 const BROWSERS = 3;
 /** Policy snapshot reads for one relay publication to three browsers (the local CLI is provisioned too), prepare() included. */
-const SNAPSHOT_READS_PER_PUBLICATION = 10;
+// Was 1 + 3 per recipient (13 with the local CLI as a fourth recipient): now one read for the readers and their keys, plus the
+// per-packet re-check in prepare().
+const SNAPSHOT_READS_PER_PUBLICATION = 1 + BROWSERS;
 /** Whether the relay publication carries an envelope for the local-cli endpoint. */
 const RELAY_SEALS_TO_LOCAL_CLI = false;
 
@@ -81,6 +84,9 @@ test('the local CLI gets no relay envelope, and its local events poll still retu
   f.client.onLocalPublication((channel, data) => server.recordPublication(channel, data));
   // The local CLI is still an approved reader: policy.recipients() keeps its semantics for every other caller.
   assert.ok((await f.security.policy.recipients()).some(device => device.endpoint.id === f.cli.endpoint.id));
+  const readers = await f.security.policy.readers();
+  assert.deepEqual(readers.map(reader => reader.endpoint), (await f.security.policy.recipients()).map(device => device.endpoint));
+  assert.deepEqual(readers.find(reader => reader.endpoint.id === f.browsers[0].endpoint.id), await f.security.policy.principal(f.browsers[0].endpoint.id));
   await f.client.publishHookEvent(email, 'session', { hook_event_name: 'Stop', marker: 'for-everyone' });
   await f.client.publishSessionUpdate(email, { id: 'session', name: 'n', command: '', status: 'running', bridgeId: 'bridge', createdAt: '', updatedAt: '' });
   await f.drained();
@@ -105,4 +111,74 @@ test('the local CLI gets no relay envelope, and its local events poll still retu
   const openedReply = JSON.parse(new TextDecoder().decode(await open(f.cli, f.security.endpoint, reply, { ownerId: f.ownerId, bridgeId: 'bridge',
     channel: route.channel, recipientId: f.cli.endpoint.id, purpose: 'application' }))) as { data: LocalEventPage };
   assert.equal(openedReply.data.events.length, 2);
+});
+
+/** Records what sealPublication sealed, so a test can tell "never sealed" from "sealed, then dropped by prepare()". */
+function recordSealed(f: Awaited<ReturnType<typeof publicationFixture>>) {
+  const sealed: string[][] = [];
+  const original = f.security.sealPublication.bind(f.security);
+  f.security.sealPublication = async (channel, application) => {
+    const packets = await original(channel, application);
+    sealed.push(packets.flatMap(packet => packet.type === 'ftown_encrypted' ? [packet.recipientId] : []).sort());
+    return packets;
+  };
+  return sealed;
+}
+
+test('a recipient revoked after the publication was enqueued loses its packet in prepare(); the others still go out', async t => {
+  const f = await publicationFixture(t);
+  const sealed = recordSealed(f);
+  const [first, revoked, last] = f.browsers;
+  const admin = await f.security.policy.principal(f.cli.endpoint.id);
+  // Enqueue: the readers of this publication are read from the policy now, before the revocation below is applied.
+  void f.client.publishHookEvent(email, 'session', { hook_event_name: 'Stop', marker: 'in-flight' });
+  await f.security.revokeEndpoint(admin, revoked.endpoint.id);
+  await f.drained();
+  assert.deepEqual(sealed, [f.browsers.map(browser => browser.endpoint.id).sort()], 'the revoked browser was still a reader when the publication was sealed');
+  assert.deepEqual(recipientsOf(f.published), [first.endpoint.id, last.endpoint.id].sort(), 'only the revoked recipient is dropped');
+  for (const browser of [first, last]) {
+    const application = await f.opened(browser, f.published.find(item => item.envelope.recipientId === browser.endpoint.id)!);
+    assert.equal(application.data.marker, 'in-flight');
+  }
+});
+
+test('a failure of the per-packet re-check that is not about one recipient still fails the whole publication', async t => {
+  const f = await publicationFixture(t);
+  const errors = t.mock.method(console, 'error', () => undefined);
+  const principal = f.security.policy.principal.bind(f.security.policy);
+  f.security.policy.principal = async endpointId => {
+    if (endpointId === f.browsers[1].endpoint.id) throw new BridgeSecurityError('storage_unavailable');
+    return principal(endpointId);
+  };
+  await f.client.publishHookEvent(email, 'session', { hook_event_name: 'Stop' });
+  await f.drained();
+  assert.deepEqual(f.published, []);
+  assert.equal(errors.mock.callCount(), 1);
+});
+
+test('a revoked recipient is absent from the next publication although its key is still in the import cache', async t => {
+  const f = await publicationFixture(t);
+  const sealed = recordSealed(f);
+  const [first, revoked, last] = f.browsers;
+  await f.client.publishHookEvent(email, 'session', { hook_event_name: 'Stop', marker: 'before' });
+  await f.drained();
+  assert.deepEqual(recipientsOf(f.published), f.browsers.map(browser => browser.endpoint.id).sort());
+  await f.security.revokeEndpoint(await f.security.policy.principal(f.cli.endpoint.id), revoked.endpoint.id);
+  f.published.length = 0;
+  const imports = t.mock.method(crypto.subtle as unknown as { importKey(...args: unknown[]): Promise<unknown> }, 'importKey');
+  const rawImports = () => imports.mock.calls.filter(call => call.arguments[0] === 'raw' && call.arguments[1] instanceof Uint8Array
+    && Buffer.from(call.arguments[1]).toString('base64url') === revoked.endpoint.publicKey).length;
+  await f.client.publishHookEvent(email, 'session', { hook_event_name: 'Stop', marker: 'after' });
+  await f.client.publishHookEvent(email, 'session', { hook_event_name: 'Stop', marker: 'after' });
+  await f.drained();
+  const remaining = [first.endpoint.id, last.endpoint.id].sort();
+  assert.deepEqual(sealed.slice(1), [remaining, remaining], 'nothing is even sealed for the revoked browser');
+  assert.deepEqual(recipientsOf(f.published), [...remaining, ...remaining].sort());
+  // Its public key is still cached: sealing to it directly needs no import. The cache holds bytes, the policy decides recipients.
+  const envelope = await seal(f.security.identity, revoked.endpoint, { type: 'ftown_encrypted', version: 1, senderId: f.security.endpoint.id,
+    recipientId: revoked.endpoint.id, ownerId: f.ownerId, bridgeId: 'bridge', channel: 'probe', purpose: 'application', messageId: randomUUID(),
+    createdAt: 1, expiresAt: 2, receiverEpoch: null }, new Uint8Array());
+  assert.equal(envelope.recipientId, revoked.endpoint.id);
+  assert.equal(rawImports(), 0);
+  imports.mock.restore();
 });

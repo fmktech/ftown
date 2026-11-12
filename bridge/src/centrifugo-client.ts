@@ -1,5 +1,5 @@
 import { Centrifuge } from 'centrifuge';
-import { BridgeSecurityService, applicationJson } from './security/bridge/security.js';
+import { BridgeSecurityService, applicationJson, recipientUnavailable } from './security/bridge/security.js';
 import { accountChannel, sessionChannel } from './security/ledger/channels.js';
 import { parseHeadAnnouncement, type HeadAnnouncement } from './security/ledger/announce.js';
 import { executeSecurePacket } from './security/bridge/execute.js';
@@ -212,7 +212,9 @@ export class CentrifugoClient {
           const out: OutboundPacket[] = [];
           for (const packet of packets) {
             if (packet.type !== 'ftown_encrypted') continue;
-            await security.policy.principal(packet.recipientId);
+            // Sealed from one policy snapshot; a recipient revoked since then loses its packet, the others still go out.
+            try { await security.policy.principal(packet.recipientId); }
+            catch (error) { if (recipientUnavailable(error)) continue; throw error; }
             out.push({
               bytes: Buffer.byteLength(JSON.stringify(packet)),
               send: () => this.client.publish(channel, packet).then(() => undefined),
