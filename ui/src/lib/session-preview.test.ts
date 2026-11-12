@@ -135,6 +135,27 @@ describe('preview protocol validation', () => {
     for (const blocked of ['other.md', '//cdn.example.test/notes.md', 'javascript:notes.md', 'data:text/html,notes.md']) frame.click(blocked);
     expect(frame.posted).toHaveLength(before);
   });
+  it('escapes hostile file names so the link script stays a single script and the handler still works', () => {
+    const hostile = '<!--<script>.md';
+    // The hostile basename passes descriptor validation (no slash, backslash or controls),
+    // so it must still be safe to embed in the inline link script.
+    expect(isPreviewDescriptor({ id, files: [{ id: fileId, fileName: hostile, kind: 'markdown' }] })).toBe(true);
+    const wrapped = previewDocument('<p>x</p>', undefined, [hostile, 'a.html']);
+    // Exactly one opening script tag: the hostile name must not inject a second script
+    // or terminate the link script via '<' or '<!--'.
+    expect(wrapped.match(/<script>/g)).toHaveLength(1);
+    expect(wrapped).not.toContain(hostile);
+    expect(wrapped).toContain('\\u003c!--\\u003cscript>.md');
+    const frame = linkFrame(wrapped);
+    // The embedded array round-trips: clicking the hostile name switches to it.
+    frame.click(hostile);
+    expect(frame.posted).toEqual([[{ channel: 'ftown-preview-link-v1', kind: 'switch-file', fileName: hostile }, '*']]);
+    frame.click('a.html');
+    expect(frame.posted).toEqual([
+      [{ channel: 'ftown-preview-link-v1', kind: 'switch-file', fileName: hostile }, '*'],
+      [{ channel: 'ftown-preview-link-v1', kind: 'switch-file', fileName: 'a.html' }, '*'],
+    ]);
+  });
 
   // The sandboxed frame is out of process: it can finish loading before the embedder gives it a size.
   function scrollFrame() {

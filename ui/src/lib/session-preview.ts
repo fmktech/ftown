@@ -78,7 +78,7 @@ export const PREVIEW_CSP = "default-src 'none'; script-src 'unsafe-inline'; styl
 
 // Runs inside the opaque sandbox before any user markup or script.
 function previewLinkScript(fileNames?: readonly string[]): string {
-  const files = JSON.stringify([...(fileNames ?? [])]).replace(/\$/g, () => '\\$').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+  const files = JSON.stringify([...(fileNames ?? [])]).replace(/</g, '\\u003c').replace(/\$/g, () => '\\$').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
   return String.raw`<script>(() => {
   const apply = Reflect.apply;
   const closest = Element.prototype.closest;

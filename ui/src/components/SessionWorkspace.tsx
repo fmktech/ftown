@@ -19,8 +19,6 @@ interface Props {
   isDesktop: boolean; mobileTab: 'sessions' | 'terminal' | 'preview' | 'review'; onMobileTab: (tab: 'terminal' | 'preview' | 'review') => void;
   reviewOpen?: boolean; reviewActivation?: number; onCloseReview?: () => void;
   onRefit: () => void; children: ReactNode; sessions?: Session[]; activity?: SessionActivity;
-  selectedFileName?: string;
-  onSelectFile?: (fileName: string) => void;
 }
 type PreviewErrorReason = 'missing' | 'too_large' | 'invalid_utf8' | 'invalid_file' | 'unavailable';
 function previewErrorMessage(reason: PreviewErrorReason, fileName: string): string {
@@ -32,7 +30,7 @@ function previewErrorMessage(reason: PreviewErrorReason, fileName: string): stri
     case 'unavailable': return `${fileName} is unavailable`;
   }
 }
-export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {}, selectedFileName, onSelectFile }: Props) {
+export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {} }: Props) {
   const mainRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   const [ratio, setRatio] = useState(50);
@@ -49,12 +47,11 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
   const sessionKey = session ? `${session.bridgeId}:${session.id}` : '';
 
   // Per-session selection stored internally (persisted while Dashboard is open because SessionWorkspace stays mounted and sessionKey changes).
-  // If Dashboard supplies controlled props (selectedFileName/onSelectFile) they take precedence.
   const [internalSelections, setInternalSelections] = useState<Record<string, string>>({});
   const previousRecordByKey = useRef<Record<string, { id: string | null; names: string[] }>>({});
   const descriptorId = descriptor?.id ?? null;
 
-  const storedSelection = selectedFileName !== undefined ? selectedFileName : sessionKey ? internalSelections[sessionKey] : undefined;
+  const storedSelection = sessionKey ? internalSelections[sessionKey] : undefined;
   let effectiveFileName: string | undefined;
   if (files.length > 0) {
     const prev = sessionKey ? previousRecordByKey.current[sessionKey] : undefined;
@@ -77,12 +74,8 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
   const target = descriptor && selectedFile ? { bridgeId: session!.bridgeId, sessionId: session!.id, preview: descriptor, file: selectedFile } : null;
 
   const handleSelectFile = useCallback((fileName: string) => {
-    if (onSelectFile) {
-      onSelectFile(fileName);
-    } else {
-      setInternalSelections(prev => ({ ...prev, [sessionKey]: fileName }));
-    }
-  }, [onSelectFile, sessionKey]);
+    setInternalSelections(prev => ({ ...prev, [sessionKey]: fileName }));
+  }, [sessionKey]);
 
   // Keep previous set tracking and sync storage when the effective selection is derived from a set change (new file added, selected removed, or initial fallback).
   useEffect(() => {
@@ -93,21 +86,12 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
       previousRecordByKey.current = { ...previousRecordByKey.current, [sessionKey]: { id: descriptorId, names: [...fileNames] } };
     }
     if (effectiveFileName === undefined) return;
-    const isControlled = onSelectFile !== undefined;
-    const stored = isControlled ? selectedFileName : internalSelections[sessionKey];
-    if (stored !== effectiveFileName) {
-      if (isControlled && onSelectFile) {
-        onSelectFile(effectiveFileName);
-      } else if (!isControlled) {
-        setInternalSelections(prevSel => prevSel[sessionKey] === effectiveFileName ? prevSel : { ...prevSel, [sessionKey]: effectiveFileName });
-      }
+    if (internalSelections[sessionKey] !== effectiveFileName) {
+      setInternalSelections(prevSel => prevSel[sessionKey] === effectiveFileName ? prevSel : { ...prevSel, [sessionKey]: effectiveFileName });
     }
     // Include fileNames identity via joined string to detect order changes; effectiveFileName captures derived choice.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionKey, effectiveFileName, selectedFileName, onSelectFile, descriptorId, fileNames.join('|'), internalSelections[sessionKey]]);
-
-  // Also update previous tracking on sessionKey change: when switching sessions, previous for new key should be treated as undefined on next render.
-  // We already handle via per-key map; no extra reset needed because prev for new key is undefined until first effect.
+  }, [sessionKey, effectiveFileName, descriptorId, fileNames.join('|'), internalSelections[sessionKey]]);
 
   const compact = !isDesktop || width < 640;
   const showPreview = !!target && open;

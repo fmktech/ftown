@@ -43,6 +43,8 @@ Markdown is rendered as a readable document with GFM — tables, task lists, str
 
 With two or more registered files, the dashboard shows a file selector in the preview toolbar. A relative link in a preview whose basename matches another registered file (ignoring `./`, query and `#fragment`) switches the selector to that file instead of opening the default behavior. All other links behave as before. Only the selected file is fetched; switching shows a loading state rather than the previous file's content.
 
+When a replace partially overlaps the previous set, the newly added file is selected because the UI cannot distinguish a replace from an add.
+
 ## Isolation
 
 The preview runs in an isolated iframe; scripts cannot use the dashboard's parent DOM or storage. This isolation does not limit script CPU or make arbitrary HTML safe to trust.
