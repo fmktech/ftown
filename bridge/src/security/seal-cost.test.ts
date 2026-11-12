@@ -1,6 +1,6 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateEndpoint, importEndpoint, open, seal } from './crypto.js';
+import { generateEndpoint, importEndpoint, open, seal, PUBLIC_KEY_CACHE_LIMIT } from './crypto.js';
 import type { EndpointIdentity, EndpointPublic, EnvelopeHeader, OpenContext } from './protocol.js';
 
 const ownerId = '349f8d2e-38e4-4d59-888d-687dcfa19e39';
@@ -89,7 +89,9 @@ test('every seal performs a fresh encapsulation: new ephemeral key, new enc and 
 
 /** WebCrypto jobs of one seal to an already seen recipient (the steady state of a bridge publishing to its devices). */
 const JOBS_PER_WARM_SEAL: { total: number; counts: Partial<Record<Op, number>> } = {
-  total: 25, counts: { digest: 2, importKey: 9, exportKey: 4, generateKey: 1, deriveBits: 6, encrypt: 1, sign: 2 },
+  // Was 25 (digest 2, importKey 9, exportKey 4) while both endpoint keys were hashed, imported and exported again on every seal.
+  // What remains is the HPKE encapsulation itself, all of it per message: nothing below is cached.
+  total: 20, counts: { importKey: 7, exportKey: 3, generateKey: 1, deriveBits: 6, encrypt: 1, sign: 2 },
 };
 
 test('WebCrypto jobs per seal', async t => {
@@ -103,4 +105,85 @@ test('WebCrypto jobs per seal', async t => {
   spy.restore();
   t.diagnostic(`jobs per warm seal: ${JSON.stringify(measured)}`);
   assert.deepEqual(measured, JOBS_PER_WARM_SEAL);
+});
+
+test('a validated public key is imported once; the cache is keyed by key bytes, never by the claimed id', async t => {
+  const sender = await generateEndpoint(ownerId, 'bridge');
+  const recipient = await generateEndpoint(ownerId, 'browser');
+  const other = await generateEndpoint(ownerId, 'browser');
+  const plaintext = encoder.encode('cached handle');
+  const spy = spySubtle(t);
+  await seal(sender, recipient.endpoint, headerFor(sender, recipient.endpoint), plaintext);
+  assert.equal(spy.publicImports(recipient.endpoint.publicKey), 1);
+  assert.equal(spy.publicImports(sender.endpoint.publicKey), 1);
+  assert.equal(spy.counts().digest, 2);
+  await seal(sender, recipient.endpoint, headerFor(sender, recipient.endpoint), plaintext);
+  await seal(sender, { ...recipient.endpoint }, headerFor(sender, recipient.endpoint), plaintext);
+  assert.equal(spy.publicImports(recipient.endpoint.publicKey), 1, 'same bytes: no second import');
+  assert.equal(spy.publicImports(sender.endpoint.publicKey), 1);
+  assert.equal(spy.counts().digest, 2, 'same bytes: no second fingerprint');
+
+  // A different recipient is validated and imported on its own.
+  await seal(sender, other.endpoint, headerFor(sender, other.endpoint), plaintext);
+  assert.equal(spy.publicImports(other.endpoint.publicKey), 1);
+  assert.equal(spy.counts().digest, 3);
+
+  // A different key under an already cached recipient id is never served the cached handle, in either direction.
+  const fresh = await generateEndpoint(ownerId, 'browser');
+  const swapped: EndpointPublic = { ...recipient.endpoint, publicKey: fresh.endpoint.publicKey };
+  const digestsBefore = spy.counts().digest ?? 0;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await assert.rejects(seal(sender, swapped, headerFor(sender, swapped), plaintext), { code: 'invalid_envelope' });
+  }
+  assert.equal((spy.counts().digest ?? 0) - digestsBefore, 2, 'unknown bytes are fingerprinted on every attempt');
+  assert.equal(spy.publicImports(fresh.endpoint.publicKey), 0, 'a key whose fingerprint is not the claimed id is never imported or cached');
+  const relabelled: EndpointPublic = { ...recipient.endpoint, id: other.endpoint.id };
+  await assert.rejects(seal(sender, relabelled, headerFor(sender, relabelled), plaintext), { code: 'invalid_envelope' });
+  // The rejected attempts left the cache as it was: the real key now validates and imports once.
+  await seal(sender, fresh.endpoint, headerFor(sender, fresh.endpoint), plaintext);
+  assert.equal(spy.publicImports(fresh.endpoint.publicKey), 1);
+  spy.restore();
+  const envelope = await seal(sender, recipient.endpoint, headerFor(sender, recipient.endpoint, 'still-opens'), plaintext);
+  assert.deepEqual(await open(recipient, sender.endpoint, envelope, contextOf(headerFor(sender, recipient.endpoint, 'still-opens'))), plaintext);
+});
+
+test('an invalid public key is rejected, and re-examined, on every attempt', async t => {
+  const sender = await generateEndpoint(ownerId, 'bridge');
+  // 65 canonical bytes with the uncompressed-point prefix that are not a point on P-256, under their true fingerprint.
+  const offCurve = Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 7)]);
+  const bad: EndpointPublic = { version: 1, ownerId, kind: 'browser', publicKey: offCurve.toString('base64url'),
+    id: Buffer.from(await crypto.subtle.digest('SHA-256', offCurve)).toString('base64url') };
+  const spy = spySubtle(t);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await assert.rejects(seal(sender, bad, headerFor(sender, bad), encoder.encode('never sealed')), { code: 'invalid_envelope' });
+    assert.equal(spy.publicImports(bad.publicKey), attempt, 'the failed import is retried, not remembered');
+  }
+  assert.equal(spy.counts().generateKey, undefined, 'no encapsulation is attempted for an invalid key');
+  // An identity whose public handle does not match its endpoint is refused every time as well.
+  const stranger = await generateEndpoint(ownerId, 'bridge');
+  const mismatched: EndpointIdentity = { endpoint: sender.endpoint, keyPair: { publicKey: stranger.keyPair.publicKey, privateKey: sender.keyPair.privateKey } };
+  const recipient = await generateEndpoint(ownerId, 'browser');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await assert.rejects(seal(mismatched, recipient.endpoint, headerFor(sender, recipient.endpoint), encoder.encode('never sealed')), { code: 'invalid_envelope' });
+  }
+  spy.restore();
+});
+
+test('the public key cache is bounded and evicts the least recently used key', async t => {
+  const sender = await generateEndpoint(ownerId, 'bridge');
+  const first = await generateEndpoint(ownerId, 'browser');
+  const plaintext = encoder.encode('bounded');
+  const spy = spySubtle(t);
+  await seal(sender, first.endpoint, headerFor(sender, first.endpoint), plaintext);
+  assert.equal(spy.publicImports(first.endpoint.publicKey), 1);
+  // Enough other keys to push `first` out; the sender's own key is used by every seal and therefore stays.
+  for (let index = 0; index < PUBLIC_KEY_CACHE_LIMIT; index++) {
+    const next = await generateEndpoint(ownerId, 'browser');
+    await seal(sender, next.endpoint, headerFor(sender, next.endpoint), plaintext);
+  }
+  assert.equal(spy.publicImports(sender.endpoint.publicKey), 1, 'a key in constant use is never evicted');
+  assert.equal(spy.publicImports(first.endpoint.publicKey), 1);
+  await seal(sender, first.endpoint, headerFor(sender, first.endpoint), plaintext);
+  assert.equal(spy.publicImports(first.endpoint.publicKey), 2, 'the evicted key is validated and imported again');
+  spy.restore();
 });
