@@ -2,9 +2,10 @@
 name: ftown
 description: >-
   Control ftown sessions: create/list/read/drive sibling sessions, send ftown
-  mail, request human attention, link session PRs, and coordinate worker agents.
-  Use for ftown sessions, child/sibling agents, bridge mail/inbox, or explicitly
-  requested orchestration.
+  mail, request human attention, register and update self-contained HTML
+  previews for the dashboard, link session PRs, and coordinate worker agents.
+  Use for ftown sessions, child/sibling agents, bridge mail/inbox, html preview,
+  or explicitly requested orchestration.
 ---
 
 # ftown
