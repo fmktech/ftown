@@ -43,6 +43,8 @@ import {
 import { removeFtownSession } from './remove-ftown-session.js';
 import { collectSessionUsage } from './usage-collector.js';
 import { toWireSession } from './session-wire.js';
+import { CardValidationError, type CardPatch } from './coordination/contract.js';
+import { createCoordination, rootOf, type Coordination } from './coordination/wiring.js';
 
 export interface HookPayload {
   ftown_session_id: string;
@@ -296,6 +298,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private port: number = 0;
   private sessionController: SessionController | null = null;
   private lifecycleController: SessionController | null = null;
+  private coordination: Coordination | null = null;
+  private defaultCoordination: Coordination | null = null;
   private mailStore: MailStore | null = null;
   private recoveryEpoch = 0;
   private recoveryStartedAt = -1;
@@ -312,6 +316,50 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
 
   setAttentionStore(store: AttentionStore): void {
     this.attention = store;
+    this.defaultCoordination = null;
+  }
+
+  setCoordination(coordination: Coordination): void {
+    this.coordination = coordination;
+    this.defaultCoordination = null;
+    if (typeof this.mail.setDigestProvider === 'function') {
+      this.mail.setDigestProvider(coordination.digest);
+    }
+    if (typeof this.mail.setEventSink === 'function') {
+      this.mail.setEventSink(coordination.mailSink);
+    }
+  }
+
+  private getCoordination(): Coordination | null {
+    if (this.coordination) return this.coordination;
+    if (this.defaultCoordination) return this.defaultCoordination;
+    const store = this.store;
+    if (!store) return null;
+    this.defaultCoordination = createCoordination({
+      store,
+      attention: {
+        list: async (id) =>
+          this.attention
+            ? this.attention.list(id)
+            : { activity: { state: 'unknown' }, openCount: 0 },
+      },
+      prStatus: async () => null,
+      mail: {
+        unreadCount: async (id) => {
+          const ms = this.mailStore;
+          if (!ms) return 0;
+          if (typeof ms.unreadCount === 'function') return ms.unreadCount(id);
+          return (await ms.listUndelivered(id)).length;
+        },
+      },
+      publishSession: (session) => {
+        if (this.centrifugo && this.userId) {
+          void this.centrifugo.publishSessionUpdate(this.userId, session);
+        }
+      },
+      now: Date.now,
+    });
+    return this.defaultCoordination;
   }
 
   /** Internal producer hook for mail already committed to the inbox. */
@@ -322,6 +370,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   setMailStore(mailStore: MailStore): void {
     if (this.mailStore !== mailStore) this.recoveryEpoch++;
     this.mailStore = mailStore;
+    this.defaultCoordination = null;
     this.mail.setMailStore(mailStore);
     this.startMailRecovery();
   }
@@ -396,6 +445,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private invalidateControllers(): void {
     this.sessionController = null;
     this.lifecycleController = null;
+    this.defaultCoordination = null;
   }
 
   /** Transport-agnostic session operations (shared with the RPC switch). */
@@ -679,6 +729,9 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
             hook_event_name: 'PreToolUse', ...toolData,
             attentionId: item.id, attentionSequence: item.sequence, attentionCreatedAt: item.createdAt,
           } } as HookEvent);
+          if (session.parentSessionId) {
+            await this.getCoordination()?.emit(session, 'attention', item.title, item.id);
+          }
         }
         jsonResponse(res, 200, { event: item && item.prompt ? item : null });
         return;
@@ -726,6 +779,9 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           attentionId: event.id, attentionSequence: event.sequence, attentionCreatedAt: event.createdAt,
           ...(event.prompt ? { attentionPrompt: event.prompt } : {}),
         } });
+        if (session.parentSessionId) {
+          await this.getCoordination()?.emit(session, 'attention', event.title, event.id);
+        }
         jsonResponse(res, 200, { event });
         return;
       }
@@ -781,6 +837,191 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     const sessionUsageMatch = path.match(/^\/api\/sessions\/([^/]+)\/usage$/);
     const sessionPreviewMatch = path.match(/^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/preview$/);
     const sessionChatMatch = path.match(/^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/preview-chat(?:\/(send|reply))?$/);
+    const sessionCardMatch = path.match(/^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/card$/);
+    const sessionBoardMatch = path.match(/^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/board$/);
+    const sessionEventsMatch = path.match(/^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/events$/);
+
+    if (sessionCardMatch) {
+      const coordination = this.getCoordination();
+      if (!coordination) { jsonResponse(res, 503, { error: 'Server not ready' }); return; }
+      const id = sessionCardMatch[1];
+      if ([...url.searchParams.keys()].length > 0) throw new BadRequestError('Unknown query parameter');
+      if (req.method === 'GET') {
+        const card = await coordination.board.card(id);
+        if (!card) { jsonResponse(res, 404, { error: 'Session not found' }); return; }
+        jsonResponse(res, 200, card);
+        return;
+      }
+      if (req.method === 'PUT') {
+        const body = await parseBody(req);
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          throw new BadRequestError('Card update must be an object');
+        }
+        const keys = Object.keys(body);
+        if (keys.length === 0) throw new BadRequestError('Empty card update');
+        for (const key of keys) {
+          if (!['state', 'headline', 'progress', 'blockedOn', 'next'].includes(key)) {
+            throw new BadRequestError(`Unknown card field: ${key}`);
+          }
+        }
+        try {
+          await coordination.cards.set(id, body as CardPatch);
+        } catch (err) {
+          if (err instanceof CardValidationError) {
+            jsonResponse(res, 400, { error: err.message });
+            return;
+          }
+          if (err instanceof Error && err.message === 'Session not found') {
+            jsonResponse(res, 404, { error: 'Session not found' });
+            return;
+          }
+          throw err;
+        }
+        const card = await coordination.board.card(id);
+        if (!card) { jsonResponse(res, 404, { error: 'Session not found' }); return; }
+        jsonResponse(res, 200, card);
+        return;
+      }
+      if (req.method === 'DELETE') {
+        const body = await parseBody(req);
+        if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length > 0) {
+          throw new BadRequestError('Unexpected request body');
+        }
+        const session = await this.store.loadSession(id);
+        if (!session) { jsonResponse(res, 404, { error: 'Session not found' }); return; }
+        await coordination.cards.clear(id);
+        jsonResponse(res, 200, { ok: true });
+        return;
+      }
+      jsonResponse(res, 405, { error: 'Method not allowed' });
+      return;
+    }
+
+    if (sessionBoardMatch) {
+      const coordination = this.getCoordination();
+      if (!coordination) { jsonResponse(res, 503, { error: 'Server not ready' }); return; }
+      if (req.method !== 'GET') { jsonResponse(res, 405, { error: 'Method not allowed' }); return; }
+      const id = sessionBoardMatch[1];
+      for (const key of url.searchParams.keys()) {
+        if (key !== 'since' && key !== 'ready' && key !== 'all') {
+          throw new BadRequestError(`Unknown query parameter: ${key}`);
+        }
+        if (url.searchParams.getAll(key).length > 1) {
+          throw new BadRequestError(`Duplicate query parameter: ${key}`);
+        }
+      }
+      let since: number | undefined;
+      const rawSince = url.searchParams.get('since');
+      if (rawSince !== null) {
+        if (!/^\d{1,12}$/.test(rawSince) || !Number.isSafeInteger(Number(rawSince))) {
+          throw new BadRequestError('Invalid since');
+        }
+        since = Number(rawSince);
+      }
+      let ready: boolean | undefined;
+      const rawReady = url.searchParams.get('ready');
+      if (rawReady !== null) {
+        if (!['1', '0', 'true', 'false'].includes(rawReady)) {
+          throw new BadRequestError('Invalid ready');
+        }
+        ready = rawReady === '1' || rawReady === 'true';
+      }
+      let all: boolean | undefined;
+      const rawAll = url.searchParams.get('all');
+      if (rawAll !== null) {
+        if (!['1', '0', 'true', 'false'].includes(rawAll)) {
+          throw new BadRequestError('Invalid all');
+        }
+        all = rawAll === '1' || rawAll === 'true';
+      }
+      try {
+        const board = await coordination.board.board({
+          sessionId: id,
+          ...(since !== undefined ? { since } : {}),
+          ...(ready !== undefined ? { ready } : {}),
+          ...(all !== undefined ? { all } : {}),
+        });
+        jsonResponse(res, 200, board);
+      } catch (err) {
+        if (err instanceof Error && err.message === 'Session not found') {
+          jsonResponse(res, 404, { error: 'Session not found' });
+          return;
+        }
+        throw err;
+      }
+      return;
+    }
+
+    if (sessionEventsMatch) {
+      const coordination = this.getCoordination();
+      if (!coordination) { jsonResponse(res, 503, { error: 'Server not ready' }); return; }
+      if (req.method !== 'GET') { jsonResponse(res, 405, { error: 'Method not allowed' }); return; }
+      const id = sessionEventsMatch[1];
+      for (const key of url.searchParams.keys()) {
+        if (key !== 'since' && key !== 'limit' && key !== 'waitSeconds') {
+          throw new BadRequestError(`Unknown query parameter: ${key}`);
+        }
+        if (url.searchParams.getAll(key).length > 1) {
+          throw new BadRequestError(`Duplicate query parameter: ${key}`);
+        }
+      }
+      let since: number | undefined;
+      const rawSince = url.searchParams.get('since');
+      if (rawSince !== null) {
+        if (!/^\d{1,12}$/.test(rawSince) || !Number.isSafeInteger(Number(rawSince))) {
+          throw new BadRequestError('Invalid since');
+        }
+        since = Number(rawSince);
+      }
+      let limit: number | undefined;
+      const rawLimit = url.searchParams.get('limit');
+      if (rawLimit !== null) {
+        if (!/^\d{1,12}$/.test(rawLimit) || !Number.isSafeInteger(Number(rawLimit))) {
+          throw new BadRequestError('Invalid limit');
+        }
+        limit = Number(rawLimit);
+        if (limit < 1 || limit > 500) {
+          throw new BadRequestError('Invalid limit');
+        }
+      }
+      let waitSeconds: number | undefined;
+      const rawWait = url.searchParams.get('waitSeconds');
+      if (rawWait !== null) {
+        if (!/^\d{1,12}$/.test(rawWait) || !Number.isSafeInteger(Number(rawWait))) {
+          throw new BadRequestError('Invalid waitSeconds');
+        }
+        waitSeconds = Number(rawWait);
+        if (waitSeconds > 300) {
+          throw new BadRequestError('Invalid waitSeconds');
+        }
+      }
+      const session = await this.store.loadSession(id);
+      if (!session) { jsonResponse(res, 404, { error: 'Session not found' }); return; }
+      const rootId = rootOf(session);
+      if (waitSeconds && waitSeconds > 0) {
+        const controller = new AbortController();
+        const cancel = () => controller.abort();
+        res.on('close', cancel);
+        if (res.destroyed) controller.abort();
+        try {
+          let page = await coordination.events.wait(rootId, since ?? 0, waitSeconds * 1000, controller.signal);
+          if (limit !== undefined && page.events.length > limit) {
+            const sliced = page.events.slice(0, limit);
+            page = { ...page, events: sliced, cursor: sliced[sliced.length - 1].seq };
+          }
+          jsonResponse(res, 200, page);
+        } finally {
+          res.off('close', cancel);
+        }
+        return;
+      }
+      const page = await coordination.events.read(rootId, {
+        ...(since !== undefined ? { since } : {}),
+        ...(limit !== undefined ? { limit } : {}),
+      });
+      jsonResponse(res, 200, page);
+      return;
+    }
 
     if (sessionChatMatch) {
       const controller = this.getSessionController();
@@ -1305,10 +1546,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     return this.mail.acceptMail(session, body);
   }
 
-  /** Best-effort child-idle signal through the ordinary durable mail path. */
+  /** Best-effort child-idle tree event emission. */
   async notifyIdleParent(signal: SubagentIdleSignal, isCurrent: () => boolean): Promise<void> {
     const store = this.store; const runner = this.runner; const bridgeId = this.securityInfo?.bridgeId;
-    if (!store || !runner || !bridgeId || !this.mail.isReady() || !/^[A-Za-z0-9_-]{1,200}$/.test(signal.sessionId) || !isCurrent()) return;
+    if (!store || !runner || !bridgeId || !/^[A-Za-z0-9_-]{1,200}$/.test(signal.sessionId) || !isCurrent()) return;
     const child = await store.loadSession(signal.sessionId);
     if (!child || child.id !== signal.sessionId || child.bridgeId !== bridgeId || child.status !== 'running' || child.shellType === 'shell'
       || !child.parentSessionId || child.parentSessionId === child.id || !/^[A-Za-z0-9_-]{1,200}$/.test(child.parentSessionId)) return;
@@ -1323,8 +1564,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       || !runner.isRunning(currentChild.id) || !runner.isRunning(currentParent.id)) return;
     const name = sanitizeAttentionText(currentChild.name, 200) || 'Session';
     if (!isCurrent()) return;
-    await this.mail.acceptMail(currentParent, { from: currentChild.id, fromName: name, type: 'message', threadId: signal.cycleId,
-      body: `Child session ${name} (${currentChild.id}) has been idle for 120 seconds. Check its status before assigning more work.` });
+    await this.getCoordination()?.emit(currentChild, 'idle', `${name} idle for 2m`);
   }
 
   private async handleInboxPost(
@@ -1415,7 +1655,14 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         const submittedSource = typeof payload.ftown_session_source === 'string' ? payload.ftown_session_source : undefined;
         if (submittedId && submittedSource !== 'workspace' && /^[a-zA-Z0-9_-]+$/.test(submittedId)
           && await this.store?.loadSession(submittedId)) {
-          this.mail.notePluginHandoff(submittedId);
+          try {
+            await this.mail.notePluginHandoff(submittedId);
+          } catch (error) {
+            console.warn(
+              `[LocalApiServer] Failed to note plugin handoff for ${submittedId}:`,
+              error instanceof Error ? error.message : String(error),
+            );
+          }
         }
         jsonResponse(res, 200, { ok: true });
         return;

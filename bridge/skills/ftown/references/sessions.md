@@ -51,6 +51,43 @@ ftown sessions archive
 ftown sessions revive <session-id>
 ```
 
+## Status, board and events
+
+Each session has a card: state (`working`, `blocked`, `waiting_review`,
+`done`, `failed`), headline, optional progress, blocker and next step. Keep
+your own card current at meaningful transitions, not every turn. Writing a
+card wakes nobody. The target defaults to `FTOWN_SESSION_ID`; `--session-id
+<id>` selects another session.
+
+```bash
+# Print my card
+ftown status [--json] [--session-id <id>]
+
+# Update my card (omitted fields unchanged; first write needs --state and --headline)
+ftown status set [--state <s>] [--headline <t>] [--progress <d>/<t>|--no-progress] \
+  [--on human|parent|external|session:<id>] [--text <t>] [--next <t>|--no-next] [--session-id <id>]
+
+# Remove my card
+ftown status clear [--session-id <id>]
+
+# One line per child of my tree
+ftown board [--json] [--since <n>] [--ready] [--all] [--session-id <id>]
+
+# Wait until a board condition holds
+ftown board [--wait --until any-change|any-done|any-blocked|all-done|any-ready [--timeout <s≤300>]] [--session-id <id>]
+
+# Tree events for my tree (status, attention, pr, preview, exit, idle, result, mail)
+ftown events [--json] [--since <n>] [--limit <n>] [--wait [--timeout <s≤300>]] [--session-id <id>]
+```
+
+`--ready` lists only children whose PR checks passed and who are not done;
+`--all` includes archived/completed children; `--since <n>` limits the board
+to children with events after that cursor (the board prints its cursor).
+Pass the cursor back as `--since` to see only what changed.
+
+Exit codes for `status`, `board` and `events`: 0 ok, 1 error, 2 usage,
+3 wait timed out with the condition unmet.
+
 ## Preview session files
 
 ```bash
@@ -213,8 +250,12 @@ reports the conversation id and delivers mail at turn end.
 Grok and Antigravity hooks do not run in the interactive TUI until the folder
 has been trusted in that CLI's own trust prompt; the owner answers it once per
 folder, and ftown does not bypass it.
-Cursor and shell sessions rely on an idle one-line nudge to run `ftown harness
-mail read` instead.
+Cursor and shell sessions rely on a one-line nudge to run `ftown harness
+mail read` instead. Each new batch of mail nudges the recipient at most once;
+un-read mail stays in the inbox. Mail types are `message`, `task`, `result`,
+`escalation` and `fyi`; `fyi` is for non-urgent notes and never wakes the
+recipient. Progress and status go on the session card (see above), never as
+mail.
 
 ```bash
 # Tell a specific session
@@ -265,7 +306,8 @@ ftown sessions list
 ftown sessions create --prompt "Run tests and report" --workdir "$PWD" --parent
 # -> note session.id from JSON
 
-ftown sessions screen <child-id> --limit 100
+ftown board --wait --until any-done --timeout 300
+ftown board
 ftown sessions grep <child-id> --pattern 'FAIL|Error'
 ```
 

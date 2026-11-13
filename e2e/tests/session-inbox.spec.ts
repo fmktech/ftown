@@ -73,10 +73,10 @@ test("mail nudge survives agent mail, highlights the trigger and shows the item 
     await execute(process.execPath, [HARNESS_CLI, "mail", "send", idA, "--type", "message", `Agent mail for A ${stamp}`], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: idB }, timeout: 30_000 });
     await expect.poll(async () => {
       const screen = await bridgeApiFetch("GET", `/api/sessions/${idA}/screen?limit=200`);
-      return JSON.stringify(screen.body).includes("You have new ftown mail");
+      return JSON.stringify(screen.body).includes("[ftown] 1 new mail (1 message)");
     }, { timeout: 30_000 }).toBe(true);
     // A harness that echoes the injected line fires UserPromptSubmit with the nudge text: it must not resolve the item.
-    const hook = await bridgeApiFetch("POST", "/hook", { body: { ftown_session_id: idA, ftown_session_source: "env", hook_event_name: "UserPromptSubmit", prompt: "[ftown msg from ftown-mail] You have new ftown mail — run `ftown harness mail read` to read it." } });
+    const hook = await bridgeApiFetch("POST", "/hook", { body: { ftown_session_id: idA, ftown_session_source: "env", hook_event_name: "UserPromptSubmit", prompt: "[ftown] 1 new mail (1 message) — run: ftown harness mail read" } });
     expect(hook.status).toBe(200);
     // The bridge still holds the item unresolved.
     const listed = await bridgeApiFetch("GET", `/api/sessions/${idA}/attention`);

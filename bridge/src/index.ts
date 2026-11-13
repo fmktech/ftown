@@ -40,6 +40,7 @@ import { createRealModelRoutingService } from './quota/routing-service.js';
 import { PullRequestStatusService } from './pull-request-status.js';
 import { createPrReviewService } from './pull-request-review.js';
 import { PullRequestEventWatcher } from './pull-request-events.js';
+import { createCoordination } from './coordination/wiring.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { SessionResurrection, shouldResurrectStoredSession } from './session-resurrection.js';
 import { createTerminalOutput } from './terminal-output.js';
@@ -757,19 +758,43 @@ program
       },
     );
     localApiServer.setAttentionStore(attentionStore);
+    const mailStore = new MailStore((sessionId) => store.sessionDir(sessionId));
+    localApiServer.setMailStore(mailStore);
+    const pullRequestStatuses = new PullRequestStatusService();
+    const coordination = createCoordination({
+      store,
+      attention: attentionStore,
+      prStatus: async (url) => (await pullRequestStatuses.get([url])).statuses[0] ?? null,
+      mail: mailStore,
+      publishSession: (session) => { void centrifugo.publishSessionUpdate(userId, session); },
+      now: Date.now,
+    });
+    localApiServer.setCoordination(coordination);
     const stopPushSessionObserver = centrifugo.onLocalPublication((channel, data) => {
       if (channel !== `sessions:updates#${userId}` || !data || typeof data !== 'object') return;
       const update = data as { type?: string; session?: { id?: string; status?: string } };
-      if (update.type === 'session_update' && update.session?.id && update.session.status !== 'running') {
-        void attentionStore.cancelIdleNotification(update.session.id).catch(() => { /* Removed sessions have no ledger left to update. */ });
+      if (update.type === 'session_update' && update.session?.id) {
+        if (update.session.status === 'running') {
+          coordination.onSessionStart(update.session.id);
+        } else {
+          void attentionStore.cancelIdleNotification(update.session.id).catch(() => { /* Removed sessions have no ledger left to update. */ });
+        }
       }
     });
-    const mailStore = new MailStore((sessionId) => store.sessionDir(sessionId));
-    localApiServer.setMailStore(mailStore);
+    const handleSessionExit = (sid: string): void => {
+      unregisterSession(sid);
+      void coordination.onSessionExit(sid).catch((err) => {
+        console.warn(
+          `[Bridge] Failed to emit exit event for ${sid}:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      });
+    };
 
     const notifyScriptPath = canonicalNotifyPath();
 
     const wireTerminalInput = (sessionId: string): void => {
+      coordination.onSessionStart(sessionId);
       centrifugo.subscribeToTerminalInput(
         userId,
         sessionId,
@@ -805,7 +830,7 @@ program
       lifecycle: {
         publishSessionUpdate: (session) => centrifugo.publishSessionUpdate(userId, session),
         publishHookEvent: (sid, event) => centrifugo.publishHookEvent(userId, sid, event),
-        unregisterSession: (sid) => unregisterSession(sid),
+        unregisterSession: handleSessionExit,
         collectUsage: (session) => collectSessionUsage(session),
       },
     });
@@ -846,19 +871,21 @@ program
       collectUsage: (session) => collectSessionUsage(session),
       publishSyntheticStop: (sid, reason) => pump.publishSyntheticStop(sid, reason),
       withSessionWrite: (sid, task) => pump.withSessionWrite(sid, task),
-      unregisterSession: (sid) => unregisterSession(sid),
+      unregisterSession: handleSessionExit,
       flushTerminalBuffer: (sid) => pump.flush(sid),
       destroyTerminal: (sid) => terminalManager.destroy(sid),
     });
 
     localApiServer.setSessionController(sessionController);
-    const pullRequestStatuses = new PullRequestStatusService();
     const pullRequestReview = createPrReviewService({ bridgeId, loadSession: id => sessionController.get(id), revalidate: principal => security.policy.revalidate(principal, 'read') });
     const pullRequestEvents = new PullRequestEventWatcher({ bridgeId, store,
       withSessionMutation: (id, task) => pump.withSessionWrite(id, task),
       statusService: pullRequestStatuses, mailStore,
       notifyCommitted: (session, sender) => localApiServer.notifyCommittedMail(session, sender, true),
     });
+    pullRequestEvents.setTreeEventEmitter((session, kind, summary, ref) =>
+      coordination.emit(session, kind, summary, ref),
+    );
     pullRequestEvents.start();
 
     const updateHome = realpathSync(homedir());

@@ -12,6 +12,7 @@ import { usePersistentState, stringSetCodec } from "@/lib/use-persistent-state";
 import { parsePullRequestUrl } from "@/lib/pull-request-url";
 import { HarnessIcon } from "./HarnessIcon";
 import { SessionStateIndicator } from "./SessionStateIndicator";
+import { SessionCardChip, formatCardRollup, rollupChildCards } from "./SessionCardChip";
 import { PullRequestBadgePlaceholder, PullRequestLink } from "./PullRequestLink";
 import type { BridgeSecurityState } from "@security/protocol";
 import { SecurityLockIcon, bridgeConnectionLock } from "./SecurityLockIcon";
@@ -712,6 +713,20 @@ export function SessionList({
     return map;
   }, [visibleSessions]);
 
+  /** parentId → rollup text for children card states, computed once per render. */
+  const cardRollups = useMemo(() => {
+    const parentIds = new Set<string>();
+    for (const s of sessions) {
+      if (s.parentSessionId && !parentIds.has(s.parentSessionId)) parentIds.add(s.parentSessionId);
+    }
+    const map = new Map<string, string>();
+    for (const parentId of parentIds) {
+      const rollup = formatCardRollup(rollupChildCards(sessions, parentId));
+      if (rollup) map.set(parentId, rollup);
+    }
+    return map;
+  }, [sessions]);
+
   const bridgeMenuAnchor = useRef<HTMLButtonElement | null>(null);
   const closeContextMenu = useCallback(() => {
     setContextMenu(null);
@@ -1261,6 +1276,7 @@ export function SessionList({
               activity={sessionActivity?.get(session.id)?.activity}
               needsInput={Boolean(sessionActivity?.get(session.id)?.attention)}
             />
+            <SessionCardChip card={session.card} />
             <span
               title={new Date(session.createdAt).toLocaleString()}
               style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}
@@ -1305,6 +1321,21 @@ export function SessionList({
         </div>
 
         <div style={{ gridColumn: "1 / -1", gridRow: 2, minWidth: 0 }}>
+        {cardRollups.get(session.id) && (
+          <div
+            style={{
+              fontSize: 10,
+              color: "var(--text-muted)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              marginBottom: 2,
+            }}
+          >
+            {cardRollups.get(session.id)}
+          </div>
+        )}
+
         {isSelected && session.status === "running" && (() => {
           const act = sessionActivity?.get(session.id);
           if (!act || act.activity === "idle") return null;

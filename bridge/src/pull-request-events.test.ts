@@ -174,3 +174,87 @@ test('failed pending-wake revalidation retains retry and does not block a later 
   phase = 3; await watcher.runOnce(); assert.ok(wakeAttempts >= 2, 'the pending wake was retained for retry');
   await watcher.stop();
 });
+
+test('each durably committed observation emits exactly one pr tree event with the classified summary', async () => {
+  const current = session('a');
+  const service = statusFixture();
+  const events: Array<{ id: string; kind: string; summary: string; ref?: string }> = [];
+  let checkpoint: { state: string; head?: string } | undefined;
+  const watcher = new PullRequestEventWatcher({ bridgeId: 'bridge', store: { listSessions: async () => [current], loadSession: async () => current, saveSession: async () => {} }, withSessionMutation: async (_id, fn) => fn(), statusService: service,
+    mailStore: { commitPullRequestObservation: async (_id, _link, observation) => {
+      if (checkpoint && checkpoint.state === observation.state && checkpoint.head === observation.headOid) return { enqueued: false };
+      checkpoint = { state: observation.state, head: observation.headOid };
+      return { enqueued: observation.state !== 'in_progress' };
+    } }, notifyCommitted: async () => {} });
+  watcher.setTreeEventEmitter(async (emitted, kind, summary, ref) => { events.push({ id: emitted.id, kind, summary, ref }); });
+  await watcher.runOnce();
+  await watcher.runOnce(); // same failed observation: deduped, no second event
+  service.setState('in_progress'); await watcher.runOnce(); // in_progress never becomes mail or an event
+  service.setState('passed', 'two'); await watcher.runOnce();
+  service.setState('merged'); await watcher.runOnce();
+  await watcher.runOnce(); // merged already observed: deduped
+  assert.deepEqual(events, [
+    { id: 'a', kind: 'pr', summary: `PR failed: ${url(1)}`, ref: url(1) },
+    { id: 'a', kind: 'pr', summary: `PR passed: ${url(1)}`, ref: url(1) },
+    { id: 'a', kind: 'pr', summary: `PR merged: ${url(1)}`, ref: url(1) },
+  ]);
+  await watcher.stop();
+});
+
+test('deduped and rejected commits never emit tree events', async () => {
+  const current = session('a');
+  const service = statusFixture();
+  const events: unknown[] = [];
+  const watcher = new PullRequestEventWatcher({ bridgeId: 'bridge', store: { listSessions: async () => [current], loadSession: async () => current, saveSession: async () => {} }, withSessionMutation: async (_id, fn) => fn(), statusService: service,
+    mailStore: { commitPullRequestObservation: async () => ({ enqueued: false }) }, notifyCommitted: async () => {} });
+  watcher.setTreeEventEmitter(async () => { events.push('emitted'); });
+  await watcher.runOnce();
+  assert.equal(events.length, 0);
+  await watcher.stop();
+});
+
+test('a throwing emitter is logged and never breaks the commit or the wake', async t => {
+  const log = t.mock.method(console, 'error', () => {});
+  const current = session('a');
+  const service = statusFixture();
+  let commits = 0, wakes = 0;
+  const watcher = new PullRequestEventWatcher({ bridgeId: 'bridge', store: { listSessions: async () => [current], loadSession: async () => current, saveSession: async () => {} }, withSessionMutation: async (_id, fn) => fn(), statusService: service,
+    mailStore: { commitPullRequestObservation: async () => { commits++; return { enqueued: true }; } }, notifyCommitted: async () => { wakes++; } });
+  watcher.setTreeEventEmitter(async () => { throw new Error('tree sink down'); });
+  await watcher.runOnce();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(commits, 1); assert.equal(wakes, 1);
+  assert.ok(log.mock.calls.length >= 1, 'the emitter failure was logged');
+  await watcher.runOnce(); // a broken sink must not wedge later scans
+  assert.equal(commits, 2); assert.equal(wakes, 2);
+  await watcher.stop();
+});
+
+test('a synchronously throwing emitter cannot skip the post-commit wake', async t => {
+  const log = t.mock.method(console, 'error', () => {});
+  const current = session('a');
+  const service = statusFixture();
+  let wakes = 0;
+  const watcher = new PullRequestEventWatcher({ bridgeId: 'bridge', store: { listSessions: async () => [current], loadSession: async () => current, saveSession: async () => {} }, withSessionMutation: async (_id, fn) => fn(), statusService: service,
+    mailStore: { commitPullRequestObservation: async () => ({ enqueued: true }) }, notifyCommitted: async () => { wakes++; } });
+  watcher.setTreeEventEmitter(() => { throw new Error('sink throws synchronously'); });
+  await watcher.runOnce();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(wakes, 1, 'the wake still fired after the commit');
+  assert.ok(log.mock.calls.length >= 1, 'the emitter failure was logged');
+  await watcher.stop();
+});
+
+test('a failing commit never emits a tree event', async t => {
+  const log = t.mock.method(console, 'error', () => {});
+  const current = session('a');
+  const service = statusFixture();
+  const events: unknown[] = [];
+  const watcher = new PullRequestEventWatcher({ bridgeId: 'bridge', store: { listSessions: async () => [current], loadSession: async () => current, saveSession: async () => {} }, withSessionMutation: async (_id, fn) => fn(), statusService: service,
+    mailStore: { commitPullRequestObservation: async () => { throw new Error('mailbox rename failed'); } }, notifyCommitted: async () => {} });
+  watcher.setTreeEventEmitter(async () => { events.push('emitted'); });
+  await watcher.runOnce();
+  assert.equal(events.length, 0, 'a thrown commit is not a durable commit');
+  assert.ok(log.mock.calls.length >= 1);
+  await watcher.stop();
+});

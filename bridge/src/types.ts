@@ -1,3 +1,4 @@
+import type { SessionCardDeclared } from './coordination/contract.js';
 // Derived from the harness registry (single source of truth for supported
 // harnesses); re-exported here so existing `from './types.js'` imports keep working.
 // Type-only, so this adds no runtime dependency on harness-registry.js.
@@ -66,6 +67,8 @@ export interface Session {
   errorReason?: string;
   loopId?: string; // Historical provenance only; retired automation can never be relaunched
   usage?: SessionUsage;
+  /** Agent-declared status card (coordination contract). */
+  card?: SessionCardDeclared;
 }
 
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error';
@@ -82,10 +85,11 @@ export interface MailMessage {
   from: string;          // sender ftown session id, or 'external'
   fromName?: string;     // friendly sender name
   to: string;            // recipient ftown session id
-  type: 'message' | 'task' | 'result' | 'escalation';
+  type: 'message' | 'task' | 'result' | 'escalation' | 'fyi';
   threadId?: string;
   body: string;          // plain text, capped at 64KB
   deliveredAt?: string;  // ISO, set when handed to the session (not for peek)
+  nudgedAt?: string;     // ISO, set once when a nudge/wake covered this message (nudge-once)
   deliveredVia?: 'poll' | 'drain' | 'nudge' | 'cli';
 }
 

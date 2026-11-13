@@ -82,7 +82,7 @@ class FakeRunner {
     return true;
   }
   nudgeLines(): string[] {
-    return this.writes.filter((w) => w.data.includes('You have new ftown mail') || w.data.includes('FTown mail may be available') || w.data.includes('[ftown mail]')).map((w) => w.data);
+    return this.writes.filter((w) => w.data.includes('new mail (') || w.data.includes('You have new ftown mail') || w.data.includes('FTown mail may be available') || w.data.includes('[ftown mail]')).map((w) => w.data);
   }
 }
 

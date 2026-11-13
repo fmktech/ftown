@@ -15,6 +15,9 @@ const result = (permission: EndpointPermission, operation: string, sessionId: st
 const deny = (): never => { throw new BridgeSecurityError('permission_denied'); };
 const object = (value: ApplicationJson | undefined): { [key: string]: ApplicationJson } | undefined =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? value : undefined;
+/** Every query key must be allowed and appear at most once. */
+const queryAllows = (url: URL, allowed: string[]): boolean =>
+  [...url.searchParams.keys()].every(key => allowed.includes(key)) && allowed.every(key => url.searchParams.getAll(key).length <= 1);
 
 /** Deliberately semantic: GET inbox consumes mail unless explicitly non-consuming. */
 export function classifyHttp(method: string, path: string): OperationPermission {
@@ -38,6 +41,18 @@ export function classifyHttp(method: string, path: string): OperationPermission 
   }
   const preview = /^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/preview$/.exec(url.pathname);
   if (preview) return !url.search && (method === 'PUT' || method === 'DELETE') ? result('control', 'session_preview_register', preview[1]) : deny();
+  const card = /^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/card$/.exec(url.pathname);
+  if (card) {
+    if (url.search) return deny();
+    if (method === 'GET') return result('read', 'card_get', card[1]);
+    if (method === 'PUT') return result('control', 'card_set', card[1]);
+    if (method === 'DELETE') return result('control', 'card_clear', card[1]);
+    return deny();
+  }
+  const board = /^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/board$/.exec(url.pathname);
+  if (board) return method === 'GET' && queryAllows(url, ['since', 'ready', 'all']) ? result('read', 'board_get', board[1]) : deny();
+  const events = /^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/events$/.exec(url.pathname);
+  if (events) return method === 'GET' && queryAllows(url, ['since', 'limit', 'waitSeconds']) ? result('read', 'events_get', events[1]) : deny();
   if (url.pathname === '/api/loops' || /^\/api\/loops\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)?$/.test(url.pathname)) {
     if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(method)) return deny();
     return { permission: method === 'GET' ? 'read' : 'control', mutating: false, operation: 'automation_removed', sessionId: null };
