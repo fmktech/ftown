@@ -51,6 +51,8 @@ export interface Session {
   piSessionFile?: string;
   opencodeSessionId?: string;
   museSessionId?: string;
+  grokSessionId?: string;
+  antigravitySessionId?: string;
   env?: Record<string, string>;
   parentSessionId?: string;
   pullRequestUrl?: string;
@@ -130,6 +132,8 @@ export interface CreateSessionPayload {
   piSessionFile?: string;
   opencodeSessionId?: string;
   museSessionId?: string;
+  grokSessionId?: string;
+  antigravitySessionId?: string;
   parentSessionId?: string;
   /** @deprecated Ignored compatibility input. Ordinary sessions use task + parent. */
   orchestrator?: boolean;

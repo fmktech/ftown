@@ -54,7 +54,7 @@ function setup(immediate = false, commandTimeoutMs?: number) {
   return { ...h, ...hook, refresh, ids };
 }
 describe("structured session creation through the actual hook", () => {
-  const shellTypes: ShellType[] = ["claude", "cursor", "codex", "shell", "zai", "kimi", "opencode", "deepseek", "fireworks", "grok", "pi", "kimi-code", "muse"];
+  const shellTypes: ShellType[] = ["claude", "cursor", "codex", "shell", "zai", "kimi", "opencode", "deepseek", "fireworks", "grok", "pi", "kimi-code", "muse", "antigravity"];
 
   it.each(shellTypes)("leaves %s command and task delivery construction to the bridge", async (shellType) => {
     const h = setup();
@@ -73,7 +73,7 @@ describe("structured session creation through the actual hook", () => {
   it("defaults to Claude and preserves every native resume identifier without inventing input", async () => {
     const h = setup();
     const resume = { claudeSessionId: "claude-id", cursorSessionId: "cursor-id", codexSessionId: "codex-id",
-      museSessionId: "muse-id", piSessionId: "pi-id", piSessionFile: "/work/pi session.jsonl", opencodeSessionId: "opencode-id" };
+      museSessionId: "muse-id", grokSessionId: "grok-id", antigravitySessionId: "antigravity-id", piSessionId: "pi-id", piSessionFile: "/work/pi session.jsonl", opencodeSessionId: "opencode-id" };
     await act(async () => h.result.current.createSession("", resume));
     const command = vi.mocked(h.rpc.sendCommand).mock.calls.map(([value]) => value).find(value => value.type === "create_session")!;
     expect(command.payload).toMatchObject({ prompt: "", shellType: "claude", ...resume });
@@ -483,5 +483,22 @@ describe("session preview metadata", () => {
     h.publication(row("one", "a", { preview }));
     h.publication(row("one", "a", { preview: { ...preview, files: [{ id: "22345678-2234-4234-8234-123456789abc", fileName: "../private", kind: "html" as const }] } }));
     expect(h.result.current.sessions[0].preview).toBeUndefined();
+  });
+});
+
+describe("native session id validation through the actual hook", () => {
+  it("accepts snapshot rows carrying string grok and antigravity session ids", () => {
+    const h = setup(true);
+    h.reply(h.request(), [row("grok", "a", { shellType: "grok", grokSessionId: "grok-native" }),
+      row("agy", "a", { shellType: "antigravity", antigravitySessionId: "agy-native" })], "a");
+    expect(h.ids()).toEqual(["grok", "agy"]);
+    expect(h.result.current.sessions.find(s => s.id === "grok")?.grokSessionId).toBe("grok-native");
+    expect(h.result.current.sessions.find(s => s.id === "agy")?.antigravitySessionId).toBe("agy-native");
+  });
+
+  it.each(["grokSessionId", "antigravitySessionId"])("rejects a snapshot row whose %s is not a string", key => {
+    const h = setup(true);
+    h.reply(h.request(), [row("valid"), { ...row("invalid"), [key]: 42 }], "a");
+    expect(h.ids()).toEqual(["valid"]);
   });
 });

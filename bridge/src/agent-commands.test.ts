@@ -8,6 +8,7 @@ import { CLAUDE_MOD_FILES } from './claude-mod-installer.js';
 import {
   buildGrokCommand,
   buildMuseCommand,
+  buildAntigravityCommand,
   buildPiCommand,
   buildSessionCommand,
   shellQuote,
@@ -122,6 +123,22 @@ describe('buildSessionCommand — grok', () => {
       buildGrokCommand(options),
     );
   });
+
+  it('resume restores the native session with -r, without model or prompt', () => {
+    assert.strictEqual(
+      buildSessionCommand({
+        shellType: 'grok',
+        model: 'grok-4.5',
+        initialPrompt: 'do not replay',
+        grokSessionId: 'g-abc',
+      }),
+      "grok --always-approve -r 'g-abc'",
+    );
+    assert.strictEqual(
+      buildSessionCommand({ shellType: 'grok', grokSessionId: 'g-abc' }),
+      buildGrokCommand({ grokSessionId: 'g-abc' }),
+    );
+  });
 });
 
 describe('buildSessionCommand — muse', () => {
@@ -179,6 +196,46 @@ describe('buildSessionCommand — muse', () => {
     assert.strictEqual(
       buildSessionCommand({ shellType: 'muse', workingDir: '/tmp/w', museSessionId: 'sess-abc' }),
       buildMuseCommand({ workingDir: '/tmp/w', museSessionId: 'sess-abc' }),
+    );
+  });
+});
+
+describe('buildSessionCommand — antigravity', () => {
+  it('launches bare agy with --dangerously-skip-permissions when no model/prompt', () => {
+    assert.strictEqual(
+      buildSessionCommand({ shellType: 'antigravity', workingDir: '/tmp/w' }),
+      'agy --dangerously-skip-permissions',
+    );
+  });
+
+  it("appends --model '<model>' and -i '<prompt>' on a fresh spawn", () => {
+    assert.strictEqual(
+      buildSessionCommand({ shellType: 'antigravity', model: 'm1', initialPrompt: 'hello world' }),
+      "agy --dangerously-skip-permissions --model 'm1' -i 'hello world'",
+    );
+  });
+
+  it('resume restores the native conversation without model or prompt', () => {
+    assert.strictEqual(
+      buildSessionCommand({
+        shellType: 'antigravity',
+        model: 'm1',
+        initialPrompt: 'do not replay',
+        antigravitySessionId: 'conv-abc',
+      }),
+      "agy --dangerously-skip-permissions --conversation 'conv-abc'",
+    );
+  });
+
+  it('produces the same string as buildAntigravityCommand for matching inputs', () => {
+    const options = { model: 'm1', initialPrompt: "it's fine" };
+    assert.strictEqual(
+      buildSessionCommand({ shellType: 'antigravity', ...options }),
+      buildAntigravityCommand(options),
+    );
+    assert.strictEqual(
+      buildSessionCommand({ shellType: 'antigravity', antigravitySessionId: 'conv-abc' }),
+      buildAntigravityCommand({ antigravitySessionId: 'conv-abc' }),
     );
   });
 });

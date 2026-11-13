@@ -367,6 +367,8 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
               codexSessionId: payload.codexSessionId,
               opencodeSessionId: payload.opencodeSessionId,
               museSessionId: payload.museSessionId,
+              grokSessionId: payload.grokSessionId,
+              antigravitySessionId: payload.antigravitySessionId,
               env: payload.env,
               parentSessionId: payload.parentSessionId,
               initialInput: payload.initialInput,

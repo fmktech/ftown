@@ -46,7 +46,7 @@ ftown sessions remove <session-id>
 ftown sessions archive
 
 # Recreate a removed session from its tombstone (resumes the agent
-# conversation when a claude/cursor/codex/Pi session id was recorded; Kimi Code
+# conversation when a claude/cursor/codex/Pi/grok/antigravity session id was recorded; Kimi Code
 # continues by working directory; the revived session gets a NEW id)
 ftown sessions revive <session-id>
 ```
@@ -205,6 +205,14 @@ follow-up turn when mail arrives, including while Pi is idle. opencode's
 installed plugin delivers pending mail as a new prompt when a turn goes idle.
 Muse's installed `ftown` plugin reports the native session id on SessionStart
 and pumps pending mail as context on Stop.
+Grok's ftown hooks (`~/.grok/hooks/ftown.json`) report the native session id
+and deliver mail that arrives mid-turn when the turn ends; the typed nudge
+remains the fallback for an idle Grok agent.
+Antigravity's ftown Stop hook (`~/.gemini/config/hooks.json`, entry `ftown`)
+reports the conversation id and delivers mail at turn end.
+Grok and Antigravity hooks do not run in the interactive TUI until the folder
+has been trusted in that CLI's own trust prompt; the owner answers it once per
+folder, and ftown does not bypass it.
 Cursor and shell sessions rely on an idle one-line nudge to run `ftown harness
 mail read` instead.
 
@@ -235,8 +243,8 @@ Fan-out targets are messaged sequentially, one JSON result line per target.
 
 | Flag | Description |
 |------|-------------|
-| `--shell` | Explicit harness override: `claude`, `cursor`, `codex`, `grok`, `muse`, `pi`, `kimi-code`, `opencode`, `shell`, or Claude Code provider flavors `zai`, `kimi`, `deepseek`, `fireworks`. When omitted inside a session, inherits that session's harness; outside a session, defaults to `claude`. |
-| `--prompt` | Initial task — passed as a CLI launch argument to `claude`/Claude provider flavors/`cursor`/`codex`/`grok`/`muse`/`pi` (typed after boot for other shells) |
+| `--shell` | Explicit harness override: `claude`, `cursor`, `codex`, `grok`, `muse`, `antigravity`, `pi`, `kimi-code`, `opencode`, `shell`, or Claude Code provider flavors `zai`, `kimi`, `deepseek`, `fireworks`. When omitted inside a session, inherits that session's harness; outside a session, defaults to `claude`. |
+| `--prompt` | Initial task — passed as a CLI launch argument to `claude`/Claude provider flavors/`cursor`/`codex`/`grok`/`muse`/`antigravity`/`pi` (typed after boot for other shells) |
 | `--workdir` | Working directory |
 | `--name` | Dashboard label |
 | `--command` | Full command override (skips `--shell` builder) |

@@ -23,14 +23,17 @@ export const COMMAND_REJECTED_WARNING = '[Centrifugo] Encrypted command rejected
 export interface OutboundPacket {
   /** Serialized size, counted against OUTBOUND_MAX_IN_FLIGHT_BYTES. */
   readonly bytes: number;
-  /** Starts sending synchronously; resolves on the server reply, rejects on failure. */
+  /** Authorizes the recipient against the current policy, then hands the packet to the relay client at once. Resolves on the server
+   *  reply. Rejects when the recipient is refused or the send fails: nothing more is published for this packet, its window slot is
+   *  freed and the rejection is recorded. */
   send(): Promise<void>;
 }
 
 export interface OutboundJob {
   /** Accounting label for logs, e.g. "terminal/output". Never secret. */
   readonly label: string;
-  /** Seals and authorizes the publication. Called serially, in enqueue order. */
+  /** Seals the publication for the readers of one policy snapshot. Called serially, in enqueue order. Each recipient is authorized
+   *  again later, in its packet's send(). */
   prepare(): Promise<readonly OutboundPacket[]>;
 }
 

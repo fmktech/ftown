@@ -104,7 +104,14 @@ export function workingDirMissingResponse(
 export function archivedSessionWasResumed(
   session: Pick<
     Session,
-    'shellType' | 'claudeSessionId' | 'cursorSessionId' | 'codexSessionId' | 'opencodeSessionId' | 'museSessionId'
+    | 'shellType'
+    | 'claudeSessionId'
+    | 'cursorSessionId'
+    | 'codexSessionId'
+    | 'opencodeSessionId'
+    | 'museSessionId'
+    | 'grokSessionId'
+    | 'antigravitySessionId'
   >,
   isCustomCommand: boolean,
 ): boolean {
@@ -921,7 +928,11 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
             (tombstone.opencodeSessionId &&
               s.opencodeSessionId === tombstone.opencodeSessionId) ||
             (tombstone.museSessionId &&
-              s.museSessionId === tombstone.museSessionId)) &&
+              s.museSessionId === tombstone.museSessionId) ||
+            (tombstone.grokSessionId &&
+              s.grokSessionId === tombstone.grokSessionId) ||
+            (tombstone.antigravitySessionId &&
+              s.antigravitySessionId === tombstone.antigravitySessionId)) &&
           isLive(s),
       );
       if (conflict) {
@@ -957,6 +968,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           piSessionFile: tombstone.piSessionFile,
           opencodeSessionId: tombstone.opencodeSessionId,
           museSessionId: tombstone.museSessionId,
+          grokSessionId: tombstone.grokSessionId,
+          antigravitySessionId: tombstone.antigravitySessionId,
           parentSessionId,
         });
         // A builder-managed resumable harness preserves conversation context;

@@ -40,6 +40,7 @@ describe("HarnessIcon", () => {
     ["pi", "Pi"],
     ["kimi-code", "Kimi Code"],
     ["muse", "Muse"],
+    ["antigravity", "Antigravity"],
   ] satisfies Array<[ShellType, string]>)("labels the %s harness", (harness, label) => {
     expect(harnessLabel(harness)).toBe(label);
     render(createElement(HarnessIcon, { harness }));

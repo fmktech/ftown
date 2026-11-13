@@ -310,6 +310,21 @@ export class BridgePolicyStore {
       });
     });
   }
+  /** recipients() as principals, from ONE snapshot read: everything a publication needs to seal to each current reader. The result
+   *  is only as fresh as that read, so whoever sends what was sealed for it re-checks each recipient with principal() first. */
+  async readers(): Promise<VerifiedPrincipal[]> {
+    return this.snapshot.read(state => {
+      this.check(state);
+      const readers: VerifiedPrincipal[] = [];
+      for (const device of state.devices) {
+        try {
+          const record = this.active(state, device.endpoint.id);
+          if (record.permissions.includes('read')) readers.push(this.principalFrom(state, record));
+        } catch { /* not a reader right now */ }
+      }
+      return readers;
+    });
+  }
   async revoke(actor: VerifiedPrincipal, endpointId: string): Promise<void> {
     await this.snapshot.transact(state => {
       this.authorize(state, actor, 'admin');

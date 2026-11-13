@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { ProviderAuthMissingError, WorkingDirMissingError } from './create-ftown-session.js';
+import { buildSessionCommand } from './agent-commands.js';
 import {
   LocalApiServer as BaseLocalApiServer,
   archivedSessionWasResumed,
@@ -890,6 +891,82 @@ describe('LocalApiServer native wake heartbeats', () => {
       assert.equal(ordinary.status, 200); assert.equal((ordinary.data.messages as unknown[]).length, 1);
     } finally { server.getHttpServer()?.closeAllConnections(); server.stop(); rmSync(home, { recursive: true, force: true }); }
   });
+});
+
+// Revive must carry each harness's native conversation id from the tombstone
+// into the new session, and refuse when a live session already owns that id.
+describe('LocalApiServer revive native session ids (grok, antigravity)', () => {
+  const harnesses = [
+    { shellType: 'grok' as const, field: 'grokSessionId' as const },
+    { shellType: 'antigravity' as const, field: 'antigravitySessionId' as const },
+  ];
+
+  for (const { shellType, field } of harnesses) {
+    it(`revives a ${shellType} tombstone with its ${field} and applies the conflict rule`, async () => {
+      const home = mkdtempSync(join(tmpdir(), `ftw-revive-${shellType}-`));
+      const server = new LocalApiServer();
+      const store = new SessionStore(join(home, 'data'));
+      const running = new Set<string>();
+      const runs: string[] = [];
+      const runner = {
+        getPreferredRuntime: () => 'direct',
+        run: (sessionId: string, command: string) => { running.add(sessionId); runs.push(command); },
+        isRunning: (id: string) => running.has(id),
+        hasTmuxSession: () => false,
+        stop: () => false,
+      } as unknown as ProcessRunner;
+      const centrifugo = { publishSessionUpdate: async () => {} } as unknown as CentrifugoClient;
+      // A builder-generated command, so revive classifies the tombstone as
+      // builder-managed (not a verbatim custom command) and may report resume.
+      const base = { command: buildSessionCommand({ shellType }), shellType, bridgeId: 'bridge', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' };
+      const tombstone = (id: string, nativeId?: string): Session =>
+        ({ ...base, id, name: id, status: 'completed', ...(nativeId ? { [field]: nativeId } : {}) }) as Session;
+      const live = (id: string, nativeId: string): Session =>
+        ({ ...base, id, name: id, status: 'running', [field]: nativeId }) as Session;
+
+      await store.archiveSession(tombstone('resume-me', 'native-resume'));
+      await store.archiveSession(tombstone('equal-id', 'native-owned'));
+      await store.archiveSession(tombstone('different-id', 'native-other'));
+      await store.archiveSession(tombstone('missing-id'));
+      await store.saveSession(live('owner', 'native-owned'));
+      running.add('owner');
+
+      server.setAuthToken('token'); server.setDependencies(store, runner, centrifugo, 'user');
+      server.setSessionFactory({ store, runner, centrifugo, userId: 'user', bridgeId: 'bridge',
+        hookPort: 0, hookToken: 'token', notifyScriptPath: '', wireTerminalInput: () => {} });
+      const port = await server.start();
+      const revive = (id: string) => api(port, 'token', 'POST', `/api/sessions/${id}/revive`);
+      const revivedNativeId = async (response: { data: Record<string, unknown> }) => {
+        const revived = await store.loadSession((response.data.session as Session).id);
+        return revived?.[field];
+      };
+      try {
+        const resumed = await revive('resume-me');
+        assert.equal(resumed.status, 201);
+        assert.equal(await revivedNativeId(resumed), 'native-resume');
+        assert.equal(resumed.data.resumed, true, 'a tombstone with a native id resumes its conversation');
+
+        const conflict = await revive('equal-id');
+        assert.equal(conflict.status, 409);
+        assert.match(String(conflict.data.error), /Session owner is already running/);
+
+        const different = await revive('different-id');
+        assert.equal(different.status, 201, 'a different native id does not conflict');
+        assert.equal(await revivedNativeId(different), 'native-other');
+
+        const missing = await revive('missing-id');
+        assert.equal(missing.status, 201, 'a tombstone without a native id never conflicts');
+        assert.equal(await revivedNativeId(missing), undefined);
+        assert.equal(missing.data.resumed, false, 'a tombstone without a native id starts fresh');
+
+        running.delete('owner');
+        await store.saveSession({ ...live('owner', 'native-owned'), status: 'completed' });
+        const released = await revive('equal-id');
+        assert.equal(released.status, 201, 'an equal id owned by a stopped session does not conflict');
+        assert.equal(await revivedNativeId(released), 'native-owned');
+      } finally { await server.stop(); rmSync(home, { recursive: true, force: true }); }
+    });
+  }
 });
 
 it('queues browser session replies through the durable mail store without an HTTP listener', async (t) => {

@@ -152,6 +152,20 @@ describe('parseCreateSessionBody — suppressBriefing plumbing', () => {
     assert.strictEqual(input.museSessionId, 'sess-abc');
     assert.strictEqual(parseCreateSessionBody({ shellType: 'muse' }).museSessionId, undefined);
   });
+
+  it('passes through the grok and antigravity native session ids as strings only', () => {
+    const grok = parseCreateSessionBody({ shellType: 'grok', grokSessionId: 'grok-abc' });
+    assert.strictEqual(grok.grokSessionId, 'grok-abc');
+    assert.strictEqual(parseCreateSessionBody({ shellType: 'grok', grokSessionId: 42 }).grokSessionId, undefined);
+    assert.strictEqual(parseCreateSessionBody({ shellType: 'grok' }).grokSessionId, undefined);
+    const agy = parseCreateSessionBody({ shellType: 'antigravity', antigravitySessionId: 'conv-abc' });
+    assert.strictEqual(agy.antigravitySessionId, 'conv-abc');
+    assert.strictEqual(
+      parseCreateSessionBody({ shellType: 'antigravity', antigravitySessionId: { id: 'x' } }).antigravitySessionId,
+      undefined,
+    );
+    assert.strictEqual(parseCreateSessionBody({ shellType: 'antigravity' }).antigravitySessionId, undefined);
+  });
 });
 
 describe('parseCreateSessionBody — missing working dir confirmation plumbing', () => {
@@ -649,6 +663,56 @@ describe('deriveRelaunchCommand — single home of the relaunch heuristic', () =
     });
   });
 
+  for (const { shellType, idField, id, resume } of [
+    { shellType: 'grok', idField: 'grokSessionId', id: 'grok-abc', resume: "grok --always-approve -r 'grok-abc'" },
+    {
+      shellType: 'antigravity',
+      idField: 'antigravitySessionId',
+      id: 'conv-abc',
+      resume: "agy --dangerously-skip-permissions --conversation 'conv-abc'",
+    },
+  ] as const) {
+    it(`rebuilds a builder-default ${shellType} stored command into the resume-by-id command`, () => {
+      const fresh = buildSessionCommand({ shellType, workingDir: '/tmp/work', model: 'some/model' });
+      assert.deepEqual(deriveRelaunchCommand({
+        shellType,
+        command: fresh,
+        workingDir: '/tmp/work',
+        model: 'some/model',
+        [idField]: id,
+      }), { command: resume, isCustom: false });
+    });
+
+    it(`treats a stored ${shellType} id-resume command as builder-generated`, () => {
+      assert.deepEqual(deriveRelaunchCommand({
+        shellType,
+        command: resume,
+        workingDir: '/tmp/work',
+        model: 'some/model',
+        [idField]: id,
+      }), { command: resume, isCustom: false });
+    });
+
+    it(`relaunches a ${shellType} session without a native id as the fresh default command`, () => {
+      const fresh = buildSessionCommand({ shellType, workingDir: '/tmp/work', model: 'some/model' });
+      const derived = deriveRelaunchCommand({ shellType, command: fresh, workingDir: '/tmp/work', model: 'some/model' });
+      assert.deepEqual(derived, { command: fresh, isCustom: false });
+      // A stray claudeSessionId must not change the grok/antigravity command.
+      assert.deepEqual(
+        deriveRelaunchCommand({ shellType, command: fresh, workingDir: '/tmp/work', model: 'some/model', claudeSessionId: 'c' }),
+        { command: fresh, isCustom: false },
+      );
+    });
+
+    it(`reruns a custom ${shellType} command verbatim`, () => {
+      const custom = `my-${shellType}-wrapper --flag`;
+      assert.deepEqual(
+        deriveRelaunchCommand({ shellType, command: custom, workingDir: '/tmp/work', [idField]: id }),
+        { command: custom, isCustom: true },
+      );
+    });
+  }
+
   it('upgrades a pre-extension Pi command to the hooked resume command', () => {
     assert.deepEqual(deriveRelaunchCommand({
       shellType: 'pi',
@@ -694,6 +758,17 @@ describe('canResumeStoredSession — which stored sessions can resume', () => {
     assert.strictEqual(canResumeStoredSession({ shellType: 'muse' }), false);
   });
 
+  it('resumes grok and antigravity only by their own captured hook-reported ids', () => {
+    assert.strictEqual(canResumeStoredSession({ shellType: 'grok' }), false);
+    assert.strictEqual(canResumeStoredSession({ shellType: 'grok', claudeSessionId: 'c' }), false);
+    assert.strictEqual(canResumeStoredSession({ shellType: 'grok', grokSessionId: 'g' }), true);
+    assert.strictEqual(canResumeStoredSession({ shellType: 'grok', grokSessionId: '  ' }), false);
+    assert.strictEqual(canResumeStoredSession({ shellType: 'antigravity' }), false);
+    assert.strictEqual(canResumeStoredSession({ shellType: 'antigravity', claudeSessionId: 'c' }), false);
+    assert.strictEqual(canResumeStoredSession({ shellType: 'antigravity', antigravitySessionId: 'a' }), true);
+    assert.strictEqual(canResumeStoredSession({ shellType: 'antigravity', antigravitySessionId: ' \t ' }), false);
+  });
+
   it('resumes Pi by working directory — no recorded id required', () => {
     assert.strictEqual(canResumeStoredSession({ shellType: 'pi' }), true);
   });
@@ -730,6 +805,18 @@ describe('createFtownSession — Pi launch', () => {
       "pi --extension \"$HOME/.ftown/pi/ftown.js\" --model 'openai/gpt-5' 'inspect today'\\''s changes'",
     );
     assert.strictEqual(harness.runs[0].initialInput, undefined);
+  });
+
+  it('createFtownSession — grok and antigravity records store their native session ids', async () => {
+    const harness = fakeDeps();
+    const grok = await createFtownSession(harness.deps, { shellType: 'grok', grokSessionId: 'grok-abc' });
+    assert.strictEqual(grok.grokSessionId, 'grok-abc');
+    assert.strictEqual(harness.saved.at(-1)?.grokSessionId, 'grok-abc');
+    assert.strictEqual(harness.runs.at(-1)?.command, "grok --always-approve -r 'grok-abc'");
+    const agy = await createFtownSession(harness.deps, { shellType: 'antigravity', antigravitySessionId: 'conv-abc' });
+    assert.strictEqual(agy.antigravitySessionId, 'conv-abc');
+    assert.strictEqual(harness.saved.at(-1)?.antigravitySessionId, 'conv-abc');
+    assert.strictEqual(harness.runs.at(-1)?.command, "agy --dangerously-skip-permissions --conversation 'conv-abc'");
   });
 
   it('createFtownSession — opencode launch passes the prompt as a --prompt CLI arg', async () => {
@@ -1010,6 +1097,17 @@ describe('commandless standard launch boundary', () => {
         assert.equal(h.runs[0].submitSuffix, undefined);
       }
     } finally { restoreHome(realHome); rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it('passes the antigravity task via -i and never replays it in the persisted command', async () => {
+    const h = fakeDeps();
+    const session = await createFtownSession(h.deps, { shellType: 'antigravity', model: 'provider/model',
+      prompt: "inspect today's changes" });
+    const base = "agy --dangerously-skip-permissions --model 'provider/model'";
+    assert.equal(session.command, base);
+    assert.equal(h.runs[0].command, `${base} -i 'inspect today'\\''s changes'`);
+    assert.equal(h.runs[0].initialInput, undefined);
+    assert.equal(h.runs[0].submitSuffix, undefined);
   });
 
   it('retains typed task delivery for shell and kimi-code without putting it into the command', async () => {

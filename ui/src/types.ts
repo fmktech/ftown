@@ -3,7 +3,7 @@ import type { SessionPreviewDescriptor, SessionPreviewStatusRequest, SessionPrev
 
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error' | 'disconnected';
 
-export type ShellType = 'claude' | 'cursor' | 'codex' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks' | 'grok' | 'pi' | 'kimi-code' | 'muse';
+export type ShellType = 'claude' | 'cursor' | 'codex' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks' | 'grok' | 'pi' | 'kimi-code' | 'muse' | 'antigravity';
 
 export interface Session {
   id: string;
@@ -23,6 +23,8 @@ export interface Session {
   piSessionFile?: string;
   opencodeSessionId?: string;
   museSessionId?: string;
+  grokSessionId?: string;
+  antigravitySessionId?: string;
   command?: string;
   parentSessionId?: string;
   pullRequestUrl?: string;
@@ -147,6 +149,8 @@ export interface CreateSessionPayload {
   piSessionFile?: string;
   opencodeSessionId?: string;
   museSessionId?: string;
+  grokSessionId?: string;
+  antigravitySessionId?: string;
   env?: Record<string, string>;
   initialInput?: string;
   initialInputDelay?: number;

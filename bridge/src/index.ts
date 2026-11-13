@@ -42,7 +42,7 @@ import { createPrReviewService } from './pull-request-review.js';
 import { PullRequestEventWatcher } from './pull-request-events.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { SessionResurrection, shouldResurrectStoredSession } from './session-resurrection.js';
-import { TerminalPump } from './terminal-pump.js';
+import { createTerminalOutput } from './terminal-output.js';
 import { collectSessionUsage } from './usage-collector.js';
 import { AgentSessionIdPersister } from './session-ids.js';
 import { HookUsagePersister } from './hook-usage.js';
@@ -649,7 +649,7 @@ program
       },
       onInput: (sid, data) => { runner.write(sid, data); },
       onResize: (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
-      onAttach: (sid) => terminalManager.serialize(sid, 20000) ?? '',
+      onAttach: (sid, deliver) => terminalOutput.attachScreen(sid, deliver),
     });
     // Loopback WebSocket rung: same DirectMessage protocol as WebRTC, tunneled
     // over TCP on the existing 127.0.0.1 local API server. Bypasses VPN/endpoint
@@ -666,7 +666,7 @@ program
       allowedOrigins: apiOrigin ? [apiOrigin] : [],
       onInput: (sid, data) => { runner.write(sid, data); },
       onResize: (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
-      onAttach: (sid) => terminalManager.serialize(sid, 20000) ?? '',
+      onAttach: (sid, deliver) => terminalOutput.attachScreen(sid, deliver),
     });
     const publishRouter = new PublishRouter({
       registry: watchRegistry,
@@ -796,16 +796,20 @@ program
 
     // Terminal output pump: buffers runner PTY output and owns the runner
     // 'complete'/'error' lifecycle handlers.
-    const pump = new TerminalPump({
+    const terminalOutput = createTerminalOutput({
       store,
       terminalManager,
-      publishTerminalData: (sid, data) => publishRouter.publishTerminalData(sid, data),
-      publishSessionUpdate: (session) => centrifugo.publishSessionUpdate(userId, session),
-      publishHookEvent: (sid, event) => centrifugo.publishHookEvent(userId, sid, event),
-      unregisterSession: (sid) => unregisterSession(sid),
-      collectUsage: (session) => collectSessionUsage(session),
+      runner,
+      router: publishRouter,
+      watchRegistry,
+      lifecycle: {
+        publishSessionUpdate: (session) => centrifugo.publishSessionUpdate(userId, session),
+        publishHookEvent: (sid, event) => centrifugo.publishHookEvent(userId, sid, event),
+        unregisterSession: (sid) => unregisterSession(sid),
+        collectUsage: (session) => collectSessionUsage(session),
+      },
     });
-    pump.attach(runner);
+    const pump = terminalOutput.pump;
 
     // Resurrection engine for sessions left live by a previous bridge process.
     const resurrection = new SessionResurrection({
@@ -920,26 +924,7 @@ program
     process.on('exit', cleanupPointer);
 
     function publishScreenDump(sid: string): void {
-      // Phase 1: viewport-only dump (~rows*cols bytes) for instant render.
-      const viewportRaw = terminalManager.serialize(sid, 0);
-      if (viewportRaw) {
-        publishRouter.publishTerminalScreen(sid, viewportRaw);
-      }
-
-      // Phase 2: full dump with scrollback. Client re-renders on top of phase 1.
-      // Cap accounts for ~50% JSON-encoding inflation on ANSI-heavy buffers
-      // (each \x1b ->  expands 1 -> 6 bytes), keeping the on-wire
-      // Centrifugo frame under websocket_message_size_limit.
-      const MAX_BYTES = 2_500_000;
-      let scrollback = 20000;
-      let raw = terminalManager.serialize(sid, scrollback);
-      while (raw && Buffer.byteLength(raw, 'utf8') > MAX_BYTES && scrollback > 100) {
-        scrollback = Math.floor(scrollback / 2);
-        raw = terminalManager.serialize(sid, scrollback);
-      }
-      if (!raw) return;
-      if (raw === viewportRaw) return;
-      publishRouter.publishTerminalScreen(sid, raw);
+      terminalOutput.publishScreenDump(sid);
     }
 
     function handleClientResize(sid: string, cols: number, rows: number): void {
@@ -1064,7 +1049,7 @@ program
           // The port and the pointer would outlive a same-PID re-exec, so no earlier failure may skip them.
           try { localApiServer.stop(); } finally { cleanupPointer(); }
         }
-        runner.stopAll();
+        await terminalOutput.stop();
         loopbackServer.closeAll();
         directPeers.closeAll();
         watchRegistry.dispose();

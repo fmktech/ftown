@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const jobs = new Set(["e2e", "release-artifacts", "gitleaks", "bridge-version", "centrifugo"]);
 const shaPattern = /^[0-9a-f]{40}$/;
+const shardPattern = /^([1-9])\/([1-9])$/;
 const idPattern = /^bx_[a-z0-9]+$/;
 const artifacts = ["playwright-report", "test-results", "ui.log", "bridge.log", "ci-infra.log"];
 const cliUrl = "https://boat.dev/api/boat/cli/download?platform=linux-x64&channel=prod";
@@ -22,6 +23,10 @@ export function validate(input) {
   if (!jobs.has(input.job)) throw new Error("Invalid CI job");
   if (input.job === "release-artifacts" && !["11", "latest"].includes(input.npmVersion)) throw new Error("Invalid npm version");
   if (input.job === "bridge-version" && (!shaPattern.test(input.baseSha || "") || !shaPattern.test(input.headSha || ""))) throw new Error("Invalid base/head SHA");
+  if (input.shard) {
+    const shard = shardPattern.exec(input.shard);
+    if (input.job !== "e2e" || !shard || Number(shard[1]) > Number(shard[2])) throw new Error("Invalid shard");
+  }
   if (!/^\d+$/.test(input.runId || "") || !/^\d+$/.test(input.runAttempt || "")) throw new Error("Invalid run identifiers");
   if (input.event === "pull_request") {
     if (!input.repository || !input.headRepository || !input.author || !input.sender || !input.actor) throw new Error("Missing PR routing identity");
@@ -33,6 +38,7 @@ export function validate(input) {
 
 export function remoteEnvironment(input) {
   const env = ["CI=true", "GITHUB_WORKSPACE=/home/user/repo", `GITHUB_RUN_ID=${input.runId}`, `GITHUB_RUN_ATTEMPT=${input.runAttempt}`];
+  if (input.shard) env.push(`E2E_SHARD=${input.shard}`);
   if (input.job === "release-artifacts") env.push(`NPM_VERSION=${input.npmVersion}`);
   if (input.job === "bridge-version") env.push(`BASE=${input.baseSha}`, `HEAD=${input.headSha}`);
   return env;
@@ -130,7 +136,7 @@ export async function orchestrate(input, io) {
 
 function inputFromEnv(env) {
   return {
-    job: env.INPUT_JOB, npmVersion: env.INPUT_NPM_VERSION, baseSha: env.INPUT_BASE_SHA, headSha: env.INPUT_HEAD_SHA,
+    job: env.INPUT_JOB, shard: env.INPUT_SHARD || undefined, npmVersion: env.INPUT_NPM_VERSION, baseSha: env.INPUT_BASE_SHA, headSha: env.INPUT_HEAD_SHA,
     key: env.BOAT_API_KEY, event: env.CI_EVENT, repository: env.CI_REPOSITORY,
     headRepository: env.CI_HEAD_REPOSITORY, author: env.CI_PR_AUTHOR, sender: env.CI_SENDER, actor: env.CI_ACTOR,
     runId: env.GITHUB_RUN_ID, runAttempt: env.GITHUB_RUN_ATTEMPT,
@@ -220,6 +226,7 @@ export async function main({ env = process.env, retryDelaysMs = [5000, 15000], t
     },
     local: async i => {
       const env = { HOME: process.env.HOME, PATH: process.env.PATH, CI: "true", GITHUB_WORKSPACE: root, GITHUB_RUN_ID: i.runId, GITHUB_RUN_ATTEMPT: i.runAttempt };
+      if (i.shard) env.E2E_SHARD = i.shard;
       if (i.job === "release-artifacts") env.NPM_VERSION = i.npmVersion;
       if (i.job === "bridge-version") { env.BASE = i.baseSha; env.HEAD = i.headSha; }
       await checked("bash", ["scripts/ci/run-job.sh", i.job], { env, timeout: i.job === "e2e" ? 2100000 : 900000 });
