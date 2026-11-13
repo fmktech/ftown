@@ -8,6 +8,7 @@ import { scopedUpdateObserver } from './update-effects.js';
 import type { ApplicationJson, SecureEnvelope, VerifiedApplication } from './security/protocol.js';
 import WebSocket from 'ws';
 import { createOutboundPipeline } from './outbound-pipeline.js';
+import { BridgeSecurityError } from './security/bridge/errors.js';
 import { COMMAND_REJECTED_WARNING, describeError } from './outbound-pipeline-types.js';
 import type { OutboundPacket } from './outbound-pipeline-types.js';
 
@@ -212,10 +213,21 @@ export class CentrifugoClient {
           const out: OutboundPacket[] = [];
           for (const packet of packets) {
             if (packet.type !== 'ftown_encrypted') continue;
-            await security.policy.principal(packet.recipientId);
+            const recipientId = packet.recipientId;
             out.push({
               bytes: Buffer.byteLength(JSON.stringify(packet)),
-              send: () => this.client.publish(channel, packet).then(() => undefined),
+              // Egress check: the packet was sealed from one policy snapshot and may have waited for in-flight room since. Its
+              // recipient is re-read from the policy immediately before the packet is handed to the relay. If it is no longer an
+              // approved reader (revoked, expired, lost read) or the policy cannot be read, this packet is not published and the
+              // rejection is recorded by the pipeline; the other recipients' packets are unaffected. Policy reads resolve in call
+              // order, so send order is kept.
+              // Known residual window, unchanged here: while the relay client is reconnecting, centrifuge-js parks the publish (up
+              // to its 5 s timeout) and sends it on reconnect without another check. Rejecting while disconnected would close it,
+              // but would drop events that are delivered today, so it is deliberately left as it is.
+              send: () => security.policy.principal(recipientId).then(principal => {
+                if (!principal.permissions.includes('read')) throw new BridgeSecurityError('permission_denied');
+                return this.client.publish(channel, packet);
+              }).then(() => undefined),
             });
           }
           return out;

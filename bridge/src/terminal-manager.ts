@@ -30,6 +30,8 @@ export interface GrepResult {
 interface ManagedTerminal {
   terminal: TerminalType;
   serializer: InstanceType<typeof SerializeAddon>;
+  /** Callers waiting for the emulator to catch up; settled on parse or destroy. */
+  parseWaiters: Set<() => void>;
 }
 
 /**
@@ -83,7 +85,7 @@ export class TerminalManager {
       });
       const serializer = new SerializeAddon();
       terminal.loadAddon(serializer);
-      managed = { terminal, serializer };
+      managed = { terminal, serializer, parseWaiters: new Set() };
       this.terminals.set(sessionId, managed);
     }
     return managed;
@@ -92,6 +94,26 @@ export class TerminalManager {
   write(sessionId: string, data: string): void {
     const managed = this.ensureTerminal(sessionId);
     managed.terminal.write(data, () => {});
+  }
+
+  /**
+   * xterm parses writes asynchronously: `serialize`/`getScreen` in the same turn
+   * as a `write` do not contain it yet. `done` runs once the emulator holds
+   * exactly the bytes written before this call — synchronously inside xterm's
+   * write loop, before any later write is parsed — or immediately when the
+   * session has no emulator, or when it is destroyed while waiting.
+   */
+  whenParsed(sessionId: string, done: () => void): void {
+    const managed = this.terminals.get(sessionId);
+    if (!managed) {
+      done();
+      return;
+    }
+    const settle = (): void => {
+      if (managed.parseWaiters.delete(settle)) done();
+    };
+    managed.parseWaiters.add(settle);
+    managed.terminal.write('', settle);
   }
 
   serialize(sessionId: string, scrollback?: number): string {
@@ -160,6 +182,7 @@ export class TerminalManager {
     if (managed) {
       managed.terminal.dispose();
       this.terminals.delete(sessionId);
+      for (const settle of [...managed.parseWaiters]) settle();
     }
   }
 

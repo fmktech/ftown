@@ -13,6 +13,12 @@ jobs:
   direct-transport-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each shard is a whole isolated stack running one slice of the Playwright suite.
+        shard: ['1/3', '2/3', '3/3']
+    name: direct-transport-e2e (${{ matrix.shard }})
     steps:
       - uses: actions/checkout@v4
         with:
@@ -24,13 +30,14 @@ jobs:
       - uses: ./.github/actions/run-ci
         with:
           job: e2e
+          shard: ${{ matrix.shard }}
           boat-api-key: ${{ secrets.BOAT_API_KEY }}
 
       - name: Upload Playwright report + traces
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report
+          name: playwright-report-${{ strategy.job-index }}
           path: |
             e2e/playwright-report/
             e2e/test-results/
