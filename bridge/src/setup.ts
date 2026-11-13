@@ -8,6 +8,8 @@ import { installPiExtension } from './pi-extension-installer.js';
 import { installClaudeMod } from './claude-mod-installer.js';
 import { installClaudeHooks } from './hook-installer.js';
 import { installCursorHooks } from './cursor-hook-installer.js';
+import { installGrokHooks } from './grok-hook-installer.js';
+import { installAntigravityHooks } from './antigravity-hook-installer.js';
 import { codexBinaryAvailable, ensureCodexHooks } from './codex-installer.js';
 import { opencodeBinaryAvailable, installOpencodePlugin } from './opencode-plugin-installer.js';
 import { ensureMusePlugin } from './muse-plugin-installer.js';
@@ -38,7 +40,11 @@ async function installIntegrations(root: string): Promise<IntegrationResult[]> {
   installClaudeMod(join(root, 'claude-mod'));
   if (!installClaudeHooks(notify)) throw new Error('Claude hook setup failed; fix settings.json and rerun ftown setup --repair');
   if (!installCursorHooks(notify)) throw new Error('Cursor hook setup failed; fix hooks.json and rerun ftown setup --repair');
+  const grok = installGrokHooks(join(root, 'hooks', 'ftown-grok-hook.sh'));
+  const antigravity = installAntigravityHooks(join(root, 'hooks', 'ftown-antigravity-hook.sh'));
   const results: IntegrationResult[] = [{ name: 'claude/cursor/pi', status: 'installed' }];
+  results.push(grok ? { name: 'grok', status: 'installed' } : { name: 'grok', status: 'skipped', detail: 'not installed or hook setup skipped' });
+  results.push(antigravity ? { name: 'antigravity', status: 'installed' } : { name: 'antigravity', status: 'skipped', detail: 'not installed or hook setup skipped' });
   if (await codexBinaryAvailable()) {
     if (!ensureCodexHooks(join(homedir(), '.ftown', 'bin', 'ftown-harness'), notify)) throw new Error('Codex hook setup failed; fix hooks.json and rerun ftown setup --repair');
     results.push({ name: 'codex', status: 'installed' });

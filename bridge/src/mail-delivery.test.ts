@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 
 import {
   AGENT_BUSY_STALE_MS,
+  MAIL_NUDGE_DELAY_HOOKED_MS,
+  MAIL_NUDGE_DELAY_MS,
   MAIL_WAKE_TEXT,
   parseNativeWakeRegistration,
   NativeWakeRegistrationError,
@@ -517,6 +519,35 @@ describe('MailDeliveryService nudges', () => {
     const nudges = runner.nudgeLines();
     assert.equal(nudges.length, 1, 'the retry must still nudge for mail that arrived while down');
     assert.ok(nudges[0].includes('from alice'), 'the original sender label must survive the not-running skip');
+  });
+
+  it('nudges an idle antigravity session at the hooked delay, not the 5s unhooked one', async () => {
+    const { clock, store, runner, service } = setup();
+    const session = makeSession('ag', { shellType: 'antigravity', antigravitySessionId: '00000000-0000-4000-8000-000000000003' });
+    store.add(session);
+    runner.running.add('ag');
+
+    await service.acceptMail(session, { body: 'work', from: 'alice' });
+    await clock.advance(MAIL_NUDGE_DELAY_HOOKED_MS - 1);
+    assert.equal(runner.nudgeLines().length, 0, 'hooked antigravity must not be nudged before the hooked delay');
+    await clock.advance(1);
+    assert.equal(runner.nudgeLines().length, 1, 'hooked antigravity is nudged once the hooked delay elapses');
+    assert.ok(runner.nudgeLines()[0].includes('from alice'));
+    service.stop();
+  });
+
+  it('nudges an idle grok session at the unhooked 5s delay', async () => {
+    const { clock, store, runner, service } = setup();
+    const session = makeSession('grok', { shellType: 'grok', grokSessionId: '00000000-0000-4000-8000-000000000004' });
+    store.add(session);
+    runner.running.add('grok');
+
+    await service.acceptMail(session, { body: 'work', from: 'alice' });
+    await clock.advance(MAIL_NUDGE_DELAY_MS - 1);
+    assert.equal(runner.nudgeLines().length, 0, 'unhooked grok must not be nudged before 5s');
+    await clock.advance(1);
+    assert.equal(runner.nudgeLines().length, 1, 'unhooked grok is nudged at 5s');
+    service.stop();
   });
 });
 

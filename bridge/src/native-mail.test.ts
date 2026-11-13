@@ -101,3 +101,15 @@ test('Codex sends a maximal body and shell metacharacters as one literal argumen
   assert.equal((await oversized.wake(session, 'x'.repeat(70 * 1024 + 1))).status, 'rejected');
   assert.equal(oversized.calls.length, 0);
 });
+test('grok and antigravity are unsupported for native wake, with or without their native id fields', async () => {
+  const f = fixture();
+  for (const change of [
+    { shellType: 'grok' as const },
+    { shellType: 'grok' as const, grokSessionId: target },
+    { shellType: 'antigravity' as const },
+    { shellType: 'antigravity' as const, antigravitySessionId: target },
+  ]) {
+    assert.equal((await f.wake({ ...session, ...change }, pointer)).status, 'unsupported', JSON.stringify(change));
+  }
+  assert.equal(f.calls.length, 0);
+});

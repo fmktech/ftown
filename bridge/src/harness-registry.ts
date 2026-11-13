@@ -25,6 +25,8 @@ export interface BuildCommandInput {
   piSessionId?: string;
   opencodeSessionId?: string;
   museSessionId?: string;
+  grokSessionId?: string;
+  antigravitySessionId?: string;
   /** Initial prompt passed as a CLI argument — avoids racing the TUI with typed input. */
   initialPrompt?: string;
   /**
@@ -48,7 +50,9 @@ export interface HarnessSpec {
     | 'cursorSessionId'
     | 'codexSessionId'
     | 'opencodeSessionId'
-    | 'museSessionId';
+    | 'museSessionId'
+    | 'grokSessionId'
+    | 'antigravitySessionId';
   /**
    * Rebadged base CLI: the harness launches this CLI with provider env overrides
    * (see PROVIDER_AUTH_ENV / PROVIDER_RUNTIME_ENV in provider-env-store.ts,
@@ -122,10 +126,18 @@ export function buildCodexCommand(options: {
 
 export function buildGrokCommand(options: {
   model?: string;
+  grokSessionId?: string;
   initialPrompt?: string;
 }): string {
   // --always-approve auto-approves all tool executions for unattended runs.
   const parts = ['grok', '--always-approve'];
+
+  if (options.grokSessionId?.trim()) {
+    // Resume must not replay the model or prompt — grok restores the captured
+    // native session (codex/opencode/muse precedent).
+    parts.push('-r', shellQuote(options.grokSessionId.trim()));
+    return parts.join(' ');
+  }
 
   if (options.model?.trim()) {
     parts.push('-m', shellQuote(options.model.trim()));
@@ -253,6 +265,34 @@ export function buildMuseCommand(options: {
   return parts.join(' ');
 }
 
+export function buildAntigravityCommand(options: {
+  model?: string;
+  antigravitySessionId?: string;
+  initialPrompt?: string;
+}): string {
+  // agy has no workdir flag: it inherits the runner cwd.
+  // --dangerously-skip-permissions is required for unattended ftown runs.
+  const parts = ['agy', '--dangerously-skip-permissions'];
+
+  if (options.antigravitySessionId?.trim()) {
+    // Resume restores the captured native conversation id; model and prompt are
+    // not replayed. -c/--continue is deliberately not used: its scope is undocumented.
+    parts.push('--conversation', shellQuote(options.antigravitySessionId.trim()));
+    return parts.join(' ');
+  }
+
+  if (options.model?.trim()) {
+    parts.push('--model', shellQuote(options.model.trim()));
+  }
+
+  if (options.initialPrompt?.trim()) {
+    // -i submits the initial prompt and keeps the interactive TUI open.
+    parts.push('-i', shellQuote(options.initialPrompt));
+  }
+
+  return parts.join(' ');
+}
+
 /** claude CLI launch — shared by 'claude' and every claude-rebadged provider flavor. */
 function buildClaudeCommand(input: BuildCommandInput): string {
   const parts = ['claude', '--allow-dangerously-skip-permissions'];
@@ -331,11 +371,15 @@ export const HARNESSES = {
     buildCommand: (input) =>
       buildGrokCommand({
         model: input.model,
+        grokSessionId: input.grokSessionId,
         initialPrompt: input.initialPrompt,
       }),
-    // Preserved decision: grok was never in HOOKED_SHELL_TYPES (no Stop-hook pump).
+    // Grok hooks (installed at ~/.grok/hooks/ftown.json) report the native
+    // session id for resume and deliver mid-turn mail at turn end; `hooked`
+    // stays false so the short typed nudge still covers an idle agent.
     hooked: false,
     promptAsCliArg: true,
+    resumeField: 'grokSessionId',
 
   },
   muse: {
@@ -355,6 +399,20 @@ export const HARNESSES = {
     promptAsCliArg: true,
     resumeField: 'museSessionId',
 
+  },
+  antigravity: {
+    // Workdir comes from the runner cwd — agy has no workdir flag.
+    buildCommand: (input) =>
+      buildAntigravityCommand({
+        model: input.model,
+        antigravitySessionId: input.antigravitySessionId,
+        initialPrompt: input.initialPrompt,
+      }),
+    // Mail arrives through the ftown Stop hook installed in
+    // ~/.gemini/config/hooks.json.
+    hooked: true,
+    promptAsCliArg: true,
+    resumeField: 'antigravitySessionId',
   },
   pi: {
     // Workdir comes from the runner cwd. Pi resumes the most recent session for
@@ -425,7 +483,13 @@ export function harnessAcceptsPromptAsCliArg(
   shellType: ShellType,
   input: Pick<
     BuildCommandInput,
-    'claudeSessionId' | 'cursorSessionId' | 'codexSessionId' | 'opencodeSessionId' | 'museSessionId'
+    | 'claudeSessionId'
+    | 'cursorSessionId'
+    | 'codexSessionId'
+    | 'opencodeSessionId'
+    | 'museSessionId'
+    | 'grokSessionId'
+    | 'antigravitySessionId'
   >,
 ): boolean {
   const spec: HarnessSpec = HARNESSES[shellType];

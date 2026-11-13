@@ -44,6 +44,8 @@ export interface CreateFtownSessionInput {
   piSessionFile?: string;
   opencodeSessionId?: string;
   museSessionId?: string;
+  grokSessionId?: string;
+  antigravitySessionId?: string;
   env?: Record<string, string>;
   parentSessionId?: string;
   initialInput?: string;
@@ -249,6 +251,8 @@ export type RelaunchCommandSource = Pick<
   | 'piSessionId'
   | 'opencodeSessionId'
   | 'museSessionId'
+  | 'grokSessionId'
+  | 'antigravitySessionId'
 >;
 
 /**
@@ -285,6 +289,8 @@ export function deriveRelaunchCommand(session: RelaunchCommandSource): {
     piSessionId: session.piSessionId,
     opencodeSessionId: session.opencodeSessionId,
     museSessionId: session.museSessionId,
+    grokSessionId: session.grokSessionId,
+    antigravitySessionId: session.antigravitySessionId,
     // Workdir-based resume (Pi/kimi-code `-c`): no id to carry, so signal
     // resume explicitly. Id-based harnesses ignore this and key off their id
     // fields.
@@ -306,7 +312,14 @@ export function deriveRelaunchCommand(session: RelaunchCommandSource): {
 export function canResumeStoredSession(
   session: Pick<
     Session,
-    'shellType' | 'claudeSessionId' | 'cursorSessionId' | 'codexSessionId' | 'opencodeSessionId' | 'museSessionId'
+    | 'shellType'
+    | 'claudeSessionId'
+    | 'cursorSessionId'
+    | 'codexSessionId'
+    | 'opencodeSessionId'
+    | 'museSessionId'
+    | 'grokSessionId'
+    | 'antigravitySessionId'
   >,
 ): boolean {
   const shellType = session.shellType ?? 'claude';
@@ -318,6 +331,11 @@ export function canResumeStoredSession(
   // muse resumes by captured session id (`resume '<ID>'`), recorded from the
   // plugin's hook events.
   if (shellType === 'muse') return Boolean(session.museSessionId?.trim());
+  // grok resumes by captured session id (`-r '<ID>'`) and antigravity by
+  // captured conversation id (`--conversation '<ID>'`), both recorded from
+  // their hook events. A stray claudeSessionId never makes either resumable.
+  if (shellType === 'grok') return Boolean(session.grokSessionId?.trim());
+  if (shellType === 'antigravity') return Boolean(session.antigravitySessionId?.trim());
   // Pi/kimi-code resume by working directory (`-c`) — neither needs a captured
   // session id, so both are always resumable on restart.
   if (shellType === 'pi' || shellType === 'kimi-code') return true;
@@ -465,6 +483,8 @@ async function createFtownSessionImpl(
     piSessionFile: input.piSessionFile,
     opencodeSessionId: input.opencodeSessionId,
     museSessionId: input.museSessionId,
+    grokSessionId: input.grokSessionId,
+    antigravitySessionId: input.antigravitySessionId,
     env: sessionEnv,
     parentSessionId,
     runtime: deps.runner.getPreferredRuntime(),
@@ -597,6 +617,10 @@ export function parseCreateSessionBody(
       typeof body.opencodeSessionId === 'string' ? body.opencodeSessionId : undefined,
     museSessionId:
       typeof body.museSessionId === 'string' ? body.museSessionId : undefined,
+    grokSessionId:
+      typeof body.grokSessionId === 'string' ? body.grokSessionId : undefined,
+    antigravitySessionId:
+      typeof body.antigravitySessionId === 'string' ? body.antigravitySessionId : undefined,
     env: env && typeof env === 'object' ? env : undefined,
     parentSessionId,
     initialInput: typeof body.initialInput === 'string' ? body.initialInput : undefined,
