@@ -114,6 +114,13 @@ test("rejects malformed jobs, versions, SHAs and run identifiers", () => {
   assert.throws(() => validate({ ...base, job: "bridge-version", baseSha: "a".repeat(40), headSha: "A".repeat(40) }));
   assert.throws(() => validate({ ...base, runId: "1;touch" }));
 });
+test("an e2e shard is validated and forwarded; other jobs and malformed shards are refused", () => {
+  assert.equal(validate({ ...base, shard: "2/3" }), "boat");
+  assert.deepEqual(remoteEnvironment({ ...base, shard: "2/3" }), ["CI=true", "GITHUB_WORKSPACE=/home/user/repo", "GITHUB_RUN_ID=123", "GITHUB_RUN_ATTEMPT=1", "E2E_SHARD=2/3"]);
+  assert.deepEqual(remoteEnvironment(base), ["CI=true", "GITHUB_WORKSPACE=/home/user/repo", "GITHUB_RUN_ID=123", "GITHUB_RUN_ATTEMPT=1"]);
+  for (const shard of ["4/3", "0/3", "1/0", "1/10", "1", "1/3 --grep x", "1/3;id"]) assert.throws(() => validate({ ...base, shard }), /Invalid shard/);
+  assert.throws(() => validate({ ...base, job: "gitleaks", shard: "1/3" }), /Invalid shard/);
+});
 test("remote environment is an explicit allowlist, with no key", () => {
   const i = { ...base, job: "bridge-version", baseSha: "a".repeat(40), headSha: "b".repeat(40) };
   assert.deepEqual(remoteEnvironment(i), ["CI=true", "GITHUB_WORKSPACE=/home/user/repo", "GITHUB_RUN_ID=123", "GITHUB_RUN_ATTEMPT=1", `BASE=${i.baseSha}`, `HEAD=${i.headSha}`]);
