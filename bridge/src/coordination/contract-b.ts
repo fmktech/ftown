@@ -179,7 +179,7 @@ export class WorktreeError extends Error {
  *   CLI: `ftown sessions remove <id> [--keep-worktree | --force-worktree]`; output states removed/retained + reason.
  *   Auto: status → decide → remove or set worktree.retained. Errors never block archiving the session.
  * List/prune:
- *   GET  /api/worktrees → { worktrees: Array<{ sessionId: string; sessionName: string; archived: boolean; worktree: SessionWorktree; status: WorktreeStatus }> }
+ *   GET  /api/worktrees → { worktrees: Array<{ sessionId: string; sessionName: string; archived: boolean; worktree: SessionWorktree; status: WorktreeStatus | null; error?: string }> }  (status null + error when the git probe failed for that row)
  *   POST /api/worktrees/prune → { removed: string[]; retained: Array<{ path: string; reason: string }> }  (archived sessions only, same decide rule)
  *   CLI (bridge/src/worktrees-cli.ts, group `ftown worktrees`): `list [--json]`, `prune [--json]`.
  */
