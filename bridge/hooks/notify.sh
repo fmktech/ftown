@@ -1,5 +1,13 @@
 #!/bin/bash
 INPUT=$(cat)
+# Grok runs Claude-compatible hooks too; ~/.ftown/grok-hook.sh is its channel. Stand down only
+# when GROK_HOOK_EVENT is set and is not "notification" (the Grok script does not forward that
+# event) AND the payload has a string hookEventName (Grok always sends it; Claude, Codex and
+# Cursor do not, so an inherited variable does not silence them).
+if [ -n "${GROK_HOOK_EVENT:-}" ] && [ "${GROK_HOOK_EVENT}" != "notification" ] \
+  && printf '%s' "$INPUT" | jq -e '(.hookEventName | type) == "string" and (.hookEventName | length) > 0' >/dev/null 2>&1; then
+  exit 0
+fi
 
 PORT="${FTOWN_HOOK_PORT:-}"
 SESSION_ID="${FTOWN_SESSION_ID:-}"

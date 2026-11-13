@@ -9,6 +9,8 @@ import {
   HARNESSES,
   HOOKED_SHELL_TYPES,
   SHELL_TYPES,
+  buildAntigravityCommand,
+  buildGrokCommand,
   buildKimiCodeCommand,
   buildMuseCommand,
   buildOpencodeCommand,
@@ -60,8 +62,12 @@ describe('harness registry', () => {
   it('contains the supported ShellType set', () => {
     assert.deepEqual(
       [...SHELL_TYPES].sort(),
-      ['claude', 'codex', 'cursor', 'deepseek', 'fireworks', 'grok', 'kimi', 'kimi-code', 'muse', 'opencode', 'pi', 'shell', 'zai'],
+      ['antigravity', 'claude', 'codex', 'cursor', 'deepseek', 'fireworks', 'grok', 'kimi', 'kimi-code', 'muse', 'opencode', 'pi', 'shell', 'zai'],
     );
+  });
+
+  it('registers antigravity directly after muse', () => {
+    assert.equal(SHELL_TYPES.indexOf('antigravity'), SHELL_TYPES.indexOf('muse') + 1);
   });
 
   for (const type of SHELL_TYPES) {
@@ -105,11 +111,13 @@ describe('harness registry', () => {
     }
   });
 
-  it('derives the hooked harness set (Pi uses the bundled ftown extension, opencode/muse the bundled ftown plugins)', () => {
+  it('derives the hooked harness set (Pi uses the bundled ftown extension, opencode/muse the bundled ftown plugins, antigravity the ftown Stop hook)', () => {
     assert.deepEqual(
       [...HOOKED_SHELL_TYPES].sort(),
-      ['claude', 'codex', 'deepseek', 'fireworks', 'kimi', 'muse', 'opencode', 'pi', 'zai'],
+      ['antigravity', 'claude', 'codex', 'deepseek', 'fireworks', 'kimi', 'muse', 'opencode', 'pi', 'zai'],
     );
+    // Grok hooks only report the session id; mail stays a typed nudge.
+    assert.equal(HOOKED_SHELL_TYPES.has('grok'), false);
   });
 
   describe('prompt-as-CLI-arg predicate (behavior preserved from create-ftown-session)', () => {
@@ -133,12 +141,23 @@ describe('harness registry', () => {
       assert.equal(harnessAcceptsPromptAsCliArg('codex', { codexSessionId: 'abc' }), false);
     });
 
-    it('grok: always (no resume support)', () => {
+    it('grok: yes, unless resuming a grok session', () => {
       assert.equal(harnessAcceptsPromptAsCliArg('grok', {}), true);
+      assert.equal(harnessAcceptsPromptAsCliArg('grok', { grokSessionId: 'g-123' }), false);
+      assert.equal(harnessAcceptsPromptAsCliArg('grok', { grokSessionId: '   ' }), true);
+      // Other harnesses' resume fields do not suppress it.
       assert.equal(
         harnessAcceptsPromptAsCliArg('grok', { claudeSessionId: 'a', cursorSessionId: 'b', codexSessionId: 'c' }),
         true,
       );
+    });
+
+    it('antigravity: yes, unless resuming an antigravity conversation', () => {
+      assert.equal(harnessAcceptsPromptAsCliArg('antigravity', {}), true);
+      assert.equal(harnessAcceptsPromptAsCliArg('antigravity', { antigravitySessionId: 'conv-1' }), false);
+      assert.equal(harnessAcceptsPromptAsCliArg('antigravity', { antigravitySessionId: '  ' }), true);
+      // Other harnesses' resume fields do not suppress it.
+      assert.equal(harnessAcceptsPromptAsCliArg('antigravity', { grokSessionId: 'g', museSessionId: 'm' }), true);
     });
 
     it('muse: yes, unless resuming a muse session', () => {
@@ -327,5 +346,113 @@ describe('buildMuseCommand', () => {
     assert.equal(HARNESSES.muse.resumeField, 'museSessionId');
     assert.ok(!('providerBase' in HARNESSES.muse));
     assert.ok(!('spawnStaggerMs' in HARNESSES.muse));
+  });
+});
+
+describe('buildAntigravityCommand', () => {
+  const AGY = 'agy --dangerously-skip-permissions';
+
+  it('base launch is --dangerously-skip-permissions only (frozen)', () => {
+    assert.equal(buildAntigravityCommand({}), AGY);
+  });
+
+  it('model rides --model (trimmed)', () => {
+    assert.equal(buildAntigravityCommand({ model: 'gemini-3-pro' }), `${AGY} --model 'gemini-3-pro'`);
+    assert.equal(buildAntigravityCommand({ model: '  gemini-3-pro  ' }), `${AGY} --model 'gemini-3-pro'`);
+  });
+
+  it('initial prompt rides -i (quoted untrimmed)', () => {
+    assert.equal(buildAntigravityCommand({ initialPrompt: 'do the thing' }), `${AGY} -i 'do the thing'`);
+    assert.equal(buildAntigravityCommand({ initialPrompt: ' padded ' }), `${AGY} -i ' padded '`);
+  });
+
+  it('model and prompt compose (model first)', () => {
+    assert.equal(
+      buildAntigravityCommand({ model: 'm1', initialPrompt: 'hello world' }),
+      `${AGY} --model 'm1' -i 'hello world'`,
+    );
+  });
+
+  it('prompts are single-quote escaped', () => {
+    assert.equal(
+      buildAntigravityCommand({ initialPrompt: "it's here" }),
+      process.platform === 'win32' ? `${AGY} -i 'it''s here'` : `${AGY} -i 'it'\\''s here'`,
+    );
+  });
+
+  it('whitespace-only model and prompt are ignored', () => {
+    assert.equal(buildAntigravityCommand({ model: '   ', initialPrompt: ' \n\t ' }), AGY);
+  });
+
+  it('resume early-returns with --conversation, dropping model and prompt', () => {
+    assert.equal(buildAntigravityCommand({ antigravitySessionId: 'conv-abc' }), `${AGY} --conversation 'conv-abc'`);
+    assert.equal(
+      buildAntigravityCommand({ antigravitySessionId: 'conv-abc', model: 'm1', initialPrompt: 'do not replay' }),
+      `${AGY} --conversation 'conv-abc'`,
+    );
+  });
+
+  it('resume id is trimmed; a whitespace-only id counts as absent', () => {
+    assert.equal(buildAntigravityCommand({ antigravitySessionId: '  conv-abc  ' }), `${AGY} --conversation 'conv-abc'`);
+    assert.equal(
+      buildAntigravityCommand({ antigravitySessionId: '   ', model: 'm1', initialPrompt: 'p' }),
+      `${AGY} --model 'm1' -i 'p'`,
+    );
+  });
+
+  it('registry antigravity entry threads model, prompt, and session id through (no workdir flag)', () => {
+    assert.equal(HARNESSES.antigravity.buildCommand({ workingDir: '/tmp/w' }), AGY);
+    assert.equal(
+      HARNESSES.antigravity.buildCommand({ workingDir: '/tmp/w', model: 'm1', initialPrompt: 'hi' }),
+      `${AGY} --model 'm1' -i 'hi'`,
+    );
+    assert.equal(
+      HARNESSES.antigravity.buildCommand({ antigravitySessionId: 'conv-abc', initialPrompt: 'hi' }),
+      `${AGY} --conversation 'conv-abc'`,
+    );
+  });
+
+  it('registry antigravity spec matches the frozen contract', () => {
+    assert.equal(HARNESSES.antigravity.hooked, true);
+    assert.equal(HARNESSES.antigravity.promptAsCliArg, true);
+    assert.equal(HARNESSES.antigravity.resumeField, 'antigravitySessionId');
+    assert.ok(!('providerBase' in HARNESSES.antigravity));
+    assert.ok(!('spawnStaggerMs' in HARNESSES.antigravity));
+  });
+});
+
+describe('buildGrokCommand', () => {
+  const GROK = 'grok --always-approve';
+
+  it('fresh output is unchanged (frozen)', () => {
+    assert.equal(buildGrokCommand({}), GROK);
+    assert.equal(buildGrokCommand({ model: ' grok-4 ' }), `${GROK} -m 'grok-4'`);
+    assert.equal(buildGrokCommand({ initialPrompt: 'do the thing' }), `${GROK} 'do the thing'`);
+    assert.equal(buildGrokCommand({ model: 'grok-4', initialPrompt: 'hello world' }), `${GROK} -m 'grok-4' 'hello world'`);
+    assert.equal(buildGrokCommand({ model: '  ', initialPrompt: '   ' }), GROK);
+    assert.equal(
+      buildGrokCommand({ initialPrompt: "it's here" }),
+      process.platform === 'win32' ? `${GROK} 'it''s here'` : `${GROK} 'it'\\''s here'`,
+    );
+  });
+
+  it('resume early-returns with -r, dropping model and prompt', () => {
+    assert.equal(buildGrokCommand({ grokSessionId: 'g-abc' }), `${GROK} -r 'g-abc'`);
+    assert.equal(
+      buildGrokCommand({ grokSessionId: 'g-abc', model: 'grok-4', initialPrompt: 'do not replay' }),
+      `${GROK} -r 'g-abc'`,
+    );
+  });
+
+  it('resume id is trimmed; a whitespace-only id counts as absent', () => {
+    assert.equal(buildGrokCommand({ grokSessionId: '  g-abc  ' }), `${GROK} -r 'g-abc'`);
+    assert.equal(buildGrokCommand({ grokSessionId: '   ', model: 'grok-4', initialPrompt: 'p' }), `${GROK} -m 'grok-4' 'p'`);
+  });
+
+  it('registry grok entry threads the session id through and stays unhooked', () => {
+    assert.equal(HARNESSES.grok.buildCommand({ grokSessionId: 'g-abc', model: 'grok-4' }), `${GROK} -r 'g-abc'`);
+    assert.equal(HARNESSES.grok.hooked, false);
+    assert.equal(HARNESSES.grok.promptAsCliArg, true);
+    assert.equal(HARNESSES.grok.resumeField, 'grokSessionId');
   });
 });

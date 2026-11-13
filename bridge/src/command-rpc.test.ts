@@ -257,6 +257,22 @@ for (const populated of [false, true]) {
     assert.equal(responses.length, 1);
   });
 }
+test('create_session forwards the grok and antigravity native session ids to the controller', async () => {
+  const responses: CommandResponse[] = []; const inputs: Record<string, unknown>[] = [];
+  const handler = createCommandHandler({ bridgeId: 'owner', sessionController: {
+    create: async (input: Record<string, unknown>) => { inputs.push(input); return { id: 'created', bridgeId: 'owner', status: 'running', ...input }; },
+  } as unknown as SessionController, publishCommandResponse: async (response) => { responses.push(response); } });
+  for (const payload of [
+    { shellType: 'grok', grokSessionId: 'grok-abc' },
+    { shellType: 'antigravity', antigravitySessionId: 'conv-abc' },
+  ]) {
+    await handler({ type: 'create_session', requestId: payload.shellType, payload } as unknown as Command);
+    assert.equal(responses.at(-1)?.success, true);
+  }
+  assert.equal(inputs[0].grokSessionId, 'grok-abc'); assert.equal(inputs[0].antigravitySessionId, undefined);
+  assert.equal(inputs[1].antigravitySessionId, 'conv-abc'); assert.equal(inputs[1].grokSessionId, undefined);
+});
+
 test('retired RPC commands reject without dependencies, preserving routing and correlation', async () => {
   const responses: CommandResponse[] = [];
   const handler = createCommandHandler({ bridgeId: 'owner', sessionController: new Proxy({}, {

@@ -39,6 +39,17 @@ describe("buildUsagePollBatches", () => {
     ]);
   });
 
+  it("never polls antigravity or grok sessions even with native ids and a working directory", () => {
+    const batches = buildUsagePollBatches([
+      session({ id: "antigravity", shellType: "antigravity", antigravitySessionId: "native-agy", workingDir: "/repo" }),
+      session({ id: "antigravity-no-id", shellType: "antigravity", workingDir: "/repo" }),
+      session({ id: "grok", shellType: "grok", grokSessionId: "native-grok", workingDir: "/repo" }),
+      session({ id: "grok-no-id", shellType: "grok", workingDir: "/repo" }),
+    ]);
+
+    expect(batches).toEqual([]);
+  });
+
   it("chunks a large bridge group to the RPC batch limit", () => {
     const sessions = Array.from({ length: 201 }, (_, index) => session({
       id: `codex-${String(index).padStart(3, "0")}`,
