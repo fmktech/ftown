@@ -87,6 +87,28 @@ export interface AskHookDeps {
   deadlineMs?: number;
 }
 
+/**
+ * True when this process is a hook started by the Grok CLI, which also loads
+ * the Claude hooks in ~/.claude/settings.json and sets GROK_HOOK_EVENT on every
+ * hook process. ftown's Claude hook entry points (`ask-hook`, `hook-pump`) stand
+ * down there: the dedicated Grok hook script is ftown's only channel in a Grok
+ * session. Requires BOTH signals: a non-empty GROK_HOOK_EVENT and Grok's
+ * camelCase `hookEventName` string in the parsed stdin payload. The variable
+ * alone is inherited by any process a Grok hook starts (e.g. a Claude Code or
+ * Codex session), whose ftown hooks must keep working.
+ */
+export function runningUnderGrokHook(payload: unknown, env: Record<string, string | undefined> = process.env): boolean {
+  const value = env.GROK_HOOK_EVENT;
+  if (typeof value !== 'string' || value.length === 0) return false;
+  if (!isRecord(payload)) return false;
+  const event = payload.hookEventName;
+  return typeof event === 'string' && event.length > 0;
+}
+
+function parseJsonOrUndefined(text: string): unknown {
+  try { return JSON.parse(text) as unknown; } catch { return undefined; }
+}
+
 function ok(response: AskHookResponse): boolean {
   return response.status >= 200 && response.status < 300;
 }
@@ -95,11 +117,19 @@ function ok(response: AskHookResponse): boolean {
 export async function runAskHook(deps: AskHookDeps): Promise<0> {
   const { signal } = deps;
   const aborted = (): boolean => signal?.aborted === true;
+  // stdin is read at most once; the Grok check below may read it early.
+  let stdin: Promise<string> | undefined;
+  const readStdin = (): Promise<string> => (stdin ??= deps.readStdin());
+  if (deps.env.GROK_HOOK_EVENT) {
+    // A read failure or unparseable input is "not Grok": fall through unchanged.
+    const payload = await readStdin().then(parseJsonOrUndefined, () => undefined);
+    if (runningUnderGrokHook(payload, deps.env)) return 0;
+  }
   try {
     const sessionId = deps.env.FTOWN_SESSION_ID;
     if (!sessionId || !SESSION_ID_PATTERN.test(sessionId)) return 0;
 
-    const input: unknown = JSON.parse(await deps.readStdin());
+    const input: unknown = JSON.parse(await readStdin());
     if (!isRecord(input) || input.tool_name !== 'AskUserQuestion' || !isRecord(input.tool_input) || typeof input.tool_use_id !== 'string') return 0;
     const toolInput = input.tool_input;
     if (aborted()) return 0;

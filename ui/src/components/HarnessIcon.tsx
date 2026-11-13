@@ -14,6 +14,7 @@ const HARNESS_LABELS = {
   pi: "Pi",
   "kimi-code": "Kimi Code",
   muse: "Muse",
+  antigravity: "Antigravity",
 } satisfies Record<ShellType, string>;
 
 const HARNESS_COLORS = {
@@ -30,6 +31,7 @@ const HARNESS_COLORS = {
   pi: "var(--harness-pi)",
   "kimi-code": "var(--harness-kimi-code)",
   muse: "var(--harness-muse)",
+  antigravity: "var(--harness-antigravity)",
 } satisfies Record<ShellType, string>;
 
 export function harnessLabel(harness?: ShellType): string {
@@ -110,6 +112,12 @@ function HarnessGlyph({ harness }: { harness?: ShellType }) {
       return (
         <svg viewBox="0 0 24 24" fill="currentColor" fillRule="evenodd" aria-hidden="true">
           <path d="M12 1.5l2.2 7.3 7.3 2.2-7.3 2.2L12 20.5l-2.2-7.3-7.3-2.2 7.3-2.2L12 1.5zM19 15l.9 3.1 3.1.9-3.1.9-.9 3.1-.9-3.1-3.1-.9 3.1-.9.9-3.1z" />
+        </svg>
+      );
+    case "antigravity":
+      return (
+        <svg viewBox="0 0 24 24" fill="currentColor" fillRule="evenodd" aria-hidden="true">
+          <path d="M12 2.5l9 9-2.5 2.5L12 7.5 5.5 14 3 11.5l9-9zM12 11l6.5 6.5-2.3 2.3L12 15.6l-4.2 4.2-2.3-2.3L12 11z" />
         </svg>
       );
     default:

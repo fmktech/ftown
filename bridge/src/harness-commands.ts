@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Command, CommanderError } from 'commander';
 import { api, loadPointer, bridgePointerPath, listSessions, resolveSessionId, fetchInbox, sendMail } from './cli-client.js';
-import { runAskHookCli } from './ask-question-hook.js';
+import { runAskHookCli, runningUnderGrokHook } from './ask-question-hook.js';
 import { cleanTerminalLine, formatLogLines, isDisplayableLine } from './harness-format.js';
 import {
   MAIL_TYPES,
@@ -500,6 +500,8 @@ async function cmdHookPump(): Promise<void> {
     if (process.stdin.isTTY) return;
     const raw = await readStdinText();
     const hook = JSON.parse(raw) as HookInput;
+    // Grok runs Claude hooks too; its own hook script delivers mail there.
+    if (runningUnderGrokHook(hook)) return;
     const event = hook.hook_event_name;
     if (event !== 'Stop' && event !== 'UserPromptSubmit' && event !== 'SessionStart') return;
 

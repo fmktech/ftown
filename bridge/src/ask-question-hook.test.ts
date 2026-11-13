@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   buildAskUserQuestionHookOutput,
   runAskHook,
+  runningUnderGrokHook,
   type AskHookDeps,
   type AskHookResponse,
 } from './ask-question-hook.js';
@@ -92,7 +93,86 @@ function standard(itemResponse: (call: number) => AskHookResponse | Error): Hand
   };
 }
 
+describe('runningUnderGrokHook', () => {
+  it('requires a non-empty GROK_HOOK_EVENT and a Grok-shaped payload', () => {
+    const stop = { GROK_HOOK_EVENT: 'stop' };
+    for (const payload of [{ hookEventName: 'stop' }, {}, null, undefined]) {
+      assert.equal(runningUnderGrokHook(payload, {}), false);
+      assert.equal(runningUnderGrokHook(payload, { GROK_HOOK_EVENT: undefined }), false);
+    }
+    assert.equal(runningUnderGrokHook({ hookEventName: 'stop' }, stop), true);
+    assert.equal(runningUnderGrokHook({ hookEventName: 'stop', hook_event_name: 'Stop' }, stop), true);
+    assert.equal(runningUnderGrokHook({ hook_event_name: 'Stop' }, stop), false);
+    for (const payload of [null, 'x', [], { hookEventName: '' }, { hookEventName: 5 }]) {
+      assert.equal(runningUnderGrokHook(payload, stop), false, JSON.stringify(payload));
+    }
+    assert.equal(runningUnderGrokHook({ hookEventName: 'stop' }, { GROK_HOOK_EVENT: '' }), false);
+  });
+});
+
 describe('runAskHook', () => {
+  const answered = (): AskHookResponse => ({
+    status: 200,
+    body: { event: { id: 'att-1', resolution: 'answered', answer: { answers: [{ selected: [0] }, { selected: [1] }] } } },
+  });
+
+  const grokEnv = { FTOWN_SESSION_ID: 'sess-1', GROK_HOOK_EVENT: 'pre_tool_use' };
+  const countReads = (h: Harness): { reads: number } => {
+    const counter = { reads: 0 };
+    const read = h.deps.readStdin;
+    h.deps.readStdin = async () => { counter.reads += 1; return read(); };
+    return counter;
+  };
+
+  it('stands down for a Grok-shaped payload: reads stdin once, no bridge call, no output', async () => {
+    const h = makeHarness(standard(answered), {
+      env: grokEnv,
+      stdin: { hookEventName: 'pre_tool_use', hook_event_name: 'PreToolUse', tool_name: 'AskUserQuestion', tool_use_id: 'toolu_1', tool_input: toolInput },
+    });
+    const counter = countReads(h);
+    assert.equal(await runAskHook(h.deps), 0);
+    assert.equal(counter.reads, 1);
+    assert.equal(h.calls.length, 0);
+    assert.deepEqual(h.stdout, []);
+    assert.deepEqual(h.stderr, []);
+  });
+
+  it('proceeds as today for a Claude-shaped payload when GROK_HOOK_EVENT is inherited', async () => {
+    const h = makeHarness(standard(answered), { env: grokEnv });
+    const counter = countReads(h);
+    assert.equal(await runAskHook(h.deps), 0);
+    assert.equal(counter.reads, 1);
+    assert.ok(h.calls.length >= 3);
+    assert.equal(h.stdout.length, 1);
+    assert.deepEqual(h.stderr, []);
+  });
+
+  it('treats a stdin read failure under GROK_HOOK_EVENT as not Grok (same outcome as today)', async () => {
+    const h = makeHarness(() => capable, { env: grokEnv });
+    let reads = 0;
+    h.deps.readStdin = async () => { reads += 1; throw new Error('EPIPE'); };
+    assert.equal(await runAskHook(h.deps), 0);
+    assert.equal(reads, 1);
+    assert.equal(h.calls.length, 0);
+    assert.deepEqual(h.stdout, []);
+    assert.deepEqual(h.stderr, ['ftown ask-hook: EPIPE\n']);
+  });
+
+  it('treats unparseable stdin under GROK_HOOK_EVENT as not Grok (same outcome as today)', async () => {
+    const h = makeHarness(() => capable, { env: grokEnv, stdin: 'not json' });
+    assert.equal(await runAskHook(h.deps), 0);
+    assert.equal(h.calls.length, 0);
+    assert.deepEqual(h.stdout, []);
+    assert.equal(h.stderr.length, 1);
+  });
+
+  it('treats an empty GROK_HOOK_EVENT as not under Grok', async () => {
+    const h = makeHarness(standard(answered), { env: { FTOWN_SESSION_ID: 'sess-1', GROK_HOOK_EVENT: '' } });
+    assert.equal(await runAskHook(h.deps), 0);
+    assert.ok(h.calls.length >= 3);
+    assert.equal(h.stdout.length, 1);
+  });
+
   it('exits quietly without session env and does not call the bridge', async () => {
     for (const env of [{}, { FTOWN_SESSION_ID: '' }, { FTOWN_SESSION_ID: '../x' }]) {
       const h = makeHarness(() => capable, { env });

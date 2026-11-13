@@ -1,6 +1,6 @@
 # ftown
 
-A remote CLI agent orchestrator that lets you manage and stream **Claude Code, Cursor Agent, Codex, Grok, Muse Code, Pi, Kimi Code, opencode,** and shell sessions through a web dashboard. Terminal streaming climbs a transport ladder — local loopback, then WebRTC P2P, then Centrifugo — so output stays on your machine or network whenever possible, and automatically upgrades back to a direct connection once it can.
+A remote CLI agent orchestrator that lets you manage and stream **Claude Code, Cursor Agent, Codex, Grok, Muse Code, Antigravity, Pi, Kimi Code, opencode,** and shell sessions through a web dashboard. Terminal streaming climbs a transport ladder — local loopback, then WebRTC P2P, then Centrifugo — so output stays on your machine or network whenever possible, and automatically upgrades back to a direct connection once it can.
 
 ## Demo
 
@@ -150,7 +150,7 @@ The file travels through the existing encrypted connection and runs in an iframe
 
 ### Everything else
 
-- Eight coding-agent CLIs plus raw shells as full interactive sessions
+- Nine coding-agent CLIs plus raw shells as full interactive sessions
 - Parent/child agent trees, durable cross-session mail, and session reparenting
 - Native resume support for Claude, Cursor, Codex, and Pi; workdir-based continuation for Kimi Code
 - Live per-session token/model usage for harnesses with structured native session logs

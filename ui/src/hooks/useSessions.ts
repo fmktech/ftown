@@ -51,7 +51,7 @@ function isSessionUsage(value: unknown): value is SessionUsage {
 function isSessionRow(value: unknown): value is Session {
   if (!value || typeof value !== "object") return false;
   const row = value as Record<string, unknown>;
-  const optionalStrings = ["prompt", "model", "workingDir", "shellType", "claudeSessionId", "cursorSessionId", "codexSessionId", "piSessionId", "piSessionFile", "opencodeSessionId", "museSessionId", "command", "parentSessionId", "loopId"];
+  const optionalStrings = ["prompt", "model", "workingDir", "shellType", "claudeSessionId", "cursorSessionId", "codexSessionId", "piSessionId", "piSessionFile", "opencodeSessionId", "museSessionId", "grokSessionId", "antigravitySessionId", "command", "parentSessionId", "loopId"];
   return (row.preview === undefined || isPreviewDescriptor(row.preview))
     && optionalStrings.every(key => row[key] === undefined || typeof row[key] === "string")
     && (row.usage === undefined || isSessionUsage(row.usage))
@@ -117,6 +117,8 @@ export interface CreateSessionOptions {
   cursorSessionId?: string;
   codexSessionId?: string;
   museSessionId?: string;
+  grokSessionId?: string;
+  antigravitySessionId?: string;
   piSessionId?: string;
   piSessionFile?: string;
   opencodeSessionId?: string;
@@ -443,6 +445,8 @@ export function useSessions(
         cursorSessionId: options?.cursorSessionId,
         codexSessionId: options?.codexSessionId,
         museSessionId: options?.museSessionId,
+        grokSessionId: options?.grokSessionId,
+        antigravitySessionId: options?.antigravitySessionId,
         piSessionId: options?.piSessionId,
         piSessionFile: options?.piSessionFile,
         opencodeSessionId: options?.opencodeSessionId,
