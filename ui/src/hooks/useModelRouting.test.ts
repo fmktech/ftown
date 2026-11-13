@@ -96,7 +96,7 @@ describe("model routing controller", () => {
     const send = vi.fn(async (command: Command) => command.type === "set_model_routing" ? ok({ schema: 1, saved: true, errors: [] }) : ok(snapshot("saved")));
     const c = make(send);
     const outcome = await c.save("a", config("saved"));
-    expect(outcome).toEqual({ saved: true });
+    expect(outcome).toEqual({ saved: true, snapshot: snapshot("saved") });
     expect(send.mock.calls[0]?.[0]).toEqual({ type: "set_model_routing", requestId: "req", payload: { bridgeId: "a", config: config("saved") } });
     expect(send.mock.calls[1]?.[0].payload).toEqual({ bridgeId: "a" });
     expect(c.get("a")).toMatchObject({ status: "ready", saving: false });
@@ -119,7 +119,7 @@ describe("model routing controller", () => {
     expect(c.get("a").saving).toBe(true);
     expect(await c.save("a", config())).toMatchObject({ saved: false });
     reply.resolve(ok({ schema: 1, saved: true, errors: [] }));
-    expect(await first).toEqual({ saved: true });
+    expect(await first).toEqual({ saved: true, snapshot: snapshot() });
     expect(send.mock.calls.filter(([command]) => command.type === "set_model_routing")).toHaveLength(1);
   });
 
@@ -147,7 +147,7 @@ describe("model routing controller", () => {
     expect(send).toHaveBeenCalledTimes(1);
     expect(await c.save("a", config(), { overwriteInvalid: true })).toEqual({ saved: false, errors: ["The routing file is invalid."], invalidFileBlocked: true });
     expect(c.get("a").invalidFileBlocked).toBe(true);
-    expect(await c.save("a", config(), { overwriteInvalid: true })).toEqual({ saved: true });
+    expect(await c.save("a", config(), { overwriteInvalid: true })).toEqual({ saved: true, snapshot: snapshot() });
     expect(c.get("a").invalidFileBlocked).toBe(false);
   });
 
@@ -162,5 +162,86 @@ describe("model routing controller", () => {
     expect(await make(async () => fail("disk full")).save("a", config())).toEqual({ saved: false, errors: ["disk full"] });
     expect(await make(async () => ({ requestId: "r", success: false, error: "permission_denied", data: { code: "permission_denied" } })).save("a", config())).toEqual({ saved: false, errors: ["This device does not have control permission for this computer."] });
     expect(await make(async () => ok({ saved: "yes" })).save("a", config())).toMatchObject({ saved: false });
+  });
+
+  it("keeps saving set until the follow-up load finishes", async () => {
+    const setReply = deferred<CommandResponse>();
+    const getReply = deferred<CommandResponse>();
+    const send = vi.fn((command: Command) => command.type === "set_model_routing" ? setReply.promise : getReply.promise);
+    const c = make(send);
+    const pending = c.save("a", config("saved"));
+    expect(c.get("a").saving).toBe(true);
+    setReply.resolve(ok({ schema: 1, saved: true, errors: [] }));
+    await vi.waitFor(() => { if (!send.mock.calls.some(([command]) => command.type === "get_model_routing")) throw new Error("reload not started"); });
+    expect(c.get("a").saving).toBe(true);
+    getReply.resolve(ok(snapshot("saved")));
+    await expect(pending).resolves.toEqual({ saved: true, snapshot: snapshot("saved") });
+    expect(c.get("a").saving).toBe(false);
+  });
+
+  it("returns no snapshot and keeps the previous one when the follow-up load fails", async () => {
+    const replies: CommandResponse[] = [ok(snapshot("before")), ok({ schema: 1, saved: true, errors: [] }), fail("reload failed")];
+    const c = make(async () => replies.shift()!);
+    await c.load("a");
+    const outcome = await c.save("a", config("draft-on-disk"));
+    expect(outcome).toEqual({ saved: true, snapshot: null });
+    expect(c.get("a")).toMatchObject({ status: "error", saving: false });
+    expect(c.get("a").snapshot?.config.steering).toBe("before");
+    expect(c.get("a").snapshot?.report.steering).toBe("before");
+  });
+
+  it("clears invalidFileBlocked when a later load is not invalid", async () => {
+    const send = vi.fn(async (command: Command) => command.type === "set_model_routing"
+      ? ok({ schema: 1, saved: false, errors: [], invalidFileBlocked: true })
+      : ok(snapshot("fresh")));
+    const c = make(send);
+    await c.save("a", config());
+    expect(c.get("a").invalidFileBlocked).toBe(true);
+    await c.load("a");
+    expect(c.get("a")).toMatchObject({ status: "ready", invalidFileBlocked: false });
+  });
+
+  it("keeps invalidFileBlocked when a later load is still invalid", async () => {
+    const invalid = snapshot("file");
+    invalid.report.routingConfig = { status: "invalid", path: "/p", errors: ["bad json"] };
+    const send = vi.fn(async (command: Command) => command.type === "set_model_routing"
+      ? ok({ schema: 1, saved: false, errors: [], invalidFileBlocked: true })
+      : ok(invalid));
+    const c = make(send);
+    await c.save("a", config());
+    expect(c.get("a").invalidFileBlocked).toBe(true);
+    await c.load("a");
+    expect(c.get("a")).toMatchObject({ status: "ready", invalidFileBlocked: true });
+    expect(c.get("a").snapshot?.report.routingConfig.status).toBe("invalid");
+  });
+
+  it("does not clear invalidFileBlocked when the later load fails", async () => {
+    const replies: CommandResponse[] = [ok({ schema: 1, saved: false, errors: [], invalidFileBlocked: true }), fail("network")];
+    const c = make(async () => replies.shift()!);
+    await c.save("a", config());
+    expect(c.get("a").invalidFileBlocked).toBe(true);
+    await c.load("a");
+    expect(c.get("a")).toMatchObject({ status: "error", invalidFileBlocked: true });
+  });
+
+  it("leaves bridge B unchanged when a late reply for bridge A arrives", async () => {
+    const lateA = deferred<CommandResponse>();
+    const bridgeB = deferred<CommandResponse>();
+    const newerA = deferred<CommandResponse>();
+    const replies = [lateA.promise, bridgeB.promise, newerA.promise];
+    const c = make(() => replies.shift()!);
+    const firstA = c.load("a");
+    const loadB = c.load("b");
+    const secondA = c.load("a", true);
+    bridgeB.resolve(ok(snapshot("from-b")));
+    await loadB;
+    newerA.resolve(ok(snapshot("from-a")));
+    await secondA;
+    lateA.resolve(ok(snapshot("stale-a")));
+    await firstA;
+    expect(c.get("b")).toMatchObject({ status: "ready", error: null });
+    expect(c.get("b").snapshot?.config.steering).toBe("from-b");
+    expect(c.get("a").snapshot?.config.steering).toBe("from-a");
+    expect(c.get("a").snapshot?.report.routing[0]?.provider).toBe("claude");
   });
 });

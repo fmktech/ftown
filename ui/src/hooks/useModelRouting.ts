@@ -9,7 +9,8 @@ type Send = (command: Command) => Promise<CommandResponse>;
 export type ModelRoutingStatus = "idle" | "loading" | "ready" | "error" | "unsupported";
 /** `invalidFileBlocked`: the last save wrote nothing because the stored routing file is invalid and replacing it was not confirmed. */
 export type ModelRoutingView = { status: ModelRoutingStatus; snapshot: ModelRoutingSnapshot | null; error: string | null; saving: boolean; invalidFileBlocked: boolean };
-export type ModelRoutingSaveOutcome = { saved: true } | { saved: false; errors: string[]; invalidFileBlocked?: true };
+/** `snapshot` is the get that followed a successful save, or null when that get failed or was superseded. */
+export type ModelRoutingSaveOutcome = { saved: true; snapshot: ModelRoutingSnapshot | null } | { saved: false; errors: string[]; invalidFileBlocked?: true };
 export type ModelRoutingSaveOptions = { overwriteInvalid: boolean };
 export const MODEL_ROUTING_INVALID_FILE_MESSAGE = "The routing file on this bridge is invalid. Confirm replacing it, then save again.";
 
@@ -33,22 +34,29 @@ export class ModelRoutingController {
   dispose() { this.disposed = true; }
   activate() { this.disposed = false; }
 
-  async load(bridgeId: string, refresh = false): Promise<void> {
-    if (this.disposed) return;
+  async load(bridgeId: string, refresh = false): Promise<ModelRoutingSnapshot | null> {
+    if (this.disposed) return null;
     const generation = (this.reads.get(bridgeId) ?? 0) + 1;
     this.reads.set(bridgeId, generation);
     this.put(bridgeId, { status: "loading", error: null });
     const payload = { bridgeId, ...(refresh ? { refresh: true } : {}) } satisfies GetModelRoutingPayload & { bridgeId: string };
     try {
       const response = await this.send({ type: "get_model_routing", requestId: this.uuid(), payload });
-      if (this.reads.get(bridgeId) !== generation) return;
-      if (unknownCommand(response, "get_model_routing")) { this.put(bridgeId, { status: "unsupported", error: MODEL_ROUTING_UNSUPPORTED_MESSAGE }); return; }
-      if (!response.success) { this.put(bridgeId, { status: "error", error: failure(response, "Could not read model routing from this bridge.") }); return; }
+      if (this.reads.get(bridgeId) !== generation) return null;
+      if (unknownCommand(response, "get_model_routing")) { this.put(bridgeId, { status: "unsupported", error: MODEL_ROUTING_UNSUPPORTED_MESSAGE }); return null; }
+      if (!response.success) { this.put(bridgeId, { status: "error", error: failure(response, "Could not read model routing from this bridge.") }); return null; }
       const snapshot = parseModelRoutingSnapshot(response.data);
-      if (!snapshot) { this.put(bridgeId, { status: "error", error: "The bridge sent a model routing reply this dashboard does not understand." }); return; }
-      this.put(bridgeId, { status: "ready", snapshot, error: null });
+      if (!snapshot) { this.put(bridgeId, { status: "error", error: "The bridge sent a model routing reply this dashboard does not understand." }); return null; }
+      this.put(bridgeId, {
+        status: "ready",
+        snapshot,
+        error: null,
+        ...(snapshot.report.routingConfig.status !== "invalid" ? { invalidFileBlocked: false } : {}),
+      });
+      return snapshot;
     } catch (error) {
       if (this.reads.get(bridgeId) === generation) this.put(bridgeId, { status: "error", error: thrown(error, "Could not read model routing from this bridge.") });
+      return null;
     }
   }
 
@@ -58,24 +66,31 @@ export class ModelRoutingController {
     if (this.get(bridgeId).saving) return { saved: false, errors: ["A save is already in progress."] };
     this.put(bridgeId, { saving: true, invalidFileBlocked: false });
     const payload = { bridgeId, config, ...(options?.overwriteInvalid === true ? { overwriteInvalid: true } : {}) } satisfies SetModelRoutingPayload & { bridgeId: string };
-    let outcome: ModelRoutingSaveOutcome;
+    let rejected: Extract<ModelRoutingSaveOutcome, { saved: false }> | null = null;
     try {
       const response = await this.send({ type: "set_model_routing", requestId: this.uuid(), payload });
-      if (unknownCommand(response, "set_model_routing")) outcome = { saved: false, errors: [MODEL_ROUTING_UNSUPPORTED_MESSAGE] };
-      else if (!response.success) outcome = { saved: false, errors: [failure(response, "The bridge could not save model routing.")] };
+      if (unknownCommand(response, "set_model_routing")) rejected = { saved: false, errors: [MODEL_ROUTING_UNSUPPORTED_MESSAGE] };
+      else if (!response.success) rejected = { saved: false, errors: [failure(response, "The bridge could not save model routing.")] };
       else {
         const result = parseSetModelRoutingResult(response.data);
-        outcome = !result ? { saved: false, errors: ["The bridge sent a save reply this dashboard does not understand."] }
-          : result.saved ? { saved: true }
-          : result.invalidFileBlocked ? { saved: false, errors: result.errors.length ? result.errors : [MODEL_ROUTING_INVALID_FILE_MESSAGE], invalidFileBlocked: true }
-          : { saved: false, errors: result.errors.length ? result.errors : ["The bridge rejected the routing config."] };
+        if (!result) rejected = { saved: false, errors: ["The bridge sent a save reply this dashboard does not understand."] };
+        else if (!result.saved) {
+          rejected = result.invalidFileBlocked
+            ? { saved: false, errors: result.errors.length ? result.errors : [MODEL_ROUTING_INVALID_FILE_MESSAGE], invalidFileBlocked: true }
+            : { saved: false, errors: result.errors.length ? result.errors : ["The bridge rejected the routing config."] };
+        }
       }
     } catch (error) {
-      outcome = { saved: false, errors: [thrown(error, "The bridge could not save model routing.")] };
+      rejected = { saved: false, errors: [thrown(error, "The bridge could not save model routing.")] };
     }
-    this.put(bridgeId, { saving: false, invalidFileBlocked: !outcome.saved && outcome.invalidFileBlocked === true });
-    if (outcome.saved) await this.load(bridgeId);
-    return outcome;
+    if (rejected) {
+      this.put(bridgeId, { saving: false, invalidFileBlocked: rejected.invalidFileBlocked === true });
+      return rejected;
+    }
+    // Stay saving through the reload so the dialog cannot edit until the new baseline is known.
+    const snapshot = await this.load(bridgeId);
+    this.put(bridgeId, { saving: false });
+    return { saved: true, snapshot };
   }
 }
 

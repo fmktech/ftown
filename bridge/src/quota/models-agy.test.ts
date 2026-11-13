@@ -249,7 +249,7 @@ describe('fetchAgyModels', () => {
   });
 
   it('returns within about the timeout when the child ignores TERM', async () => {
-    await writeFakeAgy('#!/bin/sh\ntrap "" TERM\nwhile :; do sleep 1; done\n');
+    await writeFakeAgy('#!/bin/sh\ntrap "" TERM\nwhile :; do :; done\n');
 
     const start = Date.now();
     const result = await fetchAgyModels({ timeoutMs: 1000, now: () => new Date(OBSERVED), homeDir });

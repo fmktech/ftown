@@ -35,6 +35,8 @@ export type RoutingEditorAction =
 export interface RoutingEditorState {
   config: ModelRoutingConfig;
   dirty: boolean;
+  /** Stored name of each tier when it was loaded or reset. Null if this draft added the tier. Not saved. */
+  tierOrigins: (string | null)[];
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -52,7 +54,10 @@ function copyConfig(config: ModelRoutingConfig): ModelRoutingConfig {
   return { version: config.version, tiers: config.tiers.map(copyTier), steering: config.steering };
 }
 
-function samePick(a: RoutingPick, b: RoutingPick): boolean {
+function samePick(
+  a: { provider: string; model: string; effort: string | null },
+  b: { provider: string; model: string; effort: string | null },
+): boolean {
   return a.provider === b.provider && a.model === b.model && a.effort === b.effort;
 }
 
@@ -74,9 +79,9 @@ function swapWithNeighbour<T>(list: readonly T[], index: number, direction: -1 |
   return next;
 }
 
-/** A state after a real change: always dirty. */
-function edited(config: ModelRoutingConfig): RoutingEditorState {
-  return { config, dirty: true };
+/** A state after a real change: always dirty. Origins are copied so the previous state stays untouched. */
+function edited(config: ModelRoutingConfig, tierOrigins: readonly (string | null)[]): RoutingEditorState {
+  return { config, dirty: true, tierOrigins: tierOrigins.slice() };
 }
 
 /**
@@ -92,11 +97,12 @@ function changeTier(
   if (!inRange(tiers, tierIndex)) return state;
   const updated = change(tiers[tierIndex]);
   if (updated === null) return state;
-  return edited({ ...state.config, tiers: replaceAt(tiers, tierIndex, updated) });
+  return edited({ ...state.config, tiers: replaceAt(tiers, tierIndex, updated) }, state.tierOrigins);
 }
 
 export function initialRoutingEditorState(config: ModelRoutingConfig): RoutingEditorState {
-  return { config: copyConfig(config), dirty: false };
+  const copy = copyConfig(config);
+  return { config: copy, dirty: false, tierOrigins: copy.tiers.map((tier) => tier.name) };
 }
 
 export function routingEditorReducer(state: RoutingEditorState, action: RoutingEditorAction): RoutingEditorState {
@@ -107,14 +113,17 @@ export function routingEditorReducer(state: RoutingEditorState, action: RoutingE
     case 'set_steering': {
       const steering = action.value.slice(0, MODEL_ROUTING_LIMITS.maxSteeringLength);
       if (steering === state.config.steering) return state;
-      return edited({ ...state.config, steering });
+      return edited({ ...state.config, steering }, state.tierOrigins);
     }
 
     case 'add_tier': {
       const tiers = state.config.tiers;
       if (tiers.length >= MODEL_ROUTING_LIMITS.maxTiers) return state;
       const name = uniqueTierName(tiers.map((tier) => tier.name));
-      return edited({ ...state.config, tiers: [...tiers, { name, description: '', picks: [], guidance: '' }] });
+      return edited(
+        { ...state.config, tiers: [...tiers, { name, description: '', picks: [], guidance: '' }] },
+        [...state.tierOrigins, null],
+      );
     }
 
     case 'rename_tier': {
@@ -135,14 +144,20 @@ export function routingEditorReducer(state: RoutingEditorState, action: RoutingE
     case 'remove_tier': {
       const tiers = state.config.tiers;
       if (!inRange(tiers, action.index)) return state;
-      return edited({ ...state.config, tiers: tiers.filter((_, i) => i !== action.index) });
+      return edited(
+        { ...state.config, tiers: tiers.filter((_, i) => i !== action.index) },
+        state.tierOrigins.filter((_, i) => i !== action.index),
+      );
     }
 
     case 'move_tier': {
       const tiers = state.config.tiers;
       const { index, direction } = action;
       if (!inRange(tiers, index) || !inRange(tiers, index + direction)) return state;
-      return edited({ ...state.config, tiers: swapWithNeighbour(tiers, index, direction) });
+      return edited(
+        { ...state.config, tiers: swapWithNeighbour(tiers, index, direction) },
+        swapWithNeighbour(state.tierOrigins, index, direction),
+      );
     }
 
     case 'add_pick': {
@@ -333,61 +348,190 @@ export function validateRoutingDraft(config: ModelRoutingConfig): string[] {
   return errors;
 }
 
-const PRICING_VALUES: readonly ModelPricing[] = ['free', 'included', 'paid'];
-
-/** A copy of `tier` with `guidance` forced to a string ("" when missing or not a string). Null if not an object. */
-function normalizeTierGuidance(tier: unknown): Record<string, unknown> | null {
-  if (!isRecord(tier)) return null;
-  return { ...tier, guidance: typeof tier.guidance === 'string' ? tier.guidance : '' };
+/** The annotated pick in the tier originally named `originName` with this provider, model and effort. */
+export function findAnnotatedPick<T extends { provider: string; model: string; effort: string | null }>(
+  tiers: readonly { name: string; picks: readonly T[] }[],
+  originName: string | null,
+  pick: { provider: string; model: string; effort: string | null },
+): T | null {
+  if (originName === null) return null;
+  const tier = tiers.find((candidate) => candidate.name === originName);
+  if (tier === undefined) return null;
+  return tier.picks.find((candidate) => samePick(candidate, pick)) ?? null;
 }
 
-/** Config tiers: objects with a picks array; guidance defaulted. Null when any tier is malformed. */
+/** Config to keep after a successful save: the snapshot loaded after the save, or the saved draft if that load failed. */
+export function configBaselineAfterSave(draft: ModelRoutingConfig, fresh: ModelRoutingSnapshot | null): ModelRoutingConfig {
+  return fresh === null ? draft : fresh.config;
+}
+
+const PRICING_VALUES: readonly ModelPricing[] = ['free', 'included', 'paid'];
+const AVAILABILITIES = ['available', 'low', 'exhausted', 'unknown'] as const;
+
+function finiteOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+/** Tier name must be a string. Description and guidance default to "". Null if the tier is not usable. */
+function normalizeTierShape(tier: Record<string, unknown>): Record<string, unknown> | null {
+  if (typeof tier.name !== 'string') return null;
+  return {
+    ...tier,
+    description: typeof tier.description === 'string' ? tier.description : '',
+    guidance: typeof tier.guidance === 'string' ? tier.guidance : '',
+  };
+}
+
+/** A stored pick the editor can copy. Null when provider/model/effort are not usable. Missing effort becomes null. */
+function normalizeConfigPick(pick: unknown): Record<string, unknown> | null {
+  if (!isRecord(pick)) return null;
+  if (typeof pick.provider !== 'string' || typeof pick.model !== 'string') return null;
+  if (pick.effort !== null && pick.effort !== undefined && typeof pick.effort !== 'string') return null;
+  return { provider: pick.provider, model: pick.model, effort: typeof pick.effort === 'string' ? pick.effort : null };
+}
+
+/** Config tiers. Null when any tier or pick is malformed. */
 function normalizeConfigTiers(tiers: readonly unknown[]): Record<string, unknown>[] | null {
   const out: Record<string, unknown>[] = [];
   for (const raw of tiers) {
-    const tier = normalizeTierGuidance(raw);
-    if (tier === null || !Array.isArray(tier.picks)) return null;
-    out.push(tier);
-  }
-  return out;
-}
-
-/** Annotated tiers: guidance defaulted, each pick's `checked` true only when strictly true. */
-function normalizeAnnotatedTiers(tiers: readonly unknown[]): Record<string, unknown>[] | null {
-  const out: Record<string, unknown>[] = [];
-  for (const raw of tiers) {
-    const tier = normalizeTierGuidance(raw);
-    if (tier === null || !Array.isArray(tier.picks)) return null;
+    if (!isRecord(raw) || !Array.isArray(raw.picks)) return null;
+    const tier = normalizeTierShape(raw);
+    if (tier === null) return null;
     const picks: Record<string, unknown>[] = [];
-    for (const pick of tier.picks) {
-      if (!isRecord(pick)) return null;
-      picks.push({ ...pick, checked: pick.checked === true });
+    for (const pick of raw.picks) {
+      const normalized = normalizeConfigPick(pick);
+      if (normalized === null) return null;
+      picks.push(normalized);
     }
     out.push({ ...tier, picks });
   }
   return out;
 }
 
-/** Model lists: `pricing` kept only when it is a known cost class. */
+/** Annotated tiers. A null or non-object pick rejects the snapshot. `problem` is a string or null. */
+function normalizeAnnotatedTiers(tiers: readonly unknown[]): Record<string, unknown>[] | null {
+  const out: Record<string, unknown>[] = [];
+  for (const raw of tiers) {
+    if (!isRecord(raw) || !Array.isArray(raw.picks)) return null;
+    const tier = normalizeTierShape(raw);
+    if (tier === null) return null;
+    const picks: Record<string, unknown>[] = [];
+    for (const pick of raw.picks) {
+      if (!isRecord(pick)) return null;
+      picks.push({ ...pick, checked: pick.checked === true, problem: typeof pick.problem === 'string' ? pick.problem : null });
+    }
+    out.push({ ...tier, picks });
+  }
+  return out;
+}
+
+/** One harness model. Null when it is not an object or has no string id. Efforts default to []. */
+function normalizeModel(model: unknown): Record<string, unknown> | null {
+  if (!isRecord(model) || typeof model.id !== 'string') return null;
+  const { pricing, ...rest } = model;
+  const efforts = Array.isArray(model.efforts) ? model.efforts.filter((effort): effort is string => typeof effort === 'string') : [];
+  const normalized: Record<string, unknown> = {
+    ...rest,
+    id: model.id,
+    name: stringOrNull(model.name),
+    description: stringOrNull(model.description),
+    isDefault: model.isDefault === true,
+    efforts,
+    defaultEffort: stringOrNull(model.defaultEffort),
+  };
+  if (PRICING_VALUES.includes(pricing as ModelPricing)) normalized.pricing = pricing;
+  return normalized;
+}
+
+/** Model lists. `pricing` is kept only for a known cost class. `message` is a string or null. */
 function normalizeModelLists(entries: readonly unknown[]): Record<string, unknown>[] | null {
   const out: Record<string, unknown>[] = [];
   for (const entry of entries) {
     if (!isRecord(entry) || !Array.isArray(entry.models)) return null;
     const models: Record<string, unknown>[] = [];
     for (const model of entry.models) {
-      if (!isRecord(model)) return null;
-      const { pricing, ...rest } = model;
-      models.push(PRICING_VALUES.includes(pricing as ModelPricing) ? { ...rest, pricing } : rest);
+      const normalized = normalizeModel(model);
+      if (normalized === null) return null;
+      models.push(normalized);
     }
-    out.push({ ...entry, models });
+    out.push({ ...entry, models, message: stringOrNull(entry.message) });
   }
   return out;
 }
 
+/** One quota window, or null when the element is not an object (the row is kept). */
+function normalizeWindow(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  return {
+    kind: typeof value.kind === 'string' ? value.kind : null,
+    usedPercent: finiteOrNull(value.usedPercent),
+    resetsAt: stringOrNull(value.resetsAt),
+    windowMinutes: finiteOrNull(value.windowMinutes),
+    note: stringOrNull(value.note),
+  };
+}
+
+/** Provider rows. Null when a row is not an object or its provider is not a string. Missing windows become []. */
+function normalizeProviders(rows: readonly unknown[]): Record<string, unknown>[] | null {
+  const out: Record<string, unknown>[] = [];
+  for (const row of rows) {
+    if (!isRecord(row) || typeof row.provider !== 'string') return null;
+    const windows = Array.isArray(row.windows)
+      ? row.windows.flatMap((item) => {
+          const window = normalizeWindow(item);
+          return window === null ? [] : [window];
+        })
+      : [];
+    out.push({
+      ...row,
+      provider: row.provider,
+      status: typeof row.status === 'string' ? row.status : 'error',
+      plan: stringOrNull(row.plan),
+      message: stringOrNull(row.message),
+      windows,
+    });
+  }
+  return out;
+}
+
+/** Routing advice. Null when an entry is not an object. Availability outside the known set becomes "unknown". */
+function normalizeRouting(entries: readonly unknown[]): Record<string, unknown>[] | null {
+  const out: Record<string, unknown>[] = [];
+  for (const entry of entries) {
+    if (!isRecord(entry)) return null;
+    const availability = (AVAILABILITIES as readonly string[]).includes(entry.availability as string)
+      ? entry.availability
+      : 'unknown';
+    out.push({
+      ...entry,
+      provider: typeof entry.provider === 'string' ? entry.provider : '',
+      availability,
+      leftPercent: finiteOrNull(entry.leftPercent),
+      reason: typeof entry.reason === 'string' ? entry.reason : '',
+    });
+  }
+  return out;
+}
+
+/** routingConfig. Non-string errors are dropped. A non-string status becomes "invalid". */
+function normalizeRoutingConfig(value: Record<string, unknown>): Record<string, unknown> {
+  const errors = Array.isArray(value.errors) ? value.errors.filter((item): item is string => typeof item === 'string') : [];
+  return {
+    ...value,
+    status: typeof value.status === 'string' ? value.status : 'invalid',
+    path: typeof value.path === 'string' ? value.path : '',
+    errors,
+  };
+}
+
 /**
  * Structural check of a `get_model_routing` result. Never throws. Returns a
- * normalised copy: tier `guidance` defaults to "", annotated picks get a
- * strict boolean `checked`, unknown model `pricing` values are dropped.
+ * normalised copy, or null when a tier, pick, model or provider row is not
+ * usable. Loose fields the dialog reads are coerced so render cannot throw.
  */
 export function parseModelRoutingSnapshot(data: unknown): ModelRoutingSnapshot | null {
   try {
@@ -418,15 +562,24 @@ export function parseModelRoutingSnapshot(data: unknown): ModelRoutingSnapshot |
     const configTiers = normalizeConfigTiers(config.tiers);
     const reportTiers = normalizeAnnotatedTiers(report.tiers as unknown[]);
     const models = normalizeModelLists(report.models as unknown[]);
-    if (configTiers === null || reportTiers === null || models === null) return null;
+    const providers = normalizeProviders(report.providers as unknown[]);
+    const routing = normalizeRouting(report.routing as unknown[]);
+    if (configTiers === null || reportTiers === null || models === null || providers === null || routing === null) return null;
 
     const snapshot = {
       ...data,
       config: { ...config, tiers: configTiers },
-      report: { ...report, tiers: reportTiers, models },
+      report: {
+        ...report,
+        providers,
+        routing,
+        tiers: reportTiers,
+        models,
+        routingConfig: normalizeRoutingConfig(report.routingConfig as Record<string, unknown>),
+      },
     };
     return snapshot as unknown as ModelRoutingSnapshot;
-  } catch (error) {
+  } catch {
     return null;
   }
 }

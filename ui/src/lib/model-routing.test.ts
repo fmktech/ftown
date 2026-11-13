@@ -10,8 +10,10 @@ import type {
   RoutingTier,
 } from '../../../bridge/src/quota/types';
 import {
+  configBaselineAfterSave,
   defaultPickFor,
   effortOptions,
+  findAnnotatedPick,
   initialRoutingEditorState,
   modelOptionLabel,
   modelOptions,
@@ -91,7 +93,11 @@ const fixtureReport = (): QuotaReport => ({
   steering: '',
 });
 
-const stateOf = (cfg: ModelRoutingConfig, dirty = false): RoutingEditorState => ({ config: cfg, dirty });
+const stateOf = (cfg: ModelRoutingConfig, dirty = false, origins?: (string | null)[]): RoutingEditorState => ({
+  config: cfg,
+  dirty,
+  tierOrigins: origins ?? cfg.tiers.map((tier) => tier.name),
+});
 
 const reduce = (state: RoutingEditorState, action: RoutingEditorAction): RoutingEditorState =>
   routingEditorReducer(deepFreeze(state), deepFreeze(action));
@@ -104,6 +110,7 @@ describe('initialRoutingEditorState', () => {
     expect(state.config).toEqual(source);
     expect(state.config).not.toBe(source);
     expect(state.config.tiers[0].picks[0]).not.toBe(source.tiers[0].picks[0]);
+    expect(state.tierOrigins).toEqual(['simple']);
   });
 });
 
@@ -267,6 +274,25 @@ describe('routingEditorReducer', () => {
     }
     expect(state.config.tiers[0].name).toBe('a');
     expect(state.config.tiers[0].picks[0].model).toBe('x');
+  });
+
+  it('tracks the stored tier name across rename, move, remove, add and reset', () => {
+    const state = stateOf(config([tier('a'), tier('b')]));
+    const renamed = reduce(state, { type: 'rename_tier', index: 0, name: 'alpha' });
+    expect(renamed.config.tiers[0].name).toBe('alpha');
+    expect(renamed.tierOrigins).toEqual(['a', 'b']);
+    const steered = reduce(renamed, { type: 'set_steering', value: 'note' });
+    expect(steered.tierOrigins).toEqual(['a', 'b']);
+    const moved = reduce(steered, { type: 'move_tier', index: 0, direction: 1 });
+    expect(moved.config.tiers.map((item) => item.name)).toEqual(['b', 'alpha']);
+    expect(moved.tierOrigins).toEqual(['b', 'a']);
+    const removed = reduce(moved, { type: 'remove_tier', index: 0 });
+    expect(removed.tierOrigins).toEqual(['a']);
+    const added = reduce(removed, { type: 'add_tier' });
+    expect(added.tierOrigins).toEqual(['a', null]);
+    const reset = reduce(stateOf(config([tier('a')]), true, ['renamed-away']), { type: 'reset', config: config([tier('fresh'), tier('other')]) });
+    expect(reset.dirty).toBe(false);
+    expect(reset.tierOrigins).toEqual(['fresh', 'other']);
   });
 });
 
@@ -609,6 +635,202 @@ describe('parseModelRoutingSnapshot', () => {
     for (const value of [null, undefined, [], [validSnapshot()], 'snapshot', 1, true]) {
       expect(parseModelRoutingSnapshot(value)).toBeNull();
     }
+  });
+
+  const withConfigTier = (tier: unknown) => {
+    const base = validSnapshot();
+    return { ...base, config: { ...base.config, tiers: [tier] } };
+  };
+  const withReport = (report: Record<string, unknown>) => {
+    const base = validSnapshot();
+    return { ...base, report: { ...base.report, ...report } };
+  };
+
+  it('rejects a null, non-object or incomplete pick in config tiers', () => {
+    const tierWith = (pick: unknown) => withConfigTier({ name: 'a', description: '', guidance: '', picks: [pick] });
+    expect(parseModelRoutingSnapshot(tierWith(null))).toBeNull();
+    expect(parseModelRoutingSnapshot(tierWith(['claude']))).toBeNull();
+    expect(parseModelRoutingSnapshot(tierWith({ model: 'opus', effort: null }))).toBeNull();
+    expect(parseModelRoutingSnapshot(tierWith({ provider: 'claude', effort: null }))).toBeNull();
+    expect(parseModelRoutingSnapshot(tierWith({ provider: 'claude', model: 'opus', effort: 1 }))).toBeNull();
+  });
+
+  it('normalises a missing config pick effort to null', () => {
+    const parsed = parseModelRoutingSnapshot(withConfigTier({ name: 'a', description: 'd', guidance: '', picks: [{ provider: 'claude', model: 'opus' }] }));
+    expect(parsed?.config.tiers[0].picks).toEqual([{ provider: 'claude', model: 'opus', effort: null }]);
+    expect(() => validateRoutingDraft(parsed!.config)).not.toThrow();
+  });
+
+  it('rejects a tier whose name is not a string, in config and in the report', () => {
+    expect(parseModelRoutingSnapshot(withConfigTier({ name: 1, description: '', picks: [], guidance: '' }))).toBeNull();
+    expect(parseModelRoutingSnapshot(withReport({ tiers: [{ name: 1, description: '', picks: [], guidance: '' }] }))).toBeNull();
+  });
+
+  it('defaults a non-string tier description to empty', () => {
+    const parsed = parseModelRoutingSnapshot({
+      ...validSnapshot(),
+      config: { version: 1, steering: '', tiers: [{ name: 'a', description: 5, picks: [], guidance: '' }] },
+      report: { ...validSnapshot().report, tiers: [{ name: 'b', picks: [] }] },
+    });
+    expect(parsed?.config.tiers[0].description).toBe('');
+    expect(parsed?.config.tiers[0].guidance).toBe('');
+    expect(parsed?.report.tiers[0].description).toBe('');
+    expect(parsed?.report.tiers[0].guidance).toBe('');
+    expect(validateRoutingDraft(parsed!.config)).toEqual([]);
+  });
+
+  it('normalises model efforts, defaultEffort and loose model fields', () => {
+    const parsed = parseModelRoutingSnapshot(withReport({
+      models: [{
+        provider: 'claude',
+        status: 'ok',
+        message: 12,
+        models: [
+          { id: 'opus', name: 'Opus', isDefault: true },
+          { id: 'other', efforts: 'high', defaultEffort: 3, isDefault: 'yes', name: 1, description: 2 },
+          { id: 'mix', efforts: ['low', 1, 'high'], defaultEffort: 'low' },
+        ],
+      }],
+    }));
+    const models = parsed?.report.models[0].models ?? [];
+    expect(models[0].efforts).toEqual([]);
+    expect(models[0].defaultEffort).toBeNull();
+    expect(models[1].efforts).toEqual([]);
+    expect(models[1].defaultEffort).toBeNull();
+    expect(models[1].isDefault).toBe(false);
+    expect(models[1].name).toBeNull();
+    expect(models[1].description).toBeNull();
+    expect(models[2].efforts).toEqual(['low', 'high']);
+    expect(models[2].defaultEffort).toBe('low');
+    expect(parsed?.report.models[0].message).toBeNull();
+    expect(() => defaultPickFor(parsed!.report, 'claude')).not.toThrow();
+    expect(defaultPickFor(parsed!.report, 'claude')).toEqual({ provider: 'claude', model: 'opus', effort: null });
+    expect(() => providerOptions(parsed!.report)).not.toThrow();
+  });
+
+  it('rejects a model that is not an object or has no string id', () => {
+    const models = (entries: unknown[]) => withReport({ models: [{ provider: 'claude', status: 'ok', models: entries }] });
+    expect(parseModelRoutingSnapshot(models([null]))).toBeNull();
+    expect(parseModelRoutingSnapshot(models([{ name: 'Opus' }]))).toBeNull();
+    expect(parseModelRoutingSnapshot(models([{ id: 1 }]))).toBeNull();
+  });
+
+  it('normalises provider windows and loose provider fields', () => {
+    const missing = parseModelRoutingSnapshot(withReport({
+      providers: [{ provider: 'claude', status: 'ok', plan: 'max', message: null }],
+    }));
+    expect(missing?.report.providers[0].windows).toEqual([]);
+    expect(() => missing!.report.providers[0].windows.find((item) => item.kind === 'five_hour')).not.toThrow();
+
+    const loose = parseModelRoutingSnapshot(withReport({
+      providers: [{
+        provider: 'claude',
+        status: 5,
+        plan: { name: 'max' },
+        message: { text: 'x' },
+        windows: [
+          null,
+          { kind: 'five_hour', usedPercent: 10, resetsAt: 't', windowMinutes: 300, note: null },
+          { kind: 'weekly', usedPercent: 'x', note: { n: 1 }, windowMinutes: Number.NaN },
+        ],
+      }],
+    }));
+    const row = loose?.report.providers[0];
+    expect(row?.status).toBe('error');
+    expect(row?.plan).toBeNull();
+    expect(row?.message).toBeNull();
+    expect(row?.windows).toEqual([
+      { kind: 'five_hour', usedPercent: 10, resetsAt: 't', windowMinutes: 300, note: null },
+      { kind: 'weekly', usedPercent: null, resetsAt: null, windowMinutes: null, note: null },
+    ]);
+  });
+
+  it('rejects a provider row that is not an object or has a non-string provider', () => {
+    expect(parseModelRoutingSnapshot(withReport({ providers: [null] }))).toBeNull();
+    expect(parseModelRoutingSnapshot(withReport({ providers: [{ status: 'ok', windows: [] }] }))).toBeNull();
+  });
+
+  it('normalises routing entries the subscription list reads', () => {
+    const parsed = parseModelRoutingSnapshot(withReport({
+      routing: [{ provider: 1, availability: 'nope', leftPercent: '80', reason: { text: 'x' }, bindingWindow: null }],
+    }));
+    expect(parsed?.report.routing[0]).toMatchObject({ provider: '', availability: 'unknown', leftPercent: null, reason: '', bindingWindow: null });
+    expect(parseModelRoutingSnapshot(withReport({ routing: [null] }))).toBeNull();
+  });
+
+  it('normalises routingConfig status, path and errors', () => {
+    const missing = parseModelRoutingSnapshot(withReport({ routingConfig: { status: 1, path: null, errors: 'bad' } }));
+    expect(missing?.report.routingConfig).toMatchObject({ status: 'invalid', path: '', errors: [] });
+    const mixed = parseModelRoutingSnapshot(withReport({ routingConfig: { status: 'ok', path: '/p', errors: ['fine', 2, null] } }));
+    expect(mixed?.report.routingConfig.errors).toEqual(['fine']);
+    expect(mixed?.report.routingConfig.status).toBe('ok');
+  });
+
+  it('drops a non-string annotated problem', () => {
+    const parsed = parseModelRoutingSnapshot(withReport({
+      tiers: [{ name: 'a', description: '', guidance: '', picks: [{ provider: 'claude', model: 'opus', effort: 'high', problem: { msg: 'x' }, checked: false }] }],
+    }));
+    expect(parsed?.report.tiers[0].picks[0].problem).toBeNull();
+    expect(parsed?.report.tiers[0].picks[0].checked).toBe(false);
+  });
+});
+
+describe('findAnnotatedPick', () => {
+  const tiers = [
+    {
+      name: 'complex',
+      picks: [
+        { provider: 'claude', model: 'opus', effort: 'high', checked: false, problem: null },
+        { provider: 'codex', model: 'gpt', effort: null, checked: true, problem: null },
+      ],
+    },
+  ];
+
+  it('matches the pick by content so a move keeps it', () => {
+    const found = findAnnotatedPick(tiers, 'complex', { provider: 'codex', model: 'gpt', effort: null });
+    expect(found?.provider).toBe('codex');
+    expect(found?.checked).toBe(true);
+  });
+
+  it('looks up a renamed tier by its original stored name', () => {
+    expect(findAnnotatedPick(tiers, 'complex', { provider: 'claude', model: 'opus', effort: 'high' })?.checked).toBe(false);
+  });
+
+  it('returns null for a tier added in the draft', () => {
+    expect(findAnnotatedPick(tiers, null, { provider: 'claude', model: 'opus', effort: 'high' })).toBeNull();
+  });
+
+  it('returns null when the tier or the pick does not match', () => {
+    expect(findAnnotatedPick(tiers, 'complex', { provider: 'claude', model: 'opus', effort: 'low' })).toBeNull();
+    expect(findAnnotatedPick(tiers, 'missing', { provider: 'claude', model: 'opus', effort: 'high' })).toBeNull();
+  });
+});
+
+describe('configBaselineAfterSave', () => {
+  it('uses the freshly loaded config when the follow-up snapshot exists', () => {
+    const draft = config([tier('a')], 'draft');
+    const fresh = parseModelRoutingSnapshot({
+      ...{
+        schema: 1,
+        config: config([tier('stored')], 'from-bridge'),
+        report: {
+          providers: [],
+          routing: [],
+          models: [],
+          tiers: [],
+          routingConfig: { status: 'ok', path: '/p', errors: [] },
+          steering: 'from-bridge',
+        },
+        cached: false,
+      },
+    });
+    expect(configBaselineAfterSave(draft, fresh)).toEqual(fresh!.config);
+    expect(configBaselineAfterSave(draft, fresh)).not.toBe(draft);
+  });
+
+  it('keeps the saved draft when the follow-up load failed', () => {
+    const draft = config([tier('a')], 'draft');
+    expect(configBaselineAfterSave(draft, null)).toBe(draft);
   });
 });
 
