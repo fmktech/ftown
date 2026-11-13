@@ -6,6 +6,34 @@ import { existsSync } from 'node:fs';
 import type { ArchivedSession, Session } from './types.js';
 
 /**
+ * Drop the legacy preview shape on load: version !== 2 or a preview without a
+ * files array means both fields go, so a stale descriptor never reaches the
+ * wire. No migration — an old preview is simply no preview.
+ */
+function dropLegacyPreviewShape(session: Session): void {
+  const preview = session.preview as unknown as { files?: unknown } | undefined;
+  const previewSource = session.previewSource as unknown as { version?: unknown; files?: unknown } | undefined;
+  const legacy = (previewSource !== undefined && previewSource.version !== 2)
+    || (preview !== undefined && !Array.isArray(preview.files))
+    || (previewSource !== undefined && !Array.isArray(previewSource.files));
+  if (legacy) {
+    delete session.preview;
+    delete session.previewSource;
+  }
+}
+
+/**
+ * A fresh Session parsed from cached session.json text, with the legacy
+ * preview shape dropped. Every read path goes through here so the stat-validated
+ * cache never serves a legacy preview.
+ */
+function parseSessionRecord(json: string): Session {
+  const session = JSON.parse(json) as Session;
+  dropLegacyPreviewShape(session);
+  return session;
+}
+
+/**
  * Retained tail size for a session's terminal.log. A misbehaving child (e.g. a
  * TUI stuck in a runaway repaint loop) can otherwise stream unbounded output
  * and grow this file without limit — observed in the wild at 2.5 GB and still
@@ -194,7 +222,7 @@ export class SessionStore {
 
   async loadSession(sessionId: string): Promise<Session | null> {
     const json = await this.recordJsonAt(sessionId, await this.stampOf(this.sessionFilePath(sessionId)));
-    return json === null ? null : JSON.parse(json) as Session;
+    return json === null ? null : parseSessionRecord(json);
   }
 
   async listSessions(): Promise<Session[]> {
@@ -214,7 +242,7 @@ export class SessionStore {
       const stamps = await Promise.all(batch.map((id) => this.stampOf(this.sessionFilePath(id))));
       for (let i = 0; i < batch.length; i++) {
         const json = await this.recordJsonAt(batch[i], stamps[i]);
-        const session = json === null ? null : JSON.parse(json) as Session | null;
+        const session = json === null ? null : parseSessionRecord(json);
         if (session) {
           sessions.push(session);
         }

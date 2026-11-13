@@ -71,10 +71,10 @@ describe("explicit agent attention through actual hook subscriptions", () => {
     expect(h.current()).toEqual({ activity: "idle", toolName: undefined, attention: notice });
   });
 
-  it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("clears explicit attention on %s, including same-batch events", (event) => {
+  it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("preserves explicit attention on %s, including same-batch events", (event) => {
     const h = setup();
     act(() => { h.publish("Notification", request); h.publish(event); });
-    expect(h.current()?.attention).toBeUndefined();
+    expect(h.current()?.attention).toMatchObject({ type: "agent_needs_input", title: "Work complete" });
     expect(h.current()?.activity).toBe("thinking");
   });
 
@@ -365,6 +365,20 @@ describe("durable explicit attention restoration", () => {
     expect(h.current()?.attention?.attentionId).toBe(newer.id);
   });
 
+  it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("preserves a newer restored request when an older injected %s publication arrives later", async event => {
+    const reread = deferred();
+    let reads = 0;
+    const h = durableSetup(() => ++reads === 1 ? Promise.resolve(reply(newer)) : reread.promise);
+    await settle();
+    expect(h.current()?.attention?.attentionId).toBe(newer.id);
+    act(() => h.publish(event, { injected: true }));
+    expect(h.current()?.attention?.attentionId).toBe(newer.id);
+    await act(async () => reread.resolve(reply(newer)));
+    expect(h.current()?.attention?.attentionId).toBe(newer.id);
+    act(() => h.publishSaved(newer));
+    expect(h.current()?.attention?.attentionId).toBe(newer.id);
+  });
+
   it("retains a failed dismissal and persists successful dismissal across remount", async () => {
     let current: typeof saved | null = saved;
     let fail = true;
@@ -574,6 +588,38 @@ describe("structured attention questions", () => {
     await act(async () => { h.publish("UserPromptSubmit"); await Promise.resolve(); });
     await settle();
     expect(h.current()?.attention?.attentionId).toBe("ask-1");
+  });
+
+  it("keeps an entry across an injected prompt and the snapshot re-read", async () => {
+    const h = durableSetup(async () => respond(saved));
+    await settle();
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    await act(async () => { h.publish("UserPromptSubmit", { injected: true }); await Promise.resolve(); });
+    await settle();
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    expect(h.rpc.sendCommand).toHaveBeenCalledWith(expect.objectContaining({ type: "get_session_attention",
+      payload: { bridgeId: "bridge", sessionId: "agent" } }));
+  });
+
+  it("refreshSessionAttention clears after the bridge resolved the item", async () => {
+    let item: AnyItem | null = saved;
+    const h = durableSetup(async () => respond(item));
+    await settle();
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    item = null;
+    await act(async () => { await h.result.current.refreshSessionAttention("agent"); });
+    expect(h.current()?.attention).toBeUndefined();
+  });
+
+  it("AttentionSnapshot re-reads the snapshot so other tabs follow a reply", async () => {
+    let item: AnyItem | null = saved;
+    const h = durableSetup(async () => respond(item));
+    await settle();
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    item = null;
+    act(() => h.publish("AttentionSnapshot"));
+    await settle();
+    expect(h.current()?.attention).toBeUndefined();
   });
 
   it("a snapshot without the question clears it", async () => {

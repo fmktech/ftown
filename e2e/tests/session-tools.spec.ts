@@ -272,7 +272,7 @@ for (const viewport of [
       await page.goto("/dashboard");
       await waitForBridgeOnline(page);
       await showWorkspace();
-      const shortcut = page.getByRole("button", { name: /^Inbox, [1-9]\d* messages?$/ });
+      const shortcut = page.getByRole("button", { name: /^Inbox, [1-9]\d* waiting$/ });
       const region = page.getByRole("region", { name: "Inbox", exact: true });
       const inboxEntry = region.locator(`[data-inbox-entry="${targetId}"]`);
       const checkInbox = async () => { await shortcut.click(); await expect(inboxEntry.getByText(message, { exact: true })).toBeVisible(); await expect(region.getByText(otherName, { exact: true })).toHaveCount(0); await region.getByRole("button", { name: "Back to workspace", exact: true }).click(); };
@@ -415,9 +415,10 @@ for (const viewport of [
       await screenshot("attention-with-associated-pr");
       await shortcut.click();
       await inboxEntry.getByRole("button", { name: "Open session", exact: true }).click();
+      // A phone lands on the Waiting tab; the PR link lives in the terminal header, one tab away.
+      if (mobile) { await expect(page.getByRole("tab", { name: "Waiting", exact: true })).toHaveAttribute("aria-selected", "true"); await page.getByRole("tab", { name: "Terminal", exact: true }).click(); }
       await expect(replacementLink).toBeVisible();
       await expect(page.getByRole("alert").filter({ hasText: message })).toHaveCount(0);
-      if (mobile) await expect(page.getByRole("tab", { name: "Terminal", exact: true })).toHaveClass(/mobile-tab-active/);
       await tabIntoHeaderLink(page, replacementLink, mobile);
       await screenshot("selected-session-pr-link");
       const beforeThinking = receivedHooks.length;

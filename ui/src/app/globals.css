@@ -340,6 +340,32 @@ body {
   color: var(--accent);
   border-bottom-color: var(--accent);
 }
+.mobile-tab-inbox-badge {
+  margin-left: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 9999px;
+  background: var(--accent);
+  color: var(--bg-void);
+  font-size: 11px;
+  font-weight: 700;
+}
+.inbox-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0,0,0,0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
 
 .dashboard-sidebar {
   width: 100%;
@@ -393,7 +419,15 @@ body {
 .session-preview-toolbar { display: flex; align-items: center; gap: 2px; padding: 0 4px 0 8px; min-height: 44px; border-bottom: 1px solid var(--border-subtle); }
 .session-preview-toolbar .session-preview-icon { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 44px; height: 44px; min-width: 44px; min-height: 44px; padding: 0; }
 .session-preview-filename { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.session-preview-file-tablist { display: flex; flex: 1; min-width: 0; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+.session-preview-file-tablist::-webkit-scrollbar { display: none; }
+.session-preview-file-tab { flex: 0 1 auto; min-width: 44px; max-width: 180px; min-height: 44px; padding: 0 10px; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); background: transparent; border: none; border-bottom: 2px solid transparent; cursor: pointer; font-family: var(--font-mono); display: inline-flex; align-items: center; }
+.session-preview-file-tab:hover { color: var(--text-primary); }
+.session-preview-file-tab.is-selected, .session-preview-file-tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+.session-preview-file-select { flex: 1; min-width: 0; max-width: 260px; min-height: 44px; background: var(--bg-void); color: var(--text-primary); border: 1px solid var(--border-muted); border-radius: 4px; font-family: var(--font-mono); font-size: 12px; padding: 0 8px; }
+.session-preview-file-tab:focus-visible, .session-preview-file-select:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .session-preview-auto { flex: none; width: 6px; height: 6px; margin: 0 5px; border-radius: 50%; background: var(--accent); }
+.session-attention-dot { display: inline-block; flex: none; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--accent); vertical-align: middle; }
 .session-preview-content { position: relative; flex: 1; min-height: 0; min-width: 0; }
 .session-preview-content iframe { display: block; width: 100%; height: 100%; border: 0; background: white; }
 .session-preview-message { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--text-muted); font-size: 13px; }
@@ -729,3 +763,25 @@ body {
 .session-preview-link-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; overflow-wrap: anywhere; word-break: break-all; }
 .session-preview-link-host { font-weight: 600; }
 .session-preview-link-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* Durable inbox trigger highlight */
+.session-inbox-trigger-active {
+  border-bottom: 1px solid var(--accent) !important;
+  background: var(--accent-dim);
+  color: var(--text-primary);
+}
+.session-inbox-trigger-label { color: var(--text-primary); font-weight: 700; }
+.session-inbox-trigger-pill {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 22px; height: 22px; padding: 0 7px; margin-left: auto;
+  border-radius: 9999px; background: var(--accent); color: var(--bg-void);
+  font-weight: 700; font-variant-numeric: tabular-nums; font-size: 12px;
+}
+@keyframes session-inbox-flash {
+  0% { background: var(--accent); }
+  100% { background: var(--accent-dim); }
+}
+.session-inbox-trigger-flash { animation: session-inbox-flash 1.1s ease-out 1; }
+@media (prefers-reduced-motion: reduce) {
+  .session-inbox-trigger-flash { animation: none; }
+}

@@ -22,11 +22,39 @@ it("shows full text, sorted outstanding counts, and retains ordinary hidden filt
   const notices = new Map(rows.map((row, i) => [row.id, { activity: "idle" as const, attention: entry(row.id, [1, 2, 3, 2, 5, 6][i]).notice }]));
   const entries = inboxEntries(rows, notices, [], new Set(["hidden"]), new Set(["other"]), new Set(["b"]), () => true);
   expect(entries.map(item => item.session.id)).toEqual(["newest", "tie-first", "tie-second", "older"]);
-  render(<Fixture entries={entries}/>); const trigger = screen.getByRole("button", { name: "Inbox, 4 messages" }); fireEvent.click(trigger);
+  render(<Fixture entries={entries}/>); const trigger = screen.getByRole("button", { name: "Inbox, 4 waiting" }); fireEvent.click(trigger);
   const page = screen.getByRole("region", { name: "Inbox" }); const articles = within(page).getAllByRole("article");
   expect(articles.map(item => item.getAttribute("data-inbox-entry"))).toEqual(["newest", "tie-first", "tie-second", "older"]);
   expect(articles[0].querySelector(".whitespace-pre-wrap")?.textContent).toBe(entries[0].notice.message); expect(base.onDismiss).not.toHaveBeenCalled(); expect(base.onOpenSession).not.toHaveBeenCalled();
   fireEvent.click(within(articles[0]).getByRole("button", { name: "Open session" })); expect(base.onOpenSession).toHaveBeenCalledWith("newest");
+});
+it("trigger flash is cleared when the count drops and replays on the next increase", () => {
+  const view = render(<Fixture entries={[]}/>);
+  expect(screen.getByRole("button", { name: "Inbox, 0 messages" }).className).not.toContain("session-inbox-trigger-flash");
+  view.rerender(<Fixture entries={[entry("first")]} />);
+  expect(screen.getByRole("button", { name: "Inbox, 1 waiting" }).className).toContain("session-inbox-trigger-flash");
+  view.rerender(<Fixture entries={[]} />);
+  expect(screen.getByRole("button", { name: "Inbox, 0 messages" }).className).not.toContain("session-inbox-trigger-flash");
+  view.rerender(<Fixture entries={[entry("first", 2)]} />);
+  expect(screen.getByRole("button", { name: "Inbox, 1 waiting" }).className).toContain("session-inbox-trigger-flash");
+});
+it("renders the trigger muted at 0, highlighted with a pill at 1 and 9+", () => {
+  const empty = render(<Fixture entries={[]}/>);
+  const zero = screen.getByRole("button", { name: "Inbox, 0 messages" });
+  expect(zero.className).not.toContain("session-inbox-trigger-active");
+  expect(zero.querySelector(".session-inbox-trigger-pill")).toBeNull();
+  cleanup();
+  render(<Fixture entries={[entry("first")]} />);
+  const one = screen.getByRole("button", { name: "Inbox, 1 waiting" });
+  expect(one.className).toContain("session-inbox-trigger-active");
+  expect(one.querySelector(".session-inbox-trigger-pill")?.textContent).toBe("1");
+  expect(one.querySelector(".session-inbox-trigger-label")?.textContent).toBe("Inbox");
+  cleanup();
+  const many = Array.from({ length: 10 }, (_, i) => entry(`s${i}`, i + 1));
+  render(<Fixture entries={many} />);
+  const ten = screen.getByRole("button", { name: "Inbox, 10 waiting" });
+  expect(ten.querySelector(".session-inbox-trigger-pill")?.textContent).toBe("10");
+  void empty;
 });
 it("works collapsed and empty, focuses the heading and restores focus on back", () => {
   render(<Fixture entries={[]} collapsed/>); const trigger = screen.getByRole("button", { name: "Inbox, 0 messages" }); trigger.focus(); fireEvent.click(trigger);
@@ -59,6 +87,9 @@ it("disables reply for offline and read-only sessions without removing notices",
 it("validates queued reply acknowledgements and distinguishes unsupported, denial, and uncertain failure", async () => {
   const item = entry("first"); const call = vi.fn(async (_command: Command) => ({ requestId: "r", success: true, data: { sessionId: "first", messageId: "m", status: "queued" } }));
   await queueSessionReply(call, item, "Hi"); expect(call.mock.calls[0][0]).toMatchObject({ type: "send_message", payload: { bridgeId: "b", sessionId: "first", message: "Hi" } });
+  expect(call.mock.calls[0][0].payload).not.toHaveProperty("eventId");
+  const stamped = promptEntry("first", "mail");
+  await queueSessionReply(call, stamped, "Hi"); expect(call.mock.calls[1][0]).toMatchObject({ type: "send_message", payload: { bridgeId: "b", sessionId: "first", message: "Hi", eventId: "att-1" } });
   await expect(queueSessionReply(async () => ({ requestId: "r", success: false, error: "Unknown command type: send_message" }), item, "x")).rejects.toThrow("bridge upgrade");
   await expect(queueSessionReply(async () => ({ requestId: "r", success: false, data: { code: "permission_denied" } }), item, "x")).rejects.toThrow("permission");
   await expect(queueSessionReply(async () => ({ requestId: "r", success: false, data: { code: "enqueue_failed" } }), item, "x")).rejects.toThrow("may have been queued");

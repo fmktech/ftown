@@ -122,10 +122,25 @@ describe("current attention lifecycle", () => {
     expect(clearsManualInputNotice("Notification", { notification_type }, notice("agent_needs_input"))).toBe(false);
   });
 
-  it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("lets %s clear every existing notice type", (event) => {
+  it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("lets %s clear non-explicit types but preserves explicit", (event) => {
+    expect(clearsManualInputNotice(event, {}, notice("permission_prompt"))).toBe(true);
+    expect(clearsManualInputNotice(event, {}, notice("elicitation_dialog"))).toBe(true);
+    expect(clearsManualInputNotice(event, {}, notice("ask_user"))).toBe(true);
+    expect(clearsManualInputNotice(event, {}, notice("agent_needs_input"))).toBe(false);
+  });
+
+  it.each(["UserPromptSubmit", "beforeSubmitPrompt"])("an injected %s clears no notice type", (event) => {
     for (const type of ["agent_needs_input", "permission_prompt", "elicitation_dialog", "ask_user"] as const) {
-      expect(clearsManualInputNotice(event, {}, notice(type))).toBe(true);
+      expect(clearsManualInputNotice(event, { injected: true }, notice(type))).toBe(false);
     }
+    const durable: ManualInputNotice = { type: "agent_needs_input", title: "t", message: "m", receivedAt: 1, attentionId: "a1", attentionSequence: 1 };
+    expect(clearsManualInputNotice(event, { injected: true }, durable)).toBe(false);
+    const durableQuestion: ManualInputNotice = { type: "ask_user", title: "t", message: "m", receivedAt: 1, attentionId: "a1", attentionSequence: 1,
+      prompt: { channel: "hook", questions: [{ question: "Q", options: [{ label: "A" }], multiSelect: false, allowText: false }] } };
+    expect(clearsManualInputNotice(event, { injected: true }, durableQuestion)).toBe(false);
+    // C1: a human prompt clears no explicit notice, durable or not.
+    expect(clearsManualInputNotice(event, {}, durable)).toBe(false);
+    expect(clearsManualInputNotice(event, {}, durableQuestion)).toBe(false);
   });
 
   it.each(["permission_prompt", "elicitation_dialog", "ask_user"] as const)("preserves the legacy %s tool-completion lifecycle", (type) => {

@@ -26,19 +26,41 @@ const PREVIEW_FRAME_NOT_READY = [
 
 /**
  * For expect.poll / toPass callbacks: evaluate `fn` on the <body> of the preview document of `fileName`
- * (iframe[title="HTML preview: <fileName>"]). When the evaluation races the iframe being swapped or navigated
+ * (iframe[title="Preview: <fileName>"]). When the evaluation races the iframe being swapped or navigated
  * (PREVIEW_FRAME_NOT_READY), return `notReady` so the poll simply retries; pick a value the poll's matcher never accepts
  * (NaN for numeric comparisons, null for equality). Any other error fails the test, and so does a closed PAGE (a
  * "Target closed" for the page itself is not a frame swap).
+ *
+ * Playwright serializes the callback's source, so references to outer variables inside `fn` do not exist in the
+ * page (ReferenceError). Pass every value the callback needs as `arg`; the callback receives it as its second
+ * parameter.
  */
-export async function inPreviewFrame<R, N>(page: Page, fileName: string, fn: (body: Element) => R, notReady: N): Promise<R | N> {
+export async function inPreviewFrame<R, N>(page: Page, fileName: string, fn: (body: Element, arg: string) => R, notReady: N, arg?: string): Promise<R | N> {
   try {
-    return await page.frameLocator(`iframe[title="HTML preview: ${fileName}"]`).locator("body").evaluate(fn) as R;
+    const body = page.frameLocator(`iframe[title="Preview: ${fileName}"]`).locator("body");
+    return await (arg === undefined ? body.evaluate(fn as (element: Element) => R) : body.evaluate(fn, arg)) as R;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!page.isClosed() && PREVIEW_FRAME_NOT_READY.some(pattern => pattern.test(message))) return notReady;
     throw error;
   }
+}
+
+/**
+ * Click a relative preview link that requests a switch-file and wait for the target tab to become selected.
+ *
+ * Chromium routes the trusted pointer click to the embedder <iframe> element (never into the out-of-process
+ * sandboxed frame content) when the frame was inserted within ~75ms: Playwright's hit-target check passes in
+ * the dashboard, yet the click lands on the embedder and no postMessage is produced. The first attempt can
+ * therefore fail with no product bug, so the click plus the tab assertion retry. Repeated attempts are harmless
+ * because switching to the already-selected file is a no-op (same effectiveFileName/identity/iframe key), so
+ * retries cannot remount or reset the preview.
+ */
+export async function clickPreviewLinkAndExpectSelected(page: Page, fromFileName: string, linkHref: string, toFileName: string): Promise<void> {
+  await expect(async () => {
+    await page.frameLocator(`iframe[title="Preview: ${fromFileName}"]`).locator(`a[href="${linkHref}"]`).click();
+    await expect(page.getByRole("tab", { name: toFileName })).toHaveAttribute("aria-selected", "true", { timeout: 1000 });
+  }).toPass({ timeout: 15_000 });
 }
 
 export interface CliOutput { code: number; stdout: string; stderr: string }
@@ -49,6 +71,32 @@ export interface PreviewTransportObservation {
   encryptedLocalRequests: number;
   leaked: boolean;
   markers: Set<string>;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function kindFor(fileName: string): "html" | "markdown" {
+  const lower = fileName.toLowerCase();
+  if (lower.endsWith(".html") || lower.endsWith(".htm")) return "html";
+  if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "markdown";
+  throw new Error(`Unsupported preview file kind: ${fileName}`);
+}
+function assertPreviewShape(preview: unknown, expectedNames: readonly string[], sessionId: string): string {
+  if (!record(preview) || typeof preview.id !== "string" || !UUID_RE.test(preview.id) || !Array.isArray(preview.files)) throw new Error("Preview registration fixture response is invalid");
+  const files = preview.files as unknown[];
+  if (files.length !== expectedNames.length) throw new Error("Preview registration files length mismatch");
+  for (let i = 0; i < expectedNames.length; i++) {
+    const file = files[i];
+    if (!record(file) || typeof file.id !== "string" || !UUID_RE.test(file.id) || typeof file.fileName !== "string" || typeof file.kind !== "string") throw new Error("Preview registration file entry is invalid");
+    if (file.fileName !== expectedNames[i]) throw new Error("Preview registration file order or name mismatch");
+    if (file.kind !== kindFor(expectedNames[i])) throw new Error("Preview registration file kind mismatch");
+  }
+  return preview.id;
+}
+function assertPreviewBody(body: unknown, sessionId: string, expectedNames: readonly string[], directory: string): string {
+  for (const name of expectedNames) assertSanitized(body, join(directory, name));
+  if (!record(body) || !record(body.session) || body.session.id !== sessionId) throw new Error("Preview registration fixture response is invalid");
+  if (!record(body.session.preview)) throw new Error("Preview registration fixture response is invalid");
+  return assertPreviewShape(body.session.preview, expectedNames, sessionId);
 }
 
 export async function createPreviewFixture() {
@@ -91,10 +139,14 @@ export async function createPreviewFixture() {
       const result = await this.cli(sessionId, ["preview", fileName]);
       expect(result.code).toBe(0);
       const body: unknown = JSON.parse(result.stdout);
-      assertSanitized(body, join(directory, fileName));
-      if (!record(body) || !record(body.session) || body.session.id !== sessionId || !record(body.session.preview)
-        || typeof body.session.preview.id !== "string" || body.session.preview.fileName !== fileName) throw new Error("Preview registration fixture response is invalid");
-      return body.session.preview.id;
+      return assertPreviewBody(body, sessionId, [fileName], directory);
+    },
+    async registerMultiple(sessionId: string, fileNames: string[]): Promise<string> {
+      if (fileNames.length < 1) throw new Error("registerMultiple requires at least one file");
+      const result = await this.cli(sessionId, ["preview", ...fileNames]);
+      expect(result.code).toBe(0);
+      const body: unknown = JSON.parse(result.stdout);
+      return assertPreviewBody(body, sessionId, fileNames, directory);
     },
     async cleanup(): Promise<void> {
       const results = await Promise.allSettled([...sessions].map(async (id) => {
@@ -138,6 +190,14 @@ try{localStorage.setItem('preview-fixture','yes');report.dataset.storage='allowe
 document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.remove();
 fetch('${probe}fetch').then(()=>{report.dataset.fetch='allowed'},()=>{report.dataset.fetch='blocked'});
 </script></body></html>`;
+}
+
+export function previewMarkdown(marker: string): string {
+  return `# ${marker} Notes\n\n| Name | Value |\n| --- | --- |\n| alpha | ${marker}-cell |\n\n[View a.html](a.html)\n`;
+}
+
+export function previewSimpleHtml(marker: string, version: number): string {
+  return `<!doctype html><html><head><title>${marker} v${version}</title></head><body><h1>${marker} version ${version}</h1><p>Simple HTML</p></body></html>`;
 }
 
 /** Passive crypto observation keeps real authentication and every native result intact. */

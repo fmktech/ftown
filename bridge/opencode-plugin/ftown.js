@@ -85,6 +85,7 @@ export function registerFtownOpencodePlugin(client, options = {}) {
   let polling = false;
   let inflight = false;
   let seen = new Set();
+  const postedPromptIds = new Set();
   let retryAt = 0;
   let retryDelay = 5_000;
 
@@ -145,6 +146,8 @@ export function registerFtownOpencodePlugin(client, options = {}) {
     inflight = true;
     for (const messageId of ids) seen.add(messageId);
     try {
+      // Tell the bridge first so the wake's no-text prompt hook is one-shot injected.
+      await postHook('FtownWakeSubmitted');
       const result = await client.session.prompt({ path: { id }, body: {
         parts: [{ type: 'text', text: `[ftown mail] ${MAIL_WAKE_TEXT}` }],
       } });
@@ -229,9 +232,19 @@ export function registerFtownOpencodePlugin(client, options = {}) {
         await postHook('SessionStart');
         await poll();
         break;
-      case 'message.updated':
-        if (event.properties?.info?.role === 'user') { busy = true; await postHook('UserPromptSubmit'); }
+      case 'message.updated': {
+        const info = event.properties?.info;
+        if (info?.role === 'user') {
+          busy = true;
+          const messageId = info?.id;
+          if (typeof messageId === 'string' && messageId) {
+            if (postedPromptIds.has(messageId)) break;
+            postedPromptIds.add(messageId);
+          }
+          await postHook('UserPromptSubmit');
+        }
         break;
+      }
       case 'session.status':
         if (event.properties?.status?.type === 'busy') { busy = true; await postHook('PreToolUse'); break; }
         if (event.properties?.status?.type !== 'idle') break;

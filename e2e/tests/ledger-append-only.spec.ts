@@ -26,6 +26,8 @@ import { createSecondAccount, type SecondAccount } from "../helpers/second-accou
 const audience = new URL(UI_BASE_URL).origin;
 const hex = (bytes = 3) => randomBytes(bytes).toString("hex");
 const WRITE_CONFLICT = "Something else changed first. Confirm again.";
+/** Printed when a bridge starts dispatching the commands it receives (bridge/src/index.ts); before it, each one is refused. */
+const BRIDGE_READY = "[Bridge] Ready and listening for commands";
 
 type Tip = { revision: number; head: string };
 type FullRow = { ledger: unknown; revision: number; head: string; sticky: unknown; checkpoint: string | null; checkpoint_mac: string | null };
@@ -428,6 +430,9 @@ test.describe("append-only ledger", () => {
       await expect.poll(() => bridge.replicaTip(), { timeout: 30_000 }).toEqual(h2);
       await reloadUntilLocal(second.page, second.accountId, h2);
       await restoreRow(second.accountId, h1Row); // server rolled back; B1 and M1 online at H2
+      // "Online" must mean "answers ledger_head": a computer still starting is listed by the dashboard but refuses every command,
+      // and B2 would then rightly sign on the only chain it can see (the server's H1), which is another scenario.
+      expect(bridge.output(), "M1 dispatches commands before B2 opens").toContain(BRIDGE_READY);
       const page = await b2.context.newPage();
       const outputFrom = bridge.output().length;
       const opened = Date.now();
@@ -520,12 +525,19 @@ test.describe("append-only ledger", () => {
 // ---- Bridge scenarios: shared setup ----
 
 /** A throwaway account whose browser B1 paired an isolated bridge M1 (B1 on its dashboard, M1 at the server's head). */
+/**
+ * A throwaway account with its own paired computer, returned once that computer ANSWERS commands. pairBridge() returns at relay
+ * presence, which the bridge joins about 2 s before it starts dispatching (index.ts: until then every command, `ledger_head` included,
+ * is answered with an error, although the dashboard already lists the computer). A browser treats that answer like silence, so a
+ * scenario that needs the computer's chain must not start inside that window.
+ */
 async function accountWithBridge(browserType: Parameters<typeof createSecondAccount>[0], name: string) {
   const second = await createSecondAccount(browserType, { name: `${name} ${hex()}` });
   try {
     const paired = await second.pairBridge();
     const tip = (await serverTip(second.accountId))!;
     await expect.poll(() => paired.bridge.replicaTip(), { timeout: 30_000 }).toEqual(tip);
+    await expect.poll(() => paired.bridge.output(), { timeout: 30_000, message: "the computer dispatches commands" }).toContain(BRIDGE_READY);
     return { second, bridge: paired.bridge, bridgeId: paired.bridgeId };
   } catch (error) { await second.close(); throw error; }
 }

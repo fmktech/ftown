@@ -19,7 +19,9 @@ test('explicit snapshots survive restart, prefer creation order and filter legac
   await f.store.mutate('s1', [b.id], 'ack');
   assert.equal((await f.store.explicitSnapshot('s1')).attention?.id, a.id);
   await f.store.record('s1', 'UserPromptSubmit', {});
-  assert.deepEqual(await new AttentionStore(f.resolve).explicitSnapshot('s1'), { attention: null, sequence: 3 });
+  const snap = await new AttentionStore(f.resolve).explicitSnapshot('s1');
+  assert.equal(snap.sequence, 3);
+  assert.equal(snap.attention?.id, a.id, 'C1: a prompt must leave the explicit item open');
 });
 
 test('explicit dismissal atomically covers predecessors while preserving newer and legacy incidents', async t => {
@@ -172,6 +174,32 @@ test('only explicit continuation resolves; storage failure cannot report durable
   await store.record('s1', 'UserPromptSubmit', {});
   assert.equal((await store.list('s1')).events.length, 0);
   await assert.rejects(new AttentionStore(resolve).record('missing', 'Notification', notice()), (e: unknown) => e instanceof AttentionError && e.code === 'attention_storage_error');
+});
+
+test('injected prompt resolves nothing; human prompt leaves ask_user with a prompt; replied resolves one item', async (t) => {
+  const { store } = await fixture(t);
+  const first = (await store.record('s1', 'Notification', notice('A', { notification_type: 'agent_needs_input' })))!;
+  const ask = (await store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'iq1', tool_input: { questions: [{ question: 'Pick', header: 'C', options: [{ label: 'A' }, { label: 'B' }], multiSelect: false }] } }))!;
+  assert.equal((await store.list('s1')).events.length, 2);
+  await store.record('s1', 'UserPromptSubmit', {}, { promptOrigin: 'injected' });
+  assert.equal((await store.list('s1')).events.length, 2, 'injected prompt must not resolve');
+  await store.record('s1', 'UserPromptSubmit', {}, { promptOrigin: 'human' });
+  const open = await store.list('s1');
+  assert.equal(open.events.length, 2, 'human prompt must leave all explicit items open');
+  assert.ok(open.events.some((e) => e.id === ask.id));
+  assert.ok(open.events.some((e) => e.id === first.id));
+  const all = await store.list('s1', { includeResolved: true });
+  assert.equal(all.events.find((e) => e.id === first.id)?.resolution, undefined);
+  // A new request for the replied path.
+  const second = (await store.record('s1', 'Notification', notice('B', { notification_type: 'agent_needs_input' })))!;
+  const third = (await store.record('s1', 'Notification', notice('C', { notification_type: 'agent_needs_input' })))!;
+  const beforeSeq = (await store.explicitSnapshot('s1')).sequence;
+  await store.resolveReplied('s1', second.id);
+  assert.equal((await store.explicitSnapshot('s1')).sequence, beforeSeq + 1, 'replied must bump the ledger sequence');
+  const after = await store.list('s1');
+  assert.deepEqual(after.events.map((e) => e.id).sort(), [first.id, ask.id, third.id].sort());
+  const afterAll = await store.list('s1', { includeResolved: true });
+  assert.equal(afterAll.events.find((e) => e.id === second.id)?.resolution, 'replied');
 });
 
 test('record returns its own committed public event through concurrent requests and deduplication', async (t) => {
@@ -461,7 +489,10 @@ test('waitForItem: immediate cases, deadline, unknown id, and wakes on every res
     ['answered', id => f.store.answer('s1', id, [{ selected: [0] }])],
   ];
   for (const [i, [resolution, act]] of wakes.entries()) {
-    const fresh = (await f.store.record('s1', 'Notification', needsInput(`Q${i}`), { prompt: mailPrompt() }))!;
+    // C1: a prompt wakes waiters only for non-explicit items.
+    const fresh = resolution === 'user_prompt'
+      ? (await f.store.record('s1', 'Notification', notice(`P${i}`)))!
+      : (await f.store.record('s1', 'Notification', needsInput(`Q${i}`), { prompt: mailPrompt() }))!;
     const poll = f.store.waitForItem('s1', fresh.id, 5000);
     await delay(10);
     await act(fresh.id);

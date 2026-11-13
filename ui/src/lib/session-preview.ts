@@ -1,28 +1,63 @@
 import { PREVIEW_SCROLL_CHANNEL, PREVIEW_SCROLL_MAX, PREVIEW_SCROLL_REPORT_MS, PREVIEW_SCROLL_RESTORE_MS, PREVIEW_LINK_CHANNEL } from './preview-scroll-protocol';
-import { PREVIEW_CHUNK_BYTES, PREVIEW_MAX_BYTES, type SessionPreviewDescriptor, type SessionPreviewStatus, type PreviewUnavailableReason } from '../../../bridge/src/preview-protocol';
+import { PREVIEW_CHUNK_BYTES, PREVIEW_MAX_BYTES, type PreviewUnavailableReason } from '../../../bridge/src/preview-protocol';
+import { markdownDocument } from './session-preview-markdown';
 
 const revisionPattern = /^[0-9a-f]{64}$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const reasons: PreviewUnavailableReason[] = ['missing', 'too_large', 'invalid_utf8', 'invalid_file', 'unavailable'];
 const record = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
 const size = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= PREVIEW_MAX_BYTES;
-export function isPreviewDescriptor(value: unknown): value is SessionPreviewDescriptor {
-  if (!record(value) || typeof value.id !== 'string' || !uuidPattern.test(value.id) || typeof value.fileName !== 'string') return false;
-  return value.fileName.length > 0 && new TextEncoder().encode(value.fileName).length <= 255 && !/[\x00-\x1f\x7f-\x9f/\\]/.test(value.fileName) && value.fileName !== '.' && value.fileName !== '..';
+
+// SPEC-A preview shape (accepted locally; ui/src/types.ts is owned by the bridge worker).
+export type SessionPreviewKind = 'html' | 'markdown';
+export interface SessionPreviewFile {
+  id: string;
+  fileName: string;
+  kind: SessionPreviewKind;
 }
-export function parseStatus(value: unknown, previewId: string): SessionPreviewStatus {
+export interface SessionPreviewDescriptor {
+  id: string;
+  files: SessionPreviewFile[];
+}
+export const PREVIEW_MAX_FILES = 12;
+
+function isBaseName(fileName: string): boolean {
+  return fileName.length > 0 && new TextEncoder().encode(fileName).length <= 255 && !/[\x00-\x1f\x7f-\x9f/\\]/.test(fileName) && fileName !== '.' && fileName !== '..';
+}
+
+export function isPreviewDescriptor(value: unknown): value is SessionPreviewDescriptor {
+  // Old bridge shape ({ id, fileName } with no files array) is not a preview.
+  if (!record(value) || typeof value.id !== 'string' || !uuidPattern.test(value.id) || !Array.isArray(value.files)) return false;
+  const files = value.files as unknown[];
+  if (files.length < 1 || files.length > PREVIEW_MAX_FILES) return false;
+  const seen = new Set<string>();
+  for (const file of files) {
+    if (!record(file) || typeof file.id !== 'string' || !uuidPattern.test(file.id) || typeof file.fileName !== 'string' || (file.kind !== 'html' && file.kind !== 'markdown')) return false;
+    if (!isBaseName(file.fileName) || seen.has(file.fileName)) return false;
+    seen.add(file.fileName);
+  }
+  return true;
+}
+
+export type SessionPreviewStatus =
+  | { state: 'unregistered' }
+  | { state: 'unavailable'; previewId: string; fileId: string; reason: PreviewUnavailableReason }
+  | { state: 'ready' | 'unchanged'; previewId: string; fileId: string; revision: string; totalBytes: number };
+
+export function parseStatus(value: unknown, previewId: string, fileId: string): SessionPreviewStatus {
   if (!record(value)) throw new Error('Invalid preview response');
   if (value.state === 'unregistered') return { state: 'unregistered' };
-  if (value.previewId !== previewId) throw new Error('Invalid preview response');
-  if (value.state === 'unavailable' && typeof value.reason === 'string' && reasons.includes(value.reason as PreviewUnavailableReason)) return { state: 'unavailable', previewId, reason: value.reason as PreviewUnavailableReason };
-  if ((value.state === 'ready' || value.state === 'unchanged') && typeof value.revision === 'string' && revisionPattern.test(value.revision) && size(value.totalBytes)) return { state: value.state, previewId, revision: value.revision, totalBytes: value.totalBytes };
+  if (value.previewId !== previewId || value.fileId !== fileId) throw new Error('Invalid preview response');
+  if (value.state === 'unavailable' && typeof value.reason === 'string' && reasons.includes(value.reason as PreviewUnavailableReason)) return { state: 'unavailable', previewId, fileId, reason: value.reason as PreviewUnavailableReason };
+  if ((value.state === 'ready' || value.state === 'unchanged') && typeof value.revision === 'string' && revisionPattern.test(value.revision) && size(value.totalBytes)) return { state: value.state, previewId, fileId, revision: value.revision, totalBytes: value.totalBytes };
   throw new Error('Invalid preview response');
 }
-export function parseChunk(value: unknown, previewId: string, revision: string, totalBytes: number, offset: number): { state: 'stale_revision' } | { state: 'unavailable'; reason: PreviewUnavailableReason } | { state: 'chunk'; bytes: Uint8Array; done: boolean } {
+
+export function parseChunk(value: unknown, previewId: string, fileId: string, revision: string, totalBytes: number, offset: number): { state: 'stale_revision'; fileId: string } | { state: 'unavailable'; fileId: string; reason: PreviewUnavailableReason } | { state: 'chunk'; fileId: string; bytes: Uint8Array; done: boolean } {
   if (!record(value)) throw new Error('Invalid preview chunk');
-  if (value.state === 'stale_revision') return { state: 'stale_revision' };
-  if (value.previewId !== previewId) throw new Error('Invalid preview chunk');
-  if (value.state === 'unavailable' && typeof value.reason === 'string' && reasons.includes(value.reason as PreviewUnavailableReason)) return { state: 'unavailable', reason: value.reason as PreviewUnavailableReason };
+  if (value.state === 'stale_revision') return { state: 'stale_revision', fileId };
+  if (value.previewId !== previewId || value.fileId !== fileId) throw new Error('Invalid preview chunk');
+  if (value.state === 'unavailable' && typeof value.reason === 'string' && reasons.includes(value.reason as PreviewUnavailableReason)) return { state: 'unavailable', fileId, reason: value.reason as PreviewUnavailableReason };
   if (value.state !== 'chunk' || value.revision !== revision || value.totalBytes !== totalBytes || value.offset !== offset || typeof value.dataBase64 !== 'string' || typeof value.done !== 'boolean' || value.dataBase64.length > Math.ceil(PREVIEW_CHUNK_BYTES / 3) * 4) throw new Error('Invalid preview chunk');
   let decoded: string;
   try { decoded = atob(value.dataBase64); } catch { throw new Error('Invalid preview chunk'); }
@@ -30,16 +65,21 @@ export function parseChunk(value: unknown, previewId: string, revision: string, 
   const bytes = Uint8Array.from(decoded, c => c.charCodeAt(0));
   const expected = Math.min(PREVIEW_CHUNK_BYTES, totalBytes - offset);
   if (bytes.length !== expected || value.done !== (offset + bytes.length === totalBytes)) throw new Error('Invalid preview chunk');
-  return { state: 'chunk', bytes, done: value.done };
+  return { state: 'chunk', fileId, bytes, done: value.done };
 }
+
 export async function verifyPreview(bytes: Uint8Array, revision: string): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes)));
   if (Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('') !== revision) throw new Error('Invalid preview digest');
   return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
 }
+
 export const PREVIEW_CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; media-src 'none'; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; manifest-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
+
 // Runs inside the opaque sandbox before any user markup or script.
-const PREVIEW_LINK_SCRIPT = String.raw`<script>(() => {
+function previewLinkScript(fileNames?: readonly string[]): string {
+  const files = JSON.stringify([...(fileNames ?? [])]).replace(/</g, '\\u003c').replace(/\$/g, () => '\\$').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+  return String.raw`<script>(() => {
   const apply = Reflect.apply;
   const closest = Element.prototype.closest;
   const getAttribute = Element.prototype.getAttribute;
@@ -49,16 +89,24 @@ const PREVIEW_LINK_SCRIPT = String.raw`<script>(() => {
   const button = Object.getOwnPropertyDescriptor(MouseEvent.prototype, 'button').get;
   const trim = String.prototype.trim;
   const startsWith = String.prototype.startsWith;
+  const indexOf = String.prototype.indexOf;
+  const lastIndexOf = String.prototype.lastIndexOf;
+  const slice = String.prototype.slice;
   const regexTest = RegExp.prototype.test;
+  const includes = Array.prototype.includes;
+  const maxValue = Math.max;
   const absolute = /^https?:\/\//i;
+  const scheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
   const NativeURL = URL;
   const protocol = Object.getOwnPropertyDescriptor(URL.prototype, 'protocol').get;
   const href = Object.getOwnPropertyDescriptor(URL.prototype, 'href').get;
+  const decode = decodeURIComponent;
   // External links cannot be opened inside the sandbox (no allow-popups). The
   // target is forwarded to the parent, which shows a user confirmation before
   // opening anything — a message from untrusted preview code is not proof of a
   // trusted click, so the parent must never open the URL directly.
   const channel = ${JSON.stringify(PREVIEW_LINK_CHANNEL)};
+  const files = ${files};
   const parent = window.parent;
   const post = window.parent.postMessage;
   const location = window.location;
@@ -77,14 +125,35 @@ const PREVIEW_LINK_SCRIPT = String.raw`<script>(() => {
     apply(stop, event, []);
     if (!event.isTrusted || apply(button, event, []) !== 0) return;
     if (apply(startsWith, raw, ['#'])) { location.hash = raw; return; }
-    if (!apply(regexTest, absolute, [raw])) return;
+    if (apply(regexTest, absolute, [raw])) {
+      try {
+        const url = new NativeURL(raw);
+        const linkScheme = apply(protocol, url, []);
+        if (linkScheme === 'http:' || linkScheme === 'https:') apply(post, parent, [{ channel, kind: 'open-link', url: apply(href, url, []) }, '*']);
+      } catch { /* Invalid URLs do not navigate. */ }
+      return;
+    }
+    // Relative links between registered files switch the parent selector.
+    // Anything else (protocol-relative, schemes like javascript:/data:/file:) never navigates.
+    if (apply(startsWith, raw, ['//'])) return;
+    let end = raw.length;
+    const query = apply(indexOf, raw, ['?']);
+    const fragment = apply(indexOf, raw, ['#']);
+    if (query !== -1) end = Math.min(end, query);
+    if (fragment !== -1) end = Math.min(end, fragment);
+    const withoutQuery = apply(slice, raw, [0, end]);
+    if (apply(regexTest, scheme, [withoutQuery])) return;
+    const cut = apply(maxValue, null, [apply(lastIndexOf, withoutQuery, ['/']), apply(lastIndexOf, withoutQuery, ['\\'])]);
+    const base = cut === -1 ? withoutQuery : apply(slice, withoutQuery, [cut + 1]);
+    if (base.length === 0) return;
+    if (apply(includes, files, [base])) { apply(post, parent, [{ channel, kind: 'switch-file', fileName: base }, '*']); return; }
     try {
-      const url = new NativeURL(raw);
-      const scheme = apply(protocol, url, []);
-      if (scheme === 'http:' || scheme === 'https:') apply(post, parent, [{ channel, kind: 'open-link', url: apply(href, url, []) }, '*']);
-    } catch { /* Invalid URLs do not navigate. */ }
+      const decoded = apply(decode, null, [base]);
+      if (typeof decoded === 'string' && apply(includes, files, [decoded])) apply(post, parent, [{ channel, kind: 'switch-file', fileName: decoded }, '*']);
+    } catch { /* Malformed percent escapes do not navigate. */ }
   }, true);
 })();</script>`;
+}
 function previewScrollScript(documentId: string): string {
   return `<script>(() => {
     const channel = ${JSON.stringify(PREVIEW_SCROLL_CHANNEL)}, id = ${JSON.stringify(documentId)}, max = ${PREVIEW_SCROLL_MAX};
@@ -138,8 +207,15 @@ function previewScrollScript(documentId: string): string {
     });
   })();</script>`;
 }
-export function previewDocument(html: string, documentId?: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}"><meta name="referrer" content="no-referrer">${PREVIEW_LINK_SCRIPT}${documentId ? previewScrollScript(documentId) : ""}</head><body>${html}</body></html>`;
+export function previewDocument(html: string, documentId?: string, fileNames?: readonly string[]): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}"><meta name="referrer" content="no-referrer">${previewLinkScript(fileNames)}${documentId ? previewScrollScript(documentId) : ""}</head><body>${html}</body></html>`;
+}
+/**
+ * Markdown branch of previewDocument: the converted document goes through the
+ * exact same wrapping (CSP, referrer, link-forwarding, scroll) as HTML.
+ */
+export function markdownPreviewDocument(source: string, fileName: string, documentId?: string, fileNames?: readonly string[]): string {
+  return previewDocument(markdownDocument(source, fileName), documentId, fileNames);
 }
 export function previewRatioBounds(width: number): [number, number] {
   const usable = Math.max(1, width - 8);

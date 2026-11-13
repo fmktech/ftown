@@ -797,10 +797,30 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       const controller = this.getSessionController();
       if (!controller) { jsonResponse(res, 503, { error: 'Server not ready' }); return; }
       const body = await parseBody(req);
-      if (req.method === 'PUT' ? Object.keys(body).length !== 1 || typeof body.path !== 'string' : Object.keys(body).length !== 0) {
+      if (req.method === 'PUT') {
+        if (Object.keys(body).some((key) => key !== 'paths' && key !== 'mode') || !('paths' in body) || !Array.isArray(body.paths) || body.paths.length < 1 || body.paths.length > 12 || body.paths.some((entry) => typeof entry !== 'string' || entry.length === 0)) {
+          jsonResponse(res, 400, { error: 'Invalid preview request' }); return;
+        }
+        const mode = body.mode;
+        if (mode !== undefined && mode !== 'replace' && mode !== 'add') {
+          jsonResponse(res, 400, { error: 'Invalid preview request' }); return;
+        }
+        const result = mode === 'add' ? await controller.addPreview(sessionPreviewMatch[1], body.paths) : await controller.setPreview(sessionPreviewMatch[1], body.paths);
+        if (!result.ok) { jsonResponse(res, result.code === 'not_found' ? 404 : result.code === 'too_large' ? 413 : 400, { error: result.message }); return; }
+        jsonResponse(res, 200, { session: toWireSession(result.session) }); return;
+      }
+      if (Object.keys(body).some((key) => key !== 'names')) {
         jsonResponse(res, 400, { error: 'Invalid preview request' }); return;
       }
-      const result = req.method === 'PUT' ? await controller.setPreview(sessionPreviewMatch[1], body.path) : await controller.clearPreview(sessionPreviewMatch[1]);
+      if (body.names === undefined || (Array.isArray(body.names) && body.names.length === 0)) {
+        const result = await controller.clearPreview(sessionPreviewMatch[1]);
+        if (!result.ok) { jsonResponse(res, result.code === 'not_found' ? 404 : 400, { error: result.message }); return; }
+        jsonResponse(res, 200, { session: toWireSession(result.session) }); return;
+      }
+      if (!Array.isArray(body.names) || body.names.some((entry) => typeof entry !== 'string' || entry.length === 0)) {
+        jsonResponse(res, 400, { error: 'Invalid preview request' }); return;
+      }
+      const result = await controller.removePreview(sessionPreviewMatch[1], body.names);
       if (!result.ok) { jsonResponse(res, result.code === 'not_found' ? 404 : result.code === 'too_large' ? 413 : 400, { error: result.message }); return; }
       jsonResponse(res, 200, { session: toWireSession(result.session) }); return;
     }
@@ -854,6 +874,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       }
 
       await controller.remove(sessionId);
+      this.mail.markSessionEnded(sessionId);
 
       jsonResponse(res, 200, { removed: true, sessionId });
       return;
@@ -1374,6 +1395,18 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         } catch { jsonResponse(res, 409, { error: 'invalid_native_target' }); }
         return;
       }
+      if (payload.hook_event_name === 'FtownWakeSubmitted') {
+        // Opencode announces the wake before submitting it (same 200 either way).
+        // Record only: never forwarded to the dashboard, never attention.
+        const submittedId = typeof payload.ftown_session_id === 'string' ? payload.ftown_session_id : undefined;
+        const submittedSource = typeof payload.ftown_session_source === 'string' ? payload.ftown_session_source : undefined;
+        if (submittedId && submittedSource !== 'workspace' && /^[a-zA-Z0-9_-]+$/.test(submittedId)
+          && await this.store?.loadSession(submittedId)) {
+          this.mail.notePluginHandoff(submittedId);
+        }
+        jsonResponse(res, 200, { ok: true });
+        return;
+      }
       const hookEventName = typeof payload.hook_event_name === 'string' ? payload.hook_event_name : undefined;
       let ftownSessionId = typeof payload.ftown_session_id === 'string' ? payload.ftown_session_id : undefined;
       let source = typeof payload.ftown_session_source === 'string' ? payload.ftown_session_source : undefined;
@@ -1384,19 +1417,26 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       }
       if (!ftownSessionId || !hookEventName) { jsonResponse(res, 200, { ok: true }); return; }
       const { ftown_session_id: _, ftown_session_source: __, attentionId: _attentionId,
-        attentionSequence: _attentionSequence, attentionCreatedAt: _attentionCreatedAt, ...rest } = payload;
+        attentionSequence: _attentionSequence, attentionCreatedAt: _attentionCreatedAt, ...restWithInjected } = payload;
+      // Never trust a harness-supplied injected flag.
+      const { injected: _incomingInjected, ...rest } = restWithInjected;
+      const isPromptSubmit = hookEventName === 'UserPromptSubmit' || hookEventName === 'beforeSubmitPrompt';
+      const injected = isPromptSubmit && this.mail.isInjectedPrompt(ftownSessionId, rest);
       let committedAttention: Awaited<ReturnType<AttentionStore['record']>> = undefined;
       // Workspace fallback can identify a foreign agent in the same directory.
       // Only known explicit/native-attributed sessions may produce authoritative records.
       if (this.attention && source !== 'workspace' && /^[a-zA-Z0-9_-]+$/.test(ftownSessionId) && await this.store?.loadSession(ftownSessionId)) {
-        committedAttention = await this.attention.record(ftownSessionId, hookEventName, rest);
+        committedAttention = await this.attention.record(ftownSessionId, hookEventName, rest,
+          isPromptSubmit ? { promptOrigin: injected ? 'injected' : 'human' } : undefined);
       }
       if (hookEventName === 'UserPromptSubmit' || hookEventName === 'PreToolUse' || hookEventName === 'PostToolUse') this.mail.markAgentBusy(ftownSessionId);
-      else if (hookEventName === 'Stop' || hookEventName === 'SessionEnd') this.mail.markAgentIdle(ftownSessionId);
+      else if (hookEventName === 'Stop') this.mail.markAgentIdle(ftownSessionId);
+      else if (hookEventName === 'SessionEnd') { this.mail.markAgentIdle(ftownSessionId); this.mail.markSessionEnded(ftownSessionId); }
       const conversationId = payload.conversation_id;
       if (typeof conversationId === 'string' && conversationId && source !== 'workspace') registerSessionConversation(ftownSessionId, conversationId);
       const hookEvent: HookEvent = { sessionId: ftownSessionId, eventName: hookEventName, data: {
         ...rest,
+        ...(injected ? { injected: true } : {}),
         ...(committedAttention ? { attentionId: committedAttention.id, attentionSequence: committedAttention.sequence, attentionCreatedAt: committedAttention.createdAt } : {}),
       }, source };
       // Persistence is complete before listeners can publish and before HTTP success.

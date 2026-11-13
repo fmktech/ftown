@@ -2,22 +2,42 @@ import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
 import { PREVIEW_CHUNK_BYTES } from '../../../bridge/src/preview-protocol';
-import { clampPreviewRatio, isPreviewDescriptor, parseChunk, parseStatus, previewDocument, previewRatioBounds, verifyPreview } from './session-preview';
+import { clampPreviewRatio, isPreviewDescriptor, markdownPreviewDocument, parseChunk, parseStatus, previewDocument, previewRatioBounds, verifyPreview } from './session-preview';
 const id = '12345678-1234-4234-8234-123456789abc';
+const fileId = '22345678-2234-4234-8234-123456789abc';
+const otherFileId = '32345678-3234-4234-8234-123456789abc';
 const revision = 'a'.repeat(64);
 describe('preview protocol validation', () => {
-  it('accepts bounded safe descriptors and rejects paths, controls and oversized names', () => {
-    expect(isPreviewDescriptor({ id, fileName: 'demo.html' })).toBe(true);
-    for (const fileName of ['../x', 'x\\y', 'x\n.html', 'é'.repeat(128), '']) expect(isPreviewDescriptor({ id, fileName })).toBe(false);
-    expect(isPreviewDescriptor({ id: 'not-uuid', fileName: 'demo.html' })).toBe(false);
+  it('accepts the SPEC-A descriptor and rejects the old bridge shape', () => {
+    expect(isPreviewDescriptor({ id, files: [{ id: fileId, fileName: 'demo.html', kind: 'html' }] })).toBe(true);
+    expect(isPreviewDescriptor({ id, files: [{ id: fileId, fileName: 'a.html', kind: 'html' }, { id: otherFileId, fileName: 'notes.md', kind: 'markdown' }] })).toBe(true);
+    // Old bridge shape has no files array: callers treat this as no preview.
+    expect(isPreviewDescriptor({ id, fileName: 'demo.html' })).toBe(false);
   });
-  it('rejects malformed status and chunk data, offsets and noncanonical base64', () => {
-    expect(parseStatus({ state: 'ready', previewId: id, revision, totalBytes: 1 }, id).state).toBe('ready');
-    expect(() => parseStatus({ state: 'ready', previewId: id, revision, totalBytes: 1048577 }, id)).toThrow();
-    const chunk = { state: 'chunk', previewId: id, revision, totalBytes: 1, offset: 0, dataBase64: 'YQ==', done: true };
-    expect(parseChunk(chunk, id, revision, 1, 0)).toMatchObject({ state: 'chunk', bytes: Uint8Array.of(97) });
-    for (const patch of [{ offset: 1 }, { done: false }, { dataBase64: 'YR==' }, { revision: 'b'.repeat(64) }]) expect(() => parseChunk({ ...chunk, ...patch }, id, revision, 1, 0)).toThrow();
-    expect(parseChunk({ ...chunk, totalBytes: 0, dataBase64: '' }, id, revision, 0, 0)).toMatchObject({ state: 'chunk', done: true });
+  it('rejects bad files, duplicates, wrong kinds and oversized sets', () => {
+    const one = [{ id: fileId, fileName: 'demo.html', kind: 'html' }];
+    expect(isPreviewDescriptor({ id, files: [] })).toBe(false);
+    expect(isPreviewDescriptor({ id, files: Array.from({ length: 12 }, (_, i) => ({ id: fileId, fileName: `f${i}.html`, kind: 'html' })) })).toBe(true);
+    expect(isPreviewDescriptor({ id, files: Array.from({ length: 13 }, (_, i) => ({ id: fileId, fileName: `f${i}.html`, kind: 'html' })) })).toBe(false);
+    expect(isPreviewDescriptor({ id, files: [...one, { id: otherFileId, fileName: 'demo.html', kind: 'markdown' }] })).toBe(false);
+    expect(isPreviewDescriptor({ id, files: [{ ...one[0], kind: 'text' }] })).toBe(false);
+    expect(isPreviewDescriptor({ id, files: [{ ...one[0], id: 'not-uuid' }] })).toBe(false);
+    for (const fileName of ['../x', 'x\\y', 'x\n.html', 'é'.repeat(128), '']) expect(isPreviewDescriptor({ id, files: [{ id: fileId, fileName, kind: 'html' }] })).toBe(false);
+    expect(isPreviewDescriptor({ id: 'not-uuid', files: one })).toBe(false);
+  });
+  it('rejects malformed status and chunk data, missing fileId, offsets and noncanonical base64', () => {
+    const status = { state: 'ready', previewId: id, fileId, revision, totalBytes: 1 };
+    expect(parseStatus(status, id, fileId)).toMatchObject({ state: 'ready', fileId });
+    expect(() => parseStatus(status, id, otherFileId)).toThrow();
+    expect(() => parseStatus({ state: 'ready', previewId: id, revision, totalBytes: 1 }, id, fileId)).toThrow();
+    expect(() => parseStatus({ ...status, totalBytes: 1048577 }, id, fileId)).toThrow();
+    const chunk = { state: 'chunk', previewId: id, fileId, revision, totalBytes: 1, offset: 0, dataBase64: 'YQ==', done: true };
+    expect(parseChunk(chunk, id, fileId, revision, 1, 0)).toMatchObject({ state: 'chunk', fileId, bytes: Uint8Array.of(97) });
+    expect(() => parseChunk({ ...chunk, fileId: otherFileId }, id, fileId, revision, 1, 0)).toThrow();
+    const noFile = { ...chunk } as Record<string, unknown>; delete noFile.fileId;
+    expect(() => parseChunk(noFile, id, fileId, revision, 1, 0)).toThrow();
+    for (const patch of [{ offset: 1 }, { done: false }, { dataBase64: 'YR==' }, { revision: 'b'.repeat(64) }]) expect(() => parseChunk({ ...chunk, ...patch }, id, fileId, revision, 1, 0)).toThrow();
+    expect(parseChunk({ ...chunk, totalBytes: 0, dataBase64: '' }, id, fileId, revision, 0, 0)).toMatchObject({ state: 'chunk', done: true });
   });
   it('verifies bytes after a UTF-8 character crosses a chunk boundary', async () => {
     const text = 'a'.repeat(PREVIEW_CHUNK_BYTES - 1) + '🌍';
@@ -26,7 +46,7 @@ describe('preview protocol validation', () => {
     const parts = [bytes.slice(0, PREVIEW_CHUNK_BYTES), bytes.slice(PREVIEW_CHUNK_BYTES)];
     let offset = 0; const joined = new Uint8Array(bytes.length);
     for (const part of parts) {
-      const result = parseChunk({ state: 'chunk', previewId: id, revision: hash, totalBytes: bytes.length, offset, dataBase64: Buffer.from(part).toString('base64'), done: offset + part.length === bytes.length }, id, hash, bytes.length, offset);
+      const result = parseChunk({ state: 'chunk', previewId: id, fileId, revision: hash, totalBytes: bytes.length, offset, dataBase64: Buffer.from(part).toString('base64'), done: offset + part.length === bytes.length }, id, fileId, hash, bytes.length, offset);
       if (result.state !== 'chunk') throw new Error('unexpected state');
       joined.set(result.bytes, offset); offset += result.bytes.length;
     }
@@ -43,11 +63,16 @@ describe('preview protocol validation', () => {
     expect(html).toContain('ftown-preview-link-v1');
     expect(html).not.toContain('window.open');
     expect(html).toContain("connect-src 'none'");
+    // The markdown branch goes through the same wrapping and CSP.
+    const md = markdownPreviewDocument('# Hi', 'notes.md');
+    expect(md).toContain("content=\"default-src 'none'");
+    expect(md).toContain('<h1>Hi</h1>');
+    expect(md).toContain('ftown-preview-link-v1');
     expect(previewRatioBounds(648)).toEqual([37.5, 62.5]);
     expect(clampPreviewRatio(0, 648)).toBe(37.5);
     expect(clampPreviewRatio(100, 648)).toBe(62.5);
   });
-  it('forwards external link clicks to the parent for confirmation without opening a window', () => {
+  function linkFrame(wrapped: string) {
     class TestElement {
       constructor(public value: string) {}
       closest(selector: string) { expect(selector).toBe('a[href],area[href]'); return this; }
@@ -66,25 +91,70 @@ describe('preview protocol validation', () => {
     const opened: unknown[][] = [];
     const contextWindow = { open: (...args: unknown[]) => { opened.push(args); }, parent: { postMessage: (...args: unknown[]) => { posted.push(args); } }, location: { hash: '' } };
     const document = { addEventListener: (type: string, callback: (event: TestMouseEvent) => void, capture: boolean) => { expect(type).toBe('click'); expect(capture).toBe(true); listener = callback; } };
-    const wrapped = previewDocument('<p>user markup</p>');
     const script = wrapped.match(/<script>([\s\S]*?)<\/script>/)?.[1];
     expect(script).toBeDefined();
     if (!script) throw new Error('expected script');
     runInNewContext(script, { Element: TestElement, Event: TestEvent, MouseEvent: TestMouseEvent, URL, document, window: contextWindow });
-    TestElement.prototype.getAttribute = () => 'javascript:alert(1)';
     const click = (value: string, trusted = true, button = 0) => {
       const event = new TestMouseEvent(new TestElement(value), trusted, button);
       if (!listener) throw new Error('missing handler');
       listener(event); expect(event.prevented).toBe(true); expect(event.stopped).toBe(true);
     };
-    click('https://example.test/path');
+    return { posted, opened, click, contextWindow };
+  }
+  it('forwards external link clicks to the parent for confirmation without opening a window', () => {
+    const frame = linkFrame(previewDocument('<p>user markup</p>'));
+    frame.click('https://example.test/path');
     // The frame forwards the target and never opens a window itself.
-    expect(opened).toEqual([]);
-    expect(posted).toEqual([[{ channel: 'ftown-preview-link-v1', kind: 'open-link', url: 'https://example.test/path' }, '*']]);
-    for (const blocked of ['/relative', 'javascript:alert(1)', 'data:text/html,x', 'file:///tmp/x', 'mailto:user@example.test']) click(blocked);
-    click('https://example.test/other', false); click('https://example.test/other', true, 1);
-    expect(posted).toHaveLength(1);
-    click('#section'); expect(contextWindow.location.hash).toBe('#section'); expect(posted).toHaveLength(1);
+    expect(frame.opened).toEqual([]);
+    expect(frame.posted).toEqual([[{ channel: 'ftown-preview-link-v1', kind: 'open-link', url: 'https://example.test/path' }, '*']]);
+    for (const blocked of ['/relative', 'javascript:alert(1)', 'data:text/html,x', 'file:///tmp/x', 'mailto:user@example.test']) frame.click(blocked);
+    frame.click('https://example.test/other', false); frame.click('https://example.test/other', true, 1);
+    expect(frame.posted).toHaveLength(1);
+    frame.click('#section'); expect(frame.contextWindow.location.hash).toBe('#section'); expect(frame.posted).toHaveLength(1);
+  });
+  it('switches files for relative links to registered files and keeps other behavior', () => {
+    const frame = linkFrame(previewDocument('<p>x</p>', undefined, ['a.html', 'notes.md']));
+    frame.click('./notes.md#intro');
+    frame.click('notes.md?ver=1');
+    frame.click('sub/dir/notes.md');
+    frame.click('notes.md');
+    frame.click('a.html');
+    expect(frame.posted).toEqual([
+      [{ channel: 'ftown-preview-link-v1', kind: 'switch-file', fileName: 'notes.md' }, '*'],
+      [{ channel: 'ftown-preview-link-v1', kind: 'switch-file', fileName: 'notes.md' }, '*'],
+      [{ channel: 'ftown-preview-link-v1', kind: 'switch-file', fileName: 'notes.md' }, '*'],
+      [{ channel: 'ftown-preview-link-v1', kind: 'switch-file', fileName: 'notes.md' }, '*'],
+      [{ channel: 'ftown-preview-link-v1', kind: 'switch-file', fileName: 'a.html' }, '*'],
+    ]);
+    // Absolute URLs still forward as open-link even when the basename matches.
+    frame.click('https://example.test/notes.md');
+    expect(frame.posted.at(-1)).toEqual([{ channel: 'ftown-preview-link-v1', kind: 'open-link', url: 'https://example.test/notes.md' }, '*']);
+    // Unregistered relatives, protocol-relative and bad schemes never post.
+    const before = frame.posted.length;
+    for (const blocked of ['other.md', '//cdn.example.test/notes.md', 'javascript:notes.md', 'data:text/html,notes.md']) frame.click(blocked);
+    expect(frame.posted).toHaveLength(before);
+  });
+  it('escapes hostile file names so the link script stays a single script and the handler still works', () => {
+    const hostile = '<!--<script>.md';
+    // The hostile basename passes descriptor validation (no slash, backslash or controls),
+    // so it must still be safe to embed in the inline link script.
+    expect(isPreviewDescriptor({ id, files: [{ id: fileId, fileName: hostile, kind: 'markdown' }] })).toBe(true);
+    const wrapped = previewDocument('<p>x</p>', undefined, [hostile, 'a.html']);
+    // Exactly one opening script tag: the hostile name must not inject a second script
+    // or terminate the link script via '<' or '<!--'.
+    expect(wrapped.match(/<script>/g)).toHaveLength(1);
+    expect(wrapped).not.toContain(hostile);
+    expect(wrapped).toContain('\\u003c!--\\u003cscript>.md');
+    const frame = linkFrame(wrapped);
+    // The embedded array round-trips: clicking the hostile name switches to it.
+    frame.click(hostile);
+    expect(frame.posted).toEqual([[{ channel: 'ftown-preview-link-v1', kind: 'switch-file', fileName: hostile }, '*']]);
+    frame.click('a.html');
+    expect(frame.posted).toEqual([
+      [{ channel: 'ftown-preview-link-v1', kind: 'switch-file', fileName: hostile }, '*'],
+      [{ channel: 'ftown-preview-link-v1', kind: 'switch-file', fileName: 'a.html' }, '*'],
+    ]);
   });
 
   // The sandboxed frame is out of process: it can finish loading before the embedder gives it a size.

@@ -31,25 +31,26 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
         const message = `Review the complete deployment plan. ${"longReference".repeat(30)}`;
         await postHook(second, "Notification", { notification_type: "agent_needs_input", title: "API approval", message: "Approve the API changes." });
         await postHook(first, "Notification", { notification_type: "agent_needs_input", title: "Deployment approval", message });
-        const trigger = page.getByRole("button", { name: "Inbox, 2 messages" }); await expect(trigger).toBeVisible();
+        const trigger = page.getByRole("button", { name: "Inbox, 2 waiting" }); await expect(trigger).toBeVisible();
         await expect(originalRow(page, firstName).getByRole("img", { name: "Input needed" })).toBeVisible(); await openInbox();
         const firstEntry = inbox.locator(`[data-inbox-entry="${first}"]`), secondEntry = inbox.locator(`[data-inbox-entry="${second}"]`);
         await expect(firstEntry.getByText(message, { exact: true })).toBeVisible(); await expect(secondEntry.getByText("Approve the API changes.", { exact: true })).toBeVisible();
         expect(await inbox.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
         if (mobile) { await page.setViewportSize({ width: 320, height: 844 }); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true); }
         await page.screenshot({ path: info.outputPath(`inbox-${viewport.name}.png`), fullPage: true });
-        await firstEntry.getByRole("button", { name: "Open session" }).click(); await expect(page.locator(".xterm-rows").first()).toContainText(marker, { timeout: 30_000 });
+        await firstEntry.getByRole("button", { name: "Open session" }).click(); if (mobile) await page.getByRole("tab", { name: "Terminal", exact: true }).click(); await expect(page.locator(".xterm-rows").first()).toContainText(marker, { timeout: 30_000 });
         await workspace(); await expect(trigger).toBeVisible(); await openInbox(); await expect(firstEntry.getByText(message, { exact: true })).toBeVisible(); await closeInbox();
         await page.goto("about:blank"); await postHook(first, "UserPromptSubmit"); await page.goto("/dashboard"); await waitForBridgeOnline(page); await workspace();
-        await expect(page.getByRole("button", { name: "Inbox, 1 message" })).toBeVisible();
+        // C1: a prompt never auto-resolves explicit items, so both stay waiting.
+        await expect(page.getByRole("button", { name: "Inbox, 2 waiting" })).toBeVisible();
         await originalRow(page, secondName).getByRole("button", { name: "Session actions", exact: true }).click();
         await page.getByRole("menu", { name: "Session actions" }).getByRole("menuitem", { name: "Hide", exact: true }).click();
-        await expect(page.getByRole("button", { name: "Inbox, 0 messages" })).toBeVisible();
+        await expect(page.getByRole("button", { name: "Inbox, 1 waiting" })).toBeVisible();
         await page.getByRole("button", { name: /Hidden \(1\)/ }).click(); await page.locator("#dashboard-sidebar").getByRole("button", { name: new RegExp(secondName) }).click({ button: "right" });
         await page.getByRole("menu", { name: "Session actions" }).getByRole("menuitem", { name: "Unhide", exact: true }).click();
-        await expect(page.getByRole("button", { name: "Inbox, 1 message" })).toBeVisible(); await postHook(second, "UserPromptSubmit");
-        await expect(page.getByRole("button", { name: "Inbox, 0 messages" })).toBeVisible(); await page.reload(); await waitForBridgeOnline(page); await workspace();
-        await expect(originalRow(page, firstName)).toBeVisible(); await expect(originalRow(page, secondName)).toBeVisible(); await expect(page.getByRole("button", { name: "Inbox, 0 messages" })).toBeVisible();
+        await expect(page.getByRole("button", { name: "Inbox, 2 waiting" })).toBeVisible(); await postHook(second, "UserPromptSubmit");
+        await expect(page.getByRole("button", { name: "Inbox, 2 waiting" })).toBeVisible(); await page.reload(); await waitForBridgeOnline(page); await workspace();
+        await expect(originalRow(page, firstName)).toBeVisible(); await expect(originalRow(page, secondName)).toBeVisible(); await expect(page.getByRole("button", { name: "Inbox, 2 waiting" })).toBeVisible();
       } finally { for (const id of ids.reverse()) await bridgeApiFetch("DELETE", `/api/sessions/${id}`).catch(() => undefined); }
     });
   });

@@ -32,7 +32,7 @@ const itemSchema = z.object({
   title: z.string().max(200), message: z.string().max(2000),
   createdAt: z.string(), lastSeenAt: z.string(), occurrences: z.number().int().positive(),
   acknowledgedAt: z.string().optional(), resolvedAt: z.string().optional(),
-  resolution: z.enum(['manual', 'user_prompt', 'elicitation_complete', 'session_end', 'answered', 'tool_complete']).optional(),
+  resolution: z.enum(['manual', 'user_prompt', 'elicitation_complete', 'session_end', 'answered', 'tool_complete', 'replied']).optional(),
   prompt: promptSchema.optional(), answer: answerSchema.optional(),
   fingerprint: z.string(), sourceId: z.string().optional(), reason: z.string().optional(),
 }).strict();
@@ -51,7 +51,7 @@ export interface AttentionPage {
 export interface AttentionReadOptions { cursor?: string; limit?: number; includeResolved?: boolean; actionableOnly?: boolean }
 export interface ExplicitAttentionSnapshot { attention: AttentionItem | null; sequence: number }
 export interface AttentionAnswerResult { item: AttentionItem; snapshot: ExplicitAttentionSnapshot; waiterLive: boolean }
-export interface AttentionRecordOptions { prompt?: AttentionPrompt }
+export interface AttentionRecordOptions { prompt?: AttentionPrompt; promptOrigin?: 'human' | 'injected' }
 export class AttentionError extends Error {
   constructor(readonly code: string, message: string, readonly status = 400) { super(message); }
 }
@@ -242,6 +242,11 @@ export class AttentionStore {
       apiPrompt = checked.value;
     }
     const observation = classifyAttentionHook(eventName, data);
+    // An injected prompt (bridge-typed mail pointer/nudge) must not resolve anything.
+    // Activity still records thinking so the session reflects the new turn.
+    if (options.promptOrigin === 'injected' && (eventName === 'UserPromptSubmit' || eventName === 'beforeSubmitPrompt')) {
+      observation.resolve = undefined;
+    }
     if (!observation.activity && !observation.attention && !observation.resolve && !observation.toolComplete) return { item: undefined, created: false };
     const cancelIdle = observation.activity === 'thinking' || observation.activity === 'tool_use' || observation.resolve === 'session_end';
     if (cancelIdle) this.idleCanceled(id);
@@ -258,6 +263,8 @@ export class AttentionStore {
       const resolvedIds: string[] = [];
       if (observation.resolve) for (const event of ledger.events) {
         if (event.resolvedAt || (observation.resolve === 'elicitation_complete' && event.type !== 'elicitation_dialog')) continue;
+        // Prompts never auto-resolve explicit items (C1): user_prompt covers only non-explicit.
+        if (observation.resolve === 'user_prompt' && this.isExplicit(event)) continue;
         event.resolvedAt = timestamp;
         event.resolution = observation.resolve;
         resolvedAny = true; resolvedIds.push(event.id);
@@ -355,6 +362,21 @@ export class AttentionStore {
       await this.save(id, ledger);
       this.wakeItemWaiters(id);
       return { attention: this.latestExplicit(ledger), sequence: ledger.sequence };
+    });
+  }
+  /** Resolve exactly one item as replied (inbox reply after durable mail). Unknown/already-resolved is a no-op. */
+  async resolveReplied(id: string, eventId: string): Promise<void> {
+    return this.withLock(id, async () => {
+      const ledger = await this.load(id);
+      const event = ledger.events.find(candidate => candidate.id === eventId);
+      if (!event || event.resolvedAt) return;
+      const timestamp = new Date(this.notificationOptions.now()).toISOString();
+      event.resolvedAt = timestamp;
+      event.resolution = 'replied';
+      ledger.sequence++;
+      this.prune(ledger, [event.id]);
+      await this.save(id, ledger);
+      this.wakeItemWaiters(id);
     });
   }
   /** Record the human's answer and resolve the item. The caller delivers it (waiter or mail). */

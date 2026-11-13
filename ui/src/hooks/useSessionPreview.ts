@@ -2,20 +2,20 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import { PREVIEW_POLL_MS, type PreviewUnavailableReason, type SessionPreviewDescriptor } from '../../../bridge/src/preview-protocol';
+import { PREVIEW_POLL_MS, type PreviewUnavailableReason, type SessionPreviewDescriptor, type SessionPreviewFile } from '../../../bridge/src/preview-protocol';
 import type { MessageClient } from '@/lib/message-client';
 import type { BridgeRpc } from '@/hooks/useBridgeRpc';
-import { parseChunk, parseStatus, verifyPreview } from '@/lib/session-preview';
+import { isPreviewDescriptor, parseChunk, parseStatus, verifyPreview } from '@/lib/session-preview';
 import { sessionAuthority } from '@/lib/session-authority';
 
 export type SessionPreviewAuthoritySubscriber = (listener: () => void) => () => void;
 type PreviewState =
   | { kind: 'loading' | 'offline' | 'unregistered' | 'error' }
   | { kind: 'unavailable'; reason: PreviewUnavailableReason }
-  | { kind: 'ready'; html: string; revision: string; key: string; updating: boolean };
-interface Target { bridgeId: string; sessionId: string; preview: SessionPreviewDescriptor }
+  | { kind: 'ready'; html: string; revision: string; key: string; updating: boolean; file: SessionPreviewFile };
+interface Target { bridgeId: string; sessionId: string; preview: SessionPreviewDescriptor; file: SessionPreviewFile }
 interface Options { client: MessageClient | null; userId: string; target: Target | null; visible: boolean; readable: boolean; securityGeneration: number; sendCommand: BridgeRpc['sendCommand']; subscribeAuthority?: SessionPreviewAuthoritySubscriber }
-type Complete = { html: string; revision: string; totalBytes: number; key: string };
+type Complete = { html: string; revision: string; totalBytes: number; key: string; file: SessionPreviewFile };
 interface Store {
   identity: string; client: MessageClient | null; runtime: MessageClient['securityRuntime']; userId: string; readable: boolean; subscriber?: SessionPreviewAuthoritySubscriber;
   visible: boolean; documentVisible: boolean; securityGeneration: number; epoch: number; nonce: number; manualRequested: number; manualApplied: number; hardEpoch: number;
@@ -31,8 +31,12 @@ function isAuthorityDenial(value: unknown): boolean {
   return ['permission_denied', 'endpoint_revoked', 'key_changed', 'approval_required'].includes(value.code) || value.code.startsWith('account_');
 }
 
-export function useSessionPreview({ client, userId, target, visible, readable, securityGeneration, sendCommand, subscribeAuthority }: Options) {
-  const identity = target ? JSON.stringify([target.bridgeId, target.sessionId, target.preview.id]) : '';
+export function useSessionPreview({ client, userId, target: requestedTarget, visible, readable, securityGeneration, sendCommand, subscribeAuthority }: Options) {
+  // Old bridges send the pre-multi-file shape ({ id, fileName } with no files
+  // array) and a stale selection may name a file outside the current set: both
+  // are treated as no preview, never fetched and never thrown on.
+  const target = requestedTarget && isPreviewDescriptor(requestedTarget.preview) && requestedTarget.file && requestedTarget.preview.files.some(entry => entry.id === requestedTarget.file.id) ? requestedTarget : null;
+  const identity = target ? JSON.stringify([target.bridgeId, target.sessionId, target.preview.id, target.file.id]) : '';
   const [documentVisible, setDocumentVisible] = useState(() => typeof document === 'undefined' || document.visibilityState === 'visible');
   const [, redraw] = useState(0);
   const refreshRef = useRef<() => void>(() => {});
@@ -147,10 +151,10 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
         let complete = store.complete;
         if (complete && manual) { store.status = { kind: 'ready', ...complete, updating: true }; render(); }
         else if (!complete) { store.status = { kind: 'loading' }; render(); }
-        const base = { bridgeId: target.bridgeId, sessionId: target.sessionId, previewId: target.preview.id };
+        const base = { bridgeId: target.bridgeId, sessionId: target.sessionId, previewId: target.preview.id, fileId: target.file.id };
         const raw = await command('session_preview_status', { ...base, ...(complete ? { knownRevision: complete.revision } : {}) });
         if (!mayCommit()) return;
-        const status = parseStatus(raw, target.preview.id);
+        const status = parseStatus(raw, target.preview.id, target.file.id);
         if (status.state === 'unregistered' || status.state === 'unavailable') {
           store.hardEpoch++; store.complete = null;
           if (status.state === 'unregistered') store.manualApplied = manualVersion;
@@ -166,7 +170,7 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
           do {
             const rawChunk = await command('session_preview_chunk', { ...base, revision: status.revision, offset });
             if (!mayCommit()) return;
-            const chunk = parseChunk(rawChunk, target.preview.id, status.revision, status.totalBytes, offset);
+            const chunk = parseChunk(rawChunk, target.preview.id, target.file.id, status.revision, status.totalBytes, offset);
             if (chunk.state === 'stale_revision') { abandoned = true; break; }
             if (chunk.state === 'unavailable') { store.hardEpoch++; store.complete = null; store.status = { kind: 'unavailable', reason: chunk.reason }; abandoned = true; break; }
             bytes.set(chunk.bytes, offset); offset += chunk.bytes.length;
@@ -175,7 +179,7 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
           if (!abandoned) {
             const html = await verifyPreview(bytes, status.revision);
             if (!mayCommit()) return;
-            complete = { html, revision: status.revision, totalBytes: status.totalBytes, key: `${identity}:${status.revision}:${++store.nonce}` };
+            complete = { html, revision: status.revision, totalBytes: status.totalBytes, key: `${identity}:${status.revision}:${++store.nonce}`, file: target.file };
             if (manual) store.manualApplied = manualVersion;
             store.complete = complete; store.status = { kind: 'ready', ...complete, updating: false };
           } else if (store.complete) store.status = { kind: 'ready', ...store.complete, updating: false };
@@ -203,7 +207,7 @@ export function useSessionPreview({ client, userId, target, visible, readable, s
     refreshRef.current = () => { store.manualRequested++; if (timer) clearTimeout(timer); if (!busy) void poll(); };
     void poll();
     return () => { active = false; clearTimeout(timer); refreshRef.current = () => {}; };
-  }, [client, userId, identity, target?.bridgeId, target?.sessionId, target?.preview.id, visible, readable, documentVisible, sendCommand, epoch, store]);
+  }, [client, userId, identity, target?.bridgeId, target?.sessionId, target?.preview.id, target?.file.id, visible, readable, documentVisible, sendCommand, epoch, store]);
   const refresh = useCallback(() => refreshRef.current(), []);
   const state: PreviewState = !target ? { kind: 'unregistered' } : !client || (!readable && !store.complete) ? { kind: 'offline' } : store.status;
   const getHardEpoch = useCallback(() => storeRef.current.hardEpoch, []);

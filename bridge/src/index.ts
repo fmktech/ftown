@@ -963,6 +963,7 @@ program
       await createCommandHandler({ bridgeId, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses, pullRequestReview,
         enqueueSessionMessage: (session, message) => localApiServer.enqueueSessionMessage(session, message),
         acceptSessionMail: (session, body) => localApiServer.acceptSessionMail(session, body),
+        publishAttentionChanged: (sessionId) => { localApiServer.emit('event', { sessionId, eventName: 'AttentionSnapshot', data: {} }); },
         publishCommandResponse: async response => { result = response; },
       })(message.application.data as unknown as Parameters<ReturnType<typeof createCommandHandler>>[0], message);
       return applicationJson({ type: 'command_response', response: result ?? { requestId: route.requestId, success: false, error: 'bridge_error' } });

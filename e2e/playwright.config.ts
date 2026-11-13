@@ -100,7 +100,8 @@ export default defineConfig({
       name: "setup",
       testMatch: /account\.setup\.ts$/,
       // CI: after every project that depends on setup has finished, whatever their outcome. Not locally, where a
-      // partial run would add another permanent passkey each time (run it with `--project=second-passkey`).
+      // partial run (one file, `--project=chromium`) would then add another permanent passkey each time: there
+      // `second-passkey` depends on `chromium` instead (below).
       teardown: process.env.CI ? "second-passkey" : undefined,
       use: chromiumUse,
     },
@@ -112,8 +113,16 @@ export default defineConfig({
     },
     {
       // Adds a PERMANENT second passkey to the shared account (authorities are add-only), after which every
-      // browser must "Choose passkey" before signing: it runs last, as the setup project's teardown.
+      // browser must "Choose passkey" before signing: it must run last.
+      // CI: as the setup project's teardown (above). Locally: after the whole `chromium` project, as its dependant,
+      // so a plain `npx playwright test` is ordered setup -> chromium -> second-passkey, while `--project=chromium`
+      // and a single chromium spec file never reach it. A project without this edge is scheduled alongside
+      // `chromium`'s dependencies, i.e. right after setup, and breaks every later test that signs.
+      // Consequences locally: it is skipped when a chromium test failed, and selecting it alone
+      // (`--project=second-passkey`) runs setup and chromium first; add `--no-deps` to run only it on a stack whose
+      // setup already ran.
       name: "second-passkey",
+      dependencies: process.env.CI ? undefined : ["chromium"],
       testMatch: /second-passkey\.spec\.ts$/,
       use: chromiumUse,
     },
