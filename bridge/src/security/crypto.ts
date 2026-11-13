@@ -18,6 +18,17 @@ const fields = [
 const suite = new CipherSuite({
   kem: new DhkemP256HkdfSha256(), kdf: new HkdfSha256(), aead: new Aes256Gcm(),
 });
+/** Upper bound of validated public keys kept; the least recently used one is dropped first. */
+export const PUBLIC_KEY_CACHE_LIMIT = 256;
+/**
+ * Public keys that passed full validation, by their exact canonical base64url bytes: the SHA-256 fingerprint of those bytes and the
+ * imported handle. Public material only. An entry exists only after the digest matched the claimed id AND the import succeeded, and
+ * every use still compares the claimed id with the stored fingerprint. It authorizes nothing: whom to seal to or accept from is decided
+ * by the caller's policy on every message; this only avoids hashing and importing the same bytes again.
+ */
+const validatedPublicKeys = new Map<string, { id: string; key: CryptoKey }>();
+/** Raw export of an identity's own public CryptoKey (immutable once created), by key identity. Failed exports are not recorded. */
+const exportedPublicKeys = new WeakMap<CryptoKey, string>();
 
 /** A safe, stable error: underlying crypto/input details never cross this boundary. */
 export class SecurityError extends Error implements SecurityFailure {
@@ -141,13 +152,33 @@ async function endpointKey(endpoint: EndpointPublic): Promise<CryptoKey> {
   exact(endpoint, ['version', 'id', 'ownerId', 'kind', 'publicKey']);
   if (endpoint.version !== 1 || !owner(endpoint.ownerId) || !kinds.includes(endpoint.kind) || !fingerprintSyntax(endpoint.id)) return invalid();
   const raw = bytes(endpoint.publicKey, 65);
+  const known = validatedPublicKeys.get(endpoint.publicKey);
+  if (known) {
+    if (known.id !== endpoint.id) return invalid();
+    validatedPublicKeys.delete(endpoint.publicKey);
+    validatedPublicKeys.set(endpoint.publicKey, known);
+    return known.key;
+  }
   const digest = base64(new Uint8Array(await subtle().digest('SHA-256', raw)));
   if (digest !== endpoint.id) return invalid();
-  return importPublicKey(endpoint.publicKey);
+  const key = await importPublicKey(endpoint.publicKey);
+  validatedPublicKeys.set(endpoint.publicKey, { id: digest, key });
+  for (const oldest of validatedPublicKeys.keys()) {
+    if (validatedPublicKeys.size <= PUBLIC_KEY_CACHE_LIMIT) break;
+    validatedPublicKeys.delete(oldest);
+  }
+  return key;
+}
+async function ownPublicKey(key: CryptoKey): Promise<string> {
+  const known = exportedPublicKeys.get(key);
+  if (known !== undefined) return known;
+  const exported = await exportPublicKey(key);
+  exportedPublicKeys.set(key, exported);
+  return exported;
 }
 async function validateIdentity(identity: EndpointIdentity): Promise<void> {
   await endpointKey(identity.endpoint);
-  if (await exportPublicKey(identity.keyPair.publicKey) !== identity.endpoint.publicKey
+  if (await ownPublicKey(identity.keyPair.publicKey) !== identity.endpoint.publicKey
     || identity.keyPair.privateKey.type !== 'private' || identity.keyPair.privateKey.algorithm.name !== 'ECDH'
     || !('namedCurve' in identity.keyPair.privateKey.algorithm) || identity.keyPair.privateKey.algorithm.namedCurve !== 'P-256'
     || !identity.keyPair.privateKey.usages.includes('deriveBits')) return invalid();
@@ -201,8 +232,12 @@ export async function seal(identity: EndpointIdentity, recipient: EndpointPublic
   if (overhead + Math.ceil((plaintext.byteLength + 16) * 4 / 3) > MAX_ENVELOPE_BYTES) throw new SecurityError('capacity_exceeded', 'Encrypted packet exceeds the transport limit');
   try {
     const sender = await suite.createSenderContext({ recipientPublicKey, senderKey: identity.keyPair, info: domain });
-    const ciphertext = await sender.seal(plaintext, aad(parsed));
-    return parseSecureEnvelope({ ...parsed, enc: base64(new Uint8Array(sender.enc)), ciphertext: base64(new Uint8Array(ciphertext)) });
+    const enc = new Uint8Array(sender.enc);
+    const ciphertext = new Uint8Array(await sender.seal(plaintext, aad(parsed)));
+    // The header was validated above and the size bounded before encrypting, so the only parts of this envelope not yet checked are
+    // the two HPKE outputs. These are the properties parseSecureEnvelope requires of them, without decoding the envelope again.
+    if (enc.length !== 65 || enc[0] !== 4 || ciphertext.length !== plaintext.byteLength + 16) return invalid();
+    return { ...parsed, enc: base64(enc), ciphertext: base64(ciphertext) };
   } catch (error) {
     if (error instanceof SecurityError) throw error;
     throw new SecurityError('authentication_failed', 'Encrypted packet could not be sealed');

@@ -178,10 +178,15 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
   }
   private async reply(recipient: ApprovedEndpoint['endpoint'], purpose: SecureEnvelope['purpose'], data: unknown,
     route: InboundTransportContext, messageId: string = randomUUID()): Promise<SecureEnvelope> {
+    return this.replyBytes(recipient, purpose, new TextEncoder().encode(JSON.stringify(data)), route, messageId);
+  }
+  /** One fresh encapsulation of already serialized content. */
+  private async replyBytes(recipient: ApprovedEndpoint['endpoint'], purpose: SecureEnvelope['purpose'], plaintext: Uint8Array,
+    route: InboundTransportContext, messageId: string): Promise<SecureEnvelope> {
     this.context(route);
     return seal(this.identity, recipient, { type: 'ftown_encrypted', version: 1, senderId: this.endpoint.id, recipientId: recipient.id,
       ownerId: this.endpoint.ownerId, bridgeId: this.bridgeId, channel: route.channel, purpose, messageId,
-      createdAt: this.now(), expiresAt: this.now() + 120000, receiverEpoch: null }, new TextEncoder().encode(JSON.stringify(data)));
+      createdAt: this.now(), expiresAt: this.now() + 120000, receiverEpoch: null }, plaintext);
   }
   async handleHandshake(packet: SecureEnvelope | EnrollmentPacket, route: InboundTransportContext): Promise<SecureEnvelope> {
     this.context(route);
@@ -287,13 +292,22 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
     await this.policy.revalidate(principal);
     return envelope;
   }
+  /**
+   * Relay publications only (the route is always 'cloud'). The local CLI never connects to the relay: it reads the same publications
+   * from the local events ring, sealed to it per poll by sealTo, so no relay envelope is made for it.
+   * The readers and their keys come from ONE policy snapshot read, taken when this is called; each reader still gets its own fresh
+   * encapsulation and message id. Nothing here re-reads the policy afterwards: the sender re-checks every packet's recipient with
+   * policy.principal() immediately before handing it to the relay (the packet's send() in centrifugo-client), and does not publish
+   * the packet of a recipient that stopped being one.
+   */
   async sealPublication(channel: string, application: SecureApplication): Promise<(SecureEnvelope | SecurePublication)[]> {
-    const recipients = await this.policy.recipients();
+    const readers = (await this.policy.readers()).filter(reader => reader.endpoint.kind !== 'local-cli');
+    const route: InboundTransportContext = { transport: 'cloud', channel, bridgeId: this.bridgeId, pairId: null };
+    const plaintext = new TextEncoder().encode(JSON.stringify(application));
     const packets: SecureEnvelope[] = [];
-    for (const recipient of recipients) {
-      try { packets.push(await this.sealTo(recipient.endpoint.id, application, { transport: 'cloud', channel, bridgeId: this.bridgeId, pairId: null })); }
-      catch (error) { if (!(error instanceof BridgeSecurityError) || (!['endpoint_revoked', 'approval_required', 'expired'].includes(error.code)
-        && !error.code.startsWith('account_'))) throw error; }
+    for (const reader of readers) {
+      packets.push(await this.replyBytes(reader.endpoint, 'application', plaintext, route,
+        application.route.kind === 'response' ? application.route.requestId : randomUUID()));
     }
     return packets;
   }

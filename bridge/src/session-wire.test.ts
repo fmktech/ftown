@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { generateEndpoint, open } from './security/crypto.js';
 import type { SecureEnvelope } from './security/protocol.js';
 import { BridgeSecurityService } from './security/bridge/security.js';
+import { LOCAL_RECOVERY_AUTHORITY } from './security/bridge/policy.js';
 
 function makeSession(overrides: Partial<Session> = {}): Session {
   return {
@@ -85,9 +86,12 @@ describe('CentrifugoClient.publishSessionUpdate — token never crosses the wire
     const ownerId = '7bac2a7f-c58e-4845-856f-8283fb07ad96';
     const dir = await mkdtemp(join(tmpdir(), 'ftown-session-wire-'));
     const bridge = await generateEndpoint(ownerId, 'bridge');
-    const browser = await generateEndpoint(ownerId, 'local-cli');
+    const browser = await generateEndpoint(ownerId, 'browser');
     const security = new BridgeSecurityService(bridge, 'bridge-1', dir, { relayUserId: 'user-1' });
-    await security.policy.provisionLocalEndpoint(browser.endpoint);
+    // Relay publications are sealed to enrolled browsers only: the local CLI reads the local events ring, never the relay.
+    const invitation = await security.policy.createInvitation(LOCAL_RECOVERY_AUTHORITY, { label: 'browser' });
+    await security.policy.consumeInvitation({ type: 'enroll', candidate: browser.endpoint, invitationId: invitation.invitationId,
+      invitationSecret: invitation.secret, label: 'browser' });
     client.setSecurity(security);
     t.after(async () => { await security.close(); await rm(dir, { recursive: true, force: true }); });
 
