@@ -150,13 +150,46 @@ describe("SessionOverview", () => {
 });
 
 describe("SessionWorkspace overview toggle", () => {
-  it("switches Overview -> Terminal -> Overview while the terminal stays mounted", () => {
-    class TestResizeObserver implements ResizeObserver {
-      constructor(private callback: ResizeObserverCallback) {}
-      observe(target: Element) { this.callback([{ target, contentRect: DOMRect.fromRect({ width: 900 }), borderBoxSize: [], contentBoxSize: [], devicePixelContentBoxSize: [] }], this); }
-      unobserve() {}
-      disconnect() {}
-    }
+  let observedWidth = 500;
+  class TestResizeObserver implements ResizeObserver {
+    constructor(private callback: ResizeObserverCallback) {}
+    observe(target: Element) { this.callback([{ target, contentRect: DOMRect.fromRect({ width: observedWidth }), borderBoxSize: [], contentBoxSize: [], devicePixelContentBoxSize: [] }], this); }
+    unobserve() {}
+    disconnect() {}
+  }
+
+  it("on a compact workspace the Overview is the default tab and covers the still-mounted terminal without refitting it", () => {
+    observedWidth = 500;
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    const manager = managerSession({ brief: undefined });
+    const child = session("child-1", { name: "Child one", parentSessionId: "manager" });
+    const onRefit = vi.fn();
+    render(
+      <SessionWorkspace session={manager} sessions={[manager, child]} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open={false} onClose={vi.fn()} isDesktop mobileTab="terminal" onMobileTab={vi.fn()} onRefit={onRefit}>
+        <div data-testid="terminal-node">Terminal content</div>
+      </SessionWorkspace>,
+    );
+    const tablist = screen.getByRole("tablist", { name: "Session view" });
+    expect(screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-controls")).toBe("session-overview-panel");
+    expect(screen.getByRole("tabpanel", { name: "Overview" })).toBeTruthy();
+    const terminal = screen.getByTestId("terminal-node");
+    fireEvent.click(screen.getByRole("tab", { name: "Terminal" }));
+    expect(screen.queryByRole("tabpanel", { name: "Overview" })).toBeNull();
+    expect(screen.getByTestId("terminal-node")).toBe(terminal);
+    expect(onRefit).toHaveBeenCalled();
+    onRefit.mockClear();
+    const terminalTab = screen.getByRole("tab", { name: "Terminal" });
+    terminalTab.focus();
+    fireEvent.keyDown(tablist, { key: "ArrowRight" });
+    expect(screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tabpanel", { name: "Overview" })).toBeTruthy();
+    expect(screen.getByTestId("terminal-node")).toBe(terminal);
+    expect(onRefit).not.toHaveBeenCalled();
+  });
+
+  it("on a desktop workspace the Overview gets its own column beside the fitted terminal", () => {
+    observedWidth = 900;
     vi.stubGlobal("ResizeObserver", TestResizeObserver);
     const manager = managerSession({ brief: undefined });
     const child = session("child-1", { name: "Child one", parentSessionId: "manager" });
@@ -167,19 +200,32 @@ describe("SessionWorkspace overview toggle", () => {
       </SessionWorkspace>,
     );
     expect(screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
-    expect(screen.getByRole("tabpanel", { name: "Overview" })).toBeTruthy();
+    const panel = screen.getByRole("tabpanel", { name: "Overview" });
+    expect(panel.closest(".session-aux-pane")).toBeTruthy();
+    expect(screen.getByRole("tablist", { name: "Auxiliary view" }).textContent).toBe("OverviewTerminal");
     const terminal = screen.getByTestId("terminal-node");
+    expect((terminal.closest("[aria-label='Terminal']") as HTMLElement).hidden).toBe(false);
+    expect(onRefit).toHaveBeenCalled();
+    onRefit.mockClear();
     fireEvent.click(screen.getByRole("tab", { name: "Terminal" }));
     expect(screen.queryByRole("tabpanel", { name: "Overview" })).toBeNull();
     expect(screen.getByTestId("terminal-node")).toBe(terminal);
-    expect(onRefit).toHaveBeenCalled();
-    onRefit.mockClear();
-    const terminalTab = screen.getByRole("tab", { name: "Terminal" });
-    terminalTab.focus();
-    fireEvent.keyDown(screen.getByRole("tablist", { name: "Terminal or overview" }), { key: "ArrowRight" });
-    expect(screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Terminal" }).getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(screen.getByRole("tab", { name: "Overview" }));
     expect(screen.getByRole("tabpanel", { name: "Overview" })).toBeTruthy();
     expect(screen.getByTestId("terminal-node")).toBe(terminal);
-    expect(onRefit).not.toHaveBeenCalled();
+  });
+
+  it("shows no Overview tab for a session without children", () => {
+    observedWidth = 900;
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    const plain = session("plain", { name: "Plain" });
+    render(
+      <SessionWorkspace session={plain} sessions={[plain]} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open={false} onClose={vi.fn()} isDesktop mobileTab="terminal" onMobileTab={vi.fn()} onRefit={vi.fn()}>
+        <div data-testid="terminal-node">Terminal content</div>
+      </SessionWorkspace>,
+    );
+    expect(screen.queryByRole("tab", { name: "Overview" })).toBeNull();
+    expect(screen.queryByRole("tabpanel", { name: "Overview" })).toBeNull();
   });
 });

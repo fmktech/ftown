@@ -388,6 +388,23 @@ describe("inbox document title", () => {
   });
 });
 
+describe("manager Overview tab", () => {
+  it("appears on the phone for a session with children, shows the overview panel, and disappears for a plain session", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    state.sessions = [session("boss", "Boss"), session("child", "Worker", { parentSessionId: "boss" }), session("plain", "Regular shell")];
+    dashboard();
+    fireEvent.click(await screen.findByRole("button", { name: /Boss/ }));
+    expect(phoneTabNames()).toEqual(["Workspace", "Overview", "Terminal"]);
+    fireEvent.click(phoneTab("Overview"));
+    expect(phoneTab("Overview").getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tabpanel", { name: "Overview" })).toBeTruthy();
+    fireEvent.click(phoneTab("Terminal"));
+    expect(screen.queryByRole("tabpanel", { name: "Overview" })).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
+    expect(phoneTabNames()).toEqual(["Workspace", "Terminal"]);
+  });
+});
+
 type Layout = "wide" | "compact" | "mobile";
 const layouts: Layout[] = ["wide", "compact", "mobile"];
 function useLayout(layout: Layout) {

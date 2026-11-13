@@ -23,6 +23,7 @@ import type { AttentionAnswerSubmitResult } from "./AttentionAnswerForm";
 import { SessionInboxPage, SessionInboxTrigger, inboxEntries, inboxItemKey, isWithParent, waitingInboxCount, noticeKey, queueSessionReply, attentionAnswerSubmitResult, type InboxEntry } from "./SessionInbox";
 import { PullRequestStatusProvider } from "./PullRequestStatusProvider";
 import { SessionWorkspace } from "./SessionWorkspace";
+import { childSessionsOf } from "./SessionOverview";
 import { parsePullRequestUrl } from "@/lib/pull-request-url";
 import { Terminal, TerminalHandle } from "./Terminal";
 import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
@@ -115,7 +116,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
   const [showToken, setShowToken] = useState(false);
   const [copiedCommand, setCopiedCommand] = useState<"setup" | "start" | null>(null);
-  const [mobileTab, setMobileTab] = useState<"sessions" | "terminal" | "preview" | "review">("sessions");
+  const [mobileTab, setMobileTab] = useState<"sessions" | "terminal" | "overview" | "preview" | "review">("sessions");
   const [sidebarCollapsed, setSidebarCollapsed] = usePersistentState<boolean>("ftown:sidebarCollapsed", false);
   const [storedSidebarWidth, setStoredSidebarWidth] = usePersistentState<number>("ftown:sidebarWidth", DEFAULT_SIDEBAR_WIDTH);
   const sidebarWidth = clampSidebarWidth(storedSidebarWidth);
@@ -428,6 +429,8 @@ PY`;
   // The phone's preview tab is the one side-pane tab: it exists for an open preview or a shown item. When the view behind
   // the selected tab goes away, SessionWorkspace asks for the fallback tab through onMobileTab; nothing here second-guesses it.
   const sidePaneOpen = previewOpen || attentionShown;
+  // The Overview tab exists while the selected session manages children; it shows the same manager view the desktop does.
+  const selectedHasChildren = useMemo(() => !!selectedSession && childSessionsOf(selectedSession, sessions).length > 0, [selectedSession, sessions]);
   const moveFocusAfterHideRef = useRef(false);
   const showAttention = useCallback(() => setAttentionHidden(null), []);
   const hideAttention = useCallback((moveFocus: boolean) => {
@@ -617,14 +620,15 @@ PY`;
     document.title = waitingCount > 0 ? `(${waitingCount}) ${base}` : base;
     return () => { document.title = document.title.replace(/^\((\d+)\)\s+/, ""); };
   }, [waitingCount]);
-  // A newly shown item (new item, re-shown item, Inbox page closed) moves a phone from the terminal to the side-pane tab.
-  // It never leaves the Workspace list or the PR review; entering a session is handled by handleSelectSession.
+  // A newly shown item (new item, re-shown item, Inbox page closed) moves a phone from the terminal or the
+  // manager Overview to the side-pane tab. It never leaves the Workspace list or the PR review; entering a
+  // session is handled by handleSelectSession.
   const shownAttention = attentionShown ? attentionMarker : null;
   const previousShownAttention = useRef<string | null>(null);
   useEffect(() => {
     const previous = previousShownAttention.current;
     previousShownAttention.current = shownAttention;
-    if (shownAttention && shownAttention !== previous && !isDesktop && mobileTab === "terminal") setMobileTab("preview");
+    if (shownAttention && shownAttention !== previous && !isDesktop && (mobileTab === "terminal" || mobileTab === "overview")) setMobileTab("preview");
   }, [shownAttention, isDesktop, mobileTab]);
   const replyToInbox = async (entry: InboxEntry, message: string) => {
     const current = sessions.find(session => session.id === entry.session.id && session.bridgeId === entry.session.bridgeId);
@@ -671,7 +675,7 @@ PY`;
     return () => navigator.serviceWorker?.removeEventListener("message", onNotification);
   }, [rawSessions, handleSelectSession]);
 
-  const handleMobileTabSwitch = useCallback((tab: "sessions" | "terminal" | "preview" | "review") => {
+  const handleMobileTabSwitch = useCallback((tab: "sessions" | "terminal" | "overview" | "preview" | "review") => {
     setInboxOpen(false);
     setMobileTab(tab);
     if (tab === "terminal") {
@@ -1117,6 +1121,13 @@ PY`;
           Workspace{waitingCount > 0 && mobileTab !== "sessions" ? <span aria-hidden="true" className="mobile-tab-inbox-badge">{waitingCount}</span> : null}
         </button>
         {waitingCount > 0 && mobileTab !== "sessions" ? <span id="mobile-tab-inbox-waiting" className="inbox-visually-hidden">{waitingCount} waiting</span> : null}
+        {selectedHasChildren && <button
+          className={`mobile-tab ${mobileTab === "overview" ? "mobile-tab-active" : ""}`}
+          role="tab" tabIndex={mobileTab === "overview" ? 0 : -1} aria-selected={mobileTab === "overview"} aria-controls="session-overview-panel"
+          onClick={() => handleMobileTabSwitch("overview")}
+        >
+          Overview
+        </button>}
         <button
           className={`mobile-tab ${mobileTab === "terminal" ? "mobile-tab-active" : ""}`}
           role="tab" tabIndex={mobileTab === "terminal" ? 0 : -1} aria-selected={mobileTab === "terminal"} aria-controls="session-terminal-panel"
