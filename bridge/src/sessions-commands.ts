@@ -135,7 +135,9 @@ function formatUsageTable(rows: UsageRow[]): string {
 interface SessionsOptions {
   plain?: boolean; json?: boolean; shell?: string; prompt?: string; workdir?: string;
   name?: string; command?: string; model?: string; parentId?: string; parent?: boolean;
-  createWorkdir?: boolean; offset?: string; limit?: string; pattern?: string;
+  createWorkdir?: boolean; worktree?: boolean; branch?: string; base?: string;
+  keepWorktree?: boolean; forceWorktree?: boolean; to?: string;
+  offset?: string; limit?: string; pattern?: string;
   children?: boolean; siblings?: boolean; keys?: boolean; type?: string; thread?: string;
   peek?: boolean; all?: boolean; sessionId?: string; message?: string; messageFile?: string; id?: string; title?: string; clear?: boolean;
   option?: string[]; multi?: boolean; text?: boolean; questionsJson?: string; wait?: boolean; timeout?: string;
@@ -158,15 +160,22 @@ function sessionProgram(): Command {
     .option('--shell <type>', 'Harness override; otherwise inherit the current session')
     .option('--prompt <text>', 'Initial message').option('--workdir <path>', 'Working directory')
     .option('--create-workdir', 'Create the working directory if missing')
+    .option('--worktree', 'Create a bridge-owned git worktree for the session')
+    .option('--branch <name>', 'Worktree branch (requires --worktree)')
+    .option('--base <ref>', 'Base ref for the worktree branch (requires --worktree)')
     .option('--name <label>', 'Dashboard name').option('--command <cmd>', 'Full command override')
     .option('--parent', 'Link to the current session').option('--parent-id <uuid>', 'Explicit parent session')
     .option('--model <name>', 'Model override')
     .option('--orchestrator', 'Compatibility flag (no additional prompt or environment changes)')
     .action((_opts, cmd: Command) => run('create', [], cmd));
-  for (const name of ['get', 'running', 'remove', 'revive'] as const) {
-    command(`${name} <session-id>`, { get: 'Session metadata', running: 'Check if session PTY is running', remove: 'Stop and remove a session', revive: 'Recreate an archived session' }[name])
+  for (const name of ['get', 'running', 'revive'] as const) {
+    command(`${name} <session-id>`, { get: 'Session metadata', running: 'Check if session PTY is running', revive: 'Recreate an archived session' }[name])
       .action((id: string, _opts, cmd: Command) => run(name, [id], cmd));
   }
+  command('remove <session-id>', 'Stop and remove a session')
+    .option('--keep-worktree', 'Retain a bridge-owned worktree instead of auto-retiring it')
+    .option('--force-worktree', 'Force-remove a bridge-owned worktree')
+    .action((id: string, _opts, cmd: Command) => run('remove', [id], cmd));
   command('screen <session-id>', 'Print terminal lines')
     .option('--offset <n>', 'Pagination offset', '0').option('--limit <n>', 'Max lines', '200')
     .action((id: string, _opts, cmd: Command) => run('screen', [id], cmd));
@@ -190,6 +199,7 @@ function sessionProgram(): Command {
   command('attention', 'Request human input for this session')
     .requiredOption('--message <text>', 'What the user should review or answer (max 2000 characters)')
     .option('--title <text>', 'Short title (max 200 characters)')
+    .option('--to <target>', 'Routing target (only "human" is supported to bypass parent routing)')
     .option('--option <label>', 'Answer option shown to the user (repeatable)', (value: string, previous: string[]) => [...previous, value], [] as string[])
     .option('--multi', 'Let the user select several options (needs --option)')
     .option('--no-text', 'Do not offer a free-text answer (needs --option)')
@@ -408,6 +418,9 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
         const id = selfSessionId(options.sessionId);
         const message = attentionText(options.message ?? '', '--message', 2000);
         const title = options.title === undefined ? undefined : attentionText(options.title, '--title', 200);
+        if (options.to !== undefined && options.to !== 'human') {
+          throw new Error('--to only accepts "human"');
+        }
         const labels = options.option ?? [];
         const noText = options.text === false;
         if (options.questionsJson !== undefined && (labels.length > 0 || options.multi || noText)) {
@@ -423,7 +436,12 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
         if (options.wait && !questions) throw new Error('--wait requires --option or --questions-json');
         const timeoutSeconds = options.wait ? parseAttentionTimeout(options.timeout) : 0;
         await requireSessionCapability(id, 'attention', questions !== undefined);
-        const { data } = await api('POST', `/api/sessions/${id}/attention`, { message, ...(title === undefined ? {} : { title }), ...(questions === undefined ? {} : { questions }) });
+        const { data } = await api('POST', `/api/sessions/${id}/attention`, {
+          message,
+          ...(title === undefined ? {} : { title }),
+          ...(questions === undefined ? {} : { questions }),
+          ...(options.to === 'human' ? { to: 'human' } : {}),
+        });
         const eventId = (data as { event?: { id?: unknown } } | null)?.event?.id;
         if (options.wait) {
           if (typeof eventId !== 'string') throw new Error('Invalid attention response');
@@ -476,6 +494,13 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
         const parentId = options.parentId;
         const useParent = !!options.parent;
         const createWorkdir = !!options.createWorkdir;
+        const useWorktree = !!options.worktree;
+        const branch = options.branch;
+        const base = options.base;
+
+        if ((branch !== undefined || base !== undefined) && !useWorktree) {
+          throw new Error('--branch and --base require --worktree');
+        }
 
         const body: Record<string, unknown> = {};
         if (shellType) body.shellType = shellType;
@@ -487,6 +512,16 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
         if (parentId) body.parentSessionId = parentId;
         else if (useParent) body.parentSessionId = true;
         if (createWorkdir) body.createMissingWorkingDir = true;
+        if (useWorktree) {
+          if (branch !== undefined || base !== undefined) {
+            body.worktree = {
+              ...(branch !== undefined ? { branch } : {}),
+              ...(base !== undefined ? { base } : {}),
+            };
+          } else {
+            body.worktree = true;
+          }
+        }
 
         const caller = process.env.FTOWN_SESSION_ID?.trim();
         const headers = caller ? { 'X-Ftown-Session-Id': caller } : undefined;
@@ -656,8 +691,22 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
       case 'remove': {
         const id = rest[0];
         if (!id) throw new Error('Missing session-id');
-        const { data } = await api('DELETE', `/api/sessions/${id}`);
-        console.log(jsonOut ? JSON.stringify(data, null, 2) : `removed ${id}`);
+        if (options.keepWorktree && options.forceWorktree) {
+          throw new Error('Supply at most one of --keep-worktree or --force-worktree');
+        }
+        const query = options.keepWorktree
+          ? '?worktree=keep'
+          : options.forceWorktree
+            ? '?worktree=force'
+            : '';
+        const { data } = await api('DELETE', `/api/sessions/${id}${query}`);
+        const outcomeText = formatWorktreeOutcome(data);
+        if (jsonOut) {
+          console.log(JSON.stringify(data, null, 2));
+          if (outcomeText) console.error(outcomeText);
+        } else {
+          console.log(outcomeText ? `removed ${id} (${outcomeText})` : `removed ${id}`);
+        }
         break;
       }
 
@@ -701,6 +750,16 @@ function formatSessionList(data: unknown): string {
         `${s.id}  ${s.status}  ${s.name ?? ''}  ${s.workingDir ?? ''}`.trimEnd(),
     )
     .join('\n');
+}
+
+function formatWorktreeOutcome(data: unknown): string | undefined {
+  const outcome = (data as { worktreeOutcome?: { action?: string; reason?: string } } | null)?.worktreeOutcome;
+  if (!outcome || typeof outcome !== 'object') return undefined;
+  if (outcome.action === 'removed') return 'worktree removed';
+  if (outcome.action === 'retained') {
+    return outcome.reason ? `worktree retained: ${outcome.reason}` : 'worktree retained';
+  }
+  return undefined;
 }
 
 function formatCreated(data: unknown): string {

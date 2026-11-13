@@ -747,3 +747,110 @@ test('malformed prompts of any shape give invalid_prompt, never a TypeError', as
       (e) => e instanceof AttentionError && e.code === 'invalid_prompt' && e.status === 400, JSON.stringify(prompt));
   }
 });
+
+test('setRoute merges and persists route fields on open items, cleans escalationNote, and returns undefined for missing/resolved', async t => {
+  const f = await fixture(t);
+  const a = (await f.store.record('s1', 'Notification', needsInput('Q1'), { prompt: mailPrompt() }))!;
+  const b = (await f.store.record('s1', 'Notification', needsInput('Q2'), { prompt: mailPrompt() }))!;
+
+  assert.equal(await f.store.setRoute('s1', 'unknown-id', { route: 'parent', routedTo: 'p1' }), undefined);
+
+  const routed = await f.store.setRoute('s1', a.id, { route: 'parent', routedTo: 'p1' });
+  assert.ok(routed);
+  assert.equal(routed.route, 'parent');
+  assert.equal(routed.routedTo, 'p1');
+
+  // Repeat identical record() of an open item must not change its route fields
+  const repeated = (await f.store.record('s1', 'Notification', needsInput('Q1'), { prompt: mailPrompt() }))!;
+  assert.equal(repeated.id, a.id);
+  assert.equal(repeated.occurrences, 2);
+  assert.equal(repeated.route, 'parent');
+  assert.equal(repeated.routedTo, 'p1');
+
+  // Escalate merges onto existing fields, cleans control chars, and caps at ESCALATION_NOTE_MAX (500)
+  const rawNote = `  needs\u0000\u0007 human\u001f decision ${'x'.repeat(600)}`;
+  const escalatedAt = '2026-11-13T20:00:00.000Z';
+  const escalated = await f.store.setRoute('s1', a.id, {
+    route: 'human',
+    escalatedAt,
+    escalationNote: rawNote,
+  });
+  assert.ok(escalated);
+  assert.equal(escalated.route, 'human');
+  assert.equal(escalated.routedTo, 'p1'); // preserved from previous setRoute
+  assert.equal(escalated.escalatedAt, escalatedAt);
+  assert.ok(escalated.escalationNote);
+  assert.equal(escalated.escalationNote.length, 500);
+  assert.ok(escalated.escalationNote.startsWith('needs human decision x'));
+  assert.ok(!/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(escalated.escalationNote));
+
+  // Survives reload via list() and explicitSnapshot()
+  const reloaded = new AttentionStore(f.resolve);
+  const page = await reloaded.list('s1');
+  const fromList = page.events.find(e => e.id === a.id)!;
+  assert.equal(fromList.route, 'human');
+  assert.equal(fromList.routedTo, 'p1');
+  assert.equal(fromList.escalatedAt, escalatedAt);
+  assert.equal(fromList.escalationNote, escalated.escalationNote);
+
+  // Resolved item -> setRoute returns undefined and does not modify
+  await f.store.mutate('s1', [b.id], 'resolve');
+  assert.equal(await f.store.setRoute('s1', b.id, { route: 'parent', routedTo: 'p1' }), undefined);
+  const bAfter = (await f.store.list('s1', { includeResolved: true })).events.find(e => e.id === b.id)!;
+  assert.equal(bAfter.route, undefined);
+});
+
+test('listRouted returns only open items with route === "parent" ordered by sequence', async t => {
+  const f = await fixture(t);
+  const a = (await f.store.record('s1', 'Notification', needsInput('Q1'), { prompt: mailPrompt() }))!;
+  const b = (await f.store.record('s1', 'Notification', needsInput('Q2'), { prompt: mailPrompt() }))!;
+  const c = (await f.store.record('s1', 'Notification', needsInput('Q3'), { prompt: mailPrompt() }))!;
+  const d = (await f.store.record('s1', 'Notification', needsInput('Q4'), { prompt: mailPrompt() }))!;
+
+  await f.store.setRoute('s1', a.id, { route: 'parent', routedTo: 'p1' });
+  await f.store.setRoute('s1', b.id, { route: 'parent', routedTo: 'p1' });
+  await f.store.setRoute('s1', c.id, { route: 'human' });
+  // d has route undefined
+
+  assert.deepEqual((await f.store.listRouted('s1')).map(e => e.id), [a.id, b.id]);
+
+  // Escalating a flips route to 'human' -> no longer in listRouted
+  await f.store.setRoute('s1', a.id, { route: 'human', escalatedAt: '2026-11-13T20:00:00.000Z' });
+  assert.deepEqual((await f.store.listRouted('s1')).map(e => e.id), [b.id]);
+
+  // Resolving b removes it from listRouted
+  await f.store.mutate('s1', [b.id], 'resolve');
+  assert.deepEqual(await f.store.listRouted('s1'), []);
+  assert.equal(d.route, undefined);
+});
+
+test('answer stores answeredBy (defaults to human when omitted, persists session provenance when provided)', async t => {
+  const f = await fixture(t);
+  const qHuman = (await f.store.record('s1', 'Notification', needsInput('Q-human'), { prompt: mailPrompt() }))!;
+  const qParent = (await f.store.record('s1', 'Notification', needsInput('Q-parent'), { prompt: mailPrompt() }))!;
+  await f.store.setRoute('s1', qParent.id, { route: 'parent', routedTo: 'parent-1' });
+
+  const resHuman = await f.store.answer('s1', qHuman.id, [{ selected: [0] }]);
+  assert.deepEqual(resHuman.item.answeredBy, { kind: 'human' });
+
+  const resParent = await f.store.answer(
+    's1',
+    qParent.id,
+    [{ selected: [1] }],
+    new Date('2026-11-13T20:05:00.000Z'),
+    { kind: 'session', sessionId: 'parent-1', name: 'orchestrator' },
+  );
+  assert.deepEqual(resParent.item.answeredBy, { kind: 'session', sessionId: 'parent-1', name: 'orchestrator' });
+  assert.equal(resParent.item.route, 'parent');
+  assert.equal(resParent.item.routedTo, 'parent-1');
+
+  // Verify persisted across store reload
+  const reloaded = new AttentionStore(f.resolve);
+  const events = (await reloaded.list('s1', { includeResolved: true })).events;
+  assert.deepEqual(events.find(e => e.id === qHuman.id)?.answeredBy, { kind: 'human' });
+  assert.deepEqual(events.find(e => e.id === qParent.id)?.answeredBy, {
+    kind: 'session',
+    sessionId: 'parent-1',
+    name: 'orchestrator',
+  });
+});

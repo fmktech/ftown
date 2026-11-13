@@ -12,6 +12,12 @@ export interface ManualInputNotice {
   attentionSequence?: number;
   /** Structured question the human can answer from the dashboard. */
   prompt?: AttentionPrompt;
+  /** Parent-first routing (coordination phase B); absent on legacy items and live events the bridge has not stamped. */
+  route?: "parent" | "human";
+  routedTo?: string;
+  escalatedAt?: string;
+  escalationNote?: string;
+  answeredBy?: { kind: "human" | "session"; sessionId?: string; name?: string };
 }
 
 /** Notices the bridge tracks durably: stamped explicit requests and stamped questions that carry a prompt. */
@@ -63,6 +69,22 @@ export function parseLenientPrompt(raw: unknown, expectedChannel: AttentionAnswe
 
 function extractNotificationPrompt(data: Record<string, unknown>): AttentionPrompt | undefined {
   return parseLenientPrompt(data.attentionPrompt, "mail");
+}
+
+/** Parent-first routing fields, passed through leniently when the bridge stamped them on the event. */
+function extractRoutingFields(data: Record<string, unknown>): Pick<ManualInputNotice, "route" | "routedTo" | "escalatedAt" | "escalationNote" | "answeredBy"> | undefined {
+  const out: Pick<ManualInputNotice, "route" | "routedTo" | "escalatedAt" | "escalationNote" | "answeredBy"> = {};
+  if (data.route === "parent" || data.route === "human") out.route = data.route;
+  if (typeof data.routedTo === "string" && data.routedTo.trim()) out.routedTo = data.routedTo;
+  if (typeof data.escalatedAt === "string" && !Number.isNaN(Date.parse(data.escalatedAt))) out.escalatedAt = data.escalatedAt;
+  if (typeof data.escalationNote === "string" && data.escalationNote.trim()) out.escalationNote = data.escalationNote;
+  if (isRecord(data.answeredBy) && (data.answeredBy.kind === "human" || data.answeredBy.kind === "session")) {
+    const answeredBy: NonNullable<ManualInputNotice["answeredBy"]> = { kind: data.answeredBy.kind };
+    if (typeof data.answeredBy.sessionId === "string" && data.answeredBy.sessionId.trim()) answeredBy.sessionId = data.answeredBy.sessionId;
+    if (typeof data.answeredBy.name === "string" && data.answeredBy.name.trim()) answeredBy.name = data.answeredBy.name;
+    out.answeredBy = answeredBy;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 const MANUAL_INPUT_NOTIFICATION_TYPES = new Set<ManualInputNotice["type"]>([
@@ -125,6 +147,7 @@ export function extractManualInputNotice(
         ? Date.parse(data.attentionCreatedAt) : receivedAt,
       ...(prompt ? { prompt } : {}),
       ...(stamped ? { attentionId: data.attentionId as string, attentionSequence: data.attentionSequence as number } : {}),
+      ...(extractRoutingFields(data) ?? {}),
     };
   }
   if (eventName !== "Notification") return null;
@@ -145,6 +168,7 @@ export function extractManualInputNotice(
       && typeof data.attentionSequence === "number" && Number.isSafeInteger(data.attentionSequence) && data.attentionSequence > 0
       ? { attentionId: data.attentionId, attentionSequence: data.attentionSequence } : {}),
     ...(prompt ? { prompt } : {}),
+    ...(extractRoutingFields(data) ?? {}),
   };
 }
 

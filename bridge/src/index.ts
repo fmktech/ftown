@@ -768,6 +768,9 @@ program
       mail: mailStore,
       publishSession: (session) => { void centrifugo.publishSessionUpdate(userId, session); },
       now: Date.now,
+      onAttentionEscalated: (sessionId, item) => {
+        localApiServer.publishHumanAttention(sessionId, item);
+      },
     });
     localApiServer.setCoordination(coordination);
     const stopPushSessionObserver = centrifugo.onLocalPublication((channel, data) => {

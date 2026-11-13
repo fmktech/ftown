@@ -216,7 +216,10 @@ function assertStopPostedSilently(stub: StubBridge, result: ScriptResult): void 
 function assertMailDelivered(stub: StubBridge, result: ScriptResult): void {
   assert.equal(result.exitCode, 0);
   assert.equal(result.stderr, '');
-  assert.equal(stub.requests.length, 0, 'mail delivered: nothing is posted for this Stop');
+  // Mail delivered: the continue decision is printed AND one Stop POST follows
+  // so the bridge clears the busy marker (the drain marks the mail delivered).
+  assert.equal(posts(stub).length, 1, 'mail delivered: exactly one Stop POST clears the busy marker');
+  assert.deepEqual(JSON.parse(posts(stub)[0].body), { ...BASE_BODY, hook_event_name: 'Stop' });
   assert.deepEqual(result.proxyRequest, { method: 'GET', path: '/api/sessions/ftown-sid-1/inbox?wait=0', timeoutMs: 2000 });
   const lines = result.stdout.split('\n').filter((line) => line !== '');
   assert.equal(lines.length, 1);

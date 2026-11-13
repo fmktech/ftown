@@ -192,7 +192,7 @@ test('status prints the plain row plus next line and maps to GET card', async ()
   const { deps, calls, out } = harness(() => makeCard());
   assert.equal(await runStatus([], deps), 0);
   assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), [`GET /api/sessions/${SELF}/card`]);
-  assert.match(out[0], /^worker-a working working {2}Building the CLI$/);
+  assert.match(out[0], /^worker-a working working {2}Building the CLI {2}3\/7$/);
   assert.equal(out[1], 'next: Write the tests');
 });
 
@@ -245,6 +245,28 @@ test('status set --on session:<id> sets the blockedOn ref', async () => {
   const { deps, calls } = harness(() => makeCard());
   assert.equal(await runStatus(['set', '--on', 'session:other-9', '--text', 'waiting'], deps), 0);
   assert.deepEqual(calls[0].body, { blockedOn: { kind: 'session', ref: 'other-9', text: 'waiting' } });
+});
+
+test('status set --state blocked without --on exits 2 when the card is not already blocked', async () => {
+  const { deps, calls, err } = harness(() => makeCard());
+  assert.equal(await runStatus(['set', '--state', 'blocked'], deps), 2);
+  assert.deepEqual(calls.map((c) => c.method), ['GET']);
+  assert.match(err.join('\n'), /--state blocked needs --on <human\|parent\|external\|session:id> and --text/);
+});
+
+test('status set --state blocked without --on is allowed when the card is already blocked', async () => {
+  const blocked = makeCard({
+    declared: {
+      state: 'blocked',
+      headline: 'Stuck',
+      blockedOn: { kind: 'human', text: 'need input' },
+      updatedAt: '2026-01-01T11:59:00.000Z',
+    },
+  });
+  const { deps, calls } = harness((call) => (call.method === 'GET' ? blocked : blocked));
+  assert.equal(await runStatus(['set', '--state', 'blocked', '--headline', 'Still stuck'], deps), 0);
+  assert.deepEqual(calls.map((c) => c.method), ['GET', 'PUT']);
+  assert.deepEqual(calls[1].body, { state: 'blocked', headline: 'Still stuck' });
 });
 
 test('status set with no flags exits 2 and makes no request', async () => {

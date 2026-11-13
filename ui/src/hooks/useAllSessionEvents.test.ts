@@ -502,7 +502,7 @@ describe("structured attention questions", () => {
   const hookPrompt = { ...mailPrompt, channel: "hook" as const };
   const asked = { ...saved, id: "ask-1", type: "ask_user" as const, prompt: hookPrompt };
   const answers = [{ selected: [1] }];
-  type AnyItem = Omit<typeof saved, "type"> & { type: string; prompt?: unknown };
+  type AnyItem = Omit<typeof saved, "type"> & { type: string; prompt?: unknown; [key: string]: unknown };
   const respond = (attention: AnyItem | null, extra: Record<string, unknown> = {}): CommandResponse => ({ requestId: "r", success: true,
     data: { sessionId: "agent", attention, sequence: attention?.sequence ?? 1, ...extra } });
   const askedEvent = { tool_name: "AskUserQuestion", tool_input: { questions: [{ question: "Which?", header: "Pick", multiSelect: false,
@@ -609,6 +609,34 @@ describe("structured attention questions", () => {
     item = null;
     await act(async () => { await h.result.current.refreshSessionAttention("agent"); });
     expect(h.current()?.attention).toBeUndefined();
+  });
+
+  it("applies a snapshot whose routing changed at the same sequence (escalate, parent route)", async () => {
+    let item: AnyItem | null = saved;
+    const h = durableSetup(async () => respond(item));
+    await settle();
+    expect(h.current()?.attention?.route).toBeUndefined();
+    // The parent escalates: same item id and sequence, but the routing fields flipped.
+    item = { ...saved, route: "human", routedTo: "boss", escalatedAt: "2026-11-13T00:00:00.000Z", escalationNote: "Parent is gone" };
+    await act(async () => { await h.result.current.refreshSessionAttention("agent"); });
+    expect(h.current()?.attention).toMatchObject({ attentionId: saved.id, escalatedAt: "2026-11-13T00:00:00.000Z", escalationNote: "Parent is gone" });
+    // A parent-routed restoration carries the fields the inbox greys on.
+    item = { ...saved, route: "parent", routedTo: "boss" };
+    await act(async () => { await h.result.current.refreshSessionAttention("agent"); });
+    expect(h.current()?.attention).toMatchObject({ attentionId: saved.id, route: "parent", routedTo: "boss" });
+    expect(h.current()?.attention?.escalatedAt).toBeUndefined();
+  });
+
+  it("drops unknown and invalid fields from the snapshot item", async () => {
+    let item: AnyItem | null = { ...saved, internalNote: "secret", apiKey: "leaked", route: "internal", answeredBy: { kind: "robot" } };
+    const h = durableSetup(async () => respond(item));
+    await settle();
+    const notice = h.current()?.attention;
+    expect(notice).not.toHaveProperty("internalNote");
+    expect(notice).not.toHaveProperty("apiKey");
+    expect(notice).not.toHaveProperty("route");
+    expect(notice).not.toHaveProperty("answeredBy");
+    expect(notice).toMatchObject({ attentionId: saved.id, title: saved.title, message: saved.message });
   });
 
   it("AttentionSnapshot re-reads the snapshot so other tabs follow a reply", async () => {

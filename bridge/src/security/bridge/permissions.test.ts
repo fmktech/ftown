@@ -87,3 +87,52 @@ test('model routing reads need read authority and saving it needs control', () =
   assert.deepEqual(classifyCommand('set_model_routing', { bridgeId: 'bridge', config: {} }), { permission: 'control', mutating: true, operation: 'set_model_routing', sessionId: null });
   for (const command of ['model_routing', 'get_model_routing_x', 'SET_MODEL_ROUTING']) assert.throws(() => classifyCommand(command), { code: 'permission_denied' });
 });
+
+test('phase-B attention routes classify answer/escalate as control and routed as read without shadowing', () => {
+  assert.deepEqual(classifyHttp('POST', '/api/sessions/session/attention/event-1_2/answer'), { permission: 'control', mutating: true, operation: 'attention_answer', sessionId: 'session' });
+  assert.deepEqual(classifyHttp('POST', '/api/sessions/session/attention/event-1_2/escalate'), { permission: 'control', mutating: true, operation: 'attention_escalate', sessionId: 'session' });
+  assert.deepEqual(classifyHttp('GET', '/api/sessions/session/attention/routed'), { permission: 'read', mutating: false, operation: 'attention_routed', sessionId: 'session' });
+  for (const [method, path] of [
+    ['GET', '/api/sessions/session/attention/event-1/answer'], ['PUT', '/api/sessions/session/attention/event-1/escalate'],
+    ['DELETE', '/api/sessions/session/attention/event-1/answer'], ['POST', '/api/sessions/session/attention/routed'],
+    ['DELETE', '/api/sessions/session/attention/routed'], ['GET', '/api/sessions/session/attention/routed?x=1'],
+    ['POST', '/api/sessions/session/attention/event-1/answer?x=1'], ['GET', '/api/sessions/session/attention/routed/extra'],
+  ]) assert.throws(() => classifyHttp(method, path), { code: 'permission_denied' }, `${method} ${path}`);
+  // Body keys (to, worktree) are not classified here: classifyHttp sees no body.
+  assert.equal(classifyHttp('POST', '/api/sessions').permission, 'control');
+  assert.equal(classifyHttp('POST', '/api/sessions/session/attention/ask').permission, 'control');
+});
+
+test('phase-B brief routes classify per method and deny extras', () => {
+  assert.deepEqual(classifyHttp('GET', '/api/sessions/session/brief'), { permission: 'read', mutating: false, operation: 'brief_get', sessionId: 'session' });
+  assert.deepEqual(classifyHttp('PUT', '/api/sessions/session/brief'), { permission: 'control', mutating: true, operation: 'brief_set', sessionId: 'session' });
+  assert.deepEqual(classifyHttp('DELETE', '/api/sessions/session/brief'), { permission: 'control', mutating: true, operation: 'brief_clear', sessionId: 'session' });
+  assert.deepEqual(classifyHttp('POST', '/api/sessions/session/brief/notes'), { permission: 'control', mutating: true, operation: 'brief_note', sessionId: 'session' });
+  for (const [method, path] of [
+    ['POST', '/api/sessions/session/brief'], ['PATCH', '/api/sessions/session/brief'],
+    ['GET', '/api/sessions/session/brief?x=1'], ['DELETE', '/api/sessions/session/brief?x=1'],
+    ['GET', '/api/sessions/session/brief/notes'], ['PUT', '/api/sessions/session/brief/notes'],
+    ['DELETE', '/api/sessions/session/brief/notes'], ['POST', '/api/sessions/session/brief/notes?x=1'],
+    ['GET', `/api/sessions/${'e'.repeat(201)}/brief`], ['GET', '/api/sessions/session/brief/extra'],
+  ]) assert.throws(() => classifyHttp(method, path), { code: 'permission_denied' }, `${method} ${path}`);
+});
+
+test('phase-B worktree routes classify list as read and prune as control', () => {
+  assert.deepEqual(classifyHttp('GET', '/api/worktrees'), { permission: 'read', mutating: false, operation: 'worktrees_list', sessionId: null });
+  assert.deepEqual(classifyHttp('POST', '/api/worktrees/prune'), { permission: 'control', mutating: true, operation: 'worktrees_prune', sessionId: null });
+  for (const [method, path] of [
+    ['POST', '/api/worktrees'], ['DELETE', '/api/worktrees'], ['GET', '/api/worktrees?x=1'],
+    ['GET', '/api/worktrees/prune'], ['PUT', '/api/worktrees/prune'], ['POST', '/api/worktrees/prune?x=1'],
+    ['GET', '/api/worktrees/other'],
+  ]) assert.throws(() => classifyHttp(method, path), { code: 'permission_denied' }, `${method} ${path}`);
+});
+
+test('session removal allows the worktree query once with keep or force', () => {
+  assert.equal(classifyHttp('DELETE', '/api/sessions/session').operation, 'sessions_remove');
+  assert.equal(classifyHttp('DELETE', '/api/sessions/session?worktree=keep').permission, 'control');
+  assert.equal(classifyHttp('DELETE', '/api/sessions/session?worktree=force').permission, 'control');
+  for (const path of [
+    '/api/sessions/session?worktree=bogus', '/api/sessions/session?worktree=keep&worktree=force',
+    '/api/sessions/session?worktree=', '/api/sessions/session?other=1', '/api/sessions/session?worktree=keep&other=1',
+  ]) assert.throws(() => classifyHttp('DELETE', path), { code: 'permission_denied' }, path);
+});

@@ -369,6 +369,23 @@ describe("inbox document title", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
     await waitFor(() => expect(document.title).toBe("(2) ftown new"));
   });
+  it("does not count parent-routed non-escalated items toward the waiting prefix", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    document.title = "ftown base";
+    state.sessions = [session("ordinary", "Regular shell"), session("boss", "Boss"), session("child", "Worker", { parentSessionId: "boss" })];
+    dashboard();
+    expect(document.title).toBe("ftown base");
+    const ordinary = { type: "agent_needs_input" as const, title: "Review", message: "Inspect", receivedAt: 10 };
+    const withParent = { type: "agent_needs_input" as const, title: "Question", message: "Ask", receivedAt: 11, route: "parent" as const, routedTo: "boss" };
+    state.activity = new Map([["ordinary", { activity: "idle", attention: ordinary }], ["child", { activity: "idle", attention: withParent }]]);
+    fireEvent.click(screen.getByRole("tab", { name: /^Workspace/ }));
+    await waitFor(() => expect(document.title).toBe("(1) ftown base"));
+    // Once the parent escalates, the item counts again.
+    state.activity = new Map([["child", { activity: "idle", attention: { ...withParent, escalatedAt: "2026-11-13T00:00:00.000Z", escalationNote: "Parent is gone" } }]]);
+    fireEvent.click(screen.getByRole("tab", { name: "Terminal" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+    await waitFor(() => expect(document.title).toBe("(1) ftown base"));
+  });
 });
 
 type Layout = "wide" | "compact" | "mobile";

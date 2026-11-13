@@ -10,6 +10,8 @@ import {
 
 import type { RemoveFtownSessionOptions } from './remove-ftown-session.js';
 import type { Session, SessionUsage } from './types.js';
+import type { WorktreeApi } from './coordination/contract-b.js';
+import { GitWorktrees } from './worktrees.js';
 import { normalizePullRequestUrl } from './pull-request-url.js';
 import { currentPreview, preparePreview, preparePreviewAdd, PreviewError, previewChunk, previewStatus, SessionPreviewReader, validFileId, validPreviewId, validRevision } from './session-preview.js';
 import type { SessionPreviewChunk, SessionPreviewSource, SessionPreviewStatus } from './preview-protocol.js';
@@ -81,6 +83,7 @@ export interface SessionControllerDeps {
    * Required only by usage(); omitted in adapters that never call it. */
   collectUsage?(session: Session): Promise<SessionUsage | null>;
   previewReader?: SessionPreviewReader;
+  worktrees?: WorktreeApi;
   // ---- Runtime closures still owned by index.ts. They are injected rather
   // than restructured out of index.ts (a later task splits that file); only
   // stop/clearTerminal need them, so the HTTP adapter may omit them.
@@ -91,14 +94,23 @@ export interface SessionControllerDeps {
   destroyTerminal?(sessionId: string): void;
 }
 
+export type WorktreeRemoveMode = 'auto' | 'keep' | 'force';
+
+export interface WorktreeRemoveOutcome {
+  action: 'removed' | 'retained' | 'none';
+  reason?: string;
+}
+
 export class SessionController {
   private readonly deps: SessionControllerDeps;
   private readonly metadataWrites = new Map<string, Promise<void>>();
   private readonly previewReader: SessionPreviewReader;
+  private readonly worktrees: WorktreeApi;
 
   constructor(deps: SessionControllerDeps) {
     this.deps = deps;
     this.previewReader = deps.previewReader ?? new SessionPreviewReader();
+    this.worktrees = deps.worktrees ?? new GitWorktrees();
   }
 
   private require<T>(dep: T | undefined, name: string): T {
@@ -354,10 +366,81 @@ export class SessionController {
   async remove(
     sessionId: string,
     options?: RemoveFtownSessionOptions,
-  ): Promise<{ removed: boolean }> {
+    worktreeMode: WorktreeRemoveMode = 'auto',
+  ): Promise<{
+    removed: boolean;
+    worktreeOutcome?: WorktreeRemoveOutcome;
+  }> {
     return this.withSessionMutation(sessionId, async () => {
+      const session = await this.deps.store.loadSession(sessionId);
+      if (
+        !session ||
+        (options?.onlyIfFinished &&
+          session.status !== 'completed' &&
+          session.status !== 'error')
+      ) {
+        const removed = await this.deps.removeSession(sessionId, options);
+        return { removed: removed !== null };
+      }
+
+      let worktreeOutcome: WorktreeRemoveOutcome | undefined;
+
+      if (session.worktree?.createdByBridge) {
+        this.deps.runner.stop(sessionId);
+        const wt = session.worktree;
+        if (worktreeMode === 'keep') {
+          worktreeOutcome = { action: 'retained', reason: 'kept by request' };
+        } else {
+          try {
+            if (worktreeMode === 'force') {
+              let deleteBranch = false;
+              try {
+                const st = await this.worktrees.status(wt);
+                deleteBranch = st.mergedIntoBase;
+              } catch {
+                deleteBranch = false;
+              }
+              await this.worktrees.remove(wt, {
+                force: true,
+                deleteBranch,
+              });
+              worktreeOutcome = { action: 'removed' };
+            } else {
+              const st = await this.worktrees.status(wt);
+              const decision = this.worktrees.decide(st);
+              if (decision.action === 'remove') {
+                await this.worktrees.remove(wt, {
+                  force: false,
+                  deleteBranch: decision.deleteBranch,
+                });
+                worktreeOutcome = { action: 'removed' };
+              } else {
+                worktreeOutcome = { action: 'retained', reason: decision.reason };
+              }
+            }
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            worktreeOutcome = { action: 'retained', reason };
+          }
+        }
+
+        if (worktreeOutcome.action === 'retained' && worktreeOutcome.reason !== undefined) {
+          session.worktree = {
+            ...wt,
+            retained: {
+              reason: worktreeOutcome.reason,
+              at: new Date().toISOString(),
+            },
+          };
+          await this.deps.store.saveSession(session);
+        }
+      }
+
       const removed = await this.deps.removeSession(sessionId, options);
-      return { removed: removed !== null };
+      if (!removed) {
+        return { removed: false };
+      }
+      return worktreeOutcome ? { removed: true, worktreeOutcome } : { removed: true };
     });
   }
 

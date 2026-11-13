@@ -3,9 +3,11 @@
 # ~/.ftown/antigravity-hook.sh and registered in ~/.gemini/config/hooks.json.
 # Translates agy's camelCase hook payload (stdin) to the bridge /hook wire format and POSTs it.
 # On a turn-end Stop it drains this session's ftown inbox FIRST: with mail it
-# prints {"decision":"continue","reason":"<mail>"} and posts nothing (the agent
-# keeps working); without mail it posts Stop. On terminationReason
-# MAX_FORCED_INVOCATIONS / USER_CANCELED / ERROR it never drains, only posts Stop.
+# prints {"decision":"continue","reason":"<mail>"} (the agent keeps working) and
+# still POSTs Stop so the bridge clears the busy marker (the drain marks the
+# mail delivered, so that Stop finds an empty inbox); without mail it posts
+# Stop. On terminationReason MAX_FORCED_INVOCATIONS / USER_CANCELED / ERROR it
+# never drains, only posts Stop.
 #
 # Always exits 0, also on HUP/INT/TERM/PIPE (a non-zero or signalled PreToolUse
 # hook makes agy BLOCK the tool), and writes nothing to stdout except that one
@@ -15,7 +17,7 @@
 # Worst-case runtime: ~6s inside agy's 10s hook timeout. The POST tries at most
 # 2 endpoint candidates x curl --max-time 2 (4s); on Stop the inbox read through
 # `ftown security proxy` uses a 2s request timeout and happens before the POST,
-# and when it delivers mail no POST follows.
+# and the POST also follows when the drain delivers mail (busy-marker clear).
 #
 # bash 3.2 compatible (macOS /bin/bash). No set -e on purpose; no temp files.
 # The hook's working directory is agy's hooks.json folder, so pwd is never used.
@@ -160,9 +162,13 @@ drain_mail() {
 
 MAIL_OUT=""
 if drain_mail; then
-  # Mail delivered: the agent continues, so the session stays busy (no POST).
-  # stderr is silenced so a reader that closed the pipe cannot see "Broken pipe".
+  # Mail delivered: the agent continues on the decision line, but the Stop is
+  # still POSTed so the bridge clears the busy marker (this hook posts no other
+  # Stop while the mail turn runs). The decision line goes out first; the POST
+  # is fire-and-forget and silenced. stderr is silenced so a reader that closed
+  # the pipe cannot see "Broken pipe".
   printf '%s\n' "$MAIL_OUT" 2>/dev/null
+  post_hook "$PAYLOAD" >/dev/null 2>&1 || true
   exit 0
 fi
 post_hook "$PAYLOAD"

@@ -14,6 +14,7 @@ import type { PullRequestStatusService } from './pull-request-status.js';
 import type { PrReviewService, PrReviewRequest, PrReviewChunkRequest } from './pull-request-review-protocol.js';
 import { PR_REVIEW_CHUNK_BYTES } from './pull-request-review-protocol.js';
 import { WorkingDirMissingError } from './create-ftown-session.js';
+import { WorktreeError } from './coordination/contract-b.js';
 import { AUTOMATION_REMOVED_CODE, AUTOMATION_REMOVED_MESSAGE, AutomationRemovedError, RETIRED_AUTOMATION_COMMANDS } from './retired-automation.js';
 import type { SessionController } from './session-controller.js';
 import type { Session } from './types.js';
@@ -332,7 +333,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           const session = await sessionController.get(payload.sessionId);
           if (!session || session.bridgeId !== bridgeId) throw new Error('Unknown session');
           if (!deps.attentionStore) throw new AttentionError('attention_not_ready', 'Attention store is not ready', 503);
-          const { item, snapshot, waiterLive } = await deps.attentionStore.answer(payload.sessionId, payload.eventId, payload.answers);
+          const { item, snapshot, waiterLive } = await deps.attentionStore.answer(payload.sessionId, payload.eventId, payload.answers, undefined, { kind: 'human' });
           let delivery: AttentionAnswerDelivery;
           if (item.prompt?.channel === 'hook' || waiterLive) delivery = 'waiter';
           else {
@@ -573,6 +574,8 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
         ? { requestId: command.requestId, success: false, error: 'Bridge update request could not be completed.', data: { code: err.code } }
         : err instanceof AutomationRemovedError
         ? { requestId: command.requestId, success: false, error: AUTOMATION_REMOVED_MESSAGE, data: { code: AUTOMATION_REMOVED_CODE } }
+        : err instanceof WorktreeError
+        ? { requestId: command.requestId, success: false, error: errorMessage, data: { code: err.code } }
         : err instanceof BridgeSecurityError
         ? { requestId: command.requestId, success: false, error: err.message, data: { code: err.code } }
         : err instanceof WorkingDirMissingError

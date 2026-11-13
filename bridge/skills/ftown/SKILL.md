@@ -53,6 +53,9 @@ ftown sessions preview --clear
 ftown sessions preview-reply --message "The preview is ready."
 ftown status set --state working --headline "Reviewing the API client" --progress 0/1
 ftown board
+ftown brief set --file brief.md
+ftown attention list
+ftown worktrees list
 ftown harness mail send <session-id> --type task "review the API client"
 ftown harness mail read
 ftown env --help
@@ -125,6 +128,18 @@ ftown board --wait --until any-done --timeout 300
 ftown events --wait
 ```
 
+## Manager brief
+
+If you coordinate children, set a brief at the start and add a note at each
+milestone. The dashboard overview renders the brief and your children
+automatically; you do not build a status page yourself.
+
+```bash
+ftown brief set --file brief.md
+ftown brief note "All workers spawned; waiting on the first results"
+ftown brief show
+```
+
 ## Human attention and pull requests
 
 Use `ftown sessions attention --message "..."` when you need human input. It
@@ -133,6 +148,18 @@ a plain request does not answer a prompt or guarantee a push notification. Push
 remains opt-in and requires a supported hosted session. Repeating an unresolved
 request updates its occurrence count; after an uncertain result, inspect the
 existing request before retrying.
+
+If you have a parent, your request goes to your parent first, not the human:
+the parent receives one waking escalation mail with the question and the
+commands to answer or escalate it, and the human sees it greyed as "with
+parent" (and may still answer). The parent answers with
+`ftown attention answer <child-id> <event-id> --option <n>` (or
+`--text "<reply>"`) only from facts it holds — the plan, the agreed contract,
+earlier human answers — and escalates preferences and irreversible choices
+with `ftown attention escalate <child-id> <event-id> --note "<context>"`.
+Only the parent raises a parent-routed question to the human. Use
+`ftown sessions attention ... --to human` for things only the human can
+provide, such as credentials or approvals.
 
 ### Questions with answers
 
@@ -145,7 +172,8 @@ not cancel the question; check later with
 event ID.
 
 Delivery: a live waiter receives the answer; otherwise it arrives as ftown mail
-from "You" starting with `[ftown attention answer id=...]`.
+from "You" starting with `[ftown attention answer id=...]`. When the parent
+answers, the same delivery applies but the mail sender is the parent session.
 
 Claude Code `AskUserQuestion` calls inside an FTown session are answered from
 the same inbox, and the terminal picker appears only after "Answer in terminal"
@@ -176,12 +204,14 @@ created or updated, before the completion notice: use `ftown sessions pr <URL>`.
 Omit this step for tasks without a PR; never invent a PR or guess a session
 identity.
 
-Once the task is complete, request user attention **once per completed task**,
-before the final handoff, using `ftown sessions attention --title 'Work complete'
+Once the task is complete, a top-level session requests user attention **once
+per completed task**, before the final handoff, using
+`ftown sessions attention --title 'Work complete'
 --message "<truthful outcome, checks and PR summary>"`.
 Do not send a completion notice every turn; retain the uncertain-result guidance
-above. Children must still report their result to the parent as assigned; user
-attention does not replace that reporting. See the completion example in
+above. If you have a parent, do not raise "Work complete": set your card to
+`done` and report your result to the parent as assigned; the parent raises one
+completion notice for the whole job. See the completion example in
 `references/sessions.md`.
 
 ## Cleanup
@@ -198,6 +228,14 @@ ftown sessions revive <archived-session-id>
 
 Removal archives the session; revival creates a new session id and resumes its
 agent conversation when supported. Preserve useful results before cleanup.
+
+For children that write code, create them with their own worktree:
+`ftown sessions create --parent --worktree [--branch <b>] [--base <ref>]`.
+`ftown sessions remove <id>` retires a bridge-created worktree when it is
+clean and merged or pushed; otherwise it keeps the worktree and says why.
+`--keep-worktree` always keeps it, `--force-worktree` forces removal.
+Inspect or clean up archived worktrees with `ftown worktrees list` and
+`ftown worktrees prune`.
 
 ## Connection and compatibility
 

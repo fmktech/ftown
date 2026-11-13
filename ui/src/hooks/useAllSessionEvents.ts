@@ -18,6 +18,36 @@ function persistedPrompt(value: unknown, type: string): AttentionPrompt | undefi
   return parseLenientPrompt(value, type === "ask_user" ? "hook" : "mail");
 }
 
+/** Explicit allowlist of the PersistedSessionAttention fields the dashboard renders; anything else the bridge sent is dropped. */
+function allowlistedAttention(item: Record<string, unknown>, prompt: AttentionPrompt | undefined): PersistedSessionAttention {
+  const cleanString = (value: unknown): string | undefined => typeof value === "string" && value !== "" ? value : undefined;
+  const answeredBy = (() => {
+    if (typeof item.answeredBy !== "object" || item.answeredBy === null) return undefined;
+    const raw = item.answeredBy as Record<string, unknown>;
+    if (raw.kind !== "human" && raw.kind !== "session") return undefined;
+    const kind: "human" | "session" = raw.kind === "human" ? "human" : "session";
+    return {
+      kind,
+      ...(cleanString(raw.sessionId) ? { sessionId: raw.sessionId as string } : {}),
+      ...(cleanString(raw.name) ? { name: raw.name as string } : {}),
+    };
+  })();
+  return {
+    id: item.id as string,
+    sequence: item.sequence as number,
+    type: item.type === "ask_user" ? "ask_user" : "agent_needs_input",
+    title: item.title as string,
+    message: item.message as string,
+    createdAt: item.createdAt as string,
+    ...(prompt ? { prompt } : {}),
+    ...(item.route === "parent" || item.route === "human" ? { route: item.route } : {}),
+    ...(cleanString(item.routedTo) ? { routedTo: item.routedTo as string } : {}),
+    ...(cleanString(item.escalatedAt) ? { escalatedAt: item.escalatedAt as string } : {}),
+    ...(cleanString(item.escalationNote) ? { escalationNote: item.escalationNote as string } : {}),
+    ...(answeredBy ? { answeredBy } : {}),
+  };
+}
+
 function snapshotResponse(value: unknown, sessionId: string): SessionAttentionResponse | null {
   if (!value || typeof value !== "object") return null;
   const response = value as Record<string, unknown>;
@@ -34,10 +64,7 @@ function snapshotResponse(value: unknown, sessionId: string): SessionAttentionRe
   // A question the dashboard cannot answer has no place in the inbox. Keep the watermark.
   // An invalid prompt on a plain request is dropped; the request itself stays readable.
   if (item.type === "ask_user" && !prompt) return { sessionId, attention: null, sequence: response.sequence };
-  const attention = { ...item } as Record<string, unknown>;
-  delete attention.prompt;
-  if (prompt) attention.prompt = prompt;
-  return { sessionId, attention: attention as unknown as PersistedSessionAttention, sequence: response.sequence };
+  return { sessionId, attention: allowlistedAttention(item, prompt), sequence: response.sequence };
 }
 
 function answerResponse(value: unknown, sessionId: string): { snapshot: SessionAttentionResponse; delivery: AttentionAnswerDelivery } | null {
@@ -47,15 +74,30 @@ function answerResponse(value: unknown, sessionId: string): { snapshot: SessionA
   return { snapshot, delivery: delivery as AttentionAnswerDelivery };
 }
 
+/** Routing fields are part of the item's identity: an escalate/answer keeps the id and sequence but changes these. */
+function sameRouting(a: ManualInputNotice, b: ManualInputNotice): boolean {
+  return a.route === b.route && a.routedTo === b.routedTo && a.escalatedAt === b.escalatedAt
+    && a.escalationNote === b.escalationNote
+    && a.answeredBy?.kind === b.answeredBy?.kind && a.answeredBy?.sessionId === b.answeredBy?.sessionId
+    && a.answeredBy?.name === b.answeredBy?.name;
+}
+
 function sameNotice(a: ManualInputNotice | undefined, b: ManualInputNotice | undefined): boolean {
   if (!a || !b || a.type !== b.type) return false;
-  if (a.attentionId || b.attentionId) return !!a.attentionId && a.attentionId === b.attentionId && a.attentionSequence === b.attentionSequence;
-  return a.receivedAt === b.receivedAt && a.title === b.title && a.message === b.message;
+  if (a.attentionId || b.attentionId) {
+    if (!(a.attentionId && a.attentionId === b.attentionId && a.attentionSequence === b.attentionSequence)) return false;
+  } else if (a.receivedAt !== b.receivedAt || a.title !== b.title || a.message !== b.message) return false;
+  return sameRouting(a, b);
 }
 
 function restoredNotice(item: PersistedSessionAttention): ManualInputNotice {
   return { type: item.type, title: item.title, message: item.message, receivedAt: Date.parse(item.createdAt),
-    attentionId: item.id, attentionSequence: item.sequence, ...(item.prompt ? { prompt: item.prompt } : {}) };
+    attentionId: item.id, attentionSequence: item.sequence, ...(item.prompt ? { prompt: item.prompt } : {}),
+    ...(item.route ? { route: item.route } : {}),
+    ...(item.routedTo ? { routedTo: item.routedTo } : {}),
+    ...(item.escalatedAt ? { escalatedAt: item.escalatedAt } : {}),
+    ...(item.escalationNote ? { escalationNote: item.escalationNote } : {}),
+    ...(item.answeredBy ? { answeredBy: item.answeredBy } : {}) };
 }
 
 export interface SessionActivity {

@@ -206,3 +206,37 @@ describe("structured prompts", () => {
     expect(extractManualInputNotice("Notification", { ...base, attentionPrompt: { ...extra, channel: "hook" } }, 1)).not.toHaveProperty("prompt");
   });
 });
+
+describe("routing fields passthrough", () => {
+  const base = { notification_type: "agent_needs_input" as const, message: "m" };
+  it("passes valid routing fields through on both notice kinds", () => {
+    const routed = { ...base, route: "parent", routedTo: "boss", escalatedAt: "2026-11-13T00:00:00.000Z", escalationNote: "n", answeredBy: { kind: "session", sessionId: "boss", name: "Boss" } };
+    expect(extractManualInputNotice("Notification", routed, 1)).toMatchObject({
+      route: "parent", routedTo: "boss", escalatedAt: "2026-11-13T00:00:00.000Z", escalationNote: "n",
+      answeredBy: { kind: "session", sessionId: "boss", name: "Boss" },
+    });
+    expect(extractManualInputNotice("PreToolUse", { tool_name: "AskUserQuestion", tool_input: { question: "Q?" }, ...routed }, 1))
+      .toMatchObject({ route: "parent", answeredBy: { kind: "session" } });
+    expect(extractManualInputNotice("Notification", { ...base, route: "human" }, 1)).toMatchObject({ route: "human" });
+  });
+  it("drops invalid routing values but keeps the valid ones beside them", () => {
+    const notice = extractManualInputNotice("Notification", {
+      ...base, route: "up", routedTo: "   ", escalatedAt: "not-a-date", escalationNote: "  ",
+      answeredBy: { kind: "robot", sessionId: 7 },
+    }, 1);
+    expect(notice).not.toHaveProperty("route");
+    expect(notice).not.toHaveProperty("routedTo");
+    expect(notice).not.toHaveProperty("escalatedAt");
+    expect(notice).not.toHaveProperty("escalationNote");
+    expect(notice).not.toHaveProperty("answeredBy");
+    const mixed = extractManualInputNotice("Notification", {
+      ...base, route: "up", routedTo: "boss", answeredBy: { kind: "robot" },
+    }, 1);
+    expect(mixed).not.toHaveProperty("route");
+    expect(mixed).not.toHaveProperty("answeredBy");
+    expect(mixed).toHaveProperty("routedTo", "boss");
+  });
+  it("emits no routing keys when the event carries none", () => {
+    expect(extractManualInputNotice("Notification", base, 1)).toEqual({ type: "agent_needs_input", title: "Session needs your input", message: "m", receivedAt: 1 });
+  });
+});

@@ -9,12 +9,18 @@ import { HARNESSES, harnessAcceptsPromptAsCliArg, type HarnessSpec } from './har
 import { staggerSpawn } from './spawn-stagger.js';
 import { PROVIDER_AUTH_ENV, PROVIDER_RUNTIME_ENV, loadProviderEnv } from './provider-env-store.js';
 import { registerSessionWorkspace } from './session-registry.js';
+import { GitWorktrees } from './worktrees.js';
+import { WorktreeError, type SessionWorktree, type WorktreeApi } from './coordination/contract-b.js';
 
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { UpdateAdmission } from './update-admission.js';
 import type { SessionStore } from './session-store.js';
 import type { CreateSessionPayload, Session, ShellType } from './types.js';
+
+export { WorktreeError };
+
+export type CreateSessionWorktreeInput = true | { branch?: string; base?: string };
 
 export interface CreateFtownSessionDeps {
   store: SessionStore;
@@ -28,6 +34,7 @@ export interface CreateFtownSessionDeps {
   notifyScriptPath: string;
   wireTerminalInput: (sessionId: string) => void;
   getTerminalSize?: (sessionId: string) => { cols: number; rows: number } | undefined;
+  worktrees?: Pick<WorktreeApi, 'create' | 'remove'>;
 }
 
 export interface CreateFtownSessionInput {
@@ -54,6 +61,7 @@ export interface CreateFtownSessionInput {
   orchestrator?: boolean;
   suppressBriefing?: boolean;
   createMissingWorkingDir?: boolean;
+  worktree?: CreateSessionWorktreeInput;
 }
 
 export async function resolveParentSessionId(
@@ -410,11 +418,13 @@ async function createFtownSessionImpl(
 
   let parentSessionId: string | undefined;
   let parentName: string | undefined;
+  let parentWorkingDir: string | undefined;
   if (input.parentSessionId) {
     parentSessionId = await resolveParentSessionId(deps.store, input.parentSessionId);
     if (parentSessionId) {
       const parentSession = await deps.store.loadSession(parentSessionId);
       parentName = parentSession?.name ?? parentSessionId.slice(0, 8);
+      parentWorkingDir = parentSession?.workingDir;
     }
   }
 
@@ -445,16 +455,13 @@ async function createFtownSessionImpl(
         }
       : undefined;
 
-  const workingDir = prepareWorkingDir(input.workingDir, input.createMissingWorkingDir);
-  const effectiveInput: CreateFtownSessionInput = { ...input, workingDir };
-  // Base command (no prompt arg) — persisted on the session and used for the
-  // default name; the prompt-bearing launch command must not be replayed on revive.
-  const command = buildSessionCommand(effectiveInput);
+  let workingDir = prepareWorkingDir(input.workingDir, input.createMissingWorkingDir);
+  const initialCommand = buildSessionCommand({ ...input, workingDir });
 
   const explicitName = input.name?.trim();
   const shouldSuffixGeneratedName = !explicitName && Boolean(workingDir);
   const generatedBaseName =
-    (workingDir ? basename(workingDir) : '') || (prompt || command).slice(0, 80);
+    (workingDir ? basename(workingDir) : '') || (prompt || initialCommand).slice(0, 80);
   const sessionName = explicitName
     ?? (shouldSuffixGeneratedName
       ? nextAvailableGeneratedName(
@@ -463,123 +470,179 @@ async function createFtownSessionImpl(
         )
       : generatedBaseName);
 
-  const sessionId = uuidv4();
-  const session: Session = {
-    id: sessionId,
-    name: sessionName,
-    command,
-    prompt: prompt || undefined,
-    status: 'running',
-    bridgeId: deps.bridgeId,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    workingDir,
-    shellType: input.shellType,
-    model: input.model,
-    claudeSessionId: input.claudeSessionId,
-    cursorSessionId: input.cursorSessionId,
-    codexSessionId: input.codexSessionId,
-    piSessionId: input.piSessionId,
-    piSessionFile: input.piSessionFile,
-    opencodeSessionId: input.opencodeSessionId,
-    museSessionId: input.museSessionId,
-    grokSessionId: input.grokSessionId,
-    antigravitySessionId: input.antigravitySessionId,
-    env: sessionEnv,
-    parentSessionId,
-    runtime: deps.runner.getPreferredRuntime(),
-  };
+  let worktree: SessionWorktree | undefined;
+  let worktrees: Pick<WorktreeApi, 'create' | 'remove'> | undefined;
+  if (input.worktree) {
+    const wtOpts = typeof input.worktree === 'object' ? input.worktree : {};
+    const fromDir = workingDir ?? parentWorkingDir ?? process.cwd();
+    worktrees = deps.worktrees ?? new GitWorktrees();
+    worktree = await worktrees.create({
+      fromDir,
+      name: sessionName,
+      ...(wtOpts.branch !== undefined ? { branch: wtOpts.branch } : {}),
+      ...(wtOpts.base !== undefined ? { base: wtOpts.base } : {}),
+    });
+    workingDir = worktree.path;
+  }
 
-  await deps.store.saveSession(session);
   try {
-    await deps.centrifugo.publishSessionUpdate(deps.userId, session);
+    const effectiveInput: CreateFtownSessionInput = { ...input, workingDir };
+    // Base command (no prompt arg) — persisted on the session and used for the
+    // default name; the prompt-bearing launch command must not be replayed on revive.
+    const command = buildSessionCommand(effectiveInput);
+
+    const sessionId = uuidv4();
+    const session: Session = {
+      id: sessionId,
+      name: sessionName,
+      command,
+      prompt: prompt || undefined,
+      status: 'running',
+      bridgeId: deps.bridgeId,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      workingDir,
+      shellType: input.shellType,
+      model: input.model,
+      claudeSessionId: input.claudeSessionId,
+      cursorSessionId: input.cursorSessionId,
+      codexSessionId: input.codexSessionId,
+      piSessionId: input.piSessionId,
+      piSessionFile: input.piSessionFile,
+      opencodeSessionId: input.opencodeSessionId,
+      museSessionId: input.museSessionId,
+      grokSessionId: input.grokSessionId,
+      antigravitySessionId: input.antigravitySessionId,
+      env: sessionEnv,
+      parentSessionId,
+      runtime: deps.runner.getPreferredRuntime(),
+      ...(worktree ? { worktree } : {}),
+    };
+
+    await deps.store.saveSession(session);
+    try {
+      await deps.centrifugo.publishSessionUpdate(deps.userId, session);
+    } catch (err) {
+      // UI sync failure must not fail session creation — resurrection treats
+      // publish errors the same way.
+      console.error(`[Bridge] Failed to publish session create for ${sessionId}:`, err);
+    }
+
+    registerSessionWorkspace(sessionId, workingDir);
+
+    // Agent sessions (anything but a plain 'shell') spawned by a parent get a
+    // one-paragraph briefing prepended to their first input so they know their
+    // place in the session tree and how to talk to parent/siblings.
+    const childBriefing =
+      !input.suppressBriefing && parentSessionId && parentName && isAgent
+        ? buildChildBriefing({
+            childName: session.name,
+            childId: sessionId,
+            parentName,
+            parentId: parentSessionId,
+          })
+        : undefined;
+    const briefing = childBriefing;
+
+    // Composer TUIs need the submit CR sent separately after the paste settles —
+    // a CR inside the pasted chunk becomes a newline, and ESC+CR reads as
+    // Alt+Enter (newline) on current Claude Code, so plain CR it is.
+    const promptSubmitSuffix = '\r';
+
+    let initialInput: string | undefined;
+    let initialInputDelay: number | undefined;
+    let submitSuffix: string | undefined;
+    if (briefing) {
+      initialInput = prompt ? `${briefing}\n\nTask: ${prompt}` : briefing;
+      initialInputDelay = input.initialInputDelay ?? 2000;
+      submitSuffix = promptSubmitSuffix;
+    } else if (input.initialInput !== undefined) {
+      // Raw passthrough: callers own the submit keystrokes; suppress the default CR.
+      initialInput = input.initialInput;
+      initialInputDelay = input.initialInputDelay;
+      submitSuffix = '';
+    } else {
+      initialInput = prompt || undefined;
+      initialInputDelay = input.initialInputDelay ?? (prompt ? 2000 : undefined);
+      submitSuffix = promptSubmitSuffix;
+    }
+
+    // Some harnesses accept the initial prompt as a CLI argument — far more
+    // reliable than racing the composer TUI with delayed keystrokes. The registry
+    // says which (and which resume field suppresses it); typed injection remains
+    // for custom commands, resumes, and raw passthrough.
+    const shellTypeForPrompt = effectiveInput.shellType ?? 'claude';
+    const promptAsCliArg =
+      initialInput !== undefined &&
+      effectiveInput.initialInput === undefined &&
+      !effectiveInput.command?.trim() &&
+      harnessAcceptsPromptAsCliArg(shellTypeForPrompt, effectiveInput);
+
+    const launchCommand = promptAsCliArg
+      ? buildSessionCommand({ ...effectiveInput, initialPrompt: initialInput })
+      : command;
+    if (promptAsCliArg) {
+      initialInput = undefined;
+      initialInputDelay = undefined;
+      submitSuffix = undefined;
+    }
+
+    if (effectiveInput.shellType === 'codex') {
+      // Codex blocks on an interactive "Do you trust this directory?" prompt
+      // unless the resolved workdir is trusted in ~/.codex/config.toml.
+      ensureCodexWorkdirTrust(workingDir ?? process.cwd());
+    }
+
+    await staggerHarnessSpawn(effectiveInput.shellType);
+
+    deps.runner.run(sessionId, launchCommand, {
+      workingDir,
+      env: sessionEnv,
+      initialInput,
+      initialInputDelay,
+      submitSuffix,
+      hookPort: deps.hookPort,
+      hookToken: deps.hookToken,
+      parentSessionId,
+    });
+
+    deps.wireTerminalInput(sessionId);
+
+    return session;
   } catch (err) {
-    // UI sync failure must not fail session creation — resurrection treats
-    // publish errors the same way.
-    console.error(`[Bridge] Failed to publish session create for ${sessionId}:`, err);
+    if (worktree && worktrees) {
+      try {
+        await worktrees.remove(worktree, { force: false, deleteBranch: true });
+      } catch (cleanupErr) {
+        console.warn(`[Bridge] Failed to clean up worktree at ${worktree.path}:`, cleanupErr);
+      }
+    }
+    throw err;
   }
+}
 
-  registerSessionWorkspace(sessionId, workingDir);
-
-  // Agent sessions (anything but a plain 'shell') spawned by a parent get a
-  // one-paragraph briefing prepended to their first input so they know their
-  // place in the session tree and how to talk to parent/siblings.
-  const childBriefing =
-    !input.suppressBriefing && parentSessionId && parentName && isAgent
-      ? buildChildBriefing({
-          childName: session.name,
-          childId: sessionId,
-          parentName,
-          parentId: parentSessionId,
-        })
-      : undefined;
-  const briefing = childBriefing;
-
-  // Composer TUIs need the submit CR sent separately after the paste settles —
-  // a CR inside the pasted chunk becomes a newline, and ESC+CR reads as
-  // Alt+Enter (newline) on current Claude Code, so plain CR it is.
-  const promptSubmitSuffix = '\r';
-
-  let initialInput: string | undefined;
-  let initialInputDelay: number | undefined;
-  let submitSuffix: string | undefined;
-  if (briefing) {
-    initialInput = prompt ? `${briefing}\n\nTask: ${prompt}` : briefing;
-    initialInputDelay = input.initialInputDelay ?? 2000;
-    submitSuffix = promptSubmitSuffix;
-  } else if (input.initialInput !== undefined) {
-    // Raw passthrough: callers own the submit keystrokes; suppress the default CR.
-    initialInput = input.initialInput;
-    initialInputDelay = input.initialInputDelay;
-    submitSuffix = '';
-  } else {
-    initialInput = prompt || undefined;
-    initialInputDelay = input.initialInputDelay ?? (prompt ? 2000 : undefined);
-    submitSuffix = promptSubmitSuffix;
+function parseWorktreeInput(raw: unknown): CreateSessionWorktreeInput | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === true) return true;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new WorktreeError('bad_branch', 'Invalid worktree option: expected true or { branch?: string; base?: string }');
   }
-
-  // Some harnesses accept the initial prompt as a CLI argument — far more
-  // reliable than racing the composer TUI with delayed keystrokes. The registry
-  // says which (and which resume field suppresses it); typed injection remains
-  // for custom commands, resumes, and raw passthrough.
-  const shellTypeForPrompt = effectiveInput.shellType ?? 'claude';
-  const promptAsCliArg =
-    initialInput !== undefined &&
-    effectiveInput.initialInput === undefined &&
-    !effectiveInput.command?.trim() &&
-    harnessAcceptsPromptAsCliArg(shellTypeForPrompt, effectiveInput);
-
-  const launchCommand = promptAsCliArg
-    ? buildSessionCommand({ ...effectiveInput, initialPrompt: initialInput })
-    : command;
-  if (promptAsCliArg) {
-    initialInput = undefined;
-    initialInputDelay = undefined;
-    submitSuffix = undefined;
+  const obj = raw as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    if (key !== 'branch' && key !== 'base') {
+      throw new WorktreeError('bad_branch', `Invalid worktree option: unknown key '${key}'`);
+    }
   }
-
-  if (effectiveInput.shellType === 'codex') {
-    // Codex blocks on an interactive "Do you trust this directory?" prompt
-    // unless the resolved workdir is trusted in ~/.codex/config.toml.
-    ensureCodexWorkdirTrust(workingDir ?? process.cwd());
+  if (obj.branch !== undefined && typeof obj.branch !== 'string') {
+    throw new WorktreeError('bad_branch', 'Invalid worktree option: branch must be a string');
   }
-
-  await staggerHarnessSpawn(effectiveInput.shellType);
-
-  deps.runner.run(sessionId, launchCommand, {
-    workingDir,
-    env: sessionEnv,
-    initialInput,
-    initialInputDelay,
-    submitSuffix,
-    hookPort: deps.hookPort,
-    hookToken: deps.hookToken,
-    parentSessionId,
-  });
-
-  deps.wireTerminalInput(sessionId);
-
-  return session;
+  if (obj.base !== undefined && typeof obj.base !== 'string') {
+    throw new WorktreeError('bad_branch', 'Invalid worktree option: base must be a string');
+  }
+  return {
+    ...(obj.branch !== undefined ? { branch: obj.branch } : {}),
+    ...(obj.base !== undefined ? { base: obj.base } : {}),
+  };
 }
 
 /** Map a Local API JSON body into create input. */
@@ -628,6 +691,7 @@ export function parseCreateSessionBody(
       typeof body.initialInputDelay === 'number' ? body.initialInputDelay : undefined,
     suppressBriefing: body.suppressBriefing === true,
     createMissingWorkingDir: body.createMissingWorkingDir === true,
+    worktree: parseWorktreeInput(body.worktree),
   };
 }
 

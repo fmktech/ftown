@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react';
 import type { MessageClient } from '@/lib/message-client';
 import type { BridgeRpc } from '@/hooks/useBridgeRpc';
 import type { Session } from '@/types';
@@ -13,6 +13,7 @@ import type { SessionActivity } from '@/hooks/useAllSessionEvents';
 import type { AttentionAnswerEntry } from '../../../bridge/src/attention-prompt-protocol';
 import type { AttentionAnswerSubmitResult } from './AttentionAnswerForm';
 import { InboxItemBody, inboxItemKey, type InboxEntry } from './SessionInbox';
+import { SessionOverview, childSessionsOf, type OpenAttentionCount } from './SessionOverview';
 import { clampPreviewRatio, isPreviewDescriptor, markdownPreviewDocument, previewDocument, previewRatioBounds } from '@/lib/session-preview';
 import { previewScrollOwnerKey } from '@/lib/preview-scroll-protocol';
 
@@ -34,6 +35,10 @@ interface Props {
     onAnswer(entry: InboxEntry, answers: AttentionAnswerEntry[]): Promise<AttentionAnswerSubmitResult>;
   };
   onRefit: () => void; children: ReactNode; sessions?: Session[]; activity?: SessionActivity;
+  /** Live activity per session id (the dashboard's map), shown in the overview's children table. */
+  activityBySession?: ReadonlyMap<string, SessionActivity>;
+  /** Open attention items per session id; withParent counts items still waiting with the parent. */
+  openAttentionBySession?: ReadonlyMap<string, OpenAttentionCount>;
 }
 type PreviewErrorReason = 'missing' | 'too_large' | 'invalid_utf8' | 'invalid_file' | 'unavailable';
 function previewErrorMessage(reason: PreviewErrorReason, fileName: string): string {
@@ -45,7 +50,7 @@ function previewErrorMessage(reason: PreviewErrorReason, fileName: string): stri
     case 'unavailable': return `${fileName} is unavailable`;
   }
 }
-export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {}, sessionActivation = 0, attention }: Props) {
+export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, activityBySession, openAttentionBySession, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {}, sessionActivation = 0, attention }: Props) {
   const mainRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   const [ratio, setRatio] = useState(50);
@@ -142,6 +147,14 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     }
   }, []);
   const conversation = usePreviewConversation({ client, userId, session, sessions: sessions.length ? sessions : session ? [session] : [], enabled: activeExpanded && conversationOpen && open, readable, sendCommand, subscribeAuthority });
+  // Manager sessions (≥1 child) open on the Overview instead of the terminal; the terminal stays one click away.
+  const childSessions = useMemo(() => session ? childSessionsOf(session, sessions) : [], [session, sessions]);
+  const hasChildSessions = childSessions.length > 0;
+  const [overviewOpenBySession, setOverviewOpenBySession] = useState<Record<string, boolean>>({});
+  const overviewOpen = hasChildSessions && sessionKey !== '' && (overviewOpenBySession[sessionKey] ?? true);
+  const setOverviewOpen = useCallback((open: boolean) => {
+    setOverviewOpenBySession(previous => ({ ...previous, [sessionKey]: open }));
+  }, [sessionKey]);
   useEffect(() => {
     const node = mainRef.current; if (!node) return;
     const observer = new ResizeObserver(entries => setWidth(entries[0]?.contentRect.width ?? 0));
@@ -185,7 +198,12 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     previousView.current = { showPreview, view };
   }, [expanded, previewDisappeared, rawView, view, showPreview, attentionVisible]);
   useEffect(() => { if (!open && !reviewOpen) { setExpanded(false); setConversationOpen(false); } }, [open, reviewOpen]);
-  useEffect(() => { onRefit(); }, [open, reviewOpen, compact, view, activeExpanded, width, onRefit]);
+  useEffect(() => {
+    // While the overview overlay covers the terminal the terminal must not be refitted
+    // (it is out of sight); returning to it re-runs this effect and refits it.
+    if (overviewOpen) return;
+    onRefit();
+  }, [open, reviewOpen, compact, view, activeExpanded, width, overviewOpen, onRefit]);
   const finish = () => {
     const current = drag.current; if (!current) return;
     document.body.style.cursor = current.cursor; document.body.style.userSelect = current.select;
@@ -232,6 +250,16 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
       buttons[nextIndex]?.focus();
       buttons[nextIndex]?.click();
     }
+  };
+  const overviewTabKeys = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+    const currentIndex = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    const nextIndex = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1
+      : (Math.max(0, currentIndex) + (event.key === 'ArrowRight' ? 1 : buttons.length - 1)) % buttons.length;
+    buttons[nextIndex]?.focus();
+    buttons[nextIndex]?.click();
   };
   // One selector for the slot on every layout: the waiting item first, then the open preview's files.
   // Leaving the item for a file is a hide of that item, so the next item (a different key) is shown again.
@@ -283,7 +311,16 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
       {tabs.map(tab => <button key={tab} id={`compact-${tab}-tab`} data-preview-tab={tab} role="tab" aria-selected={view === tab} aria-controls={`session-${tab}-panel`} tabIndex={view === tab ? 0 : -1} onClick={() => choose(tab)} className={`mobile-tab ${view === tab ? 'mobile-tab-active' : ''}`}>{tabLabel(tab)}</button>)}
     </div>}
     <div className="session-workspace-panes">
-      <div id="session-terminal-panel" role={compact && hasAux ? 'tabpanel' : undefined} aria-label="Terminal" hidden={!terminalVisible} className="session-terminal-pane" style={hasAux && !compact && !activeExpanded ? { flex: `0 0 calc((100% - 8px) * ${actualRatio / 100})` } : undefined}>{children}</div>
+      <div id="session-terminal-panel" role={compact && hasAux ? 'tabpanel' : undefined} aria-label="Terminal" hidden={!terminalVisible} className="session-terminal-pane" style={{ position: 'relative', ...(hasAux && !compact && !activeExpanded ? { flex: `0 0 calc((100% - 8px) * ${actualRatio / 100})` } : {}) }}>
+        {hasChildSessions && <div role="tablist" aria-label="Terminal or overview" onKeyDown={overviewTabKeys} style={{ display: 'flex', flex: 'none', gap: 2, padding: '0 8px', borderBottom: '1px solid var(--border-subtle)', position: 'relative', zIndex: 6 }}>
+          <button type="button" role="tab" id="session-overview-tab" aria-selected={overviewOpen} aria-controls="session-overview-panel" tabIndex={overviewOpen ? 0 : -1} className="session-preview-file-tab" style={{ minHeight: 36 }} onClick={() => setOverviewOpen(true)}>Overview</button>
+          <button type="button" role="tab" id="session-terminal-tab" aria-selected={!overviewOpen} aria-controls="session-terminal-panel" tabIndex={!overviewOpen ? 0 : -1} className="session-preview-file-tab" style={{ minHeight: 36 }} onClick={() => setOverviewOpen(false)}>Terminal</button>
+        </div>}
+        {children}
+        {overviewOpen && session && <div id="session-overview-panel" role="tabpanel" aria-label="Overview" style={{ position: 'absolute', inset: 0, zIndex: 5, display: 'flex', background: 'var(--bg-base)' }}>
+          <SessionOverview session={session} sessions={sessions} activityBySession={activityBySession} openAttentionBySession={openAttentionBySession} />
+        </div>}
+      </div>
       {hasAux && !compact && !activeExpanded && <div role="separator" aria-label="Resize terminal and preview" aria-orientation="vertical" aria-valuemin={Number(min.toFixed(1))} aria-valuemax={Number(max.toFixed(1))} aria-valuenow={Number(actualRatio.toFixed(1))} tabIndex={0} className="session-preview-separator" onPointerDown={start} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish} onLostPointerCapture={finish} onKeyDown={keyDown} onDoubleClick={() => setSplit(50)} />}
       {(hasAux || attention) && <div className="session-aux-pane" hidden={!hasAux || (compact && view === 'terminal')}>
       {!compact && slotOpen && reviewOpen && <div role="tablist" aria-label="Auxiliary view" onKeyDown={tabKeys} className="session-preview-tabs">{tabs.map(tab => <button key={tab} data-preview-tab={tab} role="tab" aria-selected={view === tab} aria-controls={`session-${tab}-panel`} tabIndex={view === tab ? 0 : -1} onClick={() => choose(tab)} className={`mobile-tab ${view === tab ? 'mobile-tab-active' : ''}`}>{tabLabel(tab)}</button>)}</div>}

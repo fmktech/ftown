@@ -107,6 +107,102 @@ describe('format.ts', () => {
     );
   });
 
+  it('appends progress and blocker after the headline in exact order', () => {
+    const now = Date.parse('2026-11-13T12:05:00.000Z');
+
+    const progressCard = makeCard({
+      declared: {
+        state: 'working',
+        headline: 'implementing parser',
+        progress: { done: 3, total: 8 },
+        updatedAt: '2026-11-13T12:00:00.000Z',
+      },
+    });
+    assert.equal(
+      formatBoardRow(progressCard, now),
+      'worker-a working thinking  implementing parser  3/8',
+    );
+
+    const blockedCard = makeCard({
+      declared: {
+        state: 'blocked',
+        headline: 'implementing parser',
+        blockedOn: { kind: 'human', text: 'needs API credentials' },
+        updatedAt: '2026-11-13T12:00:00.000Z',
+      },
+    });
+    assert.equal(
+      formatBoardRow(blockedCard, now),
+      'worker-a blocked thinking  implementing parser  blocked on human: needs API credentials',
+    );
+
+    const blockedOnSessionCard = makeCard({
+      declared: {
+        state: 'blocked',
+        headline: 'implementing parser',
+        blockedOn: { kind: 'session', ref: 'child-9', text: 'waiting for parser fix' },
+        updatedAt: '2026-11-13T12:00:00.000Z',
+      },
+    });
+    assert.equal(
+      formatBoardRow(blockedOnSessionCard, now),
+      'worker-a blocked thinking  implementing parser  blocked on session:child-9: waiting for parser fix',
+    );
+
+    const bothCard = makeCard({
+      declared: {
+        state: 'blocked',
+        headline: 'implementing parser',
+        progress: { done: 2, total: 5 },
+        blockedOn: { kind: 'external', text: 'CI outage' },
+        updatedAt: '2026-11-13T12:00:00.000Z',
+      },
+      derived: {
+        status: 'running',
+        activity: 'idle',
+        idleSince: '2026-11-13T12:00:00.000Z',
+        openAttention: 1,
+        unreadMail: 0,
+        previews: [],
+      },
+    });
+    assert.equal(
+      formatBoardRow(bothCard, now),
+      'worker-a blocked idle idle 5m  implementing parser  2/5  blocked on external: CI outage  !1',
+    );
+  });
+
+  it('hides progress when state is done and truncates blocker text to 60 chars', () => {
+    const now = Date.parse('2026-11-13T12:05:00.000Z');
+
+    const doneCard = makeCard({
+      declared: {
+        state: 'done',
+        headline: 'shipped',
+        progress: { done: 5, total: 5 },
+        updatedAt: '2026-11-13T12:00:00.000Z',
+      },
+    });
+    assert.equal(
+      formatBoardRow(doneCard, now),
+      'worker-a done thinking  shipped',
+    );
+
+    const longText = 'x'.repeat(61);
+    const truncatedCard = makeCard({
+      declared: {
+        state: 'blocked',
+        headline: 'implementing parser',
+        blockedOn: { kind: 'parent', text: longText },
+        updatedAt: '2026-11-13T12:00:00.000Z',
+      },
+    });
+    assert.equal(
+      formatBoardRow(truncatedCard, now),
+      `worker-a blocked thinking  implementing parser  blocked on parent: ${'x'.repeat(60)}`,
+    );
+  });
+
   it('formats an empty board as "no child sessions"', () => {
     const board: Board = {
       rootId: 'root-1',

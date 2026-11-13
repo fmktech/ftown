@@ -57,16 +57,41 @@ export function classifyHttp(method: string, path: string): OperationPermission 
     if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(method)) return deny();
     return { permission: method === 'GET' ? 'read' : 'control', mutating: false, operation: 'automation_removed', sessionId: null };
   }
-  const match = /^\/api\/sessions\/([A-Za-z0-9_-]+)(?:\/(screen|grep|keys|message|inbox|resize|usage|running|revive|stop|retry|attention)(?:\/(ack|resolve|ask)|\/([A-Za-z0-9_-]{1,100}))?)?$/.exec(url.pathname);
+  const brief = /^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/brief(?:\/(notes))?$/.exec(url.pathname);
+  if (brief) {
+    if (url.search) return deny();
+    if (!brief[2]) {
+      if (method === 'GET') return result('read', 'brief_get', brief[1]);
+      if (method === 'PUT') return result('control', 'brief_set', brief[1]);
+      if (method === 'DELETE') return result('control', 'brief_clear', brief[1]);
+      return deny();
+    }
+    return method === 'POST' ? result('control', 'brief_note', brief[1]) : deny();
+  }
+  if (url.pathname === '/api/worktrees')
+    return method === 'GET' && !url.search ? result('read', 'worktrees_list') : deny();
+  if (url.pathname === '/api/worktrees/prune')
+    return method === 'POST' && !url.search ? result('control', 'worktrees_prune') : deny();
+  const match = /^\/api\/sessions\/([A-Za-z0-9_-]+)(?:\/(screen|grep|keys|message|inbox|resize|usage|running|revive|stop|retry|attention)(?:\/(ack|resolve|ask)|\/([A-Za-z0-9_-]{1,100})(?:\/(answer|escalate))?)?)?$/.exec(url.pathname);
   if (!match) return deny();
-  const [, id, suffix, attentionAction, eventId] = match;
-  if ((attentionAction || eventId) && suffix !== 'attention') return deny();
+  const [, id, suffix, attentionAction, eventId, attentionVerb] = match;
+  if ((attentionAction || eventId || attentionVerb) && suffix !== 'attention') return deny();
   if (!suffix) {
     if (method === 'GET') return result('read', 'sessions_get', id);
     if (method === 'PATCH') return result('control', 'sessions_update', id);
-    if (method === 'DELETE') return result('control', 'sessions_remove', id);
+    if (method === 'DELETE') {
+      if (!queryAllows(url, ['worktree'])) return deny();
+      const worktree = url.searchParams.get('worktree');
+      if (worktree !== null && worktree !== 'keep' && worktree !== 'force') return deny();
+      return result('control', 'sessions_remove', id);
+    }
     return deny();
   }
+  if (suffix === 'attention' && eventId === 'routed')
+    return method === 'GET' && !url.search ? result('read', 'attention_routed', id) : deny();
+  // Parent answer/escalate act on an open item; only the parent-facing POST is allowed.
+  if (attentionVerb)
+    return method === 'POST' && !url.search ? result('control', `attention_${attentionVerb}`, id) : deny();
   // Single attention item read (long-poll). ack/resolve/ask are matched above and never reach here.
   if (eventId) return method === 'GET' ? result('read', 'attention_get', id) : deny();
   if (suffix === 'inbox' && method === 'GET') {

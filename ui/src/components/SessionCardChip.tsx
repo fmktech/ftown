@@ -38,7 +38,7 @@ export function SessionCardChip({ card, compact = false }: SessionCardChipProps)
   const colors = CHIP_COLORS[card.state];
   const blockedOn = card.state === "blocked" ? card.blockedOn : undefined;
   const stateText = blockedOn ? `blocked on ${blockedOn.kind}` : cardStateLabel(card.state);
-  const progressText = card.progress && card.progress.total > 0
+  const progressText = card.progress && card.progress.total > 0 && card.state !== "done"
     ? `${card.progress.done}/${card.progress.total}`
     : null;
   const summary = card.headline || blockedOn?.text || "";

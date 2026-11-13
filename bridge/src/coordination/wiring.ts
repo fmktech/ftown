@@ -1,8 +1,10 @@
-import type { Activity } from '../attention-events.js';
+import type { Activity, AttentionItem } from '../attention-events.js';
 import type { PullRequestState } from '../pull-request-status-protocol.js';
 import type { MailMessage, Session } from '../types.js';
+import { escalateParentChildren } from './attention-routing.js';
 import { BoardService } from './board.js';
 import { CardStore } from './card-store.js';
+import type { AttentionRoute, AttentionRoutingFields } from './contract-b.js';
 import type {
   BoardDeps,
   BoardServiceApi,
@@ -27,6 +29,13 @@ export interface CoordinationSessionStore {
 
 export interface CoordinationAttentionStore {
   list(id: string): Promise<{ activity: Activity; openCount: number }>;
+  listRouted?(childId: string): Promise<AttentionItem[]>;
+  setRoute?(
+    sessionId: string,
+    eventId: string,
+    fields: AttentionRoutingFields,
+    expectRoute?: AttentionRoute,
+  ): Promise<AttentionItem | undefined>;
 }
 
 export interface CoordinationPrStatusResult {
@@ -46,6 +55,7 @@ export interface CoordinationDeps {
   mail: CoordinationMailStore;
   publishSession: (s: Session) => void;
   now: () => number;
+  onAttentionEscalated?: (sessionId: string, item: AttentionItem) => void;
   /** Optional factory seams for unit tests using *Api fakes. */
   createCards?: (deps: CardStoreDeps) => CardStoreApi;
   createEvents?: (deps: TreeEventLogDeps) => TreeEventLogApi;
@@ -126,9 +136,20 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
     if (exitedSessions.has(sessionId)) return;
     await deps.store
       .loadSession(sessionId)
-      .then((session) => {
+      .then(async (session) => {
         if (session && (session.status === 'completed' || session.status === 'error')) {
-          return emit(session, 'exit', `exited: ${session.status}`);
+          await emit(session, 'exit', `exited: ${session.status}`);
+          if (deps.attention.listRouted && deps.attention.setRoute) {
+            await escalateParentChildren(sessionId, {
+              listSessions: () => deps.store.listSessions(),
+              attention: {
+                listRouted: (id) => deps.attention.listRouted!(id),
+                setRoute: (id, eventId, fields, expectRoute) => deps.attention.setRoute!(id, eventId, fields, expectRoute),
+              },
+              now: deps.now,
+              onEscalated: deps.onAttentionEscalated,
+            });
+          }
         }
       })
       .catch((error) => {

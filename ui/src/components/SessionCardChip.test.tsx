@@ -141,3 +141,10 @@ describe("rollupChildCards", () => {
     expect(cardStateLabel("waiting_review")).toBe("waiting review");
   });
 });
+
+it("hides progress on a done card", () => {
+  render(<SessionCardChip card={card("done", { headline: "Finished", progress: { done: 3, total: 7 } })} />);
+  expect(screen.getByText("done")).toBeTruthy();
+  expect(screen.queryByText("3/7")).toBeNull();
+  expect(screen.getByRole("img", { name: "done: Finished" })).toBeTruthy();
+});

@@ -11,6 +11,7 @@ import { MailDeliveryService } from './mail-delivery.js';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { AttentionStore, AttentionError } from './attention-store.js';
 import type { AttentionItem } from './attention-events.js';
+import type { PushNotice } from './push-notifier.js';
 import type { HookEvent } from './local-api-server.js';
 import { MailStore } from './mail-store.js';
 import { tmpdir } from 'node:os';
@@ -34,6 +35,7 @@ import type { Session } from './types.js';
 import type { VerifiedApplication } from './security/protocol.js';
 import { createCoordination } from './coordination/wiring.js';
 import type { Board, SessionCard, TreeEventPage } from './coordination/contract.js';
+import { PARENT_UNAVAILABLE_NOTE, WorktreeError } from './coordination/contract-b.js';
 
 // Tests exercise the real encrypted adapter. Raw requests remain raw in explicit boundary tests.
 const secureFixtures = new Map<number, { pointer: BridgePointer; token: string }>();
@@ -640,14 +642,20 @@ describe('LocalApiServer explicit session attention and PR metadata', () => {
     });
     it('/ask does not mark the agent busy', async t => {
       const f = await sessionToolsFixture(t);
-      const mail = (f.server as unknown as { mail: { markAgentBusy: (id: string) => void } }).mail;
-      const busy: string[] = [];
+      const mail = (f.server as unknown as { mail: { markAgentBusy: (id: string, event?: 'PreToolUse' | 'PostToolUse' | 'UserPromptSubmit') => void } }).mail;
+      const busy: Array<{ id: string; event?: 'PreToolUse' | 'PostToolUse' | 'UserPromptSubmit' }> = [];
       const original = mail.markAgentBusy.bind(mail);
-      mail.markAgentBusy = (id: string) => { busy.push(id); original(id); };
+      mail.markAgentBusy = (id, event) => { busy.push({ id, event }); original(id, event); };
       assert.equal((await api(f.port, f.token, 'POST', `/api/sessions/${f.sample.id}/attention/ask`, askBody)).status, 200);
       assert.deepEqual(busy, []);
       await api(f.port, f.token, 'POST', '/hook', hookBody(f.sample.id));
-      assert.deepEqual(busy, [f.sample.id], 'sanity: /hook does mark busy');
+      await api(f.port, f.token, 'POST', '/hook', { ftown_session_id: f.sample.id, ftown_session_source: 'env', hook_event_name: 'PostToolUse' });
+      await api(f.port, f.token, 'POST', '/hook', { ftown_session_id: f.sample.id, ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit' });
+      assert.deepEqual(busy, [
+        { id: f.sample.id, event: 'PreToolUse' },
+        { id: f.sample.id, event: 'PostToolUse' },
+        { id: f.sample.id, event: 'UserPromptSubmit' },
+      ]);
     });
     it('/ask first then /hook gives one item, two identically stamped events and occurrences 2', async t => {
       const f = await sessionToolsFixture(t);
@@ -1083,7 +1091,10 @@ describe('LocalApiServer coordination routes and attention tree events (via disp
     const store = new SessionStore(join(home, 'data'));
     const server = new BaseLocalApiServer();
     const published: Session[] = [];
-    const attention = new AttentionStore((id) => store.sessionDir(id));
+    const pushes: string[] = [];
+    const attention = new AttentionStore((id) => store.sessionDir(id), 500, (_id, notice) => {
+      pushes.push(notice.eventKey);
+    });
     const mail = new MailStore((id) => store.sessionDir(id));
     const runner = { stop: () => false, isRunning: () => true } as unknown as ProcessRunner;
     const centrifugo = {
@@ -1111,6 +1122,9 @@ describe('LocalApiServer coordination routes and attention tree events (via disp
         published.push(structuredClone(s));
       },
       now: () => Date.parse('2026-11-13T12:00:00.000Z'),
+      onAttentionEscalated: (sessionId, item) => {
+        server.publishHumanAttention(sessionId, item);
+      },
     });
     server.setCoordination(coordination);
     server.setSecurity(
@@ -1142,6 +1156,7 @@ describe('LocalApiServer coordination routes and attention tree events (via disp
       path: string,
       body?: unknown,
       signal?: AbortSignal,
+      callerSessionId?: string,
     ): Promise<{ status: number; body: Record<string, unknown> }> => {
       const message = {
         principal: {
@@ -1173,7 +1188,10 @@ describe('LocalApiServer coordination routes and attention tree events (via disp
         application: {
           type: 'application',
           route: { kind: 'http', requestId: 'req-1', method, path },
-          data: body !== undefined ? { body } : {},
+          data: {
+            ...(body !== undefined ? { body } : {}),
+            ...(callerSessionId ? { callerSessionId } : {}),
+          },
           mcp: null,
         },
       } as unknown as VerifiedApplication;
@@ -1220,7 +1238,7 @@ describe('LocalApiServer coordination routes and attention tree events (via disp
     await store.saveSession(childA);
     await store.saveSession(childB);
 
-    return { store, server, coordination, call, published, root, childA, childB };
+    return { store, server, coordination, call, published, root, childA, childB, mail, attention, pushes };
   }
 
   it('serves GET, PUT, and DELETE /api/sessions/:id/card with strict validation and 404 handling', async (t) => {
@@ -1481,5 +1499,385 @@ describe('LocalApiServer coordination routes and attention tree events (via disp
     assert.equal(treeEvents[1].kind, 'attention');
     assert.equal(treeEvents[1].summary, askEvent.title);
     assert.equal(treeEvents[1].ref, askEvent.id);
+  });
+
+  it('routes new attention to a running parent unless to is human, and skips the notice and push', async (t) => {
+    const f = await coordFixture(t);
+    const notices: HookEvent[] = [];
+    f.server.on('event', (event) => notices.push(event));
+    const questions = [{ question: 'Which database?', options: ['Postgres', 'SQLite'], allowText: true }];
+    const body = { title: 'Pick DB', message: 'Which database should we use?', questions };
+
+    const parentRouted = await f.call('POST', '/api/sessions/child-a/attention', body);
+    assert.equal(parentRouted.status, 200);
+    const event = parentRouted.body.event as AttentionItem;
+    assert.equal(event.route, 'parent');
+    assert.equal(event.routedTo, 'root-1');
+    assert.equal(notices.filter((notice) => notice.data.attentionId === event.id).length, 0);
+    assert.equal(f.pushes.includes(`question:${event.id}`), false);
+    const mailed = await f.mail.listAll('root-1', 10);
+    assert.equal(mailed.length, 1);
+    assert.equal(mailed[0].type, 'escalation');
+    assert.equal(mailed[0].from, 'child-a');
+    assert.equal(mailed[0].fromName, 'Worker A');
+    assert.equal(mailed[0].threadId, event.id);
+    assert.match(mailed[0].body, /^\[ftown question id=.* from=Worker A \(child-a\)\] Pick DB/);
+
+    const repeat = await f.call('POST', '/api/sessions/child-a/attention', body);
+    assert.equal((repeat.body.event as AttentionItem).id, event.id);
+    assert.equal((repeat.body.event as AttentionItem).occurrences, 2);
+    assert.equal((repeat.body.event as AttentionItem).route, 'parent');
+    assert.equal((await f.mail.listAll('root-1', 10)).length, 1);
+    assert.equal(notices.filter((notice) => notice.data.attentionId === event.id).length, 0);
+
+    const human = await f.call('POST', '/api/sessions/child-b/attention', {
+      title: 'Need a secret',
+      message: 'Paste the token',
+      to: 'human',
+    });
+    assert.equal(human.status, 200);
+    const humanEvent = human.body.event as AttentionItem;
+    assert.equal(humanEvent.route, undefined);
+    assert.equal(notices.filter((notice) => notice.data.attentionId === humanEvent.id).length, 1);
+    assert.equal(f.pushes.includes(`question:${humanEvent.id}`), true);
+    assert.equal((await f.mail.listAll('root-1', 10)).filter((message) => message.threadId === humanEvent.id).length, 0);
+    assert.equal((await f.call('POST', '/api/sessions/child-b/attention', { message: 'Nope', to: 'parent' })).status, 400);
+
+    const ask = await f.call('POST', '/api/sessions/child-a/attention/ask', {
+      toolName: 'AskUserQuestion',
+      toolUseId: 'toolu_parent',
+      toolInput: {
+        questions: [{
+          question: 'Which region?',
+          header: 'Region',
+          multiSelect: false,
+          options: [{ label: 'us-east', description: 'East' }, { label: 'us-west', description: 'West' }],
+        }],
+      },
+    });
+    assert.equal(ask.status, 200);
+    const askEvent = ask.body.event as AttentionItem;
+    assert.equal(askEvent.route, 'parent');
+    assert.equal(askEvent.routedTo, 'root-1');
+    assert.equal(notices.filter((notice) => notice.eventName === 'PreToolUse' && notice.data.attentionId === askEvent.id).length, 0);
+    assert.equal(f.pushes.includes(`question:${askEvent.id}`), false);
+    assert.equal((await f.mail.listAll('root-1', 10)).filter((message) => message.threadId === askEvent.id).length, 1);
+
+    const askHuman = await f.call('POST', '/api/sessions/child-b/attention/ask', {
+      toolName: 'AskUserQuestion',
+      toolUseId: 'toolu_human',
+      to: 'human',
+      toolInput: {
+        questions: [{
+          question: 'Ship it?',
+          header: 'Ship',
+          multiSelect: false,
+          options: [{ label: 'Yes', description: 'yes' }, { label: 'No', description: 'no' }],
+        }],
+      },
+    });
+    assert.equal(askHuman.status, 200);
+    const askHumanEvent = askHuman.body.event as AttentionItem;
+    assert.equal(askHumanEvent.route, undefined);
+    assert.equal(notices.filter((notice) => notice.eventName === 'PreToolUse' && notice.data.attentionId === askHumanEvent.id).length, 1);
+    assert.equal(f.pushes.includes(`question:${askHumanEvent.id}`), true);
+  });
+
+  it('lets only the parent answer or escalate, and lists that parent\'s routed items', async (t) => {
+    const f = await coordFixture(t);
+    const notices: HookEvent[] = [];
+    f.server.on('event', (event) => notices.push(event));
+    const created = await f.call('POST', '/api/sessions/child-a/attention', {
+      title: 'Pick DB',
+      message: 'Which database?',
+      questions: [{ question: 'Which database?', options: ['Postgres', 'SQLite'], allowText: true }],
+    });
+    const event = created.body.event as AttentionItem;
+    const answerPath = `/api/sessions/child-a/attention/${event.id}/answer`;
+    const answers = { answers: [{ selected: [1] }] };
+
+    assert.equal((await f.call('POST', answerPath, answers, undefined, 'child-a')).status, 403);
+    assert.equal((await f.call('POST', answerPath, answers)).status, 403);
+    assert.equal((await f.call('POST', answerPath, { answers: [{ selected: [9] }] }, undefined, 'root-1')).status, 400);
+
+    const answered = await f.call('POST', answerPath, answers, undefined, 'root-1');
+    assert.equal(answered.status, 200);
+    const answeredEvent = answered.body.event as AttentionItem;
+    assert.equal(answeredEvent.resolution, 'answered');
+    assert.equal(answeredEvent.answeredBy?.kind, 'session');
+    assert.equal(answeredEvent.answeredBy?.sessionId, 'root-1');
+    assert.equal(answeredEvent.answeredBy?.name, 'Orchestrator');
+    assert.equal((await f.call('POST', answerPath, answers, undefined, 'root-1')).status, 409);
+    const childMail = await f.mail.listAll('child-a', 10);
+    assert.equal(childMail.length, 1);
+    assert.equal(childMail[0].from, 'root-1');
+    assert.equal(childMail[0].fromName, 'Orchestrator');
+    assert.equal(childMail[0].threadId, `attention:${event.id}`);
+
+    const open = await f.call('POST', '/api/sessions/child-b/attention', {
+      title: 'Need a decision',
+      message: 'Please choose',
+    });
+    const openEvent = open.body.event as AttentionItem;
+    const escalatePath = `/api/sessions/child-b/attention/${openEvent.id}/escalate`;
+    assert.equal((await f.call('POST', escalatePath, { note: 'nope' }, undefined, 'child-b')).status, 403);
+    const escalated = await f.call('POST', escalatePath, { note: 'credentials needed' }, undefined, 'root-1');
+    assert.equal(escalated.status, 200);
+    const escalatedEvent = escalated.body.event as AttentionItem;
+    assert.equal(escalatedEvent.route, 'human');
+    assert.equal(escalatedEvent.escalationNote, 'credentials needed');
+    assert.ok(escalatedEvent.escalatedAt);
+    assert.equal(notices.filter((notice) => notice.eventName === 'Notification' && notice.data.attentionId === openEvent.id).length, 1);
+    assert.equal(f.pushes.includes(`question:${openEvent.id}`), true);
+    assert.equal((await f.call('POST', escalatePath, { note: 'again' }, undefined, 'root-1')).status, 409);
+
+    const hidden = await f.call('GET', '/api/sessions/root-1/attention/routed', undefined, undefined, 'child-a');
+    assert.equal(hidden.status, 403);
+    const listed = await f.call('GET', '/api/sessions/root-1/attention/routed', undefined, undefined, 'root-1');
+    assert.equal(listed.status, 200);
+    const items = listed.body.items as Array<{ sessionId: string; event: AttentionItem }>;
+    assert.equal(items.some((item) => item.event.id === event.id), false);
+    assert.equal(items.some((item) => item.event.id === openEvent.id), false);
+  });
+
+  it('lists open parent-routed items and escalates them when the parent exits', async (t) => {
+    const f = await coordFixture(t);
+    const notices: HookEvent[] = [];
+    f.server.on('event', (event) => notices.push(event));
+    const created = await f.call('POST', '/api/sessions/child-a/attention', {
+      title: 'Still open',
+      message: 'Waiting on the parent',
+    });
+    const event = created.body.event as AttentionItem;
+    const listed = await f.call('GET', '/api/sessions/root-1/attention/routed', undefined, undefined, 'root-1');
+    const items = listed.body.items as Array<{ sessionId: string; sessionName: string; event: AttentionItem }>;
+    assert.equal(items.length, 1);
+    assert.equal(items[0].sessionId, 'child-a');
+    assert.equal(items[0].sessionName, 'Worker A');
+    assert.equal(items[0].event.id, event.id);
+    assert.equal(f.pushes.includes(`question:${event.id}`), false);
+
+    await f.store.saveSession({ ...f.root, status: 'completed' });
+    await f.coordination.onSessionExit('root-1');
+    const page = await f.attention.list('child-a');
+    const updated = page.events.find((item) => item.id === event.id);
+    assert.ok(updated);
+    assert.equal(updated?.route, 'human');
+    assert.equal(updated?.escalationNote, PARENT_UNAVAILABLE_NOTE);
+    assert.ok(updated?.escalatedAt);
+    assert.equal(notices.filter((notice) => notice.eventName === 'Notification' && notice.data.attentionId === event.id).length, 1);
+    assert.equal(f.pushes.includes(`question:${event.id}`), true);
+    const after = await f.call('GET', '/api/sessions/root-1/attention/routed', undefined, undefined, 'root-1');
+    assert.deepEqual(after.body.items, []);
+  });
+
+  it('routes directly to the human when the parent is not running', async (t) => {
+    const f = await coordFixture(t);
+    const notices: HookEvent[] = [];
+    f.server.on('event', (event) => notices.push(event));
+    await f.store.saveSession({ ...f.root, status: 'completed' });
+    const res = await f.call('POST', '/api/sessions/child-a/attention', { title: 'Hi', message: 'Need you' });
+    assert.equal(res.status, 200);
+    const event = res.body.event as AttentionItem;
+    assert.equal(event.route, undefined);
+    assert.equal(notices.filter((notice) => notice.data.attentionId === event.id).length, 1);
+    assert.equal((await f.mail.listAll('root-1', 10)).length, 0);
+    assert.equal(f.pushes.includes(`question:${event.id}`), true);
+  });
+
+  it('falls back to the human when parent question mail fails', async (t) => {
+    const f = await coordFixture(t);
+    const notices: HookEvent[] = [];
+    f.server.on('event', (event) => notices.push(event));
+    f.server.acceptSessionMail = async () => ({ ok: false, error: 'inbox unavailable' });
+    const refused = await f.call('POST', '/api/sessions/child-a/attention', { title: 'Q', message: 'Need you' });
+    assert.equal(refused.status, 200);
+    const refusedEvent = refused.body.event as AttentionItem;
+    assert.equal(refusedEvent.route, 'human');
+    assert.equal(refusedEvent.escalationNote, PARENT_UNAVAILABLE_NOTE);
+    assert.ok(refusedEvent.escalatedAt);
+    assert.equal(notices.filter((notice) => notice.data.attentionId === refusedEvent.id).length, 1);
+    assert.equal(f.pushes.filter((key) => key === `question:${refusedEvent.id}`).length, 1);
+    assert.equal((await f.mail.listAll('root-1', 10)).length, 0);
+
+    f.server.acceptSessionMail = async () => { throw new Error('mail store down'); };
+    const thrown = await f.call('POST', '/api/sessions/child-b/attention', { title: 'Q2', message: 'Need you too' });
+    const thrownEvent = thrown.body.event as AttentionItem;
+    assert.equal(thrownEvent.route, 'human');
+    assert.equal(thrownEvent.escalationNote, PARENT_UNAVAILABLE_NOTE);
+    assert.equal(notices.filter((notice) => notice.data.attentionId === thrownEvent.id).length, 1);
+    assert.equal(f.pushes.filter((key) => key === `question:${thrownEvent.id}`).length, 1);
+  });
+
+  it('suppresses only the new parent-routed item push and still delivers an unrelated one', async (t) => {
+    const f = await coordFixture(t);
+    const internal = f.attention as unknown as {
+      onNotification?: (sessionId: string, notice: PushNotice) => void;
+      record: AttentionStore['record'];
+    };
+    const original = internal.record.bind(f.attention);
+    internal.record = async (id, eventName, data, options) => {
+      internal.onNotification?.(id, {
+        kind: 'question',
+        eventKey: 'question:other-item',
+        title: 'Other',
+        message: 'Unrelated',
+        occurredAt: '2026-11-13T12:00:00.000Z',
+      });
+      return original(id, eventName, data, options);
+    };
+    const res = await f.call('POST', '/api/sessions/child-a/attention', { title: 'Q', message: 'Need a decision' });
+    const event = res.body.event as AttentionItem;
+    assert.equal(event.route, 'parent');
+    assert.equal(f.pushes.includes('question:other-item'), true);
+    assert.equal(f.pushes.includes(`question:${event.id}`), false);
+  });
+
+  it('keeps a human-routed repeat on the human path with its notice and push', async (t) => {
+    const f = await coordFixture(t);
+    const notices: HookEvent[] = [];
+    f.server.on('event', (event) => notices.push(event));
+    const first = await f.call('POST', '/api/sessions/child-a/attention', {
+      title: 'Need a secret',
+      message: 'Paste the token',
+      to: 'human',
+    });
+    const event = first.body.event as AttentionItem;
+    assert.equal(event.route, undefined);
+    assert.equal(notices.filter((notice) => notice.data.attentionId === event.id).length, 1);
+    assert.equal(f.pushes.filter((key) => key === `question:${event.id}`).length, 1);
+
+    const repeat = await f.call('POST', '/api/sessions/child-a/attention', {
+      title: 'Need a secret',
+      message: 'Paste the token',
+    });
+    const again = repeat.body.event as AttentionItem;
+    assert.equal(again.id, event.id);
+    assert.equal(again.occurrences, 2);
+    assert.equal(again.route, undefined);
+    assert.equal(notices.filter((notice) => notice.data.attentionId === event.id).length, 2);
+    assert.equal(f.pushes.filter((key) => key === `question:${event.id}`).length, 1);
+    assert.equal((await f.mail.listAll('root-1', 10)).length, 0);
+  });
+
+  it('publishes one notice when parent escalate races parent exit', async (t) => {
+    const f = await coordFixture(t);
+    const notices: HookEvent[] = [];
+    f.server.on('event', (event) => notices.push(event));
+    const created = await f.call('POST', '/api/sessions/child-a/attention', {
+      title: 'Race',
+      message: 'Pick one',
+    });
+    const event = created.body.event as AttentionItem;
+    await f.store.saveSession({ ...f.root, status: 'completed' });
+    const [escalated] = await Promise.all([
+      f.call('POST', `/api/sessions/child-a/attention/${event.id}/escalate`, { note: 'I cannot answer' }, undefined, 'root-1'),
+      f.coordination.onSessionExit('root-1'),
+    ]);
+    assert.ok(escalated.status === 200 || escalated.status === 409);
+    const stored = (await f.attention.list('child-a')).events.find((item) => item.id === event.id);
+    assert.equal(stored?.route, 'human');
+    assert.equal(notices.filter((notice) => notice.eventName === 'Notification' && notice.data.attentionId === event.id).length, 1);
+    assert.equal(f.pushes.filter((key) => key === `question:${event.id}`).length, 1);
+  });
+
+  it('dispatches brief and worktree route modules before per-session routes', async (t) => {
+    const f = await coordFixture(t);
+    const brief = await f.call('GET', '/api/sessions/child-a/brief');
+    assert.equal(brief.status, 200);
+    assert.equal(brief.body.brief, null);
+    assert.equal((await f.call('GET', '/api/sessions/missing-session/brief')).status, 404);
+    const worktrees = await f.call('GET', '/api/worktrees');
+    assert.equal(worktrees.status, 200);
+    assert.deepEqual(worktrees.body.worktrees, []);
+    assert.equal((await f.call('GET', '/api/worktrees?extra=1')).status, 400);
+  });
+
+  it('validates DELETE worktree query and returns worktreeOutcome', async (t) => {
+    const f = await coordFixture(t);
+    const bad = await f.call('DELETE', '/api/sessions/child-a?worktree=maybe');
+    assert.equal(bad.status, 400);
+    assert.ok(await f.store.loadSession('child-a'));
+    assert.equal((await f.call('DELETE', '/api/sessions/child-a?worktree=keep&worktree=force')).status, 400);
+
+    await f.store.saveSession({
+      ...f.childB,
+      worktree: {
+        repoRoot: '/repo',
+        path: '/repo/.claude/worktrees/child-b',
+        branch: 'ftown/child-b',
+        base: 'main',
+        createdByBridge: true,
+      },
+    });
+    const keep = await f.call('DELETE', '/api/sessions/child-b?worktree=keep');
+    assert.equal(keep.status, 200);
+    assert.equal(keep.body.removed, true);
+    assert.deepEqual(keep.body.worktreeOutcome, { action: 'retained', reason: 'kept by request' });
+    assert.equal(await f.store.loadSession('child-b'), null);
+
+    const plain = await f.call('DELETE', '/api/sessions/child-a');
+    assert.equal(plain.status, 200);
+    assert.equal(plain.body.removed, true);
+    assert.equal(plain.body.worktreeOutcome, undefined);
+    assert.equal(await f.store.loadSession('child-a'), null);
+  });
+});
+
+describe('LocalApiServer worktree create', () => {
+  it('maps WorktreeError on POST /api/sessions to 400 and creates no session', async (t) => {
+    const home = mkdtempSync(join(tmpdir(), 'ftw-worktree-create-'));
+    const server = new LocalApiServer();
+    const token = 'worktree-token';
+    const store = new SessionStore(join(home, 'data'));
+    const runner = {
+      getPreferredRuntime: () => 'direct',
+      run: () => {},
+      stop: () => false,
+      isRunning: () => false,
+    } as unknown as ProcessRunner;
+    const centrifugo = { publishSessionUpdate: async () => {} } as unknown as CentrifugoClient;
+    server.setAuthToken(token);
+    server.setDependencies(store, runner, centrifugo, 'user-1');
+    server.setSessionFactory({
+      store,
+      runner,
+      centrifugo,
+      userId: 'user-1',
+      bridgeId: 'bridge-1',
+      hookPort: 4321,
+      hookToken: 'hook-token',
+      notifyScriptPath: '/tmp/notify.sh',
+      wireTerminalInput: () => {},
+      worktrees: {
+        create: async () => {
+          throw new WorktreeError('not_a_repo', 'not a git repository');
+        },
+        remove: async () => {},
+      },
+    });
+    const port = await server.start();
+    t.after(() => {
+      server.stop();
+      rmSync(home, { recursive: true, force: true });
+    });
+
+    const invalid = await api(port, token, 'POST', '/api/sessions', {
+      shellType: 'claude',
+      prompt: 'build it',
+      worktree: { branch: 1 },
+    });
+    assert.equal(invalid.status, 400);
+    assert.match(String(invalid.data.error), /Invalid worktree option/);
+    assert.equal((await store.listSessions()).length, 0);
+
+    const failed = await api(port, token, 'POST', '/api/sessions', {
+      shellType: 'claude',
+      prompt: 'build it',
+      worktree: true,
+    });
+    assert.equal(failed.status, 400);
+    assert.equal(failed.data.error, 'not a git repository');
+    assert.equal((await store.listSessions()).length, 0);
   });
 });

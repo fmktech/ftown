@@ -313,6 +313,12 @@ async function getStatus(deps: CoordinationCliDeps, opts: StatusOptions): Promis
 async function setStatus(deps: CoordinationCliDeps, opts: StatusSetOptions): Promise<void> {
   const sessionId = requireSessionId(opts.sessionId, deps.env);
   const patch = buildCardPatch(opts);
+  if (patch.state === 'blocked' && patch.blockedOn === undefined) {
+    const current = (await deps.api('GET', cardPath(sessionId))) as SessionCard;
+    if (current.declared?.state !== 'blocked') {
+      throw new UsageError('--state blocked needs --on <human|parent|external|session:id> and --text');
+    }
+  }
   const card = (await deps.api('PUT', cardPath(sessionId), patch)) as SessionCard;
   printCard(deps, card, opts.json === true);
 }
