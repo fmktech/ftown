@@ -17,6 +17,17 @@ describe('bundled agent surface contract', () => {
     assert.doesNotMatch(skill, /FTS.*primary|remove themselves|very last command/i);
   });
 
+  it('names HTML previews in the skill description so loaders match on preview requests', () => {
+    const skill = bundled('skills/ftown/SKILL.md');
+    const frontmatter = skill.slice(0, skill.indexOf('\n---', 3));
+
+    // The description is what skill loaders match on when deciding whether to
+    // read the skill — the body already documents previews, so only the
+    // frontmatter assertion can catch a description regression.
+    assert.ok(frontmatter.startsWith('---\nname: ftown'));
+    assert.match(frontmatter, /html preview/i);
+  });
+
   it('retains a terse coordination reference pointing to authoritative guidance', () => {
     const reference = bundled('skills/ftown/references/orchestrator.md');
     assert.match(reference, /SKILL\.md/);
