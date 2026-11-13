@@ -33,6 +33,17 @@ export interface Session {
   loopId?: string; // Read-only provenance on sessions created by retired recurring automation.
   usage?: SessionUsage;
   preview?: SessionPreviewDescriptor;
+  card?: SessionCard;
+}
+
+/** Mirrors bridge SessionCardDeclared (bridge/src/coordination/contract.ts). */
+export interface SessionCard {
+  state: 'working' | 'blocked' | 'waiting_review' | 'done' | 'failed';
+  headline: string;
+  progress?: { done: number; total: number };
+  blockedOn?: { kind: 'human' | 'parent' | 'session' | 'external'; ref?: string; text: string };
+  next?: string;
+  updatedAt: string;
 }
 
 /** Per-model token breakdown within a session's usage. */

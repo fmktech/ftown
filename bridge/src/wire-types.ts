@@ -55,10 +55,11 @@ export interface Session {
   /** Historical automation provenance; new sessions cannot set it. */
   loopId?: string;
   usage?: SessionUsage;
+  card?: { state: string; headline: string; progress?: { done: number; total: number }; blockedOn?: { kind: string; ref?: string; text: string }; next?: string; updatedAt: string };
 }
 
-export type MailType = 'message' | 'task' | 'result' | 'escalation';
-export const MAIL_TYPES: readonly MailType[] = ['message', 'task', 'result', 'escalation'];
+export type MailType = 'message' | 'task' | 'result' | 'escalation' | 'fyi';
+export const MAIL_TYPES: readonly MailType[] = ['message', 'task', 'result', 'escalation', 'fyi'];
 
 /** Per-session inbox message, as returned by GET/POST /api/sessions/:id/inbox. */
 export interface MailMessage {
@@ -72,6 +73,7 @@ export interface MailMessage {
   body: string;
   deliveredAt?: string;
   deliveredVia?: string;
+  nudgedAt?: string;
 }
 
 export const AUTOMATION_REMOVED_CODE = 'automation_removed' as const;
