@@ -11,6 +11,7 @@ import { useBridgeRpc } from "@/hooks/useBridgeRpc";
 import { useBridges } from "@/hooks/useBridges";
 import { useBridgeUpdates } from "@/hooks/useBridgeUpdates";
 import { BridgeUpdatesDialog } from "./BridgeUpdatesDialog";
+import { ModelRoutingDialog } from "./ModelRoutingDialog";
 import { AppUpdateNotice } from "./AppUpdateNotice";
 import { useAllSessionEvents } from "@/hooks/useAllSessionEvents";
 import type { SecurityCommand, SecurityCommandResults } from "@security/protocol";
@@ -126,6 +127,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [showNavigation, setShowNavigation] = useState(false);
   const [showSecurity, setShowSecurity] = useState(false);
   const [updateBridgeId, setUpdateBridgeId] = useState<string | null>(null);
+  const [modelRoutingBridgeId, setModelRoutingBridgeId] = useState<string | null>(null);
   const [securityBridgeId, setSecurityBridgeId] = useState<string | undefined>(undefined);
   const [securityGeneration, setSecurityGeneration] = useState(0);
   const [localityGeneration, setLocalityGeneration] = useState(0);
@@ -1241,6 +1243,7 @@ PY`;
               bridgeSecurityStates={bridgeSecurityStates}
               bridgeUpdates={updateViews}
               onOpenUpdates={setUpdateBridgeId}
+              onOpenModelRouting={setModelRoutingBridgeId}
             />
           </div>
           {!sidebarCollapsed && (
@@ -1301,6 +1304,8 @@ PY`;
         initialBridgeId={securityBridgeId} />
       {updateBridgeId && <BridgeUpdatesDialog open name={bridges.find(bridge => bridge.bridgeId === updateBridgeId)?.hostname ?? updateBridgeId}
         view={updates.get(updateBridgeId)} onClose={() => setUpdateBridgeId(null)} onCheck={() => void updates.check(updateBridgeId, true)} onUpdate={() => void updates.update(updateBridgeId)} />}
+      {modelRoutingBridgeId && <ModelRoutingDialog open bridgeId={modelRoutingBridgeId} name={bridges.find(bridge => bridge.bridgeId === modelRoutingBridgeId)?.hostname ?? modelRoutingBridgeId}
+        send={rpc.sendCommand} onClose={() => setModelRoutingBridgeId(null)} />}
       <NewSessionModal
         isOpen={showNewSession}
         onClose={() => { setShowNewSession(false); setSessionDefaults(undefined); }}

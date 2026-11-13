@@ -12,8 +12,11 @@ import type { Command, CommandResponse, Session } from './types.js';
 import { UpdateAdmission, UpdateResponseTicket } from './update-admission.js';
 import { UpdateEffects } from './update-effects.js';
 import type { BridgeUpdateCoordinator } from './bridge-update.js';
+import { BridgeSecurityError } from './security/bridge/errors.js';
 import type { BridgeSecurityService } from './security/bridge/security.js';
 import type { VerifiedApplication } from './security/protocol.js';
+import type { ModelRoutingService } from './quota/routing-service.js';
+import type { ModelRoutingSnapshot, SetModelRoutingResult } from './quota/types.js';
 
 test('targeted update commands validate payloads and bind an accepted ticket to verified dispatch', async () => {
   const responses: CommandResponse[] = []; let requests = 0, starts = 0;
@@ -368,4 +371,81 @@ test('browser session mail reports readiness and uncertain enqueue failures with
   assert.match(responses.at(-1)?.error ?? '', /may have been queued/); assert.doesNotMatch(JSON.stringify(responses.at(-1)), /private error/);
   await createCommandHandler({ ...deps, enqueueSessionMessage: async () => ({ ok: true, id: '' }) })(command, verified);
   assert.equal((responses.at(-1)?.data as { code?: string } | undefined)?.code, 'enqueue_failed');
+});
+
+test('model routing RPC validates payloads and dispatches to the injected service', async () => {
+  const responses: CommandResponse[] = [];
+  const gets: unknown[] = []; const sets: unknown[] = [];
+  let fail = false;
+  const modelRouting = {
+    get: async (payload: unknown) => { gets.push(payload); if (fail) throw new Error('quota could not be collected: offline'); return { schema: 1, cached: true } as unknown as ModelRoutingSnapshot; },
+    set: async (payload: unknown) => { sets.push(payload); if (fail) throw new Error('quota could not be collected: offline'); return { schema: 1, saved: true, errors: [] } as SetModelRoutingResult; },
+  } as ModelRoutingService;
+  const handler = createCommandHandler({ bridgeId: 'bridge', modelRouting: () => modelRouting, sessionController: {} as SessionController,
+    publishCommandResponse: async response => { responses.push(response); } });
+  const send = async (type: string, payload: Record<string, unknown>) => {
+    await handler({ type: type as Command['type'], requestId: type, payload }); return responses.at(-1)!;
+  };
+
+  assert.deepEqual(await send('get_model_routing', { bridgeId: 'bridge' }), { requestId: 'get_model_routing', success: true, data: { schema: 1, cached: true } });
+  await send('get_model_routing', { bridgeId: 'bridge', refresh: true });
+  assert.deepEqual(gets, [{}, { refresh: true }]);
+  const config = { version: 1, tiers: [], steering: '' };
+  assert.deepEqual(await send('set_model_routing', { bridgeId: 'bridge', config }), { requestId: 'set_model_routing', success: true, data: { schema: 1, saved: true, errors: [] } });
+  assert.deepEqual(sets, [{ config }]);
+  for (const overwriteInvalid of [true, false, 'true', 1, null]) {
+    const response = await send('set_model_routing', { bridgeId: 'bridge', config, overwriteInvalid });
+    assert.equal(response.success, true, JSON.stringify(overwriteInvalid));
+  }
+  assert.deepEqual(sets, [{ config }, { config, overwriteInvalid: true }, { config }, { config }, { config }, { config }]);
+  sets.length = 1;
+
+  for (const [type, payload] of [
+    ['get_model_routing', { bridgeId: 'bridge', refresh: 'yes' }],
+    ['get_model_routing', { bridgeId: 'bridge', extra: 1 }],
+    ['get_model_routing', {}],
+    ['set_model_routing', { bridgeId: 'bridge' }],
+    ['set_model_routing', { bridgeId: 'bridge', config, extra: true }],
+  ] as const) {
+    const response = await send(type, payload);
+    assert.equal(response.success, false, JSON.stringify(payload));
+    assert.deepEqual(response.data, { code: 'invalid' });
+  }
+  const huge = await send('set_model_routing', { bridgeId: 'bridge', config: { ...config, steering: 'x'.repeat(256 * 1024) } });
+  assert.equal(huge.success, false); assert.equal(huge.error, 'routing config is too large');
+  assert.equal(gets.length, 2); assert.equal(sets.length, 1);
+
+  const before = responses.length;
+  await handler({ type: 'get_model_routing', requestId: 'foreign', payload: { bridgeId: 'other' } });
+  assert.equal(responses.length, before);
+
+  fail = true;
+  for (const [type, payload] of [['get_model_routing', { bridgeId: 'bridge' }], ['set_model_routing', { bridgeId: 'bridge', config }]] as const) {
+    const response = await send(type, payload);
+    assert.equal(response.success, false); assert.equal(response.error, 'quota could not be collected: offline');
+  }
+
+  const bare = createCommandHandler({ bridgeId: 'bridge', sessionController: {} as SessionController, publishCommandResponse: async response => { responses.push(response); } });
+  await bare({ type: 'get_model_routing', requestId: 'bare', payload: { bridgeId: 'bridge' } });
+  assert.equal(responses.at(-1)?.success, false); assert.deepEqual(responses.at(-1)?.data, { code: 'unavailable' });
+});
+
+test('model routing RPC revalidates before any service call and writes nothing when that fails', async () => {
+  const responses: CommandResponse[] = [];
+  const levels: string[] = [];
+  let touched = false;
+  const modelRouting = { get: async () => { touched = true; throw new Error('get must not run'); }, set: async () => { touched = true; throw new Error('set must not run'); } } as ModelRoutingService;
+  const security = { revalidate: async () => {}, policy: { revalidate: async (_principal: unknown, permission: string) => {
+    levels.push(permission); throw new BridgeSecurityError('permission_denied');
+  } } } as unknown as BridgeSecurityService;
+  const verified = { principal: {} } as VerifiedApplication;
+  const handler = createCommandHandler({ bridgeId: 'bridge', security, modelRouting: () => { touched = true; return modelRouting; }, sessionController: {} as SessionController,
+    publishCommandResponse: async response => { responses.push(response); } });
+  const config = { version: 1, tiers: [], steering: '' };
+  await handler({ type: 'get_model_routing', requestId: 'get', payload: { bridgeId: 'bridge', refresh: true } }, verified);
+  await handler({ type: 'set_model_routing', requestId: 'set', payload: { bridgeId: 'bridge', config, overwriteInvalid: true } }, verified);
+  assert.deepEqual(levels, ['read', 'control']);
+  assert.equal(touched, false);
+  assert.deepEqual(responses.map(response => response.success), [false, false]);
+  assert.deepEqual(responses.map(response => (response.data as { code?: string }).code), ['permission_denied', 'permission_denied']);
 });

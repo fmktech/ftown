@@ -60,7 +60,8 @@ ftown start --help
 
 Read `references/sessions.md` for the session, mail and terminal command
 reference. Read `references/orchestrator.md` for practical worker coordination
-examples. Each command group also has `--help`.
+examples. Read `references/quota.md` before choosing a CLI, model and effort for delegated
+work (`ftown quota --json`). Each command group also has `--help`.
 
 `ftown sessions preview <path...>` registers up to 12 files in the current
 session's working directory for the dashboard, in this order. Kind is by

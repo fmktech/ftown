@@ -44,6 +44,7 @@ interface SessionListProps {
   bridgeSecurityStates?: ReadonlyMap<string, BridgeSecurityState["status"]>;
   bridgeUpdates?: ReadonlyMap<string, UpdateView>;
   onOpenUpdates?: (bridgeId: string) => void;
+  onOpenModelRouting?: (bridgeId: string) => void;
 }
 
 type ContextMenuState =
@@ -447,6 +448,7 @@ function BridgeContextMenu({
   onCreateSession,
   onOpenSecurity,
   onOpenUpdates,
+  onOpenModelRouting,
   onHide,
   onUnhide,
   onClose,
@@ -457,6 +459,7 @@ function BridgeContextMenu({
   onCreateSession: (bridgeId: string) => void;
   onOpenSecurity?: (bridgeId: string) => void;
   onOpenUpdates?: (bridgeId: string) => void;
+  onOpenModelRouting?: (bridgeId: string) => void;
   onHide: (bridgeId: string) => void;
   onUnhide: (bridgeId: string) => void;
   onClose: () => void;
@@ -485,6 +488,7 @@ function BridgeContextMenu({
       />
       {onOpenSecurity && <ContextMenuButton largeOnMobile label="Security log" onClick={() => { onOpenSecurity(menu.bridgeId); onClose(); }} />}
       {onOpenUpdates && <ContextMenuButton largeOnMobile label="Updates…" onClick={() => { onOpenUpdates(menu.bridgeId); onClose(); }} />}
+      {onOpenModelRouting && <ContextMenuButton largeOnMobile label="Model routing…" onClick={() => { onOpenModelRouting(menu.bridgeId); onClose(); }} />}
       {isHidden ? (
         <ContextMenuButton label="Unhide" onClick={() => { onUnhide(menu.bridgeId); onClose(); }} />
       ) : (
@@ -522,6 +526,7 @@ export function SessionList({
   bridgeSecurityStates,
   bridgeUpdates,
   onOpenUpdates,
+  onOpenModelRouting,
 }: SessionListProps) {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -1744,6 +1749,7 @@ export function SessionList({
           onCreateSession={onCreateSession ?? (() => {})}
           onOpenSecurity={onOpenSecurity}
           onOpenUpdates={onOpenUpdates}
+          onOpenModelRouting={onOpenModelRouting}
           onHide={onHideBridge ?? (() => {})}
           onUnhide={onUnhideBridge ?? (() => {})}
           onClose={closeContextMenu}

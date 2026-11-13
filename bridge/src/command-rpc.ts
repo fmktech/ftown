@@ -25,6 +25,8 @@ import { BridgeUpdateError, type BridgeUpdateCoordinator } from './bridge-update
 import type { UpdateEffects } from './update-effects.js';
 import { validFileId, validPreviewId, validRevision } from './session-preview.js';
 import { PREVIEW_CHUNK_BYTES } from './preview-protocol.js';
+import type { ModelRoutingService } from './quota/routing-service.js';
+import type { ModelRoutingConfig } from './quota/types.js';
 
 import type {
   BridgeExecPayload,
@@ -42,6 +44,8 @@ import type {
 } from './types.js';
 
 const execAsync = promisify(exec);
+/** Largest serialized set_model_routing payload accepted before validation. */
+const MODEL_ROUTING_MAX_PAYLOAD_BYTES = 256 * 1024;
 
 function auditBridgeExec(payload: BridgeExecPayload): void {
   try {
@@ -74,6 +78,8 @@ export interface CommandRpcDeps {
   acceptSessionMail?: (session: Session, body: Record<string, unknown>) => Promise<{ ok: true; id: string } | { ok: false; error: string }>;
   updates?: BridgeUpdateCoordinator;
   updateEffects?: UpdateEffects;
+  /** The bridge's long-lived model-routing service (get_model_routing / set_model_routing); resolved only when one of those commands runs. */
+  modelRouting?: () => ModelRoutingService;
   publishCommandResponse: (response: CommandResponse, verified?: VerifiedApplication) => Promise<void>;
 }
 
@@ -239,6 +245,30 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             const result = await deps.updates.request(verified.principal, payload.targetVersion, payload.operationId);
             if (result.ticket) deps.updateEffects.attachTicket(verified, result.ticket);
             response = { requestId: command.requestId, success: true, data: result.accepted as unknown as Record<string, unknown> };
+          }
+          break;
+        }
+        case 'get_model_routing':
+        case 'set_model_routing': {
+          if (deps.security && verified) await deps.security.policy.revalidate(verified.principal, command.type === 'get_model_routing' ? 'read' : 'control');
+          const payload = command.payload as Record<string, unknown>;
+          const invalid = (): CommandResponse => ({ requestId: command.requestId, success: false, error: 'Invalid model routing request', data: { code: 'invalid' } });
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.bridgeId !== bridgeId) { response = invalid(); break; }
+          const modelRouting = deps.modelRouting?.();
+          if (!modelRouting) { response = { requestId: command.requestId, success: false, error: 'Model routing is not available on this bridge', data: { code: 'unavailable' } }; break; }
+          if (command.type === 'get_model_routing') {
+            if (Object.keys(payload).some(key => key !== 'bridgeId' && key !== 'refresh') || (payload.refresh !== undefined && typeof payload.refresh !== 'boolean')) { response = invalid(); break; }
+            const snapshot = await modelRouting.get(payload.refresh === undefined ? {} : { refresh: payload.refresh });
+            response = { requestId: command.requestId, success: true, data: snapshot };
+          } else {
+            if (Buffer.byteLength(JSON.stringify(payload) ?? '', 'utf8') > MODEL_ROUTING_MAX_PAYLOAD_BYTES) {
+              response = { requestId: command.requestId, success: false, error: 'routing config is too large', data: { code: 'too_large' } }; break;
+            }
+            if (Object.keys(payload).some(key => key !== 'bridgeId' && key !== 'config' && key !== 'overwriteInvalid') || payload.config === undefined) { response = invalid(); break; }
+            // Only a strict boolean true confirms replacing an invalid file; any other value counts as absent.
+            const config = payload.config as ModelRoutingConfig;
+            const result = await modelRouting.set(payload.overwriteInvalid === true ? { config, overwriteInvalid: true } : { config });
+            response = { requestId: command.requestId, success: true, data: result };
           }
           break;
         }
